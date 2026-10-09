@@ -8,6 +8,8 @@ type t =
   }
 
 let create
+      ?(pending_retention = None)
+      ?(runtime_admission_open = true)
       (state : Session_state.t)
       ~(operation : P.Operation.t)
       ~notification_wakes
@@ -34,6 +36,25 @@ let create
            ~retryable:false
            ())
   in
+  let%bind pending =
+    if not adopt_deferred
+    then Ok None
+    else (
+      let%bind retention =
+        match pending_retention with
+        | Some retention -> Ok retention
+        | None ->
+          Pending_disposition.Retention.create
+            ~max_records:Staged_notifications.default_limits.max_retained
+      in
+      Pending_transition.prepare
+        state
+        ~change:(Adopt { boundary = Idle_start; runtime_admission_open })
+        ~retention
+        ~archive:None
+        ~limits:Session_delta.native_limits
+      |> Result.map ~f:Option.some)
+  in
   let lifecycle : Session_state.Lifecycle.t =
     { desired = state.lifecycle.desired; observed = Running_turn operation.id }
   in
@@ -49,14 +70,14 @@ let create
     ]
     @ wakes
     |> fun deltas ->
-    if adopt_deferred then Session_delta.Deferred_entries_adopted :: deltas else deltas
+    Option.value_map pending ~default:deltas ~f:(fun pending ->
+      Pending_transition.delta pending :: deltas)
   in
   let payloads =
-    (if adopt_deferred && not (List.is_empty state.conversation.deferred_user_entries)
-     then
-       [ P.Event.Durable.Payload.History_appended state.conversation.deferred_user_entries
-       ]
-     else [])
+    Option.value_map pending ~default:[] ~f:(fun pending ->
+      match Pending_plan.adopted_entries (Pending_transition.plan pending) with
+      | [] -> []
+      | entries -> [ P.Event.Durable.Payload.History_appended entries ])
     @ [ P.Event.Durable.Payload.Operation_started operation
       ; Session_state_changed
           { desired_state = lifecycle.desired; observed_state = lifecycle.observed }

@@ -2212,6 +2212,46 @@ module Coverage = struct
           }))
   ;;
 
+  let run_mappings =
+    List.concat_map
+      [ ( "moderator_v1"
+        , "2b9c89350722462144c41eae573f49a0790e0c02d7585d7e653939cbe1893642"
+        , [ ( "module/Run"
+            , "6eb6e335f86f30019f0bf3f7ff05141fbe26e7c95312a31501ab52bc016ef0e0" )
+          ; ( "module_export/Run.continue"
+            , "6070b540e55194d30941ee63b640d5d4e97d7d2a5a4cd0b906bbb4549059d174" )
+          ; ( "module_export/Run.finish"
+            , "17dfe270cdfce84d41a7e1c8b9d4b2be31d15de651062c850c2ca141706419ed" )
+          ; ( "module_export/Run.wait"
+            , "f75c21ede127c48029a18caa970cf8b6307bd281297b5f281af6a758816b2635" )
+          ] )
+      ; ( "delegated_moderator_v1"
+        , "c442cbe30513372fff67ae9feac7bc9ed153407353c193bebbafcc0d6257c267"
+        , [ ( "module/Run"
+            , "845fbe661e06d288d0974a92ecb3b14cde3918f2d126dfb0f4b8cc7c49de919b" )
+          ; ( "module_export/Run.continue"
+            , "9f4043518eb71e5e299067468acc5f7b65d1e71420ee47af0f275804058d5b56" )
+          ; ( "module_export/Run.finish"
+            , "95f02046556522bf3d53c4e4a032df646bea063996878ffda2fa5ae95f4f192e" )
+          ; ( "module_export/Run.wait"
+            , "1fab809cc6490d8b61de46f47db005da1e8d9e584013f6b877d117133b610ebd" )
+          ] )
+      ]
+      ~f:(fun (surface_id, topic_closure_sha256, contracts) ->
+        List.map contracts ~f:(fun (name, contract_sha256) ->
+          { target_id = surface_id ^ "/" ^ name
+          ; contract_sha256
+          ; topic_id = "runtime.runs"
+          ; topic_closure_sha256
+          ; evidence =
+              [ "test/agent_session/run_action_scope_tests.ml"
+              ; "test/run_lifecycle_protocol_test.ml"
+              ; "lib/chat_response/run_operations.ml"
+              ; "lib/agent_session/run_action_service.ml"
+              ]
+          }))
+  ;;
+
   let background_mappings =
     List.concat_map
       [ ( "one_off_v1"
@@ -2597,6 +2637,7 @@ module Coverage = struct
     @ moderator_data_mappings
     @ host_effect_mappings
     @ runtime_control_mappings
+    @ run_mappings
     @ background_mappings
     @ invocation_context_mappings
   ;;
@@ -3472,5 +3513,28 @@ let runtime_foundation ~sources =
        ]
      @ runtime
      @ children
+     @ [ { id = "runtime.runs"
+         ; title = "Scoped run decisions and transactional receipt custody"
+         ; prerequisites = []
+         ; surfaces = moderators
+         ; excerpts =
+             [ { path = "guide/chatml-authoring-runs.md"
+               ; heading = "# Scoped run decisions"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "563066363cdfe7bd1e806d7bd02d1179b5370565b11961a2759c8cc8e3b1fa94" ]
+               ; evidence =
+                   [ "test/agent_session/run_action_scope_tests.ml"
+                   ; "test/run_lifecycle_protocol_test.ml"
+                   ; "lib/chat_response/run_operations.ml"
+                   ; "lib/agent_session/run_action_service.ml"
+                   ]
+               }
+         }
+       ]
      @ background)
 ;;

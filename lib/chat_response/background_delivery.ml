@@ -29,6 +29,7 @@ let json t =
     ]
 ;;
 
+let to_json = json
 let equal a b = Jsonaf.exactly_equal (json a) (json b)
 
 let of_json value =

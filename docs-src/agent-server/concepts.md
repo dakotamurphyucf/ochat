@@ -54,6 +54,29 @@ local mode when combined with `--local`; without it, the flag retains legacy
 compatibility behavior. Daemon `--session`
 instead selects a daemon session. See the [TUI CLI](../bin/chat_tui.doc.md).
 
+## Client handoff: admission and lifetime
+
+Keep the durable session reference, executing host and client attachment separate.
+An attachment grants the connection's current permitted access to a session;
+it does not identify a new session or transfer the runtime host's credentials.
+
+A successful `session.run.start` reply contains an admission receipt. It proves
+that the host accepted that exact request, not that the run completed. A terminal
+receipt or retained terminal outcome supplies completion evidence. Receipts do
+not confer current execution authority. After a lost reply, reconcile the
+original host, principal and idempotency key through `command.receipt`; an
+unavailable outcome does not justify another execution with a fresh key. See
+[explicit run admission](protocol.md#explicit-run-admission).
+
+A daemon stdio gateway owns its connection, not the daemon host. Gateway EOF
+closes that connection and detaches its attachments; it does not shut down the
+daemon or finish unrelated sessions. Owner-bound sessions still follow their
+configured disconnect grace. A local process-bound host has a separate owning
+lifetime: ending that host cannot promise that its background workers continue.
+Durable recovery preserves recorded state and classifies interrupted work; it
+does not preserve a running process. Clients must distinguish detach, explicit
+session controls and host shutdown in their own interface.
+
 ## Prompts, workspaces, and authority
 
 A prompt catalog entry names a ChatMD source and an allowed set of workspace

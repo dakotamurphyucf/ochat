@@ -762,7 +762,7 @@
 
 (library
  (name agent_protocol_test)
- (modules agent_protocol_test agent_invocation_test agent_extension_test agent_history_edit_test agent_activity_test)
+ (modules agent_protocol_test agent_invocation_test agent_extension_test agent_history_edit_test agent_activity_test run_lifecycle_protocol_test)
  (libraries uri core expect_test_helpers_core ochat.agent_protocol ochat.transcript ochat.history_entry)
  (inline_tests)
  (preprocess

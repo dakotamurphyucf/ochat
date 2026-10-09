@@ -234,7 +234,13 @@ let%expect_test "active A capture remains immutable while the next root capture 
            "hello"
          |> Agent_session.History_codec.to_protocol
        in
-       A.submit_message actor ~attachment_id:writer.id entry |> protocol_ok |> ignore;
+       A.submit_message
+         ~submitting_principal:principal_id
+         actor
+         ~attachment_id:writer.id
+         entry
+       |> protocol_ok
+       |> ignore;
        Eio.Promise.await captured;
        let before = A.configuration actor |> protocol_ok in
        assert (C.equal_phase (Option.value_exn before.capture).phase Preparing);
@@ -349,7 +355,13 @@ let%expect_test "resolution failures and cancellation release preparing ownershi
          Agent_session.History_codec.user_text ~id:(history_id "cleanup-user") "hello"
          |> Agent_session.History_codec.to_protocol
        in
-       A.submit_message actor ~attachment_id:writer.id entry |> protocol_ok |> ignore;
+       A.submit_message
+         ~submitting_principal:principal_id
+         actor
+         ~attachment_id:writer.id
+         entry
+       |> protocol_ok
+       |> ignore;
        await_idle actor |> ignore;
        assert (Option.is_some (A.configuration actor |> protocol_ok).capture);
        print_endline
@@ -502,7 +514,13 @@ let%expect_test
          Agent_session.History_codec.user_text ~id:(history_id "loop-user") "hello"
          |> Agent_session.History_codec.to_protocol
        in
-       A.submit_message actor ~attachment_id:writer.id entry |> protocol_ok |> ignore;
+       A.submit_message
+         ~submitting_principal:principal_id
+         actor
+         ~attachment_id:writer.id
+         entry
+       |> protocol_ok
+       |> ignore;
        Eio.Promise.await started;
        let request =
          C.Update_request.

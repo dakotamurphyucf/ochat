@@ -506,6 +506,22 @@ let seed_children entry attachment_id (before : Agent_session.Session_state.t) =
         ~limits:Document_schema.Limits.default
       |> ok
   in
+  let deferred =
+    let value =
+      Agent_protocol.Pending_input.create
+        ~entry:deferred
+        ~generation:before.identity.generation
+        ~binding:Agent_protocol.Pending_input.Binding.safe_boundary
+      |> ok
+    in
+    match
+      Agent_session.Pending_input_document.authored
+        value
+        ~limits:Document_schema.Limits.default
+    with
+    | Ok document -> document
+    | Error error -> raise_s [%sexp (error : Document_schema.Error.t)]
+  in
   let candidate =
     { before with
       Agent_session.Session_state.conversation =

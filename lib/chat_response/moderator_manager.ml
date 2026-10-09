@@ -140,6 +140,7 @@ type t =
   ; mutable subscriptions : subscription list
   ; mutable suspended_phase : Moderation.Phase.t option
   ; invocation_tool_call : tool_call option ref
+  ; run_transaction : Run_operations.transaction option ref
   ; job_transaction : Background_job_operations.transaction option ref
   ; subscription_transaction : Subscription_operations.transaction option ref
   ; schedule_transaction : Schedule_operations.transaction option ref
@@ -336,6 +337,7 @@ let create
   : (t, string) result
   =
   let invocation_tool_call = ref None in
+  let run_transaction = ref None in
   let job_transaction = ref None in
   let subscription_transaction = ref None in
   let schedule_transaction = ref None in
@@ -409,6 +411,9 @@ let create
         ~handlers:
           (Background_job_operations.dynamic_handlers (fun () -> !job_transaction))
         config
+      |> Run_operations.install
+           ?control
+           ~handlers:(Run_operations.dynamic_handlers (fun () -> !run_transaction))
       |> Subscription_operations.install
            ?control
            ~handlers:
@@ -479,6 +484,7 @@ let create
     ; subscriptions = []
     ; suspended_phase = None
     ; invocation_tool_call
+    ; run_transaction
     ; job_transaction
     ; subscription_transaction
     ; schedule_transaction
@@ -1147,7 +1153,30 @@ let identity_snapshot_of_state ?control t ~current_state ~queued_events ~halted 
       }
 ;;
 
-let with_work_transactions t jobs subscriptions schedules notifications ingress f =
+let prepare_run_actions owner local_effects =
+  let open Result.Let_syntax in
+  let%bind receipts, local_effects = Run_operations.split_actions local_effects in
+  let%map action =
+    match owner, receipts with
+    | None, [] -> Ok None
+    | None, _ :: _ -> Error "run actions require an owning callback scope"
+    | Some transaction, receipts -> transaction.Run_operations.prepare receipts
+  in
+  action, local_effects
+;;
+
+let with_work_transactions
+      t
+      run_actions
+      jobs
+      subscriptions
+      schedules
+      notifications
+      ingress
+      f
+  =
+  let previous_runs = !(t.run_transaction) in
+  t.run_transaction := run_actions;
   let previous = !(t.job_transaction) in
   let previous_subscriptions = !(t.subscription_transaction) in
   let previous_schedules = !(t.schedule_transaction) in
@@ -1160,6 +1189,7 @@ let with_work_transactions t jobs subscriptions schedules notifications ingress 
   t.ingress_transaction := ingress;
   Exn.protect
     ~finally:(fun () ->
+      t.run_transaction := previous_runs;
       t.job_transaction := previous;
       t.subscription_transaction := previous_subscriptions;
       t.schedule_transaction := previous_schedules;
@@ -1226,6 +1256,7 @@ let persist_prepared
 ;;
 
 let handle_event_entries_transactional_unlocked
+      ?run_actions
       ?jobs
       ?subscriptions
       ?schedules
@@ -1306,8 +1337,11 @@ let handle_event_entries_transactional_unlocked
     in
     let outcome = ref Moderation.Outcome.empty in
     let prepare (transaction : Runtime.transaction) =
+      let%bind run_action, local_effects =
+        prepare_run_actions run_actions transaction.local_effects
+      in
       let%bind starts, local_effects =
-        Background_job_operations.split_starts transaction.local_effects
+        Background_job_operations.split_starts local_effects
       in
       let%bind mutations, local_effects =
         Subscription_operations.split_mutations local_effects
@@ -1323,6 +1357,7 @@ let handle_event_entries_transactional_unlocked
       in
       let%bind decoded = decode_effects t local_effects in
       let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
+      let prepared = { prepared with run_action } in
       let%bind overlay, install_overlay =
         prepare_identity_overlay t ~phase prepared.overlay_ops
       in
@@ -1367,6 +1402,7 @@ let handle_event_entries_transactional_unlocked
         ~f:(fun () ->
           with_work_transactions
             t
+            run_actions
             jobs
             subscriptions
             schedules
@@ -1410,6 +1446,7 @@ let handle_event_entries_transactional_unlocked
 ;;
 
 let handle_event_entries_transactional
+      ?run_actions
       ?jobs
       ?subscriptions
       ?schedules
@@ -1428,6 +1465,7 @@ let handle_event_entries_transactional
   =
   with_execution_lock t (fun () ->
     handle_event_entries_transactional_unlocked
+      ?run_actions
       ?jobs
       ?subscriptions
       ?schedules
@@ -1447,6 +1485,7 @@ let handle_event_entries_transactional
 ;;
 
 let handle_next_event_entries_transactional
+      ?run_actions
       ?jobs
       ?subscriptions
       ?schedules
@@ -1469,6 +1508,7 @@ let handle_next_event_entries_transactional
     | Some event ->
       let%map outcome =
         handle_event_entries_transactional_unlocked
+          ?run_actions
           ?jobs
           ?subscriptions
           ?schedules
@@ -1492,6 +1532,7 @@ let handle_next_event_entries_transactional
 ;;
 
 let handle_invocation_entries
+      ?run_actions
       ?jobs
       ?subscriptions
       ?schedules
@@ -1575,8 +1616,11 @@ let handle_invocation_entries
       in
       let outcome = ref Moderation.Outcome.empty in
       let prepare_commit ~resolved ~(transaction : Runtime.transaction) =
+        let%bind run_action, local_effects =
+          prepare_run_actions run_actions transaction.local_effects
+        in
         let%bind starts, local_effects =
-          Background_job_operations.split_starts transaction.local_effects
+          Background_job_operations.split_starts local_effects
         in
         let%bind mutations, local_effects =
           Subscription_operations.split_mutations local_effects
@@ -1592,6 +1636,7 @@ let handle_invocation_entries
         in
         let%bind decoded = Runtime.decode_local_effects local_effects in
         let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
+        let prepared = { prepared with run_action } in
         let%bind overlay, install_overlay =
           prepare_identity_overlay
             t
@@ -1639,6 +1684,7 @@ let handle_invocation_entries
           ~f:(fun () ->
             with_work_transactions
               t
+              run_actions
               jobs
               subscriptions
               schedules
@@ -1658,6 +1704,7 @@ let handle_invocation_entries
 ;;
 
 let handle_observation_entries
+      ?run_actions
       ?jobs
       ?subscriptions
       ?schedules
@@ -1745,8 +1792,11 @@ let handle_observation_entries
       in
       let outcome = ref Moderation.Outcome.empty in
       let prepare (transaction : Runtime.transaction) =
+        let%bind run_action, local_effects =
+          prepare_run_actions run_actions transaction.local_effects
+        in
         let%bind starts, local_effects =
-          Background_job_operations.split_starts transaction.local_effects
+          Background_job_operations.split_starts local_effects
         in
         let%bind mutations, local_effects =
           Subscription_operations.split_mutations local_effects
@@ -1762,6 +1812,7 @@ let handle_observation_entries
         in
         let%bind decoded = decode_effects t local_effects in
         let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
+        let prepared = { prepared with run_action } in
         let%bind overlay, install_overlay =
           prepare_identity_overlay
             t
@@ -1831,6 +1882,7 @@ let handle_observation_entries
           ~f:(fun () ->
             with_work_transactions
               t
+              run_actions
               jobs
               subscriptions
               schedules

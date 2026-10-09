@@ -330,7 +330,7 @@ let%expect_test
         ~limits:document_limits
         ~kind:"session.state"
         ~version:5
-        ~payload
+        ~payload:(legacy_pending_payload payload)
       |> document_ok
     in
     let converted =

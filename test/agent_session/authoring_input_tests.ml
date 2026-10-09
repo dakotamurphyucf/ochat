@@ -179,6 +179,7 @@ let%expect_test "provider input contains committed guidance once across foregrou
          History_entry.Id.create ~namespace:"user" ~sequence:1 |> Result.ok_or_failwith
        in
        A.submit_message
+         ~submitting_principal:principal_id
          actor
          ~attachment_id:writer.id
          (Codec.user_text ~id "follow up" |> Codec.to_protocol)
@@ -300,6 +301,7 @@ let%expect_test
            |> Result.ok_or_failwith
          in
          A.submit_message
+           ~submitting_principal:principal_id
            actor
            ~attachment_id:writer.id
            (Codec.user_text ~id "continue authoring" |> Codec.to_protocol)

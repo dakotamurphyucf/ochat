@@ -295,6 +295,7 @@ let send_message client session key =
     Agent_protocol.Session.Send_message_request.
       { session_id = session.summary.id
       ; attachment_id = session.attachment.id
+      ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
       ; content = { kind = Plain_text; text = "run shell probe"; attachments = [] }
       ; idempotency_key = idempotency_key key
       }

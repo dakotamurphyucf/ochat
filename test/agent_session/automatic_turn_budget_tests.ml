@@ -209,7 +209,13 @@ let%expect_test
            Agent_session.History_codec.user_text ~id "continue"
            |> Agent_session.History_codec.to_protocol
          in
-         A.submit_message actor ~attachment_id:writer.id entry |> protocol_ok |> ignore;
+         A.submit_message
+           ~submitting_principal:principal_id
+           actor
+           ~attachment_id:writer.id
+           entry
+         |> protocol_ok
+         |> ignore;
          let state = await_idle actor in
          [%test_eq: int] 0 (budget state).followup_turns
        in

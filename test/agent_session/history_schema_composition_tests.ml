@@ -38,7 +38,11 @@ let%expect_test "organization and content revision conversions compose in order"
         conversation =
           { initial.conversation with
             canonical_history = [ entry 0 "saved" ]
-          ; deferred_user_entries = [ entry 1 "pending" ]
+          ; deferred_user_entries =
+              [ pending_document
+                  ~generation:initial.identity.generation
+                  (entry 1 "pending")
+              ]
           ; initial_prompt_entry_count = 0
           ; next_history_sequence = 2L
           ; reserved_history_through = 2L
@@ -58,7 +62,17 @@ let%expect_test "organization and content revision conversions compose in order"
                 @ [ "future_entry", `Object [ "content_revision", `Null ] ])))
       | _ -> failwith "expected history fixture"
     in
-    let conversation = member payload "conversation" in
+    let conversation =
+      member payload "conversation"
+      |> fun json -> without (without json "pending_revision") "pending_dispositions"
+    in
+    let deferred =
+      match member conversation "deferred_user_entries" with
+      | `Array values ->
+        `Array (List.map values ~f:(fun wrapper -> member wrapper "entry"))
+      | _ -> failwith "expected queue fixture"
+    in
+    let conversation = replace conversation "deferred_user_entries" deferred in
     let conversation =
       List.fold
         [ "canonical_history"; "deferred_user_entries" ]
@@ -84,7 +98,10 @@ let%expect_test "organization and content revision conversions compose in order"
     let encoded_payload = D.Document.payload encoded in
     let entries name =
       match member (member encoded_payload "conversation") name with
-      | `Array entries -> entries
+      | `Array entries ->
+        if String.equal name "deferred_user_entries"
+        then List.map entries ~f:(fun wrapper -> member wrapper "entry")
+        else entries
       | _ -> failwith "expected converted history"
     in
     let preserved entry =
@@ -99,7 +116,9 @@ let%expect_test "organization and content revision conversions compose in order"
          : bool)
       , (List.for_all
            (value.conversation.canonical_history
-            @ value.conversation.deferred_user_entries)
+            @ List.map
+                value.conversation.deferred_user_entries
+                ~f:A.Pending_input_document.entry)
            ~f:(fun entry ->
              P.History.Content_revision.equal
                entry.content_revision
@@ -115,5 +134,5 @@ let%expect_test "organization and content revision conversions compose in order"
       , (Result.is_error
            (A.Session_state_document.decode (document 7) ~limits:document_limits)
          : bool)]);
-  [%expect {| (7 true true true true true true) |}]
+  [%expect {| (9 true true true true true true) |}]
 ;;

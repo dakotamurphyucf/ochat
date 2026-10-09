@@ -129,13 +129,14 @@ let of_json json =
   t
 ;;
 
-let of_job (job : Job.t) =
+let of_completion result ~session_id ~job_id ~generation ~attempt =
   let open Result.Let_syntax in
-  let%bind result = Job.terminal_result job in
-  let%bind result =
-    Result.of_option
-      result
-      ~error:(Protocol_error.invalid_request "result reference requires terminal work")
+  let%bind () =
+    match result with
+    | Stored_completion.Inline completion -> Completion.validate completion
+    | Artifact { reference; _ } ->
+      let%map _ = Job_artifact.of_json (Job_artifact.to_json reference) in
+      ()
   in
   let byte_length, sha256, artifact =
     match result with
@@ -148,10 +149,10 @@ let of_job (job : Job.t) =
       , None )
   in
   let t =
-    { session_id = job.session_id
-    ; job_id = job.id
-    ; generation = job.generation
-    ; attempt = job.attempt
+    { session_id
+    ; job_id
+    ; generation
+    ; attempt
     ; outcome = Stored_completion.outcome result
     ; byte_length
     ; sha256
@@ -160,6 +161,22 @@ let of_job (job : Job.t) =
   in
   let%map () = validate t in
   t
+;;
+
+let of_job (job : Job.t) =
+  let open Result.Let_syntax in
+  let%bind result = Job.terminal_result job in
+  let%bind result =
+    Result.of_option
+      result
+      ~error:(Protocol_error.invalid_request "result reference requires terminal work")
+  in
+  of_completion
+    result
+    ~session_id:job.session_id
+    ~job_id:job.id
+    ~generation:job.generation
+    ~attempt:job.attempt
 ;;
 
 let validate_job t job =

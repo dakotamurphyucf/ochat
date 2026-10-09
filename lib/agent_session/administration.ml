@@ -93,6 +93,25 @@ let plan_reset state options =
   then Error (Agent_protocol.Error.invalid_request "metadata revision exhausted")
   else (
     let candidate = reset_state state options in
+    let%bind run_state =
+      match state.run_state with
+      | None -> Ok None
+      | Some index ->
+        if Int64.equal state.counters.revision Int64.max_value
+        then
+          Error
+            (Agent_protocol.Error.invalid_request
+               "session revision exhausted during run reset")
+        else
+          Result.map
+            (Run_retirement.replace
+               index
+               ~change:(Reset None)
+               ~session_revision:(Int64.succ state.counters.revision)
+               ~now:state.identity.updated_at)
+            ~f:Option.some
+    in
+    let candidate = { candidate with run_state } in
     let%map () =
       Session_state.validate_administration_candidate candidate ~previous:state
     in
@@ -158,8 +177,11 @@ let archive ~archive_reference ~previous (candidate : Session_state.t) kind =
   let open Result.Let_syntax in
   let%bind candidate, invocation_dispositions =
     match kind with
-    | Session_state.Compaction_archive.Compaction | Upgrade | Edit | Delete ->
-      Ok (candidate, [])
+    | Session_state.Compaction_archive.Compaction
+    | Upgrade
+    | Edit
+    | Delete
+    | Pending_input -> Ok (candidate, [])
     | Reset | Rebuild ->
       let first =
         Int64.max

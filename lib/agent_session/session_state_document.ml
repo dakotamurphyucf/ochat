@@ -275,6 +275,7 @@ let archive_kind_to_jsonaf = function
   | Upgrade -> `String "upgrade"
   | Edit -> `String "edit"
   | Delete -> `String "delete"
+  | Pending_input -> `String "pending_input"
 ;;
 
 let archive_kind_of_jsonaf =
@@ -286,6 +287,7 @@ let archive_kind_of_jsonaf =
     ; "upgrade", Upgrade
     ; "edit", Edit
     ; "delete", Delete
+    ; "pending_input", Pending_input
     ]
 ;;
 
@@ -364,11 +366,34 @@ let archive_reference_shape =
     ]
 ;;
 
-let conversation_to_jsonaf (t : S.Conversation.t) =
+let pending_document_result result =
+  Result.map_error result ~f:(fun error ->
+    P.Error.invalid_request (Sexp.to_string_hum (D.Error.sexp_of_t error)))
+;;
+
+let conversation_to_jsonaf ~raw_pending ~limits (t : S.Conversation.t) =
+  let open Result.Let_syntax in
+  let%bind pending =
+    List.map t.deferred_user_entries ~f:(fun document ->
+      (if raw_pending
+       then Pending_input_document.to_jsonaf document ~limits
+       else Pending_input_document.known_jsonaf document ~limits)
+      |> pending_document_result)
+    |> Result.all
+  in
+  let%map dispositions =
+    List.map t.pending_dispositions ~f:(fun document ->
+      (if raw_pending
+       then Pending_disposition_document.to_jsonaf document ~limits
+       else Pending_disposition_document.known_jsonaf document ~limits)
+      |> pending_document_result)
+    |> Result.all
+  in
   `Object
     [ "canonical_history", (X.list_json P.History.entry_to_json) t.canonical_history
-    ; ( "deferred_user_entries"
-      , (X.list_json P.History.entry_to_json) t.deferred_user_entries )
+    ; "deferred_user_entries", `Array pending
+    ; "pending_revision", P.Pending_input.Revision.to_json t.pending_revision
+    ; "pending_dispositions", `Array dispositions
     ; "initial_prompt_entry_count", X.integer_json t.initial_prompt_entry_count
     ; "next_history_sequence", X.int64_json t.next_history_sequence
     ; "reserved_history_through", X.int64_json t.reserved_history_through
@@ -384,14 +409,28 @@ let conversation_to_jsonaf (t : S.Conversation.t) =
     ]
 ;;
 
-let conversation_of_jsonaf json =
+let conversation_of_jsonaf ~limits json =
   let open Result.Let_syntax in
   let%bind fields = X.object_ json in
   let%bind canonical_history =
     X.required fields "canonical_history" (X.list P.History.entry_of_json)
   in
   let%bind deferred_user_entries =
-    X.required fields "deferred_user_entries" (X.list P.History.entry_of_json)
+    X.required
+      fields
+      "deferred_user_entries"
+      (X.list (fun json ->
+         Pending_input_document.of_jsonaf json ~limits |> pending_document_result))
+  in
+  let%bind pending_revision =
+    X.required fields "pending_revision" P.Pending_input.Revision.of_json
+  in
+  let%bind pending_dispositions =
+    X.required
+      fields
+      "pending_dispositions"
+      (X.list (fun json ->
+         Pending_disposition_document.of_jsonaf json ~limits |> pending_document_result))
   in
   let%bind initial_prompt_entry_count =
     X.required fields "initial_prompt_entry_count" X.integer
@@ -420,6 +459,8 @@ let conversation_of_jsonaf json =
   let t : S.Conversation.t =
     { canonical_history
     ; deferred_user_entries
+    ; pending_revision
+    ; pending_dispositions
     ; initial_prompt_entry_count
     ; next_history_sequence
     ; reserved_history_through
@@ -437,7 +478,12 @@ let conversation_of_jsonaf json =
 let conversation_shape =
   X.shape_exn
     [ "canonical_history", X.array_shape_exn ~identity_field:"id" Shapes.history_entry
-    ; "deferred_user_entries", X.array_shape_exn ~identity_field:"id" Shapes.history_entry
+    ; ( "deferred_user_entries"
+      , X.array_shape_exn ~identity_field:"id" Pending_input_document.shape )
+    ; "pending_revision", D.Shape.value
+    ; ( "pending_dispositions"
+      , X.array_shape_exn ~identity_field:"history_id" Pending_disposition_document.shape
+      )
     ; "initial_prompt_entry_count", Document_schema.Shape.value
     ; "next_history_sequence", Document_schema.Shape.value
     ; "reserved_history_through", Document_schema.Shape.value
@@ -550,50 +596,94 @@ let ledger_of_jsonaf ~limits json =
   |> Result.map_error ~f:ledger_error
 ;;
 
-let state_to_jsonaf (t : S.t) =
+type run_state_field =
+  | Missing
+  | Nullable
+
+let run_state_fields field value =
+  match field, value with
+  | Missing, None -> []
+  | (Missing | Nullable), Some index -> [ "run_state", Run_state.to_jsonaf index ]
+  | Nullable, None -> [ "run_state", `Null ]
+;;
+
+let state_to_jsonaf ?(raw_pending = false) (t : S.t) ~limits ~presence =
+  let run_state_field =
+    if Session_state_presence.run_state_is_absent presence then Missing else Nullable
+  in
   let open Result.Let_syntax in
+  let%bind conversation = conversation_to_jsonaf ~raw_pending ~limits t.conversation in
   let%map ledger =
     Inference_ledger.to_document t.inference_ledger |> Result.map_error ~f:ledger_error
   in
   `Object
-    [ "identity", identity_to_jsonaf t.identity
-    ; "spec", spec_to_jsonaf t.spec
-    ; "lifecycle", lifecycle_to_jsonaf t.lifecycle
-    ; "runtime_initialization", initialization_to_jsonaf t.runtime_initialization
-    ; "pending_initial_start", X.bool_json t.pending_initial_start
-    ; "stop_epoch", X.int64_json t.stop_epoch
-    ; "parent_stop_epoch", (X.option_json X.int64_json) t.parent_stop_epoch
-    ; "conversation", conversation_to_jsonaf t.conversation
-    ; "active_operation", (X.option_json P.Operation.to_json) t.active_operation
-    ; ( "automatic_turn_budget"
-      , (X.option_json Automatic_turn_budget.to_jsonaf) t.automatic_turn_budget )
-    ; "permissions", (X.list_json P.Permission.to_json) t.permissions
-    ; "grants", (X.list_json P.Grant.to_json) t.grants
-    ; "jobs", (X.list_json P.Job.to_json) t.jobs
-    ; "inference_ledger", D.Document.json ledger
-    ; "model_job_targets", X.list_json Model_job_target.to_json t.model_job_targets
-    ; "schedules", (X.list_json P.Schedule.Storage.to_json) t.schedules
-    ; "invocations", (X.list_json P.Invocation.Storage.to_json) t.invocations
-    ; ( "managed_submissions"
-      , (X.list_json Managed_submission.to_jsonaf) t.managed_submissions )
-    ; "managed_stops", (X.list_json Managed_stop.to_jsonaf) t.managed_stops
-    ; ( "moderator_executions"
-      , (X.list_json P.Moderator_execution.to_json) t.moderator_executions )
-    ; "subscriptions", (X.list_json P.Subscription.Storage.to_json) t.subscriptions
-    ; "deliveries", (X.list_json P.Delivery.Storage.to_json) t.deliveries
-    ; ( "ingress_registrations"
-      , (X.list_json External_ingress.to_jsonaf) t.ingress_registrations )
-    ; "attachments", (X.list_json attachment_to_jsonaf) t.attachments
-    ; "moderator", (X.option_json Fn.id) t.moderator
-    ; "shell", Session.Shell_state.to_jsonaf t.shell
-    ; "halted", X.bool_json t.halted
-    ; "halt_reason", (X.option_json X.text_json) t.halt_reason
-    ; "failure", (X.option_json P.Error.to_json) t.failure
-    ; "counters", counters_to_jsonaf t.counters
-    ]
+    ([ "identity", identity_to_jsonaf t.identity
+     ; "spec", spec_to_jsonaf t.spec
+     ; "lifecycle", lifecycle_to_jsonaf t.lifecycle
+     ; "runtime_initialization", initialization_to_jsonaf t.runtime_initialization
+     ; "pending_initial_start", X.bool_json t.pending_initial_start
+     ; "stop_epoch", X.int64_json t.stop_epoch
+     ; "parent_stop_epoch", (X.option_json X.int64_json) t.parent_stop_epoch
+     ; "conversation", conversation
+     ; "active_operation", (X.option_json P.Operation.to_json) t.active_operation
+     ; ( "automatic_turn_budget"
+       , (X.option_json Automatic_turn_budget.to_jsonaf) t.automatic_turn_budget )
+     ; "permissions", (X.list_json P.Permission.to_json) t.permissions
+     ; "grants", (X.list_json P.Grant.to_json) t.grants
+     ; "jobs", (X.list_json P.Job.to_json) t.jobs
+     ; "inference_ledger", D.Document.json ledger
+     ; "model_job_targets", X.list_json Model_job_target.to_json t.model_job_targets
+     ; "schedules", (X.list_json P.Schedule.Storage.to_json) t.schedules
+     ; "invocations", (X.list_json P.Invocation.Storage.to_json) t.invocations
+     ; ( "managed_submissions"
+       , (X.list_json Managed_submission.to_jsonaf) t.managed_submissions )
+     ; "managed_stops", (X.list_json Managed_stop.to_jsonaf) t.managed_stops
+     ]
+     @ run_state_fields run_state_field t.run_state
+     @ [ ( "moderator_executions"
+         , (X.list_json P.Moderator_execution.to_json) t.moderator_executions )
+       ; "subscriptions", (X.list_json P.Subscription.Storage.to_json) t.subscriptions
+       ; ( "deliveries"
+         , X.list_json
+             (fun (delivery : P.Delivery.t) ->
+                let binding_field =
+                  if
+                    Session_state_presence.delivery_binding_is_absent
+                      presence
+                      delivery.context.id
+                  then P.Delivery.Storage.Missing
+                  else P.Delivery.Storage.Nullable
+                in
+                P.Delivery.Storage.to_json_with_binding_field delivery ~binding_field)
+             t.deliveries )
+       ; ( "ingress_registrations"
+         , (X.list_json External_ingress.to_jsonaf) t.ingress_registrations )
+       ; "attachments", (X.list_json attachment_to_jsonaf) t.attachments
+       ; "moderator", (X.option_json Fn.id) t.moderator
+       ; "shell", Session.Shell_state.to_jsonaf t.shell
+       ; "halted", X.bool_json t.halted
+       ; "halt_reason", (X.option_json X.text_json) t.halt_reason
+       ; "failure", (X.option_json P.Error.to_json) t.failure
+       ; "counters", counters_to_jsonaf t.counters
+       ])
 ;;
 
-let state_of_jsonaf ~limits json =
+let equal_values previous ~limits next =
+  let project state =
+    state_to_jsonaf
+      ~raw_pending:true
+      state
+      ~limits
+      ~presence:Session_state_presence.authored
+    |> X.document_result
+  in
+  let open Result.Let_syntax in
+  let%bind previous = project previous in
+  let%map next = project next in
+  D.Json.equal previous next
+;;
+
+let state_fields_of_jsonaf ~limits json =
   let open Result.Let_syntax in
   let%bind fields = X.object_ json in
   let%bind identity = X.required fields "identity" identity_of_jsonaf in
@@ -607,7 +697,9 @@ let state_of_jsonaf ~limits json =
   let%bind parent_stop_epoch =
     X.required fields "parent_stop_epoch" (X.nullable X.nonnegative_int64)
   in
-  let%bind conversation = X.required fields "conversation" conversation_of_jsonaf in
+  let%bind conversation =
+    X.required fields "conversation" (conversation_of_jsonaf ~limits)
+  in
   let%bind active_operation =
     X.required fields "active_operation" (X.nullable P.Operation.of_json)
   in
@@ -637,6 +729,10 @@ let state_of_jsonaf ~limits json =
   in
   let%bind managed_stops =
     X.required fields "managed_stops" (X.list Managed_stop.of_jsonaf)
+  in
+  let%bind run_state =
+    J.optional_as fields "run_state" (X.nullable Run_state.of_jsonaf)
+    |> Result.map ~f:Option.join
   in
   let%bind moderator_executions =
     X.required fields "moderator_executions" (X.list P.Moderator_execution.of_json)
@@ -682,6 +778,7 @@ let state_of_jsonaf ~limits json =
     ; managed_submissions
     ; managed_stops
     ; moderator_executions
+    ; run_state
     ; subscriptions
     ; deliveries
     ; ingress_registrations
@@ -694,8 +791,14 @@ let state_of_jsonaf ~limits json =
     ; counters
     }
   in
-  let%map () = S.validate t in
-  t
+  Ok t
+;;
+
+let state_of_jsonaf ~limits json =
+  let open Result.Let_syntax in
+  let%bind state = state_fields_of_jsonaf ~limits json in
+  let%map () = S.validate state in
+  state
 ;;
 
 let state_shape =
@@ -720,6 +823,7 @@ let state_shape =
     ; "invocations", X.array_shape_exn ~identity_field:"id" Shapes.invocation
     ; ( "managed_submissions"
       , X.array_shape_exn ~identity_field:"history_id" Managed_submission.shape )
+    ; "run_state", X.nullable_shape Run_state.shape
     ; "managed_stops", X.array_shape_exn ~identity_field:"id" Managed_stop.shape
     ; ( "moderator_executions"
       , X.array_shape_exn ~identity_field:"id" Shapes.moderator_execution )
@@ -742,6 +846,7 @@ module Original = struct
     { template : D.Document.t
     ; limits : D.Limits.t
     ; inference_ledger : Inference_ledger.t
+    ; presence : Session_state_presence.t
     }
 end
 
@@ -760,18 +865,47 @@ let authored value =
   { carrier = D.Extension_carrier.of_authored_value value; original = None }
 ;;
 
+let validate_run_capacity (state : S.t) document =
+  match state.run_state with
+  | None -> Ok ()
+  | Some index ->
+    (match D.Json.field (D.Document.payload document) ~name:"run_state" with
+     | Value raw ->
+       let open Result.Let_syntax in
+       let%bind additional_bytes =
+         Run_job_capacity.bookkeeping_reserve index ~jobs:state.jobs |> X.document_result
+       in
+       Run_state.validate_encoded_capacity_with_reserve index ~additional_bytes raw
+       |> X.document_result
+     | Absent | Null ->
+       Error
+         (D.Error.Invalid_field
+            { path = [ "run_state" ]; reason = "admitted run index is missing" }))
+;;
+
 let decoded carrier ~limits =
   let template =
     match D.Extension_carrier.template carrier with
     | Some template -> template
     | None -> raise_s [%sexp "decoded state document has no original template"]
   in
+  let open Result.Let_syntax in
+  let%bind state =
+    Pending_carrier_admission.rehydrate
+      (D.Extension_carrier.value carrier)
+      ~document:template
+      ~limits
+  in
+  let carrier = D.Extension_carrier.with_value carrier state in
+  let%bind () = validate_run_capacity state template in
+  let%map presence = Session_state_presence.of_document template ~limits in
   { carrier
   ; original =
       Some
         { template
         ; limits
         ; inference_ledger = (D.Extension_carrier.value carrier).S.inference_ledger
+        ; presence
         }
   }
 ;;
@@ -1047,11 +1181,65 @@ let upgrade document ~limits =
                  name, if String.equal name "conversation" then conversation else value)))
       | _ -> F.invalid "conversation" "must be an object")
   in
+  let%bind run_step =
+    D.Conversion.Step.of_function ~kind:"session.state" ~from_version:7 ~f:Result.return
+  in
+  let%bind pending_input_step =
+    D.Conversion.Step.of_function ~kind:"session.state" ~from_version:8 ~f:(fun payload ->
+      let module F = Agent_store.Document_fields in
+      let%bind identity = F.required payload "identity" Result.return in
+      let%bind generation =
+        F.required identity "generation" (fun json ->
+          X.host_counter_of_json json |> X.document_result)
+      in
+      let generation = X.integer_json generation in
+      let%bind conversation = F.required payload "conversation" Result.return in
+      let%bind deferred = F.required conversation "deferred_user_entries" Result.return in
+      let%bind deferred =
+        match deferred with
+        | `Array entries ->
+          List.map entries ~f:(fun entry ->
+            let%map id = F.required entry "id" Result.return in
+            `Object
+              [ "id", id
+              ; "entry", entry
+              ; "generation", generation
+              ; "binding", `Object [ "kind", `String "safe_boundary" ]
+              ; "owner", Pending_input_document.Owner.to_json Unknown
+              ])
+          |> Result.all
+          |> Result.map ~f:(fun entries -> `Array entries)
+        | _ -> F.invalid "deferred_user_entries" "must be an array"
+      in
+      match conversation, payload with
+      | `Object conversation_fields, `Object fields ->
+        if
+          List.exists conversation_fields ~f:(fun (name, _) ->
+            String.equal name "pending_revision"
+            || String.equal name "pending_dispositions")
+        then F.invalid "conversation" "pending semantic-name collision"
+        else (
+          let conversation =
+            `Object
+              (List.map conversation_fields ~f:(fun (name, value) ->
+                 ( name
+                 , if String.equal name "deferred_user_entries" then deferred else value ))
+               @ [ ( "pending_revision"
+                   , P.Pending_input.Revision.to_json P.Pending_input.Revision.zero )
+                 ; "pending_dispositions", `Array []
+                 ])
+          in
+          Ok
+            (`Object
+                (List.map fields ~f:(fun (name, value) ->
+                   name, if String.equal name "conversation" then conversation else value))))
+      | _ -> F.invalid "conversation" "must be an object")
+  in
   let%bind conversion =
     D.Conversion.create
       ~limits
-      ~targets:[ "session.state", 7 ]
-      ~max_steps:6
+      ~targets:[ "session.state", 9 ]
+      ~max_steps:8
       ~max_operations:100_000
       ~steps:
         [ step
@@ -1060,30 +1248,42 @@ let upgrade document ~limits =
         ; configuration_step
         ; organization_step
         ; history_revision_step
+        ; run_step
+        ; pending_input_step
         ]
   in
   D.Conversion.upgrade conversion document
 ;;
 
-let codec ~limits =
+let codec ~limits ~presence =
   match
     D.Domain_codec.create_validated
       ~limits
       ~kind:"session.state"
-      ~version:7
+      ~version:9
       ~shape
       ~supported_semantics:[]
       ~validate:(fun state -> X.document_result (S.validate state))
       ~decode:(fun json -> X.document_result (state_of_jsonaf ~limits json))
-      ~encode:(fun state -> X.document_result (state_to_jsonaf state))
+      ~encode:(fun state -> X.document_result (state_to_jsonaf state ~limits ~presence))
   with
   | Ok codec -> codec
   | Error error -> raise_s [%sexp "invalid session state codec", (error : D.Error.t)]
 ;;
 
+let codec_for (t : t) ~limits =
+  let presence =
+    match t.original with
+    | None -> Session_state_presence.authored
+    | Some original -> original.presence
+  in
+  codec ~limits ~presence
+;;
+
 let decode ~limits document =
   let%bind.Result document = upgrade document ~limits in
-  D.Domain_codec.decode (codec ~limits) document |> Result.map ~f:(decoded ~limits)
+  D.Domain_codec.decode (codec ~limits ~presence:Session_state_presence.authored) document
+  |> Result.bind ~f:(decoded ~limits)
 ;;
 
 let validate_ledger_carrier (t : t) ~limits =
@@ -1110,8 +1310,29 @@ let validate_ledger_carrier (t : t) ~limits =
 ;;
 
 let encode t ~limits =
-  let%bind.Result () = validate_ledger_carrier t ~limits in
-  D.Domain_codec.encode (codec ~limits) t.carrier
+  let open Result.Let_syntax in
+  let%bind () = validate_ledger_carrier t ~limits in
+  let%bind document =
+    match t.original with
+    | Some _ -> D.Domain_codec.encode (codec_for t ~limits) t.carrier
+    | None ->
+      let%bind.Result () = S.validate (value t) |> X.document_result in
+      let%bind.Result payload =
+        state_to_jsonaf
+          ~raw_pending:true
+          (value t)
+          ~limits
+          ~presence:Session_state_presence.authored
+        |> X.document_result
+      in
+      let%bind.Result document =
+        D.Document.create ~limits ~kind:"session.state" ~version:9 ~payload
+      in
+      let%bind.Result admitted = decode ~limits document in
+      D.Domain_codec.encode (codec_for admitted ~limits) admitted.carrier
+  in
+  let%map () = validate_run_capacity (value t) document in
+  document
 ;;
 
 let adopt previous ~limits incoming =
@@ -1126,10 +1347,10 @@ let adopt previous ~limits incoming =
     |> X.document_result
   in
   D.Domain_codec.adopt
-    (codec ~limits)
+    (codec_for previous ~limits)
     ~previous:previous.carrier
     ~incoming:incoming.carrier
-  |> Result.map ~f:(decoded ~limits)
+  |> Result.bind ~f:(decoded ~limits)
 ;;
 
 let retire_canonical_entries t ~retained_ids ~initial_count ~limits =
@@ -1191,8 +1412,18 @@ let retire_canonical_entries t ~retained_ids ~initial_count ~limits =
   let%bind payload = replace payload "conversation" conversation in
   let%bind raw = replace (D.Document.json document) "payload" payload in
   let%bind document = D.Document.inspect ~limits raw in
-  let%map carrier = D.Domain_codec.decode (codec ~limits) document in
-  { carrier; original = t.original }
+  let%bind carrier =
+    D.Domain_codec.decode
+      (codec ~limits ~presence:Session_state_presence.authored)
+      document
+  in
+  let%map state =
+    Pending_carrier_admission.rehydrate
+      (D.Extension_carrier.value carrier)
+      ~document
+      ~limits
+  in
+  { carrier = D.Extension_carrier.with_value carrier state; original = t.original }
 ;;
 
 let retire_canonical_suffix t ~retained_ids ~limits =
@@ -1238,3 +1469,332 @@ let retire_canonical_deletion t ~deletion ~limits =
     ~initial_count:(History_deletion.initial_prompt_entry_count deletion)
     ~limits
 ;;
+
+let transfer_pending_internal
+      t
+      ~plan
+      ~archive
+      ~expiry_archive
+      ~limits
+      ~encode_previous
+      ~decode_incoming
+  =
+  let open Result.Let_syntax in
+  let invalid reason =
+    D.Error.Invalid_field { path = [ "conversation"; "deferred_user_entries" ]; reason }
+  in
+  let previous = value t in
+  let%bind () = Pending_plan.validate_basis plan previous |> X.document_result in
+  let%bind previous_document = encode_previous t ~limits in
+  let%bind () =
+    match Pending_plan.requires_archive plan, archive with
+    | true, None -> Error (invalid "pending retirement requires exact previous archive")
+    | false, None -> Ok ()
+    | (true | false), Some reference ->
+      let%bind captured =
+        D.Document.create
+          ~limits
+          ~kind:"session.compaction_archive"
+          ~version:1
+          ~payload:(`Object [ "state", D.Document.json previous_document ])
+      in
+      let kind_allowed =
+        match reference.Session_state.Compaction_archive.kind with
+        | Pending_input | Reset | Rebuild | Upgrade -> true
+        | Compaction | Edit | Delete -> false
+      in
+      if
+        kind_allowed
+        && Int64.equal reference.revision previous.counters.revision
+        && List.is_empty reference.invocation_dispositions
+        && String.equal
+             reference.sha256
+             (Agent_store.Document_record.digest (D.Document.to_string captured))
+      then Ok ()
+      else
+        Error (invalid "pending archive does not bind exact previous admitted document")
+  in
+  let%bind () =
+    match Pending_plan.expired_dispositions plan, expiry_archive with
+    | [], None -> Ok ()
+    | [], Some _ -> Error (invalid "unexpected pending expiry archive")
+    | _ :: _, None -> Error (invalid "pending expiry requires explicit archived custody")
+    | records, Some reference ->
+      let%bind expected =
+        Pending_archive.create
+          previous
+          ~operation_id:(Pending_archive.Reference.operation_id reference)
+          ~pending_revision:(Pending_plan.revision plan)
+          ~records
+          ~limits
+        |> X.document_result
+      in
+      if Pending_archive.Reference.equal reference (Pending_archive.reference expected)
+      then Ok ()
+      else Error (invalid "pending expiry archive differs from exact retired records")
+  in
+  let%bind next = Pending_plan.apply plan previous |> X.document_result in
+  let%bind conversation =
+    Agent_store.Document_fields.required
+      (D.Document.payload previous_document)
+      "conversation"
+      Result.return
+  in
+  let%bind raw_canonical =
+    Agent_store.Document_fields.required
+      conversation
+      "canonical_history"
+      Agent_store.Document_fields.array
+  in
+  let count = List.length (Pending_plan.adopted_entries plan) in
+  let adopted = List.take previous.conversation.deferred_user_entries count in
+  let%bind () =
+    if
+      List.equal
+        P.History.equal_entry
+        (List.map adopted ~f:Pending_input_document.entry)
+        (Pending_plan.adopted_entries plan)
+    then Ok ()
+    else Error (invalid "adoption must transfer an exact queue prefix")
+  in
+  let%bind raw_adopted =
+    List.map adopted ~f:(fun document ->
+      Pending_input_document.entry_jsonaf document ~limits)
+    |> Result.all
+  in
+  let%bind raw_pending =
+    List.map (Pending_plan.pending plan) ~f:(fun document ->
+      Pending_input_document.to_jsonaf document ~limits)
+    |> Result.all
+  in
+  let%bind raw_dispositions =
+    List.map (Pending_plan.dispositions plan) ~f:(fun document ->
+      Pending_disposition_document.to_jsonaf document ~limits)
+    |> Result.all
+  in
+  let replace_fields json replacements =
+    match json with
+    | `Object fields ->
+      Ok
+        (`Object
+            (List.map fields ~f:(fun (name, old) ->
+               ( name
+               , Option.value
+                   (List.Assoc.find replacements name ~equal:String.equal)
+                   ~default:old ))))
+    | _ -> Error (invalid "pending transfer container must be an object")
+  in
+  let%bind conversation =
+    replace_fields
+      conversation
+      [ "canonical_history", `Array (raw_canonical @ raw_adopted)
+      ; "deferred_user_entries", `Array raw_pending
+      ; "pending_revision", P.Pending_input.Revision.to_json (Pending_plan.revision plan)
+      ; "pending_dispositions", `Array raw_dispositions
+      ]
+  in
+  let%bind payload =
+    replace_fields (D.Document.payload previous_document) [ "conversation", conversation ]
+  in
+  let%bind json =
+    replace_fields (D.Document.json previous_document) [ "payload", payload ]
+  in
+  let%bind document = D.Document.inspect ~limits json in
+  let%bind incoming = decode_incoming ~limits document in
+  let incoming_value = value incoming in
+  let%bind () =
+    if
+      List.equal
+        P.History.equal_entry
+        incoming_value.conversation.canonical_history
+        next.conversation.canonical_history
+      && List.equal
+           Pending_input_document.equal
+           incoming_value.conversation.deferred_user_entries
+           next.conversation.deferred_user_entries
+      && List.equal
+           Pending_disposition_document.equal
+           incoming_value.conversation.pending_dispositions
+           next.conversation.pending_dispositions
+    then Ok ()
+    else Error (invalid "pending custody transfer differs from pure candidate")
+  in
+  Ok incoming
+;;
+
+let transfer_pending t ~plan ~archive ~expiry_archive ~limits =
+  transfer_pending_internal
+    t
+    ~plan
+    ~archive
+    ~expiry_archive
+    ~limits
+    ~encode_previous:encode
+    ~decode_incoming:decode
+;;
+
+module Admitted = struct
+  type nonrec state_document = t
+
+  type t =
+    { state_document : state_document
+    ; document : D.Document.t
+    }
+
+  let state_document t = t.state_document
+  let document t = t.document
+end
+
+module Transaction = struct
+  type document = t
+  type t = { staged : document }
+
+  let value t = value t.staged
+  let with_value t state = { staged = with_value t.staged state }
+
+  let prefix_codec ~limits ~presence =
+    match
+      D.Domain_codec.create
+        ~limits
+        ~kind:"session.state"
+        ~version:9
+        ~shape
+        ~supported_semantics:[]
+        ~decode:(fun json -> state_fields_of_jsonaf ~limits json |> X.document_result)
+        ~encode:(fun state ->
+          state_to_jsonaf state ~limits ~presence |> X.document_result)
+    with
+    | Ok codec -> codec
+    | Error error ->
+      raise_s [%sexp "invalid private transaction codec", (error : D.Error.t)]
+  ;;
+
+  let presence t =
+    match t.original with
+    | None -> Session_state_presence.authored
+    | Some original -> original.presence
+  ;;
+
+  let encode_prefix t ~limits =
+    let open Result.Let_syntax in
+    let%bind () = validate_ledger_carrier t ~limits in
+    let%bind document =
+      match t.original with
+      | Some _ ->
+        D.Domain_codec.encode (prefix_codec ~limits ~presence:(presence t)) t.carrier
+      | None ->
+        let%bind payload =
+          state_to_jsonaf
+            ~raw_pending:true
+            (value { staged = t })
+            ~limits
+            ~presence:Session_state_presence.authored
+          |> X.document_result
+        in
+        let%bind document =
+          D.Document.create ~limits ~kind:"session.state" ~version:9 ~payload
+        in
+        let%bind carrier =
+          D.Domain_codec.decode
+            (prefix_codec ~limits ~presence:Session_state_presence.authored)
+            document
+        in
+        D.Domain_codec.encode
+          (prefix_codec ~limits ~presence:Session_state_presence.authored)
+          carrier
+    in
+    let%map () = validate_run_capacity (value { staged = t }) document in
+    document
+  ;;
+
+  let decode_prefix ~limits document =
+    let open Result.Let_syntax in
+    let%bind carrier =
+      D.Domain_codec.decode
+        (prefix_codec ~limits ~presence:Session_state_presence.authored)
+        document
+    in
+    let%bind state =
+      Pending_carrier_admission.rehydrate_transaction_prefix
+        (D.Extension_carrier.value carrier)
+        ~document
+        ~limits
+    in
+    let%bind () = validate_run_capacity state document in
+    let%map presence = Session_state_presence.of_document document ~limits in
+    { carrier = D.Extension_carrier.with_value carrier state
+    ; original =
+        Some
+          { template = document
+          ; limits
+          ; inference_ledger = state.S.inference_ledger
+          ; presence
+          }
+    }
+  ;;
+
+  let begin_ document ~limits =
+    let open Result.Let_syntax in
+    let%bind () = S.validate (value { staged = document }) |> X.document_result in
+    let%map _ = encode_prefix document ~limits in
+    { staged = document }
+  ;;
+
+  let checkpoint t ~limits =
+    let%map.Result _ = encode t.staged ~limits in
+    t.staged
+  ;;
+
+  let transfer_pending t ~plan ~archive ~expiry_archive ~limits =
+    let encode_previous =
+      if Pending_plan.requires_archive plan || Option.is_some archive
+      then encode
+      else encode_prefix
+    in
+    let%map.Result staged =
+      transfer_pending_internal
+        t.staged
+        ~plan
+        ~archive
+        ~expiry_archive
+        ~limits
+        ~encode_previous
+        ~decode_incoming:decode_prefix
+    in
+    { staged }
+  ;;
+
+  let finish_encoded t ~(next : S.t) ~limits =
+    let open Result.Let_syntax in
+    let expected = value t in
+    let normalized =
+      { next with
+        identity = { next.identity with updated_at = expected.identity.updated_at }
+      ; counters =
+          { next.counters with
+            revision = expected.counters.revision
+          ; event_sequence = expected.counters.event_sequence
+          ; transaction_sequence = expected.counters.transaction_sequence
+          }
+      }
+    in
+    let%bind equal = equal_values expected ~limits normalized in
+    let%bind () =
+      if equal
+      then Ok ()
+      else
+        Error
+          (D.Error.Invalid_field
+             { path = []
+             ; reason = "candidate differs from ordered admitted durable mutation"
+             })
+    in
+    let candidate = (with_value t next).staged in
+    let%map document = encode candidate ~limits in
+    { Admitted.state_document = candidate; document }
+  ;;
+
+  let finish t ~next ~limits =
+    Result.map (finish_encoded t ~next ~limits) ~f:Admitted.state_document
+  ;;
+end

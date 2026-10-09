@@ -434,7 +434,7 @@ let%expect_test
         }]);
   [%expect
     {|
-    ((schema 22)
+    ((schema 24)
      (recovered
       ((mex_failed failed) (mex_pending completed.pending)
        (mex_running interrupted) (mex_waiting completed.waiting_compaction)))
@@ -736,7 +736,7 @@ let%expect_test
          : bool)]);
   [%expect
     {|
-    ((version 22) (records 0))
+    ((version 24) (records 0))
     true
     true
     true
@@ -881,8 +881,65 @@ let%expect_test "named compaction archives admit typed state and preserve captur
         (* These values demonstrate the distinction between native validation
            and the complete typed decoder, rather than a generic JSON failure. *)
         S.validate bad |> protocol_ok;
+        let valid =
+          { bad with
+            conversation =
+              { bad.conversation with
+                initial_prompt_entry_count =
+                  Int.max 0 bad.conversation.initial_prompt_entry_count
+              }
+          ; jobs =
+              List.map bad.jobs ~f:(fun job ->
+                { job with Agent_protocol.Job.attempt = Int.max 0 job.attempt })
+          }
+        in
+        let valid_child =
+          State_document.encode (State_document.authored valid) ~limits:document_limits
+          |> document_ok
+        in
+        let set json name value =
+          match json with
+          | `Object fields ->
+            `Object
+              (List.map fields ~f:(fun (key, old) ->
+                 key, if String.equal key name then value else old))
+          | _ -> failwith "expected admitted fixture object"
+        in
+        let payload = D.Document.payload valid_child in
+        let payload =
+          if bad.conversation.initial_prompt_entry_count < 0
+          then (
+            let conversation =
+              Agent_store.Document_fields.required payload "conversation" Result.return
+              |> document_ok
+            in
+            set
+              payload
+              "conversation"
+              (set conversation "initial_prompt_entry_count" (`Number "-1")))
+          else (
+            let jobs =
+              Agent_store.Document_fields.required
+                payload
+                "jobs"
+                Agent_store.Document_fields.array
+              |> document_ok
+            in
+            set
+              payload
+              "jobs"
+              (`Array (List.map jobs ~f:(fun job -> set job "attempt" (`Number "-1")))))
+        in
+        let child =
+          D.Document.create
+            ~limits:document_limits
+            ~kind:"session.state"
+            ~version:(D.Document.version valid_child)
+            ~payload
+          |> document_ok
+        in
         let bad = State_document.authored bad in
-        let child = State_document.encode bad ~limits:document_limits |> document_ok in
+        assert (Result.is_error (State_document.encode bad ~limits:document_limits));
         assert (Result.is_error (State_document.decode ~limits:document_limits child));
         assert (Result.is_error (A.archive_document bad ~limits:document_limits));
         assert (Result.is_error (A.reference bad ~limits:document_limits operation_id));
@@ -1041,7 +1098,7 @@ let%expect_test "named compaction archives admit typed state and preserve captur
           }];
       Agent_store.Session_store.close_session store handle |> store_ok;
       Agent_store.Session_store.close store |> store_ok));
-  [%expect {| ((version 22) (records 0)) |}]
+  [%expect {| ((version 24) (records 0)) |}]
 ;;
 
 let%expect_test
@@ -1244,7 +1301,7 @@ let%expect_test "named invocation snapshots preserve pending publication" =
         ((List.hd_exn restored.invocations).status : Agent_protocol.Invocation.status)]);
   [%expect
     {|
-    ((version 22) (invocations 1) (subscriptions 0) (deliveries 0))
+    ((version 24) (invocations 1) (subscriptions 0) (deliveries 0))
     (Resolved (Complete Null))
     |}]
 ;;
@@ -1490,7 +1547,10 @@ let%test_unit
         (Agent_session.Session_state.validate
            { state with
              conversation =
-               { state.conversation with deferred_user_entries = [ canonical ] }
+               { state.conversation with
+                 deferred_user_entries =
+                   [ pending_document ~generation:state.identity.generation canonical ]
+               }
            }));
     let restored = restore_state state |> store_ok in
     let retained = List.hd_exn restored.conversation.canonical_history in
@@ -1578,7 +1638,10 @@ let%test_unit
         (Agent_session.Session_state.validate
            { state with
              conversation =
-               { state.conversation with deferred_user_entries = [ deferred ] }
+               { state.conversation with
+                 deferred_user_entries =
+                   [ pending_document ~generation:state.identity.generation deferred ]
+               }
            }));
     let restored = restore_state state |> store_ok in
     let projected = Agent_session.Session_state.snapshot ~now:timestamp restored in

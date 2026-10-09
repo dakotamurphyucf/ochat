@@ -188,7 +188,7 @@ let implementation_sources =
   ; ( "lib/agent_server/managed_output_page.ml"
     , "a14130666a4495de0c35df1c01974922da31daed064f1f7622a9b686b9c38ba5" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "5e5acca3c05203ea1d144164d0a26351f05d9ab69c7a0116d89177f844760412" )
+    , "0c89ef4ec139012d661d7f45d32ccc4f41e20e2d47a62cf2410aa2a555e77c7e" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "46e1d8969a881efd0a3600ac521dc3d810acef6648410d01b8591c8be084f4bd" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"
@@ -220,7 +220,7 @@ let implementation_sources =
   ; ( "lib/agent_session/managed_submission.ml"
     , "b7a7c8697aa0d9915c4be6ba8cd7eb65288a7508694a51ef3ea2e1acd4313cc2" )
   ; ( "lib/agent_session/managed_submission_tracking.ml"
-    , "395c05cb876b720af5c416d65202281e2878c3fd8732cebf56263d4f1edde0e4" )
+    , "6c8804b2d0c2033631b965769af63c5240afeb6dabff72695c818dc1a68baed8" )
   ; ( "lib/agent_session/managed_wait_tool.ml"
     , "5cfa00cf26188815090cc4e9549cc4eb64c7e841aa9d883dabd67ac613375a27" )
   ; ( "lib/agent_session/native_tool_invocation.ml"

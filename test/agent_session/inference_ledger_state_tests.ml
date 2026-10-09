@@ -55,6 +55,26 @@ let state workspace =
 
 let raw_state before ~version ~payload =
   ignore (before : A.Session_state.t);
+  let payload =
+    if version < 9
+    then (
+      let conversation = member payload "conversation" in
+      let conversation =
+        omit (omit conversation "pending_revision") "pending_dispositions"
+      in
+      let entries = member conversation "deferred_user_entries" in
+      let entries =
+        match entries with
+        | `Array entries ->
+          `Array (List.map entries ~f:(fun entry -> member entry "entry"))
+        | _ -> failwith "invalid pending fixture array"
+      in
+      replace
+        payload
+        "conversation"
+        (replace conversation "deferred_user_entries" entries))
+    else payload
+  in
   D.Document.create ~limits:document_limits ~kind:"session.state" ~version ~payload
   |> document_ok
 ;;
@@ -109,7 +129,7 @@ let%test_unit
       assert (List.is_empty (L.rows current.inference_ledger));
       assert (Int.equal (L.generation current.inference_ledger) before.identity.generation);
       let encoded = SD.encode decoded ~limits:document_limits |> document_ok in
-      assert (Int.equal (D.Document.version encoded) 7);
+      assert (Int.equal (D.Document.version encoded) 9);
       assert (String.equal original (D.Document.to_string raw));
       let delta =
         D.Document.create
@@ -128,7 +148,7 @@ let%test_unit
       in
       let delta_before = D.Document.to_string delta in
       let delta = DD.decode ~limits:document_limits delta |> document_ok in
-      assert (Int.equal (D.Document.version (DD.document delta)) 4);
+      assert (Int.equal (D.Document.version (DD.document delta)) 6);
       match DD.value delta with
       | Batch [ Created restored ] ->
         assert
@@ -882,6 +902,7 @@ let%test_unit
         ~f:(fun () ->
           let persistence =
             Persistence.create
+              ~pending_archive:None
               ~before_commit:None
               ~retention_preflight:None
               ~writer
@@ -949,7 +970,7 @@ let%test_unit
               let transaction =
                 Store.Transaction.decode_record record ~limits:document_limits |> store_ok
               in
-              assert (Int.equal (D.Document.version transaction.delta) 4);
+              assert (Int.equal (D.Document.version transaction.delta) 6);
               Persistence.apply_transaction ~limits:document_limits previous transaction
               |> store_ok)
           in
@@ -967,7 +988,7 @@ let%test_unit
               !current
             |> store_ok
           in
-          assert (Int.equal (D.Document.version installed.snapshot.payload) 7);
+          assert (Int.equal (D.Document.version installed.snapshot.payload) 9);
           let opened =
             Store.Snapshot.load_current
               ~env
@@ -1300,4 +1321,58 @@ let%expect_test
     assert (O.equal observed (List.hd_exn retained));
     print_endline "exact scoped diagnostic retained once across ledger codec");
   [%expect {| exact scoped diagnostic retained once across ledger codec |}]
+;;
+
+let%expect_test
+    "ordered delta rejects legal opaque ledger or selection change without matching \
+     intent"
+  =
+  with_actor_workspace (fun _ workspace ->
+    let before = state workspace in
+    let delta = A.Session_delta.Stop_epoch_changed 1L in
+    let expected = A.Session_delta.apply before delta |> protocol_ok in
+    let active, _, _ = admit before before.inference_ledger in
+    let ledger_candidate = { expected with inference_ledger = active } in
+    A.Session_state.validate ledger_candidate |> protocol_ok;
+    let original_target =
+      match Inference.Selection.view before.spec.inference_target with
+      | Captured target -> target
+      | Unresolved -> failwith "expected captured fixture target"
+    in
+    let inference_ok value =
+      Result.map_error value ~f:(fun error ->
+        Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
+      |> Result.ok_or_failwith
+    in
+    let selection =
+      Inference.Request.Target.with_model
+        original_target
+        ~model:"unmatched-candidate-model"
+        ~limits:document_limits
+      |> inference_ok
+      |> fun target ->
+      Inference.Selection.captured target ~limits:document_limits |> inference_ok
+    in
+    let selection_candidate =
+      { expected with spec = { expected.spec with inference_target = selection } }
+    in
+    A.Session_state.validate selection_candidate |> protocol_ok;
+    let inspect delta candidate =
+      A.Session_document_transition.admit
+        (SD.authored before)
+        ~delta
+        ~next:candidate
+        ~limits:document_limits
+    in
+    printf
+      "legal-ledger=%b unmatched-ledger-rejected=%b unmatched-selection-rejected=%b \
+       matching-ledger-admitted=%b unchanged-admitted=%b\n"
+      (Result.is_ok (L.validate_update before.inference_ledger ~incoming:active))
+      (Result.is_error (inspect delta ledger_candidate))
+      (Result.is_error (inspect delta selection_candidate))
+      (Result.is_ok
+         (inspect (Batch [ delta; Inference_ledger_changed active ]) ledger_candidate))
+      (Result.is_ok (inspect delta expected));
+    [%expect
+      {|legal-ledger=true unmatched-ledger-rejected=true unmatched-selection-rejected=true matching-ledger-admitted=true unchanged-admitted=true|}])
 ;;

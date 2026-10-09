@@ -872,6 +872,7 @@ module Outcome = struct
     ; ui_notifications : string list
     ; runtime_requests : Runtime_request.t list
     ; emitted_events : Lang.value list
+    ; run_action : Agent_protocol.Run_action.t option
     }
 
   let empty =
@@ -880,6 +881,7 @@ module Outcome = struct
     ; ui_notifications = []
     ; runtime_requests = []
     ; emitted_events = []
+    ; run_action = None
     }
   ;;
 
@@ -929,6 +931,7 @@ module Outcome = struct
     ; ui_notifications = List.rev outcome.ui_notifications
     ; runtime_requests = List.rev outcome.runtime_requests
     ; emitted_events = List.rev outcome.emitted_events
+    ; run_action = outcome.run_action
     }
   ;;
 end

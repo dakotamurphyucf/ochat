@@ -166,7 +166,13 @@ let%expect_test
             assert_same_session_snapshot state (A.state actor |> protocol_ok);
             commit entry |> protocol_ok |> ignore;
             let user = Codec.user_text ~id:history_id "continue" |> Codec.to_protocol in
-            A.submit_message actor ~attachment_id:writer.id user |> protocol_ok |> ignore;
+            A.submit_message
+              ~submitting_principal:principal_id
+              actor
+              ~attachment_id:writer.id
+              user
+            |> protocol_ok
+            |> ignore;
             let final = await_idle actor in
             let canonical =
               List.find_exn final.conversation.canonical_history ~f:(fun item ->

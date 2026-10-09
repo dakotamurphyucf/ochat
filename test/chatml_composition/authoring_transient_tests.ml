@@ -190,6 +190,7 @@ let%expect_test
                 ; attachments = []
                 }
             ; idempotency_key = key "transient-followup"
+            ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
             })
        |> ignore;
        wait 5;

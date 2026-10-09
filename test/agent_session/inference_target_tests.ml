@@ -103,7 +103,7 @@ let%test_unit
      | Unresolved -> ()
      | Captured _ -> assert false);
     let stored = capture admitted.delta in
-    assert (Int.equal (D.Document.version (A.Session_delta_document.document stored)) 4);
+    assert (Int.equal (D.Document.version (A.Session_delta_document.document stored)) 6);
     let replayed =
       A.Session_delta.apply before (A.Session_delta_document.value stored) |> protocol_ok
     in
@@ -184,7 +184,11 @@ let%test_unit
       |> fun json -> omit json [ "model_job_targets"; "runtime_initialization" ]
     in
     let raw =
-      D.Document.create ~limits:document_limits ~kind:"session.state" ~version:1 ~payload
+      D.Document.create
+        ~limits:document_limits
+        ~kind:"session.state"
+        ~version:1
+        ~payload:(legacy_pending_payload payload)
       |> document_ok
     in
     let original_bytes = D.Document.to_string raw in

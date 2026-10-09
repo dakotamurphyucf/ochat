@@ -1302,6 +1302,7 @@ let error_observations connection ~key_prefix =
           ; attachment_id = reader.id
           ; content = { kind = Plain_text; text = "forbidden"; attachments = [] }
           ; idempotency_key = idempotency_key (key_prefix ^ ":send")
+          ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
           } )
     ; ( "read-only-compact"
       , Session_compact
@@ -3417,6 +3418,144 @@ let test_history_deletion env environment =
            require_equal_history_deletion baseline (observe stdio_http "stdio-http"))))
 ;;
 
+let preseed_pending env environment fixture =
+  let seeds = ref [] in
+  Daemon_host.with_
+    env
+    fixture
+    ~options:(Daemon_host.with_offline_inference Agent_server.Daemon.default_options)
+    (fun sw daemon ->
+       let socket_path = Config_fixture.unix_socket fixture in
+       Agent_transport_socket.Server.prepare_path ~env ~socket_path |> protocol_ok;
+       let socket =
+         Eio.Net.listen
+           ~sw
+           ~reuse_addr:true
+           ~backlog:128
+           (Eio.Stdenv.net env)
+           (`Unix socket_path)
+       in
+       Eio.Fiber.fork_daemon ~sw (fun () ->
+         Eio.Net.run_server
+           ~on_error:raise
+           socket
+           (Agent_transport_socket.Server.serve
+              ~dispatcher:(Agent_server.Daemon.dispatcher daemon)
+              ~close_connection:(Agent_server.Daemon.close_connection daemon)
+              ~authenticate:(fun flow _ ->
+                Agent_transport_socket.Peer_credentials.authenticate_same_user_actor
+                  ~scopes:Agent_server_test_support.scopes
+                  flow)
+              ~max_line_length:(16 * 1024 * 1024)
+              ~outgoing_capacity:1024
+              ~max_attachments:
+                Agent_server.Daemon.default_options.protocol_limits
+                  .max_attachments_per_connection
+              ~on_protocol_error:(fun error ->
+                raise_s
+                  [%sexp
+                    "pending seed socket protocol failure"
+                  , (error : Agent_protocol.Error.t)])));
+       with_transport_matrix
+         ~sw
+         env
+         environment
+         fixture
+         (fun unix http stdio_unix stdio_http ->
+            List.iter
+              [ unix, "unix"
+              ; http, "http"
+              ; stdio_unix, "stdio-unix"
+              ; stdio_http, "stdio-http"
+              ]
+              ~f:(fun (connection, label) ->
+                ignore (initialize connection : Agent_protocol.Initialize.Response.t);
+                let created, _ =
+                  create_session connection ~key:("pending-seed:" ^ label)
+                in
+                let writer = attached_writer created in
+                let entry =
+                  Agent_server.Session_registry.load
+                    (Agent_server.Daemon.registry daemon)
+                    created.session.id
+                  |> protocol_ok
+                in
+                let held, held_u = Eio.Promise.create () in
+                let cancelled, cancelled_u = Eio.Promise.create () in
+                let worker =
+                  Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input:_ _ ->
+                    Exn.protect
+                      ~finally:(fun () -> Eio.Promise.resolve cancelled_u ())
+                      ~f:(fun () ->
+                        Eio.Promise.resolve held_u ();
+                        Eio.Fiber.await_cancel ()))
+                in
+                start_session connection created.session writer ~key:(label ^ ":start")
+                |> ignore;
+                Agent_session.Session_actor.set_operation_worker entry.actor (Some worker)
+                |> protocol_ok;
+                let send text suffix =
+                  request
+                    connection
+                    (Session_send_message
+                       { session_id = created.session.id
+                       ; attachment_id = writer.id
+                       ; content = { kind = Plain_text; text; attachments = [] }
+                       ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
+                       ; idempotency_key = idempotency_key (label ^ suffix)
+                       })
+                  |> ignore
+                in
+                send "Hold root during transport pending seed." ":held";
+                Eio.Promise.await held;
+                send "Retain this input for pending control conformance." ":queued";
+                Agent_session.Session_actor.stop
+                  entry.actor
+                  ~attachment_id:writer.id
+                  ~mode:Cancel
+                |> protocol_ok
+                |> ignore;
+                Eio.Promise.await cancelled;
+                Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
+                  let rec stopped () =
+                    let state =
+                      Agent_session.Session_actor.state entry.actor |> protocol_ok
+                    in
+                    match state.active_operation, state.lifecycle.observed with
+                    | None, Stopped -> ()
+                    | _ ->
+                      Eio.Fiber.yield ();
+                      stopped ()
+                  in
+                  stopped ());
+                seeds := created.session.id :: !seeds)));
+  List.rev !seeds
+;;
+
+let test_pending_inputs env environment =
+  let fixture = fixture env environment "conformance-pending-inputs" in
+  let seeds = preseed_pending env environment fixture in
+  Eio.Switch.run (fun sw ->
+    with_daemon ~sw env fixture (fun _ _ ->
+      with_transport_matrix
+        ~sw
+        env
+        environment
+        fixture
+        (fun unix http stdio_unix stdio_http ->
+           List.iter
+             (List.zip_exn
+                [ unix, "unix"
+                ; http, "http"
+                ; stdio_unix, "stdio-unix"
+                ; stdio_http, "stdio-http"
+                ]
+                seeds)
+             ~f:(fun ((client, key_prefix), session_id) ->
+               ignore (initialize client : Agent_protocol.Initialize.Response.t);
+               Pending_conformance.observe ~request:client.request ~session_id ~key_prefix))))
+;;
+
 module History_editing = struct
   module P = Agent_protocol
   module A = Agent_session
@@ -3924,6 +4063,37 @@ let test_provider_installed env environment =
                then fail "cross-transport installed provider semantics differ"))))
 ;;
 
+let test_run_admission env environment =
+  let fixture = fixture env environment "conformance-run-admission" in
+  Eio.Path.save
+    ~create:(`Or_truncate 0o600)
+    Eio.Path.(Eio.Stdenv.fs env / Config_fixture.prompt_path fixture)
+    Run_admission_conformance.prompt;
+  Eio.Switch.run (fun sw ->
+    with_daemon ~sw env fixture (fun _daemon _health ->
+      with_transport_matrix
+        ~sw
+        env
+        environment
+        fixture
+        (fun unix http stdio_unix stdio_http ->
+           List.iter
+             [ "unix", unix
+             ; "http", http
+             ; "stdio-unix", stdio_unix
+             ; "stdio-http", stdio_http
+             ]
+             ~f:(fun (label, connection) ->
+               ignore (initialize connection : Agent_protocol.Initialize.Response.t);
+               let created, _ =
+                 create_session connection ~key:("run:" ^ label ^ ":create")
+               in
+               Run_admission_conformance.check
+                 created
+                 ~request:connection.request
+                 ~key_prefix:("run:" ^ label)))))
+;;
+
 let cases =
   [ "conformance.provider-installed", test_provider_installed
   ; "conformance.read-methods", test_read_methods
@@ -3943,6 +4113,8 @@ let cases =
   ; "conformance.error-codes", test_error_codes
   ; "conformance.event-order", test_event_order
   ; "conformance.visibility", test_visibility
+  ; "conformance.run-admission", test_run_admission
+  ; "conformance.pending-inputs", test_pending_inputs
   ; "conformance.history-editing", History_editing.run
   ; "conformance.conversation-search", Conversation_search.run
   ; "conformance.history-deletion", test_history_deletion
@@ -3995,10 +4167,17 @@ let method_coverage =
   ; "session.detach", "conformance.session-lifecycle"
   ; "session.renew_owner", "conformance.error-codes"
   ; "session.start", "conformance.session-lifecycle"
+  ; "session.run.start", "conformance.run-admission"
+  ; "session.run", "conformance.run-admission"
+  ; "session.runs", "conformance.run-admission"
   ; "session.stop", "conformance.session-lifecycle"
   ; "session.cancel_operation", "conformance.error-codes"
   ; "session.send_message", "conformance.error-codes"
   ; "session.compact", "conformance.error-codes"
+  ; "session.pending_inputs", "conformance.pending-inputs"
+  ; "session.pending_input", "conformance.pending-inputs"
+  ; "session.cancel_pending_input", "conformance.pending-inputs"
+  ; "session.replace_pending_input", "conformance.pending-inputs"
   ; "session.edit_history", "conformance.history-editing"
   ; "session.continue_history", "conformance.history-editing"
   ; "session.delete_history", "conformance.history-deletion"

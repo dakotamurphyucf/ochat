@@ -27,6 +27,7 @@ val create
        (Session_state.Compaction_archive.t
         -> Document_schema.Document.t
         -> (unit, Agent_protocol.Error.t) result)
+  -> pending_archive:(Pending_archive.t -> (unit, Agent_protocol.Error.t) result) option
   -> before_commit:(Session_state.t -> (unit, Agent_protocol.Error.t) result) option
   -> command_accepted:(Document_schema.Document.t -> int64 -> unit)
   -> writer:Agent_store.Commit_writer.t

@@ -10,6 +10,9 @@ val run : Eio_unix.Stdenv.base -> case:string option -> unit
     [["side-effect"; config_path; marker]] for the scripted daemon/tool host.
     [["notification"; config_path; boundary]] selects the qualified notification
     daemon at [pending], [committed], [accepted], or unrestricted [recover].
+    [["pending-input"; root]] holds an acknowledged stopped root until SIGKILL;
+    [["pending-input-recover"; root]] reopens, reconciles Interrupted evidence and
+    validates exactly one adoption across a second reopen.
     Report readiness/boundary markers on stdout and await external termination
     at the selected IO boundary. Replacement boundaries include exclusive
     temporary-file creation before the first write and native directory sync.

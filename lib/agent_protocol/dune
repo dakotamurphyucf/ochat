@@ -28,6 +28,9 @@
   search_hit
   search_page
   search_navigation
+  pending_input
+  pending_query
+  pending_control
   permission
   grant
   audit
@@ -45,6 +48,7 @@
   completion
   stored_completion
   subscription
+  delivery_subscription_binding
   delivery
   schedule
   ingress
@@ -65,6 +69,16 @@
   session
   session_catalog
   session_work
+  run_limits
+  run_source
+  run_work
+  run_wake
+  run_result_reference
+  run
+  run_action
+  run_receipt
+  run_start
+  run_query
   session_activity_summary
   session_activity
   activity_query

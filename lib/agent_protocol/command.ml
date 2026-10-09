@@ -48,7 +48,14 @@ type t =
   | Session_update_organization of Session_organization.Request.t
   | Session_stop of Session.Stop_request.t
   | Session_cancel_operation of Session.Cancel_operation_request.t
+  | Session_runs of Run_query.Request.t
+  | Session_run of Run_query.Lookup_request.t
+  | Session_run_start of Run_start.t
   | Session_send_message of Session.Send_message_request.t
+  | Session_pending_inputs of Pending_query.Request.t
+  | Session_pending_input of Pending_query.Lookup_request.t
+  | Session_cancel_pending_input of Pending_control.Cancel_request.t
+  | Session_replace_pending_input of Pending_control.Replace_request.t
   | Session_compact of Session.Compact_request.t
   | Session_edit_history of History_edit.Edit_request.t
   | Session_continue_history of History_edit.Continue_request.t
@@ -123,7 +130,14 @@ let method_name = function
   | Session_update_organization _ -> "session.update_organization"
   | Session_stop _ -> "session.stop"
   | Session_cancel_operation _ -> "session.cancel_operation"
+  | Session_runs _ -> "session.runs"
+  | Session_run _ -> "session.run"
+  | Session_run_start _ -> "session.run.start"
   | Session_send_message _ -> "session.send_message"
+  | Session_pending_inputs _ -> "session.pending_inputs"
+  | Session_pending_input _ -> "session.pending_input"
+  | Session_cancel_pending_input _ -> "session.cancel_pending_input"
+  | Session_replace_pending_input _ -> "session.replace_pending_input"
   | Session_compact _ -> "session.compact"
   | Session_edit_history _ -> "session.edit_history"
   | Session_continue_history _ -> "session.continue_history"
@@ -201,7 +215,15 @@ let params = function
   | Session_update_organization request -> Session_organization.Request.to_json request
   | Session_stop request -> Session.Stop_request.to_json request
   | Session_cancel_operation request -> Session.Cancel_operation_request.to_json request
+  | Session_runs request -> Run_query.Request.to_json request
+  | Session_run request -> Run_query.Lookup_request.to_json request
+  | Session_run_start request -> Run_start.to_json request
   | Session_send_message request -> Session.Send_message_request.to_json request
+  | Session_pending_inputs request -> Pending_query.Request.to_json request
+  | Session_pending_input request -> Pending_query.Lookup_request.to_json request
+  | Session_cancel_pending_input request -> Pending_control.Cancel_request.to_json request
+  | Session_replace_pending_input request ->
+    Pending_control.Replace_request.to_json request
   | Session_compact request -> Session.Compact_request.to_json request
   | Session_edit_history request -> History_edit.Edit_request.to_json request
   | Session_continue_history request -> History_edit.Continue_request.to_json request
@@ -321,6 +343,7 @@ let decoders =
   ; ( "collection.delete"
     , map Organization_request.Collection.Delete.of_json (fun value ->
         Collection_delete value) )
+  ; "session.run.start", map Run_start.of_json (fun x -> Session_run_start x)
   ; "session.start", map Session.Start_request.of_json (fun x -> Session_start x)
   ; ( "session.update_organization"
     , map Session_organization.Request.of_json (fun x -> Session_update_organization x) )
@@ -329,6 +352,18 @@ let decoders =
   ; "session.stop", map Session.Stop_request.of_json (fun x -> Session_stop x)
   ; ( "session.cancel_operation"
     , map Session.Cancel_operation_request.of_json (fun x -> Session_cancel_operation x) )
+  ; "session.runs", map Run_query.Request.of_json (fun x -> Session_runs x)
+  ; "session.run", map Run_query.Lookup_request.of_json (fun x -> Session_run x)
+  ; ( "session.pending_inputs"
+    , map Pending_query.Request.of_json (fun x -> Session_pending_inputs x) )
+  ; ( "session.pending_input"
+    , map Pending_query.Lookup_request.of_json (fun x -> Session_pending_input x) )
+  ; ( "session.cancel_pending_input"
+    , map Pending_control.Cancel_request.of_json (fun x -> Session_cancel_pending_input x)
+    )
+  ; ( "session.replace_pending_input"
+    , map Pending_control.Replace_request.of_json (fun x ->
+        Session_replace_pending_input x) )
   ; ( "session.send_message"
     , map Session.Send_message_request.of_json (fun x -> Session_send_message x) )
   ; "session.compact", map Session.Compact_request.of_json (fun x -> Session_compact x)

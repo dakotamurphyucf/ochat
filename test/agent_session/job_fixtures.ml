@@ -74,6 +74,7 @@ let reject label result =
 ;;
 
 let with_actor
+      ?(archive_reference = archive_reference)
       ?(reject_save = fun _ -> false)
       ?(prepare_state = Fn.id)
       ?(now = fun () -> timestamp)

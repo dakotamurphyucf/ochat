@@ -89,11 +89,18 @@ actor state and authorization, not merely passing JSON validation.
 | `session.detach` | `Session.Detach_request` | `session.transcript.read` | Detach supplied attachment; idempotent mutation acknowledgement. |
 | `session.renew_owner` | `Session.Renew_owner_request` | `session.transcript.read` plus valid owner lease | Renew matching generation; owner lease and mutation result. |
 | `session.start` | `Session.Start_request` | `session.message.send` | Writable attachment; start or queue if permitted. |
+| `session.run.start` | `Run_start` | `session.message.send`, current original authentication and session visibility | Writable attachment; expected generation/session revision, explicit run mode and durable admission receipt. |
+| `session.runs` | `Run_query.Request` | Current transcript/security visibility and session visibility | Host-qualified, bounded page; original run principal or session administrator. |
+| `session.run` | `Run_query.Lookup_request` | Current transcript/security visibility and session visibility | Exact retained run lookup; hidden foreign or expired evidence is unavailable. |
 | `session.update_metadata` | `Session_metadata.Request` | `session.message.send` | Writable attachment; expected metadata revision; rename and label patch. |
 | `session.update_organization` | `Session_organization.Request` | `session.message.send` and `organization.manage` | Current writable attachment; shared expected metadata revision; project set/clear and collection add/remove. |
 | `session.stop` | `Session.Stop_request` | `session.stop` | Writable attachment; graceful/cancel stop. |
 | `session.cancel_operation` | `Session.Cancel_operation_request` | `session.message.send` | Writable attachment; target current operation ID. |
 | `session.send_message` | `Session.Send_message_request` | `session.message.send` | Writable attachment; history ID, started/deferred disposition and optional operation ID. |
+| `session.pending_inputs` | `Pending_query.Request` | `session.transcript.read` and current session visibility | Nonactivating FIFO page and independent pending revision; current scoped history projection. |
+| `session.pending_input` | `Pending_query.Lookup_request` | `session.transcript.read` and current session visibility | Pending, retained adopted/cancelled/retired, or unavailable evidence for one stable occurrence ID. |
+| `session.cancel_pending_input` | `Pending_control.Cancel_request` | `session.message.send` and `session.transcript.read` | Current writable attachment, persisted submitting principal, generation and pending/content CAS; adopted winner remains canonical. |
+| `session.replace_pending_input` | `Pending_control.Replace_request` | `session.message.send` and `session.transcript.read` | Same ownership and CAS; replace only plaintext pending payload, preserving identity and timing. |
 | `session.compact` | `Session.Compact_request` | `session.message.send` | Writable attachment; optional expected revision; starts compaction. |
 | `session.edit_history` | `History_edit.Edit_request` | `session.message.send` | Writable attachment; exact generation/session/content revisions; replace a retained canonical user text and archive its invalidated suffix. |
 | `session.continue_history` | `History_edit.Continue_request` | `session.message.send` | Writable attachment; exact generation/session revision and empty pending queue; continue saved history only through an already available runtime. |
@@ -489,22 +496,10 @@ They contain no provider credentials or authority. Profile connection initialize
 and checks its server pin before sensitive operations. Provider profile selection
 is a separate host service.
 
-### Shared client qualification boundaries
-
-The shared client modules consume the same host contracts over direct, Unix,
-HTTP and stdio connections. Feature transport conformance exercises the backend
-methods across those transports; controlled-transport client expect tests exercise
-helper dispatch, bounded paging, original uncertainty/receipt retention and the
-exclusive notification-reader boundary. These are separate proofs. Client helpers
-do not implement a second runtime, authority cache, local credential store or
-frontend transcript mutation. Read-only and unsupported decisions remain typed
-host errors, and reconnect never makes an unresolved receipt safe to replay.
-
 ## Provider operator privacy and recovery
 
 Shared clients use `Agent_client.Provider_login` for status, begin, challenge,
-cancel, logout and profile selection over their existing `Connection`. Only
-`challenge` accepts the
+cancel, logout and profile selection over their existing `Connection`. Only `challenge` accepts the
 private challenge result; ordinary `request_without_history` still rejects it.
 These helpers do not poll, consume session notifications or create a client
 credential store. Failed mutation replies retain the connection's original
@@ -667,6 +662,94 @@ connection's initialized host and always supply witnesses. A successful retry
 returns its original receipt after current authorization; it must not cancel a
 new attempt that happens to share a work ID.
 
+## Explicit run admission
+
+`session.run.start` admits a `single_turn` or `workflow` run through the session's
+existing runtime. The request includes the current writable attachment,
+generation, expected session revision, input and idempotency key. The host captures
+the actual compiled orchestration source and current authorization; clients do not
+provide executable source identities or reconstruct authority from receipts.
+
+Input is either a user submission or `authored_start`. The latter requires the
+genuine, unconsumed `Session_start` capability; it cannot replay initialization of
+an existing runtime. The host checks the original revision before loading a cold
+runtime. Only constructor and input reservations belonging to that admission may
+advance its tracked revision. Unrelated changes invalidate the attempt.
+
+Admission returns a durable `Run_receipt`. Retry and `command.receipt` lookup use
+the exact original principal, key and request, with current authorization checked
+again. Matching receipt lookup precedes input parsing and history allocation.
+An uncertain write remains subject to receipt reconciliation; an unavailable or
+pending result does not authorize a new key or a repeated execution.
+
+The admitted workflow's authority belongs to the host and remains subject to its
+original authentication and current policy. Disconnecting a client does not grant
+new authority or itself finish the workflow. ChatML orchestration determines its
+subsequent run actions through the native run operations. Admission is not proof
+of successful completion; clients must inspect subsequent retained outcomes.
+
+## Retained run inspection
+
+`session.runs` lists immutable, payload-free run views for a host-qualified session;
+`session.run` looks up one exact run ID. Both are reads: they do not attach, load a
+runtime, start work or replay orchestration. Current transcript and security scopes
+and session visibility are required on every request. Full run views additionally
+require the original run principal or actual session administrator authority.
+Foreign-principal rows are filtered before paging. Signed cursors bind the current
+principal, scopes, host/session, query and observed data; changed authority or data
+requires a fresh page rather than reuse of cached disclosure.
+
+A view contains the committed lifecycle, source generation/installation epoch,
+owned occurrence proofs, pending action intent and retained admission/terminal
+receipts when available. Receipt absence does not rewrite the committed lifecycle.
+An unavailable lookup is not evidence that the host terminated a run.
+
+Result references retain exact operation history IDs or job generation/attempt,
+actual terminal outcome and artifact metadata. A failed first attempt can remain
+referenced while a second attempt runs; it is not a successful run completion.
+References contain no tool/provider payload and confer no content-read authority.
+The owning result service rechecks current access; expired underlying content can
+be unavailable while the immutable terminal evidence remains unchanged.
+
+`Agent_client.Run_views` provides transport-neutral page and lookup helpers and a
+scoped watch callback for the caller's existing subscribed `Session_handle`. Install
+the callback before its initial snapshot. The supplied Eio switch owns one read
+refresh fiber; revisions coalesce into one pending refresh. Stale projection and
+fresh authorization failures go to `on_error`; callback failure and cancellation
+propagate through that scope. Closing the scope makes its callback inert. The watch
+does not acquire a second notification reader, attach, activate execution or retry
+an uncertain mutation. Resnapshotting at the same revision still rechecks current
+authority after a stale observation.
+
+## Pending input timing and recovery
+
+`session.send_message` optionally accepts `timing: "after_current_operation"`.
+The omitted/default `safe_boundary` retains existing behavior. The host captures
+the actual running turn identity and generation; after-current input becomes
+eligible only after matching terminal or explicit recovery evidence. If there
+is no active turn, after-current input waits for an idle-start boundary. The
+single FIFO queue never skips a blocked earlier input, including direct idle
+submission and notification starts. Stop or cancellation retains queued input;
+source reset/replacement records explicit retirement under its selected policy.
+
+Pending revision is independent of streaming session revision. Controls also
+compare the occurrence's content revision. Cancellation, replacement and worker
+adoption serialize through the actor. A known adopted winner returns its current
+scoped canonical occurrence without editing or cancelling it. Unknown legacy
+submitting provenance fails ownership checks; current writer permission cannot
+supply missing provenance. Private ownership and storage custody never appear in
+these public query results.
+
+Disposition retention uses an independent 4096-outcome production limit, shared
+by live admission and restart recovery. Notification, delegation and command
+receipt settings do not change this policy. `unavailable` means retained outcome evidence
+cannot establish the submission's outcome; it is never permission to resubmit.
+An adopted result with no current occurrence still establishes known adoption.
+The client connection retains the original control command and uses ordinary
+command-receipt reconciliation for uncertain replies. It does not reconstruct a
+submission from a public transcript or mint a replacement idempotency key during
+reconciliation. Combined history edit-and-continue or continuation with pending input fails with
+`pending_input_conflict`; callers may inspect/control that queue explicitly.
 
 ## Conversation text search
 
@@ -728,3 +811,14 @@ Restart or eviction rebuilds lazily without a new persistent transcript copy.
 `Agent_client.Conversation_search` exposes the same page and navigation operations
 through direct, socket, HTTP and stdio connections; desktop and TUI clients own
 presentation and explicit refresh behavior.
+
+### Shared client qualification boundaries
+
+The shared client modules consume the same host contracts over direct, Unix,
+HTTP and stdio connections. Feature transport conformance exercises the backend
+methods across those transports; controlled-transport client expect tests exercise
+helper dispatch, bounded paging, original uncertainty/receipt retention and the
+exclusive notification-reader boundary. These are separate proofs. Client helpers
+do not implement a second runtime, authority cache, local credential store or
+frontend transcript mutation. Read-only and unsupported decisions remain typed
+host errors, and reconnect never makes an unresolved receipt safe to replay.

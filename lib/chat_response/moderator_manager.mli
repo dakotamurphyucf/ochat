@@ -197,7 +197,8 @@ val handle_event_entries
     continuations are rejected. This engine boundary does not acquire an actor
     borrow, impose a host deadline or provide interactive permission ownership. *)
 val handle_event_entries_transactional
-  :  ?jobs:Background_job_operations.transaction
+  :  ?run_actions:Run_operations.transaction
+  -> ?jobs:Background_job_operations.transaction
   -> ?subscriptions:Subscription_operations.transaction
   -> ?schedules:Schedule_operations.transaction
   -> ?notifications:Notification_operations.transaction
@@ -234,7 +235,8 @@ val handle_event_entries_transactional
     effects; this method does not retry, claim or retire failures itself.
     Returns [Ok None] for an empty queue without calling either callback. *)
 val handle_next_event_entries_transactional
-  :  ?jobs:Background_job_operations.transaction
+  :  ?run_actions:Run_operations.transaction
+  -> ?jobs:Background_job_operations.transaction
   -> ?subscriptions:Subscription_operations.transaction
   -> ?schedules:Schedule_operations.transaction
   -> ?notifications:Notification_operations.transaction
@@ -282,7 +284,8 @@ val handle_next_event_entries_transactional
     private dependencies. [execution_context] retains inherited budgets across
     domain handoffs; it cannot reset the caller's limits. *)
 val handle_invocation_entries
-  :  ?jobs:Background_job_operations.transaction
+  :  ?run_actions:Run_operations.transaction
+  -> ?jobs:Background_job_operations.transaction
   -> ?subscriptions:Subscription_operations.transaction
   -> ?schedules:Schedule_operations.transaction
   -> ?notifications:Notification_operations.transaction
@@ -325,7 +328,8 @@ val handle_invocation_entries
     Optional Tool.call routing has the same scoped authority requirements as
     [handle_invocation_entries]. *)
 val handle_observation_entries
-  :  ?jobs:Background_job_operations.transaction
+  :  ?run_actions:Run_operations.transaction
+  -> ?jobs:Background_job_operations.transaction
   -> ?subscriptions:Subscription_operations.transaction
   -> ?schedules:Schedule_operations.transaction
   -> ?notifications:Notification_operations.transaction

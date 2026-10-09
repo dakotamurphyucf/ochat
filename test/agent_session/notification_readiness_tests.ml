@@ -62,7 +62,7 @@ let%expect_test
         ; completion = Succeeded (`String "ready")
         ; wake = No_wake
         ; created_at = timestamp
-        ; ownership = Some { source; creator }
+        ; ownership = Some { source; creator; subscription_binding = None }
         }
       |> protocol_ok
     in

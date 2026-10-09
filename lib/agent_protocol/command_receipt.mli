@@ -48,6 +48,10 @@ type committed =
       ; continuation : History_edit.Continuation.t
       ; mutation : Mutation_result.t
       }
+  | Accepted_run of
+      { session_id : Id.Session.t
+      ; receipt : Run_receipt.t
+      }
   | Sent_message of
       { session_id : Id.Session.t
       ; history_id : History.Id.t

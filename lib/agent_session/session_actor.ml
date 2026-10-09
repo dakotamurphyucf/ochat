@@ -49,6 +49,7 @@ module Initialization_scope = struct
     { owner : unit ref
     ; expected : Session_state.t
     ; mutable jobs : Agent_protocol.Id.Job.t list
+    ; run_preparation : Run_preparation.t option
     }
 end
 
@@ -155,6 +156,7 @@ type queued_event_borrow =
   ; event : Session.Snapshot.t
   ; retirement_reason : string option
   ; mutable callback_active : bool
+  ; mutable run_actions : Run_action_service.t option
   ; mutable committed : bool
   ; mutable cancel : (unit -> unit) option
   ; mutable cancel_requested : bool
@@ -208,25 +210,36 @@ end
 type _ request =
   | Open_inference_owner : Transcript.Source_id.t -> Inference_owner.t request
   | Admit_inference :
-      Inference_owner.t
+      Run_preparation.t option
+      * Inference_owner.t
       * Transcript.Scope.relation
       * Agent_protocol.Id.Operation.t option
       * Agent_protocol.Id.Invocation.t option
       * Inference.Observation.Configuration.t
       -> Inference_ledger.Handle.t request
   | Acknowledge_inference :
-      Inference_owner.t * Inference_ledger.Handle.t * Inference_runtime.Attempt.t
+      Run_preparation.t option
+      * Inference_owner.t
+      * Inference_ledger.Handle.t
+      * Inference_runtime.Attempt.t
       -> unit request
   | Observe_inference :
-      Inference_ledger.Handle.t * Inference.Observation.t
+      Run_preparation.t option * Inference_ledger.Handle.t * Inference.Observation.t
       -> unit request
-  | Observe_owned_inference : Inference_owner.t * Inference.Observation.t -> unit request
+  | Observe_owned_inference :
+      Run_preparation.t option * Inference_owner.t * Inference.Observation.t
+      -> unit request
   | Complete_inference :
-      Inference_owner.t * Inference_ledger.Handle.t * Inference_client.Completion.t
+      Run_preparation.t option
+      * Inference_owner.t
+      * Inference_ledger.Handle.t
+      * Inference_client.Completion.t
       -> unit request
-  | Release_inference : Inference_owner.t * Inference_ledger.Handle.t -> unit request
+  | Release_inference :
+      Run_preparation.t option * Inference_owner.t * Inference_ledger.Handle.t
+      -> unit request
   | Seal_inference_owner : Inference_owner.t -> unit request
-  | Finish_inference_owner : Inference_owner.t -> unit request
+  | Finish_inference_owner : Run_preparation.t option * Inference_owner.t -> unit request
   | Reconcile_inference_recovery : unit request
   | Claim_delegated_event :
       Agent_protocol.Id.Moderator_execution.t
@@ -271,6 +284,10 @@ type _ request =
       * Agent_protocol.Moderator_execution.Decision.t option
       * string list
       -> unit request
+  | Reconcile_run_recovery : unit request
+  | Run_actions :
+      Agent_protocol.Moderator_execution.t
+      -> Run_action_service.t option request
   | Finish_queued_event : queued_event_borrow * bool -> unit request
   | Set_queued_event_cancel : queued_event_borrow * (unit -> unit) -> unit request
   | Commit_invocation_call :
@@ -481,11 +498,11 @@ type _ request =
   | Change_workspace : Workspace_instance.t -> Agent_protocol.Session.t request
   | Shell_approval_grants : Session.Shell_state.Approval_grant.persisted list request
   | Replace_shell_approval_grants :
-      Session.Shell_state.Approval_grant.persisted list
+      Run_preparation.t option * Session.Shell_state.Approval_grant.persisted list
       -> unit request
   | Shell_manifest_grants : Session.Shell_state.Manifest_grant.persisted list request
   | Add_shell_manifest_grant :
-      Session.Shell_state.Manifest_grant.persisted
+      Run_preparation.t option * Session.Shell_state.Manifest_grant.persisted
       -> unit request
   | Reset :
       Agent_protocol.Id.Attachment.t * int64 * reset_options
@@ -509,6 +526,9 @@ type _ request =
       * Session_state.t
       -> Agent_protocol.Session.t request
   | Begin_initialization : Session_state.t -> Initialization_scope.t request
+  | Begin_run_initialization :
+      Run_preparation.t * Session_state.t
+      -> Initialization_scope.t request
   | End_initialization : Initialization_scope.t -> unit request
   | Complete_initialization :
       Initialization_scope.t * Session_state.t
@@ -556,8 +576,89 @@ type _ request =
       Agent_protocol.Id.Attachment.t * Agent_protocol.History.entry list
       -> Agent_protocol.Session.t request
   | Submit_message :
-      Agent_protocol.Id.Attachment.t * Agent_protocol.History.entry
+      Agent_protocol.Id.Attachment.t
+      * Agent_protocol.Id.Principal.t
+      * Agent_protocol.Pending_input.Timing.t
+      * Agent_protocol.History.entry
       -> submission request
+  | Control_pending :
+      Agent_protocol.Id.Principal.t
+      * Pending_inspection.projection
+      * Agent_protocol.Pending_control.Cancel_request.t
+      * string option
+      -> Agent_protocol.Pending_control.Result.t request
+  | Capture_run_constructor_model_source :
+      Run_preparation.t
+      * Agent_protocol.Id.Job.t
+      * int
+      * Inference.Request.Target.t
+      * Document_schema.Limits.t
+      -> unit request
+  | Capture_run_constructor_recipe_target :
+      Run_preparation.t
+      * Agent_protocol.Id.Job.t
+      * int
+      * int
+      * Inference.Request.Target.t
+      * Document_schema.Limits.t
+      -> unit request
+  | Enable_run_constructor_turn_budget :
+      Run_preparation.t * Chat_response.Runtime_semantics.policy
+      -> unit request
+  | Start_run_constructor_model_job :
+      Run_preparation.t * Agent_protocol.Job.t
+      -> Agent_protocol.Job.t request
+  | Complete_run_constructor_model_job :
+      Run_preparation.t
+      * Agent_protocol.Id.Job.t
+      * int
+      * int
+      * Runtime_builder.model_job_outcome
+      -> Agent_protocol.Job.t request
+  | Interrupt_run_constructor_job :
+      Run_preparation.t * Agent_protocol.Id.Job.t * int * int * string
+      -> Agent_protocol.Job.t request
+  | Add_run_constructor_job :
+      Run_preparation.t * Agent_protocol.Job.t
+      -> Agent_protocol.Job.t request
+  | Add_run_constructor_schedule :
+      Run_preparation.t * Agent_protocol.Schedule.t
+      -> Agent_protocol.Schedule.t request
+  | Cancel_run_constructor_schedule :
+      Run_preparation.t * Agent_protocol.Id.Schedule.t
+      -> Agent_protocol.Schedule.t request
+  | Reserve_run_history_block :
+      Run_preparation.t * int
+      -> History_id_source.reservation request
+  | Checkpoint_run_moderator :
+      Run_preparation.t * Jsonaf.t option
+      -> Agent_protocol.Session.t request
+  | Admit_prepared_run :
+      Run_preparation.t
+      * Run_admission.Scope.t
+      * Agent_protocol.Session_ref.t
+      * Agent_protocol.History.entry option
+      -> Run_admission_outcome.t request
+  | Begin_run_preparation :
+      (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+      * Agent_protocol.Id.Principal.t
+      * Agent_protocol.Run_start.t
+      * string
+      -> Run_preparation.Decision.t request
+  | Close_run_preparation : Run_preparation.t -> unit request
+  | Run_start_receipt :
+      (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+      * Agent_protocol.Id.Principal.t
+      * Agent_protocol.Run_start.t
+      * string
+      -> Agent_protocol.Run_receipt.t option request
+  | Admit_run :
+      Run_admission.Scope.t
+      * Agent_protocol.Run_start.t
+      * Agent_protocol.Session_ref.t
+      * string
+      * Agent_protocol.History.entry option
+      -> Agent_protocol.Run_receipt.t request
   | Submit_managed_message :
       Agent_store.Delegation_store.Reference.t
       * Agent_protocol.Idempotency_key.t
@@ -710,6 +811,9 @@ type _ request =
       * Agent_protocol.Job.t option
       * Jsonaf.t option
       -> Agent_protocol.Job.t request
+  | Enqueue_run_job_delivery :
+      Run_job_delivery.t * Session.Moderator_state.Identity_snapshot.t * Jsonaf.t
+      -> unit request
   | Cancel_job_internal : Agent_protocol.Id.Job.t -> Agent_protocol.Job.t request
   | Cancel_job :
       Agent_protocol.Id.Attachment.t * Agent_protocol.Id.Job.t * int option * int option
@@ -841,6 +945,9 @@ type t =
   ; mutable idle_moderator_borrowed : bool
   ; mutable moderator_borrow : moderator_borrow option
   ; mutable queued_event_borrow : queued_event_borrow option
+  ; mutable run_authorities : Run_authorities.t
+  ; run_preparation_owner : Run_preparation.Owner.t
+  ; mutable run_preparation : Run_preparation.t option
   ; mutable foreground_moderator :
       (Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.observer) option
   ; mutable invocation_executions : invocation_execution list
@@ -1005,13 +1112,44 @@ let sync_extension_clock t =
     ~monotonic_now:(t.services.monotonic_now ())
 ;;
 
+let close_run_preparation t =
+  Option.iter t.run_preparation ~f:Run_preparation.close;
+  t.run_preparation <- None
+;;
+
+let check_run_preparation t preparation =
+  match t.run_preparation with
+  | Some active when phys_equal active preparation ->
+    Run_preparation.check preparation ~owner:t.run_preparation_owner ~state:t.state
+  | Some _ | None ->
+    Error (error Conflict "run preparation is not this actor's live admission")
+;;
+
 let persist_transition t transition =
   t.persistence.commit ~command_audit:t.command_audit ~previous:t.state transition
 ;;
 
-let install_committed_transition t (transition : Session_transition.t) =
+let install_committed_transition ?run_preparation t (transition : Session_transition.t) =
+  (match t.run_preparation, run_preparation with
+   | Some active, Some supplied when phys_equal active supplied ->
+     (match
+        Run_preparation.advance
+          active
+          ~owner:t.run_preparation_owner
+          ~previous:t.state
+          ~current:transition.state
+      with
+      | Ok () -> ()
+      | Error _ -> close_run_preparation t)
+   | Some _, (Some _ | None) -> close_run_preparation t
+   | None, (Some _ | None) -> ());
   t.command_audit <- None;
   t.state <- transition.state;
+  t.run_authorities
+  <- Run_authorities.retain_current
+       t.run_authorities
+       ~index:t.state.run_state
+       ~generation:t.state.identity.generation;
   Atomic.set t.event_sequence t.state.counters.event_sequence
 ;;
 
@@ -1021,10 +1159,11 @@ let publish_committed_transition t (transition : Session_transition.t) =
   t.services.state_committed t.state transition.events
 ;;
 
-let install t transition =
+let install ?run_preparation ?commit_attempted t transition =
   let open Result.Let_syntax in
+  Option.iter commit_attempted ~f:(fun attempted -> attempted := true);
   let%bind () = persist_transition t transition in
-  install_committed_transition t transition;
+  install_committed_transition ?run_preparation t transition;
   publish_committed_transition t transition;
   Ok ()
 ;;
@@ -1038,18 +1177,50 @@ let current_snapshot t =
     })
 ;;
 
-let transition t ~delta ~payloads =
+(* Every actor candidate, including audited commits and speculative staged work,
+   selects source retirement before validation. Persistence and installation
+   consume this exact prepared candidate without rewriting it. *)
+let prepare_transition ?run_preparation t ~delta ~payloads =
   let open Result.Let_syntax in
-  let%bind transition =
-    Session_transition.apply ~now:(t.services.now ()) t.state ~delta ~payloads
+  let%bind () =
+    match run_preparation with
+    | None -> Ok ()
+    | Some preparation -> check_run_preparation t preparation
   in
-  let%map () = install t transition in
+  let now = t.services.now () in
+  let%bind delta = Run_source_change.prepare t.state ~delta ~now in
+  let%bind prepared = Session_transition.apply ~now t.state ~delta ~payloads in
+  let%map () =
+    match prepared.state.run_state with
+    | None -> Ok ()
+    | Some index ->
+      let%bind additional_bytes =
+        Run_job_capacity.bookkeeping_reserve index ~jobs:prepared.state.jobs
+      in
+      Run_state.validate_encoded_capacity_with_reserve
+        index
+        ~additional_bytes
+        (Run_state.to_jsonaf index)
+  in
+  prepared
+;;
+
+let transition ?run_preparation ?commit_attempted t ~delta ~payloads =
+  let open Result.Let_syntax in
+  let%bind transition = prepare_transition ?run_preparation t ~delta ~payloads in
+  let%map () = install ?run_preparation ?commit_attempted t transition in
   Agent_protocol.Session.(Session_state.summary t.state)
 ;;
 
 let inference_error _ = error Invalid_state "inference tracking admission failed"
 
-let commit_inference_ledger t ledger =
+let commit_inference_ledger ?run_preparation t ledger =
+  let open Result.Let_syntax in
+  let%bind () =
+    match run_preparation with
+    | None -> Ok ()
+    | Some preparation -> check_run_preparation t preparation
+  in
   if
     Int64.equal
       (Inference_ledger.revision ledger)
@@ -1057,6 +1228,7 @@ let commit_inference_ledger t ledger =
   then Ok ()
   else
     transition
+      ?run_preparation
       t
       ~delta:(Session_delta.Inference_ledger_changed ledger)
       ~payloads:
@@ -1110,7 +1282,15 @@ let inference_registration t owner handle =
   | Some _ | None -> Error (error Conflict "inference handle is not owned by this graph")
 ;;
 
-let admit_inference t owner relation operation_id invocation_id configuration =
+let admit_inference
+      ?run_preparation
+      t
+      owner
+      relation
+      operation_id
+      invocation_id
+      configuration
+  =
   let open Result.Let_syntax in
   let%bind () = validate_inference_owner t owner in
   let%bind () =
@@ -1133,7 +1313,7 @@ let admit_inference t owner relation operation_id invocation_id configuration =
       ~configuration
     |> Result.map_error ~f:inference_error
   in
-  let%bind () = commit_inference_ledger t ledger in
+  let%bind () = commit_inference_ledger ?run_preparation t ledger in
   owner.qualified_source
   <- Some (Transcript.Scope.key (Inference_ledger.Handle.scope handle)).source;
   owner.registrations
@@ -1159,7 +1339,7 @@ let validate_inference_attempt registration attempt =
   else Error (error Conflict "inference attempt differs from its admitted identity")
 ;;
 
-let acknowledge_inference t owner handle attempt =
+let acknowledge_inference ?run_preparation t owner handle attempt =
   let open Result.Let_syntax in
   let%bind registration = inference_registration t owner handle in
   let%bind () = validate_inference_attempt registration attempt in
@@ -1168,19 +1348,19 @@ let acknowledge_inference t owner handle attempt =
     Inference_ledger.set_state t.state.inference_ledger handle Running
     |> Result.map_error ~f:inference_error
   in
-  commit_inference_ledger t ledger
+  commit_inference_ledger ?run_preparation t ledger
 ;;
 
-let observe_inference t handle incoming =
+let observe_inference ?run_preparation t handle incoming =
   let open Result.Let_syntax in
   let%bind ledger, _disposition =
     Inference_ledger.observe t.state.inference_ledger handle incoming
     |> Result.map_error ~f:inference_error
   in
-  commit_inference_ledger t ledger
+  commit_inference_ledger ?run_preparation t ledger
 ;;
 
-let observe_owned_inference t owner incoming =
+let observe_owned_inference ?run_preparation t owner incoming =
   let open Result.Let_syntax in
   let%bind () = validate_inference_owner t owner in
   let scope = Inference.Observation.scope incoming in
@@ -1202,10 +1382,11 @@ let observe_owned_inference t owner incoming =
       && Transcript.Scope.equal scope (Inference_ledger.Handle.scope handle))
   with
   | None -> Error (error Conflict "observation has no retained admitted scope")
-  | Some row -> observe_inference t (Inference_ledger.Row.handle row) incoming
+  | Some row ->
+    observe_inference ?run_preparation t (Inference_ledger.Row.handle row) incoming
 ;;
 
-let complete_inference t owner handle completion =
+let complete_inference ?run_preparation t owner handle completion =
   let open Result.Let_syntax in
   let%bind registration = inference_registration t owner handle in
   let%bind () =
@@ -1222,7 +1403,7 @@ let complete_inference t owner handle completion =
     Inference_ledger.set_state t.state.inference_ledger handle state
     |> Result.map_error ~f:inference_error
   in
-  commit_inference_ledger t ledger
+  commit_inference_ledger ?run_preparation t ledger
 ;;
 
 let interrupt_inference_row ledger handle ~delivery =
@@ -1247,7 +1428,7 @@ let interrupt_inference_row ledger handle ~delivery =
      | Running -> interrupt Inference.Event.Terminal.Possibly_submitted)
 ;;
 
-let release_inference t owner handle =
+let release_inference ?run_preparation t owner handle =
   let open Result.Let_syntax in
   let%bind registration = inference_registration t owner handle in
   Exn.protect
@@ -1259,7 +1440,7 @@ let release_inference t owner handle =
           ~delivery:
             (Option.map registration.attempt ~f:Inference_runtime.Attempt.delivery)
       in
-      commit_inference_ledger t ledger)
+      commit_inference_ledger ?run_preparation t ledger)
     ~finally:(fun () ->
       owner.registrations
       <- Map.remove owner.registrations (Inference_ledger.Handle.ordinal handle))
@@ -1271,7 +1452,7 @@ let seal_inference_owner t owner =
   owner.Inference_owner.phase <- Sealed
 ;;
 
-let finish_inference_owner t owner =
+let finish_inference_owner ?run_preparation t owner =
   let open Result.Let_syntax in
   let%bind () = validate_inference_owner t owner in
   let%bind () =
@@ -1298,7 +1479,7 @@ let finish_inference_owner t owner =
              |> Option.map ~f:Inference_runtime.Attempt.delivery)
       | Some _ | None -> Ok ledger)
   in
-  let%map () = commit_inference_ledger t ledger in
+  let%map () = commit_inference_ledger ?run_preparation t ledger in
   owner.phase <- Finished;
   owner.registrations <- Int64.Map.empty;
   t.inference_owners
@@ -1968,27 +2149,36 @@ let change_workspace t workspace =
     Error (error Invalid_state "workspace replacement requires a stopped session")
 ;;
 
-let lifecycle t ~desired ~observed =
+let lifecycle ?run_preparation ?commit_attempted ?(extra_deltas = []) t ~desired ~observed
+  =
   let open Result.Let_syntax in
   let%bind transition =
     let delta = Session_delta.Lifecycle_changed { desired; observed } in
-    Session_transition.apply
-      ~now:(t.services.now ())
-      t.state
+    prepare_transition
+      t
       ~delta:
-        (if t.state.pending_initial_start
-         then Batch [ Initial_start_consumed; delta ]
-         else delta)
+        (Session_delta.Batch
+           (extra_deltas
+            @
+            if t.state.pending_initial_start
+            then [ Session_delta.Initial_start_consumed; delta ]
+            else [ delta ]))
       ~payloads:
         [ Agent_protocol.Event.Durable.Payload.Session_state_changed
             { desired_state = desired; observed_state = observed }
         ]
   in
-  let%map () = install t transition in
+  let%map () = install ?run_preparation ?commit_attempted t transition in
   Session_state.summary t.state
 ;;
 
-let start_internal ?expected_parent_stop_epoch t =
+let start_internal
+      ?run_preparation
+      ?commit_attempted
+      ?expected_parent_stop_epoch
+      ?(extra_deltas = [])
+      t
+  =
   if not (runtime_admission_open t)
   then Error (error Conflict "session runtime is retiring")
   else if
@@ -2008,8 +2198,16 @@ let start_internal ?expected_parent_stop_epoch t =
       Ok (Session_state.summary t.state)
     | _, _ ->
       let open Result.Let_syntax in
-      let%bind _ = lifecycle t ~desired:Running ~observed:Starting in
-      lifecycle t ~desired:Running ~observed:Idle)
+      let%bind _ =
+        lifecycle
+          ?run_preparation
+          ?commit_attempted
+          ~extra_deltas
+          t
+          ~desired:Running
+          ~observed:Starting
+      in
+      lifecycle ?run_preparation ?commit_attempted t ~desired:Running ~observed:Idle)
 ;;
 
 let queue_start_internal t =
@@ -2379,16 +2577,70 @@ let append_history t entries =
     ~payloads:[ Agent_protocol.Event.Durable.Payload.History_appended entries ]
 ;;
 
-let defer_history ?(extra_deltas = []) t entries =
+let prepare_pending t ?(archive = None) change =
+  let retention = Pending_disposition.Retention.default in
+  Pending_transition.prepare
+    t.state
+    ~change
+    ~retention
+    ~archive
+    ~limits:Session_delta.native_limits
+;;
+
+let eligible_pending t boundary =
+  let open Result.Let_syntax in
+  let%bind eligibility =
+    Pending_eligibility.create
+      t.state
+      ~boundary
+      ~runtime_admission_open:(runtime_admission_open t)
+  in
+  Pending_eligibility.eligible_prefix
+    eligibility
+    t.state.conversation.deferred_user_entries
+;;
+
+let prepare_pending_inputs t ~owner timing entries =
+  let open Result.Let_syntax in
+  let%bind binding =
+    Agent_protocol.Pending_input.Binding.create
+      timing
+      ~generation:t.state.identity.generation
+      ~operation:t.state.active_operation
+  in
+  let%bind documents =
+    List.map entries ~f:(fun entry ->
+      let%bind value =
+        Agent_protocol.Pending_input.create
+          ~entry
+          ~generation:t.state.identity.generation
+          ~binding
+      in
+      Pending_input_document.authored ~owner value ~limits:Session_delta.native_limits
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.invalid_request
+          (Sexp.to_string_hum (Document_schema.Error.sexp_of_t error))))
+    |> Result.all
+  in
+  prepare_pending t (Enqueue documents)
+;;
+
+let defer_history
+      ?(extra_deltas = [])
+      ?(owner = Pending_input_document.Owner.Host_internal)
+      ?(timing = Agent_protocol.Pending_input.Timing.Safe_boundary)
+      t
+      entries
+  =
+  let open Result.Let_syntax in
+  let%bind prepared = prepare_pending_inputs t ~owner timing entries in
   let payloads =
     List.map entries ~f:(fun entry ->
       Agent_protocol.Event.Durable.Payload.History_message_deferred entry)
   in
   transition
     t
-    ~delta:
-      (Session_delta.Batch
-         (extra_deltas @ [ Session_delta.Deferred_entries_enqueued entries ]))
+    ~delta:(Session_delta.Batch (extra_deltas @ [ Pending_transition.delta prepared ]))
     ~payloads
 ;;
 
@@ -2486,7 +2738,7 @@ let commit_administration t attachment_id expected_revision kind candidate =
            candidate.Session_state.identity.generation
            (t.state.identity.generation + 1)
       && List.is_empty candidate.ingress_registrations
-    | Upgrade | Compaction | Edit | Delete ->
+    | Upgrade | Compaction | Edit | Delete | Pending_input ->
       List.equal
         External_ingress.equal
         candidate.ingress_registrations
@@ -2519,10 +2771,48 @@ let commit_administration t attachment_id expected_revision kind candidate =
       candidate
       kind
   in
-  transition
-    t
-    ~delta:(Session_delta.Created state)
-    ~payloads:(Administration.payloads ~previous:t.state state)
+  let%bind pending =
+    match kind with
+    | Reset | Rebuild ->
+      if List.is_empty t.state.conversation.deferred_user_entries
+      then Ok None
+      else (
+        let%bind archive =
+          List.hd state.conversation.compaction_archives
+          |> Result.of_option
+               ~error:(error Internal_error "administrative archive missing")
+        in
+        let reason =
+          match kind with
+          | Reset -> Pending_disposition.Retirement_reason.Source_reset
+          | Rebuild -> Source_replaced
+          | Compaction | Upgrade | Edit | Delete | Pending_input ->
+            Canonical_history_retired
+        in
+        prepare_pending t ~archive:(Some archive) (Retire reason)
+        |> Result.map ~f:Option.some)
+    | Compaction | Upgrade | Edit | Delete | Pending_input -> Ok None
+  in
+  let state =
+    Option.value_map pending ~default:state ~f:(fun prepared ->
+      let plan = Pending_transition.plan prepared in
+      { state with
+        conversation =
+          { state.conversation with
+            deferred_user_entries = Pending_plan.pending plan
+          ; pending_revision = Pending_plan.revision plan
+          ; pending_dispositions = Pending_plan.dispositions plan
+          }
+      })
+  in
+  let delta =
+    match pending with
+    | None -> Session_delta.Created state
+    | Some prepared ->
+      Session_delta.Batch
+        [ Pending_transition.delta prepared; Session_delta.Created state ]
+  in
+  transition t ~delta ~payloads:(Administration.payloads ~previous:t.state state)
 ;;
 
 let administration_basis (expected : Session_state.t) (state : Session_state.t) =
@@ -2647,10 +2937,13 @@ let validate_initialization_scope t scope =
     | Some active when phys_equal active scope -> Ok ()
     | Some _ | None -> Error (error Conflict "initialization scope is no longer active")
   in
-  validate_initialization_basis t scope.expected
+  let%bind () = validate_initialization_basis t scope.expected in
+  match scope.Initialization_scope.run_preparation with
+  | None -> Ok ()
+  | Some preparation -> check_run_preparation t preparation
 ;;
 
-let begin_initialization t expected =
+let begin_initialization ?run_preparation t expected =
   let open Result.Let_syntax in
   let%bind () = validate_initialization_basis t expected in
   let%bind () =
@@ -2663,7 +2956,8 @@ let begin_initialization t expected =
   | Some _ -> Error (error Conflict "another initialization scope is active")
   | None ->
     let scope =
-      Initialization_scope.{ owner = t.initialization_owner; expected; jobs = [] }
+      Initialization_scope.
+        { owner = t.initialization_owner; expected; jobs = []; run_preparation }
     in
     t.initialization_scope <- Some scope;
     Ok scope
@@ -2742,6 +3036,7 @@ let complete_initialization t scope (candidate : Session_state.t) =
   in
   let%bind () = Session_state.validate state in
   transition
+    ?run_preparation:scope.Initialization_scope.run_preparation
     t
     ~delta:(Session_delta.Created state)
     ~payloads:
@@ -2756,6 +3051,7 @@ let fail_initialization t scope failure =
     { t.state.lifecycle with Session_state.Lifecycle.observed = Failed failure }
   in
   transition
+    ?run_preparation:scope.Initialization_scope.run_preparation
     t
     ~delta:
       (Session_delta.Batch [ Failure_changed (Some failure); Lifecycle_changed lifecycle ])
@@ -2800,20 +3096,35 @@ let upgrade_prompt_internal t attachment_id expected_revision target_revision =
         ])
 ;;
 
+let adoption_boundary t =
+  match t.state.active_operation with
+  | Some { Agent_protocol.Operation.kind = Turn _; id; _ } ->
+    Pending_eligibility.Boundary.Worker id
+  | Some { kind = Compaction; _ } | None -> Idle_start
+;;
+
 let adopt_deferred t =
   let open Result.Let_syntax in
   let%bind () = require_runtime_admission t in
-  let entries = t.state.conversation.deferred_user_entries in
+  let%bind prepared =
+    prepare_pending
+      t
+      (Adopt
+         { boundary = adoption_boundary t
+         ; runtime_admission_open = runtime_admission_open t
+         })
+  in
+  let entries = Pending_plan.adopted_entries (Pending_transition.plan prepared) in
   if List.is_empty entries
   then Ok (Session_state.summary t.state)
   else
     transition
       t
-      ~delta:Session_delta.Deferred_entries_adopted
+      ~delta:(Pending_transition.delta prepared)
       ~payloads:[ Agent_protocol.Event.Durable.Payload.History_appended entries ]
 ;;
 
-let reserve_history_block t count =
+let reserve_history_block ?run_preparation t count =
   if count <= 0
   then Error (error Invalid_request "history reservation count must be positive")
   else if Int64.(t.state.conversation.next_history_sequence > max_value - of_int count)
@@ -2824,6 +3135,7 @@ let reserve_history_block t count =
     let open Result.Let_syntax in
     let%map _ =
       transition
+        ?run_preparation
         t
         ~delta:(Session_delta.History_block_reserved reserved_through)
         ~payloads:[]
@@ -3222,6 +3534,16 @@ let idle_moderator_eligible t =
   runtime_ready t && idle_actor_available t && not (has_pending_permission t)
 ;;
 
+let check_run_binding t run_id =
+  let open Result.Let_syntax in
+  let%bind binding =
+    Result.of_option
+      (Run_authorities.find t.run_authorities run_id)
+      ~error:(error Permission_denied "run no longer has live host authority")
+  in
+  Run_admission.Scope.authorize (Run_authorities.scope binding) t.state
+;;
+
 let claim_queued_event t id operation_id snapshot =
   let open Result.Let_syntax in
   let%bind available =
@@ -3254,9 +3576,18 @@ let claim_queued_event t id operation_id snapshot =
       match retirement_reason with
       | Some _ -> Ok ()
       | None ->
+        let%bind resumed, run_deltas =
+          Run_transition.claim_wake t.state ~executing:receipt ~now:(t.services.now ())
+        in
+        let%bind () =
+          List.fold_result resumed ~init:() ~f:(fun () run_id ->
+            check_run_binding t run_id)
+        in
         transition
           t
-          ~delta:(Session_delta.Moderator_execution_changed receipt)
+          ~delta:
+            (Session_delta.Batch
+               (Session_delta.Moderator_execution_changed receipt :: run_deltas))
           ~payloads:[]
         |> Result.map ~f:ignore
     in
@@ -3267,6 +3598,7 @@ let claim_queued_event t id operation_id snapshot =
       ; before = snapshot
       ; event
       ; retirement_reason
+      ; run_actions = None
       ; callback_active = true
       ; committed = false
       ; cancel = None
@@ -3313,6 +3645,7 @@ let claim_ordinary_event t id operation_id snapshot event =
       ; before = snapshot
       ; event
       ; retirement_reason = None
+      ; run_actions = None
       ; callback_active = true
       ; committed = false
       ; cancel = None
@@ -3357,6 +3690,7 @@ let claim_delegated_event t id delegation snapshot event =
           ; before = snapshot
           ; event
           ; retirement_reason = None
+          ; run_actions = None
           ; callback_active = true
           ; committed = false
           ; cancel = None
@@ -3396,6 +3730,7 @@ let claim_job_event t scope id snapshot event =
     ; before = snapshot
     ; event
     ; retirement_reason = None
+    ; run_actions = None
     ; callback_active = true
     ; committed = false
     ; cancel = None
@@ -3459,6 +3794,7 @@ let claim_queued_retirement t id snapshot reason =
       ; before = snapshot
       ; event
       ; retirement_reason = Some reason
+      ; run_actions = None
       ; callback_active = true
       ; committed = false
       ; cancel = None
@@ -3613,6 +3949,138 @@ let claim_event_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
   Ok execution
 ;;
 
+let check_run_authority t scope = check_run_binding t (Run_scope.run_id scope)
+
+let run_turn_deltas t operation events deliveries =
+  let open Result.Let_syntax in
+  let%bind resumed, deltas =
+    Run_transition.admit_turn
+      t.state
+      ~operation
+      ~events
+      ~deliveries
+      ~now:(t.services.now ())
+  in
+  let%map () =
+    List.fold_result resumed ~init:() ~f:(fun () run_id -> check_run_binding t run_id)
+  in
+  deltas
+;;
+
+let run_actions_internal t (executing : Agent_protocol.Moderator_execution.t) =
+  let open Result.Let_syntax in
+  let%bind borrow =
+    match t.queued_event_borrow with
+    | Some borrow when Agent_protocol.Moderator_execution.equal borrow.receipt executing
+      -> Ok borrow
+    | Some _ | None ->
+      Error (error Conflict "run actions require the exact active event borrow")
+  in
+  let%bind () = queued_event_can_commit t borrow in
+  match borrow.run_actions with
+  | Some owner ->
+    let%map () = check_run_authority t (Run_action_service.scope owner) in
+    Some owner
+  | None ->
+    let%bind selected = Run_event_scope.select t.state ~executing in
+    (match selected with
+     | None -> Ok None
+     | Some run ->
+       let%bind scope = Run_scope.create ~run ~execution_id:executing.context.id in
+       let%map () = check_run_authority t scope in
+       let owner = Run_action_service.create ~scope in
+       borrow.run_actions <- Some owner;
+       Some owner)
+;;
+
+let prepared_run_delta t (borrow : queued_event_borrow) completed requests job_deltas =
+  let open Result.Let_syntax in
+  match borrow.run_actions with
+  | None -> Ok []
+  | Some owner ->
+    let scope = Run_action_service.scope owner in
+    let%bind () = check_run_authority t scope in
+    let%bind action =
+      Run_action_service.prepared owner |> Result.map_error ~f:(error Conflict)
+    in
+    let%bind _ =
+      Run_action_service.compose_requests owner ~action ~requests
+      |> Result.map_error ~f:(error Conflict)
+    in
+    let%bind owned_work =
+      List.filter_map job_deltas ~f:(function
+        | Session_delta.Job_changed job -> Some (Run_job_occurrence.work job)
+        | Schedule_changed schedule ->
+          Some
+            (Agent_protocol.Run_work.create
+               ~key:(Retained (Schedule schedule.id))
+               ~generation:schedule.generation)
+        | Subscription_changed subscription ->
+          Some
+            (Agent_protocol.Run_work.create
+               ~key:(Retained (Subscription subscription.context.id))
+               ~generation:subscription.context.generation)
+        | Delivery_changed delivery ->
+          Some
+            (Agent_protocol.Run_work.create
+               ~key:(Retained (Delivery delivery.context.id))
+               ~generation:delivery.context.generation)
+        | _ -> None)
+      |> Result.all
+    in
+    let owns_callback =
+      Option.bind t.state.run_state ~f:(fun index ->
+        Run_state.find index (Run_scope.run_id scope))
+      |> Option.exists ~f:(fun run ->
+        List.exists run.Agent_protocol.Run.owned_work ~f:(fun work ->
+          match work.Agent_protocol.Run_work.key with
+          | Retained (Moderator_execution id) ->
+            Agent_protocol.Id.Moderator_execution.equal id borrow.receipt.context.id
+          | Operation _
+          | Retained (Job _ | Schedule _ | Invocation _ | Subscription _ | Delivery _) ->
+            false))
+    in
+    if Option.is_none action && List.is_empty owned_work && not owns_callback
+    then Ok []
+    else (
+      let%bind work_transition =
+        prepare_transition
+          t
+          ~delta:
+            (Session_delta.Batch (job_deltas @ [ Moderator_execution_changed completed ]))
+          ~payloads:[]
+      in
+      let%bind prepared =
+        Run_transition.prepare
+          t.state
+          ~scope
+          ~executing:borrow.receipt
+          ~work_state:work_transition.state
+          ~owned_work
+          ~action
+          ~now:(t.services.now ())
+      in
+      let%map () =
+        match action with
+        | Some (Wait wake) ->
+          (match wake.occurrence with
+           | Job_completion { job_id; attempt = _ } ->
+             (match
+                List.find work_transition.state.jobs ~f:(fun job ->
+                  Agent_protocol.Id.Job.equal job.Agent_protocol.Job.id job_id)
+              with
+              | None -> Error (error Invalid_request "job wait has no retained producer")
+              | Some job ->
+                Run_job_capacity.validate_wait
+                  job
+                  ~run:(Run_transition.run prepared)
+                  ~publisher:t.services.job_results)
+           | Delivered_timer _ | Subscription_delivery _ -> Ok ())
+        | None | Some (Continue | Finish _) -> Ok ()
+      in
+      [ Run_transition.delta prepared ])
+;;
+
 let commit_queued_event t borrow snapshot requests decision notifications =
   let open Result.Let_syntax in
   let%bind () = queued_event_can_commit t borrow in
@@ -3684,6 +4152,7 @@ let commit_queued_event t borrow snapshot requests decision notifications =
   let%bind job_deltas, job_payloads =
     staged_work_changes t (Agent_protocol.Job.Moderator_event borrow.receipt.context.id)
   in
+  let%bind run_deltas = prepared_run_delta t borrow completed requests job_deltas in
   let%bind _ =
     transition
       t
@@ -3694,7 +4163,8 @@ let commit_queued_event t borrow snapshot requests decision notifications =
               ; Moderator_changed
                   (Some (Runtime_builder.encode_moderator_snapshot snapshot))
               ]
-            @ job_deltas))
+            @ job_deltas
+            @ run_deltas))
       ~payloads:
         (job_payloads
          @ List.map notifications ~f:(fun message ->
@@ -3713,6 +4183,8 @@ let commit_queued_event t borrow snapshot requests decision notifications =
 let finish_queued_event t borrow interrupted =
   let open Result.Let_syntax in
   let%bind () = validate_queued_event_borrow t borrow in
+  Option.iter borrow.run_actions ~f:Run_action_service.close;
+  borrow.run_actions <- None;
   borrow.callback_active <- false;
   abort_staged_work t ~owner:(Moderator_event borrow.receipt.context.id);
   borrow.cancel <- None;
@@ -4674,6 +5146,19 @@ let create_script_notification_internal
     | true -> Ok ()
     | false -> Error (error Resource_limit "notification admission capacity exhausted")
   in
+  let%bind subscription_binding =
+    match correlation.work with
+    | None | Some (Job _) -> Ok None
+    | Some (Subscription id) ->
+      let%bind subscription =
+        Result.of_option
+          (provisional_subscription t owner id)
+          ~error:
+            (error Invalid_state "notification subscription disappeared before admission")
+      in
+      P.Delivery.Subscription_binding.create ~subscription_id:id ~epoch:subscription.epoch
+      |> Result.map ~f:Option.some
+  in
   let%bind delivery =
     P.Delivery.create
       ?disclosure_pins
@@ -4687,7 +5172,7 @@ let create_script_notification_internal
       ; completion
       ; wake
       ; created_at = t.services.now ()
-      ; ownership = Some { source; creator = owner }
+      ; ownership = Some { source; creator = owner; subscription_binding }
       }
   in
   let%map receipt =
@@ -5419,13 +5904,26 @@ let consume_deferred t operation_id =
   else
     let open Result.Let_syntax in
     let%bind _ = current_operation t operation_id in
-    match t.state.lifecycle.desired with
-    | Stopped -> Ok []
-    | Running ->
-      let entries = t.state.conversation.deferred_user_entries in
-      let%bind decoded = History_codec.all_of_protocol entries in
-      let%map _ = adopt_deferred t in
-      decoded
+    let%bind prepared =
+      prepare_pending
+        t
+        (Adopt
+           { boundary = Worker operation_id
+           ; runtime_admission_open = runtime_admission_open t
+           })
+    in
+    let entries = Pending_plan.adopted_entries (Pending_transition.plan prepared) in
+    let%bind decoded = History_codec.all_of_protocol entries in
+    if List.is_empty entries
+    then Ok []
+    else (
+      let%map _ =
+        transition
+          t
+          ~delta:(Pending_transition.delta prepared)
+          ~payloads:[ Agent_protocol.Event.Durable.Payload.History_appended entries ]
+      in
+      decoded)
 ;;
 
 let admit_standalone_delivery_internal t plan =
@@ -5839,6 +6337,25 @@ let runtime_request_payloads summary =
   |> Option.to_list
 ;;
 
+let release_pending_delta t (operation : Agent_protocol.Operation.t) =
+  let relevant =
+    List.exists t.state.conversation.deferred_user_entries ~f:(fun document ->
+      match
+        Agent_protocol.Pending_input.binding (Pending_input_document.value document)
+      with
+      | After_root { operation_id; terminal = None; _ } ->
+        Agent_protocol.Id.Operation.equal operation_id operation.id
+      | Safe_boundary | Await_idle | After_root { terminal = Some _; _ } -> false)
+  in
+  if not relevant
+  then Ok None
+  else
+    let open Result.Let_syntax in
+    let%bind proof = Agent_protocol.Pending_input.Terminal_proof.of_operation operation in
+    let%map prepared = prepare_pending t (Release proof) in
+    Some (Pending_transition.delta prepared)
+;;
+
 let completed_delta t operation summary =
   let final_protocol =
     History_codec.all_to_protocol
@@ -5848,9 +6365,11 @@ let completed_delta t operation summary =
   let committed = t.state.conversation.canonical_history in
   if not (history_prefix ~prefix:committed final_protocol)
   then Error (error Conflict "worker final history diverges from committed history")
-  else (
+  else
+    let open Result.Let_syntax in
     let missing = List.drop final_protocol (List.length committed) in
     let operation = operation_state t operation Agent_protocol.Operation.Completed in
+    let%bind release = release_pending_delta t operation in
     let lifecycle = completed_lifecycle t summary.runtime_requests in
     let moderator_snapshot =
       match t.foreground_moderator, moderator_is_borrowed t with
@@ -5858,7 +6377,8 @@ let completed_delta t operation summary =
       | None, false -> summary.moderator_snapshot
     in
     let deltas =
-      [ Option.some_if
+      [ release
+      ; Option.some_if
           (not (List.is_empty missing))
           (Session_delta.Canonical_entries_appended missing)
       ; Some (Session_delta.Active_operation_changed None)
@@ -5880,33 +6400,39 @@ let completed_delta t operation summary =
       |> List.filter_opt
       |> fun values -> values @ runtime_request_payloads summary
     in
-    Ok (Session_delta.Batch deltas, payloads))
+    Ok (Session_delta.Batch deltas, payloads)
 ;;
 
-let terminal_delta t operation = function
+let terminal_delta t operation outcome =
+  let open Result.Let_syntax in
+  match outcome with
   | Operation_worker.Completed summary -> completed_delta t operation summary
   | Cancelled cancellation ->
     let operation = operation_state t operation Agent_protocol.Operation.Cancelled in
+    let%map release = release_pending_delta t operation in
     let lifecycle = terminal_lifecycle t in
-    Ok
-      ( Session_delta.Batch [ Active_operation_changed None; Lifecycle_changed lifecycle ]
-      , [ Agent_protocol.Event.Durable.Payload.Operation_cancelled operation
-        ; Moderator_notification
-            (`Object [ "cancellation_reason", `String cancellation.reason ])
-        ; Session_state_changed
-            { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
-        ] )
+    ( Session_delta.Batch
+        (Option.to_list release
+         @ [ Active_operation_changed None; Lifecycle_changed lifecycle ])
+    , [ Agent_protocol.Event.Durable.Payload.Operation_cancelled operation
+      ; Moderator_notification
+          (`Object [ "cancellation_reason", `String cancellation.reason ])
+      ; Session_state_changed
+          { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
+      ] )
   | Failed failure ->
     let operation =
       operation_state t operation (Agent_protocol.Operation.Failed failure)
     in
+    let%map release = release_pending_delta t operation in
     let lifecycle = terminal_lifecycle t in
-    Ok
-      ( Session_delta.Batch [ Active_operation_changed None; Lifecycle_changed lifecycle ]
-      , [ Agent_protocol.Event.Durable.Payload.Operation_failed operation
-        ; Session_state_changed
-            { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
-        ] )
+    ( Session_delta.Batch
+        (Option.to_list release
+         @ [ Active_operation_changed None; Lifecycle_changed lifecycle ])
+    , [ Agent_protocol.Event.Durable.Payload.Operation_failed operation
+      ; Session_state_changed
+          { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
+      ] )
 ;;
 
 let is_permission_review_job (job : Agent_protocol.Job.t) =
@@ -6383,7 +6909,7 @@ let manage_moderator_follow_up t operation_id observer =
 
 let admit_moderator_turn t operation_id =
   let open Result.Let_syntax in
-  let%bind _ = running_operation t operation_id in
+  let%bind operation = running_operation t operation_id in
   let%bind observer = managed_moderator t operation_id in
   let%bind halted = Runtime_builder.moderator_snapshot_is_halted t.state.moderator in
   let%bind () =
@@ -6395,7 +6921,8 @@ let admit_moderator_turn t operation_id =
   in
   let%bind plan = Observation_follow_up.admit_turn ~state:t.state ~observer in
   let%bind notifications = notification_wake_deltas t operation_id ~accept:true in
-  match follow_up_deltas t plan @ notifications with
+  let%bind run_deltas = run_turn_deltas t operation plan.events [] in
+  match follow_up_deltas t plan @ notifications @ run_deltas with
   | [] -> Ok ()
   | deltas ->
     transition t ~delta:(Session_delta.Batch deltas) ~payloads:[] |> Result.map ~f:ignore
@@ -6517,6 +7044,19 @@ let worker_terminal t operation_id outcome =
           (error Internal_error "worker completed with an active invocation")
       | _ -> outcome
     in
+    let run_outcome : Agent_protocol.Run_work.Terminal.outcome =
+      match outcome with
+      | Operation_worker.Completed _ -> Succeeded
+      | Cancelled _ -> Cancelled
+      | Failed _ -> Failed
+    in
+    let%bind run_deltas =
+      Run_transition.settle_operation
+        t.state
+        ~operation_id
+        ~outcome:run_outcome
+        ~now:(t.services.now ())
+    in
     let%bind delta, payloads = terminal_delta t operation outcome in
     let%bind follow_up = foreground_terminal_requests t operation_id outcome in
     let%bind notifications = notification_wake_deltas t operation_id ~accept:false in
@@ -6529,6 +7069,7 @@ let worker_terminal t operation_id outcome =
              (notifications
               @ follow_up
               @ unfinished
+              @ run_deltas
               @ [ borrow_delta; event_delta; delta; cleanup_delta permissions jobs ]))
         ~payloads:(payloads @ cleanup_payloads permissions jobs)
     in
@@ -7180,6 +7721,9 @@ let with_current_queued_moderator_event_tools t ~operation_id ~snapshot f =
     f
 ;;
 
+let reconcile_run_recovery t = call t Reconcile_run_recovery
+let run_actions t executing = call t (Run_actions executing)
+
 let with_current_idle_queued_moderator_event_tools t =
   with_current_queued_moderator_event_tools t ~operation_id:None
 ;;
@@ -7284,6 +7828,7 @@ let worker_capabilities t operation_id id_source buffer =
     ; with_moderator_invocation = with_moderator_invocation t operation_id
     ; with_moderator_observation = with_moderator_observation t operation_id
     ; with_next_moderator_observation = with_next_moderator_observation t operation_id
+    ; run_actions = (fun executing -> call t (Run_actions executing))
     ; with_moderator_event =
         (fun ~snapshot ~event ->
           with_current_moderator_event
@@ -7420,45 +7965,111 @@ let create_turn_operation t reason =
     }
 ;;
 
-let submit_idle_message ?(extra_deltas = []) t entry =
+let submit_idle_message
+      ?run_preparation
+      ?commit_attempted
+      ?(extra_deltas = [])
+      ?(owner = Pending_input_document.Owner.Host_internal)
+      ?(timing = Agent_protocol.Pending_input.Timing.Safe_boundary)
+      ?operation
+      t
+      entry
+  =
   let open Result.Let_syntax in
   let%bind () = require_runtime_admission t in
   let%bind () = reconcile_foreground_invocations t in
-  let operation = create_turn_operation t User_submit in
-  let lifecycle = lifecycle_for_operation t operation.id in
-  let delta =
-    Session_delta.Batch
-      (extra_deltas
-       @ [ Session_delta.Canonical_entries_appended [ entry ]
-         ; Active_operation_changed (Some operation)
-         ; Lifecycle_changed lifecycle
-         ])
+  let%bind enqueue = prepare_pending_inputs t ~owner timing [ entry ] in
+  let%bind queued = Pending_plan.apply (Pending_transition.plan enqueue) t.state in
+  let retention = Pending_disposition.Retention.default in
+  let%bind adoption =
+    Pending_transition.prepare
+      queued
+      ~change:
+        (Adopt
+           { boundary = Idle_start; runtime_admission_open = runtime_admission_open t })
+      ~retention
+      ~archive:None
+      ~limits:Session_delta.native_limits
   in
-  let payloads =
-    [ Agent_protocol.Event.Durable.Payload.History_appended [ entry ]
-    ; Operation_started operation
-    ; Session_state_changed
-        { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
-    ]
+  let entries = Pending_plan.adopted_entries (Pending_transition.plan adoption) in
+  let accepted =
+    List.exists entries ~f:(fun candidate ->
+      Agent_protocol.History.Id.equal candidate.id entry.id)
   in
-  let open Result.Let_syntax in
-  let%bind session = transition t ~delta ~payloads in
-  launch_worker t operation;
-  Ok
+  let deferred_payloads =
+    if accepted
+    then []
+    else [ Agent_protocol.Event.Durable.Payload.History_message_deferred entry ]
+  in
+  let%bind () =
+    if Option.is_some operation && not accepted
+    then
+      Error
+        (error Pending_input_conflict "run input is blocked by the pending FIFO prefix")
+    else Ok ()
+  in
+  if List.is_empty entries
+  then (
+    let%map session =
+      transition
+        ?run_preparation
+        ?commit_attempted
+        t
+        ~delta:(Session_delta.Batch (extra_deltas @ [ Pending_transition.delta enqueue ]))
+        ~payloads:deferred_payloads
+    in
+    { session; history_id = entry.id; disposition = Deferred; operation_id = None })
+  else (
+    let operation =
+      Option.value_or_thunk operation ~default:(fun () ->
+        create_turn_operation t User_submit)
+    in
+    let lifecycle = lifecycle_for_operation t operation.id in
+    let delta =
+      Session_delta.Batch
+        (extra_deltas
+         @ [ Pending_transition.delta enqueue
+           ; Pending_transition.delta adoption
+           ; Active_operation_changed (Some operation)
+           ; Lifecycle_changed lifecycle
+           ])
+    in
+    let payloads =
+      deferred_payloads
+      @ [ Agent_protocol.Event.Durable.Payload.History_appended entries
+        ; Operation_started operation
+        ; Session_state_changed
+            { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
+        ]
+    in
+    let%map session = transition ?run_preparation ?commit_attempted t ~delta ~payloads in
+    launch_worker t operation;
     { session
     ; history_id = entry.id
-    ; disposition = Started
-    ; operation_id = Some operation.id
-    }
+    ; disposition = (if accepted then Started else Deferred)
+    ; operation_id = Option.some_if accepted operation.id
+    })
 ;;
 
-let submit_deferred_message ?(extra_deltas = []) t entry =
+let submit_deferred_message
+      ?(extra_deltas = [])
+      ?(owner = Pending_input_document.Owner.Host_internal)
+      ?(timing = Agent_protocol.Pending_input.Timing.Safe_boundary)
+      t
+      entry
+  =
   let open Result.Let_syntax in
-  let%map session = defer_history ~extra_deltas t [ entry ] in
+  let%map session = defer_history ~extra_deltas ~owner ~timing t [ entry ] in
   { session; history_id = entry.id; disposition = Deferred; operation_id = None }
 ;;
 
-let submit_authorized_message ?(extra_deltas = []) t entry =
+let submit_authorized_message
+      ?(extra_deltas = [])
+      ?(owner = Pending_input_document.Owner.Host_internal)
+      ?(timing = Agent_protocol.Pending_input.Timing.Safe_boundary)
+      t
+      entry
+  =
   if not (runtime_admission_open t)
   then Error (error Conflict "session runtime is retiring")
   else if t.state.halted
@@ -7472,20 +8083,151 @@ let submit_authorized_message ?(extra_deltas = []) t entry =
     match
       t.idle_moderator_borrowed, t.state.active_operation, t.state.lifecycle.observed
     with
-    | true, _, _ -> submit_deferred_message ~extra_deltas t entry
+    | true, _, _ -> submit_deferred_message ~extra_deltas ~owner ~timing t entry
     | false, Some _, _
     | false, None, (Running_turn _ | Compacting _ | Waiting_for_permission _) ->
-      submit_deferred_message ~extra_deltas t entry
-    | false, None, Idle -> submit_idle_message ~extra_deltas t entry
+      submit_deferred_message ~extra_deltas ~owner ~timing t entry
+    | false, None, Idle -> submit_idle_message ~extra_deltas ~owner ~timing t entry
     | ( false
       , None
       , (Stopped | Queued_for_slot | Starting | Recovering | Stopping | Failed _) ) ->
       Error (error Invalid_state "session is not ready to accept a turn"))
 ;;
 
-let submit_message t attachment_id entry =
+let submit_message t attachment_id submitting_principal timing entry =
   Result.bind (write_attachment t attachment_id) ~f:(fun _ ->
-    submit_authorized_message t entry)
+    submit_authorized_message
+      ~owner:(Submitting_principal submitting_principal)
+      ~timing
+      t
+      entry)
+;;
+
+let admit_run
+      ?preparation
+      ?commit_attempted
+      t
+      scope
+      (request : Agent_protocol.Run_start.t)
+      session
+      request_sha256
+      entry
+  =
+  let open Result.Let_syntax in
+  let%bind () = Run_admission.Scope.authorize scope t.state in
+  let%bind () =
+    if
+      Agent_protocol.Id.Session.equal request.session_id t.state.identity.session_id
+      && Agent_protocol.Id.Session.equal
+           (Agent_protocol.Session_ref.session_id session)
+           t.state.identity.session_id
+    then Ok ()
+    else Error (error Invalid_request "run request does not identify this session")
+  in
+  let%bind _ = write_attachment t request.attachment_id in
+  let index = Option.value t.state.run_state ~default:Run_state.empty in
+  let%bind retained =
+    Run_state.receipt
+      index
+      ~principal_id:(Run_admission.Scope.principal_id scope)
+      ~key:request.key
+      ~request_sha256
+  in
+  match retained with
+  | Some receipt ->
+    (match receipt.kind with
+     | Admission -> Ok receipt
+     | Action | Terminal ->
+       Error (error Conflict "run start key belongs to another action"))
+  | None ->
+    let%bind () =
+      match preparation with
+      | None -> Ok ()
+      | Some preparation -> check_run_preparation t preparation
+    in
+    let%bind () = require_runtime_admission t in
+    let%bind operation =
+      match request.input, entry with
+      | User_submission _, Some _ ->
+        let%bind () = reconcile_foreground_invocations t in
+        (match
+           ( t.state.lifecycle.desired
+           , t.state.lifecycle.observed
+           , t.state.active_operation
+           , t.state.failure )
+         with
+         | Running, Idle, None, None when not (t.state.halted || t.idle_moderator_borrowed)
+           -> Ok (Some (create_turn_operation t User_submit))
+         | _ -> Error (error Conflict "run user input requires an available idle session"))
+      | Authored_start, None -> Ok None
+      | User_submission _, None | Authored_start, Some _ ->
+        Error (error Invalid_request "run input does not match its host-prepared history")
+    in
+    let%bind admission =
+      let run_id = Agent_protocol.Id.Run.create () in
+      match preparation with
+      | None ->
+        Run_admission.prepare
+          t.state
+          ~scope
+          ~request
+          ~session
+          ~run_id
+          ~operation
+          ~request_sha256
+          ~now:(t.services.now ())
+      | Some preparation ->
+        Run_admission.prepare_from_preparation
+          t.state
+          ~preparation
+          ~owner:t.run_preparation_owner
+          ~scope
+          ~session
+          ~run_id
+          ~operation
+          ~now:(t.services.now ())
+    in
+    let run = Run_admission.run admission in
+    let%bind authorities =
+      Run_authorities.add
+        t.run_authorities
+        ~run
+        ~scope
+        ~attachment_id:request.attachment_id
+    in
+    let delta = Session_delta.Run_state_changed (Run_admission.index admission) in
+    let outcome =
+      match operation, entry with
+      | Some operation, Some entry ->
+        submit_idle_message
+          ?run_preparation:preparation
+          ?commit_attempted
+          ~extra_deltas:[ delta ]
+          ~operation
+          ~owner:(Submitting_principal (Run_admission.Scope.principal_id scope))
+          t
+          entry
+        |> Result.map ~f:(fun _ -> ())
+      | None, None ->
+        start_internal
+          ?run_preparation:preparation
+          ?commit_attempted
+          ~extra_deltas:[ delta ]
+          t
+        |> Result.map ~f:(fun _ -> ())
+      | Some _, None | None, Some _ ->
+        Error (error Invalid_state "run admission lost its prepared owner")
+    in
+    (* Startup has two existing lifecycle checkpoints. If its second checkpoint
+       fails, the first admission is already durable and must retain authority;
+       its receipt still reconciles a lost/uncertain reply without replay. *)
+    Option.iter t.state.run_state ~f:(fun index ->
+      match Run_state.find index run.id with
+      | Some committed when Agent_protocol.Run.equal committed run ->
+        t.run_authorities <- authorities
+      | Some _ | None -> ());
+    let%map () = outcome in
+    Run_admission.receipt admission
 ;;
 
 let submit_managed_message t reference key request_sha256 generation max_receipts entry =
@@ -7926,13 +8668,13 @@ let revoke_grant t attachment_id grant_id reason =
     grant, session)
 ;;
 
-let replace_shell_approval_grants t approval_grants =
+let replace_shell_approval_grants ?run_preparation t approval_grants =
   let shell = { t.state.shell with approval_grants } in
-  transition t ~delta:(Session_delta.Shell_changed shell) ~payloads:[]
+  transition ?run_preparation t ~delta:(Session_delta.Shell_changed shell) ~payloads:[]
   |> Result.map ~f:(fun _ -> ())
 ;;
 
-let add_shell_manifest_grant t grant =
+let add_shell_manifest_grant ?run_preparation t grant =
   let manifest_grants = grant :: t.state.shell.manifest_grants in
   let shell = { t.state.shell with manifest_grants } in
   let projected =
@@ -7943,6 +8685,7 @@ let add_shell_manifest_grant t grant =
       grant
   in
   transition
+    ?run_preparation
     t
     ~delta:(Session_delta.Shell_changed shell)
     ~payloads:[ Agent_protocol.Event.Durable.Payload.Grant_created projected ]
@@ -8008,15 +8751,19 @@ let find_model_job_target t job_id generation =
   job, binding
 ;;
 
-let capture_model_job_source t job_id generation target limits =
+let capture_model_job_source ?run_preparation t job_id generation target limits =
   let open Result.Let_syntax in
   let%bind _, binding = find_model_job_target t job_id generation in
   let%bind captured = Model_job_target.capture_source binding ~target ~limits in
-  transition t ~delta:(Session_delta.Model_job_target_captured captured) ~payloads:[]
+  transition
+    ?run_preparation
+    t
+    ~delta:(Session_delta.Model_job_target_captured captured)
+    ~payloads:[]
   |> Result.map ~f:ignore
 ;;
 
-let capture_recipe_target t job_id generation attempt target limits =
+let capture_recipe_target ?run_preparation t job_id generation attempt target limits =
   let open Result.Let_syntax in
   let%bind job, binding = find_model_job_target t job_id generation in
   let%bind () =
@@ -8034,6 +8781,7 @@ let capture_recipe_target t job_id generation attempt target limits =
   in
   let%bind captured = Model_job_target.capture_recipe binding ~target ~limits in
   transition
+    ?run_preparation
     t
     ~delta:(Session_delta.Model_job_recipe_target_captured captured)
     ~payloads:[]
@@ -8083,7 +8831,7 @@ let validate_job_generation t (job : Agent_protocol.Job.t) generation =
   else Ok ()
 ;;
 
-let update_jobs ?(subscriptions = []) t jobs =
+let update_jobs ?run_preparation ?(subscriptions = []) ?(run_deltas = []) t jobs =
   let timer_ids =
     List.filter_map subscriptions ~f:(fun next ->
       match
@@ -8135,6 +8883,7 @@ let update_jobs ?(subscriptions = []) t jobs =
   let open Result.Let_syntax in
   let%map session =
     transition
+      ?run_preparation
       t
       ~delta:
         (Session_delta.Batch
@@ -8143,7 +8892,8 @@ let update_jobs ?(subscriptions = []) t jobs =
               Session_delta.Subscription_changed value)
             @ List.map cancelled_timers ~f:(fun value ->
               Session_delta.Schedule_changed value)
-            @ deltas))
+            @ deltas
+            @ run_deltas))
       ~payloads:
         (List.map jobs ~f:(fun job ->
            Agent_protocol.Event.Durable.Payload.Job_state_changed job)
@@ -8156,9 +8906,9 @@ let update_jobs ?(subscriptions = []) t jobs =
   session
 ;;
 
-let update_job t job = update_jobs t [ job ]
+let update_job ?run_preparation t job = update_jobs ?run_preparation t [ job ]
 
-let add_job t (job : Agent_protocol.Job.t) =
+let add_job ?run_preparation t (job : Agent_protocol.Job.t) =
   if Agent_protocol.Id.Session.compare job.session_id t.state.identity.session_id <> 0
   then Error (error Invalid_request "job belongs to another session")
   else if job.generation <> t.state.identity.generation
@@ -8167,7 +8917,7 @@ let add_job t (job : Agent_protocol.Job.t) =
     List.exists t.state.jobs ~f:(fun existing ->
       Agent_protocol.Id.Job.compare existing.id job.id = 0)
   then Error (error Conflict "job ID is already present")
-  else Result.map (update_job t job) ~f:(fun _ -> job)
+  else Result.map (update_job ?run_preparation t job) ~f:(fun _ -> job)
 ;;
 
 let job_is_due t (job : Agent_protocol.Job.t) =
@@ -8175,7 +8925,67 @@ let job_is_due t (job : Agent_protocol.Job.t) =
     Agent_protocol.Timestamp.compare next_run_at (t.services.now ()) <= 0)
 ;;
 
-let claim_job t job_id generation =
+let retire_unauthorized_run_job t (job : Agent_protocol.Job.t) =
+  let open Result.Let_syntax in
+  match t.state.run_state with
+  | None -> Ok false
+  | Some original ->
+    let%bind work = Run_job_occurrence.work job in
+    let%bind index, retired =
+      List.fold_result
+        (Run_state.runs original)
+        ~init:(original, false)
+        ~f:(fun (index, retired) run ->
+          if
+            not
+              (List.exists
+                 run.Agent_protocol.Run.owned_work
+                 ~f:(Agent_protocol.Run_work.equal work))
+          then Ok (index, retired)
+          else (
+            match run.lifecycle with
+            | Terminal _ ->
+              Ok
+                ( index
+                , retired
+                  || not
+                       (List.exists
+                          run.relinquished_work
+                          ~f:(Agent_protocol.Run_work.equal work)) )
+            | Admitted | Active | Waiting _ ->
+              (match check_run_binding t run.id with
+               | Ok () -> Ok (index, retired)
+               | Error _ ->
+                 let%map index =
+                   Run_retirement.interrupt_run
+                     index
+                     ~run_id:run.id
+                     ~session_revision:(Int64.succ t.state.counters.revision)
+                     ~now:(t.services.now ())
+                 in
+                 index, true)))
+    in
+    if not retired
+    then Ok false
+    else (
+      let job =
+        { job with
+          status = Cancelled
+        ; result =
+            background_terminal_result
+              job
+              (Cancelled "run authority retired before dispatch")
+        ; completed_at = Some (t.services.now ())
+        ; delivery = Discarded { at = t.services.now (); reason = Authority_changed }
+        }
+      in
+      let%map _ =
+        update_jobs t [ job ] ~run_deltas:[ Session_delta.Run_state_changed index ]
+      in
+      true)
+;;
+
+let claim_job ?run_preparation t job_id generation =
   let open Result.Let_syntax in
   let%bind job = find_job t job_id in
   let%bind () = validate_job_generation t job generation in
@@ -8189,7 +8999,10 @@ let claim_job t job_id generation =
   in
   match job.status with
   | Agent_protocol.Job.Queued when job_is_due t job ->
-    if job.attempt = Int.max_value
+    let%bind retired = retire_unauthorized_run_job t job in
+    if retired
+    then Ok None
+    else if job.attempt = Int.max_value
     then Error (error Invalid_state "job attempt counter overflow")
     else (
       let job =
@@ -8201,7 +9014,7 @@ let claim_job t job_id generation =
         ; result = None
         }
       in
-      let%map _ = update_job t job in
+      let%map _ = update_job ?run_preparation t job in
       Some job)
   | Queued -> Ok None
   | Running
@@ -8510,11 +9323,11 @@ let running_job_for_completion t job_id generation attempt =
     Error (error Already_resolved "job is already terminal")
 ;;
 
-let complete_job t job_id generation attempt outcome =
+let complete_job ?run_preparation t job_id generation attempt outcome =
   let open Result.Let_syntax in
   let%bind job = running_job_for_completion t job_id generation attempt in
   let job = complete_job_outcome t job outcome in
-  let%map _ = update_job t job in
+  let%map _ = update_job ?run_preparation t job in
   job
 ;;
 
@@ -8527,7 +9340,9 @@ let add_initialization_model_job t scope (job : Agent_protocol.Job.t) =
     | _ ->
       Error (error Invalid_request "initialization requires a fresh queued model job")
   in
-  let%map job = add_job t job in
+  let%map job =
+    add_job ?run_preparation:scope.Initialization_scope.run_preparation t job
+  in
   scope.Initialization_scope.jobs <- job.id :: scope.jobs;
   job
 ;;
@@ -8544,7 +9359,13 @@ let start_initialization_model_job t scope (job : Agent_protocol.Job.t) =
            "synchronous initialization job must be immediate and not deliverable")
   in
   let%bind job = add_initialization_model_job t scope job in
-  let%bind claimed = claim_job t job.id job.generation in
+  let%bind claimed =
+    claim_job
+      ?run_preparation:scope.Initialization_scope.run_preparation
+      t
+      job.id
+      job.generation
+  in
   Result.of_option
     claimed
     ~error:(error Conflict "initialization job could not be claimed")
@@ -8588,13 +9409,26 @@ let validate_initialization_model_job t scope job_id generation attempt =
 let capture_initialization_recipe_target t scope job_id generation attempt target limits =
   let open Result.Let_syntax in
   let%bind () = validate_initialization_model_job t scope job_id generation attempt in
-  capture_recipe_target t job_id generation attempt target limits
+  capture_recipe_target
+    ?run_preparation:scope.Initialization_scope.run_preparation
+    t
+    job_id
+    generation
+    attempt
+    target
+    limits
 ;;
 
 let complete_initialization_model_job t scope job_id generation attempt outcome =
   let open Result.Let_syntax in
   let%bind () = validate_initialization_model_job t scope job_id generation attempt in
-  complete_job t job_id generation attempt outcome
+  complete_job
+    ?run_preparation:scope.Initialization_scope.run_preparation
+    t
+    job_id
+    generation
+    attempt
+    outcome
 ;;
 
 let finish_background_scopes t job_id generation attempt =
@@ -8622,9 +9456,14 @@ let defer_background_job t job_id generation attempt dependency =
   next
 ;;
 
+type background_control =
+  | Cancelled_control
+  | Interrupted_control
+
 let complete_background_job
       ?(waiting = false)
       ?completed_at
+      ?control
       t
       job_id
       generation
@@ -8641,6 +9480,27 @@ let complete_background_job
     | _ -> Error (error Invalid_request "generic completion requires an async tool job")
   in
   let%bind () = Agent_protocol.Completion.validate completion in
+  let original_completion = completion in
+  let%bind completion =
+    match control with
+    | None -> Ok completion
+    | Some (Cancelled_control | Interrupted_control) ->
+      Run_job_capacity.normalize_host_control completion |> Result.map ~f:fst
+  in
+  let awaited = Run_job_completion.awaits t.state job in
+  let%bind capacity =
+    if awaited && (Option.is_none control || Option.is_some t.services.job_results)
+    then
+      Result.map
+        (Run_job_capacity.capture job ~publisher:t.services.job_results)
+        ~f:Option.some
+    else Ok None
+  in
+  let%bind completion, delivery_limited =
+    match capacity with
+    | None -> Ok (completion, false)
+    | Some capacity -> Run_job_capacity.normalize_completion capacity completion
+  in
   let completion, storage_limited =
     match t.services.job_results with
     | Some publisher
@@ -8649,6 +9509,9 @@ let complete_background_job
                 publisher
                 completion) ->
       ( (match completion with
+         | Cancelled _ when awaited ->
+           Agent_protocol.Completion.Cancelled
+             "The job was cancelled; its diagnostic exceeds the host storage limit."
          | Cancelled _ | Expired -> completion
          | Succeeded _ | Failed _ ->
            Agent_protocol.Completion.Failed
@@ -8658,13 +9521,23 @@ let complete_background_job
              ; details = `Null
              })
       , true )
-    | _ -> completion, false
+    | _ -> completion, delivery_limited
   in
   let%bind () = finish_background_scopes t job_id generation attempt in
   let%bind job =
-    match job.status, waiting with
-    | Waiting_completion _, true -> Ok job
-    | _ -> running_job_for_completion t job_id generation attempt
+    match job.status, waiting, control with
+    | Waiting_permission _, _, Some (Cancelled_control | Interrupted_control)
+    | Waiting_completion _, true, _ -> Ok job
+    | ( ( Queued
+        | Running
+        | Waiting_permission _
+        | Waiting_completion _
+        | Succeeded
+        | Failed _
+        | Cancelled
+        | Interrupted _ )
+      , _
+      , _ ) -> running_job_for_completion t job_id generation attempt
   in
   let encoded = Agent_protocol.Completion.to_json completion in
   let%bind cancelled, subscriptions =
@@ -8679,13 +9552,24 @@ let complete_background_job
     | Some at -> { terminal with completed_at = Some at }
   in
   let running = job in
+  let%bind interruption =
+    match control, completion with
+    | Some Interrupted_control, Failed failure -> Ok (Some failure.message)
+    | Some Cancelled_control, Cancelled _
+    | None, (Succeeded _ | Failed _ | Cancelled _ | Expired) -> Ok None
+    | Some Interrupted_control, (Succeeded _ | Cancelled _ | Expired)
+    | Some Cancelled_control, (Succeeded _ | Failed _ | Expired) ->
+      Error (error Invalid_request "host control disagrees with its actual outcome")
+  in
   let job =
-    match completion with
-    | Agent_protocol.Completion.Succeeded _ -> terminal Succeeded
-    | Cancelled _ -> terminal Cancelled
-    | Expired ->
+    match interruption, completion with
+    | Some reason, (Succeeded _ | Failed _ | Cancelled _ | Expired) ->
+      terminal (Interrupted reason)
+    | None, Agent_protocol.Completion.Succeeded _ -> terminal Succeeded
+    | None, Cancelled _ -> terminal Cancelled
+    | None, Expired ->
       terminal (Failed (error Resource_limit "background job deadline elapsed"))
-    | Failed failure ->
+    | None, Failed failure ->
       let retry =
         match job.status with
         | Waiting_completion _ -> None
@@ -8712,17 +9596,75 @@ let complete_background_job
       | status, _ -> status
     in
     let job =
-      { job with status; result = Some (Agent_protocol.Stored_completion.to_json stored) }
+      { job with
+        status
+      ; result =
+          Some
+            (match status with
+             | Queued -> encoded
+             | Running
+             | Waiting_permission _
+             | Waiting_completion _
+             | Succeeded
+             | Failed _
+             | Cancelled
+             | Interrupted _ -> Agent_protocol.Stored_completion.to_json stored)
+      }
     in
-    let%map _ = update_jobs ~subscriptions t (job :: cancelled) in
+    let terminal_status =
+      match interruption, completion with
+      | Some reason, (Succeeded _ | Failed _ | Cancelled _ | Expired) ->
+        Agent_protocol.Job.Interrupted reason
+      | None, Succeeded _ -> Succeeded
+      | None, Failed failure ->
+        Failed
+          (Agent_protocol.Error.create
+             Internal_error
+             ~message:failure.message
+             ~retryable:failure.retryable
+             ~data:`Null
+             ())
+      | None, Cancelled _ -> Cancelled
+      | None, Expired -> Failed (error Resource_limit "background job deadline elapsed")
+    in
+    let terminal =
+      terminal terminal_status
+      |> fun (terminal : Agent_protocol.Job.t) ->
+      { terminal with result = Some (Agent_protocol.Stored_completion.to_json stored) }
+    in
+    let outcome =
+      match control with
+      | Some Interrupted_control -> Agent_protocol.Run_work.Terminal.Interrupted
+      | None | Some Cancelled_control ->
+        (match original_completion with
+         | Succeeded _ ->
+           if storage_limited then Agent_protocol.Run_work.Terminal.Limited else Succeeded
+         | Failed _ -> Failed
+         | Cancelled _ -> Cancelled
+         | Expired -> Limited)
+    in
+    let%bind run_deltas =
+      Run_job_completion.prepare
+        t.state
+        ~running
+        ~terminal
+        ~successor:job
+        ~outcome
+        ~now:(t.services.now ())
+    in
+    let%map _ = update_jobs ~subscriptions ~run_deltas t (job :: cancelled) in
     job
   in
-  match job.status, t.services.job_results, storage_limited with
-  | Queued, _, _ | _, None, _ | _, _, true ->
+  match job.status, t.services.job_results, storage_limited, awaited with
+  | Queued, _, _, false | _, None, _, _ | _, _, true, _ ->
     persist (Agent_protocol.Stored_completion.Inline completion)
-  | _, Some publisher, false ->
+  | _, Some publisher, false, _ ->
     Agent_store.Job_result_store.Publisher.publish
       publisher
+      ~storage:
+        (match capacity with
+         | Some capacity -> Run_job_capacity.storage capacity
+         | None -> Automatic)
       ~jobs:t.state.jobs
       ~job:running
       ~now:(t.services.now ())
@@ -8846,6 +9788,113 @@ let check_expected_moderator_checkpoint t = function
      | _ -> Error (error Conflict "moderator checkpoint changed before external delivery"))
 ;;
 
+let prepare_run_job_enqueue t ~frame =
+  let open Result.Let_syntax in
+  match t.state.run_state with
+  | None -> Ok []
+  | Some index ->
+    (match
+       List.find (Run_state.job_deliveries index) ~f:(fun delivery ->
+         Chat_response.Background_delivery.equal (Run_job_delivery.frame delivery) frame)
+     with
+     | None -> Ok []
+     | Some delivery ->
+       let%bind () = check_run_binding t (Run_job_delivery.run_id delivery) in
+       let%bind delivery = Run_job_delivery.enqueue delivery ~at:(t.services.now ()) in
+       let%map index = Run_state.replace_job_delivery index delivery in
+       [ Session_delta.Run_state_changed index ])
+;;
+
+let enqueue_run_job_delivery t expected before after =
+  let open Result.Let_syntax in
+  let%bind () = check_expected_moderator_checkpoint t (Some before) in
+  let%bind () =
+    if moderator_is_borrowed t
+    then Error (error Conflict "moderator callback owns the checkpoint")
+    else Ok ()
+  in
+  let%bind index =
+    Result.of_option t.state.run_state ~error:(error Conflict "run index is absent")
+  in
+  let%bind retained =
+    Result.of_option
+      (Run_state.find_job_delivery index (Run_job_delivery.key expected))
+      ~error:(error Conflict "run delivery is absent")
+  in
+  let%bind () =
+    if Run_job_delivery.equal retained expected
+    then Ok ()
+    else Error (error Conflict "run delivery changed before enqueue")
+  in
+  let%bind () =
+    match Run_job_delivery.disposition retained with
+    | Pending -> Ok ()
+    | Enqueued _ | Claimed _ | Retired _ ->
+      Error (error Already_resolved "run delivery is no longer pending")
+  in
+  let frame = Run_job_delivery.frame retained in
+  let observer : Agent_protocol.Invocation.observer =
+    { script_id = before.script_id; source_sha256 = before.script_source_hash }
+  in
+  let%bind () =
+    if Agent_protocol.Invocation.equal_observer observer frame.source
+    then Ok ()
+    else Error (error Conflict "run delivery source differs from moderator")
+  in
+  let%bind () =
+    match check_run_binding t (Run_job_delivery.run_id retained) with
+    | Ok () -> Ok ()
+    | Error denied ->
+      let%bind index =
+        Run_retirement.interrupt_run
+          index
+          ~run_id:(Run_job_delivery.run_id retained)
+          ~session_revision:(Int64.succ t.state.counters.revision)
+          ~now:(t.services.now ())
+      in
+      let%bind _ =
+        transition t ~delta:(Session_delta.Run_state_changed index) ~payloads:[]
+      in
+      Error denied
+  in
+  let%bind event =
+    Chat_response.Background_delivery.capture frame
+    |> Session.Snapshot.of_value
+    |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+  in
+  let appended =
+    { before with queued_internal_events = before.queued_internal_events @ [ event ] }
+  in
+  let%bind () =
+    if Jsonaf.exactly_equal (Runtime_builder.encode_moderator_snapshot appended) after
+    then Ok ()
+    else Error (error Conflict "run delivery must append its exact retained frame only")
+  in
+  let%bind deltas = prepare_run_job_enqueue t ~frame in
+  let job_deltas, payloads =
+    match
+      List.find t.state.jobs ~f:(fun job ->
+        Agent_protocol.Id.Job.equal job.id frame.job_id)
+    with
+    | None -> [], []
+    | Some job ->
+      (match job.delivery, Background_job_event.frame ~state:t.state ~observer job with
+       | Pending, Ok current when Chat_response.Background_delivery.equal current frame ->
+         let job = { job with delivery = Delivered (t.services.now ()) } in
+         ( [ Session_delta.Job_changed job ]
+         , [ Agent_protocol.Event.Durable.Payload.Job_state_changed job ] )
+       | (Not_required | Pending | Delivered _ | Discarded _), (Ok _ | Error _) -> [], [])
+  in
+  let%map _ =
+    transition
+      t
+      ~delta:
+        (Session_delta.Batch (deltas @ job_deltas @ [ Moderator_changed (Some after) ]))
+      ~payloads
+  in
+  ()
+;;
+
 let deliver_job t job_id generation expected expected_job moderator_snapshot =
   let open Result.Let_syntax in
   let%bind () = check_expected_moderator_checkpoint t expected in
@@ -8904,12 +9953,30 @@ let deliver_job t job_id generation expected expected_job moderator_snapshot =
              (error Conflict "background delivery requires an exact moderator checkpoint"))
       | _ -> Ok ()
     in
+    let%bind run_deltas =
+      match job.kind, job.launch, expected with
+      | Async_tool, Some _, Some before ->
+        let observer : Agent_protocol.Invocation.observer =
+          { script_id = before.script_id; source_sha256 = before.script_source_hash }
+        in
+        let%bind frame = Background_job_event.frame ~state:t.state ~observer job in
+        prepare_run_job_enqueue t ~frame
+      | ( ( Model_call
+          | Nested_agent
+          | Scheduled_event
+          | Async_tool
+          | Shell_process
+          | Compaction )
+        , _
+        , _ ) -> Ok []
+    in
     let job = { job with delivery = Delivered (t.services.now ()) } in
     let%map _ =
       transition
         t
         ~delta:
-          (Session_delta.Batch [ Job_changed job; Moderator_changed moderator_snapshot ])
+          (Session_delta.Batch
+             (run_deltas @ [ Job_changed job; Moderator_changed moderator_snapshot ]))
         ~payloads:[ Agent_protocol.Event.Durable.Payload.Job_state_changed job ]
     in
     job
@@ -8927,10 +9994,45 @@ let cancel_job_internal t job_id =
     | Waiting_completion _ -> refresh_background_job t job_id job.generation job.attempt
     | _ -> Ok job
   in
+  let owned = Run_job_completion.owns t.state job in
   match job.status, job.delivery with
   | _, Agent_protocol.Job.Discarded _ -> Ok job
+  | (Running | Waiting_permission _ | Waiting_completion _), _
+    when owned && Agent_protocol.Job.equal_kind job.kind Async_tool ->
+    let waiting =
+      match job.status with
+      | Waiting_completion _ -> true
+      | Queued
+      | Running
+      | Waiting_permission _
+      | Succeeded
+      | Failed _
+      | Cancelled
+      | Interrupted _ -> false
+    in
+    complete_background_job
+      ~waiting
+      ~control:Cancelled_control
+      t
+      job.id
+      job.generation
+      job.attempt
+      (Cancelled "job cancelled")
   | (Queued | Running | Waiting_permission _ | Waiting_completion _ | Interrupted _), _ ->
     let%bind cancelled, subscriptions = cancelled_work_dependencies t job in
+    let%bind run_deltas =
+      match job.status with
+      | Queued when owned && Agent_protocol.Job.equal_kind job.kind Async_tool ->
+        Run_job_completion.cancel_queued t.state ~job ~now:(t.services.now ())
+      | Queued
+      | Running
+      | Waiting_permission _
+      | Waiting_completion _
+      | Succeeded
+      | Failed _
+      | Cancelled
+      | Interrupted _ -> Ok []
+    in
     let job =
       { job with
         status = Cancelled
@@ -8942,17 +10044,32 @@ let cancel_job_internal t job_id =
            | _ -> Pending)
       }
     in
-    let%map _ = update_jobs ~subscriptions t (job :: cancelled) in
+    let%map _ = update_jobs ~subscriptions ~run_deltas t (job :: cancelled) in
     job
   | (Succeeded | Failed _ | Cancelled), _ -> Ok job
 ;;
 
-let interrupt_job t job_id generation attempt reason =
+let interrupt_job ?run_preparation t job_id generation attempt reason =
   let open Result.Let_syntax in
   let%bind job = find_job t job_id in
   let%bind () = validate_job_generation t job generation in
   let%bind () = validate_job_attempt job attempt in
   match job.status with
+  | Agent_protocol.Job.Running
+    when Agent_protocol.Job.equal_kind job.kind Async_tool
+         && Run_job_completion.owns t.state job ->
+    complete_background_job
+      ~control:Interrupted_control
+      t
+      job.id
+      job.generation
+      job.attempt
+      (Failed
+         { code = "background.interrupted"
+         ; message = reason
+         ; retryable = false
+         ; details = `Null
+         })
   | Agent_protocol.Job.Running ->
     let job =
       { job with
@@ -8973,7 +10090,7 @@ let interrupt_job t job_id generation attempt reason =
            | _ -> Pending)
       }
     in
-    let%map _ = update_job t job in
+    let%map _ = update_job ?run_preparation t job in
     job
   | Queued
   | Waiting_permission _
@@ -8994,7 +10111,7 @@ let change_schedule t attachment_id event schedule =
     transition t ~delta:(Session_delta.Schedule_changed schedule) ~payloads:[ payload ])
 ;;
 
-let add_schedule t schedule =
+let add_schedule ?run_preparation t schedule =
   if
     Agent_protocol.Id.Session.compare
       schedule.Agent_protocol.Schedule.session_id
@@ -9011,6 +10128,7 @@ let add_schedule t schedule =
     let open Result.Let_syntax in
     let%map _ =
       transition
+        ?run_preparation
         t
         ~delta:(Session_delta.Schedule_changed schedule)
         ~payloads:[ Agent_protocol.Event.Durable.Payload.Schedule_created schedule ]
@@ -9032,8 +10150,9 @@ let validate_schedule_generation t schedule generation =
   else Ok ()
 ;;
 
-let update_schedule t schedule =
+let update_schedule ?run_preparation t schedule =
   transition
+    ?run_preparation
     t
     ~delta:(Session_delta.Schedule_changed schedule)
     ~payloads:[ Agent_protocol.Event.Durable.Payload.Schedule_state_changed schedule ]
@@ -9327,7 +10446,7 @@ let skip_schedule t schedule_id generation =
     Error (error Already_resolved "schedule is already terminal")
 ;;
 
-let cancel_schedule_internal t schedule_id =
+let cancel_schedule_internal ?run_preparation t schedule_id =
   let open Result.Let_syntax in
   let%bind schedule = find_schedule t schedule_id in
   match schedule.status with
@@ -9335,6 +10454,7 @@ let cancel_schedule_internal t schedule_id =
     let schedule = { schedule with status = Cancelled } in
     let%map _ =
       transition
+        ?run_preparation
         t
         ~delta:(Session_delta.Schedule_changed schedule)
         ~payloads:[ Agent_protocol.Event.Durable.Payload.Schedule_cancelled schedule ]
@@ -9377,11 +10497,18 @@ let start_idle_turn_unchecked
   let%bind () = reconcile_foreground_invocations t in
   let operation = create_turn_operation t reason in
   let%bind admission =
-    Turn_admission.create t.state ~operation ~notification_wakes ~adopt_deferred
+    let retention = Pending_disposition.Retention.default in
+    Turn_admission.create
+      ~pending_retention:(Some retention)
+      ~runtime_admission_open:(runtime_admission_open t)
+      t.state
+      ~operation
+      ~notification_wakes
+      ~adopt_deferred
   in
   let leading_deltas, turn_deltas =
     match Turn_admission.deltas admission with
-    | Deferred_entries_adopted :: rest -> [ Session_delta.Deferred_entries_adopted ], rest
+    | (Pending_inputs_changed _ as delta) :: rest -> [ delta ], rest
     | deltas -> [], deltas
   in
   let leading_payloads, turn_payloads =
@@ -9390,8 +10517,15 @@ let start_idle_turn_unchecked
       [ Agent_protocol.Event.Durable.Payload.History_appended entries ], rest
     | payloads -> [], payloads
   in
+  let events =
+    List.filter_map extra_deltas ~f:(function
+      | Session_delta.Moderator_execution_changed event -> Some event
+      | _ -> None)
+  in
+  let%bind run_deltas = run_turn_deltas t operation events notification_wakes in
   let deltas =
-    leading_deltas
+    run_deltas
+    @ leading_deltas
     @ extra_deltas
     @ [ Session_delta.Moderator_changed drain.Runtime_builder.moderator_snapshot ]
     @ turn_deltas
@@ -9405,9 +10539,7 @@ let start_idle_turn_unchecked
 
 let commit_history_transition t ~delta ~payloads ~admission =
   let open Result.Let_syntax in
-  let%bind prepared =
-    Session_transition.apply ~now:(t.services.now ()) t.state ~delta ~payloads
-  in
+  let%bind prepared = prepare_transition t ~delta ~payloads in
   Eio.Cancel.protect (fun () ->
     let%map () = persist_transition t prepared in
     install_committed_transition t prepared;
@@ -9446,6 +10578,106 @@ let history_command_precondition t session_id attachment_id generation revision 
          Conflict
          "history cannot change while a foreground or runtime owner is active")
   else Ok ()
+;;
+
+let control_pending_internal
+      t
+      principal
+      project
+      (request : Agent_protocol.Pending_control.Cancel_request.t)
+      replacement
+  =
+  with_writer t request.attachment_id (fun () ->
+    let open Result.Let_syntax in
+    let%bind () =
+      if
+        (not
+           (Agent_protocol.Id.Session.equal
+              request.session_id
+              t.state.identity.session_id))
+        || not (Int.equal request.expected_generation t.state.identity.generation)
+      then Error (error Conflict "pending control session or generation differs")
+      else Ok ()
+    in
+    let%bind () =
+      Pending_inspection.authorize_control
+        t.state
+        ~history_id:request.history_id
+        ~principal
+    in
+    let%bind outcome =
+      Pending_inspection.lookup t.state ~history_id:request.history_id ~project
+    in
+    let%bind () =
+      match outcome with
+      | Pending _ ->
+        if
+          Agent_protocol.Pending_input.Revision.equal
+            request.expected_pending_revision
+            t.state.conversation.pending_revision
+        then Ok ()
+        else Error (error Conflict "pending queue revision differs")
+      | Adopted _ | Cancelled _ | Retired _ | Unavailable _ -> Ok ()
+    in
+    let%bind () =
+      match outcome with
+      | Adopted _ | Cancelled _ | Retired _ | Unavailable _ -> Ok ()
+      | Pending _ ->
+        let change =
+          match replacement with
+          | None ->
+            Pending_plan.Change.Cancel
+              { history_id = request.history_id
+              ; expected_content_revision = request.expected_content_revision
+              }
+          | Some text ->
+            Replace_text
+              { history_id = request.history_id
+              ; expected_content_revision = request.expected_content_revision
+              ; text
+              }
+        in
+        let retention = Pending_disposition.Retention.default in
+        let%bind _ =
+          Pending_plan.prepare
+            t.state
+            ~expected_pending_revision:request.expected_pending_revision
+            ~change
+            ~retention
+            ~limits:Session_delta.native_limits
+        in
+        let%bind archive =
+          t.persistence.archive_reference
+            ~previous:t.state
+            ~kind:Pending_input
+            (Agent_protocol.Id.Operation.create ())
+        in
+        let%bind prepared = prepare_pending t ~archive:(Some archive) change in
+        let%bind candidate =
+          Pending_plan.apply (Pending_transition.plan prepared) t.state
+        in
+        let%map _ =
+          transition
+            t
+            ~delta:(Pending_transition.delta prepared)
+            ~payloads:
+              [ Agent_protocol.Event.Durable.Payload.Session_updated
+                  (Session_state.summary candidate)
+              ]
+        in
+        ()
+    in
+    let%map outcome =
+      Pending_inspection.lookup t.state ~history_id:request.history_id ~project
+    in
+    Agent_protocol.Pending_control.Result.
+      { pending_revision = t.state.conversation.pending_revision
+      ; outcome
+      ; mutation =
+          { revision = t.state.counters.revision
+          ; latest_event_sequence = t.state.counters.event_sequence
+          }
+      })
 ;;
 
 let delete_history_internal t attachment_id revision history_id =
@@ -9631,11 +10863,10 @@ let start_idle_turn
       ~reason
       ~adopt_deferred
   =
-  let reason =
-    match adopt_deferred, t.state.conversation.deferred_user_entries with
-    | true, _ :: _ -> Agent_protocol.Operation.User_submit
-    | _ -> reason
-  in
+  let open Result.Let_syntax in
+  let%bind eligible = if adopt_deferred then eligible_pending t Idle_start else Ok [] in
+  let adopt_deferred = not (List.is_empty eligible) in
+  let reason = if adopt_deferred then Agent_protocol.Operation.User_submit else reason in
   let decision =
     match reason, t.state.automatic_turn_budget with
     | (Agent_protocol.Operation.User_submit | Administrative | Recovery_retry), _
@@ -9804,9 +11035,8 @@ let deliver_idle_notifications_internal t (proposal : Notification_delivery.idle
                ; remaining_events = false
                }
              in
-             let adopt_deferred =
-               not (List.is_empty t.state.conversation.deferred_user_entries)
-             in
+             let%bind eligible = eligible_pending t Idle_start in
+             let adopt_deferred = not (List.is_empty eligible) in
              let needs_turn =
                adopt_deferred
                || (not (List.is_empty notification_wakes))
@@ -9862,9 +11092,8 @@ let apply_observation_follow_up t =
       ; remaining_events = false
       }
     in
-    let resume_deferred =
-      (not halted) && not (List.is_empty t.state.conversation.deferred_user_entries)
-    in
+    let%bind eligible = eligible_pending t Idle_start in
+    let resume_deferred = (not halted) && not (List.is_empty eligible) in
     let%map () =
       match plan.action, extra_deltas with
       | Checkpoint, _ when resume_deferred && Option.is_none t.operation_worker ->
@@ -9889,7 +11118,7 @@ let apply_observation_follow_up t =
           t
           drain
           ~reason:Moderator_request
-          ~adopt_deferred:(not (List.is_empty t.state.conversation.deferred_user_entries))
+          ~adopt_deferred:(not (List.is_empty eligible))
     in
     resume_deferred || not (List.is_empty extra_deltas)
 ;;
@@ -9903,8 +11132,10 @@ let checkpoint_idle_moderator t (drain : Runtime_builder.moderator_drain) =
 ;;
 
 let complete_running_idle_moderator t (drain : Runtime_builder.moderator_drain) =
+  let open Result.Let_syntax in
   let requests = drain.Runtime_builder.runtime_requests in
-  match t.state.conversation.deferred_user_entries with
+  let%bind eligible = eligible_pending t Idle_start in
+  match eligible with
   | _ :: _ -> start_idle_turn t drain ~reason:User_submit ~adopt_deferred:true
   | [] when Chat_response.Runtime_semantics.request_compaction requests ->
     let open Result.Let_syntax in
@@ -10284,6 +11515,29 @@ let detach t attachment_id =
          ~f:(fun _ -> ()))
 ;;
 
+let enable_automatic_turn_budget ?run_preparation t policy =
+  let open Result.Let_syntax in
+  let%bind () =
+    match run_preparation with
+    | None -> Ok ()
+    | Some preparation -> check_run_preparation t preparation
+  in
+  match
+    t.state.automatic_turn_budget, t.state.active_operation, moderator_is_borrowed t
+  with
+  | Some budget, _, _
+    when Chat_response.Runtime_semantics.equal_policy budget.policy policy -> Ok ()
+  | _, None, false ->
+    transition
+      ?run_preparation
+      t
+      ~delta:(Session_delta.Automatic_turn_budget_enabled policy)
+      ~payloads:[]
+    |> Result.map ~f:ignore
+  | _ ->
+    Error (error Conflict "cannot enable automatic-turn accounting during active work")
+;;
+
 let lifecycle_request_allowed : type a. a request -> bool = function
   | Set_operation_worker None
   | Set_runtime_worker (None, _)
@@ -10298,6 +11552,11 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Release_inference _
   | Seal_inference_owner _
   | Finish_inference_owner _
+  | Close_run_preparation _
+  | Run_start_receipt _
+  | Complete_run_constructor_model_job _
+  | Interrupt_run_constructor_job _
+  | Cancel_run_constructor_schedule _
   | Claim_queued_retirement _
   | Commit_queued_event _
   | Finish_queued_event _
@@ -10378,6 +11637,8 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Admit_notification_turn _
   | Claim_ordinary_event _
   | Claim_queued_event _
+  | Reconcile_run_recovery
+  | Run_actions _
   | Commit_invocation_call _
   | Claim_invocation _
   | Claim_idle_invocation _
@@ -10416,6 +11677,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Check_runtime_admission
   | Begin_lifecycle _
   | Enable_automatic_turn_budget _
+  | Enable_run_constructor_turn_budget _
   | Set_automatic_turn_pauses _
   | Change_moderator _
   | Change_workspace _
@@ -10427,6 +11689,16 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Validate_administration_basis _
   | Commit_reconciled_administration _
   | Begin_initialization _
+  | Begin_run_initialization _
+  | Capture_run_constructor_model_source _
+  | Capture_run_constructor_recipe_target _
+  | Start_run_constructor_model_job _
+  | Add_run_constructor_job _
+  | Add_run_constructor_schedule _
+  | Reserve_run_history_block _
+  | Checkpoint_run_moderator _
+  | Admit_prepared_run _
+  | Begin_run_preparation _
   | Complete_initialization _
   | Start _
   | Start_initial_delegated _
@@ -10440,6 +11712,8 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Append_history _
   | Defer_history _
   | Submit_message _
+  | Control_pending _
+  | Admit_run _
   | Submit_managed_message _
   | Compact _
   | Delete_history _
@@ -10469,6 +11743,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Claim_job _
   | Refresh_background_job _
   | Recover_background_results _
+  | Enqueue_run_job_delivery _
   | Deliver_job _
   | Cancel_job _
   | Change_schedule _
@@ -10552,6 +11827,29 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       let%bind () = validate_queued_event_borrow t borrow in
       with_staged_transaction t (Moderator_event borrow.receipt.context.id) (fun () ->
         commit_queued_event t borrow snapshot requests decision notifications)
+    | Reconcile_run_recovery ->
+      let open Result.Let_syntax in
+      (match t.state.run_state with
+       | None -> Ok ()
+       | Some index ->
+         if
+           List.for_all (Run_state.runs index) ~f:(fun run ->
+             match run.Agent_protocol.Run.lifecycle with
+             | Terminal _ -> true
+             | Admitted | Active | Waiting _ -> false)
+         then Ok ()
+         else if Int64.equal t.state.counters.revision Int64.max_value
+         then Error (error Invalid_state "session revision exhausted during run recovery")
+         else (
+           let%bind index =
+             Run_retirement.recover
+               index
+               ~session_revision:(Int64.succ t.state.counters.revision)
+               ~now:(t.services.now ())
+           in
+           transition t ~delta:(Session_delta.Run_state_changed index) ~payloads:[]
+           |> Result.map ~f:ignore))
+    | Run_actions executing -> run_actions_internal t executing
     | Finish_queued_event (borrow, interrupted) ->
       finish_queued_event t borrow interrupted
     | Set_queued_event_cancel (borrow, cancel) ->
@@ -10853,21 +12151,9 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Set_compaction_inference port ->
       t.compaction_inference <- port;
       Ok ()
-    | Enable_automatic_turn_budget policy ->
-      (match
-         t.state.automatic_turn_budget, t.state.active_operation, moderator_is_borrowed t
-       with
-       | Some budget, _, _
-         when Chat_response.Runtime_semantics.equal_policy budget.policy policy -> Ok ()
-       | _, None, false ->
-         transition
-           t
-           ~delta:(Session_delta.Automatic_turn_budget_enabled policy)
-           ~payloads:[]
-         |> Result.map ~f:ignore
-       | _ ->
-         Error
-           (error Conflict "cannot enable automatic-turn accounting during active work"))
+    | Enable_automatic_turn_budget policy -> enable_automatic_turn_budget t policy
+    | Enable_run_constructor_turn_budget (preparation, policy) ->
+      enable_automatic_turn_budget ~run_preparation:preparation t policy
     | Set_automatic_turn_pauses conditions ->
       (match
          t.state.active_operation, moderator_is_borrowed t, t.idle_moderator_borrowed
@@ -10896,10 +12182,11 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Change_moderator moderator -> change_moderator t moderator
     | Change_workspace workspace -> change_workspace t workspace
     | Shell_approval_grants -> Ok t.state.shell.approval_grants
-    | Replace_shell_approval_grants approval_grants ->
-      replace_shell_approval_grants t approval_grants
+    | Replace_shell_approval_grants (run_preparation, approval_grants) ->
+      replace_shell_approval_grants ?run_preparation t approval_grants
     | Shell_manifest_grants -> Ok t.state.shell.manifest_grants
-    | Add_shell_manifest_grant grant -> add_shell_manifest_grant t grant
+    | Add_shell_manifest_grant (run_preparation, grant) ->
+      add_shell_manifest_grant ?run_preparation t grant
     | Reset (attachment_id, expected_revision, options) ->
       reset_internal t attachment_id expected_revision options
     | Upgrade_prompt (attachment_id, expected_revision, target_revision) ->
@@ -10911,6 +12198,10 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Commit_reconciled_administration (attachment_id, expected, kind, candidate) ->
       commit_reconciled_administration t attachment_id expected kind candidate
     | Begin_initialization expected -> begin_initialization t expected
+    | Begin_run_initialization (preparation, expected) ->
+      let open Result.Let_syntax in
+      let%bind () = check_run_preparation t preparation in
+      begin_initialization ~run_preparation:preparation t expected
     | End_initialization scope -> end_initialization t scope
     | Complete_initialization (scope, candidate) ->
       complete_initialization t scope candidate
@@ -10986,9 +12277,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
             ]
           else []
         in
-        let%bind transition =
-          Session_transition.apply ~now:(t.services.now ()) t.state ~delta ~payloads
-        in
+        let%bind transition = prepare_transition t ~delta ~payloads in
         let%bind () =
           Eio.Cancel.protect (fun () ->
             let%map () =
@@ -11052,7 +12341,191 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
            (error Permission_denied "delegation.stop: child relationship does not match"))
     | Defer_history (attachment_id, entries) ->
       with_writer t attachment_id (fun () -> defer_history t entries)
-    | Submit_message (attachment_id, entry) -> submit_message t attachment_id entry
+    | Submit_message (attachment_id, submitting_principal, timing, entry) ->
+      submit_message t attachment_id submitting_principal timing entry
+    | Control_pending (principal, project, request, replacement) ->
+      control_pending_internal t principal project request replacement
+    | Capture_run_constructor_model_source
+        (preparation, job_id, generation, target, limits) ->
+      let open Result.Let_syntax in
+      let%bind () = check_run_preparation t preparation in
+      capture_model_job_source
+        ~run_preparation:preparation
+        t
+        job_id
+        generation
+        target
+        limits
+    | Capture_run_constructor_recipe_target
+        (preparation, job_id, generation, attempt, target, limits) ->
+      let open Result.Let_syntax in
+      let%bind () = check_run_preparation t preparation in
+      capture_recipe_target
+        ~run_preparation:preparation
+        t
+        job_id
+        generation
+        attempt
+        target
+        limits
+    | Start_run_constructor_model_job (preparation, job) ->
+      let open Result.Let_syntax in
+      let%bind () = check_run_preparation t preparation in
+      let%bind job = add_job ~run_preparation:preparation t job in
+      let%bind claimed = claim_job ~run_preparation:preparation t job.id job.generation in
+      Result.of_option
+        claimed
+        ~error:(error Conflict "constructor model call could not claim its durable job")
+    | Complete_run_constructor_model_job
+        (preparation, job_id, generation, attempt, outcome) ->
+      let open Result.Let_syntax in
+      let%bind () = check_run_preparation t preparation in
+      complete_job ~run_preparation:preparation t job_id generation attempt outcome
+    | Interrupt_run_constructor_job (preparation, job_id, generation, attempt, reason) ->
+      let open Result.Let_syntax in
+      let%bind () = check_run_preparation t preparation in
+      interrupt_job ~run_preparation:preparation t job_id generation attempt reason
+    | Add_run_constructor_job (preparation, job) ->
+      let open Result.Let_syntax in
+      let%bind () = check_run_preparation t preparation in
+      add_job ~run_preparation:preparation t job
+    | Add_run_constructor_schedule (preparation, schedule) ->
+      let open Result.Let_syntax in
+      let%bind () = check_run_preparation t preparation in
+      add_schedule ~run_preparation:preparation t schedule
+    | Cancel_run_constructor_schedule (preparation, id) ->
+      let open Result.Let_syntax in
+      let%bind () = check_run_preparation t preparation in
+      cancel_schedule_internal ~run_preparation:preparation t id
+    | Reserve_run_history_block (preparation, count) ->
+      let open Result.Let_syntax in
+      let%bind () = check_run_preparation t preparation in
+      reserve_history_block ~run_preparation:preparation t count
+    | Checkpoint_run_moderator (preparation, moderator) ->
+      let open Result.Let_syntax in
+      let%bind () = check_run_preparation t preparation in
+      if Option.equal Jsonaf.exactly_equal t.state.moderator moderator
+      then Ok (Session_state.summary t.state)
+      else
+        transition
+          ~run_preparation:preparation
+          t
+          ~delta:(Session_delta.Moderator_changed moderator)
+          ~payloads:[]
+    | Admit_prepared_run (preparation, scope, session, entry) ->
+      if not (Run_preparation.belongs_to preparation ~owner:t.run_preparation_owner)
+      then
+        Ok
+          (Run_admission_outcome.Rejected
+             (error Conflict "run preparation belongs to another actor"))
+      else
+        Exn.protect
+          ~finally:(fun () ->
+            Run_preparation.close preparation;
+            match t.run_preparation with
+            | Some active when phys_equal active preparation -> t.run_preparation <- None
+            | Some _ | None -> ())
+          ~f:(fun () ->
+            let attempted = ref false in
+            let result =
+              let open Result.Let_syntax in
+              let%bind () = check_run_preparation t preparation in
+              admit_run
+                ~preparation
+                ~commit_attempted:attempted
+                t
+                scope
+                (Run_preparation.request preparation)
+                session
+                (Run_preparation.request_sha256 preparation)
+                entry
+            in
+            match result with
+            | Ok receipt -> Ok (Run_admission_outcome.Admitted receipt)
+            | Error failure ->
+              let retained =
+                Run_state.receipt
+                  (Option.value t.state.run_state ~default:Run_state.empty)
+                  ~principal_id:(Run_preparation.principal_id preparation)
+                  ~key:(Run_preparation.request preparation).key
+                  ~request_sha256:(Run_preparation.request_sha256 preparation)
+              in
+              (match retained with
+               | Ok (Some ({ kind = Admission; _ } as receipt)) ->
+                 Ok (Run_admission_outcome.Admitted receipt)
+               | Ok (Some { kind = Action | Terminal; _ }) | Ok None | Error _ ->
+                 Ok
+                   (if !attempted
+                    then Run_admission_outcome.Uncertain failure
+                    else Run_admission_outcome.Rejected failure)))
+    | Begin_run_preparation (authorize, principal_id, request, request_sha256) ->
+      let open Result.Let_syntax in
+      let%bind () = authorize t.state in
+      let%bind _ = write_attachment t request.attachment_id in
+      let%bind () =
+        if Agent_protocol.Id.Session.equal request.session_id t.state.identity.session_id
+        then Ok ()
+        else Error (error Invalid_request "run preparation targets another session")
+      in
+      let%bind receipt =
+        Run_state.receipt
+          (Option.value t.state.run_state ~default:Run_state.empty)
+          ~principal_id
+          ~key:request.key
+          ~request_sha256
+      in
+      (match receipt with
+       | Some ({ kind = Admission; _ } as receipt) ->
+         Ok (Run_preparation.Decision.Retained receipt)
+       | Some { kind = Action | Terminal; _ } ->
+         Error (error Conflict "run start key belongs to another action")
+       | None ->
+         (match t.run_preparation with
+          | Some _ -> Error (error Conflict "another run admission is being prepared")
+          | None ->
+            let%map preparation =
+              Run_preparation.create
+                ~owner:t.run_preparation_owner
+                ~state:t.state
+                ~principal_id
+                ~request
+                ~request_sha256
+                ~authorize
+            in
+            t.run_preparation <- Some preparation;
+            Run_preparation.Decision.Prepare preparation))
+    | Close_run_preparation preparation ->
+      if not (Run_preparation.belongs_to preparation ~owner:t.run_preparation_owner)
+      then Error (error Conflict "run preparation belongs to another actor")
+      else (
+        Run_preparation.close preparation;
+        (match t.run_preparation with
+         | Some active when phys_equal active preparation -> t.run_preparation <- None
+         | Some _ | None -> ());
+        Ok ())
+    | Run_start_receipt (authorize, principal_id, request, request_sha256) ->
+      let open Result.Let_syntax in
+      let%bind () = authorize t.state in
+      let%bind _ = write_attachment t request.attachment_id in
+      let%bind () =
+        if Agent_protocol.Id.Session.equal request.session_id t.state.identity.session_id
+        then Ok ()
+        else Error (error Invalid_request "run receipt targets another session")
+      in
+      let%bind retained =
+        Run_state.receipt
+          (Option.value t.state.run_state ~default:Run_state.empty)
+          ~principal_id
+          ~key:request.key
+          ~request_sha256
+      in
+      (match retained with
+       | None -> Ok None
+       | Some ({ kind = Admission; _ } as receipt) -> Ok (Some receipt)
+       | Some { kind = Action | Terminal; _ } ->
+         Error (error Conflict "run start key belongs to another action"))
+    | Admit_run (scope, request, session, request_sha256, entry) ->
+      admit_run t scope request session request_sha256 entry
     | Submit_managed_message (reference, key, fingerprint, generation, maximum, entry) ->
       submit_managed_message t reference key fingerprint generation maximum entry
     | Compact (attachment_id, expected_revision) ->
@@ -11148,6 +12621,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       refresh_background_job t job_id generation attempt
     | Recover_background_results (max_count, max_total_bytes) ->
       recover_background_results t max_count max_total_bytes
+    | Enqueue_run_job_delivery (delivery, before, after) ->
+      enqueue_run_job_delivery t delivery before after
     | Deliver_job (job_id, generation, expected, expected_job, moderator_snapshot) ->
       deliver_job t job_id generation expected expected_job moderator_snapshot
     | Cancel_job_internal job_id -> cancel_job_internal t job_id
@@ -11235,20 +12710,32 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
          Result.map (inspect t.state) ~f:Option.some
        | _ -> Ok None)
     | Open_inference_owner source -> open_inference_owner t source
-    | Admit_inference (owner, relation, operation_id, invocation_id, configuration) ->
-      admit_inference t owner relation operation_id invocation_id configuration
-    | Acknowledge_inference (owner, handle, attempt) ->
-      acknowledge_inference t owner handle attempt
-    | Observe_inference (handle, incoming) -> observe_inference t handle incoming
-    | Observe_owned_inference (owner, incoming) ->
-      observe_owned_inference t owner incoming
-    | Complete_inference (owner, handle, completion) ->
-      complete_inference t owner handle completion
-    | Release_inference (owner, handle) -> release_inference t owner handle
+    | Admit_inference
+        (run_preparation, owner, relation, operation_id, invocation_id, configuration) ->
+      admit_inference
+        ?run_preparation
+        t
+        owner
+        relation
+        operation_id
+        invocation_id
+        configuration
+    | Acknowledge_inference (run_preparation, owner, handle, attempt) ->
+      acknowledge_inference ?run_preparation t owner handle attempt
+    | Observe_inference (run_preparation, handle, incoming) ->
+      observe_inference ?run_preparation t handle incoming
+    | Observe_owned_inference (run_preparation, owner, incoming) ->
+      observe_owned_inference ?run_preparation t owner incoming
+    | Complete_inference (run_preparation, owner, handle, completion) ->
+      complete_inference ?run_preparation t owner handle completion
+    | Release_inference (run_preparation, owner, handle) ->
+      release_inference ?run_preparation t owner handle
     | Seal_inference_owner owner -> seal_inference_owner t owner
-    | Finish_inference_owner owner -> finish_inference_owner t owner
+    | Finish_inference_owner (run_preparation, owner) ->
+      finish_inference_owner ?run_preparation t owner
     | Reconcile_inference_recovery -> reconcile_inference_recovery t
     | Shutdown ->
+      close_run_preparation t;
       t.initialization_scope <- None;
       abort_all_staged_work t;
       Option.iter t.owner_timer_cancel ~f:(fun resolver ->
@@ -11364,6 +12851,9 @@ let create_with_owner_lease_duration
     ; idle_moderator_borrowed = false
     ; moderator_borrow = None
     ; queued_event_borrow = None
+    ; run_authorities = Run_authorities.empty
+    ; run_preparation_owner = Run_preparation.Owner.create ()
+    ; run_preparation = None
     ; foreground_moderator = None
     ; invocation_executions = []
     ; inference_owner_identity = ref ()
@@ -11453,11 +12943,11 @@ let change_moderator t moderator = call t (Change_moderator moderator)
 let shell_approval_grants t = call t Shell_approval_grants
 
 let replace_shell_approval_grants t approval_grants =
-  call t (Replace_shell_approval_grants approval_grants)
+  call t (Replace_shell_approval_grants (None, approval_grants))
 ;;
 
 let shell_manifest_grants t = call t Shell_manifest_grants
-let add_shell_manifest_grant t grant = call t (Add_shell_manifest_grant grant)
+let add_shell_manifest_grant t grant = call t (Add_shell_manifest_grant (None, grant))
 
 let commit_administration t ~command_audit ~attachment_id ~expected_revision ~kind state =
   call
@@ -11487,28 +12977,87 @@ let commit_reconciled_administration
 let open_inference_owner t ~source = call t (Open_inference_owner source)
 
 let admit_inference t ~owner ~relation ~operation_id ~invocation_id ~configuration =
-  call t (Admit_inference (owner, relation, operation_id, invocation_id, configuration))
+  call
+    t
+    (Admit_inference (None, owner, relation, operation_id, invocation_id, configuration))
 ;;
 
 let acknowledge_inference t ~owner ~handle attempt =
-  call t (Acknowledge_inference (owner, handle, attempt))
+  call t (Acknowledge_inference (None, owner, handle, attempt))
 ;;
 
-let observe_inference t ~handle incoming = call t (Observe_inference (handle, incoming))
+let observe_inference t ~handle incoming =
+  call t (Observe_inference (None, handle, incoming))
+;;
 
 let observe_owned_inference t ~owner incoming =
-  call t (Observe_owned_inference (owner, incoming))
+  call t (Observe_owned_inference (None, owner, incoming))
 ;;
 
 let complete_inference t ~owner ~handle completion =
-  call t (Complete_inference (owner, handle, completion))
+  call t (Complete_inference (None, owner, handle, completion))
 ;;
 
-let release_inference t ~owner ~handle = call t (Release_inference (owner, handle))
+let release_inference t ~owner ~handle = call t (Release_inference (None, owner, handle))
 let seal_inference_owner t ~owner = call t (Seal_inference_owner owner)
-let finish_inference_owner t ~owner = call t (Finish_inference_owner owner)
+let finish_inference_owner t ~owner = call t (Finish_inference_owner (None, owner))
+
+module Constructor_mutations = struct
+  let admit_inference
+        t
+        ~preparation
+        ~owner
+        ~relation
+        ~operation_id
+        ~invocation_id
+        ~configuration
+    =
+    call
+      t
+      (Admit_inference
+         (Some preparation, owner, relation, operation_id, invocation_id, configuration))
+  ;;
+
+  let acknowledge_inference t ~preparation ~owner ~handle attempt =
+    call t (Acknowledge_inference (Some preparation, owner, handle, attempt))
+  ;;
+
+  let observe_inference t ~preparation ~handle incoming =
+    call t (Observe_inference (Some preparation, handle, incoming))
+  ;;
+
+  let observe_owned_inference t ~preparation ~owner incoming =
+    call t (Observe_owned_inference (Some preparation, owner, incoming))
+  ;;
+
+  let complete_inference t ~preparation ~owner ~handle completion =
+    call t (Complete_inference (Some preparation, owner, handle, completion))
+  ;;
+
+  let release_inference t ~preparation ~owner ~handle =
+    call t (Release_inference (Some preparation, owner, handle))
+  ;;
+
+  let finish_inference_owner t ~preparation ~owner =
+    call t (Finish_inference_owner (Some preparation, owner))
+  ;;
+
+  let replace_shell_approval_grants t ~preparation approval_grants =
+    call t (Replace_shell_approval_grants (Some preparation, approval_grants))
+  ;;
+
+  let add_shell_manifest_grant t ~preparation grant =
+    call t (Add_shell_manifest_grant (Some preparation, grant))
+  ;;
+end
+
 let reconcile_inference_recovery t = call t Reconcile_inference_recovery
 let begin_initialization t ~expected = call t (Begin_initialization expected)
+
+let begin_run_initialization t ~preparation ~expected =
+  call t (Begin_run_initialization (preparation, expected))
+;;
+
 let end_initialization t ~scope = call t ~priority:Priority (End_initialization scope)
 
 let complete_initialization t ~scope ~candidate =
@@ -11603,7 +13152,115 @@ let defer_history t ~attachment_id entries =
   call t (Defer_history (attachment_id, entries))
 ;;
 
-let submit_message t ~attachment_id entry = call t (Submit_message (attachment_id, entry))
+let submit_message
+      t
+      ?(timing = Agent_protocol.Pending_input.Timing.Safe_boundary)
+      ~submitting_principal
+      ~attachment_id
+      entry
+  =
+  call t (Submit_message (attachment_id, submitting_principal, timing, entry))
+;;
+
+let enable_run_constructor_turn_budget t ~preparation policy =
+  call t (Enable_run_constructor_turn_budget (preparation, policy))
+;;
+
+let capture_run_constructor_model_source
+      t
+      ~preparation
+      ~job_id
+      ~generation
+      ~target
+      ~limits
+  =
+  call
+    t
+    (Capture_run_constructor_model_source (preparation, job_id, generation, target, limits))
+;;
+
+let capture_run_constructor_recipe_target
+      t
+      ~preparation
+      ~job_id
+      ~generation
+      ~attempt
+      ~target
+      ~limits
+  =
+  call
+    t
+    (Capture_run_constructor_recipe_target
+       (preparation, job_id, generation, attempt, target, limits))
+;;
+
+let start_run_constructor_model_job t ~preparation job =
+  call t (Start_run_constructor_model_job (preparation, job))
+;;
+
+let complete_run_constructor_model_job t ~preparation ~job_id ~generation ~attempt outcome
+  =
+  call
+    t
+    (Complete_run_constructor_model_job (preparation, job_id, generation, attempt, outcome))
+;;
+
+let interrupt_run_constructor_job t ~preparation ~job_id ~generation ~attempt ~reason =
+  call
+    t
+    ~priority:Priority
+    (Interrupt_run_constructor_job (preparation, job_id, generation, attempt, reason))
+;;
+
+let add_run_constructor_job t ~preparation job =
+  call t (Add_run_constructor_job (preparation, job))
+;;
+
+let add_run_constructor_schedule t ~preparation schedule =
+  call t (Add_run_constructor_schedule (preparation, schedule))
+;;
+
+let cancel_run_constructor_schedule t ~preparation ~schedule_id =
+  call t (Cancel_run_constructor_schedule (preparation, schedule_id))
+;;
+
+let reserve_run_history_block t ~preparation ~count =
+  call t (Reserve_run_history_block (preparation, count))
+;;
+
+let checkpoint_run_moderator t ~preparation moderator =
+  call t (Checkpoint_run_moderator (preparation, moderator))
+;;
+
+let admit_prepared_run t ~command_audit ~preparation ~scope ~session ~entry =
+  call t ?command_audit (Admit_prepared_run (preparation, scope, session, entry))
+;;
+
+let begin_run_preparation t ~authorize ~principal_id ~request ~request_sha256 =
+  call t (Begin_run_preparation (authorize, principal_id, request, request_sha256))
+;;
+
+let end_run_preparation t preparation = call t (Close_run_preparation preparation)
+
+let run_start_receipt t ~authorize ~principal_id ~request ~request_sha256 =
+  call t (Run_start_receipt (authorize, principal_id, request, request_sha256))
+;;
+
+let admit_run t ~scope ~request ~session ~request_sha256 ~entry =
+  call t (Admit_run (scope, request, session, request_sha256, entry))
+;;
+
+let admit_run_with_command_audit
+      t
+      ~command_audit
+      ~scope
+      ~request
+      ~session
+      ~request_sha256
+      ~entry
+  =
+  call t ~command_audit (Admit_run (scope, request, session, request_sha256, entry))
+;;
 
 let submit_managed_message
       t
@@ -11621,8 +13278,35 @@ let submit_managed_message
          (reference, key, request_sha256, generation, max_receipts, entry)))
 ;;
 
-let submit_message_with_command_audit t ~command_audit ~attachment_id entry =
-  call t ~command_audit (Submit_message (attachment_id, entry))
+let submit_message_with_command_audit
+      t
+      ?(timing = Agent_protocol.Pending_input.Timing.Safe_boundary)
+      ~command_audit
+      ~submitting_principal
+      ~attachment_id
+      entry
+  =
+  call
+    t
+    ~command_audit
+    (Submit_message (attachment_id, submitting_principal, timing, entry))
+;;
+
+let cancel_pending t ?command_audit ~principal ~project request =
+  call t ?command_audit (Control_pending (principal, project, request, None))
+;;
+
+let replace_pending
+      t
+      ?command_audit
+      ~principal
+      ~project
+      (request : Agent_protocol.Pending_control.Replace_request.t)
+  =
+  call
+    t
+    ?command_audit
+    (Control_pending (principal, project, request.target, Some request.text))
 ;;
 
 let compact t ~attachment_id ~expected_revision =
@@ -11851,6 +13535,10 @@ let refresh_background_job t ~job_id ~generation ~attempt =
 
 let recover_background_results t ~max_count ~max_total_bytes =
   call t ~priority:Priority (Recover_background_results (max_count, max_total_bytes))
+;;
+
+let enqueue_run_job_delivery t ~delivery ~before ~after =
+  call t (Enqueue_run_job_delivery (delivery, before, after))
 ;;
 
 let deliver_job ?expected ?expected_job t ~job_id ~generation ~moderator_snapshot =

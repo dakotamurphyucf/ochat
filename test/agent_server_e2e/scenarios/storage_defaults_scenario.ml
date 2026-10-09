@@ -299,6 +299,7 @@ let on_event ctx state event =
                   ; attachments = []
                   }
               ; idempotency_key = F.key (sprintf "storage-send-%d" index)
+              ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
               })
        with
        | Session_send_message _ -> ()

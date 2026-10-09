@@ -117,6 +117,15 @@ let atom_to_jsonaf ~limits ~state_document delta =
           [ "kind", `String "initial_prompt_count_changed"
           ; "count", X.integer_json value
           ])
+  | Pending_inputs_changed (mutation, archive, expiry_archive) ->
+    let%map mutation = Pending_mutation.to_jsonaf mutation ~limits in
+    `Object
+      [ "kind", `String "pending_inputs_changed"
+      ; "mutation", mutation
+      ; ( "archive"
+        , X.option_json Session_state_document.archive_reference_to_jsonaf archive )
+      ; "expiry_archive", X.option_json Pending_archive.Reference.to_jsonaf expiry_archive
+      ]
   | Deferred_entries_adopted ->
     Ok (`Object [ "kind", `String "deferred_entries_adopted" ])
   | Active_operation_changed value ->
@@ -232,6 +241,9 @@ let atom_to_jsonaf ~limits ~state_document delta =
           [ "kind", `String "invocation_reconciled"
           ; "value", P.Invocation.Storage.to_json value
           ])
+  | Run_state_changed value ->
+    Ok
+      (`Object [ "kind", `String "run_state_changed"; "value", Run_state.to_jsonaf value ])
   | Moderator_execution_changed value ->
     Ok
       (`Object
@@ -448,6 +460,20 @@ let atom_of_jsonaf ~limits json =
   | "initial_prompt_count_changed" ->
     Result.map (X.required fields "count" X.integer) ~f:(fun value ->
       Delta.Initial_prompt_count_changed value)
+  | "pending_inputs_changed" ->
+    let%bind mutation =
+      X.required fields "mutation" (fun json -> Pending_mutation.of_jsonaf json ~limits)
+    in
+    let%bind archive =
+      X.required
+        fields
+        "archive"
+        (X.nullable Session_state_document.archive_reference_of_jsonaf)
+    in
+    let%map expiry_archive =
+      X.required fields "expiry_archive" (X.nullable Pending_archive.Reference.of_jsonaf)
+    in
+    Delta.Pending_inputs_changed (mutation, archive, expiry_archive)
   | "deferred_entries_adopted" -> Ok Delta.Deferred_entries_adopted
   | "active_operation_changed" ->
     Result.map
@@ -524,6 +550,9 @@ let atom_of_jsonaf ~limits json =
   | "invocation_reconciled" ->
     Result.map (X.required fields "value" P.Invocation.Storage.of_json) ~f:(fun value ->
       Delta.Invocation_reconciled value)
+  | "run_state_changed" ->
+    Result.map (X.required fields "value" Run_state.of_jsonaf) ~f:(fun value ->
+      Delta.Run_state_changed value)
   | "moderator_execution_changed" ->
     Result.map (X.required fields "value" P.Moderator_execution.of_json) ~f:(fun value ->
       Delta.Moderator_execution_changed value)
@@ -677,6 +706,14 @@ let shape =
              ; ( "initial_prompt_count_changed"
                , X.shape_exn [ "kind", D.Shape.value; "count", D.Shape.value ] )
              ; "deferred_entries_adopted", X.shape_exn [ "kind", D.Shape.value ]
+             ; ( "pending_inputs_changed"
+               , X.shape_exn
+                   [ "kind", D.Shape.value
+                   ; "mutation", Pending_mutation.shape
+                   ; ( "archive"
+                     , D.Shape.nullable Session_state_document.archive_reference_shape )
+                   ; "expiry_archive", D.Shape.nullable Pending_archive.Reference.shape
+                   ] )
              ; ( "active_operation_changed"
                , X.shape_exn
                    [ "kind", D.Shape.value
@@ -727,6 +764,8 @@ let shape =
              ; ( "invocation_reconciled"
                , X.shape_exn
                    [ "kind", D.Shape.value; "value", Session_record_shapes.invocation ] )
+             ; ( "run_state_changed"
+               , X.shape_exn [ "kind", D.Shape.value; "value", Run_state.shape ] )
              ; ( "moderator_execution_changed"
                , X.shape_exn
                    [ "kind", D.Shape.value
@@ -942,13 +981,19 @@ let upgrade document ~limits =
                  name, if String.equal name "changes" then `Array changes else old)))
       | _ -> F.invalid "payload" "must be an object")
   in
+  let%bind run_step =
+    D.Conversion.Step.of_function ~kind:"session.delta" ~from_version:4 ~f:Result.return
+  in
+  let%bind pending_input_step =
+    D.Conversion.Step.of_function ~kind:"session.delta" ~from_version:5 ~f:Result.return
+  in
   let%bind conversion =
     D.Conversion.create
       ~limits
-      ~targets:[ "session.delta", 4 ]
-      ~max_steps:3
+      ~targets:[ "session.delta", 6 ]
+      ~max_steps:5
       ~max_operations:100_000
-      ~steps:[ step; ledger_step; history_revision_step ]
+      ~steps:[ step; ledger_step; history_revision_step; run_step; pending_input_step ]
   in
   D.Conversion.upgrade conversion document
 ;;
@@ -957,7 +1002,7 @@ let codec ~limits =
   D.Domain_codec.create
     ~limits
     ~kind:"session.delta"
-    ~version:4
+    ~version:6
     ~shape
     ~supported_semantics:[]
     ~decode:(fun json -> decode_payload ~limits json |> X.document_result)
@@ -987,7 +1032,7 @@ let create value ~limits ~state_document =
     D.Document.create
       ~limits
       ~kind:"session.delta"
-      ~version:4
+      ~version:6
       ~payload:(`Object [ "changes", `Array changes ])
   in
   (* Decode authored output too: one set of validators governs both paths. *)
@@ -1132,13 +1177,35 @@ let patch_history ~limits payload child =
                 match D.Json.field value ~name:"id" with
                 | Value (`String other) -> String.equal other id
                 | _ -> false) ->
-         patch_member
-           ~limits
-           ~shape:Session_record_shapes.history_entry
-           payload
-           path
-           ~identity_field:"id"
-           child
+         if String.equal field "deferred_user_entries"
+         then (
+           let%bind values =
+             List.map values ~f:(fun wrapper ->
+               match D.Json.field wrapper ~name:"id" with
+               | Value (`String other) when String.equal other id ->
+                 let%bind entry =
+                   Agent_store.Document_fields.required wrapper "entry" Result.return
+                 in
+                 let%bind entry =
+                   merge_component
+                     ~limits
+                     Session_record_shapes.history_entry
+                     ~current:entry
+                     ~incoming:child
+                 in
+                 set_path wrapper [ "entry" ] entry
+               | _ -> Ok wrapper)
+             |> Result.all
+           in
+           set_path payload path (`Array values))
+         else
+           patch_member
+             ~limits
+             ~shape:Session_record_shapes.history_entry
+             payload
+             path
+             ~identity_field:"id"
+             child
        | _ -> find rest)
   in
   find [ "canonical_history"; "deferred_user_entries" ]
@@ -1213,7 +1280,9 @@ let apply t ?transaction_metadata ~limits previous =
     Delta.apply ~limits (Session_state_document.value previous) t.value
     |> X.document_result
   in
-  let%bind candidate = History_retirement.admit previous ~delta:t.value ~next ~limits in
+  let%bind candidate =
+    Session_document_transition.admit previous ~delta:t.value ~next ~limits
+  in
   let%bind changes = raw_changes t in
   (* Created is an immutable captured state document, carrying its full template.
     Retarget it to the final typed candidate before unioning preservation paths. *)
@@ -1307,6 +1376,7 @@ let apply t ?transaction_metadata ~limits previous =
         in
         let%bind entry = field "entry" in
         patch_history ~limits payload entry
+      | "run_state_changed" -> scalar [ "run_state" ] "value" Run_state.shape
       | "lifecycle_changed" ->
         scalar [ "lifecycle" ] "lifecycle" Session_record_shapes.lifecycle
       | "workspace_changed" ->

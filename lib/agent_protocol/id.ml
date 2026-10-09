@@ -77,6 +77,10 @@ module Session = Make (struct
     let prefix = "ses"
   end)
 
+module Run = Make (struct
+    let prefix = "run"
+  end)
+
 module Attachment = Make (struct
     let prefix = "att"
   end)

@@ -74,6 +74,9 @@ module Capabilities = struct
                   -> (unit, Agent_protocol.Error.t) result)
             -> (unit, Agent_protocol.Error.t) result)
         -> (bool, Agent_protocol.Error.t) result
+    ; run_actions :
+        Agent_protocol.Moderator_execution.t
+        -> (Run_action_service.t option, Agent_protocol.Error.t) result
     ; with_moderator_event :
         snapshot:
           (unit

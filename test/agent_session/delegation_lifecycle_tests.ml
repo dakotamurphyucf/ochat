@@ -350,7 +350,11 @@ let%expect_test
              Agent_session.History_codec.user_text ~id:history_id "retained child input"
              |> Agent_session.History_codec.to_protocol
            in
-           A.submit_message child ~attachment_id:writer.id message
+           A.submit_message
+             ~submitting_principal:principal_id
+             child
+             ~attachment_id:writer.id
+             message
            |> protocol_ok
            |> ignore;
            A.detach child writer.id |> protocol_ok;

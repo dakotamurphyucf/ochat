@@ -57,6 +57,13 @@ val load
 module Publisher : sig
   type t
 
+  module Storage : sig
+    type t =
+      | Automatic
+      | Artifact
+    [@@deriving equal, sexp]
+  end
+
   type collection_limits =
     { max_intents : int
     ; max_entries : int
@@ -106,9 +113,14 @@ module Publisher : sig
   (** [jobs] is the current authoritative session state. Stale preparations are
       evicted from memory, retaining any potentially referenced artifact for
       separate durable orphan reconciliation. The persistence callback must not
-      reenter this publisher. *)
+      reenter this publisher. [Artifact] retains the exact attempt in the existing
+      durable result store even below the inline threshold. It does not change
+      completion limits or authority; the host must reserve its bounded descriptor
+      before promising later occurrence delivery. An already selected artifact
+      remains selected regardless of a retry's storage preference. *)
   val publish
     :  t
+    -> ?storage:Storage.t
     -> jobs:Agent_protocol.Job.t list
     -> job:Agent_protocol.Job.t
     -> now:Agent_protocol.Timestamp.t

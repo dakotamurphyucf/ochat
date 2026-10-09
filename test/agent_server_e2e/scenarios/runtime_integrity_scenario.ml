@@ -60,6 +60,7 @@ let send client (session : P.session) text =
          ; attachment_id = session.attachment.id
          ; content
          ; idempotency_key = key text
+         ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
          })
   with
   | Session_send_message value -> value

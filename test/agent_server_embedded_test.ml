@@ -399,7 +399,13 @@ let submit_halt embedded =
   ignore
     (Agent_client.Connection.request_without_history
        (Agent_server.Embedded.connection embedded)
-       (Session_send_message { session_id; attachment_id; idempotency_key; content })
+       (Session_send_message
+          { session_id
+          ; attachment_id
+          ; idempotency_key
+          ; content
+          ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
+          })
      |> protocol_ok
      : Agent_protocol.Method_result.t)
 ;;
@@ -514,6 +520,7 @@ let%expect_test "read-only sends do not consume history IDs" =
              ; content = { kind = Plain_text; text; attachments = [] }
              ; idempotency_key =
                  Agent_protocol.Idempotency_key.of_string key |> protocol_ok
+             ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
              })
       in
       let accepted result =
@@ -600,7 +607,13 @@ let%expect_test "embedded close joins active root inference with a deferred user
         match
           Agent_client.Connection.request_without_history
             (Agent_server.Embedded.connection embedded)
-            (Session_send_message { session_id; attachment_id; idempotency_key; content })
+            (Session_send_message
+               { session_id
+               ; attachment_id
+               ; idempotency_key
+               ; content
+               ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
+               })
           |> protocol_ok
         with
         | Agent_protocol.Method_result.Session_send_message sent -> sent

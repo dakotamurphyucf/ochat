@@ -8,9 +8,15 @@ type source =
 
 (** Actual creating moderator source and execution. An absent owner identifies
     a legacy/host-adapter record, never implicit authority for a current script. *)
+module Subscription_binding = Delivery_subscription_binding
+
 type ownership =
   { source : Invocation.observer
   ; creator : Job.launch_owner
+  ; subscription_binding : Subscription_binding.t option [@sexp.option]
+    (** Captured terminal subscription ID/epoch. Historical absence remains None
+        and supplies no exact subscription wake authority. New public values use
+        an explicit version-6 envelope; versions 1–5 retain their encoding. *)
   }
 [@@deriving equal, sexp]
 
@@ -99,6 +105,14 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 (** Complete current durable record projection. Required-null option fields;
     independent of the public protocol's historical envelope variants. *)
 module Storage : sig
+  type binding_field =
+    | Missing
+    | Nullable
+
+  (** Changes only a None binding's wire presence. A real captured binding always
+      emits its validated ID/epoch, regardless of the original field presence. *)
+  val to_json_with_binding_field : t -> binding_field:binding_field -> Jsonaf.t
+
   val to_json : t -> Jsonaf.t
   val of_json : Jsonaf.t -> (t, Error.t) result
 end

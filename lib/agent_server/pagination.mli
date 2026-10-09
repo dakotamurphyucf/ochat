@@ -83,3 +83,28 @@ module Inference : sig
     -> after_ordinal:int64
     -> (Agent_protocol.Page.Cursor.t, Agent_protocol.Error.t) result
 end
+
+(** Select private queue records before content projection. Signed cursor binds
+    current principal/query, generation and independent pending revision; no raw
+    content or custody is encoded into cursor claims. Preserves exact FIFO order. *)
+val pending
+  :  t
+  -> Agent_protocol.Principal.t
+  -> Agent_protocol.Pending_query.Request.t
+  -> generation:int
+  -> pending_revision:Agent_protocol.Pending_input.Revision.t
+  -> Agent_session.Pending_input_document.t list
+  -> ( Agent_session.Pending_input_document.t Agent_protocol.Page.t
+       , Agent_protocol.Error.t )
+       result
+
+(** Current authority and immutable run observation bound the opaque cursor.
+    Callers filter foreign-principal records before pagination. *)
+val runs
+  :  t
+  -> Agent_protocol.Principal.t
+  -> Agent_protocol.Run_query.Request.t
+  -> Agent_protocol.Run_query.View.t list
+  -> ( Agent_protocol.Run_query.View.t Agent_protocol.Page.t
+       , Agent_protocol.Error.t )
+       result

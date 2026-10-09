@@ -400,20 +400,43 @@ let deliver entry (job : Agent_protocol.Job.t) =
        : (bool, Agent_protocol.Error.t) result)
 ;;
 
-let deliver_pending entry jobs =
-  List.filter jobs ~f:delivery_pending |> List.iter ~f:(deliver entry)
+let pending_run_deliveries entry =
+  match Agent_session.Session_actor.state entry.Session_registry.actor with
+  | Error _ -> []
+  | Ok state ->
+    Option.value_map state.run_state ~default:[] ~f:(fun index ->
+      List.filter (Agent_session.Run_state.job_deliveries index) ~f:(fun delivery ->
+        match Agent_session.Run_job_delivery.disposition delivery with
+        | Pending -> true
+        | Enqueued _ | Claimed _ | Retired _ -> false))
+;;
+
+let deliver_pending entry =
+  List.iter (pending_run_deliveries entry) ~f:(fun delivery ->
+    match
+      Runtime_owner.deliver_run_job_completion entry.Session_registry.runtime delivery
+    with
+    | Error _ -> ()
+    | Ok () ->
+      ignore
+        (Runtime_owner.drain_idle_moderator entry.runtime
+         : (bool, Agent_protocol.Error.t) result));
+  match Agent_session.Session_actor.state entry.actor with
+  | Error _ -> ()
+  | Ok state -> List.filter state.jobs ~f:delivery_pending |> List.iter ~f:(deliver entry)
 ;;
 
 let dispatch_delivery t sw entry jobs =
   if
     (not (Atomic.get t.closed))
-    && List.exists jobs ~f:delivery_pending
+    && (List.exists jobs ~f:delivery_pending
+        || not (List.is_empty (pending_run_deliveries entry)))
     && not (List.mem t.delivering entry ~equal:phys_equal)
   then (
     t.delivering <- entry :: t.delivering;
     Eio.Fiber.fork ~sw (fun () ->
       Exn.protect
-        ~f:(fun () -> if not (Atomic.get t.closed) then deliver_pending entry jobs)
+        ~f:(fun () -> if not (Atomic.get t.closed) then deliver_pending entry)
         ~finally:(fun () ->
           t.delivering
           <- List.filter t.delivering ~f:(fun active -> not (phys_equal active entry));

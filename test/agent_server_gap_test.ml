@@ -250,6 +250,7 @@ let mutations session_id attachment_id expected_revision target_revision =
       ; attachment_id
       ; content = { kind = Plain_text; text = "denied"; attachments = [] }
       ; idempotency_key
+      ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
       }
   ; Session_cancel_operation
       { session_id

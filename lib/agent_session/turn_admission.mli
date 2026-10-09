@@ -4,7 +4,9 @@
 type t
 
 val create
-  :  Session_state.t
+  :  ?pending_retention:Pending_disposition.Retention.t option
+  -> ?runtime_admission_open:bool
+  -> Session_state.t
   -> operation:Agent_protocol.Operation.t
   -> notification_wakes:Agent_protocol.Delivery.t list
   -> adopt_deferred:bool

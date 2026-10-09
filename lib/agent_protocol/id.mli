@@ -35,6 +35,7 @@ end
 
 module Server : S
 module Session : S
+module Run : S
 module Attachment : S
 module Operation : S
 module Event_cursor : S

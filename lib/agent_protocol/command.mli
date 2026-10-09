@@ -48,7 +48,14 @@ type t =
   | Session_update_organization of Session_organization.Request.t
   | Session_stop of Session.Stop_request.t
   | Session_cancel_operation of Session.Cancel_operation_request.t
+  | Session_runs of Run_query.Request.t
+  | Session_run of Run_query.Lookup_request.t
+  | Session_run_start of Run_start.t
   | Session_send_message of Session.Send_message_request.t
+  | Session_pending_inputs of Pending_query.Request.t
+  | Session_pending_input of Pending_query.Lookup_request.t
+  | Session_cancel_pending_input of Pending_control.Cancel_request.t
+  | Session_replace_pending_input of Pending_control.Replace_request.t
   | Session_compact of Session.Compact_request.t
   | Session_edit_history of History_edit.Edit_request.t
   | Session_continue_history of History_edit.Continue_request.t

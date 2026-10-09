@@ -16,3 +16,11 @@ val initial_prompt_entry_count : t -> int
 (** Exact original canonical/deferred/allocator/overlay basis recheck; does not
     grant writer or process-local publication ownership. *)
 val validate_basis : t -> Session_state.t -> (unit, Agent_protocol.Error.t) result
+
+(** Shared plaintext/content-revision rule for canonical and still-pending
+    occurrences. This does not remove a canonical causal suffix or grant custody. *)
+val replace_text
+  :  Agent_protocol.History.entry
+  -> expected_content_revision:Agent_protocol.History.Content_revision.t
+  -> text:string
+  -> (Agent_protocol.History.entry, Agent_protocol.Error.t) result

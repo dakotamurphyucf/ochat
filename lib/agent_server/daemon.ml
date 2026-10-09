@@ -1206,6 +1206,10 @@ let compose
       | Session_work _
       | Session_search _
       | Session_search_navigate _
+      | Session_runs _
+      | Session_run _
+      | Session_pending_inputs _
+      | Session_pending_input _
       | Session_list _
       | Session_inference_summary _
       | Session_inference_observations _
@@ -1230,7 +1234,10 @@ let compose
       | Session_update_metadata _
       | Session_stop _
       | Session_cancel_operation _
+      | Session_run_start _
       | Session_send_message _
+      | Session_cancel_pending_input _
+      | Session_replace_pending_input _
       | Session_compact _
       | Session_edit_history _
       | Session_continue_history _

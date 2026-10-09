@@ -175,7 +175,14 @@ type t =
   | Session_update_organization of Session_mutation.t
   | Session_stop of Session_mutation.t
   | Session_cancel_operation of Session_mutation.t
+  | Session_run_start of Run_receipt.t
   | Session_send_message of Send_message.t
+  | Session_runs of Run_query.View.t Page.t
+  | Session_run of Run_query.Outcome.t
+  | Session_pending_inputs of Pending_query.View.t
+  | Session_pending_input of Pending_query.Outcome.t
+  | Session_cancel_pending_input of Pending_control.Result.t
+  | Session_replace_pending_input of Pending_control.Result.t
   | Session_compact of Session_mutation.t
   | Session_edit_history of History_edit.t
   | Session_continue_history of History_continue.t

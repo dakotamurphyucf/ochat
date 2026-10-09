@@ -2,7 +2,9 @@
     principal, before execution or idempotency replay. Create/attach retries
     cannot disclose an attachment or reclaim credential after its required
     transcript, send or owner scopes have been removed. Session actors perform
-    a second current-state attachment check for mutations. *)
+    a second current-state attachment check for mutations. Pending controls also
+    require current transcript scope here, including reconstructed original
+    commands during receipt reconciliation. *)
 
 val authorize
   :  Agent_protocol.Principal.t

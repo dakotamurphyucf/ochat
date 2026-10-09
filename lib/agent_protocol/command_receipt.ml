@@ -58,6 +58,10 @@ type committed =
       ; continuation : History_edit.Continuation.t
       ; mutation : Mutation_result.t
       }
+  | Accepted_run of
+      { session_id : Id.Session.t
+      ; receipt : Run_receipt.t
+      }
   | Sent_message of
       { session_id : Id.Session.t
       ; history_id : History.Id.t
@@ -205,6 +209,12 @@ let committed_to_json = function
        ; "continuation", History_edit.Continuation.to_json continuation
        ]
        @ mutation_fields mutation)
+  | Accepted_run { session_id; receipt } ->
+    `Object
+      [ "kind", `String "accepted_run"
+      ; "session_id", Id.Session.to_json session_id
+      ; "receipt", Run_receipt.to_json receipt
+      ]
   | Sent_message { session_id; history_id; operation_id; mutation } ->
     `Object
       ([ "kind", `String "sent_message"
@@ -350,6 +360,10 @@ let committed_of_json json =
     in
     let%map mutation = mutation () in
     Continued_history { session_id; continuation; mutation }
+  | "accepted_run" ->
+    let%bind session_id = session () in
+    let%map receipt = Json_codec.required_as fields "receipt" Run_receipt.of_json in
+    Accepted_run { session_id; receipt }
   | "sent_message" ->
     let%bind session_id = session () in
     let%bind history_id = Json_codec.required_as fields "history_id" History.Id.of_json in

@@ -434,3 +434,47 @@ let%expect_test "entrypoint-only coverage cannot establish complete compiler cov
     entrypoints alone do not establish full compiler coverage
     |}]
 ;;
+
+let%expect_test "Run decisions are covered only on actual moderator surfaces" =
+  let sources = Authoring_sources.installed () |> ok in
+  let corpus = C.runtime_foundation ~sources |> ok in
+  List.iter
+    [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
+    ~f:(fun surface_id ->
+      let targets =
+        V.compiler_targets ~sources ~surface_ids:[ surface_id ]
+        |> ok
+        |> List.filter ~f:(fun target ->
+          String.is_suffix target.V.id ~suffix:"/module/Run"
+          || String.is_substring target.id ~substring:"/module_export/Run.")
+      in
+      let mappings =
+        List.filter V.reviewed_mappings ~f:(fun mapping ->
+          String.is_prefix mapping.V.target_id ~prefix:(surface_id ^ "/")
+          && String.equal mapping.topic_id "runtime.runs")
+      in
+      let missing_rejected =
+        match targets with
+        | [] ->
+          assert (List.is_empty mappings);
+          assert (List.mem [ "one_off_v1"; "tool_v1" ] surface_id ~equal:String.equal);
+          false
+        | _ :: _ ->
+          assert (Int.equal (List.length targets) 4);
+          let coverage = V.audit corpus ~targets ~mappings |> ok in
+          V.require_complete coverage |> ok;
+          let remainder = List.tl_exn mappings in
+          let missing = V.audit corpus ~targets ~mappings:remainder |> ok in
+          Result.is_error (V.require_complete missing)
+      in
+      print_s
+        [%sexp
+          (surface_id : string), (List.length targets : int), (missing_rejected : bool)]);
+  [%expect
+    {|
+    (one_off_v1 0 false)
+    (tool_v1 0 false)
+    (moderator_v1 4 true)
+    (delegated_moderator_v1 4 true)
+    |}]
+;;

@@ -59,7 +59,10 @@ module Stored = struct
     in
     let%bind state = F.required payload "state" (F.document ~limits) in
     let%bind () =
-      F.expect_versions state ~kind:"session.state" ~versions:[ 1; 2; 3; 4; 5; 6; 7 ]
+      F.expect_versions
+        state
+        ~kind:"session.state"
+        ~versions:[ 1; 2; 3; 4; 5; 6; 7; 8; 9 ]
     in
     let state = D.Document.payload state in
     let%bind identity = F.required state "identity" Result.return in

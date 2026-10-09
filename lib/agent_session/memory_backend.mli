@@ -14,3 +14,10 @@ val events_after
   :  t
   -> int64
   -> (Agent_protocol.Event.Durable.t list, Agent_protocol.Error.t) result
+
+(** Same-owner transient custody retained before eviction publication. No durable
+    file is promised by a process-bound backend; records live until its disposal. *)
+val pending_archive
+  :  t
+  -> reference:Pending_archive.Reference.t
+  -> Pending_archive.t option

@@ -89,6 +89,7 @@ let run env environment boundary =
               ; content =
                   { kind = Plain_text; text = "Call watch once."; attachments = [] }
               ; idempotency_key = F.key "notification:send"
+              ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
               })
          : P.Method_result.t);
       F.await_marker env child ("notification-boundary " ^ boundary);

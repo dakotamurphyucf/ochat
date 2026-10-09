@@ -35,6 +35,7 @@ let send embedded text =
        ; attachment_id = (Embedded.attachment embedded).id
        ; content = { kind = Plain_text; text; attachments = [] }
        ; idempotency_key = P.Idempotency_key.of_string "embedded:send" |> protocol_ok
+       ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
        })
   |> ignore
 ;;

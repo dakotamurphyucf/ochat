@@ -52,6 +52,7 @@ let%expect_test
                      ; content = { kind = Plain_text; text = sentinel; attachments = [] }
                      ; idempotency_key =
                          P.Idempotency_key.of_string "audit:inject" |> H.get
+                     ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
                      })
                 : P.Public.Result.t);
              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 2. (fun () ->

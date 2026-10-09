@@ -226,6 +226,7 @@ let execute ?audit ~env candidate =
                          ; attachments = []
                          }
                      ; idempotency_key = P.Idempotency_key.of_string id |> H.get
+                     ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
                      })
                 : P.Public.Result.t);
              let rec wait () =

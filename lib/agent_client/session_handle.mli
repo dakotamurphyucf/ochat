@@ -71,8 +71,52 @@ val stop
 
 val send_message
   :  t
+  -> ?timing:Agent_protocol.Pending_input.Timing.t
   -> Agent_protocol.Session.Message_content.t
   -> (Agent_protocol.Method_result.Send_message.t, Agent_protocol.Error.t) result
+
+(** Nonactivating, bounded inspection under the current host authorization.
+    Unknown or expired disposition evidence is [Unavailable], never permission
+    to resubmit. Private ownership and storage custody are not projected. *)
+val pending_inputs
+  :  t
+  -> Agent_protocol.Page.Request.t
+  -> (Agent_protocol.Pending_query.View.t, Agent_protocol.Error.t) Result.t
+
+val pending_input
+  :  t
+  -> Agent_protocol.History.Id.t
+  -> (Agent_protocol.Pending_query.Outcome.t, Agent_protocol.Error.t) Result.t
+
+(** Control one occurrence using independent queue and content revisions. Uses
+    the connection's retained original command and ordinary receipt recovery;
+    an adopted winner is returned without altering canonical history. *)
+val cancel_pending_input
+  :  t
+  -> expected_generation:int
+  -> expected_pending_revision:Agent_protocol.Pending_input.Revision.t
+  -> history_id:Agent_protocol.History.Id.t
+  -> expected_content_revision:Agent_protocol.History.Content_revision.t
+  -> (Agent_protocol.Pending_control.Result.t, Agent_protocol.Error.t) Result.t
+
+val replace_pending_input
+  :  t
+  -> expected_generation:int
+  -> expected_pending_revision:Agent_protocol.Pending_input.Revision.t
+  -> history_id:Agent_protocol.History.Id.t
+  -> expected_content_revision:Agent_protocol.History.Content_revision.t
+  -> text:string
+  -> (Agent_protocol.Pending_control.Result.t, Agent_protocol.Error.t) Result.t
+
+(** Explicit run admission, retained by the connection for lost-reply reconciliation.
+    Authored_start requires a genuine unconsumed startup capability. *)
+val start_run
+  :  t
+  -> generation:int
+  -> expected_revision:int64
+  -> mode:Agent_protocol.Run.Mode.t
+  -> input:Agent_protocol.Run_start.Input.t
+  -> (Agent_protocol.Run_receipt.t, Agent_protocol.Error.t) result
 
 (** Replace one saved canonical user-text occurrence at the exact advertised
     session/content revisions. Uses the connection's existing retained original

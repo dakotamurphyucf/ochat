@@ -327,6 +327,7 @@ module Send_message_request : sig
     { session_id : Id.Session.t
     ; attachment_id : Id.Attachment.t
     ; content : Message_content.t
+    ; timing : Pending_input.Timing.t [@sexp.default Pending_input.Timing.Safe_boundary]
     ; idempotency_key : Idempotency_key.t
     }
   [@@deriving sexp]

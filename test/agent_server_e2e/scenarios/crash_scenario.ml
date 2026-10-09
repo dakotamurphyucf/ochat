@@ -103,6 +103,9 @@ let run_child env arguments =
   | [ "creator-recover"; root; boundary ] ->
     Crash_creator.run_child env ~root ~boundary ~recover:true
   | [ "generated-provider"; root ] -> Generated_provider_scenario.run_child env root
+  | [ "pending-input"; root ] -> Crash_pending_input.run_child env ~root ~recover:false
+  | [ "pending-input-recover"; root ] ->
+    Crash_pending_input.run_child env ~root ~recover:true
   | [ "owned-stop"; root ] -> Crash_owned_stop.run_child env ~root ~recover:false
   | [ "owned-stop-recover"; root ] -> Crash_owned_stop.run_child env ~root ~recover:true
   | [ "owned-stop-recover"; root; boundary ] ->
@@ -312,6 +315,7 @@ let cases =
   ; "authored.creation-lost-acknowledgement", Crash_authored_creation.test_lost_ack
   ; "generated.creator-outcome-recovery", Crash_creator.test
   ; "generated.owned-stop-recovery", Crash_owned_stop.test
+  ; "pending.interrupted-root-recovery", Crash_pending_input.test
   ; "side-effect.unknown-no-replay", Crash_unknown_effect.test
   ; "invocation.admission-publication-no-replay", Crash_invocation_publication.test
   ; "job.committed-intent-launch-once", Crash_queued_launch.test

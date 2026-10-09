@@ -1176,6 +1176,7 @@ module Send_message_request = struct
     { session_id : Id.Session.t
     ; attachment_id : Id.Attachment.t
     ; content : Message_content.t
+    ; timing : Pending_input.Timing.t [@sexp.default Pending_input.Timing.Safe_boundary]
     ; idempotency_key : Idempotency_key.t
     }
   [@@deriving sexp]
@@ -1186,7 +1187,11 @@ module Send_message_request = struct
          ~session_id:t.session_id
          ~attachment_id:t.attachment_id
          ~idempotency_key:t.idempotency_key
-       @ [ "content", Message_content.to_json t.content ])
+       @ [ "content", Message_content.to_json t.content ]
+       @
+       match t.timing with
+       | Pending_input.Timing.Safe_boundary -> []
+       | After_current_operation -> [ "timing", Pending_input.Timing.to_json t.timing ])
   ;;
 
   let of_json json =
@@ -1204,8 +1209,13 @@ module Send_message_request = struct
         Error (Protocol_error.invalid_request "provide either content or text, not both")
       | None, None -> Error (Protocol_error.invalid_request "message content is required")
     in
+    let%bind timing =
+      match Json_codec.optional fields "timing" with
+      | None -> Ok Pending_input.Timing.Safe_boundary
+      | Some value -> Pending_input.Timing.of_json value
+    in
     let%map idempotency_key = decode_idempotency_key fields in
-    { session_id; attachment_id; content; idempotency_key }
+    { session_id; attachment_id; content; timing; idempotency_key }
   ;;
 end
 

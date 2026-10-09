@@ -314,6 +314,7 @@ let on_event ctx state event = match event with
             ; claim_lifecycle =
                 (fun ~event ->
                   A.with_current_moderator_event (actor ()) ~operation_id:None ~event)
+            ; run_actions = (fun _ -> Ok None)
             ; lifecycle_started = (fun _ -> false)
             ; history =
                 (fun () ->
@@ -552,7 +553,11 @@ let on_event ctx state event = match event with
                     |> protocol_ok
                     |> Agent_session.History_codec.to_protocol
                   in
-                  A.submit_message actor_value ~attachment_id:writer.id message
+                  A.submit_message
+                    ~submitting_principal:principal_id
+                    actor_value
+                    ~attachment_id:writer.id
+                    message
                   |> protocol_ok
                   |> ignore;
                   let rec wait () =

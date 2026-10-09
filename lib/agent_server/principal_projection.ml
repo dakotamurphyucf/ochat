@@ -45,10 +45,12 @@ let readable_history_entry principal entry =
     Error
       (P.Error.create
          Permission_denied
-         ~message:"conversation search requires transcript access"
+         ~message:"reading history requires transcript access"
          ~retryable:false
          ())
 ;;
+
+let pending_history_entry = readable_history_entry
 
 let history principal (window : P.History.Window.t) =
   let open Result.Let_syntax in
@@ -286,6 +288,24 @@ let project_result principal = function
     in
     Result.map (P.Public.Result.Non_history.of_internal value) ~f:(fun value ->
       P.Public.Result.Non_history value)
+  | Session_pending_inputs value ->
+    let%bind.Result value = Pending_projection.view principal value in
+    P.Public.Result.Non_history.of_internal (P.Method_result.Session_pending_inputs value)
+    |> Result.map ~f:(fun value -> P.Public.Result.Non_history value)
+  | Session_pending_input value ->
+    let%bind.Result value = Pending_projection.outcome principal value in
+    P.Public.Result.Non_history.of_internal (P.Method_result.Session_pending_input value)
+    |> Result.map ~f:(fun value -> P.Public.Result.Non_history value)
+  | Session_cancel_pending_input value ->
+    let%bind.Result value = Pending_projection.control principal value in
+    P.Public.Result.Non_history.of_internal
+      (P.Method_result.Session_cancel_pending_input value)
+    |> Result.map ~f:(fun value -> P.Public.Result.Non_history value)
+  | Session_replace_pending_input value ->
+    let%bind.Result value = Pending_projection.control principal value in
+    P.Public.Result.Non_history.of_internal
+      (P.Method_result.Session_replace_pending_input value)
+    |> Result.map ~f:(fun value -> P.Public.Result.Non_history value)
   | value ->
     Result.map (P.Public.Result.Non_history.of_internal value) ~f:(fun value ->
       P.Public.Result.Non_history value)

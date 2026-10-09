@@ -28,6 +28,18 @@ val create_with_unload
   -> build:(unit -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result)
   -> t
 
+(** Actual shared-host constructor with explicit run preparation custody. The
+    build callback propagates [Some] to its actor-owned initialization/reservation
+    calls. Ordinary runtime loading passes [None]; no ambient owner is inferred. *)
+val create_with_run_unload
+  :  before_unload:(closing:bool -> (unit, Agent_protocol.Error.t) result)
+  -> actor:Agent_session.Session_actor.t
+  -> initial:Agent_session.Runtime_builder.t option
+  -> build:
+       (Agent_session.Run_preparation.t option
+        -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result)
+  -> t
+
 val is_loaded : t -> bool
 val ensure_loaded : t -> (unit, Agent_protocol.Error.t) result
 val unload : t -> (unit, Agent_protocol.Error.t) result
@@ -96,6 +108,15 @@ val reserve_inactive_close : t -> bool
     This is lifetime ownership, not generic scheduler dispatch or job admission. *)
 val with_background_runtime
   :  t
+  -> (Agent_session.Runtime_builder.t -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
+
+(** Same existing lifetime lease with explicitly attributable constructor
+    commits. The actor must have issued [preparation] first; every exit releases
+    the runtime lease, including cancellation and unexpected exceptions. *)
+val with_prepared_run_runtime
+  :  t
+  -> preparation:Agent_session.Run_preparation.t
   -> (Agent_session.Runtime_builder.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
 
@@ -308,6 +329,14 @@ val deliver_model_job_completion
 val deliver_background_job_completion
   :  t
   -> Agent_protocol.Job.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Deliver an immutable actual terminal attempt through the existing moderator
+    queue, independently of a later latest-job retry. The actor rechecks Pending
+    custody/current authority and commits its queue append atomically. *)
+val deliver_run_job_completion
+  :  t
+  -> Agent_session.Run_job_delivery.t
   -> (unit, Agent_protocol.Error.t) result
 
 (** [close] permanently prevents runtime reload and is safe to request from a

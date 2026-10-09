@@ -42,6 +42,7 @@ let send client session key text =
          ; attachment_id = session.attachment_id
          ; content = { kind = Plain_text; text; attachments = [] }
          ; idempotency_key = F.key key
+         ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
          })
   with
   | Session_send_message result -> result

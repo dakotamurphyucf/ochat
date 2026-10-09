@@ -75,6 +75,7 @@ let%expect_test
                             ; source_sha256 = script.source_sha256
                             }
                         ; creator = Invocation invocation.context.id
+                        ; subscription_binding = None
                         }
                   }
                 |> F.protocol
@@ -236,7 +237,12 @@ let%expect_test
                       ; completion
                       ; wake
                       ; created_at = context.created_at
-                      ; ownership = Some { source; creator = Invocation context.id }
+                      ; ownership =
+                          Some
+                            { source
+                            ; creator = Invocation context.id
+                            ; subscription_binding = None
+                            }
                       }
                     |> F.protocol
                   in

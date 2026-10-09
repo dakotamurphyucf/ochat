@@ -196,6 +196,76 @@ val finish_inference_owner
   -> owner:Inference_owner.t
   -> (unit, Agent_protocol.Error.t) Result.t
 
+(** Explicit constructor-only mutations under the actor-issued preparation.
+    Each request captures the token; the actor checks its issuer/current policy
+    before persistence. Ordinary APIs above never infer constructor custody. *)
+module Constructor_mutations : sig
+  val admit_inference
+    :  t
+    -> preparation:Run_preparation.t
+    -> owner:Inference_owner.t
+    -> relation:Transcript.Scope.relation
+    -> operation_id:Agent_protocol.Id.Operation.t option
+    -> invocation_id:Agent_protocol.Id.Invocation.t option
+    -> configuration:Inference.Observation.Configuration.t
+    -> (Inference_ledger.Handle.t, Agent_protocol.Error.t) Result.t
+
+  val acknowledge_inference
+    :  t
+    -> preparation:Run_preparation.t
+    -> owner:Inference_owner.t
+    -> handle:Inference_ledger.Handle.t
+    -> Inference_runtime.Attempt.t
+    -> (unit, Agent_protocol.Error.t) Result.t
+
+  val observe_inference
+    :  t
+    -> preparation:Run_preparation.t
+    -> handle:Inference_ledger.Handle.t
+    -> Inference.Observation.t
+    -> (unit, Agent_protocol.Error.t) Result.t
+
+  val observe_owned_inference
+    :  t
+    -> preparation:Run_preparation.t
+    -> owner:Inference_owner.t
+    -> Inference.Observation.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  val complete_inference
+    :  t
+    -> preparation:Run_preparation.t
+    -> owner:Inference_owner.t
+    -> handle:Inference_ledger.Handle.t
+    -> Inference_client.Completion.t
+    -> (unit, Agent_protocol.Error.t) Result.t
+
+  val release_inference
+    :  t
+    -> preparation:Run_preparation.t
+    -> owner:Inference_owner.t
+    -> handle:Inference_ledger.Handle.t
+    -> (unit, Agent_protocol.Error.t) Result.t
+
+  val finish_inference_owner
+    :  t
+    -> preparation:Run_preparation.t
+    -> owner:Inference_owner.t
+    -> (unit, Agent_protocol.Error.t) Result.t
+
+  val replace_shell_approval_grants
+    :  t
+    -> preparation:Run_preparation.t
+    -> Session.Shell_state.Approval_grant.persisted list
+    -> (unit, Agent_protocol.Error.t) result
+
+  val add_shell_manifest_grant
+    :  t
+    -> preparation:Run_preparation.t
+    -> Session.Shell_state.Manifest_grant.persisted
+    -> (unit, Agent_protocol.Error.t) result
+end
+
 (** Exclusive activation/recovery only, never read/query. Reconciles outstanding
     Prepared/Running using honest conservative delivery before fresh constructors. *)
 val reconcile_inference_recovery : t -> (unit, Agent_protocol.Error.t) Result.t
@@ -736,6 +806,14 @@ val begin_initialization
   -> expected:Session_state.t
   -> (Initialization_scope.t, Agent_protocol.Error.t) result
 
+(** Same existing constructor scope, explicitly bound to this run preparation.
+    Scoped commits recheck current custody and acknowledge only their own changes. *)
+val begin_run_initialization
+  :  t
+  -> preparation:Run_preparation.t
+  -> expected:Session_state.t
+  -> (Initialization_scope.t, Agent_protocol.Error.t) result
+
 (** Retire the issuing actor's scope idempotently, without a durable write. Wrong
     actors reject. The host must call this under cancellation protection on every
     exit before exposing the constructed runtime. *)
@@ -944,13 +1022,187 @@ val defer_history
 
 val submit_message
   :  t
+  -> ?timing:Agent_protocol.Pending_input.Timing.t
+  -> submitting_principal:Agent_protocol.Id.Principal.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> Agent_protocol.History.entry
   -> (submission, Agent_protocol.Error.t) result
 
-val submit_message_with_command_audit
+(** Called by the restoring host before any runtime can execute. Durable old
+    live runs become Interrupted with immutable Unconfirmed owner evidence and
+    terminal receipts; installation epoch is unchanged and no effect replays. *)
+val reconcile_run_recovery : t -> (unit, Agent_protocol.Error.t) result
+
+(** Native action provider for the exact currently held actor event borrow.
+    Returns None for unrelated events, and rechecks the current host policy.
+    Execution authority belongs to the admitted host scope, independently of
+    transport attachment lifetime; initial admission still requires a writer. The owning actor closes the service before releasing the borrow. *)
+val run_actions
+  :  t
+  -> Agent_protocol.Moderator_execution.t
+  -> (Run_action_service.t option, Agent_protocol.Error.t) result
+
+(** Captured constructor's staged work, using existing admission/cancellation
+    validation plus exact preparation custody in the same mailbox commit. *)
+val add_run_constructor_job
+  :  t
+  -> preparation:Run_preparation.t
+  -> Agent_protocol.Job.t
+  -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
+
+val add_run_constructor_schedule
+  :  t
+  -> preparation:Run_preparation.t
+  -> Agent_protocol.Schedule.t
+  -> (Agent_protocol.Schedule.t, Agent_protocol.Error.t) result
+
+val cancel_run_constructor_schedule
+  :  t
+  -> preparation:Run_preparation.t
+  -> schedule_id:Agent_protocol.Id.Schedule.t
+  -> (Agent_protocol.Schedule.t, Agent_protocol.Error.t) result
+
+(** Attributable constructor/user history reservation; same serialized custody
+    check as its durable high-water-mark commit. *)
+val reserve_run_history_block
+  :  t
+  -> preparation:Run_preparation.t
+  -> count:int
+  -> (History_id_source.reservation, Agent_protocol.Error.t) result
+
+(** Synchronous constructor work carries the exact live admission custody.
+    Admission/claim and terminal updates recheck the issuer and current policy;
+    no preparation is inferred from the actor's ambient state. *)
+val start_run_constructor_model_job
+  :  t
+  -> preparation:Run_preparation.t
+  -> Agent_protocol.Job.t
+  -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
+
+val complete_run_constructor_model_job
+  :  t
+  -> preparation:Run_preparation.t
+  -> job_id:Agent_protocol.Id.Job.t
+  -> generation:int
+  -> attempt:int
+  -> Runtime_builder.model_job_outcome
+  -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
+
+(** Captures only the exact constructor model job's source/recipe selection;
+    actual generation/attempt and token custody are checked before persistence. *)
+val capture_run_constructor_model_source
+  :  t
+  -> preparation:Run_preparation.t
+  -> job_id:Agent_protocol.Id.Job.t
+  -> generation:int
+  -> target:Inference.Request.Target.t
+  -> limits:Document_schema.Limits.t
+  -> (unit, Agent_protocol.Error.t) result
+
+val capture_run_constructor_recipe_target
+  :  t
+  -> preparation:Run_preparation.t
+  -> job_id:Agent_protocol.Id.Job.t
+  -> generation:int
+  -> attempt:int
+  -> target:Inference.Request.Target.t
+  -> limits:Document_schema.Limits.t
+  -> (unit, Agent_protocol.Error.t) result
+
+val interrupt_run_constructor_job
+  :  t
+  -> preparation:Run_preparation.t
+  -> job_id:Agent_protocol.Id.Job.t
+  -> generation:int
+  -> attempt:int
+  -> reason:string
+  -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
+
+(** Captured runtime's moderator install in the preparation's acknowledged
+    constructor transaction. Matching checkpoints produce no durable advance. *)
+val checkpoint_run_moderator
+  :  t
+  -> preparation:Run_preparation.t
+  -> Jsonaf.t option
+  -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
+(** Install the captured runtime's accounting policy under constructor custody.
+    Matching policies do not advance the durable revision. *)
+val enable_run_constructor_turn_budget
+  :  t
+  -> preparation:Run_preparation.t
+  -> Chat_response.Runtime_semantics.policy
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Final checked admission consumes original input from the actual issuing
+    preparation. Always releases custody. Distinguishes definite no-run rejection
+    from an attempted uncertain final persistence; exceptions/cancellation retain
+    their primary backtrace and still close custody. *)
+val admit_prepared_run
+  :  t
+  -> command_audit:Document_schema.Document.t option
+  -> preparation:Run_preparation.t
+  -> scope:Run_admission.Scope.t
+  -> session:Agent_protocol.Session_ref.t
+  -> entry:Agent_protocol.History.entry option
+  -> (Run_admission_outcome.t, Agent_protocol.Error.t) result
+
+(** Issue exclusive ephemeral custody after original CAS/current policy/writer
+    checks. Receipt retries allocate nothing. Every host exit must end custody. *)
+val begin_run_preparation
+  :  t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> principal_id:Agent_protocol.Id.Principal.t
+  -> request:Agent_protocol.Run_start.t
+  -> request_sha256:string
+  -> (Run_preparation.Decision.t, Agent_protocol.Error.t) result
+
+val end_run_preparation : t -> Run_preparation.t -> (unit, Agent_protocol.Error.t) result
+
+(** Current host policy, target and writer are checked in one mailbox read before
+    receipt lookup. [authorize] is host-owned and non-yielding. No runtime load,
+    history allocation or authority reconstruction occurs on this path. *)
+val run_start_receipt
+  :  t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> principal_id:Agent_protocol.Id.Principal.t
+  -> request:Agent_protocol.Run_start.t
+  -> request_sha256:string
+  -> (Agent_protocol.Run_receipt.t option, Agent_protocol.Error.t) result
+
+(** Internal host-authenticated run admission. The host prepares [entry] from
+    exactly the request's user input through its existing runtime parser, or None
+    for the actual pending authored startup. The scope rechecks current host
+    authority in the actor. Current live writer visibility precedes receipt retry;
+    an old receipt never creates a new execution scope. New admission persists
+    run/receipt with the actual history+operation or startup checkpoint before
+    existing execution starts. Busy user input is rejected rather than deferred
+    without a bound owner. Persistence uncertainty is reconciled by the same key. *)
+val admit_run
+  :  t
+  -> scope:Run_admission.Scope.t
+  -> request:Agent_protocol.Run_start.t
+  -> session:Agent_protocol.Session_ref.t
+  -> request_sha256:string
+  -> entry:Agent_protocol.History.entry option
+  -> (Agent_protocol.Run_receipt.t, Agent_protocol.Error.t) result
+
+(** Same atomic admission with the existing command-audit persistence carrier. *)
+val admit_run_with_command_audit
   :  t
   -> command_audit:Document_schema.Document.t
+  -> scope:Run_admission.Scope.t
+  -> request:Agent_protocol.Run_start.t
+  -> session:Agent_protocol.Session_ref.t
+  -> request_sha256:string
+  -> entry:Agent_protocol.History.entry option
+  -> (Agent_protocol.Run_receipt.t, Agent_protocol.Error.t) result
+
+val submit_message_with_command_audit
+  :  t
+  -> ?timing:Agent_protocol.Pending_input.Timing.t
+  -> command_audit:Document_schema.Document.t
+  -> submitting_principal:Agent_protocol.Id.Principal.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> Agent_protocol.History.entry
   -> (submission, Agent_protocol.Error.t) result
@@ -985,6 +1237,25 @@ val delete_history
   -> expected_revision:int64
   -> Agent_protocol.History.Id.t
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
+(** Serialized cancel/edit/adopt arbitration. Current authorized host principal
+    and its pure public projection are required; original submitting ownership
+    is checked again against the admitted durable wrapper/disposition. *)
+val cancel_pending
+  :  t
+  -> ?command_audit:Document_schema.Document.t
+  -> principal:Agent_protocol.Id.Principal.t
+  -> project:Pending_inspection.projection
+  -> Agent_protocol.Pending_control.Cancel_request.t
+  -> (Agent_protocol.Pending_control.Result.t, Agent_protocol.Error.t) result
+
+val replace_pending
+  :  t
+  -> ?command_audit:Document_schema.Document.t
+  -> principal:Agent_protocol.Id.Principal.t
+  -> project:Pending_inspection.projection
+  -> Agent_protocol.Pending_control.Replace_request.t
+  -> (Agent_protocol.Pending_control.Result.t, Agent_protocol.Error.t) result
 
 (** [compact t ~attachment_id ~expected_revision] starts an asynchronous summary
     without changing canonical history until the successful terminal commit.
@@ -1304,6 +1575,17 @@ val recover_background_results
   :  t
   -> max_count:int
   -> max_total_bytes:int
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Enqueues an exact retained terminal attempt through the existing moderator
+    checkpoint. Rechecks actual Pending custody, source and current run authority;
+    denial retires that run truthfully before returning the original denial.
+    Saves Enqueued and the exact queue append in one durable transaction. *)
+val enqueue_run_job_delivery
+  :  t
+  -> delivery:Run_job_delivery.t
+  -> before:Session.Moderator_state.Identity_snapshot.t
+  -> after:Jsonaf.t
   -> (unit, Agent_protocol.Error.t) result
 
 (** Optional expected values perform checkpoint and complete job-record comparison

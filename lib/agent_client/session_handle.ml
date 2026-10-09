@@ -492,7 +492,7 @@ let stop t ~mode =
       | _ -> Error (Agent_protocol.Error.invalid_request "unexpected session.stop result"))
 ;;
 
-let send_message t content =
+let send_message t ?(timing = Agent_protocol.Pending_input.Timing.Safe_boundary) content =
   mutation_command
     t
     (fun idempotency_key ->
@@ -500,11 +500,132 @@ let send_message t content =
          { session_id = t.session_id
          ; attachment_id = t.attachment.id
          ; content
+         ; timing
          ; idempotency_key
          })
     (function
       | Session_send_message result -> Ok result
       | _ -> Error (Agent_protocol.Error.invalid_request "unexpected send result"))
+;;
+
+let pending_inputs t page =
+  let open Result.Let_syntax in
+  let%bind request =
+    Agent_protocol.Pending_query.Request.create ~session_id:t.session_id ~page
+  in
+  match
+    Connection.request_without_history t.connection (Session_pending_inputs request)
+  with
+  | Ok (Session_pending_inputs view) -> Ok view
+  | Ok _ ->
+    Error (Agent_protocol.Error.invalid_request "unexpected pending inputs result")
+  | Error _ as failure -> failure
+;;
+
+let pending_input t history_id =
+  match
+    Connection.request_without_history
+      t.connection
+      (Session_pending_input { session_id = t.session_id; history_id })
+  with
+  | Ok (Session_pending_input outcome) -> Ok outcome
+  | Ok _ -> Error (Agent_protocol.Error.invalid_request "unexpected pending input result")
+  | Error _ as failure -> failure
+;;
+
+let pending_target
+      t
+      ~expected_generation
+      ~expected_pending_revision
+      ~history_id
+      ~expected_content_revision
+  =
+  let open Result.Let_syntax in
+  let%bind idempotency_key = key () in
+  Agent_protocol.Pending_control.Cancel_request.create
+    ~session_id:t.session_id
+    ~attachment_id:(attachment t).id
+    ~expected_generation
+    ~expected_pending_revision
+    ~history_id
+    ~expected_content_revision
+    ~idempotency_key
+;;
+
+let cancel_pending_input
+      t
+      ~expected_generation
+      ~expected_pending_revision
+      ~history_id
+      ~expected_content_revision
+  =
+  let open Result.Let_syntax in
+  let%bind target =
+    pending_target
+      t
+      ~expected_generation
+      ~expected_pending_revision
+      ~history_id
+      ~expected_content_revision
+  in
+  match
+    Connection.request_without_history t.connection (Session_cancel_pending_input target)
+  with
+  | Ok (Session_cancel_pending_input result) -> Ok result
+  | Ok _ ->
+    Error (Agent_protocol.Error.invalid_request "unexpected pending cancellation result")
+  | Error _ as failure -> failure
+;;
+
+let replace_pending_input
+      t
+      ~expected_generation
+      ~expected_pending_revision
+      ~history_id
+      ~expected_content_revision
+      ~text
+  =
+  let open Result.Let_syntax in
+  let%bind target =
+    pending_target
+      t
+      ~expected_generation
+      ~expected_pending_revision
+      ~history_id
+      ~expected_content_revision
+  in
+  let%bind request =
+    Agent_protocol.Pending_control.Replace_request.create ~target ~text
+  in
+  match
+    Connection.request_without_history
+      t.connection
+      (Session_replace_pending_input request)
+  with
+  | Ok (Session_replace_pending_input result) -> Ok result
+  | Ok _ ->
+    Error (Agent_protocol.Error.invalid_request "unexpected pending replacement result")
+  | Error _ as failure -> failure
+;;
+
+let start_run t ~generation ~expected_revision ~mode ~input =
+  let open Result.Let_syntax in
+  let%bind key = key () in
+  let%bind request =
+    Agent_protocol.Run_start.create
+      ~session_id:t.session_id
+      ~attachment_id:(attachment t).id
+      ~generation
+      ~expected_revision
+      ~mode
+      ~input
+      ~key
+  in
+  match Connection.request_without_history t.connection (Session_run_start request) with
+  | Ok (Session_run_start receipt) -> Ok receipt
+  | Ok _ ->
+    Error (Agent_protocol.Error.invalid_request "unexpected session.run.start result")
+  | Error _ as failure -> failure
 ;;
 
 let edit_history t ~expected_generation ~expected_revision edit =

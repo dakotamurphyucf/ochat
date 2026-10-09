@@ -86,7 +86,12 @@ let%expect_test
                  ; completion = Succeeded (`String "saved result")
                  ; wake = Request_turn
                  ; created_at = P.Timestamp.now ()
-                 ; ownership = Some { source; creator = Invocation creator.context.id }
+                 ; ownership =
+                     Some
+                       { source
+                       ; creator = Invocation creator.context.id
+                       ; subscription_binding = None
+                       }
                  }
                |> protocol_ok
              in
@@ -129,7 +134,12 @@ let%expect_test
                |> Agent_session.History_codec.to_protocol
              in
              let submitted =
-               A.submit_message actor ~attachment_id:writer.id user |> protocol_ok
+               A.submit_message
+                 ~submitting_principal:(principal ()).id
+                 actor
+                 ~attachment_id:writer.id
+                 user
+               |> protocol_ok
              in
              operation := submitted.operation_id;
              Background_shell_tests.wait env (fun () ->

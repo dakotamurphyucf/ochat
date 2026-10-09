@@ -45,7 +45,12 @@ let%expect_test
             id = P.Id.Delivery.create ()
           ; invocation_id = None
           ; work = None
-          ; ownership = Some { source; creator = Moderator_event event.context.id }
+          ; ownership =
+              Some
+                { source
+                ; creator = Moderator_event event.context.id
+                ; subscription_binding = None
+                }
           }
         |> protocol_ok)
     in

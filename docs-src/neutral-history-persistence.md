@@ -664,3 +664,57 @@ visibility while their target exists. The narrow absence exception is the bounde
 original Protected successful Remove acknowledgement, with the original principal
 and current deletion policy. Archive, restore and resume receipts never bypass
 current visibility merely because the caller once held broad host authority.
+
+## Pending input durable custody (OCH-169)
+
+Named session state version 9 follows version 8's optional run lifecycle index.
+Native state is version 24 and named delta version 6. The adjacent 8→9 structural
+conversion wraps each original deferred entry without re-encoding its contents,
+introduces a zero pending revision and empty retained dispositions, and captures
+unknown legacy submitting provenance. It preserves unrelated raw run fields and
+compatible unknown paths; same-name new semantic fields are rejected rather than
+silently reinterpreted.
+
+The existing queue remains the sole pending-input carrier. New admissions capture
+host-authenticated submitting principal separately from receipt retention.
+Adoption atomically transfers the exact queued entry into canonical history and
+the exact wrapper metadata minus its entry into a declared storage-only
+adoption-custody member. Compatible nested future fields, explicit nulls and
+numeric spelling survive admission, journal replay and restart. Public DTOs
+project only known timing and authorized public history, never private custody
+or provenance.
+
+Ordered admission keeps intermediate custody transfers private until the complete
+candidate passes state validation, preservation checks, and comparison with the
+ordered delta result. Persistence reuses that exact validated final encoding and
+decodes it once to establish the next preservation basis before archive or journal
+effects. This avoids a repeated encoding without bypassing native validation or
+changing unknown-field custody.
+
+Pending cancellation and replacement archive the exact prior admitted session
+document before their journal record. Ordinary adoption does not archive full
+history. The independent pending-outcome retention policy keeps at most 4096
+records in both live admission and recovery; unrelated notification, delegation
+and command receipt limits do not affect it. When bounded retained dispositions expire, the exact removed private
+records are independently archived before the eviction journal record; rejected
+archive/journal publication leaves state, events and worker launch unchanged.
+Transient memory backends retain the same exact custody within their owned
+lifetime. Expired public lookup remains unavailable rather than inventing a
+missing or never-submitted outcome. Source reset/replacement and proved canonical
+causal retirement preserve truthful explicit disposition reasons.
+
+The offline `@test/agent_server_e2e/agent-e2e-pending` alias runs
+`crash-matrix / pending.interrupted-root-recovery`; the same focused case is also
+part of the required `agent-e2e-extensibility-pr` selection. It kills an owned child only
+after the actual daemon acknowledges after-root input and graceful stop, then
+reopens the physical store. Cold inspection cannot invent terminal proof; actual
+activation records matching Interrupted evidence while the queue remains stopped.
+Explicit resume admits one canonical occurrence, and a second reopen retains its
+adopted outcome. SIGKILL exercises process interruption, not power-loss durability.
+
+The `cross-transport-conformance / conformance.pending-inputs` case exercises the
+four pending methods over Unix, HTTP, and both stdio gateways. It uses actual
+persisted queued input with a cancelled predecessor and stopped session. Read-only
+controls fail; replacement keeps identity and changes content revision once; stale
+controls fail; cancellation and original-key retries preserve the truthful outcome.
+No live inference provider is used.

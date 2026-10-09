@@ -44,15 +44,15 @@ let projected_payloads ~previous state payloads =
     @ [ Agent_protocol.Event.Durable.Payload.Moderator_overlay_changed projection ]
 ;;
 
-let replacement_events state delta events =
-  match delta with
-  | Session_delta.Created _ ->
+let replacement_events state replacement events =
+  match replacement with
+  | Some _ ->
     let snapshot =
       Session_state.snapshot ~now:state.Session_state.identity.updated_at state
     in
     List.map events ~f:(fun event ->
       Agent_protocol.Event.Durable.with_replacement_snapshot event snapshot)
-  | _ -> events
+  | None -> events
 ;;
 
 let validate_session_updates state payloads =
@@ -187,9 +187,9 @@ let track_host_turns ~previous state delta payloads =
   else (
     let state = { state with inference_ledger } in
     let delta =
-      match delta with
-      | Session_delta.Created _ -> Session_delta.Created state
-      | _ -> Session_delta.Batch [ delta; Inference_ledger_changed inference_ledger ]
+      match Session_replacement_delta.classify delta with
+      | Some replacement -> Session_replacement_delta.with_state replacement state
+      | None -> Session_delta.Batch [ delta; Inference_ledger_changed inference_ledger ]
     in
     state, delta)
 ;;
@@ -197,6 +197,7 @@ let track_host_turns ~previous state delta payloads =
 let apply ~now state ~delta ~payloads =
   let open Result.Let_syntax in
   let previous = state in
+  let replacement = Session_replacement_delta.classify delta in
   let%bind () = validate_session_updates state payloads in
   let%bind delta = Session_delta.capture_new_model_jobs state delta in
   let%bind state = Session_delta.apply state delta in
@@ -205,8 +206,8 @@ let apply ~now state ~delta ~payloads =
     Managed_submission_tracking.apply ~previous ~state ~delta ~payloads ~now
   in
   let%bind state, delta =
-    match delta with
-    | Session_delta.Created _ ->
+    match Session_replacement_delta.classify delta with
+    | Some replacement ->
       let%map managed_stops =
         List.fold_result
           previous.managed_stops
@@ -221,8 +222,8 @@ let apply ~now state ~delta ~payloads =
             | None -> Ok (receipts @ [ receipt ]))
       in
       let state = { state with managed_stops } in
-      state, Session_delta.Created state
-    | _ -> Ok (state, delta)
+      state, Session_replacement_delta.with_state replacement state
+    | None -> Ok (state, delta)
   in
   let%bind state, delta =
     match previous.lifecycle.desired, state.lifecycle.desired with
@@ -230,9 +231,9 @@ let apply ~now state ~delta ~payloads =
       let%map stop_epoch = increment "stop epoch" previous.stop_epoch in
       let state = { state with stop_epoch } in
       let delta =
-        match delta with
-        | Session_delta.Created _ -> Session_delta.Created state
-        | _ -> Session_delta.Batch [ delta; Stop_epoch_changed stop_epoch ]
+        match Session_replacement_delta.classify delta with
+        | Some replacement -> Session_replacement_delta.with_state replacement state
+        | None -> Session_delta.Batch [ delta; Stop_epoch_changed stop_epoch ]
       in
       state, delta
     | _ -> Ok (state, delta)
@@ -254,7 +255,11 @@ let apply ~now state ~delta ~payloads =
   in
   let payloads =
     if
-      (statuses_changed || inference_changed)
+      (statuses_changed
+       || inference_changed
+       || not
+            (Option.equal Run_state.equal_observation previous.run_state state.run_state)
+      )
       && not
            (List.exists payloads ~f:(function
               | Agent_protocol.Event.Durable.Payload.Session_updated _ -> true
@@ -283,7 +288,7 @@ let apply ~now state ~delta ~payloads =
       | payload -> payload)
   in
   let events = assign_events state ~revision ~first_sequence ~now payloads in
-  let events = replacement_events state delta events in
+  let events = replacement_events state replacement events in
   let events =
     if statuses_changed
     then

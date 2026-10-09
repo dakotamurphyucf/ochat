@@ -24,6 +24,7 @@ end
 type t =
   { archive :
       Session_state.Compaction_archive.t -> D.Document.t -> (unit, P.Error.t) result
+  ; pending_archive : (Pending_archive.t -> (unit, P.Error.t) result) option
   ; command_accepted : D.Document.t -> int64 -> unit
   ; before_commit : (Session_state.t -> (unit, P.Error.t) result) option
   ; writer : Store.Commit_writer.t
@@ -38,6 +39,7 @@ type t =
 
 let create
       ~archive
+      ~pending_archive
       ~before_commit
       ~command_accepted
       ~writer
@@ -49,6 +51,7 @@ let create
       ~previous_transaction_hash
   =
   { archive
+  ; pending_archive
   ; command_accepted
   ; before_commit
   ; writer
@@ -87,13 +90,13 @@ let accepted_at_ns state =
   |> Int64.of_int
 ;;
 
-let transaction t ~command_audit previous transition =
+let transaction t ~state_document ~command_audit previous transition =
   let open Result.Let_syntax in
   let%bind delta =
     Session_delta_document.create
       transition.Session_transition.delta
       ~limits:t.limits
-      ~state_document:(Session_state_document.with_value t.restored.state_document)
+      ~state_document:(Session_state_document.with_value state_document)
     |> Result.map_error ~f:document_error
   in
   let%bind events =
@@ -141,24 +144,28 @@ let admit_state_document state_document ~limits =
 
 let commit t ~command_audit ~(previous : Session_state.t) transition =
   let open Result.Let_syntax in
-  let%bind state_document =
-    History_retirement.admit
+  let%bind admitted =
+    Session_document_transition.admit_encoded
       t.restored.state_document
       ~delta:transition.Session_transition.delta
       ~next:transition.state
       ~limits:t.archive_limits
     |> Result.map_error ~f:(fun error -> protocol_error (document_error error))
   in
-  let next = { t.restored with state_document } in
-  (* Validate the complete merge and immutable transaction before any archive or
-    journal write. Unknown-bearing deletion fails with all durable owners intact. *)
-  let%bind _, state_document =
-    admit_state_document next.state_document ~limits:t.archive_limits
+  (* Ordered admission already validated and encoded this exact original native
+     candidate. Decode that immutable encoding once to materialize the complete
+     next preservation basis. All admission and transaction validation still
+     precedes archive/journal effects. *)
+  let%bind state_document =
+    Session_state_document.decode
+      ~limits:t.archive_limits
+      (Session_state_document.Admitted.document admitted)
     |> Result.map_error ~f:(fun e -> protocol_error (document_error e))
   in
-  let next = { next with state_document } in
+  let next = { t.restored with state_document } in
   let%bind transaction, events =
-    transaction t ~command_audit previous transition |> Result.map_error ~f:protocol_error
+    transaction t ~state_document ~command_audit previous transition
+    |> Result.map_error ~f:protocol_error
   in
   let references =
     List.filter transition.state.conversation.compaction_archives ~f:(fun reference ->
@@ -176,9 +183,27 @@ let commit t ~command_audit ~(previous : Session_state.t) transition =
       |> Result.map ~f:Option.some
       |> Result.map_error ~f:(fun e -> protocol_error (document_error e))
   in
+  let%bind pending_archives =
+    Pending_archive_transition.collect
+      previous
+      ~delta:transition.delta
+      ~limits:t.archive_limits
+  in
   let%bind () =
     Option.value_map t.before_commit ~default:(Ok ()) ~f:(fun prepare ->
       prepare transition.state)
+  in
+  let%bind () =
+    List.fold_result pending_archives ~init:() ~f:(fun () archive ->
+      match t.pending_archive with
+      | Some publish -> publish archive
+      | None ->
+        Error
+          (P.Error.create
+             Persistence_error
+             ~message:"pending disposition archive publisher is unavailable"
+             ~retryable:false
+             ()))
   in
   let%bind () =
     List.fold_result references ~init:() ~f:(fun () reference ->

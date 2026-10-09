@@ -230,6 +230,13 @@ let load store ~sw ~session ~max_bytes reference =
 ;;
 
 module Publisher = struct
+  module Storage = struct
+    type t =
+      | Automatic
+      | Artifact
+    [@@deriving equal, sexp]
+  end
+
   type collection_limits =
     { max_intents : int
     ; max_entries : int
@@ -313,7 +320,7 @@ module Publisher = struct
            ())
   ;;
 
-  let publish t ~jobs ~job ~now completion ~persist =
+  let publish t ?(storage = Storage.Automatic) ~jobs ~job ~now completion ~persist =
     with_owner t.mutex (fun () ->
       let open Result.Let_syntax in
       prune t jobs;
@@ -323,7 +330,12 @@ module Publisher = struct
         List.find t.pending ~f:(fun prepared ->
           P.Id.Job.equal (reference prepared).job_id job.P.Job.id)
       in
-      match cached, String.length content <= t.inline_bytes with
+      let inline =
+        match storage with
+        | Automatic -> String.length content <= t.inline_bytes
+        | Artifact -> false
+      in
+      match cached, inline with
       | None, true -> persist (P.Stored_completion.Inline completion)
       | _, _ ->
         let%bind prepared =

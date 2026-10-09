@@ -672,7 +672,14 @@ let architecture_methods =
   ; "session.configuration_update"
   ; "session.stop"
   ; "session.cancel_operation"
+  ; "session.run.start"
+  ; "session.runs"
+  ; "session.run"
   ; "session.send_message"
+  ; "session.pending_inputs"
+  ; "session.pending_input"
+  ; "session.cancel_pending_input"
+  ; "session.replace_pending_input"
   ; "session.compact"
   ; "session.edit_history"
   ; "session.continue_history"
@@ -712,7 +719,7 @@ let%expect_test "every architecture method has request and result dispatch" =
           (List.equal String.equal expected (normalize Method_result.supported_methods)
            : bool)
       }];
-  [%expect {| ((method_count 72) (requests true) (results true)) |}]
+  [%expect {| ((method_count 79) (requests true) (results true)) |}]
 ;;
 
 let%expect_test "history deletion requires stable ID, revision and idempotency" =
