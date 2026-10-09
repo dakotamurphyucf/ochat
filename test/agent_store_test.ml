@@ -3392,3 +3392,53 @@ let%expect_test
     (true true true)
   |}]
 ;;
+
+let%expect_test "retained artifact store opens existing namespace without repair" =
+  with_temp_directory "ochat-artifact-open-existing" (fun env temporary ->
+    let module Store = Agent_store.Prompt_artifact_store in
+    let path name = Eio.Path.(Eio.Stdenv.fs env / Filename.concat temporary name) in
+    let missing = Filename.concat temporary "missing" in
+    let missing_rejected =
+      match Store.open_existing ~env ~root:missing with
+      | Error (Agent_store.Store_error.Missing actual) -> String.equal actual missing
+      | Ok _ | Error _ -> false
+    in
+    let missing_preserved =
+      match Eio.Path.kind ~follow:false (path "missing") with
+      | `Not_found -> true
+      | _ -> false
+    in
+    let root = Filename.concat temporary "artifacts" in
+    Eio.Path.mkdir ~perm:0o700 (path "artifacts");
+    Eio.Path.save
+      ~create:(`Exclusive 0o600)
+      Eio.Path.(path "artifacts" / "evidence")
+      "retained";
+    let existing = Store.open_existing ~env ~root |> Result.is_ok in
+    Eio.Path.symlink ~link_to:root (path "linked");
+    let linked_rejected =
+      match Store.open_existing ~env ~root:(Filename.concat temporary "linked") with
+      | Error (Agent_store.Store_error.Corrupt _) -> true
+      | Ok _ | Error _ -> false
+    in
+    let link_preserved =
+      match Eio.Path.kind ~follow:false (path "linked") with
+      | `Symbolic_link -> true
+      | _ -> false
+    in
+    let evidence = Eio.Path.load Eio.Path.(path "artifacts" / "evidence") in
+    let unchanged =
+      String.equal evidence "retained"
+      && List.equal String.equal (Eio.Path.read_dir (path "artifacts")) [ "evidence" ]
+    in
+    print_s
+      [%sexp
+        (( missing_rejected
+         , missing_preserved
+         , existing
+         , linked_rejected
+         , link_preserved
+         , unchanged )
+         : bool * bool * bool * bool * bool * bool)]);
+  [%expect {| (true true true true true true) |}]
+;;

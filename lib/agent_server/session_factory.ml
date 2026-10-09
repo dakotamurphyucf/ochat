@@ -495,7 +495,7 @@ let lookup_state_source t (state : Agent_session.Session_state.t) =
     in
     let%bind () = validate_delegated_target state record in
     let%bind artifact_store =
-      Agent_store.Prompt_artifact_store.create
+      Agent_store.Prompt_artifact_store.open_existing
         ~env:t.env
         ~root:
           (Agent_store.Data_root.prompt_artifacts_path
@@ -5843,12 +5843,18 @@ let read_owned_session t handle =
       ~validate:(validate_recovery_state t handle)
     |> Result.map_error ~f:protocol_of_store
   in
-  let%map restored =
+  let%bind restored =
     Result.of_option
       recovered.state
       ~error:(corrupt "durable session has no restored state")
   in
-  Agent_session.Session_persistence.Restored.state restored
+  let state = Agent_session.Session_persistence.Restored.state restored in
+  let%map () =
+    match state.spec.protocol.prompt with
+    | Generated _ -> lookup_state_source t state |> Result.map ~f:(fun _ -> ())
+    | Catalog _ | Local_path _ -> Ok ()
+  in
+  state
 ;;
 
 let read_session t index_entry =

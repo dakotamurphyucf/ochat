@@ -265,7 +265,10 @@ val recover_session
 
 (** Immutable Recovery.read using the caller's existing checked Handle/actor lock.
     Retains no resource and performs no repair, source/credential/runtime creation
-    or checkpoint writes. Caller closes Handle and excludes lifecycle mutations. *)
+    or checkpoint writes. Generated and authored delegated source identity/contract
+    and captured inference target are checked against their retained admission,
+    without requiring a live parent or native workspace. Caller closes Handle and
+    excludes lifecycle mutations. *)
 val read_owned_session
   :  t
   -> Agent_store.Session_store.Handle.t

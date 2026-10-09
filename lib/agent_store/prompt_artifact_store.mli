@@ -53,6 +53,11 @@ type t
 
 val create : env:Eio_unix.Stdenv.base -> root:string -> (t, Store_error.t) result
 
+(** Admit an existing absolute, non-symlink directory without creating or repairing
+    its namespace. Missing/non-directory roots fail preserved. Performs no file
+    load or authority grant; each [load] still validates its artifact document. *)
+val open_existing : env:Eio_unix.Stdenv.base -> root:string -> (t, Store_error.t) result
+
 (** [install] writes owner-read-only files into an exclusive staging directory,
     flushes files and staging directories, then renames it to the revision ID and
     flushes the artifact parent before acknowledgment. Uncertain final publication

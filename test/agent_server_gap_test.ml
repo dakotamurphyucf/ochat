@@ -975,6 +975,23 @@ let%expect_test
             revision
           ; latest_event_sequence
           ; session = { initial.session with revision; latest_event_sequence }
+          ; lifecycle =
+              Option.map initial.lifecycle ~f:(fun observation ->
+                let module L = Agent_protocol.Session_lifecycle in
+                let previous = L.Observation.expected observation in
+                let expected =
+                  L.Expected.create
+                    ~reference:(L.Expected.reference previous)
+                    ~generation:(L.Expected.generation previous)
+                    ~session_revision:revision
+                    ~lifecycle_revision:(L.Expected.lifecycle_revision previous)
+                  |> ok
+                in
+                L.Observation.create
+                  ~expected
+                  ~status:(L.Observation.status observation)
+                  ~admission:(L.Observation.admission observation)
+                |> ok)
           }
         in
         let event =
