@@ -2,15 +2,32 @@ open Core
 module P = Agent_protocol
 
 type t =
-  { version : int
-  ; reference : P.Job_artifact.t
-  ; metadata : Blob_store.Metadata.t
+  { reference : P.Job_artifact.t
+  ; metadata : Blob_metadata.t
+  ; stage : Blob_stage_documents.t
+  ; document : Document_schema.Document.t
+  ; contents : string
   }
-[@@deriving sexp]
 
 let reference t = t.reference
 let metadata t = t.metadata
+let stage t = t.stage
 let max_payload_length = 32768
+
+let iter_reference_strings t ~f =
+  Document_fields.iter_strings (Document_schema.Document.json t.document) ~f;
+  List.iter
+    [ Blob_stage_documents.temporary_bytes t.stage
+    ; Blob_stage_documents.durable_bytes t.stage
+    ]
+    ~f:(fun bytes ->
+      match
+        Document_schema.Document.decode ~limits:Blob_metadata_document.limits bytes
+      with
+      | Ok document ->
+        Document_fields.iter_strings (Document_schema.Document.json document) ~f
+      | Error _ -> assert false)
+;;
 
 let directory session =
   Filename.concat (Session_store.Handle.directory session) "result-preparations"
@@ -21,31 +38,9 @@ let path session t = Filename.concat (directory session) (filename t)
 let corrupt message = Error (Store_error.Corrupt message)
 
 let validate_session session_id t =
-  let open Result.Let_syntax in
-  let%bind _ =
-    P.Job_artifact.of_json (P.Job_artifact.to_json t.reference)
-    |> Result.map_error ~f:(fun error -> Store_error.Corrupt error.P.Error.message)
-  in
-  let%bind _ =
-    P.Id.Principal.of_json (P.Id.Principal.to_json t.metadata.creating_principal)
-    |> Result.map_error ~f:(fun error -> Store_error.Corrupt error.P.Error.message)
-  in
-  match
-    t.version = 1
-    && P.Id.Session.equal t.reference.session_id session_id
-    && Option.exists
-         t.metadata.target_session
-         ~f:(P.Id.Session.equal t.reference.session_id)
-    && (not t.metadata.durable)
-    && String.equal t.metadata.allowed_use (P.Job_artifact.allowed_use t.reference)
-    && Jsonaf.exactly_equal
-         (P.Blob.Metadata.to_json t.metadata.blob)
-         (P.Blob.Metadata.to_json t.reference.blob)
-    && Option.for_all t.metadata.expires_at ~f:(fun at ->
-      P.Timestamp.compare at t.metadata.created_at >= 0)
-  with
-  | true -> Ok ()
-  | false -> corrupt "invalid job result preparation intent"
+  if P.Id.Session.equal t.reference.session_id session_id
+  then Ok ()
+  else corrupt "job result preparation belongs to another session"
 ;;
 
 let validate session t = validate_session (Session_store.Handle.session_id session) t
@@ -62,12 +57,30 @@ let ensure_directory ~env session =
       Durable_file.sync_directory ~env ~path:(Session_store.Handle.directory session)
     | _ -> corrupt "job result preparation directory is not a regular directory"
   with
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
   | exn ->
     Error (Store_error.of_exn ~operation:"create job result intent directory" ~path exn)
 ;;
 
 let make ~session ~reference ~metadata =
-  let t = { version = 1; reference; metadata } in
+  let open Result.Let_syntax in
+  let%bind metadata_document =
+    Blob_metadata_document.create metadata |> Document_fields.store
+  in
+  let%bind stage =
+    Blob_stage_documents.create metadata_document |> Document_fields.store
+  in
+  let%bind document =
+    Job_result_intent_document.create ~reference ~stage |> Document_fields.store
+  in
+  let%bind named =
+    Job_result_intent_document.to_document document |> Document_fields.store
+  in
+  let%bind contents =
+    Document_record.encode named ~limits:Job_result_intent_document.limits ~flags:0
+    |> Result.map_error ~f:Document_fields.record_error
+  in
+  let t = { reference; metadata; stage; document = named; contents } in
   Result.map (validate session t) ~f:(fun () -> t)
 ;;
 
@@ -102,15 +115,29 @@ let decode ~session_id ~filename contents =
   match Frame.decode ~max_payload_length ~contents ~offset:0 with
   | Ok (Complete { frame; next_offset })
     when next_offset = String.length contents && Frame.flags frame = 0 ->
-    let%bind intent =
-      Result.try_with (fun () -> Frame.payload frame |> Sexp.of_string |> t_of_sexp)
-      |> Result.map_error ~f:(fun _ ->
-        Store_error.Corrupt "invalid job result intent payload")
+    let%bind record =
+      Document_record.of_frame
+        frame
+        ~limits:Job_result_intent_document.limits
+        ~expected_digest:None
+      |> Result.map_error ~f:Document_fields.record_error
     in
-    let%bind () = validate_session session_id intent in
-    (match P.Id.Blob.equal id intent.reference.blob.id with
-     | true -> Ok intent
-     | false -> corrupt "job result intent filename differs from its blob")
+    let named = Document_record.document record in
+    let%bind stored_session, stored_blob =
+      Job_result_intent_document.stored_identity named |> Document_fields.store
+    in
+    let%bind () =
+      if P.Id.Session.equal stored_session session_id && P.Id.Blob.equal stored_blob id
+      then Ok ()
+      else corrupt "original job result intent identity differs from its owner"
+    in
+    let%bind document =
+      Job_result_intent_document.of_document named |> Document_fields.store
+    in
+    let reference = Job_result_intent_document.reference document in
+    let stage = Job_result_intent_document.stage document in
+    let metadata = Blob_metadata_document.value (Blob_stage_documents.temporary stage) in
+    Ok { reference; metadata; stage; document = named; contents }
   | _ -> corrupt "job result intent is incomplete or corrupt"
 ;;
 
@@ -134,6 +161,7 @@ let read_owned ~env ~session_id ~directory ~filename =
     let%bind contents = read_contents file in
     decode ~session_id ~filename contents
   with
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
   | exn -> Error (Store_error.of_exn ~operation:"read job result intent" ~path exn)
 ;;
 
@@ -184,15 +212,12 @@ let protects_temporary ~env ~data_root (metadata : Blob_store.Metadata.t) =
              | `Not_found -> Ok false
              | _ ->
                let%bind intent = read_owned ~env ~session_id ~directory ~filename in
-               (match
-                  Sexp.equal
-                    (Blob_store.Metadata.sexp_of_t metadata)
-                    (Blob_store.Metadata.sexp_of_t intent.metadata)
-                with
+               (match Blob_metadata.equal metadata intent.metadata with
                 | true -> Ok true
                 | false ->
                   corrupt "temporary blob differs from its private result preparation")))
      with
+     | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
      | exn ->
        Error
          (Store_error.of_exn
@@ -212,19 +237,15 @@ let save ~env ~session t =
       | `Not_found -> Ok ()
       | `Regular_file ->
         let%bind actual = read ~env ~session ~filename:(filename t) in
-        (match Sexp.equal (sexp_of_t actual) (sexp_of_t t) with
+        (match String.equal actual.contents t.contents with
          | true -> Ok ()
          | false ->
            corrupt "job result preparation intent already belongs to another value")
       | _ -> corrupt "job result preparation intent is not a regular file"
     in
-    let%bind contents =
-      Frame.encode ~max_payload_length ~flags:0 (sexp_of_t t |> Sexp.to_string_mach)
-      |> Result.map_error ~f:(fun _ ->
-        Store_error.Corrupt "job result intent exceeds its frame limit")
-    in
-    Durable_file.replace ~env ~durability:Flush_file_and_directory ~path contents
+    Durable_file.replace ~env ~durability:Flush_file_and_directory ~path t.contents
   with
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
   | exn -> Error (Store_error.of_exn ~operation:"save job result intent" ~path exn)
 ;;
 
@@ -314,13 +335,14 @@ let remove ~env ~session t =
     | `Not_found -> Ok ()
     | `Regular_file ->
       let%bind actual = read ~env ~session ~filename:(filename t) in
-      (match Sexp.equal (sexp_of_t actual) (sexp_of_t t) with
+      (match String.equal actual.contents t.contents with
        | false -> corrupt "job result intent changed before removal"
        | true ->
          Eio.Path.unlink Eio.Path.(Eio.Stdenv.fs env / path);
          Durable_file.sync_directory ~env ~path:(directory session))
     | _ -> corrupt "job result intent is not a regular file"
   with
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
   | exn -> Error (Store_error.of_exn ~operation:"remove job result intent" ~path exn)
 ;;
 
@@ -345,7 +367,7 @@ let finish ~env ~reader ~session t ~before_remove =
         ~filename:(filename t)
         bytes
     in
-    match Sexp.equal (sexp_of_t actual) (sexp_of_t t) with
+    match String.equal actual.contents t.contents with
     | true -> Ok bytes
     | false -> corrupt "private result intent changed before staged discard"
   in
@@ -384,12 +406,13 @@ let finish ~env ~reader ~session t ~before_remove =
     in
     Durable_file.sync_directory ~env ~path:(directory session)
   with
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
   | exn -> Error (Store_error.of_exn ~operation:"finish staged result discard" ~path exn)
 ;;
 
 let discard_unreferenced ~env ~scope ~reader ~session t =
   finish ~env ~reader ~session t ~before_remove:(fun () ->
-    Blob_store.discard_staged_unreferenced scope ~reader session ~metadata:t.metadata)
+    Blob_store.discard_staged_unreferenced scope ~reader session ~stage:t.stage)
 ;;
 
 let retire_published ~env ~reader ~session t =

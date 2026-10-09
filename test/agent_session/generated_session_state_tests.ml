@@ -66,7 +66,7 @@ let%expect_test
           ; capability_pins = []
           ; lifetime = Owned
           ; created_at = timestamp
-          ; inference_target = None
+          ; inference_target = Some (delegation_inference_target ())
           }
       in
       let key =

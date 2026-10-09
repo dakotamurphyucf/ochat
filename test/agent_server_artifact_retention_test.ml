@@ -152,7 +152,7 @@ let%expect_test
                 ; capability_pins = G.capability_pins definition
                 ; lifetime = Owned
                 ; created_at = artifact.created_at
-                ; inference_target = None
+                ; inference_target = Some (delegation_inference_target ())
                 }
               in
               let record =

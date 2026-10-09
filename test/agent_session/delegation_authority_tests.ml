@@ -56,7 +56,7 @@ let%expect_test
               ; capability_pins = Request.capability_pins selected |> protocol_ok
               ; lifetime
               ; created_at = timestamp
-              ; inference_target = None
+              ; inference_target = Some (delegation_inference_target ())
               }
             in
             let record =
@@ -284,7 +284,7 @@ let%expect_test "descendants revalidate private ancestry and its exact live narr
               ; capability_pins = Request.capability_pins selected |> protocol_ok
               ; lifetime = Owned
               ; created_at = timestamp
-              ; inference_target = None
+              ; inference_target = Some (delegation_inference_target ())
               }
             in
             let record =

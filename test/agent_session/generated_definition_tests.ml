@@ -132,7 +132,7 @@ let%expect_test "generated installation requires its exact durable unrevoked res
           ; capability_pins = G.capability_pins prepared
           ; lifetime = Owned
           ; created_at
-          ; inference_target = None
+          ; inference_target = Some (delegation_inference_target ())
           }
       in
       let reservation =

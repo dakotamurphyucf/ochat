@@ -1,22 +1,17 @@
 (** Eio streaming storage for temporary uploads and session-owned blobs. *)
 
-module Metadata : sig
-  type t =
-    { blob : Agent_protocol.Blob.Metadata.t
-    ; creating_principal : Agent_protocol.Id.Principal.t
-    ; target_session : Agent_protocol.Id.Session.t option
-    ; allowed_use : string
-    ; created_at : Agent_protocol.Timestamp.t
-    ; expires_at : Agent_protocol.Timestamp.t option
-    ; durable : bool
-    }
-  [@@deriving sexp]
-end
+module Metadata = Blob_metadata
 
 module Handle : sig
   type t
 
+  (** Last validated observation for diagnostics only. Production authority
+      decisions use [metadata_checked]; reads/mutations enforce it internally. *)
   val metadata : t -> Metadata.t
+
+  (** Reject if uncertain adoption could not prove the original or installed
+      exact document/data pair. A fresh checked reopen may recover authority. *)
+  val metadata_checked : t -> (Metadata.t, Store_error.t) result
 end
 
 module Upload : sig
@@ -80,7 +75,7 @@ val discard_staged_unreferenced
   :  retention
   -> reader:Retention_reader.t
   -> Session_store.Handle.t
-  -> metadata:Metadata.t
+  -> stage:Blob_stage_documents.t
   -> (unit, Store_error.t) result
 
 (** The existing exact-handle discard under a live retention scope, without
@@ -182,14 +177,14 @@ val load_staged_content
 (** Idempotently complete a host-owned staged write using the same ID and bytes.
     Requires a durable private preparation intent and exclusive ownership from the
     caller; allowed_use is not ownership proof. Existing files must match the
-    expected canonical metadata/content (partials must be prefixes). Refuses links
+    exact selected metadata publication/content bytes (partials must be prefixes). Refuses links
     and conflicting files before mutation. Repairs unpaired data/metadata left by
     interrupted writes and adoption, without rerunning the originating tool. *)
 val ensure_staged_content
   :  t
   -> sw:Eio.Switch.t
   -> Session_store.Handle.t
-  -> metadata:Metadata.t
+  -> stage:Blob_stage_documents.t
   -> string
   -> (Handle.t, Store_error.t) result
 

@@ -78,7 +78,9 @@ let create_exclusive ~env ~directory ~id =
       Eio.Path.with_open_out ~create:(`Exclusive 0o600) (eio_path env path) Eio.File.sync;
       Ok { id; path }
     with
-    | exn -> Error (Store_error.of_exn ~operation:"create journal segment" ~path exn))
+    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+    | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+      Error (Store_error.of_exn ~operation:"create journal segment" ~path exn))
 ;;
 
 let open_existing ~env ~directory ~id =
@@ -89,7 +91,9 @@ let open_existing ~env ~directory ~id =
       then Ok { id; path }
       else Error (Store_error.Missing path)
     with
-    | exn -> Error (Store_error.of_exn ~operation:"open journal segment" ~path exn))
+    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+    | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+      Error (Store_error.of_exn ~operation:"open journal segment" ~path exn))
 ;;
 
 let append_eio ~env ~durability path frame =
@@ -111,7 +115,9 @@ let append_eio ~env ~durability path frame =
 
 let append ~env ~durability t ~frame =
   try Ok (append_eio ~env ~durability t.path frame) with
-  | exn -> Error (Store_error.of_exn ~operation:"append journal segment" ~path:t.path exn)
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+  | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+    Error (Store_error.of_exn ~operation:"append journal segment" ~path:t.path exn)
 ;;
 
 let frame_error offset error =
@@ -151,7 +157,9 @@ let scan_contents ~max_payload_length contents =
 
 let scan ~env ~max_payload_length t =
   try Eio.Path.load (eio_path env t.path) |> scan_contents ~max_payload_length with
-  | exn -> Error (Store_error.of_exn ~operation:"scan journal segment" ~path:t.path exn)
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+  | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+    Error (Store_error.of_exn ~operation:"scan journal segment" ~path:t.path exn)
 ;;
 
 let truncate_crash_tail ~env t scan =
@@ -167,6 +175,7 @@ let truncate_crash_tail ~env t scan =
            Eio.File.sync flow);
       Ok ()
     with
-    | exn ->
+    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+    | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
       Error (Store_error.of_exn ~operation:"truncate journal tail" ~path:t.path exn))
 ;;

@@ -545,8 +545,7 @@ let blob_kind = function
   | _ -> Error (protocol_error Invalid_request "ochat-blob-kind is invalid")
 ;;
 
-let upload_metadata_json handle =
-  let metadata = Agent_store.Blob_store.Handle.metadata handle in
+let upload_metadata_json (metadata : Agent_store.Blob_store.Metadata.t) =
   `Object
     [ "blob", Agent_protocol.Blob.Metadata.to_json metadata.blob
     ; "allowed_use", `String metadata.allowed_use
@@ -666,7 +665,11 @@ let handle_blob_upload t request principal =
                 | Error error ->
                   error_response (Agent_store.Store_error.to_protocol_error error)
                 | Ok handle ->
-                  json_response ~status:`Created (upload_metadata_json handle))))))
+                  (match Agent_store.Blob_store.Handle.metadata_checked handle with
+                   | Error error ->
+                     error_response (Agent_store.Store_error.to_protocol_error error)
+                   | Ok metadata ->
+                     json_response ~status:`Created (upload_metadata_json metadata)))))))
 ;;
 
 let can_download_blob principal metadata =
@@ -707,18 +710,20 @@ let handle_blob_download t principal encoded_blob_id =
     let open Result.Let_syntax in
     let%bind id = blob_id encoded_blob_id in
     let%bind handle = open_blob t id in
-    let metadata = Agent_store.Blob_store.Handle.metadata handle in
+    let%bind metadata =
+      Agent_store.Blob_store.Handle.metadata_checked handle
+      |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+    in
     if
       can_download_blob principal metadata
       && Agent_server.Principal_projection.can_read_blob principal metadata
-    then Ok handle
+    then Ok (handle, metadata)
     else Error (protocol_error Permission_denied "blob is not visible")
   with
   | Error error when Agent_protocol.Error.equal_code error.code Permission_denied ->
     error_response ~status:`Forbidden error
   | Error error -> error_response error
-  | Ok handle ->
-    let metadata = Agent_store.Blob_store.Handle.metadata handle in
+  | Ok (handle, metadata) ->
     let stream, push = P.Stream.create t.outgoing_capacity in
     Eio.Fiber.fork ~sw:t.sw (fun () ->
       Exn.protect

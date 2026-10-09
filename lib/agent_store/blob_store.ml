@@ -1,17 +1,5 @@
 open Core
-
-module Metadata = struct
-  type t =
-    { blob : Agent_protocol.Blob.Metadata.t
-    ; creating_principal : Agent_protocol.Id.Principal.t
-    ; target_session : Agent_protocol.Id.Session.t option
-    ; allowed_use : string
-    ; created_at : Agent_protocol.Timestamp.t
-    ; expires_at : Agent_protocol.Timestamp.t option
-    ; durable : bool
-    }
-  [@@deriving sexp]
-end
+module Metadata = Blob_metadata
 
 type coordination =
   { mutex : Eio.Mutex.t
@@ -30,13 +18,77 @@ type t =
 type store = t
 
 module Handle = struct
-  type t =
-    { mutable metadata : Metadata.t
-    ; mutable data_path : string
-    ; mutable metadata_path : string
-    }
+  module Location = struct
+    type t =
+      { data_path : string
+      ; metadata_path : string
+      }
+  end
 
-  let metadata t = t.metadata
+  module Observation = struct
+    type t =
+      { document : Blob_metadata_document.t
+      ; location : Location.t
+      }
+
+    let metadata t = Blob_metadata_document.value t.document
+  end
+
+  type availability =
+    | Available of Observation.t
+    | Unavailable of
+        { last_observation : Observation.t
+        ; failure : Store_error.t
+        }
+
+  type t = { mutable availability : availability }
+
+  let create document ~data_path ~metadata_path =
+    { availability = Available { document; location = { data_path; metadata_path } } }
+  ;;
+
+  let observation t =
+    match t.availability with
+    | Available observation -> observation
+    | Unavailable { last_observation; _ } -> last_observation
+  ;;
+
+  let metadata t = Observation.metadata (observation t)
+  let document t = (observation t).document
+  let data_path t = (observation t).location.data_path
+  let metadata_path t = (observation t).location.metadata_path
+
+  let metadata_checked t =
+    match t.availability with
+    | Available observation -> Ok (Observation.metadata observation)
+    | Unavailable { failure; _ } -> Error failure
+  ;;
+
+  let unavailable t failure =
+    t.availability <- Unavailable { last_observation = observation t; failure }
+  ;;
+
+  let publish t document ~data_path ~metadata_path =
+    t.availability <- Available { document; location = { data_path; metadata_path } }
+  ;;
+end
+
+(* Secondary recovery runs only after a primary adoption failure. It must never
+   replace that primary result or exception, and begins by removing authority. *)
+module Adoption = struct
+  let recover handle ~f =
+    Handle.unavailable
+      handle
+      (Store_error.Corrupt
+         "blob adoption requires verified reopen after uncertain publication");
+    Eio.Cancel.protect (fun () ->
+      try f () with
+      | _ -> ())
+  ;;
+
+  let restore handle ~f =
+    recover handle ~f:(fun () -> ignore (f () : (unit, Store_error.t) result))
+  ;;
 end
 
 module Upload = struct
@@ -93,6 +145,7 @@ let create ~env ~temporary_directory ~durable_directory ~max_upload_bytes =
             { mutex = Eio.Mutex.create (); active_uploads = 0; active_reads = 0 }
         }
     with
+    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
     | exn ->
       Error
         (Store_error.of_exn ~operation:"create blob store" ~path:temporary_directory exn))
@@ -149,6 +202,7 @@ let begin_upload
         ; counted = false
         }
   with
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
   | exn ->
     Error (Store_error.of_exn ~operation:"begin blob upload" ~path:partial_path exn)
 ;;
@@ -158,8 +212,10 @@ let abort upload =
   then (
     upload.closed <- true;
     (try Eio.Resource.close upload.flow with
+     | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
      | _ -> ());
     try Eio.Path.unlink (eio_path upload.store upload.partial_path) with
+    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
     | _ -> ())
 ;;
 
@@ -179,6 +235,7 @@ let write_string upload chunk =
         upload.digest <- Digestif.SHA256.feed_string upload.digest chunk;
         Ok ()
       with
+      | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
       | exn ->
         abort upload;
         Error
@@ -188,15 +245,13 @@ let write_string upload chunk =
              exn)))
 ;;
 
-let save_metadata store path metadata =
-  Durable_file.replace
-    ~env:store.env
-    ~durability:Flush_file_and_directory
-    ~path
-    (Sexp.to_string_mach ([%sexp_of: Metadata.t] metadata))
+let save_metadata store path document =
+  let open Result.Let_syntax in
+  let%bind contents = Blob_metadata_document.to_bytes document |> Document_fields.store in
+  Durable_file.replace ~env:store.env ~durability:Flush_file_and_directory ~path contents
 ;;
 
-let finish upload ~expected_digest =
+let finish ?publication upload ~expected_digest =
   if upload.Upload.closed
   then Error (Store_error.Corrupt "blob upload is closed")
   else (
@@ -229,6 +284,23 @@ let finish upload ~expected_digest =
           ; durable = false
           }
       in
+      let%bind document, publication_bytes =
+        match publication with
+        | None ->
+          let%bind document =
+            Blob_metadata_document.create metadata |> Document_fields.store
+          in
+          let%map bytes =
+            Blob_metadata_document.to_bytes document |> Document_fields.store
+          in
+          document, bytes
+        | Some stage ->
+          let document = Blob_stage_documents.temporary stage in
+          if Metadata.equal metadata (Blob_metadata_document.value document)
+          then Ok (document, Blob_stage_documents.temporary_bytes stage)
+          else
+            Error (Store_error.Corrupt "upload differs from selected stage publication")
+      in
       try
         Eio.File.sync upload.flow;
         Eio.Resource.close upload.flow;
@@ -236,16 +308,25 @@ let finish upload ~expected_digest =
         Eio.Path.rename
           (eio_path upload.store upload.partial_path)
           (eio_path upload.store upload.final_path);
-        let%map () = save_metadata upload.store upload.metadata_path metadata in
-        { Handle.metadata
-        ; data_path = upload.final_path
-        ; metadata_path = upload.metadata_path
-        }
+        let%map () =
+          Durable_file.replace
+            ~env:upload.store.env
+            ~durability:Flush_file_and_directory
+            ~path:upload.metadata_path
+            publication_bytes
+        in
+        Handle.create
+          document
+          ~data_path:upload.final_path
+          ~metadata_path:upload.metadata_path
       with
+      | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
       | exn ->
         (try Eio.Path.unlink (eio_path upload.store upload.partial_path) with
+         | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
          | _ -> ());
         (try Eio.Path.unlink (eio_path upload.store upload.final_path) with
+         | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
          | _ -> ());
         Error
           (Store_error.of_exn ~operation:"finish blob upload" ~path:upload.final_path exn))
@@ -253,22 +334,45 @@ let finish upload ~expected_digest =
 
 let load_metadata store path =
   let open Result.Let_syntax in
-  let%bind contents = Durable_file.load ~env:store.env ~path in
-  try Ok ([%of_sexp: Metadata.t] (Sexp.of_string contents)) with
-  | exn ->
-    Error (Store_error.Corrupt ("blob metadata decode failed: " ^ Exn.to_string exn))
+  let%bind () =
+    try
+      match Eio.Path.kind ~follow:false (eio_path store path) with
+      | `Regular_file -> Ok ()
+      | `Not_found -> Error (Store_error.Missing path)
+      | _ -> Error (Store_error.Corrupt "blob metadata is not a regular file")
+    with
+    | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+      Error (Store_error.of_exn ~operation:"inspect blob metadata" ~path exn)
+  in
+  let%bind contents =
+    Durable_file.load_bounded
+      ~env:store.env
+      ~path
+      ~max_bytes:(Document_schema.Limits.max_bytes Blob_metadata_document.limits)
+  in
+  let%bind original =
+    Document_schema.Document.decode ~limits:Blob_metadata_document.limits contents
+    |> Document_fields.store
+  in
+  let%bind original_id =
+    Blob_metadata_document.stored_blob_id original |> Document_fields.store
+  in
+  if not (String.equal (Filename.basename path) (blob_name original_id ".sexp"))
+  then Error (Store_error.Corrupt "original blob metadata identity differs from filename")
+  else Blob_metadata_document.of_document original |> Document_fields.store
 ;;
 
 let open_temporary store id =
   let metadata_path = Filename.concat store.temporary_directory (blob_name id ".sexp") in
   let data_path = Filename.concat store.temporary_directory (blob_name id ".blob") in
   let open Result.Let_syntax in
-  let%bind metadata = load_metadata store metadata_path in
+  let%bind document = load_metadata store metadata_path in
+  let metadata = Blob_metadata_document.value document in
   if Agent_protocol.Id.Blob.compare metadata.blob.id id <> 0 || metadata.durable
   then Error (Store_error.Corrupt "temporary blob metadata identity is invalid")
   else if not (Eio.Path.is_file (eio_path store data_path))
   then Error (Store_error.Missing data_path)
-  else Ok { Handle.metadata; data_path; metadata_path }
+  else Ok (Handle.create document ~data_path ~metadata_path)
 ;;
 
 let open_session store session id =
@@ -276,7 +380,8 @@ let open_session store session id =
   let metadata_path = Filename.concat directory (blob_name id ".sexp") in
   let data_path = Filename.concat directory (blob_name id ".blob") in
   let open Result.Let_syntax in
-  let%bind metadata = load_metadata store metadata_path in
+  let%bind document = load_metadata store metadata_path in
+  let metadata = Blob_metadata_document.value document in
   if Agent_protocol.Id.Blob.compare metadata.blob.id id <> 0 || not metadata.durable
   then Error (Store_error.Corrupt "session blob metadata identity is invalid")
   else if
@@ -289,23 +394,29 @@ let open_session store session id =
   then Error (Store_error.Corrupt "session blob target identity is invalid")
   else if not (Eio.Path.is_file (eio_path store data_path))
   then Error (Store_error.Missing data_path)
-  else Ok { Handle.metadata; data_path; metadata_path }
+  else Ok (Handle.create document ~data_path ~metadata_path)
 ;;
 
 let load store handle =
-  try Ok (Eio.Path.load (eio_path store handle.Handle.data_path)) with
-  | exn -> Error (Store_error.of_exn ~operation:"load blob" ~path:handle.data_path exn)
+  let open Result.Let_syntax in
+  let%bind _ = Handle.metadata_checked handle in
+  try Ok (Eio.Path.load (eio_path store (Handle.data_path handle))) with
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+  | exn ->
+    Error (Store_error.of_exn ~operation:"load blob" ~path:(Handle.data_path handle) exn)
 ;;
 
 let read_range store ~sw handle ~offset ~max_bytes =
-  let length = handle.Handle.metadata.blob.byte_length in
+  let open Result.Let_syntax in
+  let%bind _ = Handle.metadata_checked handle in
+  let length = (Handle.metadata handle).blob.byte_length in
   if Int64.(offset < zero || offset > length)
   then Error (Store_error.Corrupt "blob read offset is outside the blob")
   else if max_bytes <= 0
   then Error (Store_error.Corrupt "blob read size must be positive")
   else (
     try
-      let source = Eio.Path.open_in ~sw (eio_path store handle.Handle.data_path) in
+      let source = Eio.Path.open_in ~sw (eio_path store (Handle.data_path handle)) in
       let remaining = Int64.(length - offset) in
       let count = Int64.min remaining (Int64.of_int max_bytes) |> Int64.to_int_exn in
       let buffer = Cstruct.create count in
@@ -316,16 +427,23 @@ let read_range store ~sw handle ~offset ~max_bytes =
       in
       Ok (Cstruct.to_string (Cstruct.sub buffer 0 read))
     with
+    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
     | exn ->
-      Error (Store_error.of_exn ~operation:"read blob range" ~path:handle.data_path exn))
+      Error
+        (Store_error.of_exn
+           ~operation:"read blob range"
+           ~path:(Handle.data_path handle)
+           exn))
 ;;
 
 let iter_chunks store ~sw handle ~chunk_size ~f =
+  let open Result.Let_syntax in
+  let%bind _ = Handle.metadata_checked handle in
   if chunk_size <= 0
   then Error (Store_error.Corrupt "blob chunk size must be positive")
   else (
     try
-      let source = Eio.Path.open_in ~sw (eio_path store handle.Handle.data_path) in
+      let source = Eio.Path.open_in ~sw (eio_path store (Handle.data_path handle)) in
       let buffer = Cstruct.create chunk_size in
       let rec loop () =
         match Eio.Flow.single_read source buffer with
@@ -337,17 +455,21 @@ let iter_chunks store ~sw handle ~chunk_size ~f =
       in
       Exn.protect ~finally:(fun () -> Eio.Resource.close source) ~f:loop
     with
+    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
     | exn ->
-      Error (Store_error.of_exn ~operation:"stream blob" ~path:handle.data_path exn))
+      Error
+        (Store_error.of_exn ~operation:"stream blob" ~path:(Handle.data_path handle) exn))
 ;;
 
 let adopt store session handle =
+  let open Result.Let_syntax in
+  let%bind _ = Handle.metadata_checked handle in
   let session_id = Session_store.Handle.session_id session in
-  match handle.Handle.metadata.target_session with
+  match (Handle.metadata handle).target_session with
   | Some id when not (Agent_protocol.Id.Session.equal id session_id) ->
     Error (Store_error.Corrupt "blob is bound to another target session")
   | target ->
-    (match handle.metadata.durable, target with
+    (match (Handle.metadata handle).durable, target with
      | true, Some _ -> Ok handle
      | true, None -> Error (Store_error.Corrupt "durable blob has no target session")
      | false, _ ->
@@ -357,70 +479,156 @@ let adopt store session handle =
            Filename.concat (Session_store.Handle.directory session) "blobs"
          in
          let destination_data =
-           Filename.concat directory (blob_name handle.metadata.blob.id ".blob")
+           Filename.concat directory (blob_name (Handle.metadata handle).blob.id ".blob")
          in
          let destination_metadata =
-           Filename.concat directory (blob_name handle.metadata.blob.id ".sexp")
-         in
-         let%bind () =
-           try
-             Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 (eio_path store directory);
-             match
-               ( Eio.Path.kind ~follow:false (eio_path store destination_data)
-               , Eio.Path.kind ~follow:false (eio_path store destination_metadata) )
-             with
-             | `Not_found, `Not_found ->
-               Eio.Path.rename
-                 (eio_path store handle.data_path)
-                 (eio_path store destination_data);
-               Ok ()
-             | _ ->
-               Error (Store_error.Corrupt "blob adoption would overwrite existing data")
-           with
-           | exn ->
-             Error
-               (Store_error.of_exn
-                  ~operation:"adopt blob data"
-                  ~path:destination_data
-                  exn)
+           Filename.concat directory (blob_name (Handle.metadata handle).blob.id ".sexp")
          in
          let metadata =
-           { handle.metadata with target_session = Some session_id; durable = true }
+           { (Handle.metadata handle) with
+             target_session = Some session_id
+           ; durable = true
+           }
          in
-         match save_metadata store destination_metadata metadata with
-         | Error failure ->
-           (try
-              Eio.Path.rename
-                (eio_path store destination_data)
-                (eio_path store handle.data_path);
-              (match
-                 Eio.Path.kind ~follow:false (eio_path store destination_metadata)
+         let%bind document =
+           Blob_metadata_document.with_value (Handle.document handle) metadata
+           |> Document_fields.store
+         in
+         let old_data = Handle.data_path handle
+         and old_metadata = Handle.metadata_path handle
+         and old_document = Handle.document handle in
+         let refresh () =
+           Handle.unavailable
+             handle
+             (Store_error.Corrupt
+                "blob adoption requires verified reopen after uncertain publication");
+           let candidate data_path metadata_path expected =
+             let%bind () =
+               match Eio.Path.kind ~follow:false (eio_path store data_path) with
+               | `Regular_file -> Ok ()
+               | _ -> Error (Store_error.Missing data_path)
+             in
+             let%bind actual = load_metadata store metadata_path in
+             let%bind actual_document =
+               Blob_metadata_document.to_document actual |> Document_fields.store
+             in
+             let%bind expected_document =
+               Blob_metadata_document.to_document expected |> Document_fields.store
+             in
+             if
+               Jsonaf.exactly_equal
+                 (Document_schema.Document.json actual_document)
+                 (Document_schema.Document.json expected_document)
+             then (
+               let metadata = Blob_metadata_document.value actual in
+               let candidate = Handle.create actual ~data_path ~metadata_path in
+               let length = ref 0L in
+               let digest = ref Digestif.SHA256.empty in
+               let%bind () =
+                 Eio.Switch.run (fun sw ->
+                   iter_chunks store ~sw candidate ~chunk_size:8192 ~f:(fun bytes ->
+                     (length := Int64.(!length + of_int (String.length bytes)));
+                     digest := Digestif.SHA256.feed_string !digest bytes))
+               in
+               if
+                 Int64.equal !length metadata.blob.byte_length
+                 && String.equal
+                      Digestif.SHA256.(get !digest |> to_hex)
+                      metadata.blob.digest
+               then Ok (data_path, metadata_path, actual)
+               else Error (Store_error.Corrupt "adoption blob integrity changed"))
+             else Error (Store_error.Corrupt "adoption metadata changed")
+           in
+           let old = candidate old_data old_metadata old_document in
+           let final = candidate destination_data destination_metadata document in
+           match old, final with
+           | Ok (data_path, metadata_path, document), Error _
+           | Error _, Ok (data_path, metadata_path, document) ->
+             Handle.publish handle document ~data_path ~metadata_path
+           | _ -> ()
+         in
+         let perform () =
+           let%bind () =
+             try
+               Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 (eio_path store directory);
+               let%bind () =
+                 Durable_file.sync_directory
+                   ~env:store.env
+                   ~path:(Session_store.Handle.directory session)
+               in
+               match
+                 ( Eio.Path.kind ~follow:false (eio_path store destination_data)
+                 , Eio.Path.kind ~follow:false (eio_path store destination_metadata) )
                with
-               | `Not_found -> ()
-               | _ -> Eio.Path.unlink (eio_path store destination_metadata));
-              let%bind () = Durable_file.sync_directory ~env:store.env ~path:directory in
-              let%bind () =
-                Durable_file.sync_directory ~env:store.env ~path:store.temporary_directory
-              in
-              Error failure
-            with
-            | exn ->
-              Error
-                (Store_error.of_exn
-                   ~operation:"restore failed blob adoption"
-                   ~path:destination_data
-                   exn))
-         | Ok () ->
-           (try Eio.Path.unlink (eio_path store handle.metadata_path) with
-            | _ -> ());
-           handle.metadata <- metadata;
-           handle.data_path <- destination_data;
-           handle.metadata_path <- destination_metadata;
-           Ok handle))
+               | `Not_found, `Not_found ->
+                 Eio.Path.rename
+                   (eio_path store (Handle.data_path handle))
+                   (eio_path store destination_data);
+                 Ok ()
+               | _ ->
+                 Error (Store_error.Corrupt "blob adoption would overwrite existing data")
+             with
+             | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+             | exn ->
+               Error
+                 (Store_error.of_exn
+                    ~operation:"adopt blob data"
+                    ~path:destination_data
+                    exn)
+           in
+           match save_metadata store destination_metadata document with
+           | Error failure ->
+             let restore () =
+               Eio.Path.rename (eio_path store destination_data) (eio_path store old_data);
+               (match
+                  Eio.Path.kind ~follow:false (eio_path store destination_metadata)
+                with
+                | `Not_found -> ()
+                | _ -> Eio.Path.unlink (eio_path store destination_metadata));
+               let%bind () = Durable_file.sync_directory ~env:store.env ~path:directory in
+               Durable_file.sync_directory ~env:store.env ~path:store.temporary_directory
+             in
+             Adoption.restore handle ~f:restore;
+             Error failure
+           | Ok () ->
+             let%bind () =
+               try
+                 Eio.Path.unlink (eio_path store old_metadata);
+                 Ok ()
+               with
+               | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+               | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+                 Error
+                   (Store_error.of_exn
+                      ~operation:"remove adopted temporary metadata"
+                      ~path:old_metadata
+                      exn)
+             in
+             let%map () =
+               Durable_file.sync_directory ~env:store.env ~path:store.temporary_directory
+             in
+             Handle.publish
+               handle
+               document
+               ~data_path:destination_data
+               ~metadata_path:destination_metadata;
+             handle
+         in
+         match perform () with
+         | Ok _ as success -> success
+         | Error _ as error ->
+           Adoption.recover handle ~f:refresh;
+           error
+         | exception exn ->
+           let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+           Adoption.recover handle ~f:refresh;
+           Exn.raise_with_original_backtrace exn backtrace))
 ;;
 
 let load_verified store ~sw handle ~max_bytes =
-  let metadata = handle.Handle.metadata.blob in
+  let open Result.Let_syntax in
+  let%bind _ = Handle.metadata_checked handle in
+  let metadata = (Handle.metadata handle).blob in
   match
     max_bytes > 0
     && Int64.(metadata.byte_length >= zero && metadata.byte_length <= of_int max_bytes)
@@ -462,6 +670,7 @@ let load_verified store ~sw handle ~max_bytes =
 let load_staged_content store ~sw session ~(metadata : Metadata.t) ~max_bytes =
   let invalid message = Error (Store_error.Corrupt message) in
   let open Result.Let_syntax in
+  let%bind document = Blob_metadata_document.create metadata |> Document_fields.store in
   let%bind () =
     match
       (not metadata.durable)
@@ -498,16 +707,19 @@ let load_staged_content store ~sw session ~(metadata : Metadata.t) ~max_bytes =
          (match partial && Int64.(size < metadata.blob.byte_length) with
           | true -> Ok None
           | false ->
-            let handle = { Handle.metadata; data_path = path; metadata_path = path } in
+            let handle = Handle.create document ~data_path:path ~metadata_path:path in
             let%map content = load_verified store ~sw handle ~max_bytes in
             Some content)
        | _ -> invalid "staged result data is not a regular file")
   in
   try read locations with
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
   | exn -> Error (Store_error.of_exn ~operation:"load staged result" ~path:directory exn)
 ;;
 
-let ensure_staged_content store ~sw session ~(metadata : Metadata.t) content =
+let ensure_staged_content store ~sw session ~stage content =
+  let document = Blob_stage_documents.temporary stage in
+  let metadata = Blob_metadata_document.value document in
   let session_id = Session_store.Handle.session_id session in
   let invalid message = Error (Store_error.Corrupt message) in
   let open Result.Let_syntax in
@@ -539,9 +751,8 @@ let ensure_staged_content store ~sw session ~(metadata : Metadata.t) content =
   let partial = Filename.concat store.temporary_directory (name ".part") in
   let final_data = Filename.concat directory (name ".blob") in
   let final_metadata = Filename.concat directory (name ".sexp") in
-  let durable = { metadata with durable = true } in
   let verify path expected ~partial =
-    let handle = { Handle.metadata; data_path = path; metadata_path = path } in
+    let handle = Handle.create document ~data_path:path ~metadata_path:path in
     let offset = ref 0 in
     let mismatch = ref false in
     let read =
@@ -582,14 +793,11 @@ let ensure_staged_content store ~sw session ~(metadata : Metadata.t) content =
       let%bind _ =
         inspect
           temporary_metadata
-          (Metadata.sexp_of_t metadata |> Sexp.to_string_mach)
+          (Blob_stage_documents.temporary_bytes stage)
           ~partial:false
       in
       let%bind _ =
-        inspect
-          final_metadata
-          (Metadata.sexp_of_t durable |> Sexp.to_string_mach)
-          ~partial:false
+        inspect final_metadata (Blob_stage_documents.durable_bytes stage) ~partial:false
       in
       let%bind has_final = inspect final_data content ~partial:false in
       let%bind has_temporary = inspect temporary_data content ~partial:false in
@@ -617,7 +825,12 @@ let ensure_staged_content store ~sw session ~(metadata : Metadata.t) content =
             ~finally:(fun () -> abort upload)
             ~f:(fun () ->
               let%bind () = write_string upload content in
-              let%map _ = finish upload ~expected_digest:(Some metadata.blob.digest) in
+              let%map _ =
+                finish
+                  ~publication:stage
+                  upload
+                  ~expected_digest:(Some metadata.blob.digest)
+              in
               ())
       in
       Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 (eio_path store directory);
@@ -630,7 +843,13 @@ let ensure_staged_content store ~sw session ~(metadata : Metadata.t) content =
        | true -> ()
        | false ->
          Eio.Path.rename (eio_path store temporary_data) (eio_path store final_data));
-      let%bind () = save_metadata store final_metadata durable in
+      let%bind () =
+        Durable_file.replace
+          ~env:store.env
+          ~durability:Flush_file_and_directory
+          ~path:final_metadata
+          (Blob_stage_documents.durable_bytes stage)
+      in
       List.iter [ temporary_data; temporary_metadata; partial ] ~f:(fun path ->
         match Eio.Path.kind ~follow:false (eio_path store path) with
         | `Not_found -> ()
@@ -639,23 +858,26 @@ let ensure_staged_content store ~sw session ~(metadata : Metadata.t) content =
       let%map () =
         Durable_file.sync_directory ~env:store.env ~path:store.temporary_directory
       in
-      { Handle.metadata = durable
-      ; data_path = final_data
-      ; metadata_path = final_metadata
-      }
+      Handle.create
+        (Blob_stage_documents.durable stage)
+        ~data_path:final_data
+        ~metadata_path:final_metadata
     with
+    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
     | exn ->
       Error (Store_error.of_exn ~operation:"resume staged blob" ~path:final_data exn))
 ;;
 
 let discard_unreferenced store session handle =
-  let id = handle.Handle.metadata.blob.id in
+  let open Result.Let_syntax in
+  let%bind _ = Handle.metadata_checked handle in
+  let id = (Handle.metadata handle).blob.id in
   let directory = Filename.concat (Session_store.Handle.directory session) "blobs" in
   let data_path = Filename.concat directory (blob_name id ".blob") in
   let metadata_path = Filename.concat directory (blob_name id ".sexp") in
   let open Result.Let_syntax in
   let%bind () =
-    match handle.metadata.target_session with
+    match (Handle.metadata handle).target_session with
     | Some target
       when Agent_protocol.Id.Session.equal
              target
@@ -673,7 +895,15 @@ let discard_unreferenced store session handle =
   in
   match
     Option.for_all current ~f:(fun current ->
-      Sexp.equal ([%sexp_of: Metadata.t] current) ([%sexp_of: Metadata.t] handle.metadata))
+      match
+        ( Blob_metadata_document.to_document current
+        , Blob_metadata_document.to_document (Handle.document handle) )
+      with
+      | Ok current, Ok expected ->
+        Jsonaf.exactly_equal
+          (Document_schema.Document.json current)
+          (Document_schema.Document.json expected)
+      | _ -> false)
   with
   | false -> Error (Store_error.Corrupt "blob changed before unreferenced cleanup")
   | true ->
@@ -685,6 +915,7 @@ let discard_unreferenced store session handle =
           | _ -> Eio.Path.unlink (eio_path store path));
         Durable_file.sync_directory ~env:store.env ~path:directory
       with
+      | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
       | exn ->
         Error
           (Store_error.of_exn ~operation:"discard unreferenced blob" ~path:data_path exn))
@@ -695,50 +926,63 @@ let expired ~now metadata =
     Agent_protocol.Timestamp.compare expires_at now <= 0)
 ;;
 
-let cleanup_one store ~protect ~now filename =
+let prepare_cleanup store ~protect ~now filename =
+  let open Result.Let_syntax in
   let metadata_path = Filename.concat store.temporary_directory filename in
-  match load_metadata store metadata_path with
-  | Error _ -> Ok 0
-  | Ok metadata when not (expired ~now metadata) -> Ok 0
-  | Ok metadata ->
+  let%bind document = load_metadata store metadata_path in
+  let metadata = Blob_metadata_document.value document in
+  let%bind () =
+    if
+      (not metadata.durable) && String.equal filename (blob_name metadata.blob.id ".sexp")
+    then Ok ()
+    else Error (Store_error.Corrupt "temporary expiry metadata identity mismatch")
+  in
+  let%map protected = if expired ~now metadata then protect metadata else Ok true in
+  metadata, protected
+;;
+
+let unlink_expired_file store path =
+  try
+    Eio.Path.unlink (eio_path store path);
+    Ok ()
+  with
+  | Eio.Io (Eio.Fs.E (Not_found _), _) -> Ok ()
+  | Core_unix.Unix_error (ENOENT, _, _) -> Ok ()
+  | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+    Error (Store_error.of_exn ~operation:"unlink expired temporary blob" ~path exn)
+;;
+
+let cleanup_one store (metadata, protected) =
+  if protected
+  then Ok 0
+  else
     let open Result.Let_syntax in
-    let%bind _ =
-      Agent_protocol.Blob.Metadata.of_json
-        (Agent_protocol.Blob.Metadata.to_json metadata.blob)
-      |> Result.map_error ~f:(fun failure ->
-        Store_error.Corrupt failure.Agent_protocol.Error.message)
+    let data_path =
+      Filename.concat
+        store.temporary_directory
+        (blob_name metadata.Metadata.blob.id ".blob")
     in
-    let%bind () =
-      match
-        (not metadata.durable)
-        && String.equal filename (blob_name metadata.blob.id ".sexp")
-      with
-      | true -> Ok ()
-      | false -> Error (Store_error.Corrupt "temporary expiry metadata identity mismatch")
+    let metadata_path =
+      Filename.concat store.temporary_directory (blob_name metadata.blob.id ".sexp")
     in
-    let%bind protected = protect metadata in
-    (match protected with
-     | true -> Ok 0
-     | false ->
-       let data_path =
-         Filename.concat store.temporary_directory (blob_name metadata.blob.id ".blob")
-       in
-       (try Eio.Path.unlink (eio_path store data_path) with
-        | _ -> ());
-       (try Eio.Path.unlink (eio_path store metadata_path) with
-        | _ -> ());
-       Ok 1)
+    let%bind () = unlink_expired_file store data_path in
+    let%map () = unlink_expired_file store metadata_path in
+    1
 ;;
 
 let cleanup_expired ?(protect = fun _ -> Ok false) store ~now =
   try
     Eio.Path.read_dir (eio_path store store.temporary_directory)
     |> List.filter ~f:(String.is_suffix ~suffix:".sexp")
-    |> List.map ~f:(cleanup_one store ~protect ~now)
+    |> List.map ~f:(prepare_cleanup store ~protect ~now)
     |> Result.all
-    |> Result.map ~f:(List.fold ~init:0 ~f:( + ))
+    |> Result.bind ~f:(fun prepared ->
+      List.map prepared ~f:(cleanup_one store)
+      |> Result.all
+      |> Result.map ~f:(List.fold ~init:0 ~f:( + )))
   with
-  | exn ->
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+  | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
     Error
       (Store_error.of_exn
          ~operation:"cleanup temporary blobs"
@@ -767,7 +1011,8 @@ let retention_reserved_directory retention =
   | true -> Ok retention.store.durable_directory
 ;;
 
-let discard_staged_unreferenced retention ~reader session ~(metadata : Metadata.t) =
+let discard_staged_unreferenced retention ~reader session ~stage =
+  let metadata = Blob_metadata_document.value (Blob_stage_documents.temporary stage) in
   let open Result.Let_syntax in
   let invalid message = Error (Store_error.Corrupt message) in
   let%bind session_root, temporary_root = retention_directories retention session in
@@ -795,7 +1040,11 @@ let discard_staged_unreferenced retention ~reader session ~(metadata : Metadata.
   let data_limit = Int64.to_int_exn metadata.blob.byte_length in
   let inspect_directory reader relative native ~durable =
     let%bind names = Retention_reader.list reader ~directory:relative in
-    let expected = Metadata.sexp_of_t { metadata with durable } |> Sexp.to_string_mach in
+    let expected =
+      if durable
+      then Blob_stage_documents.durable_bytes stage
+      else Blob_stage_documents.temporary_bytes stage
+    in
     let metadata_name = blob_name metadata.blob.id ".sexp" in
     let temporaries =
       List.filter names ~f:(fun name ->
@@ -862,6 +1111,7 @@ let discard_staged_unreferenced retention ~reader session ~(metadata : Metadata.
     let%bind () = Durable_file.sync_directory ~env:store.env ~path:final_directory in
     Durable_file.sync_directory ~env:store.env ~path:temporary_root
   with
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
   | exn ->
     Error
       (Store_error.of_exn ~operation:"discard staged result files" ~path:session_root exn)
@@ -873,11 +1123,11 @@ let coordinated store f =
   let outcome =
     Eio.Mutex.use_rw ~protect:false store.coordination.mutex (fun () ->
       try Ok (f ()) with
-      | exn -> Error exn)
+      | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
   in
   match outcome with
   | Ok value -> value
-  | Error exn -> raise exn
+  | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
 let discard_retained_unreferenced retention session handle =
@@ -977,6 +1227,7 @@ let begin_upload
         holder := Some upload;
         Ok upload)
   with
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
   | exn ->
     Eio.Switch.remove_hook !hook;
     Error
@@ -1032,8 +1283,8 @@ let load_staged_content store ~sw session ~metadata ~max_bytes =
   reading store (fun () -> load_staged_content store ~sw session ~metadata ~max_bytes)
 ;;
 
-let ensure_staged_content store ~sw session ~metadata content =
-  coordinated store (fun () -> ensure_staged_content store ~sw session ~metadata content)
+let ensure_staged_content store ~sw session ~stage content =
+  coordinated store (fun () -> ensure_staged_content store ~sw session ~stage content)
 ;;
 
 let discard_unreferenced store session handle =

@@ -114,6 +114,7 @@
   one_off_execution_tests
   permissions_tests
   persistence_tests
+  prompt_publication_tests
   standalone_tests
   state_tests)
  (libraries inference_fixture ochat.transcript core eio eio_main mirage-crypto-rng.unix ochat.agent_session ochat.agent_server)

@@ -197,3 +197,61 @@ let%expect_test
   [%expect
     {| conflicting partial and symlink preserved; matching partial rebuilt under the same reference; published once |}]
 ;;
+
+let%expect_test
+    "explicit staging cancellation preserves private intent and recoverable publisher \
+     locks"
+  =
+  let armed = ref false in
+  with_store
+    ~wrap_env:(fun env ->
+      fault_env env (ref None) ~before_open_out:(fun path ->
+        if !armed && String.is_suffix path ~suffix:".part"
+        then (
+          armed := false;
+          raise Eio.Time.Timeout)))
+    (fun env sw blobs _ session _ ->
+       let job = job session in
+       let publisher =
+         Store.Publisher.create
+           ~env
+           ~blobs
+           ~sw
+           ~session
+           ~principal
+           ~inline_bytes:64
+           ~max_bytes:4096
+         |> protocol_ok
+       in
+       let completion = P.Completion.Succeeded (`String (String.make 512 'x')) in
+       let publish () =
+         Store.Publisher.publish
+           publisher
+           ~jobs:[ job ]
+           ~job
+           ~now:timestamp
+           completion
+           ~persist:(fun value -> Ok value)
+       in
+       armed := true;
+       let cancelled =
+         try
+           publish () |> protocol_ok |> ignore;
+           false
+         with
+         | Eio.Time.Timeout -> true
+       in
+       assert cancelled;
+       assert (List.length (Intent.list ~env ~session ~max_count:8 |> store_ok) = 1);
+       assert (Option.is_some (Store.Publisher.pending_completion publisher ~job));
+       assert (
+         Option.is_some
+           (Agent_store.Blob_store.with_retention blobs ~f:(fun _ -> Ok ()) |> store_ok));
+       publish () |> protocol_ok |> ignore;
+       assert (List.is_empty (Intent.list ~env ~session ~max_count:8 |> store_ok));
+       print_endline
+         "cancellation propagates; intent survives; publisher/storage locks and upload \
+          accounting permit retry");
+  [%expect
+    {|cancellation propagates; intent survives; publisher/storage locks and upload accounting permit retry|}]
+;;
