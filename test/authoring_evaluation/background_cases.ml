@@ -176,6 +176,8 @@ let execute_checked ?audit ?replay_job_delivery ~env ~finish candidate =
                 { session_id = H.session_id embedded
                 ; attachment_id = (H.attachment embedded).id
                 ; job_id
+                ; expected_generation = None
+                ; expected_attempt = None
                 ; idempotency_key =
                     P.Idempotency_key.of_string "evaluation:cancel" |> H.get
                 })

@@ -142,6 +142,33 @@ module Tool : sig
 end
 ```
 
+## activity_query
+
+[JSON codec](../../lib/agent_protocol/activity_query.ml) · [interface](../../lib/agent_protocol/activity_query.mli)
+
+```ocaml
+(** Bounded cross-session query. The scan bound is checked against the authorized
+    matching catalog before immutable state IO. Cursor remains a top-level field;
+    reasons and the bound are part of its authenticated query binding. *)
+type t = private
+  { server_id : Id.Server.t
+  ; catalog : Session.List_request.t
+  ; reasons : Session_activity.Reason.t list
+  ; scan_limit : int
+  }
+[@@deriving sexp]
+
+val create
+  :  server_id:Id.Server.t
+  -> catalog:Session.List_request.t
+  -> reasons:Session_activity.Reason.t list
+  -> scan_limit:int
+  -> (t, Error.t) result
+
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
 ## audit
 
 [JSON codec](../../lib/agent_protocol/audit.ml) · [interface](../../lib/agent_protocol/audit.mli)
@@ -474,6 +501,8 @@ type t =
   | Blob_read of Blob.Read_request.t
   | Session_create of Session.Create_request.t
   | Session_list of Session.List_request.t
+  | Activity_list of Activity_query.t
+  | Session_work of Session_work.Query.t
   | Session_configuration_get of Session_configuration.Get_request.t
   | Session_configuration_update of Session_configuration.Update_request.t
   | Session_get of Session.Get_request.t
@@ -2456,6 +2485,8 @@ module Cancel_request : sig
     { session_id : Id.Session.t
     ; attachment_id : Id.Attachment.t
     ; job_id : Id.Job.t
+    ; expected_generation : int option [@sexp.option]
+    ; expected_attempt : int option [@sexp.option]
     ; idempotency_key : Idempotency_key.t
     }
   [@@deriving sexp]
@@ -2800,6 +2831,8 @@ type t =
   | Blob_read of Blob.Chunk.t
   | Session_create of Create.t
   | Session_list of Session_catalog.t Page.t
+  | Activity_list of Session_activity.t Page.t
+  | Session_work of Session_work.t Page.t
   | Session_configuration_get of Session_configuration.t
   | Session_configuration_update of Session_configuration.t
   | Session_get of Snapshot.t
@@ -4360,6 +4393,7 @@ module Cancel_request : sig
     { session_id : Id.Session.t
     ; attachment_id : Id.Attachment.t
     ; schedule_id : Id.Schedule.t
+    ; expected_generation : int option [@sexp.option]
     ; idempotency_key : Idempotency_key.t
     }
   [@@deriving sexp]
@@ -4897,6 +4931,174 @@ module Delete_request : sig
 end
 ```
 
+## session_activity
+
+[JSON codec](../../lib/agent_protocol/session_activity.ml) · [interface](../../lib/agent_protocol/session_activity.mli)
+
+```ocaml
+(** Payload-free attention observed from existing session/work owners. Reading is
+    not acknowledgement; unresolved rows never disappear because a client read them. *)
+module Reason : sig
+  type t =
+    | Approval
+    | Input_required
+    | Failure
+    | Completion_pending
+  [@@deriving compare, equal, sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Attention : sig
+  type entity =
+    | Permission of Id.Permission.t
+    | Operation of Id.Operation.t
+    | Work of Session_work.Key.t
+    | Session
+  [@@deriving compare, equal, sexp]
+
+  type t = private
+    { entity : entity
+    ; reason : Reason.t
+    ; unresolved : bool
+    ; expired : bool
+    }
+  [@@deriving sexp]
+
+  val create
+    :  entity:entity
+    -> reason:Reason.t
+    -> unresolved:bool
+    -> expired:bool
+    -> (t, Error.t) result
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+  val compare_key : t -> t -> int
+end
+
+module Transient : sig
+  (** Unloaded/restarted snapshots have no durable active-call/progress authority. *)
+  type t =
+    | Unavailable
+    | Live of
+        { tool_calls : int
+        ; agent_calls : int
+        }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+type t = private
+  { summary : Session_activity_summary.t
+  ; attention : Attention.t list
+  ; work_count : int
+  ; transient : Transient.t
+  ; usage : Inference_query.Summary.t
+  }
+[@@deriving sexp]
+
+val create
+  :  summary:Session_activity_summary.t
+  -> attention:Attention.t list
+  -> work_count:int
+  -> transient:Transient.t
+  -> usage:Inference_query.Summary.t
+  -> (t, Error.t) result
+
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## session_activity_summary
+
+[JSON codec](../../lib/agent_protocol/session_activity_summary.ml) · [interface](../../lib/agent_protocol/session_activity_summary.mli)
+
+```ocaml
+(** Safe command-center session projection. Explicitly excludes Session.Spec,
+    raw errors, prompt/workspace configuration, tool arguments/results and
+    operation interruption text. Metadata is intentionally visible. *)
+module Observed : sig
+  type t =
+    | Stopped
+    | Queued_for_slot
+    | Starting
+    | Recovering
+    | Idle
+    | Running_turn
+    | Compacting
+    | Waiting_for_permission
+    | Stopping
+    | Failed
+  [@@deriving compare, equal, sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Operation : sig
+  (** Exact foreground lifecycle without raw failure/interruption payloads. *)
+  module Status : sig
+    type t =
+      | Starting
+      | Running
+      | Cancelling
+      | Completed
+      | Failed
+      | Cancelled
+      | Interrupted
+    [@@deriving compare, equal, sexp]
+
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  type t = private
+    { id : Id.Operation.t
+    ; generation : int
+    ; kind : Operation.kind
+    ; status : Status.t
+    }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+type t = private
+  { session : Session_ref.t
+  ; display_name : string option
+  ; labels : (string * string) list
+  ; creator : Id.Principal.t option
+  ; created_at : Timestamp.t
+  ; updated_at : Timestamp.t
+  ; generation : int
+  ; revision : int64
+  ; metadata_revision : int64
+  ; latest_event_sequence : int64
+  ; execution_host : Session.execution_host
+  ; liveness : Session.liveness
+  ; persistence : Session.persistence
+  ; desired_state : Session.desired_state
+  ; observed : Observed.t
+  ; archived : bool
+  ; effective_organization : Session_organization.Values.t
+  ; active_owner_principal_id : Id.Principal.t option
+  ; active_operation : Operation.t option
+  }
+[@@deriving sexp]
+
+(** Copies only named safe fields from the already-authorized checked catalog.
+    Validates revisions/generation and metadata structural invariants. *)
+val of_catalog : Session_catalog.t -> server_id:Id.Server.t -> (t, Error.t) result
+
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
 ## session_catalog
 
 [JSON codec](../../lib/agent_protocol/session_catalog.ml) · [interface](../../lib/agent_protocol/session_catalog.mli)
@@ -5215,6 +5417,94 @@ val server_id : t -> Id.Server.t
 val session_id : t -> Id.Session.t
 val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## session_work
+
+[JSON codec](../../lib/agent_protocol/session_work.ml) · [interface](../../lib/agent_protocol/session_work.mli)
+
+```ocaml
+(** Payload-free work occurrence projections. Current security-view and transcript
+    visibility are required by the server; decoding grants no control capability. *)
+module Key : sig
+  type t =
+    | Job of
+        { id : Id.Job.t
+        ; attempt : int
+        }
+    | Schedule of Id.Schedule.t
+    | Invocation of Id.Invocation.t
+    | Subscription of Id.Subscription.t
+    | Delivery of Id.Delivery.t
+    | Moderator_execution of Id.Moderator_execution.t
+  [@@deriving compare, equal, sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Status : sig
+  type t =
+    | Accepted
+    | Running
+    | Waiting_approval
+    | Waiting_work
+    | Succeeded
+    | Failed
+    | Cancelled
+    | Interrupted
+    | Unsupported
+  [@@deriving compare, equal, sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Delivery_state : sig
+  type t =
+    | Not_applicable
+    | Pending
+    | Acknowledged
+    | Discarded
+  [@@deriving compare, equal, sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+type t = private
+  { session : Session_ref.t
+  ; generation : int
+  ; key : Key.t
+  ; status : Status.t
+  ; delivery : Delivery_state.t
+  ; revision : int64
+  }
+[@@deriving sexp]
+
+val create
+  :  session:Session_ref.t
+  -> generation:int
+  -> key:Key.t
+  -> status:Status.t
+  -> delivery:Delivery_state.t
+  -> revision:int64
+  -> (t, Error.t) result
+
+val compare_key : t -> t -> int
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+
+module Query : sig
+  type t =
+    { session : Session_ref.t
+    ; page : Page.Request.t
+    }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
 ```
 
 ## snapshot

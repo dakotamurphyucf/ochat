@@ -160,6 +160,8 @@ module Cancel_request : sig
     { session_id : Id.Session.t
     ; attachment_id : Id.Attachment.t
     ; job_id : Id.Job.t
+    ; expected_generation : int option [@sexp.option]
+    ; expected_attempt : int option [@sexp.option]
     ; idempotency_key : Idempotency_key.t
     }
   [@@deriving sexp]

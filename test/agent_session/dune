@@ -10,6 +10,7 @@
   inference_tracking_tests
   inference_transition_tests
   actor_tests
+  activity_control_tests
   metadata_tests
   organization_tests
 

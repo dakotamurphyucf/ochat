@@ -447,6 +447,7 @@ type _ request =
   | Finish_configuration_capture : Configuration_capture.Token.t * bool -> unit request
   | State : Session_state.t request
   | Snapshot : Agent_protocol.Snapshot.t request
+  | Observe : (Session_state.t * Agent_protocol.Snapshot.t) request
   | Authorize_writer : Agent_protocol.Id.Attachment.t -> unit request
   | Set_operation_worker : Operation_worker.t option -> unit request
   | Set_runtime_worker :
@@ -693,7 +694,7 @@ type _ request =
       -> Agent_protocol.Job.t request
   | Cancel_job_internal : Agent_protocol.Id.Job.t -> Agent_protocol.Job.t request
   | Cancel_job :
-      Agent_protocol.Id.Attachment.t * Agent_protocol.Id.Job.t
+      Agent_protocol.Id.Attachment.t * Agent_protocol.Id.Job.t * int option * int option
       -> Agent_protocol.Job.t request
   | Interrupt_job :
       Agent_protocol.Id.Job.t * int * int * string
@@ -704,6 +705,9 @@ type _ request =
       * Agent_protocol.Schedule.t
       -> Agent_protocol.Session.t request
   | Add_schedule : Agent_protocol.Schedule.t -> Agent_protocol.Schedule.t request
+  | Cancel_schedule :
+      Agent_protocol.Id.Attachment.t * Agent_protocol.Id.Schedule.t * int option
+      -> Agent_protocol.Schedule.t request
   | Cancel_schedule_internal :
       Agent_protocol.Id.Schedule.t
       -> Agent_protocol.Schedule.t request
@@ -7813,6 +7817,10 @@ let respond_permission_internal
   else if not (Agent_protocol.Permission.equal_state permission.state Pending)
   then Error (error Already_resolved "permission has already been resolved")
   else if
+    Option.value_map permission.expires_at ~default:false ~f:(fun deadline ->
+      Agent_protocol.Timestamp.compare deadline (t.services.now ()) <= 0)
+  then Error (error Already_resolved "permission request has expired")
+  else if
     not (List.mem permission.choices choice ~equal:Agent_protocol.Permission.equal_choice)
   then Error (error Invalid_request "permission choice is not offered")
   else (
@@ -10567,6 +10575,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Finish_configuration_capture (capture, success) ->
     finish_configuration_capture t capture success
   | Snapshot -> Ok (current_snapshot t)
+  | Observe -> Ok (t.state, current_snapshot t)
   | Set_operation_worker worker -> set_operation_worker t worker
   | Set_runtime_worker (worker, inference) -> set_runtime_worker t worker inference
   | Retire_runtime_worker closing -> retire_runtime_worker t ~closing
@@ -10866,13 +10875,44 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Deliver_job (job_id, generation, expected, expected_job, moderator_snapshot) ->
     deliver_job t job_id generation expected expected_job moderator_snapshot
   | Cancel_job_internal job_id -> cancel_job_internal t job_id
-  | Cancel_job (attachment_id, job_id) ->
-    with_writer t attachment_id (fun () -> cancel_job_internal t job_id)
+  | Cancel_job (attachment_id, job_id, expected_generation, expected_attempt) ->
+    with_writer t attachment_id (fun () ->
+      let open Result.Let_syntax in
+      let%bind job = find_job t job_id in
+      let%bind () =
+        match expected_generation, expected_attempt with
+        | None, None -> Ok ()
+        | Some generation, Some attempt ->
+          if
+            Int.equal generation t.state.identity.generation
+            && Int.equal generation job.generation
+            && Int.equal attempt job.attempt
+          then Ok ()
+          else Error (error Conflict "job occurrence has changed")
+        | Some _, None | None, Some _ ->
+          Error (error Invalid_request "job occurrence requires generation and attempt")
+      in
+      cancel_job_internal t job_id)
   | Interrupt_job (job_id, generation, attempt, reason) ->
     interrupt_job t job_id generation attempt reason
   | Change_schedule (attachment_id, event, schedule) ->
     change_schedule t attachment_id event schedule
   | Add_schedule schedule -> add_schedule t schedule
+  | Cancel_schedule (attachment_id, schedule_id, expected_generation) ->
+    with_writer t attachment_id (fun () ->
+      let open Result.Let_syntax in
+      let%bind schedule = find_schedule t schedule_id in
+      let%bind () =
+        match expected_generation with
+        | None -> Ok ()
+        | Some generation ->
+          if
+            Int.equal generation t.state.identity.generation
+            && Int.equal generation schedule.generation
+          then Ok ()
+          else Error (error Conflict "schedule occurrence has changed")
+      in
+      cancel_schedule_internal t schedule_id)
   | Cancel_schedule_internal schedule_id -> cancel_schedule_internal t schedule_id
   | Claim_schedule (schedule_id, generation) -> claim_schedule t schedule_id generation
   | Retry_schedule (schedule_id, generation) -> retry_schedule t schedule_id generation
@@ -11102,6 +11142,7 @@ let create
 ;;
 
 let snapshot t = call t Snapshot
+let observe t = call t Observe
 let state t = call t State
 let due_schedules t = call t Due_schedules
 
@@ -11539,8 +11580,20 @@ let deliver_job ?expected ?expected_job t ~job_id ~generation ~moderator_snapsho
 let cancel_job_internal t ~job_id = call t ~priority:Priority (Cancel_job_internal job_id)
 let authorize_writer t ~attachment_id = call t (Authorize_writer attachment_id)
 
-let cancel_job t ?command_audit ~attachment_id ~job_id () =
-  call t ~priority:Priority ?command_audit (Cancel_job (attachment_id, job_id))
+let cancel_job
+      t
+      ?command_audit
+      ?expected_generation
+      ?expected_attempt
+      ~attachment_id
+      ~job_id
+      ()
+  =
+  call
+    t
+    ~priority:Priority
+    ?command_audit
+    (Cancel_job (attachment_id, job_id, expected_generation, expected_attempt))
 ;;
 
 let cancel_job_internal_with_command_audit t ~command_audit ~job_id =
@@ -11560,6 +11613,14 @@ let change_schedule_with_command_audit t ~command_audit ~attachment_id ~event sc
 ;;
 
 let add_schedule t schedule = call t (Add_schedule schedule)
+
+let cancel_schedule t ?command_audit ?expected_generation ~attachment_id ~schedule_id () =
+  call
+    t
+    ~priority:Priority
+    ?command_audit
+    (Cancel_schedule (attachment_id, schedule_id, expected_generation))
+;;
 
 let cancel_schedule_internal t ~schedule_id =
   call t (Cancel_schedule_internal schedule_id)

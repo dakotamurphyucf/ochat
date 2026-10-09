@@ -655,6 +655,8 @@ let architecture_methods =
   ; "blob.read"
   ; "session.create"
   ; "session.list"
+  ; "activity.list"
+  ; "session.work"
   ; "session.get"
   ; "session.inference_summary"
   ; "session.inference_observations"
@@ -706,7 +708,7 @@ let%expect_test "every architecture method has request and result dispatch" =
           (List.equal String.equal expected (normalize Method_result.supported_methods)
            : bool)
       }];
-  [%expect {| ((method_count 66) (requests true) (results true)) |}]
+  [%expect {| ((method_count 68) (requests true) (results true)) |}]
 ;;
 
 let%expect_test "history deletion requires stable ID, revision and idempotency" =

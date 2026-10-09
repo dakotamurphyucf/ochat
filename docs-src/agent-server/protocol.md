@@ -76,6 +76,8 @@ actor state and authorization, not merely passing JSON validation.
 | `blob.read` | `Blob.Read_request` | `session.transcript.read` plus blob ownership | Bounded chunk with cursor and metadata. |
 | `session.create` | `Session.Create_request` | `session.create` plus requested attachment scopes | Session, mutation acknowledgement and optional attachment/replay. |
 | `session.list` | `Session.List_request` | `session.transcript.read` | Paged visible sessions with filters. |
+| `activity.list` | `Activity_query` | `session.transcript.read` and `security.read` plus current session visibility | Bounded immutable activity/attention summaries, selected catalog order. |
+| `session.work` | `Session_work.Query` | `session.transcript.read` and `security.read` plus current session visibility | Bounded payload-free retained work with typed occurrence witnesses. |
 | `session.get` | `Session.Get_request` | `session.transcript.read` | Scoped snapshot; optional history window. |
 | `session.configuration_get` | `Session_configuration.Get_request` | `session.transcript.read` | Safe selected/captured configuration and independent configuration revision; profile identity requires `diagnostics.read`. |
 | `session.configuration_update` | `Session_configuration.Update_request` | `session.message.send`; profile patches also require `provider.select` | Writable attachment, expected generation/configuration revision and nonempty model/profile/settings patch; next root capture selection. |
@@ -532,3 +534,60 @@ no organization scope grants access to session content. Explicit `project_filter
 checked host organization revision as well as query, principal authority and
 session data; an organization mutation invalidates a cursor with an explicit
 refresh conflict. Listing does not activate stopped or archived sessions.
+
+
+## Activity and attention observations
+
+`activity.list` embeds the ordinary catalog filters, sort and page fields at the
+request's top level and additionally requires `server_id`, `reasons` and
+`scan_limit` (1–4096). An empty reason list returns all matching sessions. A
+nonempty list selects sessions with at least one matching attention reason.
+The server rejects an authorized matching catalog larger than the scan bound
+before immutable state reads; narrow the query rather than assuming a truncated
+result is complete. Current visibility and both read scopes are checked on every
+request. Explicit organization filters retain `organization.view` requirements.
+
+Activity rows carry a `summary` built from `Session_activity_summary`: host-qualified
+session identity, display metadata, creator/timestamps, revision counters, desired
+and closed observed status, explicit execution host/liveness/persistence policy,
+organization/archive metadata and optional operation
+ID/generation/kind/closed status. Foreground operation statuses preserve starting,
+running, cancelling, completed, failed, cancelled and interrupted as distinct
+states; work-only waiting/unsupported states are rejected. The wire contains no full session specification,
+prompt/workspace configuration, raw failure object or interruption text. The
+checked catalog is an internal authorization/projection input.
+
+`session.work` requires a host-qualified `session` and ordinary page fields. Rows
+contain generation, typed work key, sanitized status, delivery state and revision;
+job keys additionally contain the retained attempt. Payloads, results, errors,
+arguments and credentials are absent. Rich existing job/schedule methods keep
+`session.message.send` requirements. These queries never attach or load execution
+resources, invoke a provider, schedule work, acknowledge completion or answer an
+approval. Unloaded and restarted immutable reads report transient state
+`unavailable`; this does not assert zero active calls or completed work.
+
+Attention is an observation of retained owners, with Approval, Input_required,
+Failure and Completion_pending reasons. Reading does not resolve an attention
+row or record a human-seen acknowledgement. Session failure and foreground
+operation failure are separate source facts and may both appear; each entity/reason
+key appears once. Failed or interrupted retained operations contribute operation
+failure attention even when the snapshot failure field is absent. Client bookmarks may be local display
+state, but must not conceal unresolved owner state. Pending expired approvals are
+reported as expired; fresh answers at or after the deadline are rejected before
+choice/grant resolution. A historical successful idempotent reply remains an
+historical outcome and is not a new approval.
+
+Paging preserves catalog sort (activity) or typed work key order (work). Cursors
+bind the current principal/scopes, host/query, exact observations and organization
+revision for activity. Changed observations or organization revision require
+refresh with an explicit conflict; another principal/query or host restart
+invalidates the cursor. No cursor grants authority or retains server resources.
+
+`job.cancel` accepts optional `expected_generation` and `expected_attempt`, both
+or neither; `schedule.cancel` accepts optional `expected_generation`. Fresh actor
+admission compares supplied occurrence witnesses atomically with cancellation.
+Omission keeps established cancel-current-ID semantics. The typed
+`Agent_client.Activity_views` helpers require a retained row, verify the
+connection's initialized host and always supply witnesses. A successful retry
+returns its original receipt after current authorization; it must not cancel a
+new attempt that happens to share a work ID.

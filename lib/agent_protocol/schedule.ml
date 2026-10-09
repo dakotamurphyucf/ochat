@@ -566,17 +566,25 @@ module Cancel_request = struct
     { session_id : Id.Session.t
     ; attachment_id : Id.Attachment.t
     ; schedule_id : Id.Schedule.t
+    ; expected_generation : int option [@sexp.option]
     ; idempotency_key : Idempotency_key.t
     }
   [@@deriving sexp]
 
   let to_json t =
+    let optional =
+      List.filter_opt
+        [ Option.map t.expected_generation ~f:(fun value ->
+            "expected_generation", `Number (Int.to_string value))
+        ]
+    in
     `Object
-      [ "session_id", Id.Session.to_json t.session_id
-      ; "attachment_id", Id.Attachment.to_json t.attachment_id
-      ; "schedule_id", Id.Schedule.to_json t.schedule_id
-      ; "idempotency_key", Idempotency_key.to_json t.idempotency_key
-      ]
+      (optional
+       @ [ "session_id", Id.Session.to_json t.session_id
+         ; "attachment_id", Id.Attachment.to_json t.attachment_id
+         ; "schedule_id", Id.Schedule.to_json t.schedule_id
+         ; "idempotency_key", Idempotency_key.to_json t.idempotency_key
+         ])
   ;;
 
   let of_json json =
@@ -589,10 +597,23 @@ module Cancel_request = struct
     let%bind schedule_id =
       Json_codec.required_as fields "schedule_id" Id.Schedule.of_json
     in
+    let%bind expected_generation =
+      Json_codec.optional_as
+        fields
+        "expected_generation"
+        (Json_codec.bounded_int ~min:0 ~max:Int.max_value)
+    in
     let%map idempotency_key =
       Json_codec.required_as fields "idempotency_key" Idempotency_key.of_json
     in
-    { session_id; attachment_id; schedule_id; idempotency_key }
+    { session_id; attachment_id; schedule_id; expected_generation; idempotency_key }
+  ;;
+
+  let t_of_sexp sexp =
+    let raw = t_of_sexp sexp in
+    match of_json (to_json raw) with
+    | Ok value -> value
+    | Error error -> Sexplib.Conv.of_sexp_error error.message sexp
   ;;
 end
 

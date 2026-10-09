@@ -123,6 +123,28 @@ let test_bundle_redaction environment =
   let secret = "e2e-secret-value" in
   let encoded = Base64.encode_exn secret in
   let bundle = artifact_bundle environment roots.artifacts secret in
+  let nested_encoding = Base64.encode_exn encoded in
+  List.iter
+    (List.init 12 ~f:(fun index -> "registered-private-value-" ^ Int.to_string index))
+    ~f:(fun value -> Artifact_bundle.register_secret bundle value);
+  let later_secret = "registered-private-value-11" in
+  let later_encoded = Base64.encode_exn later_secret in
+  let probe = String.concat ~sep:" " [ secret; encoded; later_secret; later_encoded ] in
+  let redacted = Artifact_bundle.redact bundle probe in
+  require
+    (String.equal redacted "<redacted> <redacted> <redacted> <redacted>")
+    "registration lost original or single Base64 secret redaction";
+  require
+    (String.equal (Artifact_bundle.redact bundle nested_encoding) nested_encoding)
+    "registration recursively encoded an existing secret variant";
+  List.iter (List.init 12 ~f:Fn.id) ~f:(fun _ ->
+    Artifact_bundle.register_secret bundle later_secret);
+  require
+    (String.equal (Artifact_bundle.redact bundle probe) redacted)
+    "repeated secret registration changed redaction";
+  require
+    (String.equal (Artifact_bundle.redact bundle nested_encoding) nested_encoding)
+    "repeated registration recursively encoded an existing secret variant";
   Artifact_bundle.write_text
     bundle
     ~name:"failure.txt"

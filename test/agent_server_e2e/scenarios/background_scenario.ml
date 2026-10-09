@@ -337,6 +337,8 @@ let cancel client session job name =
       { session_id = session.F.summary.id
       ; attachment_id = session.attachment_id
       ; job_id = job.Agent_protocol.Job.id
+      ; expected_generation = None
+      ; expected_attempt = None
       ; idempotency_key = F.key name
       }
   in

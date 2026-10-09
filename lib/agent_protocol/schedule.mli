@@ -105,6 +105,7 @@ module Cancel_request : sig
     { session_id : Id.Session.t
     ; attachment_id : Id.Attachment.t
     ; schedule_id : Id.Schedule.t
+    ; expected_generation : int option [@sexp.option]
     ; idempotency_key : Idempotency_key.t
     }
   [@@deriving sexp]

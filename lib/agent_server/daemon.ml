@@ -1189,6 +1189,8 @@ let compose
       | Collection_list _
       | Collection_update _
       | Collection_delete _
+      | Activity_list _
+      | Session_work _
       | Session_list _
       | Session_inference_summary _
       | Session_inference_observations _

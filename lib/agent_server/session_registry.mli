@@ -57,6 +57,16 @@ val read_state
   -> Agent_protocol.Id.Session.t
   -> (Agent_session.Session_state.t, Agent_protocol.Error.t) result
 
+(** Same immutable authorization/IO boundary as [read_state]. Loaded state and
+    transient calls are captured atomically in one mailbox turn; stored reads
+    advertise Unavailable rather than inventing empty live-call state. *)
+val read_observation
+  :  t
+  -> authorize:(Agent_protocol.Session.t -> (unit, Agent_protocol.Error.t) result)
+  -> now:Agent_protocol.Timestamp.t
+  -> Agent_protocol.Id.Session.t
+  -> (Activity_service.Observation.t, Agent_protocol.Error.t) result
+
 val index : t -> Agent_store.Session_index.Entry.t -> unit
 val index_all : t -> Agent_store.Session_index.Entry.t list -> unit
 

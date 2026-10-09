@@ -149,10 +149,10 @@ let load t session_id =
               ())))
 ;;
 
-let read_state t ~authorize session_id =
+let read_retained t ~authorize ~read_loaded ~read_stored session_id =
   Eio.Mutex.use_ro t.mutex (fun () ->
     let open Result.Let_syntax in
-    let check state =
+    let check (state, observation) =
       let summary = Agent_session.Session_state.summary state in
       if not (Agent_protocol.Id.Session.equal summary.id session_id)
       then
@@ -164,13 +164,13 @@ let read_state t ~authorize session_id =
              ())
       else (
         let%map () = authorize summary in
-        state)
+        state, observation)
     in
     match Atomic.get t.closing, find t session_id with
     | true, _ -> Error (shutting_down ())
     | false, Some entry ->
-      let%bind state = Agent_session.Session_actor.state entry.actor in
-      check state
+      let%bind observation = read_loaded entry.actor in
+      check observation
     | false, None ->
       (match Map.find t.indexed session_id, t.reader with
        | None, _ ->
@@ -190,7 +190,47 @@ let read_state t ~authorize session_id =
        | Some indexed, Some reader ->
          let%bind () = authorize indexed.Agent_store.Session_index.Entry.session in
          let%bind state = reader indexed in
-         check state))
+         check (state, read_stored state)))
+;;
+
+let read_state t ~authorize session_id =
+  read_retained
+    t
+    ~authorize
+    session_id
+    ~read_loaded:(fun actor ->
+      Agent_session.Session_actor.state actor |> Result.map ~f:(fun state -> state, ()))
+    ~read_stored:(fun _ -> ())
+  |> Result.map ~f:fst
+;;
+
+let read_observation t ~authorize ~now session_id =
+  let open Result.Let_syntax in
+  let%map state, snapshot =
+    read_retained
+      t
+      ~authorize
+      session_id
+      ~read_loaded:(fun actor ->
+        Agent_session.Session_actor.observe actor
+        |> Result.map ~f:(fun (state, snapshot) -> state, Some snapshot))
+      ~read_stored:(fun _ -> None)
+  in
+  let snapshot, transient =
+    match snapshot with
+    | Some snapshot ->
+      ( snapshot
+      , Agent_protocol.Session_activity.Transient.Live
+          { tool_calls = List.length snapshot.active_tool_calls
+          ; agent_calls = List.length snapshot.active_agent_calls
+          } )
+    | None -> Agent_session.Session_state.snapshot ~now state, Unavailable
+  in
+  Activity_service.Observation.
+    { snapshot
+    ; transient
+    ; usage = Agent_session.Inference_ledger.summary state.inference_ledger
+    }
 ;;
 
 let entries t = Eio.Mutex.use_ro t.mutex (fun () -> Map.data (Atomic.get t.sessions))

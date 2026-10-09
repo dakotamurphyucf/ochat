@@ -22,6 +22,8 @@ let required_scope = function
   | Workspace_list _ | Workspace_get _ -> Some List_workspaces
   | Blob_read _ -> Some View_session_transcript
   | Session_create _ -> Some Create_sessions
+  | Activity_list _
+  | Session_work _
   | Session_list _
   | Session_get _
   | Session_attach _
@@ -113,6 +115,14 @@ let authorize principal command =
            ())
   in
   match command with
+  | (Agent_protocol.Command.Activity_list _ | Session_work _)
+    when not (Agent_protocol.Principal.has_scope principal View_security_state) ->
+    Error
+      (Agent_protocol.Error.create
+         Permission_denied
+         ~message:"activity requires security visibility"
+         ~retryable:false
+         ())
   | Agent_protocol.Command.Session_create { requested_mode = Some mode; _ } ->
     authorize_attachment_mode principal mode
   | Session_attach request -> authorize_attachment_mode principal request.requested_mode

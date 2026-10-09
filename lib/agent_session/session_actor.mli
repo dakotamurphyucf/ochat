@@ -245,6 +245,13 @@ val create_with_owner_lease_duration
   -> t
 
 val snapshot : t -> (Agent_protocol.Snapshot.t, Agent_protocol.Error.t) result
+
+(** One mailbox observation captures retained state and transient active calls
+    from the same owner instant. Never activates or acknowledges work. *)
+val observe
+  :  t
+  -> (Session_state.t * Agent_protocol.Snapshot.t, Agent_protocol.Error.t) result
+
 val state : t -> (Session_state.t, Agent_protocol.Error.t) result
 
 (** Trusted host ingress bridge. Producer must come from authenticated transport
@@ -1324,6 +1331,8 @@ val authorize_writer
 val cancel_job
   :  t
   -> ?command_audit:Document_schema.Document.t
+  -> ?expected_generation:int
+  -> ?expected_attempt:int
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> job_id:Agent_protocol.Id.Job.t
   -> unit
@@ -1370,6 +1379,17 @@ val change_schedule_with_command_audit
 val add_schedule
   :  t
   -> Agent_protocol.Schedule.t
+  -> (Agent_protocol.Schedule.t, Agent_protocol.Error.t) result
+
+(** Atomically checks a supplied occurrence before cancelling. Omission retains
+    the legacy cancel-current-ID contract. *)
+val cancel_schedule
+  :  t
+  -> ?command_audit:Document_schema.Document.t
+  -> ?expected_generation:int
+  -> attachment_id:Agent_protocol.Id.Attachment.t
+  -> schedule_id:Agent_protocol.Id.Schedule.t
+  -> unit
   -> (Agent_protocol.Schedule.t, Agent_protocol.Error.t) result
 
 val cancel_schedule_internal
