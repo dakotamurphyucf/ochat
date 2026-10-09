@@ -1,6 +1,6 @@
 (library
  (name session_catalog_tests)
- (modules catalog_service_tests activity_service_tests)
- (libraries agent_server_test_support core eio eio_main mirage-crypto-rng.unix ochat.agent_protocol ochat.agent_client ochat.agent_server ochat.agent_session ochat.agent_store)
+ (modules catalog_service_tests activity_service_tests search_text_tests search_service_tests search_retained_tests search_source_tests)
+ (libraries agent_server_test_support core base64 eio eio_main mirage-crypto-rng.unix ochat.agent_protocol ochat.agent_client ochat.agent_server ochat.agent_session ochat.agent_store)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))

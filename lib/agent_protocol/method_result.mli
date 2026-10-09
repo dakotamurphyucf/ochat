@@ -148,6 +148,8 @@ type t =
   | Blob_read of Blob.Chunk.t
   | Session_create of Create.t
   | Session_list of Session_catalog.t Page.t
+  | Session_search of Search_page.t
+  | Session_search_navigate of Search_navigation.Response.t
   | Activity_list of Session_activity.t Page.t
   | Session_work of Session_work.t Page.t
   | Session_configuration_get of Session_configuration.t

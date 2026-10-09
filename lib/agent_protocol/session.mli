@@ -208,6 +208,9 @@ module List_request : sig
     }
   [@@deriving sexp]
 
+  (** Validate native selectors and sort label keys without a JSON round trip. *)
+  val normalize : t -> (t, Error.t) result
+
   val to_json : t -> Jsonaf.t
   val of_json : Jsonaf.t -> (t, Error.t) result
 end

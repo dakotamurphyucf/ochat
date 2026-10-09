@@ -60,6 +60,8 @@ let has_command_receipt = function
   | Collection_list _
   | Activity_list _
   | Session_work _
+  | Session_search _
+  | Session_search_navigate _
   | Session_list _
   | Session_get _
   | Session_configuration_get _
