@@ -2,6 +2,7 @@
 
 type t =
   { session : Session.t
+  ; lifecycle : Session_lifecycle.Observation.t option [@sexp.option]
   ; canonical_history : History.Window.t
   ; archived_revisions : int64 list [@sexp.list]
   ; effective_history : History.Window.t option

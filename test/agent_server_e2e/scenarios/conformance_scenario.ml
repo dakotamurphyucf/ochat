@@ -1962,6 +1962,45 @@ let test_session_lifecycle env environment =
              (lifecycle_observation stdio_http ~key_prefix:"stdio-http"))))
 ;;
 
+let test_retained_lifecycle env environment =
+  let fixture = fixture env environment "conformance-retained-lifecycle" in
+  Eio.Switch.run (fun sw ->
+    with_daemon ~sw env fixture (fun _daemon _health ->
+      with_transport_matrix
+        ~sw
+        env
+        environment
+        fixture
+        (fun unix http stdio_unix stdio_http ->
+           let observe connection prefix =
+             ignore (initialize connection : Agent_protocol.Initialize.Response.t);
+             let created, _ = create_session connection ~key:(prefix ^ ":create") in
+             let result =
+               Retained_lifecycle.run
+                 ~request:connection.request
+                 ~created
+                 ~key_prefix:prefix
+             in
+             Retained_lifecycle.require_complete result;
+             result
+           in
+           let baseline = observe unix "retained-unix" in
+           List.iter
+             [ http, "retained-http"
+             ; stdio_unix, "retained-stdio-unix"
+             ; stdio_http, "retained-stdio-http"
+             ]
+             ~f:(fun (connection, prefix) ->
+               let actual = observe connection prefix in
+               if not (Retained_lifecycle.equal baseline actual)
+               then
+                 raise_s
+                   [%sexp
+                     "retained lifecycle transport outcomes differ"
+                   , (baseline : Retained_lifecycle.t)
+                   , (actual : Retained_lifecycle.t)]))))
+;;
+
 type metadata_observation =
   { metadata_revision_delta : int64
   ; display_name : string option
@@ -3879,6 +3918,7 @@ let cases =
   [ "conformance.provider-installed", test_provider_installed
   ; "conformance.read-methods", test_read_methods
   ; "conformance.session-lifecycle", test_session_lifecycle
+  ; "conformance.retained-lifecycle", test_retained_lifecycle
   ; "conformance.session-metadata", test_session_metadata
   ; "conformance.session-activity", test_session_activity
   ; "conformance.session-organization", test_session_organization
@@ -3956,7 +3996,9 @@ let method_coverage =
   ; "session.reset", "conformance.error-codes"
   ; "session.rebuild", "conformance.error-codes"
   ; "session.upgrade_prompt", "conformance.error-codes"
-  ; "session.delete", "conformance.error-codes"
+  ; "session.delete", "conformance.retained-lifecycle"
+  ; "session.restore", "conformance.retained-lifecycle"
+  ; "session.resume", "conformance.retained-lifecycle"
   ; "permission.list", "conformance.permissions-grants"
   ; "permission.respond", "conformance.permissions-grants"
   ; "grant.list", "conformance.permissions-grants"

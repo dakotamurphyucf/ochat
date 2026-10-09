@@ -22,6 +22,7 @@ type t =
   ; audit_store : Agent_store.Audit_store.t
   ; blob_store : Agent_store.Blob_store.t
   ; session_store : Agent_store.Session_store.t
+  ; lifecycle_service : Session_lifecycle_service.t
   ; initialize :
       principal:Agent_protocol.Principal.t
       -> Agent_protocol.Initialize.Request.t
@@ -54,6 +55,7 @@ let create
       ~audit_store
       ~blob_store
       ~session_store
+      ~lifecycle_service
       ~initialize
       ~ping
       ~server_info
@@ -83,6 +85,7 @@ let create
   ; audit_store
   ; blob_store
   ; session_store
+  ; lifecycle_service
   ; initialize
   ; ping
   ; server_info
@@ -350,6 +353,13 @@ let idempotency = function
   | Session_upgrade_prompt request ->
     protected (Some request.session_id) request.idempotency_key
   | Session_delete request -> protected (Some request.session_id) request.idempotency_key
+  | Session_restore request | Session_resume request ->
+    let expected = Agent_protocol.Session_lifecycle.Request.expected request in
+    protected
+      (Some
+         (Agent_protocol.Session_ref.session_id
+            (Agent_protocol.Session_lifecycle.Expected.reference expected)))
+      (Agent_protocol.Session_lifecycle.Request.idempotency_key request)
   | Permission_respond request ->
     standard (Some request.session_id) request.idempotency_key
   | Grant_revoke request -> standard (Some request.session_id) request.idempotency_key
@@ -934,17 +944,47 @@ let handle_session_work t context (request : Agent_protocol.Session_work.Query.t
 
 let handle_session_get t context request =
   let open Result.Let_syntax in
-  let%bind entry, _ =
-    find_visible_entry t context request.Agent_protocol.Session.Get_request.session_id
+  let principal = Connection_context.principal context in
+  let session_id = request.Agent_protocol.Session.Get_request.session_id in
+  let%bind observation =
+    Session_registry.read_observation
+      t.registry
+      session_id
+      ~now:(now t)
+      ~authorize:(fun summary ->
+        if session_visible_to principal summary
+        then Ok ()
+        else Error (error Permission_denied "session is not visible"))
   in
-  let%bind snapshot = Agent_session.Session_actor.snapshot entry.actor in
-  let%map snapshot =
-    Pagination.history
-      t.pagination
-      (Connection_context.principal context)
-      request
-      snapshot
+  let snapshot = observation.Activity_service.Observation.snapshot in
+  let summary = snapshot.Agent_protocol.Snapshot.session in
+  let%bind indexed =
+    Agent_store.Session_index.find_checked
+      (Agent_store.Session_store.session_index t.session_store)
+      session_id
+    |> Result.map_error ~f:persistence_error
   in
+  let%bind indexed =
+    Result.of_option indexed ~error:(error Session_not_found "session does not exist")
+  in
+  let%bind expected =
+    Agent_protocol.Session_lifecycle.Expected.create
+      ~reference:
+        (Agent_protocol.Session_ref.create
+           ~server_id:(Agent_store.Session_store.server_id t.session_store)
+           ~session_id)
+      ~generation:summary.generation
+      ~session_revision:summary.revision
+      ~lifecycle_revision:indexed.lifecycle_revision
+  in
+  let%bind lifecycle =
+    Agent_protocol.Session_lifecycle.Observation.create
+      ~expected
+      ~status:(if indexed.archived then Archived else Active)
+      ~admission:indexed.admission
+  in
+  let snapshot = { snapshot with Agent_protocol.Snapshot.lifecycle = Some lifecycle } in
+  let%map snapshot = Pagination.history t.pagination principal request snapshot in
   Agent_protocol.Method_result.Session_get snapshot
 ;;
 
@@ -1721,89 +1761,6 @@ let handle_session_export t context request =
     }
 ;;
 
-let validate_delete_state request state =
-  if
-    not
-      (Int64.equal
-         request.Agent_protocol.Session.Delete_request.expected_revision
-         state.Agent_session.Session_state.counters.revision)
-  then Error (error Conflict "session revision does not match")
-  else if Option.is_some state.active_operation
-  then Error (error Conflict "session has an active foreground operation")
-  else if
-    match state.lifecycle.observed with
-    | Agent_protocol.Session.Stopped -> false
-    | Queued_for_slot
-    | Starting
-    | Recovering
-    | Idle
-    | Running_turn _
-    | Compacting _
-    | Waiting_for_permission _
-    | Stopping
-    | Failed _ -> true
-  then Error (error Invalid_state "session must be stopped before deletion")
-  else if
-    not
-      (String.equal
-         request.confirmation
-         (Agent_protocol.Id.Session.to_string request.session_id))
-  then Error (error Invalid_request "deletion confirmation must equal the session ID")
-  else Ok ()
-;;
-
-let close_deleted_entry t context request entry =
-  ignore
-    (Session_registry.remove
-       t.registry
-       request.Agent_protocol.Session.Delete_request.session_id
-     : Session_registry.entry option);
-  Connection_context.remove_session_attachments context request.session_id;
-  entry.Session_registry.close ()
-;;
-
-let handle_session_delete t context request =
-  let open Result.Let_syntax in
-  let%bind () =
-    require_connection_attachment
-      context
-      ~session_id:request.Agent_protocol.Session.Delete_request.session_id
-      ~attachment_id:request.attachment_id
-  in
-  let%bind entry, state = find_visible_entry t context request.session_id in
-  let%bind () = validate_delete_state request state in
-  (* Permanent deletion joins independent resource users before removing their
-     roots. Keep the actor registered while their cleanup acknowledges closure. *)
-  Runtime_owner.close_and_wait entry.runtime;
-  let%bind (_ : Agent_session.Workspace_instance.t) =
-    cleanup_temporary t entry state ~event:Agent_session.Workspace_cleanup.Session_delete
-  in
-  let deleted_at = now t in
-  let%bind () =
-    match request.policy with
-    | Agent_protocol.Session.Delete_request.Archive ->
-      let%bind () =
-        Agent_store.Session_store.archive_session t.session_store request.session_id
-        |> Result.map_error ~f:persistence_error
-      in
-      close_deleted_entry t context request entry;
-      let%map indexed =
-        Agent_store.Session_index.find_checked
-          (Agent_store.Session_store.session_index t.session_store)
-          request.session_id
-        |> Result.map_error ~f:persistence_error
-      in
-      Option.iter indexed ~f:(Session_registry.index t.registry)
-    | Remove ->
-      close_deleted_entry t context request entry;
-      Agent_store.Session_store.remove_session t.session_store request.session_id
-      |> Result.map_error ~f:persistence_error
-  in
-  Ok
-    (Agent_protocol.Method_result.Session_delete
-       { session_id = request.session_id; deleted_at; archive = None })
-;;
-
 let validate_stopped_revision state expected_revision =
   if
     not
@@ -2550,7 +2507,8 @@ let dispatch_authorized t ~actor ~context ~command_audit ~inference_budget = fun
   | Session_rebuild request -> handle_session_rebuild t context command_audit request
   | Session_upgrade_prompt request ->
     handle_session_upgrade_prompt t context command_audit request
-  | Session_delete request -> handle_session_delete t context request
+  | Session_delete _ | Session_restore _ | Session_resume _ ->
+    Error (error Invalid_state "lifecycle commands require their original receipt owner")
   | Permission_list request -> handle_permission_list t context request
   | Permission_respond request ->
     handle_permission_respond t context command_audit request
@@ -2636,6 +2594,11 @@ let command_session_id = function
   | Session_rebuild request -> Some request.session_id
   | Session_upgrade_prompt request -> Some request.session_id
   | Session_delete request -> Some request.session_id
+  | Session_restore request | Session_resume request ->
+    Some
+      (Agent_protocol.Session_lifecycle.Request.expected request
+       |> Agent_protocol.Session_lifecycle.Expected.reference
+       |> Agent_protocol.Session_ref.session_id)
   | Permission_list request -> Some request.session_id
   | Permission_respond request -> Some request.session_id
   | Grant_list request -> request.session_id
@@ -2743,6 +2706,15 @@ let receipt_summary ~session_id result =
             ; mutation = value.mutation
             }))
   | Session_delete value -> Ok (R.Deleted_session value.session_id)
+  | Session_restore value | Session_resume value ->
+    let expected = Agent_protocol.Session_lifecycle.Result.expected value in
+    mutation
+      Agent_protocol.Mutation_result.
+        { revision = Agent_protocol.Session_lifecycle.Expected.session_revision expected
+        ; latest_event_sequence =
+            (* canonical head is unchanged by lifecycle *)
+            Agent_protocol.Session_lifecycle.Result.latest_event_sequence value
+        }
   | Permission_respond value ->
     Ok (R.Permission_response (value.permission.id, value.mutation))
   | Grant_revoke value -> Ok (R.Revoked_grant (value.grant.id, value.mutation))
@@ -2844,11 +2816,30 @@ let handle_command_receipt
     | Conflict _ ->
       Error (error Idempotency_conflict "receipt request does not match original payload")
     | Replay record ->
+      let retained_removal =
+        Agent_protocol.Id.Principal.equal key.principal_id principal.id
+        && Agent_store.Idempotency_store.equal_retention record.retention Protected
+        &&
+        match command, record.outcome with
+        | Agent_protocol.Command.Session_delete { policy = Remove; _ }, Success _ -> true
+        | _, (Pending | Failure _ | Success _) -> false
+      in
+      let visible_original session_id =
+        match visible session_id with
+        | Error failure
+          when retained_removal
+               && Agent_protocol.Error.equal_code failure.code Session_not_found
+               && Option.equal
+                    Agent_protocol.Id.Session.equal
+                    identity.session_id
+                    (Some session_id) -> Ok ()
+        | result -> result
+      in
       let guarded () =
         let%bind () =
           match identity.session_id with
           | None -> Ok ()
-          | Some session_id -> visible session_id
+          | Some session_id -> visible_original session_id
         in
         let%map receipt =
           match record.outcome with
@@ -2873,7 +2864,7 @@ let handle_command_receipt
               | Continued_history { session_id; _ }
               | Configuration_updated { session_id; _ }
               | Session_mutation { session_id; _ }
-              | Sent_message { session_id; _ } -> visible session_id
+              | Sent_message { session_id; _ } -> visible_original session_id
               | Project_mutation _
               | Deleted_project _
               | Collection_mutation _
@@ -2899,10 +2890,102 @@ let handle_command_receipt
        | result -> result))
 ;;
 
+let handle_lifecycle t context command request =
+  let open Result.Let_syntax in
+  let principal = Connection_context.principal context in
+  let%bind identity =
+    Result.of_option
+      (idempotency command)
+      ~error:(error Invalid_request "lifecycle command has no original idempotency key")
+  in
+  let key = idempotency_key principal command identity in
+  let%bind digest = request_digest command in
+  let%bind cached =
+    Eio.Mutex.use_rw ~protect:true t.idempotency_mutex (fun () ->
+      match
+        Agent_store.Idempotency_store.lookup
+          t.idempotency_store
+          ~key
+          ~request_digest:digest
+      with
+      | Conflict _ ->
+        Error (error Idempotency_conflict "idempotency key was used for another request")
+      | Replay { outcome = Success json; retention = Protected; _ } ->
+        Agent_protocol.Method_result.of_json
+          ~method_:(Agent_protocol.Command.method_name command)
+          json
+        |> Result.map ~f:(fun value -> Some (Ok value))
+      | Replay { outcome = Failure failure; retention = Protected; _ } ->
+        Ok (Some (Error failure))
+      | Replay { outcome = Failure _; retention = Standard; _ } ->
+        Error (error Persistence_error "lifecycle rejection lacks protected retention")
+      | Replay { outcome = Pending; _ } -> Ok None
+      | Replay { outcome = Success _; retention = Standard; _ } ->
+        Error (error Persistence_error "lifecycle receipt lacks protected retention")
+      | Missing -> pending_record t key digest Protected |> Result.map ~f:(fun _ -> None))
+  in
+  match cached with
+  | Some cached_outcome ->
+    let session_id, allow_removed =
+      match request with
+      | Session_lifecycle_service.Request.Delete request ->
+        ( request.session_id
+        , Result.is_ok cached_outcome
+          && Agent_protocol.Session.Delete_request.equal_policy request.policy Remove )
+      | Restore request | Resume request ->
+        ( Agent_protocol.Session_lifecycle.Request.expected request
+          |> Agent_protocol.Session_lifecycle.Expected.reference
+          |> Agent_protocol.Session_ref.session_id
+        , false )
+    in
+    let checked =
+      Session_registry.read_state t.registry session_id ~authorize:(fun session ->
+        if session_visible_to principal session
+        then Ok ()
+        else Error (error Permission_denied "lifecycle receipt session is not visible"))
+      |> Result.map ~f:(fun _ -> ())
+    in
+    let%bind () =
+      match checked with
+      | Error failure
+        when allow_removed
+             && Agent_protocol.Error.equal_code failure.code Session_not_found -> Ok ()
+      | result -> result
+    in
+    cached_outcome
+  | None ->
+    (match
+       Session_lifecycle_service.execute
+         t.lifecycle_service
+         ~key
+         ~request_digest:digest
+         ~authorize:(fun summary ->
+           if session_visible_to principal summary
+           then Ok ()
+           else Error (error Permission_denied "session is not visible"))
+         ~validate_attachment:(fun session_id attachment_id ->
+           require_connection_attachment context ~session_id ~attachment_id)
+         request
+     with
+     | Ok value ->
+       (match request with
+        | Session_lifecycle_service.Request.Delete request ->
+          Connection_context.remove_session_attachments context request.session_id
+        | Restore _ | Resume _ -> ());
+       Ok value
+     | Error failure -> Error (Session_lifecycle_service.Failure.error failure))
+;;
+
 let execute t ~actor context ~inference_budget command =
   match command with
   | Agent_protocol.Command.Command_receipt request ->
     handle_command_receipt t ~actor context request
+  | Session_delete request ->
+    handle_lifecycle t context command (Session_lifecycle_service.Request.Delete request)
+  | Session_restore request ->
+    handle_lifecycle t context command (Session_lifecycle_service.Request.Restore request)
+  | Session_resume request ->
+    handle_lifecycle t context command (Session_lifecycle_service.Request.Resume request)
   | _ ->
     (match idempotency command with
      | None ->

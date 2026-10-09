@@ -3,6 +3,7 @@
 module Fields : sig
   type t =
     { session : Session.t
+    ; lifecycle : Session_lifecycle.Observation.t option [@sexp.option]
     ; canonical_history : Public_history.Window.t
     ; archived_revisions : int64 list
     ; effective_history : Public_history.Window.t option

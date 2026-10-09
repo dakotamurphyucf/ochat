@@ -97,7 +97,11 @@ val update
   -> payload:Document_schema.Document.t
   -> (t, Store_error.t) Result.t
 
-(** Validate/encode before writing, then reread before atomic CURRENT install. *)
+(** Validate/encode before Exclusive writing, then reread before atomic CURRENT
+    install. Existing same-sequence files may be reused only when exact full frame
+    bytes match, validated and fsynced on one bounded descriptor plus parent sync.
+    Mismatches remain untouched and do not change CURRENT. This supports unchanged
+    checkpoints after reopen and retry after uncertain snapshot publication. *)
 val install
   :  env:Eio_unix.Stdenv.base
   -> directory:string

@@ -80,6 +80,9 @@ let collect_results ~env ~session_store registry stats =
       List.fold entries ~init:(stats, None) ~f:(fun (stats, failure) entry ->
         match
           entry.Agent_store.Session_index.Entry.archived
+          || Agent_store.Session_archive_record.Admission.equal
+               entry.admission
+               Explicit_resume_required
           || not (has_preparations ~env session_store entry.session.id)
         with
         | true -> stats, failure

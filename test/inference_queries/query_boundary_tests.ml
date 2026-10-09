@@ -296,6 +296,8 @@ let%expect_test
       ; owner_grace_deadline = None
       ; pending_initial_start = false
       ; archived = false
+      ; lifecycle_revision = Agent_store.Session_archive_record.Revision.zero
+      ; admission = Automatic
       }
     in
     S.Session_registry.index registry index;
@@ -385,6 +387,8 @@ let%expect_test "cancelled immutable read releases registry ownership for the ne
       ; owner_grace_deadline = None
       ; pending_initial_start = false
       ; archived = false
+      ; lifecycle_revision = Agent_store.Session_archive_record.Revision.zero
+      ; admission = Automatic
       }
     in
     S.Session_registry.index registry index;

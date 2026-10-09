@@ -155,7 +155,6 @@ let publish t entries (bytes, carrier) =
   | Error _ as error ->
     Eio.Cancel.protect (fun () ->
       try refresh t with
-      | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
       | _ -> ());
     error
   | exception exn ->
@@ -250,7 +249,13 @@ let confirm_requested_publication t bytes =
         raise exn)
 ;;
 
-let with_prepared_upsert t entry ~publish_authority =
+let with_prepared_replacement
+      t
+      ~session_id
+      ~expected_entry
+      ~replacement
+      ~publish_authority
+  =
   with_mutation_lock t ~f:(fun () ->
     let open Result.Let_syntax in
     let%bind () =
@@ -258,7 +263,19 @@ let with_prepared_upsert t entry ~publish_authority =
       | None -> Ok ()
       | Some error -> Error error
     in
-    let entries = Map.set t.entries ~key:entry.Entry.session.id ~data:entry in
+    let%bind () =
+      match expected_entry with
+      | None -> Ok ()
+      | Some expected ->
+        if Option.equal Entry.equal expected (Map.find t.entries session_id)
+        then Ok ()
+        else Error (Store_error.Corrupt "lifecycle index observation changed")
+    in
+    let entries =
+      match replacement with
+      | Some entry -> Map.set t.entries ~key:session_id ~data:entry
+      | None -> Map.remove t.entries session_id
+    in
     let%bind ((bytes, _) as prepared) = prepare t entries in
     match publish_authority () with
     | Error _ as error ->
@@ -272,13 +289,32 @@ let with_prepared_upsert t entry ~publish_authority =
       (match publish t entries prepared with
        | Ok () -> Ok value
        | Error _ as error ->
-         confirm_requested_publication t bytes;
+         (try confirm_requested_publication t bytes with
+          | _ -> ());
          error
        | exception exn ->
          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
          (try confirm_requested_publication t bytes with
           | _ -> ());
          Exn.raise_with_original_backtrace exn backtrace))
+;;
+
+let with_prepared_upsert ?expected_entry t entry ~publish_authority =
+  with_prepared_replacement
+    t
+    ~session_id:entry.Entry.session.id
+    ~expected_entry
+    ~replacement:(Some entry)
+    ~publish_authority
+;;
+
+let with_prepared_remove ?expected_entry t session_id ~publish_authority =
+  with_prepared_replacement
+    t
+    ~session_id
+    ~expected_entry
+    ~replacement:None
+    ~publish_authority
 ;;
 
 let upsert t entry =
@@ -298,4 +334,11 @@ let validate_upsert t entry =
     in
     prepare t (Map.set t.entries ~key:entry.Entry.session.id ~data:entry)
     |> Result.map ~f:ignore)
+;;
+
+let validate_remove t session_id =
+  with_mutation_lock t ~f:(fun () ->
+    match t.unavailable with
+    | Some error -> Error error
+    | None -> prepare t (Map.remove t.entries session_id) |> Result.map ~f:(fun _ -> ()))
 ;;

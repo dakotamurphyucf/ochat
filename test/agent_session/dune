@@ -112,6 +112,7 @@
   runtime_resource_tests
   runtime_lease_tests
   runtime_retirement_tests
+  lifecycle_fence_tests
   runtime_activity_tests
   delegated_runtime_tests
   delegation_resource_tests

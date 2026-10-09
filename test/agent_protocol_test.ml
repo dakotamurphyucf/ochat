@@ -682,6 +682,8 @@ let architecture_methods =
   ; "session.rebuild"
   ; "session.upgrade_prompt"
   ; "session.delete"
+  ; "session.restore"
+  ; "session.resume"
   ; "permission.list"
   ; "permission.respond"
   ; "grant.list"
@@ -710,7 +712,7 @@ let%expect_test "every architecture method has request and result dispatch" =
           (List.equal String.equal expected (normalize Method_result.supported_methods)
            : bool)
       }];
-  [%expect {| ((method_count 70) (requests true) (results true)) |}]
+  [%expect {| ((method_count 72) (requests true) (results true)) |}]
 ;;
 
 let%expect_test "history deletion requires stable ID, revision and idempotency" =
@@ -889,6 +891,7 @@ let%expect_test "client snapshots and typed method results round trip" =
   let session = session_summary () in
   let snapshot : Snapshot.t =
     { session
+    ; lifecycle = None
     ; canonical_history = empty_history_window
     ; archived_revisions = []
     ; effective_history = None
@@ -1200,4 +1203,93 @@ let%expect_test "catalog independent wire fixtures roundtrip absent and present 
     {|
     true
     true |}]
+;;
+
+let%expect_test
+    "lifecycle protocol validates owned anchors and makes restore and resume explicit"
+  =
+  let module L = Session_lifecycle in
+  let session = session_summary () in
+  let reference =
+    Session_ref.create
+      ~server_id:(Id.Server.of_string "srv_lifecycle" |> ok_or_fail)
+      ~session_id:session.id
+  in
+  let revision = L.Revision.of_int64 1L |> ok_or_fail in
+  let expected =
+    L.Expected.create
+      ~reference
+      ~generation:session.generation
+      ~session_revision:session.revision
+      ~lifecycle_revision:revision
+    |> ok_or_fail
+  in
+  let request =
+    L.Request.create
+      ~expected
+      ~idempotency_key:(Idempotency_key.of_string "restore-original" |> ok_or_fail)
+  in
+  let restore = Command.Session_restore request in
+  let resume = Command.Session_resume request in
+  let restore_roundtrip =
+    Command.of_method_and_params
+      ~method_:(Command.method_name restore)
+      ~params:(Command.params restore)
+    |> ok_or_fail
+  in
+  let valid_observation =
+    L.Observation.create ~expected ~status:Active ~admission:Explicit_resume_required
+    |> ok_or_fail
+  in
+  let malformed_expected =
+    match L.Expected.to_json expected with
+    | `Object fields ->
+      `Object
+        (List.map fields ~f:(fun (name, value) ->
+           if String.equal name "generation" then name, `Number "-1" else name, value))
+    | _ -> failwith "expected object"
+  in
+  let invalid_outcome =
+    L.Result.create
+      ~reference
+      ~generation:session.generation
+      ~session_revision:session.revision
+      ~latest_event_sequence:session.latest_event_sequence
+      ~lifecycle_revision:revision
+      ~status:Active
+      ~admission:Automatic
+      ~action:Restore
+      ~disposition:Applied
+      ~completed_at:(Timestamp.of_time_ns Time_ns.epoch)
+  in
+  print_s
+    [%sexp
+      (( Command.method_name restore_roundtrip
+       , Command.method_name resume
+       , Result.is_error (L.Expected.of_json malformed_expected)
+       , Result.is_error invalid_outcome
+       , L.Observation.matches_session valid_observation session )
+       : string * string * bool * bool * bool)];
+  [%expect {| (session.restore session.resume true true true) |}]
+;;
+
+let%expect_test
+    "catalog lifecycle defaults are presentation only and partial gate observations \
+     reject"
+  =
+  let session = session_summary () in
+  let legacy = Session_catalog.of_json (Session.to_json session) |> ok_or_fail in
+  let only_gate =
+    match Session.to_json session with
+    | `Object fields ->
+      `Object (fields @ [ "admission", `String "explicit_resume_required" ])
+    | _ -> failwith "session object"
+  in
+  print_s
+    [%sexp
+      (( Session_lifecycle.Revision.to_int64 legacy.lifecycle_revision
+       , legacy.admission
+       , Result.is_error (Session_catalog.of_json only_gate) )
+       : int64 * Session_lifecycle.Result.Admission.t * bool)];
+  [%expect {| (0 Automatic true) |}]
 ;;

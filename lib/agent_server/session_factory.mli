@@ -262,3 +262,27 @@ val recover_session
   :  t
   -> Agent_store.Session_index.Entry.t
   -> (Session_registry.entry, Agent_protocol.Error.t) result
+
+(** Immutable Recovery.read using the caller's existing checked Handle/actor lock.
+    Retains no resource and performs no repair, source/credential/runtime creation
+    or checkpoint writes. Generated and authored delegated source identity/contract
+    and captured inference target are checked against their retained admission,
+    without requiring a live parent or native workspace. Caller closes Handle and
+    excludes lifecycle mutations. *)
+val read_owned_session
+  :  t
+  -> Agent_store.Session_store.Handle.t
+  -> (Agent_session.Session_state.t, Agent_protocol.Error.t) Result.t
+
+(** Complete canonical scheduling projection from an immutable state. Lifecycle
+    authority is applied separately by Session_store.prepare_lifecycle. *)
+val index_entry : Agent_session.Session_state.t -> Agent_store.Session_index.Entry.t
+
+(** Recheck current bounded private linkage under the generated-creation
+    coordinator. Live parent/child obligations reject removal; revoked terminal
+    historical links with completed cleanup may remain. Caller retains lifecycle
+    exclusion through subsequent publication and physical cleanup. *)
+val validate_session_removal
+  :  t
+  -> Agent_session.Session_state.t
+  -> (unit, Agent_protocol.Error.t) Result.t

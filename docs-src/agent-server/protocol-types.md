@@ -538,6 +538,8 @@ type t =
   | Session_rebuild of Session.Rebuild_request.t
   | Session_upgrade_prompt of Session.Upgrade_prompt_request.t
   | Session_delete of Session.Delete_request.t
+  | Session_restore of Session_lifecycle.Request.t
+  | Session_resume of Session_lifecycle.Request.t
   | Permission_list of Permission.List_request.t
   | Permission_respond of Permission.Respond_request.t
   | Grant_list of Grant.List_request.t
@@ -2870,6 +2872,8 @@ type t =
   | Session_rebuild of Session_mutation.t
   | Session_upgrade_prompt of Session_mutation.t
   | Session_delete of Delete.t
+  | Session_restore of Session_lifecycle.Result.t
+  | Session_resume of Session_lifecycle.Result.t
   | Permission_list of Permission.t Page.t
   | Permission_respond of Permission.Respond_result.t
   | Grant_list of Grant.t Page.t
@@ -4251,6 +4255,7 @@ val validate : t -> (unit, Error.t) result
 module Fields : sig
   type t =
     { session : Session.t
+    ; lifecycle : Session_lifecycle.Observation.t option [@sexp.option]
     ; canonical_history : Public_history.Window.t
     ; archived_revisions : int64 list
     ; effective_history : Public_history.Window.t option
@@ -5313,6 +5318,8 @@ type t =
   { session : Session.t
   ; active_owner_principal_id : Id.Principal.t option
   ; archived : bool
+  ; lifecycle_revision : Session_lifecycle.Revision.t
+  ; admission : Session_lifecycle.Result.Admission.t
   ; effective_organization : Session_organization.Values.t
   }
 [@@deriving sexp]
@@ -5440,6 +5447,143 @@ module Update_request : sig
 
   val to_json : t -> Jsonaf.t
   val of_json : Jsonaf.t -> (t, Error.t) Result.t
+end
+```
+
+## session_lifecycle
+
+[JSON codec](../../lib/agent_protocol/session_lifecycle.ml) · [interface](../../lib/agent_protocol/session_lifecycle.mli)
+
+```ocaml
+open! Core
+
+(** Host-qualified lifecycle requests, independent of actor/store implementation.
+    Restoring retains all session/workspace content but grants no execution. *)
+module Revision : sig
+  type t [@@deriving compare, equal, sexp]
+
+  val zero : t
+  val one : t
+  val of_int64 : int64 -> (t, Protocol_error.t) Result.t
+  val to_int64 : t -> int64
+  val succ : t -> (t, Protocol_error.t) Result.t
+end
+
+module Expected : sig
+  type t [@@deriving equal, sexp]
+
+  val create
+    :  reference:Session_ref.t
+    -> generation:int
+    -> session_revision:int64
+    -> lifecycle_revision:Revision.t
+    -> (t, Protocol_error.t) Result.t
+
+  val reference : t -> Session_ref.t
+  val generation : t -> int
+  val session_revision : t -> int64
+  val lifecycle_revision : t -> Revision.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Protocol_error.t) Result.t
+end
+
+module Request : sig
+  (** Method determines Restore or Resume. The identity/generation/revisions and
+      original idempotency key are part of the immutable original request digest.
+      No attachment is required for an archived unloaded session. *)
+  type t [@@deriving sexp]
+
+  val create : expected:Expected.t -> idempotency_key:Idempotency_key.t -> t
+  val expected : t -> Expected.t
+  val idempotency_key : t -> Idempotency_key.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Protocol_error.t) Result.t
+end
+
+module Result : sig
+  module Status : sig
+    type t =
+      | Active
+      | Archived
+      | Removed
+    [@@deriving equal, sexp]
+
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Protocol_error.t) Core.Result.t
+  end
+
+  module Admission : sig
+    type t =
+      | Automatic
+      | Explicit_resume_required
+    [@@deriving equal, sexp]
+
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Protocol_error.t) Core.Result.t
+  end
+
+  module Action : sig
+    type t =
+      | Archive
+      | Restore
+      | Resume
+      | Remove
+    [@@deriving equal, sexp]
+  end
+
+  module Disposition : sig
+    type t =
+      | Applied
+      | Already_current
+    [@@deriving equal, sexp]
+  end
+
+  (** Validating create/decoder enforces legal status/action/admission pairs,
+      nonnegative anchors and nonzero archived/removed lifecycle revisions.
+      Exposes actual current disposition rather than inventing replacement state. *)
+  type t [@@deriving sexp]
+
+  val expected : t -> Expected.t
+  val latest_event_sequence : t -> int64
+  val status : t -> Status.t
+  val admission : t -> Admission.t
+  val action : t -> Action.t
+  val disposition : t -> Disposition.t
+  val completed_at : t -> Timestamp.t
+
+  val create
+    :  reference:Session_ref.t
+    -> generation:int
+    -> session_revision:int64
+    -> latest_event_sequence:int64
+    -> lifecycle_revision:Revision.t
+    -> status:Status.t
+    -> admission:Admission.t
+    -> action:Action.t
+    -> disposition:Disposition.t
+    -> completed_at:Timestamp.t
+    -> (t, Protocol_error.t) Core.Result.t
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Protocol_error.t) Core.Result.t
+end
+
+module Observation : sig
+  (** Current nonactivating observation; never an execution capability. *)
+  type t [@@deriving sexp]
+
+  val create
+    :  expected:Expected.t
+    -> status:Result.Status.t
+    -> admission:Result.Admission.t
+    -> (t, Protocol_error.t) Core.Result.t
+
+  val expected : t -> Expected.t
+  val status : t -> Result.Status.t
+  val admission : t -> Result.Admission.t
+  val matches_session : t -> Session.t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Protocol_error.t) Core.Result.t
 end
 ```
 
@@ -5619,6 +5763,10 @@ val server_id : t -> Id.Server.t
 val session_id : t -> Id.Session.t
 val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
+
+(** Snapshot lifecycle observations use this decoder. Both string IDs are
+    admitted through their validated constructors; decoding grants no authority. *)
+val t_of_sexp : Sexplib0.Sexp.t -> t
 ```
 
 ## session_work
@@ -5718,6 +5866,7 @@ end
 
 type t =
   { session : Session.t
+  ; lifecycle : Session_lifecycle.Observation.t option [@sexp.option]
   ; canonical_history : History.Window.t
   ; archived_revisions : int64 list [@sexp.list]
   ; effective_history : History.Window.t option

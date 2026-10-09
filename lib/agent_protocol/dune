@@ -10,6 +10,7 @@
   json_codec
   idempotency_key
   session_ref
+  session_lifecycle
   command_receipt
   provider_operator
   initialize

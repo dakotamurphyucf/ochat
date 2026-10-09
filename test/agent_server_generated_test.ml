@@ -328,13 +328,11 @@ let%expect_test
                         assert (
                           List.exists snapshot.canonical_history.entries ~f:(fun entry ->
                             P.History.Id.equal entry.id retained.id));
-                        let entry =
-                          Agent_server.Session_registry.find
-                            (Daemon.registry daemon)
-                            child_id
-                          |> Option.value_exn
-                        in
-                        assert (not (Agent_server.Runtime_owner.is_loaded entry.runtime));
+                        assert (
+                          Option.is_none
+                            (Agent_server.Session_registry.find
+                               (Daemon.registry daemon)
+                               child_id));
                         let handle =
                           Agent_client.Session_handle.attach
                             ~sw
@@ -346,6 +344,13 @@ let%expect_test
                             ()
                           |> protocol_ok
                         in
+                        let entry =
+                          Agent_server.Session_registry.find
+                            (Daemon.registry daemon)
+                            child_id
+                          |> Option.value_exn
+                        in
+                        assert (not (Agent_server.Runtime_owner.is_loaded entry.runtime));
                         let before = A.state entry.actor |> protocol_ok in
                         (match
                            Agent_client.Session_handle.start

@@ -813,47 +813,8 @@ let config_watcher
   watcher
 ;;
 
-let close_store_on_error store ~f =
-  let close_failed () =
-    try
-      Eio.Cancel.protect (fun () ->
-        ignore
-          (Agent_store.Session_store.close store
-           : (unit, Agent_store.Store_error.t) result))
-    with
-    | _ -> ()
-  in
-  match f () with
-  | Ok _ as result -> result
-  | Error _ as failure ->
-    close_failed ();
-    failure
-  | exception exn ->
-    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-    close_failed ();
-    Exn.raise_with_original_backtrace exn backtrace
-;;
-
-let close_operator_on_error provider_operator ~f =
-  let close_failed () =
-    try
-      Eio.Cancel.protect (fun () ->
-        Option.iter provider_operator ~f:Provider_operator_port.close)
-    with
-    | _ -> ()
-  in
-  match f () with
-  | Ok _ as result -> result
-  | Error _ as failure ->
-    close_failed ();
-    failure
-  | exception exn ->
-    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-    close_failed ();
-    Exn.raise_with_original_backtrace exn backtrace
-;;
-
 let compose
+      ~startup_cleanup
       ~sw
       ~env
       ~(config : Config.t)
@@ -973,6 +934,7 @@ let compose
     |> Result.map_error ~f:protocol_of_store
   in
   let registry = Session_registry.create () in
+  Startup_cleanup.adopt_registry_exn startup_cleanup registry;
   let start_queue = Agent_session.Start_queue.create () in
   let%bind quota_manager =
     Agent_session.Quota_manager.create
@@ -1013,6 +975,24 @@ let compose
       ~authoring_validation_host:options.authoring_validation_host
       ~durability:(durability config.server)
       ~limits:factory_limits
+  in
+  let lifecycle_service =
+    Session_lifecycle_service.create
+      ~store
+      ~registry
+      ~idempotency:idempotency_store
+      ~now:(fun () ->
+        Eio.Time.now (Eio.Stdenv.clock env)
+        |> Time_ns.Span.of_sec
+        |> Time_ns.of_span_since_epoch
+        |> Agent_protocol.Timestamp.of_time_ns)
+      ~read_owned_session:(Session_factory.read_owned_session factory)
+      ~validate_removal:(Session_factory.validate_session_removal factory)
+  in
+  let%bind () =
+    if equal_startup_mode options.startup_mode Execute
+    then Session_lifecycle_service.recover_removals lifecycle_service
+    else Ok ()
   in
   let%bind indexed_sessions =
     Agent_store.Session_store.list_sessions_checked store
@@ -1147,6 +1127,7 @@ let compose
       ~audit_store
       ~blob_store
       ~session_store:store
+      ~lifecycle_service
       ~initialize:
         (initialize
            env
@@ -1227,6 +1208,8 @@ let compose
       | Session_rebuild _
       | Session_upgrade_prompt _
       | Session_delete _
+      | Session_restore _
+      | Session_resume _
       | Blob_read _
       | Permission_list _
       | Permission_respond _
@@ -1318,7 +1301,8 @@ let start
     open_store ~sw ~env config.server ~process_start_identity
     |> Result.map_error ~f:protocol_of_store
   in
-  close_store_on_error store ~f:(fun () ->
+  let startup_cleanup = Startup_cleanup.create ~sw ~store in
+  Startup_cleanup.protect startup_cleanup (fun () ->
     let%bind () = before_activation store in
     let%bind provider_operator =
       match options.provider_operator_factory with
@@ -1327,41 +1311,42 @@ let start
         factory ~sw ~server_id:(Agent_store.Session_store.server_id store)
         |> Result.map ~f:Option.some
     in
-    close_operator_on_error provider_operator ~f:(fun () ->
-      Option.iter provider_operator ~f:(fun port ->
-        Eio.Switch.on_release sw (fun () -> Provider_operator_port.close port));
-      let features =
-        List.filter options.features ~f:(fun feature ->
-          not (String.equal feature "provider.operator"))
-      in
-      let options =
-        { options with
-          features =
-            (match provider_operator with
-             | None -> features
-             | Some _ -> features @ [ "provider.operator" ])
-        }
-      in
-      let%bind built, prompts =
-        build_catalog
-          ~env
-          store
-          config
-          options.reviewer_resolver
-          options.policy_evaluator_resolver
-        |> Result.map_error ~f:protocol_of_store
-      in
-      compose
-        ~sw
+    Option.iter provider_operator ~f:(Startup_cleanup.adopt_operator_exn startup_cleanup);
+    Eio.Switch.on_release sw (fun () ->
+      Startup_cleanup.release_operator_on_scope_exit startup_cleanup);
+    let features =
+      List.filter options.features ~f:(fun feature ->
+        not (String.equal feature "provider.operator"))
+    in
+    let options =
+      { options with
+        features =
+          (match provider_operator with
+           | None -> features
+           | Some _ -> features @ [ "provider.operator" ])
+      }
+    in
+    let%bind built, prompts =
+      build_catalog
         ~env
-        ~config
-        ~tool_dir
-        ~home
-        ~options
-        ~provider_operator
         store
-        built
-        prompts))
+        config
+        options.reviewer_resolver
+        options.policy_evaluator_resolver
+      |> Result.map_error ~f:protocol_of_store
+    in
+    compose
+      ~startup_cleanup
+      ~sw
+      ~env
+      ~config
+      ~tool_dir
+      ~home
+      ~options
+      ~provider_operator
+      store
+      built
+      prompts)
 ;;
 
 let close_connection t context = Command_handler.close_connection t.handler context

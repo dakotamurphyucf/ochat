@@ -275,6 +275,8 @@ let%expect_test
             }
       ; active_owner_principal_id = Some owner
       ; archived = false
+      ; lifecycle_revision = P.Session_lifecycle.Revision.zero
+      ; admission = P.Session_lifecycle.Result.Admission.Automatic
       }
   in
   let a = entry "ses_catalog_a"

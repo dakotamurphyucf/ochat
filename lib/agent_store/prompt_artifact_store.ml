@@ -148,6 +148,21 @@ let create ~env ~root =
       Error (Store_error.of_exn ~operation:"create prompt artifact store" ~path:root exn))
 ;;
 
+let open_existing ~env ~root =
+  if not (Filename.is_absolute root)
+  then Error (Store_error.Corrupt "prompt artifact root must be absolute")
+  else (
+    try
+      match Eio.Path.kind ~follow:false Eio.Path.(Eio.Stdenv.fs env / root) with
+      | `Directory -> Ok { env; root }
+      | `Not_found -> Error (Store_error.Missing root)
+      | _ ->
+        Error (Store_error.Corrupt "prompt artifact root is not a non-symlink directory")
+    with
+    | Eio.Io _ as exn ->
+      Error (Store_error.of_exn ~operation:"open prompt artifact store" ~path:root exn))
+;;
+
 let revision_directory t revision_id =
   Filename.concat t.root (Agent_protocol.Id.Prompt_revision.to_string revision_id)
 ;;

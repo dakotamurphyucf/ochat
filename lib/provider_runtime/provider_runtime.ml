@@ -36,8 +36,17 @@ type state =
   | Opened of Opened.t
   | Closed
 
+module Close_state = struct
+  type t =
+    | Open
+    | Closing
+    | Closed
+end
+
 type t =
-  { sw : Eio.Switch.t
+  { close_mutex : Eio.Mutex.t
+  ; mutable close_state : Close_state.t
+  ; sw : Eio.Switch.t
   ; server_id : P.Id.Server.t
   ; authorize_setup : Actor.t -> bool
   ; authorize_status : Actor.t -> bool
@@ -51,17 +60,32 @@ type t =
   ; mutable state : state
   }
 
+let admission_open t =
+  match t.close_state with
+  | Open -> true
+  | Closing | Closed -> false
+;;
+
 let close t =
-  let previous = t.state in
-  t.state <- Closed;
-  match previous with
-  | Opened opened -> opened.close ()
-  | Initializing initialization ->
-    Eio.Cancel.protect (fun () ->
-      if not (Eio.Promise.is_resolved initialization.stop)
-      then Eio.Promise.resolve initialization.stop_u ();
-      Eio.Promise.await initialization.finished)
-  | Unconfigured | Closed -> ()
+  if admission_open t then t.close_state <- Closing;
+  Eio.Cancel.protect (fun () ->
+    Eio.Mutex.use_ro t.close_mutex (fun () ->
+      match t.close_state with
+      | Closed -> ()
+      | Open | Closing ->
+        (match t.state with
+         | Initializing initialization ->
+           if not (Eio.Promise.is_resolved initialization.stop)
+           then Eio.Promise.resolve initialization.stop_u ();
+           Eio.Promise.await initialization.finished
+         | Opened _ | Unconfigured | Closed -> ());
+        (match t.state with
+         | Opened opened -> opened.close ()
+         | Unconfigured | Closed -> ()
+         | Initializing _ ->
+           failwith "provider initialization completed without ownership transfer");
+        t.state <- Closed;
+        t.close_state <- Closed))
 ;;
 
 let create
@@ -76,7 +100,9 @@ let create
   let open Result.Let_syntax in
   let%map opened = existing ~sw in
   let t =
-    { sw
+    { close_mutex = Eio.Mutex.create ()
+    ; close_state = Open
+    ; sw
     ; server_id
     ; authorize_setup
     ; authorize_status
@@ -90,11 +116,14 @@ let create
 ;;
 
 let opened t =
-  match t.state with
-  | Opened opened -> Ok opened
-  | Unconfigured -> Error DTO.Error.Store_unavailable
-  | Initializing _ -> Error DTO.Error.Busy
-  | Closed -> Error DTO.Error.Closed
+  if not (admission_open t)
+  then Error DTO.Error.Closed
+  else (
+    match t.state with
+    | Opened opened -> Ok opened
+    | Unconfigured -> Error DTO.Error.Store_unavailable
+    | Initializing _ -> Error DTO.Error.Busy
+    | Closed -> Error DTO.Error.Closed)
 ;;
 
 let rec backend_view t bound =
@@ -136,7 +165,9 @@ let rec backend_view t bound =
 let backend t = backend_view t None
 
 let setup t ~actor request =
-  if
+  if not (admission_open t)
+  then Error DTO.Error.Closed
+  else if
     not
       (Actor.is_current actor
        && P.Principal.has_scope (Actor.principal actor) Provider_manage
@@ -170,12 +201,9 @@ let setup t ~actor request =
         in
         let outcome =
           match outcome, t.state with
-          | Ok (Ok newly_opened), Closed ->
-            (try
-               newly_opened.close ();
-               Ok (Error DTO.Error.Closed)
-             with
-             | exn -> Error exn)
+          | Ok (Ok newly_opened), _ when not (admission_open t) ->
+            t.state <- Opened newly_opened;
+            Ok (Error DTO.Error.Closed)
           | Ok (Ok newly_opened), _ ->
             t.state <- Opened newly_opened;
             Ok (Ok newly_opened)
@@ -198,74 +226,80 @@ let setup t ~actor request =
 
 let dispatch t ~actor command =
   let open Result.Let_syntax in
-  match command with
-  | P.Command.Provider_setup request ->
-    setup t ~actor request
-    |> Result.map ~f:(fun result -> P.Method_result.Provider_setup result)
-  | Provider_status _
-    when match t.state with
-         | Unconfigured -> true
-         | _ -> false ->
-    if
-      not
-        (Actor.is_current actor
-         && P.Principal.has_scope (Actor.principal actor) Provider_view
-         && t.authorize_status actor)
-    then Error DTO.Error.Denied
-    else
-      Ok
-        (P.Method_result.Provider_status
-           { DTO.Status_result.server_id = t.server_id
-           ; setup_required = true
-           ; profiles = []
-           ; flows = []
-           ; selection = None
-           })
-  | _ ->
-    let%bind opened = opened t in
-    let service = opened.service in
-    (match command with
-     | Provider_status request ->
-       Service.status service ~actor request
-       |> Result.map ~f:(fun x -> P.Method_result.Provider_status x)
-     | Provider_login_begin request ->
-       Service.begin_login service ~actor request
-       |> Result.map ~f:(fun x -> P.Method_result.Provider_login_begin x)
-     | Provider_login_challenge request ->
-       Service.challenge service ~actor ~flow:request.flow
-       |> Result.map ~f:(fun x -> P.Method_result.Provider_login_challenge x)
-     | Provider_login_cancel request ->
-       Service.cancel service ~actor request
-       |> Result.map ~f:(fun x -> P.Method_result.Provider_login_cancel x)
-     | Provider_logout request ->
-       Service.logout service ~actor ~sw:t.sw request
-       |> Result.map ~f:(fun x -> P.Method_result.Provider_logout x)
-     | Provider_select request ->
-       Service.select service ~actor request
-       |> Result.map ~f:(fun x -> P.Method_result.Provider_select x)
-     | Provider_configure_environment request ->
-       Service.configure_environment service ~actor request
-       |> Result.map ~f:(fun x -> P.Method_result.Provider_configure_environment x)
-     | _ -> Error DTO.Error.Unsupported)
+  if not (admission_open t)
+  then Error DTO.Error.Closed
+  else (
+    match command with
+    | P.Command.Provider_setup request ->
+      setup t ~actor request
+      |> Result.map ~f:(fun result -> P.Method_result.Provider_setup result)
+    | Provider_status _
+      when match t.state with
+           | Unconfigured -> true
+           | _ -> false ->
+      if
+        not
+          (Actor.is_current actor
+           && P.Principal.has_scope (Actor.principal actor) Provider_view
+           && t.authorize_status actor)
+      then Error DTO.Error.Denied
+      else
+        Ok
+          (P.Method_result.Provider_status
+             { DTO.Status_result.server_id = t.server_id
+             ; setup_required = true
+             ; profiles = []
+             ; flows = []
+             ; selection = None
+             })
+    | _ ->
+      let%bind opened = opened t in
+      let service = opened.service in
+      (match command with
+       | Provider_status request ->
+         Service.status service ~actor request
+         |> Result.map ~f:(fun x -> P.Method_result.Provider_status x)
+       | Provider_login_begin request ->
+         Service.begin_login service ~actor request
+         |> Result.map ~f:(fun x -> P.Method_result.Provider_login_begin x)
+       | Provider_login_challenge request ->
+         Service.challenge service ~actor ~flow:request.flow
+         |> Result.map ~f:(fun x -> P.Method_result.Provider_login_challenge x)
+       | Provider_login_cancel request ->
+         Service.cancel service ~actor request
+         |> Result.map ~f:(fun x -> P.Method_result.Provider_login_cancel x)
+       | Provider_logout request ->
+         Service.logout service ~actor ~sw:t.sw request
+         |> Result.map ~f:(fun x -> P.Method_result.Provider_logout x)
+       | Provider_select request ->
+         Service.select service ~actor request
+         |> Result.map ~f:(fun x -> P.Method_result.Provider_select x)
+       | Provider_configure_environment request ->
+         Service.configure_environment service ~actor request
+         |> Result.map ~f:(fun x -> P.Method_result.Provider_configure_environment x)
+       | _ -> Error DTO.Error.Unsupported))
 ;;
 
 let receipt t ~actor command =
   let open Result.Let_syntax in
-  match command with
-  | P.Command.Provider_setup request ->
-    if
-      not
-        (Actor.is_current actor
-         && P.Principal.has_scope (Actor.principal actor) Provider_manage
-         && t.authorize_setup actor)
-    then Error DTO.Error.Denied
-    else (
-      match t.state with
-      | Closed -> Error DTO.Error.Closed
-      | _ -> t.setup_receipt ~actor request)
-  | _ ->
-    let%bind opened = opened t in
-    Service.command_receipt opened.service ~actor command
+  if not (admission_open t)
+  then Error DTO.Error.Closed
+  else (
+    match command with
+    | P.Command.Provider_setup request ->
+      if
+        not
+          (Actor.is_current actor
+           && P.Principal.has_scope (Actor.principal actor) Provider_manage
+           && t.authorize_setup actor)
+      then Error DTO.Error.Denied
+      else (
+        match t.state with
+        | Closed -> Error DTO.Error.Closed
+        | _ -> t.setup_receipt ~actor request)
+    | _ ->
+      let%bind opened = opened t in
+      Service.command_receipt opened.service ~actor command)
 ;;
 
 let enroll_private_key t ~actor ~profile ~key ~source_reference ~sw ~read =

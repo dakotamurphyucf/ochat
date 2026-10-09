@@ -513,3 +513,73 @@ let%expect_test
     print_endline "cancelled pure preparation leaves no intent; owner remains usable");
   [%expect {|cancelled pure preparation leaves no intent; owner remains usable|}]
 ;;
+
+let%expect_test
+    "index v2 conversion preserves unknown fields and rejects lifecycle collisions"
+  =
+  let module R = S.Session_archive_record in
+  let original = entry_fixture "ses_side_document" in
+  let admitted =
+    index_fixture [ replace original "archived" `True ]
+    |> S.Session_index_document.of_document
+    |> checked
+  in
+  let entry = D.Extension_carrier.value admitted |> List.hd_exn in
+  let written = S.Session_index_document.to_document admitted |> checked in
+  let encoded = field (D.Document.payload written) "entries" in
+  let retained =
+    match encoded with
+    | `Array [ entry ] ->
+      D.Json.equal (field entry "future_entry") (field original "future_entry")
+    | _ -> false
+  in
+  print_s
+    [%sexp
+      (entry.archived : bool)
+    , (R.Revision.to_int64 entry.lifecycle_revision : int64)
+    , (entry.admission : R.Admission.t)
+    , (retained : bool)];
+  let colliding =
+    index_fixture [ replace original "admission" (`String "explicit_resume_required") ]
+  in
+  print_s
+    [%sexp (Result.is_error (S.Session_index_document.of_document colliding) : bool)];
+  let current fields =
+    index_fixture [ fields ]
+    |> D.Document.json
+    |> fun json ->
+    replace json "schema_version" (`Number "2")
+    |> D.Document.inspect ~limits:S.Session_index_document.limits
+    |> checked
+    |> S.Session_index_document.of_document
+  in
+  print_s [%sexp (Result.is_error (current original) : bool)];
+  let incoherent =
+    original
+    |> fun entry ->
+    replace entry "lifecycle_revision" (`String "0")
+    |> fun entry -> replace entry "admission" (`String "explicit_resume_required")
+  in
+  print_s [%sexp (Result.is_error (current incoherent) : bool)];
+  let active_gate =
+    replace incoherent "lifecycle_revision" (`String "2")
+    |> current
+    |> checked
+    |> D.Extension_carrier.value
+    |> List.hd_exn
+  in
+  print_s
+    [%sexp
+      (active_gate.archived : bool)
+    , (active_gate.admission : R.Admission.t)
+    , (S.Session_index.Entry.equal active_gate { active_gate with admission = Automatic }
+       : bool)];
+  [%expect
+    {|
+    (true 1 Explicit_resume_required true)
+    true
+    true
+    true
+    (false Explicit_resume_required false)
+  |}]
+;;

@@ -102,7 +102,9 @@ actor state and authorization, not merely passing JSON validation.
 | `session.reset` | `Session.Reset_request` | `session.own` | Writable attachment; required expected revision and explicit preservation flags. |
 | `session.rebuild` | `Session.Rebuild_request` | `session.own` | Writable attachment; expected revision, pinned/current-catalog choice. |
 | `session.upgrade_prompt` | `Session.Upgrade_prompt_request` | `session.own` | Writable attachment; expected revision, target revision, migration flag. |
-| `session.delete` | `Session.Delete_request` | `session.delete` | Writable attachment; expected revision, archive/remove policy; confirmation equals session ID. |
+| `session.delete` | `Session.Delete_request` | `session.delete` | Loaded active sessions require a writable attachment; retained archived/gated sessions use current management visibility. Expected revision, archive/remove policy; confirmation equals session ID. |
+| `session.restore` | `Session_lifecycle.Request` | `session.delete` | Exact host/session, generation, canonical and lifecycle revision; restore to explicit resume admission without activation. |
+| `session.resume` | `Session_lifecycle.Request` | `session.message.send` | Same expected anchor; commit Automatic admission without starting a runtime or changing desired state. |
 | `permission.list` | `Permission.List_request` | `security.read` | Paged permission state. |
 | `permission.respond` | `Permission.Respond_request` | `permission.respond` | Writable attachment; offered decision, identity and compare-and-set checks. |
 | `grant.list` | `Grant.List_request` | `grant.manage` | Paged grant state. |
@@ -164,6 +166,42 @@ Create can return an attachment; otherwise attach explicitly. Keep session,
 attachment, operation, history, permission and blob IDs distinct. Never use IDs
 as paths. An attach response can report current state, replayed durable events or
 a snapshot. Apply it before treating live notifications as an initialized view.
+
+`session.delete` with `policy: "archive"` retains the session identity, pinned
+prompt/configuration and workspace contents, while closing runtime ownership.
+Use `session.list` with `archive: "archived"` or `"all"` to discover retained
+sessions and `session.get` to inspect them without loading a runtime. Permanent
+`policy: "remove"` removes session-owned storage after guarded cleanup; workspace
+contents are preserved. For a session-directory workspace, Remove relocates the
+whole directory to `<data-root>/lost-and-found/deleted-<session-id>-<transaction-id>/workspace`,
+retaining the original terminal removal proof beside it. These directories are
+not cataloged or restored as sessions; subsequent cleanup preserves them, including
+empty directories and ownership markers. External and system-temporary workspaces
+keep their existing paths. A live parent/child ownership obligation prevents removal.
+
+`session.restore` and `session.resume` accept `expected` and `idempotency_key`.
+Copy the current inspection's lifecycle expected anchor: `reference` contains
+`server_id` and `session_id`, accompanied by nonnegative `generation`,
+`session_revision` and `lifecycle_revision`. A stale anchor conflicts. Catalog
+entries also expose lifecycle revision and admission, so management clients do
+not have to activate a session to construct requests. An observation is data,
+not permission to execute.
+
+Restore changes an archived session to `active` with admission
+`explicit_resume_required`. It preserves retained work and starts none of it.
+Resume commits `automatic` admission; it does not start a runtime or change the
+session's desired state to running. Attach/start remains a separate authorized
+operation after resume. Automatic startup, background collection and delegation
+respect the same admission gate.
+
+Keep the exact original method, parameters and idempotency key when retrying.
+An old archive/restore receipt replays its original outcome without undoing a
+later resume. `command.receipt` reconciles the original bounded request without
+executing it. Cached results and receipts recheck current session visibility;
+the narrow exception after permanent removal is the original principal's retained
+successful remove acknowledgement under current deletion policy. A pending
+receipt following uncertain publication requires recovery; it is not proof that
+physical cleanup finished.
 
 Message content supports plain text or ChatMD plus blob attachments. Validate
 content parts, tool-output/image encodings and size constraints against the

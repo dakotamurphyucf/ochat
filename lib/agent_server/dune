@@ -19,7 +19,10 @@
   independent_resources
   authored_resources
   result_retention
+  session_recovery_owner
   session_registry
+  session_lifecycle_receipts
+  session_lifecycle_service
   session_catalog_policy
   delegation_lifecycle
   connection_context
@@ -51,6 +54,7 @@
   maintenance
   session_factory
   embedded
+  startup_cleanup
   daemon
   provider_operator_port
   command_handler

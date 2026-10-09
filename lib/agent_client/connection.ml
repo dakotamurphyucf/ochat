@@ -33,6 +33,8 @@ let has_command_receipt = function
   | Session_rebuild _
   | Session_upgrade_prompt _
   | Session_delete _
+  | Session_restore _
+  | Session_resume _
   | Permission_respond _
   | Grant_revoke _
   | Job_cancel _

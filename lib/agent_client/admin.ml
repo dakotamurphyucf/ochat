@@ -151,3 +151,17 @@ let enumerate_collections connection ~query ~max_groups ~max_pages =
     ~max_pages
     ~list_page:list_collections_page
 ;;
+
+let restore_session connection request =
+  match Connection.request_without_history connection (Session_restore request) with
+  | Ok (Session_restore value) -> Ok value
+  | Ok _ -> Error (invalid "unexpected session.restore result")
+  | Error _ as failure -> failure
+;;
+
+let resume_session connection request =
+  match Connection.request_without_history connection (Session_resume request) with
+  | Ok (Session_resume value) -> Ok value
+  | Ok _ -> Error (invalid "unexpected session.resume result")
+  | Error _ as failure -> failure
+;;

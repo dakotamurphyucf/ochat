@@ -75,6 +75,7 @@ let window entries =
 let snapshot_fields =
   Public.Snapshot.Fields.
     { session
+    ; lifecycle = None
     ; canonical_history = window []
     ; archived_revisions = []
     ; effective_history = None

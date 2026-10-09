@@ -362,6 +362,125 @@ let snapshot transaction_sequence payload =
     payload
 ;;
 
+let snapshot_fault_file (Eio.Resource.T (file, handler)) fault syncs =
+  let module Original = (val Eio.Resource.get handler Eio.File.Pi.Write) in
+  let module Write = struct
+    include Original
+
+    let sync file =
+      Int.incr syncs;
+      Original.sync file;
+      if !fault
+      then (
+        fault := false;
+        raise (Core_unix.Unix_error (EIO, "injected snapshot sync", "fixture")))
+    ;;
+  end
+  in
+  Eio.Resource.T
+    ( file
+    , Eio.Resource.handler
+        (H (Eio.File.Pi.Write, (module Write)) :: Eio.Resource.bindings handler) )
+;;
+
+let snapshot_fault_env env fault syncs =
+  let Eio.Resource.T (directory, handler), prefix = Eio.Stdenv.fs env in
+  let module Original = (val Eio.Resource.get handler Eio.Fs.Pi.Dir) in
+  let module Directory = struct
+    include Original
+
+    let open_out directory ~sw ~append ~create path =
+      let file = Original.open_out directory ~sw ~append ~create path in
+      if String.is_suffix path ~suffix:".bin"
+      then snapshot_fault_file file fault syncs
+      else file
+    ;;
+  end
+  in
+  let fs =
+    ( Eio.Resource.T
+        ( directory
+        , Eio.Resource.handler
+            (H (Eio.Fs.Pi.Dir, (module Directory)) :: Eio.Resource.bindings handler) )
+    , prefix )
+  in
+  object
+    method fs = fs
+    method cwd = env#cwd
+    method stdin = env#stdin
+    method stdout = env#stdout
+    method stderr = env#stderr
+    method net = env#net
+    method domain_mgr = env#domain_mgr
+    method process_mgr = env#process_mgr
+    method clock = env#clock
+    method mono_clock = env#mono_clock
+    method secure_random = env#secure_random
+    method debug = env#debug
+    method backend_id = env#backend_id
+  end
+;;
+
+let%expect_test
+    "snapshot retry reuses exact durable bytes and rejects same-counter replacement"
+  =
+  with_temp_directory "ochat-snapshot-idempotency" (fun env root ->
+    let directory = Filename.concat root "snapshot" in
+    let install env value =
+      Agent_store.Snapshot.install ~env ~directory ~max_payload_length:4096 value
+    in
+    install env (snapshot 0L "initial") |> store_ok |> ignore;
+    let current = Eio.Path.(Eio.Stdenv.fs env / directory / "CURRENT") in
+    let before = Eio.Path.load current in
+    let fault = ref true in
+    let syncs = ref 0 in
+    let faulty_env = snapshot_fault_env env fault syncs in
+    let candidate = snapshot 1L "retained" in
+    let uncertain =
+      match install faulty_env candidate with
+      | Error (Agent_store.Store_error.Io _) -> true
+      | Ok _ | Error _ -> false
+    in
+    let old_pointer = String.equal before (Eio.Path.load current) in
+    let target =
+      Eio.Path.(Eio.Stdenv.fs env / directory / "snapshot-0000000000000001.bin")
+    in
+    let complete_bytes = Eio.Path.load target in
+    install faulty_env candidate |> store_ok |> ignore;
+    let retried = String.equal complete_bytes (Eio.Path.load target) && !syncs = 2 in
+    let cold =
+      Agent_store.Snapshot.load_current ~env ~directory ~max_payload_length:4096
+      |> store_ok
+      |> Option.value_exn
+    in
+    install env cold.snapshot |> store_ok |> ignore;
+    let pointer = Eio.Path.load current in
+    let different =
+      match install env (snapshot 1L "different") with
+      | Error (Agent_store.Store_error.Corrupt _) -> true
+      | Ok _ | Error _ -> false
+    in
+    let preserved =
+      String.equal pointer (Eio.Path.load current)
+      && String.equal complete_bytes (Eio.Path.load target)
+    in
+    Eio.Path.save ~create:(`Or_truncate 0o600) target "short";
+    let truncated =
+      match install env candidate with
+      | Error (Agent_store.Store_error.Corrupt _) -> true
+      | Ok _ | Error _ -> false
+    in
+    let evidence =
+      String.equal "short" (Eio.Path.load target)
+      && String.equal pointer (Eio.Path.load current)
+    in
+    print_s
+      [%sexp
+        ((uncertain, old_pointer, retried, different, preserved, truncated, evidence)
+         : bool * bool * bool * bool * bool * bool * bool)]);
+  [%expect {| (true true true true true true true) |}]
+;;
+
 let%expect_test "snapshots install atomically and load the current checkpoint" =
   with_temp_directory "ochat-agent-snapshot" (fun env temporary ->
     let directory = Filename.concat temporary "snapshot" in
@@ -762,30 +881,36 @@ let%expect_test "existing corrupt session index stays corrupt instead of invokin
   [%expect {| complete corrupt index rejected and preserved |}]
 ;;
 
-let%expect_test "valid session index is authoritative and backfills old archive flags" =
+let%expect_test "cached archive without lifecycle authority is rejected and preserved" =
   with_temp_directory "ochat-crash-recovery-archive" (fun env root ->
     Eio.Switch.run (fun sw ->
       crash_recovery_seed ~sw env root;
       let store = crash_recovery_open ~sw env root |> store_ok in
       let index = Agent_store.Session_store.session_index store in
       let entry = Agent_store.Session_index.find index session_id |> Option.value_exn in
-      Agent_store.Session_index.upsert index { entry with archived = true } |> store_ok;
+      let entry =
+        Agent_store.Session_index.Entry.with_lifecycle
+          entry
+          (Agent_store.Session_archive_record.of_original_archive ~session_id)
+        |> store_ok
+      in
+      Agent_store.Session_index.upsert index entry |> store_ok;
       Agent_store.Session_store.close store |> store_ok;
-      let reopened = crash_recovery_open ~sw env root |> store_ok in
-      crash_recovery_assert
-        (not (Agent_store.Session_store.index_was_rebuilt reopened))
-        "valid index triggered rebuilding";
-      Agent_store.Session_store.close reopened |> store_ok;
-      Eio.Path.unlink (crash_recovery_path env (crash_recovery_index_path root));
-      let rebuilt = crash_recovery_open ~sw env root |> store_ok in
-      let entry = List.hd_exn (Agent_store.Session_store.list_sessions rebuilt) in
-      crash_recovery_assert
-        entry.archived
-        "legacy archive flag was not backfilled durably";
-      Agent_store.Session_store.close rebuilt |> store_ok));
-  crash_recovery_report
-    "valid index retained; legacy archive flag survived later index loss";
-  [%expect {| valid index retained; legacy archive flag survived later index loss |}]
+      let index_path = crash_recovery_path env (crash_recovery_index_path root) in
+      let before = Eio.Path.load index_path in
+      let marker =
+        Filename.concat
+          (Filename.concat
+             (Filename.concat root "sessions")
+             (Agent_protocol.Id.Session.to_string session_id))
+          "ARCHIVED"
+      in
+      print_s
+        [%sexp
+          (Result.is_error (crash_recovery_open ~sw env root) : bool)
+        , (String.equal (Eio.Path.load index_path) before : bool)
+        , (path_exists env marker : bool)]));
+  [%expect {| (true true false) |}]
 ;;
 
 let%expect_test "session store owns, persists, indexes, and reopens sessions" =
@@ -2100,6 +2225,8 @@ let%expect_test
           ; owner_grace_deadline = None
           ; pending_initial_start = false
           ; archived = false
+          ; lifecycle_revision = Agent_store.Session_archive_record.Revision.zero
+          ; admission = Automatic
           }
       in
       Agent_store.Session_store.prepare_canonical_projection
@@ -2280,6 +2407,8 @@ let%expect_test
           ; owner_grace_deadline = None
           ; pending_initial_start = false
           ; archived = false
+          ; lifecycle_revision = Agent_store.Session_archive_record.Revision.zero
+          ; admission = Automatic
           }
       in
       let invalid = { entry with session = { entry.session with revision = 10L } } in
@@ -2357,6 +2486,8 @@ let%expect_test
           ; owner_grace_deadline = None
           ; pending_initial_start = false
           ; archived = false
+          ; lifecycle_revision = Agent_store.Session_archive_record.Revision.zero
+          ; admission = Automatic
           }
       in
       Agent_store.Session_store.prepare_canonical_projection
@@ -2477,6 +2608,8 @@ let%expect_test
           ; owner_grace_deadline = None
           ; pending_initial_start = false
           ; archived = false
+          ; lifecycle_revision = Agent_store.Session_archive_record.Revision.zero
+          ; admission = Automatic
           }
       in
       Agent_store.Session_store.prepare_canonical_projection
@@ -2545,6 +2678,8 @@ let%expect_test
           ; owner_grace_deadline = None
           ; pending_initial_start = false
           ; archived = false
+          ; lifecycle_revision = Agent_store.Session_archive_record.Revision.zero
+          ; admission = Automatic
           }
       in
       let handle =
@@ -2607,4 +2742,958 @@ let%expect_test
          indexed"));
   [%expect
     {|staged canonical journal installs with exact full hints; clean restart remains indexed|}]
+;;
+
+let%expect_test
+    "lifecycle publication preserves gated restore across stale catalog and rebuild"
+  =
+  let module S = Agent_store.Session_store in
+  let module R = Agent_store.Session_archive_record in
+  with_temp_directory "ochat-lifecycle-publication" (fun env root ->
+    Eio.Switch.run (fun sw ->
+      let store = crash_recovery_create ~sw env root in
+      crash_recovery_add store ~sw session_id 7L;
+      let handle =
+        S.open_session store ~sw ~actor_lock_nonce:"lifecycle" session_id |> store_ok
+      in
+      let workspace_file =
+        Filename.concat (S.Handle.workspace_directory handle) "retained"
+      in
+      crash_recovery_save env workspace_file "workspace remains";
+      let entry () =
+        Agent_store.Session_index.find_checked (S.session_index store) session_id
+        |> store_ok
+        |> Option.value_exn
+      in
+      let key action suffix =
+        Agent_store.Idempotency_store.Key.
+          { principal_id =
+              Agent_protocol.Id.Principal.of_string "pri_lifecycle_test" |> protocol_ok
+          ; session_id = Some session_id
+          ; method_name = R.Outcome.method_name action
+          ; idempotency_key =
+              Agent_protocol.Idempotency_key.of_string suffix |> protocol_ok
+          }
+      in
+      let prepare action suffix =
+        let observed = S.read_lifecycle store handle |> store_ok in
+        let current = S.Lifecycle.Observation.value observed in
+        let session = (S.Handle.metadata_checked handle |> store_ok).session in
+        let anchor =
+          R.Anchor.create
+            ~generation:session.generation
+            ~session_revision:session.revision
+            ~latest_event_sequence:session.latest_event_sequence
+          |> protocol_ok
+        in
+        let transition =
+          R.prepare
+            current
+            ~expected:(R.revision current)
+            ~anchor
+            ~action
+            ~key:(key action suffix)
+            ~request_digest:(String.make 64 'a')
+            ~now:timestamp
+          |> protocol_ok
+        in
+        S.prepare_lifecycle
+          store
+          handle
+          observed
+          ~current_entry:(entry ())
+          ~transition
+          ~now:timestamp
+        |> store_ok
+      in
+      let archive = prepare Archive "archive" in
+      let foreign =
+        crash_recovery_create ~sw env (Filename.concat root "foreign-store")
+      in
+      print_s
+        [%sexp
+          (Result.is_error (S.read_lifecycle foreign handle) : bool)
+        , (Result.is_error (S.publish_lifecycle foreign handle archive) : bool)];
+      let stale_archive = prepare Archive "other-archive" in
+      let archived = S.publish_lifecycle store handle archive |> store_ok in
+      let preserved_paths =
+        [ crash_recovery_index_path root
+        ; crash_recovery_index_path (Filename.concat root "foreign-store")
+        ; Filename.concat (S.Handle.directory handle) "metadata.sexp"
+        ; Filename.concat (S.Handle.directory handle) "ARCHIVED"
+        ]
+      in
+      let preserved_bytes =
+        List.map preserved_paths ~f:(fun path ->
+          Eio.Path.load (crash_recovery_path env path))
+      in
+      let changed = metadata 9L in
+      let foreign_entry = { (entry ()) with session = changed.session } in
+      assert (
+        Result.is_error
+          (S.prepare_canonical_projection
+             foreign
+             handle
+             ~metadata:changed
+             ~entry:foreign_entry));
+      assert (
+        Result.is_error (S.write_metadata ~entry:foreign_entry foreign handle changed));
+      assert (Result.is_error (S.is_archived foreign handle));
+      assert (Result.is_error (S.close_session foreign handle));
+      assert (S.Lifecycle.Installed.is_current archived handle);
+      assert (
+        List.equal
+          String.equal
+          preserved_bytes
+          (List.map preserved_paths ~f:(fun path ->
+             Eio.Path.load (crash_recovery_path env path))));
+      S.close foreign |> store_ok;
+      print_s
+        [%sexp
+          (S.Lifecycle.Installed.is_current archived handle : bool)
+        , (Result.is_error (S.publish_lifecycle store handle stale_archive) : bool)];
+      let completion ~complete =
+        S.complete_lifecycle_outcome
+          store
+          handle
+          ~key:(key Archive "archive")
+          ~request_digest:(String.make 64 'a')
+          ~complete
+      in
+      assert (
+        Result.is_error
+          (completion ~complete:(fun _ ->
+             Error (Agent_store.Store_error.Corrupt "generic completion fault"))));
+      let receipt () =
+        S.read_lifecycle store handle
+        |> store_ok
+        |> S.Lifecycle.Observation.value
+        |> R.receipts
+        |> List.hd_exn
+      in
+      assert (not (receipt ()).completion_acknowledged);
+      completion ~complete:(fun outcome ->
+        assert (R.Outcome.equal_action outcome.action Archive);
+        ignore
+          (S.list_sessions_checked store |> store_ok
+           : Agent_store.Session_index.Entry.t list);
+        ignore (S.read_lifecycle store handle |> store_ok : S.Lifecycle.Observation.t);
+        Ok ())
+      |> store_ok;
+      assert (receipt ()).completion_acknowledged;
+      assert (not (S.Lifecycle.Installed.is_current archived handle));
+      let restored =
+        S.publish_lifecycle store handle (prepare Restore "restore") |> store_ok
+      in
+      print_s
+        [%sexp
+          ((entry ()).archived : bool)
+        , ((entry ()).admission : R.Admission.t)
+        , (S.Lifecycle.Installed.is_current archived handle : bool)
+        , (S.Lifecycle.Installed.is_current restored handle : bool)];
+      let stale_index =
+        Agent_store.Session_index_document.to_document
+          (Document_schema.Extension_carrier.of_authored_value
+             [ S.Lifecycle.Installed.entry archived ])
+        |> document_ok
+        |> Document_schema.Document.to_string
+      in
+      S.close_session store handle |> store_ok;
+      print_s [%sexp (S.Lifecycle.Installed.is_current restored handle : bool)];
+      S.close store |> store_ok;
+      crash_recovery_save env (crash_recovery_index_path root) stale_index;
+      let reopened = crash_recovery_open ~sw env root |> store_ok in
+      let current = S.list_sessions_checked reopened |> store_ok |> List.hd_exn in
+      print_s
+        [%sexp
+          (current.archived : bool)
+        , (R.Revision.to_int64 current.lifecycle_revision : int64)
+        , (current.admission : R.Admission.t)];
+      S.close reopened |> store_ok;
+      Eio.Path.unlink (crash_recovery_path env (crash_recovery_index_path root));
+      let rebuilt = crash_recovery_open ~sw env root |> store_ok in
+      let current = S.list_sessions_checked rebuilt |> store_ok |> List.hd_exn in
+      print_s
+        [%sexp
+          (current.archived : bool)
+        , (R.Revision.to_int64 current.lifecycle_revision : int64)
+        , (current.admission : R.Admission.t)
+        , (String.equal
+             (Eio.Path.load (crash_recovery_path env workspace_file))
+             "workspace remains"
+           : bool)];
+      S.close rebuilt |> store_ok));
+  [%expect
+    {|
+    (true true)
+    (true true)
+    (false Explicit_resume_required false true)
+    false
+    (false 2 Explicit_resume_required)
+    (false 2 Explicit_resume_required true)
+  |}]
+;;
+
+let%expect_test
+    "uncertain lifecycle authority blocks handle and retains recovery before reopen"
+  =
+  let module S = Agent_store.Session_store in
+  let module R = Agent_store.Session_archive_record in
+  with_temp_directory "ochat-lifecycle-uncertainty" (fun raw_env root ->
+    let armed = ref None in
+    let env =
+      Job_store_fixtures.fault_env raw_env armed ~matches_rename:(fun path ->
+        String.is_suffix path ~suffix:"ARCHIVED")
+    in
+    Eio.Switch.run (fun sw ->
+      let store = crash_recovery_create ~sw env root in
+      crash_recovery_add store ~sw session_id 7L;
+      let handle =
+        S.open_session store ~sw ~actor_lock_nonce:"uncertain-lifecycle" session_id
+        |> store_ok
+      in
+      let observed = S.read_lifecycle store handle |> store_ok in
+      let state = S.Lifecycle.Observation.value observed in
+      let session = (S.Handle.metadata handle).session in
+      let anchor =
+        R.Anchor.create
+          ~generation:session.generation
+          ~session_revision:session.revision
+          ~latest_event_sequence:session.latest_event_sequence
+        |> protocol_ok
+      in
+      let key =
+        Agent_store.Idempotency_store.Key.
+          { principal_id =
+              Agent_protocol.Id.Principal.of_string "pri_lifecycle_test" |> protocol_ok
+          ; session_id = Some session_id
+          ; method_name = "session.archive"
+          ; idempotency_key =
+              Agent_protocol.Idempotency_key.of_string "uncertain" |> protocol_ok
+          }
+      in
+      let transition =
+        R.prepare
+          state
+          ~expected:(R.revision state)
+          ~anchor
+          ~action:Archive
+          ~key
+          ~request_digest:(String.make 64 'a')
+          ~now:timestamp
+        |> protocol_ok
+      in
+      let current_entry =
+        Agent_store.Session_index.find_checked (S.session_index store) session_id
+        |> store_ok
+        |> Option.value_exn
+      in
+      let prepared =
+        S.prepare_lifecycle
+          store
+          handle
+          observed
+          ~current_entry
+          ~transition
+          ~now:timestamp
+        |> store_ok
+      in
+      armed := Some true;
+      let publication_failed =
+        Result.is_error (S.publish_lifecycle store handle prepared)
+      in
+      let metadata_unavailable = Result.is_error (S.Handle.metadata_checked handle) in
+      let lifecycle_unavailable = Result.is_error (S.read_lifecycle store handle) in
+      let catalog_unavailable = Result.is_error (S.list_sessions_checked store) in
+      let recovery_blocked = Result.is_error (S.complete_index_recovery store) in
+      print_s
+        [%sexp
+          (publication_failed : bool)
+        , (metadata_unavailable : bool)
+        , (lifecycle_unavailable : bool)
+        , (catalog_unavailable : bool)
+        , (recovery_blocked : bool)];
+      let metadata_path = Filename.concat (S.Handle.directory handle) "metadata.sexp" in
+      let before = Eio.Path.load (crash_recovery_path env metadata_path) in
+      let changed = metadata 9L in
+      let entry = { current_entry with session = changed.session } in
+      assert (
+        Result.is_error
+          (S.prepare_canonical_projection store handle ~metadata:changed ~entry));
+      assert (Result.is_error (S.write_metadata ~entry store handle changed));
+      assert (String.equal before (Eio.Path.load (crash_recovery_path env metadata_path)));
+      S.close_session store handle |> store_ok;
+      S.close store |> store_ok;
+      let recovered = crash_recovery_open ~sw env root |> store_ok in
+      let entry = S.list_sessions_checked recovered |> store_ok |> List.hd_exn in
+      print_s
+        [%sexp
+          (entry.archived : bool)
+        , (R.Revision.to_int64 entry.lifecycle_revision : int64)
+        , (entry.admission : R.Admission.t)
+        , (S.index_was_rebuilt recovered : bool)];
+      S.close recovered |> store_ok));
+  [%expect
+    {|
+    (true true true true true)
+    (true 1 Explicit_resume_required true)
+  |}]
+;;
+
+let%expect_test "logical remove owns terminal delete proof before physical cleanup" =
+  let module S = Agent_store.Session_store in
+  let module R = Agent_store.Session_archive_record in
+  with_temp_directory "ochat-terminal-remove" (fun env root ->
+    Eio.Switch.run (fun sw ->
+      let store = crash_recovery_create ~sw env root in
+      crash_recovery_add store ~sw session_id 7L;
+      let handle =
+        S.open_session store ~sw ~actor_lock_nonce:"terminal-remove" session_id
+        |> store_ok
+      in
+      let observed = S.read_lifecycle store handle |> store_ok in
+      let state = S.Lifecycle.Observation.value observed in
+      let session = (S.Handle.metadata handle).session in
+      let anchor =
+        R.Anchor.create
+          ~generation:session.generation
+          ~session_revision:session.revision
+          ~latest_event_sequence:session.latest_event_sequence
+        |> protocol_ok
+      in
+      let key =
+        Agent_store.Idempotency_store.Key.
+          { principal_id =
+              Agent_protocol.Id.Principal.of_string "pri_terminal_owner" |> protocol_ok
+          ; session_id = Some session_id
+          ; method_name = "session.delete"
+          ; idempotency_key =
+              Agent_protocol.Idempotency_key.of_string "original-remove" |> protocol_ok
+          }
+      in
+      let request_digest = String.make 64 'c' in
+      let transition =
+        R.prepare
+          state
+          ~expected:(R.revision state)
+          ~anchor
+          ~action:Remove
+          ~key
+          ~request_digest
+          ~now:timestamp
+        |> protocol_ok
+      in
+      let current_entry =
+        Agent_store.Session_index.find_checked (S.session_index store) session_id
+        |> store_ok
+        |> Option.value_exn
+      in
+      let prepared =
+        S.prepare_lifecycle
+          store
+          handle
+          observed
+          ~current_entry
+          ~transition
+          ~now:timestamp
+        |> store_ok
+      in
+      let removed = S.begin_removal store handle prepared |> store_ok in
+      print_s
+        [%sexp
+          ((S.Lifecycle.Removal.outcome removed |> Option.value_exn).status : R.Status.t)
+        , (List.is_empty (S.list_sessions_checked store |> store_ok) : bool)
+        , (path_exists env (S.Handle.directory handle) : bool)];
+      S.complete_lifecycle_outcome
+        store
+        handle
+        ~key
+        ~request_digest
+        ~complete:(fun outcome ->
+          assert (R.Outcome.equal_action outcome.action Remove);
+          ignore
+            (S.list_sessions_checked store |> store_ok
+             : Agent_store.Session_index.Entry.t list);
+          Ok ())
+      |> store_ok;
+      let proof =
+        S.read_lifecycle store handle
+        |> store_ok
+        |> S.Lifecycle.Observation.value
+        |> R.receipts
+        |> List.hd_exn
+      in
+      print_s
+        [%sexp
+          (String.equal proof.key.method_name "session.delete" : bool)
+        , (String.equal proof.request_digest request_digest : bool)
+        , (proof.completion_acknowledged : bool)
+        , (proof.outcome.disposition : R.Outcome.disposition)];
+      S.close_session store handle |> store_ok;
+      S.close store |> store_ok;
+      let reopened = crash_recovery_open ~sw env root |> store_ok in
+      print_s
+        [%sexp
+          (List.is_empty (S.list_sessions_checked reopened |> store_ok) : bool)
+        , (Result.is_error
+             (S.open_session reopened ~sw ~actor_lock_nonce:"deny-removed" session_id)
+           : bool)
+        , (path_exists env (S.Handle.directory handle) : bool)];
+      S.close reopened |> store_ok));
+  [%expect
+    {|
+    (Removed true true)
+    (true true true Applied)
+    (true true true)
+  |}]
+;;
+
+module Removal_fault = struct
+  type t =
+    | Proof_placement
+    | Payload_deletion
+    | Final_cleanup
+    | Workspace_placement
+    | Workspace_sync
+end
+
+let rec removal_fault_directory
+  :  'tags.
+     ([> Eio.Fs.dir_ty ] as 'tags) Eio.Resource.t
+  -> Removal_fault.t option ref
+  -> prefix:string
+  -> 'tags Eio.Resource.t
+  =
+  fun (Eio.Resource.T (directory, handler) as underlying_directory) phase ~prefix ->
+  let module Original = (val Eio.Resource.get handler Eio.Fs.Pi.Dir) in
+  let qualify name =
+    if Filename.is_absolute name then name else Filename.concat prefix name
+  in
+  let marker_in_root name =
+    String.is_substring name ~substring:"/deleted-"
+    && String.is_suffix name ~suffix:"/ARCHIVED"
+    && not (String.is_substring name ~substring:"/payload/")
+  in
+  let fail () =
+    phase := None;
+    raise (Core_unix.Unix_error (EIO, "injected removal phase", "fixture"))
+  in
+  let module Directory = struct
+    include Original
+
+    let open_dir directory ~sw name =
+      Original.open_dir directory ~sw name
+      |> fun child -> removal_fault_directory child phase ~prefix:(qualify name)
+    ;;
+
+    let rename directory source _destination target =
+      match !phase with
+      | Some Removal_fault.Workspace_placement
+        when String.is_suffix (qualify target) ~suffix:"/workspace"
+             && String.is_substring (qualify target) ~substring:"/deleted-" ->
+        Original.rename directory source underlying_directory target;
+        fail ()
+      | Some Removal_fault.Proof_placement when marker_in_root (qualify target) ->
+        Original.rename directory source underlying_directory target;
+        fail ()
+      | Some
+          ( Proof_placement
+          | Payload_deletion
+          | Final_cleanup
+          | Workspace_placement
+          | Workspace_sync )
+      | None -> Original.rename directory source underlying_directory target
+    ;;
+
+    let open_in directory ~sw name =
+      match !phase with
+      | Some Removal_fault.Workspace_sync
+        when String.is_suffix (qualify name) ~suffix:"/payload/." -> fail ()
+      | Some
+          ( Proof_placement
+          | Payload_deletion
+          | Final_cleanup
+          | Workspace_placement
+          | Workspace_sync )
+      | None -> Original.open_in directory ~sw name
+    ;;
+
+    let unlink directory name =
+      let qualified = qualify name in
+      match !phase with
+      | Some Removal_fault.Payload_deletion
+        when String.is_substring qualified ~substring:"/payload/" -> fail ()
+      | Some Final_cleanup when marker_in_root qualified -> fail ()
+      | Some
+          ( Proof_placement
+          | Payload_deletion
+          | Final_cleanup
+          | Workspace_placement
+          | Workspace_sync )
+      | None -> Original.unlink directory name
+    ;;
+  end
+  in
+  Eio.Resource.T
+    ( directory
+    , Eio.Resource.handler
+        (H (Eio.Fs.Pi.Dir, (module Directory)) :: Eio.Resource.bindings handler) )
+;;
+
+let removal_fault_env env phase =
+  let directory, prefix = Eio.Stdenv.fs env in
+  let fs = removal_fault_directory directory phase ~prefix, prefix in
+  object
+    method fs = fs
+    method cwd = env#cwd
+    method stdin = env#stdin
+    method stdout = env#stdout
+    method stderr = env#stderr
+    method net = env#net
+    method domain_mgr = env#domain_mgr
+    method process_mgr = env#process_mgr
+    method clock = env#clock
+    method mono_clock = env#mono_clock
+    method secure_random = env#secure_random
+    method debug = env#debug
+    method backend_id = env#backend_id
+  end
+;;
+
+let%expect_test
+    "single terminal marker survives placement payload and final cleanup faults"
+  =
+  let module S = Agent_store.Session_store in
+  let module R = Agent_store.Session_archive_record in
+  let module I = Agent_store.Idempotency_store in
+  with_temp_directory "ochat-removal-crash-phases" (fun raw_env root ->
+    let phase = ref None in
+    let env = removal_fault_env raw_env phase in
+    Eio.Switch.run (fun sw ->
+      let store = crash_recovery_create ~sw env root in
+      crash_recovery_add store ~sw session_id 7L;
+      let handle =
+        S.open_session store ~sw ~actor_lock_nonce:"removal-crash" session_id |> store_ok
+      in
+      (* This fixture covers complete container retirement with no workspace;
+         nested workspace retention has its own content/restart regression. *)
+      Eio.Path.rmdir
+        (crash_recovery_path
+           env
+           (Filename.concat (S.Handle.directory handle) "workspace"));
+      let observed = S.read_lifecycle store handle |> store_ok in
+      let state = S.Lifecycle.Observation.value observed in
+      let session = (S.Handle.metadata handle).session in
+      let anchor =
+        R.Anchor.create
+          ~generation:session.generation
+          ~session_revision:session.revision
+          ~latest_event_sequence:session.latest_event_sequence
+        |> protocol_ok
+      in
+      let key =
+        I.Key.
+          { principal_id =
+              Agent_protocol.Id.Principal.of_string "pri_original_remove" |> protocol_ok
+          ; session_id = Some session_id
+          ; method_name = "session.delete"
+          ; idempotency_key =
+              Agent_protocol.Idempotency_key.of_string "protected-original" |> protocol_ok
+          }
+      in
+      let request_digest = String.make 64 'd' in
+      let transition =
+        R.prepare
+          state
+          ~expected:(R.revision state)
+          ~anchor
+          ~action:Remove
+          ~key
+          ~request_digest
+          ~now:timestamp
+        |> protocol_ok
+      in
+      let current_entry =
+        Agent_store.Session_index.find_checked (S.session_index store) session_id
+        |> store_ok
+        |> Option.value_exn
+      in
+      let prepared =
+        S.prepare_lifecycle
+          store
+          handle
+          observed
+          ~current_entry
+          ~transition
+          ~now:timestamp
+        |> store_ok
+      in
+      let removal = S.begin_removal store handle prepared |> store_ok in
+      let cache_path =
+        Filename.concat (Filename.concat root "indexes") "idempotency.sexp"
+      in
+      let result = `Object [ "removed", `True ] in
+      let complete (receipt : R.Receipt.t) =
+        assert (Int.equal (I.Key.compare receipt.key key) 0);
+        assert (String.equal receipt.request_digest request_digest);
+        let cache = I.open_or_create ~env ~path:cache_path |> store_ok in
+        I.record
+          cache
+          { key = receipt.key
+          ; request_digest = receipt.request_digest
+          ; accepted_transaction_sequence = None
+          ; outcome = Success result
+          ; created_at = receipt.created_at
+          ; expires_at = None
+          ; retention = Protected
+          }
+        |> Result.map ~f:(fun _ -> ())
+      in
+      let retire handle = S.close_session store handle in
+      phase := Some Proof_placement;
+      let placement_failed =
+        Result.is_error (S.finish_removal store removal ~complete ~retire)
+      in
+      let proof () =
+        Agent_store.Session_removal_directory.discover ~env ~data_root:(S.data_root store)
+        |> store_ok
+        |> List.hd_exn
+      in
+      let terminal =
+        Agent_store.Session_removal_directory.terminal_outcome (proof ())
+        |> Option.value_exn
+      in
+      print_s
+        [%sexp
+          (placement_failed : bool)
+        , (Option.is_none (S.Lifecycle.Removal.handle removal) : bool)
+        , (terminal.status : R.Status.t)];
+      S.close store |> store_ok;
+      let reopen nonce =
+        let store = crash_recovery_open ~sw env root |> store_ok in
+        let removal =
+          S.open_removal store ~sw ~actor_lock_nonce:nonce session_id |> store_ok
+        in
+        store, removal
+      in
+      let store, removal = reopen "payload-retry" in
+      phase := Some Payload_deletion;
+      let payload_failed =
+        Result.is_error
+          (S.finish_removal store removal ~complete ~retire:(fun _ ->
+             failwith "retired cleanup activated runtime"))
+      in
+      let pending = S.pending_removal_ids store |> store_ok in
+      print_s
+        [%sexp
+          (payload_failed : bool)
+        , (List.equal Agent_protocol.Id.Session.equal pending [ session_id ] : bool)
+        , (List.is_empty (S.list_sessions_checked store |> store_ok) : bool)];
+      S.close store |> store_ok;
+      let store, removal = reopen "final-retry" in
+      phase := Some Final_cleanup;
+      let final_failed =
+        Result.is_error
+          (S.finish_removal store removal ~complete ~retire:(fun _ ->
+             failwith "retired cleanup activated runtime"))
+      in
+      let pending = S.pending_removal_ids store |> store_ok in
+      print_s
+        [%sexp
+          (final_failed : bool)
+        , (List.equal Agent_protocol.Id.Session.equal pending [ session_id ] : bool)];
+      S.close store |> store_ok;
+      let store, removal = reopen "cleanup-complete" in
+      S.finish_removal store removal ~complete ~retire:(fun _ ->
+        failwith "retired cleanup activated runtime")
+      |> store_ok;
+      let cache = I.open_or_create ~env ~path:cache_path |> store_ok in
+      let retained =
+        match I.lookup cache ~key ~request_digest with
+        | Replay { outcome = Success stored; retention = Protected; key = original; _ } ->
+          Jsonaf.exactly_equal stored result && Int.equal (I.Key.compare original key) 0
+        | Replay _ | Conflict _ | Missing -> false
+      in
+      print_s
+        [%sexp
+          (List.is_empty (S.pending_removal_ids store |> store_ok) : bool)
+        , (not (path_exists env (S.Handle.directory handle)) : bool)
+        , (retained : bool)];
+      S.close store |> store_ok));
+  [%expect
+    {|
+    (true true Removed)
+    (true true true)
+    (true true)
+    (true true true)
+  |}]
+;;
+
+let%expect_test "retained artifact store opens existing namespace without repair" =
+  with_temp_directory "ochat-artifact-open-existing" (fun env temporary ->
+    let module Store = Agent_store.Prompt_artifact_store in
+    let path name = Eio.Path.(Eio.Stdenv.fs env / Filename.concat temporary name) in
+    let missing = Filename.concat temporary "missing" in
+    let missing_rejected =
+      match Store.open_existing ~env ~root:missing with
+      | Error (Agent_store.Store_error.Missing actual) -> String.equal actual missing
+      | Ok _ | Error _ -> false
+    in
+    let missing_preserved =
+      match Eio.Path.kind ~follow:false (path "missing") with
+      | `Not_found -> true
+      | _ -> false
+    in
+    let root = Filename.concat temporary "artifacts" in
+    Eio.Path.mkdir ~perm:0o700 (path "artifacts");
+    Eio.Path.save
+      ~create:(`Exclusive 0o600)
+      Eio.Path.(path "artifacts" / "evidence")
+      "retained";
+    let existing = Store.open_existing ~env ~root |> Result.is_ok in
+    Eio.Path.symlink ~link_to:root (path "linked");
+    let linked_rejected =
+      match Store.open_existing ~env ~root:(Filename.concat temporary "linked") with
+      | Error (Agent_store.Store_error.Corrupt _) -> true
+      | Ok _ | Error _ -> false
+    in
+    let link_preserved =
+      match Eio.Path.kind ~follow:false (path "linked") with
+      | `Symbolic_link -> true
+      | _ -> false
+    in
+    let evidence = Eio.Path.load Eio.Path.(path "artifacts" / "evidence") in
+    let unchanged =
+      String.equal evidence "retained"
+      && List.equal String.equal (Eio.Path.read_dir (path "artifacts")) [ "evidence" ]
+    in
+    print_s
+      [%sexp
+        (( missing_rejected
+         , missing_preserved
+         , existing
+         , linked_rejected
+         , link_preserved
+         , unchanged )
+         : bool * bool * bool * bool * bool * bool)]);
+  [%expect {| (true true true true true true) |}]
+;;
+
+let%expect_test "removed nested workspace and original proof survive retry and reopen" =
+  let module S = Agent_store.Session_store in
+  let module M = Agent_store.Session_removal_directory in
+  let module R = Agent_store.Session_archive_record in
+  with_temp_directory "ochat-retained-removed-workspace" (fun raw_env root ->
+    let phase = ref None in
+    let env = removal_fault_env raw_env phase in
+    Eio.Switch.run (fun sw ->
+      let store = crash_recovery_create ~sw env root in
+      crash_recovery_add store ~sw session_id 7L;
+      let handle =
+        S.open_session store ~sw ~actor_lock_nonce:"workspace-remove" session_id
+        |> store_ok
+      in
+      let workspace = Filename.concat (S.Handle.directory handle) "workspace" in
+      Eio.Path.save
+        ~create:(`Exclusive 0o600)
+        (crash_recovery_path env (Filename.concat workspace "user-file"))
+        "exact user bytes";
+      Eio.Path.save
+        ~create:(`Exclusive 0o600)
+        (crash_recovery_path env (Filename.concat workspace "ownership-marker"))
+        "exact marker";
+      let observed = S.read_lifecycle store handle |> store_ok in
+      let state = S.Lifecycle.Observation.value observed in
+      let session = (S.Handle.metadata handle).session in
+      let anchor =
+        R.Anchor.create
+          ~generation:session.generation
+          ~session_revision:session.revision
+          ~latest_event_sequence:session.latest_event_sequence
+        |> protocol_ok
+      in
+      let key =
+        Agent_store.Idempotency_store.Key.
+          { principal_id =
+              Agent_protocol.Id.Principal.of_string "pri_terminal_owner" |> protocol_ok
+          ; session_id = Some session_id
+          ; method_name = "session.delete"
+          ; idempotency_key =
+              Agent_protocol.Idempotency_key.of_string "original-remove" |> protocol_ok
+          }
+      in
+      let request_digest = String.make 64 'c' in
+      let transition =
+        R.prepare
+          state
+          ~expected:(R.revision state)
+          ~anchor
+          ~action:Remove
+          ~key
+          ~request_digest
+          ~now:timestamp
+        |> protocol_ok
+      in
+      let current_entry =
+        Agent_store.Session_index.find_checked (S.session_index store) session_id
+        |> store_ok
+        |> Option.value_exn
+      in
+      let prepared =
+        S.prepare_lifecycle
+          store
+          handle
+          observed
+          ~current_entry
+          ~transition
+          ~now:timestamp
+        |> store_ok
+      in
+      let removal = S.begin_removal store handle prepared |> store_ok in
+      let fail_at phase_name =
+        phase := Some phase_name;
+        match
+          S.finish_removal
+            store
+            removal
+            ~complete:(fun _ -> Ok ())
+            ~retire:(S.close_session store)
+        with
+        | Error (Agent_store.Store_error.Io _) -> Option.is_none !phase
+        | Ok () | Error _ -> false
+      in
+      let placement_failed = fail_at Workspace_placement in
+      let sync_failed = fail_at Workspace_sync in
+      print_s [%sexp (placement_failed : bool), (sync_failed : bool)];
+      phase := Some Removal_fault.Payload_deletion;
+      let payload_failed =
+        match
+          S.finish_removal
+            store
+            removal
+            ~complete:(fun _ -> Ok ())
+            ~retire:(S.close_session store)
+        with
+        | Error (Agent_store.Store_error.Io _) -> Option.is_none !phase
+        | Ok () | Error _ -> false
+      in
+      print_s [%sexp (payload_failed : bool)];
+      S.finish_removal
+        store
+        removal
+        ~complete:(fun _ -> Ok ())
+        ~retire:(S.close_session store)
+      |> store_ok;
+      let directory = Agent_store.Data_root.lost_and_found_path (S.data_root store) in
+      let container =
+        Filename.concat
+          directory
+          (Eio.Path.read_dir (crash_recovery_path env directory) |> List.hd_exn)
+      in
+      let retained = Filename.concat container "workspace" in
+      let marker = Filename.concat container "ARCHIVED" in
+      let marker_before = Eio.Path.load (crash_recovery_path env marker) in
+      let check () =
+        String.equal
+          (Eio.Path.load (crash_recovery_path env (Filename.concat retained "user-file")))
+          "exact user bytes"
+        && String.equal
+             (Eio.Path.load
+                (crash_recovery_path env (Filename.concat retained "ownership-marker")))
+             "exact marker"
+      in
+      let proof =
+        M.discover ~env ~data_root:(S.data_root store) |> store_ok |> List.hd_exn
+      in
+      let payload = Filename.concat container "payload" in
+      let collision = Filename.concat payload "workspace" in
+      Eio.Path.mkdir ~perm:0o700 (crash_recovery_path env payload);
+      Eio.Path.mkdir ~perm:0o700 (crash_recovery_path env collision);
+      Eio.Path.save
+        ~create:(`Exclusive 0o600)
+        (crash_recovery_path env (Filename.concat collision "other-user-file"))
+        "other bytes";
+      let collision_rejected =
+        match M.cleanup proof with
+        | Error (Agent_store.Store_error.Corrupt _) -> true
+        | Ok () | Error _ -> false
+      in
+      let collision_preserved =
+        String.equal
+          (Eio.Path.load
+             (crash_recovery_path env (Filename.concat collision "other-user-file")))
+          "other bytes"
+        && check ()
+      in
+      Eio.Path.rmtree (crash_recovery_path env payload);
+      Eio.Path.mkdir ~perm:0o700 (crash_recovery_path env payload);
+      Eio.Path.symlink ~link_to:retained (crash_recovery_path env collision);
+      let symlink_rejected =
+        match M.cleanup proof with
+        | Error (Agent_store.Store_error.Corrupt _) -> true
+        | Ok () | Error _ -> false
+      in
+      Eio.Path.unlink (crash_recovery_path env collision);
+      Eio.Path.rmdir (crash_recovery_path env payload);
+      print_s
+        [%sexp
+          (collision_rejected : bool)
+        , (collision_preserved : bool)
+        , (symlink_rejected : bool)
+        , (check () : bool)];
+      M.complete_receipts proof ~complete:(fun _ ->
+        failwith "acknowledged receipt replayed")
+      |> store_ok;
+      M.cleanup proof |> store_ok;
+      print_s
+        [%sexp
+          (check () : bool)
+        , (String.equal marker_before (Eio.Path.load (crash_recovery_path env marker))
+           : bool)
+        , (not (path_exists env (S.Handle.directory handle)) : bool)];
+      S.close store |> store_ok;
+      let reopened = crash_recovery_open ~sw env root |> store_ok in
+      let proofs = M.discover ~env ~data_root:(S.data_root reopened) |> store_ok in
+      List.iter proofs ~f:(fun proof -> M.cleanup proof |> store_ok);
+      print_s
+        [%sexp
+          (check () : bool)
+        , (List.is_empty (S.list_sessions_checked reopened |> store_ok) : bool)
+        , (String.equal marker_before (Eio.Path.load (crash_recovery_path env marker))
+           : bool)];
+      (* User-side edits do not turn marker-only or empty directories into
+         cleanup authority. Every existing retained directory survives. *)
+      Eio.Path.unlink (crash_recovery_path env (Filename.concat retained "user-file"));
+      List.iter proofs ~f:(fun proof -> M.cleanup proof |> store_ok);
+      let marker_only =
+        String.equal
+          (Eio.Path.load
+             (crash_recovery_path env (Filename.concat retained "ownership-marker")))
+          "exact marker"
+      in
+      Eio.Path.unlink
+        (crash_recovery_path env (Filename.concat retained "ownership-marker"));
+      List.iter proofs ~f:(fun proof -> M.cleanup proof |> store_ok);
+      let empty_retained =
+        match Eio.Path.kind ~follow:false (crash_recovery_path env retained) with
+        | `Directory ->
+          List.is_empty (Eio.Path.read_dir (crash_recovery_path env retained))
+        | _ -> false
+      in
+      print_s
+        [%sexp
+          (marker_only : bool)
+        , (empty_retained : bool)
+        , (String.equal marker_before (Eio.Path.load (crash_recovery_path env marker))
+           : bool)];
+      S.close reopened |> store_ok));
+  [%expect
+    {|
+    (true true)
+    true
+    (true true true true)
+    (true true true)
+    (true true true)
+    (true true true)
+    |}]
 ;;

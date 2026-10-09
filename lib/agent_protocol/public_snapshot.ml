@@ -3,6 +3,7 @@ open Core
 module Fields = struct
   type t =
     { session : Session.t
+    ; lifecycle : Session_lifecycle.Observation.t option [@sexp.option]
     ; canonical_history : Public_history.Window.t
     ; archived_revisions : int64 list [@sexp.list]
     ; effective_history : Public_history.Window.t option
@@ -40,6 +41,7 @@ let nonnegative_int64 = Json_codec.bounded_int64 ~min:Int64.zero ~max:Int64.max_
 let to_json t =
   let fields =
     [ Some ("session", Session.to_json t.session)
+    ; optional_field "lifecycle" t.lifecycle Session_lifecycle.Observation.to_json
     ; Some ("canonical_history", Public_history.Window.to_json t.canonical_history)
     ; Some ("archived_revisions", list int64_to_json t.archived_revisions)
     ; optional_field "effective_history" t.effective_history Public_history.Window.to_json
@@ -180,6 +182,10 @@ let validate_fields t =
   let same_session id = Id.Session.equal t.session.id id in
   let bounded generation = generation >= 0 && generation <= t.session.generation in
   if
+    Option.exists t.lifecycle ~f:(fun observation ->
+      not (Session_lifecycle.Observation.matches_session observation t.session))
+  then Error (Protocol_error.invalid_request "snapshot lifecycle anchor disagrees")
+  else if
     Int64.(t.revision < zero || t.latest_event_sequence < zero)
     || (not (Int64.equal t.revision t.session.revision))
     || not (Int64.equal t.latest_event_sequence t.session.latest_event_sequence)
@@ -235,6 +241,9 @@ let of_json json =
   let%bind () = Projection_codec.validate json in
   let%bind fields = Json_codec.fields json in
   let%bind session = Json_codec.required_as fields "session" Session.of_json in
+  let%bind lifecycle =
+    Json_codec.optional_as fields "lifecycle" Session_lifecycle.Observation.of_json
+  in
   let%bind archived_revisions =
     Json_codec.optional_as fields "archived_revisions" (Json_codec.list nonnegative_int64)
   in
@@ -264,6 +273,7 @@ let of_json json =
   else
     create
       { session
+      ; lifecycle
       ; canonical_history
       ; archived_revisions = Option.value archived_revisions ~default:[]
       ; effective_history

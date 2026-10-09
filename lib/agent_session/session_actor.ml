@@ -194,6 +194,17 @@ module History_continuation_result = struct
     }
 end
 
+module Lifecycle_fence = struct
+  type phase =
+    | Reserved
+    | Retiring
+
+  type t =
+    { owner : unit ref
+    ; mutable phase : phase
+    }
+end
+
 type _ request =
   | Open_inference_owner : Transcript.Source_id.t -> Inference_owner.t request
   | Admit_inference :
@@ -445,6 +456,12 @@ type _ request =
       Configuration_capture.Token.t * Inference.Observation.Configuration.t
       -> unit request
   | Finish_configuration_capture : Configuration_capture.Token.t * bool -> unit request
+  | Begin_lifecycle :
+      Agent_protocol.Id.Attachment.t option * int * int64
+      -> Lifecycle_fence.t request
+  | Lifecycle_state : Lifecycle_fence.t -> Session_state.t request
+  | Retire_lifecycle : Lifecycle_fence.t -> unit request
+  | Abort_lifecycle : Lifecycle_fence.t -> unit request
   | State : Session_state.t request
   | Snapshot : Agent_protocol.Snapshot.t request
   | Observe : (Session_state.t * Agent_protocol.Snapshot.t) request
@@ -453,6 +470,7 @@ type _ request =
   | Set_runtime_worker :
       Operation_worker.t option * Inference_client.Execution.t option
       -> unit request
+  | Check_runtime_admission : unit request
   | Retire_runtime_worker : bool -> Runtime_retirement.t request
   | Set_compaction_inference : Compaction_inference.t option -> unit request
   | Enable_automatic_turn_budget : Chat_response.Runtime_semantics.policy -> unit request
@@ -803,6 +821,8 @@ type t =
   ; subscribers : (Agent_protocol.Id.Attachment.t, Subscriber.t) Map.Poly.t ref
   ; permission_waiters :
       (Agent_protocol.Id.Permission.t, permission_waiter) Map.Poly.t ref
+  ; lifecycle_owner : unit ref
+  ; mutable lifecycle_fence : Lifecycle_fence.t option
   ; mutable organization_admission : Session_organization_admission.t option
   ; mutable configuration_policy : Configuration_policy.t option
   ; configuration_update_owner : Configuration_update.Owner.t
@@ -1861,7 +1881,9 @@ let set_operation_worker t worker =
       Ok ())
 ;;
 
-let runtime_admission_open t = Option.is_none t.runtime_retirement
+let runtime_admission_open t =
+  Option.is_none t.runtime_retirement && Option.is_none t.lifecycle_fence
+;;
 
 let require_runtime_admission t =
   if runtime_admission_open t
@@ -10262,741 +10284,997 @@ let detach t attachment_id =
          ~f:(fun _ -> ()))
 ;;
 
+let lifecycle_request_allowed : type a. a request -> bool = function
+  | Set_operation_worker None
+  | Set_runtime_worker (None, _)
+  | Set_compaction_inference None -> true
+  | Set_operation_worker (Some _)
+  | Set_runtime_worker (Some _, _)
+  | Set_compaction_inference (Some _) -> false
+  | Acknowledge_inference _
+  | Observe_inference _
+  | Observe_owned_inference _
+  | Complete_inference _
+  | Release_inference _
+  | Seal_inference_owner _
+  | Finish_inference_owner _
+  | Claim_queued_retirement _
+  | Commit_queued_event _
+  | Finish_queued_event _
+  | Set_queued_event_cancel _
+  | Set_job_scope_cancel _
+  | Seal_job_scope _
+  | Finish_job_scope _
+  | Abort_subscription_mutation _
+  | Read_script_subscription _
+  | Read_script_ingress _
+  | Abort_ingress_mutation _
+  | Abort_schedule_mutation _
+  | Read_script_schedule _
+  | Read_script_notification _
+  | Abort_notification_mutation _
+  | Abort_background_job _
+  | Has_staged_background_job _
+  | Read_script_job _
+  | Read_script_job_result _
+  | Finish_invocation _
+  | Finish_moderator_invocation _
+  | Set_idle_moderator_cancel _
+  | Configuration
+  | Finish_configuration_capture _
+  | Lifecycle_state _
+  | Retire_lifecycle _
+  | Abort_lifecycle _
+  | State
+  | Snapshot
+  | Observe
+  | Authorize_writer _
+  | Retire_runtime_worker _
+  | Shell_approval_grants
+  | Shell_manifest_grants
+  | End_initialization _
+  | Fail_initialization _
+  | Stop_delegated _
+  | Stop_delegated_at_epoch _
+  | Commit_worker_entry _
+  | Publish_invocation_output _
+  | Commit_worker_moderator _
+  | Has_writer_attachment
+  | Invocation_granted _
+  | Worker_ready _
+  | Worker_terminal _
+  | Compaction_terminal _
+  | Cancel_operation _
+  | Resolve_permission_system _
+  | Initialization_model_job_is_current _
+  | Complete_initialization_model_job _
+  | Read_job _
+  | Publish_job_progress _
+  | Complete_job _
+  | Complete_background_job _
+  | Defer_background_job _
+  | Cancel_job_internal _
+  | Interrupt_job _
+  | Cancel_schedule_internal _
+  | Complete_schedule _
+  | Fail_schedule _
+  | Skip_schedule _
+  | Complete_idle_moderator _
+  | Fail_idle_moderator _
+  | Expire_permission _
+  | Detach _
+  | Owner_expired _
+  | Checkpoint _
+  | Quiescent_checkpoint _
+  | Shutdown -> true
+  | Open_inference_owner _
+  | Admit_inference _
+  | Reconcile_inference_recovery
+  | Claim_delegated_event _
+  | Claim_job_moderator _
+  | Claim_job_event _
+  | Manage_moderator_follow_up _
+  | Admit_moderator_turn _
+  | Admit_notification_turn _
+  | Claim_ordinary_event _
+  | Claim_queued_event _
+  | Commit_invocation_call _
+  | Claim_invocation _
+  | Claim_idle_invocation _
+  | Claim_event_invocation _
+  | Claim_job_scope _
+  | Prepare_background_job _
+  | Stage_background_job _
+  | Stage_subscription_mutation _
+  | Create_script_subscription _
+  | Finish_script_subscription _
+  | Select_subscription_mutations _
+  | Expire_subscriptions
+  | Create_script_ingress _
+  | Revoke_script_ingress _
+  | Select_ingress_mutations _
+  | Stage_schedule_mutation _
+  | Create_script_schedule _
+  | Select_schedule_mutations _
+  | Select_background_jobs _
+  | Create_script_notification _
+  | Select_notification_mutations _
+  | Cancel_script_job _
+  | Claim_job_invocation _
+  | Claim_moderator_invocation _
+  | Claim_moderator_observation _
+  | Claim_next_moderator_observation _
+  | Claim_idle_moderator_observation _
+  | Commit_moderator_invocation _
+  | Commit_extensions _
+  | Set_organization_admission _
+  | Set_configuration_policy _
+  | Prepare_configuration_update _
+  | Commit_configuration_update _
+  | Begin_configuration_capture _
+  | Mark_configuration_capture _
+  | Check_runtime_admission
+  | Begin_lifecycle _
+  | Enable_automatic_turn_budget _
+  | Set_automatic_turn_pauses _
+  | Change_moderator _
+  | Change_workspace _
+  | Replace_shell_approval_grants _
+  | Add_shell_manifest_grant _
+  | Reset _
+  | Upgrade_prompt _
+  | Commit_administration _
+  | Validate_administration_basis _
+  | Commit_reconciled_administration _
+  | Begin_initialization _
+  | Complete_initialization _
+  | Start _
+  | Start_initial_delegated _
+  | Fail_initial_delegated _
+  | Queue_start _
+  | Activate_queued_start
+  | Update_organization _
+  | Update_metadata _
+  | Stop _
+  | Stop_managed _
+  | Append_history _
+  | Defer_history _
+  | Submit_message _
+  | Submit_managed_message _
+  | Compact _
+  | Delete_history _
+  | Edit_history _
+  | Continue_history _
+  | Adopt_deferred
+  | Reserve_history_block _
+  | Prepare_authoring_input _
+  | Consume_deferred _
+  | Consume_notifications _
+  | Deliver_idle_notifications _
+  | Admit_standalone_delivery _
+  | Retire_obsolete_moderator_delivery _
+  | Deliver_standalone_completion _
+  | Consume_initial_notifications _
+  | Open_permission _
+  | Respond_permission _
+  | Revoke_grant _
+  | Change_job _
+  | Capture_inference_target _
+  | Capture_model_job_source _
+  | Capture_recipe_target _
+  | Add_initialization_model_job _
+  | Start_initialization_model_job _
+  | Capture_initialization_recipe_target _
+  | Add_job _
+  | Claim_job _
+  | Refresh_background_job _
+  | Recover_background_results _
+  | Deliver_job _
+  | Cancel_job _
+  | Change_schedule _
+  | Add_schedule _
+  | Cancel_schedule _
+  | Claim_schedule _
+  | Due_schedules
+  | Retry_schedule _
+  | Prepare_ingress_submission _
+  | Commit_ingress_submission _
+  | Claim_idle_moderator
+  | Apply_observation_follow_up
+  | Attach _
+  | Renew_owner _ -> false
+;;
+
+let check_lifecycle_fence t fence =
+  if
+    phys_equal t.lifecycle_owner fence.Lifecycle_fence.owner
+    && Option.exists t.lifecycle_fence ~f:(fun current -> phys_equal current fence)
+  then Ok ()
+  else Error (error Conflict "session lifecycle fence is no longer current")
+;;
+
+let begin_lifecycle t attachment_id expected_generation expected_revision =
+  let open Result.Let_syntax in
+  let%bind () =
+    match attachment_id with
+    | None -> Ok ()
+    | Some id -> Result.map (write_attachment t id) ~f:(fun _ -> ())
+  in
+  if Option.is_some t.lifecycle_fence
+  then Error (error Conflict "session lifecycle change is already reserved")
+  else if
+    (not (Int.equal t.state.identity.generation expected_generation))
+    || not (Int64.equal t.state.counters.revision expected_revision)
+  then Error (error Conflict "session lifecycle canonical anchor changed")
+  else (
+    let fence = Lifecycle_fence.{ owner = t.lifecycle_owner; phase = Reserved } in
+    t.lifecycle_fence <- Some fence;
+    Ok fence)
+;;
+
 let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
-  fun t -> function
-  | Manage_moderator_follow_up (operation_id, observer) ->
-    manage_moderator_follow_up t operation_id observer
-  | Admit_moderator_turn operation_id -> admit_moderator_turn t operation_id
-  | Admit_notification_turn operation_id -> admit_notification_turn t operation_id
-  | Claim_delegated_event (id, delegation, snapshot, event) ->
-    claim_delegated_event t id delegation snapshot event
-  | Claim_job_event (scope, id, snapshot, event) ->
-    claim_job_event t scope id snapshot event
-  | Claim_job_moderator (scope, invocation) -> claim_job_moderator t scope invocation
-  | Claim_ordinary_event (id, operation_id, snapshot, event) ->
-    claim_ordinary_event t id operation_id snapshot event
-  | Claim_queued_event (id, operation_id, snapshot) ->
-    claim_queued_event t id operation_id snapshot
-  | Claim_queued_retirement (id, snapshot, reason) ->
-    claim_queued_retirement t id snapshot reason
-  | Commit_queued_event (borrow, snapshot, requests, decision, notifications) ->
-    let open Result.Let_syntax in
-    let%bind () = validate_queued_event_borrow t borrow in
-    with_staged_transaction t (Moderator_event borrow.receipt.context.id) (fun () ->
-      commit_queued_event t borrow snapshot requests decision notifications)
-  | Finish_queued_event (borrow, interrupted) -> finish_queued_event t borrow interrupted
-  | Set_queued_event_cancel (borrow, cancel) ->
-    Result.map (queued_event_can_commit t borrow) ~f:(fun () ->
-      borrow.cancel <- Some cancel)
-  | Commit_invocation_call (operation_id, invocation, entry) ->
-    commit_invocation_call t operation_id invocation entry
-  | Claim_invocation (operation_id, invocation) ->
-    claim_invocation t operation_id invocation
-  | Claim_idle_invocation (borrow, invocation) ->
-    claim_idle_invocation t borrow invocation
-  | Claim_event_invocation (borrow, invocation) ->
-    claim_event_invocation t borrow invocation
-  | Claim_job_scope (id, generation, attempt, deadline) ->
-    claim_job_scope t id generation attempt deadline
-  | Claim_job_invocation (scope, invocation) ->
-    (match t.moderator_borrow with
-     | Some borrow
-       when Option.exists borrow.job_scope ~f:(phys_equal scope)
-            && Option.exists invocation.context.parent_invocation ~f:(fun parent ->
-              Agent_protocol.Id.Invocation.equal parent borrow.invocation.context.id
-              || List.exists t.invocation_executions ~f:(fun execution ->
-                invocation_execution_owned_by borrow execution
-                && Agent_protocol.Id.Invocation.equal
-                     parent
-                     execution.dispatched.context.id)) ->
-       claim_idle_invocation t borrow invocation
-     | _ -> claim_job_invocation t scope invocation)
-  | Finish_job_scope scope -> finish_job_scope t scope
-  | Seal_job_scope scope ->
-    (match List.mem t.job_scopes scope ~equal:phys_equal with
-     | false -> Error (error Conflict "background execution scope has ended")
-     | true ->
-       scope.active <- false;
-       scope.unfinished_on_return
-       <- job_has_moderator t scope
-          || List.exists t.invocation_executions ~f:(job_execution_owned_by scope);
-       signal_job_scope scope;
-       cancel_job_moderators t scope;
-       Ok ())
-  | Set_job_scope_cancel (scope, cancel) ->
-    let open Result.Let_syntax in
-    let%map () = job_scope_can_execute t scope in
-    scope.cancel <- Some cancel
-  | Finish_invocation (execution, outcome, requests, commit_starts, authoring_reference)
-    ->
-    let open Result.Let_syntax in
-    let%bind () =
-      match List.mem t.invocation_executions execution ~equal:phys_equal with
-      | true -> Ok ()
-      | false -> Error (error Conflict "invocation callback no longer owns its result")
-    in
-    with_staged_transaction t (Invocation execution.dispatched.context.id) (fun () ->
-      finish_invocation t execution outcome requests commit_starts authoring_reference)
-  | Claim_moderator_invocation (operation_id, invocation) ->
-    claim_moderator_invocation t operation_id invocation
-  | Claim_moderator_observation (operation_id, invocation_id) ->
-    claim_moderator_observation t (Some operation_id) invocation_id
-  | Claim_next_moderator_observation (operation_id, observer) ->
-    claim_next_moderator_observation t (Some operation_id) observer
-  | Claim_idle_moderator_observation (observer, tools) ->
-    if idle_moderator_eligible t
-    then
-      Result.map (claim_next_moderator_observation t None observer) ~f:(fun borrow ->
-        Option.iter borrow ~f:(fun borrow -> borrow.accepts_children <- tools);
-        borrow)
-    else Ok None
-  | Commit_moderator_invocation (borrow, resolved, snapshot) ->
-    let open Result.Let_syntax in
-    let%bind () = validate_moderator_borrow t borrow in
-    with_staged_transaction t (Invocation borrow.invocation.context.id) (fun () ->
-      commit_moderator_invocation t borrow resolved snapshot)
-  | Finish_moderator_invocation (borrow, failure) ->
-    finish_moderator_invocation t borrow failure
-  | Set_idle_moderator_cancel (borrow, cancel) ->
-    let open Result.Let_syntax in
-    let%bind () = validate_moderator_borrow t borrow in
-    (match
-       ( borrow.job_scope
-       , borrow.operation_id
-       , t.state.lifecycle.desired
-       , t.state.lifecycle.observed )
-     with
-     | Some scope, None, _, _ ->
-       let%map () = job_scope_can_execute t scope in
-       borrow.cancel <- Some cancel
-     | None, None, Running, Idle ->
-       borrow.cancel <- Some cancel;
-       Ok ()
-     | _ ->
-       Error (error Conflict "idle observation was stopped before callback execution"))
-  | Commit_extensions (generation, revision, changes) ->
-    commit_extensions_internal t generation revision changes
-  | State -> Ok t.state
-  | Prepare_ingress_submission (source, producer, registration_id, namespace, key, payload)
-    ->
-    prepare_ingress_submission_internal
-      t
-      source
-      producer
-      registration_id
-      namespace
-      key
-      payload
-  | Commit_ingress_submission (proposal, before, snapshot) ->
-    commit_ingress_submission_internal t proposal before snapshot
-  | Due_schedules -> due_schedules t
-  | Read_job id -> Result.map (find_job t id) ~f:(job_with_progress t)
-  | Publish_job_progress (id, progress) ->
-    publish_job_progress_internal t id progress;
-    Ok ()
-  | Prepare_background_job (owner, request) -> prepare_background_job t owner request
-  | Stage_background_job (job, capacity) -> stage_background_job_internal t job capacity
-  | Stage_subscription_mutation (owner, source, previous, next) ->
-    stage_subscription_mutation_internal t owner source previous next
-  | Create_script_subscription (owner, source, kind, lifetime_ms, wake, completion_schema)
-    ->
-    create_script_subscription_internal
-      t
-      owner
-      source
-      kind
-      lifetime_ms
-      wake
-      completion_schema
-  | Select_subscription_mutations (owner, source, receipts) ->
-    let open Result.Let_syntax in
-    let%bind _ = subscription_owner_active t owner source in
-    Staged_subscriptions.select
-      t.staged_subscriptions
-      ~owner
-      ~receipts
-      ~lookup:(lookup_subscription t)
-  | Abort_subscription_mutation (owner, receipt) ->
-    let open Result.Let_syntax in
-    let%map () = Staged_subscriptions.abort t.staged_subscriptions ~owner ~receipt in
-    sync_extension_clock t
-  | Finish_script_subscription (owner, source, id, expected_epoch, completion) ->
-    finish_script_subscription_internal t owner source id expected_epoch completion
-  | Read_script_subscription (owner, source, id) ->
-    let open Result.Let_syntax in
-    let%bind _ = subscription_owner_active t owner source in
-    let%bind subscription =
-      Result.of_option
-        (provisional_subscription t owner id)
-        ~error:(error Invalid_state "subscription is not retained")
-    in
-    let%map () = subscription_owned t source subscription in
-    subscription
-  | Expire_subscriptions -> expire_subscriptions_internal t
-  | Create_script_ingress (owner, source, id, epoch, namespace, schema) ->
-    create_script_ingress_internal t owner source id epoch namespace schema
-  | Revoke_script_ingress (owner, source, id, reason) ->
-    revoke_script_ingress_internal t owner source id reason
-  | Read_script_ingress (owner, source, id) ->
-    read_script_ingress_internal t owner source id
-  | Abort_ingress_mutation (owner, receipt) ->
-    Staged_ingress.abort t.staged_ingress ~owner ~receipt
-  | Select_ingress_mutations (owner, source, receipts) ->
-    let open Result.Let_syntax in
-    let%bind _ = subscription_owner_active t owner source in
-    Staged_ingress.select
-      t.staged_ingress
-      ~owner
-      ~receipts
-      ~lookup:(lookup_ingress t)
-      ~subscription:
-        (ingress_subscription_lookup
-           t
-           (Staged_subscriptions.values t.staged_subscriptions))
-  | Create_script_notification
-      (owner, source, correlation, completion, wake, disclosure_pins) ->
-    create_script_notification_internal
-      t
-      owner
-      source
-      correlation
-      completion
-      wake
-      disclosure_pins
-  | Read_script_notification (owner, source, id) ->
-    let open Result.Let_syntax in
-    let%bind _ = subscription_owner_active t owner source in
-    let%bind value =
-      Result.of_option
-        (provisional_notification t owner id)
-        ~error:(error Invalid_state "notification is not retained")
-    in
-    let%map () = notification_owned t source value in
-    value
-  | Select_notification_mutations (owner, source, receipts) ->
-    let open Result.Let_syntax in
-    let%bind _ = subscription_owner_active t owner source in
-    Staged_notifications.select
-      t.staged_notifications
-      ~owner
-      ~receipts
-      ~lookup:(lookup_notification t)
-  | Abort_notification_mutation (owner, receipt) ->
-    Staged_notifications.abort t.staged_notifications ~owner ~receipt
-  | Stage_schedule_mutation (owner, source, previous, next) ->
-    stage_schedule_mutation_internal t owner source previous next
-  | Create_script_schedule (owner, source, delay_ms, payload, misfire) ->
-    create_script_schedule_internal t owner source delay_ms payload misfire
-  | Select_schedule_mutations (owner, source, receipts) ->
-    let open Result.Let_syntax in
-    let%bind _ = subscription_owner_active t owner source in
-    Staged_schedules.select t.staged_schedules ~owner ~receipts ~lookup:(fun id ->
-      List.find t.state.schedules ~f:(fun value ->
-        Agent_protocol.Id.Schedule.equal value.id id))
-  | Abort_schedule_mutation (owner, receipt) ->
-    let open Result.Let_syntax in
-    let%map () = Staged_schedules.abort t.staged_schedules ~owner ~receipt in
-    sync_extension_clock t
-  | Read_script_schedule (owner, source, id) ->
-    let open Result.Let_syntax in
-    let%bind _ = subscription_owner_active t owner source in
-    let%bind value =
-      Result.of_option
-        (provisional_schedule t owner id)
-        ~error:(error Invalid_state "schedule is not retained")
-    in
-    let%map () = schedule_owned t source value in
-    value
-  | Select_background_jobs (owner, ids) ->
-    let open Result.Let_syntax in
-    let%bind () = background_owner_active t owner in
-    Staged_jobs.select t.staged_jobs ~owner ~ids
-  | Abort_background_job (owner, id) -> Staged_jobs.abort t.staged_jobs ~owner ~id
-  | Has_staged_background_job (owner, id) ->
-    let open Result.Let_syntax in
-    let%map () = background_owner_active t owner in
-    Staged_jobs.contains t.staged_jobs ~owner ~id
-  | Read_script_job (owner, id) ->
-    let open Result.Let_syntax in
-    let%bind () = background_owner_active t owner in
-    let%bind staged = Staged_jobs.find t.staged_jobs ~owner ~id in
-    (match staged with
-     | Some job -> Ok job
-     | None ->
-       let%bind job = find_job t id in
-       let%map () = validate_job_generation t job t.state.identity.generation in
-       job_with_progress t job)
-  | Read_script_job_result (owner, expected) ->
-    let open Result.Let_syntax in
-    let%bind () = background_owner_active t owner in
-    let%bind job = find_job t expected.id in
-    let%bind () = validate_job_generation t job t.state.identity.generation in
-    let%bind () =
-      match
-        Jsonaf.exactly_equal
-          (Agent_protocol.Job.to_json job)
-          (Agent_protocol.Job.to_json expected)
-      with
-      | true -> Ok ()
-      | false -> Error (error Conflict "job changed before artifact materialization")
-    in
-    let load_artifact =
-      Option.map t.services.job_results ~f:(fun publisher ->
-        Agent_store.Job_result_store.Publisher.load publisher)
-    in
-    let%bind completion = Agent_protocol.Job.terminal_completion ?load_artifact job in
-    Result.of_option
-      completion
-      ~error:(error Invalid_state "job has no terminal completion")
-  | Cancel_script_job (owner, id) ->
-    let open Result.Let_syntax in
-    let%bind () = background_owner_active t owner in
-    let%bind staged =
-      Staged_jobs.cancel t.staged_jobs ~owner ~id ~now:(t.services.now ())
-    in
-    (match staged with
-     | Some _ -> Ok ()
-     | None ->
-       let%bind job = find_job t id in
-       let%bind () = validate_job_generation t job t.state.identity.generation in
-       Result.map (cancel_job_internal t id) ~f:ignore)
-  | Configuration -> configuration_view t
-  | Set_organization_admission admission ->
-    t.organization_admission <- Some admission;
-    Ok ()
-  | Set_configuration_policy policy ->
-    t.configuration_policy <- Some policy;
-    Ok ()
-  | Prepare_configuration_update request -> prepare_configuration_update t request
-  | Commit_configuration_update validated -> commit_configuration_update t validated
-  | Begin_configuration_capture operation_id -> begin_configuration_capture t operation_id
-  | Mark_configuration_capture (capture, configuration) ->
-    mark_configuration_capture t capture configuration
-  | Finish_configuration_capture (capture, success) ->
-    finish_configuration_capture t capture success
-  | Snapshot -> Ok (current_snapshot t)
-  | Observe -> Ok (t.state, current_snapshot t)
-  | Set_operation_worker worker -> set_operation_worker t worker
-  | Set_runtime_worker (worker, inference) -> set_runtime_worker t worker inference
-  | Retire_runtime_worker closing -> retire_runtime_worker t ~closing
-  | Set_compaction_inference port ->
-    t.compaction_inference <- port;
-    Ok ()
-  | Enable_automatic_turn_budget policy ->
-    (match
-       t.state.automatic_turn_budget, t.state.active_operation, moderator_is_borrowed t
-     with
-     | Some budget, _, _
-       when Chat_response.Runtime_semantics.equal_policy budget.policy policy -> Ok ()
-     | _, None, false ->
-       transition
-         t
-         ~delta:(Session_delta.Automatic_turn_budget_enabled policy)
-         ~payloads:[]
-       |> Result.map ~f:ignore
-     | _ ->
-       Error (error Conflict "cannot enable automatic-turn accounting during active work"))
-  | Set_automatic_turn_pauses conditions ->
-    (match
-       t.state.active_operation, moderator_is_borrowed t, t.idle_moderator_borrowed
-     with
-     | None, false, false ->
-       let open Result.Let_syntax in
-       let%bind budget =
-         t.state.automatic_turn_budget
-         |> Result.of_option
-              ~error:(error Invalid_state "automatic-turn policy is not enabled")
-       in
-       let next = Automatic_turn_budget.with_pauses budget conditions in
-       (match Automatic_turn_budget.equal budget next with
+  fun t request ->
+  if Option.is_some t.lifecycle_fence && not (lifecycle_request_allowed request)
+  then Error (error Conflict "session lifecycle is reserved")
+  else (
+    match request with
+    | Begin_lifecycle (attachment_id, generation, revision) ->
+      begin_lifecycle t attachment_id generation revision
+    | Lifecycle_state fence ->
+      Result.map (check_lifecycle_fence t fence) ~f:(fun () -> t.state)
+    | Retire_lifecycle fence ->
+      Result.map (check_lifecycle_fence t fence) ~f:(fun () -> fence.phase <- Retiring)
+    | Abort_lifecycle fence ->
+      let open Result.Let_syntax in
+      let%bind () = check_lifecycle_fence t fence in
+      (match fence.phase with
+       | Retiring -> Error (error Conflict "retired lifecycle owner cannot reopen")
+       | Reserved ->
+         t.lifecycle_fence <- None;
+         Ok ())
+    | Manage_moderator_follow_up (operation_id, observer) ->
+      manage_moderator_follow_up t operation_id observer
+    | Admit_moderator_turn operation_id -> admit_moderator_turn t operation_id
+    | Admit_notification_turn operation_id -> admit_notification_turn t operation_id
+    | Claim_delegated_event (id, delegation, snapshot, event) ->
+      claim_delegated_event t id delegation snapshot event
+    | Claim_job_event (scope, id, snapshot, event) ->
+      claim_job_event t scope id snapshot event
+    | Claim_job_moderator (scope, invocation) -> claim_job_moderator t scope invocation
+    | Claim_ordinary_event (id, operation_id, snapshot, event) ->
+      claim_ordinary_event t id operation_id snapshot event
+    | Claim_queued_event (id, operation_id, snapshot) ->
+      claim_queued_event t id operation_id snapshot
+    | Claim_queued_retirement (id, snapshot, reason) ->
+      claim_queued_retirement t id snapshot reason
+    | Commit_queued_event (borrow, snapshot, requests, decision, notifications) ->
+      let open Result.Let_syntax in
+      let%bind () = validate_queued_event_borrow t borrow in
+      with_staged_transaction t (Moderator_event borrow.receipt.context.id) (fun () ->
+        commit_queued_event t borrow snapshot requests decision notifications)
+    | Finish_queued_event (borrow, interrupted) ->
+      finish_queued_event t borrow interrupted
+    | Set_queued_event_cancel (borrow, cancel) ->
+      Result.map (queued_event_can_commit t borrow) ~f:(fun () ->
+        borrow.cancel <- Some cancel)
+    | Commit_invocation_call (operation_id, invocation, entry) ->
+      commit_invocation_call t operation_id invocation entry
+    | Claim_invocation (operation_id, invocation) ->
+      claim_invocation t operation_id invocation
+    | Claim_idle_invocation (borrow, invocation) ->
+      claim_idle_invocation t borrow invocation
+    | Claim_event_invocation (borrow, invocation) ->
+      claim_event_invocation t borrow invocation
+    | Claim_job_scope (id, generation, attempt, deadline) ->
+      claim_job_scope t id generation attempt deadline
+    | Claim_job_invocation (scope, invocation) ->
+      (match t.moderator_borrow with
+       | Some borrow
+         when Option.exists borrow.job_scope ~f:(phys_equal scope)
+              && Option.exists invocation.context.parent_invocation ~f:(fun parent ->
+                Agent_protocol.Id.Invocation.equal parent borrow.invocation.context.id
+                || List.exists t.invocation_executions ~f:(fun execution ->
+                  invocation_execution_owned_by borrow execution
+                  && Agent_protocol.Id.Invocation.equal
+                       parent
+                       execution.dispatched.context.id)) ->
+         claim_idle_invocation t borrow invocation
+       | _ -> claim_job_invocation t scope invocation)
+    | Finish_job_scope scope -> finish_job_scope t scope
+    | Seal_job_scope scope ->
+      (match List.mem t.job_scopes scope ~equal:phys_equal with
+       | false -> Error (error Conflict "background execution scope has ended")
+       | true ->
+         scope.active <- false;
+         scope.unfinished_on_return
+         <- job_has_moderator t scope
+            || List.exists t.invocation_executions ~f:(job_execution_owned_by scope);
+         signal_job_scope scope;
+         cancel_job_moderators t scope;
+         Ok ())
+    | Set_job_scope_cancel (scope, cancel) ->
+      let open Result.Let_syntax in
+      let%map () = job_scope_can_execute t scope in
+      scope.cancel <- Some cancel
+    | Finish_invocation (execution, outcome, requests, commit_starts, authoring_reference)
+      ->
+      let open Result.Let_syntax in
+      let%bind () =
+        match List.mem t.invocation_executions execution ~equal:phys_equal with
         | true -> Ok ()
-        | false ->
-          transition
-            t
-            ~delta:
-              (Session_delta.Automatic_turn_pauses_changed
-                 next.policy.budget.pause_conditions)
-            ~payloads:[]
-          |> Result.map ~f:ignore)
-     | _ ->
-       Error (error Conflict "pause changes wait for active moderator or foreground work"))
-  | Change_moderator moderator -> change_moderator t moderator
-  | Change_workspace workspace -> change_workspace t workspace
-  | Shell_approval_grants -> Ok t.state.shell.approval_grants
-  | Replace_shell_approval_grants approval_grants ->
-    replace_shell_approval_grants t approval_grants
-  | Shell_manifest_grants -> Ok t.state.shell.manifest_grants
-  | Add_shell_manifest_grant grant -> add_shell_manifest_grant t grant
-  | Reset (attachment_id, expected_revision, options) ->
-    reset_internal t attachment_id expected_revision options
-  | Upgrade_prompt (attachment_id, expected_revision, target_revision) ->
-    upgrade_prompt_internal t attachment_id expected_revision target_revision
-  | Commit_administration (attachment_id, expected_revision, kind, state) ->
-    commit_administration t attachment_id expected_revision kind state
-  | Validate_administration_basis (attachment_id, expected) ->
-    validate_administration_basis t attachment_id expected
-  | Commit_reconciled_administration (attachment_id, expected, kind, candidate) ->
-    commit_reconciled_administration t attachment_id expected kind candidate
-  | Begin_initialization expected -> begin_initialization t expected
-  | End_initialization scope -> end_initialization t scope
-  | Complete_initialization (scope, candidate) ->
-    complete_initialization t scope candidate
-  | Fail_initialization (scope, failure) -> fail_initialization t scope failure
-  | Start (attachment_id, expected_parent_stop_epoch) ->
-    with_writer t attachment_id (fun () -> start_internal ?expected_parent_stop_epoch t)
-  | Start_initial_delegated (reference, expected_parent_stop_epoch) ->
-    (match t.state.spec.delegation with
-     | Some current
-       when Agent_store.Delegation_store.Reference.equal current reference
-            && Agent_protocol.Id.Session.equal
-                 reference.child_session_id
-                 t.state.identity.session_id ->
-       (match t.state.pending_initial_start with
-        | true -> start_internal ?expected_parent_stop_epoch t
-        | false -> Ok (Session_state.summary t.state))
-     | _ ->
-       Error
-         (error Permission_denied "delegation.start: child relationship does not match"))
-  | Fail_initial_delegated (reference, failure) ->
-    (match t.state.spec.delegation with
-     | Some current
-       when Agent_store.Delegation_store.Reference.equal current reference
-            && Agent_protocol.Id.Session.equal
-                 reference.child_session_id
-                 t.state.identity.session_id ->
-       (match t.state.pending_initial_start with
-        | false -> Ok (Session_state.summary t.state)
-        | true ->
-          let open Result.Let_syntax in
-          let%map _ =
+        | false -> Error (error Conflict "invocation callback no longer owns its result")
+      in
+      with_staged_transaction t (Invocation execution.dispatched.context.id) (fun () ->
+        finish_invocation t execution outcome requests commit_starts authoring_reference)
+    | Claim_moderator_invocation (operation_id, invocation) ->
+      claim_moderator_invocation t operation_id invocation
+    | Claim_moderator_observation (operation_id, invocation_id) ->
+      claim_moderator_observation t (Some operation_id) invocation_id
+    | Claim_next_moderator_observation (operation_id, observer) ->
+      claim_next_moderator_observation t (Some operation_id) observer
+    | Claim_idle_moderator_observation (observer, tools) ->
+      if idle_moderator_eligible t
+      then
+        Result.map (claim_next_moderator_observation t None observer) ~f:(fun borrow ->
+          Option.iter borrow ~f:(fun borrow -> borrow.accepts_children <- tools);
+          borrow)
+      else Ok None
+    | Commit_moderator_invocation (borrow, resolved, snapshot) ->
+      let open Result.Let_syntax in
+      let%bind () = validate_moderator_borrow t borrow in
+      with_staged_transaction t (Invocation borrow.invocation.context.id) (fun () ->
+        commit_moderator_invocation t borrow resolved snapshot)
+    | Finish_moderator_invocation (borrow, failure) ->
+      finish_moderator_invocation t borrow failure
+    | Set_idle_moderator_cancel (borrow, cancel) ->
+      let open Result.Let_syntax in
+      let%bind () = validate_moderator_borrow t borrow in
+      (match
+         ( borrow.job_scope
+         , borrow.operation_id
+         , t.state.lifecycle.desired
+         , t.state.lifecycle.observed )
+       with
+       | Some scope, None, _, _ ->
+         let%map () = job_scope_can_execute t scope in
+         borrow.cancel <- Some cancel
+       | None, None, Running, Idle ->
+         borrow.cancel <- Some cancel;
+         Ok ()
+       | _ ->
+         Error (error Conflict "idle observation was stopped before callback execution"))
+    | Commit_extensions (generation, revision, changes) ->
+      commit_extensions_internal t generation revision changes
+    | State -> Ok t.state
+    | Prepare_ingress_submission
+        (source, producer, registration_id, namespace, key, payload) ->
+      prepare_ingress_submission_internal
+        t
+        source
+        producer
+        registration_id
+        namespace
+        key
+        payload
+    | Commit_ingress_submission (proposal, before, snapshot) ->
+      commit_ingress_submission_internal t proposal before snapshot
+    | Due_schedules -> due_schedules t
+    | Read_job id -> Result.map (find_job t id) ~f:(job_with_progress t)
+    | Publish_job_progress (id, progress) ->
+      publish_job_progress_internal t id progress;
+      Ok ()
+    | Prepare_background_job (owner, request) -> prepare_background_job t owner request
+    | Stage_background_job (job, capacity) -> stage_background_job_internal t job capacity
+    | Stage_subscription_mutation (owner, source, previous, next) ->
+      stage_subscription_mutation_internal t owner source previous next
+    | Create_script_subscription
+        (owner, source, kind, lifetime_ms, wake, completion_schema) ->
+      create_script_subscription_internal
+        t
+        owner
+        source
+        kind
+        lifetime_ms
+        wake
+        completion_schema
+    | Select_subscription_mutations (owner, source, receipts) ->
+      let open Result.Let_syntax in
+      let%bind _ = subscription_owner_active t owner source in
+      Staged_subscriptions.select
+        t.staged_subscriptions
+        ~owner
+        ~receipts
+        ~lookup:(lookup_subscription t)
+    | Abort_subscription_mutation (owner, receipt) ->
+      let open Result.Let_syntax in
+      let%map () = Staged_subscriptions.abort t.staged_subscriptions ~owner ~receipt in
+      sync_extension_clock t
+    | Finish_script_subscription (owner, source, id, expected_epoch, completion) ->
+      finish_script_subscription_internal t owner source id expected_epoch completion
+    | Read_script_subscription (owner, source, id) ->
+      let open Result.Let_syntax in
+      let%bind _ = subscription_owner_active t owner source in
+      let%bind subscription =
+        Result.of_option
+          (provisional_subscription t owner id)
+          ~error:(error Invalid_state "subscription is not retained")
+      in
+      let%map () = subscription_owned t source subscription in
+      subscription
+    | Expire_subscriptions -> expire_subscriptions_internal t
+    | Create_script_ingress (owner, source, id, epoch, namespace, schema) ->
+      create_script_ingress_internal t owner source id epoch namespace schema
+    | Revoke_script_ingress (owner, source, id, reason) ->
+      revoke_script_ingress_internal t owner source id reason
+    | Read_script_ingress (owner, source, id) ->
+      read_script_ingress_internal t owner source id
+    | Abort_ingress_mutation (owner, receipt) ->
+      Staged_ingress.abort t.staged_ingress ~owner ~receipt
+    | Select_ingress_mutations (owner, source, receipts) ->
+      let open Result.Let_syntax in
+      let%bind _ = subscription_owner_active t owner source in
+      Staged_ingress.select
+        t.staged_ingress
+        ~owner
+        ~receipts
+        ~lookup:(lookup_ingress t)
+        ~subscription:
+          (ingress_subscription_lookup
+             t
+             (Staged_subscriptions.values t.staged_subscriptions))
+    | Create_script_notification
+        (owner, source, correlation, completion, wake, disclosure_pins) ->
+      create_script_notification_internal
+        t
+        owner
+        source
+        correlation
+        completion
+        wake
+        disclosure_pins
+    | Read_script_notification (owner, source, id) ->
+      let open Result.Let_syntax in
+      let%bind _ = subscription_owner_active t owner source in
+      let%bind value =
+        Result.of_option
+          (provisional_notification t owner id)
+          ~error:(error Invalid_state "notification is not retained")
+      in
+      let%map () = notification_owned t source value in
+      value
+    | Select_notification_mutations (owner, source, receipts) ->
+      let open Result.Let_syntax in
+      let%bind _ = subscription_owner_active t owner source in
+      Staged_notifications.select
+        t.staged_notifications
+        ~owner
+        ~receipts
+        ~lookup:(lookup_notification t)
+    | Abort_notification_mutation (owner, receipt) ->
+      Staged_notifications.abort t.staged_notifications ~owner ~receipt
+    | Stage_schedule_mutation (owner, source, previous, next) ->
+      stage_schedule_mutation_internal t owner source previous next
+    | Create_script_schedule (owner, source, delay_ms, payload, misfire) ->
+      create_script_schedule_internal t owner source delay_ms payload misfire
+    | Select_schedule_mutations (owner, source, receipts) ->
+      let open Result.Let_syntax in
+      let%bind _ = subscription_owner_active t owner source in
+      Staged_schedules.select t.staged_schedules ~owner ~receipts ~lookup:(fun id ->
+        List.find t.state.schedules ~f:(fun value ->
+          Agent_protocol.Id.Schedule.equal value.id id))
+    | Abort_schedule_mutation (owner, receipt) ->
+      let open Result.Let_syntax in
+      let%map () = Staged_schedules.abort t.staged_schedules ~owner ~receipt in
+      sync_extension_clock t
+    | Read_script_schedule (owner, source, id) ->
+      let open Result.Let_syntax in
+      let%bind _ = subscription_owner_active t owner source in
+      let%bind value =
+        Result.of_option
+          (provisional_schedule t owner id)
+          ~error:(error Invalid_state "schedule is not retained")
+      in
+      let%map () = schedule_owned t source value in
+      value
+    | Select_background_jobs (owner, ids) ->
+      let open Result.Let_syntax in
+      let%bind () = background_owner_active t owner in
+      Staged_jobs.select t.staged_jobs ~owner ~ids
+    | Abort_background_job (owner, id) -> Staged_jobs.abort t.staged_jobs ~owner ~id
+    | Has_staged_background_job (owner, id) ->
+      let open Result.Let_syntax in
+      let%map () = background_owner_active t owner in
+      Staged_jobs.contains t.staged_jobs ~owner ~id
+    | Read_script_job (owner, id) ->
+      let open Result.Let_syntax in
+      let%bind () = background_owner_active t owner in
+      let%bind staged = Staged_jobs.find t.staged_jobs ~owner ~id in
+      (match staged with
+       | Some job -> Ok job
+       | None ->
+         let%bind job = find_job t id in
+         let%map () = validate_job_generation t job t.state.identity.generation in
+         job_with_progress t job)
+    | Read_script_job_result (owner, expected) ->
+      let open Result.Let_syntax in
+      let%bind () = background_owner_active t owner in
+      let%bind job = find_job t expected.id in
+      let%bind () = validate_job_generation t job t.state.identity.generation in
+      let%bind () =
+        match
+          Jsonaf.exactly_equal
+            (Agent_protocol.Job.to_json job)
+            (Agent_protocol.Job.to_json expected)
+        with
+        | true -> Ok ()
+        | false -> Error (error Conflict "job changed before artifact materialization")
+      in
+      let load_artifact =
+        Option.map t.services.job_results ~f:(fun publisher ->
+          Agent_store.Job_result_store.Publisher.load publisher)
+      in
+      let%bind completion = Agent_protocol.Job.terminal_completion ?load_artifact job in
+      Result.of_option
+        completion
+        ~error:(error Invalid_state "job has no terminal completion")
+    | Cancel_script_job (owner, id) ->
+      let open Result.Let_syntax in
+      let%bind () = background_owner_active t owner in
+      let%bind staged =
+        Staged_jobs.cancel t.staged_jobs ~owner ~id ~now:(t.services.now ())
+      in
+      (match staged with
+       | Some _ -> Ok ()
+       | None ->
+         let%bind job = find_job t id in
+         let%bind () = validate_job_generation t job t.state.identity.generation in
+         Result.map (cancel_job_internal t id) ~f:ignore)
+    | Configuration -> configuration_view t
+    | Set_organization_admission admission ->
+      t.organization_admission <- Some admission;
+      Ok ()
+    | Set_configuration_policy policy ->
+      t.configuration_policy <- Some policy;
+      Ok ()
+    | Prepare_configuration_update request -> prepare_configuration_update t request
+    | Commit_configuration_update validated -> commit_configuration_update t validated
+    | Begin_configuration_capture operation_id ->
+      begin_configuration_capture t operation_id
+    | Mark_configuration_capture (capture, configuration) ->
+      mark_configuration_capture t capture configuration
+    | Finish_configuration_capture (capture, success) ->
+      finish_configuration_capture t capture success
+    | Snapshot -> Ok (current_snapshot t)
+    | Observe -> Ok (t.state, current_snapshot t)
+    | Set_operation_worker worker -> set_operation_worker t worker
+    | Set_runtime_worker (worker, inference) -> set_runtime_worker t worker inference
+    | Check_runtime_admission -> require_runtime_admission t
+    | Retire_runtime_worker closing -> retire_runtime_worker t ~closing
+    | Set_compaction_inference port ->
+      t.compaction_inference <- port;
+      Ok ()
+    | Enable_automatic_turn_budget policy ->
+      (match
+         t.state.automatic_turn_budget, t.state.active_operation, moderator_is_borrowed t
+       with
+       | Some budget, _, _
+         when Chat_response.Runtime_semantics.equal_policy budget.policy policy -> Ok ()
+       | _, None, false ->
+         transition
+           t
+           ~delta:(Session_delta.Automatic_turn_budget_enabled policy)
+           ~payloads:[]
+         |> Result.map ~f:ignore
+       | _ ->
+         Error
+           (error Conflict "cannot enable automatic-turn accounting during active work"))
+    | Set_automatic_turn_pauses conditions ->
+      (match
+         t.state.active_operation, moderator_is_borrowed t, t.idle_moderator_borrowed
+       with
+       | None, false, false ->
+         let open Result.Let_syntax in
+         let%bind budget =
+           t.state.automatic_turn_budget
+           |> Result.of_option
+                ~error:(error Invalid_state "automatic-turn policy is not enabled")
+         in
+         let next = Automatic_turn_budget.with_pauses budget conditions in
+         (match Automatic_turn_budget.equal budget next with
+          | true -> Ok ()
+          | false ->
             transition
               t
               ~delta:
-                (Batch
-                   [ Initial_start_consumed
-                   ; Lifecycle_changed { desired = Stopped; observed = Failed failure }
-                   ; Failure_changed (Some failure)
-                   ])
-              ~payloads:
-                [ Session_state_changed
-                    { desired_state = Stopped; observed_state = Failed failure }
-                ]
-          in
-          Session_state.summary t.state)
-     | _ ->
-       Error
-         (error Permission_denied "delegation.start: child relationship does not match"))
-  | Queue_start attachment_id ->
-    with_writer t attachment_id (fun () -> queue_start_internal t)
-  | Activate_queued_start -> activate_queued_start t
-  | Update_organization (principal, request) ->
-    with_writer t request.attachment_id (fun () ->
-      let open Result.Let_syntax in
-      let%bind admission =
-        Result.of_option
-          t.organization_admission
-          ~error:(error Invalid_state "organization admission is not configured")
-      in
-      let%bind plan =
-        Session_organization_transition.create
-          t.state
-          ~expected_metadata_revision:request.expected_metadata_revision
-          ~patch:request.patch
-      in
-      let delta = Session_organization_transition.delta plan in
-      let%bind candidate = Session_delta.apply t.state delta in
-      let payloads =
-        if Session_organization_transition.changed plan
-        then
-          [ Agent_protocol.Event.Durable.Payload.Session_updated
-              (Session_state.summary candidate)
-          ]
-        else []
-      in
-      let%bind transition =
-        Session_transition.apply ~now:(t.services.now ()) t.state ~delta ~payloads
-      in
-      let%bind () =
-        Eio.Cancel.protect (fun () ->
-          let%map () =
-            Session_organization_admission.persist
-              admission
-              ~principal
-              ~host_id:request.host_id
-              ~additions:(Session_organization_transition.additions plan)
-              ~commit:(fun () -> persist_transition t transition)
-          in
-          install_committed_transition t transition;
-          publish_committed_transition t transition)
-      in
-      Ok (Session_state.summary t.state))
-  | Update_metadata (attachment_id, expected_metadata_revision, patch) ->
-    with_writer t attachment_id (fun () ->
-      let open Result.Let_syntax in
-      let%bind delta =
-        Session_metadata_transition.apply t.state ~expected_metadata_revision ~patch
-      in
-      match delta with
-      | None -> transition t ~delta:(Session_delta.Batch []) ~payloads:[]
-      | Some delta ->
+                (Session_delta.Automatic_turn_pauses_changed
+                   next.policy.budget.pause_conditions)
+              ~payloads:[]
+            |> Result.map ~f:ignore)
+       | _ ->
+         Error
+           (error Conflict "pause changes wait for active moderator or foreground work"))
+    | Change_moderator moderator -> change_moderator t moderator
+    | Change_workspace workspace -> change_workspace t workspace
+    | Shell_approval_grants -> Ok t.state.shell.approval_grants
+    | Replace_shell_approval_grants approval_grants ->
+      replace_shell_approval_grants t approval_grants
+    | Shell_manifest_grants -> Ok t.state.shell.manifest_grants
+    | Add_shell_manifest_grant grant -> add_shell_manifest_grant t grant
+    | Reset (attachment_id, expected_revision, options) ->
+      reset_internal t attachment_id expected_revision options
+    | Upgrade_prompt (attachment_id, expected_revision, target_revision) ->
+      upgrade_prompt_internal t attachment_id expected_revision target_revision
+    | Commit_administration (attachment_id, expected_revision, kind, state) ->
+      commit_administration t attachment_id expected_revision kind state
+    | Validate_administration_basis (attachment_id, expected) ->
+      validate_administration_basis t attachment_id expected
+    | Commit_reconciled_administration (attachment_id, expected, kind, candidate) ->
+      commit_reconciled_administration t attachment_id expected kind candidate
+    | Begin_initialization expected -> begin_initialization t expected
+    | End_initialization scope -> end_initialization t scope
+    | Complete_initialization (scope, candidate) ->
+      complete_initialization t scope candidate
+    | Fail_initialization (scope, failure) -> fail_initialization t scope failure
+    | Start (attachment_id, expected_parent_stop_epoch) ->
+      with_writer t attachment_id (fun () -> start_internal ?expected_parent_stop_epoch t)
+    | Start_initial_delegated (reference, expected_parent_stop_epoch) ->
+      (match t.state.spec.delegation with
+       | Some current
+         when Agent_store.Delegation_store.Reference.equal current reference
+              && Agent_protocol.Id.Session.equal
+                   reference.child_session_id
+                   t.state.identity.session_id ->
+         (match t.state.pending_initial_start with
+          | true -> start_internal ?expected_parent_stop_epoch t
+          | false -> Ok (Session_state.summary t.state))
+       | _ ->
+         Error
+           (error Permission_denied "delegation.start: child relationship does not match"))
+    | Fail_initial_delegated (reference, failure) ->
+      (match t.state.spec.delegation with
+       | Some current
+         when Agent_store.Delegation_store.Reference.equal current reference
+              && Agent_protocol.Id.Session.equal
+                   reference.child_session_id
+                   t.state.identity.session_id ->
+         (match t.state.pending_initial_start with
+          | false -> Ok (Session_state.summary t.state)
+          | true ->
+            let open Result.Let_syntax in
+            let%map _ =
+              transition
+                t
+                ~delta:
+                  (Batch
+                     [ Initial_start_consumed
+                     ; Lifecycle_changed { desired = Stopped; observed = Failed failure }
+                     ; Failure_changed (Some failure)
+                     ])
+                ~payloads:
+                  [ Session_state_changed
+                      { desired_state = Stopped; observed_state = Failed failure }
+                  ]
+            in
+            Session_state.summary t.state)
+       | _ ->
+         Error
+           (error Permission_denied "delegation.start: child relationship does not match"))
+    | Queue_start attachment_id ->
+      with_writer t attachment_id (fun () -> queue_start_internal t)
+    | Activate_queued_start -> activate_queued_start t
+    | Update_organization (principal, request) ->
+      with_writer t request.attachment_id (fun () ->
+        let open Result.Let_syntax in
+        let%bind admission =
+          Result.of_option
+            t.organization_admission
+            ~error:(error Invalid_state "organization admission is not configured")
+        in
+        let%bind plan =
+          Session_organization_transition.create
+            t.state
+            ~expected_metadata_revision:request.expected_metadata_revision
+            ~patch:request.patch
+        in
+        let delta = Session_organization_transition.delta plan in
         let%bind candidate = Session_delta.apply t.state delta in
-        transition
-          t
-          ~delta
-          ~payloads:
+        let payloads =
+          if Session_organization_transition.changed plan
+          then
             [ Agent_protocol.Event.Durable.Payload.Session_updated
                 (Session_state.summary candidate)
-            ])
-  | Stop (attachment_id, mode) ->
-    with_writer t attachment_id (fun () -> stop_internal t mode)
-  | Stop_delegated (reference, mode) ->
-    (match t.state.spec.delegation with
-     | Some current
-       when Agent_store.Delegation_store.Reference.equal current reference
-            && Agent_protocol.Id.Session.equal
-                 reference.child_session_id
-                 t.state.identity.session_id -> stop_internal t mode
-     | _ ->
-       Error
-         (error Permission_denied "delegation.stop: child relationship does not match"))
-  | Stop_managed (reference, key, mode, generation, max_receipts) ->
-    stop_managed_internal t reference key mode generation max_receipts
-  | Append_history (attachment_id, entries) ->
-    with_writer t attachment_id (fun () -> append_history t entries)
-  | Stop_delegated_at_epoch (reference, epoch, force) ->
-    (match t.state.spec.delegation with
-     | Some current
-       when Agent_store.Delegation_store.Reference.equal current reference
-            && Agent_protocol.Id.Session.equal
-                 reference.child_session_id
-                 t.state.identity.session_id ->
-       (match t.state.parent_stop_epoch with
-        | Some previous when (not force) && Int64.(epoch <= previous) ->
-          Ok (Session_state.summary t.state)
-        | _ -> stop_internal ~parent_stop_epoch:epoch t Cancel)
-     | _ ->
-       Error
-         (error Permission_denied "delegation.stop: child relationship does not match"))
-  | Defer_history (attachment_id, entries) ->
-    with_writer t attachment_id (fun () -> defer_history t entries)
-  | Submit_message (attachment_id, entry) -> submit_message t attachment_id entry
-  | Submit_managed_message (reference, key, fingerprint, generation, maximum, entry) ->
-    submit_managed_message t reference key fingerprint generation maximum entry
-  | Compact (attachment_id, expected_revision) ->
-    compact_internal t attachment_id expected_revision
-  | Delete_history (attachment_id, revision, history_id) ->
-    delete_history_internal t attachment_id revision history_id
-  | Edit_history request -> edit_history_internal t request
-  | Continue_history request -> continue_history_internal t request
-  | Adopt_deferred -> adopt_deferred t
-  | Reserve_history_block count -> reserve_history_block t count
-  | Commit_worker_entry (operation_id, entry) -> commit_worker_entry t operation_id entry
-  | Prepare_authoring_input (operation_id, materialization, history, effective) ->
-    prepare_authoring_input t operation_id materialization history effective
-  | Publish_invocation_output (operation_id, invocation_id, entry) ->
-    publish_invocation_output t operation_id invocation_id entry
-  | Consume_deferred operation_id -> consume_deferred t operation_id
-  | Consume_notifications (operation_id, plan) ->
-    consume_notifications_internal t operation_id plan
-  | Deliver_idle_notifications plan -> deliver_idle_notifications_internal t plan
-  | Admit_standalone_delivery plan -> admit_standalone_delivery_internal t plan
-  | Retire_obsolete_moderator_delivery (revision, job) ->
-    retire_obsolete_moderator_delivery_internal t revision job
-  | Deliver_standalone_completion (revision, job, capabilities, policy) ->
-    deliver_standalone_completion_internal t revision job capabilities policy
-  | Consume_initial_notifications (operation_id, proposal) ->
-    consume_notifications_internal
-      ~wakes:proposal.wakes
-      ~discarded_wakes:proposal.discarded_wakes
-      t
-      operation_id
-      proposal.pending
-  | Commit_worker_moderator (operation_id, snapshot) ->
-    commit_worker_moderator t operation_id snapshot
-  | Has_writer_attachment -> Ok (has_writer_attachment t)
-  | Authorize_writer attachment_id -> with_writer t attachment_id (fun () -> Ok ())
-  | Invocation_granted (tool_name, identity_digest) ->
-    Ok (invocation_granted t ~tool_name ~identity_digest)
-  | Worker_ready (operation_id, cancel) -> worker_ready t operation_id cancel
-  | Worker_terminal (operation_id, outcome) ->
-    with_runtime_terminal t operation_id (fun () ->
-      worker_terminal t operation_id outcome)
-  | Compaction_terminal (operation_id, outcome) ->
-    with_runtime_terminal t operation_id (fun () ->
-      compaction_terminal t operation_id outcome)
-  | Cancel_operation (attachment_id, operation_id) ->
-    cancel_operation_internal t attachment_id operation_id
-  | Open_permission (permission, timeout_seconds, fallback) ->
-    open_permission t permission timeout_seconds fallback
-  | Respond_permission
-      (attachment_id, principal_id, permission_id, generation, choice, reason) ->
-    respond_permission_internal
-      t
-      attachment_id
-      principal_id
-      permission_id
-      generation
-      choice
-      reason
-  | Resolve_permission_system (permission_id, generation, choice, reason) ->
-    resolve_permission_system t permission_id generation choice reason
-  | Expire_permission (permission_id, generation, fallback) ->
-    expire_permission_internal t permission_id generation fallback
-  | Revoke_grant (attachment_id, grant_id, reason) ->
-    revoke_grant t attachment_id grant_id reason
-  | Change_job (attachment_id, job) -> change_job t attachment_id job
-  | Capture_inference_target (target, limits) -> capture_inference_target t target limits
-  | Capture_model_job_source (job_id, generation, target, limits) ->
-    capture_model_job_source t job_id generation target limits
-  | Capture_recipe_target (job_id, generation, attempt, target, limits) ->
-    capture_recipe_target t job_id generation attempt target limits
-  | Add_initialization_model_job (scope, job) -> add_initialization_model_job t scope job
-  | Start_initialization_model_job (scope, job) ->
-    start_initialization_model_job t scope job
-  | Initialization_model_job_is_current (scope, job_id, generation, attempt) ->
-    initialization_model_job_is_current t scope job_id generation attempt
-  | Capture_initialization_recipe_target
-      (scope, job_id, generation, attempt, target, limits) ->
-    capture_initialization_recipe_target t scope job_id generation attempt target limits
-  | Complete_initialization_model_job (scope, job_id, generation, attempt, outcome) ->
-    complete_initialization_model_job t scope job_id generation attempt outcome
-  | Add_job job -> add_job t job
-  | Claim_job (job_id, generation) -> claim_job t job_id generation
-  | Complete_job (job_id, generation, attempt, outcome) ->
-    complete_job t job_id generation attempt outcome
-  | Complete_background_job (job_id, generation, attempt, outcome) ->
-    complete_background_job t job_id generation attempt outcome
-  | Defer_background_job (job_id, generation, attempt, dependency) ->
-    defer_background_job t job_id generation attempt dependency
-  | Refresh_background_job (job_id, generation, attempt) ->
-    refresh_background_job t job_id generation attempt
-  | Recover_background_results (max_count, max_total_bytes) ->
-    recover_background_results t max_count max_total_bytes
-  | Deliver_job (job_id, generation, expected, expected_job, moderator_snapshot) ->
-    deliver_job t job_id generation expected expected_job moderator_snapshot
-  | Cancel_job_internal job_id -> cancel_job_internal t job_id
-  | Cancel_job (attachment_id, job_id, expected_generation, expected_attempt) ->
-    with_writer t attachment_id (fun () ->
-      let open Result.Let_syntax in
-      let%bind job = find_job t job_id in
-      let%bind () =
-        match expected_generation, expected_attempt with
-        | None, None -> Ok ()
-        | Some generation, Some attempt ->
-          if
-            Int.equal generation t.state.identity.generation
-            && Int.equal generation job.generation
-            && Int.equal attempt job.attempt
-          then Ok ()
-          else Error (error Conflict "job occurrence has changed")
-        | Some _, None | None, Some _ ->
-          Error (error Invalid_request "job occurrence requires generation and attempt")
-      in
-      cancel_job_internal t job_id)
-  | Interrupt_job (job_id, generation, attempt, reason) ->
-    interrupt_job t job_id generation attempt reason
-  | Change_schedule (attachment_id, event, schedule) ->
-    change_schedule t attachment_id event schedule
-  | Add_schedule schedule -> add_schedule t schedule
-  | Cancel_schedule (attachment_id, schedule_id, expected_generation) ->
-    with_writer t attachment_id (fun () ->
-      let open Result.Let_syntax in
-      let%bind schedule = find_schedule t schedule_id in
-      let%bind () =
-        match expected_generation with
-        | None -> Ok ()
-        | Some generation ->
-          if
-            Int.equal generation t.state.identity.generation
-            && Int.equal generation schedule.generation
-          then Ok ()
-          else Error (error Conflict "schedule occurrence has changed")
-      in
-      cancel_schedule_internal t schedule_id)
-  | Cancel_schedule_internal schedule_id -> cancel_schedule_internal t schedule_id
-  | Claim_schedule (schedule_id, generation) -> claim_schedule t schedule_id generation
-  | Retry_schedule (schedule_id, generation) -> retry_schedule t schedule_id generation
-  | Complete_schedule
-      (schedule_id, generation, expected, expected_schedule, moderator_snapshot) ->
-    complete_schedule
-      t
-      schedule_id
-      generation
-      expected
-      expected_schedule
-      moderator_snapshot
-  | Fail_schedule (schedule_id, generation, failure) ->
-    fail_schedule t schedule_id generation failure
-  | Skip_schedule (schedule_id, generation) -> skip_schedule t schedule_id generation
-  | Claim_idle_moderator -> claim_idle_moderator t
-  | Apply_observation_follow_up -> apply_observation_follow_up t
-  | Complete_idle_moderator drain -> complete_idle_moderator t drain
-  | Fail_idle_moderator failure -> fail_idle_moderator t failure
-  | Attach (mode, subscribe, principal_id, reclaim_token) ->
-    attach t mode subscribe principal_id reclaim_token
-  | Detach attachment_id -> detach t attachment_id
-  | Renew_owner (attachment_id, generation) -> renew_owner t attachment_id generation
-  | Owner_expired generation -> owner_expired t generation
-  | Checkpoint persist -> persist t.state
-  | Quiescent_checkpoint inspect ->
-    (match
-       ( t.state.active_operation
-       , t.active_cancel
-       , t.invocation_executions
-       , t.job_scopes
-       , t.moderator_borrow
-       , t.queued_event_borrow
-       , t.foreground_moderator
-       , t.idle_moderator_borrowed
-       , Staged_jobs.is_empty t.staged_jobs
-         && Staged_subscriptions.is_empty t.staged_subscriptions
-         && Staged_ingress.is_empty t.staged_ingress
-         && Staged_schedules.is_empty t.staged_schedules
-         && Staged_notifications.is_empty t.staged_notifications
-       , Active_calls.snapshot t.active_calls )
-     with
-     | None, None, [], [], None, None, None, false, true, ([], []) ->
-       Result.map (inspect t.state) ~f:Option.some
-     | _ -> Ok None)
-  | Open_inference_owner source -> open_inference_owner t source
-  | Admit_inference (owner, relation, operation_id, invocation_id, configuration) ->
-    admit_inference t owner relation operation_id invocation_id configuration
-  | Acknowledge_inference (owner, handle, attempt) ->
-    acknowledge_inference t owner handle attempt
-  | Observe_inference (handle, incoming) -> observe_inference t handle incoming
-  | Observe_owned_inference (owner, incoming) -> observe_owned_inference t owner incoming
-  | Complete_inference (owner, handle, completion) ->
-    complete_inference t owner handle completion
-  | Release_inference (owner, handle) -> release_inference t owner handle
-  | Seal_inference_owner owner -> seal_inference_owner t owner
-  | Finish_inference_owner owner -> finish_inference_owner t owner
-  | Reconcile_inference_recovery -> reconcile_inference_recovery t
-  | Shutdown ->
-    t.initialization_scope <- None;
-    abort_all_staged_work t;
-    Option.iter t.owner_timer_cancel ~f:(fun resolver -> Eio.Promise.resolve resolver ());
-    t.owner_timer_cancel <- None;
-    Option.iter t.active_cancel ~f:(fun cancel -> cancel ());
-    List.iter t.job_scopes ~f:cancel_job_scope;
-    Option.iter t.queued_event_borrow ~f:(fun borrow ->
-      borrow.callback_active <- false;
-      borrow.cancel_requested <- true;
-      Option.iter borrow.cancel ~f:(fun cancel -> cancel ()));
-    Eio.Mutex.use_rw ~protect:true t.subscriber_mutex (fun () ->
-      Map.iter !(t.subscribers) ~f:Subscriber.close;
-      t.subscribers := Map.Poly.empty);
-    Map.iter !(t.permission_waiters) ~f:(fun waiter ->
-      Eio.Promise.resolve
-        waiter.resolver
-        Agent_protocol.Permission.
-          { choice = Deny
-          ; principal_id = None
-          ; resolved_at = t.services.now ()
-          ; reason = Some "session actor shut down"
-          });
-    t.permission_waiters := Map.Poly.empty;
-    t.stopped <- true;
-    Ok ()
+            ]
+          else []
+        in
+        let%bind transition =
+          Session_transition.apply ~now:(t.services.now ()) t.state ~delta ~payloads
+        in
+        let%bind () =
+          Eio.Cancel.protect (fun () ->
+            let%map () =
+              Session_organization_admission.persist
+                admission
+                ~principal
+                ~host_id:request.host_id
+                ~additions:(Session_organization_transition.additions plan)
+                ~commit:(fun () -> persist_transition t transition)
+            in
+            install_committed_transition t transition;
+            publish_committed_transition t transition)
+        in
+        Ok (Session_state.summary t.state))
+    | Update_metadata (attachment_id, expected_metadata_revision, patch) ->
+      with_writer t attachment_id (fun () ->
+        let open Result.Let_syntax in
+        let%bind delta =
+          Session_metadata_transition.apply t.state ~expected_metadata_revision ~patch
+        in
+        match delta with
+        | None -> transition t ~delta:(Session_delta.Batch []) ~payloads:[]
+        | Some delta ->
+          let%bind candidate = Session_delta.apply t.state delta in
+          transition
+            t
+            ~delta
+            ~payloads:
+              [ Agent_protocol.Event.Durable.Payload.Session_updated
+                  (Session_state.summary candidate)
+              ])
+    | Stop (attachment_id, mode) ->
+      with_writer t attachment_id (fun () -> stop_internal t mode)
+    | Stop_delegated (reference, mode) ->
+      (match t.state.spec.delegation with
+       | Some current
+         when Agent_store.Delegation_store.Reference.equal current reference
+              && Agent_protocol.Id.Session.equal
+                   reference.child_session_id
+                   t.state.identity.session_id -> stop_internal t mode
+       | _ ->
+         Error
+           (error Permission_denied "delegation.stop: child relationship does not match"))
+    | Stop_managed (reference, key, mode, generation, max_receipts) ->
+      stop_managed_internal t reference key mode generation max_receipts
+    | Append_history (attachment_id, entries) ->
+      with_writer t attachment_id (fun () -> append_history t entries)
+    | Stop_delegated_at_epoch (reference, epoch, force) ->
+      (match t.state.spec.delegation with
+       | Some current
+         when Agent_store.Delegation_store.Reference.equal current reference
+              && Agent_protocol.Id.Session.equal
+                   reference.child_session_id
+                   t.state.identity.session_id ->
+         (match t.state.parent_stop_epoch with
+          | Some previous when (not force) && Int64.(epoch <= previous) ->
+            Ok (Session_state.summary t.state)
+          | _ -> stop_internal ~parent_stop_epoch:epoch t Cancel)
+       | _ ->
+         Error
+           (error Permission_denied "delegation.stop: child relationship does not match"))
+    | Defer_history (attachment_id, entries) ->
+      with_writer t attachment_id (fun () -> defer_history t entries)
+    | Submit_message (attachment_id, entry) -> submit_message t attachment_id entry
+    | Submit_managed_message (reference, key, fingerprint, generation, maximum, entry) ->
+      submit_managed_message t reference key fingerprint generation maximum entry
+    | Compact (attachment_id, expected_revision) ->
+      compact_internal t attachment_id expected_revision
+    | Delete_history (attachment_id, revision, history_id) ->
+      delete_history_internal t attachment_id revision history_id
+    | Edit_history request -> edit_history_internal t request
+    | Continue_history request -> continue_history_internal t request
+    | Adopt_deferred -> adopt_deferred t
+    | Reserve_history_block count -> reserve_history_block t count
+    | Commit_worker_entry (operation_id, entry) ->
+      commit_worker_entry t operation_id entry
+    | Prepare_authoring_input (operation_id, materialization, history, effective) ->
+      prepare_authoring_input t operation_id materialization history effective
+    | Publish_invocation_output (operation_id, invocation_id, entry) ->
+      publish_invocation_output t operation_id invocation_id entry
+    | Consume_deferred operation_id -> consume_deferred t operation_id
+    | Consume_notifications (operation_id, plan) ->
+      consume_notifications_internal t operation_id plan
+    | Deliver_idle_notifications plan -> deliver_idle_notifications_internal t plan
+    | Admit_standalone_delivery plan -> admit_standalone_delivery_internal t plan
+    | Retire_obsolete_moderator_delivery (revision, job) ->
+      retire_obsolete_moderator_delivery_internal t revision job
+    | Deliver_standalone_completion (revision, job, capabilities, policy) ->
+      deliver_standalone_completion_internal t revision job capabilities policy
+    | Consume_initial_notifications (operation_id, proposal) ->
+      consume_notifications_internal
+        ~wakes:proposal.wakes
+        ~discarded_wakes:proposal.discarded_wakes
+        t
+        operation_id
+        proposal.pending
+    | Commit_worker_moderator (operation_id, snapshot) ->
+      commit_worker_moderator t operation_id snapshot
+    | Has_writer_attachment -> Ok (has_writer_attachment t)
+    | Authorize_writer attachment_id -> with_writer t attachment_id (fun () -> Ok ())
+    | Invocation_granted (tool_name, identity_digest) ->
+      Ok (invocation_granted t ~tool_name ~identity_digest)
+    | Worker_ready (operation_id, cancel) -> worker_ready t operation_id cancel
+    | Worker_terminal (operation_id, outcome) ->
+      with_runtime_terminal t operation_id (fun () ->
+        worker_terminal t operation_id outcome)
+    | Compaction_terminal (operation_id, outcome) ->
+      with_runtime_terminal t operation_id (fun () ->
+        compaction_terminal t operation_id outcome)
+    | Cancel_operation (attachment_id, operation_id) ->
+      cancel_operation_internal t attachment_id operation_id
+    | Open_permission (permission, timeout_seconds, fallback) ->
+      open_permission t permission timeout_seconds fallback
+    | Respond_permission
+        (attachment_id, principal_id, permission_id, generation, choice, reason) ->
+      respond_permission_internal
+        t
+        attachment_id
+        principal_id
+        permission_id
+        generation
+        choice
+        reason
+    | Resolve_permission_system (permission_id, generation, choice, reason) ->
+      resolve_permission_system t permission_id generation choice reason
+    | Expire_permission (permission_id, generation, fallback) ->
+      expire_permission_internal t permission_id generation fallback
+    | Revoke_grant (attachment_id, grant_id, reason) ->
+      revoke_grant t attachment_id grant_id reason
+    | Change_job (attachment_id, job) -> change_job t attachment_id job
+    | Capture_inference_target (target, limits) ->
+      capture_inference_target t target limits
+    | Capture_model_job_source (job_id, generation, target, limits) ->
+      capture_model_job_source t job_id generation target limits
+    | Capture_recipe_target (job_id, generation, attempt, target, limits) ->
+      capture_recipe_target t job_id generation attempt target limits
+    | Add_initialization_model_job (scope, job) ->
+      add_initialization_model_job t scope job
+    | Start_initialization_model_job (scope, job) ->
+      start_initialization_model_job t scope job
+    | Initialization_model_job_is_current (scope, job_id, generation, attempt) ->
+      initialization_model_job_is_current t scope job_id generation attempt
+    | Capture_initialization_recipe_target
+        (scope, job_id, generation, attempt, target, limits) ->
+      capture_initialization_recipe_target t scope job_id generation attempt target limits
+    | Complete_initialization_model_job (scope, job_id, generation, attempt, outcome) ->
+      complete_initialization_model_job t scope job_id generation attempt outcome
+    | Add_job job -> add_job t job
+    | Claim_job (job_id, generation) -> claim_job t job_id generation
+    | Complete_job (job_id, generation, attempt, outcome) ->
+      complete_job t job_id generation attempt outcome
+    | Complete_background_job (job_id, generation, attempt, outcome) ->
+      complete_background_job t job_id generation attempt outcome
+    | Defer_background_job (job_id, generation, attempt, dependency) ->
+      defer_background_job t job_id generation attempt dependency
+    | Refresh_background_job (job_id, generation, attempt) ->
+      refresh_background_job t job_id generation attempt
+    | Recover_background_results (max_count, max_total_bytes) ->
+      recover_background_results t max_count max_total_bytes
+    | Deliver_job (job_id, generation, expected, expected_job, moderator_snapshot) ->
+      deliver_job t job_id generation expected expected_job moderator_snapshot
+    | Cancel_job_internal job_id -> cancel_job_internal t job_id
+    | Cancel_job (attachment_id, job_id, expected_generation, expected_attempt) ->
+      with_writer t attachment_id (fun () ->
+        let open Result.Let_syntax in
+        let%bind job = find_job t job_id in
+        let%bind () =
+          match expected_generation, expected_attempt with
+          | None, None -> Ok ()
+          | Some generation, Some attempt ->
+            if
+              Int.equal generation t.state.identity.generation
+              && Int.equal generation job.generation
+              && Int.equal attempt job.attempt
+            then Ok ()
+            else Error (error Conflict "job occurrence has changed")
+          | Some _, None | None, Some _ ->
+            Error (error Invalid_request "job occurrence requires generation and attempt")
+        in
+        cancel_job_internal t job_id)
+    | Interrupt_job (job_id, generation, attempt, reason) ->
+      interrupt_job t job_id generation attempt reason
+    | Change_schedule (attachment_id, event, schedule) ->
+      change_schedule t attachment_id event schedule
+    | Add_schedule schedule -> add_schedule t schedule
+    | Cancel_schedule (attachment_id, schedule_id, expected_generation) ->
+      with_writer t attachment_id (fun () ->
+        let open Result.Let_syntax in
+        let%bind schedule = find_schedule t schedule_id in
+        let%bind () =
+          match expected_generation with
+          | None -> Ok ()
+          | Some generation ->
+            if
+              Int.equal generation t.state.identity.generation
+              && Int.equal generation schedule.generation
+            then Ok ()
+            else Error (error Conflict "schedule occurrence has changed")
+        in
+        cancel_schedule_internal t schedule_id)
+    | Cancel_schedule_internal schedule_id -> cancel_schedule_internal t schedule_id
+    | Claim_schedule (schedule_id, generation) -> claim_schedule t schedule_id generation
+    | Retry_schedule (schedule_id, generation) -> retry_schedule t schedule_id generation
+    | Complete_schedule
+        (schedule_id, generation, expected, expected_schedule, moderator_snapshot) ->
+      complete_schedule
+        t
+        schedule_id
+        generation
+        expected
+        expected_schedule
+        moderator_snapshot
+    | Fail_schedule (schedule_id, generation, failure) ->
+      fail_schedule t schedule_id generation failure
+    | Skip_schedule (schedule_id, generation) -> skip_schedule t schedule_id generation
+    | Claim_idle_moderator -> claim_idle_moderator t
+    | Apply_observation_follow_up -> apply_observation_follow_up t
+    | Complete_idle_moderator drain -> complete_idle_moderator t drain
+    | Fail_idle_moderator failure -> fail_idle_moderator t failure
+    | Attach (mode, subscribe, principal_id, reclaim_token) ->
+      attach t mode subscribe principal_id reclaim_token
+    | Detach attachment_id -> detach t attachment_id
+    | Renew_owner (attachment_id, generation) -> renew_owner t attachment_id generation
+    | Owner_expired generation -> owner_expired t generation
+    | Checkpoint persist -> persist t.state
+    | Quiescent_checkpoint inspect ->
+      (match
+         ( t.state.active_operation
+         , t.active_cancel
+         , t.invocation_executions
+         , t.job_scopes
+         , t.moderator_borrow
+         , t.queued_event_borrow
+         , t.foreground_moderator
+         , t.idle_moderator_borrowed
+         , Staged_jobs.is_empty t.staged_jobs
+           && Staged_subscriptions.is_empty t.staged_subscriptions
+           && Staged_ingress.is_empty t.staged_ingress
+           && Staged_schedules.is_empty t.staged_schedules
+           && Staged_notifications.is_empty t.staged_notifications
+         , Active_calls.snapshot t.active_calls )
+       with
+       | None, None, [], [], None, None, None, false, true, ([], []) ->
+         Result.map (inspect t.state) ~f:Option.some
+       | _ -> Ok None)
+    | Open_inference_owner source -> open_inference_owner t source
+    | Admit_inference (owner, relation, operation_id, invocation_id, configuration) ->
+      admit_inference t owner relation operation_id invocation_id configuration
+    | Acknowledge_inference (owner, handle, attempt) ->
+      acknowledge_inference t owner handle attempt
+    | Observe_inference (handle, incoming) -> observe_inference t handle incoming
+    | Observe_owned_inference (owner, incoming) ->
+      observe_owned_inference t owner incoming
+    | Complete_inference (owner, handle, completion) ->
+      complete_inference t owner handle completion
+    | Release_inference (owner, handle) -> release_inference t owner handle
+    | Seal_inference_owner owner -> seal_inference_owner t owner
+    | Finish_inference_owner owner -> finish_inference_owner t owner
+    | Reconcile_inference_recovery -> reconcile_inference_recovery t
+    | Shutdown ->
+      t.initialization_scope <- None;
+      abort_all_staged_work t;
+      Option.iter t.owner_timer_cancel ~f:(fun resolver ->
+        Eio.Promise.resolve resolver ());
+      t.owner_timer_cancel <- None;
+      Option.iter t.active_cancel ~f:(fun cancel -> cancel ());
+      List.iter t.job_scopes ~f:cancel_job_scope;
+      Option.iter t.queued_event_borrow ~f:(fun borrow ->
+        borrow.callback_active <- false;
+        borrow.cancel_requested <- true;
+        Option.iter borrow.cancel ~f:(fun cancel -> cancel ()));
+      Eio.Mutex.use_rw ~protect:true t.subscriber_mutex (fun () ->
+        Map.iter !(t.subscribers) ~f:Subscriber.close;
+        t.subscribers := Map.Poly.empty);
+      Map.iter !(t.permission_waiters) ~f:(fun waiter ->
+        Eio.Promise.resolve
+          waiter.resolver
+          Agent_protocol.Permission.
+            { choice = Deny
+            ; principal_id = None
+            ; resolved_at = t.services.now ()
+            ; reason = Some "session actor shut down"
+            });
+      t.permission_waiters := Map.Poly.empty;
+      t.stopped <- true;
+      Ok ())
 ;;
 
 let rec reject_pending mailbox =
@@ -11080,6 +11358,8 @@ let create_with_owner_lease_duration
     ; schedule_permission_timeouts
     ; owner_timer_cancel = None
     ; active_cancel = None
+    ; lifecycle_owner = ref ()
+    ; lifecycle_fence = None
     ; runtime_retirement = None
     ; idle_moderator_borrowed = false
     ; moderator_borrow = None
@@ -11768,3 +12048,15 @@ let edit_history t ?command_audit request = call t ?command_audit (Edit_history 
 let continue_history t ?command_audit request =
   call t ?command_audit (Continue_history request)
 ;;
+
+let begin_lifecycle t ~attachment_id ~expected_generation ~expected_revision =
+  call
+    t
+    ~priority:Priority
+    (Begin_lifecycle (attachment_id, expected_generation, expected_revision))
+;;
+
+let lifecycle_state t fence = call t ~priority:Priority (Lifecycle_state fence)
+let retire_lifecycle t fence = call t ~priority:Priority (Retire_lifecycle fence)
+let abort_lifecycle t fence = call t ~priority:Priority (Abort_lifecycle fence)
+let check_runtime_admission t = call t ~priority:Priority Check_runtime_admission

@@ -2,6 +2,13 @@ open! Core
 module P = Agent_protocol
 module DTO = P.Provider_operator
 
+module Close_state = struct
+  type t =
+    | Open
+    | Closing
+    | Closed
+end
+
 type t =
   { dispatch :
       actor:Operator_authorization.t
@@ -12,10 +19,24 @@ type t =
       -> P.Command.t
       -> (P.Command_receipt.t, DTO.Error.t) Result.t
   ; close : unit -> unit
-  ; mutable closed : bool
+  ; close_state : Close_state.t Atomic.t
+  ; close_mutex : Eio.Mutex.t
   }
 
-let create ~dispatch ~receipt ~close = { dispatch; receipt; close; closed = false }
+let create ~dispatch ~receipt ~close =
+  { dispatch
+  ; receipt
+  ; close
+  ; close_state = Atomic.make Close_state.Open
+  ; close_mutex = Eio.Mutex.create ()
+  }
+;;
+
+let admission_open t =
+  match Atomic.get t.close_state with
+  | Open -> true
+  | Closing | Closed -> false
+;;
 
 type factory = sw:Eio.Switch.t -> server_id:P.Id.Server.t -> (t, P.Error.t) Result.t
 
@@ -43,7 +64,7 @@ let protocol_error provider_error =
 let dispatch t ~actor command =
   match t with
   | None -> Error (protocol_error Unsupported)
-  | Some t when t.closed -> Error (protocol_error Closed)
+  | Some t when not (admission_open t) -> Error (protocol_error Closed)
   | Some _ when not (Operator_authorization.is_current actor) ->
     Error (protocol_error Denied)
   | Some t -> t.dispatch ~actor command |> Result.map_error ~f:protocol_error
@@ -52,17 +73,23 @@ let dispatch t ~actor command =
 let receipt t ~actor command =
   match t with
   | None -> Error (protocol_error Unsupported)
-  | Some t when t.closed -> Error (protocol_error Closed)
+  | Some t when not (admission_open t) -> Error (protocol_error Closed)
   | Some _ when not (Operator_authorization.is_current actor) ->
     Error (protocol_error Denied)
   | Some t -> t.receipt ~actor command |> Result.map_error ~f:protocol_error
 ;;
 
 let close t =
-  if not t.closed
-  then (
-    t.closed <- true;
-    t.close ())
+  (* Atomic transition closes admission before waiting on another closing caller;
+     the private coordinator alone acknowledges actual callback completion. *)
+  ignore (Atomic.compare_and_set t.close_state Close_state.Open Closing : bool);
+  Eio.Cancel.protect (fun () ->
+    Eio.Mutex.use_ro t.close_mutex (fun () ->
+      match Atomic.get t.close_state with
+      | Closed -> ()
+      | Open | Closing ->
+        t.close ();
+        Atomic.set t.close_state Closed))
 ;;
 
 let is_provider_command = function

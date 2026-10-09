@@ -370,6 +370,48 @@ let read_file ~env ~directory ~max_payload_length ~filename =
   { filename; snapshot }
 ;;
 
+let verify_existing ~env ~path contents =
+  let file = eio_path env path in
+  let mismatch () =
+    Error (Store_error.Corrupt "existing snapshot differs from requested checkpoint")
+  in
+  let open Result.Let_syntax in
+  let%bind () =
+    match Eio.Path.kind ~follow:false file with
+    | `Regular_file -> Ok ()
+    | _ -> mismatch ()
+  in
+  Eio.Path.with_open_out ~create:`Never file (fun flow ->
+    let stat = Eio.File.stat flow in
+    if
+      (not
+         (Int64.equal
+            (Optint.Int63.to_int64 stat.size)
+            (Int64.of_int (String.length contents))))
+      || not
+           (match stat.kind with
+            | `Regular_file -> true
+            | _ -> false)
+    then mismatch ()
+    else (
+      let bytes = Cstruct.create (String.length contents) in
+      let%bind () =
+        match Eio.Flow.read_exact flow bytes with
+        | () -> Ok ()
+        | exception End_of_file -> mismatch ()
+      in
+      let extra = Cstruct.create 1 in
+      let count =
+        try Eio.Flow.single_read flow extra with
+        | End_of_file -> 0
+      in
+      if count <> 0 || not (String.equal (Cstruct.to_string bytes) contents)
+      then mismatch ()
+      else (
+        Eio.File.sync flow;
+        Durable_file.sync_directory ~env ~path:(Filename.dirname path))))
+;;
+
 let write_exclusive ~env ~path contents =
   try
     Eio.Path.with_open_out ~create:(`Exclusive 0o600) (eio_path env path) (fun flow ->
@@ -377,6 +419,10 @@ let write_exclusive ~env ~path contents =
       Eio.File.sync flow);
     Ok ()
   with
+  | Eio.Io (Eio.Fs.E (Eio.Fs.Already_exists _), _) ->
+    (try verify_existing ~env ~path contents with
+     | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+       Error (Store_error.of_exn ~operation:"verify existing snapshot" ~path exn))
   | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
     Error (Store_error.of_exn ~operation:"write snapshot" ~path exn)
 ;;
