@@ -362,6 +362,125 @@ let snapshot transaction_sequence payload =
     payload
 ;;
 
+let snapshot_fault_file (Eio.Resource.T (file, handler)) fault syncs =
+  let module Original = (val Eio.Resource.get handler Eio.File.Pi.Write) in
+  let module Write = struct
+    include Original
+
+    let sync file =
+      Int.incr syncs;
+      Original.sync file;
+      if !fault
+      then (
+        fault := false;
+        raise (Core_unix.Unix_error (EIO, "injected snapshot sync", "fixture")))
+    ;;
+  end
+  in
+  Eio.Resource.T
+    ( file
+    , Eio.Resource.handler
+        (H (Eio.File.Pi.Write, (module Write)) :: Eio.Resource.bindings handler) )
+;;
+
+let snapshot_fault_env env fault syncs =
+  let Eio.Resource.T (directory, handler), prefix = Eio.Stdenv.fs env in
+  let module Original = (val Eio.Resource.get handler Eio.Fs.Pi.Dir) in
+  let module Directory = struct
+    include Original
+
+    let open_out directory ~sw ~append ~create path =
+      let file = Original.open_out directory ~sw ~append ~create path in
+      if String.is_suffix path ~suffix:".bin"
+      then snapshot_fault_file file fault syncs
+      else file
+    ;;
+  end
+  in
+  let fs =
+    ( Eio.Resource.T
+        ( directory
+        , Eio.Resource.handler
+            (H (Eio.Fs.Pi.Dir, (module Directory)) :: Eio.Resource.bindings handler) )
+    , prefix )
+  in
+  object
+    method fs = fs
+    method cwd = env#cwd
+    method stdin = env#stdin
+    method stdout = env#stdout
+    method stderr = env#stderr
+    method net = env#net
+    method domain_mgr = env#domain_mgr
+    method process_mgr = env#process_mgr
+    method clock = env#clock
+    method mono_clock = env#mono_clock
+    method secure_random = env#secure_random
+    method debug = env#debug
+    method backend_id = env#backend_id
+  end
+;;
+
+let%expect_test
+    "snapshot retry reuses exact durable bytes and rejects same-counter replacement"
+  =
+  with_temp_directory "ochat-snapshot-idempotency" (fun env root ->
+    let directory = Filename.concat root "snapshot" in
+    let install env value =
+      Agent_store.Snapshot.install ~env ~directory ~max_payload_length:4096 value
+    in
+    install env (snapshot 0L "initial") |> store_ok |> ignore;
+    let current = Eio.Path.(Eio.Stdenv.fs env / directory / "CURRENT") in
+    let before = Eio.Path.load current in
+    let fault = ref true in
+    let syncs = ref 0 in
+    let faulty_env = snapshot_fault_env env fault syncs in
+    let candidate = snapshot 1L "retained" in
+    let uncertain =
+      match install faulty_env candidate with
+      | Error (Agent_store.Store_error.Io _) -> true
+      | Ok _ | Error _ -> false
+    in
+    let old_pointer = String.equal before (Eio.Path.load current) in
+    let target =
+      Eio.Path.(Eio.Stdenv.fs env / directory / "snapshot-0000000000000001.bin")
+    in
+    let complete_bytes = Eio.Path.load target in
+    install faulty_env candidate |> store_ok |> ignore;
+    let retried = String.equal complete_bytes (Eio.Path.load target) && !syncs = 2 in
+    let cold =
+      Agent_store.Snapshot.load_current ~env ~directory ~max_payload_length:4096
+      |> store_ok
+      |> Option.value_exn
+    in
+    install env cold.snapshot |> store_ok |> ignore;
+    let pointer = Eio.Path.load current in
+    let different =
+      match install env (snapshot 1L "different") with
+      | Error (Agent_store.Store_error.Corrupt _) -> true
+      | Ok _ | Error _ -> false
+    in
+    let preserved =
+      String.equal pointer (Eio.Path.load current)
+      && String.equal complete_bytes (Eio.Path.load target)
+    in
+    Eio.Path.save ~create:(`Or_truncate 0o600) target "short";
+    let truncated =
+      match install env candidate with
+      | Error (Agent_store.Store_error.Corrupt _) -> true
+      | Ok _ | Error _ -> false
+    in
+    let evidence =
+      String.equal "short" (Eio.Path.load target)
+      && String.equal pointer (Eio.Path.load current)
+    in
+    print_s
+      [%sexp
+        ((uncertain, old_pointer, retried, different, preserved, truncated, evidence)
+         : bool * bool * bool * bool * bool * bool * bool)]);
+  [%expect {| (true true true true true true true) |}]
+;;
+
 let%expect_test "snapshots install atomically and load the current checkpoint" =
   with_temp_directory "ochat-agent-snapshot" (fun env temporary ->
     let directory = Filename.concat temporary "snapshot" in
