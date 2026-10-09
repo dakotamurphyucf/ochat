@@ -10,7 +10,9 @@ const memoryKeys = new Set(["low", "high", "max", "oom", "oom_kill", "oom_group_
 // Compiler arguments, runtime output, environment and credentials are excluded.
 export function summarizeActions(text) {
   const actions = [];
-  for (const line of text.split("\n")) {
+  for (const rawLine of text.split("\n")) {
+    // Dune honours CLICOLOR_FORCE in CI, including inside Running/action IDs.
+    const line = rawLine.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "").trimStart();
     const running = line.match(/^Running\[(\d+)\]:/);
     if (!running) continue;
     const executable = line.match(/\b(ocamlopt(?:\.opt)?|ocamlc(?:\.opt)?|ocamldep(?:\.opt)?|agent_server_e2e\.exe|ochat_agent_server\.exe)\b/);
@@ -44,11 +46,42 @@ export function memoryEvents(text) {
   }));
 }
 
+export function e2eIdentity(pid, cmdline) {
+  if (!/^\d{1,10}$/.test(pid)) return undefined;
+  const argv = cmdline.split("\0");
+  if (path.basename(argv[0]) !== "agent_server_e2e.exe") return undefined;
+  const result = { pid, executable: "agent_server_e2e.exe" };
+  for (const [flag, field] of [["--scenario", "scenario"], ["--case", "case"]]) {
+    const index = argv.indexOf(flag);
+    const value = index >= 0 ? argv[index + 1] : undefined;
+    if (value && /^[a-z0-9_.-]{1,80}$/.test(value)) result[field] = value;
+  }
+  return result;
+}
+
+function readE2eIdentity(pid) {
+  let fd;
+  try {
+    fd = fs.openSync(`/proc/${pid}/cmdline`, "r");
+    const buffer = Buffer.alloc(8192);
+    const count = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    // A full buffer might truncate a flag value: never admit a partial argv.
+    if (count === buffer.length) return undefined;
+    return e2eIdentity(pid, buffer.subarray(0, count).toString("utf8"));
+  } catch { return undefined; }
+  finally { if (fd !== undefined) fs.closeSync(fd); }
+}
+
 function resourceSample() {
   const result = {};
   try {
     // No args or environment; highest RSS processes first, bounded output.
     result.processes = execFileSync("ps", ["-eo", "pid,ppid,rss,comm", "--sort=-rss"], { encoding: "utf8", timeout: 2000, maxBuffer: 1024 * 1024 }).split("\n").slice(0, 17).map((line) => line.slice(0, 160));
+    result.e2eProcesses = result.processes.slice(1).flatMap((line) => {
+      const pid = line.trim().split(/\s+/)[0];
+      const identity = /^\d{1,10}$/.test(pid) ? readE2eIdentity(pid) : undefined;
+      return identity ? [identity] : [];
+    });
   } catch (error) { result.processesUnavailable = error.code ?? "ps_failed"; }
   try {
     const entry = fs.readFileSync("/proc/self/cgroup", "utf8").split("\n").find((line) => line.startsWith("0::"));

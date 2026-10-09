@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { summarizeActions, readProgress, memoryEvents } from "../scripts/framework-progress.mjs";
+import { summarizeActions, readProgress, memoryEvents, e2eIdentity } from "../scripts/framework-progress.mjs";
 
 const script = fileURLToPath(new URL("../scripts/framework-progress.mjs", import.meta.url));
 
@@ -126,3 +126,18 @@ for (const [tier, duneExit] of [["e2e", 0], ["e2e", 7], ["normal", 0]]) {
     await runFrameworkFixture(tier, duneExit);
   });
 }
+
+test("actual coloured Dune verbose output yields sanitized action and executable", () => {
+  const line = "\u001b[1;34mRunning\u001b[0m[\u001b[1;33m123\u001b[0m]: (cd _build/default && /host/bin/\u001b[34;102mocamlopt\u001b[0m.opt --private secret)";
+  assert.deepEqual(summarizeActions(line), [{ action: "123", executable: "ocamlopt.opt" }]);
+  const e2e = "  \u001b[1;34mRunning\u001b[0m[\u001b[1;33m124\u001b[0m]: agent_server_e2e.exe --scenario crash-matrix --case generated.creator-outcome-recovery";
+  assert.equal(summarizeActions(e2e)[0].scenario, "crash-matrix");
+});
+
+test("proc identity admits only the E2E executable and bounded scenario/case fields", () => {
+  const args = ["/host/private/path/agent_server_e2e.exe", "--scenario", "crash-matrix", "--case", "generated.creator-outcome-recovery", "--token", "never-disclose"].join("\0") + "\0";
+  assert.deepEqual(e2eIdentity("13383", args), { pid: "13383", executable: "agent_server_e2e.exe", scenario: "crash-matrix", case: "generated.creator-outcome-recovery" });
+  assert.equal(e2eIdentity("1", "/host/ochat_agent_server.exe\0--token\0never-disclose\0"), undefined);
+  assert.equal(e2eIdentity("../1", args), undefined);
+  assert.deepEqual(e2eIdentity("2", "agent_server_e2e.exe\0--scenario\0private/path\0--case\0" + "x".repeat(81) + "\0"), { pid: "2", executable: "agent_server_e2e.exe" });
+});
