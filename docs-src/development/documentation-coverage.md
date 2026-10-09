@@ -139,6 +139,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_client/blob_download.mli` | [contract](../../lib/agent_client/blob_download.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_client/catalog.mli` | [contract](../../lib/agent_client/catalog.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_client/connection.mli` | [contract](../../lib/agent_client/connection.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_client/conversation_search.mli` | [contract](../../lib/agent_client/conversation_search.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_client/in_memory.mli` | [contract](../../lib/agent_client/in_memory.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_client/inference_views.mli` | [contract](../../lib/agent_client/inference_views.mli) | [integration](../lib/inference-observations.md) | Public interface + current host guide. |
 | `lib/agent_client/ingress.mli` | [contract](../../lib/agent_client/ingress.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
@@ -201,6 +202,12 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_protocol/public_snapshot.mli` | [contract](../../lib/agent_protocol/public_snapshot.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/schedule.mli` | [contract](../../lib/agent_protocol/schedule.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/scope.mli` | [contract](../../lib/agent_protocol/scope.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/search_hit.mli` | [contract](../../lib/agent_protocol/search_hit.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/search_navigation.mli` | [contract](../../lib/agent_protocol/search_navigation.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/search_page.mli` | [contract](../../lib/agent_protocol/search_page.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/search_query.mli` | [contract](../../lib/agent_protocol/search_query.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/search_snippet.mli` | [contract](../../lib/agent_protocol/search_snippet.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/search_term.mli` | [contract](../../lib/agent_protocol/search_term.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/session.mli` | [contract](../../lib/agent_protocol/session.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/session_activity.mli` | [contract](../../lib/agent_protocol/session_activity.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/session_activity_summary.mli` | [contract](../../lib/agent_protocol/session_activity_summary.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
@@ -258,6 +265,12 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_server/result_retention.mli` | [contract](../../lib/agent_server/result_retention.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_server/runtime_owner.mli` | [contract](../../lib/agent_server/runtime_owner.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/agent_server/schedule_scheduler.mli` | [contract](../../lib/agent_server/schedule_scheduler.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/agent_server/search_cache.mli` | [contract](../../lib/agent_server/search_cache.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/agent_server/search_cursor.mli` | [contract](../../lib/agent_server/search_cursor.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/agent_server/search_entry.mli` | [contract](../../lib/agent_server/search_entry.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/agent_server/search_service.mli` | [contract](../../lib/agent_server/search_service.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/agent_server/search_source.mli` | [contract](../../lib/agent_server/search_source.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/agent_server/search_text.mli` | [contract](../../lib/agent_server/search_text.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/agent_server/session_capacity.mli` | [contract](../../lib/agent_server/session_capacity.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_server/session_catalog_policy.mli` | [contract](../../lib/agent_server/session_catalog_policy.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_server/session_factory.mli` | [contract](../../lib/agent_server/session_factory.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |

@@ -3672,6 +3672,101 @@ module History_editing = struct
   ;;
 end
 
+module Conversation_search = struct
+  module P = Agent_protocol
+
+  let observe connection expected_ids =
+    let server_id = (initialize connection).server_id in
+    let catalog =
+      P.Session.List_request.
+        { organization = P.Session_organization.Query.default
+        ; page = P.Page.Request.create ~limit:1 () |> protocol_ok
+        ; desired_state = None
+        ; prompt_id = None
+        ; workspace_id = None
+        ; owner_principal_id = None
+        ; creator_principal_id = None
+        ; active_owner_principal_id = None
+        ; sort = { field = Created_at; direction = Ascending }
+        ; archive = All
+        ; labels = []
+        }
+    in
+    let query cursor =
+      P.Search_query.create
+        ~server_id
+        ~term:(P.Search_term.create "ordinary retained user" |> protocol_ok)
+        ~catalog:{ catalog with page = { catalog.page with cursor } }
+        ~scan_limit:1
+      |> protocol_ok
+    in
+    let rec pages cursor attempts hits misses =
+      if attempts > 128 then fail "bounded search made no finite progress";
+      let page =
+        match request connection (Session_search (query cursor)) with
+        | Session_search page -> page
+        | _ -> fail "search response variant"
+      in
+      let hits = List.rev_append (P.Search_page.hits page) hits in
+      let misses =
+        misses
+        + Bool.to_int
+            (List.is_empty (P.Search_page.hits page)
+             && not (P.Search_page.reached_end page))
+      in
+      match P.Search_page.next_cursor page with
+      | Some cursor -> pages (Some cursor) (attempts + 1) hits misses
+      | None -> List.rev hits, misses
+    in
+    let hits, misses = pages None 0 [] 0 in
+    let actual_ids = List.map hits ~f:P.Search_hit.history_id in
+    if
+      not
+        (List.equal
+           P.History.Id.equal
+           (List.sort expected_ids ~compare:P.History.Id.compare)
+           (List.sort actual_ids ~compare:P.History.Id.compare))
+    then fail "search omitted or duplicated retained canonical IDs";
+    if misses = 0 then fail "search did not exercise zero-hit continuations";
+    List.iter hits ~f:(fun hit ->
+      let navigation =
+        P.Search_navigation.Request.create ~query:(query None) ~hit |> protocol_ok
+      in
+      match request connection (Session_search_navigate navigation) with
+      | Session_search_navigate (Current { hit = current; context }) ->
+        if
+          (not
+             (P.History.Id.equal
+                (P.Search_hit.history_id current)
+                (P.Search_hit.history_id hit)))
+          || List.length context <> 2
+          || not
+               (String.equal
+                  (P.Search_snippet.text (P.Search_hit.snippet current))
+                  "ordinary retained user")
+        then fail "navigation exposed the wrong current context"
+      | _ -> fail "retained current hit did not navigate")
+  ;;
+
+  let run env environment =
+    let fixture = fixture env environment "conformance-conversation-search" in
+    (* The same durable plain-user history fixture is reopened by the external
+       daemon. No provider work or runtime start is needed for search/navigation. *)
+    let seeds = History_editing.preseed env fixture in
+    let expected_ids = List.map seeds ~f:(fun seed -> seed.History_editing.target_id) in
+    Eio.Switch.run (fun sw ->
+      with_daemon ~sw env fixture (fun _ _ ->
+        with_transport_matrix
+          ~sw
+          env
+          environment
+          fixture
+          (fun unix http stdio_unix stdio_http ->
+             List.iter [ unix; http; stdio_unix; stdio_http ] ~f:(fun connection ->
+               observe connection expected_ids))))
+  ;;
+end
+
 let provider_installed_observation client ~key_prefix =
   let module P = Agent_protocol in
   let module DTO = P.Provider_operator in
@@ -3799,6 +3894,7 @@ let cases =
   ; "conformance.event-order", test_event_order
   ; "conformance.visibility", test_visibility
   ; "conformance.history-editing", History_editing.run
+  ; "conformance.conversation-search", Conversation_search.run
   ; "conformance.history-deletion", test_history_deletion
   ]
 ;;
@@ -3838,6 +3934,8 @@ let method_coverage =
   ; "session.update_metadata", "conformance.session-metadata"
   ; "activity.list", "conformance.session-activity"
   ; "session.work", "conformance.session-activity"
+  ; "session.search", "conformance.conversation-search"
+  ; "session.search.navigate", "conformance.conversation-search"
   ; "session.update_organization", "conformance.session-organization"
   ; "session.configuration_get", "conformance.session-configuration"
   ; "session.configuration_update", "conformance.session-configuration"

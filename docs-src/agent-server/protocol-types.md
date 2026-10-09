@@ -501,6 +501,8 @@ type t =
   | Blob_read of Blob.Read_request.t
   | Session_create of Session.Create_request.t
   | Session_list of Session.List_request.t
+  | Session_search of Search_query.t
+  | Session_search_navigate of Search_navigation.Request.t
   | Activity_list of Activity_query.t
   | Session_work of Session_work.Query.t
   | Session_configuration_get of Session_configuration.Get_request.t
@@ -2831,6 +2833,8 @@ type t =
   | Blob_read of Blob.Chunk.t
   | Session_create of Create.t
   | Session_list of Session_catalog.t Page.t
+  | Session_search of Search_page.t
+  | Session_search_navigate of Search_navigation.Response.t
   | Activity_list of Session_activity.t Page.t
   | Session_work of Session_work.t Page.t
   | Session_configuration_get of Session_configuration.t
@@ -4472,6 +4476,201 @@ val set_to_json : Set.t -> Jsonaf.t
 val set_of_json : Jsonaf.t -> (Set.t, Error.t) result
 ```
 
+## search_hit
+
+[JSON codec](../../lib/agent_protocol/search_hit.ml) · [interface](../../lib/agent_protocol/search_hit.mli)
+
+```ocaml
+(** A disclosed occurrence in current canonical history; identity is host-owned.
+    Revisions are observations, not authorization or proof the hit still exists.
+    The snippet contains only readable user/assistant text. Part index is the
+    zero-based public message-content position, including non-text parts. *)
+type t [@@deriving sexp_of]
+
+val create
+  :  session:Session_ref.t
+  -> generation:int
+  -> session_revision:int64
+  -> history_id:History.Id.t
+  -> content_revision:History.Content_revision.t
+  -> part_index:int
+  -> snippet:Search_snippet.t
+  -> (t, Error.t) result
+
+val session : t -> Session_ref.t
+val generation : t -> int
+val session_revision : t -> int64
+val history_id : t -> History.Id.t
+val content_revision : t -> History.Content_revision.t
+val part_index : t -> int
+val snippet : t -> Search_snippet.t
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## search_navigation
+
+[JSON codec](../../lib/agent_protocol/search_navigation.ml) · [interface](../../lib/agent_protocol/search_navigation.mli)
+
+```ocaml
+(** Navigation is a fresh authorized lookup, never authority conveyed by a hit.
+    The supplied snippet is ignored. The query reapplies current catalog filters;
+    its pagination cursor is not part of navigation. *)
+module Request : sig
+  type t
+
+  val create : query:Search_query.t -> hit:Search_hit.t -> (t, Error.t) result
+  val query : t -> Search_query.t
+  val hit : t -> Search_hit.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+  val sexp_of_t : t -> Sexplib.Sexp.t
+  val t_of_sexp : Sexplib.Sexp.t -> t
+end
+
+(** Plain text from one readable canonical entry. Text is at most 2048 UTF-8
+    bytes; [truncated] explicitly records omitted text. No raw provider data,
+    reasoning, image URI or tool payload is represented. *)
+module Entry : sig
+  type t
+
+  val create
+    :  history_id:History.Id.t
+    -> content_revision:History.Content_revision.t
+    -> text:string
+    -> truncated:bool
+    -> (t, Error.t) result
+
+  val history_id : t -> History.Id.t
+  val content_revision : t -> History.Content_revision.t
+  val text : t -> string
+  val truncated : t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Response : sig
+  type t = private
+    | Current of
+        { hit : Search_hit.t
+        ; context : Entry.t list
+        }
+    | Changed of History.Content_revision.t
+    | Unavailable
+
+  (** Up to five chronological canonical positions around the target. Excluded
+      positions are omitted, not replaced by more distant entries. The context
+      includes the target and has unique IDs; its revision agrees with [hit]. *)
+  val current : hit:Search_hit.t -> context:Entry.t list -> (t, Error.t) result
+
+  val changed : History.Content_revision.t -> t
+  val unavailable : t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+  val sexp_of_t : t -> Sexplib.Sexp.t
+  val t_of_sexp : Sexplib.Sexp.t -> t
+end
+```
+
+## search_page
+
+[JSON codec](../../lib/agent_protocol/search_page.ml) · [interface](../../lib/agent_protocol/search_page.mli)
+
+```ocaml
+(** Bounded traversal progress, not a relevance-ranked or exact-count result.
+    A partial page must carry a continuation and make observable scan progress;
+    it may contain zero hits. Only a complete traversal sets reached_end. *)
+type t [@@deriving sexp]
+
+val create
+  :  hits:Search_hit.t list
+  -> next_cursor:Page.Cursor.t option
+  -> reached_end:bool
+  -> scanned_entries:int
+  -> scanned_sessions:int
+  -> (t, Error.t) result
+
+val hits : t -> Search_hit.t list
+val next_cursor : t -> Page.Cursor.t option
+val reached_end : t -> bool
+val scanned_entries : t -> int
+val scanned_sessions : t -> int
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## search_query
+
+[JSON codec](../../lib/agent_protocol/search_query.ml) · [interface](../../lib/agent_protocol/search_query.mli)
+
+```ocaml
+(** Conversation search reuses catalog selectors. Page limit counts hits (1–100),
+    while scan_limit bounds examined canonical entries (1–512), including misses.
+    Ordering is Created_at/Ascending with the catalog's stable session-ID ties,
+    then canonical entry order. A zero-hit partial page can have a continuation.
+    Query JSON is bounded to 64 KiB with at most 128 label filters.
+    Cursors belong to search and cannot be reused for catalog listing. *)
+type t [@@deriving sexp]
+
+val create
+  :  server_id:Id.Server.t
+  -> term:Search_term.t
+  -> catalog:Session.List_request.t
+  -> scan_limit:int
+  -> (t, Error.t) result
+
+val server_id : t -> Id.Server.t
+val term : t -> Search_term.t
+val catalog : t -> Session.List_request.t
+val scan_limit : t -> int
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## search_snippet
+
+[JSON codec](../../lib/agent_protocol/search_snippet.ml) · [interface](../../lib/agent_protocol/search_snippet.mli)
+
+```ocaml
+(** Plain text with one highlighted literal occurrence. Offsets and lengths count
+    UTF-8 bytes, relative to [text], and both ends are Unicode scalar boundaries.
+    At most 2048 bytes; no HTML or terminal rendering interpretation is implied.
+    Truncation flags describe omitted source text, never an incomplete search. *)
+type t [@@deriving equal, sexp_of]
+
+val create
+  :  text:string
+  -> highlight_start:int
+  -> highlight_length:int
+  -> truncated_before:bool
+  -> truncated_after:bool
+  -> (t, Error.t) result
+
+val text : t -> string
+val highlight_start : t -> int
+val highlight_length : t -> int
+val truncated_before : t -> bool
+val truncated_after : t -> bool
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## search_term
+
+[JSON codec](../../lib/agent_protocol/search_term.ml) · [interface](../../lib/agent_protocol/search_term.mli)
+
+```ocaml
+(** A nonempty UTF-8 literal of at most 256 bytes. ASCII letters match without
+    regard to case; every other UTF-8 byte matches exactly. No normalization,
+    regular expressions, tokenization or locale-sensitive folding. *)
+type t [@@deriving equal, sexp_of]
+
+val create : string -> (t, Error.t) result
+val text : t -> string
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
 ## session
 
 [JSON codec](../../lib/agent_protocol/session.ml) · [interface](../../lib/agent_protocol/session.mli)
@@ -4686,6 +4885,9 @@ module List_request : sig
     ; active_owner_principal_id : Id.Principal.t option
     }
   [@@deriving sexp]
+
+  (** Validate native selectors and sort label keys without a JSON round trip. *)
+  val normalize : t -> (t, Error.t) result
 
   val to_json : t -> Jsonaf.t
   val of_json : Jsonaf.t -> (t, Error.t) result
