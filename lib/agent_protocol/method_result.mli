@@ -130,6 +130,16 @@ type t =
   | Session_detach of Mutation_result.t
   | Session_renew_owner of Session.Owner_lease.t * Mutation_result.t
   | Session_start of Session_mutation.t
+  | Project_create of Organization_group.Project.t
+  | Project_get of Organization_group.Project.t
+  | Project_list of Organization_group.Project.t Page.t
+  | Project_update of Organization_group.Project.t
+  | Project_delete of Organization_result.Project_deleted.t
+  | Collection_create of Organization_group.Collection.t
+  | Collection_get of Organization_group.Collection.t
+  | Collection_list of Organization_group.Collection.t Page.t
+  | Collection_update of Organization_group.Collection.t
+  | Collection_delete of Organization_result.Collection_deleted.t
   | Session_update_metadata of Session_mutation.t
   | Session_stop of Session_mutation.t
   | Session_cancel_operation of Session_mutation.t

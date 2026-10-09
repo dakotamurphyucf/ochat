@@ -41,6 +41,22 @@ type committed =
       ; operation_id : Id.Operation.t option
       ; mutation : Mutation_result.t
       }
+  | Project_mutation of
+      { project_id : Id.Project.t
+      ; revision : int64
+      }
+  | Deleted_project of
+      { project_id : Id.Project.t
+      ; revision : int64
+      }
+  | Collection_mutation of
+      { collection_id : Id.Collection.t
+      ; revision : int64
+      }
+  | Deleted_collection of
+      { collection_id : Id.Collection.t
+      ; revision : int64
+      }
   | Deleted_session of Id.Session.t
   | Permission_response of Id.Permission.t * Mutation_result.t
   | Revoked_grant of Id.Grant.t * Mutation_result.t

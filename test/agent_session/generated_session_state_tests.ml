@@ -175,7 +175,7 @@ let%expect_test
         | _ -> false);
       let metadata =
         Store.Metadata.
-          { schema_version = Store.current_schema_version
+          { schema_version = Store.current_metadata_schema_version
           ; session = State.summary state
           ; prompt_artifact = P.Id.Prompt_revision.to_string artifact.revision_id
           ; workspace_identity = workspace_instance.conflict_domain

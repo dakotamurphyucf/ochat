@@ -38,6 +38,8 @@ let all_scope_names =
     ; Provider_view
     ; Provider_manage
     ; Provider_select
+    ; View_organization
+    ; Manage_organization
     ]
   |> List.map ~f:Agent_protocol.Scope.to_string
 ;;
@@ -65,6 +67,11 @@ let write_tokens_with_public_scopes t public_scopes =
 ;;
 
 let write_tokens t = write_tokens_with_public_scopes t []
+
+let grant_public_scopes t scopes =
+  write_tokens_with_public_scopes t (List.map scopes ~f:Agent_protocol.Scope.to_string)
+;;
+
 let grant_public_all_scopes t = write_tokens_with_public_scopes t all_scope_names
 
 let configuration t ?data_dir ?unix_socket ?http_port () =

@@ -353,6 +353,16 @@ let idempotency = function
   | Workspace_list _
   | Workspace_get _
   | Blob_read _
+  | Project_create _
+  | Project_get _
+  | Project_list _
+  | Project_update _
+  | Project_delete _
+  | Collection_create _
+  | Collection_get _
+  | Collection_list _
+  | Collection_update _
+  | Collection_delete _
   | Session_list _
   | Session_get _
   | Session_configuration_get _
@@ -2240,6 +2250,22 @@ let dispatch_authorized t ~actor ~context ~command_audit ~inference_budget = fun
   | Prompt_get request -> handle_prompt_get t request
   | Workspace_list request -> handle_workspace_list t request
   | Workspace_get request -> handle_workspace_get t request
+  | ( Project_create _
+    | Project_get _
+    | Project_list _
+    | Project_update _
+    | Project_delete _
+    | Collection_create _
+    | Collection_get _
+    | Collection_list _
+    | Collection_update _
+    | Collection_delete _ ) as command ->
+    Organization_service.handle
+      (Agent_store.Session_store.organizations t.session_store)
+      ~server_id:(Agent_store.Session_store.server_id t.session_store)
+      ~principal:(Connection_context.principal context)
+      ~now:(now t)
+      command
   | Blob_read request -> handle_blob_read t context request
   | Session_create request -> handle_session_create t context command_audit request
   | Session_list request -> handle_session_list t context request
@@ -2315,6 +2341,16 @@ let command_session_id = function
   | Prompt_get _
   | Workspace_list _
   | Workspace_get _
+  | Project_create _
+  | Project_get _
+  | Project_list _
+  | Project_update _
+  | Project_delete _
+  | Collection_create _
+  | Collection_get _
+  | Collection_list _
+  | Collection_update _
+  | Collection_delete _
   | Session_list _ -> None
   | Blob_read request -> Some request.session_id
   | Audit_read request -> request.session_id
@@ -2443,6 +2479,16 @@ let receipt_summary ~session_id result =
   | Workspace_list _
   | Workspace_get _
   | Blob_read _
+  | Project_create _
+  | Project_get _
+  | Project_list _
+  | Project_update _
+  | Project_delete _
+  | Collection_create _
+  | Collection_get _
+  | Collection_list _
+  | Collection_update _
+  | Collection_delete _
   | Session_list _
   | Session_get _
   | Session_configuration_get _
@@ -2478,7 +2524,16 @@ let handle_command_receipt
       ~params:request.original_params
   in
   let%bind () = Authorization.authorize principal command in
-  if Provider_operator_port.is_provider_command command
+  if Organization_service.handles command
+  then
+    Organization_service.receipt
+      (Agent_store.Session_store.organizations t.session_store)
+      ~server_id:(Agent_store.Session_store.server_id t.session_store)
+      ~principal
+      ~now:(now t)
+      command
+    |> Result.map ~f:(fun value -> Agent_protocol.Method_result.Command_receipt value)
+  else if Provider_operator_port.is_provider_command command
   then
     Provider_operator_port.receipt t.provider_operator ~actor command
     |> Result.map ~f:(fun receipt -> Agent_protocol.Method_result.Command_receipt receipt)
@@ -2532,6 +2587,10 @@ let handle_command_receipt
               | Configuration_updated { session_id; _ }
               | Session_mutation { session_id; _ }
               | Sent_message { session_id; _ } -> visible session_id
+              | Project_mutation _
+              | Deleted_project _
+              | Collection_mutation _
+              | Deleted_collection _
               | Provider_setup _
               | Provider_login _
               | Provider_cancel _

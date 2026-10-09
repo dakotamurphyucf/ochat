@@ -325,7 +325,8 @@ The M3 store baseline replaces root `schema.sexp`, session `metadata.sexp`,
 `indexes/sessions.recovery-required` payloads with named documents, retaining
 these filenames and their existing atomic file replacement adapters. The kinds
 are `store.schema`, `store.session_metadata`, `store.session_index`,
-`store.session_archive` and `store.session_index_recovery`, each version 1.
+`store.session_archive` and `store.session_index_recovery`. The root schema is
+version 2; the other records retain version 1 independently.
 There are no sexp or binary fallback readers for these beta records. Raw host
 server IDs, locks and secrets remain outside this session-document boundary.
 Operator migration inspection uses the same `store.schema` admission boundary.
@@ -388,6 +389,7 @@ until actor/journal hydration, with no invented pending initial start.
 | Record | Writer and ordinary reader | Independent recovery/retention | Boundary |
 | --- | --- | --- | --- |
 | Root schema | `Session_store` / `Store_schema_document` | Store open before index work | Named document |
+| Host organization | `Organization_store` / `Organization_document` | `Organization_root` upgrade and reopen | Named `host.organization` v1; atomic groups, tombstones and mutation receipts |
 | Session metadata | `Session_store` / `Session_metadata_document` | Index rebuild and session open share decoder | Named document and private Handle carrier |
 | Session index | `Session_index` / `Session_index_document` | Checked startup/maintenance/workspace reads | Named document and keyed entry carrier |
 | Archive marker | `Session_store` / `Session_archive_document` | Index rebuild/archive reconciliation | Named identity document; file presence owns archived state |
@@ -398,6 +400,19 @@ until actor/journal hydration, with no invented pending initial start.
 | Prompt manifest | `Prompt_artifact_store` / `Prompt_manifest_document.Publication` | Revision rebuild and independent retention | Exact immutable bytes/digest before conversion; known inventory validation |
 | Root audit evidence | `Audit_store` / `Audit_evidence_document` / `Audit_event_document` | Complete semantic admission before tail repair | Original embedded bytes/hash; verified canonical snapshot and signed pages |
 | Host server ID, actor/daemon locks, secrets | Existing host owners | Existing validation | Intentionally outside session JSON |
+
+Root schema version 2 requires the host organization authority. A version 1
+root acquires its existing exclusive owner, admits or initializes the organization
+document, synchronizes its directory, and publishes schema version 2 last. Missing
+organization authority under version 2 fails closed. Schema conversion preserves
+unknown fields and the original creation timestamp. Session metadata versions
+remain independent of the root version.
+
+Organization mutations publish groups, permanent ID tombstones and terminal
+receipts in one bounded document. An uncertain publication makes the live owner
+unavailable until reopen; it does not claim rollback. Failed startup releases
+acquired organization, operator and daemon-lock resources, preserving the primary
+error or cancellation even if cleanup also fails.
 
 ## M3 blob metadata and private result intents
 

@@ -160,3 +160,11 @@ module Blob = Make (struct
 module Idempotency_record = Make (struct
     let prefix = "idr"
   end)
+
+module Project = Make (struct
+    let prefix = "prj"
+  end)
+
+module Collection = Make (struct
+    let prefix = "col"
+  end)

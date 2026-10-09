@@ -25,6 +25,10 @@
   delegation_record
   delegation_document
   delegation_store
+  organization_state
+  organization_document
+  organization_store
+  organization_root
   session_store
   local_operator
   blob_metadata

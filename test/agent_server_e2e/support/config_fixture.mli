@@ -40,6 +40,10 @@ val admin_token : t -> string
 (** [public_token t] authenticates without the diagnostics scope. *)
 val public_token : t -> string
 
+(** Replace the public credential grants before daemon startup. This rewrites
+    fixture principal identities; it is not a live scope-change operation. *)
+val grant_public_scopes : t -> Agent_protocol.Scope.t list -> unit
+
 (** [grant_public_all_scopes t] rewrites the fixture token file so the public
     credential has full scopes under its distinct principal identity. *)
 val grant_public_all_scopes : t -> unit

@@ -83,6 +83,28 @@ let inspect ~env ~root ~mode =
         ~max_bytes:(Document_schema.Limits.max_bytes Store_schema_document.limits)
     in
     let%bind source_version = schema_version contents in
+    let%bind data_root = Data_root.open_existing ~env ~path:root in
+    let%bind server_id_bytes =
+      Durable_file.load_bounded
+        ~env
+        ~path:(Data_root.server_id_path data_root)
+        ~max_bytes:256
+    in
+    let%bind server_id =
+      Agent_protocol.Id.Server.of_string (String.strip server_id_bytes)
+      |> Document_fields.protocol
+      |> Document_fields.store
+    in
+    let%bind () =
+      if source_version <= Session_store.current_schema_version
+      then
+        Organization_root.inspect_authority
+          ~env
+          ~root:data_root
+          ~server_id
+          ~required:(source_version >= 2)
+      else Ok ()
+    in
     let%map session_count = session_count ~env root in
     { source_version
     ; target_version = Session_store.current_schema_version
@@ -112,9 +134,34 @@ let run ~env ~sw ~root ~server_id ~process_start_identity ~lock_nonce ~mode =
       ~process_start_identity
       ~nonce:lock_nonce
   in
-  Exn.protect
-    ~f:(fun () ->
-      let%bind plan = inspect ~env ~root ~mode in
-      finish plan)
-    ~finally:(fun () -> ignore (Lock.release ~env lock : (unit, Store_error.t) result))
+  let migrate () =
+    let%bind plan = inspect ~env ~root ~mode in
+    match mode, plan.status, plan.source_version with
+    | Apply, Migration_required, 1 ->
+      let%bind organizations =
+        Organization_root.open_owned ~env ~sw ~root:data_root ~server_id
+      in
+      Organization_store.close organizations;
+      Ok { plan with status = Current }
+    | _ -> finish plan
+  in
+  let release_after_failure () =
+    try
+      Eio.Cancel.protect (fun () ->
+        ignore (Lock.release ~env lock : (unit, Store_error.t) result))
+    with
+    | _ -> ()
+  in
+  match migrate () with
+  | Ok plan ->
+    (* With no earlier failure, release is part of this operation's outcome.
+       Its typed filesystem error or original exception must remain visible. *)
+    Result.map (Lock.release ~env lock) ~f:(fun () -> plan)
+  | Error _ as failure ->
+    release_after_failure ();
+    failure
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    release_after_failure ();
+    Exn.raise_with_original_backtrace exn backtrace
 ;;

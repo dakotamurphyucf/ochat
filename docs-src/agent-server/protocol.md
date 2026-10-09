@@ -63,6 +63,16 @@ actor state and authorization, not merely passing JSON validation.
 | `prompt.get` | `Prompt.Get_request` | `prompt.list` | Prompt definition/revision projection. |
 | `workspace.list` | `Workspace.List_request` | `workspace.list` | Paged catalog. |
 | `workspace.get` | `Workspace.Get_request` | `workspace.list` | Workspace projection. |
+| `project.create` | `Organization_request.Create` | `organization.manage` plus owner/admin visibility | Host-qualified logical project create. |
+| `project.get` | `Organization_request.Project.Get` | `organization.view` plus owner/admin visibility | Host-qualified logical project get. |
+| `project.list` | `Organization_request.List` | `organization.view` plus owner/admin visibility | Host-qualified logical project list. |
+| `project.update` | `Organization_request.Project.Update` | `organization.manage` plus owner/admin visibility | Host-qualified logical project update. |
+| `project.delete` | `Organization_request.Project.Delete` | `organization.manage` plus owner/admin visibility | Host-qualified logical project delete. |
+| `collection.create` | `Organization_request.Create` | `organization.manage` plus owner/admin visibility | Host-qualified logical collection create. |
+| `collection.get` | `Organization_request.Collection.Get` | `organization.view` plus owner/admin visibility | Host-qualified logical collection get. |
+| `collection.list` | `Organization_request.List` | `organization.view` plus owner/admin visibility | Host-qualified logical collection list. |
+| `collection.update` | `Organization_request.Collection.Update` | `organization.manage` plus owner/admin visibility | Host-qualified logical collection update. |
+| `collection.delete` | `Organization_request.Collection.Delete` | `organization.manage` plus owner/admin visibility | Host-qualified logical collection delete. |
 | `blob.read` | `Blob.Read_request` | `session.transcript.read` plus blob ownership | Bounded chunk with cursor and metadata. |
 | `session.create` | `Session.Create_request` | `session.create` plus requested attachment scopes | Session, mutation acknowledgement and optional attachment/replay. |
 | `session.list` | `Session.List_request` | `session.transcript.read` | Paged visible sessions with filters. |
@@ -379,3 +389,40 @@ key or exchange retry.
 uses the distinct revision returned in `Status_result.selection`; it is not an
 auth epoch or secret revision. Status never includes an authorization URI, device
 code or raw provider response, and it does not infer a failure from readiness.
+
+
+Logical projects and collections are private organization owned by their creator
+on one initialized host. They carry names and revisions; they configure no execution
+workspace, provider, prompt, grants or session authority. Organization reads require
+`organization.view`; mutations and receipt reconciliation require `organization.manage`.
+Each operation also requires creator ownership or the existing host configuration
+administrator authority. Trusted local principals explicitly carry both scopes;
+configured network principals must receive deliberate grants. Names need not be unique.
+
+Create generates a distinct opaque ID. Update/delete require the current nonnegative
+revision; a successful name change/delete advances it. A no-op rename preserves that
+revision and still records its receipt. Delete retains a permanent tombstone, never
+reuses the ID, and performs no session cascade. Membership is a separate service.
+Lists exclude tombstones, sort by creation time then typed ID ascending, expose every
+page and offer explicitly bounded client enumeration. Signed cursors bind current
+principal/scopes, query and visible data; changed data returns refresh-required conflict.
+
+The authoritative host organization document commits mutation and exact terminal
+idempotency receipt together. Same key/params replays the original result after current
+authorization; changed params conflict. Standard receipts expire after 24 hours;
+4096 unexpired receipts and 4096 retained IDs per kind are maximums, with a shared
+16 MiB complete-document limit. Capacity exhaustion rejects rather than evicting retry
+evidence. `command.receipt` returns narrow group ID/revision references and never executes
+or retries the original command. Root schema 2 requires organization authority. An older
+schema 1 host installs or preserves that document before publishing schema 2, retaining
+unknown fields and creation time. A schema 2 host missing authority fails admission;
+uncertain replacement acknowledgements make organization reads unavailable until reopen.
+
+The cross-transport conformance scenario exercises all ten organization methods
+over Unix, HTTP, and both stdio gateway routes. It checks exact idempotent
+results, conflicting key reuse, compare-and-swap conflicts, ordered continuation
+pages, cursor invalidation after rename, deletion visibility and retained
+historical receipts. A separate daemon restart scenario retains project and
+collection identity and original create receipts. A principal granted only
+organization view/manage cannot inspect another creator's groups or read
+sessions; these operations leave the session catalog empty.

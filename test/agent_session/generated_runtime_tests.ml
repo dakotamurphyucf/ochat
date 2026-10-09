@@ -565,7 +565,7 @@ let%expect_test
               ~sw
               ~transaction_id:admission.transaction_id
               ~actor_lock_nonce:"generated-runtime-child"
-              { schema_version = Session_store.current_schema_version
+              { schema_version = Session_store.current_metadata_schema_version
               ; session = Agent_session.Session_state.summary initial
               ; prompt_artifact = P.Id.Prompt_revision.to_string admission.revision_id
               ; workspace_identity = workspace_instance.conflict_domain

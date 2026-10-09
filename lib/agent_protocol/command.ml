@@ -30,6 +30,16 @@ type t =
   | Session_detach of Session.Detach_request.t
   | Session_renew_owner of Session.Renew_owner_request.t
   | Session_start of Session.Start_request.t
+  | Project_create of Organization_request.Create.t
+  | Project_get of Organization_request.Project.Get.t
+  | Project_list of Organization_request.List.t
+  | Project_update of Organization_request.Project.Update.t
+  | Project_delete of Organization_request.Project.Delete.t
+  | Collection_create of Organization_request.Create.t
+  | Collection_get of Organization_request.Collection.Get.t
+  | Collection_list of Organization_request.List.t
+  | Collection_update of Organization_request.Collection.Update.t
+  | Collection_delete of Organization_request.Collection.Delete.t
   | Session_update_metadata of Session_metadata.Request.t
   | Session_stop of Session.Stop_request.t
   | Session_cancel_operation of Session.Cancel_operation_request.t
@@ -86,6 +96,16 @@ let method_name = function
   | Session_detach _ -> "session.detach"
   | Session_renew_owner _ -> "session.renew_owner"
   | Session_start _ -> "session.start"
+  | Project_create _ -> "project.create"
+  | Project_get _ -> "project.get"
+  | Project_list _ -> "project.list"
+  | Project_update _ -> "project.update"
+  | Project_delete _ -> "project.delete"
+  | Collection_create _ -> "collection.create"
+  | Collection_get _ -> "collection.get"
+  | Collection_list _ -> "collection.list"
+  | Collection_update _ -> "collection.update"
+  | Collection_delete _ -> "collection.delete"
   | Session_update_metadata _ -> "session.update_metadata"
   | Session_stop _ -> "session.stop"
   | Session_cancel_operation _ -> "session.cancel_operation"
@@ -145,6 +165,16 @@ let params = function
   | Session_detach request -> Session.Detach_request.to_json request
   | Session_renew_owner request -> Session.Renew_owner_request.to_json request
   | Session_start request -> Session.Start_request.to_json request
+  | Project_create value -> Organization_request.Create.to_json value
+  | Project_get value -> Organization_request.Project.Get.to_json value
+  | Project_list value -> Organization_request.List.to_json value
+  | Project_update value -> Organization_request.Project.Update.to_json value
+  | Project_delete value -> Organization_request.Project.Delete.to_json value
+  | Collection_create value -> Organization_request.Create.to_json value
+  | Collection_get value -> Organization_request.Collection.Get.to_json value
+  | Collection_list value -> Organization_request.List.to_json value
+  | Collection_update value -> Organization_request.Collection.Update.to_json value
+  | Collection_delete value -> Organization_request.Collection.Delete.to_json value
   | Session_update_metadata request -> Session_metadata.Request.to_json request
   | Session_stop request -> Session.Stop_request.to_json request
   | Session_cancel_operation request -> Session.Cancel_operation_request.to_json request
@@ -234,6 +264,31 @@ let decoders =
   ; "session.detach", map Session.Detach_request.of_json (fun x -> Session_detach x)
   ; ( "session.renew_owner"
     , map Session.Renew_owner_request.of_json (fun x -> Session_renew_owner x) )
+  ; ( "project.create"
+    , map Organization_request.Create.of_json (fun value -> Project_create value) )
+  ; ( "project.get"
+    , map Organization_request.Project.Get.of_json (fun value -> Project_get value) )
+  ; ( "project.list"
+    , map Organization_request.List.of_json (fun value -> Project_list value) )
+  ; ( "project.update"
+    , map Organization_request.Project.Update.of_json (fun value -> Project_update value)
+    )
+  ; ( "project.delete"
+    , map Organization_request.Project.Delete.of_json (fun value -> Project_delete value)
+    )
+  ; ( "collection.create"
+    , map Organization_request.Create.of_json (fun value -> Collection_create value) )
+  ; ( "collection.get"
+    , map Organization_request.Collection.Get.of_json (fun value -> Collection_get value)
+    )
+  ; ( "collection.list"
+    , map Organization_request.List.of_json (fun value -> Collection_list value) )
+  ; ( "collection.update"
+    , map Organization_request.Collection.Update.of_json (fun value ->
+        Collection_update value) )
+  ; ( "collection.delete"
+    , map Organization_request.Collection.Delete.of_json (fun value ->
+        Collection_delete value) )
   ; "session.start", map Session.Start_request.of_json (fun x -> Session_start x)
   ; ( "session.update_metadata"
     , map Session_metadata.Request.of_json (fun x -> Session_update_metadata x) )

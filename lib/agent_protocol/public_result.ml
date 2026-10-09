@@ -39,6 +39,16 @@ module Non_history = struct
     | Session_detach _
     | Session_renew_owner _
     | Session_start _
+    | Project_create _
+    | Project_get _
+    | Project_list _
+    | Project_update _
+    | Project_delete _
+    | Collection_create _
+    | Collection_get _
+    | Collection_list _
+    | Collection_update _
+    | Collection_delete _
     | Session_update_metadata _
     | Session_stop _
     | Session_cancel_operation _

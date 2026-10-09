@@ -56,3 +56,5 @@ module Prompt_revision : S
 module Principal : S
 module Blob : S
 module Idempotency_record : S
+module Project : S
+module Collection : S

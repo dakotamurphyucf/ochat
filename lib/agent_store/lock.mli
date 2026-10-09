@@ -32,5 +32,9 @@ val read_owner
   -> path:string
   -> (owner option, Store_error.t) result
 
-(** [release t] clears metadata and releases both kernel locks. It is idempotent. *)
+(** [release t] clears metadata and releases owned kernel/file resources. Cleanup
+    still runs when clearing or syncing metadata fails. It is idempotent after
+    release. Expected filesystem failures return [Error]; cancellation and
+    unexpected exceptions retain their original backtrace. A secondary cleanup
+    failure never replaces an earlier metadata failure. *)
 val release : env:Eio_unix.Stdenv.base -> t -> (unit, Store_error.t) result

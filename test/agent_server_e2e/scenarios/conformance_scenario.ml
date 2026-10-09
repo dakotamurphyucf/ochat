@@ -2279,6 +2279,604 @@ let test_session_configuration env environment =
                    , (actual : configuration_observation)]))))
 ;;
 
+type organization_observation =
+  { create_retry_exact : bool
+  ; changed_key_error : Agent_protocol.Error.code
+  ; get_exact : bool
+  ; pages_complete_in_order : bool
+  ; update_retry_exact : bool
+  ; stale_revision_error : Agent_protocol.Error.code
+  ; invalidated_cursor_error : Agent_protocol.Error.code
+  ; receipt_matches : bool
+  ; delete_retry_exact : bool
+  ; deleted_get_error : Agent_protocol.Error.code
+  ; deleted_list_empty : bool
+  ; historical_retry_exact : bool
+  }
+[@@deriving equal, sexp]
+
+let organization_name value =
+  Agent_protocol.Organization_group.Name.create value |> protocol_ok
+;;
+
+let project_observation connection ~host_id ~key_prefix =
+  let create_request =
+    Agent_protocol.Organization_request.Create.
+      { host_id
+      ; name = organization_name "First"
+      ; idempotency_key = idempotency_key (key_prefix ^ ":project-create")
+      }
+  in
+  let create request_ =
+    match request connection (Project_create request_) with
+    | Project_create group -> group
+    | _ -> fail "project.create returned the wrong result variant"
+  in
+  let first = create create_request in
+  let duplicate = create create_request in
+  let changed_key_error =
+    request_error
+      connection
+      (Project_create { create_request with name = organization_name "Changed" })
+  in
+  let second =
+    create
+      { create_request with
+        name = organization_name "Second"
+      ; idempotency_key = idempotency_key (key_prefix ^ ":project-second")
+      }
+  in
+  let get_request =
+    Agent_protocol.Organization_request.Project.Get.{ host_id; id = first.id }
+  in
+  let fetched =
+    match request connection (Project_get get_request) with
+    | Project_get group -> group
+    | _ -> fail "project.get returned the wrong result variant"
+  in
+  let list_request =
+    Agent_protocol.Organization_request.List.
+      { host_id
+      ; creator_principal_id = Some first.creator_principal_id
+      ; page = Agent_protocol.Page.Request.create ~limit:1 () |> protocol_ok
+      }
+  in
+  let list request_ =
+    match request connection (Project_list request_) with
+    | Project_list page -> page
+    | _ -> fail "project.list returned the wrong result variant"
+  in
+  let page_one = list list_request in
+  let cursor =
+    match page_one.next_cursor with
+    | Some cursor -> cursor
+    | None -> fail "organization first page must have a continuation"
+  in
+  let continuation =
+    { list_request with
+      page = Agent_protocol.Page.Request.create ~limit:1 ~cursor () |> protocol_ok
+    }
+  in
+  let page_two = list continuation in
+  let expected =
+    List.sort
+      [ first; second ]
+      ~compare:(fun (left : Agent_protocol.Organization_group.Project.t) right ->
+        let timestamp =
+          Agent_protocol.Timestamp.compare left.created_at right.created_at
+        in
+        if Int.equal timestamp 0
+        then Agent_protocol.Id.Project.compare left.id right.id
+        else timestamp)
+  in
+  let update_request =
+    Agent_protocol.Organization_request.Project.Update.
+      { host_id
+      ; id = first.id
+      ; expected_revision = first.revision
+      ; name = organization_name "Renamed"
+      ; idempotency_key = idempotency_key (key_prefix ^ ":project-update")
+      }
+  in
+  let update request_ =
+    match request connection (Project_update request_) with
+    | Project_update group -> group
+    | _ -> fail "project.update returned the wrong result variant"
+  in
+  let updated = update update_request in
+  let update_retry = update update_request in
+  let stale_revision_error =
+    request_error
+      connection
+      (Project_update
+         { update_request with
+           idempotency_key = idempotency_key (key_prefix ^ ":project-stale")
+         })
+  in
+  let invalidated_cursor_error = request_error connection (Project_list continuation) in
+  let receipt_matches =
+    match command_receipt connection (Project_update update_request) with
+    | Committed (Project_mutation { project_id; revision }) ->
+      Agent_protocol.Id.Project.equal project_id first.id
+      && Int64.equal revision updated.revision
+    | _ -> false
+  in
+  let delete_request =
+    Agent_protocol.Organization_request.Project.Delete.
+      { host_id
+      ; id = first.id
+      ; expected_revision = updated.revision
+      ; idempotency_key = idempotency_key (key_prefix ^ ":project-delete")
+      }
+  in
+  let delete request_ =
+    match request connection (Project_delete request_) with
+    | Project_delete result -> result
+    | _ -> fail "project.delete returned the wrong result variant"
+  in
+  let deleted = delete delete_request in
+  let delete_retry = delete delete_request in
+  let deleted_get_error = request_error connection (Project_get get_request) in
+  ignore
+    (delete
+       { delete_request with
+         id = second.id
+       ; expected_revision = second.revision
+       ; idempotency_key = idempotency_key (key_prefix ^ ":project-delete-second")
+       });
+  let final_page = list { list_request with page = page_request () } in
+  { create_retry_exact = Agent_protocol.Organization_group.Project.equal first duplicate
+  ; changed_key_error = changed_key_error.code
+  ; get_exact = Agent_protocol.Organization_group.Project.equal first fetched
+  ; pages_complete_in_order =
+      List.equal
+        Agent_protocol.Organization_group.Project.equal
+        expected
+        (page_one.items @ page_two.items)
+      && Option.is_none page_two.next_cursor
+  ; update_retry_exact =
+      Agent_protocol.Organization_group.Project.equal updated update_retry
+      && Int64.equal updated.revision 1L
+  ; stale_revision_error = stale_revision_error.code
+  ; invalidated_cursor_error = invalidated_cursor_error.code
+  ; receipt_matches
+  ; delete_retry_exact =
+      Agent_protocol.Organization_result.Project_deleted.equal deleted delete_retry
+      && Int64.equal deleted.revision 2L
+  ; deleted_get_error = deleted_get_error.code
+  ; deleted_list_empty = List.is_empty final_page.items
+  ; historical_retry_exact =
+      Agent_protocol.Organization_group.Project.equal first (create create_request)
+  }
+;;
+
+let collection_observation connection ~host_id ~key_prefix =
+  let create_request =
+    Agent_protocol.Organization_request.Create.
+      { host_id
+      ; name = organization_name "First"
+      ; idempotency_key = idempotency_key (key_prefix ^ ":collection-create")
+      }
+  in
+  let create request_ =
+    match request connection (Collection_create request_) with
+    | Collection_create group -> group
+    | _ -> fail "collection.create returned the wrong result variant"
+  in
+  let first = create create_request in
+  let duplicate = create create_request in
+  let changed_key_error =
+    request_error
+      connection
+      (Collection_create { create_request with name = organization_name "Changed" })
+  in
+  let second =
+    create
+      { create_request with
+        name = organization_name "Second"
+      ; idempotency_key = idempotency_key (key_prefix ^ ":collection-second")
+      }
+  in
+  let get_request =
+    Agent_protocol.Organization_request.Collection.Get.{ host_id; id = first.id }
+  in
+  let fetched =
+    match request connection (Collection_get get_request) with
+    | Collection_get group -> group
+    | _ -> fail "collection.get returned the wrong result variant"
+  in
+  let list_request =
+    Agent_protocol.Organization_request.List.
+      { host_id
+      ; creator_principal_id = Some first.creator_principal_id
+      ; page = Agent_protocol.Page.Request.create ~limit:1 () |> protocol_ok
+      }
+  in
+  let list request_ =
+    match request connection (Collection_list request_) with
+    | Collection_list page -> page
+    | _ -> fail "collection.list returned the wrong result variant"
+  in
+  let page_one = list list_request in
+  let cursor =
+    match page_one.next_cursor with
+    | Some cursor -> cursor
+    | None -> fail "organization first page must have a continuation"
+  in
+  let continuation =
+    { list_request with
+      page = Agent_protocol.Page.Request.create ~limit:1 ~cursor () |> protocol_ok
+    }
+  in
+  let page_two = list continuation in
+  let expected =
+    List.sort
+      [ first; second ]
+      ~compare:(fun (left : Agent_protocol.Organization_group.Collection.t) right ->
+        let timestamp =
+          Agent_protocol.Timestamp.compare left.created_at right.created_at
+        in
+        if Int.equal timestamp 0
+        then Agent_protocol.Id.Collection.compare left.id right.id
+        else timestamp)
+  in
+  let update_request =
+    Agent_protocol.Organization_request.Collection.Update.
+      { host_id
+      ; id = first.id
+      ; expected_revision = first.revision
+      ; name = organization_name "Renamed"
+      ; idempotency_key = idempotency_key (key_prefix ^ ":collection-update")
+      }
+  in
+  let update request_ =
+    match request connection (Collection_update request_) with
+    | Collection_update group -> group
+    | _ -> fail "collection.update returned the wrong result variant"
+  in
+  let updated = update update_request in
+  let update_retry = update update_request in
+  let stale_revision_error =
+    request_error
+      connection
+      (Collection_update
+         { update_request with
+           idempotency_key = idempotency_key (key_prefix ^ ":collection-stale")
+         })
+  in
+  let invalidated_cursor_error =
+    request_error connection (Collection_list continuation)
+  in
+  let receipt_matches =
+    match command_receipt connection (Collection_update update_request) with
+    | Committed (Collection_mutation { collection_id; revision }) ->
+      Agent_protocol.Id.Collection.equal collection_id first.id
+      && Int64.equal revision updated.revision
+    | _ -> false
+  in
+  let delete_request =
+    Agent_protocol.Organization_request.Collection.Delete.
+      { host_id
+      ; id = first.id
+      ; expected_revision = updated.revision
+      ; idempotency_key = idempotency_key (key_prefix ^ ":collection-delete")
+      }
+  in
+  let delete request_ =
+    match request connection (Collection_delete request_) with
+    | Collection_delete result -> result
+    | _ -> fail "collection.delete returned the wrong result variant"
+  in
+  let deleted = delete delete_request in
+  let delete_retry = delete delete_request in
+  let deleted_get_error = request_error connection (Collection_get get_request) in
+  ignore
+    (delete
+       { delete_request with
+         id = second.id
+       ; expected_revision = second.revision
+       ; idempotency_key = idempotency_key (key_prefix ^ ":collection-delete-second")
+       });
+  let final_page = list { list_request with page = page_request () } in
+  { create_retry_exact =
+      Agent_protocol.Organization_group.Collection.equal first duplicate
+  ; changed_key_error = changed_key_error.code
+  ; get_exact = Agent_protocol.Organization_group.Collection.equal first fetched
+  ; pages_complete_in_order =
+      List.equal
+        Agent_protocol.Organization_group.Collection.equal
+        expected
+        (page_one.items @ page_two.items)
+      && Option.is_none page_two.next_cursor
+  ; update_retry_exact =
+      Agent_protocol.Organization_group.Collection.equal updated update_retry
+      && Int64.equal updated.revision 1L
+  ; stale_revision_error = stale_revision_error.code
+  ; invalidated_cursor_error = invalidated_cursor_error.code
+  ; receipt_matches
+  ; delete_retry_exact =
+      Agent_protocol.Organization_result.Collection_deleted.equal deleted delete_retry
+      && Int64.equal deleted.revision 2L
+  ; deleted_get_error = deleted_get_error.code
+  ; deleted_list_empty = List.is_empty final_page.items
+  ; historical_retry_exact =
+      Agent_protocol.Organization_group.Collection.equal first (create create_request)
+  }
+;;
+
+let require_organization_observation observation =
+  if
+    not
+      (observation.create_retry_exact
+       && observation.get_exact
+       && observation.pages_complete_in_order
+       && observation.update_retry_exact
+       && observation.receipt_matches
+       && observation.delete_retry_exact
+       && observation.deleted_list_empty
+       && observation.historical_retry_exact
+       && Agent_protocol.Error.equal_code
+            observation.changed_key_error
+            Idempotency_conflict
+       && Agent_protocol.Error.equal_code observation.stale_revision_error Conflict
+       && Agent_protocol.Error.equal_code observation.invalidated_cursor_error Conflict
+       && Agent_protocol.Error.equal_code
+            observation.deleted_get_error
+            Organization_not_found)
+  then
+    raise_s
+      [%sexp
+        "organization conformance invariants failed"
+      , (observation : organization_observation)]
+;;
+
+let test_organization_crud env environment =
+  let fixture = fixture env environment "conformance-organization" in
+  Eio.Switch.run (fun sw ->
+    with_daemon ~sw env fixture (fun _daemon _health ->
+      with_transport_matrix
+        ~sw
+        env
+        environment
+        fixture
+        (fun unix http stdio_unix stdio_http ->
+           let observe connection key_prefix =
+             let initialized = initialize connection in
+             let project =
+               project_observation connection ~host_id:initialized.server_id ~key_prefix
+             in
+             let collection =
+               collection_observation
+                 connection
+                 ~host_id:initialized.server_id
+                 ~key_prefix
+             in
+             require_organization_observation project;
+             require_organization_observation collection;
+             project, collection
+           in
+           let baseline = observe unix "unix" in
+           List.iter
+             [ http, "http"; stdio_unix, "stdio-unix"; stdio_http, "stdio-http" ]
+             ~f:(fun (connection, prefix) ->
+               let actual = observe connection prefix in
+               if
+                 not
+                   ([%equal: organization_observation * organization_observation]
+                      baseline
+                      actual)
+               then
+                 raise_s
+                   [%sexp
+                     "cross-transport organization semantics differ"
+                   , (baseline : organization_observation * organization_observation)
+                   , (actual : organization_observation * organization_observation)]))))
+;;
+
+let organization_sessions_empty connection =
+  let list_request =
+    Agent_protocol.Session.List_request.
+      { page = page_request ()
+      ; desired_state = None
+      ; prompt_id = None
+      ; workspace_id = None
+      ; owner_principal_id = None
+      ; creator_principal_id = None
+      ; active_owner_principal_id = None
+      ; sort = Agent_protocol.Session_catalog_query.Sort.default
+      ; archive = Active
+      ; labels = []
+      }
+  in
+  match request connection (Session_list list_request) with
+  | Session_list page -> List.is_empty page.items
+  | _ -> fail "session.list returned the wrong result variant"
+;;
+
+let organization_public_client ~sw env fixture =
+  Agent_transport_http.Client.connect
+    ~sw
+    ~env
+    ~uri:
+      (Uri.of_string (sprintf "http://127.0.0.1:%d" (Config_fixture.http_port fixture)))
+    ~bearer_token:(Some (Config_fixture.public_token fixture))
+    ~notification_capacity:1024
+  |> protocol_ok
+  |> client_of_connection
+;;
+
+let test_organization_authority_reopen env environment =
+  let fixture = fixture env environment "conformance-organization-reopen" in
+  Config_fixture.grant_public_scopes fixture [ View_organization; Manage_organization ];
+  Eio.Switch.run (fun sw ->
+    let host_id, project, project_request, collection, collection_request =
+      with_daemon ~sw env fixture (fun _daemon _health ->
+        let admin = unix_client ~sw env fixture in
+        let owner = organization_public_client ~sw env fixture in
+        Exn.protect
+          ~finally:(fun () -> close_clients [ owner; admin ])
+          ~f:(fun () ->
+            let host_id = (initialize admin).server_id in
+            ignore (initialize owner);
+            if not (organization_sessions_empty admin)
+            then fail "organization fixture starts with sessions";
+            let foreign_request =
+              Agent_protocol.Organization_request.Create.
+                { host_id
+                ; name = organization_name "Private admin group"
+                ; idempotency_key = idempotency_key "org-foreign"
+                }
+            in
+            let foreign =
+              match request admin (Project_create foreign_request) with
+              | Project_create group -> group
+              | _ -> assert false
+            in
+            let denied = request_error owner (Project_get { host_id; id = foreign.id }) in
+            if not (Agent_protocol.Error.equal_code denied.code Organization_not_found)
+            then fail "organization owner can inspect another creator's group";
+            (match command_receipt owner (Project_create foreign_request) with
+             | Missing -> ()
+             | _ -> fail "organization receipt discloses another principal's mutation");
+            let project_request =
+              Agent_protocol.Organization_request.Create.
+                { host_id
+                ; name = organization_name "Persistent project"
+                ; idempotency_key = idempotency_key "org-reopen-project"
+                }
+            in
+            let project =
+              match request owner (Project_create project_request) with
+              | Project_create group -> group
+              | _ -> assert false
+            in
+            let collection_request =
+              { project_request with
+                name = organization_name "Persistent collection"
+              ; idempotency_key = idempotency_key "org-reopen-collection"
+              }
+            in
+            let collection =
+              match request owner (Collection_create collection_request) with
+              | Collection_create group -> group
+              | _ -> assert false
+            in
+            let page =
+              match
+                request
+                  owner
+                  (Project_list
+                     { host_id; creator_principal_id = None; page = page_request () })
+              with
+              | Project_list page -> page
+              | _ -> assert false
+            in
+            if
+              not
+                (List.equal
+                   Agent_protocol.Organization_group.Project.equal
+                   [ project ]
+                   page.items)
+            then fail "organization list includes another creator's private group";
+            let session_request =
+              Agent_protocol.Session.List_request.
+                { page = page_request ()
+                ; desired_state = None
+                ; prompt_id = None
+                ; workspace_id = None
+                ; owner_principal_id = None
+                ; creator_principal_id = None
+                ; active_owner_principal_id = None
+                ; sort = Agent_protocol.Session_catalog_query.Sort.default
+                ; archive = Active
+                ; labels = []
+                }
+            in
+            let denied_session = request_error owner (Session_list session_request) in
+            if not (Agent_protocol.Error.equal_code denied_session.code Permission_denied)
+            then fail "organization grants imply session visibility";
+            if not (organization_sessions_empty admin)
+            then fail "organization CRUD activates sessions";
+            host_id, project, project_request, collection, collection_request))
+    in
+    with_daemon ~sw env fixture (fun _daemon _health ->
+      let admin = unix_client ~sw env fixture in
+      let owner = organization_public_client ~sw env fixture in
+      Exn.protect
+        ~finally:(fun () -> close_clients [ owner; admin ])
+        ~f:(fun () ->
+          if not (Agent_protocol.Id.Server.equal host_id (initialize owner).server_id)
+          then fail "organization host identity changed on reopen";
+          ignore (initialize admin);
+          let project_get =
+            match request owner (Project_get { host_id; id = project.id }) with
+            | Project_get group -> group
+            | _ -> assert false
+          in
+          let project_retry =
+            match request owner (Project_create project_request) with
+            | Project_create group -> group
+            | _ -> assert false
+          in
+          let collection_get =
+            match request owner (Collection_get { host_id; id = collection.id }) with
+            | Collection_get group -> group
+            | _ -> assert false
+          in
+          let collection_retry =
+            match request owner (Collection_create collection_request) with
+            | Collection_create group -> group
+            | _ -> assert false
+          in
+          if
+            not
+              (Agent_protocol.Organization_group.Project.equal project project_get
+               && Agent_protocol.Organization_group.Project.equal project project_retry
+               && Agent_protocol.Organization_group.Collection.equal
+                    collection
+                    collection_get
+               && Agent_protocol.Organization_group.Collection.equal
+                    collection
+                    collection_retry
+               && organization_sessions_empty admin)
+          then fail "organization authority or receipt changed on durable reopen")))
+;;
+
+let test_organization_missing_scopes env environment =
+  let fixture = fixture env environment "conformance-organization-scopes" in
+  Eio.Switch.run (fun sw ->
+    with_daemon ~sw env fixture (fun _daemon _health ->
+      let public = organization_public_client ~sw env fixture in
+      Exn.protect ~finally:public.close ~f:(fun () ->
+        let host_id = (initialize public).server_id in
+        let create_request =
+          Agent_protocol.Organization_request.Create.
+            { host_id
+            ; name = organization_name "Denied"
+            ; idempotency_key = idempotency_key "organization-denied"
+            }
+        in
+        let list_request =
+          Agent_protocol.Organization_request.List.
+            { host_id; creator_principal_id = None; page = page_request () }
+        in
+        List.iter
+          [ Agent_protocol.Command.Project_create create_request
+          ; Collection_create create_request
+          ; Project_list list_request
+          ; Collection_list list_request
+          ]
+          ~f:(fun command ->
+            let denied = request_error public command in
+            if not (Agent_protocol.Error.equal_code denied.code Permission_denied)
+            then
+              raise_s
+                [%sexp
+                  "missing organization scope was not denied"
+                , (command : Agent_protocol.Command.t)
+                , (denied : Agent_protocol.Error.t)]))))
+;;
+
 let test_permissions_grants env environment =
   let fixture = fixture env environment "conformance-security" in
   Eio.Switch.run (fun sw ->
@@ -2535,6 +3133,9 @@ let cases =
   ; "conformance.session-lifecycle", test_session_lifecycle
   ; "conformance.session-metadata", test_session_metadata
   ; "conformance.session-configuration", test_session_configuration
+  ; "conformance.organization-crud", test_organization_crud
+  ; "conformance.organization-authority-reopen", test_organization_authority_reopen
+  ; "conformance.organization-missing-scopes", test_organization_missing_scopes
   ; "conformance.inference-reads", test_inference_reads
   ; "conformance.permissions-grants", test_permissions_grants
   ; "conformance.jobs-schedules", test_jobs_schedules
@@ -2564,6 +3165,16 @@ let method_coverage =
   ; "prompt.get", "conformance.read-methods"
   ; "workspace.list", "conformance.read-methods"
   ; "workspace.get", "conformance.read-methods"
+  ; "project.create", "conformance.organization-crud"
+  ; "project.get", "conformance.organization-crud"
+  ; "project.list", "conformance.organization-crud"
+  ; "project.update", "conformance.organization-crud"
+  ; "project.delete", "conformance.organization-crud"
+  ; "collection.create", "conformance.organization-crud"
+  ; "collection.get", "conformance.organization-crud"
+  ; "collection.list", "conformance.organization-crud"
+  ; "collection.update", "conformance.organization-crud"
+  ; "collection.delete", "conformance.organization-crud"
   ; "blob.read", "conformance.blob-read"
   ; "session.create", "conformance.session-lifecycle"
   ; "session.list", "conformance.session-lifecycle"

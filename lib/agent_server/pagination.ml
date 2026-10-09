@@ -70,18 +70,13 @@ let page t principal command request encode values =
     Agent_protocol.Page.{ items; next_cursor })
 ;;
 
-let ordered_sessions t principal command request values =
+let ordered t principal command request encode values =
   let open Result.Let_syntax in
   let authority =
     sign t (Jsonaf.to_string (Agent_protocol.Principal.to_json principal))
   in
   let query = sign t (Jsonaf.to_string (query command)) in
-  let data =
-    sign
-      t
-      (Jsonaf.to_string
-         (`Array (List.map values ~f:Agent_protocol.Session_catalog.to_json)))
-  in
+  let data = sign t (Jsonaf.to_string (`Array (List.map values ~f:encode))) in
   let%bind offset =
     match request.Agent_protocol.Page.Request.cursor with
     | None -> Ok 0
@@ -107,7 +102,7 @@ let ordered_sessions t principal command request values =
               Error
                 (Agent_protocol.Error.create
                    Conflict
-                   ~message:"session catalog changed; refresh required"
+                   ~message:"catalog changed; refresh required"
                    ~data:(`Object [ "refresh_required", `True ])
                    ~retryable:false
                    ())
@@ -147,8 +142,32 @@ let lists t principal command result =
       page t principal command r.page Agent_protocol.Workspace.to_json p.items
     in
     Agent_protocol.Method_result.Workspace_list p
+  | Project_list r, Project_list p ->
+    let%map p =
+      ordered
+        t
+        principal
+        command
+        r.page
+        Agent_protocol.Organization_group.Project.to_json
+        p.items
+    in
+    Agent_protocol.Method_result.Project_list p
+  | Collection_list r, Collection_list p ->
+    let%map p =
+      ordered
+        t
+        principal
+        command
+        r.page
+        Agent_protocol.Organization_group.Collection.to_json
+        p.items
+    in
+    Agent_protocol.Method_result.Collection_list p
   | Session_list r, Session_list p ->
-    let%map p = ordered_sessions t principal command r.page p.items in
+    let%map p =
+      ordered t principal command r.page Agent_protocol.Session_catalog.to_json p.items
+    in
     Agent_protocol.Method_result.Session_list p
   | Permission_list r, Permission_list p ->
     let%map p =

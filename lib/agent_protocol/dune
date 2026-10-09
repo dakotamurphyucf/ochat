@@ -46,6 +46,9 @@
   prompt
   workspace
   operation
+  organization_group
+  organization_request
+  organization_result
   session_metadata
   session_catalog_query
 

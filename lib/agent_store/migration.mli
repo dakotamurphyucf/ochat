@@ -32,7 +32,10 @@ val inspect
     daemon lock. It does not validate individual session journals or artifacts.
     Validation and dry-run modes return a plan for admitted positive named-document
     schema versions. Malformed documents and unsupported beta formats fail admission.
-    Applying an unsupported older or newer schema fails without mutation. *)
+    Applying an unsupported older or newer schema fails without mutation.
+    Following successful migration/inspection, a lock release failure is reported
+    as its typed filesystem error or original exceptional failure. When migration
+    already failed, cleanup preserves that primary error/exception. *)
 val run
   :  env:Eio_unix.Stdenv.base
   -> sw:Eio.Switch.t

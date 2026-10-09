@@ -41,6 +41,14 @@ val load_bounded
   -> max_bytes:int
   -> (string, Store_error.t) result
 
+(** Bounded regular-file read relative to the retained owned directory.
+    Rejects a symlink or a basename outside that directory; cancellation propagates. *)
+val load_bounded_in
+  :  directory:_ Eio.Path.t
+  -> basename:string
+  -> max_bytes:int
+  -> (string, Store_error.t) result
+
 (** [sync_directory ~env ~path] durably records prior directory-entry changes.
     [path] must be an absolute directory path. Opens an Eio-owned read-only
     file descriptor for the directory and performs fsync in an Eio system

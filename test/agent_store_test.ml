@@ -1869,7 +1869,9 @@ let%expect_test "audit records survive reopen and cursors reject tampering" =
     |}]
 ;;
 
-let%expect_test "migration framework validates V1 without mutating the store" =
+let%expect_test
+    "migration framework validates current root schema without mutating the store"
+  =
   with_temp_directory "ochat-agent-migration" (fun env temporary ->
     let root = Filename.concat temporary "data" in
     Eio.Switch.run (fun switch ->
@@ -1904,7 +1906,7 @@ let%expect_test "migration framework validates V1 without mutating the store" =
           }]));
   [%expect
     {|
-    ((source_version 1) (target_version 1) (session_count 0) (status Current))
+    ((source_version 2) (target_version 2) (session_count 0) (status Current))
     |}]
 ;;
 
@@ -1986,7 +1988,7 @@ let%expect_test "migration dry-run reports a newer named schema without applying
                     fields
                     ~equal:String.equal
                     "schema_version"
-                    (`Number "2")))
+                    (`Number "3")))
          | _ -> assert false);
       let future_schema = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / schema_path) in
       let plan =
@@ -2023,7 +2025,7 @@ let%expect_test "migration dry-run reports a newer named schema without applying
           }]));
   [%expect
     {|
-    ((source_version 2) (status Schema_too_new) (apply_rejected true))
+    ((source_version 3) (status Schema_too_new) (apply_rejected true))
     |}]
 ;;
 

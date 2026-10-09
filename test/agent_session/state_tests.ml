@@ -766,7 +766,7 @@ let%expect_test "named compaction archives admit typed state and preserve captur
       in
       let metadata =
         Agent_store.Session_store.Metadata.
-          { schema_version = Agent_store.Session_store.current_schema_version
+          { schema_version = Agent_store.Session_store.current_metadata_schema_version
           ; session = Agent_session.Session_state.summary archived
           ; prompt_artifact =
               Agent_protocol.Id.Prompt_revision.to_string prompt_revision_id

@@ -172,6 +172,8 @@ let all_scopes =
     ; List_workspaces
     ; Create_sessions
     ; View_session_transcript
+    ; View_organization
+    ; Manage_organization
     ; Send_messages
     ; Own_sessions
     ; Answer_approvals

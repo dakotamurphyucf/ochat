@@ -175,7 +175,7 @@ let install_child
       ~sw
       ~transaction_id:admission.transaction_id
       ~actor_lock_nonce:"stored-generated-child"
-      { schema_version = S.current_schema_version
+      { schema_version = S.current_metadata_schema_version
       ; session = State.summary state
       ; prompt_artifact = P.Id.Prompt_revision.to_string artifact.revision_id
       ; workspace_identity = state.spec.workspace_instance.conflict_domain

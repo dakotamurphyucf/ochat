@@ -180,6 +180,9 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_protocol/moderator_execution.mli` | [contract](../../lib/agent_protocol/moderator_execution.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/mutation_result.mli` | [contract](../../lib/agent_protocol/mutation_result.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/operation.mli` | [contract](../../lib/agent_protocol/operation.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/organization_group.mli` | [contract](../../lib/agent_protocol/organization_group.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/organization_request.mli` | [contract](../../lib/agent_protocol/organization_request.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/organization_result.mli` | [contract](../../lib/agent_protocol/organization_result.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/page.mli` | [contract](../../lib/agent_protocol/page.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/permission.mli` | [contract](../../lib/agent_protocol/permission.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/ping.mli` | [contract](../../lib/agent_protocol/ping.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
@@ -236,6 +239,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_server/managed_output_cursor.mli` | [contract](../../lib/agent_server/managed_output_cursor.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_server/managed_output_page.mli` | [contract](../../lib/agent_server/managed_output_page.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_server/operator_manifest_grant.mli` | [contract](../../lib/agent_server/operator_manifest_grant.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
+| `lib/agent_server/organization_service.mli` | [contract](../../lib/agent_server/organization_service.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/agent_server/pagination.mli` | [contract](../../lib/agent_server/pagination.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/agent_server/permission_review_service.mli` | [contract](../../lib/agent_server/permission_review_service.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
 | `lib/agent_server/permission_scheduler.mli` | [contract](../../lib/agent_server/permission_scheduler.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
@@ -399,6 +403,10 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_store/local_operator.mli` | [contract](../../lib/agent_store/local_operator.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/lock.mli` | [contract](../../lib/agent_store/lock.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/migration.mli` | [contract](../../lib/agent_store/migration.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/agent_store/organization_document.mli` | [contract](../../lib/agent_store/organization_document.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/agent_store/organization_root.mli` | [contract](../../lib/agent_store/organization_root.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/agent_store/organization_state.mli` | [contract](../../lib/agent_store/organization_state.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/agent_store/organization_store.mli` | [contract](../../lib/agent_store/organization_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/prompt_artifact_store.mli` | [contract](../../lib/agent_store/prompt_artifact_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/prompt_manifest.mli` | [contract](../../lib/agent_store/prompt_manifest.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/prompt_manifest_document.mli` | [contract](../../lib/agent_store/prompt_manifest_document.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |

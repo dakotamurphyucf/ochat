@@ -351,7 +351,7 @@ let imported_state provisional legacy =
 
 let metadata state =
   Agent_store.Session_store.Metadata.
-    { schema_version = Agent_store.Session_store.current_schema_version
+    { schema_version = Agent_store.Session_store.current_metadata_schema_version
     ; session = Agent_session.Session_state.summary state
     ; prompt_artifact =
         Agent_protocol.Id.Prompt_revision.to_string state.spec.prompt_revision_id
@@ -4010,24 +4010,52 @@ let checkpoint_entry t handle journal persistence actor =
     |> Result.map_error ~f:protocol_of_store)
 ;;
 
-let close_entry t handle journal persistence runtime writer actor capacity =
-  Exn.protect
-    ~f:(fun () ->
-      Runtime_owner.close_and_wait runtime;
+let close_actor_lock_after_failure t handle =
+  (* Only cleanup following an admitted failure uses this best-effort path.
+     Ordinary close continues to report its own release failure. *)
+  try
+    Eio.Cancel.protect (fun () ->
       ignore
-        (checkpoint_entry t handle journal persistence actor
-         : (unit, Agent_protocol.Error.t) result))
-    ~finally:(fun () ->
-      Eio.Cancel.protect (fun () ->
-        Job_capacity.close_session
-          t.job_capacity
-          ~session_id:(Agent_store.Session_store.Handle.session_id handle);
-        Agent_session.Session_actor.shutdown actor;
-        Option.iter capacity ~f:Session_capacity.release;
-        Agent_store.Commit_writer.close writer;
-        ignore
-          (Agent_store.Session_store.close_session t.store handle
-           : (unit, Agent_store.Store_error.t) result)))
+        (Agent_store.Session_store.close_session t.store handle
+         : (unit, Agent_store.Store_error.t) result))
+  with
+  | _ -> ()
+;;
+
+let close_entry t handle journal persistence runtime writer actor capacity =
+  let close_resources () =
+    Eio.Cancel.protect (fun () ->
+      Job_capacity.close_session
+        t.job_capacity
+        ~session_id:(Agent_store.Session_store.Handle.session_id handle);
+      Agent_session.Session_actor.shutdown actor;
+      Option.iter capacity ~f:Session_capacity.release;
+      Agent_store.Commit_writer.close writer)
+  in
+  let run () =
+    Runtime_owner.close_and_wait runtime;
+    ignore
+      (checkpoint_entry t handle journal persistence actor
+       : (unit, Agent_protocol.Error.t) result)
+  in
+  match run () with
+  | () ->
+    (match close_resources () with
+     | () ->
+       Eio.Cancel.protect (fun () ->
+         ignore
+           (Agent_store.Session_store.close_session t.store handle
+            : (unit, Agent_store.Store_error.t) result))
+     | exception exn ->
+       let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+       close_actor_lock_after_failure t handle;
+       Exn.raise_with_original_backtrace exn backtrace)
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    (try close_resources () with
+     | _ -> ());
+    close_actor_lock_after_failure t handle;
+    Exn.raise_with_original_backtrace exn backtrace
 ;;
 
 let close_unregistered_entry t handle runtime writer actor capacity =
@@ -4652,9 +4680,7 @@ let create_unloaded_entry
 ;;
 
 let cleanup_failed_session t handle =
-  ignore
-    (Agent_store.Session_store.close_session t.store handle
-     : (unit, Agent_store.Store_error.t) result);
+  close_actor_lock_after_failure t handle;
   ignore
     (Agent_store.Session_index.remove
        (Agent_store.Session_store.session_index t.store)
@@ -4922,9 +4948,7 @@ let create_session
   match finish_creation t handle revision profile provisional ~command_audit with
   | Ok entry -> Ok entry
   | Error _ as failure ->
-    ignore
-      (Agent_store.Session_store.close_session t.store handle
-       : (unit, Agent_store.Store_error.t) result);
+    close_actor_lock_after_failure t handle;
     failure
   | exception exn ->
     let backtrace = Stdlib.Printexc.get_raw_backtrace () in
@@ -5036,16 +5060,12 @@ let import_legacy t ~principal ~source_id ~source_path ~legacy request =
   match result with
   | Ok _ as success -> success
   | Error _ as failure ->
-    cleanup_failed_session t handle;
+    (try Eio.Cancel.protect (fun () -> cleanup_failed_session t handle) with
+     | _ -> ());
     failure
 ;;
 
-let close_recovery_handle t handle =
-  ignore
-    (Agent_store.Session_store.close_session t.store handle
-     : (unit, Agent_store.Store_error.t) result)
-;;
-
+let close_recovery_handle t handle = close_actor_lock_after_failure t handle
 let corrupt message = protocol_of_store (Agent_store.Store_error.Corrupt message)
 
 let validate_snapshot handle installed state =

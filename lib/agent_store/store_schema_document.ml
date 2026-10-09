@@ -23,7 +23,7 @@ let codec =
   D.Domain_codec.create
     ~limits
     ~kind:"store.schema"
-    ~version:1
+    ~version:2
     ~shape:(F.shape [ "created_at", D.Shape.value ])
     ~supported_semantics:[]
     ~decode
@@ -34,7 +34,18 @@ let codec =
 
 let of_document document =
   let open Result.Let_syntax in
-  let%bind document = F.upgrade document ~limits ~kind:"store.schema" in
+  let%bind step =
+    D.Conversion.Step.create ~kind:"store.schema" ~from_version:1 ~operations:[]
+  in
+  let%bind conversion =
+    D.Conversion.create
+      ~limits
+      ~targets:[ "store.schema", 2 ]
+      ~max_steps:1
+      ~max_operations:1
+      ~steps:[ step ]
+  in
+  let%bind document = D.Conversion.upgrade conversion document in
   D.Domain_codec.decode codec document
 ;;
 
@@ -44,7 +55,7 @@ let stored_version document =
   let open Result.Let_syntax in
   let version = D.Document.version document in
   let%bind () = F.expect document ~kind:"store.schema" ~version in
-  if version = 1
+  if version = 1 || version = 2
   then Result.map (of_document document) ~f:(fun _ -> version)
   else Ok version
 ;;

@@ -30,6 +30,16 @@ type t =
   | Session_detach of Session.Detach_request.t
   | Session_renew_owner of Session.Renew_owner_request.t
   | Session_start of Session.Start_request.t
+  | Project_create of Organization_request.Create.t
+  | Project_get of Organization_request.Project.Get.t
+  | Project_list of Organization_request.List.t
+  | Project_update of Organization_request.Project.Update.t
+  | Project_delete of Organization_request.Project.Delete.t
+  | Collection_create of Organization_request.Create.t
+  | Collection_get of Organization_request.Collection.Get.t
+  | Collection_list of Organization_request.List.t
+  | Collection_update of Organization_request.Collection.Update.t
+  | Collection_delete of Organization_request.Collection.Delete.t
   | Session_update_metadata of Session_metadata.Request.t
   | Session_stop of Session.Stop_request.t
   | Session_cancel_operation of Session.Cancel_operation_request.t

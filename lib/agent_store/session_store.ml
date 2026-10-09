@@ -78,14 +78,6 @@ module Handle = struct
   let idempotency_directory t = t.idempotency_directory
 end
 
-module Schema = struct
-  type t =
-    { version : int
-    ; created_at : Agent_protocol.Timestamp.t
-    }
-  [@@deriving sexp]
-end
-
 type t =
   { env : Eio_unix.Stdenv.base
   ; root : Data_root.t
@@ -93,16 +85,19 @@ type t =
   ; daemon_lock : Lock.t
   ; index : Session_index.t
   ; delegations : Delegation_store.t
+  ; organizations : Organization_store.t
   ; projection_updates : Session_projection_update.t
   ; mutable index_was_rebuilt : bool
   ; mutable closed : bool
   }
 
-let current_schema_version = 1
+let current_schema_version = 2
+let current_metadata_schema_version = 1
 let data_root t = t.root
 let server_id t = t.server_id
 let session_index t = t.index
 let delegations t = t.delegations
+let organizations t = t.organizations
 let index_was_rebuilt t = t.index_was_rebuilt
 let is_closed t = t.closed
 let eio_path t path = Eio.Path.(Eio.Stdenv.fs t.env / path)
@@ -135,35 +130,6 @@ let timestamp env =
   |> Time_ns.Span.of_sec
   |> Time_ns.of_span_since_epoch
   |> Agent_protocol.Timestamp.of_time_ns
-;;
-
-let save_schema ~env root =
-  let open Result.Let_syntax in
-  let value = Store_schema_document.{ created_at = timestamp env } in
-  let%bind document =
-    Store_schema_document.to_document (D.Extension_carrier.of_authored_value value)
-    |> F.store
-  in
-  Durable_file.replace
-    ~env
-    ~durability:Flush_file_and_directory
-    ~path:(Data_root.schema_path root)
-    (D.Document.to_string document)
-;;
-
-let load_schema ~env root =
-  let open Result.Let_syntax in
-  let%bind contents =
-    Durable_file.load_bounded
-      ~env
-      ~path:(Data_root.schema_path root)
-      ~max_bytes:(D.Limits.max_bytes Store_schema_document.limits)
-  in
-  let%bind document =
-    D.Document.decode ~limits:Store_schema_document.limits contents |> F.store
-  in
-  let%map carrier = Store_schema_document.of_document document |> F.store in
-  Schema.{ version = 1; created_at = (D.Extension_carrier.value carrier).created_at }
 ;;
 
 let save_server_id ~env root server_id =
@@ -279,9 +245,9 @@ let validate_layout ~env directory =
 let validate_metadata ?(require_durable = false) name metadata =
   let open Result.Let_syntax in
   let validate_version version =
-    if version = current_schema_version
+    if version = current_metadata_schema_version
     then Ok ()
-    else if version > current_schema_version
+    else if version > current_metadata_schema_version
     then Error (Store_error.Schema_too_new version)
     else Error (Store_error.Migration_required version)
   in
@@ -449,7 +415,7 @@ let open_index ~env root =
   index, pending
 ;;
 
-let make ~env ~root ~server_id ~daemon_lock (index, index_was_rebuilt) =
+let make ~env ~root ~server_id ~daemon_lock ~organizations (index, index_was_rebuilt) =
   { env
   ; root
   ; server_id
@@ -460,15 +426,30 @@ let make ~env ~root ~server_id ~daemon_lock (index, index_was_rebuilt) =
   ; index_was_rebuilt
   ; closed = false
   ; delegations = Delegation_store.create ~env ~data_root:root
+  ; organizations
   }
 ;;
 
-let release_on_error ~env lock result =
-  match result with
-  | Ok _ -> result
-  | Error _ as error ->
-    ignore (Lock.release ~env lock : (unit, Store_error.t) result);
-    error
+let release_on_error ~env lock ~cleanup ~f =
+  let best_effort action =
+    (* Only secondary failed-attempt cleanup is suppressed. The initialization
+       result or original exception remains the caller's primary outcome. *)
+    try Eio.Cancel.protect action with
+    | _ -> ()
+  in
+  let release () =
+    best_effort cleanup;
+    best_effort (fun () -> ignore (Lock.release ~env lock : (unit, Store_error.t) result))
+  in
+  match f () with
+  | Ok _ as result -> result
+  | Error _ as result ->
+    release ();
+    result
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    release ();
+    Exn.raise_with_original_backtrace exn backtrace
 ;;
 
 let create ~env ~sw ~root ~server_id ~process_start_identity ~lock_nonce =
@@ -487,12 +468,22 @@ let create ~env ~sw ~root ~server_id ~process_start_identity ~lock_nonce =
         ~process_start_identity
         ~nonce:lock_nonce
     in
-    release_on_error ~env daemon_lock
-    @@
-    let%bind () = save_schema ~env root in
-    let%bind () = save_server_id ~env root server_id in
-    let%map index = open_index ~env root in
-    make ~env ~root ~server_id ~daemon_lock index)
+    release_on_error
+      ~env
+      daemon_lock
+      ~cleanup:(fun () -> ())
+      ~f:(fun () ->
+        let%bind () = save_server_id ~env root server_id in
+        let%bind index = open_index ~env root in
+        let%map organizations =
+          Organization_root.create_owned
+            ~env
+            ~sw
+            ~root
+            ~server_id
+            ~created_at:(timestamp env)
+        in
+        make ~env ~root ~server_id ~daemon_lock ~organizations index))
 ;;
 
 let open_existing ~env ~sw ~root ~process_start_identity ~lock_nonce =
@@ -508,17 +499,24 @@ let open_existing ~env ~sw ~root ~process_start_identity ~lock_nonce =
       ~process_start_identity
       ~nonce:lock_nonce
   in
-  release_on_error ~env daemon_lock
-  @@
-  let%bind (_ : Schema.t) = load_schema ~env root in
-  let%map index = open_index ~env root in
-  make ~env ~root ~server_id ~daemon_lock index
+  let acquired_organizations = ref None in
+  release_on_error
+    ~env
+    daemon_lock
+    ~cleanup:(fun () -> Option.iter !acquired_organizations ~f:Organization_store.close)
+    ~f:(fun () ->
+      let%bind organizations = Organization_root.open_owned ~env ~sw ~root ~server_id in
+      acquired_organizations := Some organizations;
+      let%map index = open_index ~env root in
+      make ~env ~root ~server_id ~daemon_lock ~organizations index)
 ;;
 
 let close t =
   if t.closed
   then Ok ()
-  else Result.map (Lock.release ~env:t.env t.daemon_lock) ~f:(fun () -> t.closed <- true)
+  else (
+    Organization_store.close t.organizations;
+    Result.map (Lock.release ~env:t.env t.daemon_lock) ~f:(fun () -> t.closed <- true))
 ;;
 
 let metadata_document carrier =

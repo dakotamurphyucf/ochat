@@ -51,6 +51,22 @@ type committed =
       ; operation_id : Id.Operation.t option
       ; mutation : Mutation_result.t
       }
+  | Project_mutation of
+      { project_id : Id.Project.t
+      ; revision : int64
+      }
+  | Deleted_project of
+      { project_id : Id.Project.t
+      ; revision : int64
+      }
+  | Collection_mutation of
+      { collection_id : Id.Collection.t
+      ; revision : int64
+      }
+  | Deleted_collection of
+      { collection_id : Id.Collection.t
+      ; revision : int64
+      }
   | Deleted_session of Id.Session.t
   | Permission_response of Id.Permission.t * Mutation_result.t
   | Revoked_grant of Id.Grant.t * Mutation_result.t
@@ -115,6 +131,30 @@ let committed_to_json = function
       [ "kind", `String "attached_session"
       ; "session_id", Id.Session.to_json id
       ; "recovery", `String "reattach_required"
+      ]
+  | Project_mutation { project_id; revision } ->
+    `Object
+      [ "kind", `String "project_mutation"
+      ; "project_id", Id.Project.to_json project_id
+      ; "revision", `Number (Core.Int64.to_string revision)
+      ]
+  | Deleted_project { project_id; revision } ->
+    `Object
+      [ "kind", `String "deleted_project"
+      ; "project_id", Id.Project.to_json project_id
+      ; "revision", `Number (Core.Int64.to_string revision)
+      ]
+  | Collection_mutation { collection_id; revision } ->
+    `Object
+      [ "kind", `String "collection_mutation"
+      ; "collection_id", Id.Collection.to_json collection_id
+      ; "revision", `Number (Core.Int64.to_string revision)
+      ]
+  | Deleted_collection { collection_id; revision } ->
+    `Object
+      [ "kind", `String "deleted_collection"
+      ; "collection_id", Id.Collection.to_json collection_id
+      ; "revision", `Number (Core.Int64.to_string revision)
       ]
   | Deleted_session id ->
     `Object [ "kind", `String "deleted_session"; "session_id", Id.Session.to_json id ]
@@ -188,6 +228,46 @@ let committed_of_json json =
     if not (String.equal recovery "reattach_required")
     then Error (Protocol_error.invalid_request "invalid attachment receipt recovery")
     else session () |> Result.map ~f:(fun id -> Attached_session id)
+  | "project_mutation" ->
+    let%bind project_id = Json_codec.required_as fields "project_id" Id.Project.of_json in
+    let%map revision =
+      Json_codec.required_as
+        fields
+        "revision"
+        (Json_codec.bounded_int64 ~min:0L ~max:Core.Int64.max_value)
+    in
+    Project_mutation { project_id; revision }
+  | "deleted_project" ->
+    let%bind project_id = Json_codec.required_as fields "project_id" Id.Project.of_json in
+    let%map revision =
+      Json_codec.required_as
+        fields
+        "revision"
+        (Json_codec.bounded_int64 ~min:0L ~max:Core.Int64.max_value)
+    in
+    Deleted_project { project_id; revision }
+  | "collection_mutation" ->
+    let%bind collection_id =
+      Json_codec.required_as fields "collection_id" Id.Collection.of_json
+    in
+    let%map revision =
+      Json_codec.required_as
+        fields
+        "revision"
+        (Json_codec.bounded_int64 ~min:0L ~max:Core.Int64.max_value)
+    in
+    Collection_mutation { collection_id; revision }
+  | "deleted_collection" ->
+    let%bind collection_id =
+      Json_codec.required_as fields "collection_id" Id.Collection.of_json
+    in
+    let%map revision =
+      Json_codec.required_as
+        fields
+        "revision"
+        (Json_codec.bounded_int64 ~min:0L ~max:Core.Int64.max_value)
+    in
+    Deleted_collection { collection_id; revision }
   | "deleted_session" -> session () |> Result.map ~f:(fun id -> Deleted_session id)
   | "session_mutation" ->
     let%bind session_id = session () in

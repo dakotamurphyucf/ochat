@@ -641,12 +641,20 @@ let architecture_methods =
   ; "prompt.get"
   ; "workspace.list"
   ; "workspace.get"
+  ; "project.create"
+  ; "project.get"
+  ; "project.list"
+  ; "project.update"
+  ; "project.delete"
+  ; "collection.create"
+  ; "collection.get"
+  ; "collection.list"
+  ; "collection.update"
+  ; "collection.delete"
   ; "blob.read"
   ; "session.create"
   ; "session.list"
   ; "session.get"
-  ; "session.configuration_get"
-  ; "session.configuration_update"
   ; "session.inference_summary"
   ; "session.inference_observations"
   ; "session.attach"
@@ -654,6 +662,8 @@ let architecture_methods =
   ; "session.renew_owner"
   ; "session.start"
   ; "session.update_metadata"
+  ; "session.configuration_get"
+  ; "session.configuration_update"
   ; "session.stop"
   ; "session.cancel_operation"
   ; "session.send_message"
@@ -692,7 +702,7 @@ let%expect_test "every architecture method has request and result dispatch" =
           (List.equal String.equal expected (normalize Method_result.supported_methods)
            : bool)
       }];
-  [%expect {| ((method_count 53) (requests true) (results true)) |}]
+  [%expect {| ((method_count 63) (requests true) (results true)) |}]
 ;;
 
 let%expect_test "history deletion requires stable ID, revision and idempotency" =

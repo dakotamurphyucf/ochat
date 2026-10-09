@@ -121,11 +121,39 @@ let acquire ~env ~sw ~path ~server_id ~process_start_identity ~nonce =
 let release_eio ~env t =
   if not t.released
   then (
-    Eio.File.truncate t.file Optint.Int63.zero;
-    Eio.File.sync t.file;
-    ignore (set_lock ~env t.file Core_unix.Flock_command.unlock : bool);
-    close_file t.file;
-    t.released <- true)
+    let capture f =
+      try Ok (f ()) with
+      | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+    in
+    let owner =
+      capture (fun () ->
+        Eio.File.truncate t.file Optint.Int63.zero;
+        Eio.File.sync t.file)
+    in
+    let cleanup =
+      capture (fun () ->
+        Eio.Cancel.protect (fun () ->
+          let unlocked =
+            capture (fun () ->
+              ignore (set_lock ~env t.file Core_unix.Flock_command.unlock : bool))
+          in
+          let closed = capture (fun () -> Eio.Resource.close t.file) in
+          t.released <- true;
+          match unlocked with
+          | Error _ -> unlocked
+          | Ok () -> closed))
+    in
+    let outcome =
+      match owner with
+      | Error _ -> owner
+      | Ok () ->
+        (match cleanup with
+         | Ok result -> result
+         | Error _ as error -> error)
+    in
+    match outcome with
+    | Ok () -> ()
+    | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace)
 ;;
 
 let release ~env t =
@@ -133,5 +161,6 @@ let release ~env t =
     release_eio ~env t;
     Ok ()
   with
-  | exn -> Error (Store_error.of_exn ~operation:"release lock" ~path:t.path exn)
+  | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+    Error (Store_error.of_exn ~operation:"release lock" ~path:t.path exn)
 ;;

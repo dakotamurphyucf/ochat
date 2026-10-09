@@ -40,13 +40,19 @@ end
 
 type t
 
+(** Root envelope version; independent of session side metadata and state versions. *)
 val current_schema_version : int
+
+val current_metadata_schema_version : int
 val data_root : t -> Data_root.t
 val server_id : t -> Agent_protocol.Id.Server.t
 val session_index : t -> Session_index.t
 
 (** Shared private child-creation ledger under this store's exclusive ownership. *)
 val delegations : t -> Delegation_store.t
+
+(** Host organization under this root's exclusive ownership; closed with store. *)
+val organizations : t -> Organization_store.t
 
 (** [index_was_rebuilt t] reports that a missing index was reconstructed and
     eager recovery remains required. Scheduling hints are unknown: the daemon
