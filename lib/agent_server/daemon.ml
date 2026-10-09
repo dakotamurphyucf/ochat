@@ -1440,6 +1440,7 @@ let shutdown t =
     Schedule_scheduler.close t.schedule_scheduler;
     Maintenance.close t.maintenance;
     Config_watcher.close t.config_watcher;
+    Start_scheduler.close_and_wait t.start_scheduler;
     shutdown_sessions t;
     Option.iter t.provider_operator ~f:Provider_operator_port.close;
     Agent_store.Session_store.close t.store

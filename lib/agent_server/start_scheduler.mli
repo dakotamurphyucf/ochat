@@ -23,6 +23,15 @@ val start
   -> t
 
 val close : t -> unit
+
+(** Close admission, cancel this service's actual owned fiber, and wait for its
+    callback/finalizers to finish before retiring registry actors. Disabled services
+    finish immediately. Joining is cancellation-protected; callback cancellation
+    remains cancellation and must never become a permanent startup failure. Existing
+    protected startup sections must finish before the callback can acknowledge
+    cancellation; this join does not impose an independent timeout on them. *)
+val close_and_wait : t -> unit
+
 val is_running : t -> bool
 
 (** [seed_recovered registry queue] reconstructs queue tickets from durable

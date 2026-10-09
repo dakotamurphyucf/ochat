@@ -6424,9 +6424,9 @@ let initialize_generated_layout t state ~staging_directory =
         ~entry:(index_entry state))
 ;;
 
-let with_generated_creation_lock t f =
+let with_generated_creation_lock ?(protect = true) t f =
   let outcome =
-    Eio.Mutex.use_rw ~protect:true t.generated_creation_mutex (fun () ->
+    Eio.Mutex.use_rw ~protect t.generated_creation_mutex (fun () ->
       try Ok (f ()) with
       | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
   in
@@ -6727,7 +6727,7 @@ let resume_generated_initial_start t entry =
 ;;
 
 let resume_generated_initial_starts t =
-  with_generated_creation_lock t (fun () ->
+  with_generated_creation_lock ~protect:false t (fun () ->
     match Agent_store.Session_store.list_sessions_checked t.store with
     | Error _ -> () (* Failed projection availability grants no automatic start. *)
     | Ok entries ->
@@ -6808,7 +6808,7 @@ let resume_selected_initial_starts t =
       let%bind selected = ancestry_selected 0 reference in
       if selected then resume_generated_initial_start t entry else Ok ()
   in
-  with_generated_creation_lock t (fun () ->
+  with_generated_creation_lock ~protect:false t (fun () ->
     List.iter (Session_registry.entries t.registry) ~f:(fun entry ->
       ignore (resume entry : (unit, Agent_protocol.Error.t) Result.t)))
 ;;

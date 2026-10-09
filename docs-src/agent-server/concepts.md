@@ -77,6 +77,13 @@ Durable recovery preserves recorded state and classifies interrupted work; it
 does not preserve a running process. Clients must distinguish detach, explicit
 session controls and host shutdown in their own interface.
 
+Host shutdown closes scheduler admissions and cancels and joins the initial-start
+scheduler before retiring session actors. Cancellation preserves an unfinished
+durable start intent rather than recording a permanent startup failure caused by
+actor retirement. Protected startup and ownership cleanup must finish before the
+join completes; this ordering does not impose a separate shutdown timeout on
+those protected sections.
+
 ## Prompts, workspaces, and authority
 
 A prompt catalog entry names a ChatMD source and an allowed set of workspace
