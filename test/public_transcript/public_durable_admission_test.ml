@@ -199,3 +199,64 @@ let%expect_test "whole public results validate native children anchors and outer
     (true true)
     |}]
 ;;
+
+let%expect_test "snapshot decode preserves constructor checks and normalized bounds" =
+  let module S = P.Public.Snapshot in
+  let fields = S.fields snapshot in
+  let rejected = function
+    | Error { P.Error.code = Invalid_request; _ } -> true
+    | Error _ | Ok _ -> false
+  in
+  let bad_session = { fields with session = { session with generation = -1 } } in
+  let wire_with name value =
+    match S.to_json snapshot with
+    | `Object values ->
+      `Object ((name, value) :: List.Assoc.remove values name ~equal:String.equal)
+    | _ -> assert false
+  in
+  let invalid_session_wire =
+    wire_with "session" (P.Session.to_json bad_session.session)
+  in
+  let future = { fields with extension_status = [ status 1 ] } in
+  let future_wire =
+    wire_with "extension_status" (`Array [ P.Extension_status.to_json (status 1) ])
+  in
+  let mismatched = { fields with revision = 2L } in
+  let missing_defaults =
+    match S.to_json snapshot with
+    | `Object values ->
+      `Object
+        (List.filter values ~f:(fun (name, _) ->
+           not
+             (List.mem
+                [ "archived_revisions"; "extension_status" ]
+                name
+                ~equal:String.equal)))
+    | _ -> assert false
+  in
+  let normalized = S.of_json missing_defaults |> ok in
+  let oversized_normalization =
+    match missing_defaults with
+    | `Object values ->
+      let empty = `Object (("halt_reason", `String "") :: values) in
+      let padding = (16 * 1024 * 1024) - String.length (Jsonaf.to_string empty) in
+      `Object (("halt_reason", `String (String.make padding 'x')) :: values)
+    | _ -> assert false
+  in
+  print_s
+    [%sexp
+      (rejected (S.create bad_session) && rejected (S.of_json invalid_session_wire)
+       : bool)
+    , (rejected (S.create future) && rejected (S.of_json future_wire) : bool)
+    , (rejected (S.create mismatched)
+       && rejected (S.of_json (wire_with "revision" (`Number "2")))
+       : bool)
+    , (Jsonaf.exactly_equal (S.to_json normalized) (S.to_json snapshot) : bool)
+    , (Result.is_ok
+         (Document_schema.Json.validate
+            ~limits:Transcript.Admission.default
+            oversized_normalization)
+       : bool)
+    , (rejected (S.of_json oversized_normalization) : bool)];
+  [%expect {| (true true true true true true) |}]
+;;
