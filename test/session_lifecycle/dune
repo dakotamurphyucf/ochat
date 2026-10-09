@@ -1,6 +1,6 @@
 (library
  (name session_lifecycle_tests)
- (modules lifecycle_service_tests registry_lifecycle_tests lifecycle_faults)
+ (modules lifecycle_service_tests registry_lifecycle_tests lifecycle_faults cold_reader_cleanup_tests)
  (libraries ochat.inference_runtime ochat.operator_authorization agent_server_test_support core core_unix digestif eio eio_main mirage-crypto-rng.unix ochat.agent_protocol ochat.agent_client ochat.agent_server ochat.agent_session ochat.agent_store chat_response chatmd ochat.chatmd_shell_spec)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))

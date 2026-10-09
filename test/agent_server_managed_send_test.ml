@@ -32,9 +32,10 @@ let field json name = Jsonaf.member_exn name json
 let text json name = field json name |> Jsonaf.string_exn
 
 let state daemon id =
-  R.load (D.registry daemon) id
-  |> protocol_ok
-  |> fun (e : R.entry) -> A.state e.actor |> protocol_ok
+  (* Diagnostic observation borrows the checked owner; it must not compete with
+     maintenance's lifecycle eligibility reservation or implicitly load actors.
+     Activation remains explicit through the fixture's attachment operations. *)
+  R.read_state (D.registry daemon) ~authorize:(fun _ -> Ok ()) id |> protocol_ok
 ;;
 
 let assert_same_state before after ~context =

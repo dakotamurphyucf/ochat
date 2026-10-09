@@ -256,15 +256,16 @@ val with_recovery_owner
     This is not a fresh-session remove or lifecycle publication. *)
 val rollback_recovered : t -> primary:Cleanup_failure.t -> entry list -> unit
 
-(** Retained projection rebuilding borrows no actor. Close exact Handle preserving
-    reconciliation primary; failed release joins the existing registry cleanup
-    ownership before the exclusive startup owner can release its Store. *)
+(** Retained projection rebuilding and immutable session reads borrow no actor.
+    Close the exact Handle while preserving the primary failure; failed release
+    joins the existing registry cleanup ownership before its owner can release
+    the Store. *)
 val with_recovery_handle
   :  t
   -> store:Agent_store.Session_store.t
   -> Agent_store.Session_store.Handle.t
-  -> (unit -> (unit, Agent_protocol.Error.t) Result.t)
-  -> (unit, Agent_protocol.Error.t) Result.t
+  -> (unit -> ('a, Agent_protocol.Error.t) Result.t)
+  -> ('a, Agent_protocol.Error.t) Result.t
 
 (** Pure ownership check under a short registry snapshot: true only when failed
     cleanup retains this exact Handle capability. It does not grant admission. *)

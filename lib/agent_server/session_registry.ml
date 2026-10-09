@@ -415,13 +415,13 @@ let with_recovery_handle t ~store handle f =
   let owner = Cleanup_owner.handle ~store handle in
   let session_id = Agent_store.Session_store.Handle.session_id handle in
   match f () with
-  | Ok () ->
+  | Ok value ->
     (match cleanup_owner owner with
-     | Ok () -> Ok ()
-     | Error error as failure ->
+     | Ok () -> Ok value
+     | Error error ->
        let diagnostic = Cleanup_failure.rejected error in
        retain_failure t ~session_id ~owner ~primary:diagnostic ~failure:diagnostic;
-       failure
+       Error error
      | exception exn ->
        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
        let diagnostic = Cleanup_failure.raised exn backtrace in

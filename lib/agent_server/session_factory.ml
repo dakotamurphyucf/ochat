@@ -5871,24 +5871,8 @@ let read_session t index_entry =
         session_id
       |> Result.map_error ~f:protocol_of_store
     in
-    let close () =
-      Eio.Cancel.protect (fun () ->
-        Agent_store.Session_store.close_session t.store handle)
-    in
-    let read () = read_owned_session t handle in
-    match read () with
-    | Ok state ->
-      let%map () = close () |> Result.map_error ~f:protocol_of_store in
-      state
-    | Error _ as failure ->
-      (try ignore (close () : (unit, Agent_store.Store_error.t) Result.t) with
-       | _ -> ());
-      failure
-    | exception exn ->
-      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-      (try ignore (close () : (unit, Agent_store.Store_error.t) Result.t) with
-       | _ -> ());
-      Exn.raise_with_original_backtrace exn backtrace)
+    Session_registry.with_recovery_handle t.registry ~store:t.store handle (fun () ->
+      read_owned_session t handle))
 ;;
 
 let recover_index_entry t index_entry =
