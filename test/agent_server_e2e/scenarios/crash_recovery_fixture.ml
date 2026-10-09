@@ -194,7 +194,7 @@ let normalized_snapshot
   }
 ;;
 
-let assert_snapshot
+let assert_retained_snapshot
       (expected : Agent_protocol.Public.Snapshot.Fields.t)
       (actual : Agent_protocol.Public.Snapshot.Fields.t)
   =
@@ -208,12 +208,17 @@ let assert_snapshot
     [%sexp_of: Agent_protocol.Public.Snapshot.Fields.t]
     expected
     (normalized_snapshot expected actual);
-  require Int64.(actual.revision > expected.revision) "recovery revision did not advance";
+  require Int64.(actual.revision >= expected.revision) "retained revision regressed";
   require
     (* Recovery can commit attachment/history reservations without publishing a
        new event when the stopped session's observable state is unchanged. *)
     Int64.(actual.latest_event_sequence >= expected.latest_event_sequence)
     "recovery event sequence regressed"
+;;
+
+let assert_snapshot expected actual =
+  assert_retained_snapshot expected actual;
+  require Int64.(actual.revision > expected.revision) "recovery revision did not advance"
 ;;
 
 let wait_ready env daemon =

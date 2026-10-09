@@ -102,7 +102,7 @@ let run_child ?(lose_ack = false) env ~root ~boundary ~mode ~recover =
               ~prefix:(Filename.concat root "data/sessions/.creating-")
             && String.is_suffix path ~suffix:".bin"
           | _ -> String.is_prefix path ~prefix:ledger_prefix)
-        ~reached:(fun _ ->
+        ~reached:(fun path ->
           Int.incr writes;
           let target =
             match boundary with
@@ -115,7 +115,11 @@ let run_child ?(lose_ack = false) env ~root ~boundary ~mode ~recover =
           in
           if Int.equal target !writes
           then (
-            if lose_ack then failwith "injected authored creation acknowledgement loss";
+            if lose_ack
+            then
+              raise
+                (Core_unix.Unix_error
+                   (EIO, "injected authored creation acknowledgement loss", path));
             Eio.Flow.copy_string "authored-creation-boundary\n" (Eio.Stdenv.stdout env);
             Eio.Fiber.await_cancel ()))
   in

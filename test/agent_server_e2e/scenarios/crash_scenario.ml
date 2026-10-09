@@ -291,10 +291,26 @@ let test_sigkill_committed_session env environment =
         Daemon_process.signal first Stdlib.Sys.sigkill;
         Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
           await_daemon_kill env first);
-        F.with_daemon env fixture (fun client ->
-          F.assert_snapshot expected (F.get client expected.session.id));
-        F.with_daemon env fixture (fun client ->
-          F.assert_snapshot expected (F.get client expected.session.id))))
+        let journal = F.current_journal env fixture expected.session.id in
+        let committed = F.read env journal in
+        let previous_counters = ref None in
+        let inspect () =
+          F.with_daemon env fixture (fun client ->
+            let actual = F.get client expected.session.id in
+            F.assert_retained_snapshot expected actual;
+            let counters = actual.revision, actual.latest_event_sequence in
+            Option.iter !previous_counters ~f:(fun (revision, sequence) ->
+              F.require
+                (Int64.equal revision actual.revision
+                 && Int64.equal sequence actual.latest_event_sequence)
+                "cold physical reopening advanced recorded counters");
+            previous_counters := Some counters);
+          F.require
+            (String.equal committed (F.read env journal))
+            "cold acknowledged-session inspection mutated the journal"
+        in
+        inspect ();
+        inspect ()))
 ;;
 
 let test_unknown_outcome env _environment =

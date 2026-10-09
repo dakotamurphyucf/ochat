@@ -144,7 +144,9 @@ let%expect_test
       }
     (fun env _ embedded ->
        let wait count =
-         Background_shell_tests.wait env (fun () ->
+         (* Full transcript validation shares CPU with the integration suite;
+            this bounds liveness rather than defining a five-second latency target. *)
+         Background_shell_tests.wait ~timeout:15. env (fun () ->
            let current = F.snapshot embedded in
            !requests = count && Option.is_none current.session.active_operation)
        in

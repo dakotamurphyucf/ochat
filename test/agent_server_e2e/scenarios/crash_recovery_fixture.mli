@@ -51,9 +51,17 @@ val await_notifications
 
 val require_equal : string -> ('a -> Sexp.t) -> 'a -> 'a -> unit
 
+(** Complete acknowledged-state oracle for nonactivating retained reads. Only
+    already recorded timestamp/revision/event counters may differ; counters must
+    not regress and the lifecycle anchor must match the actual session. *)
+val assert_retained_snapshot
+  :  Agent_protocol.Public.Snapshot.Fields.t
+  -> Agent_protocol.Public.Snapshot.Fields.t
+  -> unit
+
 (** [assert_snapshot expected actual] compares every projected field, including
     history IDs, payloads, order, effective history, permissions, jobs and schedules.
-    Only recovery's update timestamp and advancing revision/event counters differ. *)
+    Recovery must advance the session revision; event counters must not regress. *)
 val assert_snapshot
   :  Agent_protocol.Public.Snapshot.Fields.t
   -> Agent_protocol.Public.Snapshot.Fields.t

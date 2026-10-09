@@ -942,7 +942,7 @@ let pending_create connection =
     Agent_protocol.Command.Session_create
       (create_request connection ~key:"idempotency:pending")
   in
-  match request connection command with
+  match request_public connection command with
   | Session_create created -> command, created.session.id
   | _ -> fail "pending fixture create returned the wrong result variant"
 ;;
@@ -964,24 +964,42 @@ let create_then_crash env fixture =
     created)
 ;;
 
-let rec replace_success replaced = function
-  | Sexp.List [ Atom "outcome"; List (Atom "Success" :: _) ] ->
-    Int.incr replaced;
-    Sexp.List [ Atom "outcome"; Atom "Pending" ]
-  | Sexp.List values -> Sexp.List (List.map values ~f:(replace_success replaced))
-  | Atom _ as atom -> atom
-;;
-
 let force_pending_receipt environment fixture =
   let receipt_path =
     Filename.concat (Config_fixture.data_dir fixture) "indexes/idempotency.sexp"
   in
   let file = path environment receipt_path in
-  let sexp = Eio.Path.load file |> Sexp.of_string in
+  let json = Eio.Path.load file |> Jsonaf.of_string in
   let replaced = ref 0 in
-  let pending = replace_success replaced sexp in
+  let replace_field json name f =
+    match json with
+    | `Object fields ->
+      require
+        (List.Assoc.mem fields ~equal:String.equal name)
+        "pending fixture lacks a required current document field";
+      `Object
+        (List.map fields ~f:(fun (key, value) ->
+           if String.equal key name then key, f value else key, value))
+    | _ -> fail "pending fixture expected a current document object"
+  in
+  let pending =
+    replace_field json "payload" (fun payload ->
+      replace_field payload "records" (function
+        | `Array records ->
+          `Array
+            (List.map records ~f:(fun record ->
+               replace_field record "outcome" (fun outcome ->
+                 match Jsonaf.member "tag" outcome with
+                 | Some (`String "success") ->
+                   Int.incr replaced;
+                   `Object [ "tag", `String "pending" ]
+                 | Some (`String ("pending" | "failure")) -> outcome
+                 | Some (`String _) | Some _ | None ->
+                   fail "pending fixture found an unsupported outcome tag")))
+        | _ -> fail "pending fixture expected current receipt records"))
+  in
   require (Int.equal !replaced 1) "pending fixture did not find one successful receipt";
-  Eio.Path.save ~create:(`Or_truncate 0o600) file (Sexp.to_string_mach pending)
+  Eio.Path.save ~create:(`Or_truncate 0o600) file (Jsonaf.to_string pending)
 ;;
 
 let session_count connection session_id =
