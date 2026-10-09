@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
+import { startProgressMonitor } from "./framework-progress.mjs";
 const tier = process.argv[2];
 // Match the concurrency used for local qualification. Several persistence
 // scenarios do CPU work inside bounded foreground operations.
@@ -33,11 +34,17 @@ const report = {
   result: "fail",
 };
 const log = fs.openSync(`.ci-evidence/${tier}.log`, "w");
-const result = spawnSync("dune", command, {
-  stdio: ["ignore", log, log],
-  timeout: timeoutMs,
-});
-fs.closeSync(log);
+const monitor = tier === "e2e" ? startProgressMonitor(`.ci-evidence/${tier}.log`) : undefined;
+let result;
+try {
+  result = spawnSync("dune", command, {
+    stdio: ["ignore", log, log],
+    timeout: timeoutMs,
+  });
+} finally {
+  fs.closeSync(log);
+  await monitor?.close();
+}
 // Retain the build log under the same artifact root rather than relying on a
 // separate upload glob. Missing diagnostics must not hide the primary result.
 const duneLog = path.join(process.env.DUNE_BUILD_DIR ?? "_build", "log");

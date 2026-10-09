@@ -6,20 +6,25 @@ type t =
   ; mutable secret_variants : string list
   }
 
-let secret_variants secrets =
-  List.concat_map secrets ~f:(fun secret -> [ secret; Base64.encode_exn secret ])
-  |> List.filter ~f:(Fn.non String.is_empty)
+let deduplicate_variants variants =
+  List.filter variants ~f:(Fn.non String.is_empty)
   |> List.dedup_and_sort ~compare:(fun a b ->
     match Int.compare (String.length b) (String.length a) with
     | 0 -> String.compare a b
     | order -> order)
 ;;
 
+let secret_variants secrets =
+  List.concat_map secrets ~f:(fun secret -> [ secret; Base64.encode_exn secret ])
+  |> deduplicate_variants
+;;
+
 let create ~fs ~root ~secrets = { fs; root; secret_variants = secret_variants secrets }
 let path t native_path = Eio.Path.(t.fs / native_path)
 
 let register_secret t secret =
-  t.secret_variants <- secret_variants (secret :: t.secret_variants)
+  t.secret_variants
+  <- deduplicate_variants (secret_variants [ secret ] @ t.secret_variants)
 ;;
 
 let redact t contents =
