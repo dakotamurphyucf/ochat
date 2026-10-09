@@ -40,3 +40,10 @@ let logout connection request =
   | Ok _ -> unexpected "provider.logout"
   | Error _ as failure -> failure
 ;;
+
+let select_profile connection request =
+  match Connection.request_without_history connection (Provider_select request) with
+  | Ok (Provider_select result) -> Ok result
+  | Ok _ -> unexpected "provider.select"
+  | Error _ as failure -> failure
+;;

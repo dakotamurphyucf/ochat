@@ -158,3 +158,73 @@ let%expect_test "enumeration bounds and failures never return a successful prefi
     , (same_failure : bool)];
   [%expect {| (true true true true true true) |}]
 ;;
+
+let%expect_test
+    "host descriptor lookup preserves IDs, availability and current typed errors"
+  =
+  Eio_main.run (fun _ ->
+    let prompt =
+      { (prompt "remote") with
+        availability = Unavailable { reason = "host prompt disabled" }
+      }
+    in
+    let workspace =
+      { (workspace "remote") with
+        availability = Unavailable { reason = "host workspace unavailable" }
+      }
+    in
+    let refusal = ref None in
+    let calls = ref 0 in
+    let connection =
+      connection ~request:(fun command ->
+        incr calls;
+        match !refusal with
+        | Some code ->
+          Error (P.Error.create code ~message:"current host decision" ~retryable:false ())
+        | None ->
+          (match command with
+           | P.Command.Prompt_get request ->
+             assert (P.Id.Prompt_definition.equal request.prompt_id prompt.id);
+             public (Prompt_get prompt)
+           | Workspace_get request ->
+             assert (P.Id.Workspace_definition.equal request.workspace_id workspace.id);
+             public (Workspace_get workspace)
+           | _ -> failwith "descriptor lookup must not enumerate or attach"))
+    in
+    let owner = C.Connection.claim_notifications connection |> checked in
+    Exn.protect
+      ~finally:(fun () ->
+        C.Connection.release_notifications owner;
+        C.Connection.close connection)
+      ~f:(fun () ->
+        let selected_prompt = C.Catalog.get_prompt connection prompt.id |> checked in
+        let selected_workspace =
+          C.Catalog.get_workspace connection workspace.id |> checked
+        in
+        assert (P.Id.Prompt_definition.equal selected_prompt.id prompt.id);
+        assert (P.Id.Workspace_definition.equal selected_workspace.id workspace.id);
+        assert (
+          P.Prompt.equal_availability selected_prompt.availability prompt.availability);
+        assert (
+          P.Workspace.equal_availability
+            selected_workspace.availability
+            workspace.availability);
+        let decision result =
+          match result with
+          | Ok _ -> failwith "host refusal must remain an error"
+          | Error (error : P.Error.t) ->
+            assert (String.equal error.message "current host decision");
+            error.code
+        in
+        refusal := Some Permission_denied;
+        let permission = decision (C.Catalog.get_workspace connection workspace.id) in
+        refusal := Some Workspace_not_found;
+        let missing = decision (C.Catalog.get_workspace connection workspace.id) in
+        refusal := Some Method_not_found;
+        let unsupported = decision (C.Catalog.get_prompt connection prompt.id) in
+        print_s
+          [%sexp
+            ((permission, missing, unsupported, !calls)
+             : P.Error.code * P.Error.code * P.Error.code * int)]));
+  [%expect {| (Permission_denied Workspace_not_found Method_not_found 5) |}]
+;;

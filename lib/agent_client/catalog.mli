@@ -48,3 +48,17 @@ val resolve_workspace
   :  Connection.t
   -> name:string
   -> (Agent_protocol.Workspace.t, Agent_protocol.Error.t) result
+
+(** Lookup a current host-admitted descriptor by its stable definition ID.
+    Returned summaries contain no native paths or uploaded client sources.
+    Availability and permission/not-found/unsupported errors remain host facts;
+    these reads do not attach, activate, enumerate, or consume notifications. *)
+val get_prompt
+  :  Connection.t
+  -> Agent_protocol.Id.Prompt_definition.t
+  -> (Agent_protocol.Prompt.t, Agent_protocol.Error.t) result
+
+val get_workspace
+  :  Connection.t
+  -> Agent_protocol.Id.Workspace_definition.t
+  -> (Agent_protocol.Workspace.t, Agent_protocol.Error.t) result

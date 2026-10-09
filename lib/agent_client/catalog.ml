@@ -76,3 +76,19 @@ let resolve_workspace connection ~name =
     find_unique values ~name ~kind:"workspace" ~name_of:(fun value ->
       value.Agent_protocol.Workspace.name))
 ;;
+
+let get_prompt connection prompt_id =
+  match Connection.request_without_history connection (Prompt_get { prompt_id }) with
+  | Ok (Prompt_get result) -> Ok result
+  | Ok _ -> Error (invalid "unexpected prompt.get result")
+  | Error _ as failure -> failure
+;;
+
+let get_workspace connection workspace_id =
+  match
+    Connection.request_without_history connection (Workspace_get { workspace_id })
+  with
+  | Ok (Workspace_get result) -> Ok result
+  | Ok _ -> Error (invalid "unexpected workspace.get result")
+  | Error _ as failure -> failure
+;;

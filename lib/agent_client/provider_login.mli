@@ -30,3 +30,13 @@ val logout
   :  Connection.t
   -> Agent_protocol.Provider_operator.Logout_request.t
   -> (Agent_protocol.Provider_operator.Logout_result.t, Agent_protocol.Error.t) result
+
+(** Select the host's default profile using the exact selection revision from
+    [status], not the setup or credential revision. The caller supplies the
+    original idempotency key; lost replies remain in the same Connection for
+    ordinary receipt reconciliation. No credential forwarding or session
+    configuration/ownership change is implied by selection. *)
+val select_profile
+  :  Connection.t
+  -> Agent_protocol.Provider_operator.Select_request.t
+  -> (Agent_protocol.Provider_operator.Selection_result.t, Agent_protocol.Error.t) result
