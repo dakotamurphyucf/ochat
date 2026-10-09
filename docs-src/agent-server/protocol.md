@@ -320,6 +320,15 @@ attachment/lease conflicts, stale revision, capacity/resource limit, snapshot
 required, persistence failure and server draining. Treat `retryable` as guidance,
 not permission to retry a changed or irreversible operation blindly.
 
+Generic writable-session mutations resolve the current session owner and validate
+its attachment before claiming a fresh key. A retryable lifecycle-reservation
+conflict at this admission stage leaves the receipt `missing`; retry the exact
+original command after the reservation is released. After a key becomes `pending`,
+terminal failures remain replayable and uncertain outcomes suppress duplicate
+execution. The retryable flag does not erase an admitted receipt or permit a new
+key to bypass an unresolved outcome. Specialized lifecycle, run, history and
+pending-input controls retain their documented admission and recovery protocols.
+
 For methods with `idempotency_key`, generate a new key for each new mutation and
 retain it until the outcome is resolved. Retry the same payload/key after an
 uncertain reply. A different payload under the same key is a conflict. The store

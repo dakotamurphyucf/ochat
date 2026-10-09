@@ -497,7 +497,7 @@ let store_outcome t key digest result =
   |> Result.bind ~f:(fun _ -> result)
 ;;
 
-let with_idempotency_owner t context command identity ~execute ~complete =
+let with_idempotency_owner t context command identity ~prepare ~complete =
   Eio.Mutex.use_rw ~protect:true t.idempotency_mutex (fun () ->
     let open Result.Let_syntax in
     let principal = Connection_context.principal context in
@@ -510,6 +510,7 @@ let with_idempotency_owner t context command identity ~execute ~complete =
     | Conflict _ ->
       Error (error Idempotency_conflict "idempotency key was used for another request")
     | Missing ->
+      let%bind execute = prepare () in
       let%bind _ = pending_record t key digest identity.retention in
       let%bind command_audit =
         Agent_store.Idempotency_store.Command_audit.
@@ -526,13 +527,13 @@ let with_idempotency_owner t context command identity ~execute ~complete =
       complete ~key ~digest (execute (Some command_audit)))
 ;;
 
-let handle_idempotent t context command identity execute =
+let handle_idempotent t context command identity ~prepare =
   with_idempotency_owner
     t
     context
     command
     identity
-    ~execute
+    ~prepare
     ~complete:(fun ~key ~digest result -> store_outcome t key digest result)
 ;;
 
@@ -1363,17 +1364,48 @@ let handle_session_renew_owner t context command_audit request =
   Agent_protocol.Method_result.Session_renew_owner (lease, mutation session)
 ;;
 
-let with_writer t context ~session_id ~attachment_id f =
+(* Borrowed only by one fresh command execution; never cached. Physical identity
+   deliberately checks the actual registry-owned Entry capability after yielding
+   Pending persistence, rather than equality of its session projection. *)
+module Prepared_writer = struct
+  type t =
+    { entry : Session_registry.entry
+    ; session_id : Agent_protocol.Id.Session.t
+    ; attachment_id : Agent_protocol.Id.Attachment.t
+    }
+
+  let create entry ~session_id ~attachment_id = { entry; session_id; attachment_id }
+
+  let entry t ~registry ~session_id ~attachment_id =
+    if
+      (not (Agent_protocol.Id.Session.equal t.session_id session_id))
+      || not (Agent_protocol.Id.Attachment.equal t.attachment_id attachment_id)
+    then Error (error Invalid_state "prepared writer does not match the command")
+    else (
+      match Session_registry.find registry session_id with
+      | Some current when phys_equal current t.entry -> Ok current
+      | Some _ | None ->
+        Error (error Invalid_state "prepared writer owner is no longer current"))
+  ;;
+end
+
+let with_writer t ?prepared_writer context ~session_id ~attachment_id f =
   let open Result.Let_syntax in
   let%bind () = require_connection_attachment context ~session_id ~attachment_id in
-  let%bind entry = find_entry t session_id in
+  let%bind entry =
+    match prepared_writer with
+    | None -> find_entry t session_id
+    | Some writer ->
+      Prepared_writer.entry writer ~registry:t.registry ~session_id ~attachment_id
+  in
   let%bind () = Agent_session.Session_actor.authorize_writer entry.actor ~attachment_id in
   f entry
 ;;
 
-let rec handle_session_start t context command_audit request =
+let rec handle_session_start t ?prepared_writer context command_audit request =
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Session.Start_request.session_id
     ~attachment_id:request.attachment_id
@@ -1482,9 +1514,10 @@ and handle_capacity_start t entry capacity command_audit request =
   | Rejected error -> Error error
 ;;
 
-let handle_session_update_organization t context command_audit request =
+let handle_session_update_organization t ?prepared_writer context command_audit request =
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Session_organization.Request.session_id
     ~attachment_id:request.attachment_id
@@ -1513,12 +1546,14 @@ let authorize_organization_mutation t principal = function
 
 let handle_session_update_metadata
       t
+      ?prepared_writer
       context
       command_audit
       (request : Agent_protocol.Session_metadata.Request.t)
   =
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.session_id
     ~attachment_id:request.attachment_id
@@ -1536,9 +1571,10 @@ let handle_session_update_metadata
        Agent_protocol.Method_result.Session_update_metadata (session_mutation session))
 ;;
 
-let handle_session_stop t context command_audit request =
+let handle_session_stop t ?prepared_writer context command_audit request =
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Session.Stop_request.session_id
     ~attachment_id:request.attachment_id
@@ -1577,9 +1613,10 @@ let handle_session_stop t context command_audit request =
        Agent_protocol.Method_result.Session_stop (session_mutation session))
 ;;
 
-let handle_session_cancel_operation t context command_audit request =
+let handle_session_cancel_operation t ?prepared_writer context command_audit request =
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Session.Cancel_operation_request.session_id
     ~attachment_id:request.attachment_id
@@ -1649,9 +1686,10 @@ let handle_continue_history
                 { session = result.session; mutation; continuation = result.continuation }))
 ;;
 
-let handle_delete_history t context command_audit request =
+let handle_delete_history t ?prepared_writer context command_audit request =
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Session.Delete_history_request.session_id
     ~attachment_id:request.attachment_id
@@ -1666,9 +1704,10 @@ let handle_delete_history t context command_audit request =
          Agent_protocol.Method_result.Session_delete_history (session_mutation session)))
 ;;
 
-let handle_session_compact t context command_audit request =
+let handle_session_compact t ?prepared_writer context command_audit request =
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Session.Compact_request.session_id
     ~attachment_id:request.attachment_id
@@ -1733,6 +1772,7 @@ let handle_configuration_get t context request =
 
 let handle_configuration_update
       t
+      ?prepared_writer
       context
       command_audit
       (request : Agent_protocol.Session_configuration.Update_request.t)
@@ -1741,6 +1781,7 @@ let handle_configuration_update
   let principal = Connection_context.principal context in
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.session_id
     ~attachment_id:request.attachment_id
@@ -1786,7 +1827,7 @@ let run_start_result = function
   | Rejected failure | Uncertain failure -> Error failure
 ;;
 
-let handle_send_message t context command_audit request =
+let handle_send_message t ?prepared_writer context command_audit request =
   let open Result.Let_syntax in
   let content = request.Agent_protocol.Session.Send_message_request.content in
   let%bind () =
@@ -1796,6 +1837,7 @@ let handle_send_message t context command_audit request =
   in
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.session_id
     ~attachment_id:request.attachment_id
@@ -2019,9 +2061,10 @@ let replacement_workspace t entry state keep_workspace =
     | _, (Physical | Current) -> Ok None)
 ;;
 
-let handle_session_reset t context command_audit request =
+let handle_session_reset t ?prepared_writer context command_audit request =
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Session.Reset_request.session_id
     ~attachment_id:request.attachment_id
@@ -2156,9 +2199,10 @@ let commit_prepared
       Agent_session.History_id_source.discard_reserved entry.history_ids)
 ;;
 
-let handle_session_rebuild t context command_audit request =
+let handle_session_rebuild t ?prepared_writer context command_audit request =
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Session.Rebuild_request.session_id
     ~attachment_id:request.attachment_id
@@ -2191,9 +2235,10 @@ let handle_session_rebuild t context command_audit request =
        Agent_protocol.Method_result.Session_rebuild (session_mutation session))
 ;;
 
-let handle_session_upgrade_prompt t context command_audit request =
+let handle_session_upgrade_prompt t ?prepared_writer context command_audit request =
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Session.Upgrade_prompt_request.session_id
     ~attachment_id:request.attachment_id
@@ -2242,10 +2287,11 @@ let handle_permission_list t context request =
   Agent_protocol.Method_result.Permission_list (page request.page.limit permissions)
 ;;
 
-let handle_permission_respond t context command_audit request =
+let handle_permission_respond t ?prepared_writer context command_audit request =
   let open Result.Let_syntax in
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Permission.Respond_request.session_id
     ~attachment_id:request.attachment_id
@@ -2313,10 +2359,11 @@ let handle_grant_list t context request =
   Agent_protocol.Method_result.Grant_list (page request.page.limit grants)
 ;;
 
-let handle_grant_revoke t context command_audit request =
+let handle_grant_revoke t ?prepared_writer context command_audit request =
   let open Result.Let_syntax in
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Grant.Revoke_request.session_id
     ~attachment_id:request.attachment_id
@@ -2390,10 +2437,11 @@ let handle_job_get t context request =
   Agent_protocol.Method_result.Job_get job
 ;;
 
-let handle_job_cancel t context command_audit request =
+let handle_job_cancel t ?prepared_writer context command_audit request =
   let open Result.Let_syntax in
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Job.Cancel_request.session_id
     ~attachment_id:request.attachment_id
@@ -2468,10 +2516,11 @@ let schedule_due now = function
   | After_ms delay -> Agent_protocol.Timestamp.add_ms now delay
 ;;
 
-let handle_schedule_create t context command_audit request =
+let handle_schedule_create t ?prepared_writer context command_audit request =
   let open Result.Let_syntax in
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Schedule.Create_request.session_id
     ~attachment_id:request.attachment_id
@@ -2516,10 +2565,11 @@ let handle_schedule_create t context command_audit request =
          { schedule; mutation = mutation session })
 ;;
 
-let handle_schedule_cancel t context command_audit request =
+let handle_schedule_cancel t ?prepared_writer context command_audit request =
   let open Result.Let_syntax in
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Schedule.Cancel_request.session_id
     ~attachment_id:request.attachment_id
@@ -2602,7 +2652,90 @@ let mutation_attachment = function
   | _ -> None
 ;;
 
-let authorize_mutation t context command =
+let prepared_writer_attachment command =
+  match command with
+  | Agent_protocol.Command.Session_start _
+  | Session_update_organization _
+  | Session_update_metadata _
+  | Session_stop _
+  | Session_cancel_operation _
+  | Session_configuration_update _
+  | Session_send_message _
+  | Session_compact _
+  | Session_delete_history _
+  | Session_reset _
+  | Session_rebuild _
+  | Session_upgrade_prompt _
+  | Permission_respond _
+  | Grant_revoke _
+  | Job_cancel _
+  | Schedule_create _
+  | Schedule_cancel _ -> mutation_attachment command
+  | Protocol_initialize _
+  | Command_receipt _
+  | Provider_setup _
+  | Provider_status _
+  | Provider_login_begin _
+  | Provider_login_challenge _
+  | Provider_login_cancel _
+  | Provider_logout _
+  | Provider_select _
+  | Provider_configure_environment _
+  | Protocol_ping _
+  | Server_info
+  | Server_health _
+  | Prompt_list _
+  | Prompt_get _
+  | Workspace_list _
+  | Workspace_get _
+  | Blob_read _
+  | Session_create _
+  | Session_list _
+  | Session_search _
+  | Session_search_navigate _
+  | Activity_list _
+  | Session_work _
+  | Session_configuration_get _
+  | Session_get _
+  | Session_inference_summary _
+  | Session_inference_observations _
+  | Session_attach _
+  | Session_detach _
+  | Session_renew_owner _
+  | Project_create _
+  | Project_get _
+  | Project_list _
+  | Project_update _
+  | Project_delete _
+  | Collection_create _
+  | Collection_get _
+  | Collection_list _
+  | Collection_update _
+  | Collection_delete _
+  | Session_runs _
+  | Session_run _
+  | Session_run_start _
+  | Session_pending_inputs _
+  | Session_pending_input _
+  | Session_cancel_pending_input _
+  | Session_replace_pending_input _
+  | Session_edit_history _
+  | Session_continue_history _
+  | Session_export _
+  | Session_delete _
+  | Session_restore _
+  | Session_resume _
+  | Permission_list _
+  | Grant_list _
+  | Audit_read _
+  | Job_list _
+  | Job_get _
+  | Schedule_list _
+  | Schedule_get _
+  | Ingress_submit _ -> None
+;;
+
+let authorize_mutation t ?prepared_writer context command =
   match command with
   | Agent_protocol.Command.Session_edit_history request ->
     with_attached_writer
@@ -2642,10 +2775,17 @@ let authorize_mutation t context command =
     (match mutation_attachment command with
      | None -> Ok ()
      | Some (session_id, attachment_id) ->
-       with_writer t context ~session_id ~attachment_id (fun _ -> Ok ()))
+       with_writer t ?prepared_writer context ~session_id ~attachment_id (fun _ -> Ok ()))
 ;;
 
-let dispatch_authorized t ~actor ~context ~command_audit ~inference_budget = function
+let dispatch_authorized
+      t
+      ?prepared_writer
+      ~actor
+      ~context
+      ~command_audit
+      ~inference_budget
+  = function
   | ( Agent_protocol.Command.Provider_setup _
     | Provider_status _
     | Provider_login_begin _
@@ -2711,20 +2851,23 @@ let dispatch_authorized t ~actor ~context ~command_audit ~inference_budget = fun
   | Session_detach request -> handle_session_detach t context command_audit request
   | Session_renew_owner request ->
     handle_session_renew_owner t context command_audit request
-  | Session_start request -> handle_session_start t context command_audit request
+  | Session_start request ->
+    handle_session_start t ?prepared_writer context command_audit request
   | Session_update_organization request ->
-    handle_session_update_organization t context command_audit request
+    handle_session_update_organization t ?prepared_writer context command_audit request
   | Session_update_metadata request ->
-    handle_session_update_metadata t context command_audit request
-  | Session_stop request -> handle_session_stop t context command_audit request
+    handle_session_update_metadata t ?prepared_writer context command_audit request
+  | Session_stop request ->
+    handle_session_stop t ?prepared_writer context command_audit request
   | Session_cancel_operation request ->
-    handle_session_cancel_operation t context command_audit request
+    handle_session_cancel_operation t ?prepared_writer context command_audit request
   | Session_configuration_get request -> handle_configuration_get t context request
   | Session_configuration_update request ->
-    handle_configuration_update t context command_audit request
+    handle_configuration_update t ?prepared_writer context command_audit request
   | Session_run_start request ->
     handle_run_start t ~actor context command_audit request |> run_start_result
-  | Session_send_message request -> handle_send_message t context command_audit request
+  | Session_send_message request ->
+    handle_send_message t ?prepared_writer context command_audit request
   | Session_runs request -> handle_runs t ~actor context request
   | Session_run request -> handle_run t ~actor context request
   | Session_pending_inputs request -> handle_pending_inputs t context request
@@ -2733,41 +2876,63 @@ let dispatch_authorized t ~actor ~context ~command_audit ~inference_budget = fun
     handle_cancel_pending t context command_audit request
   | Session_replace_pending_input request ->
     handle_replace_pending t context command_audit request
-  | Session_compact request -> handle_session_compact t context command_audit request
+  | Session_compact request ->
+    handle_session_compact t ?prepared_writer context command_audit request
   | Session_edit_history request -> handle_edit_history t context command_audit request
   | Session_continue_history request ->
     handle_continue_history t context command_audit request
   | Session_delete_history request ->
-    handle_delete_history t context command_audit request
+    handle_delete_history t ?prepared_writer context command_audit request
   | Session_export request -> handle_session_export t context request
-  | Session_reset request -> handle_session_reset t context command_audit request
-  | Session_rebuild request -> handle_session_rebuild t context command_audit request
+  | Session_reset request ->
+    handle_session_reset t ?prepared_writer context command_audit request
+  | Session_rebuild request ->
+    handle_session_rebuild t ?prepared_writer context command_audit request
   | Session_upgrade_prompt request ->
-    handle_session_upgrade_prompt t context command_audit request
+    handle_session_upgrade_prompt t ?prepared_writer context command_audit request
   | Session_delete _ | Session_restore _ | Session_resume _ ->
     Error (error Invalid_state "lifecycle commands require their original receipt owner")
   | Permission_list request -> handle_permission_list t context request
   | Permission_respond request ->
-    handle_permission_respond t context command_audit request
+    handle_permission_respond t ?prepared_writer context command_audit request
   | Grant_list request -> handle_grant_list t context request
-  | Grant_revoke request -> handle_grant_revoke t context command_audit request
+  | Grant_revoke request ->
+    handle_grant_revoke t ?prepared_writer context command_audit request
   | Audit_read request -> handle_audit_read t request
   | Job_list request -> handle_job_list t context request
   | Job_get request -> handle_job_get t context request
-  | Job_cancel request -> handle_job_cancel t context command_audit request
+  | Job_cancel request ->
+    handle_job_cancel t ?prepared_writer context command_audit request
   | Schedule_list request -> handle_schedule_list t context request
   | Schedule_get request -> handle_schedule_get t context request
-  | Schedule_create request -> handle_schedule_create t context command_audit request
-  | Schedule_cancel request -> handle_schedule_cancel t context command_audit request
+  | Schedule_create request ->
+    handle_schedule_create t ?prepared_writer context command_audit request
+  | Schedule_cancel request ->
+    handle_schedule_cancel t ?prepared_writer context command_audit request
   | Command_receipt _ -> Error (error Invalid_state "receipt requires read-only dispatch")
   | Ingress_submit request -> handle_ingress_submit t context request
 ;;
 
-let handle_authorized t ~actor ~context ~command_audit ~inference_budget command =
+let handle_authorized
+      t
+      ?prepared_writer
+      ~actor
+      ~context
+      ~command_audit
+      ~inference_budget
+      command
+  =
   let open Result.Let_syntax in
-  let%bind () = authorize_mutation t context command in
+  let%bind () = authorize_mutation t ?prepared_writer context command in
   let%bind result =
-    dispatch_authorized t ~actor ~context ~command_audit ~inference_budget command
+    dispatch_authorized
+      t
+      ?prepared_writer
+      ~actor
+      ~context
+      ~command_audit
+      ~inference_budget
+      command
   in
   Pagination.lists t.pagination (Connection_context.principal context) command result
 ;;
@@ -3308,8 +3473,10 @@ let execute t ~actor context ~inference_budget command =
          context
          command
          identity
-         ~execute:(fun command_audit ->
-           handle_run_start t ~actor context command_audit request)
+         ~prepare:(fun () ->
+           Ok
+             (fun command_audit ->
+               handle_run_start t ~actor context command_audit request))
          ~complete:(fun ~key ~digest outcome ->
            match outcome with
            | Agent_session.Run_admission_outcome.Admitted _ | Rejected _ ->
@@ -3320,8 +3487,24 @@ let execute t ~actor context ~inference_budget command =
      | None ->
        handle_authorized t ~actor ~context ~command_audit:None ~inference_budget command
      | Some identity ->
-       handle_idempotent t context command identity (fun command_audit ->
-         handle_authorized t ~actor ~context ~command_audit ~inference_budget command))
+       handle_idempotent t context command identity ~prepare:(fun () ->
+         let open Result.Let_syntax in
+         let%map prepared_writer =
+           match prepared_writer_attachment command with
+           | None -> Ok None
+           | Some (session_id, attachment_id) ->
+             with_writer t context ~session_id ~attachment_id (fun entry ->
+               Ok (Some (Prepared_writer.create entry ~session_id ~attachment_id)))
+         in
+         fun command_audit ->
+           handle_authorized
+             t
+             ?prepared_writer
+             ~actor
+             ~context
+             ~command_audit
+             ~inference_budget
+             command))
 ;;
 
 let handle t ?actor ~context ~inference_budget command =
