@@ -24,6 +24,7 @@
   delegation_lifecycle
   connection_context
   organization_service
+  organization_membership_projection
   authorization
   principal_projection
   pagination

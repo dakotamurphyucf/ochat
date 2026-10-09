@@ -1,5 +1,16 @@
 open! Core
 
+module Session_key = struct
+  module T = struct
+    type t = Agent_protocol.Id.Session.t [@@deriving sexp]
+
+    let compare = Agent_protocol.Id.Session.compare
+  end
+
+  include T
+  include Comparator.Make (T)
+end
+
 type entry =
   { actor : Agent_session.Session_actor.t
   ; history_ids : Agent_session.History_id_source.t
@@ -19,9 +30,13 @@ type entry =
 type t =
   { mutex : Eio.Mutex.t
   ; closing : bool Atomic.t
-  ; sessions : (Agent_protocol.Id.Session.t, entry) Map.Poly.t Atomic.t
+  ; sessions :
+      (Agent_protocol.Id.Session.t, entry, Session_key.comparator_witness) Map.t Atomic.t
   ; mutable indexed :
-      (Agent_protocol.Id.Session.t, Agent_store.Session_index.Entry.t) Map.Poly.t
+      ( Agent_protocol.Id.Session.t
+        , Agent_store.Session_index.Entry.t
+        , Session_key.comparator_witness )
+        Map.t
   ; mutable reader :
       (Agent_store.Session_index.Entry.t
        -> (Agent_session.Session_state.t, Agent_protocol.Error.t) result)
@@ -39,8 +54,8 @@ type stats =
 let create () =
   { mutex = Eio.Mutex.create ()
   ; closing = Atomic.make false
-  ; sessions = Atomic.make Map.Poly.empty
-  ; indexed = Map.Poly.empty
+  ; sessions = Atomic.make (Map.empty (module Session_key))
+  ; indexed = Map.empty (module Session_key)
   ; reader = None
   ; loader = None
   }
@@ -214,7 +229,8 @@ let catalog t ~now ~indexed_entries =
         let%map state = Agent_session.Session_actor.state data.actor in
         ( key
         , Agent_protocol.Session_catalog.
-            { session = Agent_session.Session_state.summary state
+            { effective_organization = Agent_protocol.Session_organization.Values.empty
+            ; session = Agent_session.Session_state.summary state
             ; active_owner_principal_id =
                 Session_catalog_policy.active_owner ~now state.attachments
             ; archived = false
@@ -229,7 +245,8 @@ let catalog t ~now ~indexed_entries =
         else
           Some
             Agent_protocol.Session_catalog.
-              { session = data.session
+              { effective_organization = Agent_protocol.Session_organization.Values.empty
+              ; session = data.session
               ; active_owner_principal_id = None
               ; archived = data.archived
               })
@@ -289,8 +306,11 @@ let inactive state =
 
 let unload_inactive t ~index_entries =
   let indexes =
-    List.fold index_entries ~init:Map.Poly.empty ~f:(fun indexes entry ->
-      Map.set indexes ~key:entry.Agent_store.Session_index.Entry.session.id ~data:entry)
+    List.fold
+      index_entries
+      ~init:(Map.empty (module Session_key))
+      ~f:(fun indexes entry ->
+        Map.set indexes ~key:entry.Agent_store.Session_index.Entry.session.id ~data:entry)
   in
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     Map.fold (Atomic.get t.sessions) ~init:0 ~f:(fun ~key:session_id ~data:entry count ->
@@ -312,7 +332,7 @@ let shutdown t =
       Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
         let entries = Map.data (Atomic.get t.sessions) in
         Atomic.set t.closing true;
-        t.indexed <- Map.Poly.empty;
+        t.indexed <- Map.empty (module Session_key);
         t.loader <- None;
         t.reader <- None;
         entries)
@@ -323,6 +343,6 @@ let shutdown t =
     List.map entries ~f:(fun entry () -> Runtime_owner.close_and_wait entry.runtime)
     |> Eio.Fiber.all;
     Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-      Atomic.set t.sessions Map.Poly.empty);
+      Atomic.set t.sessions (Map.empty (module Session_key)));
     List.map entries ~f:(fun entry () -> entry.close ()) |> Eio.Fiber.all)
 ;;

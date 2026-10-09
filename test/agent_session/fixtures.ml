@@ -313,6 +313,7 @@ let actor_state ~workspace_instance ~liveness ~start_immediately =
       ; labels = []
       ; generation = 0
       ; metadata_revision = 0L
+      ; organization = Agent_protocol.Session_organization.Values.empty
       }
   in
   let spec =

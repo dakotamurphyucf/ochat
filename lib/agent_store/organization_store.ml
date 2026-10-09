@@ -135,3 +135,35 @@ let mutate t ~principal ~audit ~now ~candidate mutation =
         t.availability <- Available carrier;
         result))
 ;;
+
+let authorize_membership t ~principal ~host_id ~references =
+  Eio.Mutex.use_ro t.mutex (fun () ->
+    match t.availability with
+    | Available carrier ->
+      S.authorize_membership
+        (D.Extension_carrier.value carrier)
+        ~principal
+        ~host_id
+        ~references
+        ~require_live:false
+    | Unavailable | Closed ->
+      unavailable () |> Result.map_error ~f:Store_error.to_protocol_error)
+;;
+
+let with_live_membership t ~principal ~host_id ~additions ~commit =
+  with_mutation_lock t ~f:(fun () ->
+    let open Result.Let_syntax in
+    let%bind () =
+      match t.availability with
+      | Available carrier ->
+        S.authorize_membership
+          (D.Extension_carrier.value carrier)
+          ~principal
+          ~host_id
+          ~references:additions
+          ~require_live:true
+      | Unavailable | Closed ->
+        unavailable () |> Result.map_error ~f:Store_error.to_protocol_error
+    in
+    commit ())
+;;

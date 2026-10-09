@@ -19,6 +19,7 @@ let has_command_receipt = function
   | Collection_create _
   | Collection_update _
   | Collection_delete _
+  | Session_update_organization _
   | Session_update_metadata _
   | Session_stop _
   | Session_cancel_operation _

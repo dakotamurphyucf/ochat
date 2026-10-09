@@ -7,6 +7,7 @@ type t =
   | Created of Session_state.t
   | Lifecycle_changed of Session_state.Lifecycle.t
   | Metadata_changed of Agent_protocol.Session_metadata.Values.t * int64
+  | Organization_changed of Agent_protocol.Session_organization.Values.t * int64
   | Initial_start_consumed
   | Stop_epoch_changed of int64
   | Parent_stop_epoch_changed of int64

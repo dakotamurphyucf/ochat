@@ -1,4 +1,4 @@
-import { inspectCapacity } from './deployment-policy.mjs';
+import { inspectCapacity, privateOutputFiles } from './deployment-policy.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -319,7 +319,7 @@ await fs.writeFile(
   new URL('../.generated/capacity-report.json', import.meta.url),
   JSON.stringify(capacity, null, 2) + '\n',
 );
-if (files.some((f) => /\/(scratch|node_modules|planning)\//.test(f)))
+if (privateOutputFiles(root, files).length)
   failures.push('Private implementation material included in output');
 if (failures.length) {
   console.error(failures.join('\n'));

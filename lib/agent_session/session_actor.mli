@@ -1750,3 +1750,21 @@ val update_configuration
   -> ?command_audit:Document_schema.Document.t
   -> Agent_protocol.Session_configuration.Update_request.t
   -> (Agent_protocol.Session_configuration.t, Agent_protocol.Error.t) Result.t
+
+(** Trusted host composition only. Borrow the root-owned group admission authority;
+    no permissive default exists. Must be installed for loaded and stopped actors. *)
+val set_organization_admission
+  :  t
+  -> Session_organization_admission.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Host caller authenticates principal and binds connection attachment before
+    enqueue/replay. Actor repeats current writer/mode/lease validation. Group admission
+    serializes only persistence; acknowledged install and post-unlock publication are protected across org unlock,
+    event/index callbacks follow unlock. Does not activate runtime. *)
+val update_organization
+  :  t
+  -> ?command_audit:Document_schema.Document.t
+  -> principal:Agent_protocol.Principal.t
+  -> Agent_protocol.Session_organization.Request.t
+  -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result

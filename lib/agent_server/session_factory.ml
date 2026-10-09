@@ -253,6 +253,7 @@ let session_identity principal request session_id now =
     ; labels = request.spec.labels
     ; generation = 0
     ; metadata_revision = 0L
+    ; organization = Agent_protocol.Session_organization.Values.empty
     }
 ;;
 
@@ -4383,6 +4384,17 @@ let install_compaction_inference t actor owner =
   A.set_compaction_inference actor (Some port)
 ;;
 
+let organization_admission t =
+  Agent_session.Session_organization_admission.create
+    (fun ~principal ~host_id ~additions ~commit ->
+       Agent_store.Organization_store.with_live_membership
+         (Agent_store.Session_store.organizations t.store)
+         ~principal
+         ~host_id
+         ~additions
+         ~commit)
+;;
+
 (* Configuration policy is host composition, not graph activation. Both loaded
    and stopped entries retain the same authorization/resolver ports. Resolution
    runs outside the actor through Configuration_update's two-phase admission. *)
@@ -4461,6 +4473,11 @@ let create_loaded_entry
   actor_ref := Some actor;
   match
     let open Result.Let_syntax in
+    let%bind () =
+      Agent_session.Session_actor.set_organization_admission
+        actor
+        (organization_admission t)
+    in
     let%bind () =
       Agent_session.Session_actor.set_configuration_policy actor (configuration_policy t)
     in
@@ -4620,6 +4637,11 @@ let create_unloaded_entry
           Exn.protect
             ~f:(fun () -> Agent_session.Session_actor.shutdown actor)
             ~finally:close_borrowed);
+    let%bind () =
+      Agent_session.Session_actor.set_organization_admission
+        actor
+        (organization_admission t)
+    in
     let%bind () =
       Agent_session.Session_actor.set_configuration_policy actor (configuration_policy t)
     in
@@ -6602,6 +6624,7 @@ let create_delegated_session
                       ; labels = []
                       ; generation = 0
                       ; metadata_revision = 0L
+                      ; organization = Agent_protocol.Session_organization.Values.empty
                       }
                     ~spec:
                       { before.spec with

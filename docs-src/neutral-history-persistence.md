@@ -549,3 +549,22 @@ Commit and close race their complete enqueue-and-reply waits against shutdown;
 shutdown cancels blocked producers and releases external queued callers even
 when they do not share the worker's cancellation scope. Already resolved normal
 or exceptional replies always take precedence over generic closed failures.
+
+## Session organization projections
+
+Canonical session state version 6 requires the historical organization IDs.
+Its structural version 5 conversion initializes an absent organization to empty;
+current canonical records cannot omit the field. Changes share the metadata
+revision with names and labels and preserve all unrelated canonical state.
+
+Public session summaries admit absent organization as empty for existing summary
+records. Metadata and index documents retain their independent version 1 boundary;
+this compatibility default is a projection, not permission to erase canonical
+membership. Checked publication writes the full current summary from canonical
+state. An unloaded catalog cannot distinguish an older empty summary from an
+isolated missing organization field without reading canonical history.
+
+Live catalog membership resolves historical IDs against checked host organization
+authority and current principal visibility. Deleted IDs remain in canonical state
+but disappear from effective membership. Neither representation grants access to
+session content or changes execution workspace, prompt or provider authority.

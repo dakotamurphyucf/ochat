@@ -17,6 +17,7 @@ let tag discriminator cases =
 
 let cases field names = List.map names ~f:(fun name -> name, f [ field ])
 let error = f [ "code"; "message"; "retryable"; "data" ]
+let organization = f [ "project_id"; "collection_ids" ]
 
 let observed =
   tag
@@ -152,6 +153,7 @@ let shape =
     ; "active_operation", operation
     ; "revision", v
     ; "metadata_revision", v
+    ; "organization", organization
     ; "latest_event_sequence", v
     ; "inference_summary", D.Shape.nullable inference_summary
     ]

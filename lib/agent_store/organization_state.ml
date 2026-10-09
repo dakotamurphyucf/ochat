@@ -763,3 +763,33 @@ let apply t ~principal ~audit ~now ~candidate mutation =
         in
         validated, result))
 ;;
+
+let project_entry t id = Map.find t.projects id
+let collection_entry t id = Map.find t.collections id
+
+let authorize_membership t ~principal ~host_id ~references ~require_live =
+  let open Result.Let_syntax in
+  let%bind () = require_scope principal Manage_organization in
+  let%bind () =
+    if P.Id.Server.equal host_id t.server_id
+    then Ok ()
+    else invalid "membership host differs from organization authority"
+  in
+  let authorize creator deleted_at =
+    if (require_live && Option.is_some deleted_at) || not (owns principal creator)
+    then not_found ()
+    else Ok ()
+  in
+  let%bind () =
+    match references.P.Session_organization.Values.project_id with
+    | None -> Ok ()
+    | Some id ->
+      (match project_entry t id with
+       | None -> not_found ()
+       | Some entry -> authorize entry.group.creator_principal_id entry.deleted_at)
+  in
+  List.fold_result references.collection_ids ~init:() ~f:(fun () id ->
+    match collection_entry t id with
+    | None -> not_found ()
+    | Some entry -> authorize entry.group.creator_principal_id entry.deleted_at)
+;;

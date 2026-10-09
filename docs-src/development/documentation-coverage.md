@@ -203,6 +203,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_protocol/session_catalog_query.mli` | [contract](../../lib/agent_protocol/session_catalog_query.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/session_configuration.mli` | [contract](../../lib/agent_protocol/session_configuration.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/session_metadata.mli` | [contract](../../lib/agent_protocol/session_metadata.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/session_organization.mli` | [contract](../../lib/agent_protocol/session_organization.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/session_ref.mli` | [contract](../../lib/agent_protocol/session_ref.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/snapshot.mli` | [contract](../../lib/agent_protocol/snapshot.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/stored_completion.mli` | [contract](../../lib/agent_protocol/stored_completion.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
@@ -239,6 +240,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_server/managed_output_cursor.mli` | [contract](../../lib/agent_server/managed_output_cursor.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_server/managed_output_page.mli` | [contract](../../lib/agent_server/managed_output_page.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_server/operator_manifest_grant.mli` | [contract](../../lib/agent_server/operator_manifest_grant.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
+| `lib/agent_server/organization_membership_projection.mli` | [contract](../../lib/agent_server/organization_membership_projection.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/agent_server/organization_service.mli` | [contract](../../lib/agent_server/organization_service.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/agent_server/pagination.mli` | [contract](../../lib/agent_server/pagination.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/agent_server/permission_review_service.mli` | [contract](../../lib/agent_server/permission_review_service.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
@@ -352,6 +354,8 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/session_management_channel.mli` | [contract](../../lib/agent_session/session_management_channel.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/session_management_native.mli` | [contract](../../lib/agent_session/session_management_native.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/session_metadata_transition.mli` | [contract](../../lib/agent_session/session_metadata_transition.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/session_organization_admission.mli` | [contract](../../lib/agent_session/session_organization_admission.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/session_organization_transition.mli` | [contract](../../lib/agent_session/session_organization_transition.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/session_persistence.mli` | [contract](../../lib/agent_session/session_persistence.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_session/session_record_shapes.mli` | [contract](../../lib/agent_session/session_record_shapes.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/session_state.mli` | [contract](../../lib/agent_session/session_state.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |

@@ -10,6 +10,8 @@ module Identity = struct
     ; labels : (string * string) list
     ; generation : int
     ; metadata_revision : int64 [@sexp.default 0L]
+    ; organization : Agent_protocol.Session_organization.Values.t
+          [@sexp.default Agent_protocol.Session_organization.Values.empty]
     }
   [@@deriving sexp]
 end
@@ -1024,6 +1026,7 @@ let summary t =
     ; active_operation = t.active_operation
     ; revision = t.counters.revision
     ; metadata_revision = t.identity.metadata_revision
+    ; organization = t.identity.organization
     ; inference_summary = Value (Inference_ledger.summary t.inference_ledger)
     ; latest_event_sequence = t.counters.event_sequence
     }

@@ -48,7 +48,7 @@ val adopt
   -> t
   -> (t, Document_schema.Error.t) result
 
-(** Adjacent generic v1/v2/v3/v4 to v5 conversion. Missing configuration revision
+(** Adjacent generic v1 through v5 to v6 conversion. The v5 to v6 step introduces empty historical organization references without resolving host objects. Missing configuration revision
     is introduced in the v4 to v5 step. Missing metadata revision
     defaults to zero. Missing captured selection and job
     bindings become Unresolved; missing ledger becomes empty with UNKNOWN prior

@@ -139,6 +139,8 @@ type t =
   ; active_operation : Operation.t option
   ; revision : int64
   ; metadata_revision : int64 [@sexp.default 0L]
+  ; organization : Session_organization.Values.t
+        [@sexp.default Session_organization.Values.empty]
     (** Nonnegative organization counter. Streaming changes advance [revision]
         while leaving this counter intact. Legacy summaries default to zero. *)
   ; latest_event_sequence : int64
@@ -197,6 +199,7 @@ module List_request : sig
     ; prompt_id : Id.Prompt_definition.t option
     ; workspace_id : Id.Workspace_definition.t option
     ; owner_principal_id : Id.Principal.t option
+    ; organization : Session_organization.Query.t
     ; labels : (string * string) list
     ; sort : Session_catalog_query.Sort.t
     ; archive : Session_catalog_query.Archive_filter.t

@@ -41,6 +41,7 @@ type t =
   | Collection_update of Organization_request.Collection.Update.t
   | Collection_delete of Organization_request.Collection.Delete.t
   | Session_update_metadata of Session_metadata.Request.t
+  | Session_update_organization of Session_organization.Request.t
   | Session_stop of Session.Stop_request.t
   | Session_cancel_operation of Session.Cancel_operation_request.t
   | Session_send_message of Session.Send_message_request.t
@@ -107,6 +108,7 @@ let method_name = function
   | Collection_update _ -> "collection.update"
   | Collection_delete _ -> "collection.delete"
   | Session_update_metadata _ -> "session.update_metadata"
+  | Session_update_organization _ -> "session.update_organization"
   | Session_stop _ -> "session.stop"
   | Session_cancel_operation _ -> "session.cancel_operation"
   | Session_send_message _ -> "session.send_message"
@@ -176,6 +178,7 @@ let params = function
   | Collection_update value -> Organization_request.Collection.Update.to_json value
   | Collection_delete value -> Organization_request.Collection.Delete.to_json value
   | Session_update_metadata request -> Session_metadata.Request.to_json request
+  | Session_update_organization request -> Session_organization.Request.to_json request
   | Session_stop request -> Session.Stop_request.to_json request
   | Session_cancel_operation request -> Session.Cancel_operation_request.to_json request
   | Session_send_message request -> Session.Send_message_request.to_json request
@@ -290,6 +293,8 @@ let decoders =
     , map Organization_request.Collection.Delete.of_json (fun value ->
         Collection_delete value) )
   ; "session.start", map Session.Start_request.of_json (fun x -> Session_start x)
+  ; ( "session.update_organization"
+    , map Session_organization.Request.of_json (fun x -> Session_update_organization x) )
   ; ( "session.update_metadata"
     , map Session_metadata.Request.of_json (fun x -> Session_update_metadata x) )
   ; "session.stop", map Session.Stop_request.of_json (fun x -> Session_stop x)

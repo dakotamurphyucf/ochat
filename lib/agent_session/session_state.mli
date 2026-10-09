@@ -12,6 +12,8 @@ module Identity : sig
     ; labels : (string * string) list
     ; generation : int
     ; metadata_revision : int64 [@sexp.default 0L]
+    ; organization : Agent_protocol.Session_organization.Values.t
+          [@sexp.default Agent_protocol.Session_organization.Values.empty]
     }
   [@@deriving sexp]
 end

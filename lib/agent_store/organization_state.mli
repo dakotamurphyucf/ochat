@@ -102,3 +102,20 @@ val validate_retention
   -> next_state:t
   -> now:Agent_protocol.Timestamp.t
   -> (unit, Agent_protocol.Error.t) result
+
+(** Retained identity lookup; does not authorize visibility. Returned immutable
+    entries include tombstones and belong to this host snapshot. *)
+val project_entry : t -> Agent_protocol.Id.Project.t -> Project_entry.t option
+
+val collection_entry : t -> Agent_protocol.Id.Collection.t -> Collection_entry.t option
+
+(** Current manage/host/owner-or-admin checks, including tombstones for receipt
+    and no-op authorization. [require_live] additionally rejects tombstones at
+    fresh association commit; absent IDs reject before ownership checks. *)
+val authorize_membership
+  :  t
+  -> principal:Agent_protocol.Principal.t
+  -> host_id:Agent_protocol.Id.Server.t
+  -> references:Agent_protocol.Session_organization.Values.t
+  -> require_live:bool
+  -> (unit, Agent_protocol.Error.t) result

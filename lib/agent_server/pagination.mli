@@ -15,6 +15,20 @@ val lists
   -> Agent_protocol.Method_result.t
   -> (Agent_protocol.Method_result.t, Agent_protocol.Error.t) result
 
+(** Catalog paging uses the exact checked organization snapshot used for projection.
+    Org revision changes conservatively refresh-conflict even for unchanged entries.
+    Session_list results passed to [lists] are already paged by this operation. *)
+val session_catalog
+  :  t
+  -> Agent_protocol.Principal.t
+  -> Agent_protocol.Session.List_request.t
+  -> host_id:Agent_protocol.Id.Server.t
+  -> organization_revision:int64
+  -> Agent_protocol.Session_catalog.t list
+  -> ( Agent_protocol.Session_catalog.t Agent_protocol.Page.t
+       , Agent_protocol.Error.t )
+       result
+
 val history
   :  t
   -> Agent_protocol.Principal.t

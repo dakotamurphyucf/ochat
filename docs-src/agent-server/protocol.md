@@ -86,6 +86,7 @@ actor state and authorization, not merely passing JSON validation.
 | `session.renew_owner` | `Session.Renew_owner_request` | `session.transcript.read` plus valid owner lease | Renew matching generation; owner lease and mutation result. |
 | `session.start` | `Session.Start_request` | `session.message.send` | Writable attachment; start or queue if permitted. |
 | `session.update_metadata` | `Session_metadata.Request` | `session.message.send` | Writable attachment; expected metadata revision; rename and label patch. |
+| `session.update_organization` | `Session_organization.Request` | `session.message.send` and `organization.manage` | Current writable attachment; shared expected metadata revision; project set/clear and collection add/remove. |
 | `session.stop` | `Session.Stop_request` | `session.stop` | Writable attachment; graceful/cancel stop. |
 | `session.cancel_operation` | `Session.Cancel_operation_request` | `session.message.send` | Writable attachment; target current operation ID. |
 | `session.send_message` | `Session.Send_message_request` | `session.message.send` | Writable attachment; history ID, started/deferred disposition and optional operation ID. |
@@ -426,3 +427,39 @@ historical receipts. A separate daemon restart scenario retains project and
 collection identity and original create receipts. A principal granted only
 organization view/manage cannot inspect another creator's groups or read
 sessions; these operations leave the session catalog empty.
+
+### Session project and collection membership
+
+`session.update_organization` changes logical organization IDs without changing
+execution workspace, prompt, provider, content permissions or running operations.
+Its request includes `host_id`, `session_id`, `attachment_id`,
+`expected_metadata_revision`, `patch` and `idempotency_key`. In the patch,
+`project_id` omitted means keep, null means clear and an ID means set;
+`add_collections` and `remove_collections` are optional distinct ID lists.
+Each list and the resulting collection membership are bounded to 128 IDs.
+A collection can contain sessions from different projects.
+
+The host checks current writer authority and `organization.manage` before an
+ordinary retry returns its original receipt. Every requested set/add group must
+belong to this host and be owned by the principal or accessible to a configuration
+administrator. Retained tombstoned IDs can be repeated without changing state;
+new references must be live when admitted with the session commit. Membership
+shares the metadata revision with rename/label updates. A changed membership
+increments it once; a no-op preserves it; a stale revision conflicts. An exact
+idempotency retry returns the original result rather than applying the patch again.
+
+`command.receipt` permits reconciliation from a fresh authenticated transport after
+a lost reply. It checks current principal, scopes, session visibility, retained
+group authorization and the original request digest, without requiring the old
+connection's attachment. Revoked scopes or group access deny this read.
+
+The session's `organization` contains historical project and collection IDs.
+Deleting a group leaves these durable references intact and never deletes a
+session. Catalog entries additionally expose `effective_organization`: live groups
+visible to the caller. Without `organization.view`, this projection is empty;
+no organization scope grants access to session content. Explicit `project_filter`
+(`unassigned` or a project ID) and `collection_all_of` filters require
+`organization.view` and visibility of referenced groups. Catalog cursors bind the
+checked host organization revision as well as query, principal authority and
+session data; an organization mutation invalidates a cursor with an explicit
+refresh conflict. Listing does not activate stopped or archived sessions.

@@ -134,6 +134,7 @@ let identity_to_jsonaf (t : S.Identity.t) =
     ; "labels", pairs_to_jsonaf t.labels
     ; "generation", X.host_counter_to_json t.generation
     ; "metadata_revision", X.int64_json t.metadata_revision
+    ; "organization", P.Session_organization.Values.to_json t.organization
     ]
 ;;
 
@@ -152,6 +153,9 @@ let identity_of_jsonaf json =
   let%bind metadata_revision =
     X.required fields "metadata_revision" X.nonnegative_int64
   in
+  let%bind organization =
+    X.required fields "organization" P.Session_organization.Values.of_json
+  in
   let t : S.Identity.t =
     { session_id
     ; display_name
@@ -161,6 +165,7 @@ let identity_of_jsonaf json =
     ; labels
     ; generation
     ; metadata_revision
+    ; organization
     }
   in
   Ok t
@@ -176,6 +181,7 @@ let identity_shape =
     ; "labels", pairs_shape
     ; "generation", Document_schema.Shape.value
     ; "metadata_revision", Document_schema.Shape.value
+    ; "organization", Agent_store.Session_record_document.organization
     ]
 ;;
 
@@ -984,13 +990,41 @@ let upgrade document ~limits =
                  name, if String.equal name "spec" then spec else value)))
       | _ -> Agent_store.Document_fields.invalid "payload" "must be an object")
   in
+  let%bind organization_step =
+    D.Conversion.Step.of_function ~kind:"session.state" ~from_version:5 ~f:(fun payload ->
+      let%bind identity =
+        D.Json.field payload ~name:"identity"
+        |> function
+        | D.Json.Value (`Object fields) -> Ok fields
+        | D.Json.Absent | Null | Value _ ->
+          Agent_store.Document_fields.invalid "identity" "must be an object"
+      in
+      let identity =
+        if List.Assoc.mem identity "organization" ~equal:String.equal
+        then `Object identity
+        else
+          `Object
+            (identity
+             @ [ ( "organization"
+                 , P.Session_organization.Values.to_json
+                     P.Session_organization.Values.empty )
+               ])
+      in
+      match payload with
+      | `Object fields ->
+        Ok
+          (`Object
+              (List.map fields ~f:(fun (name, value) ->
+                 name, if String.equal name "identity" then identity else value)))
+      | _ -> Agent_store.Document_fields.invalid "payload" "must be an object")
+  in
   let%bind conversion =
     D.Conversion.create
       ~limits
-      ~targets:[ "session.state", 5 ]
-      ~max_steps:4
+      ~targets:[ "session.state", 6 ]
+      ~max_steps:5
       ~max_operations:100_000
-      ~steps:[ step; ledger_step; metadata_step; configuration_step ]
+      ~steps:[ step; ledger_step; metadata_step; configuration_step; organization_step ]
   in
   D.Conversion.upgrade conversion document
 ;;
@@ -1000,7 +1034,7 @@ let codec ~limits =
     D.Domain_codec.create_validated
       ~limits
       ~kind:"session.state"
-      ~version:5
+      ~version:6
       ~shape
       ~supported_semantics:[]
       ~validate:(fun state -> X.document_result (S.validate state))

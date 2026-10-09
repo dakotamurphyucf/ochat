@@ -177,3 +177,12 @@ val update_configuration
   -> expected_revision:int64
   -> Agent_protocol.Session_configuration.Patch.t
   -> (Agent_protocol.Session_configuration.t, Agent_protocol.Error.t) Result.t
+
+(** Update historical logical membership under current writer and organization
+    authority. Shares metadata CAS with name/labels; execution is unchanged. *)
+val update_organization
+  :  t
+  -> host_id:Agent_protocol.Id.Server.t
+  -> expected_metadata_revision:int64
+  -> patch:Agent_protocol.Session_organization.Patch.t
+  -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result

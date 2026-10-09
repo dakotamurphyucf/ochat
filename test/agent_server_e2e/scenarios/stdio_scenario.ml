@@ -163,7 +163,8 @@ let page_request () = Agent_protocol.Page.Request.create ~limit:100 () |> protoc
 let list_sessions client =
   let request =
     Agent_protocol.Session.List_request.
-      { page = page_request ()
+      { organization = Agent_protocol.Session_organization.Query.default
+      ; page = page_request ()
       ; desired_state = None
       ; prompt_id = None
       ; workspace_id = None

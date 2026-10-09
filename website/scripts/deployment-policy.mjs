@@ -1,3 +1,4 @@
+import path from 'node:path';
 // Reviewed against Cloudflare Workers Static Assets documentation, 2026-09-07.
 export const limits = Object.freeze({
   files: 20000,
@@ -87,4 +88,16 @@ export function inspectCapacity(files, headers, redirects = '') {
     failures,
     result: failures.length ? 'fail' : 'pass',
   };
+}
+
+// Inspect artifact-relative components, not private names in host ancestors.
+export function privateOutputFiles(root, files) {
+  return files.filter((file) =>
+    path
+      .relative(root, file)
+      .split(path.sep)
+      .some((component) =>
+        ['scratch', 'node_modules', 'planning'].includes(component),
+      ),
+  );
 }

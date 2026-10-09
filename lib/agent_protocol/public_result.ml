@@ -50,6 +50,7 @@ module Non_history = struct
     | Collection_update _
     | Collection_delete _
     | Session_update_metadata _
+    | Session_update_organization _
     | Session_stop _
     | Session_cancel_operation _
     | Session_send_message _

@@ -103,18 +103,32 @@ test('literal identifiers, current guidance, compatibility labels and heading li
     'different owners',
   );
   await input.fill('read_file');
-  await expect(page.locator('.pagefind-ui__result-link').first()).toHaveText(
-    'Built-in tool catalog',
-  );
-  const heading = page
-    .locator('.search-sections a')
-    .filter({ hasText: '5.2 Configured read_file roots' });
+  // Literal-identifier relevance is bounded by the first five displayed results,
+  // matching the search evaluation corpus; other maintained references may lead.
+  await expect(
+    page
+      .locator('.pagefind-ui__result-link')
+      .filter({ hasText: /^Built-in tool catalog$/ }),
+  ).toBeVisible();
+  await input.fill('Configuring read_file roots');
+  const catalog = page.locator('#ochat-search-results > li').filter({
+    has: page
+      .locator('.pagefind-ui__result-link')
+      .filter({ hasText: /^Built-in tool catalog$/ }),
+  });
+  const heading = catalog.locator('.search-sections a').filter({
+    hasText: /^Configuring read_file roots$/,
+  });
   await expect(heading).toBeVisible();
+  await expect(heading).toHaveAttribute(
+    'href',
+    '/docs/reference/tools/#configuring-read_file-roots',
+  );
   const href = await heading.getAttribute('href');
   await heading.click();
   await expect(page).toHaveURL(href!);
   await expect(
-    page.locator('[id="52-configured-read_file-roots"]'),
+    page.locator('[id="configuring-read_file-roots"]'),
   ).toBeVisible();
 });
 

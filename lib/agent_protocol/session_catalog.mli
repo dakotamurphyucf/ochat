@@ -5,6 +5,7 @@ type t =
   { session : Session.t
   ; active_owner_principal_id : Id.Principal.t option
   ; archived : bool
+  ; effective_organization : Session_organization.Values.t
   }
 [@@deriving sexp]
 
