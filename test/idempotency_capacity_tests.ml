@@ -110,12 +110,14 @@ let%expect_test "remaining reservation survives completion and acceptance in eit
        (document [ expiring ])
        ~mode:Fresh);
   [%expect
-    {| pending=ok
-accepted-pending=ok
-completed-unaccepted=ok
-completed-accepted=ok
-one-byte-short=bytes
-short-expiry=ok |}]
+    {|
+    pending=ok
+    accepted-pending=ok
+    completed-unaccepted=ok
+    completed-accepted=ok
+    one-byte-short=bytes
+    short-expiry=ok
+    |}]
 ;;
 
 let%expect_test
@@ -136,12 +138,14 @@ let%expect_test
   show "reserved-fit" (C.check fitting actual ~mode:Fresh);
   show "mixed-fit" (C.check fitting mixed ~mode:Fresh);
   [%expect
-    {| actual-only=ok
-all-completed-only=ok
-mixed-state=bytes
-reserve-before-effects=bytes
-reserved-fit=ok
-mixed-fit=ok |}]
+    {|
+    actual-only=ok
+    all-completed-only=ok
+    mixed-state=bytes
+    reserve-before-effects=bytes
+    reserved-fit=ok
+    mixed-fit=ok
+    |}]
 ;;
 
 let%expect_test "mixed retained extensions reserve fields and nodes independently" =
@@ -165,10 +169,12 @@ let%expect_test "mixed retained extensions reserve fields and nodes independentl
     (D.Json.validate ~limits:(C.limits node_capacity ~mode:Fresh) node_actual);
   show "node-reserved" (C.check node_capacity node_actual ~mode:Fresh);
   [%expect
-    {| field-actual=ok
-field-reserved=fields
-node-actual=ok
-node-reserved=nodes |}]
+    {|
+    field-actual=ok
+    field-reserved=fields
+    node-actual=ok
+    node-reserved=nodes
+    |}]
 ;;
 
 let%expect_test "field node depth and escaped byte budgets are independent" =
@@ -191,13 +197,15 @@ let%expect_test "field node depth and escaped byte budgets are independent" =
     "depth"
     (C.check (profile 4096) (put (document [ row pending ]) "future" deep) ~mode:Fresh);
   [%expect
-    {| field-boundary=ok
-field-short=fields
-node-boundary=ok
-node-short=nodes
-escaped-exact=ok
-escaped-short=bytes
-depth=depth |}]
+    {|
+    field-boundary=ok
+    field-short=fields
+    node-boundary=ok
+    node-short=nodes
+    escaped-exact=ok
+    escaped-short=bytes
+    depth=depth
+    |}]
 ;;
 
 let%expect_test "compatibility headroom never grants new admission capacity" =
@@ -225,15 +233,17 @@ let%expect_test "compatibility headroom never grants new admission capacity" =
     "nonpositive"
     (C.create ~max_bytes:0 ~max_fields:10 ~max_nodes:11 |> Result.map ~f:ignore);
   [%expect
-    {| legacy-actual=ok
-legacy-existing=ok
-legacy-fresh=fields
-terminal-existing=ok
-derived-existing-bytes=38877216
-overflow=configuration
-field-overflow=configuration
-node-overflow=configuration
-nonpositive=configuration |}]
+    {|
+    legacy-actual=ok
+    legacy-existing=ok
+    legacy-fresh=fields
+    terminal-existing=ok
+    derived-existing-bytes=38877216
+    overflow=configuration
+    field-overflow=configuration
+    node-overflow=configuration
+    nonpositive=configuration
+    |}]
 ;;
 
 let%expect_test "all independent completion and acceptance subsets fit admitted capacity" =
@@ -287,8 +297,10 @@ let%expect_test "all independent completion and acceptance subsets fit admitted 
   in
   printf "future-subsets=%d/%d\n" valid (List.length states);
   [%expect
-    {| admitted=ok
-future-subsets=64/64 |}]
+    {|
+    admitted=ok
+    future-subsets=64/64
+    |}]
 ;;
 
 let%expect_test "composite reference size does not enlarge fresh metadata admission" =
@@ -304,7 +316,9 @@ let%expect_test "composite reference size does not enlarge fresh metadata admiss
     (D.Limits.max_bytes (C.limits C.default ~mode:Fresh))
     (D.Limits.max_bytes (C.limits C.default ~mode:Existing));
   [%expect
-    {| composite-reference=ok
-above-composite=invalid:encoded_bytes
-fresh-bytes=16777216 existing-bytes=38877216 |}]
+    {|
+    composite-reference=ok
+    above-composite=invalid:encoded_bytes
+    fresh-bytes=16777216 existing-bytes=38877216
+    |}]
 ;;
