@@ -883,6 +883,17 @@ let run env helper ~native_watch =
           let child = id created in
           assert (P.Id.Session.equal child (id one_off_replay));
           check_child_tools daemon child;
+          (* Reference pages and validation are independent permission probes.
+             Keep their complete outputs in a separate parent so later lifecycle
+             commits do not repeatedly validate unrelated reference transcripts.
+             This uses the same prompt, capabilities, helper process and grants. *)
+          let probe, _ =
+            create_session
+              ~start_immediately:true
+              ~key:"reference-validation-parent"
+              client.connection
+          in
+          await (fun () -> Option.is_none (state daemon probe.id).active_operation);
           let docs_request =
             `Object
               [ "version", `Number "1"
@@ -896,7 +907,7 @@ let run env helper ~native_watch =
               ]
           in
           let reference =
-            bridge sw daemon client parent.id "reference" docs_request |> complete
+            bridge sw daemon client probe.id "reference" docs_request |> complete
           in
           let selected = Jsonaf.member_exn "items" reference |> Jsonaf.list_exn in
           assert (
@@ -927,7 +938,7 @@ let run env helper ~native_watch =
               (`String "moderator_tool")
               (`String "runtime.jobs.shell-example")
               `Null
-            |> bridge sw daemon client parent.id "reference"
+            |> bridge sw daemon client probe.id "reference"
             |> complete
           in
           let cursor = field "next_cursor" page in
@@ -936,7 +947,7 @@ let run env helper ~native_watch =
            | _ -> failwith "expected paged helper reference");
           let next =
             page_request "continue" `Null `Null cursor
-            |> bridge sw daemon client parent.id "reference"
+            |> bridge sw daemon client probe.id "reference"
             |> complete
           in
           assert (not (List.is_empty (field "items" next |> Jsonaf.list_exn)));
@@ -954,7 +965,7 @@ let run env helper ~native_watch =
           in
           let calls_before = !child_calls in
           let report =
-            bridge sw daemon client parent.id "validate" validation_request |> complete
+            bridge sw daemon client probe.id "validate" validation_request |> complete
           in
           assert (Jsonaf.exactly_equal (field "valid" report) `True);
           [%test_eq: int] calls_before !child_calls;
@@ -962,11 +973,28 @@ let run env helper ~native_watch =
             [ "reference", docs_request; "validate", validation_request ]
             ~f:(fun (operation, arguments) ->
               match
-                bridge ~name:"session_view" sw daemon client parent.id operation arguments
+                bridge ~name:"session_view" sw daemon client probe.id operation arguments
               with
               | P.Invocation.Fail error ->
                 [%test_eq: string] "agent.management.denied" error.code
               | _ -> failwith "ungranted authoring operation was accepted");
+          let probe_handle = Hashtbl.find_exn client.invocation_handles probe.id in
+          H.stop probe_handle ~mode:Graceful |> protocol_ok |> ignore;
+          await (fun () ->
+            let current = state daemon probe.id in
+            P.Session.equal_desired_state current.lifecycle.desired Stopped
+            && (match current.lifecycle.observed with
+                | Stopped -> true
+                | Queued_for_slot
+                | Starting
+                | Recovering
+                | Idle
+                | Running_turn _
+                | Compacting _
+                | Waiting_for_permission _
+                | Stopping
+                | Failed _ -> false)
+            && Option.is_none current.active_operation);
           print_endline
             "confined helper reference and non-executing validation work without native \
              authoring tools";
