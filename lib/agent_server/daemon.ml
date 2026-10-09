@@ -1172,6 +1172,8 @@ let compose
       | Collection_delete _
       | Activity_list _
       | Session_work _
+      | Session_search _
+      | Session_search_navigate _
       | Session_list _
       | Session_inference_summary _
       | Session_inference_observations _

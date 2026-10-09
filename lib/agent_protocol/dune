@@ -22,6 +22,12 @@
   authoring_reference
   history
   history_edit
+  search_term
+  search_snippet
+  search_query
+  search_hit
+  search_page
+  search_navigation
   permission
   grant
   audit

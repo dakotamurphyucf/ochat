@@ -657,6 +657,8 @@ let architecture_methods =
   ; "session.list"
   ; "activity.list"
   ; "session.work"
+  ; "session.search"
+  ; "session.search.navigate"
   ; "session.get"
   ; "session.inference_summary"
   ; "session.inference_observations"

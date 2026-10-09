@@ -33,6 +33,12 @@
   work_projection
   activity_projection
   activity_service
+  search_entry
+  search_text
+  search_cache
+  search_cursor
+  search_source
+  search_service
   pagination
   inference_query_budget
   managed_output_cursor
@@ -58,6 +64,7 @@
   base64
   cstruct
   digestif
+  ochat.document_schema
   eio
   eio.unix
   mirage-crypto-rng.unix

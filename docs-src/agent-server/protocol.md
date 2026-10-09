@@ -78,6 +78,8 @@ actor state and authorization, not merely passing JSON validation.
 | `session.list` | `Session.List_request` | `session.transcript.read` | Paged visible sessions with filters. |
 | `activity.list` | `Activity_query` | `session.transcript.read` and `security.read` plus current session visibility | Bounded immutable activity/attention summaries, selected catalog order. |
 | `session.work` | `Session_work.Query` | `session.transcript.read` and `security.read` plus current session visibility | Bounded payload-free retained work with typed occurrence witnesses. |
+| `session.search` | `Search_query` | `session.transcript.read` plus current session visibility | Bounded literal search over current readable canonical user/assistant text. |
+| `session.search.navigate` | `Search_navigation.Request` | `session.transcript.read` plus current session visibility | Revalidate a hit and read bounded current context without activation. |
 | `session.get` | `Session.Get_request` | `session.transcript.read` | Scoped snapshot; optional history window. |
 | `session.configuration_get` | `Session_configuration.Get_request` | `session.transcript.read` | Safe selected/captured configuration and independent configuration revision; profile identity requires `diagnostics.read`. |
 | `session.configuration_update` | `Session_configuration.Update_request` | `session.message.send`; profile patches also require `provider.select` | Writable attachment, expected generation/configuration revision and nonempty model/profile/settings patch; next root capture selection. |
@@ -659,3 +661,65 @@ Omission keeps established cancel-current-ID semantics. The typed
 connection's initialized host and always supply witnesses. A successful retry
 returns its original receipt after current authorization; it must not cancel a
 new attempt that happens to share a work ID.
+
+
+## Conversation text search
+
+`session.search` combines the ordinary catalog filters with a host-qualified
+`server_id`, `term`, and `scan_limit`. `page.limit` counts hits (1–100), while
+`scan_limit` counts examined canonical positions (1–512), including excluded
+entries and misses. Use `Created_at`/`Ascending`; equal timestamps use the catalog's
+stable session-ID ordering, followed by chronological canonical entry order.
+Project, collection, workspace, label and archived-session selectors retain their
+ordinary intersection semantics.
+
+Search is literal substring matching with ASCII case folding; non-ASCII text is
+matched exactly. It is not regex, fuzzy, semantic or attachment-body search. The
+term must be valid UTF-8 and at most 256 bytes. A canonical entry contributes at
+most one hit, from its first matching readable text or refusal part. Multimodal
+text captions are included, but image URLs and attachment contents are not read.
+System/developer content, the initial authored prompt prefix, reasoning, tools,
+provider metadata, runtime/moderator content, deferred drafts, and retired
+edit/reset/compaction archives are excluded. An archived **session** may still be
+selected: its current canonical conversation is different from a historical
+conversation archive.
+
+Each page examines at most 64 sessions and the requested position count. Raw
+payload examination admits 6 MiB plus at most one 2 MiB boundary probe. Sources
+are limited to 65536 canonical positions and each examined payload to 2 MiB;
+malformed, oversized or unsupported source data produces an explicit error,
+never an empty successful shard. Hits include host/session identity, generation,
+canonical history ID, content revision, original content-part index, and a plain
+UTF-8 snippet. Highlight offsets and lengths are UTF-8 **bytes**, both on Unicode
+scalar boundaries. Service snippets are at most 512 bytes; clients must render
+plain text without interpreting HTML or terminal escapes. Session revisions use
+canonical decimal strings. There is no exact total-count claim.
+
+Follow `next_cursor` even when `hits` is empty. Only `reached_end` means traversal
+is complete. Signed cursors bind the principal, query, filters, organization
+revision and observed source basis. Query/principal changes, tampering or host
+restart expire a cursor; changed source state returns `Conflict` with
+`refresh_required`. Clients explicitly restart a query rather than looping
+indefinitely while a session is streaming. The host reauthorizes and revalidates
+all candidate hits before disclosure.
+
+`session.search.navigate` accepts the original query and a hit. The supplied
+snippet grants no authority and is not reused; the query's pagination cursor is
+ignored. The host reapplies current visibility and filters and looks up the
+canonical ID. `Current` returns a freshly generated hit and at most five
+chronological canonical positions centered on it, omitting excluded positions.
+Each context entry contains at most 2048 UTF-8 bytes of selected text with an
+explicit truncation flag. `Changed` reports a newer current content revision;
+`Unavailable` means the original occurrence is no longer a readable matching
+current target. Permission denial is a normal `Permission_denied` error. Neither
+navigation nor search opens retained historical evidence as a fallback.
+
+These reads never start inference or activate an unloaded session. The host's
+private in-memory projection cache is disposable, bounded, and contains only
+selected readable text. Defaults allow 8 MiB of conservative accounted storage,
+256 entries total and 32 per session. Source revisions invalidate reuse;
+authorization and current source identity are checked even for cache hits.
+Restart or eviction rebuilds lazily without a new persistent transcript copy.
+`Agent_client.Conversation_search` exposes the same page and navigation operations
+through direct, socket, HTTP and stdio connections; desktop and TUI clients own
+presentation and explicit refresh behavior.

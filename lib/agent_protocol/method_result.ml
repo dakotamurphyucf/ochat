@@ -405,6 +405,8 @@ type t =
   | Blob_read of Blob.Chunk.t
   | Session_create of Create.t
   | Session_list of Session_catalog.t Page.t
+  | Session_search of Search_page.t
+  | Session_search_navigate of Search_navigation.Response.t
   | Activity_list of Session_activity.t Page.t
   | Session_work of Session_work.t Page.t
   | Session_configuration_get of Session_configuration.t
@@ -478,6 +480,8 @@ let method_name = function
   | Blob_read _ -> "blob.read"
   | Session_create _ -> "session.create"
   | Session_list _ -> "session.list"
+  | Session_search _ -> "session.search"
+  | Session_search_navigate _ -> "session.search.navigate"
   | Activity_list _ -> "activity.list"
   | Session_work _ -> "session.work"
   | Session_configuration_get _ -> "session.configuration_get"
@@ -553,6 +557,8 @@ let to_json = function
   | Blob_read value -> Blob.Chunk.to_json value
   | Session_create value -> Create.to_json value
   | Session_list value -> Page.to_json Session_catalog.to_json value
+  | Session_search value -> Search_page.to_json value
+  | Session_search_navigate value -> Search_navigation.Response.to_json value
   | Activity_list value -> Page.to_json Session_activity.to_json value
   | Session_work value -> Page.to_json Session_work.to_json value
   | Session_configuration_get value | Session_configuration_update value ->
@@ -653,6 +659,9 @@ let decoders =
   ; "blob.read", map Blob.Chunk.of_json (fun x -> Blob_read x)
   ; "session.create", map Create.of_json (fun x -> Session_create x)
   ; "session.list", map (Page.of_json Session_catalog.of_json) (fun x -> Session_list x)
+  ; "session.search", map Search_page.of_json (fun x -> Session_search x)
+  ; ( "session.search.navigate"
+    , map Search_navigation.Response.of_json (fun x -> Session_search_navigate x) )
   ; ( "activity.list"
     , map (Page.of_json Session_activity.of_json) (fun x -> Activity_list x) )
   ; "session.work", map (Page.of_json Session_work.of_json) (fun x -> Session_work x)

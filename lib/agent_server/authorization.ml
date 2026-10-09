@@ -24,6 +24,8 @@ let required_scope = function
   | Session_create _ -> Some Create_sessions
   | Activity_list _
   | Session_work _
+  | Session_search _
+  | Session_search_navigate _
   | Session_list _
   | Session_get _
   | Session_attach _
