@@ -3748,3 +3748,97 @@ let%expect_test "removed nested workspace and original proof survive retry and r
     (true true true)
     |}]
 ;;
+
+let%expect_test "legacy migration uses persisted authority with a distinct lock caller" =
+  with_temp_directory "ochat-migration-persisted-owner" (fun env temporary ->
+    let root = Filename.concat temporary "data" in
+    Eio.Switch.run (fun sw ->
+      let store =
+        Agent_store.Session_store.create
+          ~env
+          ~sw
+          ~root
+          ~server_id
+          ~process_start_identity:None
+          ~lock_nonce:"persisted-owner-create"
+        |> store_ok
+      in
+      Agent_store.Session_store.close store |> store_ok;
+      let schema_path =
+        Eio.Path.(Eio.Stdenv.fs env / Filename.concat root "schema.sexp")
+      in
+      let schema = Eio.Path.load schema_path |> Jsonaf.of_string in
+      let legacy =
+        match schema with
+        | `Object fields ->
+          `Object
+            (List.Assoc.add fields ~equal:String.equal "schema_version" (`Number "1"))
+          |> Jsonaf.to_string
+        | _ -> failwith "schema fixture lacks document envelope"
+      in
+      Eio.Path.save ~create:(`Or_truncate 0o600) schema_path legacy;
+      let identity_path =
+        Eio.Path.(Eio.Stdenv.fs env / Filename.concat root "server-id")
+      in
+      let before_identity = Eio.Path.load identity_path in
+      let caller =
+        Agent_protocol.Id.Server.of_string "srv_migration_caller" |> protocol_ok
+      in
+      assert (not (Agent_protocol.Id.Server.equal caller server_id));
+      let plan =
+        Agent_store.Migration.run
+          ~env
+          ~sw
+          ~root
+          ~server_id:caller
+          ~process_start_identity:None
+          ~lock_nonce:"persisted-owner-migrate"
+          ~mode:Apply
+        |> store_ok
+      in
+      let reopened =
+        Agent_store.Session_store.open_existing
+          ~env
+          ~sw
+          ~root
+          ~process_start_identity:None
+          ~lock_nonce:"persisted-owner-reopen"
+        |> store_ok
+      in
+      Exn.protect
+        ~finally:(fun () -> Agent_store.Session_store.close reopened |> store_ok)
+        ~f:(fun () ->
+          let organization =
+            Agent_store.Organization_store.snapshot_checked
+              (Agent_store.Session_store.organizations reopened)
+            |> store_ok
+          in
+          let current =
+            Agent_store.Migration.inspect ~env ~root ~mode:Validate_only |> store_ok
+          in
+          print_s
+            [%sexp
+              { source = (plan.source_version : int)
+              ; target = (plan.target_version : int)
+              ; status = (plan.status : Agent_store.Migration.status)
+              ; identity_unchanged =
+                  (String.equal before_identity (Eio.Path.load identity_path) : bool)
+              ; host_preserved =
+                  (Agent_protocol.Id.Server.equal
+                     server_id
+                     (Agent_store.Session_store.server_id reopened)
+                   : bool)
+              ; organization_preserved =
+                  (Agent_protocol.Id.Server.equal
+                     server_id
+                     (Agent_store.Organization_state.server_id organization)
+                   : bool)
+              ; current =
+                  (Agent_store.Migration.equal_status current.status Current : bool)
+              }])));
+  [%expect
+    {|
+    ((source 1) (target 2) (status Current) (identity_unchanged true)
+     (host_preserved true) (organization_preserved true) (current true))
+    |}]
+;;
