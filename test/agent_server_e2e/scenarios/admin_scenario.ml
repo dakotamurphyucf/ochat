@@ -484,31 +484,63 @@ let check_corrupt_archive
 let test_compact env environment =
   let fixture = fixture env environment "admin-compact" in
   let session, revision, original =
-    with_daemon env fixture (fun _sw _daemon connection ->
-      let session = create_session connection ~key:"admin:compact:create" in
-      let original =
-        (get_snapshot connection session.id).canonical_history.entries
-        |> List.map ~f:Agent_protocol.Public.History.to_json
-        |> fun entries -> `Array entries
-      in
-      let compacted =
-        request
-          connection
-          (compact_command session ~revision:session.revision "admin:compact")
-        |> mutation_session
-      in
-      ignore (operation_of_compaction compacted : Agent_protocol.Id.Operation.t);
-      let terminal = await_observed env connection session.id Stopped 250 in
-      require
-        Int64.(terminal.revision > compacted.revision)
-        "compaction did not terminate";
-      let snapshot = get_snapshot connection session.id in
-      let revision = List.hd_exn snapshot.archived_revisions in
-      let exported = export_archive connection session revision in
-      require
-        (Poly.equal (Jsonaf.member "history" exported) (Some original))
-        "archive lost original history";
-      session, revision, original)
+    Eio.Switch.run (fun sw ->
+      let port = reserve_port env in
+      let provider = Support.Compaction_json_provider.start ~sw ~env ~port in
+      Eio.Fiber.fork ~sw (fun () ->
+        let request =
+          Support.Compaction_json_provider.await_request provider ~env ~index:0
+        in
+        Support.Compaction_json_provider.release
+          request
+          (Summary "retained fixture summary");
+        Support.Compaction_json_provider.await_returned request ~env);
+      with_daemon
+        ~environment_overrides:
+          [ "OPENAI_API_KEY", "admin-compaction-local-test-key"
+          ; "API_URL", sprintf "http://127.0.0.1:%d" port
+          ]
+        env
+        fixture
+        (fun _sw _daemon connection ->
+           let session = create_session connection ~key:"admin:compact:create" in
+           let original =
+             (get_snapshot connection session.id).canonical_history.entries
+             |> List.map ~f:Agent_protocol.Public.History.to_json
+             |> fun entries -> `Array entries
+           in
+           let compacted =
+             request
+               connection
+               (compact_command session ~revision:session.revision "admin:compact")
+             |> mutation_session
+           in
+           ignore (operation_of_compaction compacted : Agent_protocol.Id.Operation.t);
+           let terminal = await_observed env connection session.id Stopped 250 in
+           require
+             Int64.(terminal.revision > compacted.revision)
+             "compaction did not terminate";
+           let snapshot = get_snapshot connection session.id in
+           require
+             (Support.Compaction_json_provider.request_count provider = 1)
+             "compaction did not use exactly one local provider request";
+           let revision =
+             match snapshot.archived_revisions with
+             | revision :: _ -> revision
+             | [] ->
+               raise_s
+                 [%sexp
+                   "compaction terminated without an archive"
+                 , (snapshot : Agent_protocol.Public.Snapshot.Fields.t)]
+           in
+           let exported = export_archive connection session revision in
+           require
+             (Option.equal
+                Jsonaf.exactly_equal
+                (Jsonaf.member "history" exported)
+                (Some original))
+             "archive lost original history";
+           session, revision, original))
   in
   let deleted_id =
     with_daemon env fixture (fun sw _daemon connection ->
@@ -530,7 +562,10 @@ let test_compact env environment =
       in
       let exported = export_archive connection session revision in
       require
-        (Poly.equal (Jsonaf.member "history" exported) (Some original))
+        (Option.equal
+           Jsonaf.exactly_equal
+           (Jsonaf.member "history" exported)
+           (Some original))
         "archive did not survive restart";
       check_corrupt_archive environment fixture session revision connection;
       let snapshot = get_snapshot connection session.id in

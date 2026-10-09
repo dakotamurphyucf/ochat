@@ -74,8 +74,13 @@ let response index request =
     if is_stream
     then (
       let events =
-        List.map (output index) ~f:(fun item ->
-          Res.Response_stream.jsonaf_of_t item |> event)
+        List.mapi (output index) ~f:(fun sequence_number item ->
+          match Res.Response_stream.jsonaf_of_t item with
+          | `Object fields ->
+            event
+              (`Object
+                  (("sequence_number", `Number (Int.to_string sequence_number)) :: fields))
+          | _ -> assert false)
       in
       ( "text/event-stream"
       , String.concat

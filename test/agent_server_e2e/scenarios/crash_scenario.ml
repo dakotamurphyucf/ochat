@@ -24,6 +24,9 @@ let run_replace_child env name target =
   let matches path =
     String.is_prefix path ~prefix:(target ^ ".tmp-")
     || String.equal path (Filename.dirname target)
+    (* Directory sync opens "." relative to the parent capability; the fault
+       still targets that exact directory before the real fsync. *)
+    || String.equal path (Filename.concat (Filename.dirname target) ".")
   in
   let directory_opened = ref false in
   let on_boundary path =

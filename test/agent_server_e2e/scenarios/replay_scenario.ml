@@ -500,6 +500,20 @@ let with_backpressure_observation env environment name f =
   let fixture =
     fixture ~subscriber_capacity:16 env environment name ~retained_events:1024
   in
+  (* Isolate queue overflow from the independent stalled-socket idle cutoff.
+     Durable writes for the pressure batch can exceed the default 7.5-second
+     cutoff; retain a finite 45-second cutoff for this scenario. *)
+  let config_path =
+    Temporary_environment.path environment (Config_fixture.config_path fixture)
+  in
+  let configuration = Eio.Path.load config_path in
+  Eio.Path.save
+    ~create:(`Or_truncate 0o600)
+    config_path
+    (String.substr_replace_first
+       configuration
+       ~pattern:"(idle_connection_timeout_ms 5000)"
+       ~with_:"(idle_connection_timeout_ms 30000)");
   with_daemon env fixture (fun sw ->
     with_client ~sw env fixture (fun writer ->
       let created = create_session writer (name ^ ":create") in

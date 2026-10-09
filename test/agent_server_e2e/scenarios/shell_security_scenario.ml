@@ -119,23 +119,29 @@ let output_text text =
 ;;
 
 let tool_stream secret index =
-  let item =
-    Res.Response_stream.Item.Function_call
-      { name = "fixed_echo"
-      ; arguments = ""
-      ; call_id = sprintf "shell-call-%d" index
-      ; _type = "function_call"
-      ; id = Some (sprintf "shell-item-%d" index)
-      ; status = Some "in_progress"
-      }
+  let arguments = Jsonaf.to_string (`Object [ "arguments", `Array [ `String secret ] ]) in
+  let call : Res.Function_call.t =
+    { name = "fixed_echo"
+    ; arguments = ""
+    ; call_id = sprintf "shell-call-%d" index
+    ; _type = "function_call"
+    ; id = Some (sprintf "shell-item-%d" index)
+    ; status = Some "in_progress"
+    }
   in
+  let item = Res.Response_stream.Item.Function_call call in
   [ Res.Response_stream.Output_item_added
       { item; output_index = 0; type_ = "response.output_item.added" }
   ; Res.Response_stream.Function_call_arguments_done
-      { arguments = Jsonaf.to_string (`Object [ "arguments", `Array [ `String secret ] ])
+      { arguments
       ; item_id = sprintf "shell-item-%d" index
       ; output_index = 0
       ; type_ = "response.function_call_arguments.done"
+      }
+  ; Res.Response_stream.Output_item_done
+      { item = Function_call { call with arguments; status = Some "completed" }
+      ; output_index = 0
+      ; type_ = "response.output_item.done"
       }
   ]
 ;;
@@ -882,19 +888,35 @@ let stream_delta (event : Agent_protocol.Event.Recoverable.t) =
   | Tool_activity _ -> None
 ;;
 
-let require_live_deltas events =
-  let deltas = List.filter_map events ~f:stream_delta in
-  require (not (List.is_empty deltas)) "live probe did not publish tool argument deltas";
-  let groups = String.Table.create () in
-  List.iter deltas ~f:(fun (id, change) ->
-    let previous = Option.value (Hashtbl.find groups id) ~default:"" in
-    let text =
-      match change with
-      | Append text -> previous ^ text
-      | Replace text -> text
-    in
-    Hashtbl.set groups ~key:id ~data:text);
-  Hashtbl.iter groups ~f:(fun payload ->
+let require_finalized_redacted_arguments events =
+  require
+    (List.is_empty (List.filter_map events ~f:stream_delta))
+    "live probe published unmoderated tool argument fragments";
+  let arguments =
+    List.filter_map events ~f:(fun (event : Agent_protocol.Event.Recoverable.t) ->
+      match event.payload with
+      | Transcript stream ->
+        (match Transcript.Stream.view stream with
+         | Item_finalized { entry; _ } ->
+           (match
+              History_entry.Payload.Semantic.view
+                (History_entry.Payload.semantic (History_entry.payload entry))
+            with
+            | Call { name; input_bytes; _ } when String.equal name "fixed_echo" ->
+              Some input_bytes
+            | Call _ | Message _ | Result _ | Reasoning _ | Unknown _ -> None)
+         | Source_started _
+         | Item_announced _
+         | Part_announced _
+         | Changed _
+         | Source_finished _
+         | Unknown_event _ -> None)
+      | Tool_activity _ -> None)
+  in
+  require
+    (not (List.is_empty arguments))
+    "live probe did not publish finalized moderated tool arguments";
+  List.iter arguments ~f:(fun payload ->
     require
       (String.is_substring payload ~substring:"<redacted>")
       "completed tool arguments were dropped instead of redacted";
@@ -902,7 +924,7 @@ let require_live_deltas events =
       live_secret
       (Base64.encode_exn live_secret)
       payload
-      "reassembled live arguments")
+      "finalized live arguments")
 ;;
 
 let require_live_tool_events events nested =
@@ -952,7 +974,10 @@ let cases =
   ; "shell.single-delegated-approval", test_single_delegated
   ; "redaction.events-jobs-audit-health-logs", test_redaction
   ; ( "redaction.live-split-deltas"
-    , test_live_redaction "redaction.live-split-deltas" false require_live_deltas )
+    , test_live_redaction
+        "redaction.live-split-deltas"
+        false
+        require_finalized_redacted_arguments )
   ; ( "redaction.live-started"
     , test_live_redaction "redaction.live-started" false (fun events ->
         require_live_tool_events events false) )

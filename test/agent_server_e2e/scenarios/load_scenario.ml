@@ -128,16 +128,21 @@ let observer_client ~sw env fixture summary =
 ;;
 
 let keepalive ~sw env client closing =
+  let stopped, resolver = Eio.Promise.create () in
   Eio.Fiber.fork_daemon ~sw (fun () ->
-    let rec loop () =
-      Eio.Time.sleep (Eio.Stdenv.clock env) 10.;
-      if not !closing
-      then (
-        ignore (L.health client : Agent_protocol.Health.Response.t);
-        loop ())
-    in
-    loop ();
-    `Stop_daemon)
+    Exn.protect
+      ~finally:(fun () -> Eio.Promise.resolve resolver ())
+      ~f:(fun () ->
+        let rec loop () =
+          Eio.Time.sleep (Eio.Stdenv.clock env) 10.;
+          if not !closing
+          then (
+            ignore (L.health client : Agent_protocol.Health.Response.t);
+            loop ())
+        in
+        loop ());
+    `Stop_daemon);
+  stopped
 ;;
 
 let open_observer ~sw env fixture summary =
@@ -155,7 +160,7 @@ let open_observer ~sw env fixture summary =
   F.require (response.status = 200) "SSE did not open";
   let closing = ref false in
   let cursor = watch_events ~sw env stream closing snapshot.latest_event_sequence in
-  keepalive ~sw env client closing;
+  ignore (keepalive ~sw env client closing : unit Eio.Promise.t);
   client, stream, cursor, closing
 ;;
 
@@ -200,7 +205,18 @@ let attachments env report =
     let groups = count "OCHAT_E2E_LOAD_ACTIVE_SESSIONS" 25 in
     let clients = count "OCHAT_E2E_LOAD_CLIENTS_PER_SESSION" 20 in
     let sessions = sessions writer groups in
-    let observers = open_observers ~sw env fixture sessions clients in
+    (* Opening all observers can exceed the configured HTTP idle interval.
+       Keep the writer alive until fanout begins, then join its keepalive so
+       writer RPCs remain serialized on the same fixture client. *)
+    let writer_closing = ref false in
+    let writer_stopped = keepalive ~sw env writer writer_closing in
+    let observers =
+      Exn.protect
+        ~f:(fun () -> open_observers ~sw env fixture sessions clients)
+        ~finally:(fun () ->
+          writer_closing := true;
+          Eio.Cancel.protect (fun () -> Eio.Promise.await writer_stopped))
+    in
     await_fanout env writer sessions observers;
     ignore
       (R.sample
