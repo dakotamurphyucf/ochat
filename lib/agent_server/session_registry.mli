@@ -109,7 +109,10 @@ val summaries : t -> Agent_protocol.Session.t list
 
 (** Closes actors for stopped sessions with no attachments, runnable work, active
     schedules, runtime or resource borrows, retaining their durable index entries
-    for lazy reload. Each candidate is reserved and its actual actor fenced before
+    for lazy reload. Passive loaded observations use a read lease and revalidate
+    the exact readable owner without activating indexed sessions or reserving
+    running sessions. Only witnessed inactive candidates matching their durable
+    projection enter exclusive admission; each is then reserved and its actor fenced before
     inactivity is rechecked. Eviction permanently closes runtime/resource admission
     and closes the entry outside the global mutex before committing its unchanged
     durable projection. Failed closure retains the retired owner for recovery. *)

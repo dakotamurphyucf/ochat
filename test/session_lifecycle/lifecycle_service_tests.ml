@@ -2039,3 +2039,172 @@ let%expect_test "prepared writer rechecks attachment after durable pending admis
         Agent_server.Daemon.shutdown daemon |> protocol_ok)));
   [%expect {| (true true true true 0) |}]
 ;;
+
+let%expect_test
+    "maintenance observes busy owners without lifecycle admission and rechecks candidates"
+  =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    with_lifecycle_root env (fun ~root ~content:_ ~configuration ->
+      Eio.Switch.run (fun sw ->
+        let module R = Agent_server.Session_registry in
+        let module A = Agent_session.Session_actor in
+        let module S = Agent_session.Session_state in
+        let calls = ref 0 in
+        let daemon = start_daemon sw env ~root ~configuration calls in
+        let client = connection daemon (principal ()) in
+        initialize client;
+        let seed, _ = create_session ~key:"maintenance-seed" client in
+        let seed_entry =
+          R.find (Agent_server.Daemon.registry daemon) seed.id |> Option.value_exn
+        in
+        let seed_state = A.state seed_entry.actor |> protocol_ok in
+        List.iter [ true; false ] ~f:(fun running ->
+          let initial =
+            { seed_state with
+              attachments = []
+            ; runtime_initialization = Ready
+            ; lifecycle =
+                { desired = (if running then Running else Stopped)
+                ; observed = (if running then Idle else Stopped)
+                }
+            }
+          in
+          let backend =
+            Agent_session.Memory_backend.create ~event_capacity:128 ~initial_state:initial
+          in
+          let persistence = Agent_session.Memory_backend.persistence backend in
+          let entered, enter = Eio.Promise.create () in
+          let release, resume = Eio.Promise.create () in
+          let blocked = ref true in
+          let next_state = ref initial in
+          let actor =
+            A.create
+              ~sw
+              ~clock:(Eio.Stdenv.clock env)
+              ~mailbox_capacity:32
+              ~compaction_env:None
+              ~initial_state:initial
+              ~operation_worker:None
+              ~persistence:
+                { persistence with
+                  commit =
+                    (fun ~command_audit ~previous next ->
+                      if !blocked
+                      then (
+                        blocked := false;
+                        next_state := next.Agent_session.Session_transition.state;
+                        Eio.Promise.resolve enter ();
+                        Eio.Promise.await release);
+                      persistence.commit ~command_audit ~previous next)
+                }
+              ~services:
+                { now = P.Timestamp.now
+                ; monotonic_now =
+                    (fun () -> Eio.Time.Mono.now (Eio.Stdenv.mono_clock env))
+                ; create_attachment_id = P.Id.Attachment.create
+                ; create_reclaim_token = (fun () -> "maintenance-test")
+                ; state_committed = (fun _ _ -> ())
+                ; job_results = None
+                ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
+                ; schedule_limits = Agent_session.Staged_schedules.default_limits
+                ; notification_limits = Agent_session.Staged_notifications.default_limits
+                ; ingress_limits = Agent_session.Staged_ingress.default_limits
+                }
+          in
+          let closes = ref 0 in
+          let runtime =
+            Agent_server.Runtime_owner.create ~actor ~initial:None ~build:(fun () ->
+              failwith "maintenance activated an owner")
+          in
+          let entry : R.entry =
+            { actor
+            ; runtime
+            ; history_ids =
+                Agent_session.History_id_source.create
+                  ~namespace:"maintenance"
+                  ~block_size:8
+                  ~reserve:(fun ~count -> A.reserve_history_block actor ~count)
+                |> protocol_ok
+            ; durable_events =
+                Agent_session.Durable_event_log.create ~capacity:128 [] |> protocol_ok
+            ; capacity = None
+            ; store_handle = None
+            ; expire_permissions = (fun ~now:_ -> ())
+            ; collect_results = (fun () -> Ok None)
+            ; close =
+                (fun () ->
+                  Int.incr closes;
+                  A.shutdown actor)
+            }
+          in
+          let registry = R.create () in
+          R.add registry ~session_id:seed.id entry |> protocol_ok;
+          let committed, commit = Eio.Promise.create () in
+          Eio.Fiber.fork ~sw (fun () ->
+            Eio.Promise.resolve commit (A.reserve_history_block actor ~count:1));
+          Eio.Promise.await entered;
+          let indexed : Agent_store.Session_index.Entry.t =
+            { session = S.summary !next_state
+            ; runnable_job_count = 0
+            ; deliverable_job_count = 0
+            ; earliest_schedule_due = None
+            ; owner_grace_deadline = None
+            ; pending_initial_start = false
+            ; archived = false
+            ; lifecycle_revision = P.Session_lifecycle.Revision.zero
+            ; admission = Automatic
+            }
+          in
+          let observing, observe = Eio.Promise.create () in
+          let unloaded, unload = Eio.Promise.create () in
+          Eio.Fiber.fork ~sw (fun () ->
+            Eio.Promise.resolve observe ();
+            Eio.Promise.resolve
+              unload
+              (R.unload_inactive registry ~index_entries:[ indexed ]));
+          Eio.Promise.await observing;
+          let same_owner =
+            match R.load registry seed.id with
+            | Ok actual -> phys_equal actual.actor actor
+            | Error _ -> false
+          in
+          let unrelated =
+            R.with_lifecycle registry (P.Id.Session.create ()) (fun _ -> Ok ())
+            |> Result.is_ok
+          in
+          let restarted, restart = Eio.Promise.create () in
+          let attaching, attach = Eio.Promise.create () in
+          if not running
+          then (
+            Eio.Fiber.fork ~sw (fun () ->
+              Eio.Promise.resolve attach ();
+              let attachment, _ =
+                A.attach actor ~mode:Read_write ~subscribe:false |> protocol_ok
+              in
+              Eio.Promise.resolve restart (A.start actor ~attachment_id:attachment.id));
+            Eio.Promise.await attaching);
+          Eio.Promise.resolve resume ();
+          Eio.Promise.await committed |> protocol_ok |> ignore;
+          let removed = Eio.Promise.await unloaded in
+          if not running then Eio.Promise.await restarted |> protocol_ok |> ignore;
+          let current =
+            R.read_state registry ~authorize:(fun _ -> Ok ()) seed.id |> protocol_ok
+          in
+          print_s
+            [%sexp
+              (running : bool)
+            , (same_owner : bool)
+            , (unrelated : bool)
+            , (Int.equal removed 0 : bool)
+            , (Int.equal !closes 0 : bool)
+            , (P.Session.equal_desired_state current.lifecycle.desired Running : bool)];
+          R.shutdown registry);
+        C.Connection.close client;
+        Agent_server.Daemon.shutdown daemon |> protocol_ok)));
+  [%expect
+    {|
+    (true true true true true true)
+    (false true true true true true)
+    |}]
+;;

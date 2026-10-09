@@ -796,21 +796,26 @@ let unload_inactive t ~index_entries =
   let candidates =
     Eio.Mutex.use_ro t.mutex (fun () -> Map.keys (Atomic.get t.sessions))
   in
-  let unload session_id =
+  let matches_index state indexed =
+    inactive state
+    && Jsonaf.exactly_equal
+         (Agent_protocol.Session.to_json (Agent_session.Session_state.summary state))
+         (Agent_protocol.Session.to_json indexed.Agent_store.Session_index.Entry.session)
+  in
+  let unload_candidate session_id observed_entry =
     let open Result.Let_syntax in
     with_lifecycle t session_id (fun reservation ->
       match reservation.Lifecycle_reservation.target, Map.find indexes session_id with
       | (Indexed _ | Absent), _ | Loaded _, None -> Ok false
       | Loaded entry, Some indexed ->
+        let%bind () =
+          if same_owner observed_entry entry
+          then Ok ()
+          else Error (lifecycle_conflict "eviction observation binding changed")
+        in
         let%bind () = check_retained_owner entry in
         let%bind state = Agent_session.Session_actor.state entry.actor in
-        let matches state =
-          inactive state
-          && Jsonaf.exactly_equal
-               (Agent_protocol.Session.to_json
-                  (Agent_session.Session_state.summary state))
-               (Agent_protocol.Session.to_json indexed.session)
-        in
+        let matches state = matches_index state indexed in
         if not (matches state)
         then Ok false
         else (
@@ -859,6 +864,33 @@ let unload_inactive t ~index_entries =
                   ignore
                     (Agent_session.Session_actor.abort_lifecycle entry.actor fence
                      : (unit, Agent_protocol.Error.t) Result.t)))))
+  in
+  let observe session_id =
+    with_read_snapshot
+      t
+      ~capture:(fun () -> Ok (find t session_id))
+      ~check_current:(function
+        | None -> Ok ()
+        | Some original ->
+          (match find t session_id with
+           | Some current when same_owner original current -> check_retained_owner current
+           | Some _ | None ->
+             Error (lifecycle_conflict "eviction observation binding changed")))
+      (function
+        | None -> Ok None
+        | Some entry ->
+          let open Result.Let_syntax in
+          let%bind () = check_retained_owner entry in
+          let%map state = Agent_session.Session_actor.state entry.actor in
+          Some (entry, state))
+  in
+  let unload session_id =
+    let open Result.Let_syntax in
+    let%bind observed = observe session_id in
+    match observed, Map.find indexes session_id with
+    | None, _ | Some _, None -> Ok false
+    | Some (entry, state), Some indexed ->
+      if matches_index state indexed then unload_candidate session_id entry else Ok false
   in
   List.fold candidates ~init:0 ~f:(fun count session_id ->
     match unload session_id with
