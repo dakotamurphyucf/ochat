@@ -118,6 +118,13 @@
     ]
   },
   {
+    "query": "Configuring read_file roots",
+    "expected": [
+      "/docs/reference/tools/"
+    ],
+    "maxRank": 3
+  },
+  {
     "query": "workspace",
     "expected": [
       "/docs/concepts/sessions-and-workspaces/"

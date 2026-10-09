@@ -10,6 +10,7 @@ import { createHash } from 'node:crypto';
 import {
   deploymentHeaders,
   inspectCapacity,
+  privateOutputFiles,
   limits,
 } from '../scripts/deployment-policy.mjs';
 import { inventory, verifyArtifact } from '../scripts/release-artifact.mjs';
@@ -489,5 +490,23 @@ test('browser shards consume a single build per environment and gate requires qu
         step.if ===
           "matrix.environment == 'production' && needs.browser.result == 'success'",
     ),
+  );
+});
+
+test('private output exclusion checks artifact components without rejecting host ancestors', () => {
+  const root = path.join(os.tmpdir(), 'scratch', 'planning', 'site', 'dist');
+  const publicFile = path.join(root, 'docs', 'index.html');
+  assert.deepEqual(privateOutputFiles(root, [publicFile]), []);
+  for (const component of ['scratch', 'node_modules', 'planning']) {
+    const topLevel = path.join(root, component, 'private.html');
+    const nested = path.join(root, 'assets', component, 'private.html');
+    assert.deepEqual(privateOutputFiles(root, [publicFile, topLevel, nested]), [
+      topLevel,
+      nested,
+    ]);
+  }
+  assert.deepEqual(
+    privateOutputFiles(root, [path.join(root, 'scratchpad', 'index.html')]),
+    [],
   );
 });
