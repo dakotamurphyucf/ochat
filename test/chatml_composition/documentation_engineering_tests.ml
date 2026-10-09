@@ -70,10 +70,14 @@ let%expect_test
             ~post_stream
       }
     (fun env workspace host ->
+       (* Durable workflow completion is separate from individual script/tool limits.
+          Match the neighboring lab fixture's bound; CI completed the denied turn
+          during cleanup after the shared five-second waiter had expired. *)
+       let finish_call = Workflow.finish_call ~timeout:30. in
        let call id name input =
          queued := [ id, name, input ];
          Workflow.send host id "Investigate the source and check its actual evidence.";
-         Workflow.finish_call env host id;
+         finish_call env host id;
          Host.initial_outcome (Host.snapshot host) id
        in
        call "inspect" "inspect_setup" (`Object []) |> ignore;
@@ -155,7 +159,7 @@ let%expect_test
                 P.Idempotency_key.of_string "engineering-deny" |> protocol_ok
             })
        |> ignore;
-       Workflow.finish_call env host "replace";
+       finish_call env host "replace";
        Documentation_shell_review_tests.denied (Host.snapshot host) "replace";
        [%test_eq: string] before (Eio.Path.load report);
        [%test_eq: string]
