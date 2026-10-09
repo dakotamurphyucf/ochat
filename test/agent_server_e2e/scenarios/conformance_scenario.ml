@@ -3205,6 +3205,310 @@ let test_history_deletion env environment =
            require_equal_history_deletion baseline (observe stdio_http "stdio-http"))))
 ;;
 
+module History_editing = struct
+  module P = Agent_protocol
+  module A = Agent_session
+
+  type seed =
+    { session_id : P.Id.Session.t
+    ; target_id : P.History.Id.t
+    ; prefix_ids : P.History.Id.t list
+    }
+
+  type t =
+    { content_revision : int64
+    ; revision_delta : int64
+    ; stable_id : bool
+    ; retired_suffix : bool
+    ; initial_unchanged : bool
+    ; retry_unchanged : bool
+    ; receipt_matches : bool
+    ; stale_revision : P.Error.code
+    ; stale_content : P.Error.code
+    ; stale_generation : P.Error.code
+    ; read_only : P.Error.code
+    ; stopped_continuation : bool
+    ; continue_receipt : bool
+    ; stopped_without_operation : bool
+    }
+  [@@deriving equal, sexp]
+
+  let preseed env fixture =
+    let seeds = ref [] in
+    let options =
+      Daemon_host.with_offline_inference Agent_server.Daemon.default_options
+    in
+    let options =
+      { options with
+        inference_policy =
+          { options.inference_policy with
+            select_inference_profile =
+              (fun ~current ~profile ->
+                if String.equal profile (Inference.Request.Target.profile current)
+                then Ok current
+                else Error Inference_runtime.Preparation_error.Target_unavailable)
+          }
+      }
+    in
+    Daemon_host.with_ env fixture ~options (fun sw daemon ->
+      let connection = http_client ~sw env fixture in
+      Exn.protect ~finally:connection.close ~f:(fun () ->
+        ignore (initialize connection : P.Initialize.Response.t);
+        List.iter [ "unix"; "http"; "stdio-unix"; "stdio-http" ] ~f:(fun label ->
+          let created, _ = create_session connection ~key:("history-seed:" ^ label) in
+          let writer = attached_writer created in
+          let entry =
+            Agent_server.Session_registry.load
+              (Agent_server.Daemon.registry daemon)
+              created.session.id
+            |> protocol_ok
+          in
+          let before = A.Session_actor.state entry.actor |> protocol_ok in
+          let prefix = before.conversation.canonical_history in
+          if List.length prefix < before.conversation.initial_prompt_entry_count
+          then fail "seed initial prompt prefix is incomplete";
+          let reserved =
+            A.Session_actor.reserve_history_block entry.actor ~count:2 |> protocol_ok
+          in
+          let make offset text =
+            let id =
+              History_entry.Id.create
+                ~namespace:(P.Id.Session.to_string created.session.id)
+                ~sequence:(Int64.to_int_exn reserved.first_sequence + offset)
+              |> Result.ok_or_failwith
+            in
+            A.History_codec.user_text ~id text |> A.History_codec.to_protocol
+          in
+          let target = make 0 "ordinary retained user"
+          and suffix = make 1 "obsolete suffix" in
+          A.Session_actor.append_history
+            entry.actor
+            ~attachment_id:writer.id
+            [ target; suffix ]
+          |> protocol_ok
+          |> ignore;
+          seeds
+          := !seeds
+             @ [ { session_id = created.session.id
+                 ; target_id = target.id
+                 ; prefix_ids = List.map prefix ~f:(fun entry -> entry.P.History.id)
+                 }
+               ])));
+    !seeds
+  ;;
+
+  let observe connection seed ~key_prefix =
+    ignore (initialize connection : P.Initialize.Response.t);
+    let attach mode suffix =
+      match
+        request_public
+          connection
+          (Session_attach
+             { session_id = seed.session_id
+             ; requested_mode = mode
+             ; subscribe = false
+             ; after_sequence = None
+             ; reclaim_token = None
+             ; idempotency_key = idempotency_key (key_prefix ^ suffix)
+             })
+      with
+      | Session_attach result -> result.attachment
+      | _ -> fail "history editing attachment variant"
+    in
+    let writer = attach Read_write ":writer" in
+    let reader = attach Read_only ":reader" in
+    let before = history_snapshot connection seed.session_id in
+    let target =
+      List.find_exn before.canonical_history.entries ~f:(fun entry ->
+        P.History.Id.equal entry.id seed.target_id)
+    in
+    let edit =
+      P.History_edit.create
+        ~history_id:target.id
+        ~expected_content_revision:target.content_revision
+        ~text:"revised saved user"
+        ~mode:Save_only
+      |> protocol_ok
+    in
+    let intent : P.History_edit.Edit_request.t =
+      { session_id = seed.session_id
+      ; attachment_id = writer.id
+      ; expected_generation = before.session.generation
+      ; expected_revision = before.revision
+      ; edit
+      ; idempotency_key = idempotency_key (key_prefix ^ ":edit")
+      }
+    in
+    let first = request connection (Session_edit_history intent) in
+    let retry = request connection (Session_edit_history intent) in
+    let result =
+      match first with
+      | Session_edit_history result -> result
+      | _ -> fail "history edit result variant"
+    in
+    let after = history_snapshot connection seed.session_id in
+    let current =
+      List.find_exn after.canonical_history.entries ~f:(fun entry ->
+        P.History.Id.equal entry.id seed.target_id)
+    in
+    let receipt_matches =
+      match command_receipt connection (Session_edit_history intent) with
+      | Committed (Edited_history receipt) ->
+        P.Id.Session.equal receipt.session_id seed.session_id
+        && P.History.Id.equal receipt.history_id seed.target_id
+        && P.History.Content_revision.equal
+             receipt.content_revision
+             current.content_revision
+        && Int64.equal receipt.mutation.revision result.mutation.revision
+        && Int64.equal receipt.archived_revision result.archived_revision
+        && P.History_edit.Continuation.equal receipt.continuation Not_requested
+      | _ -> false
+    in
+    let denied suffix intent =
+      (request_error
+         connection
+         (Session_edit_history
+            { intent with idempotency_key = idempotency_key (key_prefix ^ suffix) }))
+        .code
+    in
+    let stale_revision = denied ":stale-session" intent in
+    let stale_content =
+      denied ":stale-content" { intent with expected_revision = after.revision }
+    in
+    let stale_generation =
+      denied
+        ":stale-generation"
+        { intent with
+          expected_revision = after.revision
+        ; expected_generation = after.session.generation + 1
+        }
+    in
+    let fresh_edit =
+      P.History_edit.create
+        ~history_id:target.id
+        ~expected_content_revision:current.content_revision
+        ~text:"forbidden"
+        ~mode:Save_only
+      |> protocol_ok
+    in
+    let read_only =
+      denied
+        ":read-only"
+        { intent with
+          attachment_id = reader.id
+        ; expected_revision = after.revision
+        ; edit = fresh_edit
+        }
+    in
+    let continuation_request : P.History_edit.Continue_request.t =
+      { session_id = seed.session_id
+      ; attachment_id = writer.id
+      ; expected_generation = after.session.generation
+      ; expected_revision = after.revision
+      ; idempotency_key = idempotency_key (key_prefix ^ ":continue")
+      }
+    in
+    let continuation =
+      match request connection (Session_continue_history continuation_request) with
+      | Session_continue_history result -> result
+      | _ -> fail "history continuation result variant"
+    in
+    let continue_retry =
+      request connection (Session_continue_history continuation_request)
+    in
+    let continue_receipt =
+      match
+        command_receipt connection (Session_continue_history continuation_request)
+      with
+      | Committed (Continued_history receipt) ->
+        P.Id.Session.equal receipt.session_id seed.session_id
+        && P.History_edit.Continuation.equal receipt.continuation (Not_started Stopped)
+      | _ -> false
+    in
+    let final = history_snapshot connection seed.session_id in
+    let prefix_count = List.length seed.prefix_ids in
+    let initial_unchanged =
+      List.equal
+        P.Public.History.equal
+        (List.take before.canonical_history.entries prefix_count)
+        (List.take final.canonical_history.entries prefix_count)
+    in
+    let stopped_without_operation =
+      match final.session.observed_state, final.session.active_operation with
+      | Stopped, None -> Int64.equal final.revision after.revision
+      | _ -> false
+    in
+    { content_revision = P.History.Content_revision.to_int64 current.content_revision
+    ; revision_delta = Int64.(after.revision - before.revision)
+    ; stable_id = P.History.Id.equal current.id target.id
+    ; retired_suffix =
+        Int.equal (List.length after.canonical_history.entries) (prefix_count + 1)
+    ; initial_unchanged
+    ; retry_unchanged =
+        Document_schema.Json.equal
+          (P.Method_result.to_json first)
+          (P.Method_result.to_json retry)
+        && Document_schema.Json.equal
+             (P.Method_result.to_json (Session_continue_history continuation))
+             (P.Method_result.to_json continue_retry)
+    ; receipt_matches
+    ; stale_revision
+    ; stale_content
+    ; stale_generation
+    ; read_only
+    ; stopped_continuation =
+        P.History_edit.Continuation.equal continuation.continuation (Not_started Stopped)
+    ; continue_receipt
+    ; stopped_without_operation
+    }
+  ;;
+
+  let run env environment =
+    let fixture = fixture env environment "conformance-history-editing" in
+    let seeds = preseed env fixture in
+    Eio.Switch.run (fun sw ->
+      with_daemon ~sw env fixture (fun _ _ ->
+        with_transport_matrix
+          ~sw
+          env
+          environment
+          fixture
+          (fun unix http stdio_unix stdio_http ->
+             let observations =
+               List.map
+                 (List.zip_exn
+                    [ unix, "unix"
+                    ; http, "http"
+                    ; stdio_unix, "stdio-unix"
+                    ; stdio_http, "stdio-http"
+                    ]
+                    seeds)
+                 ~f:(fun ((connection, key_prefix), seed) ->
+                   observe connection seed ~key_prefix)
+             in
+             let expected =
+               { content_revision = 1L
+               ; revision_delta = 1L
+               ; stable_id = true
+               ; retired_suffix = true
+               ; initial_unchanged = true
+               ; retry_unchanged = true
+               ; receipt_matches = true
+               ; stale_revision = Conflict
+               ; stale_content = Conflict
+               ; stale_generation = Conflict
+               ; read_only = Permission_denied
+               ; stopped_continuation = true
+               ; continue_receipt = true
+               ; stopped_without_operation = true
+               }
+             in
+             List.iter observations ~f:(fun actual ->
+               if not (equal expected actual)
+               then raise_s [%sexp "history editing conformance mismatch", (actual : t)]))))
+  ;;
+end
+
 let provider_installed_observation client ~key_prefix =
   let module P = Agent_protocol in
   let module DTO = P.Provider_operator in
@@ -3330,6 +3634,7 @@ let cases =
   ; "conformance.error-codes", test_error_codes
   ; "conformance.event-order", test_event_order
   ; "conformance.visibility", test_visibility
+  ; "conformance.history-editing", History_editing.run
   ; "conformance.history-deletion", test_history_deletion
   ]
 ;;
@@ -3380,6 +3685,8 @@ let method_coverage =
   ; "session.cancel_operation", "conformance.error-codes"
   ; "session.send_message", "conformance.error-codes"
   ; "session.compact", "conformance.error-codes"
+  ; "session.edit_history", "conformance.history-editing"
+  ; "session.continue_history", "conformance.history-editing"
   ; "session.delete_history", "conformance.history-deletion"
   ; "session.export", "conformance.blob-read"
   ; "session.reset", "conformance.error-codes"

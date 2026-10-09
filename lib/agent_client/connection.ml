@@ -26,6 +26,8 @@ let has_command_receipt = function
   | Session_configuration_update _
   | Session_send_message _
   | Session_compact _
+  | Session_edit_history _
+  | Session_continue_history _
   | Session_delete_history _
   | Session_reset _
   | Session_rebuild _
@@ -169,6 +171,7 @@ let unknown_outcome = function
   | Snapshot_required
   | Operation_not_found
   | Conflict
+  | Pending_input_conflict
   | Incompatible_protocol
   | Cursor_expired
   | Blob_unavailable

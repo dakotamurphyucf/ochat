@@ -177,6 +177,23 @@ type invocation_execution =
   ; mutable accepts_children : bool
   }
 
+module History_edit_result = struct
+  type t =
+    { session : Agent_protocol.Session.t
+    ; history_id : Agent_protocol.History.Id.t
+    ; content_revision : Agent_protocol.History.Content_revision.t
+    ; archived_revision : int64
+    ; continuation : Agent_protocol.History_edit.Continuation.t
+    }
+end
+
+module History_continuation_result = struct
+  type t =
+    { session : Agent_protocol.Session.t
+    ; continuation : Agent_protocol.History_edit.Continuation.t
+    }
+end
+
 type _ request =
   | Open_inference_owner : Transcript.Source_id.t -> Inference_owner.t request
   | Admit_inference :
@@ -536,6 +553,12 @@ type _ request =
   | Delete_history :
       Agent_protocol.Id.Attachment.t * int64 * Agent_protocol.History.Id.t
       -> Agent_protocol.Session.t request
+  | Edit_history :
+      Agent_protocol.History_edit.Edit_request.t
+      -> History_edit_result.t request
+  | Continue_history :
+      Agent_protocol.History_edit.Continue_request.t
+      -> History_continuation_result.t request
   | Adopt_deferred : Agent_protocol.Session.t request
   | Reserve_history_block : int -> History_id_source.reservation request
   | Commit_worker_entry : Agent_protocol.Id.Operation.t * History_entry.t -> unit request
@@ -2437,7 +2460,7 @@ let commit_administration t attachment_id expected_revision kind candidate =
            candidate.Session_state.identity.generation
            (t.state.identity.generation + 1)
       && List.is_empty candidate.ingress_registrations
-    | Upgrade | Compaction ->
+    | Upgrade | Compaction | Edit | Delete ->
       List.equal
         External_ingress.equal
         candidate.ingress_registrations
@@ -2850,7 +2873,9 @@ let commit_invocation_call t operation_id (invocation : Agent_protocol.Invocatio
       Error
         (error Invalid_request "call intent requires an admitted root model invocation")
   in
-  let encoded = History_codec.to_protocol entry in
+  let encoded =
+    History_codec.canonical_encoder ~previous:t.state.conversation.canonical_history entry
+  in
   let%bind entries =
     match
       List.find t.state.conversation.canonical_history ~f:(fun item ->
@@ -5057,7 +5082,9 @@ let lifecycle_for_compaction t operation_id =
 let commit_worker_entry t operation_id entry =
   let open Result.Let_syntax in
   let%bind _ = current_operation t operation_id in
-  let protocol_entry = History_codec.to_protocol entry in
+  let protocol_entry =
+    History_codec.canonical_encoder ~previous:t.state.conversation.canonical_history entry
+  in
   match
     List.find t.state.conversation.canonical_history ~f:(fun existing ->
       History_entry.Id.equal existing.id protocol_entry.id)
@@ -5108,7 +5135,7 @@ let prepare_authoring_input t operation_id materialization history effective =
       | Moderator_inserted _ ->
         History_codec.to_protocol ~provenance:Moderator_inserted value.entry
       | Moderator_replacement { target_id; _ } ->
-        History_codec.to_protocol ~provenance:(Moderator_replaced target_id) value.entry)
+        { (canonical value.entry) with provenance = Moderator_replaced target_id })
   in
   let%bind references = Session_state.authoring_references t.state in
   let%bind messages =
@@ -5201,7 +5228,9 @@ let publish_invocation_output t operation_id invocation_id entry =
       invocation
       ~output_entry_id:(History_entry.id entry)
   in
-  let raw_entry = History_codec.to_protocol entry in
+  let raw_entry =
+    History_codec.canonical_encoder ~previous:t.state.conversation.canonical_history entry
+  in
   let existing =
     List.find t.state.conversation.canonical_history ~f:(fun e ->
       History_entry.Id.equal e.id raw_entry.id)
@@ -6282,51 +6311,6 @@ let history_edit_precondition t revision =
     match t.state.lifecycle.observed with
     | Idle | Stopped -> Ok ()
     | _ -> Error (error Invalid_state "session is not ready for history editing"))
-;;
-
-let history_deletion t history_id =
-  let open Result.Let_syntax in
-  let history = t.state.conversation.canonical_history in
-  let%bind canonical = History_codec.all_of_protocol history in
-  let%bind retained =
-    History_entry.remove_with_tool_pair canonical ~entry_id:history_id
-    |> Result.map_error ~f:(error Invalid_request)
-  in
-  let ids =
-    Hash_set.of_list (module History_entry.Id) (List.map retained ~f:History_entry.id)
-  in
-  let keep entry = Hash_set.mem ids entry.Agent_protocol.History.id in
-  let initial = List.take history t.state.conversation.initial_prompt_entry_count in
-  let initial_count = List.count initial ~f:keep in
-  Ok (List.filter history ~f:keep, initial_count)
-;;
-
-let delete_history_internal t attachment_id revision history_id =
-  let open Result.Let_syntax in
-  let%bind _ = write_attachment t attachment_id in
-  let%bind () = history_edit_precondition t revision in
-  let%bind history, initial_count = history_deletion t history_id in
-  let retained_ids =
-    Hash_set.of_list
-      (module Agent_protocol.History.Id)
-      (List.map history ~f:(fun entry -> entry.Agent_protocol.History.id))
-  in
-  let forgotten =
-    List.filter_map t.state.conversation.canonical_history ~f:(fun entry ->
-      Option.some_if (not (Hash_set.mem retained_ids entry.id)) entry.id)
-  in
-  transition
-    t
-    ~delta:
-      (Session_delta.Batch
-         [ Canonical_history_replaced history
-         ; Authoring_references_forgotten forgotten
-         ; Initial_prompt_count_changed initial_count
-         ])
-    ~payloads:
-      [ Agent_protocol.Event.Durable.Payload.History_replaced
-          (Session_state.history_window history)
-      ]
 ;;
 
 let outcome_requests_compaction = function
@@ -9362,37 +9346,222 @@ let start_idle_turn_unchecked
   let%bind () = require_runtime_admission t in
   let%bind () = reconcile_foreground_invocations t in
   let operation = create_turn_operation t reason in
-  let lifecycle = lifecycle_for_operation t operation.id in
-  let%bind wake_deltas =
-    List.map notification_wakes ~f:(fun value ->
-      Agent_protocol.Delivery.accept_wake value ~operation_id:operation.id
-      |> Result.map ~f:(fun value -> Session_delta.Delivery_wake_changed value))
-    |> Result.all
+  let%bind admission =
+    Turn_admission.create t.state ~operation ~notification_wakes ~adopt_deferred
   in
-  let deferred = t.state.conversation.deferred_user_entries in
+  let leading_deltas, turn_deltas =
+    match Turn_admission.deltas admission with
+    | Deferred_entries_adopted :: rest -> [ Session_delta.Deferred_entries_adopted ], rest
+    | deltas -> [], deltas
+  in
+  let leading_payloads, turn_payloads =
+    match Turn_admission.payloads admission with
+    | History_appended entries :: rest ->
+      [ Agent_protocol.Event.Durable.Payload.History_appended entries ], rest
+    | payloads -> [], payloads
+  in
   let deltas =
-    extra_deltas
-    @ [ Session_delta.Moderator_changed drain.Runtime_builder.moderator_snapshot
-      ; Active_operation_changed (Some operation)
-      ; Lifecycle_changed lifecycle
-      ]
-    @ wake_deltas
-    |> fun values ->
-    if adopt_deferred then Session_delta.Deferred_entries_adopted :: values else values
+    leading_deltas
+    @ extra_deltas
+    @ [ Session_delta.Moderator_changed drain.Runtime_builder.moderator_snapshot ]
+    @ turn_deltas
   in
   let payloads =
-    drain_payloads drain
-    @ (if adopt_deferred && not (List.is_empty deferred)
-       then [ Agent_protocol.Event.Durable.Payload.History_appended deferred ]
-       else [])
-    @ extra_payloads
-    @ [ Agent_protocol.Event.Durable.Payload.Operation_started operation
-      ; Session_state_changed
-          { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
-      ]
+    drain_payloads drain @ leading_payloads @ extra_payloads @ turn_payloads
   in
   let%map _ = transition t ~delta:(Session_delta.Batch deltas) ~payloads in
   launch_worker t operation
+;;
+
+let commit_history_transition t ~delta ~payloads ~admission =
+  let open Result.Let_syntax in
+  let%bind prepared =
+    Session_transition.apply ~now:(t.services.now ()) t.state ~delta ~payloads
+  in
+  Eio.Cancel.protect (fun () ->
+    let%map () = persist_transition t prepared in
+    install_committed_transition t prepared;
+    publish_committed_transition t prepared;
+    Option.iter admission ~f:(fun admission ->
+      launch_worker t (Turn_admission.operation admission));
+    Session_state.summary t.state)
+;;
+
+let history_command_precondition t session_id attachment_id generation revision =
+  let open Result.Let_syntax in
+  let%bind () =
+    if Agent_protocol.Id.Session.equal session_id t.state.identity.session_id
+    then Ok ()
+    else Error (error Invalid_request "history command targets a different session")
+  in
+  let%bind _ = write_attachment t attachment_id in
+  let%bind () =
+    if Int.equal generation t.state.identity.generation
+    then Ok ()
+    else Error (error Conflict "session generation does not match")
+  in
+  let%bind () = history_edit_precondition t revision in
+  if
+    Option.is_some t.moderator_borrow
+    || Option.is_some t.queued_event_borrow
+    || Option.is_some t.initialization_scope
+    || Option.is_some t.runtime_retirement
+    || List.exists t.invocation_executions ~f:(fun execution ->
+      match execution.owner with
+      | Foreground _ | Invocation_moderator _ | Event_moderator _ -> true
+      | Background_job _ -> false)
+  then
+    Error
+      (error
+         Conflict
+         "history cannot change while a foreground or runtime owner is active")
+  else Ok ()
+;;
+
+let delete_history_internal t attachment_id revision history_id =
+  let open Result.Let_syntax in
+  let%bind () =
+    history_command_precondition
+      t
+      t.state.identity.session_id
+      attachment_id
+      t.state.identity.generation
+      revision
+  in
+  let%bind plan = History_deletion.prepare t.state ~history_id in
+  let%bind archive =
+    t.persistence.archive_reference
+      ~previous:t.state
+      ~kind:Delete
+      (Agent_protocol.Id.Operation.create ())
+  in
+  commit_history_transition
+    t
+    ~delta:(Session_delta.History_deleted (history_id, archive))
+    ~payloads:
+      [ Agent_protocol.Event.Durable.Payload.History_replaced
+          (Session_state.history_window (History_deletion.canonical_history plan))
+      ]
+    ~admission:None
+;;
+
+let history_continuation_availability t =
+  match t.state.lifecycle.observed, t.operation_worker with
+  | Stopped, _ -> Some Agent_protocol.History_edit.Continuation.Stopped
+  | Idle, Some _ -> None
+  | _ -> Some Agent_protocol.History_edit.Continuation.Runtime_unavailable
+;;
+
+let edit_history_internal t (request : Agent_protocol.History_edit.Edit_request.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    history_command_precondition
+      t
+      request.session_id
+      request.attachment_id
+      request.expected_generation
+      request.expected_revision
+  in
+  let%bind plan = History_edit.prepare t.state ~edit:request.edit in
+  let continue =
+    Agent_protocol.History_edit.Mode.equal
+      (Agent_protocol.History_edit.mode request.edit)
+      Edit_and_continue
+  in
+  let%bind () =
+    if continue && not (List.is_empty t.state.conversation.deferred_user_entries)
+    then
+      Error
+        (error
+           Pending_input_conflict
+           "edit-and-continue requires an empty pending-input queue")
+    else Ok ()
+  in
+  let%bind archive =
+    t.persistence.archive_reference
+      ~previous:t.state
+      ~kind:Edit
+      (Agent_protocol.Id.Operation.create ())
+  in
+  let continuation =
+    if not continue
+    then History_edit_transition.Save_only
+    else (
+      match history_continuation_availability t with
+      | Some reason -> History_edit_transition.Unavailable reason
+      | None -> History_edit_transition.Start (create_turn_operation t Administrative))
+  in
+  let%bind prepared =
+    History_edit_transition.create t.state ~plan ~edit:request.edit ~archive ~continuation
+  in
+  let%map session =
+    commit_history_transition
+      t
+      ~delta:(History_edit_transition.delta prepared)
+      ~payloads:(History_edit_transition.payloads prepared)
+      ~admission:(History_edit_transition.admission prepared)
+  in
+  let edited = History_edit_transition.edited_entry prepared in
+  ({ session
+   ; history_id = edited.id
+   ; content_revision = edited.content_revision
+   ; archived_revision = History_edit_transition.archived_revision prepared
+   ; continuation = History_edit_transition.continuation prepared
+   }
+   : History_edit_result.t)
+;;
+
+let continue_history_internal t (request : Agent_protocol.History_edit.Continue_request.t)
+  =
+  let open Result.Let_syntax in
+  let%bind () =
+    history_command_precondition
+      t
+      request.session_id
+      request.attachment_id
+      request.expected_generation
+      request.expected_revision
+  in
+  let%bind () =
+    if List.is_empty t.state.conversation.deferred_user_entries
+    then Ok ()
+    else
+      Error
+        (error
+           Pending_input_conflict
+           "history continuation requires an empty pending-input queue")
+  in
+  match history_continuation_availability t with
+  | Some reason ->
+    Ok
+      ({ session = Session_state.summary t.state
+       ; continuation = Agent_protocol.History_edit.Continuation.Not_started reason
+       }
+       : History_continuation_result.t)
+  | None ->
+    let%bind recovery = History_continuation.prepare t.state ~retiring_history:false in
+    let operation = create_turn_operation t Administrative in
+    let%bind admission =
+      Turn_admission.create
+        t.state
+        ~operation
+        ~notification_wakes:[]
+        ~adopt_deferred:false
+    in
+    let delta =
+      Session_delta.Batch
+        (History_continuation.deltas recovery @ Turn_admission.deltas admission)
+    in
+    let payloads =
+      History_continuation.payloads recovery @ Turn_admission.payloads admission
+    in
+    let%map session =
+      commit_history_transition t ~delta ~payloads ~admission:(Some admission)
+    in
+    ({ session
+     ; continuation = Agent_protocol.History_edit.Continuation.Started operation.id
+     }
+     : History_continuation_result.t)
 ;;
 
 let suppress_follow_up_deltas t deltas ~reason =
@@ -10608,6 +10777,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     compact_internal t attachment_id expected_revision
   | Delete_history (attachment_id, revision, history_id) ->
     delete_history_internal t attachment_id revision history_id
+  | Edit_history request -> edit_history_internal t request
+  | Continue_history request -> continue_history_internal t request
   | Adopt_deferred -> adopt_deferred t
   | Reserve_history_block count -> reserve_history_block t count
   | Commit_worker_entry (operation_id, entry) -> commit_worker_entry t operation_id entry
@@ -11529,4 +11700,10 @@ let set_organization_admission t admission = call t (Set_organization_admission 
 
 let update_organization t ?command_audit ~principal request =
   call t ?command_audit (Update_organization (principal, request))
+;;
+
+let edit_history t ?command_audit request = call t ?command_audit (Edit_history request)
+
+let continue_history t ?command_audit request =
+  call t ?command_audit (Continue_history request)
 ;;

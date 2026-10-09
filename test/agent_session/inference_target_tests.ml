@@ -103,7 +103,7 @@ let%test_unit
      | Unresolved -> ()
      | Captured _ -> assert false);
     let stored = capture admitted.delta in
-    assert (Int.equal (D.Document.version (A.Session_delta_document.document stored)) 3);
+    assert (Int.equal (D.Document.version (A.Session_delta_document.document stored)) 4);
     let replayed =
       A.Session_delta.apply before (A.Session_delta_document.value stored) |> protocol_ok
     in

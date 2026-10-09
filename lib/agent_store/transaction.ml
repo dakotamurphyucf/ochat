@@ -84,7 +84,9 @@ module Stored = struct
     in
     let%bind () = validate_event_range metadata in
     let%bind delta = F.required payload "delta" (F.document ~limits) in
-    let%bind () = F.expect_versions delta ~kind:"session.delta" ~versions:[ 1; 2; 3 ] in
+    let%bind () =
+      F.expect_versions delta ~kind:"session.delta" ~versions:[ 1; 2; 3; 4 ]
+    in
     let%bind audit = F.optional payload "command_audit" (F.document ~limits) in
     let%bind () =
       match audit with
@@ -95,7 +97,7 @@ module Stored = struct
       List.foldi durable_events ~init:(Ok ()) ~f:(fun index checked json ->
         let%bind () = checked in
         let%bind event = F.document ~limits json in
-        let%bind () = F.expect event ~kind:"session.event" ~version:1 in
+        let%bind () = F.expect_versions event ~kind:"session.event" ~versions:[ 1; 2 ] in
         let event = D.Document.payload event in
         let%bind event_session = F.required event "session_id" F.string in
         let%bind sequence = F.required event "sequence" F.decimal in

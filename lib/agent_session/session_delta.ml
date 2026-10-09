@@ -52,6 +52,9 @@ type t =
   | History_block_reserved of int64
   | Compaction_generation_changed of int
   | Compaction_archived of Session_state.Compaction_archive.t
+  | History_deleted of Agent_protocol.History.Id.t * Session_state.Compaction_archive.t
+  | History_edited of
+      (Agent_protocol.History_edit.t[@sexp.opaque]) * Session_state.Compaction_archive.t
   | Owner_lease_generation_changed of int64
   | Failure_changed of Agent_protocol.Error.t option
   | Halt_changed of string option
@@ -286,6 +289,47 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
   | Initial_prompt_count_changed initial_prompt_entry_count ->
     Ok
       { state with conversation = { state.conversation with initial_prompt_entry_count } }
+  | History_deleted (history_id, archive) ->
+    let open Result.Let_syntax in
+    let%bind plan = History_deletion.prepare state ~history_id in
+    let%bind () =
+      if
+        Session_state.Compaction_archive.equal_kind archive.kind Delete
+        && Int64.equal archive.revision state.counters.revision
+      then Ok ()
+      else
+        Error
+          (Agent_protocol.Error.invalid_request "history deletion archive basis differs")
+    in
+    apply
+      ~limits
+      state
+      (Batch
+         [ Canonical_history_replaced (History_deletion.canonical_history plan)
+         ; Authoring_references_forgotten (History_deletion.retired_ids plan)
+         ; Initial_prompt_count_changed (History_deletion.initial_prompt_entry_count plan)
+         ; Compaction_archived archive
+         ])
+  | History_edited (edit, archive) ->
+    let open Result.Let_syntax in
+    let%bind plan = History_edit.prepare state ~edit in
+    let%bind () =
+      if
+        Session_state.Compaction_archive.equal_kind archive.kind Edit
+        && Int64.equal archive.revision state.counters.revision
+      then Ok ()
+      else
+        Error (Agent_protocol.Error.invalid_request "history edit archive basis differs")
+    in
+    apply
+      ~limits
+      state
+      (Batch
+         [ Canonical_history_replaced (History_edit.canonical_history plan)
+         ; Authoring_references_forgotten (History_edit.retired_ids plan)
+         ; Initial_prompt_count_changed (History_edit.initial_prompt_entry_count plan)
+         ; Compaction_archived archive
+         ])
   | Compaction_archived archive ->
     Ok
       { state with

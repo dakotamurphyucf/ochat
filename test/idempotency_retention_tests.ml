@@ -222,3 +222,84 @@ let%expect_test
   [%expect
     {| record/byte limits, corrupt file, duplicate key and symlink all refused before callback |}]
 ;;
+
+let%expect_test
+    "legacy cache restores attach history before receipt decoding and preserves evidence"
+  =
+  with_temp_directory "idempotency-history-conversion" (fun env root ->
+    let path = Filename.concat root "responses.json" in
+    let record = receipt "legacy-attach" Pending in
+    let key = { record.key with method_name = "session.attach" } in
+    let key_json =
+      `Object
+        [ "principal_id", P.Id.Principal.to_json key.principal_id
+        ; "session_id", P.Id.Session.to_json session_id
+        ; "method_name", `String key.method_name
+        ; "idempotency_key", P.Idempotency_key.to_json key.idempotency_key
+        ]
+    in
+    let record_id = Agent_store.Document_record.digest (Jsonaf.to_string key_json) in
+    (* Literal old owner shape: independent of the current cache encoder and
+       strict History.entry encoder. The embedded result is opaque to the cache
+       except for the declared Attach snapshot ownership. *)
+    let bytes =
+      sprintf
+        {|{"format":"ochat.document","schema_version":1,"kind":"store.idempotency_cache","cache_evidence":"outer","payload":{"records":[{"record_id":%s,"key":%s,"request_digest":"legacy-attach","accepted_transaction_sequence":null,"outcome":{"tag":"success","value":{"replay":{"type":"snapshot","snapshot":{"canonical_history":{"entries":[{"id":"old","evidence":"retained"}]},"deferred_entries":[],"effective_history":null}},"opaque":{"entries":[{"id":"unknown"}]}}},"created_at":%s,"expires_at":null,"retention":"protected","record_evidence":"original"}]}}|}
+        (Jsonaf.to_string (`String record_id))
+        (Jsonaf.to_string key_json)
+        (Jsonaf.to_string (P.Timestamp.to_json timestamp))
+    in
+    let file = Eio.Path.(Eio.Stdenv.fs env / path) in
+    Eio.Path.save ~create:(`Or_truncate 0o600) file bytes;
+    let store = Store.open_or_create ~env ~path |> store_ok in
+    (match Store.lookup store ~key ~request_digest:"legacy-attach" with
+     | Replay { outcome = Success json; _ } ->
+       let text = Jsonaf.to_string json in
+       printf
+         "revision-initialized=%b opaque-untouched=%b\n"
+         (String.is_substring text ~substring:{|"content_revision":"0"|})
+         (String.is_substring text ~substring:{|"opaque":{"entries":[{"id":"unknown"}]}|})
+     | _ -> failwith "legacy completed attach receipt unavailable");
+    assert (String.equal bytes (Eio.Path.load file));
+    Store.record store (receipt "new-pending" Pending) |> store_ok |> ignore;
+    let current = Eio.Path.load file in
+    printf
+      "current-version=%b original-evidence=%b reopened=%b\n"
+      (String.is_substring current ~substring:{|"schema_version":2|})
+      (List.for_all [ "outer"; "retained"; "original" ] ~f:(fun evidence ->
+         String.is_substring current ~substring:evidence))
+      (Result.is_ok (Store.open_or_create ~env ~path));
+    [%expect
+      {|revision-initialized=true opaque-untouched=true
+current-version=true original-evidence=true reopened=true|}])
+;;
+
+let%expect_test
+    "stopped continuation with no accepted transaction remains honestly pending after \
+     interruption"
+  =
+  with_temp_directory "continue-pending" (fun env root ->
+    let path = Filename.concat root "idempotency.json" in
+    let pending = receipt "no-op-continue" Pending in
+    let pending =
+      { pending with
+        key = { pending.key with method_name = "session.continue_history" }
+      ; retention = Protected
+      ; expires_at = None
+      ; accepted_transaction_sequence = None
+      }
+    in
+    let owner = Store.open_or_create ~env ~path |> store_ok in
+    Store.record owner pending |> store_ok |> ignore;
+    (* No journal command admission and no terminal cache completion occurred.
+       Reopening must not infer Not_started from the currently stopped session. *)
+    let reopened = Store.open_or_create ~env ~path |> store_ok in
+    Store.reconcile_accepted reopened [] |> store_ok |> ignore;
+    match
+      Store.lookup reopened ~key:pending.key ~request_digest:pending.request_digest
+    with
+    | Replay { outcome = Pending; accepted_transaction_sequence = None; _ } ->
+      print_endline "original outcome remains unknown; no terminal continuation inferred"
+    | _ -> failwith "interrupted no-op continuation became terminal");
+  [%expect {|original outcome remains unknown; no terminal continuation inferred|}]
+;;

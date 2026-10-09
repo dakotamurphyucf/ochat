@@ -46,6 +46,8 @@ type t =
   | Session_cancel_operation of Session.Cancel_operation_request.t
   | Session_send_message of Session.Send_message_request.t
   | Session_compact of Session.Compact_request.t
+  | Session_edit_history of History_edit.Edit_request.t
+  | Session_continue_history of History_edit.Continue_request.t
   | Session_delete_history of Session.Delete_history_request.t
   | Session_export of Session.Export_request.t
   | Session_reset of Session.Reset_request.t

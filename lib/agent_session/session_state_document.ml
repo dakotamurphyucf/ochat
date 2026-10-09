@@ -273,6 +273,8 @@ let archive_kind_to_jsonaf = function
   | Reset -> `String "reset"
   | Rebuild -> `String "rebuild"
   | Upgrade -> `String "upgrade"
+  | Edit -> `String "edit"
+  | Delete -> `String "delete"
 ;;
 
 let archive_kind_of_jsonaf =
@@ -282,6 +284,8 @@ let archive_kind_of_jsonaf =
     ; "reset", Reset
     ; "rebuild", Rebuild
     ; "upgrade", Upgrade
+    ; "edit", Edit
+    ; "delete", Delete
     ]
 ;;
 
@@ -1018,13 +1022,45 @@ let upgrade document ~limits =
                  name, if String.equal name "identity" then identity else value)))
       | _ -> Agent_store.Document_fields.invalid "payload" "must be an object")
   in
+  let%bind history_revision_step =
+    D.Conversion.Step.of_function ~kind:"session.state" ~from_version:6 ~f:(fun payload ->
+      let module F = Agent_store.Document_fields in
+      let%bind conversation = F.required payload "conversation" Result.return in
+      let entries = X.initialize_history_revisions in
+      let%bind canonical = F.required conversation "canonical_history" entries in
+      let%bind deferred = F.required conversation "deferred_user_entries" entries in
+      match conversation, payload with
+      | `Object conversation_fields, `Object fields ->
+        let conversation =
+          `Object
+            (List.map conversation_fields ~f:(fun (name, value) ->
+               ( name
+               , if String.equal name "canonical_history"
+                 then canonical
+                 else if String.equal name "deferred_user_entries"
+                 then deferred
+                 else value )))
+        in
+        Ok
+          (`Object
+              (List.map fields ~f:(fun (name, value) ->
+                 name, if String.equal name "conversation" then conversation else value)))
+      | _ -> F.invalid "conversation" "must be an object")
+  in
   let%bind conversion =
     D.Conversion.create
       ~limits
-      ~targets:[ "session.state", 6 ]
-      ~max_steps:5
+      ~targets:[ "session.state", 7 ]
+      ~max_steps:6
       ~max_operations:100_000
-      ~steps:[ step; ledger_step; metadata_step; configuration_step; organization_step ]
+      ~steps:
+        [ step
+        ; ledger_step
+        ; metadata_step
+        ; configuration_step
+        ; organization_step
+        ; history_revision_step
+        ]
   in
   D.Conversion.upgrade conversion document
 ;;
@@ -1034,7 +1070,7 @@ let codec ~limits =
     D.Domain_codec.create_validated
       ~limits
       ~kind:"session.state"
-      ~version:6
+      ~version:7
       ~shape
       ~supported_semantics:[]
       ~validate:(fun state -> X.document_result (S.validate state))
@@ -1094,4 +1130,111 @@ let adopt previous ~limits incoming =
     ~previous:previous.carrier
     ~incoming:incoming.carrier
   |> Result.map ~f:(decoded ~limits)
+;;
+
+let retire_canonical_entries t ~retained_ids ~initial_count ~limits =
+  let open Result.Let_syntax in
+  let invalid reason =
+    D.Error.Invalid_field { path = [ "conversation"; "canonical_history" ]; reason }
+  in
+  let previous = value t in
+  let canonical = previous.conversation.canonical_history in
+  let ids = Hash_set.of_list (module P.History.Id) retained_ids in
+  let retained =
+    List.filter canonical ~f:(fun entry -> Hash_set.mem ids entry.P.History.id)
+  in
+  let%bind () =
+    if
+      List.equal
+        P.History.Id.equal
+        retained_ids
+        (List.map retained ~f:(fun entry -> entry.P.History.id))
+    then Ok ()
+    else
+      Error
+        (invalid "retirement must retain an exact ordered canonical identity subsequence")
+  in
+  let%bind document = encode t ~limits in
+  let payload = D.Document.payload document in
+  let%bind conversation =
+    Agent_store.Document_fields.required payload "conversation" Result.return
+  in
+  let%bind raw_history =
+    Agent_store.Document_fields.required
+      conversation
+      "canonical_history"
+      Agent_store.Document_fields.array
+  in
+  let replace json name replacement =
+    match json with
+    | `Object fields ->
+      Ok
+        (`Object
+            (List.map fields ~f:(fun (key, old) ->
+               key, if String.equal key name then replacement else old)))
+    | _ -> Error (invalid "retirement container must be an object")
+  in
+  let%bind retained_raw =
+    match
+      List.map2 canonical raw_history ~f:(fun entry raw ->
+        Option.some_if (Hash_set.mem ids entry.P.History.id) raw)
+    with
+    | Ok values -> Ok (List.filter_opt values)
+    | Unequal_lengths -> Error (invalid "canonical history carrier length differs")
+  in
+  let%bind conversation =
+    replace conversation "canonical_history" (`Array retained_raw)
+  in
+  let%bind conversation =
+    replace conversation "initial_prompt_entry_count" (X.integer_json initial_count)
+  in
+  let%bind payload = replace payload "conversation" conversation in
+  let%bind raw = replace (D.Document.json document) "payload" payload in
+  let%bind document = D.Document.inspect ~limits raw in
+  let%map carrier = D.Domain_codec.decode (codec ~limits) document in
+  { carrier; original = t.original }
+;;
+
+let retire_canonical_suffix t ~retained_ids ~limits =
+  let previous = value t in
+  let prefix =
+    List.take previous.conversation.canonical_history (List.length retained_ids)
+  in
+  if
+    List.is_empty retained_ids
+    || not
+         (List.equal
+            P.History.Id.equal
+            retained_ids
+            (List.map prefix ~f:(fun entry -> entry.P.History.id)))
+  then
+    Error
+      (D.Error.Invalid_field
+         { path = [ "conversation"; "canonical_history" ]
+         ; reason = "retirement must retain an exact nonempty canonical identity prefix"
+         })
+  else
+    retire_canonical_entries
+      t
+      ~retained_ids
+      ~initial_count:
+        (Int.min
+           previous.conversation.initial_prompt_entry_count
+           (List.length retained_ids))
+      ~limits
+;;
+
+let retire_canonical_deletion t ~deletion ~limits =
+  let open Result.Let_syntax in
+  let%bind () =
+    History_deletion.validate_basis deletion (value t)
+    |> Persistence_codec.document_result
+  in
+  retire_canonical_entries
+    t
+    ~retained_ids:
+      (List.map (History_deletion.canonical_history deletion) ~f:(fun entry ->
+         entry.P.History.id))
+    ~initial_count:(History_deletion.initial_prompt_entry_count deletion)
+    ~limits
 ;;

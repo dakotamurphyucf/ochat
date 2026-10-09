@@ -46,6 +46,8 @@ type t =
   | Session_cancel_operation of Session.Cancel_operation_request.t
   | Session_send_message of Session.Send_message_request.t
   | Session_compact of Session.Compact_request.t
+  | Session_edit_history of History_edit.Edit_request.t
+  | Session_continue_history of History_edit.Continue_request.t
   | Session_delete_history of Session.Delete_history_request.t
   | Session_export of Session.Export_request.t
   | Session_reset of Session.Reset_request.t
@@ -113,6 +115,8 @@ let method_name = function
   | Session_cancel_operation _ -> "session.cancel_operation"
   | Session_send_message _ -> "session.send_message"
   | Session_compact _ -> "session.compact"
+  | Session_edit_history _ -> "session.edit_history"
+  | Session_continue_history _ -> "session.continue_history"
   | Session_delete_history _ -> "session.delete_history"
   | Session_export _ -> "session.export"
   | Session_reset _ -> "session.reset"
@@ -183,6 +187,8 @@ let params = function
   | Session_cancel_operation request -> Session.Cancel_operation_request.to_json request
   | Session_send_message request -> Session.Send_message_request.to_json request
   | Session_compact request -> Session.Compact_request.to_json request
+  | Session_edit_history request -> History_edit.Edit_request.to_json request
+  | Session_continue_history request -> History_edit.Continue_request.to_json request
   | Session_delete_history request -> Session.Delete_history_request.to_json request
   | Session_export request -> Session.Export_request.to_json request
   | Session_reset request -> Session.Reset_request.to_json request
@@ -303,6 +309,10 @@ let decoders =
   ; ( "session.send_message"
     , map Session.Send_message_request.of_json (fun x -> Session_send_message x) )
   ; "session.compact", map Session.Compact_request.of_json (fun x -> Session_compact x)
+  ; ( "session.edit_history"
+    , map History_edit.Edit_request.of_json (fun x -> Session_edit_history x) )
+  ; ( "session.continue_history"
+    , map History_edit.Continue_request.of_json (fun x -> Session_continue_history x) )
   ; ( "session.delete_history"
     , map Session.Delete_history_request.of_json (fun x -> Session_delete_history x) )
   ; "session.export", map Session.Export_request.of_json (fun x -> Session_export x)

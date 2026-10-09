@@ -70,6 +70,9 @@ type t =
   | History_block_reserved of int64
   | Compaction_generation_changed of int
   | Compaction_archived of Session_state.Compaction_archive.t
+  | History_deleted of Agent_protocol.History.Id.t * Session_state.Compaction_archive.t
+  | History_edited of
+      (Agent_protocol.History_edit.t[@sexp.opaque]) * Session_state.Compaction_archive.t
   | Owner_lease_generation_changed of int64
   | Failure_changed of Agent_protocol.Error.t option
   | Halt_changed of string option

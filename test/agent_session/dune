@@ -12,6 +12,9 @@
   actor_tests
   metadata_tests
   organization_tests
+
+  history_edit_tests
+  history_schema_composition_tests
   managed_output_cursor_tests
   managed_output_page_tests
   durable_event_wait_tests

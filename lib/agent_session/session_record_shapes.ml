@@ -52,6 +52,7 @@ let provenance =
 let history_entry =
   o
     [ "id", v
+    ; "content_revision", v
     ; "role", v
     ; "kind", v
     ; "payload", v

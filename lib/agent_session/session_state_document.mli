@@ -48,7 +48,10 @@ val adopt
   -> t
   -> (t, Document_schema.Error.t) result
 
-(** Adjacent generic v1 through v5 to v6 conversion. The v5 to v6 step introduces empty historical organization references without resolving host objects. Missing configuration revision
+(** Adjacent generic v1 through v6 to v7 conversion. The v5 to v6 step introduces
+    empty historical organization references without resolving host objects. The
+    v6 to v7 step introduces required content revisions in canonical and deferred
+    entries. Missing configuration revision
     is introduced in the v4 to v5 step. Missing metadata revision
     defaults to zero. Missing captured selection and job
     bindings become Unresolved; missing ledger becomes empty with UNKNOWN prior
@@ -64,3 +67,23 @@ val upgrade
 val legacy_model_job_target
   :  Jsonaf.t
   -> (Jsonaf.t option, Document_schema.Error.t) Result.t
+
+(** Internal carrier operation for an independently archive-admitted history edit.
+    Retain an exact, nonempty canonical identity prefix, preserving each retained
+    envelope and all unrelated extensions. Only suffix preservation paths retire;
+    this grants no actor mutation/archival permission and is not a wire API.
+    The original immutable inference-ledger validation basis remains unchanged. *)
+val retire_canonical_suffix
+  :  t
+  -> retained_ids:Agent_protocol.History.Id.t list
+  -> limits:Document_schema.Limits.t
+  -> (t, Document_schema.Error.t) result
+
+(** Internal custody transfer for a validated ordinary deletion. Rechecks its exact
+    basis and preserves the full ordered retained subsequence. Callers must admit
+    the exact previous archive before using this carrier. *)
+val retire_canonical_deletion
+  :  t
+  -> deletion:History_deletion.t
+  -> limits:Document_schema.Limits.t
+  -> (t, Document_schema.Error.t) result

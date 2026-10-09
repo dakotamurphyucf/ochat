@@ -59,6 +59,7 @@ let internal entry =
     ; kind = Message
     ; payload = Payload.to_json (H.payload entry)
     ; provenance = Canonical
+    ; content_revision = Agent_protocol.History.Content_revision.zero
     ; redacted = false
     }
 ;;

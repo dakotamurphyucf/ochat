@@ -35,6 +35,19 @@ type committed =
       { session_id : Id.Session.t
       ; revision : int64
       }
+  | Edited_history of
+      { session_id : Id.Session.t
+      ; history_id : History.Id.t
+      ; content_revision : History.Content_revision.t
+      ; archived_revision : int64
+      ; continuation : History_edit.Continuation.t
+      ; mutation : Mutation_result.t
+      }
+  | Continued_history of
+      { session_id : Id.Session.t
+      ; continuation : History_edit.Continuation.t
+      ; mutation : Mutation_result.t
+      }
   | Sent_message of
       { session_id : Id.Session.t
       ; history_id : History.Id.t

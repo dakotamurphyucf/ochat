@@ -28,6 +28,47 @@ module Id = struct
   ;;
 end
 
+module Content_revision = struct
+  type t = int64 [@@deriving compare, equal, sexp_of]
+
+  let zero = 0L
+
+  let of_int64 t =
+    if Int64.(t < zero)
+    then Error (Protocol_error.invalid_request "negative history content revision")
+    else Ok t
+  ;;
+
+  let t_of_sexp sexp =
+    let value = Int64.t_of_sexp sexp in
+    match of_int64 value with
+    | Ok value -> value
+    | Error error -> Sexplib.Conv.of_sexp_error error.Protocol_error.message sexp
+  ;;
+
+  let to_int64 t = t
+
+  let succ t =
+    if Int64.equal t Int64.max_value
+    then Error (Protocol_error.invalid_request "history content revision exhausted")
+    else Ok (Int64.succ t)
+  ;;
+
+  let to_json t = `String (Int64.to_string t)
+
+  let of_json = function
+    | `String encoded ->
+      (match Int64.of_string_opt encoded with
+       | Some value when String.equal (Int64.to_string value) encoded -> of_int64 value
+       | Some _ | None ->
+         Error (Protocol_error.invalid_request "invalid history content revision"))
+    | _ ->
+      Error
+        (Protocol_error.invalid_request
+           "history content revision must be a decimal string")
+  ;;
+end
+
 type role =
   | System
   | User
@@ -53,6 +94,7 @@ type provenance =
 
 type entry =
   { id : Id.t
+  ; content_revision : Content_revision.t
   ; role : role
   ; kind : kind
   ; payload : Jsonaf.t
@@ -139,6 +181,7 @@ let provenance_of_json json =
 let entry_to_json entry =
   `Object
     [ "id", Id.to_json entry.id
+    ; "content_revision", Content_revision.to_json entry.content_revision
     ; "role", `String (role_to_string entry.role)
     ; "kind", `String (kind_to_string entry.kind)
     ; "payload", entry.payload
@@ -151,12 +194,15 @@ let entry_of_json json =
   let open Result.Let_syntax in
   let%bind fields = Json_codec.fields json in
   let%bind id = Json_codec.required_as fields "id" Id.of_json in
+  let%bind content_revision =
+    Json_codec.required_as fields "content_revision" Content_revision.of_json
+  in
   let%bind role = Json_codec.required_as fields "role" role_of_json in
   let%bind kind = Json_codec.required_as fields "kind" kind_of_json in
   let%bind payload = Json_codec.required fields "payload" in
   let%bind provenance = Json_codec.required_as fields "provenance" provenance_of_json in
   let%map redacted = Json_codec.required_as fields "redacted" Json_codec.bool in
-  { id; role; kind; payload; provenance; redacted }
+  { id; content_revision; role; kind; payload; provenance; redacted }
 ;;
 
 module Window_request = struct

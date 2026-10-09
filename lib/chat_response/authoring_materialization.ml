@@ -109,6 +109,7 @@ let entry (message : message) ~id =
     ; kind = Message
     ; payload = message.payload
     ; provenance = Runtime_authoring message.guidance
+    ; content_revision = Agent_protocol.History.Content_revision.zero
     ; redacted = false
     }
 ;;

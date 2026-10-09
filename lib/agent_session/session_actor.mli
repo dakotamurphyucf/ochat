@@ -47,6 +47,23 @@ type reset_options = Administration.reset_options =
 
 type t
 
+module History_edit_result : sig
+  type t =
+    { session : Agent_protocol.Session.t
+    ; history_id : Agent_protocol.History.Id.t
+    ; content_revision : Agent_protocol.History.Content_revision.t
+    ; archived_revision : int64
+    ; continuation : Agent_protocol.History_edit.Continuation.t
+    }
+end
+
+module History_continuation_result : sig
+  type t =
+    { session : Agent_protocol.Session.t
+    ; continuation : Agent_protocol.History_edit.Continuation.t
+    }
+end
+
 module Runtime_retirement : sig
   (** A process-local foreground cleanup join. The actor remains available to
       inference and worker finalizers until the terminal checkpoint finishes. *)
@@ -950,7 +967,10 @@ val submit_managed_message
 
 (** [delete_history t ... id] removes one canonical occurrence and its matching
     tool call/result occurrence. Requires an idle/stopped writable session and
-    an exact revision; rejects borrowed moderator work. Commits before broadcast. *)
+    an exact revision; rejects foreground and borrowed moderator publication owners.
+    Independent background jobs remain live and publish against current state.
+    Archives the exact prior admitted document as [Delete] before committing;
+    archive or journal failures publish no history change. Commits before broadcast. *)
 val delete_history
   :  t
   -> ?command_audit:Document_schema.Document.t
@@ -1768,3 +1788,21 @@ val update_organization
   -> principal:Agent_protocol.Principal.t
   -> Agent_protocol.Session_organization.Request.t
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
+(** The accepted edit and optional Starting Turn are one durable transition.
+    Save_only invokes no worker/preparation/recovery port. Publication precedes
+    worker launch, within the command's protected commit handoff. Started means
+    admitted host operation, not provider dispatch; owner interruption is recovered
+    through existing operation/receipt reconciliation and never rolled back. *)
+
+val edit_history
+  :  t
+  -> ?command_audit:Document_schema.Document.t
+  -> Agent_protocol.History_edit.Edit_request.t
+  -> (History_edit_result.t, Agent_protocol.Error.t) result
+
+val continue_history
+  :  t
+  -> ?command_audit:Document_schema.Document.t
+  -> Agent_protocol.History_edit.Continue_request.t
+  -> (History_continuation_result.t, Agent_protocol.Error.t) result

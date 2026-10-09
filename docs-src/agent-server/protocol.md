@@ -91,6 +91,8 @@ actor state and authorization, not merely passing JSON validation.
 | `session.cancel_operation` | `Session.Cancel_operation_request` | `session.message.send` | Writable attachment; target current operation ID. |
 | `session.send_message` | `Session.Send_message_request` | `session.message.send` | Writable attachment; history ID, started/deferred disposition and optional operation ID. |
 | `session.compact` | `Session.Compact_request` | `session.message.send` | Writable attachment; optional expected revision; starts compaction. |
+| `session.edit_history` | `History_edit.Edit_request` | `session.message.send` | Writable attachment; exact generation/session/content revisions; replace a retained canonical user text and archive its invalidated suffix. |
+| `session.continue_history` | `History_edit.Continue_request` | `session.message.send` | Writable attachment; exact generation/session revision and empty pending queue; continue saved history only through an already available runtime. |
 | `session.delete_history` | `Session.Delete_history_request` | `session.message.send` | Writable attachment; required expected revision; remove a canonical occurrence and matching tool pair while idle/stopped. |
 | `session.export` | `Session.Export_request` | `session.transcript.read` | Authorized attachment; format/revision/window, principal-bound blob. |
 | `session.reset` | `Session.Reset_request` | `session.own` | Writable attachment; required expected revision and explicit preservation flags. |
@@ -169,17 +171,84 @@ records. Text not starting with `<` is wrapped in a user element; missing-user
 or parse failures are returned as errors. Root prompt declarations still come
 from the configured, pinned source, not from a client message.
 
+`session.edit_history` carries `session_id`, `attachment_id`, nonnegative
+`expected_generation` and `expected_revision`, `idempotency_key`, and `edit`.
+The edit has the stable `history_id`, `expected_content_revision`, complete UTF-8
+`text` (at most 1 MiB, including empty text), and `mode` (`save_only` or
+`edit_and_continue`). Obtain IDs and revisions from current readable history.
+Every history entry exposes a nonnegative `content_revision` as a canonical
+decimal string; stream/session revisions remain separate. An accepted edit keeps
+the occurrence ID, increments its content revision once, and replaces its text
+completely. Retrying the original key replays the original result and archive.
+
+Supported targets are ordinary canonical input user messages whose nonempty
+content list contains only unannotated plain text segments without logprobs or
+phase metadata. Initial prompt instructions, nontext/native entries, moderator
+replacement or tombstone targets, and edits that would split a retained tool
+call/result pair fail before mutation. Typed unsupported reasons are
+`initial_instruction`, `not_plain_user_text`, `overlay_override`, and
+`tool_pair_crosses_boundary`. A stale session/generation/content basis is a
+conflict. An edit never executes or reverses tools.
+
+The entire original saved document is retained in an independently checked edit
+archive before the changed history is committed. Current history keeps the
+prefix and edited occurrence and retires the later causal suffix; original
+native payloads, unknown fields and effect evidence remain in the archive and
+existing ledgers. The edited occurrence's envelope and unrelated retained
+unknown fields remain current. Subscribers receive `history.replaced`; clients
+must reconcile that replacement rather than optimistically changing local rows.
+
+`save_only` requires a safe idle/stopped boundary, saves without provider/runtime
+activation or invocation recovery, and returns continuation `not_requested`.
+`edit_and_continue` additionally requires an empty pending-input queue and returns
+`pending_input_conflict` when queued inputs require explicit selection. Save-only
+preserves those inputs exactly. Enqueue and combined editing have one serialized
+admission winner; a later enqueue remains pending without joining the admitted Turn. When an
+already available runtime can continue, the edit and actual Starting Turn commit
+once together and return `started` with its host operation ID. This records host
+admission, not provider dispatch. Owner interruption follows existing durable
+operation and command-receipt recovery. Stopped/unavailable sessions still save
+and return `not_started` with `stopped` or `runtime_unavailable`, without a latent
+future request. Real foreground/moderator/event/initialization or runtime
+retirement owners block the operation; independent captured jobs and children
+keep their original inputs.
+
+`session.continue_history` uses the same session/attachment/generation/revision
+and idempotency fields without an edit or new user message. At the safe boundary
+with an empty pending queue (otherwise `pending_input_conflict`) it starts one actual Turn through the already
+available runtime; stopped/unavailable results do not activate it. The caller
+may explicitly start/resume first and then continue. If combined editing cannot
+reconcile a retained invocation without appending an already recorded outcome,
+it rejects with an actionable conflict: save first and then continue. Standalone
+continuation can atomically include those retained outcomes and allocator changes
+with its Turn, without reexecuting a tool or observation. `Edited_history` and
+`Continued_history` command receipts retain the exact continuation disposition;
+edit receipts also retain the occurrence/content/archive revisions. Current
+scope and session visibility apply before fresh commands, replays and receipt
+disclosure; mutation admission and replay also require the current writable
+attachment. Receipt lookup remains available after the original attachment is
+lost. A stopped/unavailable continuation has no state transaction. If its host
+is interrupted after reserving the original idempotency key but before recording
+the terminal cache reply, its receipt remains `pending` with no accepted sequence,
+and duplicate execution is suppressed as an unknown outcome. The host never
+infers a terminal `not_started` receipt merely from current stopped state.
+
 `session.delete_history` requires `session_id`, `attachment_id`, `history_id`,
 nonnegative `expected_revision`, and `idempotency_key`. Obtain the stable history
 ID from a current snapshot, not a row index or provider item ID. It rejects
-stale revisions, read-only attachments, active operations and borrowed idle
-moderator execution. The result is a `Session_mutation`; committed
-`history.replaced` events update subscribers. It removes the nearest matching
-function/custom call-result pair without crossing another same-direction
-occurrence with the same call ID. It neither executes nor reverses tools.
+stale revisions, read-only attachments, foreground operations and borrowed
+moderator/event/initialization/runtime-retirement publication owners. Independent
+background jobs continue and commit their outcomes against the current state.
+The result is a `Session_mutation`; committed `history.replaced` events update
+subscribers. It removes the actual bound function/custom call-result pair, or
+the nearest matching unresolved pair without crossing another same-direction
+occurrence with the same call ID, preserving later unrelated entries. The exact
+prior admitted document is retained as a `delete` archive, including unknown
+fields on removed middle entries. Archive or journal failures publish no change.
+It neither executes nor reverses tools.
 
 `Snapshot.archived_revisions` lists pre-change archive revisions from compaction,
-reset, rebuild and prompt upgrade, newest
+reset, rebuild, prompt upgrade, saved-history edits and ordinary deletions, newest
 first (older peers may omit it; the decoder defaults to an empty list).
 `session.export.revision` may be absent/current or one of those archived
 revisions, not an arbitrary old journal revision. Historical export uses the

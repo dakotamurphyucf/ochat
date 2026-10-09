@@ -25,6 +25,7 @@ let to_canonical ?(provenance = Agent_protocol.History.Canonical) entry =
   let role, kind = classification (Payload.semantic payload) in
   Agent_protocol.History.
     { id = History_entry.id entry
+    ; content_revision = Agent_protocol.History.Content_revision.zero
     ; role
     ; kind
     ; payload = Payload.to_json payload
@@ -66,9 +67,15 @@ let to_presentation ?provenance entry =
 let canonical_encoder ~previous =
   let provenance = Hashtbl.create (module History_entry.Id) in
   List.iter previous ~f:(fun entry ->
-    Hashtbl.set provenance ~key:entry.Agent_protocol.History.id ~data:entry.provenance);
+    Hashtbl.set
+      provenance
+      ~key:entry.Agent_protocol.History.id
+      ~data:(entry.provenance, entry.content_revision));
   fun entry ->
-    to_canonical ?provenance:(Hashtbl.find provenance (History_entry.id entry)) entry
+    match Hashtbl.find provenance (History_entry.id entry) with
+    | None -> to_canonical entry
+    | Some (provenance, content_revision) ->
+      { (to_canonical ~provenance entry) with content_revision }
 ;;
 
 let all_to_protocol ?(previous = []) entries =

@@ -41,6 +41,8 @@ let required_scope = function
   | Session_start _
   | Session_send_message _
   | Session_compact _
+  | Session_edit_history _
+  | Session_continue_history _
   | Session_delete_history _
   | Session_cancel_operation _ -> Some Send_messages
   | Session_stop _ -> Some Stop_sessions

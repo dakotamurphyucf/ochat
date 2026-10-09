@@ -171,6 +171,7 @@ type body =
 
 type t =
   { id : History.Id.t
+  ; content_revision : History.Content_revision.t
   ; provenance : History.provenance
   ; body : body
   }
@@ -189,12 +190,13 @@ let body_to_json = function
 let to_json t =
   `Object
     [ "id", History.Id.to_json t.id
+    ; "content_revision", History.Content_revision.to_json t.content_revision
     ; "provenance", History.provenance_to_json t.provenance
     ; "body", body_to_json t.body
     ]
 ;;
 
-let create id ~provenance body =
+let create id ~content_revision ~provenance body =
   let open Result.Let_syntax in
   let%bind () =
     match body with
@@ -211,17 +213,26 @@ let create id ~provenance body =
     | Canonical | Moderator_inserted | Moderator_replaced _ | Runtime_notification _ ->
       Ok ()
   in
-  let t = { id; provenance; body } in
+  let t = { id; content_revision; provenance; body } in
   let%map () = Projection_codec.validate (to_json t) in
   t
 ;;
 
-let full entry ~provenance =
-  create (History_entry.id entry) ~provenance (Full (History_entry.payload entry))
+let full ?(content_revision = History.Content_revision.zero) entry ~provenance =
+  create
+    (History_entry.id entry)
+    ~content_revision
+    ~provenance
+    (Full (History_entry.payload entry))
 ;;
 
-let visible id ~provenance view = create id ~provenance (Visible view)
-let redacted id ~provenance redaction = create id ~provenance (Redacted redaction)
+let visible ?(content_revision = History.Content_revision.zero) id ~provenance view =
+  create id ~content_revision ~provenance (Visible view)
+;;
+
+let redacted ?(content_revision = History.Content_revision.zero) id ~provenance redaction =
+  create id ~content_revision ~provenance (Redacted redaction)
+;;
 
 let header t =
   match t.body with
@@ -238,6 +249,7 @@ let full_payload t =
 
 let equal a b =
   History.Id.equal a.id b.id
+  && History.Content_revision.equal a.content_revision b.content_revision
   && History.equal_provenance a.provenance b.provenance
   &&
   match a.body, b.body with
@@ -258,6 +270,9 @@ let of_json json =
   let%bind () = Projection_codec.validate json in
   let%bind fields = J.fields json in
   let%bind id = J.required_as fields "id" History.Id.of_json in
+  let%bind content_revision =
+    J.required_as fields "content_revision" History.Content_revision.of_json
+  in
   let%bind provenance = J.required_as fields "provenance" History.provenance_of_json in
   let%bind body = J.required_as fields "body" J.fields in
   let%bind kind = J.required_as body "type" J.string in
@@ -278,7 +293,7 @@ let of_json json =
       Redacted (Redaction.create ~disclosed_header)
     | _ -> Error (Protocol_error.invalid_request "unknown public history body")
   in
-  create id ~provenance body
+  create id ~content_revision ~provenance body
 ;;
 
 module Window = struct

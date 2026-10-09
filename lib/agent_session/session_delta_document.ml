@@ -323,6 +323,20 @@ let atom_to_jsonaf ~limits ~state_document delta =
           [ "kind", `String "compaction_generation_changed"
           ; "generation", X.integer_json value
           ])
+  | History_deleted (history_id, archive) ->
+    Ok
+      (`Object
+          [ "kind", `String "history_deleted"
+          ; "history_id", P.History.Id.to_json history_id
+          ; "archive", Session_state_document.archive_reference_to_jsonaf archive
+          ])
+  | History_edited (edit, archive) ->
+    Ok
+      (`Object
+          [ "kind", `String "history_edited"
+          ; "edit", P.History_edit.to_json edit
+          ; "archive", Session_state_document.archive_reference_to_jsonaf archive
+          ])
   | Compaction_archived value ->
     Ok
       (`Object
@@ -556,6 +570,18 @@ let atom_of_jsonaf ~limits json =
   | "compaction_generation_changed" ->
     Result.map (X.required fields "generation" X.integer) ~f:(fun value ->
       Delta.Compaction_generation_changed value)
+  | "history_deleted" ->
+    let%bind history_id = X.required fields "history_id" P.History.Id.of_json in
+    let%map archive =
+      X.required fields "archive" Session_state_document.archive_reference_of_jsonaf
+    in
+    Delta.History_deleted (history_id, archive)
+  | "history_edited" ->
+    let%bind edit = X.required fields "edit" P.History_edit.of_json in
+    let%map archive =
+      X.required fields "archive" Session_state_document.archive_reference_of_jsonaf
+    in
+    Delta.History_edited (edit, archive)
   | "compaction_archived" ->
     Result.map
       (X.required fields "archive" Session_state_document.archive_reference_of_jsonaf)
@@ -751,6 +777,18 @@ let shape =
                , X.shape_exn [ "kind", D.Shape.value; "sequence", D.Shape.value ] )
              ; ( "compaction_generation_changed"
                , X.shape_exn [ "kind", D.Shape.value; "generation", D.Shape.value ] )
+             ; ( "history_deleted"
+               , X.shape_exn
+                   [ "kind", D.Shape.value
+                   ; "history_id", D.Shape.value
+                   ; "archive", Session_state_document.archive_reference_shape
+                   ] )
+             ; ( "history_edited"
+               , X.shape_exn
+                   [ "kind", D.Shape.value
+                   ; "edit", D.Shape.value
+                   ; "archive", Session_state_document.archive_reference_shape
+                   ] )
              ; ( "compaction_archived"
                , X.shape_exn
                    [ "kind", D.Shape.value
@@ -863,13 +901,54 @@ let upgrade document ~limits =
                  name, if String.equal name "changes" then `Array changes else value)))
       | _ -> F.invalid "payload" "must be an object")
   in
+  let%bind history_revision_step =
+    D.Conversion.Step.of_function ~kind:"session.delta" ~from_version:3 ~f:(fun payload ->
+      let%bind changes = F.required payload "changes" F.array in
+      let%bind changes =
+        List.map changes ~f:(fun change ->
+          let%bind kind = F.required change "kind" F.string in
+          let field, convert =
+            match kind with
+            | "canonical_entries_appended"
+            | "canonical_history_replaced"
+            | "deferred_entries_enqueued" -> "entries", X.initialize_history_revisions
+            | "delivery_committed" -> "entry", X.initialize_history_revision
+            | "created" ->
+              ( "state"
+              , fun raw ->
+                  let%bind state = D.Document.inspect ~limits raw in
+                  let%map state = Session_state_document.upgrade state ~limits in
+                  D.Document.json state )
+            | _ -> "", Result.return
+          in
+          if String.is_empty field
+          then Ok change
+          else (
+            let%bind value = F.required change field convert in
+            match change with
+            | `Object fields ->
+              Ok
+                (`Object
+                    (List.map fields ~f:(fun (name, old) ->
+                       name, if String.equal name field then value else old)))
+            | _ -> F.invalid "change" "must be an object"))
+        |> Result.all
+      in
+      match payload with
+      | `Object fields ->
+        Ok
+          (`Object
+              (List.map fields ~f:(fun (name, old) ->
+                 name, if String.equal name "changes" then `Array changes else old)))
+      | _ -> F.invalid "payload" "must be an object")
+  in
   let%bind conversion =
     D.Conversion.create
       ~limits
-      ~targets:[ "session.delta", 3 ]
-      ~max_steps:2
+      ~targets:[ "session.delta", 4 ]
+      ~max_steps:3
       ~max_operations:100_000
-      ~steps:[ step; ledger_step ]
+      ~steps:[ step; ledger_step; history_revision_step ]
   in
   D.Conversion.upgrade conversion document
 ;;
@@ -878,7 +957,7 @@ let codec ~limits =
   D.Domain_codec.create
     ~limits
     ~kind:"session.delta"
-    ~version:3
+    ~version:4
     ~shape
     ~supported_semantics:[]
     ~decode:(fun json -> decode_payload ~limits json |> X.document_result)
@@ -908,7 +987,7 @@ let create value ~limits ~state_document =
     D.Document.create
       ~limits
       ~kind:"session.delta"
-      ~version:3
+      ~version:4
       ~payload:(`Object [ "changes", `Array changes ])
   in
   (* Decode authored output too: one set of validators governs both paths. *)
@@ -1134,7 +1213,7 @@ let apply t ?transaction_metadata ~limits previous =
     Delta.apply ~limits (Session_state_document.value previous) t.value
     |> X.document_result
   in
-  let candidate = Session_state_document.with_value previous next in
+  let%bind candidate = History_retirement.admit previous ~delta:t.value ~next ~limits in
   let%bind changes = raw_changes t in
   (* Created is an immutable captured state document, carrying its full template.
     Retarget it to the final typed candidate before unioning preservation paths. *)
@@ -1198,7 +1277,7 @@ let apply t ?transaction_metadata ~limits previous =
           [ "attachments" ]
           ~identity_field:"id"
           child
-      | "compaction_archived" ->
+      | "compaction_archived" | "history_edited" | "history_deleted" ->
         let%bind child = field "archive" in
         patch_member
           ~limits

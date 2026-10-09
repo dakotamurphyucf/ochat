@@ -28,6 +28,8 @@ val to_presentation
   -> History_entry.t
   -> (Agent_protocol.History.entry, Agent_protocol.Error.t) result
 
+(** Same-ID native re-encoding preserves canonical provenance and content revision;
+    new IDs begin at zero. This is projection continuity, not edit admission. *)
 val canonical_encoder
   :  previous:Agent_protocol.History.entry list
   -> History_entry.t

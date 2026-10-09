@@ -39,6 +39,8 @@ module Compaction_archive = struct
     | Reset
     | Rebuild
     | Upgrade
+    | Edit
+    | Delete
   [@@deriving equal, sexp]
 
   type invocation_disposition =
@@ -1049,7 +1051,7 @@ let effective_entry ~canonical (entry : Chat_response.Moderation.Effective_entry
   | Moderator_inserted _ ->
     History_codec.to_protocol ~provenance:Moderator_inserted entry.entry
   | Moderator_replacement { target_id; _ } ->
-    History_codec.to_protocol ~provenance:(Moderator_replaced target_id) entry.entry
+    { (canonical entry.entry) with provenance = Moderator_replaced target_id }
 ;;
 
 let effective_history t =

@@ -12,6 +12,20 @@ module Id : sig
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
 
+module Content_revision : sig
+  type t [@@deriving compare, equal, sexp]
+
+  val zero : t
+  val of_int64 : int64 -> (t, Error.t) result
+  val to_int64 : t -> int64
+  val succ : t -> (t, Error.t) result
+
+  (** Canonical decimal strings avoid precision loss in public and stored data. *)
+  val to_json : t -> Jsonaf.t
+
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
 type role =
   | System
   | User
@@ -40,6 +54,7 @@ val provenance_of_json : Jsonaf.t -> (provenance, Error.t) result
 
 type entry =
   { id : Id.t
+  ; content_revision : Content_revision.t
   ; role : role
   ; kind : kind
   ; payload : Jsonaf.t

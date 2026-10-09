@@ -1215,6 +1215,8 @@ let compose
       | Session_cancel_operation _
       | Session_send_message _
       | Session_compact _
+      | Session_edit_history _
+      | Session_continue_history _
       | Session_delete_history _
       | Session_export _
       | Session_reset _

@@ -670,6 +670,8 @@ let architecture_methods =
   ; "session.cancel_operation"
   ; "session.send_message"
   ; "session.compact"
+  ; "session.edit_history"
+  ; "session.continue_history"
   ; "session.delete_history"
   ; "session.export"
   ; "session.reset"
@@ -704,7 +706,7 @@ let%expect_test "every architecture method has request and result dispatch" =
           (List.equal String.equal expected (normalize Method_result.supported_methods)
            : bool)
       }];
-  [%expect {| ((method_count 64) (requests true) (results true)) |}]
+  [%expect {| ((method_count 66) (requests true) (results true)) |}]
 ;;
 
 let%expect_test "history deletion requires stable ID, revision and idempotency" =

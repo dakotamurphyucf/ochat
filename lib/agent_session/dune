@@ -103,6 +103,12 @@
   subscriber
   history_id_source
   history_codec
+  history_edit
+  history_deletion
+  turn_admission
+  history_continuation
+  history_edit_transition
+  history_retirement
   notification_history
   notification_readiness
   notification_delivery

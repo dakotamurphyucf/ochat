@@ -141,7 +141,15 @@ let admit_state_document state_document ~limits =
 
 let commit t ~command_audit ~(previous : Session_state.t) transition =
   let open Result.Let_syntax in
-  let next = Restored.with_state t.restored transition.Session_transition.state in
+  let%bind state_document =
+    History_retirement.admit
+      t.restored.state_document
+      ~delta:transition.Session_transition.delta
+      ~next:transition.state
+      ~limits:t.archive_limits
+    |> Result.map_error ~f:(fun error -> protocol_error (document_error error))
+  in
+  let next = { t.restored with state_document } in
   (* Validate the complete merge and immutable transaction before any archive or
     journal write. Unknown-bearing deletion fails with all durable owners intact. *)
   let%bind _, state_document =

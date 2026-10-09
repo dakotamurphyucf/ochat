@@ -332,6 +332,10 @@ let idempotency = function
   | Session_send_message request ->
     protected (Some request.session_id) request.idempotency_key
   | Session_compact request -> protected (Some request.session_id) request.idempotency_key
+  | Session_edit_history request ->
+    protected (Some request.session_id) request.idempotency_key
+  | Session_continue_history request ->
+    protected (Some request.session_id) request.idempotency_key
   | Session_delete_history request ->
     protected (Some request.session_id) request.idempotency_key
   | Session_reset request -> protected (Some request.session_id) request.idempotency_key
@@ -1043,6 +1047,21 @@ let with_writer t context ~session_id ~attachment_id f =
   f entry
 ;;
 
+(* History mutations require a still-loaded actor owned by this attachment.
+   Checking a stale connection must never invoke the activating durable loader. *)
+let with_attached_writer t context ~session_id ~attachment_id f =
+  let open Result.Let_syntax in
+  let%bind () = require_connection_attachment context ~session_id ~attachment_id in
+  let%bind () = require_connection_writer context attachment_id in
+  let%bind entry =
+    match Session_registry.find t.registry session_id with
+    | Some entry -> Ok entry
+    | None -> Error (error Lease_stale "attachment is stale; attach to the session again")
+  in
+  let%bind () = Agent_session.Session_actor.authorize_writer entry.actor ~attachment_id in
+  f entry
+;;
+
 let rec handle_session_start t context command_audit request =
   with_writer
     t
@@ -1271,6 +1290,54 @@ let handle_session_cancel_operation t context command_audit request =
              ~operation_id:request.operation_id)
        |> Result.map ~f:(fun session ->
          Agent_protocol.Method_result.Session_cancel_operation (session_mutation session)))
+;;
+
+let handle_edit_history
+      t
+      context
+      command_audit
+      (request : Agent_protocol.History_edit.Edit_request.t)
+  =
+  with_attached_writer
+    t
+    context
+    ~session_id:request.session_id
+    ~attachment_id:request.attachment_id
+    (fun entry ->
+       Agent_session.Session_actor.edit_history entry.actor ?command_audit request
+       |> Result.map
+            ~f:(fun (result : Agent_session.Session_actor.History_edit_result.t) ->
+              let mutation = (session_mutation result.session).mutation in
+              Agent_protocol.Method_result.Session_edit_history
+                { session = result.session
+                ; mutation
+                ; history_id = result.history_id
+                ; content_revision = result.content_revision
+                ; archived_revision = result.archived_revision
+                ; continuation = result.continuation
+                }))
+;;
+
+let handle_continue_history
+      t
+      context
+      command_audit
+      (request : Agent_protocol.History_edit.Continue_request.t)
+  =
+  with_attached_writer
+    t
+    context
+    ~session_id:request.session_id
+    ~attachment_id:request.attachment_id
+    (fun entry ->
+       Agent_session.Session_actor.continue_history entry.actor ?command_audit request
+       |> Result.map
+            ~f:
+              (fun
+                (result : Agent_session.Session_actor.History_continuation_result.t) ->
+              let mutation = (session_mutation result.session).mutation in
+              Agent_protocol.Method_result.Session_continue_history
+                { session = result.session; mutation; continuation = result.continuation }))
 ;;
 
 let handle_delete_history t context command_audit request =
@@ -2267,6 +2334,8 @@ let mutation_attachment = function
   | Session_configuration_update r -> Some (r.session_id, r.attachment_id)
   | Session_send_message r -> Some (r.session_id, r.attachment_id)
   | Session_compact r -> Some (r.session_id, r.attachment_id)
+  | Session_edit_history r -> Some (r.session_id, r.attachment_id)
+  | Session_continue_history r -> Some (r.session_id, r.attachment_id)
   | Session_delete_history r -> Some (r.session_id, r.attachment_id)
   | Session_reset r -> Some (r.session_id, r.attachment_id)
   | Session_rebuild r -> Some (r.session_id, r.attachment_id)
@@ -2281,10 +2350,26 @@ let mutation_attachment = function
 ;;
 
 let authorize_mutation t context command =
-  match mutation_attachment command with
-  | None -> Ok ()
-  | Some (session_id, attachment_id) ->
-    with_writer t context ~session_id ~attachment_id (fun _ -> Ok ())
+  match command with
+  | Agent_protocol.Command.Session_edit_history request ->
+    with_attached_writer
+      t
+      context
+      ~session_id:request.session_id
+      ~attachment_id:request.attachment_id
+      (fun _ -> Ok ())
+  | Session_continue_history request ->
+    with_attached_writer
+      t
+      context
+      ~session_id:request.session_id
+      ~attachment_id:request.attachment_id
+      (fun _ -> Ok ())
+  | _ ->
+    (match mutation_attachment command with
+     | None -> Ok ()
+     | Some (session_id, attachment_id) ->
+       with_writer t context ~session_id ~attachment_id (fun _ -> Ok ()))
 ;;
 
 let dispatch_authorized t ~actor ~context ~command_audit ~inference_budget = function
@@ -2359,6 +2444,9 @@ let dispatch_authorized t ~actor ~context ~command_audit ~inference_budget = fun
     handle_configuration_update t context command_audit request
   | Session_send_message request -> handle_send_message t context command_audit request
   | Session_compact request -> handle_session_compact t context command_audit request
+  | Session_edit_history request -> handle_edit_history t context command_audit request
+  | Session_continue_history request ->
+    handle_continue_history t context command_audit request
   | Session_delete_history request ->
     handle_delete_history t context command_audit request
   | Session_export request -> handle_session_export t context request
@@ -2440,6 +2528,8 @@ let command_session_id = function
   | Session_cancel_operation request -> Some request.session_id
   | Session_send_message request -> Some request.session_id
   | Session_compact request -> Some request.session_id
+  | Session_edit_history request -> Some request.session_id
+  | Session_continue_history request -> Some request.session_id
   | Session_delete_history request -> Some request.session_id
   | Session_export request -> Some request.session_id
   | Session_reset request -> Some request.session_id
@@ -2518,6 +2608,23 @@ let receipt_summary ~session_id result =
   | Session_rebuild value
   | Session_upgrade_prompt value ->
     Ok (R.Session_mutation { session_id = value.session.id; mutation = value.mutation })
+  | Session_edit_history value ->
+    Ok
+      (R.Edited_history
+         { session_id = value.session.id
+         ; history_id = value.history_id
+         ; content_revision = value.content_revision
+         ; archived_revision = value.archived_revision
+         ; continuation = value.continuation
+         ; mutation = value.mutation
+         })
+  | Session_continue_history value ->
+    Ok
+      (R.Continued_history
+         { session_id = value.session.id
+         ; continuation = value.continuation
+         ; mutation = value.mutation
+         })
   | Session_configuration_update value ->
     (match session_id with
      | Some session_id ->
@@ -2658,6 +2765,8 @@ let handle_command_receipt
               | Created_session session_id
               | Attached_session session_id
               | Deleted_session session_id
+              | Edited_history { session_id; _ }
+              | Continued_history { session_id; _ }
               | Configuration_updated { session_id; _ }
               | Session_mutation { session_id; _ }
               | Sent_message { session_id; _ } -> visible session_id
@@ -2714,8 +2823,9 @@ let handle t ?actor ~context ~inference_budget command =
     in
     let%bind () =
       match command with
-      | Agent_protocol.Command.Session_update_organization _ ->
-        authorize_mutation t context command
+      | Agent_protocol.Command.Session_update_organization _
+      | Session_edit_history _
+      | Session_continue_history _ -> authorize_mutation t context command
       | _ -> Ok ()
     in
     let outcome =
