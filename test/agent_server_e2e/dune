@@ -17,7 +17,16 @@
   (alias agent-e2e-transports)
   (alias agent-e2e-workspaces)
   (alias agent-e2e-multiclient)
-  (alias agent-e2e-extensibility-pr)))
+  (alias agent-e2e-extensibility-pr)
+  (alias agent-e2e-artifact-redaction)))
+
+;; Bound secret-registration growth and preserve its exact redaction contract in
+;; required CI without relying on a larger scenario exhausting runner memory.
+(rule
+ (alias agent-e2e-artifact-redaction)
+ (action
+  (setenv OCHAT_E2E_ARTIFACT_ROOT %{workspace_root}/_build/agent-e2e-artifacts
+   (run %{exe:agent_server_e2e.exe} --scenario harness-isolation --case artifact.redaction))))
 
 ;; Keep process-boundary extensibility regressions in required PR CI. The normal
 ;; tier covers the full in-process contract/composition matrix; the safe alias
