@@ -9,34 +9,17 @@ let list_sessions_page connection request =
   | Error _ as failure -> failure
 ;;
 
-let enumerate_sessions connection ~query ~max_sessions ~max_pages =
-  let open Result.Let_syntax in
-  if
-    max_sessions <= 0
-    || max_pages <= 0
-    || Option.is_some query.Agent_protocol.Session.List_request.page.cursor
-  then Error (invalid "enumeration requires positive bounds and a fresh query")
-  else (
-    let rec loop request pages count reversed =
-      let%bind page = list_sessions_page connection request in
-      let count = count + List.length page.items in
-      if count > max_sessions
-      then Error (invalid "session enumeration exceeds max_sessions")
-      else (
-        let reversed = List.rev_append page.items reversed in
-        match page.next_cursor with
-        | None -> Ok (List.rev reversed)
-        | Some cursor ->
-          if pages >= max_pages
-          then Error (invalid "session enumeration exceeds max_pages")
-          else
-            loop
-              { request with page = { request.page with cursor = Some cursor } }
-              (pages + 1)
-              count
-              reversed)
-    in
-    loop query 1 0 [])
+let enumerate_sessions
+      connection
+      ~(query : Agent_protocol.Session.List_request.t)
+      ~max_sessions
+      ~max_pages
+  =
+  Page_enumeration.collect
+    query.page
+    ~max_items:max_sessions
+    ~max_pages
+    ~read:(fun page -> list_sessions_page connection { query with page })
 ;;
 
 let list_sessions connection =
@@ -140,33 +123,15 @@ let delete_collection connection request =
   | Error _ as failure -> failure
 ;;
 
-let enumerate_organization connection ~query ~max_groups ~max_pages ~list_page =
-  let open Result.Let_syntax in
-  if
-    max_groups <= 0
-    || max_pages <= 0
-    || Option.is_some query.Agent_protocol.Organization_request.List.page.cursor
-  then Error (invalid "organization enumeration requires positive bounds and fresh query")
-  else (
-    let rec loop (query : Agent_protocol.Organization_request.List.t) pages count reverse =
-      let%bind page = list_page connection query in
-      let count = count + List.length page.Agent_protocol.Page.items in
-      if count > max_groups
-      then Error (invalid "organization enumeration exceeds max_groups")
-      else (
-        let reverse = List.rev_append page.items reverse in
-        match page.next_cursor with
-        | None -> Ok (List.rev reverse)
-        | Some cursor when pages >= max_pages ->
-          Error (invalid "organization enumeration exceeds max_pages")
-        | Some cursor ->
-          loop
-            { query with page = { query.page with cursor = Some cursor } }
-            (pages + 1)
-            count
-            reverse)
-    in
-    loop query 1 0 [])
+let enumerate_organization
+      connection
+      ~(query : Agent_protocol.Organization_request.List.t)
+      ~max_groups
+      ~max_pages
+      ~list_page
+  =
+  Page_enumeration.collect query.page ~max_items:max_groups ~max_pages ~read:(fun page ->
+    list_page connection { query with page })
 ;;
 
 let enumerate_projects connection ~query ~max_groups ~max_pages =
