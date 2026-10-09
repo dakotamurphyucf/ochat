@@ -12,6 +12,7 @@
   ingress
   inference_views
   activity_views
+  conversation_search
   blob_download
   session_handle
   reconnect)

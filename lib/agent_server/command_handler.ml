@@ -16,6 +16,8 @@ type t =
   ; idempotency_store : Agent_store.Idempotency_store.t
   ; provider_operator : Provider_operator_port.t option
   ; idempotency_mutex : Eio.Mutex.t
+  ; search_cache : Search_cache.t
+  ; search_cursors : Search_cursor.t
   ; pagination : Pagination.t
   ; audit_store : Agent_store.Audit_store.t
   ; blob_store : Agent_store.Blob_store.t
@@ -72,6 +74,11 @@ let create
   ; idempotency_store
   ; provider_operator
   ; idempotency_mutex = Eio.Mutex.create ()
+  ; search_cache =
+      Search_cache.create ()
+      |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+      |> Result.ok_or_failwith
+  ; search_cursors = Search_cursor.create ()
   ; pagination = Pagination.create ()
   ; audit_store
   ; blob_store
@@ -371,6 +378,8 @@ let idempotency = function
   | Collection_delete _
   | Activity_list _
   | Session_work _
+  | Session_search _
+  | Session_search_navigate _
   | Session_list _
   | Session_get _
   | Session_configuration_get _
@@ -945,6 +954,28 @@ let read_visible_state t context session_id =
     if session_visible_to principal summary
     then Ok ()
     else Error (error Permission_denied "session is not visible to this principal"))
+;;
+
+let search_service t context =
+  Search_service.create
+    ~server_id:(Agent_store.Session_store.server_id t.session_store)
+    ~principal:(Connection_context.principal context)
+    ~cache:t.search_cache
+    ~cursors:t.search_cursors
+    ~read_catalog:(fun query ->
+      let open Result.Let_syntax in
+      let%map projection, sessions = read_catalog t context query in
+      Search_service.Catalog.
+        { organization_revision = Organization_membership_projection.revision projection
+        ; sessions
+        })
+    ~read_state:(read_visible_state t context)
+;;
+
+let handle_session_search t context request =
+  Result.map
+    (Search_service.query (search_service t context) request)
+    ~f:(fun page -> Agent_protocol.Method_result.Session_search page)
 ;;
 
 let handle_inference_summary
@@ -2481,6 +2512,11 @@ let dispatch_authorized t ~actor ~context ~command_audit ~inference_budget = fun
   | Blob_read request -> handle_blob_read t context request
   | Session_create request -> handle_session_create t context command_audit request
   | Session_list request -> handle_session_list t context request
+  | Session_search request -> handle_session_search t context request
+  | Session_search_navigate request ->
+    Result.map
+      (Search_service.navigate (search_service t context) request)
+      ~f:(fun response -> Agent_protocol.Method_result.Session_search_navigate response)
   | Activity_list request -> handle_activity_list t context request
   | Session_work request -> handle_session_work t context request
   | Session_get request -> handle_session_get t context request
@@ -2571,6 +2607,8 @@ let command_session_id = function
   | Collection_update _
   | Collection_delete _
   | Activity_list _
+  | Session_search _
+  | Session_search_navigate _
   | Session_list _ -> None
   | Session_work request -> Some (Agent_protocol.Session_ref.session_id request.session)
   | Blob_read request -> Some request.session_id
@@ -2733,6 +2771,8 @@ let receipt_summary ~session_id result =
   | Collection_delete _
   | Activity_list _
   | Session_work _
+  | Session_search _
+  | Session_search_navigate _
   | Session_list _
   | Session_get _
   | Session_configuration_get _

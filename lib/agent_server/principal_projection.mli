@@ -8,6 +8,14 @@ val snapshot
   -> Agent_protocol.Snapshot.t
   -> (Agent_protocol.Public.Snapshot.t, Agent_protocol.Error.t) result
 
+(** Project one already session-authorized canonical entry. Requires transcript
+    scope explicitly; security scope alone never grants readable text. The
+    caller owns source-size limits and initial prompt/provenance exclusion. *)
+val readable_history_entry
+  :  Agent_protocol.Principal.t
+  -> Agent_protocol.History.entry
+  -> (Agent_protocol.Public_history.t, Agent_protocol.Error.t) result
+
 val durable
   :  Agent_protocol.Principal.t
   -> Agent_protocol.Event.Durable.t

@@ -38,6 +38,18 @@ let history_entry principal (entry : P.History.entry) =
                 (Transcript.Header.of_semantic (History_entry.Payload.semantic payload)))))
 ;;
 
+let readable_history_entry principal entry =
+  if has principal View_session_transcript
+  then history_entry principal entry
+  else
+    Error
+      (P.Error.create
+         Permission_denied
+         ~message:"conversation search requires transcript access"
+         ~retryable:false
+         ())
+;;
+
 let history principal (window : P.History.Window.t) =
   let open Result.Let_syntax in
   if not (has principal View_session_transcript)

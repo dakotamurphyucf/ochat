@@ -768,6 +768,23 @@ module List_request = struct
     }
   [@@deriving sexp]
 
+  let normalize t =
+    let open Result.Let_syntax in
+    let%bind _ = Page.Request.create ~limit:t.page.limit ?cursor:t.page.cursor () in
+    let%bind labels = validate_labels t.labels in
+    let%bind _ =
+      Session_organization.Query.create
+        ~project:t.organization.project
+        ~collection_all_of:t.organization.collection_all_of
+    in
+    match t.owner_principal_id, t.creator_principal_id with
+    | Some old, Some current when not (Id.Principal.equal old current) ->
+      Error
+        (Protocol_error.invalid_request
+           "creator filter conflicts with legacy owner filter")
+    | _ -> Ok { t with labels }
+  ;;
+
   let to_json t =
     let filters =
       [ Some ("sort", Session_catalog_query.Sort.to_json t.sort)
@@ -818,7 +835,7 @@ module List_request = struct
     in
     let%bind organization = Session_organization.Query.of_fields fields in
     let%bind labels = Json_codec.optional_as fields "labels" labels_of_json in
-    let%bind labels = validate_labels (Option.value labels ~default:[]) in
+    let labels = Option.value labels ~default:[] in
     let%bind sort =
       Json_codec.optional_as fields "sort" Session_catalog_query.Sort.of_json
     in
@@ -831,26 +848,22 @@ module List_request = struct
     let%bind active_owner_principal_id =
       Json_codec.optional_as fields "active_owner_principal_id" Id.Principal.of_json
     in
-    let%map () =
-      match owner_principal_id, creator_principal_id with
-      | Some old, Some current when not (Id.Principal.equal old current) ->
-        Error
-          (Protocol_error.invalid_request
-             "creator filter conflicts with legacy owner filter")
-      | _ -> Ok ()
+    let t =
+      { page
+      ; desired_state
+      ; prompt_id
+      ; workspace_id
+      ; owner_principal_id
+      ; organization
+      ; labels
+      ; creator_principal_id
+      ; active_owner_principal_id
+      ; sort = Option.value sort ~default:Session_catalog_query.Sort.default
+      ; archive =
+          Option.value archive ~default:Session_catalog_query.Archive_filter.Active
+      }
     in
-    { page
-    ; desired_state
-    ; prompt_id
-    ; workspace_id
-    ; owner_principal_id
-    ; organization
-    ; labels
-    ; creator_principal_id
-    ; active_owner_principal_id
-    ; sort = Option.value sort ~default:Session_catalog_query.Sort.default
-    ; archive = Option.value archive ~default:Session_catalog_query.Archive_filter.Active
-    }
+    normalize t
   ;;
 end
 
