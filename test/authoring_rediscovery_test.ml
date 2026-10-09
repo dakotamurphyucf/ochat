@@ -42,6 +42,7 @@ let receipt ~context ~host ~policy ~identity ~number id =
       ; kind = Message
       ; payload
       ; provenance = Runtime_authoring guidance
+      ; content_revision = Agent_protocol.History.Content_revision.zero
       ; redacted = false
       } )
 ;;
@@ -357,6 +358,7 @@ let%expect_test
         ; kind = Message
         ; payload
         ; provenance = Runtime_authoring guidance
+        ; content_revision = Agent_protocol.History.Content_revision.zero
         ; redacted = false
         }
     in

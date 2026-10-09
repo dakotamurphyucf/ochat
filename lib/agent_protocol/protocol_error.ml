@@ -22,6 +22,7 @@ type code =
   | Persistence_error
   | Interrupted
   | Conflict
+  | Pending_input_conflict
   | Internal_error
   | Incompatible_protocol
   | Cursor_expired
@@ -74,6 +75,7 @@ let code_to_string = function
   | Persistence_error -> "persistence_error"
   | Interrupted -> "interrupted"
   | Conflict -> "conflict"
+  | Pending_input_conflict -> "pending_input_conflict"
   | Internal_error -> "internal_error"
   | Incompatible_protocol -> "incompatible_protocol"
   | Cursor_expired -> "cursor_expired"
@@ -111,6 +113,7 @@ let code_of_string value =
   | "persistence_error" -> Ok Persistence_error
   | "interrupted" -> Ok Interrupted
   | "conflict" -> Ok Conflict
+  | "pending_input_conflict" -> Ok Pending_input_conflict
   | "internal_error" -> Ok Internal_error
   | "incompatible_protocol" -> Ok Incompatible_protocol
   | "cursor_expired" -> Ok Cursor_expired

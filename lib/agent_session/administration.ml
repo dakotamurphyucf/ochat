@@ -158,7 +158,8 @@ let archive ~archive_reference ~previous (candidate : Session_state.t) kind =
   let open Result.Let_syntax in
   let%bind candidate, invocation_dispositions =
     match kind with
-    | Session_state.Compaction_archive.Compaction | Upgrade -> Ok (candidate, [])
+    | Session_state.Compaction_archive.Compaction | Upgrade | Edit | Delete ->
+      Ok (candidate, [])
     | Reset | Rebuild ->
       let first =
         Int64.max

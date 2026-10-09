@@ -171,7 +171,7 @@ type t =
   ; mutable carrier : Persisted.record list D.Extension_carrier.t
   }
 
-let version = 1
+let version = 2
 
 let persist_outcome = function
   | Pending -> Persisted.Pending
@@ -370,11 +370,55 @@ let map_of_records records =
   | `Duplicate_key _ -> Error (Store_error.Corrupt "duplicate persisted idempotency key")
 ;;
 
+let upgrade document =
+  let open Result.Let_syntax in
+  let map_field json name f =
+    let%bind value = F.required json name f in
+    match json with
+    | `Object fields ->
+      Ok
+        (`Object
+            (List.map fields ~f:(fun (key, old) ->
+               key, if String.equal key name then value else old)))
+    | _ -> F.invalid name "must be an object"
+  in
+  let%bind step =
+    D.Conversion.Step.of_function
+      ~kind:"store.idempotency_cache"
+      ~from_version:1
+      ~f:(fun json ->
+        map_field json "records" (fun json ->
+          let%bind records = F.array json in
+          let%map records =
+            Result.all
+              (List.map records ~f:(fun record ->
+                 let%bind key = F.required record "key" key_decode in
+                 map_field record "outcome" (fun outcome ->
+                   let%bind tag = F.required outcome "tag" F.string in
+                   if String.equal tag "success"
+                   then
+                     map_field outcome "value" (fun value ->
+                       History_revision_conversion.initialize_method_result
+                         value
+                         ~method_name:key.method_name)
+                   else Ok outcome)))
+          in
+          `Array records))
+  in
+  let%bind conversion =
+    D.Conversion.create
+      ~limits:cache_limits
+      ~targets:[ "store.idempotency_cache", version ]
+      ~max_steps:1
+      ~max_operations:100_000
+      ~steps:[ step ]
+  in
+  D.Conversion.upgrade conversion document
+;;
+
 let restore_document document =
   let open Result.Let_syntax in
-  let%bind document =
-    F.upgrade document ~limits:cache_limits ~kind:"store.idempotency_cache" |> F.store
-  in
+  let%bind document = upgrade document |> F.store in
   D.Domain_codec.decode codec document |> F.store
 ;;
 

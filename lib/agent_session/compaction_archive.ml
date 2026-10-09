@@ -47,6 +47,8 @@ let prefix = function
   | Reset -> "reset"
   | Rebuild -> "rebuild"
   | Upgrade -> "upgrade"
+  | Edit -> "edit"
+  | Delete -> "delete"
 ;;
 
 let filename reference =

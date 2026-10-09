@@ -74,6 +74,24 @@ val send_message
   -> Agent_protocol.Session.Message_content.t
   -> (Agent_protocol.Method_result.Send_message.t, Agent_protocol.Error.t) result
 
+(** Replace one saved canonical user-text occurrence at the exact advertised
+    session/content revisions. Uses the connection's existing retained original
+    command and receipt reconciliation for uncertain admissions. *)
+val edit_history
+  :  t
+  -> expected_generation:int
+  -> expected_revision:int64
+  -> Agent_protocol.History_edit.t
+  -> (Agent_protocol.Method_result.History_edit.t, Agent_protocol.Error.t) Result.t
+
+(** Continue the saved current history without appending a new user occurrence
+    or implicitly activating a stopped/unloaded runtime. *)
+val continue_history
+  :  t
+  -> expected_generation:int
+  -> expected_revision:int64
+  -> (Agent_protocol.Method_result.History_continue.t, Agent_protocol.Error.t) Result.t
+
 (** [delete_history t ~expected_revision id] requests a writer-authorized history
     mutation. The actor rejects stale revisions or active work. Projection
     replacement arrives through subscription events, not optimistic local edits. *)

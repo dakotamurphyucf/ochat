@@ -89,6 +89,88 @@ module Session_mutation = struct
   ;;
 end
 
+module History_continue = struct
+  type t =
+    { session : Session.t
+    ; mutation : Mutation_result.t
+    ; continuation : History_edit.Continuation.t
+    }
+  [@@deriving sexp]
+
+  let to_json t =
+    `Object
+      ([ "session", Session.to_json t.session
+       ; "continuation", History_edit.Continuation.to_json t.continuation
+       ]
+       @ Mutation_result.to_fields t.mutation)
+  ;;
+
+  let of_fields fields =
+    let open Result.Let_syntax in
+    let%bind session = Json_codec.required_as fields "session" Session.of_json in
+    let%bind mutation = Mutation_result.of_fields fields in
+    let%map continuation =
+      Json_codec.required_as fields "continuation" History_edit.Continuation.of_json
+    in
+    { session; mutation; continuation }
+  ;;
+
+  let of_json json =
+    let%bind.Result fields = Json_codec.fields json in
+    of_fields fields
+  ;;
+end
+
+module History_edit = struct
+  type t =
+    { session : Session.t
+    ; mutation : Mutation_result.t
+    ; history_id : History.Id.t
+    ; content_revision : History.Content_revision.t
+    ; archived_revision : int64
+    ; continuation : History_edit.Continuation.t
+    }
+  [@@deriving sexp]
+
+  let to_json t =
+    let common : History_continue.t =
+      { session = t.session; mutation = t.mutation; continuation = t.continuation }
+    in
+    match History_continue.to_json common with
+    | `Object fields ->
+      `Object
+        (fields
+         @ [ "history_id", History.Id.to_json t.history_id
+           ; "content_revision", History.Content_revision.to_json t.content_revision
+           ; "archived_revision", `Number (Int64.to_string t.archived_revision)
+           ])
+    | _ -> assert false
+  ;;
+
+  let of_json json =
+    let open Result.Let_syntax in
+    let%bind fields = Json_codec.fields json in
+    let%bind common = History_continue.of_fields fields in
+    let%bind history_id = Json_codec.required_as fields "history_id" History.Id.of_json in
+    let%bind content_revision =
+      Json_codec.required_as fields "content_revision" History.Content_revision.of_json
+    in
+    let%map archived_revision =
+      Json_codec.required_as
+        fields
+        "archived_revision"
+        (Json_codec.bounded_int64 ~min:0L ~max:Int64.max_value)
+    in
+    { session = common.session
+    ; mutation = common.mutation
+    ; continuation = common.continuation
+    ; history_id
+    ; content_revision
+    ; archived_revision
+    }
+  ;;
+end
+
 module Attach = struct
   type replay =
     | Current
@@ -348,6 +430,8 @@ type t =
   | Session_cancel_operation of Session_mutation.t
   | Session_send_message of Send_message.t
   | Session_compact of Session_mutation.t
+  | Session_edit_history of History_edit.t
+  | Session_continue_history of History_continue.t
   | Session_delete_history of Session_mutation.t
   | Session_export of Export.t
   | Session_reset of Session_mutation.t
@@ -415,6 +499,8 @@ let method_name = function
   | Session_cancel_operation _ -> "session.cancel_operation"
   | Session_send_message _ -> "session.send_message"
   | Session_compact _ -> "session.compact"
+  | Session_edit_history _ -> "session.edit_history"
+  | Session_continue_history _ -> "session.continue_history"
   | Session_delete_history _ -> "session.delete_history"
   | Session_export _ -> "session.export"
   | Session_reset _ -> "session.reset"
@@ -480,6 +566,8 @@ let to_json = function
   | Collection_list value -> Page.to_json Organization_group.Collection.to_json value
   | Collection_update value -> Organization_group.Collection.to_json value
   | Collection_delete value -> Organization_result.Collection_deleted.to_json value
+  | Session_edit_history value -> History_edit.to_json value
+  | Session_continue_history value -> History_continue.to_json value
   | Session_start value
   | Session_update_metadata value
   | Session_update_organization value
@@ -601,6 +689,9 @@ let decoders =
     , map Session_mutation.of_json (fun x -> Session_cancel_operation x) )
   ; "session.send_message", map Send_message.of_json (fun x -> Session_send_message x)
   ; "session.compact", map Session_mutation.of_json (fun x -> Session_compact x)
+  ; "session.edit_history", map History_edit.of_json (fun x -> Session_edit_history x)
+  ; ( "session.continue_history"
+    , map History_continue.of_json (fun x -> Session_continue_history x) )
   ; ( "session.delete_history"
     , map Session_mutation.of_json (fun x -> Session_delete_history x) )
   ; "session.export", map Export.of_json (fun x -> Session_export x)

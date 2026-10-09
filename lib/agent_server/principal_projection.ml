@@ -17,13 +17,20 @@ let history_entry principal (entry : P.History.entry) =
   then
     H.full
       (History_entry.create_with_id ~id:entry.id payload)
+      ~content_revision:entry.content_revision
       ~provenance:entry.provenance
   else (
     match H.Visible.of_semantic (History_entry.Payload.semantic payload) with
-    | Some view -> H.visible entry.id ~provenance:entry.provenance view
+    | Some view ->
+      H.visible
+        entry.id
+        ~content_revision:entry.content_revision
+        ~provenance:entry.provenance
+        view
     | None ->
       H.redacted
         entry.id
+        ~content_revision:entry.content_revision
         ~provenance:entry.provenance
         (H.Redaction.create
            ~disclosed_header:

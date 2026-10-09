@@ -109,7 +109,7 @@ let%test_unit
       assert (List.is_empty (L.rows current.inference_ledger));
       assert (Int.equal (L.generation current.inference_ledger) before.identity.generation);
       let encoded = SD.encode decoded ~limits:document_limits |> document_ok in
-      assert (Int.equal (D.Document.version encoded) 6);
+      assert (Int.equal (D.Document.version encoded) 7);
       assert (String.equal original (D.Document.to_string raw));
       let delta =
         D.Document.create
@@ -128,7 +128,7 @@ let%test_unit
       in
       let delta_before = D.Document.to_string delta in
       let delta = DD.decode ~limits:document_limits delta |> document_ok in
-      assert (Int.equal (D.Document.version (DD.document delta)) 3);
+      assert (Int.equal (D.Document.version (DD.document delta)) 4);
       match DD.value delta with
       | Batch [ Created restored ] ->
         assert
@@ -949,7 +949,7 @@ let%test_unit
               let transaction =
                 Store.Transaction.decode_record record ~limits:document_limits |> store_ok
               in
-              assert (Int.equal (D.Document.version transaction.delta) 3);
+              assert (Int.equal (D.Document.version transaction.delta) 4);
               Persistence.apply_transaction ~limits:document_limits previous transaction
               |> store_ok)
           in
@@ -967,7 +967,7 @@ let%test_unit
               !current
             |> store_ok
           in
-          assert (Int.equal (D.Document.version installed.snapshot.payload) 6);
+          assert (Int.equal (D.Document.version installed.snapshot.payload) 7);
           let opened =
             Store.Snapshot.load_current
               ~env

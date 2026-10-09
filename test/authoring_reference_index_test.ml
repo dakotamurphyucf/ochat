@@ -34,6 +34,7 @@ let entry ?(source = G.Installed (digest "corpus")) number =
     ; kind = Message
     ; payload
     ; provenance = Runtime_authoring guidance
+    ; content_revision = Agent_protocol.History.Content_revision.zero
     ; redacted = false
     }
 ;;

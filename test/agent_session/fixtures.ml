@@ -839,7 +839,14 @@ let permission_policy ~tool_default ~fallback ~evaluator ~reviewer =
   |> protocol_ok
 ;;
 
-let audit_actor ?(with_invocation = false) ~sw ~env ~workspace_instance ~reject_archive ()
+let audit_actor
+      ?(with_invocation = false)
+      ?(reject_archive_reference = false)
+      ~sw
+      ~env
+      ~workspace_instance
+      ~reject_archive
+      ()
   =
   let initial =
     actor_state ~workspace_instance ~liveness:Process_bound ~start_immediately:false
@@ -850,7 +857,12 @@ let audit_actor ?(with_invocation = false) ~sw ~env ~workspace_instance ~reject_
   in
   let initial =
     { initial with
-      conversation = { initial.conversation with canonical_history = [ entry ] }
+      conversation =
+        { initial.conversation with
+          canonical_history = [ entry ]
+        ; next_history_sequence = 8L
+        ; reserved_history_through = 8L
+        }
     }
   in
   let initial =
@@ -890,13 +902,24 @@ let audit_actor ?(with_invocation = false) ~sw ~env ~workspace_instance ~reject_
       ; conversation = { initial.conversation with canonical_history = [ call ] }
       })
   in
+  Agent_session.Session_state.validate initial |> protocol_ok;
   let backend =
     Agent_session.Memory_backend.create ~event_capacity:64 ~initial_state:initial
   in
   let persistence = Agent_session.Memory_backend.persistence backend in
   let persistence =
     Agent_session.Session_actor.
-      { archive_reference
+      { archive_reference =
+          (fun ~previous ~kind operation_id ->
+            if reject_archive_reference
+            then
+              Error
+                (Agent_protocol.Error.create
+                   Persistence_error
+                   ~message:"injected archive reference failure"
+                   ~retryable:false
+                   ())
+            else archive_reference ~previous ~kind operation_id)
       ; commit =
           (fun ~command_audit ~previous transition ->
             if

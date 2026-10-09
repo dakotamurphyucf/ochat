@@ -50,6 +50,7 @@ let private_fixture (fields : Agent_protocol.Public.Snapshot.Fields.t) =
       ; kind = Message
       ; payload = History_entry.Payload.to_json (History_entry.Payload.authored semantic)
       ; provenance = Canonical
+      ; content_revision = Agent_protocol.History.Content_revision.zero
       ; redacted = false
       }
   in
@@ -852,6 +853,7 @@ let%expect_test
                else Message)
           ; payload = `Object [ "text", `String (Int.to_string sequence) ]
           ; provenance = Canonical
+          ; content_revision = Agent_protocol.History.Content_revision.zero
           ; redacted = false
           })
     in

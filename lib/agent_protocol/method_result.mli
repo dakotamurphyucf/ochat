@@ -27,6 +27,33 @@ module Session_mutation : sig
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
 
+module History_continue : sig
+  type t =
+    { session : Session.t
+    ; mutation : Mutation_result.t
+    ; continuation : History_edit.Continuation.t
+    }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module History_edit : sig
+  type t =
+    { session : Session.t
+    ; mutation : Mutation_result.t
+    ; history_id : History.Id.t
+    ; content_revision : History.Content_revision.t
+    ; archived_revision : int64
+    ; continuation : History_edit.Continuation.t
+    }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
 module Attach : sig
   type replay =
     | Current
@@ -146,6 +173,8 @@ type t =
   | Session_cancel_operation of Session_mutation.t
   | Session_send_message of Send_message.t
   | Session_compact of Session_mutation.t
+  | Session_edit_history of History_edit.t
+  | Session_continue_history of History_continue.t
   | Session_delete_history of Session_mutation.t
   | Session_export of Export.t
   | Session_reset of Session_mutation.t

@@ -507,6 +507,44 @@ let send_message t content =
       | _ -> Error (Agent_protocol.Error.invalid_request "unexpected send result"))
 ;;
 
+let edit_history t ~expected_generation ~expected_revision edit =
+  mutation_command
+    t
+    (fun idempotency_key ->
+       Session_edit_history
+         { session_id = t.session_id
+         ; attachment_id = t.attachment.id
+         ; expected_generation
+         ; expected_revision
+         ; edit
+         ; idempotency_key
+         })
+    (function
+      | Session_edit_history result -> Ok result
+      | _ ->
+        Error
+          (Agent_protocol.Error.invalid_request "unexpected session.edit_history result"))
+;;
+
+let continue_history t ~expected_generation ~expected_revision =
+  mutation_command
+    t
+    (fun idempotency_key ->
+       Session_continue_history
+         { session_id = t.session_id
+         ; attachment_id = t.attachment.id
+         ; expected_generation
+         ; expected_revision
+         ; idempotency_key
+         })
+    (function
+      | Session_continue_history result -> Ok result
+      | _ ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "unexpected session.continue_history result"))
+;;
+
 let delete_history t ~expected_revision history_id =
   mutation_command
     t

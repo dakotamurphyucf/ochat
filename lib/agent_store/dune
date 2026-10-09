@@ -44,6 +44,7 @@
   transaction
   commit_writer
   recovery
+  history_revision_conversion
   idempotency_store
   audit_event_document
   audit_evidence_document

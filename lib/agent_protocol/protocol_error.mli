@@ -24,6 +24,7 @@ type code =
   | Persistence_error
   | Interrupted
   | Conflict
+  | Pending_input_conflict
   | Internal_error
   | Incompatible_protocol
   | Cursor_expired

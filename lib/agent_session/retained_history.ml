@@ -216,7 +216,9 @@ let scan
         state.conversation.compaction_archives
         ~init:()
         ~f:(fun () reference -> remember reference)
-    | Compaction_archived reference -> remember reference
+    | Compaction_archived reference
+    | History_edited (_, reference)
+    | History_deleted (_, reference) -> remember reference
     | _ -> Ok ()
   in
   let%bind () =
@@ -258,8 +260,9 @@ let scan
       then Ok contents
       else (
         let%bind operation =
-          List.find_map [ "compaction"; "reset"; "rebuild"; "upgrade" ] ~f:(fun prefix ->
-            String.chop_prefix name ~prefix:(prefix ^ "-"))
+          List.find_map
+            [ "compaction"; "reset"; "rebuild"; "upgrade"; "edit"; "delete" ]
+            ~f:(fun prefix -> String.chop_prefix name ~prefix:(prefix ^ "-"))
           |> Result.of_option
                ~error:(Store.Store_error.Corrupt "unknown archive filename")
         in

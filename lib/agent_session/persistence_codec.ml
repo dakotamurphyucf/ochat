@@ -65,12 +65,12 @@ let document_shape payload =
     ]
 ;;
 
-let codec_exn ~limits ~kind ~shape ~decode ~encode =
+let codec_exn ~version ~limits ~kind ~shape ~decode ~encode =
   match
     D.Domain_codec.create
       ~limits
       ~kind
-      ~version:1
+      ~version
       ~shape
       ~supported_semantics:[]
       ~decode:(fun json -> document_result (decode json))
@@ -129,4 +129,20 @@ let upgrade document ~limits ~kind =
 let moderator_of_jsonaf json =
   let%map.Result _ = Moderator_checkpoint.decode (Some json) in
   json
+;;
+
+let initialize_history_revision =
+  Agent_store.History_revision_conversion.initialize_history_revision
+;;
+
+let initialize_history_revisions =
+  Agent_store.History_revision_conversion.initialize_history_revisions
+;;
+
+let initialize_history_window =
+  Agent_store.History_revision_conversion.initialize_history_window
+;;
+
+let initialize_snapshot_history =
+  Agent_store.History_revision_conversion.initialize_snapshot_history
 ;;

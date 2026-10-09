@@ -50,21 +50,28 @@ type body =
 
 type t = private
   { id : History.Id.t
+  ; content_revision : History.Content_revision.t
   ; provenance : History.provenance
   ; body : body
   }
 [@@deriving sexp_of]
 
-val full : History_entry.t -> provenance:History.provenance -> (t, Error.t) result
+val full
+  :  ?content_revision:History.Content_revision.t
+  -> History_entry.t
+  -> provenance:History.provenance
+  -> (t, Error.t) result
 
 val visible
-  :  History.Id.t
+  :  ?content_revision:History.Content_revision.t
+  -> History.Id.t
   -> provenance:History.provenance
   -> Visible.t
   -> (t, Error.t) result
 
 val redacted
-  :  History.Id.t
+  :  ?content_revision:History.Content_revision.t
+  -> History.Id.t
   -> provenance:History.provenance
   -> Redaction.t
   -> (t, Error.t) result

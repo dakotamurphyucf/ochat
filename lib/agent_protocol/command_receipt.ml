@@ -45,6 +45,19 @@ type committed =
       { session_id : Id.Session.t
       ; revision : int64
       }
+  | Edited_history of
+      { session_id : Id.Session.t
+      ; history_id : History.Id.t
+      ; content_revision : History.Content_revision.t
+      ; archived_revision : int64
+      ; continuation : History_edit.Continuation.t
+      ; mutation : Mutation_result.t
+      }
+  | Continued_history of
+      { session_id : Id.Session.t
+      ; continuation : History_edit.Continuation.t
+      ; mutation : Mutation_result.t
+      }
   | Sent_message of
       { session_id : Id.Session.t
       ; history_id : History.Id.t
@@ -168,6 +181,30 @@ let committed_to_json = function
       ; "session_id", Id.Session.to_json session_id
       ; "revision", `Number (Int64.to_string revision)
       ]
+  | Edited_history
+      { session_id
+      ; history_id
+      ; content_revision
+      ; archived_revision
+      ; continuation
+      ; mutation
+      } ->
+    `Object
+      ([ "kind", `String "edited_history"
+       ; "session_id", Id.Session.to_json session_id
+       ; "history_id", History.Id.to_json history_id
+       ; "content_revision", History.Content_revision.to_json content_revision
+       ; "archived_revision", `Number (Int64.to_string archived_revision)
+       ; "continuation", History_edit.Continuation.to_json continuation
+       ]
+       @ mutation_fields mutation)
+  | Continued_history { session_id; continuation; mutation } ->
+    `Object
+      ([ "kind", `String "continued_history"
+       ; "session_id", Id.Session.to_json session_id
+       ; "continuation", History_edit.Continuation.to_json continuation
+       ]
+       @ mutation_fields mutation)
   | Sent_message { session_id; history_id; operation_id; mutation } ->
     `Object
       ([ "kind", `String "sent_message"
@@ -282,6 +319,37 @@ let committed_of_json json =
         (Json_codec.bounded_int64 ~min:0L ~max:Int64.max_value)
     in
     Configuration_updated { session_id; revision }
+  | "edited_history" ->
+    let%bind session_id = session () in
+    let%bind history_id = Json_codec.required_as fields "history_id" History.Id.of_json in
+    let%bind content_revision =
+      Json_codec.required_as fields "content_revision" History.Content_revision.of_json
+    in
+    let%bind archived_revision =
+      Json_codec.required_as
+        fields
+        "archived_revision"
+        (Json_codec.bounded_int64 ~min:0L ~max:Int64.max_value)
+    in
+    let%bind continuation =
+      Json_codec.required_as fields "continuation" History_edit.Continuation.of_json
+    in
+    let%map mutation = mutation () in
+    Edited_history
+      { session_id
+      ; history_id
+      ; content_revision
+      ; archived_revision
+      ; continuation
+      ; mutation
+      }
+  | "continued_history" ->
+    let%bind session_id = session () in
+    let%bind continuation =
+      Json_codec.required_as fields "continuation" History_edit.Continuation.of_json
+    in
+    let%map mutation = mutation () in
+    Continued_history { session_id; continuation; mutation }
   | "sent_message" ->
     let%bind session_id = session () in
     let%bind history_id = Json_codec.required_as fields "history_id" History.Id.of_json in

@@ -48,6 +48,12 @@ let validate_known event =
       History_codec.of_canonical entry |> Result.map ~f:ignore
     | History_appended entries -> validate_history entries
     | History_replaced window -> validate_history window.P.History.Window.entries
+    | Moderator_overlay_changed json ->
+      (match D.Json.field json ~name:"effective_history" with
+       | Absent | Null -> Ok ()
+       | Value json ->
+         let%bind window = P.History.Window.of_json json in
+         validate_history window.entries)
     | _ -> Ok ()
   in
   let%bind _ = E.extension_status event in
@@ -133,14 +139,38 @@ let shape =
            ] )))
 ;;
 
+let upgrade document ~limits =
+  let open Result.Let_syntax in
+  let%bind step =
+    D.Conversion.Step.of_function ~kind:"session.event" ~from_version:1 ~f:(fun json ->
+      Agent_store.History_revision_conversion.initialize_event_history json)
+  in
+  let%bind conversion =
+    D.Conversion.create
+      ~limits
+      ~targets:[ "session.event", 2 ]
+      ~max_steps:1
+      ~max_operations:100_000
+      ~steps:[ step ]
+  in
+  D.Conversion.upgrade conversion document
+;;
+
 let codec ~limits =
-  X.codec_exn ~limits ~kind:"session.event" ~shape ~decode:of_jsonaf ~encode:(fun _ ->
-    Error (P.Error.invalid_request "immutable event document is captured at construction"))
+  X.codec_exn
+    ~version:2
+    ~limits
+    ~kind:"session.event"
+    ~shape
+    ~decode:of_jsonaf
+    ~encode:(fun _ ->
+      Error
+        (P.Error.invalid_request "immutable event document is captured at construction"))
 ;;
 
 let decode ~limits document =
   let open Result.Let_syntax in
-  let%bind document = X.upgrade document ~limits ~kind:"session.event" in
+  let%bind document = upgrade document ~limits in
   let%bind carrier = D.Domain_codec.decode (codec ~limits) document in
   let%bind fields = X.object_ (D.Document.payload document) |> X.document_result in
   let%map payload = X.required fields "payload" X.raw |> X.document_result in
@@ -154,7 +184,7 @@ let validate ?(limits = D.Limits.default) event =
   in
   let open Result.Let_syntax in
   let%bind document =
-    D.Document.create ~limits ~kind:"session.event" ~version:1 ~payload:(to_jsonaf event)
+    D.Document.create ~limits ~kind:"session.event" ~version:2 ~payload:(to_jsonaf event)
     |> Result.map_error ~f:protocol_error
   in
   decode ~limits document |> Result.map ~f:ignore |> Result.map_error ~f:protocol_error
@@ -163,7 +193,7 @@ let validate ?(limits = D.Limits.default) event =
 let create value ~limits =
   let open Result.Let_syntax in
   let%bind document =
-    D.Document.create ~limits ~kind:"session.event" ~version:1 ~payload:(to_jsonaf value)
+    D.Document.create ~limits ~kind:"session.event" ~version:2 ~payload:(to_jsonaf value)
   in
   decode ~limits document
 ;;

@@ -499,6 +499,8 @@ type t =
   | Session_cancel_operation of Session.Cancel_operation_request.t
   | Session_send_message of Session.Send_message_request.t
   | Session_compact of Session.Compact_request.t
+  | Session_edit_history of History_edit.Edit_request.t
+  | Session_continue_history of History_edit.Continue_request.t
   | Session_delete_history of Session.Delete_history_request.t
   | Session_export of Session.Export_request.t
   | Session_reset of Session.Reset_request.t
@@ -574,6 +576,19 @@ type committed =
   | Configuration_updated of
       { session_id : Id.Session.t
       ; revision : int64
+      }
+  | Edited_history of
+      { session_id : Id.Session.t
+      ; history_id : History.Id.t
+      ; content_revision : History.Content_revision.t
+      ; archived_revision : int64
+      ; continuation : History_edit.Continuation.t
+      ; mutation : Mutation_result.t
+      }
+  | Continued_history of
+      { session_id : Id.Session.t
+      ; continuation : History_edit.Continuation.t
+      ; mutation : Mutation_result.t
       }
   | Sent_message of
       { session_id : Id.Session.t
@@ -1282,6 +1297,20 @@ module Id : sig
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
 
+module Content_revision : sig
+  type t [@@deriving compare, equal, sexp]
+
+  val zero : t
+  val of_int64 : int64 -> (t, Error.t) result
+  val to_int64 : t -> int64
+  val succ : t -> (t, Error.t) result
+
+  (** Canonical decimal strings avoid precision loss in public and stored data. *)
+  val to_json : t -> Jsonaf.t
+
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
 type role =
   | System
   | User
@@ -1310,6 +1339,7 @@ val provenance_of_json : Jsonaf.t -> (provenance, Error.t) result
 
 type entry =
   { id : Id.t
+  ; content_revision : Content_revision.t
   ; role : role
   ; kind : kind
   ; payload : Jsonaf.t
@@ -1358,6 +1388,102 @@ module Window : sig
   [@@deriving sexp]
 
   val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+```
+
+## history_edit
+
+[JSON codec](../../lib/agent_protocol/history_edit.ml) · [interface](../../lib/agent_protocol/history_edit.mli)
+
+```ocaml
+(** A complete replacement of one canonical user-text occurrence. This intent
+    grants no writer, runtime or archive authority. Text is bounded UTF-8; empty
+    text is valid. The content revision identifies the exact saved occurrence. *)
+module Mode : sig
+  type t =
+    | Save_only
+    | Edit_and_continue
+  [@@deriving equal, sexp]
+end
+
+module Unsupported_target : sig
+  type t =
+    | Not_plain_user_text
+    | Overlay_override
+    | Tool_pair_crosses_boundary
+    | Initial_instruction
+  [@@deriving equal, sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+type t [@@deriving sexp]
+
+val create
+  :  history_id:History.Id.t
+  -> expected_content_revision:History.Content_revision.t
+  -> text:string
+  -> mode:Mode.t
+  -> (t, Error.t) result
+
+val history_id : t -> History.Id.t
+val expected_content_revision : t -> History.Content_revision.t
+val text : t -> string
+val mode : t -> Mode.t
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+
+module Edit_request : sig
+  type intent = t [@@deriving sexp]
+
+  type t =
+    { session_id : Id.Session.t
+    ; attachment_id : Id.Attachment.t
+    ; expected_generation : int
+    ; expected_revision : int64
+    ; edit : intent
+    ; idempotency_key : Idempotency_key.t
+    }
+  [@@deriving sexp]
+
+  (** Decode validates nonnegative generation/session revision and complete edit. *)
+  val to_json : t -> Jsonaf.t
+
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Continue_request : sig
+  type t =
+    { session_id : Id.Session.t
+    ; attachment_id : Id.Attachment.t
+    ; expected_generation : int
+    ; expected_revision : int64
+    ; idempotency_key : Idempotency_key.t
+    }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Continuation : sig
+  type unavailable =
+    | Stopped
+    | Runtime_unavailable
+  [@@deriving equal, sexp]
+
+  type t =
+    | Not_requested
+    | Started of Id.Operation.t
+    | Not_started of unavailable
+  [@@deriving equal, sexp]
+
+  (** Started means a committed actual host Turn operation, never provider paid
+      submission. Not_started creates no latent intent or runtime activation. *)
+  val to_json : t -> Jsonaf.t
+
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
 ```
@@ -2553,6 +2679,33 @@ module Session_mutation : sig
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
 
+module History_continue : sig
+  type t =
+    { session : Session.t
+    ; mutation : Mutation_result.t
+    ; continuation : History_edit.Continuation.t
+    }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module History_edit : sig
+  type t =
+    { session : Session.t
+    ; mutation : Mutation_result.t
+    ; history_id : History.Id.t
+    ; content_revision : History.Content_revision.t
+    ; archived_revision : int64
+    ; continuation : History_edit.Continuation.t
+    }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
 module Attach : sig
   type replay =
     | Current
@@ -2672,6 +2825,8 @@ type t =
   | Session_cancel_operation of Session_mutation.t
   | Session_send_message of Send_message.t
   | Session_compact of Session_mutation.t
+  | Session_edit_history of History_edit.t
+  | Session_continue_history of History_continue.t
   | Session_delete_history of Session_mutation.t
   | Session_export of Export.t
   | Session_reset of Session_mutation.t
@@ -3428,6 +3583,7 @@ type code =
   | Persistence_error
   | Interrupted
   | Conflict
+  | Pending_input_conflict
   | Internal_error
   | Incompatible_protocol
   | Cursor_expired
@@ -3922,21 +4078,28 @@ type body =
 
 type t = private
   { id : History.Id.t
+  ; content_revision : History.Content_revision.t
   ; provenance : History.provenance
   ; body : body
   }
 [@@deriving sexp_of]
 
-val full : History_entry.t -> provenance:History.provenance -> (t, Error.t) result
+val full
+  :  ?content_revision:History.Content_revision.t
+  -> History_entry.t
+  -> provenance:History.provenance
+  -> (t, Error.t) result
 
 val visible
-  :  History.Id.t
+  :  ?content_revision:History.Content_revision.t
+  -> History.Id.t
   -> provenance:History.provenance
   -> Visible.t
   -> (t, Error.t) result
 
 val redacted
-  :  History.Id.t
+  :  ?content_revision:History.Content_revision.t
+  -> History.Id.t
   -> provenance:History.provenance
   -> Redaction.t
   -> (t, Error.t) result

@@ -143,6 +143,7 @@ let%expect_test "guidance presence honors policy, provenance and exact effective
         ; kind = Message
         ; payload
         ; provenance = Runtime_authoring guidance
+        ; content_revision = Agent_protocol.History.Content_revision.zero
         ; redacted = false
         }
     in

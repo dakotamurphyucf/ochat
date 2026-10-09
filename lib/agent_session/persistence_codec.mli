@@ -47,7 +47,8 @@ val nullable_shape : Document_schema.Shape.t -> Document_schema.Shape.t
 val document_shape : Document_schema.Shape.t -> Document_schema.Shape.t
 
 val codec_exn
-  :  limits:Document_schema.Limits.t
+  :  version:int
+  -> limits:Document_schema.Limits.t
   -> kind:string
   -> shape:Document_schema.Shape.t
   -> decode:(Jsonaf.t -> ('a, Agent_protocol.Error.t) Result.t)
@@ -82,3 +83,12 @@ val upgrade
   -> (Document_schema.Document.t, Document_schema.Error.t) result
 
 val moderator_of_jsonaf : Jsonaf.t -> (Jsonaf.t, Agent_protocol.Error.t) result
+
+(** Adjacent structural conversion of known history envelopes. Adds only the
+    required zero revision when absent; never descends into opaque payloads or
+    unknown extension fields. Existing revision values remain for strict decode. *)
+val initialize_history_revision : Jsonaf.t -> (Jsonaf.t, Document_schema.Error.t) result
+
+val initialize_history_revisions : Jsonaf.t -> (Jsonaf.t, Document_schema.Error.t) result
+val initialize_history_window : Jsonaf.t -> (Jsonaf.t, Document_schema.Error.t) result
+val initialize_snapshot_history : Jsonaf.t -> (Jsonaf.t, Document_schema.Error.t) result

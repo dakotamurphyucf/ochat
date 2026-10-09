@@ -44,6 +44,8 @@ module Compaction_archive : sig
     | Reset
     | Rebuild
     | Upgrade
+    | Edit
+    | Delete
   [@@deriving equal, sexp]
 
   (** Administrative reconciliation of an invocation in the checksummed archive.
