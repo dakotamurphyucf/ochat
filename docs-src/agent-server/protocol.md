@@ -357,6 +357,16 @@ edit a cursor or silently combine pages from different catalog observations.
 or returns an error. Legacy `Admin.list_sessions` maps entries to sessions and
 uses documented bounds of 100000 sessions and 100 pages.
 
+Prompt and workspace discovery also share the existing connection.
+`Catalog.prompts_page` and `workspaces_page` expose every server filter and the
+opaque continuation. `enumerate_prompts` and `enumerate_workspaces` accept explicit
+item/page bounds and complete the fresh query or return an error. An empty page
+with a continuation is not the end. The convenience `prompts`, `workspaces` and
+name-resolution functions enumerate at most 100000 items over 100 pages; they
+report bound exhaustion or cross-page name ambiguity instead of selecting an
+incomplete first-page result. Enumeration does not automatically retry a changed
+catalog cursor or take ownership of notifications.
+
 Metadata edits carry `expected_metadata_revision`, independently of streaming
 transaction revisions. Patches can set/clear names and set/remove labels, reject
 ambiguous duplicate/overlapping keys, and commit both persisted identity and
@@ -437,6 +447,13 @@ and checks its server pin before sensitive operations. Provider profile selectio
 is a separate host service.
 
 ## Provider operator privacy and recovery
+
+Shared clients use `Agent_client.Provider_login` for status, begin, challenge,
+cancel and logout over their existing `Connection`. Only `challenge` accepts the
+private challenge result; ordinary `request_without_history` still rejects it.
+These helpers do not poll, consume session notifications or create a client
+credential store. Failed mutation replies retain the connection's original
+command identity for reconciliation.
 
 Provider methods require an explicitly installed trusted host service. Protocol
 support alone does not provision a registry or discover a login. The host owns

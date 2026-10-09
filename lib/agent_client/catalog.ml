@@ -2,34 +2,60 @@ open! Core
 
 let invalid message = Agent_protocol.Error.invalid_request message
 
-let page_request () =
-  Agent_protocol.Page.Request.create ~limit:10_000 ()
-  |> Result.map_error ~f:(fun error -> error)
-;;
-
-let prompts connection =
-  let open Result.Let_syntax in
-  let%bind page = page_request () in
-  let request =
-    Agent_protocol.Prompt.List_request.{ page; enabled = None; available = None }
-  in
+let prompts_page connection request =
   match Connection.request_without_history connection (Prompt_list request) with
-  | Ok (Prompt_list result) -> Ok result.items
+  | Ok (Prompt_list result) -> Ok result
   | Ok _ -> Error (invalid "unexpected prompt.list result")
   | Error _ as failure -> failure
 ;;
 
+let workspaces_page connection request =
+  match Connection.request_without_history connection (Workspace_list request) with
+  | Ok (Workspace_list result) -> Ok result
+  | Ok _ -> Error (invalid "unexpected workspace.list result")
+  | Error _ as failure -> failure
+;;
+
+let enumerate_prompts
+      connection
+      ~(query : Agent_protocol.Prompt.List_request.t)
+      ~max_prompts
+      ~max_pages
+  =
+  Page_enumeration.collect query.page ~max_items:max_prompts ~max_pages ~read:(fun page ->
+    prompts_page connection { query with page })
+;;
+
+let enumerate_workspaces
+      connection
+      ~(query : Agent_protocol.Workspace.List_request.t)
+      ~max_workspaces
+      ~max_pages
+  =
+  Page_enumeration.collect
+    query.page
+    ~max_items:max_workspaces
+    ~max_pages
+    ~read:(fun page -> workspaces_page connection { query with page })
+;;
+
+let prompts connection =
+  let open Result.Let_syntax in
+  let%bind page = Agent_protocol.Page.Request.create ~limit:1000 () in
+  let query =
+    Agent_protocol.Prompt.List_request.{ page; enabled = None; available = None }
+  in
+  enumerate_prompts connection ~query ~max_prompts:100_000 ~max_pages:100
+;;
+
 let workspaces connection =
   let open Result.Let_syntax in
-  let%bind page = page_request () in
-  let request =
+  let%bind page = Agent_protocol.Page.Request.create ~limit:1000 () in
+  let query =
     Agent_protocol.Workspace.List_request.
       { page; kind = None; access = None; available = None }
   in
-  match Connection.request_without_history connection (Workspace_list request) with
-  | Ok (Workspace_list result) -> Ok result.items
-  | Ok _ -> Error (invalid "unexpected workspace.list result")
-  | Error _ as failure -> failure
+  enumerate_workspaces connection ~query ~max_workspaces:100_000 ~max_pages:100
 ;;
 
 let find_unique values ~name ~name_of ~kind =
