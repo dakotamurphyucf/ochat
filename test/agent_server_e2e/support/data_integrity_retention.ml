@@ -121,7 +121,7 @@ let session_summary t now =
 let session t ~sw now name =
   let metadata =
     Store.Metadata.
-      { schema_version = Store.current_schema_version
+      { schema_version = Store.current_metadata_schema_version
       ; session = session_summary t now
       ; prompt_artifact = "data-retention-fixture"
       ; workspace_identity = "fixture"

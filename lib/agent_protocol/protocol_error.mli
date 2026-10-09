@@ -10,6 +10,7 @@ type code =
   | Session_not_found
   | Prompt_not_found
   | Workspace_not_found
+  | Organization_not_found
   | Invalid_state
   | Already_resolved
   | Resource_limit

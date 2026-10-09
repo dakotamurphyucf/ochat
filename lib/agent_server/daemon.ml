@@ -314,6 +314,8 @@ let all_scopes =
     ; List_workspaces
     ; Create_sessions
     ; View_session_transcript
+    ; View_organization
+    ; Manage_organization
     ; Send_messages
     ; Own_sessions
     ; Answer_approvals
@@ -811,13 +813,44 @@ let config_watcher
   watcher
 ;;
 
-let close_store_on_error store result =
-  match result with
-  | Ok _ -> result
+let close_store_on_error store ~f =
+  let close_failed () =
+    try
+      Eio.Cancel.protect (fun () ->
+        ignore
+          (Agent_store.Session_store.close store
+           : (unit, Agent_store.Store_error.t) result))
+    with
+    | _ -> ()
+  in
+  match f () with
+  | Ok _ as result -> result
   | Error _ as failure ->
-    ignore
-      (Agent_store.Session_store.close store : (unit, Agent_store.Store_error.t) result);
+    close_failed ();
     failure
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    close_failed ();
+    Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let close_operator_on_error provider_operator ~f =
+  let close_failed () =
+    try
+      Eio.Cancel.protect (fun () ->
+        Option.iter provider_operator ~f:Provider_operator_port.close)
+    with
+    | _ -> ()
+  in
+  match f () with
+  | Ok _ as result -> result
+  | Error _ as failure ->
+    close_failed ();
+    failure
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    close_failed ();
+    Exn.raise_with_original_backtrace exn backtrace
 ;;
 
 let compose
@@ -1146,6 +1179,16 @@ let compose
       | Prompt_get _
       | Workspace_list _
       | Workspace_get _
+      | Project_create _
+      | Project_get _
+      | Project_list _
+      | Project_update _
+      | Project_delete _
+      | Collection_create _
+      | Collection_get _
+      | Collection_list _
+      | Collection_update _
+      | Collection_delete _
       | Session_list _
       | Session_inference_summary _
       | Session_inference_observations _
@@ -1268,56 +1311,50 @@ let start
     open_store ~sw ~env config.server ~process_start_identity
     |> Result.map_error ~f:protocol_of_store
   in
-  close_store_on_error store
-  @@
-  let%bind () = before_activation store in
-  let%bind provider_operator =
-    match options.provider_operator_factory with
-    | None -> Ok None
-    | Some factory ->
-      factory ~sw ~server_id:(Agent_store.Session_store.server_id store)
-      |> Result.map ~f:Option.some
-  in
-  Option.iter provider_operator ~f:(fun port ->
-    Eio.Switch.on_release sw (fun () -> Provider_operator_port.close port));
-  let features =
-    List.filter options.features ~f:(fun feature ->
-      not (String.equal feature "provider.operator"))
-  in
-  let options =
-    { options with
-      features =
-        (match provider_operator with
-         | None -> features
-         | Some _ -> features @ [ "provider.operator" ])
-    }
-  in
-  let result =
-    let%bind built, prompts =
-      build_catalog
-        ~env
-        store
-        config
-        options.reviewer_resolver
-        options.policy_evaluator_resolver
-      |> Result.map_error ~f:protocol_of_store
+  close_store_on_error store ~f:(fun () ->
+    let%bind () = before_activation store in
+    let%bind provider_operator =
+      match options.provider_operator_factory with
+      | None -> Ok None
+      | Some factory ->
+        factory ~sw ~server_id:(Agent_store.Session_store.server_id store)
+        |> Result.map ~f:Option.some
     in
-    compose
-      ~sw
-      ~env
-      ~config
-      ~tool_dir
-      ~home
-      ~options
-      ~provider_operator
-      store
-      built
-      prompts
-  in
-  (match result with
-   | Error _ -> Option.iter provider_operator ~f:Provider_operator_port.close
-   | Ok _ -> ());
-  result
+    close_operator_on_error provider_operator ~f:(fun () ->
+      Option.iter provider_operator ~f:(fun port ->
+        Eio.Switch.on_release sw (fun () -> Provider_operator_port.close port));
+      let features =
+        List.filter options.features ~f:(fun feature ->
+          not (String.equal feature "provider.operator"))
+      in
+      let options =
+        { options with
+          features =
+            (match provider_operator with
+             | None -> features
+             | Some _ -> features @ [ "provider.operator" ])
+        }
+      in
+      let%bind built, prompts =
+        build_catalog
+          ~env
+          store
+          config
+          options.reviewer_resolver
+          options.policy_evaluator_resolver
+        |> Result.map_error ~f:protocol_of_store
+      in
+      compose
+        ~sw
+        ~env
+        ~config
+        ~tool_dir
+        ~home
+        ~options
+        ~provider_operator
+        store
+        built
+        prompts))
 ;;
 
 let close_connection t context = Command_handler.close_connection t.handler context

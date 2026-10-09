@@ -20,6 +20,8 @@ module T = struct
     | Provider_view
     | Provider_manage
     | Provider_select
+    | View_organization
+    | Manage_organization
   [@@deriving compare, equal, sexp]
 end
 
@@ -45,6 +47,8 @@ let to_string = function
   | Provider_view -> "provider.view"
   | Provider_manage -> "provider.manage"
   | Provider_select -> "provider.select"
+  | View_organization -> "organization.view"
+  | Manage_organization -> "organization.manage"
 ;;
 
 let of_string = function
@@ -66,6 +70,8 @@ let of_string = function
   | "provider.view" -> Ok Provider_view
   | "provider.manage" -> Ok Provider_manage
   | "provider.select" -> Ok Provider_select
+  | "organization.view" -> Ok View_organization
+  | "organization.manage" -> Ok Manage_organization
   | encoded -> Error (Protocol_error.invalid_request ("unknown scope: " ^ encoded))
 ;;
 

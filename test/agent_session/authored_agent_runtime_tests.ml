@@ -468,7 +468,7 @@ let on_event ctx state event = match event with
               ~sw
               ~transaction_id:admission.transaction_id
               ~actor_lock_nonce:"authored-runtime"
-              { schema_version = Store.current_schema_version
+              { schema_version = Store.current_metadata_schema_version
               ; session = Agent_session.Session_state.summary initial
               ; prompt_artifact = P.Id.Prompt_revision.to_string artifact.revision_id
               ; workspace_identity = workspace_instance.conflict_domain

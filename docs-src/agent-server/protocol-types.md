@@ -483,6 +483,16 @@ type t =
   | Session_detach of Session.Detach_request.t
   | Session_renew_owner of Session.Renew_owner_request.t
   | Session_start of Session.Start_request.t
+  | Project_create of Organization_request.Create.t
+  | Project_get of Organization_request.Project.Get.t
+  | Project_list of Organization_request.List.t
+  | Project_update of Organization_request.Project.Update.t
+  | Project_delete of Organization_request.Project.Delete.t
+  | Collection_create of Organization_request.Create.t
+  | Collection_get of Organization_request.Collection.Get.t
+  | Collection_list of Organization_request.List.t
+  | Collection_update of Organization_request.Collection.Update.t
+  | Collection_delete of Organization_request.Collection.Delete.t
   | Session_update_metadata of Session_metadata.Request.t
   | Session_stop of Session.Stop_request.t
   | Session_cancel_operation of Session.Cancel_operation_request.t
@@ -569,6 +579,22 @@ type committed =
       ; history_id : History.Id.t
       ; operation_id : Id.Operation.t option
       ; mutation : Mutation_result.t
+      }
+  | Project_mutation of
+      { project_id : Id.Project.t
+      ; revision : int64
+      }
+  | Deleted_project of
+      { project_id : Id.Project.t
+      ; revision : int64
+      }
+  | Collection_mutation of
+      { collection_id : Id.Collection.t
+      ; revision : int64
+      }
+  | Deleted_collection of
+      { collection_id : Id.Collection.t
+      ; revision : int64
       }
   | Deleted_session of Id.Session.t
   | Permission_response of Id.Permission.t * Mutation_result.t
@@ -1398,6 +1424,8 @@ module Prompt_revision : S
 module Principal : S
 module Blob : S
 module Idempotency_record : S
+module Project : S
+module Collection : S
 ```
 
 ## idempotency_key
@@ -2627,6 +2655,16 @@ type t =
   | Session_detach of Mutation_result.t
   | Session_renew_owner of Session.Owner_lease.t * Mutation_result.t
   | Session_start of Session_mutation.t
+  | Project_create of Organization_group.Project.t
+  | Project_get of Organization_group.Project.t
+  | Project_list of Organization_group.Project.t Page.t
+  | Project_update of Organization_group.Project.t
+  | Project_delete of Organization_result.Project_deleted.t
+  | Collection_create of Organization_group.Collection.t
+  | Collection_get of Organization_group.Collection.t
+  | Collection_list of Organization_group.Collection.t Page.t
+  | Collection_update of Organization_group.Collection.t
+  | Collection_delete of Organization_result.Collection_deleted.t
   | Session_update_metadata of Session_mutation.t
   | Session_stop of Session_mutation.t
   | Session_cancel_operation of Session_mutation.t
@@ -2873,6 +2911,185 @@ type t =
 val to_json : t -> Jsonaf.t
 
 (** [of_json json] decodes and validates an operation summary. *)
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## organization_group
+
+[JSON codec](../../lib/agent_protocol/organization_group.ml) · [interface](../../lib/agent_protocol/organization_group.mli)
+
+```ocaml
+(** Host-owned logical organization; never an execution workspace or authority grant.
+    Names are nonempty UTF-8 without controls, bounded to 1024 bytes. *)
+module Name : sig
+  type t [@@deriving equal, sexp]
+
+  val create : string -> (t, Error.t) result
+  val to_string : t -> string
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module type S = sig
+  type id [@@deriving equal, sexp]
+
+  type t = private
+    { id : id
+    ; creator_principal_id : Id.Principal.t
+    ; name : Name.t
+    ; revision : int64
+    ; created_at : Timestamp.t
+    ; updated_at : Timestamp.t
+    }
+  [@@deriving equal, sexp]
+
+  val create
+    :  id:id
+    -> creator_principal_id:Id.Principal.t
+    -> name:Name.t
+    -> revision:int64
+    -> created_at:Timestamp.t
+    -> updated_at:Timestamp.t
+    -> (t, Error.t) result
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Project : S with type id = Id.Project.t
+module Collection : S with type id = Id.Collection.t
+```
+
+## organization_request
+
+[JSON codec](../../lib/agent_protocol/organization_request.ml) · [interface](../../lib/agent_protocol/organization_request.mli)
+
+```ocaml
+(** CRUD requests are host-qualified. The initialized connection host must match.
+    Updates/deletes require a nonnegative expected revision and a bounded key.
+    List order is created_at ascending, then typed ID ascending. *)
+module Create : sig
+  type t =
+    { host_id : Id.Server.t
+    ; name : Organization_group.Name.t
+    ; idempotency_key : Idempotency_key.t
+    }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module List : sig
+  type t =
+    { host_id : Id.Server.t
+    ; creator_principal_id : Id.Principal.t option
+    ; page : Page.Request.t
+    }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module type S = sig
+  type id [@@deriving sexp]
+
+  module Get : sig
+    type t =
+      { host_id : Id.Server.t
+      ; id : id
+      }
+    [@@deriving sexp]
+
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  module Update : sig
+    type t =
+      { host_id : Id.Server.t
+      ; id : id
+      ; expected_revision : int64
+      ; name : Organization_group.Name.t
+      ; idempotency_key : Idempotency_key.t
+      }
+    [@@deriving sexp]
+
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  module Delete : sig
+    type t =
+      { host_id : Id.Server.t
+      ; id : id
+      ; expected_revision : int64
+      ; idempotency_key : Idempotency_key.t
+      }
+    [@@deriving sexp]
+
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+end
+
+module Project : S with type id = Id.Project.t
+module Collection : S with type id = Id.Collection.t
+```
+
+## organization_result
+
+[JSON codec](../../lib/agent_protocol/organization_result.ml) · [interface](../../lib/agent_protocol/organization_result.mli)
+
+```ocaml
+(** Exact organization mutation results; deletion retains the ID forever. *)
+module Project_deleted : sig
+  type t = private
+    { id : Id.Project.t
+    ; revision : int64
+    ; deleted_at : Timestamp.t
+    }
+  [@@deriving equal, sexp]
+
+  val create
+    :  id:Id.Project.t
+    -> revision:int64
+    -> deleted_at:Timestamp.t
+    -> (t, Error.t) result
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Collection_deleted : sig
+  type t = private
+    { id : Id.Collection.t
+    ; revision : int64
+    ; deleted_at : Timestamp.t
+    }
+  [@@deriving equal, sexp]
+
+  val create
+    :  id:Id.Collection.t
+    -> revision:int64
+    -> deleted_at:Timestamp.t
+    -> (t, Error.t) result
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+type t =
+  | Project_created of Organization_group.Project.t
+  | Project_updated of Organization_group.Project.t
+  | Project_deleted of Project_deleted.t
+  | Collection_created of Organization_group.Collection.t
+  | Collection_updated of Organization_group.Collection.t
+  | Collection_deleted of Collection_deleted.t
+[@@deriving equal, sexp]
+
+val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
 ```
 
@@ -3195,6 +3412,7 @@ type code =
   | Session_not_found
   | Prompt_not_found
   | Workspace_not_found
+  | Organization_not_found
   | Invalid_state
   | Already_resolved
   | Resource_limit
@@ -4030,6 +4248,8 @@ type t =
   | Provider_view
   | Provider_manage
   | Provider_select
+  | View_organization
+  | Manage_organization
 [@@deriving compare, equal, sexp]
 
 include Core.Comparable.S with type t := t

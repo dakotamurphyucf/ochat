@@ -13,6 +13,12 @@ let has_command_receipt = function
   | Session_detach _
   | Session_renew_owner _
   | Session_start _
+  | Project_create _
+  | Project_update _
+  | Project_delete _
+  | Collection_create _
+  | Collection_update _
+  | Collection_delete _
   | Session_update_metadata _
   | Session_stop _
   | Session_cancel_operation _
@@ -45,6 +51,10 @@ let has_command_receipt = function
   | Workspace_list _
   | Workspace_get _
   | Blob_read _
+  | Project_get _
+  | Project_list _
+  | Collection_get _
+  | Collection_list _
   | Session_list _
   | Session_get _
   | Session_configuration_get _
@@ -144,6 +154,7 @@ let unknown_outcome = function
   | Unauthenticated
   | Permission_denied
   | Session_not_found
+  | Organization_not_found
   | Prompt_not_found
   | Workspace_not_found
   | Invalid_state

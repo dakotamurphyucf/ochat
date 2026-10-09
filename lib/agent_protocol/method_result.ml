@@ -332,6 +332,16 @@ type t =
   | Session_detach of Mutation_result.t
   | Session_renew_owner of Session.Owner_lease.t * Mutation_result.t
   | Session_start of Session_mutation.t
+  | Project_create of Organization_group.Project.t
+  | Project_get of Organization_group.Project.t
+  | Project_list of Organization_group.Project.t Page.t
+  | Project_update of Organization_group.Project.t
+  | Project_delete of Organization_result.Project_deleted.t
+  | Collection_create of Organization_group.Collection.t
+  | Collection_get of Organization_group.Collection.t
+  | Collection_list of Organization_group.Collection.t Page.t
+  | Collection_update of Organization_group.Collection.t
+  | Collection_delete of Organization_result.Collection_deleted.t
   | Session_update_metadata of Session_mutation.t
   | Session_stop of Session_mutation.t
   | Session_cancel_operation of Session_mutation.t
@@ -388,6 +398,16 @@ let method_name = function
   | Session_detach _ -> "session.detach"
   | Session_renew_owner _ -> "session.renew_owner"
   | Session_start _ -> "session.start"
+  | Project_create _ -> "project.create"
+  | Project_get _ -> "project.get"
+  | Project_list _ -> "project.list"
+  | Project_update _ -> "project.update"
+  | Project_delete _ -> "project.delete"
+  | Collection_create _ -> "collection.create"
+  | Collection_get _ -> "collection.get"
+  | Collection_list _ -> "collection.list"
+  | Collection_update _ -> "collection.update"
+  | Collection_delete _ -> "collection.delete"
   | Session_update_metadata _ -> "session.update_metadata"
   | Session_stop _ -> "session.stop"
   | Session_cancel_operation _ -> "session.cancel_operation"
@@ -448,6 +468,16 @@ let to_json = function
     `Object
       (("owner_lease", Session.Owner_lease.to_json lease)
        :: Mutation_result.to_fields mutation)
+  | Project_create value -> Organization_group.Project.to_json value
+  | Project_get value -> Organization_group.Project.to_json value
+  | Project_list value -> Page.to_json Organization_group.Project.to_json value
+  | Project_update value -> Organization_group.Project.to_json value
+  | Project_delete value -> Organization_result.Project_deleted.to_json value
+  | Collection_create value -> Organization_group.Collection.to_json value
+  | Collection_get value -> Organization_group.Collection.to_json value
+  | Collection_list value -> Page.to_json Organization_group.Collection.to_json value
+  | Collection_update value -> Organization_group.Collection.to_json value
+  | Collection_delete value -> Organization_result.Collection_deleted.to_json value
   | Session_start value
   | Session_update_metadata value
   | Session_stop value
@@ -535,6 +565,29 @@ let decoders =
   ; "session.attach", map Attach.of_json (fun x -> Session_attach x)
   ; "session.detach", map Mutation_result.of_json (fun x -> Session_detach x)
   ; "session.renew_owner", renew_owner_of_json
+  ; ( "project.create"
+    , map Organization_group.Project.of_json (fun value -> Project_create value) )
+  ; "project.get", map Organization_group.Project.of_json (fun value -> Project_get value)
+  ; ( "project.list"
+    , map (Page.of_json Organization_group.Project.of_json) (fun value ->
+        Project_list value) )
+  ; ( "project.update"
+    , map Organization_group.Project.of_json (fun value -> Project_update value) )
+  ; ( "project.delete"
+    , map Organization_result.Project_deleted.of_json (fun value -> Project_delete value)
+    )
+  ; ( "collection.create"
+    , map Organization_group.Collection.of_json (fun value -> Collection_create value) )
+  ; ( "collection.get"
+    , map Organization_group.Collection.of_json (fun value -> Collection_get value) )
+  ; ( "collection.list"
+    , map (Page.of_json Organization_group.Collection.of_json) (fun value ->
+        Collection_list value) )
+  ; ( "collection.update"
+    , map Organization_group.Collection.of_json (fun value -> Collection_update value) )
+  ; ( "collection.delete"
+    , map Organization_result.Collection_deleted.of_json (fun value ->
+        Collection_delete value) )
   ; "session.start", map Session_mutation.of_json (fun x -> Session_start x)
   ; ( "session.update_metadata"
     , map Session_mutation.of_json (fun x -> Session_update_metadata x) )

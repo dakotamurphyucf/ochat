@@ -19,6 +19,8 @@ type t =
   | Provider_view
   | Provider_manage
   | Provider_select
+  | View_organization
+  | Manage_organization
 [@@deriving compare, equal, sexp]
 
 include Core.Comparable.S with type t := t

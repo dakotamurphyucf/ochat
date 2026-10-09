@@ -28,6 +28,14 @@ let required_scope = function
   | Session_detach _
   | Session_renew_owner _
   | Session_export _ -> Some View_session_transcript
+  | Project_get _ | Project_list _ | Collection_get _ | Collection_list _ ->
+    Some Agent_protocol.Scope.View_organization
+  | Project_create _
+  | Project_update _
+  | Project_delete _
+  | Collection_create _
+  | Collection_update _
+  | Collection_delete _ -> Some Agent_protocol.Scope.Manage_organization
   | Session_update_metadata _
   | Session_start _
   | Session_send_message _

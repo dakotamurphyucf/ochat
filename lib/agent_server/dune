@@ -23,6 +23,7 @@
   session_catalog_policy
   delegation_lifecycle
   connection_context
+  organization_service
   authorization
   principal_projection
   pagination

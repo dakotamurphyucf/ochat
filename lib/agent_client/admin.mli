@@ -32,3 +32,79 @@ val enumerate_sessions
   -> max_sessions:int
   -> max_pages:int
   -> (Agent_protocol.Session_catalog.t list, Agent_protocol.Error.t) result
+
+(** Host-qualified logical organization. Scopes and owner/admin visibility are
+    checked by the host on every page/mutation/receipt. No session execution. *)
+val create_project
+  :  Connection.t
+  -> Agent_protocol.Organization_request.Create.t
+  -> (Agent_protocol.Organization_group.Project.t, Agent_protocol.Error.t) result
+
+val get_project
+  :  Connection.t
+  -> Agent_protocol.Organization_request.Project.Get.t
+  -> (Agent_protocol.Organization_group.Project.t, Agent_protocol.Error.t) result
+
+val list_projects_page
+  :  Connection.t
+  -> Agent_protocol.Organization_request.List.t
+  -> ( Agent_protocol.Organization_group.Project.t Agent_protocol.Page.t
+       , Agent_protocol.Error.t )
+       result
+
+val update_project
+  :  Connection.t
+  -> Agent_protocol.Organization_request.Project.Update.t
+  -> (Agent_protocol.Organization_group.Project.t, Agent_protocol.Error.t) result
+
+val delete_project
+  :  Connection.t
+  -> Agent_protocol.Organization_request.Project.Delete.t
+  -> (Agent_protocol.Organization_result.Project_deleted.t, Agent_protocol.Error.t) result
+
+val create_collection
+  :  Connection.t
+  -> Agent_protocol.Organization_request.Create.t
+  -> (Agent_protocol.Organization_group.Collection.t, Agent_protocol.Error.t) result
+
+val get_collection
+  :  Connection.t
+  -> Agent_protocol.Organization_request.Collection.Get.t
+  -> (Agent_protocol.Organization_group.Collection.t, Agent_protocol.Error.t) result
+
+val list_collections_page
+  :  Connection.t
+  -> Agent_protocol.Organization_request.List.t
+  -> ( Agent_protocol.Organization_group.Collection.t Agent_protocol.Page.t
+       , Agent_protocol.Error.t )
+       result
+
+val update_collection
+  :  Connection.t
+  -> Agent_protocol.Organization_request.Collection.Update.t
+  -> (Agent_protocol.Organization_group.Collection.t, Agent_protocol.Error.t) result
+
+val delete_collection
+  :  Connection.t
+  -> Agent_protocol.Organization_request.Collection.Delete.t
+  -> ( Agent_protocol.Organization_result.Collection_deleted.t
+       , Agent_protocol.Error.t )
+       result
+
+(** Completes all pages or fails at either explicit bound; never truncates or
+    implicitly restarts a conflicted cursor. *)
+val enumerate_projects
+  :  Connection.t
+  -> query:Agent_protocol.Organization_request.List.t
+  -> max_groups:int
+  -> max_pages:int
+  -> (Agent_protocol.Organization_group.Project.t list, Agent_protocol.Error.t) result
+
+(** Completes all pages or fails at either explicit bound; never truncates or
+    implicitly restarts a conflicted cursor. *)
+val enumerate_collections
+  :  Connection.t
+  -> query:Agent_protocol.Organization_request.List.t
+  -> max_groups:int
+  -> max_pages:int
+  -> (Agent_protocol.Organization_group.Collection.t list, Agent_protocol.Error.t) result

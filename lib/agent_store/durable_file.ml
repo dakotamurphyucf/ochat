@@ -135,15 +135,12 @@ let load ~env ~path =
            { operation = "load"; path; message = "path is not a regular file" }))
 ;;
 
-let load_bounded ~env ~path ~max_bytes =
-  let open Result.Let_syntax in
-  let%bind () = validate_path path in
+let load_bounded_at ~path ~follow file ~max_bytes =
   if max_bytes < 0
   then Error (Store_error.Corrupt "negative bounded read limit")
   else (
     try
-      let file = eio_path env path in
-      match Eio.Path.kind ~follow:true file with
+      match Eio.Path.kind ~follow file with
       | `Not_found -> Error (Store_error.Missing path)
       | `Regular_file ->
         Eio.Path.with_open_in file (fun input ->
@@ -187,6 +184,27 @@ let load_bounded ~env ~path ~max_bytes =
     with
     | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
       Error (Store_error.of_exn ~operation:"bounded load" ~path exn))
+;;
+
+let load_bounded ~env ~path ~max_bytes =
+  Result.bind (validate_path path) ~f:(fun () ->
+    load_bounded_at ~path ~follow:true (eio_path env path) ~max_bytes)
+;;
+
+let load_bounded_in ~directory ~basename ~max_bytes =
+  if
+    String.is_empty basename
+    || String.mem basename '\000'
+    || (not (String.equal (Filename.basename basename) basename))
+    || String.equal basename "."
+    || String.equal basename ".."
+  then Error (Store_error.Corrupt "bounded load requires a child basename")
+  else
+    load_bounded_at
+      ~path:basename
+      ~follow:false
+      Eio.Path.(directory / basename)
+      ~max_bytes
 ;;
 
 let sync_directory ~env ~path =

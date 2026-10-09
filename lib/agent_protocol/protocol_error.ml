@@ -8,6 +8,7 @@ type code =
   | Session_not_found
   | Prompt_not_found
   | Workspace_not_found
+  | Organization_not_found
   | Invalid_state
   | Already_resolved
   | Resource_limit
@@ -59,6 +60,7 @@ let code_to_string = function
   | Session_not_found -> "session_not_found"
   | Prompt_not_found -> "prompt_not_found"
   | Workspace_not_found -> "workspace_not_found"
+  | Organization_not_found -> "organization_not_found"
   | Invalid_state -> "invalid_state"
   | Already_resolved -> "already_resolved"
   | Resource_limit -> "resource_limit"
@@ -95,6 +97,7 @@ let code_of_string value =
   | "session_not_found" -> Ok Session_not_found
   | "prompt_not_found" -> Ok Prompt_not_found
   | "workspace_not_found" -> Ok Workspace_not_found
+  | "organization_not_found" -> Ok Organization_not_found
   | "invalid_state" -> Ok Invalid_state
   | "already_resolved" -> Ok Already_resolved
   | "resource_limit" -> Ok Resource_limit
