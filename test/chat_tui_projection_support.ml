@@ -87,6 +87,7 @@ let projection text =
   let snapshot =
     Agent_protocol.Public.Snapshot.Fields.
       { session = session ()
+      ; lifecycle = None
       ; canonical_history = window
       ; archived_revisions = []
       ; effective_history = None

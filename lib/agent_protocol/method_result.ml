@@ -440,6 +440,8 @@ type t =
   | Session_rebuild of Session_mutation.t
   | Session_upgrade_prompt of Session_mutation.t
   | Session_delete of Delete.t
+  | Session_restore of Session_lifecycle.Result.t
+  | Session_resume of Session_lifecycle.Result.t
   | Permission_list of Permission.t Page.t
   | Permission_respond of Permission.Respond_result.t
   | Grant_list of Grant.t Page.t
@@ -511,6 +513,8 @@ let method_name = function
   | Session_rebuild _ -> "session.rebuild"
   | Session_upgrade_prompt _ -> "session.upgrade_prompt"
   | Session_delete _ -> "session.delete"
+  | Session_restore _ -> "session.restore"
+  | Session_resume _ -> "session.resume"
   | Permission_list _ -> "permission.list"
   | Permission_respond _ -> "permission.respond"
   | Grant_list _ -> "grant.list"
@@ -587,6 +591,7 @@ let to_json = function
   | Session_send_message value -> Send_message.to_json value
   | Session_export value -> Export.to_json value
   | Session_delete value -> Delete.to_json value
+  | Session_restore value | Session_resume value -> Session_lifecycle.Result.to_json value
   | Permission_list value -> Page.to_json Permission.to_json value
   | Permission_respond value -> Permission.Respond_result.to_json value
   | Grant_list value -> Page.to_json Grant.to_json value
@@ -709,6 +714,8 @@ let decoders =
   ; ( "session.upgrade_prompt"
     , map Session_mutation.of_json (fun x -> Session_upgrade_prompt x) )
   ; "session.delete", map Delete.of_json (fun x -> Session_delete x)
+  ; "session.restore", map Session_lifecycle.Result.of_json (fun x -> Session_restore x)
+  ; "session.resume", map Session_lifecycle.Result.of_json (fun x -> Session_resume x)
   ; "permission.list", map (Page.of_json Permission.of_json) (fun x -> Permission_list x)
   ; ( "permission.respond"
     , map Permission.Respond_result.of_json (fun x -> Permission_respond x) )

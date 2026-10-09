@@ -1014,6 +1014,24 @@ let compose
       ~durability:(durability config.server)
       ~limits:factory_limits
   in
+  let lifecycle_service =
+    Session_lifecycle_service.create
+      ~store
+      ~registry
+      ~idempotency:idempotency_store
+      ~now:(fun () ->
+        Eio.Time.now (Eio.Stdenv.clock env)
+        |> Time_ns.Span.of_sec
+        |> Time_ns.of_span_since_epoch
+        |> Agent_protocol.Timestamp.of_time_ns)
+      ~read_owned_session:(Session_factory.read_owned_session factory)
+      ~validate_removal:(Session_factory.validate_session_removal factory)
+  in
+  let%bind () =
+    if equal_startup_mode options.startup_mode Execute
+    then Session_lifecycle_service.recover_removals lifecycle_service
+    else Ok ()
+  in
   let%bind indexed_sessions =
     Agent_store.Session_store.list_sessions_checked store
     |> Result.map_error ~f:protocol_of_store
@@ -1147,6 +1165,7 @@ let compose
       ~audit_store
       ~blob_store
       ~session_store:store
+      ~lifecycle_service
       ~initialize:
         (initialize
            env
@@ -1225,6 +1244,8 @@ let compose
       | Session_rebuild _
       | Session_upgrade_prompt _
       | Session_delete _
+      | Session_restore _
+      | Session_resume _
       | Blob_read _
       | Permission_list _
       | Permission_respond _

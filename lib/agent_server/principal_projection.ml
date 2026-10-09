@@ -93,6 +93,7 @@ let snapshot principal (snapshot : P.Snapshot.t) =
   in
   P.Public.Snapshot.create
     { session = snapshot.session
+    ; lifecycle = snapshot.lifecycle
     ; canonical_history
     ; effective_history
     ; deferred_entries

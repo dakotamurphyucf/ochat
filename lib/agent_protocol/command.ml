@@ -56,6 +56,8 @@ type t =
   | Session_rebuild of Session.Rebuild_request.t
   | Session_upgrade_prompt of Session.Upgrade_prompt_request.t
   | Session_delete of Session.Delete_request.t
+  | Session_restore of Session_lifecycle.Request.t
+  | Session_resume of Session_lifecycle.Request.t
   | Permission_list of Permission.List_request.t
   | Permission_respond of Permission.Respond_request.t
   | Grant_list of Grant.List_request.t
@@ -127,6 +129,8 @@ let method_name = function
   | Session_rebuild _ -> "session.rebuild"
   | Session_upgrade_prompt _ -> "session.upgrade_prompt"
   | Session_delete _ -> "session.delete"
+  | Session_restore _ -> "session.restore"
+  | Session_resume _ -> "session.resume"
   | Permission_list _ -> "permission.list"
   | Permission_respond _ -> "permission.respond"
   | Grant_list _ -> "grant.list"
@@ -201,6 +205,8 @@ let params = function
   | Session_rebuild request -> Session.Rebuild_request.to_json request
   | Session_upgrade_prompt request -> Session.Upgrade_prompt_request.to_json request
   | Session_delete request -> Session.Delete_request.to_json request
+  | Session_restore request | Session_resume request ->
+    Session_lifecycle.Request.to_json request
   | Permission_list request -> Permission.List_request.to_json request
   | Permission_respond request -> Permission.Respond_request.to_json request
   | Grant_list request -> Grant.List_request.to_json request
@@ -329,6 +335,8 @@ let decoders =
   ; ( "session.upgrade_prompt"
     , map Session.Upgrade_prompt_request.of_json (fun x -> Session_upgrade_prompt x) )
   ; "session.delete", map Session.Delete_request.of_json (fun x -> Session_delete x)
+  ; "session.restore", map Session_lifecycle.Request.of_json (fun x -> Session_restore x)
+  ; "session.resume", map Session_lifecycle.Request.of_json (fun x -> Session_resume x)
   ; "permission.list", map Permission.List_request.of_json (fun x -> Permission_list x)
   ; ( "permission.respond"
     , map Permission.Respond_request.of_json (fun x -> Permission_respond x) )

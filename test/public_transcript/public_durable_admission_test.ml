@@ -130,6 +130,7 @@ let snapshot =
   in
   P.Public.Snapshot.create
     { session
+    ; lifecycle = None
     ; canonical_history = window
     ; archived_revisions = []
     ; effective_history = None

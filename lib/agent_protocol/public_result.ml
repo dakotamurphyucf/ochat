@@ -65,6 +65,8 @@ module Non_history = struct
     | Session_rebuild _
     | Session_upgrade_prompt _
     | Session_delete _
+    | Session_restore _
+    | Session_resume _
     | Permission_list _
     | Permission_respond _
     | Grant_list _

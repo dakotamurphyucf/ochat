@@ -160,6 +160,8 @@ let%expect_test "safe activity summary excludes hostile configuration and errors
     P.Session_catalog.
       { session
       ; archived = true
+      ; lifecycle_revision = P.Session_lifecycle.Revision.one
+      ; admission = Explicit_resume_required
       ; active_owner_principal_id = None
       ; effective_organization = P.Session_organization.Values.empty
       }

@@ -116,6 +116,8 @@ let%expect_test
                 { session = failed_session
                 ; active_owner_principal_id = None
                 ; archived = false
+                ; lifecycle_revision = P.Session_lifecycle.Revision.zero
+                ; admission = P.Session_lifecycle.Result.Admission.Automatic
                 ; effective_organization = P.Session_organization.Values.empty
                 }
             in

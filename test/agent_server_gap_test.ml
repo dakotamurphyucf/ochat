@@ -66,6 +66,7 @@ let private_fixture (fields : Agent_protocol.Public.Snapshot.Fields.t) =
   in
   Agent_protocol.Snapshot.
     { session = fields.session
+    ; lifecycle = fields.lifecycle
     ; canonical_history = history
     ; archived_revisions = fields.archived_revisions
     ; effective_history = Some history

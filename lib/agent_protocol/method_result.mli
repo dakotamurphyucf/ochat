@@ -183,6 +183,8 @@ type t =
   | Session_rebuild of Session_mutation.t
   | Session_upgrade_prompt of Session_mutation.t
   | Session_delete of Delete.t
+  | Session_restore of Session_lifecycle.Result.t
+  | Session_resume of Session_lifecycle.Result.t
   | Permission_list of Permission.t Page.t
   | Permission_respond of Permission.Respond_result.t
   | Grant_list of Grant.t Page.t

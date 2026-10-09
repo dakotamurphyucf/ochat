@@ -407,6 +407,8 @@ let index_entry state =
     ; owner_grace_deadline = owner_grace_deadline state
     ; pending_initial_start = state.pending_initial_start
     ; archived = false
+    ; lifecycle_revision = Agent_store.Session_archive_record.Revision.zero
+    ; admission = Automatic
     }
 ;;
 
@@ -4090,6 +4092,7 @@ let close_unregistered_runtime t handle runtime writer actor capacity =
 
 let build_runtime_for_actor t handle actor =
   let open Result.Let_syntax in
+  let%bind () = Agent_session.Session_actor.check_runtime_admission actor in
   let%bind state = Agent_session.Session_actor.state actor in
   let%bind revision = restore_state_source t state in
   let%bind () = check_source_for_execution t state revision in
@@ -5517,6 +5520,51 @@ let persist_recovered_state t handle journal persistence state =
 
 let recover_open_handle t handle =
   let open Result.Let_syntax in
+  let%bind lifecycle =
+    Agent_store.Session_store.read_lifecycle t.store handle
+    |> Result.map_error ~f:protocol_of_store
+  in
+  let lifecycle = Agent_store.Session_store.Lifecycle.Observation.value lifecycle in
+  let%bind () =
+    if
+      Agent_store.Session_archive_record.Status.equal
+        (Agent_store.Session_archive_record.status lifecycle)
+        Active
+      && Agent_store.Session_archive_record.Admission.equal
+           (Agent_store.Session_archive_record.admission lifecycle)
+           Automatic
+    then Ok ()
+    else
+      Error
+        (unavailable
+           Invalid_state
+           "session lifecycle requires explicit restoration or resume")
+  in
+  let receipts =
+    Session_lifecycle_receipts.create
+      ~store:t.idempotency_store
+      ~server_id:(Agent_store.Session_store.server_id t.store)
+  in
+  let%bind () =
+    List.fold_result
+      (Agent_store.Session_archive_record.receipts lifecycle)
+      ~init:()
+      ~f:(fun () receipt ->
+        if receipt.Agent_store.Session_archive_record.Receipt.completion_acknowledged
+        then Ok ()
+        else
+          Agent_store.Session_store.complete_lifecycle_outcome
+            t.store
+            handle
+            ~key:receipt.key
+            ~request_digest:receipt.request_digest
+            ~complete:
+              (Session_lifecycle_receipts.complete
+                 receipts
+                 ~key:receipt.key
+                 ~request_digest:receipt.request_digest)
+          |> Result.map_error ~f:protocol_of_store)
+  in
   let%bind journal, recovery = open_recovery t handle in
   let%bind () = reconcile_command_audits t recovery in
   let state =
@@ -5712,6 +5760,46 @@ let recover_open_handle t handle =
           Exn.raise_with_original_backtrace exn backtrace))
 ;;
 
+let read_owned_session t handle =
+  let open Result.Let_syntax in
+  let%bind metadata =
+    Agent_store.Session_store.Handle.metadata_checked handle
+    |> Result.map_error ~f:protocol_of_store
+  in
+  let session_id = metadata.session.id in
+  let%bind journal =
+    Agent_store.Journal.open_existing
+      ~env:t.env
+      ~directory:(Agent_store.Session_store.Handle.journal_directory handle)
+      ~max_payload_length:t.limits.max_journal_payload
+      ~max_segment_bytes:t.limits.max_segment_bytes
+      ~max_segment_frames:t.limits.max_segment_frames
+    |> Result.map_error ~f:protocol_of_store
+  in
+  let%bind recovered =
+    Agent_store.Recovery.read
+      ~env:t.env
+      ~journal
+      ~snapshot_directory:(Agent_store.Session_store.Handle.snapshot_directory handle)
+      ~max_snapshot_payload_length:t.limits.snapshot_payload_limit
+      ~session_id
+      ~initial:None
+      ~restore_snapshot:(restore_recovery_state t)
+      ~apply:(apply_recovery_transaction t)
+      ~validate_transaction:
+        (Agent_session.Session_persistence.validate_transaction
+           ~limits:t.journal_document_limits)
+      ~validate:(validate_recovery_state t handle)
+    |> Result.map_error ~f:protocol_of_store
+  in
+  let%map restored =
+    Result.of_option
+      recovered.state
+      ~error:(corrupt "durable session has no restored state")
+  in
+  Agent_session.Session_persistence.Restored.state restored
+;;
+
 let read_session t index_entry =
   let open Result.Let_syntax in
   let session_id = index_entry.Agent_store.Session_index.Entry.session.id in
@@ -5730,39 +5818,7 @@ let read_session t index_entry =
       Eio.Cancel.protect (fun () ->
         Agent_store.Session_store.close_session t.store handle)
     in
-    let read () =
-      let%bind journal =
-        Agent_store.Journal.open_existing
-          ~env:t.env
-          ~directory:(Agent_store.Session_store.Handle.journal_directory handle)
-          ~max_payload_length:t.limits.max_journal_payload
-          ~max_segment_bytes:t.limits.max_segment_bytes
-          ~max_segment_frames:t.limits.max_segment_frames
-        |> Result.map_error ~f:protocol_of_store
-      in
-      let%bind recovered =
-        Agent_store.Recovery.read
-          ~env:t.env
-          ~journal
-          ~snapshot_directory:(Agent_store.Session_store.Handle.snapshot_directory handle)
-          ~max_snapshot_payload_length:t.limits.snapshot_payload_limit
-          ~session_id
-          ~initial:None
-          ~restore_snapshot:(restore_recovery_state t)
-          ~apply:(apply_recovery_transaction t)
-          ~validate_transaction:
-            (Agent_session.Session_persistence.validate_transaction
-               ~limits:t.journal_document_limits)
-          ~validate:(validate_recovery_state t handle)
-        |> Result.map_error ~f:protocol_of_store
-      in
-      let%map restored =
-        Result.of_option
-          recovered.state
-          ~error:(corrupt "durable session has no restored state")
-      in
-      Agent_session.Session_persistence.Restored.state restored
-    in
+    let read () = read_owned_session t handle in
     match read () with
     | Ok state ->
       let%map () = close () |> Result.map_error ~f:protocol_of_store in
@@ -5824,6 +5880,10 @@ let complete_index_recovery t entries =
 ;;
 
 let index_requires_load entry =
+  Agent_store.Session_archive_record.Admission.equal
+    entry.Agent_store.Session_index.Entry.admission
+    Automatic
+  &&
   let session = entry.Agent_store.Session_index.Entry.session in
   Agent_protocol.Session.equal_desired_state session.desired_state Running
   || entry.runnable_job_count > 0
@@ -5833,15 +5893,74 @@ let index_requires_load entry =
   || entry.pending_initial_start
 ;;
 
+(* Rebuild archived and gated projections under the actual store lock without
+   constructing an actor, repairing a tail or granting execution admission. *)
+let rebuild_retained_projection t indexed =
+  let open Result.Let_syntax in
+  Eio.Switch.run (fun sw ->
+    let%bind handle =
+      Agent_store.Session_store.open_session
+        t.store
+        ~sw
+        ~actor_lock_nonce:
+          (Agent_protocol.Id.Transaction.create ()
+           |> Agent_protocol.Id.Transaction.to_string)
+        indexed.Agent_store.Session_index.Entry.session.id
+      |> Result.map_error ~f:protocol_of_store
+    in
+    let close () = Agent_store.Session_store.close_session t.store handle in
+    let reconcile () =
+      let%bind state = read_owned_session t handle in
+      Agent_store.Session_store.write_metadata
+        ~entry:(index_entry state)
+        t.store
+        handle
+        (metadata state)
+      |> Result.map_error ~f:protocol_of_store
+    in
+    match reconcile () with
+    | Ok () -> close () |> Result.map_error ~f:protocol_of_store
+    | Error _ as failure ->
+      (try
+         Eio.Cancel.protect (fun () ->
+           ignore (close () : (unit, Agent_store.Store_error.t) Result.t))
+       with
+       | _ -> ());
+      failure
+    | exception exn ->
+      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      (try
+         Eio.Cancel.protect (fun () ->
+           ignore (close () : (unit, Agent_store.Store_error.t) Result.t))
+       with
+       | _ -> ());
+      Exn.raise_with_original_backtrace exn backtrace)
+;;
+
 let recover_sessions t =
   let open Result.Let_syntax in
   let%bind all =
     Agent_store.Session_store.list_sessions_checked t.store
     |> Result.map_error ~f:protocol_of_store
   in
+  let%bind () =
+    if not (Agent_store.Session_store.index_was_rebuilt t.store)
+    then Ok ()
+    else
+      List.fold_result all ~init:() ~f:(fun () indexed ->
+        if
+          (not indexed.Agent_store.Session_index.Entry.archived)
+          && Agent_store.Session_archive_record.Admission.equal
+               indexed.admission
+               Automatic
+        then Ok ()
+        else rebuild_retained_projection t indexed)
+  in
   let all =
     all
-    |> List.filter ~f:(fun entry -> not entry.Agent_store.Session_index.Entry.archived)
+    |> List.filter ~f:(fun entry ->
+      (not entry.Agent_store.Session_index.Entry.archived)
+      && Agent_store.Session_archive_record.Admission.equal entry.admission Automatic)
   in
   let indexed =
     all
@@ -6041,6 +6160,9 @@ let workspace_retained t (state : Agent_session.Session_state.t) =
              (match Map.find by_id record.admission.child_session_id with
               | Some entry ->
                 (not entry.archived)
+                && Agent_store.Session_archive_record.Admission.equal
+                     entry.admission
+                     Automatic
                 && (entry.pending_initial_start
                     || P.Session.equal_desired_state entry.session.desired_state Running)
                 && Option.equal
@@ -6300,7 +6422,9 @@ let resume_generated_initial_starts t =
     | Ok entries ->
       entries
       |> List.filter ~f:(fun entry ->
-        entry.Agent_store.Session_index.Entry.pending_initial_start && not entry.archived)
+        entry.Agent_store.Session_index.Entry.pending_initial_start
+        && (not entry.archived)
+        && Agent_store.Session_archive_record.Admission.equal entry.admission Automatic)
       |> List.iter ~f:(fun indexed ->
         let entry =
           match Session_registry.find t.registry indexed.session.id with
@@ -6380,6 +6504,11 @@ let create_delegated_session
   let module S = Agent_store.Session_store in
   let open Result.Let_syntax in
   let run () =
+    let%bind () =
+      if Session_registry.lifecycle_reserved t.registry parent_session_id
+      then Error (unavailable Conflict "parent lifecycle is reserved")
+      else Ok ()
+    in
     let%bind admitted_lifetime = requested_lifetime t lifetime in
     let%bind admitted_lifetime =
       match admitted_lifetime, invocation_owner with
@@ -8144,4 +8273,64 @@ let create
     }
   in
   t
+;;
+
+let validate_session_removal t (state : Agent_session.Session_state.t) =
+  let module D = Agent_store.Delegation_store in
+  let session_id = state.identity.session_id in
+  let open Result.Let_syntax in
+  let%bind loaded_runtime_ids =
+    List.fold_result (Session_registry.entries t.registry) ~init:[] ~f:(fun ids entry ->
+      if Runtime_owner.is_loaded entry.Session_registry.runtime
+      then (
+        let%map state = Agent_session.Session_actor.state entry.actor in
+        state.Agent_session.Session_state.identity.session_id :: ids)
+      else Ok ids)
+  in
+  with_generated_creation_lock t (fun () ->
+    let open Result.Let_syntax in
+    let%bind live =
+      D.with_records
+        (Agent_store.Session_store.delegations t.store)
+        ~max_records:t.limits.delegation_recovery_max_count
+        ~max_bytes:t.limits.delegation_recovery_max_bytes
+        ~f:(fun records ->
+          let open Result.Let_syntax in
+          let%bind indexed = Agent_store.Session_store.list_sessions_checked t.store in
+          let still_live record =
+            let child_id = record.D.admission.child_session_id in
+            let child =
+              List.find indexed ~f:(fun entry ->
+                Agent_protocol.Id.Session.equal
+                  entry.Agent_store.Session_index.Entry.session.id
+                  child_id)
+            in
+            Option.is_none record.revocation
+            || Option.exists child ~f:(fun child ->
+              Agent_protocol.Session.equal_desired_state
+                child.session.desired_state
+                Running
+              || Option.is_some child.session.active_operation
+              || child.pending_initial_start
+              || child.runnable_job_count > 0
+              || child.deliverable_job_count > 0
+              || Option.is_some child.earliest_schedule_due)
+            || ((not (Agent_protocol.Id.Session.equal child_id session_id))
+                && List.mem
+                     loaded_runtime_ids
+                     child_id
+                     ~equal:Agent_protocol.Id.Session.equal)
+          in
+          Ok
+            (List.exists records ~f:(fun record ->
+               (Agent_protocol.Id.Session.equal record.D.key.parent_session_id session_id
+                || Agent_protocol.Id.Session.equal
+                     record.admission.child_session_id
+                     session_id)
+               && still_live record)))
+      |> Result.map_error ~f:protocol_of_store
+    in
+    if live
+    then Error (unavailable Conflict "session has a live durable delegation obligation")
+    else Ok ())
 ;;

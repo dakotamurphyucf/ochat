@@ -299,6 +299,8 @@ let%expect_test
                 ; owner_grace_deadline = None
                 ; pending_initial_start = false
                 ; archived = false
+                ; lifecycle_revision = Agent_store.Session_archive_record.Revision.zero
+                ; admission = Automatic
                 };
               let reads = ref 0 in
               S.Session_registry.install_reader registry (fun _ ->

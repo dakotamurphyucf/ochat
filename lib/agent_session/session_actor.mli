@@ -1826,3 +1826,48 @@ val continue_history
   -> ?command_audit:Document_schema.Document.t
   -> Agent_protocol.History_edit.Continue_request.t
   -> (History_continuation_result.t, Agent_protocol.Error.t) result
+
+module Lifecycle_fence : sig
+  type t
+end
+
+(** One mailbox turn validates the current writer attachment (when supplied),
+    expected generation and canonical revision before excluding fresh execution,
+    runtime construction and user canonical mutations. Worker/inference/background
+    finalizers remain admitted so external runtime retirement can join. A rejected
+    attempt does not install a fence or retire the runtime. *)
+val begin_lifecycle
+  :  t
+  -> attachment_id:Agent_protocol.Id.Attachment.t option
+  -> expected_generation:int
+  -> expected_revision:int64
+  -> (Lifecycle_fence.t, Agent_protocol.Error.t) Result.t
+
+(** Read the final canonical state after Runtime_owner.close_and_wait has joined;
+    validates issuing actor/current fence. This permits honest tracking-ACK drift
+    during retirement; original user anchor is validated at begin_lifecycle. *)
+val lifecycle_state
+  :  t
+  -> Lifecycle_fence.t
+  -> (Session_state.t, Agent_protocol.Error.t) Result.t
+
+(** Release only after proven absence of lifecycle effects AND before permanent
+    Runtime_owner retirement has begun. Once runtime close starts, host detaches
+    and closes this actor even when publication fails without effects, retaining
+    the unchanged durable index for a fresh owner. Installed archive or
+    removal and uncertain publication retain the fence until actor closure.
+    Restored sessions are not released into execution: they are retired and
+    subsequently inspected through the retained reader. Explicit resume commits
+    its gate through indexed ownership before a fresh activating load. *)
+val abort_lifecycle : t -> Lifecycle_fence.t -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Mark irreversible runtime retirement before closing its owner. The fence
+    cannot subsequently be aborted, including after cancellation or no-effect
+    publication failure. The host must retire the actor/store or retain this
+    fenced owner for an actual cleanup retry. *)
+val retire_lifecycle : t -> Lifecycle_fence.t -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Current mailbox preflight before runtime construction; does not grant a
+    future execution lifetime. Actual owner/scope installation must revalidate
+    under the same admission rules after any waits. *)
+val check_runtime_admission : t -> (unit, Agent_protocol.Error.t) Result.t

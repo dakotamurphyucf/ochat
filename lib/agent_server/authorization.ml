@@ -41,6 +41,7 @@ let required_scope = function
   | Session_update_organization _
   | Session_update_metadata _
   | Session_start _
+  | Session_resume _
   | Session_send_message _
   | Session_compact _
   | Session_edit_history _
@@ -49,7 +50,7 @@ let required_scope = function
   | Session_cancel_operation _ -> Some Send_messages
   | Session_stop _ -> Some Stop_sessions
   | Session_reset _ | Session_rebuild _ | Session_upgrade_prompt _ -> Some Own_sessions
-  | Session_delete _ -> Some Delete_sessions
+  | Session_delete _ | Session_restore _ -> Some Delete_sessions
   | Permission_list _ -> Some View_security_state
   | Permission_respond _ -> Some Answer_approvals
   | Grant_list _ | Grant_revoke _ -> Some Manage_grants

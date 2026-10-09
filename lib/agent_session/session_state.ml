@@ -1106,6 +1106,7 @@ let snapshot ~now t =
   in
   Agent_protocol.Snapshot.
     { session = summary t
+    ; lifecycle = None
     ; canonical_history = history_window t.conversation.canonical_history
     ; archived_revisions =
         List.map t.conversation.compaction_archives ~f:(fun archive -> archive.revision)

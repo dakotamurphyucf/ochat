@@ -19,6 +19,7 @@ val create
   -> audit_store:Agent_store.Audit_store.t
   -> blob_store:Agent_store.Blob_store.t
   -> session_store:Agent_store.Session_store.t
+  -> lifecycle_service:Session_lifecycle_service.t
   -> initialize:
        (principal:Agent_protocol.Principal.t
         -> Agent_protocol.Initialize.Request.t

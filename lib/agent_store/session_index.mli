@@ -38,8 +38,18 @@ val replace_all : t -> Entry.t list -> (unit, Store_error.t) result
     the exact requested complete projection is proven installed. A valid old
     snapshot alone cannot prove reconciliation with newer metadata. *)
 val with_prepared_upsert
-  :  t
+  :  ?expected_entry:Entry.t option
+  -> t
   -> Entry.t
+  -> publish_authority:(unit -> ('a, Store_error.t) result)
+  -> ('a, Store_error.t) result
+
+(** Prepare exact logical catalog absence before authoritative terminal proof.
+    Ownership, failure and [expected_entry] rules match [with_prepared_upsert]. *)
+val with_prepared_remove
+  :  ?expected_entry:Entry.t option
+  -> t
+  -> Agent_protocol.Id.Session.t
   -> publish_authority:(unit -> ('a, Store_error.t) result)
   -> ('a, Store_error.t) result
 
@@ -57,3 +67,6 @@ val find_checked
 (** Prevalidate the complete preserved replacement without any filesystem effect.
     Canonical commit admission holds the projection owner before this index lock. *)
 val validate_upsert : t -> Entry.t -> (unit, Store_error.t) result
+
+(** Prevalidate the complete preserved index after logical absence without effects. *)
+val validate_remove : t -> Agent_protocol.Id.Session.t -> (unit, Store_error.t) result

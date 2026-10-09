@@ -17,7 +17,10 @@
   session_metadata_document
   session_index_entry
   session_index_document
+  session_lifecycle_documents
+  session_removal_directory
   store_schema_document
+  session_archive_record
   session_archive_document
   session_index_recovery_document
   session_projection_update

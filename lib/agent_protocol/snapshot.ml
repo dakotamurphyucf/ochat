@@ -2,6 +2,7 @@ open Core
 
 type t =
   { session : Session.t
+  ; lifecycle : Session_lifecycle.Observation.t option [@sexp.option]
   ; canonical_history : History.Window.t
   ; archived_revisions : int64 list [@sexp.list]
   ; effective_history : History.Window.t option
@@ -21,6 +22,8 @@ type t =
   }
 [@@deriving sexp]
 
+let decoded_of_sexp = t_of_sexp
+
 let optional_field name value encode =
   Option.map value ~f:(fun value -> name, encode value)
 ;;
@@ -32,6 +35,7 @@ let nonnegative_int64 = Json_codec.bounded_int64 ~min:Int64.zero ~max:Int64.max_
 let to_json t =
   let fields =
     [ Some ("session", Session.to_json t.session)
+    ; optional_field "lifecycle" t.lifecycle Session_lifecycle.Observation.to_json
     ; Some ("canonical_history", History.Window.to_json t.canonical_history)
     ; Some ("archived_revisions", list int64_to_json t.archived_revisions)
     ; optional_field "effective_history" t.effective_history History.Window.to_json
@@ -109,6 +113,9 @@ let of_json json =
   let open Result.Let_syntax in
   let%bind fields = Json_codec.fields json in
   let%bind session = Json_codec.required_as fields "session" Session.of_json in
+  let%bind lifecycle =
+    Json_codec.optional_as fields "lifecycle" Session_lifecycle.Observation.of_json
+  in
   let%bind archived_revisions =
     Json_codec.optional_as fields "archived_revisions" (Json_codec.list nonnegative_int64)
   in
@@ -127,6 +134,10 @@ let of_json json =
   in
   let extension_status = Option.value extension_status ~default:[] in
   if
+    Option.exists lifecycle ~f:(fun observation ->
+      not (Session_lifecycle.Observation.matches_session observation session))
+  then Error (Protocol_error.invalid_request "snapshot lifecycle anchor disagrees")
+  else if
     List.exists extension_status ~f:(fun status ->
       status.Extension_status.generation > session.generation)
   then
@@ -138,6 +149,7 @@ let of_json json =
   else
     Ok
       { session
+      ; lifecycle
       ; canonical_history
       ; archived_revisions = Option.value archived_revisions ~default:[]
       ; effective_history
@@ -155,4 +167,10 @@ let of_json json =
       ; revision
       ; latest_event_sequence
       }
+;;
+
+let t_of_sexp sexp =
+  match of_json (to_json (decoded_of_sexp sexp)) with
+  | Ok snapshot -> snapshot
+  | Error failure -> Sexplib.Conv.of_sexp_error failure.Protocol_error.message sexp
 ;;

@@ -108,3 +108,16 @@ val enumerate_collections
   -> max_groups:int
   -> max_pages:int
   -> (Agent_protocol.Organization_group.Collection.t list, Agent_protocol.Error.t) result
+
+(** Restore retained state to explicit resume admission without activating work. *)
+val restore_session
+  :  Connection.t
+  -> Agent_protocol.Session_lifecycle.Request.t
+  -> (Agent_protocol.Session_lifecycle.Result.t, Agent_protocol.Error.t) result
+
+(** Commit the explicit Active/Automatic execution gate. This is separate from
+    actual runtime construction or session.start; the result reports the gate. *)
+val resume_session
+  :  Connection.t
+  -> Agent_protocol.Session_lifecycle.Request.t
+  -> (Agent_protocol.Session_lifecycle.Result.t, Agent_protocol.Error.t) result

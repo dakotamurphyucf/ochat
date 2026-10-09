@@ -214,6 +214,7 @@ let advance (fields : Public.Snapshot.Fields.t) (event : Public.Durable.t) =
       ; latest_event_sequence = event.sequence
       ; updated_at = event.timestamp
       }
+  ; lifecycle = None
   ; revision = event.revision
   ; latest_event_sequence = event.sequence
   }

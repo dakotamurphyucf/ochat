@@ -392,7 +392,7 @@ until actor/journal hydration, with no invented pending initial start.
 | Host organization | `Organization_store` / `Organization_document` | `Organization_root` upgrade and reopen | Named `host.organization` v1; atomic groups, tombstones and mutation receipts |
 | Session metadata | `Session_store` / `Session_metadata_document` | Index rebuild and session open share decoder | Named document and private Handle carrier |
 | Session index | `Session_index` / `Session_index_document` | Checked startup/maintenance/workspace reads | Named document and keyed entry carrier |
-| Archive marker | `Session_store` / `Session_archive_document` | Index rebuild/archive reconciliation | Named identity document; file presence owns archived state |
+| Archive marker | `Session_store` / `Session_archive_document` | Index rebuild/archive reconciliation | Named v2 lifecycle authority; status and admission own archive/execution state |
 | Projection recovery marker | `Session_projection_update` / `Session_index_recovery_document` | Store reopen/eager hydration | Named document; serialized recovery ownership |
 | Blob metadata | `Blob_store` / `Blob_metadata_document` | Expiry, preparation protection and `Blob_retention` share decoder | Named carrier; original blob ID and raw content digest |
 | Private result intent | `Job_result_intent` / `Job_result_intent_document` | Publisher restart and independent retention | Verified frame, full reference, exact temporary/durable metadata strings |
@@ -558,7 +558,8 @@ current canonical records cannot omit the field. Changes share the metadata
 revision with names and labels and preserve all unrelated canonical state.
 
 Public session summaries admit absent organization as empty for existing summary
-records. Metadata and index documents retain their independent version 1 boundary;
+records. Metadata retains its independent version 1 boundary; the session index uses
+version 2 with required lifecycle revision and admission fields;
 this compatibility default is a projection, not permission to erase canonical
 membership. Checked publication writes the full current summary from canonical
 state. An unloaded catalog cannot distinguish an older empty summary from an
@@ -568,3 +569,98 @@ Live catalog membership resolves historical IDs against checked host organizatio
 authority and current principal visibility. Deleted IDs remain in canonical state
 but disappear from effective membership. Neither representation grants access to
 session content or changes execution workspace, prompt or provider authority.
+## Archive lifecycle document preparation
+
+`Session_archive_record` defines the pure M3 archive lifecycle state and its
+accepted outcome proof. `store.session_archive` v2 keeps the existing archive
+marker filename, session identity, lifecycle revision and explicit execution
+admission. Active restoration requires explicit resume; an already active restore
+is a no-op that preserves its current admission. Successful explicit resume sets
+Automatic. Removed is terminal logical absence, including while physical cleanup
+is pending. These pure types do not authorize a client, acquire actor ownership,
+start work or implement the public restore workflow.
+
+Original named v1 archive documents convert structurally to Archived,
+Explicit_resume_required, revision 1 and an empty receipt inventory. Original
+owner extraction precedes conversion. Colliding v1 fields must agree with those
+original archive semantics; they are never overwritten or interpreted as a grant
+of active execution. Current fields require validated presence and types. Unknown
+root, payload and keyed receipt fields survive lawful edits and acknowledgement.
+Unsupported required semantics fail admission.
+
+One accepted lifecycle outcome and its principal/session/method/idempotency key,
+request digest, canonical anchor and exact timestamps live in the same immutable
+record. Replay requires current authorization by the eventual owning service.
+Matching replay precedes stale lifecycle-revision checks; it never supplies new
+execution admission. Outcomes cannot be changed by receipt acknowledgement.
+At most 32 receipts and a 32,768-byte complete envelope are admitted. Receipts have
+a 24-hour retained interval; unacknowledged outcome proof remains protected beyond
+expiry until exact generic durable completion is proven. Only acknowledged,
+expired receipt templates may retire. Capacity and byte limits reject a new
+admission before effects instead of evicting retained proof or increasing budgets.
+
+The host service reserves a session ID under the registry's short mutex before
+performing actor or filesystem work. Loaded mutations acquire the issuing actor's
+canonical fence and stop admission before retiring its runtime. Indexed targets
+retain the existing store actor lock and read canonical state without constructing
+an actor. Exact checked publication binds its current installed witness to the
+owning Handle and canonical epoch. Closing, uncertain publication, or a later
+canonical/lifecycle change invalidates that witness. A rejected foreign Handle
+cannot invalidate the original owner's witness.
+
+Registry reads capture a binding under the short mutex and hold a private read
+lifetime while observing outside it. Successful reads recheck the binding rather
+than substituting a replacement owner. Loaders reserve only their own session ID,
+so loading a retained ancestor does not recursively acquire the global mutex.
+Shutdown rejects new lifetimes, drains existing readers and reservations, then
+joins the complete runtime graph before releasing stores. Failed provisional
+cleanup retains its actual owner, issuing ID and both original diagnostics for
+shutdown retry; that ID cannot admit replacement ownership meanwhile. Inactive
+eviction uses the actor fence and closes outside the global mutex. Failed cleanup
+after retirement keeps its closed owner discoverable; it never reopens execution.
+
+`session.restore` publishes Active with Explicit_resume_required. `session.resume`
+commits the Active/Automatic admission gate; it does not start a runtime or change
+the session's desired state to Running. Startup, background collection, attachment
+and delegated creation respect the gate. Catalog and inspection expose lifecycle
+revision and admission so clients can construct an exact expected anchor. Neither
+inspection nor archive restoration activates an actor. Workspace references and
+workspace content survive archive, restore and permanent session removal.
+
+Removed publishes terminal authority and index absence before physical cleanup.
+The existing host-owned generic idempotency store retains each original protected
+result before payload destruction. Cleanup moves the session into a recognized
+`lost+found/deleted-<session>-<transaction>/payload` namespace, synchronizes both
+rename parents, moves the terminal marker to the stable container root and then
+removes only the payload. The marker survives interrupted recursive deletion; it
+is removed only after payload absence and parent synchronization. Startup retries
+from either recoverable location. Live delegation or registry obligations reject
+removal; fully retired historical references alone do not. Cleanup never rolls
+back namespace changes or deletes workspace content.
+
+Generic outcome acknowledgement does not prove physical removal cleanup. A Removed
+head must retain exactly one Applied Remove outcome at its current lifecycle
+revision, even after the 24-hour interval and generic acknowledgement. Only final
+physical cleanup of the owned terminal document retires that proof. No-op Remove
+receipts and other acknowledged expired receipts can retire normally. Existing
+`session.delete` Archive/Remove commands retain their original method, principal,
+key and policy-bound params digest; the service validates the original delete
+policy before selecting the action and retains existing deletion authorization.
+Receipt aliases never turn deletion into restore/resume authority.
+
+A checked absent outcome under the current session reservation, before any
+publication attempt, permits recording the exact primary command rejection as
+Failure in the retained generic owner. Completion occurs before the reservation
+is released, so a same-key retry cannot publish between proof and failure caching.
+Reservation contention, unreadable authority, retained proof or attempted
+publication preserves Pending until recovery reconciles the original result.
+Cancellation and unexpected exceptions remain exceptional control flow. A failed
+rejection acknowledgement preserves the primary error and reports required
+recovery with its secondary storage diagnostic. Definitive No_effect means the
+exact generic Failure completed durably; runtime cleanup may still have occurred.
+
+Cached lifecycle results and command receipts recheck current nonactivating
+visibility while their target exists. The narrow absence exception is the bounded
+original Protected successful Remove acknowledgement, with the original principal
+and current deletion policy. Archive, restore and resume receipts never bypass
+current visibility merely because the caller once held broad host authority.

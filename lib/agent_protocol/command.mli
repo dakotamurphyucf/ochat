@@ -56,6 +56,8 @@ type t =
   | Session_rebuild of Session.Rebuild_request.t
   | Session_upgrade_prompt of Session.Upgrade_prompt_request.t
   | Session_delete of Session.Delete_request.t
+  | Session_restore of Session_lifecycle.Request.t
+  | Session_resume of Session_lifecycle.Request.t
   | Permission_list of Permission.List_request.t
   | Permission_respond of Permission.Respond_request.t
   | Grant_list of Grant.List_request.t

@@ -1464,6 +1464,8 @@ let%expect_test
         ; owner_grace_deadline = None
         ; pending_initial_start = state.pending_initial_start
         ; archived = false
+        ; lifecycle_revision = Agent_store.Session_archive_record.Revision.zero
+        ; admission = Automatic
         }
       in
       let handle =

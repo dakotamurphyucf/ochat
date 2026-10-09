@@ -24,3 +24,24 @@ let of_json json =
   let%map session_id = Json_codec.required_as fields "session_id" Id.Session.of_json in
   create ~server_id ~session_id
 ;;
+
+module Sexp_input = struct
+  type t =
+    { server_id : string
+    ; session_id : string
+    }
+  [@@deriving of_sexp]
+end
+
+let t_of_sexp sexp =
+  let input = Sexp_input.t_of_sexp sexp in
+  let decoded =
+    let open Result.Let_syntax in
+    let%bind server_id = Id.Server.of_string input.server_id in
+    let%map session_id = Id.Session.of_string input.session_id in
+    create ~server_id ~session_id
+  in
+  match decoded with
+  | Ok t -> t
+  | Error failure -> Sexplib.Conv.of_sexp_error failure.Protocol_error.message sexp
+;;

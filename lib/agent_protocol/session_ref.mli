@@ -6,3 +6,7 @@ val server_id : t -> Id.Server.t
 val session_id : t -> Id.Session.t
 val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
+
+(** Snapshot lifecycle observations use this decoder. Both string IDs are
+    admitted through their validated constructors; decoding grants no authority. *)
+val t_of_sexp : Sexplib0.Sexp.t -> t
