@@ -327,6 +327,7 @@ module Send_message_request : sig
     { session_id : Id.Session.t
     ; attachment_id : Id.Attachment.t
     ; content : Message_content.t
+    ; timing : Pending_input.Timing.t [@sexp.default Pending_input.Timing.Safe_boundary]
     ; idempotency_key : Idempotency_key.t
     }
   [@@deriving sexp]
@@ -362,6 +363,9 @@ module Delete_history_request : sig
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
 
+(** An absent attachment requests retained access under current principal
+    visibility and method scopes. A supplied attachment must remain current.
+    Encoding omits absence; explicit JSON null is invalid. No execution admission. *)
 module Export_request : sig
   type format =
     | Chatmd
@@ -370,7 +374,7 @@ module Export_request : sig
 
   type t =
     { session_id : Id.Session.t
-    ; attachment_id : Id.Attachment.t
+    ; attachment_id : Id.Attachment.t option
     ; format : format
     ; revision : int64 option
     ; history : History.Window_request.t option

@@ -45,7 +45,12 @@ let%expect_test "a user deferred by an idle event resumes without a moderator wa
            ~snapshot:before
            (fun ~event:_ ~commit ->
               let submission =
-                A.submit_message actor ~attachment_id:writer.id entry |> protocol_ok
+                A.submit_message
+                  ~submitting_principal:principal_id
+                  actor
+                  ~attachment_id:writer.id
+                  entry
+                |> protocol_ok
               in
               (match submission.disposition with
                | Deferred -> ()

@@ -200,13 +200,13 @@ let moderator_features =
 
 let implementation_sources =
   [ ( "lib/agent_session/administration.ml"
-    , "1a395d256d0a83f8ce205cb92a90ee608061533812ae20c73ad2c834a650a730" )
+    , "294e4f4885be914c82f8fd9b327b9dac9a311ba6c49f3c424cdd34f7c9a9f54b" )
   ; ( "lib/agent_server/command_handler.ml"
-    , "87a100eb77da6026cc25f8297d78aad31a52ea6002172f33b3d3d469cc407101" )
+    , "5f3054bc7a800289757ef23127c329766fb3f951ef0fa36c2db225f35e926477" )
   ; ( "lib/agent_server/runtime_owner.ml"
-    , "397da960e3f1182a210676373156ab5d26ea5e2b69015602a98e0be3617afb16" )
+    , "7431f8254c524a641f3ce86633cd812481b938ba3b6e35bf1e31d01059cd7d66" )
   ; ( "lib/agent_session/managed_submission_tracking.ml"
-    , "395c05cb876b720af5c416d65202281e2878c3fd8732cebf56263d4f1edde0e4" )
+    , "6c8804b2d0c2033631b965769af63c5240afeb6dabff72695c818dc1a68baed8" )
   ; ( "lib/agent_server/managed_output_cursor.ml"
     , "d5db2b48aa4a0c4a1b05704054ef3c41557ea31c8c4b92d8f538406185af472c" )
   ; ( "lib/agent_server/delegation_lifecycle.ml"
@@ -218,7 +218,7 @@ let implementation_sources =
   ; ( "lib/chatml/chatml_value_codec.ml"
     , "0f621d743b97b856dd40270fc8c51444ca18e6098ceb7ff2481a22cf999d85be" )
   ; ( "lib/agent_protocol/delivery.ml"
-    , "d3ec9e97025329aa4567cb44b057f783abcb69bca293d0673d29f4260200b91f" )
+    , "63ae0f4d478302e84a1e49c84f406abf090794db4c231aa76181ad02072581d9" )
   ; ( "lib/agent_protocol/job.ml"
     , "7c470ee027c3ecd23a63a2111227c98030726b58eb370f414c3b6bb85b5ba21e" )
   ; ( "lib/agent_protocol/stored_completion.ml"
@@ -226,9 +226,9 @@ let implementation_sources =
   ; ( "lib/agent_protocol/subscription.ml"
     , "a5447544cbe1cd55302cd70a3c50bf7f6b0ec07ad3af8ce1f70b7b90dfbd07bc" )
   ; ( "lib/agent_server/job_scheduler.ml"
-    , "bcdad550384bdb7f556d6494b8fe366904266d9692594c74c2154e9cae0be299" )
+    , "c678a807a835e4c91c9afe90d9c8a875934dd05be41a72482f1ea0a9f8215b23" )
   ; ( "lib/agent_server/schedule_scheduler.ml"
-    , "6ba04be83b9552c6f131940423d1306784527f12afce5ef5de4b9b7da111484f" )
+    , "37cf371632d8ad86693c162e0593d56866f76df577dceb06ddd2ac5fe5bfdae9" )
   ; ( "lib/agent_session/background_execution.ml"
     , "fc23c982b4655372427f5c81c46959194561beb110e8a6ce848468c460ccaea7" )
   ; ( "lib/agent_session/background_job_event.ml"
@@ -254,7 +254,7 @@ let implementation_sources =
   ; ( "lib/agent_session/script_subscription_service.ml"
     , "3c9e62b0f11666b6e5916b21c5b3ee1c8a2a3184ec9ffc4066927dee3457f44e" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "4e15737e5c7b4feb2a8628bc7649ee44061afd07b5a774194c468f452ace042d" )
+    , "31a99121c40ddf3208aa91df1a99ba79e033742d50f92d522cc1ec6b2f6a8746" )
   ; ( "lib/agent_session/staged_jobs.ml"
     , "7731a0fc9f021188e3856041fe493f3044556bc7a15364815c47299fe968603b" )
   ; ( "lib/agent_session/staged_notifications.ml"
@@ -262,7 +262,7 @@ let implementation_sources =
   ; ( "lib/agent_session/staged_subscriptions.ml"
     , "9c48fbd27c5c8889bff5094106e49a77c0f3cf328023370c9e52877421216abc" )
   ; ( "lib/chat_response/background_delivery.ml"
-    , "ad8536c2f2e126c03e5c6a6f782b9dbaa3b7420874e26236531abf1d2eafb1d6" )
+    , "057c3b5ab886ae06b403dbec7f3c03c057e414504d74c7e419216809cc69de25" )
   ; ( "lib/chat_response/background_job_operations.ml"
     , "86e16c6df7d1eafcb41cb8b558318f7f5b310f9b356afc2412f0e0a32055fcb5" )
   ; ( "lib/chat_response/background_request.ml"
@@ -272,7 +272,7 @@ let implementation_sources =
   ; ( "lib/chat_response/moderator_invocation.ml"
     , "2acb0161a22fcc03eeaa7b92660266b0010b1733d7fa595d16f79dfe3fa2c52b" )
   ; ( "lib/chat_response/moderator_manager.ml"
-    , "34d9d057a1735cd32889a99d6c2f7742cc43f33965e77ccfc63bf1c0ff4fb553" )
+    , "c67622bcd7c0da613b5c8a6aca7b8841be9ada1dd9283d6e83e14c70b3d16d05" )
   ; ( "lib/chat_response/notification_operations.ml"
     , "1e67db1e69921f11f0c28798e340e7e23dc5436eb492bb79a12a0125b0f69e29" )
   ; ( "lib/chat_response/runtime_semantics.ml"

@@ -33,13 +33,16 @@ let replacement_case env environment (name, boundary, after_rename) =
       env
       ~boundary
       ~matches:(fun path ->
-        String.is_prefix path ~prefix:(target ^ ".tmp-") || String.equal path dir)
+        String.is_prefix path ~prefix:(target ^ ".tmp-")
+        || String.equal path dir
+        || String.equal path (Filename.concat dir "."))
       ~reached:(fun path ->
         hit := true;
         if String.equal name "disk-full" then fail_full path else fail_io path)
   in
-  replace wrapped target "new" |> assert_io_failure;
+  let replacement = replace wrapped target "new" in
   F.require !hit "fault boundary was not reached";
+  replacement |> assert_io_failure;
   F.require
     (String.equal (F.read env target) (if after_rename then "new" else "old"))
     "failed replacement exposed an invalid target";
@@ -168,13 +171,16 @@ let snapshot_case env environment (name, boundary, after_rename) =
       env
       ~boundary
       ~matches:(fun path ->
-        String.is_prefix path ~prefix:(target ^ ".tmp-") || String.equal path dir)
+        String.is_prefix path ~prefix:(target ^ ".tmp-")
+        || String.equal path dir
+        || String.equal path (Filename.concat dir "."))
       ~reached:(fun path ->
         hit := true;
         fail_io path)
   in
-  install wrapped dir (snapshot 2L "new") |> assert_io_failure;
+  let activation = install wrapped dir (snapshot 2L "new") in
   F.require !hit "snapshot activation fault did not run";
+  activation |> assert_io_failure;
   let recovered = (load_snapshot env dir).snapshot in
   F.require
     (Int64.equal recovered.transaction_sequence (if after_rename then 2L else 1L)

@@ -1118,6 +1118,7 @@ let%test_unit
              assert (
                Result.is_error
                  (Agent_session.Session_actor.submit_message
+                    ~submitting_principal:principal_id
                     actor
                     ~attachment_id:writer.id
                     entry));

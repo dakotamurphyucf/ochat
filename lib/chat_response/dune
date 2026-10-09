@@ -26,6 +26,7 @@
   chatml_moderator
   chatml_moderation
   moderation
+  run_operations
   moderator_manager
   moderator_invocation
   execution_gate

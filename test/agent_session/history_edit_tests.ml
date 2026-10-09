@@ -37,7 +37,8 @@ let%expect_test
         conversation =
           { original.conversation with
             canonical_history = [ before; target; after ]
-          ; deferred_user_entries = [ pending ]
+          ; deferred_user_entries =
+              [ pending_document ~generation:original.identity.generation pending ]
           ; next_history_sequence = 8L
           ; reserved_history_through = 8L
           ; initial_prompt_entry_count = 0
@@ -179,6 +180,16 @@ let%expect_test
       Document_schema.Document.payload current
       |> fun value ->
       map_field value "conversation" (fun value ->
+        let value =
+          match value with
+          | `Object fields ->
+            `Object
+              (List.filter fields ~f:(fun (name, _) ->
+                 not
+                   (String.equal name "pending_revision"
+                    || String.equal name "pending_dispositions")))
+          | _ -> failwith "fixture conversation"
+        in
         map_field value "canonical_history" legacy_entries)
     in
     let legacy =
@@ -197,7 +208,7 @@ let%expect_test
                (A.Session_state_document.value restored).conversation.canonical_history)
               .content_revision))
       (String.is_substring json ~substring:"\"evidence\":\"keep\"");
-    [%expect {| version=7 revision=0 unknown=true |}])
+    [%expect {| version=9 revision=0 unknown=true |}])
 ;;
 
 let%expect_test
@@ -341,6 +352,7 @@ let%expect_test
         ~f:(fun () ->
           let persistence =
             Persistence.create
+              ~pending_archive:None
               ~before_commit:None
               ~retention_preflight:None
               ~writer
@@ -935,7 +947,7 @@ let%expect_test
             (A.Session_state.Compaction_archive.equal_kind archive.kind Delete)
             (Int64.equal archive.revision before.counters.revision)
             (List.equal
-               P.History.equal_entry
+               A.Pending_input_document.equal
                before.conversation.deferred_user_entries
                after.conversation.deferred_user_entries)
             (Int64.equal
@@ -1309,7 +1321,9 @@ let%expect_test "enqueue racing combined edit has one serialized admission winne
                  R.zero))
            (List.equal
               P.History.equal_entry
-              after.conversation.deferred_user_entries
+              (List.map
+                 after.conversation.deferred_user_entries
+                 ~f:A.Pending_input_document.entry)
               [ pending ])
            (Option.is_some after.active_operation)
            (List.length after.conversation.compaction_archives);
@@ -1322,14 +1336,17 @@ let%expect_test "enqueue racing combined edit has one serialized admission winne
              (match rejected with
               | Error error -> P.Error.equal_code error.code Pending_input_conflict
               | Ok _ -> false);
+           let pending_before_save =
+             (A.Memory_backend.state backend).conversation.deferred_user_entries
+           in
            let saved = { fresh with edit = intent target "save only with pending" } in
            A.Session_actor.edit_history actor saved |> protocol_ok |> ignore;
            printf
              "save-only-pending-exact=%b\n"
              (List.equal
-                P.History.equal_entry
+                A.Pending_input_document.equal
                 (A.Memory_backend.state backend).conversation.deferred_user_entries
-                [ pending ]))
+                pending_before_save))
          else (
            Eio.Promise.await worker_entered;
            let busy =

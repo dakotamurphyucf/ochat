@@ -57,6 +57,7 @@ let with_history f =
         ~f:(fun () ->
           let persistence =
             Persistence.create
+              ~pending_archive:None
               ~before_commit:None
               ~retention_preflight:None
               ~writer

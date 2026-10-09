@@ -8,7 +8,10 @@ type t =
 
 (** Apply one durable state change. If its effective conversation or halt state
     changes, append a rendering-neutral [moderator.overlay_changed] event at the
-    same revision, after the supplied events. Interpreter state is not published. *)
+    same revision, after the supplied events. Public run evidence changes append
+    one [session.updated] event unless the caller already supplied it, so existing
+    session subscriptions can refresh their authorized run views. Private delivery
+    frames and interpreter state are not published. *)
 val apply
   :  now:Agent_protocol.Timestamp.t
   -> Session_state.t

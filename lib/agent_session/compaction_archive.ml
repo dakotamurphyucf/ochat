@@ -49,6 +49,7 @@ let prefix = function
   | Upgrade -> "upgrade"
   | Edit -> "edit"
   | Delete -> "delete"
+  | Pending_input -> "pending-input"
 ;;
 
 let filename reference =

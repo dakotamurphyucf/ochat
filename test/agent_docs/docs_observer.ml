@@ -109,6 +109,7 @@ let verify_observer client session_id =
          ; attachment_id = attachment
          ; content = { kind = Plain_text; text = "must not run"; attachments = [] }
          ; idempotency_key = key "docs-observer-denied"
+         ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
          })
   with
   | Error error -> assert (Agent_protocol.Error.equal_code error.code Permission_denied)

@@ -213,8 +213,26 @@ let%expect_test "maintenance reloads a stopped indexed session to collect prepar
         ~path:(Filename.concat root "expiry-only.sexp")
       |> store_ok
     in
+    let deferred =
+      Agent_server.Maintenance.run_once
+        ~collection_policy:Selected_only
+        ~env
+        ~idempotency_store:expiry
+        ~blob_store:(Agent_server.Daemon.blob_store daemon)
+        ~session_store:sessions
+        ~registry:(Some registry)
+        ~protected_response_sessions:[]
+        ~response_retention:(Time_ns.Span.of_day 1.)
+        ~now:(P.Timestamp.now ())
+      |> store_ok
+    in
+    [%test_eq: int] 1 deferred.deferred_result_collections;
+    [%test_eq: int] 0 deferred.discarded_job_results;
+    assert (
+      Option.is_none (Agent_server.Session_registry.find registry reference.session_id));
     let stats =
       Agent_server.Maintenance.run_once
+        ~collection_policy:Load_retained
         ~env
         ~idempotency_store:expiry
         ~blob_store:(Agent_server.Daemon.blob_store daemon)

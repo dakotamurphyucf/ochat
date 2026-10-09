@@ -7,8 +7,8 @@ type options =
   { prompt_file : string
   ; workspace : string
   ; tool_dir : string
-  ; home : string
-  ; data_root : string option
+  ; home : string option
+  ; storage : Local_storage.t
   ; start_immediately : bool
   ; permission_profile : Config.Permission_profile.t
   ; attachment_mode : Agent_protocol.Session.attachment_mode
@@ -30,7 +30,7 @@ val interactive_permission_profile
 (** [daemon_options] supplies the shared runtime's trusted host configuration,
     including provider adapters, policy and internal extension qualification.
     Defaults match [Daemon.default_options]. The embedded host always derives
-    extension host metadata from [data_root], keeps process-bound liveness and
+    extension host metadata from explicit [storage], keeps process-bound liveness and
     starts no network listener. A durable data root preserves data; it does not
     keep jobs running after the embedding process exits. Startup initializes the
     Unix cryptographic RNG before allocating IDs or a transient data root. *)
@@ -65,6 +65,42 @@ val open_host
   -> unit
   -> (host, Agent_protocol.Error.t) result
 
+(** Additions to Embedded: reuse the exact local composition and actual host
+    cleanup owner without creating a replacement session. *)
+val open_local_host
+  :  sw:Eio.Switch.t
+  -> env:Eio_unix.Stdenv.base
+  -> ?daemon_options:Daemon.options
+  -> ?authoring_package_files:string list
+  -> ?authoring_budget:Chat_response.Authoring_validation.context_budget
+  -> options
+  -> (host, Agent_protocol.Error.t) result
+
+(** Caller owns open host. Select exact current anchor before attachment. Saved
+    prompt/workspace/permissions are authoritative; mode only requests attachment
+    access and cannot replace them.
+    Stopped selection does not start. Failure leaves caller owning this host. *)
+val attach_retained
+  :  host
+  -> mode:Agent_protocol.Session.attachment_mode
+  -> expected:Agent_protocol.Session_lifecycle.Expected.t
+  -> (t, Agent_protocol.Error.t) result
+
+(** Scope one local host through a callback without transferring its owner out.
+    On rejection/exception preserve the original failure and protected cleanup;
+    failed cleanup fails the actual owning Switch with retained diagnostics.
+    On success close this host before returning the callback value. The callback
+    must not return the host, its connection, or resources owned by it. *)
+val with_local_host
+  :  sw:Eio.Switch.t
+  -> env:Eio_unix.Stdenv.base
+  -> ?daemon_options:Daemon.options
+  -> ?authoring_package_files:string list
+  -> ?authoring_budget:Chat_response.Authoring_validation.context_budget
+  -> options
+  -> f:(host -> ('a, Agent_protocol.Error.t) Result.t)
+  -> ('a, Agent_protocol.Error.t) Result.t
+
 val host_connection : host -> Agent_client.Connection.t
 
 (** Trusted local composition currently grants the same compiled local scopes
@@ -87,3 +123,30 @@ val connect : t -> Agent_client.Connection.t
 
 val close_connection : t -> Connection_context.t -> unit
 val close : t -> unit
+
+(** Open a distinct connection owned by this embedded host. The caller borrows
+    it until host close, may install one notification consumer, and must not
+    independently close or escape it. Acquire and close on the host owning Eio
+    domain. Acquisition/adoption do not yield on that domain, so closed admission
+    rejects acquisition before constructing a client. Existing [connect] retains its
+    caller-owned contract. All owned connection cleanup precedes daemon/store
+    release and preserves original failure plus cleanup diagnostics. *)
+val connect_owned : t -> (Agent_client.Connection.t, Agent_protocol.Error.t) result
+
+(** Borrow this started session within its existing ownership Switch and close its
+    actual host before returning. Callback must not escape usable session-owned
+    resources or recursively close the host. Result rejection, exception and
+    cancellation preserve the original primary/backtrace and secondary cleanup
+    diagnostic using the concrete host owner; repeated cleanup failure fails that
+    owning scope. *)
+val with_session
+  :  t
+  -> f:(t -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
+
+(** Promote the exact retained owner after current local-principal authorization.
+    Stopped selection does not start a session; reads/replay/gate commits never call it. *)
+val select_session
+  :  host
+  -> Agent_protocol.Session_lifecycle.Expected.t
+  -> (unit, Agent_protocol.Error.t) Result.t

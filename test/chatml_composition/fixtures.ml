@@ -67,9 +67,38 @@ let call_events calls =
   |> Stdlib.List.to_seq
 ;;
 
+(* Fixture polling and safety deadlines retain the real environment. Paused
+   daemon clocks must be released before the switch joins scheduler fibers,
+   including when construction or a fixture assertion raises. *)
+let with_daemon_switch env ~clocks f =
+  Eio.Switch.run (fun sw ->
+    let clock, mono_clock, release_clocks = clocks env in
+    Exn.protect ~finally:release_clocks ~f:(fun () ->
+      let daemon_env =
+        object
+          method fs = env#fs
+          method cwd = env#cwd
+          method stdin = env#stdin
+          method stdout = env#stdout
+          method stderr = env#stderr
+          method net = env#net
+          method domain_mgr = env#domain_mgr
+          method process_mgr = env#process_mgr
+          method clock = clock
+          method mono_clock = mono_clock
+          method secure_random = env#secure_random
+          method debug = env#debug
+          method backend_id = env#backend_id
+        end
+      in
+      f sw daemon_env))
+;;
+
 let with_daemon
       ?validation_host
       ?config_file
+      ?(daemon_clocks =
+        fun env -> Eio.Stdenv.clock env, Eio.Stdenv.mono_clock env, ignore)
       ?job_limits
       ?(factory_limits = Agent_server.Daemon.default_options.factory_limits)
       ?(runtime_policy = Chat_response.Runtime_semantics.default_policy)
@@ -169,11 +198,11 @@ let with_daemon
             provider_failure := Some error;
             raise error
         in
-        Eio.Switch.run (fun sw ->
+        with_daemon_switch env ~clocks:daemon_clocks (fun sw daemon_env ->
           let daemon =
             Agent_server.Daemon.start
               ~sw
-              ~env
+              ~env:daemon_env
               ~config:configuration
               ~tool_dir:root
               ~home:root

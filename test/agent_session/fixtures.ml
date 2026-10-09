@@ -22,6 +22,18 @@ let document_ok = function
     raise_s [%sexp "unexpected document error", (error : Document_schema.Error.t)]
 ;;
 
+let pending_document ~generation entry =
+  let value =
+    Agent_protocol.Pending_input.create
+      ~entry
+      ~generation
+      ~binding:Agent_protocol.Pending_input.Binding.safe_boundary
+    |> protocol_ok
+  in
+  Agent_session.Pending_input_document.authored value ~limits:document_limits
+  |> document_ok
+;;
+
 let state_document state =
   Agent_session.Session_state_document.encode
     (Agent_session.Session_state_document.authored state)
@@ -586,6 +598,7 @@ let with_handoff_actor ?(reject = fun _ -> false) ?inference ~make_worker f =
               |> Agent_session.History_codec.to_protocol
             in
             Agent_session.Session_actor.submit_message
+              ~submitting_principal:principal_id
               actor
               ~attachment_id:writer.id
               entry
@@ -977,4 +990,45 @@ let delegation_inference_target () =
   |> Result.map_error ~f:(fun error ->
     Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
   |> Result.ok_or_failwith
+;;
+
+(* Historical fixture inputs must actually have the pre-pending wrapper shape;
+   current fields are not compatible unknowns in an old schema version. *)
+let legacy_pending_payload payload =
+  match payload with
+  | `Object fields ->
+    `Object
+      (List.map fields ~f:(fun (name, value) ->
+         if String.equal name "conversation"
+         then (
+           match value with
+           | `Object fields ->
+             let fields =
+               List.filter fields ~f:(fun (name, _) ->
+                 not
+                   (String.equal name "pending_revision"
+                    || String.equal name "pending_dispositions"))
+             in
+             ( name
+             , `Object
+                 (List.map fields ~f:(fun (name, value) ->
+                    if String.equal name "deferred_user_entries"
+                    then (
+                      match value with
+                      | `Array entries ->
+                        ( name
+                        , `Array
+                            (List.map entries ~f:(fun wrapper ->
+                               match Document_schema.Json.field wrapper ~name:"entry" with
+                               | Value entry -> entry
+                               | Absent | Null ->
+                                 failwith "expected current pending fixture wrapper")) )
+                      | `Null | `True | `False | `Number _ | `String _ | `Object _ ->
+                        failwith "expected fixture pending array")
+                    else name, value)) )
+           | `Null | `True | `False | `Number _ | `String _ | `Array _ ->
+             failwith "expected fixture conversation")
+         else name, value))
+  | `Null | `True | `False | `Number _ | `String _ | `Array _ ->
+    failwith "expected fixture state payload"
 ;;

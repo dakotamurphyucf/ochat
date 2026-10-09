@@ -71,10 +71,10 @@ Do not paste credentials into the agent definition or a bug report.
 After the response finishes, press <kbd>Esc</kbd> to leave Insert mode, type
 `:q`, and press Enter. You should return to your shell.
 
-Native local state is transient: quitting ends this host and does not leave an
-agent running in the background. The agent definition on disk remains available
-for the next launch. See the persistence details below before choosing another
-host mode.
+Quitting ends this process-bound host and leaves durable records under
+`$HOME/.ochat/agent-store`; it does not leave an agent running in the background.
+Use `--transient` when you want disposable records. See the persistence details
+below to inspect, export or explicitly select a retained session.
 
 ## 5. Use an agent in your own project
 
@@ -91,7 +91,8 @@ changing the workspace does not grant this tool-free agent access to files.
 Continue with [the file-tool tutorial](../../tutorials/file-tool.md) to add a
 read-oriented tool, then [a specialist reviewer](../../tutorials/specialist.md).
 
-There is no native local `--workspace` or `--data-root` TUI option. In the native
+There is no native local `--workspace` TUI option. `--data-root` selects an
+absolute durable storage root, independently of the workspace. In the native
 host, `${prompt_dir}` points into the materialized prompt artifact; imported
 sources have their own captured `${source_dir}`. Uncaptured neighboring files
 are not copied automatically. Use `${workspace}` or explicit tool roots for
@@ -99,10 +100,28 @@ project data; see [workspace and file roots](../../guide/chat_tui.md#workspace-a
 
 ## Persistence and compatibility
 
-Native local TUI has process-bound transient state. Quit ends the host; it does
-not turn it into a background daemon. Use a detached daemon session when it must
-outlive the terminal. Local stdio or the embedding API can use a persistent data
-root without a daemon, but remain process-bound.
+Native local records are durable by default under `$HOME/.ochat/agent-store`.
+`--data-root /absolute/path` selects another root; `--transient` selects disposable
+storage. Quit always ends the host. There is no implicit legacy migration, no cwd
+fallback when HOME is absent, and no workspace substitution when reopening.
+
+Use the native catalog explicitly:
+
+```sh
+chat-tui --no-config --local --list-sessions --json
+chat-tui --no-config --local --session-info SESSION_ID --json
+chat-tui --no-config --local --export-session SESSION_ID --out /tmp/session.chatmd
+chat-tui --no-config --local --session SESSION_ID
+```
+
+The first three commands read without execution selection, including archived
+records. Export reuses the authorized session blob/download path. The last
+command explicitly selects the exact inspected lifecycle anchor before attaching;
+it preserves saved identity, source and workspace. A stopped session stays stopped,
+and an archived or restore-gated session needs the supported lifecycle Restore
+and Resume commands first. A gate commit alone does not report running.
+
+Use a detached daemon session when work must outlive the terminal.
 
 Older file-backed sessions remain available through compatibility flags, without
 explicit `--local`. For example (replace the prompt path):
@@ -130,7 +149,8 @@ See the [CLI reference](../../bin/chat_tui.doc.md) for exact flags and conflicts
 ## Checkpoint and next step
 
 You opened a tool-free agent, observed a completed response, and returned to the
-shell. The source remains on disk; the native session ended. If you used a private
-copy, archive or remove that copy after exit. Runtime/provider logs may be separate.
+shell. The local host has stopped; its durable session remains available for
+inspection and explicit resume. If you used a private prompt copy, keep it available
+at its recorded path when resuming. Runtime/provider logs may be separate.
 Next, [give the agent a file tool](../../tutorials/file-tool.md).
 Use the [example catalog](../../examples/README.md) for the complete hello source.

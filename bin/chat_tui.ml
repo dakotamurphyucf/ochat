@@ -1220,6 +1220,8 @@ module Cli = struct
     ; inference_transport : string option
     ; conversation_file : string
     ; local : bool
+    ; local_data_root : string option
+    ; local_transient : bool
     ; authoring_package_files : string list
     ; authoring_options : Agent_server.Authoring_options.t
     ; connect : string option
@@ -1337,8 +1339,15 @@ module Cli = struct
         ; bearer_token_file : string option
         ; command : daemon_admin
         }
+    | Embedded_admin of
+        { prompt_file : string
+        ; storage : Agent_server.Local_storage.t
+        ; command : daemon_admin
+        }
     | Embedded_interactive of
         { prompt_file : string
+        ; storage : Agent_server.Local_storage.t
+        ; session_id : string option
         ; authoring_package_files : string list
         ; authoring_budget : Chat_response.Authoring_validation.context_budget option
         ; textmate_grammar_files : string list
@@ -1435,8 +1444,26 @@ module Cli = struct
     | _, false -> Ok true
   ;;
 
+  let local_storage t =
+    let open Or_error.Let_syntax in
+    match t.local_transient, t.local_data_root with
+    | true, Some _ ->
+      Or_error.error_string "Error: --transient and --data-root are mutually exclusive."
+    | true, None -> Ok Agent_server.Local_storage.Transient
+    | false, None -> Ok Agent_server.Local_storage.Default
+    | false, Some path ->
+      let%map root =
+        Agent_server.Local_storage.Root.create ~path ()
+        |> Result.map_error ~f:(fun error ->
+          Error.create_s [%sexp (error : Agent_protocol.Error.t)])
+      in
+      Agent_server.Local_storage.Durable root
+  ;;
+
   let validate_global t =
-    if Option.is_some t.session_id && t.new_session
+    if (t.local_transient || Option.is_some t.local_data_root) && not t.local
+    then Or_error.error_string "Error: --transient and --data-root require --local."
+    else if Option.is_some t.session_id && t.new_session
     then
       Or_error.error_string "Error: --session and --new-session are mutually exclusive."
     else if t.parallel_tool_calls && t.no_parallel_tool_calls
@@ -1504,7 +1531,7 @@ module Cli = struct
     then Or_error.error_string "Error: daemon session flags require --connect."
     else (
       let legacy_only_requested =
-        Option.is_some t.session_id
+        (Option.is_some t.session_id && not t.local)
         || t.new_session
         || Option.is_some t.export_file
         || t.no_persist
@@ -1519,11 +1546,14 @@ module Cli = struct
            --local."
       else if t.local || not (legacy_only_requested || t.authorize_shell_manifest)
       then (
+        let%bind storage = local_storage t in
         let%map authoring_budget =
           Agent_server.Authoring_options.resolve t.authoring_options
         in
         Embedded_interactive
           { prompt_file = t.conversation_file
+          ; storage
+          ; session_id = t.session_id
           ; authoring_package_files = t.authoring_package_files
           ; authoring_budget
           ; textmate_grammar_files = t.textmate_grammar_files
@@ -1700,9 +1730,38 @@ module Cli = struct
     Daemon_admin { connect; bearer_token_file = t.bearer_token_file; command }
   ;;
 
+  let normalize_embedded_selected t sel =
+    let open Or_error.Let_syntax in
+    let%bind () = require_no_local_session_selection t in
+    let%bind storage = local_storage t in
+    let%map command =
+      match sel with
+      | Sel_list_sessions ->
+        let%map format = list_sessions_format t in
+        List { format }
+      | Sel_session_info id ->
+        let%map format = session_info_format t in
+        Info { id; format }
+      | Sel_export_session id ->
+        (match t.export_out_file with
+         | Some out_file -> Ok (Export { id; out_file })
+         | None -> Or_error.error_string "Error: --export-session requires --out.")
+      | Sel_start_session _
+      | Sel_stop_session _
+      | Sel_delete_session _
+      | Sel_reset_session _
+      | Sel_rebuild_from_prompt _ ->
+        Or_error.error_string "Error: this mutation requires --connect."
+    in
+    Embedded_admin { prompt_file = t.conversation_file; storage; command }
+  ;;
+
   let normalize_selected t sel =
     match t.connect with
-    | None -> normalize_local_selected t sel
+    | None ->
+      if t.local
+      then normalize_embedded_selected t sel
+      else normalize_local_selected t sel
     | Some connect -> normalize_daemon_selected t ~connect sel
   ;;
 
@@ -2102,6 +2161,8 @@ module Embedded_interactive = struct
         ~typeahead_config
         ~env
         ~prompt_file
+        ~storage
+        ~session_id
         ~textmate_grammar_files
         ~authoring_package_files
         ~authoring_budget
@@ -2110,14 +2171,14 @@ module Embedded_interactive = struct
     Eio.Switch.run
     @@ fun sw ->
     let workspace = working_directory env in
-    let home = Sys.getenv "HOME" |> Option.value ~default:workspace in
+    let home = Sys.getenv "HOME" in
     let options =
       Agent_server.Embedded.
         { prompt_file = absolute_path ~cwd:workspace prompt_file
         ; workspace
         ; tool_dir = workspace
         ; home
-        ; data_root = None
+        ; storage
         ; start_immediately = true
         ; permission_profile = interactive_permission_profile ~authorize_shell_manifest
         ; attachment_mode = Agent_protocol.Session.Read_write
@@ -2134,45 +2195,177 @@ module Embedded_interactive = struct
         ~env
         ~default_model:"gpt-4.5-preview"
     in
-    Agent_server.Embedded.start
-      ~daemon_options:(Inference_composition.daemon_options inference_host)
-      ~sw
-      ~env
-      ~authoring_package_files
-      ?authoring_budget
-      options
-    |> Result.map_error ~f:protocol_error
-    |> Or_error.bind ~f:(fun host ->
-      Fun.protect
-        ~finally:(fun () -> Agent_server.Embedded.close host)
-        (fun () ->
-           let connection = Agent_server.Embedded.connect host in
-           Fun.protect
-             ~finally:(fun () -> Agent_client.Connection.close connection)
-             (fun () ->
-                Chat_tui.Agent_session_client.attach
-                  ~sw
-                  ~clock:(Eio.Stdenv.clock env)
-                  ~connection
-                  ~session_id:(Agent_server.Embedded.session_id host)
-                  ~mode:Agent_protocol.Session.Read_write
-                  ()
-                |> Result.map_error ~f:protocol_error
-                |> Or_error.map ~f:(fun client ->
-                  let typeahead_inference =
-                    private_typeahead_execution
-                      typeahead_config
-                      ~sw
-                      ~env
-                      ~host:(Some inference_host)
-                  in
-                  Chat_tui.App.run_agent_session
-                    ?typeahead_inference
-                    ~typeahead_config
-                    ~env
-                    ~client
-                    ~textmate_grammar_files
-                    ()))))
+    let run_attached embedded =
+      let open Result.Let_syntax in
+      let%bind connection = Agent_server.Embedded.connect_owned embedded in
+      let%map client =
+        Chat_tui.Agent_session_client.attach
+          ~sw
+          ~clock:(Eio.Stdenv.clock env)
+          ~connection
+          ~session_id:(Agent_server.Embedded.session_id embedded)
+          ~mode:Agent_protocol.Session.Read_write
+          ()
+      in
+      let typeahead_inference =
+        private_typeahead_execution typeahead_config ~sw ~env ~host:(Some inference_host)
+      in
+      Chat_tui.App.run_agent_session
+        ?typeahead_inference
+        ~typeahead_config
+        ~env
+        ~client
+        ~textmate_grammar_files
+        ()
+    in
+    let daemon_options = Inference_composition.daemon_options inference_host in
+    let result =
+      let open Result.Let_syntax in
+      match session_id with
+      | None ->
+        let%bind embedded =
+          Agent_server.Embedded.start
+            ~daemon_options
+            ~sw
+            ~env
+            ~authoring_package_files
+            ?authoring_budget
+            options
+        in
+        Agent_server.Embedded.with_session embedded ~f:run_attached
+      | Some id ->
+        let%bind id = Agent_protocol.Id.Session.of_string id in
+        Agent_server.Embedded.with_local_host
+          ~daemon_options
+          ~sw
+          ~env
+          ~authoring_package_files
+          ?authoring_budget
+          options
+          ~f:(fun host ->
+            let%bind snapshot =
+              Agent_client.Admin.get_session
+                (Agent_server.Embedded.host_connection host)
+                id
+            in
+            let%bind observation =
+              Result.of_option
+                (Agent_protocol.Public.Snapshot.fields snapshot).lifecycle
+                ~error:
+                  (Agent_protocol.Error.invalid_request
+                     "session lacks lifecycle authority")
+            in
+            let%bind embedded =
+              Agent_server.Embedded.attach_retained
+                host
+                ~mode:options.attachment_mode
+                ~expected:
+                  (Agent_protocol.Session_lifecycle.Observation.expected observation)
+            in
+            run_attached embedded)
+    in
+    Result.map_error result ~f:protocol_error
+  ;;
+end
+
+module Embedded_admin = struct
+  let protocol_error error = Error.create_s [%sexp (error : Agent_protocol.Error.t)]
+
+  let list connection =
+    let open Result.Let_syntax in
+    let%bind page = Agent_protocol.Page.Request.create ~limit:1000 () in
+    let query =
+      Agent_protocol.Session.List_request.
+        { organization = Agent_protocol.Session_organization.Query.default
+        ; page
+        ; desired_state = None
+        ; prompt_id = None
+        ; workspace_id = None
+        ; owner_principal_id = None
+        ; creator_principal_id = None
+        ; active_owner_principal_id = None
+        ; labels = []
+        ; sort = Agent_protocol.Session_catalog_query.Sort.default
+        ; archive = All
+        }
+    in
+    let%map entries =
+      Agent_client.Admin.enumerate_sessions
+        connection
+        ~query
+        ~max_sessions:100_000
+        ~max_pages:100
+    in
+    List.map entries ~f:(fun entry -> entry.Agent_protocol.Session_catalog.session)
+  ;;
+
+  let export ~env connection id ~out_file =
+    let open Result.Let_syntax in
+    let%bind session_id = Agent_protocol.Id.Session.of_string id in
+    let%bind exported =
+      Agent_client.Admin.export_session
+        connection
+        ~session_id
+        ~format:(Daemon_admin.export_format out_file)
+        ~revision:None
+        ~history:None
+    in
+    let path = Daemon_admin.output_path env out_file in
+    if not (Daemon_admin.confirm_overwrite ~env ~path ~out_file)
+    then (
+      Daemon_admin.write env "Aborted.\n";
+      Ok ())
+    else
+      Agent_client.Blob_download.install_atomic ~path ~download:(fun output ->
+        Agent_client.Blob_download.download
+          ~connection
+          ~session_id
+          ~attachment_id:None
+          ~blob:exported.blob
+          ~output)
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.create
+          Persistence_error
+          ~message:(Error.to_string_hum error)
+          ~retryable:true
+          ())
+      |> Result.map ~f:(fun () ->
+        Daemon_admin.write env (sprintf "Session export written to %s\n" out_file))
+  ;;
+
+  let run ~env ~prompt_file ~storage ~command =
+    Eio.Switch.run (fun sw ->
+      let cwd = Embedded_interactive.working_directory env in
+      let options =
+        Agent_server.Embedded.
+          { prompt_file = Embedded_interactive.absolute_path ~cwd prompt_file
+          ; workspace = cwd
+          ; tool_dir = cwd
+          ; home = Sys.getenv "HOME"
+          ; storage
+          ; start_immediately = false
+          ; permission_profile = default_permission_profile
+          ; attachment_mode = Read_only
+          ; event_capacity = 256
+          }
+      in
+      Agent_server.Embedded.with_local_host ~sw ~env options ~f:(fun host ->
+        let connection = Agent_server.Embedded.host_connection host in
+        let open Result.Let_syntax in
+        match command with
+        | Cli.List { format } ->
+          let%map sessions = list connection in
+          Daemon_admin.write_sessions env format sessions
+        | Info { id; format } ->
+          let%bind id = Agent_protocol.Id.Session.of_string id in
+          let%map snapshot = Agent_client.Admin.get_session connection id in
+          Daemon_admin.write_info env format snapshot
+        | Export { id; out_file } -> export ~env connection id ~out_file
+        | Reset _ | Rebuild _ | Start _ | Stop _ | Delete _ ->
+          Error
+            (Agent_protocol.Error.invalid_request
+               "local read command cannot mutate a session"))
+      |> Result.map_error ~f:protocol_error)
   ;;
 end
 
@@ -2192,7 +2385,11 @@ let run_env_action ~env (action : Cli.action) =
     Handlers.handle_rebuild_from_prompt ~env ~id ~dry_run ~prompt_preview_max
   | Export_session { id; out_file } ->
     Handlers.handle_export_session ~env ~id ~outfile:out_file
-  | Interactive _ | Daemon_interactive _ | Daemon_admin _ | Embedded_interactive _ -> ()
+  | Interactive _
+  | Daemon_interactive _
+  | Daemon_admin _
+  | Embedded_admin _
+  | Embedded_interactive _ -> ()
 ;;
 
 let run_action ~transport_policy ~typeahead_config (action : Cli.action) =
@@ -2232,8 +2429,12 @@ let run_action ~transport_policy ~typeahead_config (action : Cli.action) =
         ~textmate_grammar_files)
   | Daemon_admin { connect; bearer_token_file; command } ->
     Env.with_env (fun env -> Daemon_admin.run ~env ~connect ~bearer_token_file ~command)
+  | Embedded_admin { prompt_file; storage; command } ->
+    Env.with_env (fun env -> Embedded_admin.run ~env ~prompt_file ~storage ~command)
   | Embedded_interactive
       { prompt_file
+      ; storage
+      ; session_id
       ; textmate_grammar_files
       ; authoring_package_files
       ; authoring_budget
@@ -2245,6 +2446,8 @@ let run_action ~transport_policy ~typeahead_config (action : Cli.action) =
         ~typeahead_config
         ~env
         ~prompt_file
+        ~storage
+        ~session_id
         ~textmate_grammar_files
         ~authoring_package_files
         ~authoring_budget
@@ -2340,6 +2543,13 @@ let raw_flags_param =
         "--bearer-token-file"
         (optional string)
         ~doc:"FILE Read the HTTP daemon bearer token from FILE using Eio."
+    and local_data_root =
+      flag
+        "--data-root"
+        (optional string)
+        ~doc:"DIR Absolute durable root for --local (default HOME/.ochat/agent-store)."
+    and local_transient =
+      flag "--transient" no_arg ~doc:"Use explicit temporary storage with --local."
     and inference_transport =
       flag
         "--inference-transport"
@@ -2357,8 +2567,8 @@ let raw_flags_param =
         "--session"
         (optional string)
         ~doc:
-          "NAME Resume session NAME (a directory name under $HOME/.ochat/sessions). \
-           Incompatible with --new-session."
+          "ID With --local, explicitly select a retained agent session; otherwise resume \
+           a legacy session. Incompatible with --new-session."
     and new_session =
       flag
         "--new-session"
@@ -2548,6 +2758,8 @@ let raw_flags_param =
      ; inference_transport
      ; conversation_file
      ; local
+     ; local_data_root
+     ; local_transient
      ; authoring_package_files
      ; authoring_options
      ; connect

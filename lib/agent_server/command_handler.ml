@@ -23,6 +23,8 @@ type t =
   ; blob_store : Agent_store.Blob_store.t
   ; session_store : Agent_store.Session_store.t
   ; lifecycle_service : Session_lifecycle_service.t
+  ; retained : Retained_session.t
+  ; archive_payload_limit : int
   ; initialize :
       principal:Agent_protocol.Principal.t
       -> Agent_protocol.Initialize.Request.t
@@ -56,6 +58,8 @@ let create
       ~blob_store
       ~session_store
       ~lifecycle_service
+      ~retained
+      ~archive_payload_limit
       ~initialize
       ~ping
       ~server_info
@@ -86,6 +90,8 @@ let create
   ; blob_store
   ; session_store
   ; lifecycle_service
+  ; retained
+  ; archive_payload_limit
   ; initialize
   ; ping
   ; server_info
@@ -101,11 +107,22 @@ let create
 let error code message = Agent_protocol.Error.create code ~message ~retryable:false ()
 
 let persistence_error failure =
-  Agent_protocol.Error.create
-    Persistence_error
-    ~message:(Sexp.to_string_hum ([%sexp_of: Agent_store.Store_error.t] failure))
-    ~retryable:true
-    ()
+  match failure with
+  | Agent_store.Store_error.Admission_capacity _ ->
+    Agent_store.Store_error.to_protocol_error failure
+  | Locked _
+  | Missing _
+  | Schema_too_new _
+  | Migration_required _
+  | Document _
+  | Framing _
+  | Corrupt _
+  | Io _ ->
+    Agent_protocol.Error.create
+      Persistence_error
+      ~message:(Sexp.to_string_hum ([%sexp_of: Agent_store.Store_error.t] failure))
+      ~retryable:true
+      ()
 ;;
 
 let workspace_unavailable failure =
@@ -339,8 +356,13 @@ let idempotency = function
     standard (Some request.session_id) request.idempotency_key
   | Session_configuration_update request ->
     protected (Some request.session_id) request.idempotency_key
+  | Session_run_start request -> protected (Some request.session_id) request.key
   | Session_send_message request ->
     protected (Some request.session_id) request.idempotency_key
+  | Session_cancel_pending_input request ->
+    protected (Some request.session_id) request.idempotency_key
+  | Session_replace_pending_input request ->
+    protected (Some request.target.session_id) request.target.idempotency_key
   | Session_compact request -> protected (Some request.session_id) request.idempotency_key
   | Session_edit_history request ->
     protected (Some request.session_id) request.idempotency_key
@@ -390,6 +412,10 @@ let idempotency = function
   | Session_work _
   | Session_search _
   | Session_search_navigate _
+  | Session_runs _
+  | Session_run _
+  | Session_pending_inputs _
+  | Session_pending_input _
   | Session_list _
   | Session_get _
   | Session_configuration_get _
@@ -482,7 +508,7 @@ let store_outcome t key digest result =
   |> Result.bind ~f:(fun _ -> result)
 ;;
 
-let handle_idempotent t context command identity execute =
+let with_idempotency_owner t context command identity ~prepare ~complete =
   Eio.Mutex.use_rw ~protect:true t.idempotency_mutex (fun () ->
     let open Result.Let_syntax in
     let principal = Connection_context.principal context in
@@ -495,6 +521,7 @@ let handle_idempotent t context command identity execute =
     | Conflict _ ->
       Error (error Idempotency_conflict "idempotency key was used for another request")
     | Missing ->
+      let%bind execute = prepare () in
       let%bind _ = pending_record t key digest identity.retention in
       let%bind command_audit =
         Agent_store.Idempotency_store.Command_audit.
@@ -508,7 +535,17 @@ let handle_idempotent t context command identity execute =
         |> Agent_store.Idempotency_store.Command_audit.encode
         |> Result.map_error ~f:persistence_error
       in
-      store_outcome t key digest (execute (Some command_audit)))
+      complete ~key ~digest (execute (Some command_audit)))
+;;
+
+let handle_idempotent t context command identity ~prepare =
+  with_idempotency_owner
+    t
+    context
+    command
+    identity
+    ~prepare
+    ~complete:(fun ~key ~digest result -> store_outcome t key digest result)
 ;;
 
 let mutation session =
@@ -534,15 +571,7 @@ let principal_is_admin principal =
   Agent_protocol.Principal.has_scope principal Administer_configuration
 ;;
 
-let session_visible_to principal (session : Agent_protocol.Session.t) =
-  principal_is_admin principal
-  || Option.value_map
-       session.Agent_protocol.Session.creator
-       ~default:false
-       ~f:(fun creator ->
-         Agent_protocol.Id.Principal.compare creator principal.Agent_protocol.Principal.id
-         = 0)
-;;
+let session_visible_to = Authorization.session_visible_to
 
 let state_visible_to principal state =
   session_visible_to principal (Agent_session.Session_state.summary state)
@@ -561,6 +590,39 @@ let require_connection_attachment context ~session_id ~attachment_id =
   if Connection_context.owns_attachment context ~session_id ~attachment_id
   then Ok ()
   else Error (error Permission_denied "attachment is not owned by this connection")
+;;
+
+let with_retained_artifact t context ~session_id ~attachment_id f =
+  let open Result.Let_syntax in
+  let%bind () =
+    match attachment_id with
+    | None -> Ok ()
+    | Some attachment_id ->
+      require_connection_attachment context ~session_id ~attachment_id
+  in
+  let principal = Connection_context.principal context in
+  Retained_session.with_state
+    t.retained
+    ~session_id
+    ~authorize:(fun summary ->
+      if session_visible_to principal summary
+      then Ok ()
+      else Error (error Permission_denied "session is not visible to this principal"))
+    ~f:(fun handle state ->
+      let%bind () =
+        match attachment_id with
+        | None -> Ok ()
+        | Some attachment_id ->
+          if
+            Option.is_some (Session_registry.find t.registry session_id)
+            && List.exists
+                 state.Agent_session.Session_state.attachments
+                 ~f:(fun attachment ->
+                   Agent_protocol.Id.Attachment.equal attachment.id attachment_id)
+          then Ok ()
+          else Error (error Permission_denied "attachment is no longer current")
+      in
+      f handle state)
 ;;
 
 let require_connection_writer context attachment_id =
@@ -638,53 +700,51 @@ let handle_workspace_get t request =
   |> Result.map ~f:(fun workspace -> Agent_protocol.Method_result.Workspace_get workspace)
 ;;
 
-let handle_blob_read t context request =
-  let open Result.Let_syntax in
-  let%bind () =
-    require_connection_attachment
-      context
-      ~session_id:request.Agent_protocol.Blob.Read_request.session_id
-      ~attachment_id:request.attachment_id
-  in
-  let%bind entry, _ = find_visible_entry t context request.session_id in
-  let%bind store_handle =
-    entry.Session_registry.store_handle
-    |> Result.of_option ~error:(error Invalid_state "session has no durable blob store")
-  in
-  let%bind handle =
-    Agent_store.Blob_store.open_session t.blob_store store_handle request.blob_id
-    |> Result.map_error ~f:persistence_error
-  in
-  let%bind metadata =
-    Agent_store.Blob_store.Handle.metadata_checked handle
-    |> Result.map_error ~f:persistence_error
-  in
-  let blob = metadata.blob in
-  let%bind () =
-    if Principal_projection.can_read_blob (Connection_context.principal context) metadata
-    then Ok ()
-    else Error (error Permission_denied "blob requires additional principal scopes")
-  in
-  if Int64.(request.offset > blob.byte_length)
-  then Error (error Invalid_request "blob read offset exceeds the blob length")
-  else (
-    let%map data =
-      Agent_store.Blob_store.read_range
-        t.blob_store
-        ~sw:t.sw
-        handle
-        ~offset:request.offset
-        ~max_bytes:request.max_bytes
-      |> Result.map_error ~f:persistence_error
-    in
-    let next_offset = Int64.(request.offset + of_int (String.length data)) in
-    Agent_protocol.Method_result.Blob_read
-      { blob
-      ; offset = request.offset
-      ; next_offset
-      ; data_base64 = Base64.encode_exn data
-      ; eof = Int64.equal next_offset blob.byte_length
-      })
+let handle_blob_read t context (request : Agent_protocol.Blob.Read_request.t) =
+  with_retained_artifact
+    t
+    context
+    ~session_id:request.session_id
+    ~attachment_id:request.attachment_id
+    (fun store_handle _state ->
+       let open Result.Let_syntax in
+       let%bind handle =
+         Agent_store.Blob_store.open_session t.blob_store store_handle request.blob_id
+         |> Result.map_error ~f:persistence_error
+       in
+       let%bind metadata =
+         Agent_store.Blob_store.Handle.metadata_checked handle
+         |> Result.map_error ~f:persistence_error
+       in
+       let blob = metadata.blob in
+       let%bind () =
+         if
+           Principal_projection.can_read_blob
+             (Connection_context.principal context)
+             metadata
+         then Ok ()
+         else Error (error Permission_denied "blob requires additional principal scopes")
+       in
+       if Int64.(request.offset > blob.byte_length)
+       then Error (error Invalid_request "blob read offset exceeds the blob length")
+       else (
+         let%map data =
+           Agent_store.Blob_store.read_range
+             t.blob_store
+             ~sw:t.sw
+             handle
+             ~offset:request.offset
+             ~max_bytes:request.max_bytes
+           |> Result.map_error ~f:persistence_error
+         in
+         let next_offset = Int64.(request.offset + of_int (String.length data)) in
+         Agent_protocol.Method_result.Blob_read
+           { blob
+           ; offset = request.offset
+           ; next_offset
+           ; data_base64 = Base64.encode_exn data
+           ; eof = Int64.equal next_offset blob.byte_length
+           }))
 ;;
 
 let rec forward_subscriber context ~attachment subscriber =
@@ -1018,6 +1078,150 @@ let handle_session_search t context request =
     ~f:(fun page -> Agent_protocol.Method_result.Session_search page)
 ;;
 
+(* History mutations require a still-loaded actor owned by this attachment.
+   Checking a stale connection must never invoke the activating durable loader. *)
+let with_attached_writer t context ~session_id ~attachment_id f =
+  let open Result.Let_syntax in
+  let%bind () = require_connection_attachment context ~session_id ~attachment_id in
+  let%bind () = require_connection_writer context attachment_id in
+  let%bind entry =
+    match Session_registry.find t.registry session_id with
+    | Some entry -> Ok entry
+    | None -> Error (error Lease_stale "attachment is stale; attach to the session again")
+  in
+  let%bind () = Agent_session.Session_actor.authorize_writer entry.actor ~attachment_id in
+  f entry
+;;
+
+let pending_service t context =
+  Pending_service.create
+    (Connection_context.principal context)
+    ~read:(read_visible_state t context)
+    ~pagination:t.pagination
+;;
+
+let run_read_service t ~actor context =
+  let open Result.Let_syntax in
+  let current () =
+    if Operator_authorization.is_current actor
+    then Ok ()
+    else Error (error Permission_denied "run inspection authority expired or was revoked")
+  in
+  let%bind () = current () in
+  let read session_id =
+    let%bind () = current () in
+    let%bind state = read_visible_state t context session_id in
+    let%map () = current () in
+    state
+  in
+  Run_read_service.create
+    (Connection_context.principal context)
+    ~server_id:(Agent_store.Session_store.server_id t.session_store)
+    ~read
+    ~pagination:t.pagination
+;;
+
+let handle_runs t ~actor context (request : Agent_protocol.Run_query.Request.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    if request.page.limit > (t.server_info ()).limits.max_page_size
+    then Error (error Invalid_request "run page exceeds the advertised page limit")
+    else Ok ()
+  in
+  let%bind service = run_read_service t ~actor context in
+  let%map page = Run_read_service.list service request in
+  Agent_protocol.Method_result.Session_runs page
+;;
+
+let handle_run t ~actor context request =
+  let open Result.Let_syntax in
+  let%bind service = run_read_service t ~actor context in
+  let%map outcome = Run_read_service.lookup service request in
+  Agent_protocol.Method_result.Session_run outcome
+;;
+
+let handle_pending_inputs t context (request : Agent_protocol.Pending_query.Request.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    if request.page.limit > (t.server_info ()).limits.max_page_size
+    then Error (error Invalid_request "pending page exceeds the advertised page limit")
+    else Ok ()
+  in
+  let%bind service = pending_service t context in
+  let%map view = Pending_service.list service request in
+  Agent_protocol.Method_result.Session_pending_inputs view
+;;
+
+let handle_pending_input t context request =
+  let open Result.Let_syntax in
+  let%bind service = pending_service t context in
+  let%map outcome = Pending_service.lookup service request in
+  Agent_protocol.Method_result.Session_pending_input outcome
+;;
+
+let require_pending_transcript context =
+  if
+    Agent_protocol.Principal.has_scope
+      (Connection_context.principal context)
+      View_session_transcript
+  then Ok ()
+  else
+    Error
+      (error Permission_denied "pending controls require current transcript visibility")
+;;
+
+let handle_cancel_pending
+      t
+      context
+      command_audit
+      (request : Agent_protocol.Pending_control.Cancel_request.t)
+  =
+  let open Result.Let_syntax in
+  let%bind () = require_pending_transcript context in
+  with_attached_writer
+    t
+    context
+    ~session_id:request.session_id
+    ~attachment_id:request.attachment_id
+    (fun entry ->
+       let principal = Connection_context.principal context in
+       let%map result =
+         Agent_session.Session_actor.cancel_pending
+           entry.actor
+           ?command_audit
+           ~principal:principal.id
+           ~project:(Principal_projection.pending_history_entry principal)
+           request
+       in
+       Agent_protocol.Method_result.Session_cancel_pending_input result)
+;;
+
+let handle_replace_pending
+      t
+      context
+      command_audit
+      (request : Agent_protocol.Pending_control.Replace_request.t)
+  =
+  let open Result.Let_syntax in
+  let%bind () = require_pending_transcript context in
+  with_attached_writer
+    t
+    context
+    ~session_id:request.target.session_id
+    ~attachment_id:request.target.attachment_id
+    (fun entry ->
+       let principal = Connection_context.principal context in
+       let%map result =
+         Agent_session.Session_actor.replace_pending
+           entry.actor
+           ?command_audit
+           ~principal:principal.id
+           ~project:(Principal_projection.pending_history_entry principal)
+           request
+       in
+       Agent_protocol.Method_result.Session_replace_pending_input result)
+;;
+
 let handle_inference_summary
       t
       context
@@ -1171,32 +1375,48 @@ let handle_session_renew_owner t context command_audit request =
   Agent_protocol.Method_result.Session_renew_owner (lease, mutation session)
 ;;
 
-let with_writer t context ~session_id ~attachment_id f =
-  let open Result.Let_syntax in
-  let%bind () = require_connection_attachment context ~session_id ~attachment_id in
-  let%bind entry = find_entry t session_id in
-  let%bind () = Agent_session.Session_actor.authorize_writer entry.actor ~attachment_id in
-  f entry
-;;
+(* Borrowed only by one fresh command execution; never cached. Physical identity
+   deliberately checks the actual registry-owned Entry capability after yielding
+   Pending persistence, rather than equality of its session projection. *)
+module Prepared_writer = struct
+  type t =
+    { entry : Session_registry.entry
+    ; session_id : Agent_protocol.Id.Session.t
+    ; attachment_id : Agent_protocol.Id.Attachment.t
+    }
 
-(* History mutations require a still-loaded actor owned by this attachment.
-   Checking a stale connection must never invoke the activating durable loader. *)
-let with_attached_writer t context ~session_id ~attachment_id f =
+  let create entry ~session_id ~attachment_id = { entry; session_id; attachment_id }
+
+  let entry t ~registry ~session_id ~attachment_id =
+    if
+      (not (Agent_protocol.Id.Session.equal t.session_id session_id))
+      || not (Agent_protocol.Id.Attachment.equal t.attachment_id attachment_id)
+    then Error (error Invalid_state "prepared writer does not match the command")
+    else (
+      match Session_registry.find registry session_id with
+      | Some current when phys_equal current t.entry -> Ok current
+      | Some _ | None ->
+        Error (error Invalid_state "prepared writer owner is no longer current"))
+  ;;
+end
+
+let with_writer t ?prepared_writer context ~session_id ~attachment_id f =
   let open Result.Let_syntax in
   let%bind () = require_connection_attachment context ~session_id ~attachment_id in
-  let%bind () = require_connection_writer context attachment_id in
   let%bind entry =
-    match Session_registry.find t.registry session_id with
-    | Some entry -> Ok entry
-    | None -> Error (error Lease_stale "attachment is stale; attach to the session again")
+    match prepared_writer with
+    | None -> find_entry t session_id
+    | Some writer ->
+      Prepared_writer.entry writer ~registry:t.registry ~session_id ~attachment_id
   in
   let%bind () = Agent_session.Session_actor.authorize_writer entry.actor ~attachment_id in
   f entry
 ;;
 
-let rec handle_session_start t context command_audit request =
+let rec handle_session_start t ?prepared_writer context command_audit request =
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Session.Start_request.session_id
     ~attachment_id:request.attachment_id
@@ -1305,9 +1525,10 @@ and handle_capacity_start t entry capacity command_audit request =
   | Rejected error -> Error error
 ;;
 
-let handle_session_update_organization t context command_audit request =
+let handle_session_update_organization t ?prepared_writer context command_audit request =
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Session_organization.Request.session_id
     ~attachment_id:request.attachment_id
@@ -1336,12 +1557,14 @@ let authorize_organization_mutation t principal = function
 
 let handle_session_update_metadata
       t
+      ?prepared_writer
       context
       command_audit
       (request : Agent_protocol.Session_metadata.Request.t)
   =
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.session_id
     ~attachment_id:request.attachment_id
@@ -1359,9 +1582,10 @@ let handle_session_update_metadata
        Agent_protocol.Method_result.Session_update_metadata (session_mutation session))
 ;;
 
-let handle_session_stop t context command_audit request =
+let handle_session_stop t ?prepared_writer context command_audit request =
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Session.Stop_request.session_id
     ~attachment_id:request.attachment_id
@@ -1400,9 +1624,10 @@ let handle_session_stop t context command_audit request =
        Agent_protocol.Method_result.Session_stop (session_mutation session))
 ;;
 
-let handle_session_cancel_operation t context command_audit request =
+let handle_session_cancel_operation t ?prepared_writer context command_audit request =
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Session.Cancel_operation_request.session_id
     ~attachment_id:request.attachment_id
@@ -1472,9 +1697,10 @@ let handle_continue_history
                 { session = result.session; mutation; continuation = result.continuation }))
 ;;
 
-let handle_delete_history t context command_audit request =
+let handle_delete_history t ?prepared_writer context command_audit request =
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Session.Delete_history_request.session_id
     ~attachment_id:request.attachment_id
@@ -1489,9 +1715,10 @@ let handle_delete_history t context command_audit request =
          Agent_protocol.Method_result.Session_delete_history (session_mutation session)))
 ;;
 
-let handle_session_compact t context command_audit request =
+let handle_session_compact t ?prepared_writer context command_audit request =
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Session.Compact_request.session_id
     ~attachment_id:request.attachment_id
@@ -1556,6 +1783,7 @@ let handle_configuration_get t context request =
 
 let handle_configuration_update
       t
+      ?prepared_writer
       context
       command_audit
       (request : Agent_protocol.Session_configuration.Update_request.t)
@@ -1564,6 +1792,7 @@ let handle_configuration_update
   let principal = Connection_context.principal context in
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.session_id
     ~attachment_id:request.attachment_id
@@ -1578,7 +1807,38 @@ let handle_configuration_update
        Agent_protocol.Method_result.Session_configuration_update view)
 ;;
 
-let handle_send_message t context command_audit request =
+let handle_run_start t ~actor context command_audit (request : Agent_protocol.Run_start.t)
+  =
+  with_attached_writer
+    t
+    context
+    ~session_id:request.session_id
+    ~attachment_id:request.attachment_id
+    (fun entry ->
+       let service =
+         Run_start_service.create
+           ~server_id:(Agent_store.Session_store.server_id t.session_store)
+           ~authorize:(fun actor state ->
+             let principal = Operator_authorization.principal actor in
+             if
+               Agent_protocol.Principal.has_scope principal Send_messages
+               && state_visible_to principal state
+             then Ok ()
+             else Error (error Permission_denied "run admission is no longer authorized"))
+       in
+       Ok (Run_start_service.start service ~actor ~entry ~request ~command_audit))
+  |> function
+  | Ok outcome -> outcome
+  | Error failure -> Agent_session.Run_admission_outcome.Rejected failure
+;;
+
+let run_start_result = function
+  | Agent_session.Run_admission_outcome.Admitted receipt ->
+    Ok (Agent_protocol.Method_result.Session_run_start receipt)
+  | Rejected failure | Uncertain failure -> Error failure
+;;
+
+let handle_send_message t ?prepared_writer context command_audit request =
   let open Result.Let_syntax in
   let content = request.Agent_protocol.Session.Send_message_request.content in
   let%bind () =
@@ -1588,6 +1848,7 @@ let handle_send_message t context command_audit request =
   in
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.session_id
     ~attachment_id:request.attachment_id
@@ -1604,12 +1865,16 @@ let handle_send_message t context command_audit request =
            ~plain:(fun () ->
              Agent_session.Session_actor.submit_message
                entry.actor
+               ~timing:request.timing
+               ~submitting_principal:(Connection_context.principal context).id
                ~attachment_id:request.attachment_id
                history_entry)
            ~audited:(fun command_audit ->
              Agent_session.Session_actor.submit_message_with_command_audit
                entry.actor
                ~command_audit
+               ~timing:request.timing
+               ~submitting_principal:(Connection_context.principal context).id
                ~attachment_id:request.attachment_id
                history_entry)
        in
@@ -1678,12 +1943,12 @@ let create_export_blob
   |> Result.map_error ~f:persistence_error
 ;;
 
-let export_snapshot t entry revision =
+let export_snapshot t handle state revision =
   let open Result.Let_syntax in
-  let%bind state = Agent_session.Session_actor.state entry.Session_registry.actor in
   match revision with
-  | None -> Agent_session.Session_actor.snapshot entry.actor
-  | Some revision when Int64.equal revision state.counters.revision ->
+  | None -> Ok (Agent_session.Session_state.snapshot ~now:(now t) state)
+  | Some revision
+    when Int64.equal revision state.Agent_session.Session_state.counters.revision ->
     Ok (Agent_session.Session_state.snapshot ~now:state.identity.updated_at state)
   | Some revision ->
     let%bind reference =
@@ -1692,73 +1957,65 @@ let export_snapshot t entry revision =
       |> Result.of_option
            ~error:(error Conflict "requested revision has no retained archive")
     in
-    let%bind handle =
-      entry.store_handle
-      |> Result.of_option
-           ~error:(error Invalid_state "session has no durable archive store")
-    in
     let%map archived =
       Agent_session.Compaction_archive.read
         ~env:t.env
         ~handle
-        ~max_payload_length:Int.max_value
+        ~max_payload_length:t.archive_payload_limit
         reference
     in
     Agent_session.Session_state.snapshot ~now:archived.identity.updated_at archived
 ;;
 
-let handle_session_export t context request =
-  let open Result.Let_syntax in
-  let%bind () =
-    require_connection_attachment
-      context
-      ~session_id:request.Agent_protocol.Session.Export_request.session_id
-      ~attachment_id:request.attachment_id
-  in
-  let%bind entry, _ = find_visible_entry t context request.session_id in
-  let%bind snapshot = export_snapshot t entry request.revision in
-  let%bind snapshot =
-    Pagination.history
-      t.pagination
-      (Connection_context.principal context)
-      { session_id = request.session_id; history = request.history }
-      snapshot
-  in
-  let%bind snapshot =
-    Principal_projection.snapshot (Connection_context.principal context) snapshot
-  in
-  let projected = Agent_protocol.Public.Snapshot.fields snapshot in
-  let entries =
-    if Option.exists request.history ~f:(fun history -> history.effective)
-    then
-      Option.value_map projected.effective_history ~default:[] ~f:(fun window ->
-        window.entries)
-    else projected.canonical_history.entries
-  in
-  let%bind media_type, display_name, content = render_export request snapshot entries in
-  let%bind store_handle =
-    entry.store_handle
-    |> Result.of_option ~error:(error Invalid_state "session has no durable blob store")
-  in
-  let%bind handle =
-    create_export_blob
-      t
-      (Connection_context.principal context)
-      request.session_id
-      store_handle
-      ~media_type
-      ~display_name
-      content
-  in
-  let%map metadata =
-    Agent_store.Blob_store.Handle.metadata_checked handle
-    |> Result.map_error ~f:persistence_error
-  in
-  Agent_protocol.Method_result.Session_export
-    { blob = metadata.blob
-    ; session_revision = projected.revision
-    ; latest_event_sequence = projected.latest_event_sequence
-    }
+let handle_session_export t context (request : Agent_protocol.Session.Export_request.t) =
+  with_retained_artifact
+    t
+    context
+    ~session_id:request.session_id
+    ~attachment_id:request.attachment_id
+    (fun store_handle state ->
+       let open Result.Let_syntax in
+       let%bind snapshot = export_snapshot t store_handle state request.revision in
+       let%bind snapshot =
+         Pagination.history
+           t.pagination
+           (Connection_context.principal context)
+           { session_id = request.session_id; history = request.history }
+           snapshot
+       in
+       let%bind snapshot =
+         Principal_projection.snapshot (Connection_context.principal context) snapshot
+       in
+       let projected = Agent_protocol.Public.Snapshot.fields snapshot in
+       let entries =
+         if Option.exists request.history ~f:(fun history -> history.effective)
+         then
+           Option.value_map projected.effective_history ~default:[] ~f:(fun window ->
+             window.entries)
+         else projected.canonical_history.entries
+       in
+       let%bind media_type, display_name, content =
+         render_export request snapshot entries
+       in
+       let%bind handle =
+         create_export_blob
+           t
+           (Connection_context.principal context)
+           request.session_id
+           store_handle
+           ~media_type
+           ~display_name
+           content
+       in
+       let%map metadata =
+         Agent_store.Blob_store.Handle.metadata_checked handle
+         |> Result.map_error ~f:persistence_error
+       in
+       Agent_protocol.Method_result.Session_export
+         { blob = metadata.blob
+         ; session_revision = projected.revision
+         ; latest_event_sequence = projected.latest_event_sequence
+         })
 ;;
 
 let validate_stopped_revision state expected_revision =
@@ -1815,9 +2072,10 @@ let replacement_workspace t entry state keep_workspace =
     | _, (Physical | Current) -> Ok None)
 ;;
 
-let handle_session_reset t context command_audit request =
+let handle_session_reset t ?prepared_writer context command_audit request =
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Session.Reset_request.session_id
     ~attachment_id:request.attachment_id
@@ -1952,9 +2210,10 @@ let commit_prepared
       Agent_session.History_id_source.discard_reserved entry.history_ids)
 ;;
 
-let handle_session_rebuild t context command_audit request =
+let handle_session_rebuild t ?prepared_writer context command_audit request =
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Session.Rebuild_request.session_id
     ~attachment_id:request.attachment_id
@@ -1987,9 +2246,10 @@ let handle_session_rebuild t context command_audit request =
        Agent_protocol.Method_result.Session_rebuild (session_mutation session))
 ;;
 
-let handle_session_upgrade_prompt t context command_audit request =
+let handle_session_upgrade_prompt t ?prepared_writer context command_audit request =
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Session.Upgrade_prompt_request.session_id
     ~attachment_id:request.attachment_id
@@ -2038,10 +2298,11 @@ let handle_permission_list t context request =
   Agent_protocol.Method_result.Permission_list (page request.page.limit permissions)
 ;;
 
-let handle_permission_respond t context command_audit request =
+let handle_permission_respond t ?prepared_writer context command_audit request =
   let open Result.Let_syntax in
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Permission.Respond_request.session_id
     ~attachment_id:request.attachment_id
@@ -2109,10 +2370,11 @@ let handle_grant_list t context request =
   Agent_protocol.Method_result.Grant_list (page request.page.limit grants)
 ;;
 
-let handle_grant_revoke t context command_audit request =
+let handle_grant_revoke t ?prepared_writer context command_audit request =
   let open Result.Let_syntax in
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Grant.Revoke_request.session_id
     ~attachment_id:request.attachment_id
@@ -2186,10 +2448,11 @@ let handle_job_get t context request =
   Agent_protocol.Method_result.Job_get job
 ;;
 
-let handle_job_cancel t context command_audit request =
+let handle_job_cancel t ?prepared_writer context command_audit request =
   let open Result.Let_syntax in
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Job.Cancel_request.session_id
     ~attachment_id:request.attachment_id
@@ -2264,10 +2527,11 @@ let schedule_due now = function
   | After_ms delay -> Agent_protocol.Timestamp.add_ms now delay
 ;;
 
-let handle_schedule_create t context command_audit request =
+let handle_schedule_create t ?prepared_writer context command_audit request =
   let open Result.Let_syntax in
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Schedule.Create_request.session_id
     ~attachment_id:request.attachment_id
@@ -2312,10 +2576,11 @@ let handle_schedule_create t context command_audit request =
          { schedule; mutation = mutation session })
 ;;
 
-let handle_schedule_cancel t context command_audit request =
+let handle_schedule_cancel t ?prepared_writer context command_audit request =
   let open Result.Let_syntax in
   with_writer
     t
+    ?prepared_writer
     context
     ~session_id:request.Agent_protocol.Schedule.Cancel_request.session_id
     ~attachment_id:request.attachment_id
@@ -2378,7 +2643,10 @@ let mutation_attachment = function
   | Session_stop r -> Some (r.session_id, r.attachment_id)
   | Session_cancel_operation r -> Some (r.session_id, r.attachment_id)
   | Session_configuration_update r -> Some (r.session_id, r.attachment_id)
+  | Session_run_start r -> Some (r.session_id, r.attachment_id)
   | Session_send_message r -> Some (r.session_id, r.attachment_id)
+  | Session_cancel_pending_input r -> Some (r.session_id, r.attachment_id)
+  | Session_replace_pending_input r -> Some (r.target.session_id, r.target.attachment_id)
   | Session_compact r -> Some (r.session_id, r.attachment_id)
   | Session_edit_history r -> Some (r.session_id, r.attachment_id)
   | Session_continue_history r -> Some (r.session_id, r.attachment_id)
@@ -2395,7 +2663,90 @@ let mutation_attachment = function
   | _ -> None
 ;;
 
-let authorize_mutation t context command =
+let prepared_writer_attachment command =
+  match command with
+  | Agent_protocol.Command.Session_start _
+  | Session_update_organization _
+  | Session_update_metadata _
+  | Session_stop _
+  | Session_cancel_operation _
+  | Session_configuration_update _
+  | Session_send_message _
+  | Session_compact _
+  | Session_delete_history _
+  | Session_reset _
+  | Session_rebuild _
+  | Session_upgrade_prompt _
+  | Permission_respond _
+  | Grant_revoke _
+  | Job_cancel _
+  | Schedule_create _
+  | Schedule_cancel _ -> mutation_attachment command
+  | Protocol_initialize _
+  | Command_receipt _
+  | Provider_setup _
+  | Provider_status _
+  | Provider_login_begin _
+  | Provider_login_challenge _
+  | Provider_login_cancel _
+  | Provider_logout _
+  | Provider_select _
+  | Provider_configure_environment _
+  | Protocol_ping _
+  | Server_info
+  | Server_health _
+  | Prompt_list _
+  | Prompt_get _
+  | Workspace_list _
+  | Workspace_get _
+  | Blob_read _
+  | Session_create _
+  | Session_list _
+  | Session_search _
+  | Session_search_navigate _
+  | Activity_list _
+  | Session_work _
+  | Session_configuration_get _
+  | Session_get _
+  | Session_inference_summary _
+  | Session_inference_observations _
+  | Session_attach _
+  | Session_detach _
+  | Session_renew_owner _
+  | Project_create _
+  | Project_get _
+  | Project_list _
+  | Project_update _
+  | Project_delete _
+  | Collection_create _
+  | Collection_get _
+  | Collection_list _
+  | Collection_update _
+  | Collection_delete _
+  | Session_runs _
+  | Session_run _
+  | Session_run_start _
+  | Session_pending_inputs _
+  | Session_pending_input _
+  | Session_cancel_pending_input _
+  | Session_replace_pending_input _
+  | Session_edit_history _
+  | Session_continue_history _
+  | Session_export _
+  | Session_delete _
+  | Session_restore _
+  | Session_resume _
+  | Permission_list _
+  | Grant_list _
+  | Audit_read _
+  | Job_list _
+  | Job_get _
+  | Schedule_list _
+  | Schedule_get _
+  | Ingress_submit _ -> None
+;;
+
+let authorize_mutation t ?prepared_writer context command =
   match command with
   | Agent_protocol.Command.Session_edit_history request ->
     with_attached_writer
@@ -2403,6 +2754,26 @@ let authorize_mutation t context command =
       context
       ~session_id:request.session_id
       ~attachment_id:request.attachment_id
+      (fun _ -> Ok ())
+  | Session_cancel_pending_input request ->
+    let open Result.Let_syntax in
+    let%bind () = require_pending_transcript context in
+    let%bind _ = read_visible_state t context request.session_id in
+    with_attached_writer
+      t
+      context
+      ~session_id:request.session_id
+      ~attachment_id:request.attachment_id
+      (fun _ -> Ok ())
+  | Session_replace_pending_input request ->
+    let open Result.Let_syntax in
+    let%bind () = require_pending_transcript context in
+    let%bind _ = read_visible_state t context request.target.session_id in
+    with_attached_writer
+      t
+      context
+      ~session_id:request.target.session_id
+      ~attachment_id:request.target.attachment_id
       (fun _ -> Ok ())
   | Session_continue_history request ->
     with_attached_writer
@@ -2415,10 +2786,17 @@ let authorize_mutation t context command =
     (match mutation_attachment command with
      | None -> Ok ()
      | Some (session_id, attachment_id) ->
-       with_writer t context ~session_id ~attachment_id (fun _ -> Ok ()))
+       with_writer t ?prepared_writer context ~session_id ~attachment_id (fun _ -> Ok ()))
 ;;
 
-let dispatch_authorized t ~actor ~context ~command_audit ~inference_budget = function
+let dispatch_authorized
+      t
+      ?prepared_writer
+      ~actor
+      ~context
+      ~command_audit
+      ~inference_budget
+  = function
   | ( Agent_protocol.Command.Provider_setup _
     | Provider_status _
     | Provider_login_begin _
@@ -2484,53 +2862,88 @@ let dispatch_authorized t ~actor ~context ~command_audit ~inference_budget = fun
   | Session_detach request -> handle_session_detach t context command_audit request
   | Session_renew_owner request ->
     handle_session_renew_owner t context command_audit request
-  | Session_start request -> handle_session_start t context command_audit request
+  | Session_start request ->
+    handle_session_start t ?prepared_writer context command_audit request
   | Session_update_organization request ->
-    handle_session_update_organization t context command_audit request
+    handle_session_update_organization t ?prepared_writer context command_audit request
   | Session_update_metadata request ->
-    handle_session_update_metadata t context command_audit request
-  | Session_stop request -> handle_session_stop t context command_audit request
+    handle_session_update_metadata t ?prepared_writer context command_audit request
+  | Session_stop request ->
+    handle_session_stop t ?prepared_writer context command_audit request
   | Session_cancel_operation request ->
-    handle_session_cancel_operation t context command_audit request
+    handle_session_cancel_operation t ?prepared_writer context command_audit request
   | Session_configuration_get request -> handle_configuration_get t context request
   | Session_configuration_update request ->
-    handle_configuration_update t context command_audit request
-  | Session_send_message request -> handle_send_message t context command_audit request
-  | Session_compact request -> handle_session_compact t context command_audit request
+    handle_configuration_update t ?prepared_writer context command_audit request
+  | Session_run_start request ->
+    handle_run_start t ~actor context command_audit request |> run_start_result
+  | Session_send_message request ->
+    handle_send_message t ?prepared_writer context command_audit request
+  | Session_runs request -> handle_runs t ~actor context request
+  | Session_run request -> handle_run t ~actor context request
+  | Session_pending_inputs request -> handle_pending_inputs t context request
+  | Session_pending_input request -> handle_pending_input t context request
+  | Session_cancel_pending_input request ->
+    handle_cancel_pending t context command_audit request
+  | Session_replace_pending_input request ->
+    handle_replace_pending t context command_audit request
+  | Session_compact request ->
+    handle_session_compact t ?prepared_writer context command_audit request
   | Session_edit_history request -> handle_edit_history t context command_audit request
   | Session_continue_history request ->
     handle_continue_history t context command_audit request
   | Session_delete_history request ->
-    handle_delete_history t context command_audit request
+    handle_delete_history t ?prepared_writer context command_audit request
   | Session_export request -> handle_session_export t context request
-  | Session_reset request -> handle_session_reset t context command_audit request
-  | Session_rebuild request -> handle_session_rebuild t context command_audit request
+  | Session_reset request ->
+    handle_session_reset t ?prepared_writer context command_audit request
+  | Session_rebuild request ->
+    handle_session_rebuild t ?prepared_writer context command_audit request
   | Session_upgrade_prompt request ->
-    handle_session_upgrade_prompt t context command_audit request
+    handle_session_upgrade_prompt t ?prepared_writer context command_audit request
   | Session_delete _ | Session_restore _ | Session_resume _ ->
     Error (error Invalid_state "lifecycle commands require their original receipt owner")
   | Permission_list request -> handle_permission_list t context request
   | Permission_respond request ->
-    handle_permission_respond t context command_audit request
+    handle_permission_respond t ?prepared_writer context command_audit request
   | Grant_list request -> handle_grant_list t context request
-  | Grant_revoke request -> handle_grant_revoke t context command_audit request
+  | Grant_revoke request ->
+    handle_grant_revoke t ?prepared_writer context command_audit request
   | Audit_read request -> handle_audit_read t request
   | Job_list request -> handle_job_list t context request
   | Job_get request -> handle_job_get t context request
-  | Job_cancel request -> handle_job_cancel t context command_audit request
+  | Job_cancel request ->
+    handle_job_cancel t ?prepared_writer context command_audit request
   | Schedule_list request -> handle_schedule_list t context request
   | Schedule_get request -> handle_schedule_get t context request
-  | Schedule_create request -> handle_schedule_create t context command_audit request
-  | Schedule_cancel request -> handle_schedule_cancel t context command_audit request
+  | Schedule_create request ->
+    handle_schedule_create t ?prepared_writer context command_audit request
+  | Schedule_cancel request ->
+    handle_schedule_cancel t ?prepared_writer context command_audit request
   | Command_receipt _ -> Error (error Invalid_state "receipt requires read-only dispatch")
   | Ingress_submit request -> handle_ingress_submit t context request
 ;;
 
-let handle_authorized t ~actor ~context ~command_audit ~inference_budget command =
+let handle_authorized
+      t
+      ?prepared_writer
+      ~actor
+      ~context
+      ~command_audit
+      ~inference_budget
+      command
+  =
   let open Result.Let_syntax in
-  let%bind () = authorize_mutation t context command in
+  let%bind () = authorize_mutation t ?prepared_writer context command in
   let%bind result =
-    dispatch_authorized t ~actor ~context ~command_audit ~inference_budget command
+    dispatch_authorized
+      t
+      ?prepared_writer
+      ~actor
+      ~context
+      ~command_audit
+      ~inference_budget
+      command
   in
   Pagination.lists t.pagination (Connection_context.principal context) command result
 ;;
@@ -2584,7 +2997,14 @@ let command_session_id = function
   | Session_update_metadata request -> Some request.session_id
   | Session_stop request -> Some request.session_id
   | Session_cancel_operation request -> Some request.session_id
+  | Session_run_start request -> Some request.session_id
   | Session_send_message request -> Some request.session_id
+  | Session_runs request -> Some (Agent_protocol.Session_ref.session_id request.session)
+  | Session_run request -> Some (Agent_protocol.Session_ref.session_id request.session)
+  | Session_pending_inputs request -> Some request.session_id
+  | Session_pending_input request -> Some request.session_id
+  | Session_cancel_pending_input request -> Some request.session_id
+  | Session_replace_pending_input request -> Some request.target.session_id
   | Session_compact request -> Some request.session_id
   | Session_edit_history request -> Some request.session_id
   | Session_continue_history request -> Some request.session_id
@@ -2694,6 +3114,12 @@ let receipt_summary ~session_id result =
        Ok (R.Configuration_updated { session_id; revision = value.revision })
      | None ->
        Error (error Invalid_request "configuration receipt requires session identity"))
+  | Session_cancel_pending_input value | Session_replace_pending_input value ->
+    mutation value.mutation
+  | Session_run_start receipt ->
+    (match session_id with
+     | Some session_id -> Ok (R.Accepted_run { session_id; receipt })
+     | None -> Error (error Invalid_request "run receipt requires session identity"))
   | Session_send_message value ->
     (match session_id with
      | None -> Error (error Invalid_request "message receipt requires session identity")
@@ -2745,6 +3171,10 @@ let receipt_summary ~session_id result =
   | Session_work _
   | Session_search _
   | Session_search_navigate _
+  | Session_runs _
+  | Session_run _
+  | Session_pending_inputs _
+  | Session_pending_input _
   | Session_list _
   | Session_get _
   | Session_configuration_get _
@@ -2760,6 +3190,41 @@ let receipt_summary ~session_id result =
   | Schedule_get _
   | Ingress_submit _ ->
     Error (error Invalid_request "method has no generic command receipt")
+;;
+
+let retained_run_receipt t ~actor (request : Agent_protocol.Run_start.t) ~request_sha256 =
+  let open Result.Let_syntax in
+  let principal = Operator_authorization.principal actor in
+  let current () =
+    if Operator_authorization.is_current actor
+    then Ok ()
+    else Error (error Permission_denied "run receipt authority expired or was revoked")
+  in
+  let%bind () = current () in
+  let%bind state =
+    Session_registry.read_state t.registry request.session_id ~authorize:(fun session ->
+      let%bind () = current () in
+      if session_visible_to principal session
+      then Ok ()
+      else Error (error Permission_denied "run receipt session is not visible"))
+  in
+  let%bind () = current () in
+  let%bind retained =
+    Agent_session.Run_state.receipt
+      (Option.value state.run_state ~default:Agent_session.Run_state.empty)
+      ~principal_id:principal.id
+      ~key:request.key
+      ~request_sha256
+  in
+  match retained with
+  | None -> Ok None
+  | Some ({ kind = Admission; _ } as receipt) ->
+    Ok
+      (Some
+         (Agent_protocol.Command_receipt.Committed
+            (Accepted_run { session_id = request.session_id; receipt })))
+  | Some { kind = Action | Terminal; _ } ->
+    Error (error Conflict "run request key identifies a non-admission receipt")
 ;;
 
 let handle_command_receipt
@@ -2778,6 +3243,12 @@ let handle_command_receipt
     Agent_protocol.Command.of_method_and_params
       ~method_:request.method_name
       ~params:request.original_params
+  in
+  let%bind () =
+    match command with
+    | Session_run_start _ when not (Operator_authorization.is_current actor) ->
+      Error (error Permission_denied "run receipt authority expired or was revoked")
+    | _ -> Ok ()
   in
   let%bind () = Authorization.authorize principal command in
   let%bind () = authorize_organization_mutation t principal command in
@@ -2812,7 +3283,15 @@ let handle_command_receipt
     match
       Agent_store.Idempotency_store.lookup t.idempotency_store ~key ~request_digest:digest
     with
-    | Missing -> Ok (Agent_protocol.Method_result.Command_receipt Missing)
+    | Missing ->
+      (match command with
+       | Session_run_start original ->
+         let%map receipt =
+           retained_run_receipt t ~actor original ~request_sha256:digest
+         in
+         Agent_protocol.Method_result.Command_receipt
+           (Option.value receipt ~default:Missing)
+       | _ -> Ok (Agent_protocol.Method_result.Command_receipt Missing))
     | Conflict _ ->
       Error (error Idempotency_conflict "receipt request does not match original payload")
     | Replay record ->
@@ -2844,11 +3323,19 @@ let handle_command_receipt
         let%map receipt =
           match record.outcome with
           | Pending ->
-            Ok
-              (Agent_protocol.Command_receipt.Pending
-                 { accepted_sequence = record.accepted_transaction_sequence
-                 ; expires_at = record.expires_at
-                 })
+            let pending =
+              Agent_protocol.Command_receipt.Pending
+                { accepted_sequence = record.accepted_transaction_sequence
+                ; expires_at = record.expires_at
+                }
+            in
+            (match command with
+             | Session_run_start original ->
+               let%map receipt =
+                 retained_run_receipt t ~actor original ~request_sha256:digest
+               in
+               Option.value receipt ~default:pending
+             | _ -> Ok pending)
           | Failure failure -> Ok (Agent_protocol.Command_receipt.Failed failure)
           | Success json ->
             let%bind result =
@@ -2864,6 +3351,7 @@ let handle_command_receipt
               | Continued_history { session_id; _ }
               | Configuration_updated { session_id; _ }
               | Session_mutation { session_id; _ }
+              | Accepted_run { session_id; _ }
               | Sent_message { session_id; _ } -> visible_original session_id
               | Project_mutation _
               | Deleted_project _
@@ -2986,13 +3474,48 @@ let execute t ~actor context ~inference_budget command =
     handle_lifecycle t context command (Session_lifecycle_service.Request.Restore request)
   | Session_resume request ->
     handle_lifecycle t context command (Session_lifecycle_service.Request.Resume request)
+  | Session_run_start request ->
+    (match idempotency command with
+     | None ->
+       Error (error Invalid_request "run admission requires a protected request key")
+     | Some identity ->
+       with_idempotency_owner
+         t
+         context
+         command
+         identity
+         ~prepare:(fun () ->
+           Ok
+             (fun command_audit ->
+               handle_run_start t ~actor context command_audit request))
+         ~complete:(fun ~key ~digest outcome ->
+           match outcome with
+           | Agent_session.Run_admission_outcome.Admitted _ | Rejected _ ->
+             store_outcome t key digest (run_start_result outcome)
+           | Uncertain failure -> Error failure))
   | _ ->
     (match idempotency command with
      | None ->
        handle_authorized t ~actor ~context ~command_audit:None ~inference_budget command
      | Some identity ->
-       handle_idempotent t context command identity (fun command_audit ->
-         handle_authorized t ~actor ~context ~command_audit ~inference_budget command))
+       handle_idempotent t context command identity ~prepare:(fun () ->
+         let open Result.Let_syntax in
+         let%map prepared_writer =
+           match prepared_writer_attachment command with
+           | None -> Ok None
+           | Some (session_id, attachment_id) ->
+             with_writer t context ~session_id ~attachment_id (fun entry ->
+               Ok (Some (Prepared_writer.create entry ~session_id ~attachment_id)))
+         in
+         fun command_audit ->
+           handle_authorized
+             t
+             ?prepared_writer
+             ~actor
+             ~context
+             ~command_audit
+             ~inference_budget
+             command))
 ;;
 
 let handle t ?actor ~context ~inference_budget command =
@@ -3012,7 +3535,23 @@ let handle t ?actor ~context ~inference_budget command =
       match command with
       | Agent_protocol.Command.Session_update_organization _
       | Session_edit_history _
-      | Session_continue_history _ -> authorize_mutation t context command
+      | Session_continue_history _
+      | Session_cancel_pending_input _
+      | Session_replace_pending_input _ -> authorize_mutation t context command
+      | Session_run_start request ->
+        if not (Operator_authorization.is_current actor)
+        then Error (error Permission_denied "run authority expired or was revoked")
+        else
+          with_attached_writer
+            t
+            context
+            ~session_id:request.session_id
+            ~attachment_id:request.attachment_id
+            (fun entry ->
+               let%bind state = Agent_session.Session_actor.state entry.actor in
+               if state_visible_to (Operator_authorization.principal actor) state
+               then Ok ()
+               else Error (error Permission_denied "run session is no longer visible"))
       | Job_cancel request ->
         read_visible_state t context request.session_id |> Result.map ~f:(fun _ -> ())
       | Schedule_cancel request ->

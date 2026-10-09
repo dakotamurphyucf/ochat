@@ -239,6 +239,7 @@ let run_host env name =
       Support.Port_reservation.release port;
       let provider = Provider.start ~sw ~env ~port:number in
       let fixture = F.create env temporary ("typeahead-" ^ name) in
+      Support.Provider_fixture.provision ~env ~key:"typeahead-fixture-key" fixture;
       Eio.Path.save
         ~create:(`Or_truncate 0o600)
         (Temp.path temporary (Config.prompt_path fixture))
@@ -267,7 +268,7 @@ let run_host env name =
            (fun () -> ())
        | "local" ->
          start
-           [ "--local"; "-file"; Config.prompt_path fixture ]
+           [ "--local"; "--transient"; "-file"; Config.prompt_path fixture ]
            (fun () -> assert_no_local_user temporary)
        | _ ->
          F.with_daemon env fixture (fun _ connection ->

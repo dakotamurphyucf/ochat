@@ -24,7 +24,10 @@ let has_command_receipt = function
   | Session_stop _
   | Session_cancel_operation _
   | Session_configuration_update _
+  | Session_run_start _
   | Session_send_message _
+  | Session_cancel_pending_input _
+  | Session_replace_pending_input _
   | Session_compact _
   | Session_edit_history _
   | Session_continue_history _
@@ -64,6 +67,10 @@ let has_command_receipt = function
   | Session_work _
   | Session_search _
   | Session_search_navigate _
+  | Session_runs _
+  | Session_run _
+  | Session_pending_inputs _
+  | Session_pending_input _
   | Session_list _
   | Session_get _
   | Session_configuration_get _

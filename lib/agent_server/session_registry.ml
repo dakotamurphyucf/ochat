@@ -796,21 +796,26 @@ let unload_inactive t ~index_entries =
   let candidates =
     Eio.Mutex.use_ro t.mutex (fun () -> Map.keys (Atomic.get t.sessions))
   in
-  let unload session_id =
+  let matches_index state indexed =
+    inactive state
+    && Jsonaf.exactly_equal
+         (Agent_protocol.Session.to_json (Agent_session.Session_state.summary state))
+         (Agent_protocol.Session.to_json indexed.Agent_store.Session_index.Entry.session)
+  in
+  let unload_candidate session_id observed_entry =
     let open Result.Let_syntax in
     with_lifecycle t session_id (fun reservation ->
       match reservation.Lifecycle_reservation.target, Map.find indexes session_id with
       | (Indexed _ | Absent), _ | Loaded _, None -> Ok false
       | Loaded entry, Some indexed ->
+        let%bind () =
+          if same_owner observed_entry entry
+          then Ok ()
+          else Error (lifecycle_conflict "eviction observation binding changed")
+        in
         let%bind () = check_retained_owner entry in
         let%bind state = Agent_session.Session_actor.state entry.actor in
-        let matches state =
-          inactive state
-          && Jsonaf.exactly_equal
-               (Agent_protocol.Session.to_json
-                  (Agent_session.Session_state.summary state))
-               (Agent_protocol.Session.to_json indexed.session)
-        in
+        let matches state = matches_index state indexed in
         if not (matches state)
         then Ok false
         else (
@@ -859,6 +864,33 @@ let unload_inactive t ~index_entries =
                   ignore
                     (Agent_session.Session_actor.abort_lifecycle entry.actor fence
                      : (unit, Agent_protocol.Error.t) Result.t)))))
+  in
+  let observe session_id =
+    with_read_snapshot
+      t
+      ~capture:(fun () -> Ok (find t session_id))
+      ~check_current:(function
+        | None -> Ok ()
+        | Some original ->
+          (match find t session_id with
+           | Some current when same_owner original current -> check_retained_owner current
+           | Some _ | None ->
+             Error (lifecycle_conflict "eviction observation binding changed")))
+      (function
+        | None -> Ok None
+        | Some entry ->
+          let open Result.Let_syntax in
+          let%bind () = check_retained_owner entry in
+          let%map state = Agent_session.Session_actor.state entry.actor in
+          Some (entry, state))
+  in
+  let unload session_id =
+    let open Result.Let_syntax in
+    let%bind observed = observe session_id in
+    match observed, Map.find indexes session_id with
+    | None, _ | Some _, None -> Ok false
+    | Some (entry, state), Some indexed ->
+      if matches_index state indexed then unload_candidate session_id entry else Ok false
   in
   List.fold candidates ~init:0 ~f:(fun count session_id ->
     match unload session_id with
@@ -1082,4 +1114,68 @@ let retains_cleanup_handle t handle =
         | Recovery owner -> Some (Session_recovery_owner.handle owner)
       in
       Option.exists actual ~f:(phys_equal handle)))
+;;
+
+let select_indexed t reservation ~store ~handle ~current ~authorize ~recover =
+  let module S = Agent_store.Session_store in
+  let module C = S.Lifecycle.Current in
+  let module Entry = Agent_store.Session_index.Entry in
+  let open Result.Let_syntax in
+  let session_id = reservation.Lifecycle_reservation.session_id in
+  let check_current current =
+    let entry = C.entry current in
+    let%bind () = authorize entry.session in
+    if
+      S.owns_handle store handle
+      && C.is_current current handle
+      && Agent_protocol.Id.Session.equal entry.session.id session_id
+      && (not entry.archived)
+      && Agent_store.Session_archive_record.Admission.equal entry.admission Automatic
+    then Ok ()
+    else Error (lifecycle_conflict "session selection projection is not current")
+  in
+  let check_reservation_open () =
+    let%bind () = check_reservation t reservation in
+    if Atomic.get t.closing
+    then Error (shutting_down ())
+    else if Option.is_some (find t session_id)
+    then Error (lifecycle_conflict "session selection already has a loaded owner")
+    else Ok ()
+  in
+  let%bind () =
+    Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+      let%bind () = check_reservation_open () in
+      let%bind () = check_current current in
+      match reservation.target with
+      | Indexed expected
+        when Entry.equal expected (C.entry current)
+             && Option.exists (Map.find t.indexed session_id) ~f:(Entry.equal expected) ->
+        Ok ()
+      | Indexed _ | Loaded _ | Absent ->
+        Error (lifecycle_conflict "session indexed selection basis changed"))
+  in
+  Eio.Cancel.protect (fun () ->
+    let%bind entry, fresh = recover () in
+    close_provisional t ~session_id entry (fun () ->
+      Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+        let%bind () = check_reservation_open () in
+        let%bind () = check_retained_owner entry in
+        let%bind () = check_current fresh in
+        let%bind () =
+          if
+            Option.exists entry.store_handle ~f:(phys_equal handle)
+            && Int.equal
+                 (C.entry fresh).session.generation
+                 (C.entry current).session.generation
+            && Agent_protocol.Session_lifecycle.Revision.equal
+                 (C.entry fresh).lifecycle_revision
+                 (C.entry current).lifecycle_revision
+          then Ok ()
+          else Error (lifecycle_conflict "session recovery returned a different owner")
+        in
+        Atomic.set
+          t.sessions
+          (Map.set (Atomic.get t.sessions) ~key:session_id ~data:entry);
+        t.indexed <- Map.remove t.indexed session_id;
+        Ok entry)))
 ;;

@@ -6,7 +6,11 @@ type activation =
   | Retry
   | Drop
 
-type t = { stopped : bool Atomic.t }
+type t =
+  { stopped : bool Atomic.t
+  ; cancel : (unit -> unit) option Atomic.t
+  ; finished : unit Eio.Promise.t
+  }
 
 let ticket_of_state state =
   Option.map state.Agent_session.Session_state.spec.quota_key ~f:(fun quota_key ->
@@ -142,9 +146,24 @@ let rec run t clock registry queue resume_initial_starts =
 ;;
 
 let start_controlled ~enabled ~sw ~clock ~registry ~queue ~resume_initial_starts =
-  let t = { stopped = Atomic.make (not enabled) } in
+  let finished, finish = Eio.Promise.create () in
+  let t = { stopped = Atomic.make (not enabled); cancel = Atomic.make None; finished } in
   if enabled
-  then Eio.Fiber.fork ~sw (fun () -> run t clock registry queue resume_initial_starts);
+  then
+    Eio.Fiber.fork ~sw (fun () ->
+      Exn.protect
+        ~finally:(fun () ->
+          Atomic.set t.cancel None;
+          Eio.Promise.resolve finish ())
+        ~f:(fun () ->
+          try
+            Eio.Cancel.sub (fun context ->
+              Atomic.set t.cancel (Some (fun () -> Eio.Cancel.cancel context Exit));
+              if not (Atomic.get t.stopped)
+              then run t clock registry queue resume_initial_starts)
+          with
+          | Eio.Cancel.Cancelled _ as exn -> if not (Atomic.get t.stopped) then raise exn))
+  else Eio.Promise.resolve finish ();
   t
 ;;
 
@@ -153,4 +172,12 @@ let start ~sw ~clock ~registry ~queue ~resume_initial_starts =
 ;;
 
 let close t = Atomic.set t.stopped true
+
+let close_and_wait t =
+  Eio.Cancel.protect (fun () ->
+    close t;
+    Option.iter (Atomic.get t.cancel) ~f:(fun cancel -> cancel ());
+    Eio.Promise.await t.finished)
+;;
+
 let is_running t = not (Atomic.get t.stopped)

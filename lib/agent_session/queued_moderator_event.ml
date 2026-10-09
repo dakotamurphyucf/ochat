@@ -226,27 +226,96 @@ let background_retirement_reason ~state ~observer ~event =
   match captured with
   | None -> Ok None
   | Some frame ->
-    (match
-       List.find state.Session_state.jobs ~f:(fun job ->
-         P.Id.Job.equal job.id frame.job_id)
-     with
-     | None -> Ok (Some "background.unknown_job")
-     | Some job ->
-       (match job.delivery, Background_job_event.frame ~state ~observer job with
-        | Delivered _, Ok expected
-          when Chat_response.Background_delivery.equal expected frame ->
-          let%map claims =
-            List.map state.moderator_executions ~f:(fun receipt ->
-              let%bind snapshot = receipt_snapshot receipt in
-              match snapshot with
-              | None -> Ok false
-              | Some event ->
-                let%map previous = decode event in
-                Option.exists previous ~f:(Chat_response.Background_delivery.equal frame))
-            |> Result.all
-          in
-          Option.some_if (List.exists claims ~f:Fn.id) "background.duplicate_delivery"
-        | _ -> Ok (Some "background.stale_or_forged_delivery")))
+    let%bind retained =
+      match state.Session_state.run_state with
+      | None -> Ok None
+      | Some index -> Run_state.enqueued_job_frame index ~frame
+    in
+    let retained_matches =
+      Option.exists retained ~f:(fun delivery ->
+        P.Invocation.equal_observer (Run_job_delivery.source delivery).observer observer)
+    in
+    let carrier_known =
+      Option.exists state.run_state ~f:(fun index ->
+        List.exists (Run_state.job_deliveries index) ~f:(fun delivery ->
+          Chat_response.Background_delivery.equal (Run_job_delivery.frame delivery) frame))
+    in
+    let retired_run_owner =
+      Option.exists state.run_state ~f:(fun index ->
+        List.exists (Run_state.runs index) ~f:(fun run ->
+          match run.P.Run.lifecycle with
+          | Admitted | Active | Waiting _ -> false
+          | Terminal _ ->
+            List.exists run.owned_work ~f:(fun work ->
+              Int.equal work.P.Run_work.generation frame.generation
+              && (not (List.exists run.relinquished_work ~f:(P.Run_work.equal work)))
+              &&
+              match work.key with
+              | Retained (Job { id; attempt }) ->
+                P.Id.Job.equal id frame.job_id
+                && (Int.equal attempt frame.attempt
+                    || (frame.attempt < Int.max_value
+                        && Int.equal attempt (Int.succ frame.attempt)
+                        && List.exists
+                             run.terminal_work
+                             ~f:(fun (proof : P.Run_work.Terminal.t) ->
+                               P.Run_work.equal proof.work work
+                               && P.Run_work.Terminal.equal_outcome
+                                    proof.outcome
+                                    Cancelled)
+                        && List.exists state.jobs ~f:(fun (job : P.Job.t) ->
+                          P.Id.Job.equal job.id frame.job_id
+                          && Int.equal job.generation frame.generation
+                          && Int.equal job.attempt frame.attempt
+                          && P.Id.Session.equal job.session_id frame.session_id
+                          && (match job.status with
+                              | Cancelled -> true
+                              | Queued
+                              | Running
+                              | Waiting_permission _
+                              | Waiting_completion _
+                              | Succeeded
+                              | Failed _
+                              | Interrupted _ -> false)
+                          &&
+                          match Background_job_event.frame ~state ~observer job with
+                          | Ok actual ->
+                            Chat_response.Background_delivery.equal actual frame
+                          | Error _ -> false)))
+              | Operation _
+              | Retained
+                  ( Schedule _
+                  | Invocation _
+                  | Subscription _
+                  | Delivery _
+                  | Moderator_execution _ ) -> false)))
+    in
+    let ordinary_matches =
+      (not carrier_known)
+      && (not retired_run_owner)
+      && List.exists state.jobs ~f:(fun job ->
+        P.Id.Job.equal job.id frame.job_id
+        &&
+        match job.delivery, Background_job_event.frame ~state ~observer job with
+        | Delivered _, Ok expected ->
+          Chat_response.Background_delivery.equal expected frame
+        | (Not_required | Pending | Discarded _), (Ok _ | Error _) | Delivered _, Error _
+          -> false)
+    in
+    if not (retained_matches || ordinary_matches)
+    then Ok (Some "background.stale_or_forged_delivery")
+    else (
+      let%map claims =
+        List.map state.moderator_executions ~f:(fun receipt ->
+          let%bind snapshot = receipt_snapshot receipt in
+          match snapshot with
+          | None -> Ok false
+          | Some event ->
+            let%map previous = decode event in
+            Option.exists previous ~f:(Chat_response.Background_delivery.equal frame))
+        |> Result.all
+      in
+      Option.some_if (List.exists claims ~f:Fn.id) "background.duplicate_delivery")
 ;;
 
 let delivery_retirement_reason ~state ~observer ~event ~subscription_expired =

@@ -14,7 +14,7 @@ type t =
   ; request : P.Session_configuration.Update_request.t
   ; current : R.Target.t
   ; canonical : P.History.entry list
-  ; deferred : P.History.entry list
+  ; deferred : Pending_input_document.t list
   ; history : History_entry.t list
   }
 
@@ -58,7 +58,10 @@ let create ~owner ~policy ~request ~(state : Session_state.t) =
   let%bind current = Configuration_transition.target state in
   let canonical = state.conversation.canonical_history in
   let deferred = state.conversation.deferred_user_entries in
-  let%map history = History_codec.all_of_protocol (canonical @ deferred) in
+  let%map history =
+    History_codec.all_of_protocol
+      (canonical @ List.map deferred ~f:Pending_input_document.entry)
+  in
   { owner; policy; request; current; canonical; deferred; history }
 ;;
 
@@ -99,7 +102,7 @@ let recheck t ~owner ~policy ~(state : Session_state.t) =
                state.conversation.canonical_history))
       || not
            (List.equal
-              P.History.equal_entry
+              Pending_input_document.equal
               basis.deferred
               state.conversation.deferred_user_entries)
     then conflict ()

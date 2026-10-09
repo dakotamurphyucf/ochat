@@ -206,6 +206,17 @@ module Lifecycle : sig
     val outcome : t -> R.Outcome.t
   end
 
+  module Current : sig
+    (** Actual checked complete retained projection without a fabricated command
+        outcome. Caller retains the per-ID reservation/actor fence; after awaited
+        qualification, consume [is_current] without yielding at execution promotion.
+        Later lifecycle/canonical mutation, uncertainty or closure invalidates it. *)
+    type t
+
+    val entry : t -> Session_index.Entry.t
+    val is_current : t -> Handle.t -> bool
+  end
+
   module Installed : sig
     (** Acknowledged authority AND checked exact full index projection. Replays
         whose outcome is older than current state do not construct this witness.
@@ -214,6 +225,7 @@ module Lifecycle : sig
     type t
 
     val outcome : t -> R.Outcome.t
+    val current : t -> Current.t
     val entry : t -> Session_index.Entry.t
     val is_current : t -> Handle.t -> bool
   end
@@ -233,6 +245,15 @@ end
 val owns_handle : t -> Handle.t -> bool
 
 val read_lifecycle : t -> Handle.t -> (Lifecycle.Observation.t, Store_error.t) Result.t
+
+(** Read-only current projection issuance from owned authority, exact full index
+    and fenced canonical state. Does not publish, acknowledge receipts, repair or
+    authorize execution. Rejects foreign/closed/unavailable owners and stale basis. *)
+val current_lifecycle
+  :  t
+  -> Handle.t
+  -> current_entry:Session_index.Entry.t
+  -> (Lifecycle.Current.t, Store_error.t) Result.t
 
 val prepare_lifecycle
   :  t

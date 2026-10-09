@@ -17,6 +17,10 @@ type t =
   | Initial_prompt_count_changed of int
   | Deferred_entries_enqueued of Agent_protocol.History.entry list
   | Deferred_entries_adopted
+  | Pending_inputs_changed of
+      Pending_mutation.t
+      * Session_state.Compaction_archive.t option
+      * Pending_archive.Reference.t option
   | Active_operation_changed of Agent_protocol.Operation.t option
   | Automatic_turn_budget_enabled of Chat_response.Runtime_semantics.policy
   | Automatic_turn_pauses_changed of Chat_response.Runtime_semantics.pause_condition list
@@ -47,6 +51,7 @@ type t =
   | Ingress_changed of External_ingress.t
   | Delivery_committed of Agent_protocol.Delivery.t * Agent_protocol.History.entry
   | Delivery_wake_changed of Agent_protocol.Delivery.t
+  | Run_state_changed of Run_state.t
   | Moderator_changed of Jsonaf.t option
   | Shell_changed of Session.Shell_state.t
   | History_block_reserved of int64
@@ -122,18 +127,48 @@ let inference_error error =
     (Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
 ;;
 
+let retire_pending_dispositions state ~history_ids ~limits =
+  let retired = Hash_set.of_list (module Agent_protocol.History.Id) history_ids in
+  let%map.Result dispositions =
+    List.map state.Session_state.conversation.pending_dispositions ~f:(fun document ->
+      let id =
+        Pending_disposition.history_id (Pending_disposition_document.value document)
+      in
+      if Hash_set.mem retired id
+      then
+        Pending_disposition_document.retire_canonical document ~limits
+        |> Result.map_error ~f:(fun error ->
+          Agent_protocol.Error.invalid_request
+            (Sexp.to_string_hum (Document_schema.Error.sexp_of_t error)))
+      else Ok document)
+    |> Result.all
+  in
+  { state with
+    conversation = { state.conversation with pending_dispositions = dispositions }
+  }
+;;
+
 let rec apply ?(limits = native_limits) (state : Session_state.t) = function
   | Batch deltas -> List.fold_result deltas ~init:state ~f:(apply ~limits)
   | Created created ->
     let open Result.Let_syntax in
     let%bind created = Session_state.upgrade_schema created in
-    let%map () =
+    let%bind () =
       Inference_ledger.validate_update
         state.inference_ledger
         ~incoming:created.inference_ledger
       |> Result.map_error ~f:(fun error ->
         Agent_protocol.Error.invalid_request
           (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error)))
+    in
+    let%map () =
+      match state.run_state, created.run_state with
+      | None, _ -> Ok ()
+      | Some previous, Some incoming -> Run_state.validate_transition ~previous incoming
+      | Some _, None ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "replacement discarded durable run custody")
     in
     created
   | Managed_stop_admitted receipt ->
@@ -301,15 +336,22 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
         Error
           (Agent_protocol.Error.invalid_request "history deletion archive basis differs")
     in
-    apply
+    let%bind next =
+      apply
+        ~limits
+        state
+        (Batch
+           [ Canonical_history_replaced (History_deletion.canonical_history plan)
+           ; Authoring_references_forgotten (History_deletion.retired_ids plan)
+           ; Initial_prompt_count_changed
+               (History_deletion.initial_prompt_entry_count plan)
+           ; Compaction_archived archive
+           ])
+    in
+    retire_pending_dispositions
+      next
+      ~history_ids:(History_deletion.retired_ids plan)
       ~limits
-      state
-      (Batch
-         [ Canonical_history_replaced (History_deletion.canonical_history plan)
-         ; Authoring_references_forgotten (History_deletion.retired_ids plan)
-         ; Initial_prompt_count_changed (History_deletion.initial_prompt_entry_count plan)
-         ; Compaction_archived archive
-         ])
   | History_edited (edit, archive) ->
     let open Result.Let_syntax in
     let%bind plan = History_edit.prepare state ~edit in
@@ -321,15 +363,18 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
       else
         Error (Agent_protocol.Error.invalid_request "history edit archive basis differs")
     in
-    apply
-      ~limits
-      state
-      (Batch
-         [ Canonical_history_replaced (History_edit.canonical_history plan)
-         ; Authoring_references_forgotten (History_edit.retired_ids plan)
-         ; Initial_prompt_count_changed (History_edit.initial_prompt_entry_count plan)
-         ; Compaction_archived archive
-         ])
+    let%bind next =
+      apply
+        ~limits
+        state
+        (Batch
+           [ Canonical_history_replaced (History_edit.canonical_history plan)
+           ; Authoring_references_forgotten (History_edit.retired_ids plan)
+           ; Initial_prompt_count_changed (History_edit.initial_prompt_entry_count plan)
+           ; Compaction_archived archive
+           ])
+    in
+    retire_pending_dispositions next ~history_ids:(History_edit.retired_ids plan) ~limits
   | Compaction_archived archive ->
     Ok
       { state with
@@ -339,24 +384,53 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
           }
       }
   | Deferred_entries_enqueued entries ->
-    Ok
-      { state with
-        conversation =
-          { state.conversation with
-            deferred_user_entries = state.conversation.deferred_user_entries @ entries
-          }
-      }
+    let%bind.Result additions =
+      List.map entries ~f:(fun entry ->
+        let open Result.Let_syntax in
+        let%bind input =
+          Agent_protocol.Pending_input.create
+            ~entry
+            ~generation:state.identity.generation
+            ~binding:Agent_protocol.Pending_input.Binding.safe_boundary
+        in
+        Pending_input_document.authored input ~limits
+        |> Result.map_error ~f:(fun error ->
+          Agent_protocol.Error.invalid_request
+            (Sexp.to_string_hum (Document_schema.Error.sexp_of_t error))))
+      |> Result.all
+    in
+    let%map.Result pending_revision =
+      Agent_protocol.Pending_input.Revision.succ state.conversation.pending_revision
+    in
+    { state with
+      conversation =
+        { state.conversation with
+          deferred_user_entries = state.conversation.deferred_user_entries @ additions
+        ; pending_revision
+        }
+    }
   | Deferred_entries_adopted ->
-    Ok
-      { state with
-        conversation =
-          { state.conversation with
-            canonical_history =
-              state.conversation.canonical_history
-              @ state.conversation.deferred_user_entries
-          ; deferred_user_entries = []
-          }
-      }
+    let%bind.Result plan = Pending_plan.legacy_adoption state ~limits in
+    Pending_plan.apply plan state
+  | Pending_inputs_changed (mutation, archive, _expiry_archive) ->
+    let open Result.Let_syntax in
+    let%bind plan = Pending_mutation.prepare mutation state ~limits in
+    let%bind () =
+      if Pending_plan.requires_archive plan && Option.is_none archive
+      then
+        Error
+          (Agent_protocol.Error.invalid_request
+             "pending mutation requires exact prestate archival")
+      else Ok ()
+    in
+    let%map next = Pending_plan.apply plan state in
+    { next with
+      conversation =
+        { next.conversation with
+          compaction_archives =
+            Option.to_list archive @ next.conversation.compaction_archives
+        }
+    }
   | Active_operation_changed active_operation ->
     let automatic_turn_budget =
       match active_operation, state.active_operation with
@@ -1083,6 +1157,11 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
           state.moderator_executions
           ~id_of:(fun e -> e.E.context.id)
     }
+  | Run_state_changed run_state ->
+    let open Result.Let_syntax in
+    let previous = Option.value state.run_state ~default:Run_state.empty in
+    let%map () = Run_state.validate_transition ~previous run_state in
+    { state with run_state = Some run_state }
   | Moderator_changed moderator -> Ok { state with moderator }
   | Shell_changed shell -> Ok { state with shell }
   | History_block_reserved reserved_history_through ->

@@ -24,6 +24,9 @@ let run_replace_child env name target =
   let matches path =
     String.is_prefix path ~prefix:(target ^ ".tmp-")
     || String.equal path (Filename.dirname target)
+    (* Directory sync opens "." relative to the parent capability; the fault
+       still targets that exact directory before the real fsync. *)
+    || String.equal path (Filename.concat (Filename.dirname target) ".")
   in
   let directory_opened = ref false in
   let on_boundary path =
@@ -103,6 +106,9 @@ let run_child env arguments =
   | [ "creator-recover"; root; boundary ] ->
     Crash_creator.run_child env ~root ~boundary ~recover:true
   | [ "generated-provider"; root ] -> Generated_provider_scenario.run_child env root
+  | [ "pending-input"; root ] -> Crash_pending_input.run_child env ~root ~recover:false
+  | [ "pending-input-recover"; root ] ->
+    Crash_pending_input.run_child env ~root ~recover:true
   | [ "owned-stop"; root ] -> Crash_owned_stop.run_child env ~root ~recover:false
   | [ "owned-stop-recover"; root ] -> Crash_owned_stop.run_child env ~root ~recover:true
   | [ "owned-stop-recover"; root; boundary ] ->
@@ -285,10 +291,26 @@ let test_sigkill_committed_session env environment =
         Daemon_process.signal first Stdlib.Sys.sigkill;
         Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
           await_daemon_kill env first);
-        F.with_daemon env fixture (fun client ->
-          F.assert_snapshot expected (F.get client expected.session.id));
-        F.with_daemon env fixture (fun client ->
-          F.assert_snapshot expected (F.get client expected.session.id))))
+        let journal = F.current_journal env fixture expected.session.id in
+        let committed = F.read env journal in
+        let previous_counters = ref None in
+        let inspect () =
+          F.with_daemon env fixture (fun client ->
+            let actual = F.get client expected.session.id in
+            F.assert_retained_snapshot expected actual;
+            let counters = actual.revision, actual.latest_event_sequence in
+            Option.iter !previous_counters ~f:(fun (revision, sequence) ->
+              F.require
+                (Int64.equal revision actual.revision
+                 && Int64.equal sequence actual.latest_event_sequence)
+                "cold physical reopening advanced recorded counters");
+            previous_counters := Some counters);
+          F.require
+            (String.equal committed (F.read env journal))
+            "cold acknowledged-session inspection mutated the journal"
+        in
+        inspect ();
+        inspect ()))
 ;;
 
 let test_unknown_outcome env _environment =
@@ -312,6 +334,7 @@ let cases =
   ; "authored.creation-lost-acknowledgement", Crash_authored_creation.test_lost_ack
   ; "generated.creator-outcome-recovery", Crash_creator.test
   ; "generated.owned-stop-recovery", Crash_owned_stop.test
+  ; "pending.interrupted-root-recovery", Crash_pending_input.test
   ; "side-effect.unknown-no-replay", Crash_unknown_effect.test
   ; "invocation.admission-publication-no-replay", Crash_invocation_publication.test
   ; "job.committed-intent-launch-once", Crash_queued_launch.test

@@ -6,8 +6,8 @@ let apply ~previous ~(state : Session_state.t) ~delta ~payloads ~now =
   let open Result.Let_syntax in
   let previous_receipts = previous.Session_state.managed_submissions in
   let%bind receipts =
-    match delta with
-    | Session_delta.Created _ ->
+    match Session_replacement_delta.classify delta with
+    | Some _ ->
       List.fold_result
         previous_receipts
         ~init:state.managed_submissions
@@ -17,7 +17,7 @@ let apply ~previous ~(state : Session_state.t) ~delta ~payloads ~now =
             Result.map (M.validate_transition ~previous:receipt retained) ~f:(fun () ->
               values)
           | None -> Ok (values @ [ receipt ]))
-    | _ -> Ok state.managed_submissions
+    | None -> Ok state.managed_submissions
   in
   if List.is_empty receipts
   then Ok (state, delta)
@@ -84,9 +84,10 @@ let apply ~previous ~(state : Session_state.t) ~delta ~payloads ~now =
         else Some (Session_delta.Managed_submission_changed after))
     in
     let state = { state with managed_submissions = next } in
-    match delta with
-    | Session_delta.Created _ -> Ok (state, Session_delta.Created state)
-    | _ ->
+    match Session_replacement_delta.classify delta with
+    | Some replacement ->
+      Ok (state, Session_replacement_delta.with_state replacement state)
+    | None ->
       Ok
         ( state
         , if List.is_empty changes then delta else Session_delta.Batch (delta :: changes)

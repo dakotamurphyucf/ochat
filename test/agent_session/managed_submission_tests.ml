@@ -23,9 +23,36 @@ let%expect_test
      receipts"
   =
   let reject = ref false in
+  let document = ref None in
+  let document_commits = ref 0 in
   Delegation_lifecycle_tests.with_fixture
-    ~reject_transition:(fun _ -> !reject)
-    (fun _env
+    ~reject_transition:(fun (transition : Agent_session.Session_transition.t) ->
+      match !document with
+      | None -> !reject
+      | Some previous ->
+        let candidate =
+          Agent_session.Session_document_transition.admit
+            previous
+            ~delta:transition.delta
+            ~next:transition.state
+            ~limits:document_limits
+          |> document_ok
+        in
+        let encoded =
+          Agent_session.Session_state_document.encode candidate ~limits:document_limits
+          |> document_ok
+        in
+        let candidate =
+          Agent_session.Session_state_document.decode ~limits:document_limits encoded
+          |> document_ok
+        in
+        if !reject
+        then true
+        else (
+          document := Some candidate;
+          Int.incr document_commits;
+          false))
+    (fun env
       _sw
       _ledger
       record
@@ -70,6 +97,12 @@ let%expect_test
            (input number text)
        in
        let before = A.state actor |> protocol_ok in
+       document
+       := Some
+            (Agent_session.Session_state_document.decode
+               ~limits:document_limits
+               (state_document before)
+             |> document_ok);
        reject := true;
        assert (Result.is_error (send reference "one" 0 "first"));
        assert_same_session_snapshot before (A.state actor |> protocol_ok);
@@ -105,6 +138,42 @@ let%expect_test
        List.iter done_state.managed_submissions ~f:(fun receipt ->
          assert (M.equal_status (Terminal (Some operation, Completed)) receipt.status));
        [%test_eq: int] 1 !runs;
+       assert (!document_commits > 0);
+       let committed = Option.value_exn !document in
+       let unqueued =
+         M.create
+           ~reference
+           ~key:(key "invalid-final-unqueued")
+           ~request_sha256:(digest "unqueued final receipt")
+           ~generation:0
+           ~history_id:(input 999 "unqueued final receipt").id
+           ~now:timestamp
+         |> protocol_ok
+       in
+       let invalid_delta =
+         Agent_session.Session_delta.Managed_submission_admitted unqueued
+       in
+       let invalid =
+         Agent_session.Session_delta.apply done_state invalid_delta |> protocol_ok
+       in
+       assert (Result.is_error (State.validate invalid));
+       let invalid_final_rejected =
+         match
+           Agent_session.Session_document_transition.admit
+             committed
+             ~delta:invalid_delta
+             ~next:invalid
+             ~limits:document_limits
+         with
+         | Error (Document_schema.Error.Invalid_field { path = []; reason }) ->
+           String.equal reason "managed submission identity/generation is inconsistent"
+         | Error _ | Ok _ -> false
+       in
+       assert invalid_final_rejected;
+       assert_same_session_snapshot done_state (A.state actor |> protocol_ok);
+       assert_same_session_snapshot
+         done_state
+         (Agent_session.Memory_backend.state backend);
        let restored = restore_state done_state |> store_ok in
        assert (
          List.equal M.equal done_state.managed_submissions restored.managed_submissions);
@@ -117,8 +186,46 @@ let%expect_test
        let migrated = State.upgrade_schema legacy |> protocol_ok in
        [%test_eq: int] State.current_schema_version migrated.schema_version;
        let writer, _ = A.attach actor ~mode:Read_write ~subscribe:false |> protocol_ok in
+       let held, held_u = Eio.Promise.create () in
+       let cancelled, cancelled_u = Eio.Promise.create () in
+       let held_worker =
+         Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input:_ _ ->
+           Exn.protect
+             ~finally:(fun () -> Eio.Promise.resolve cancelled_u ())
+             ~f:(fun () ->
+               Eio.Promise.resolve held_u ();
+               Eio.Fiber.await_cancel ()))
+       in
+       A.set_operation_worker actor (Some held_worker) |> protocol_ok;
+       A.submit_message
+         actor
+         ~submitting_principal:principal_id
+         ~attachment_id:writer.id
+         (input 998 "Hold a new root during pending reset.")
+       |> protocol_ok
+       |> ignore;
+       Eio.Promise.await held;
+       A.submit_message
+         actor
+         ~submitting_principal:principal_id
+         ~attachment_id:writer.id
+         (input 999 "Retire at reset without losing submission receipts.")
+       |> protocol_ok
+       |> ignore;
        A.stop actor ~attachment_id:writer.id ~mode:Cancel |> protocol_ok |> ignore;
+       Eio.Promise.await cancelled;
+       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
+         let rec settled () =
+           let state = A.state actor |> protocol_ok in
+           match state.active_operation, state.lifecycle.observed with
+           | None, Stopped -> ()
+           | _ ->
+             Eio.Fiber.yield ();
+             settled ()
+         in
+         settled ());
        let before_reset = A.state actor |> protocol_ok in
+       assert (not (List.is_empty before_reset.conversation.deferred_user_entries));
        let reset =
          Agent_session.Administration.reset
            before_reset

@@ -38,6 +38,9 @@ type extension_services =
   ; one_off_policy : Chat_response.One_off_request.policy
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
   ; claim_lifecycle : event:Moderation.Event.t -> Moderator_event.claim
+  ; run_actions :
+      Agent_protocol.Moderator_execution.t
+      -> (Run_action_service.t option, Agent_protocol.Error.t) result
   ; lifecycle_started : Agent_protocol.Invocation.observer -> bool
   ; history : unit -> History_entry.t list
   ; standalone_completion :
@@ -69,6 +72,7 @@ type extension_services =
 
 type moderator_activation =
   { pending : unit -> bool
+  ; startup_pending : unit -> bool
   ; run : unit -> (bool, Agent_protocol.Error.t) result
   }
 
@@ -1089,6 +1093,7 @@ let guarded_services authority (services : extension_services) =
   ; claim_lifecycle =
       (fun ~event ~snapshot f ->
         checked (fun () -> services.claim_lifecycle ~event ~snapshot f))
+  ; run_actions = (fun executing -> checked (fun () -> services.run_actions executing))
   ; notification_input =
       (fun ~source ~tools ~operation_id () ->
         checked (fun () -> services.notification_input ~source ~tools ~operation_id ()))
@@ -1519,10 +1524,11 @@ let build_with_services
                 ~f:services.lifecycle_started))
     | _ -> None
   in
-  let activate lifecycle ~claim ~history =
+  let activate lifecycle ~claim ~run_actions ~history =
     Moderator_event.Lifecycle.run
       lifecycle
       ~claim
+      ~run_actions
       ?script_tools
       ~history
       ~available_tools:tools
@@ -1535,9 +1541,15 @@ let build_with_services
     | Some lifecycle, Some services ->
       Some
         { pending = (fun () -> Moderator_event.Lifecycle.pending lifecycle)
+        ; startup_pending =
+            (fun () -> Moderator_event.Lifecycle.startup_pending lifecycle)
         ; run =
             (fun () ->
-              activate lifecycle ~claim:services.claim_lifecycle ~history:services.history
+              activate
+                lifecycle
+                ~claim:services.claim_lifecycle
+                ~run_actions:services.run_actions
+                ~history:services.history
               |> Result.map ~f:(function
                 | Activated _ -> true
                 | Unavailable | Already_active -> false))
@@ -1554,6 +1566,7 @@ let build_with_services
               lifecycle
               ~claim:(fun ~event ->
                 capabilities.Operation_worker.Capabilities.with_moderator_event ~event)
+              ~run_actions:capabilities.run_actions
               ~history:(fun () -> input.Operation_worker.Input.history)
           in
           match activation with

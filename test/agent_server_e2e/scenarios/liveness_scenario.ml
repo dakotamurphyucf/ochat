@@ -544,6 +544,7 @@ let child_environment fixture =
 
 let test_process_bound_stdio env environment =
   let fixture = setup_fixture env environment "liveness-process-stdio" in
+  Support.Provider_fixture.provision ~env fixture;
   Eio.Switch.run (fun sw ->
     let process =
       Stdio_process.spawn
@@ -640,6 +641,7 @@ let rec await_tui_ready env process attempts =
 
 let test_process_bound_tui env environment =
   let fixture = setup_fixture env environment "liveness-process-tui" in
+  Support.Provider_fixture.provision ~env fixture;
   Eio.Switch.run (fun sw ->
     let target =
       [ tui_executable env

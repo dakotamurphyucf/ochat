@@ -247,6 +247,7 @@ module Outcome : sig
     ; ui_notifications : string list
     ; runtime_requests : Runtime_request.t list
     ; emitted_events : Lang.value list
+    ; run_action : Agent_protocol.Run_action.t option
     }
 
   val empty : t

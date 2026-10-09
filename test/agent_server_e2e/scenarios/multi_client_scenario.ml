@@ -362,6 +362,7 @@ let send_command session attachment text key =
     ; attachment_id = attachment.Agent_protocol.Session.Attachment.id
     ; content = { kind = Plain_text; text; attachments = [] }
     ; idempotency_key = idempotency_key key
+    ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
     }
 ;;
 

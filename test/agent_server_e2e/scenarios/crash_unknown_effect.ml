@@ -45,6 +45,7 @@ let send client session_id attachment_id =
          ; content =
              { kind = Plain_text; text = "append the marker once"; attachments = [] }
          ; idempotency_key = F.key "crash-effect:send"
+         ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
          })
   with
   | Session_send_message sent -> sent
@@ -148,11 +149,59 @@ let assert_interrupted env fixture (before : Agent_protocol.Public.Snapshot.Fiel
       | _ -> None)
   in
   match interrupted with
-  | [ { state = Interrupted { reason; _ }; _ } ] ->
-    F.require (not (String.is_empty reason)) "persisted interruption has no explanation"
+  | [ ({ state = Interrupted { reason; _ }; _ } as operation) ] ->
+    F.require (not (String.is_empty reason)) "persisted interruption has no explanation";
+    operation
   | _ ->
     F.fail
       "recovery did not durably classify the exact operation as interrupted exactly once"
+;;
+
+let retained_interruption env fixture session_id operation_id =
+  let installed =
+    Agent_store.Snapshot.load_current
+      ~env
+      ~directory:(Filename.concat (F.session_directory fixture session_id) "snapshot")
+      ~max_payload_length:(64 * 1024 * 1024)
+    |> F.store_ok
+    |> Option.value_exn
+  in
+  let state =
+    Agent_session.Session_persistence.restore_snapshot
+      ~limits:Document_schema.Limits.default
+      installed.snapshot
+    |> F.store_ok
+    |> Agent_session.Session_persistence.Restored.state
+  in
+  F.require (Option.is_none state.active_operation) "checkpoint retained active operation";
+  let ledger =
+    Agent_session.Inference_ledger.to_document state.inference_ledger
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum ([%sexp_of: Agent_session.Inference_ledger.Error.t] error))
+    |> Result.ok_or_failwith
+    |> Document_schema.Document.payload
+  in
+  let turns =
+    match Jsonaf.member_exn "turns" ledger with
+    | `Array turns -> turns
+    | _ -> F.fail "validated inference ledger has no retained turns"
+  in
+  let exact =
+    List.filter_map turns ~f:(fun turn ->
+      let operation =
+        Jsonaf.member_exn "operation" turn
+        |> Agent_protocol.Operation.of_json
+        |> F.protocol_ok
+      in
+      Option.some_if
+        (Agent_protocol.Id.Operation.equal operation.id operation_id)
+        operation)
+  in
+  match exact with
+  | [ ({ state = Interrupted { reason; _ }; _ } as operation) ] ->
+    F.require (not (String.is_empty reason)) "checkpoint interruption has no explanation";
+    operation
+  | _ -> F.fail "checkpoint lost the exact retained operation interruption"
 ;;
 
 let test env environment =
@@ -180,7 +229,8 @@ let test env environment =
       snapshot)
   in
   let recovered_history = ref None in
-  for _ = 1 to 2 do
+  let durable_interruption = ref None in
+  for reopen = 1 to 2 do
     with_host env environment fixture marker (fun child client ->
       let recovered = assert_no_replay env child client before.session.id marker in
       let prefix, appended =
@@ -229,6 +279,31 @@ let test env environment =
            history
            recovered.canonical_history);
       F.kill env child);
-    assert_interrupted env fixture before
+    let operation = Option.value_exn before.session.active_operation in
+    let retained = retained_interruption env fixture before.session.id operation.id in
+    if reopen = 1
+    then (
+      let interrupted = assert_interrupted env fixture before in
+      F.require
+        (Jsonaf.exactly_equal
+           (Agent_protocol.Operation.to_json interrupted)
+           (Agent_protocol.Operation.to_json retained))
+        "checkpoint differs from the exact committed interruption";
+      durable_interruption := Some retained)
+    else (
+      (* The two-checkpoint retention floor may prune the original interruption
+         journal segment; its exact terminal turn remains in the checkpoint. *)
+      F.require
+        (Jsonaf.exactly_equal
+           (Agent_protocol.Operation.to_json (Option.value_exn !durable_interruption))
+           (Agent_protocol.Operation.to_json retained))
+        "second physical reopen changed the retained terminal operation";
+      F.require
+        (not
+           (List.exists
+              (persisted_events env fixture before.session.id)
+              ~f:(fun (event : Agent_protocol.Event.Durable.t) ->
+                Agent_protocol.Event.Durable.equal_kind event.kind Operation_interrupted)))
+        "second recovery appended another operation interruption")
   done
 ;;

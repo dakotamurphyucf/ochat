@@ -4,6 +4,13 @@
   fixtures
   inference_ports
   document_adoption_tests
+  run_state_tests
+  run_replacement_tests
+  run_admission_tests
+  run_subscription_wake_tests
+  run_persistence_tests
+  run_job_delivery_tests
+  run_action_scope_tests
   configuration_tests
   inference_target_tests
   inference_ledger_state_tests
@@ -14,6 +21,10 @@
   metadata_tests
   organization_tests
 
+  pending_input_tests
+  pending_control_tests
+  pending_document_tests
+  pending_persistence_tests
   history_edit_tests
   history_schema_composition_tests
   managed_output_cursor_tests

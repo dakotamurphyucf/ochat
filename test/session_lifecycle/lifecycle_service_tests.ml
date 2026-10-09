@@ -836,8 +836,10 @@ let%expect_test
               match phase with
               | Authority_acknowledgement -> P.Session.Delete_request.Archive
               | Payload_deletion | Final_cleanup -> Remove
-              | Rejection_completion | Actor_lock_release ->
-                failwith "not an irreversible boundary"
+              | Rejection_completion
+              | Actor_lock_release
+              | Pending_claim
+              | Mutation_completion -> failwith "not an irreversible boundary"
             in
             (match policy with
              | Archive -> ()
@@ -1817,4 +1819,392 @@ let%expect_test
                    , !providers )
                    : bool * bool * bool * bool * bool * bool * bool * int)]))));
   [%expect {| (true true true true true true true 0) |}]
+;;
+
+let%expect_test
+    "schedule lifecycle admission rejects before claim and same key admits exactly once"
+  =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    with_lifecycle_root env (fun ~root ~content:_ ~configuration ->
+      Eio.Switch.run (fun sw ->
+        let calls = ref 0 in
+        let daemon = start_daemon sw env ~root ~configuration calls in
+        let client = connection daemon (principal ()) in
+        initialize client;
+        let session, attachment =
+          create_session ~key:"schedule-admission-create" client
+        in
+        let command =
+          P.Command.Schedule_create
+            { session_id = session.id
+            ; attachment_id = attachment.id
+            ; payload = `Null
+            ; due = After_ms 60000
+            ; misfire = Deliver_once_immediately
+            ; idempotency_key = key "schedule-admission-original"
+            }
+        in
+        let rejected, missing =
+          Agent_server.Session_registry.with_lifecycle
+            (Agent_server.Daemon.registry daemon)
+            session.id
+            (fun _ ->
+               let rejected =
+                 match C.Connection.request_without_history client command with
+                 | Error { P.Error.code = Conflict; retryable = true; _ } -> true
+                 | Ok _ | Error _ -> false
+               in
+               Ok (rejected, String.equal (receipt_state client command) "missing"))
+          |> protocol_ok
+        in
+        let admitted () =
+          match C.Connection.request_without_history client command |> protocol_ok with
+          | P.Method_result.Schedule_create result -> result.schedule.id
+          | _ -> failwith "schedule create result"
+        in
+        let original = admitted () in
+        let replay = admitted () in
+        let snapshot = inspect client session.id in
+        print_s
+          [%sexp
+            (rejected : bool)
+          , (missing : bool)
+          , (P.Id.Schedule.equal original replay : bool)
+          , (Int.equal (List.length snapshot.schedules) 1 : bool)
+          , (String.equal (receipt_state client command) "committed" : bool)
+          , (!calls : int)];
+        let metadata_command =
+          P.Command.Session_update_metadata
+            { session_id = session.id
+            ; attachment_id = attachment.id
+            ; expected_metadata_revision = session.metadata_revision
+            ; patch =
+                P.Session_metadata.Patch.create
+                  ~name:(Set "admitted metadata")
+                  ~set_labels:[]
+                  ~remove_labels:[]
+                |> protocol_ok
+            ; idempotency_key = key "metadata-admission-original"
+            }
+        in
+        let rejected_metadata, missing_metadata =
+          Agent_server.Session_registry.with_lifecycle
+            (Agent_server.Daemon.registry daemon)
+            session.id
+            (fun _ ->
+               let rejected =
+                 match C.Connection.request_without_history client metadata_command with
+                 | Error { P.Error.code = Conflict; retryable = true; _ } -> true
+                 | Ok _ | Error _ -> false
+               in
+               Ok
+                 (rejected, String.equal (receipt_state client metadata_command) "missing"))
+          |> protocol_ok
+        in
+        ignore
+          (C.Connection.request_without_history client metadata_command |> protocol_ok
+           : P.Method_result.t);
+        ignore
+          (C.Connection.request_without_history client metadata_command |> protocol_ok
+           : P.Method_result.t);
+        let changed = (inspect client session.id).session in
+        print_s
+          [%sexp
+            (rejected_metadata : bool)
+          , (missing_metadata : bool)
+          , (Int64.equal changed.metadata_revision Int64.(session.metadata_revision + 1L)
+             : bool)
+          , (Option.equal
+               String.equal
+               changed.spec.display_name
+               (Some "admitted metadata")
+             : bool)];
+        C.Connection.close client;
+        Agent_server.Daemon.shutdown daemon |> protocol_ok)));
+  [%expect
+    {|
+    (true true true true true 0)
+    (true true true true)
+  |}]
+;;
+
+let%expect_test
+    "schedule post-effect completion failure retains Pending and suppresses duplicate"
+  =
+  Eio_main.run (fun raw_env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let fault = Lifecycle_faults.create () in
+    let env = Lifecycle_faults.wrap_env fault raw_env in
+    with_lifecycle_root raw_env (fun ~root ~content:_ ~configuration ->
+      Eio.Switch.run (fun sw ->
+        let calls = ref 0 in
+        let daemon = start_daemon sw env ~root ~configuration calls in
+        let client = connection daemon (principal ()) in
+        initialize client;
+        let session, attachment =
+          create_session ~key:"schedule-uncertain-create" client
+        in
+        let command =
+          P.Command.Schedule_create
+            { session_id = session.id
+            ; attachment_id = attachment.id
+            ; payload = `Null
+            ; due = After_ms 60000
+            ; misfire = Deliver_once_immediately
+            ; idempotency_key = key "schedule-uncertain-original"
+            }
+        in
+        Lifecycle_faults.arm fault Mutation_completion;
+        let failed =
+          match C.Connection.request_without_history client command with
+          | Error { P.Error.code = Persistence_error; _ } -> true
+          | Ok _ | Error _ -> false
+        in
+        let pending =
+          match
+            C.Connection.request_without_history
+              client
+              (P.Command.Command_receipt
+                 { method_name = P.Command.method_name command
+                 ; original_params = P.Command.params command
+                 })
+            |> protocol_ok
+          with
+          | P.Method_result.Command_receipt (Pending { accepted_sequence = Some _; _ }) ->
+            true
+          | _ -> false
+        in
+        let suppressed =
+          match C.Connection.request_without_history client command with
+          | Error { P.Error.code = Interrupted; _ } -> true
+          | Ok _ | Error _ -> false
+        in
+        print_s
+          [%sexp
+            (Lifecycle_faults.was_triggered fault : bool)
+          , (failed : bool)
+          , (pending : bool)
+          , (suppressed : bool)
+          , (Int.equal (List.length (inspect client session.id).schedules) 1 : bool)
+          , (!calls : int)];
+        C.Connection.close client;
+        Agent_server.Daemon.shutdown daemon |> protocol_ok)));
+  [%expect {| (true true true true true 0) |}]
+;;
+
+let%expect_test "prepared writer rechecks attachment after durable pending admission" =
+  Eio_main.run (fun raw_env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let fault = Lifecycle_faults.create () in
+    let env = Lifecycle_faults.wrap_env fault raw_env in
+    with_lifecycle_root raw_env (fun ~root ~content:_ ~configuration ->
+      Eio.Switch.run (fun sw ->
+        let calls = ref 0 in
+        let daemon = start_daemon sw env ~root ~configuration calls in
+        let client = connection daemon (principal ()) in
+        initialize client;
+        let session, attachment = create_session ~key:"prepared-writer-create" client in
+        let entry =
+          Agent_server.Session_registry.find
+            (Agent_server.Daemon.registry daemon)
+            session.id
+          |> Option.value_exn
+        in
+        let command =
+          P.Command.Schedule_create
+            { session_id = session.id
+            ; attachment_id = attachment.id
+            ; payload = `Null
+            ; due = After_ms 60000
+            ; misfire = Deliver_once_immediately
+            ; idempotency_key = key "prepared-writer-original"
+            }
+        in
+        Lifecycle_faults.arm_cancel fault Pending_claim ~cancel:(fun () ->
+          Agent_session.Session_actor.detach entry.actor attachment.id |> protocol_ok);
+        let rejected =
+          match C.Connection.request_without_history client command with
+          | Error { P.Error.code = Invalid_request; _ } -> true
+          | Ok _ | Error _ -> false
+        in
+        print_s
+          [%sexp
+            (Lifecycle_faults.was_triggered fault : bool)
+          , (rejected : bool)
+          , (List.is_empty (inspect client session.id).schedules : bool)
+          , (String.equal (receipt_state client command) "failed" : bool)
+          , (!calls : int)];
+        C.Connection.close client;
+        Agent_server.Daemon.shutdown daemon |> protocol_ok)));
+  [%expect {| (true true true true 0) |}]
+;;
+
+let%expect_test
+    "maintenance observes busy owners without lifecycle admission and rechecks candidates"
+  =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    with_lifecycle_root env (fun ~root ~content:_ ~configuration ->
+      Eio.Switch.run (fun sw ->
+        let module R = Agent_server.Session_registry in
+        let module A = Agent_session.Session_actor in
+        let module S = Agent_session.Session_state in
+        let calls = ref 0 in
+        let daemon = start_daemon sw env ~root ~configuration calls in
+        let client = connection daemon (principal ()) in
+        initialize client;
+        let seed, _ = create_session ~key:"maintenance-seed" client in
+        let seed_entry =
+          R.find (Agent_server.Daemon.registry daemon) seed.id |> Option.value_exn
+        in
+        let seed_state = A.state seed_entry.actor |> protocol_ok in
+        List.iter [ true; false ] ~f:(fun running ->
+          let initial =
+            { seed_state with
+              attachments = []
+            ; runtime_initialization = Ready
+            ; lifecycle =
+                { desired = (if running then Running else Stopped)
+                ; observed = (if running then Idle else Stopped)
+                }
+            }
+          in
+          let backend =
+            Agent_session.Memory_backend.create ~event_capacity:128 ~initial_state:initial
+          in
+          let persistence = Agent_session.Memory_backend.persistence backend in
+          let entered, enter = Eio.Promise.create () in
+          let release, resume = Eio.Promise.create () in
+          let blocked = ref true in
+          let next_state = ref initial in
+          let actor =
+            A.create
+              ~sw
+              ~clock:(Eio.Stdenv.clock env)
+              ~mailbox_capacity:32
+              ~compaction_env:None
+              ~initial_state:initial
+              ~operation_worker:None
+              ~persistence:
+                { persistence with
+                  commit =
+                    (fun ~command_audit ~previous next ->
+                      if !blocked
+                      then (
+                        blocked := false;
+                        next_state := next.Agent_session.Session_transition.state;
+                        Eio.Promise.resolve enter ();
+                        Eio.Promise.await release);
+                      persistence.commit ~command_audit ~previous next)
+                }
+              ~services:
+                { now = P.Timestamp.now
+                ; monotonic_now =
+                    (fun () -> Eio.Time.Mono.now (Eio.Stdenv.mono_clock env))
+                ; create_attachment_id = P.Id.Attachment.create
+                ; create_reclaim_token = (fun () -> "maintenance-test")
+                ; state_committed = (fun _ _ -> ())
+                ; job_results = None
+                ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
+                ; schedule_limits = Agent_session.Staged_schedules.default_limits
+                ; notification_limits = Agent_session.Staged_notifications.default_limits
+                ; ingress_limits = Agent_session.Staged_ingress.default_limits
+                }
+          in
+          let closes = ref 0 in
+          let runtime =
+            Agent_server.Runtime_owner.create ~actor ~initial:None ~build:(fun () ->
+              failwith "maintenance activated an owner")
+          in
+          let entry : R.entry =
+            { actor
+            ; runtime
+            ; history_ids =
+                Agent_session.History_id_source.create
+                  ~namespace:"maintenance"
+                  ~block_size:8
+                  ~reserve:(fun ~count -> A.reserve_history_block actor ~count)
+                |> protocol_ok
+            ; durable_events =
+                Agent_session.Durable_event_log.create ~capacity:128 [] |> protocol_ok
+            ; capacity = None
+            ; store_handle = None
+            ; expire_permissions = (fun ~now:_ -> ())
+            ; collect_results = (fun () -> Ok None)
+            ; close =
+                (fun () ->
+                  Int.incr closes;
+                  A.shutdown actor)
+            }
+          in
+          let registry = R.create () in
+          R.add registry ~session_id:seed.id entry |> protocol_ok;
+          let committed, commit = Eio.Promise.create () in
+          Eio.Fiber.fork ~sw (fun () ->
+            Eio.Promise.resolve commit (A.reserve_history_block actor ~count:1));
+          Eio.Promise.await entered;
+          let indexed : Agent_store.Session_index.Entry.t =
+            { session = S.summary !next_state
+            ; runnable_job_count = 0
+            ; deliverable_job_count = 0
+            ; earliest_schedule_due = None
+            ; owner_grace_deadline = None
+            ; pending_initial_start = false
+            ; archived = false
+            ; lifecycle_revision = P.Session_lifecycle.Revision.zero
+            ; admission = Automatic
+            }
+          in
+          let observing, observe = Eio.Promise.create () in
+          let unloaded, unload = Eio.Promise.create () in
+          Eio.Fiber.fork ~sw (fun () ->
+            Eio.Promise.resolve observe ();
+            Eio.Promise.resolve
+              unload
+              (R.unload_inactive registry ~index_entries:[ indexed ]));
+          Eio.Promise.await observing;
+          let same_owner =
+            match R.load registry seed.id with
+            | Ok actual -> phys_equal actual.actor actor
+            | Error _ -> false
+          in
+          let unrelated =
+            R.with_lifecycle registry (P.Id.Session.create ()) (fun _ -> Ok ())
+            |> Result.is_ok
+          in
+          let restarted, restart = Eio.Promise.create () in
+          let attaching, attach = Eio.Promise.create () in
+          if not running
+          then (
+            Eio.Fiber.fork ~sw (fun () ->
+              Eio.Promise.resolve attach ();
+              let attachment, _ =
+                A.attach actor ~mode:Read_write ~subscribe:false |> protocol_ok
+              in
+              Eio.Promise.resolve restart (A.start actor ~attachment_id:attachment.id));
+            Eio.Promise.await attaching);
+          Eio.Promise.resolve resume ();
+          Eio.Promise.await committed |> protocol_ok |> ignore;
+          let removed = Eio.Promise.await unloaded in
+          if not running then Eio.Promise.await restarted |> protocol_ok |> ignore;
+          let current =
+            R.read_state registry ~authorize:(fun _ -> Ok ()) seed.id |> protocol_ok
+          in
+          print_s
+            [%sexp
+              (running : bool)
+            , (same_owner : bool)
+            , (unrelated : bool)
+            , (Int.equal removed 0 : bool)
+            , (Int.equal !closes 0 : bool)
+            , (P.Session.equal_desired_state current.lifecycle.desired Running : bool)];
+          R.shutdown registry);
+        C.Connection.close client;
+        Agent_server.Daemon.shutdown daemon |> protocol_ok)));
+  [%expect
+    {|
+    (true true true true true true)
+    (false true true true true true)
+    |}]
 ;;

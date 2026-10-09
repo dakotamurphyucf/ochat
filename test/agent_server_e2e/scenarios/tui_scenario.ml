@@ -76,6 +76,7 @@ let local_message env temporary child =
 
 let local env temporary ~columns ~rows ~message =
   let fixture = F.create env temporary "tui-local" in
+  Support.Provider_fixture.provision ~env fixture;
   Eio.Switch.run (fun sw ->
     let child =
       spawn
@@ -84,7 +85,7 @@ let local env temporary ~columns ~rows ~message =
         fixture
         ~columns
         ~rows
-        [ "--local"; "-file"; Config.prompt_path fixture ]
+        [ "--local"; "--transient"; "-file"; Config.prompt_path fixture ]
     in
     ready env child;
     inspect_work env child;
@@ -169,7 +170,8 @@ let connected http env temporary =
 ;;
 
 let cases =
-  [ "trace.messages-stable-ids", Tui_trace_scenario.messages
+  [ "local.durable-retained-commands", Local_storage_scenario.run
+  ; "trace.messages-stable-ids", Tui_trace_scenario.messages
   ; "trace.reasoning-tools-progress", Tui_stream_scenario.run
   ; "trace.deferred-overlays-agent-page", Tui_stream_scenario.overlays
   ; "trace.approval-compaction-cancellation", Tui_stream_scenario.approval

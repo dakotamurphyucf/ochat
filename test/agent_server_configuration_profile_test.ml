@@ -354,6 +354,7 @@ let%expect_test "configuration RPC selects a declared same-owner profile at next
                       ; content = { kind = Plain_text; text = "hello"; attachments = [] }
                       ; idempotency_key =
                           P.Idempotency_key.of_string "profile-message" |> protocol_ok
+                      ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
                       })
                  |> protocol_ok
                  |> ignore;
@@ -436,7 +437,9 @@ let%expect_test "configuration RPC selects a declared same-owner profile at next
                      let history =
                        Agent_session.History_codec.all_of_protocol
                          (before.conversation.canonical_history
-                          @ before.conversation.deferred_user_entries)
+                          @ List.map
+                              before.conversation.deferred_user_entries
+                              ~f:Agent_session.Pending_input_document.entry)
                        |> protocol_ok
                      in
                      let preflight = RT.Context.preflight_history context history in

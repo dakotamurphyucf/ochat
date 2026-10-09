@@ -26,6 +26,7 @@ let run
       ~event
       ~claim
       ?script_tools
+      ?run_actions
       ~manager
       ~history
       ~available_tools
@@ -72,6 +73,11 @@ let run
                fun () -> outcome := Some Chat_response.Moderation.Outcome.empty)
              |> Result.map_error ~f:failed
            | None ->
+             let%bind run_actions =
+               match run_actions with
+               | None -> Ok None
+               | Some provide -> provide executing
+             in
              let with_work f =
                match script_tools with
                | None ->
@@ -187,6 +193,14 @@ let run
                               prepared.runtime_requests
                         }
                       in
+                      let open Result.Let_syntax in
+                      let%bind requests =
+                        match run_actions, prepared.run_action with
+                        | None, None -> Ok requests
+                        | None, Some _ -> Error "run action has no callback owner"
+                        | Some owner, action ->
+                          Run_action_service.compose_requests owner ~action ~requests
+                      in
                       Ok
                         { M.persist =
                             (fun () ->
@@ -203,6 +217,8 @@ let run
                          ?schedules
                          ?notifications
                          ?ingress
+                         ?run_actions:
+                           (Option.map run_actions ~f:Run_action_service.transaction)
                          manager
                          ~session_id
                          ~now_ms
@@ -225,6 +241,8 @@ let run
                          ?schedules
                          ?notifications
                          ?ingress
+                         ?run_actions:
+                           (Option.map run_actions ~f:Run_action_service.transaction)
                          manager
                          ~session_id
                          ~now_ms
@@ -272,6 +290,7 @@ let run_delegated
       ~event
       ~(claim : delegated_claim)
       ?script_tools
+      ?run_actions
       ~manager
       ~history
       ~available_tools
@@ -326,6 +345,7 @@ let run_delegated
       ~event:(Ordinary event)
       ~claim:ordinary_claim
       ?script_tools
+      ?run_actions
       ~manager
       ~history
       ~available_tools
@@ -378,7 +398,31 @@ module Lifecycle = struct
     | Completed | Failed _ -> false
   ;;
 
-  let run t ~claim ?script_tools ~history ~available_tools ~session_meta ~now () =
+  let startup_pending t =
+    pending t
+    &&
+    match t.event with
+    | Session_start -> true
+    | Session_resume
+    | Turn_start
+    | Item_appended _
+    | Pre_tool_call _
+    | Post_tool_response _
+    | Turn_end
+    | Internal_event _ -> false
+  ;;
+
+  let run
+        t
+        ~claim
+        ?script_tools
+        ?run_actions
+        ~history
+        ~available_tools
+        ~session_meta
+        ~now
+        ()
+    =
     match
       Chat_response.Execution_gate.with_access t.gate (fun () ->
         match Atomic.get t.state with
@@ -395,6 +439,7 @@ module Lifecycle = struct
                  ~event:t.event
                  ~claim:(claim ~event:t.event)
                  ?script_tools
+                 ?run_actions
                  ~manager:t.manager
                  ~history
                  ~available_tools
@@ -472,6 +517,7 @@ let foreground_handlers ?script_tools ~capabilities ~manager ~session_meta ~now 
            ~event
            ~claim:(capabilities.with_moderator_event ~event)
            ?script_tools
+           ~run_actions:capabilities.run_actions
            ~manager
            ~history:(fun () -> history)
            ~available_tools
@@ -538,6 +584,7 @@ let foreground_handlers ?script_tools ~capabilities ~manager ~session_meta ~now 
                  ~event:Queued
                  ~claim:capabilities.with_queued_moderator_event
                  ?script_tools
+                 ~run_actions:capabilities.run_actions
                  ~manager
                  ~history:(fun () -> history)
                  ~available_tools

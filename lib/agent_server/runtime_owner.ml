@@ -15,9 +15,15 @@ type unload_outcome =
 
 exception Cleanup_failed of Agent_protocol.Error.t
 
+type builder =
+  | Ordinary of (unit -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result)
+  | For_runs of
+      (Agent_session.Run_preparation.t option
+       -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result)
+
 type t =
   { actor : Agent_session.Session_actor.t
-  ; build : unit -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result
+  ; build : builder
   ; before_unload : (closing:bool -> (unit, Agent_protocol.Error.t) result) option
   ; mutex : Eio.Mutex.t
   ; moderator_work_mutex : Eio.Mutex.t
@@ -48,25 +54,50 @@ let create_internal ~before_unload ~actor ~initial ~build =
 ;;
 
 let create_with_unload ~before_unload ~actor ~initial ~build =
-  create_internal ~before_unload:(Some before_unload) ~actor ~initial ~build
+  create_internal
+    ~before_unload:(Some before_unload)
+    ~actor
+    ~initial
+    ~build:(Ordinary build)
 ;;
 
 let create ~actor ~initial ~build =
-  create_internal ~before_unload:None ~actor ~initial ~build
+  create_internal ~before_unload:None ~actor ~initial ~build:(Ordinary build)
+;;
+
+let create_with_run_unload ~before_unload ~actor ~initial ~build =
+  create_internal
+    ~before_unload:(Some before_unload)
+    ~actor
+    ~initial
+    ~build:(For_runs build)
 ;;
 
 let is_loaded t = Eio.Mutex.use_ro t.mutex (fun () -> Option.is_some t.runtime)
 
-let install t (runtime : Agent_session.Runtime_builder.t) =
+let install ?run_preparation t (runtime : Agent_session.Runtime_builder.t) =
   let open Result.Let_syntax in
   let%bind () =
     match runtime.automatic_turn_policy with
     | None -> Ok ()
     | Some policy ->
-      Agent_session.Session_actor.enable_automatic_turn_budget t.actor policy
+      (match run_preparation with
+       | None -> Agent_session.Session_actor.enable_automatic_turn_budget t.actor policy
+       | Some preparation ->
+         Agent_session.Session_actor.enable_run_constructor_turn_budget
+           t.actor
+           ~preparation
+           policy)
   in
   let%bind _ =
-    Agent_session.Session_actor.change_moderator t.actor (runtime.moderator_snapshot ())
+    match run_preparation with
+    | None ->
+      Agent_session.Session_actor.change_moderator t.actor (runtime.moderator_snapshot ())
+    | Some preparation ->
+      Agent_session.Session_actor.checkpoint_run_moderator
+        t.actor
+        ~preparation
+        (runtime.moderator_snapshot ())
   in
   let%map () =
     Agent_session.Session_actor.set_runtime_worker
@@ -100,7 +131,7 @@ let with_owner_lock t ~protect f =
   | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
-let ensure_loaded_locked t =
+let ensure_loaded_locked ?run_preparation t =
   let check (runtime : Agent_session.Runtime_builder.t) =
     match runtime.check_execution with
     | None -> Ok ()
@@ -124,10 +155,22 @@ let ensure_loaded_locked t =
          ())
   | false, Some runtime -> check runtime
   | false, None ->
-    (match t.build () with
+    let built =
+      match t.build, run_preparation with
+      | Ordinary build, None -> build ()
+      | For_runs build, preparation -> build preparation
+      | Ordinary _, Some _ ->
+        Error
+          (Agent_protocol.Error.create
+             Invalid_state
+             ~message:"runtime constructor does not support scoped run admission"
+             ~retryable:false
+             ())
+    in
+    (match built with
      | Error _ as failure -> failure
      | Ok runtime ->
-       (match install t runtime with
+       (match install ?run_preparation t runtime with
         | Ok () -> check runtime
         | Error _ as failure ->
           runtime.close ();
@@ -276,19 +319,24 @@ let with_lease t ~survives_stop ~admit f =
          Exn.raise_with_original_backtrace exn backtrace))
 ;;
 
-let with_runtime_lease t ~retain_resources f =
+let with_runtime_lease ?run_preparation t ~retain_resources f =
   with_lease
     t
     ~survives_stop:retain_resources
     ~admit:(fun () ->
       let open Result.Let_syntax in
-      let%map () = ensure_loaded_locked t in
+      let%map () = ensure_loaded_locked ?run_preparation t in
       let runtime = Option.value_exn t.runtime in
       runtime, if retain_resources then Some runtime else None)
     f
 ;;
 
 let with_background_runtime t f = with_runtime_lease t ~retain_resources:false f
+
+let with_prepared_run_runtime t ~preparation f =
+  with_runtime_lease ~run_preparation:preparation t ~retain_resources:false f
+;;
+
 let with_delegation_resources t f = with_runtime_lease t ~retain_resources:true f
 
 let with_auxiliary_execution_lifetime t f =
@@ -378,6 +426,7 @@ let prepare_delegated_tool t ~delegation ~event ~authorize =
         Agent_session.Moderator_event.run_delegated
           ~event
           ~claim
+          ~run_actions:(A.run_actions t.actor)
           ?script_tools:runtime.moderator_script_tools
           ~manager
           ~history:(fun () -> !history)
@@ -824,6 +873,7 @@ let drain_loaded_queued_events ~max_events t runtime manager =
         let%bind outcome =
           Agent_session.Moderator_event.run_queued_idle
             ~claim
+            ~run_actions:(A.run_actions t.actor)
             ?script_tools:runtime.Agent_session.Runtime_builder.moderator_script_tools
             ~manager
             ~history:(fun () -> !history)
@@ -978,6 +1028,17 @@ let snapshot_has_pending_events t =
     let%bind halted =
       Agent_session.Runtime_builder.moderator_snapshot_is_halted state.moderator
     in
+    let%bind eligibility =
+      Agent_session.Pending_eligibility.create
+        state
+        ~boundary:Idle_start
+        ~runtime_admission_open:true
+    in
+    let%bind pending =
+      Agent_session.Pending_eligibility.eligible_prefix
+        eligibility
+        state.conversation.deferred_user_entries
+    in
     let%map observer =
       Agent_session.Runtime_builder.moderator_snapshot_observer state.moderator
     in
@@ -990,7 +1051,7 @@ let snapshot_has_pending_events t =
              (Option.exists observer ~f:(fun observer ->
                 Agent_session.Queued_moderator_event.has_unsettled_claim ~state ~observer))
        )
-    || ((not halted) && not (List.is_empty state.conversation.deferred_user_entries))
+    || ((not halted) && not (List.is_empty pending))
     || List.exists state.invocations ~f:Agent_session.Observation_follow_up.pending
     || List.exists
          state.moderator_executions
@@ -1291,6 +1352,26 @@ let deliver_moderated_background_job_completion
             (Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot))
         |> Result.map ~f:ignore)
       |> Result.map ~f:ignore)
+;;
+
+let deliver_run_job_completion t delivery =
+  with_cancellable_access t (fun runtime ->
+    let open Result.Let_syntax in
+    Agent_session.Session_actor.with_moderator_checkpoint t.actor (fun () ->
+      let%bind payload =
+        Agent_session.Run_job_delivery.frame delivery
+        |> Chat_response.Background_delivery.capture
+        |> Chatml.Chatml_value_codec.Snapshot.of_value
+        |> Result.map ~f:Chatml.Chatml_value_codec.Snapshot.to_jsonaf
+        |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+      in
+      runtime.enqueue_internal_event payload ~prepare:(fun ~before ~snapshot ->
+        Agent_session.Session_actor.enqueue_run_job_delivery
+          t.actor
+          ~delivery
+          ~before
+          ~after:(Agent_session.Runtime_builder.encode_moderator_snapshot snapshot))
+      |> Result.map ~f:ignore))
 ;;
 
 let deliver_background_job_completion t (job : Agent_protocol.Job.t) =

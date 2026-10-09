@@ -50,7 +50,7 @@ let validate_basis t state =
     && Int64.equal t.previous.counters.revision state.counters.revision
     && List.equal H.equal_entry previous.canonical_history current.canonical_history
     && List.equal
-         H.equal_entry
+         Pending_input_document.equal
          previous.deferred_user_entries
          current.deferred_user_entries
     && Int.equal previous.initial_prompt_entry_count current.initial_prompt_entry_count

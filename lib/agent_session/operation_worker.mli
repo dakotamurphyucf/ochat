@@ -140,6 +140,9 @@ module Capabilities : sig
           A recorded [Pending] initial tool outcome is eligible.
           Concurrent drainers cannot both receive the same record. Each claim
           revalidates operation ownership; this is not an idle-session API. *)
+    ; run_actions :
+        Agent_protocol.Moderator_execution.t
+        -> (Run_action_service.t option, Agent_protocol.Error.t) result
     ; with_moderator_event :
         snapshot:
           (unit

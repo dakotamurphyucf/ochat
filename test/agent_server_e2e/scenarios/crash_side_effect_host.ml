@@ -3,25 +3,31 @@ module F = Crash_recovery_fixture
 module Res = Openai.Responses
 
 let function_call marker =
-  let item =
-    Res.Response_stream.Item.Function_call
-      { name = "append_to_file"
-      ; arguments = ""
-      ; call_id = "crash-unknown-call"
-      ; _type = "function_call"
-      ; id = Some "crash-unknown-item"
-      ; status = Some "in_progress"
-      }
+  let arguments =
+    Jsonaf.to_string (`Object [ "path", `String marker; "content", `String "executed" ])
   in
+  let call : Res.Function_call.t =
+    { name = "append_to_file"
+    ; arguments = ""
+    ; call_id = "crash-unknown-call"
+    ; _type = "function_call"
+    ; id = Some "crash-unknown-item"
+    ; status = Some "in_progress"
+    }
+  in
+  let item = Res.Response_stream.Item.Function_call call in
   [ Res.Response_stream.Output_item_added
       { item; output_index = 0; type_ = "response.output_item.added" }
   ; Res.Response_stream.Function_call_arguments_done
-      { arguments =
-          Jsonaf.to_string
-            (`Object [ "path", `String marker; "content", `String "executed" ])
+      { arguments
       ; item_id = "crash-unknown-item"
       ; output_index = 0
       ; type_ = "response.function_call_arguments.done"
+      }
+  ; Res.Response_stream.Output_item_done
+      { item = Function_call { call with arguments; status = Some "completed" }
+      ; output_index = 0
+      ; type_ = "response.output_item.done"
       }
   ]
 ;;

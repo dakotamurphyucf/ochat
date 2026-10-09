@@ -22,12 +22,13 @@ let sources =
   ]
 ;;
 
-let wait ?(timeout = 5.) env condition =
+let wait ?(timeout = 5.) ?(on_poll = fun () -> ()) env condition =
   Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) timeout (fun () ->
     let rec loop () =
       match condition () with
       | true -> ()
       | false ->
+        on_poll ();
         Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
         loop ()
     in

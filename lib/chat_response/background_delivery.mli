@@ -17,6 +17,13 @@ val create
   -> (t, string) result
 
 val equal : t -> t -> bool
+
+(** Private immutable frame encoding for durable host occurrence carriers.
+    Decode validates identity/source, result and total frame bounds; the value
+    alone never grants callback or disclosure authority. *)
+val to_json : t -> Jsonaf.t
+
+val of_json : Jsonaf.t -> (t, string) result
 val capture : t -> Chatml.Chatml_lang.value
 val decode : Chatml.Chatml_lang.value -> (t option, string) result
 

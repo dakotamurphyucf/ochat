@@ -150,7 +150,10 @@ let%expect_test "named state decoding protects local history allocation and admi
     let deferred =
       { initial with
         conversation =
-          { initial.conversation with deferred_user_entries = [ local_protocol ] }
+          { initial.conversation with
+            deferred_user_entries =
+              [ pending_document ~generation:initial.identity.generation local_protocol ]
+          }
       }
     in
     let overlay =
@@ -1207,6 +1210,7 @@ let%expect_test "live commits and snapshots retain the exact admitted replay bas
           ~f:(fun () ->
             let persistence =
               Persistence.create
+                ~pending_archive:None
                 ~before_commit:None
                 ~retention_preflight:None
                 ~writer
@@ -1382,7 +1386,11 @@ let%expect_test
                  ])))
     in
     let legacy =
-      D.Document.create ~limits ~kind:"session.state" ~version:3 ~payload:legacy_payload
+      D.Document.create
+        ~limits
+        ~kind:"session.state"
+        ~version:3
+        ~payload:(legacy_pending_payload legacy_payload)
       |> document_ok
     in
     let converted = A.Session_state_document.decode ~limits legacy |> document_ok in
@@ -1498,6 +1506,7 @@ let%expect_test
       in
       let persistence =
         Persistence.create
+          ~pending_archive:None
           ~before_commit:
             (Some
                (fun state ->

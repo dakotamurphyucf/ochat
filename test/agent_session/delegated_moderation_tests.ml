@@ -505,7 +505,13 @@ let%expect_test
           Agent_session.History_codec.user_text ~id:history_id "parent work"
           |> Agent_session.History_codec.to_protocol
         in
-        A.submit_message actor ~attachment_id:writer.id entry |> protocol_ok |> ignore;
+        A.submit_message
+          ~submitting_principal:principal_id
+          actor
+          ~attachment_id:writer.id
+          entry
+        |> protocol_ok
+        |> ignore;
         Eio.Promise.await worker_entered;
         let delegated = delegation () in
         let entered, entered_u = Eio.Promise.create () in
@@ -630,7 +636,13 @@ let%expect_test
            Agent_session.History_codec.user_text ~id:history_id "parent work"
            |> Agent_session.History_codec.to_protocol
          in
-         A.submit_message actor ~attachment_id:writer.id entry |> protocol_ok |> ignore;
+         A.submit_message
+           ~submitting_principal:principal_id
+           actor
+           ~attachment_id:writer.id
+           entry
+         |> protocol_ok
+         |> ignore;
          Eio.Promise.await worker_entered);
       let entered, entered_u = Eio.Promise.create () in
       let delegated = delegation () in

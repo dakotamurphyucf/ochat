@@ -635,6 +635,7 @@ let%expect_test "foreground worker commits history before terminal operation" =
       in
       let submission =
         Agent_session.Session_actor.submit_message
+          ~submitting_principal:principal_id
           actor
           ~attachment_id:attachment.id
           user_entry
@@ -648,6 +649,7 @@ let%expect_test "foreground worker commits history before terminal operation" =
       in
       let deferred =
         Agent_session.Session_actor.submit_message
+          ~submitting_principal:principal_id
           actor
           ~attachment_id:attachment.id
           deferred_entry
@@ -767,7 +769,11 @@ let%expect_test
         |> Agent_session.History_codec.to_protocol
       in
       ignore
-        (Agent_session.Session_actor.submit_message actor ~attachment_id:writer.id entry
+        (Agent_session.Session_actor.submit_message
+           ~submitting_principal:principal_id
+           actor
+           ~attachment_id:writer.id
+           entry
          |> protocol_ok
          : Agent_session.Session_actor.submission);
       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->

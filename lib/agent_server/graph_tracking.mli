@@ -27,9 +27,15 @@ type t
     A cancelled caller can receive the binding, install its cleanup without
     yielding, and then observe the original cancellation at its next effect.
     All optional operation/invocation associations remain absent unless actual
-    per-execution ownership is supplied by a future explicit port. *)
+    per-execution ownership is supplied by a future explicit port.
+
+    [run_preparation] is explicit constructor custody. The constructor clears
+    this shared cell on every exit before a runtime escapes; later callbacks use
+    ordinary commits. Each mailbox request captures its current token and the
+    actor revalidates it at commit, never substitutes a later preparation. *)
 val create
-  :  Agent_session.Session_actor.t
+  :  ?run_preparation:Agent_session.Run_preparation.t option ref
+  -> Agent_session.Session_actor.t
   -> source:Transcript.Source_id.t
   -> upstream:Upstream.t
   -> (t, Agent_protocol.Error.t) Result.t

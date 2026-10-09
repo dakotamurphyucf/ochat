@@ -53,6 +53,17 @@ let get_session connection session_id =
   | Error _ as failure -> failure
 ;;
 
+let export_session connection ~session_id ~format ~revision ~history =
+  match
+    Connection.request_without_history
+      connection
+      (Session_export { session_id; attachment_id = None; format; revision; history })
+  with
+  | Ok (Session_export result) -> Ok result
+  | Ok _ -> Error (invalid "unexpected session.export result")
+  | Error _ as failure -> failure
+;;
+
 let create_project connection request =
   match Connection.request_without_history connection (Project_create request) with
   | Ok (Project_create value) -> Ok value

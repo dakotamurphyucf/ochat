@@ -41,6 +41,7 @@ module Compaction_archive = struct
     | Upgrade
     | Edit
     | Delete
+    | Pending_input
   [@@deriving equal, sexp]
 
   type invocation_disposition =
@@ -64,7 +65,9 @@ end
 module Conversation = struct
   type t =
     { canonical_history : Agent_protocol.History.entry list
-    ; deferred_user_entries : Agent_protocol.History.entry list
+    ; deferred_user_entries : Pending_input_document.t list
+    ; pending_revision : Agent_protocol.Pending_input.Revision.t
+    ; pending_dispositions : Pending_disposition_document.t list
     ; initial_prompt_entry_count : int
     ; next_history_sequence : int64
     ; reserved_history_through : int64
@@ -126,6 +129,7 @@ type t =
   ; managed_submissions : Managed_submission.t list [@sexp.list]
   ; managed_stops : Managed_stop.t list [@sexp.list]
   ; moderator_executions : Agent_protocol.Moderator_execution.t list [@sexp.list]
+  ; run_state : Run_state.t option [@sexp.option]
   ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
   ; deliveries : Agent_protocol.Delivery.t list [@sexp.list]
   ; ingress_registrations : External_ingress.t list [@sexp.list]
@@ -139,11 +143,15 @@ type t =
   }
 [@@deriving sexp]
 
-let current_schema_version = 22
+let current_schema_version = 24
 
 let upgrade_schema t =
   if t.schema_version = current_schema_version
   then Ok t
+  else if t.schema_version = 23
+  then Ok { t with schema_version = current_schema_version }
+  else if t.schema_version = 22
+  then Ok { t with schema_version = current_schema_version }
   else if t.schema_version = 21
   then Ok { t with schema_version = current_schema_version }
   else if t.schema_version = 20
@@ -262,7 +270,9 @@ let upgrade_schema t =
   else if
     t.schema_version < current_schema_version
     && List.exists
-         (t.conversation.canonical_history @ t.conversation.deferred_user_entries)
+         (t.conversation.canonical_history
+          @ List.map t.conversation.deferred_user_entries ~f:Pending_input_document.entry
+         )
          ~f:(fun entry ->
            match entry.Agent_protocol.History.provenance with
            | Runtime_authoring _ -> true
@@ -388,6 +398,8 @@ let create ~(identity : Identity.t) ~(spec : Spec.t) ~initial_history =
   ; conversation =
       { canonical_history = initial_history
       ; deferred_user_entries = []
+      ; pending_revision = Agent_protocol.Pending_input.Revision.zero
+      ; pending_dispositions = []
       ; initial_prompt_entry_count = List.length initial_history
       ; next_history_sequence = 0L
       ; reserved_history_through = 0L
@@ -410,6 +422,7 @@ let create ~(identity : Identity.t) ~(spec : Spec.t) ~initial_history =
   ; managed_submissions = []
   ; managed_stops = []
   ; moderator_executions = []
+  ; run_state = None
   ; subscriptions = []
   ; deliveries = []
   ; ingress_registrations = []
@@ -533,6 +546,41 @@ let validate_domain t =
     then Error (Agent_protocol.Error.invalid_request "negative configuration revision")
     else Ok ()
   in
+  let%bind () =
+    List.fold_result t.conversation.deferred_user_entries ~init:() ~f:(fun () document ->
+      if
+        Int.equal
+          (Agent_protocol.Pending_input.generation
+             (Pending_input_document.value document))
+          t.identity.generation
+      then Ok ()
+      else
+        Error
+          (Agent_protocol.Error.invalid_request
+             "pending input generation differs from session"))
+  in
+  let disposition_ids = Hash_set.create (module Agent_protocol.History.Id) in
+  let%bind () =
+    List.fold_result t.conversation.pending_dispositions ~init:() ~f:(fun () document ->
+      let value = Pending_disposition_document.value document in
+      let id = Pending_disposition.history_id value in
+      if
+        Pending_disposition.generation value > t.identity.generation
+        || Agent_protocol.Pending_input.Revision.compare
+             (Pending_disposition.pending_revision value)
+             t.conversation.pending_revision
+           > 0
+        || Hash_set.mem disposition_ids id
+        || List.exists t.conversation.deferred_user_entries ~f:(fun document ->
+          Agent_protocol.History.Id.equal id (Pending_input_document.entry document).id)
+      then
+        Error
+          (Agent_protocol.Error.invalid_request
+             "invalid pending disposition identity, generation or revision")
+      else (
+        Hash_set.add disposition_ids id;
+        Ok ()))
+  in
   let%bind () = validate_delegation t in
   let%bind () = validate_model_job_targets t in
   let%bind moderator = Moderator_checkpoint.decode t.moderator in
@@ -544,14 +592,18 @@ let validate_domain t =
         snapshot
         ~history_ids:
           (List.map
-             (t.conversation.canonical_history @ t.conversation.deferred_user_entries)
+             (t.conversation.canonical_history
+              @ List.map
+                  t.conversation.deferred_user_entries
+                  ~f:Pending_input_document.entry)
              ~f:(fun entry -> entry.Agent_protocol.History.id))
       |> Result.map_error ~f:Agent_protocol.Error.invalid_request
   in
   let%bind () =
     match
       List.find_a_dup
-        (t.conversation.canonical_history @ t.conversation.deferred_user_entries)
+        (t.conversation.canonical_history
+         @ List.map t.conversation.deferred_user_entries ~f:Pending_input_document.entry)
         ~compare:(fun a b ->
           Agent_protocol.History.Id.compare a.Agent_protocol.History.id b.id)
     with
@@ -563,7 +615,8 @@ let validate_domain t =
   in
   let%bind () =
     let%bind deferred =
-      History_codec.all_of_protocol t.conversation.deferred_user_entries
+      History_codec.all_of_protocol
+        (List.map t.conversation.deferred_user_entries ~f:Pending_input_document.entry)
     in
     let entries =
       Invocation_history.Validated_history.entries retained_history @ deferred
@@ -881,8 +934,10 @@ let validate_domain t =
             | Turn _ -> true
             | Compaction -> false)
         | Deferred ->
-          List.exists t.conversation.deferred_user_entries ~f:(fun entry ->
-            Agent_protocol.History.Id.equal entry.id receipt.history_id)
+          List.exists t.conversation.deferred_user_entries ~f:(fun document ->
+            Agent_protocol.History.Id.equal
+              (Pending_input_document.entry document).id
+              receipt.history_id)
         | Ready | Terminal _ -> true
       in
       match
@@ -960,6 +1015,15 @@ let validate_domain t =
 
 let validate t =
   let open Result.Let_syntax in
+  let%bind () =
+    match t.run_state with
+    | None -> Ok ()
+    | Some runs ->
+      Run_state.validate
+        runs
+        ~session_id:t.identity.session_id
+        ~generation:t.identity.generation
+  in
   let%bind () = validate_domain t in
   let%bind identity_metadata =
     Agent_protocol.Session_metadata.Values.create
@@ -1111,7 +1175,8 @@ let snapshot ~now t =
     ; archived_revisions =
         List.map t.conversation.compaction_archives ~f:(fun archive -> archive.revision)
     ; effective_history = effective_history t
-    ; deferred_entries = t.conversation.deferred_user_entries
+    ; deferred_entries =
+        List.map t.conversation.deferred_user_entries ~f:Pending_input_document.entry
     ; permissions = t.permissions
     ; grants
     ; jobs = t.jobs

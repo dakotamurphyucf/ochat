@@ -22,7 +22,9 @@ raw protocol clients must discover catalog IDs.
 | Flags | Meaning / restrictions |
 |---|---|
 | `-file FILE` | Local prompt; default path is `./prompts/interactive.md`, which need not exist in a clean checkout. Supply a tracked/user-created file. |
-| `--local` | Native transient process-bound host; workspace is launch cwd. No workspace/data-root override here. |
+| `--local` | Native process-bound host; records default to `$HOME/.ochat/agent-store`. New-session workspace is launch cwd; selection retains the saved workspace. |
+| `--data-root DIR` | With `--local`, select an absolute durable root; incompatible with `--transient`. |
+| `--transient` | With `--local`, explicitly select temporary records removed after owned host cleanup. |
 | `--connect URI` | Daemon mode; incompatible with local runtime/persistence flags. |
 | `--new-daemon-session --prompt NAME --workspace NAME` | Create and attach; do not combine with existing `--session`. |
 | `--detached` | Explicit creation liveness; also the connected creation default. |
@@ -46,8 +48,10 @@ not one of the legacy-only persistence/execution controls.
 
 ## Administration
 
-Use one selector per command. Without `--connect`, session listing/info/export/
-reset/rebuild operate on the legacy store, not native transient sessions.
+Use one selector per command. Without `--connect` or `--local`, session listing/info/export/
+reset/rebuild operate on the legacy store. Explicit `--local --session ID`
+selects retained native sessions under the same root without implicitly starting
+a stopped session. Local list, inspect and export do not create or activate one.
 
 | Selector | Relevant flags and behavior |
 |---|---|

@@ -34,6 +34,9 @@ type claim =
     retained intent, not schedule the returned requests independently. [history]
     reads current canonical history after the claim without entering the manager.
     Each call has a fresh Tool.call budget and a scope that expires before return.
+    [run_actions] is supplied by the actual owning actor for this exact execution.
+    The actor retains and closes this service with its borrow and verifies its
+    sealed selection again at final commit. Absent ownership denies Run actions.
     Without [script_tools], Tool.call returns [invocation.unavailable]; the
     manager's default native callback is never used.
 
@@ -42,6 +45,9 @@ type claim =
 val run_queued_idle
   :  claim:claim
   -> ?script_tools:Script_tool_calls.t
+  -> ?run_actions:
+       (Agent_protocol.Moderator_execution.t
+        -> (Run_action_service.t option, Agent_protocol.Error.t) result)
   -> manager:Chat_response.Moderator_manager.t
   -> history:(unit -> History_entry.t list)
   -> available_tools:Openai.Responses.Request.Tool.t list
@@ -60,6 +66,9 @@ val run_ordinary
   :  event:Chat_response.Moderation.Event.t
   -> claim:claim
   -> ?script_tools:Script_tool_calls.t
+  -> ?run_actions:
+       (Agent_protocol.Moderator_execution.t
+        -> (Run_action_service.t option, Agent_protocol.Error.t) result)
   -> manager:Chat_response.Moderator_manager.t
   -> history:(unit -> History_entry.t list)
   -> available_tools:Openai.Responses.Request.Tool.t list
@@ -101,6 +110,9 @@ val run_delegated
   :  event:Chat_response.Moderation.Event.t
   -> claim:delegated_claim
   -> ?script_tools:Script_tool_calls.t
+  -> ?run_actions:
+       (Agent_protocol.Moderator_execution.t
+        -> (Run_action_service.t option, Agent_protocol.Error.t) result)
   -> manager:Chat_response.Moderator_manager.t
   -> history:(unit -> History_entry.t list)
   -> available_tools:Openai.Responses.Request.Tool.t list
@@ -126,6 +138,10 @@ module Lifecycle : sig
       attempts are not polled again. A halted restored manager needs no activation. *)
   val pending : t -> bool
 
+  (** Genuine unconsumed Session_start capability. A restored Session_resume
+      is never an authored no-input start. *)
+  val startup_pending : t -> bool
+
   (** Concurrent callers serialize outside the actor through the shared execution
       coordinator. Recursive/cyclic activation fails before waiting. Unavailable
       actors leave activation ready for a later runnable boundary; successful
@@ -141,6 +157,9 @@ module Lifecycle : sig
     :  t
     -> claim:(event:Chat_response.Moderation.Event.t -> claim)
     -> ?script_tools:Script_tool_calls.t
+    -> ?run_actions:
+         (Agent_protocol.Moderator_execution.t
+          -> (Run_action_service.t option, Agent_protocol.Error.t) result)
     -> history:(unit -> History_entry.t list)
     -> available_tools:Openai.Responses.Request.Tool.t list
     -> session_meta:Jsonaf.t

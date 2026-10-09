@@ -30,6 +30,7 @@ let%expect_test
        in
        A.set_operation_worker actor (Some worker) |> protocol_ok;
        A.submit_message
+         ~submitting_principal:principal_id
          actor
          ~attachment_id:writer.id
          (Managed_submission_tests.input 400 "Keep running until cancelled.")
@@ -37,6 +38,7 @@ let%expect_test
        |> ignore;
        Eio.Promise.await entered;
        A.submit_message
+         ~submitting_principal:principal_id
          actor
          ~attachment_id:writer.id
          (Managed_submission_tests.input 401 "Retain for a later explicit resume.")
@@ -128,6 +130,7 @@ let%expect_test
        assert_same_session_snapshot restarted (A.state actor |> protocol_ok);
        A.stop actor ~attachment_id:writer.id ~mode:Cancel |> protocol_ok |> ignore;
        let before_reset = A.state actor |> protocol_ok in
+       assert (not (List.is_empty before_reset.conversation.deferred_user_entries));
        let reset =
          Agent_session.Administration.reset
            before_reset

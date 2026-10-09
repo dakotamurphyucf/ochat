@@ -29,7 +29,9 @@ val inspect
   -> (plan, Store_error.t) result
 
 (** [run] inspects the schema and counts session directories while holding the
-    daemon lock. It does not validate individual session journals or artifacts.
+    daemon lock. [server_id] identifies the lock caller for diagnostics; migration
+    admits the persisted root identity for organization authority and never replaces
+    it with the caller identity. It does not validate individual session journals or artifacts.
     Validation and dry-run modes return a plan for admitted positive named-document
     schema versions. Malformed documents and unsupported beta formats fail admission.
     Applying an unsupported older or newer schema fails without mutation.

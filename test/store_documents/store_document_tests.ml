@@ -759,7 +759,7 @@ let%expect_test "aggregate cache completion, reopen and retention share durable 
         }
     in
     let outcome =
-      `Object (List.init 50_001 ~f:(fun i -> sprintf "field_%06d" i, `Null))
+      `Object (List.init 100_001 ~f:(fun i -> sprintf "field_%06d" i, `Null))
     in
     let path = Filename.concat root "cache.json" in
     let file = Eio.Path.(Eio.Stdenv.fs env / path) in
@@ -775,8 +775,17 @@ let%expect_test "aggregate cache completion, reopen and retention share durable 
       |> ok
       |> ignore);
     let saved = Eio.Path.load file in
+    let artifact_name =
+      Eio.Path.read_dir Eio.Path.(Eio.Stdenv.fs env / root)
+      |> List.find_exn ~f:(fun name ->
+        String.is_prefix name ~prefix:"idempotency-outcome-"
+        && String.is_suffix name ~suffix:".json")
+    in
+    let artifact_bytes =
+      Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / Filename.concat root artifact_name)
+    in
     assert (
-      match D.Json.decode ~limits:D.Limits.default saved with
+      match D.Json.decode ~limits:D.Limits.default artifact_bytes with
       | Error (Limit_exceeded "fields") -> true
       | Error _ | Ok _ -> false);
     let cache_limits = S.Document_fields.limits ~max_bytes:(16 * 1024 * 1024) |> doc_ok in
@@ -818,7 +827,7 @@ let%expect_test "aggregate cache completion, reopen and retention share durable 
         reread
         ~candidates:[ blob; Agent_protocol.Id.Blob.create () ]
         ~max_records:4
-        ~max_bytes:(8 * 1024 * 1024)
+        ~max_bytes:(16 * 1024 * 1024)
         ~f:(fun references -> Ok references)
       |> ok
       |> Option.value_exn
@@ -826,7 +835,7 @@ let%expect_test "aggregate cache completion, reopen and retention share durable 
     assert (List.equal Agent_protocol.Id.Blob.equal references [ blob ]);
     I.record reread (pending "byte-rejected") |> ok |> ignore;
     let before = Eio.Path.load file in
-    let individual_outcome = `String (String.make (15 * 1024 * 1024) 'x') in
+    let individual_outcome = `String (String.make ((16 * 1024 * 1024) - 2) 'x') in
     D.Json.validate ~limits:cache_limits individual_outcome |> doc_ok;
     let rejected =
       I.complete

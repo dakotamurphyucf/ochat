@@ -103,7 +103,7 @@ let read_artifact client session ~reopen (reference : P.Job_artifact.t) =
         client
         (Blob_read
            { session_id = reference.session_id
-           ; attachment_id = attached.attachment_id
+           ; attachment_id = Some attached.attachment_id
            ; blob_id = reference.blob.id
            ; offset
            ; max_bytes = 16384
@@ -149,6 +149,7 @@ let run env environment boundary =
               ; attachment_id = session.attachment_id
               ; content = { kind = Plain_text; text = "Call watch."; attachments = [] }
               ; idempotency_key = F.key "standalone:send"
+              ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
               })
          : P.Method_result.t);
       F.await_marker env child "notification-provider 2 frames=0";

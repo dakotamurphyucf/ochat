@@ -94,25 +94,31 @@ let output_text text =
 ;;
 
 let function_call_stream marker =
-  let item =
-    Res.Response_stream.Item.Function_call
-      { name = "append_to_file"
-      ; arguments = ""
-      ; call_id = "permission-call"
-      ; _type = "function_call"
-      ; id = Some "permission-item"
-      ; status = Some "in_progress"
-      }
+  let arguments =
+    Jsonaf.to_string (`Object [ "path", `String marker; "content", `String "executed" ])
   in
+  let call : Res.Function_call.t =
+    { name = "append_to_file"
+    ; arguments = ""
+    ; call_id = "permission-call"
+    ; _type = "function_call"
+    ; id = Some "permission-item"
+    ; status = Some "in_progress"
+    }
+  in
+  let item = Res.Response_stream.Item.Function_call call in
   [ Res.Response_stream.Output_item_added
       { item; output_index = 0; type_ = "response.output_item.added" }
   ; Res.Response_stream.Function_call_arguments_done
-      { arguments =
-          Jsonaf.to_string
-            (`Object [ "path", `String marker; "content", `String "executed" ])
+      { arguments
       ; item_id = "permission-item"
       ; output_index = 0
       ; type_ = "response.function_call_arguments.done"
+      }
+  ; Res.Response_stream.Output_item_done
+      { item = Function_call { call with arguments; status = Some "completed" }
+      ; output_index = 0
+      ; type_ = "response.output_item.done"
       }
   ]
 ;;
@@ -304,6 +310,7 @@ let send_message client session key =
     Agent_protocol.Session.Send_message_request.
       { session_id = session.summary.id
       ; attachment_id = session.attachment.id
+      ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
       ; content = { kind = Plain_text; text = "run permission probe"; attachments = [] }
       ; idempotency_key = idempotency_key key
       }

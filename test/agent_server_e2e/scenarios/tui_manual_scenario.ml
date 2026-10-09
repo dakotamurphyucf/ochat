@@ -91,7 +91,7 @@ let launchers env fixture provider_port =
       fixture
       provider_port
       "local"
-      [ "--local"; "-file"; Config.prompt_path fixture ]
+      [ "--local"; "--transient"; "-file"; Config.prompt_path fixture ]
   in
   List.iter
     [ "unix", [ "--connect"; "unix://" ^ Config.unix_socket fixture ]
@@ -436,6 +436,7 @@ let run_fixture env ~case =
       let provider = Provider.start ~sw ~env ~port:provider_port in
       let manual = Manual.create provider in
       let fixture = fixture env temporary in
+      Tui_trace_scenario.provision_provider env fixture ~api_url:(endpoint provider_port);
       if
         List.mem
           [ Some "orchestration"; Some "orchestration-self-check" ]

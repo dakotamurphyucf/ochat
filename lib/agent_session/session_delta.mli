@@ -21,6 +21,10 @@ type t =
   | Initial_prompt_count_changed of int
   | Deferred_entries_enqueued of Agent_protocol.History.entry list
   | Deferred_entries_adopted
+  | Pending_inputs_changed of
+      Pending_mutation.t
+      * Session_state.Compaction_archive.t option
+      * Pending_archive.Reference.t option
   | Active_operation_changed of Agent_protocol.Operation.t option
   | Automatic_turn_budget_enabled of Chat_response.Runtime_semantics.policy
   (** Enable once, or repeat the same policy without resetting accounting.
@@ -65,6 +69,7 @@ type t =
   (** Settle an existing committed wake without reinserting history. Acceptance
       requires the matching active Turn, generation and running lifecycle in this checkpoint.
       Repeating the same disposition remains valid after that turn has ended. *)
+  | Run_state_changed of Run_state.t
   | Moderator_changed of Jsonaf.t option
   | Shell_changed of Session.Shell_state.t
   | History_block_reserved of int64
@@ -100,3 +105,7 @@ val capture_new_model_jobs
   -> Session_state.t
   -> t
   -> (t, Agent_protocol.Error.t) Result.t
+
+(** Existing bounded default for native transition admission. Durable owners may
+    impose smaller limits; the actual whole-state publication validates again. *)
+val native_limits : Document_schema.Limits.t

@@ -30,21 +30,57 @@
   managed_stop_tool
   managed_submission
   managed_stop
+  pending_carrier_admission
+  session_replacement_delta
   managed_submission_tracking
   prompt_catalog
   security_grant
   session_record_shapes
   persistence_codec
+  session_state_presence
   session_state_document
   session_delta_document
   durable_event_document
   model_job_target
+  pending_input_document
+  pending_metadata_custody
+  pending_disposition
+  pending_disposition_document
+  pending_eligibility
+  pending_inspection
+  pending_plan
+  pending_mutation
+  pending_archive
+  pending_archive_transition
+  pending_transition
+  session_document_transition
   session_state
   configuration_transition
   configuration_update
   configuration_capture
   configuration_policy
   moderator_checkpoint
+  run_source_installation
+  run_scope
+  run_action_service
+  run_record_shapes
+  run_intent
+  run_state
+  run_transition
+  run_retirement
+  run_source_change
+  run_wake_owner
+  run_job_occurrence
+  run_callback_evidence
+  run_job_delivery
+  run_job_deliveries
+  run_job_capacity
+  run_job_completion
+  run_admission
+  run_preparation
+  run_admission_outcome
+  run_authorities
+  run_event_scope
   delegation_authority
   automatic_turn_budget
   external_ingress
@@ -132,6 +168,7 @@
   quota_manager
   start_queue
   inference_ledger)
+ (private_modules pending_carrier_admission)
  (libraries ochat.inference_client ochat.inference_runtime ochat.inference ochat.history_chatmd ochat.transcript
   core
   digestif

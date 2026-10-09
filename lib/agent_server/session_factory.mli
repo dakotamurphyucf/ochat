@@ -111,7 +111,7 @@ val create
   -> quota_manager:Agent_session.Quota_manager.t
   -> job_capacity:Job_capacity.t
   -> tool_dir:string
-  -> home:string
+  -> home:string option
   -> inference_policy:inference_policy
   -> qualify_chatml_extensions:bool
   -> session_helpers:Agent_session.Session_management_channel.grant list
@@ -286,3 +286,31 @@ val validate_session_removal
   :  t
   -> Agent_session.Session_state.t
   -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Borrow no second Handle: validated same-Store actual Handle transfers to the
+    concrete recovery owner before any fallible retained-parent preparation or
+    yielding construction/activation. Invalid host depth limits therefore clean or
+    retain this same owned Handle rather than reject before adoption. Success returns
+    actual entry; failure cleans or retains that same partial owner in Registry.
+    A foreign Handle is rejected without transfer or mutation. Caller holds issuing
+    per-ID reservation and has consumed exact current lifecycle/anchor witness.
+    Current retained ancestors are read without activation under their existing
+    owned leases. Missing loaded ancestry alone preserves a pending initial start
+    only when immutable generation/source/epoch/linkage remains valid. Known
+    retirement consumes it; unavailable/corrupt observations remain errors.
+    No nested reservation for this same session is acquired. *)
+val recover_owned_session
+  :  t
+  -> Agent_store.Session_store.Handle.t
+  -> (Session_registry.entry, Agent_protocol.Error.t) Result.t
+
+(** Pure same-host actual Handle ownership check before reconstruction transfer. *)
+val owns_handle : t -> Agent_store.Session_store.Handle.t -> bool
+
+(** Rebuild missing-index projections through immutable owned reads without
+    actors/providers. Retain the eager-recovery marker for actual Execute recovery. *)
+val rebuild_index_projections : t -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Retry durable initial-start intents only on actual loaded selected owners;
+    never discover/load indexed sessions. Current linkage still governs each start. *)
+val resume_selected_initial_starts : t -> unit

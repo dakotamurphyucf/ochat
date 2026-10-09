@@ -109,7 +109,10 @@ val summaries : t -> Agent_protocol.Session.t list
 
 (** Closes actors for stopped sessions with no attachments, runnable work, active
     schedules, runtime or resource borrows, retaining their durable index entries
-    for lazy reload. Each candidate is reserved and its actual actor fenced before
+    for lazy reload. Passive loaded observations use a read lease and revalidate
+    the exact readable owner without activating indexed sessions or reserving
+    running sessions. Only witnessed inactive candidates matching their durable
+    projection enter exclusive admission; each is then reserved and its actor fenced before
     inactivity is rechecked. Eviction permanently closes runtime/resource admission
     and closes the entry outside the global mutex before committing its unchanged
     durable projection. Failed closure retains the retired owner for recovery. *)
@@ -270,3 +273,32 @@ val with_recovery_handle
 (** Pure ownership check under a short registry snapshot: true only when failed
     cleanup retains this exact Handle capability. It does not grant admission. *)
 val retains_cleanup_handle : t -> Agent_store.Session_store.Handle.t -> bool
+
+(** The caller owns the issuing per-ID [with_lifecycle] reservation. *)
+val select_indexed
+  :  t
+  -> Lifecycle_reservation.t
+  -> store:Agent_store.Session_store.t
+  -> handle:Agent_store.Session_store.Handle.t
+  -> current:Agent_store.Session_store.Lifecycle.Current.t
+  -> authorize:(Agent_protocol.Session.t -> (unit, Agent_protocol.Error.t) Result.t)
+  -> recover:
+       (unit
+        -> ( entry * Agent_store.Session_store.Lifecycle.Current.t
+             , Agent_protocol.Error.t )
+             Result.t)
+  -> (entry, Agent_protocol.Error.t) Result.t
+
+(** Before invoking recover, validate issuing Indexed reservation, exact indexed
+    basis, Store/Handle ownership and current exact-Handle witness in one short
+    mutex body. No filesystem/mailbox work under this mutex. Invoke recover under
+    protected ownership transfer; the callback consumes valid Handle on invocation,
+    including partial construction/activation failure, using Factory's concrete
+    recovery owner. Caller retains Handle only if callback was never invoked.
+    Successful recovery returns actual entry plus fresh Current for its same Handle
+    after legitimate recovery publication; the original witness cannot remain
+    current across that publication. Validate fresh currentness/availability and
+    exact entry owner before installing under short mutex. [authorize] must be a
+    pure non-yielding current principal/visibility check, run on both the original
+    and recovered canonical summary. It must not call back into the registry. Failed provisional
+    cleanup remains registry-owned with original and secondary diagnostics. *)

@@ -57,7 +57,20 @@ let validate ~invocations ~events ~subscriptions (delivery : P.Delivery.t) =
           let%bind () =
             same_session subscription.context.session_id subscription.context.generation
           in
-          (match subscription.context.source with
-           | Some source when P.Invocation.equal_observer source ownership.source -> Ok ()
-           | _ -> invalid "delivery and subscription moderator sources differ")))
+          let%bind () =
+            match subscription.context.source with
+            | Some source when P.Invocation.equal_observer source ownership.source ->
+              Ok ()
+            | _ -> invalid "delivery and subscription moderator sources differ"
+          in
+          (match ownership.subscription_binding with
+           | None -> Ok ()
+           | Some binding ->
+             if
+               P.Id.Subscription.equal binding.subscription_id subscription.context.id
+               && Int.equal binding.epoch subscription.epoch
+               && Option.exists subscription.result ~f:(fun result ->
+                 P.Completion.equal result delivery.context.completion)
+             then Ok ()
+             else invalid "delivery differs from its captured terminal subscription epoch")))
 ;;

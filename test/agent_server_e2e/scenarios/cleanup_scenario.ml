@@ -442,9 +442,26 @@ let test_system_delete env environment =
     stop_session connection session ~key:"system-delete";
     require (exists environment workspace) "on-delete workspace disappeared on stop";
     delete_session connection session ~key:"system-delete" ~policy:Remove;
+    (match
+       Agent_client.Connection.request
+         connection
+         (Session_get { session_id = session.id; history = None })
+     with
+     | Error error ->
+       require
+         (Agent_protocol.Error.equal_code error.code Session_not_found)
+         "removed session returned the wrong read error"
+     | Ok _ -> fail "removed session remained readable");
     require
-      (not (exists environment workspace))
-      "on-delete system workspace survived deletion")
+      (not (exists environment (session_directory fixture session)))
+      "removal retained session payload";
+    require (exists environment workspace) "removal deleted the original workspace";
+    require (exists environment (marker workspace)) "removal lost workspace ownership";
+    require
+      (String.equal
+         (Eio.Path.load (path environment (Filename.concat workspace "sentinel")))
+         "delete")
+      "removal changed retained workspace content")
 ;;
 
 let test_session_dir_stop env environment =
@@ -486,10 +503,29 @@ let test_session_dir_delete env environment =
       (exists environment workspace)
       "on-delete session workspace disappeared on stop";
     delete_session connection session ~key:"session-delete" ~policy:Archive;
+    (match
+       request_public connection (Session_get { session_id = session.id; history = None })
+     with
+     | Session_get snapshot ->
+       (match (Agent_protocol.Public.Snapshot.fields snapshot).lifecycle with
+        | Some lifecycle ->
+          require
+            (Agent_protocol.Session_lifecycle.Result.Status.equal
+               (Agent_protocol.Session_lifecycle.Observation.status lifecycle)
+               Archived)
+            "archived session did not retain archive authority"
+        | None -> fail "archived session omitted lifecycle authority")
+     | _ -> fail "archived session read returned the wrong result variant");
     require
       (exists environment (session_directory fixture session))
       "archive removed session directory";
-    require (not (exists environment workspace)) "archive retained on-delete workspace")
+    require (exists environment workspace) "archive deleted the original workspace";
+    require (exists environment (marker workspace)) "archive lost workspace ownership";
+    require
+      (String.equal
+         (Eio.Path.load (path environment (Filename.concat workspace "sentinel")))
+         "archive")
+      "archive changed retained workspace content")
 ;;
 
 let test_retain env environment =
@@ -592,9 +628,31 @@ let test_reference_protection env environment =
       (exists environment (Filename.concat workspace "sentinel"))
       "restart removed referenced workspace";
     delete_session connection session ~key:"reference-restart" ~policy:Archive;
+    (match
+       request_public connection (Session_get { session_id = session.id; history = None })
+     with
+     | Session_get snapshot ->
+       (match (Agent_protocol.Public.Snapshot.fields snapshot).lifecycle with
+        | Some lifecycle ->
+          require
+            (Agent_protocol.Session_lifecycle.Result.Status.equal
+               (Agent_protocol.Session_lifecycle.Observation.status lifecycle)
+               Archived)
+            "recovered session did not retain archive authority"
+        | None -> fail "recovered archive omitted lifecycle authority")
+     | _ -> fail "recovered archive read returned the wrong result variant");
     require
-      (not (exists environment workspace))
-      "delete did not clean recovered referenced workspace")
+      (exists environment (session_directory fixture session))
+      "archive removed recovered session payload";
+    require (exists environment workspace) "archive deleted recovered workspace";
+    require
+      (exists environment (marker workspace))
+      "archive lost recovered workspace ownership";
+    require
+      (String.equal
+         (Eio.Path.load (path environment (Filename.concat workspace "sentinel")))
+         "referenced")
+      "archive changed recovered workspace content")
 ;;
 
 let cases =

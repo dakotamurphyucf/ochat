@@ -8,9 +8,12 @@ type source =
   | External_ingress
 [@@deriving compare, equal, sexp]
 
+module Subscription_binding = Delivery_subscription_binding
+
 type ownership =
   { source : Invocation.observer
   ; creator : Job.launch_owner
+  ; subscription_binding : Subscription_binding.t option [@sexp.option]
   }
 [@@deriving equal, sexp]
 
@@ -70,25 +73,81 @@ let history_id_of_json json =
 
 let history_id_to_json id = `String (History_entry.Id.to_string id)
 
-let ownership_to_json (ownership : ownership) =
+let validate_ownership (ownership : ownership) =
+  let open Result.Let_syntax in
+  let%bind () =
+    text ~name:"delivery script identity" ~max:256 ownership.source.script_id
+  in
+  let%bind () =
+    if
+      String.length ownership.source.source_sha256 = 64
+      && String.for_all ownership.source.source_sha256 ~f:(function
+        | '0' .. '9' | 'a' .. 'f' -> true
+        | _ -> false)
+    then Ok ()
+    else invalid "delivery source digest must be lowercase SHA256"
+  in
+  let%bind () =
+    match ownership.creator with
+    | Job.Invocation id ->
+      Id.Invocation.of_string (Id.Invocation.to_string id) |> Result.map ~f:ignore
+    | Moderator_event id ->
+      Id.Moderator_execution.of_string (Id.Moderator_execution.to_string id)
+      |> Result.map ~f:ignore
+  in
+  optional_validate ownership.subscription_binding Subscription_binding.validate
+;;
+
+let ownership_to_json_with_binding (ownership : ownership) binding_fields =
   let kind, id =
     match ownership.creator with
     | Job.Invocation id -> "invocation", Id.Invocation.to_json id
     | Moderator_event id -> "moderator_event", Id.Moderator_execution.to_json id
   in
   `Object
-    [ "script_id", `String ownership.source.script_id
-    ; "source_sha256", `String ownership.source.source_sha256
-    ; "creator_type", `String kind
-    ; "creator_id", id
-    ]
+    ([ "script_id", `String ownership.source.script_id
+     ; "source_sha256", `String ownership.source.source_sha256
+     ; "creator_type", `String kind
+     ; "creator_id", id
+     ]
+     @ binding_fields)
+;;
+
+let ownership_to_json ownership =
+  ownership_to_json_with_binding
+    ownership
+    (Option.to_list
+       (Option.map ownership.subscription_binding ~f:(fun binding ->
+          "subscription_binding", Subscription_binding.to_json binding)))
+;;
+
+type binding_field =
+  | Missing
+  | Nullable
+
+let ownership_to_storage_json ownership ~binding_field =
+  let fields =
+    match ownership.subscription_binding, binding_field with
+    | None, Missing -> []
+    | None, Nullable -> [ "subscription_binding", `Null ]
+    | Some binding, (Missing | Nullable) ->
+      [ "subscription_binding", Subscription_binding.to_json binding ]
+  in
+  ownership_to_json_with_binding ownership fields
 ;;
 
 let ownership_of_json json =
   let open Result.Let_syntax in
   let%bind fields = Json_codec.fields json in
   let%bind () =
-    closed fields [ "script_id"; "source_sha256"; "creator_type"; "creator_id" ]
+    closed
+      fields
+      [ "script_id"
+      ; "source_sha256"
+      ; "creator_type"
+      ; "creator_id"
+      ; "subscription_binding"
+      ]
   in
   let%bind script_id = Json_codec.required_as fields "script_id" Json_codec.string in
   let%bind source_sha256 =
@@ -106,7 +165,7 @@ let ownership_of_json json =
     | false -> invalid "delivery source digest must be lowercase SHA256"
   in
   let%bind kind = Json_codec.required_as fields "creator_type" Json_codec.string in
-  let%map creator =
+  let%bind creator =
     match kind with
     | "invocation" ->
       Json_codec.required_as fields "creator_id" Id.Invocation.of_json
@@ -116,7 +175,13 @@ let ownership_of_json json =
       |> Result.map ~f:(fun id -> Job.Moderator_event id)
     | _ -> invalid "unknown delivery creator"
   in
-  { source = { script_id; source_sha256 }; creator }
+  let%map subscription_binding =
+    Json_codec.optional_as fields "subscription_binding" (function
+      | `Null -> Ok None
+      | value -> Subscription_binding.of_json value |> Result.map ~f:Option.some)
+    |> Result.map ~f:Option.join
+  in
+  { source = { script_id; source_sha256 }; creator; subscription_binding }
 ;;
 
 let pins_to_json pins = `Object (List.map pins ~f:(fun (name, pin) -> name, `String pin))
@@ -212,10 +277,23 @@ let validate t =
   let%bind () =
     match c.ownership, c.source with
     | None, _ -> Ok ()
-    | Some ownership, Moderator ->
-      ownership_of_json (ownership_to_json ownership) |> Result.map ~f:ignore
+    | Some ownership, Moderator -> validate_ownership ownership
     | Some _, (Job_adapter | External_ingress) ->
       invalid "moderator-owned delivery has a different source kind"
+  in
+  let%bind () =
+    match c.ownership with
+    | None -> Ok ()
+    | Some ownership ->
+      (match ownership.subscription_binding, c.work with
+       | None, _ -> Ok ()
+       | Some binding, Some (Invocation.Subscription id) ->
+         let%bind () = Subscription_binding.validate binding in
+         if Id.Subscription.equal binding.subscription_id id
+         then Ok ()
+         else invalid "delivery binding differs from its subscription work"
+       | Some _, (None | Some (Invocation.Job _)) ->
+         invalid "delivery subscription binding requires subscription work")
   in
   let%bind () =
     match t.wake_disposition, c.wake, t.status with
@@ -481,7 +559,7 @@ let to_json_body t =
        @ optional "ownership" ownership ownership_to_json)
 ;;
 
-let to_json t =
+let to_json_without_subscription t =
   match t.completion_projection with
   | None -> to_json_body t
   | Some projection ->
@@ -489,6 +567,26 @@ let to_json t =
       [ "schema_version", `Number "5"
       ; "delivery", to_json_body t
       ; "completion_projection", Completion_projection.to_json projection
+      ]
+;;
+
+let to_json t =
+  match t.context.ownership with
+  | None -> to_json_without_subscription t
+  | Some { subscription_binding = None; _ } -> to_json_without_subscription t
+  | Some ({ subscription_binding = Some binding; _ } as ownership) ->
+    let legacy =
+      { t with
+        context =
+          { t.context with
+            ownership = Some { ownership with subscription_binding = None }
+          }
+      }
+    in
+    `Object
+      [ "schema_version", `Number "6"
+      ; "delivery", to_json_without_subscription legacy
+      ; "subscription_binding", Subscription_binding.to_json binding
       ]
 ;;
 
@@ -608,7 +706,7 @@ let of_json_body json =
   t
 ;;
 
-let of_json json =
+let of_json_without_subscription json =
   let open Result.Let_syntax in
   let%bind () = validate_json ~max_bytes:(18 * 1024 * 1024) ~max_depth:138 json in
   let%bind fields = Json_codec.fields json in
@@ -633,7 +731,55 @@ let of_json json =
   | _ -> of_json_body json
 ;;
 
+let of_json json =
+  let open Result.Let_syntax in
+  let%bind () = validate_json ~max_bytes:(18 * 1024 * 1024) ~max_depth:140 json in
+  let%bind fields = Json_codec.fields json in
+  let%bind version =
+    Json_codec.required_as
+      fields
+      "schema_version"
+      (Json_codec.bounded_int ~min:1 ~max:Int.max_value)
+  in
+  let%bind value =
+    if version = 6
+    then (
+      let%bind () =
+        closed fields [ "schema_version"; "delivery"; "subscription_binding" ]
+      in
+      let%bind value =
+        Json_codec.required_as fields "delivery" of_json_without_subscription
+      in
+      let%bind binding =
+        Json_codec.required_as fields "subscription_binding" Subscription_binding.of_json
+      in
+      match value.context.ownership with
+      | Some ({ subscription_binding = None; _ } as ownership) ->
+        Ok
+          { value with
+            context =
+              { value.context with
+                ownership = Some { ownership with subscription_binding = Some binding }
+              }
+          }
+      | None | Some { subscription_binding = Some _; _ } ->
+        invalid "delivery epoch envelope requires exactly one legacy owner")
+    else (
+      let%bind value = of_json_without_subscription json in
+      match value.context.ownership with
+      | None | Some { subscription_binding = None; _ } -> Ok value
+      | Some { subscription_binding = Some _; _ } ->
+        invalid "delivery subscription binding requires envelope version 6")
+  in
+  let%map () = validate value in
+  value
+;;
+
 module Storage = struct
+  type nonrec binding_field = binding_field =
+    | Missing
+    | Nullable
+
   let nullable decode = function
     | `Null -> Ok None
     | json -> Result.map (decode json) ~f:Option.some
@@ -641,7 +787,7 @@ module Storage = struct
 
   let option encode value = Option.value_map value ~default:`Null ~f:encode
 
-  let to_json (t : t) =
+  let to_json_with_binding_field (t : t) ~binding_field =
     let c = t.context in
     `Object
       [ "id", Id.Delivery.to_json c.id
@@ -654,7 +800,10 @@ module Storage = struct
       ; "completion", Completion.to_json c.completion
       ; "wake", Completion.wake_to_json c.wake
       ; "created_at", Timestamp.to_json c.created_at
-      ; "ownership", option ownership_to_json c.ownership
+      ; ( "ownership"
+        , option
+            (fun ownership -> ownership_to_storage_json ownership ~binding_field)
+            c.ownership )
       ; "attempt", `Number (Int.to_string t.attempt)
       ; "status", status_to_json t.status
       ; "wake_disposition", option wake_disposition_to_json t.wake_disposition
@@ -663,6 +812,8 @@ module Storage = struct
         , option Completion_projection.to_json t.completion_projection )
       ]
   ;;
+
+  let to_json t = to_json_with_binding_field t ~binding_field:Nullable
 
   let of_json json =
     let open Result.Let_syntax in
@@ -718,3 +869,12 @@ module Storage = struct
     t
   ;;
 end
+
+let unchecked_t_of_sexp = t_of_sexp
+
+let t_of_sexp sexp =
+  let value = unchecked_t_of_sexp sexp in
+  match validate value with
+  | Ok () -> value
+  | Error error -> Sexplib.Conv.of_sexp_error error.message sexp
+;;

@@ -76,41 +76,52 @@ let fail_metadata_rename
       ?(before_open_out = fun _ -> ())
       ?(before_open_in = fun _ -> ())
       ?(matches_rename = fun path -> String.is_suffix path ~suffix:".sexp")
-      (Eio.Resource.T (directory, handler) as native_directory)
+      native_directory
       armed
   =
-  let module Original = (val Eio.Resource.get handler Eio.Fs.Pi.Dir) in
-  let module Directory = struct
-    include Original
+  let rec wrap
+    : 'tags. ([> Eio.Fs.dir_ty ] as 'tags) Eio.Resource.t -> 'tags Eio.Resource.t
+    =
+    fun (Eio.Resource.T (directory, handler)) ->
+    let module Original = (val Eio.Resource.get handler Eio.Fs.Pi.Dir) in
+    let module Directory = struct
+      include Original
 
-    let rename directory source _destination target =
-      match !armed, matches_rename target with
-      | Some after_rename, true ->
-        armed := None;
-        on_failure target;
-        if after_rename then Original.rename directory source native_directory target;
-        raise (Core_unix.Unix_error (EIO, "injected metadata rename failure", "metadata"))
-      | _ -> Original.rename directory source native_directory target
-    ;;
+      let open_dir directory ~sw path = wrap (Original.open_dir directory ~sw path)
 
-    let unlink directory path =
-      before_unlink path;
-      Original.unlink directory path
-    ;;
+      let rename directory source destination target =
+        match !armed, matches_rename target with
+        | Some after_rename, true ->
+          armed := None;
+          on_failure target;
+          if after_rename then Original.rename directory source destination target;
+          raise
+            (Core_unix.Unix_error (EIO, "injected metadata rename failure", "metadata"))
+        | _ -> Original.rename directory source destination target
+      ;;
 
-    let open_out directory ~sw ~append ~create path =
-      before_open_out path;
-      Original.open_out directory ~sw ~append ~create path
-    ;;
+      let unlink directory path =
+        before_unlink path;
+        Original.unlink directory path
+      ;;
 
-    let open_in directory ~sw path =
-      before_open_in path;
-      Original.open_in directory ~sw path
-    ;;
-  end
+      let open_out directory ~sw ~append ~create path =
+        before_open_out path;
+        Original.open_out directory ~sw ~append ~create path
+      ;;
+
+      let open_in directory ~sw path =
+        before_open_in path;
+        Original.open_in directory ~sw path
+      ;;
+    end
+    in
+    Eio.Resource.T
+      ( directory
+      , Eio.Resource.handler
+          (H (Eio.Fs.Pi.Dir, (module Directory)) :: Eio.Resource.bindings handler) )
   in
-  Eio.Resource.T
-    (directory, Eio.Resource.handler [ H (Eio.Fs.Pi.Dir, (module Directory)) ])
+  wrap native_directory
 ;;
 
 let fault_env

@@ -9,6 +9,94 @@ module D = Agent_store.Delegation_store
 module H = Agent_client.Session_handle
 module Registry = Agent_server.Session_registry
 
+let rec has_stop_epoch (delta : Agent_session.Session_delta.t) =
+  match delta with
+  | Stop_epoch_changed _ -> true
+  | Batch deltas -> List.exists deltas ~f:has_stop_epoch
+  | Created _
+  | Lifecycle_changed _
+  | Metadata_changed _
+  | Organization_changed _
+  | Initial_start_consumed
+  | Parent_stop_epoch_changed _
+  | Workspace_changed _
+  | Canonical_entries_appended _
+  | Canonical_history_replaced _
+  | Authoring_references_forgotten _
+  | Authoring_publication_changed _
+  | Initial_prompt_count_changed _
+  | Deferred_entries_enqueued _
+  | Deferred_entries_adopted
+  | Pending_inputs_changed _
+  | Active_operation_changed _
+  | Automatic_turn_budget_enabled _
+  | Automatic_turn_pauses_changed _
+  | Attachment_added _
+  | Attachment_removed _
+  | Permission_changed _
+  | Grant_changed _
+  | Inference_target_captured _
+  | Configuration_revision_changed _
+  | Inference_target_changed _
+  | Model_job_target_captured _
+  | Model_job_recipe_target_captured _
+  | Model_job_target_restored _
+  | Inference_ledger_changed _
+  | Job_changed _
+  | Schedule_changed _
+  | Invocation_changed _
+  | Managed_submission_admitted _
+  | Managed_submission_changed _
+  | Managed_stop_admitted _
+  | Invocation_reconciled _
+  | Moderator_execution_changed _
+  | Moderator_execution_reconciled _
+  | Subscription_changed _
+  | Subscription_expired _
+  | Subscription_cancelled _
+  | Delivery_changed _
+  | Ingress_changed _
+  | Delivery_committed _
+  | Delivery_wake_changed _
+  | Run_state_changed _
+  | Moderator_changed _
+  | Shell_changed _
+  | History_block_reserved _
+  | Compaction_generation_changed _
+  | Compaction_archived _
+  | History_deleted _
+  | History_edited _
+  | Owner_lease_generation_changed _
+  | Failure_changed _
+  | Halt_changed _
+  | Reset_generation _ -> false
+;;
+
+let journal_has_stop_epoch env path =
+  let scan =
+    Eio.Path.load (F.path env path)
+    |> Agent_store.Journal_segment.scan_contents
+         ~max_payload_length:Daemon.default_options.factory_limits.max_journal_payload
+    |> F.store_ok
+  in
+  match List.last scan.entries with
+  | Some entry when Int.equal (Agent_store.Frame.flags entry.frame) 0 ->
+    let transaction =
+      Agent_store.Frame.payload entry.frame
+      |> Agent_store.Transaction.decode
+      |> F.store_ok
+    in
+    Agent_session.Session_delta_document.decode
+      ~limits:Document_schema.Limits.default
+      transaction.delta
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum ([%sexp_of: Document_schema.Error.t] error))
+    |> Result.ok_or_failwith
+    |> Agent_session.Session_delta_document.value
+    |> has_stop_epoch
+  | None | Some _ -> false
+;;
+
 let run_child ?interrupt_recovery env ~root ~recover =
   let read name = Eio.Path.load (F.path env (Filename.concat root name)) in
   let journal =
@@ -38,10 +126,7 @@ let run_child ?interrupt_recovery env ~root ~recover =
           let hit =
             match interrupt_recovery with
             | None -> true
-            | Some "journal" ->
-              String.is_substring
-                (Eio.Path.load (F.path env path))
-                ~substring:"Stop_epoch_changed"
+            | Some "journal" -> journal_has_stop_epoch env path
             | Some "index" ->
               let index =
                 Agent_store.Session_index.open_or_create ~env ~path |> F.store_ok

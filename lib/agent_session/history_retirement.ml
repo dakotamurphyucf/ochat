@@ -74,7 +74,7 @@ let apply t ~next ~limits =
                (canonical_history t.edit)))
       || (not
             (List.equal
-               P.History.equal_entry
+               Pending_input_document.equal
                current.deferred_user_entries
                old.deferred_user_entries))
       || (not (Int64.equal current.next_history_sequence old.next_history_sequence))
@@ -137,6 +137,7 @@ let admit previous ~delta ~next ~limits =
     | Initial_prompt_count_changed _
     | Deferred_entries_enqueued _
     | Deferred_entries_adopted
+    | Pending_inputs_changed _
     | Active_operation_changed _
     | Automatic_turn_budget_enabled _
     | Automatic_turn_pauses_changed _
@@ -167,6 +168,7 @@ let admit previous ~delta ~next ~limits =
     | Ingress_changed _
     | Delivery_committed _
     | Delivery_wake_changed _
+    | Run_state_changed _
     | Moderator_changed _
     | Shell_changed _
     | History_block_reserved _

@@ -1,5 +1,11 @@
 open! Core
 
+module Collection_policy = struct
+  type t =
+    | Load_retained
+    | Selected_only
+end
+
 type stats =
   { expired_idempotency_records : int
   ; expired_temporary_blobs : int
@@ -70,7 +76,7 @@ let has_preparations ~env session_store session_id =
   | Error _ -> true
 ;;
 
-let collect_results ~env ~session_store registry stats =
+let collect_results ~env ~session_store ~collection_policy registry stats =
   match registry with
   | None -> Ok stats
   | Some registry ->
@@ -88,8 +94,15 @@ let collect_results ~env ~session_store registry stats =
         | true -> stats, failure
         | false ->
           let result =
-            Result.bind (Session_registry.load registry entry.session.id) ~f:(fun entry ->
-              entry.collect_results ())
+            match collection_policy with
+            | Collection_policy.Load_retained ->
+              Result.bind
+                (Session_registry.load registry entry.session.id)
+                ~f:(fun entry -> entry.collect_results ())
+            | Selected_only ->
+              (match Session_registry.find registry entry.session.id with
+               | None -> Ok None
+               | Some actual -> actual.collect_results ())
           in
           (match result with
            | Error error ->
@@ -117,6 +130,7 @@ let collect_results ~env ~session_store registry stats =
 ;;
 
 let run_once
+      ~collection_policy
       ~env
       ~idempotency_store
       ~blob_store
@@ -146,6 +160,7 @@ let run_once
       ~older_than:(retention_cutoff now response_retention)
   in
   collect_results
+    ~collection_policy
     ~env
     ~session_store
     registry
@@ -202,6 +217,7 @@ let protected_response_sessions registry =
 
 let rec loop
           t
+          collection_policy
           env
           clock
           every
@@ -218,6 +234,7 @@ let rec loop
     let now = timestamp clock in
     let result =
       run_once
+        ~collection_policy
         ~env
         ~idempotency_store
         ~blob_store
@@ -235,6 +252,7 @@ let rec loop
        ignore (Session_registry.unload_inactive registry ~index_entries:entries : int));
     loop
       t
+      collection_policy
       env
       clock
       every
@@ -247,6 +265,7 @@ let rec loop
 ;;
 
 let start_controlled
+      ~collection_policy
       ~enabled
       ~sw
       ~env
@@ -273,6 +292,7 @@ let start_controlled
     Eio.Fiber.fork ~sw (fun () ->
       loop
         t
+        collection_policy
         env
         clock
         every
@@ -286,6 +306,7 @@ let start_controlled
 ;;
 
 let start
+      ~collection_policy
       ~sw
       ~env
       ~clock
@@ -298,6 +319,7 @@ let start
       ~on_error
   =
   start_controlled
+    ~collection_policy
     ~enabled:true
     ~sw
     ~env

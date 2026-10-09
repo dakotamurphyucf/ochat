@@ -1,5 +1,14 @@
 open! Core
 
+let durable_storage path =
+  let root =
+    Agent_server.Local_storage.Root.create ~path ()
+    |> Result.map_error ~f:(fun (error : Agent_protocol.Error.t) -> error.message)
+    |> Result.ok_or_failwith
+  in
+  Agent_server.Local_storage.Durable root
+;;
+
 let inference_options () =
   { Agent_server.Daemon.default_options with
     inference_policy =
@@ -127,8 +136,8 @@ let with_host ?(prompt = "<developer>Offline gap regression.</developer>") f =
               { prompt_file
               ; workspace = root
               ; tool_dir = root
-              ; home = root
-              ; data_root = Some (Filename.concat root "store")
+              ; home = Some root
+              ; storage = durable_storage (Filename.concat root "store")
               ; start_immediately = false
               ; permission_profile = Agent_server.Embedded.default_permission_profile
               ; attachment_mode = Read_write
@@ -241,6 +250,7 @@ let mutations session_id attachment_id expected_revision target_revision =
       ; attachment_id
       ; content = { kind = Plain_text; text = "denied"; attachments = [] }
       ; idempotency_key
+      ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
       }
   ; Session_cancel_operation
       { session_id
@@ -724,7 +734,12 @@ let%expect_test
       request
         connection
         (Session_export
-           { session_id; attachment_id; format = Json; revision = None; history = None })
+           { session_id
+           ; attachment_id = Some attachment_id
+           ; format = Json
+           ; revision = None
+           ; history = None
+           })
       |> ok
       |> non_history
       |> function
@@ -736,7 +751,7 @@ let%expect_test
       dispatch
         (Blob_read
            { session_id
-           ; attachment_id = attached.attachment.id
+           ; attachment_id = Some attached.attachment.id
            ; blob_id = full_blob.id
            ; offset = 0L
            ; max_bytes = 65536
@@ -750,7 +765,7 @@ let%expect_test
       dispatch
         (Session_export
            { session_id
-           ; attachment_id = attached.attachment.id
+           ; attachment_id = Some attached.attachment.id
            ; format = Json
            ; revision = None
            ; history = None
@@ -765,7 +780,7 @@ let%expect_test
       dispatch
         (Blob_read
            { session_id
-           ; attachment_id = attached.attachment.id
+           ; attachment_id = Some attached.attachment.id
            ; blob_id = filtered.id
            ; offset = 0L
            ; max_bytes = 65536

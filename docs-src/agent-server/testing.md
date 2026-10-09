@@ -57,7 +57,8 @@ dune build @agent-e2e-pr
 Normal `runtest` does not require the opt-in E2E runner, live provider, manual TUI,
 load, or soak scenarios. `@agent-docs-check` validates the documentation/examples
 separately. `@agent-e2e-pr` selects smoke, transports, workspaces, multi-client
-checks and `@agent-e2e-extensibility-pr`. The focused extensibility subset checks
+checks, `@agent-e2e-extensibility-pr` and the bounded
+`@agent-e2e-artifact-redaction` regression. The focused extensibility subset checks
 retained child provider settings across restart, invocation admission/publication
 without replaying an external effect, and recovery of a committed native child
 creation outcome. It also checks that native tool-start and nested trace events
@@ -116,6 +117,20 @@ successful outcome is published without repeating its real file mutation. Live
 progress is observed through public snapshots; raw checkpoints are inspected only
 after the child has been killed and joined. The approval case must cancel the old
 wait and reject a late approval submitted through a new valid attachment.
+
+`pending.interrupted-root-recovery` is also in the required PR subset. It kills
+an owned daemon process with an active turn and an input held behind that turn,
+then physically reopens the store. A nonactivating query must preserve the
+blocked boundary; actual recovery records `Interrupted` while the session stays
+stopped. Explicit resume adopts the input once, and a second reopening preserves
+that result. The harness joins the killed child and observes the recovery child's
+successful exit.
+
+The required `artifact.redaction` case uses bounded repeated registrations to
+check that original secrets and their single Base64 encodings are redacted,
+without recursively registering encodings of existing variants. It guards
+registration growth independently of the larger conformance scenario. These
+checks use fixture secrets and do not require credentials.
 
 `job.committed-intent-launch-once` kills the daemon after a standalone ChatML
 handler saves its selected native job and Pending outcome, before worker launch.

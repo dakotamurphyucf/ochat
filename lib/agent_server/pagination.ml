@@ -165,6 +165,41 @@ let work t principal (request : Agent_protocol.Session_work.Query.t) values =
     values
 ;;
 
+let pending
+      t
+      principal
+      (request : Agent_protocol.Pending_query.Request.t)
+      ~generation
+      ~pending_revision
+      values
+  =
+  let summarize document =
+    let input = Agent_session.Pending_input_document.value document in
+    `Object
+      [ ( "history_id"
+        , Agent_protocol.History.Id.to_json
+            (Agent_protocol.Pending_input.history_id input) )
+      ; ( "content_revision"
+        , Agent_protocol.History.Content_revision.to_json
+            (Agent_protocol.Pending_input.entry input).content_revision )
+      ; ( "binding"
+        , Agent_protocol.Pending_input.Binding.to_json
+            (Agent_protocol.Pending_input.binding input) )
+      ]
+  in
+  ordered
+    t
+    principal
+    (Agent_protocol.Command.Session_pending_inputs request)
+    request.page
+    summarize
+    values
+    ~additional_binding:
+      [ "generation", `Number (Int.to_string generation)
+      ; "pending_revision", Agent_protocol.Pending_input.Revision.to_json pending_revision
+      ]
+;;
+
 let session_catalog t principal request ~host_id ~organization_revision values =
   ordered
     t
@@ -471,3 +506,13 @@ module Inference = struct
            | _ -> Error (expired ())))
   ;;
 end
+
+let runs t principal (request : Agent_protocol.Run_query.Request.t) values =
+  ordered
+    t
+    principal
+    (Agent_protocol.Command.Session_runs request)
+    request.page
+    Agent_protocol.Run_query.View.to_json
+    values
+;;

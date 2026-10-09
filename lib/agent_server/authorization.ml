@@ -26,6 +26,10 @@ let required_scope = function
   | Session_work _
   | Session_search _
   | Session_search_navigate _
+  | Session_runs _
+  | Session_run _
+  | Session_pending_inputs _
+  | Session_pending_input _
   | Session_list _
   | Session_get _
   | Session_attach _
@@ -44,7 +48,10 @@ let required_scope = function
   | Session_update_metadata _
   | Session_start _
   | Session_resume _
+  | Session_run_start _
   | Session_send_message _
+  | Session_cancel_pending_input _
+  | Session_replace_pending_input _
   | Session_compact _
   | Session_edit_history _
   | Session_continue_history _
@@ -118,7 +125,19 @@ let authorize principal command =
            ())
   in
   match command with
-  | (Agent_protocol.Command.Activity_list _ | Session_work _)
+  | Agent_protocol.Command.Session_cancel_pending_input _
+  | Session_replace_pending_input _
+    when not (Agent_protocol.Principal.has_scope principal View_session_transcript) ->
+    Error
+      (Agent_protocol.Error.create
+         Permission_denied
+         ~message:"pending controls require transcript visibility"
+         ~retryable:false
+         ())
+  | Agent_protocol.Command.Activity_list _
+  | Session_work _
+  | Session_runs _
+  | Session_run _
     when not (Agent_protocol.Principal.has_scope principal View_security_state) ->
     Error
       (Agent_protocol.Error.create
@@ -156,4 +175,10 @@ let authorize principal command =
          ~retryable:false
          ())
   | _ -> Ok ()
+;;
+
+let session_visible_to principal (session : Agent_protocol.Session.t) =
+  Agent_protocol.Principal.has_scope principal Administer_configuration
+  || Option.exists session.creator ~f:(fun creator ->
+    Agent_protocol.Id.Principal.equal creator principal.Agent_protocol.Principal.id)
 ;;

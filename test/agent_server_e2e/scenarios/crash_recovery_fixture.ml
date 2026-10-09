@@ -165,17 +165,36 @@ let normalized_snapshot
       (expected : Agent_protocol.Public.Snapshot.Fields.t)
       (actual : Agent_protocol.Public.Snapshot.Fields.t)
   =
-  let normalized =
-    { actual with
-      session = expected.session
-    ; revision = expected.revision
-    ; latest_event_sequence = expected.latest_event_sequence
-    }
+  let lifecycle =
+    Option.map actual.lifecycle ~f:(fun observation ->
+      let module L = Agent_protocol.Session_lifecycle in
+      require
+        (L.Observation.matches_session observation actual.session)
+        "recovered lifecycle anchor disagrees with its session";
+      let anchor = L.Observation.expected observation in
+      let normalized_anchor =
+        L.Expected.create
+          ~reference:(L.Expected.reference anchor)
+          ~generation:(L.Expected.generation anchor)
+          ~session_revision:expected.revision
+          ~lifecycle_revision:(L.Expected.lifecycle_revision anchor)
+        |> protocol_ok
+      in
+      L.Observation.create
+        ~expected:normalized_anchor
+        ~status:(L.Observation.status observation)
+        ~admission:(L.Observation.admission observation)
+      |> protocol_ok)
   in
-  normalized
+  { actual with
+    session = expected.session
+  ; revision = expected.revision
+  ; latest_event_sequence = expected.latest_event_sequence
+  ; lifecycle
+  }
 ;;
 
-let assert_snapshot
+let assert_retained_snapshot
       (expected : Agent_protocol.Public.Snapshot.Fields.t)
       (actual : Agent_protocol.Public.Snapshot.Fields.t)
   =
@@ -189,10 +208,17 @@ let assert_snapshot
     [%sexp_of: Agent_protocol.Public.Snapshot.Fields.t]
     expected
     (normalized_snapshot expected actual);
-  require Int64.(actual.revision > expected.revision) "recovery revision did not advance";
+  require Int64.(actual.revision >= expected.revision) "retained revision regressed";
   require
-    Int64.(actual.latest_event_sequence > expected.latest_event_sequence)
-    "recovery event sequence did not advance"
+    (* Recovery can commit attachment/history reservations without publishing a
+       new event when the stopped session's observable state is unchanged. *)
+    Int64.(actual.latest_event_sequence >= expected.latest_event_sequence)
+    "recovery event sequence regressed"
+;;
+
+let assert_snapshot expected actual =
+  assert_retained_snapshot expected actual;
+  require Int64.(actual.revision > expected.revision) "recovery revision did not advance"
 ;;
 
 let wait_ready env daemon =

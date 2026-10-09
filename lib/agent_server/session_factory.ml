@@ -106,7 +106,7 @@ type t =
   ; quota_manager : Agent_session.Quota_manager.t
   ; job_capacity : Job_capacity.t
   ; tool_dir : string
-  ; home : string
+  ; home : string option
   ; inference_policy : inference_policy
   ; qualify_chatml_extensions : bool
   ; session_helpers : Agent_session.Session_management_channel.grant list
@@ -698,7 +698,11 @@ type parent_stop_recovery =
   ; stop : bool
   }
 
-let parent_stop_recovery t (state : Agent_session.Session_state.t) =
+type parent_recovery_policy =
+  | Loaded_only
+  | Retained_unselected of Recovery_parent.t
+
+let parent_stop_recovery t ~policy (state : Agent_session.Session_state.t) =
   let module D = Agent_store.Delegation_store in
   let open Result.Let_syntax in
   match state.spec.delegation with
@@ -734,30 +738,54 @@ let parent_stop_recovery t (state : Agent_session.Session_state.t) =
                 (Agent_store.Store_error.Corrupt
                    "parent stop counter moved backwards during child recovery"))
        in
-       let stop =
-         Option.is_some record.revocation
-         || Int64.(epoch > previous)
-         || Option.value_map parent ~default:true ~f:(fun parent ->
-           Agent_protocol.Session.equal_desired_state parent.lifecycle.desired Stopped
-           || parent.halted
-           || Option.is_some parent.failure
-           || Result.is_error
-                (Agent_session.Delegation_authority.check_invocation_owner record parent))
+       let%bind stop =
+         match parent, policy with
+         | None, Retained_unselected retained ->
+           let%map disposition =
+             Recovery_parent.inspect retained ~reference ~expected_stop_epoch:previous
+           in
+           (match disposition with
+            | Retired -> true
+            | Retained _ -> false)
+         | Some _, (Loaded_only | Retained_unselected _) | None, Loaded_only ->
+           Ok
+             (Option.is_some record.revocation
+              || Int64.(epoch > previous)
+              || Option.value_map parent ~default:true ~f:(fun parent ->
+                Agent_protocol.Session.equal_desired_state
+                  parent.lifecycle.desired
+                  Stopped
+                || parent.halted
+                || Option.is_some parent.failure
+                || Result.is_error
+                     (Agent_session.Delegation_authority.check_invocation_owner
+                        record
+                        parent)))
        in
        Ok (Some { reference; epoch; stop }))
 ;;
 
 let runtime_paths t handle source state =
-  Agent_session.Runtime_paths.create
-    ~env:t.env
-    ~tool_dir:t.tool_dir
-    ~workspace:
-      state.Agent_session.Session_state.spec.workspace_instance.canonical_root.native_path
-    ~prompt_dir:(source_prompt_directory source)
-    ~session_dir:(Agent_store.Session_store.Handle.directory handle)
-    ~cache_dir:(Agent_store.Session_store.Handle.cache_directory handle)
-    ~home:t.home
-  |> Result.map_error ~f:protocol_of_store
+  match t.home with
+  | None ->
+    Error
+      (Agent_protocol.Error.create
+         Invalid_state
+         ~message:"native runtime qualification requires an explicit host home"
+         ~retryable:false
+         ())
+  | Some home ->
+    Agent_session.Runtime_paths.create
+      ~env:t.env
+      ~tool_dir:t.tool_dir
+      ~workspace:
+        state.Agent_session.Session_state.spec.workspace_instance.canonical_root
+          .native_path
+      ~prompt_dir:(source_prompt_directory source)
+      ~session_dir:(Agent_store.Session_store.Handle.directory handle)
+      ~cache_dir:(Agent_store.Session_store.Handle.cache_directory handle)
+      ~home
+    |> Result.map_error ~f:protocol_of_store
 ;;
 
 let shell_permission_choices scopes =
@@ -942,7 +970,7 @@ let shell_store_error (error : Agent_protocol.Error.t) =
     { code = "shell.actor_store_failed"; message = error.message }
 ;;
 
-let shell_approval_store state actor_ref shell_state =
+let shell_approval_store ?(run_preparation = ref None) state actor_ref shell_state =
   let load () =
     match !actor_ref with
     | None -> Ok !shell_state.Session.Shell_state.approval_grants
@@ -956,7 +984,14 @@ let shell_approval_store state actor_ref shell_state =
       shell_state := { !shell_state with approval_grants };
       Ok ()
     | Some actor ->
-      Agent_session.Session_actor.replace_shell_approval_grants actor approval_grants
+      (match !run_preparation with
+       | None ->
+         Agent_session.Session_actor.replace_shell_approval_grants actor approval_grants
+       | Some preparation ->
+         Agent_session.Session_actor.Constructor_mutations.replace_shell_approval_grants
+           actor
+           ~preparation
+           approval_grants)
       |> Result.map_error ~f:shell_store_error
   in
   Shell_runtime.Approval_store.create
@@ -1026,7 +1061,16 @@ let operator_manifest_authorizer t ~manifest_sha256 revision state =
     | _ -> Reject "shell manifest cannot be bound to a complete session identity"
 ;;
 
-let manifest_authorizer ?manifest_sha256 t profile revision state actor_ref shell_state =
+let manifest_authorizer
+      ?manifest_sha256
+      ?(run_preparation = ref None)
+      t
+      profile
+      revision
+      state
+      actor_ref
+      shell_state
+  =
   let load () =
     match !actor_ref with
     | None -> Ok !shell_state.Session.Shell_state.manifest_grants
@@ -1041,7 +1085,13 @@ let manifest_authorizer ?manifest_sha256 t profile revision state actor_ref shel
       := { !shell_state with manifest_grants = grant :: !shell_state.manifest_grants };
       Ok ()
     | Some actor ->
-      Agent_session.Session_actor.add_shell_manifest_grant actor grant
+      (match !run_preparation with
+       | None -> Agent_session.Session_actor.add_shell_manifest_grant actor grant
+       | Some preparation ->
+         Agent_session.Session_actor.Constructor_mutations.add_shell_manifest_grant
+           actor
+           ~preparation
+           grant)
       |> Result.map_error ~f:manifest_store_error
   in
   let fallback =
@@ -1073,10 +1123,16 @@ type pending_schedule_operation =
   | Add of Agent_protocol.Schedule.t
   | Cancel of Agent_protocol.Id.Schedule.t
 
-let add_bound_schedule actor_ref pending schedule =
+let add_bound_schedule actor_ref pending ~run_preparation schedule =
   match !actor_ref with
   | Some actor ->
-    Agent_session.Session_actor.add_schedule actor schedule
+    (match !run_preparation with
+     | None -> Agent_session.Session_actor.add_schedule actor schedule
+     | Some preparation ->
+       Agent_session.Session_actor.add_run_constructor_schedule
+         actor
+         ~preparation
+         schedule)
     |> Result.map ~f:(fun schedule ->
       Agent_protocol.Id.Schedule.to_string schedule.Agent_protocol.Schedule.id)
     |> Result.map_error ~f:(fun error -> error.message)
@@ -1085,7 +1141,7 @@ let add_bound_schedule actor_ref pending schedule =
     Ok (Agent_protocol.Id.Schedule.to_string schedule.id)
 ;;
 
-let schedule_services t state actor_ref pending =
+let schedule_services t state actor_ref pending ~run_preparation =
   let session_id = state.Agent_session.Session_state.identity.session_id in
   let generation = state.identity.generation in
   let after_ms ~delay_ms ~payload =
@@ -1114,7 +1170,7 @@ let schedule_services t state actor_ref pending =
           ; ownership = None
           }
       in
-      add_bound_schedule actor_ref pending schedule)
+      add_bound_schedule actor_ref pending ~run_preparation schedule)
   in
   let cancel ~id =
     let open Result.Let_syntax in
@@ -1124,7 +1180,13 @@ let schedule_services t state actor_ref pending =
     in
     match !actor_ref with
     | Some actor ->
-      Agent_session.Session_actor.cancel_schedule_internal actor ~schedule_id
+      (match !run_preparation with
+       | None -> Agent_session.Session_actor.cancel_schedule_internal actor ~schedule_id
+       | Some preparation ->
+         Agent_session.Session_actor.cancel_run_constructor_schedule
+           actor
+           ~preparation
+           ~schedule_id)
       |> Result.map ~f:(fun _ -> ())
       |> Result.map_error ~f:(fun error -> error.message)
     | None ->
@@ -1134,13 +1196,25 @@ let schedule_services t state actor_ref pending =
   Agent_session.Runtime_builder.{ after_ms; cancel }
 ;;
 
-let flush_pending_schedules actor operations =
+let flush_pending_schedules ?run_preparation actor operations =
   let apply = function
     | Add schedule ->
-      Agent_session.Session_actor.add_schedule actor schedule
+      (match run_preparation with
+       | None -> Agent_session.Session_actor.add_schedule actor schedule
+       | Some preparation ->
+         Agent_session.Session_actor.add_run_constructor_schedule
+           actor
+           ~preparation
+           schedule)
       |> Result.map ~f:(fun _ -> ())
     | Cancel schedule_id ->
-      Agent_session.Session_actor.cancel_schedule_internal actor ~schedule_id
+      (match run_preparation with
+       | None -> Agent_session.Session_actor.cancel_schedule_internal actor ~schedule_id
+       | Some preparation ->
+         Agent_session.Session_actor.cancel_run_constructor_schedule
+           actor
+           ~preparation
+           ~schedule_id)
       |> Result.map ~f:(fun _ -> ())
   in
   List.fold_result operations ~init:() ~f:(fun () operation -> apply operation)
@@ -1804,6 +1878,11 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
           let open Result.Let_syntax in
           let%bind actor = extension_actor actor_ref in
           A.with_current_moderator_event actor ~operation_id:None ~event ~snapshot handle)
+    ; run_actions =
+        (fun executing ->
+          let open Result.Let_syntax in
+          let%bind actor = extension_actor actor_ref in
+          A.run_actions actor executing)
     ; lifecycle_started =
         (fun observer ->
           List.exists state.moderator_executions ~f:(fun receipt ->
@@ -1893,10 +1972,13 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
     }
 ;;
 
-let add_bound_job actor_ref pending job =
+let add_bound_job actor_ref pending ~run_preparation job =
   match !actor_ref with
   | Some actor ->
-    Agent_session.Session_actor.add_job actor job
+    (match !run_preparation with
+     | None -> Agent_session.Session_actor.add_job actor job
+     | Some preparation ->
+       Agent_session.Session_actor.add_run_constructor_job actor ~preparation job)
     |> Result.map ~f:(fun job -> Agent_protocol.Id.Job.to_string job.id)
     |> Result.map_error ~f:(fun error -> error.message)
   | None ->
@@ -1939,14 +2021,32 @@ let rec await_call_cancellation t actor initialization_scope (job : Agent_protoc
   else ()
 ;;
 
-let cancelled_call actor (job : Agent_protocol.Job.t) =
+let interrupt_constructor_job actor ~run_preparation (job : Agent_protocol.Job.t) ~reason =
+  match run_preparation with
+  | None ->
+    Agent_session.Session_actor.interrupt_job
+      actor
+      ~job_id:job.id
+      ~generation:job.generation
+      ~attempt:job.attempt
+      ~reason
+  | Some preparation ->
+    Agent_session.Session_actor.interrupt_run_constructor_job
+      actor
+      ~preparation
+      ~job_id:job.id
+      ~generation:job.generation
+      ~attempt:job.attempt
+      ~reason
+;;
+
+let cancelled_call actor ~run_preparation (job : Agent_protocol.Job.t) =
   Eio.Cancel.protect (fun () ->
     ignore
-      (Agent_session.Session_actor.interrupt_job
+      (interrupt_constructor_job
          actor
-         ~job_id:job.id
-         ~generation:job.generation
-         ~attempt:job.attempt
+         ~run_preparation
+         job
          ~reason:"synchronous model call was cancelled"
        : (Agent_protocol.Job.t, Agent_protocol.Error.t) result));
   Ok
@@ -1954,7 +2054,12 @@ let cancelled_call actor (job : Agent_protocol.Job.t) =
        "synchronous model call was cancelled")
 ;;
 
-let prepare_model_job_inference t actor ~initialization_scope (job : Agent_protocol.Job.t)
+let prepare_model_job_inference
+      ?(run_preparation = ref None)
+      t
+      actor
+      ~initialization_scope
+      (job : Agent_protocol.Job.t)
   =
   let open Result.Let_syntax in
   let%bind state = Agent_session.Session_actor.state actor in
@@ -1985,12 +2090,22 @@ let prepare_model_job_inference t actor ~initialization_scope (job : Agent_proto
             (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
       in
       let%map () =
-        Agent_session.Session_actor.capture_model_job_source
-          actor
-          ~job_id:job.id
-          ~generation:job.generation
-          ~target
-          ~limits:t.journal_document_limits
+        match !run_preparation with
+        | None ->
+          Agent_session.Session_actor.capture_model_job_source
+            actor
+            ~job_id:job.id
+            ~generation:job.generation
+            ~target
+            ~limits:t.journal_document_limits
+        | Some preparation ->
+          Agent_session.Session_actor.capture_run_constructor_model_source
+            actor
+            ~preparation
+            ~job_id:job.id
+            ~generation:job.generation
+            ~target
+            ~limits:t.journal_document_limits
       in
       target
   in
@@ -2006,13 +2121,24 @@ let prepare_model_job_inference t actor ~initialization_scope (job : Agent_proto
       (fun target ->
         match initialization_scope with
         | None ->
-          Agent_session.Session_actor.capture_recipe_target
-            actor
-            ~job_id:job.id
-            ~generation:job.generation
-            ~attempt:job.attempt
-            ~target
-            ~limits:t.journal_document_limits
+          (match !run_preparation with
+           | None ->
+             Agent_session.Session_actor.capture_recipe_target
+               actor
+               ~job_id:job.id
+               ~generation:job.generation
+               ~attempt:job.attempt
+               ~target
+               ~limits:t.journal_document_limits
+           | Some preparation ->
+             Agent_session.Session_actor.capture_run_constructor_recipe_target
+               actor
+               ~preparation
+               ~job_id:job.id
+               ~generation:job.generation
+               ~attempt:job.attempt
+               ~target
+               ~limits:t.journal_document_limits)
         | Some scope ->
           Agent_session.Session_actor.capture_initialization_recipe_target
             actor
@@ -2033,7 +2159,15 @@ let model_job_inference t entry job =
     job
 ;;
 
-let job_services t state actor_ref pending ~initialization_scope ~initialization_jobs =
+let job_services
+      t
+      state
+      actor_ref
+      pending
+      ~initialization_scope
+      ~initialization_jobs
+      ~run_preparation
+  =
   let spawn_model ~recipe ~payload =
     let job = model_job t state ~recipe ~payload ~delivery:Pending in
     match !actor_ref, !initialization_scope with
@@ -2041,7 +2175,7 @@ let job_services t state actor_ref pending ~initialization_scope ~initialization
       Agent_session.Session_actor.add_initialization_model_job actor ~scope job
       |> Result.map ~f:(fun job -> Agent_protocol.Id.Job.to_string job.id)
       |> Result.map_error ~f:(fun error -> error.message)
-    | _, None -> add_bound_job actor_ref pending job
+    | _, None -> add_bound_job actor_ref pending ~run_preparation job
     | None, Some _ -> Error "initialization model admission requires its issuing actor"
   in
   let capacity_key () =
@@ -2069,12 +2203,22 @@ let job_services t state actor_ref pending ~initialization_scope ~initialization
     in
     (match scope with
      | None ->
-       Agent_session.Session_actor.complete_job
-         actor
-         ~job_id:job.Agent_protocol.Job.id
-         ~generation:job.generation
-         ~attempt:job.attempt
-         outcome
+       (match !run_preparation with
+        | None ->
+          Agent_session.Session_actor.complete_job
+            actor
+            ~job_id:job.Agent_protocol.Job.id
+            ~generation:job.generation
+            ~attempt:job.attempt
+            outcome
+        | Some preparation ->
+          Agent_session.Session_actor.complete_run_constructor_model_job
+            actor
+            ~preparation
+            ~job_id:job.id
+            ~generation:job.generation
+            ~attempt:job.attempt
+            outcome)
      | Some scope ->
        Agent_session.Session_actor.complete_initialization_model_job
          actor
@@ -2095,15 +2239,14 @@ let job_services t state actor_ref pending ~initialization_scope ~initialization
            `Cancelled)
     with
     | `Completed result -> complete_call actor scope job result
-    | `Cancelled -> cancelled_call actor job
+    | `Cancelled -> cancelled_call actor ~run_preparation:!run_preparation job
     | exception (Eio.Cancel.Cancelled _ as exn) ->
       Eio.Cancel.protect (fun () ->
         ignore
-          (Agent_session.Session_actor.interrupt_job
+          (interrupt_constructor_job
              actor
-             ~job_id:job.Agent_protocol.Job.id
-             ~generation:job.generation
-             ~attempt:job.attempt
+             ~run_preparation:!run_preparation
+             job
              ~reason:"synchronous model call was cancelled"
            : (Agent_protocol.Job.t, Agent_protocol.Error.t) result));
       raise exn
@@ -2146,25 +2289,37 @@ let job_services t state actor_ref pending ~initialization_scope ~initialization
                     ~scope
                     job
                 | None ->
-                  let%bind job = Agent_session.Session_actor.add_job actor job in
-                  let%bind claimed =
-                    Agent_session.Session_actor.claim_job
-                      actor
-                      ~job_id:job.id
-                      ~generation:job.generation
-                  in
-                  Result.of_option
-                    claimed
-                    ~error:
-                      (unavailable
-                         Conflict
-                         "synchronous model call could not claim its durable job"))
+                  (match !run_preparation with
+                   | Some preparation ->
+                     Agent_session.Session_actor.start_run_constructor_model_job
+                       actor
+                       ~preparation
+                       job
+                   | None ->
+                     let%bind job = Agent_session.Session_actor.add_job actor job in
+                     let%bind claimed =
+                       Agent_session.Session_actor.claim_job
+                         actor
+                         ~job_id:job.id
+                         ~generation:job.generation
+                     in
+                     Result.of_option
+                       claimed
+                       ~error:
+                         (unavailable
+                            Conflict
+                            "synchronous model call could not claim its durable job")))
                |> Result.map_error ~f:(fun error -> error.message)
              in
              Option.iter scope ~f:(fun _ ->
                initialization_jobs := job :: !initialization_jobs);
              let%bind inference =
-               prepare_model_job_inference t actor ~initialization_scope:scope job
+               prepare_model_job_inference
+                 ~run_preparation
+                 t
+                 actor
+                 ~initialization_scope:scope
+                 job
                |> Result.map_error ~f:(fun error -> error.message)
              in
              run_call actor scope job (fun () ->
@@ -2190,18 +2345,28 @@ let job_services t state actor_ref pending ~initialization_scope ~initialization
   Agent_session.Runtime_builder.{ spawn_model; call_model }
 ;;
 
-let flush_pending_jobs actor jobs =
+let flush_pending_jobs ?run_preparation actor jobs =
   List.fold_result jobs ~init:() ~f:(fun () job ->
-    Agent_session.Session_actor.add_job actor job |> Result.map ~f:(fun _ -> ()))
+    (match run_preparation with
+     | None -> Agent_session.Session_actor.add_job actor job
+     | Some preparation ->
+       Agent_session.Session_actor.add_run_constructor_job actor ~preparation job)
+    |> Result.map ~f:(fun _ -> ()))
 ;;
 
-let install_moderator_if_changed actor moderator_snapshot =
+let install_moderator_if_changed ?run_preparation actor moderator_snapshot =
   let open Result.Let_syntax in
   let%bind state = Agent_session.Session_actor.state actor in
   if Option.equal Jsonaf.exactly_equal state.moderator moderator_snapshot
   then Ok ()
   else
-    Agent_session.Session_actor.change_moderator actor moderator_snapshot
+    (match run_preparation with
+     | None -> Agent_session.Session_actor.change_moderator actor moderator_snapshot
+     | Some preparation ->
+       Agent_session.Session_actor.checkpoint_run_moderator
+         actor
+         ~preparation
+         moderator_snapshot)
     |> Result.map ~f:(fun _ -> ())
 ;;
 
@@ -2222,7 +2387,7 @@ let runtime_inference_ports t actor_ref =
       (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
 ;;
 
-let create_graph_tracking t actor_ref =
+let create_graph_tracking ?run_preparation t actor_ref =
   let open Result.Let_syntax in
   let%bind actor =
     Result.of_option
@@ -2238,7 +2403,7 @@ let create_graph_tracking t actor_ref =
           |> Agent_protocol.Id.Transaction.to_string))
     |> Result.map_error ~f:(unavailable Internal_error)
   in
-  Graph_tracking.create actor ~source ~upstream
+  Graph_tracking.create ?run_preparation actor ~source ~upstream
 ;;
 
 exception Inference_graph_cleanup_failed of Agent_protocol.Error.t
@@ -2988,14 +3153,17 @@ let prepare_runtime_at_paths
       ~pending_jobs
       ~initialization_scope
       ~initialization_jobs
+      ~run_preparation
   =
   let open Result.Let_syntax in
   let%bind inference_context = resolve_state_inference_context t state in
-  let%bind tracking = create_graph_tracking t actor_ref in
+  let%bind tracking = create_graph_tracking ~run_preparation t actor_ref in
   let prepare () =
     let shell_state = ref state.Agent_session.Session_state.shell in
     let approval_provider = shell_approval_provider t profile actor_ref in
-    let approval_store = shell_approval_store state actor_ref shell_state in
+    let approval_store =
+      shell_approval_store ~run_preparation state actor_ref shell_state
+    in
     let construct sw build manifest_authorizer =
       build
         ~sw
@@ -3019,7 +3187,12 @@ let prepare_runtime_at_paths
         ~permission_profile:profile
         ~review_permission:(review_permission t actor_ref profile)
         ~schedule_services:
-          (schedule_services t state actor_ref pending_schedule_operations)
+          (schedule_services
+             t
+             state
+             actor_ref
+             pending_schedule_operations
+             ~run_preparation)
         ~job_services:
           (job_services
              t
@@ -3027,7 +3200,8 @@ let prepare_runtime_at_paths
              actor_ref
              pending_jobs
              ~initialization_scope
-             ~initialization_jobs)
+             ~initialization_jobs
+             ~run_preparation)
     in
     let%map runtime =
       match source with
@@ -3038,7 +3212,14 @@ let prepare_runtime_at_paths
             construct
               sw
               (Agent_session.Runtime_builder.build ~revision)
-              (manifest_authorizer t profile revision state actor_ref shell_state)
+              (manifest_authorizer
+                 ~run_preparation
+                 t
+                 profile
+                 revision
+                 state
+                 actor_ref
+                 shell_state)
           | true ->
             let module B = Agent_session.Runtime_builder in
             let services = extension_services t profile actor_ref ~state in
@@ -3062,7 +3243,14 @@ let prepare_runtime_at_paths
               construct
                 sw
                 (B.build_with_extensions ~native_registrations ~revision ~services)
-                (manifest_authorizer t profile revision state actor_ref shell_state)
+                (manifest_authorizer
+                   ~run_preparation
+                   t
+                   profile
+                   revision
+                   state
+                   actor_ref
+                   shell_state)
             in
             let installed =
               let%bind public =
@@ -3441,6 +3629,7 @@ let prepare_runtime
       ~pending_jobs
       ~initialization_scope
       ~initialization_jobs
+      ~run_preparation
   =
   let open Result.Let_syntax in
   let%bind paths = runtime_paths t handle revision state in
@@ -3459,6 +3648,7 @@ let prepare_runtime
     ~pending_jobs
     ~initialization_scope
     ~initialization_jobs
+    ~run_preparation
   |> Result.map ~f:(fun (runtime, shell) -> runtime, !shell)
 ;;
 
@@ -4090,7 +4280,7 @@ let close_unregistered_runtime t handle runtime writer actor capacity =
   Agent_store.Commit_writer.close writer
 ;;
 
-let build_runtime_for_actor t handle actor =
+let build_runtime_for_actor ?run_preparation t handle actor =
   let open Result.Let_syntax in
   let%bind () = Agent_session.Session_actor.check_runtime_admission actor in
   let%bind state = Agent_session.Session_actor.state actor in
@@ -4098,9 +4288,16 @@ let build_runtime_for_actor t handle actor =
   let%bind () = check_source_for_execution t state revision in
   let%bind profile = restore_state_profile t state in
   let%bind reservation =
-    Agent_session.Session_actor.reserve_history_block
-      actor
-      ~count:t.limits.moderator_reservation_size
+    match run_preparation with
+    | None ->
+      Agent_session.Session_actor.reserve_history_block
+        actor
+        ~count:t.limits.moderator_reservation_size
+    | Some preparation ->
+      Agent_session.Session_actor.reserve_run_history_block
+        actor
+        ~preparation
+        ~count:t.limits.moderator_reservation_size
   in
   let%bind next_history_sequence =
     if Int64.(reservation.first_sequence > of_int Int.max_value)
@@ -4124,10 +4321,14 @@ let build_runtime_for_actor t handle actor =
     match pending with
     | None -> Ok None
     | Some _ ->
-      Agent_session.Session_actor.begin_initialization actor ~expected
+      (match run_preparation with
+       | None -> Agent_session.Session_actor.begin_initialization actor ~expected
+       | Some preparation ->
+         Agent_session.Session_actor.begin_run_initialization actor ~preparation ~expected)
       |> Result.map ~f:Option.some
   in
   let initialization_scope = ref scope in
+  let constructor_preparation = ref run_preparation in
   let initialization_jobs = ref [] in
   let actor_ref = ref (Some actor) in
   let schedules = ref [] in
@@ -4148,14 +4349,15 @@ let build_runtime_for_actor t handle actor =
         ~pending_jobs:jobs
         ~initialization_scope
         ~initialization_jobs
+        ~run_preparation:constructor_preparation
     in
     let finish () =
       let%bind moderator = runtime.start_moderator () in
-      let%bind () = flush_pending_schedules actor !schedules in
-      let%bind () = flush_pending_jobs actor !jobs in
+      let%bind () = flush_pending_schedules ?run_preparation actor !schedules in
+      let%bind () = flush_pending_jobs ?run_preparation actor !jobs in
       let%bind () =
         match pending with
-        | None -> install_moderator_if_changed actor moderator
+        | None -> install_moderator_if_changed ?run_preparation actor moderator
         | Some fresh_history ->
           let candidate =
             prepared_state expected runtime (ref shell) (ref []) (ref []) ~fresh_history
@@ -4209,6 +4411,7 @@ let build_runtime_for_actor t handle actor =
         record_failure (unavailable Invalid_state "runtime initialization failed");
         Exn.raise_with_original_backtrace exn backtrace)
     ~finally:(fun () ->
+      constructor_preparation := None;
       initialization_scope := None;
       (* End before the runtime escapes. Residual exact synchronous attempts are
          interrupted on failed preparation/cancellation; queued async work is
@@ -4224,11 +4427,10 @@ let build_runtime_for_actor t handle actor =
           List.iter !initialization_jobs ~f:(fun job ->
             try
               ignore
-                (Agent_session.Session_actor.interrupt_job
+                (interrupt_constructor_job
                    actor
-                   ~job_id:job.id
-                   ~generation:job.generation
-                   ~attempt:job.attempt
+                   ~run_preparation
+                   job
                    ~reason:"runtime initialization scope ended"
                  : (Agent_protocol.Job.t, Agent_protocol.Error.t) result)
             with
@@ -4476,6 +4678,7 @@ let create_loaded_entry
   actor_ref := Some actor;
   match
     let open Result.Let_syntax in
+    let%bind () = Agent_session.Session_actor.reconcile_run_recovery actor in
     let%bind () =
       Agent_session.Session_actor.set_organization_admission
         actor
@@ -4507,11 +4710,12 @@ let create_loaded_entry
     failure
   | Ok () ->
     let runtime =
-      Runtime_owner.create_with_unload
+      Runtime_owner.create_with_run_unload
         ~before_unload:(retire_owned_children t actor)
         ~actor
         ~initial:(Some runtime)
-        ~build:(fun () -> build_runtime_for_actor t handle actor)
+        ~build:(fun run_preparation ->
+          build_runtime_for_actor ?run_preparation t handle actor)
     in
     runtime_owner := Some runtime;
     let finish () =
@@ -4660,6 +4864,7 @@ let create_unloaded_entry
         ~services
     in
     Session_recovery_owner.adopt_actor_exn owner actor;
+    let%bind () = Agent_session.Session_actor.reconcile_run_recovery actor in
     let%bind () =
       Agent_session.Session_actor.set_organization_admission
         actor
@@ -4669,11 +4874,12 @@ let create_unloaded_entry
       Agent_session.Session_actor.set_configuration_policy actor (configuration_policy t)
     in
     let runtime =
-      Runtime_owner.create_with_unload
+      Runtime_owner.create_with_run_unload
         ~before_unload:(retire_owned_children t actor)
         ~actor
         ~initial:None
-        ~build:(fun () -> build_runtime_for_actor t handle actor)
+        ~build:(fun run_preparation ->
+          build_runtime_for_actor ?run_preparation t handle actor)
     in
     runtime_owner := Some runtime;
     Session_recovery_owner.adopt_runtime_exn owner runtime;
@@ -4817,6 +5023,14 @@ let finish_unloaded_creation t handle state ~command_audit =
             ~finally:(fun () -> Agent_store.Commit_writer.close writer));
     let persistence =
       Agent_session.Session_persistence.create
+        ~pending_archive:
+          (Some
+             (fun archive ->
+               Agent_session.Pending_archive.write
+                 archive
+                 ~env:t.env
+                 ~handle
+                 ~limits:t.document_limits))
         ~before_commit:
           (Some
              (fun state ->
@@ -5351,12 +5565,14 @@ let recovery_attachment_deltas state ~now =
 let recovery_transition
       ~parent_stop
       ~inference_target
+      ~pending_retention
       state
       ~now
       ~reserved_history_through
       ~observed
       ~(invocations : Agent_session.Invocation_recovery.t)
   =
+  let open Result.Let_syntax in
   let lifecycle =
     Agent_session.Session_state.Lifecycle.
       { desired =
@@ -5371,14 +5587,36 @@ let recovery_transition
     List.exists state.attachments ~f:(fun attachment ->
       Agent_protocol.Session.equal_attachment_mode attachment.mode Owner_read_write)
   in
-  let operation_delta, operation_payload =
+  let%bind operation_delta, operation_payload =
     match state.active_operation with
-    | None -> [], []
+    | None -> Ok ([], [])
     | Some operation ->
-      ( [ Agent_session.Session_delta.Active_operation_changed None ]
-      , [ Agent_protocol.Event.Durable.Payload.Operation_interrupted
-            (interrupted_operation now operation)
-        ] )
+      let interrupted = interrupted_operation now operation in
+      let%map release =
+        match operation.kind with
+        | Compaction -> Ok []
+        | Turn _ ->
+          let%bind proof =
+            Agent_protocol.Pending_input.Terminal_proof.of_operation interrupted
+          in
+          let%map prepared =
+            Agent_session.Pending_transition.prepare
+              state
+              ~change:(Release proof)
+              ~retention:pending_retention
+              ~archive:None
+              ~limits:Agent_session.Session_delta.native_limits
+          in
+          if
+            Agent_protocol.Pending_input.Revision.equal
+              state.conversation.pending_revision
+              (Agent_session.Pending_plan.revision
+                 (Agent_session.Pending_transition.plan prepared))
+          then []
+          else [ Agent_session.Pending_transition.delta prepared ]
+      in
+      ( release @ [ Agent_session.Session_delta.Active_operation_changed None ]
+      , [ Agent_protocol.Event.Durable.Payload.Operation_interrupted interrupted ] )
   in
   let permissions = interrupted_permissions state now in
   let permission_deltas =
@@ -5402,10 +5640,10 @@ let recovery_transition
     state
     ~delta:
       (Batch
-         ([ Agent_session.Session_delta.History_block_reserved reserved_history_through
-          ; Lifecycle_changed lifecycle
-          ]
-          @ operation_delta
+         (operation_delta
+          @ [ Agent_session.Session_delta.History_block_reserved reserved_history_through
+            ; Lifecycle_changed lifecycle
+            ]
           @ invocations.deltas
           @ permission_deltas
           @ reviewer_job_deltas
@@ -5472,10 +5710,12 @@ let commit_recovery_boundary
       invocations
   =
   let open Result.Let_syntax in
+  let pending_retention = Agent_session.Pending_disposition.Retention.default in
   let%bind transition =
     recovery_transition
       ~parent_stop
       ~inference_target
+      ~pending_retention
       state
       ~now:(now t)
       ~reserved_history_through
@@ -5571,7 +5811,7 @@ let persist_recovered_state t handle journal persistence state =
   persist_metadata t handle state |> Result.map_error ~f:protocol_of_store
 ;;
 
-let recover_open_handle t handle =
+let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t handle =
   let open Result.Let_syntax in
   let%bind owner =
     Session_recovery_owner.create
@@ -5581,6 +5821,7 @@ let recover_open_handle t handle =
       ~capacity:None
   in
   Session_registry.with_recovery_owner t.registry owner (fun () ->
+    let%bind parent_policy = prepare_parent_policy () in
     let%bind lifecycle =
       Agent_store.Session_store.read_lifecycle t.store handle
       |> Result.map_error ~f:protocol_of_store
@@ -5631,7 +5872,7 @@ let recover_open_handle t handle =
     let state =
       Agent_session.Session_persistence.Restored.state recovery.Agent_store.Recovery.state
     in
-    let%bind parent_stop = parent_stop_recovery t state in
+    let%bind parent_stop = parent_stop_recovery t ~policy:parent_policy state in
     let stopping = Option.exists parent_stop ~f:(fun parent -> parent.stop) in
     let%bind inference_target =
       match
@@ -5723,6 +5964,14 @@ let recover_open_handle t handle =
     Session_recovery_owner.adopt_writer_exn owner writer;
     let persistence =
       Agent_session.Session_persistence.create
+        ~pending_archive:
+          (Some
+             (fun archive ->
+               Agent_session.Pending_archive.write
+                 archive
+                 ~env:t.env
+                 ~handle
+                 ~limits:t.document_limits))
         ~before_commit:
           (Some
              (fun state ->
@@ -5875,6 +6124,22 @@ let read_session t index_entry =
       read_owned_session t handle))
 ;;
 
+let owns_handle t handle = Agent_store.Session_store.owns_handle t.store handle
+
+let recover_owned_session t handle =
+  recover_open_handle
+    ~prepare_parent_policy:(fun () ->
+      Recovery_parent.create
+        ~store:t.store
+        ~registry:t.registry
+        ~max_depth:t.limits.delegation_max_depth
+        ~read_owned:(read_owned_session t)
+        ~authorize_independent:(authorize_independent t)
+      |> Result.map ~f:(fun retained -> Retained_unselected retained))
+    t
+    handle
+;;
+
 let recover_index_entry t index_entry =
   let session_id = index_entry.Agent_store.Session_index.Entry.session.id in
   let handle_result =
@@ -5954,6 +6219,19 @@ let rebuild_retained_projection t indexed =
       |> Result.map_error ~f:protocol_of_store
     in
     Session_registry.with_recovery_handle t.registry ~store:t.store handle reconcile)
+;;
+
+let rebuild_index_projections t =
+  let open Result.Let_syntax in
+  if not (Agent_store.Session_store.index_was_rebuilt t.store)
+  then Ok ()
+  else (
+    let%bind entries =
+      Agent_store.Session_store.list_sessions_checked t.store
+      |> Result.map_error ~f:protocol_of_store
+    in
+    List.fold_result entries ~init:() ~f:(fun () entry ->
+      rebuild_retained_projection t entry))
 ;;
 
 let recover_sessions t =
@@ -6111,6 +6389,7 @@ let initialize_generated_layout t state ~staging_directory =
     ~f:(fun () ->
       let persistence =
         Agent_session.Session_persistence.create
+          ~pending_archive:None
           ~before_commit:None
           ~retention_preflight:None
           ~limits:t.journal_document_limits
@@ -6145,9 +6424,9 @@ let initialize_generated_layout t state ~staging_directory =
         ~entry:(index_entry state))
 ;;
 
-let with_generated_creation_lock t f =
+let with_generated_creation_lock ?(protect = true) t f =
   let outcome =
-    Eio.Mutex.use_rw ~protect:true t.generated_creation_mutex (fun () ->
+    Eio.Mutex.use_rw ~protect t.generated_creation_mutex (fun () ->
       try Ok (f ()) with
       | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
   in
@@ -6448,7 +6727,7 @@ let resume_generated_initial_start t entry =
 ;;
 
 let resume_generated_initial_starts t =
-  with_generated_creation_lock t (fun () ->
+  with_generated_creation_lock ~protect:false t (fun () ->
     match Agent_store.Session_store.list_sessions_checked t.store with
     | Error _ -> () (* Failed projection availability grants no automatic start. *)
     | Ok entries ->
@@ -6498,6 +6777,40 @@ let resume_generated_initial_starts t =
           ignore
             (resume_generated_initial_start t entry
              : (unit, Agent_protocol.Error.t) result)))
+;;
+
+let resume_selected_initial_starts t =
+  let module A = Agent_session.Session_actor in
+  let module D = Agent_store.Delegation_store in
+  let open Result.Let_syntax in
+  let rec ancestry_selected depth reference =
+    if depth >= t.limits.delegation_max_depth
+    then Error (corrupt "selected initial-start ancestry exceeds depth limit")
+    else (
+      let%bind record =
+        D.resolve (Agent_store.Session_store.delegations t.store) reference
+        |> Result.map_error ~f:protocol_of_store
+      in
+      match Session_registry.find t.registry record.key.parent_session_id with
+      | None -> Ok false
+      | Some parent ->
+        let%bind state = A.state parent.actor in
+        (match state.spec.delegation with
+         | None -> Ok true
+         | Some ancestor -> ancestry_selected (depth + 1) ancestor))
+  in
+  let resume entry =
+    let%bind state = A.state entry.Session_registry.actor in
+    match state.pending_initial_start, state.spec.delegation with
+    | false, _ -> Ok ()
+    | true, None -> resume_generated_initial_start t entry
+    | true, Some reference ->
+      let%bind selected = ancestry_selected 0 reference in
+      if selected then resume_generated_initial_start t entry else Ok ()
+  in
+  with_generated_creation_lock ~protect:false t (fun () ->
+    List.iter (Session_registry.entries t.registry) ~f:(fun entry ->
+      ignore (resume entry : (unit, Agent_protocol.Error.t) Result.t)))
 ;;
 
 (* Source-specific admission runs under the parent's runtime lease. Everything

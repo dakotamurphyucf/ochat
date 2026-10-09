@@ -114,6 +114,28 @@ let validate_pair_boundary state ~prefix_length ~target_id =
     | Message _ | Result _ | Reasoning _ | Unknown _ -> Ok ())
 ;;
 
+let replace_text entry ~expected_content_revision ~text =
+  let open Result.Let_syntax in
+  let%bind _ =
+    P.History_edit.create
+      ~history_id:entry.H.id
+      ~expected_content_revision
+      ~text
+      ~mode:Save_only
+  in
+  let%bind () =
+    if H.Content_revision.equal entry.content_revision expected_content_revision
+    then Ok ()
+    else Error (failure Conflict "history content revision does not match")
+  in
+  let%bind () = plain_user entry in
+  let%map content_revision = H.Content_revision.succ entry.content_revision in
+  let replacement =
+    History_codec.user_text ~id:entry.id text |> History_codec.to_protocol
+  in
+  { replacement with content_revision; provenance = entry.provenance }
+;;
+
 let prepare state ~edit =
   let open Result.Let_syntax in
   let id = P.History_edit.history_id edit in
@@ -145,12 +167,11 @@ let prepare state ~edit =
   let%bind () =
     validate_pair_boundary state ~prefix_length:(List.length prefix) ~target_id:id
   in
-  let%bind content_revision = H.Content_revision.succ entry.content_revision in
-  let replacement =
-    History_codec.user_text ~id (P.History_edit.text edit) |> History_codec.to_protocol
-  in
-  let edited_entry =
-    { replacement with content_revision; provenance = entry.provenance }
+  let%bind edited_entry =
+    replace_text
+      entry
+      ~expected_content_revision:(P.History_edit.expected_content_revision edit)
+      ~text:(P.History_edit.text edit)
   in
   let canonical_history = prefix @ [ edited_entry ] in
   let%bind canonical = History_codec.all_of_protocol canonical_history in
@@ -183,7 +204,7 @@ let validate_basis t state =
     && Int.equal t.previous.identity.generation state.identity.generation
     && List.equal H.equal_entry previous.canonical_history current.canonical_history
     && List.equal
-         H.equal_entry
+         Pending_input_document.equal
          previous.deferred_user_entries
          current.deferred_user_entries
     && Int.equal previous.initial_prompt_entry_count current.initial_prompt_entry_count

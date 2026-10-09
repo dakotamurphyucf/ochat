@@ -109,7 +109,10 @@ let plan_selected ~accept ~state ~namespace ~first_sequence ~reason =
                 let%bind () =
                   if
                     List.exists
-                      (history () @ state.conversation.deferred_user_entries)
+                      (history ()
+                       @ List.map
+                           state.conversation.deferred_user_entries
+                           ~f:Pending_input_document.entry)
                       ~f:(fun entry -> P.History.Id.compare entry.id id = 0)
                     || List.exists state.invocations ~f:(fun inv ->
                       List.exists

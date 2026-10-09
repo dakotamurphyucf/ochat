@@ -1,4 +1,14 @@
 open Core
+
+let durable_storage path =
+  let root =
+    Agent_server.Local_storage.Root.create ~path ()
+    |> Result.map_error ~f:(fun (error : Agent_protocol.Error.t) -> error.message)
+    |> Result.ok_or_failwith
+  in
+  Agent_server.Local_storage.Durable root
+;;
+
 open Agent_server_test_support
 module P = Agent_protocol
 module Embedded = Agent_server.Embedded
@@ -25,6 +35,7 @@ let send embedded text =
        ; attachment_id = (Embedded.attachment embedded).id
        ; content = { kind = Plain_text; text; attachments = [] }
        ; idempotency_key = P.Idempotency_key.of_string "embedded:send" |> protocol_ok
+       ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
        })
   |> ignore
 ;;
@@ -36,6 +47,8 @@ let with_host
         ; "reports/report-b.json", Fixtures.report_b
         ])
       ?authoring_budget
+      ?(daemon_clocks =
+        fun env -> Eio.Stdenv.clock env, Eio.Stdenv.mono_clock env, ignore)
       ?(permission_profile =
         { Embedded.default_permission_profile with
           tool_default = Allow
@@ -76,22 +89,25 @@ let with_host
           { prompt_file = Filename.concat root "agent.chatmd"
           ; workspace
           ; tool_dir = root
-          ; home = root
-          ; data_root = Option.some_if durable (Filename.concat root "data")
+          ; home = Some root
+          ; storage =
+              (if durable
+               then durable_storage (Filename.concat root "data")
+               else Agent_server.Local_storage.Transient)
           ; start_immediately = true
           ; permission_profile
           ; attachment_mode = Read_write
           ; event_capacity = 512
           }
         in
-        Eio.Switch.run (fun sw ->
+        Fixtures.with_daemon_switch env ~clocks:daemon_clocks (fun sw daemon_env ->
           let authoring_package_files =
             List.map package_files ~f:(Filename.concat root)
           in
           let embedded =
             Embedded.start
               ~sw
-              ~env
+              ~env:daemon_env
               ~daemon_options
               ~authoring_package_files
               ?authoring_budget

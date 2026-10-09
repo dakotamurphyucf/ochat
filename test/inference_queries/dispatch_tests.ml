@@ -1,4 +1,14 @@
 open! Core
+
+let durable_storage path =
+  let root =
+    Agent_server.Local_storage.Root.create ~path ()
+    |> Result.map_error ~f:(fun (error : Agent_protocol.Error.t) -> error.message)
+    |> Result.ok_or_failwith
+  in
+  Agent_server.Local_storage.Durable root
+;;
+
 module P = Agent_protocol
 module S = Agent_server
 module Q = P.Inference_query
@@ -49,8 +59,8 @@ let%expect_test
               { prompt_file
               ; workspace = root
               ; tool_dir = root
-              ; home = root
-              ; data_root = Some (Filename.concat root "store")
+              ; home = Some root
+              ; storage = durable_storage (Filename.concat root "store")
               ; start_immediately = false
               ; permission_profile = S.Embedded.default_permission_profile
               ; attachment_mode = Read_write

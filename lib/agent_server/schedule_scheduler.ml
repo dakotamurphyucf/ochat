@@ -43,7 +43,7 @@ let rec reconcile_schedule entry startup_time (schedule : Agent_protocol.Schedul
   | Scheduled | Delivered | Cancelled | Failed _ -> Ok ()
 ;;
 
-let reconcile_entry startup_time entry =
+let reconcile_entry entry ~startup_time =
   let open Result.Let_syntax in
   let%bind _ =
     Agent_session.Session_actor.expire_subscriptions entry.Session_registry.actor
@@ -55,7 +55,7 @@ let reconcile_entry startup_time entry =
 
 let reconcile_recovered ~registry ~startup_time =
   Session_registry.entries registry
-  |> List.fold_result ~init:() ~f:(fun () entry -> reconcile_entry startup_time entry)
+  |> List.fold_result ~init:() ~f:(fun () entry -> reconcile_entry entry ~startup_time)
 ;;
 
 let fail_claim entry schedule error =

@@ -58,7 +58,12 @@ let initial mode registry state =
              | Quiet -> No_wake
              | _ -> Request_turn)
         ; created_at = timestamp
-        ; ownership = Some { source; creator = Moderator_event event.context.id }
+        ; ownership =
+            Some
+              { source
+              ; creator = Moderator_event event.context.id
+              ; subscription_binding = None
+              }
         }
       |> protocol_ok)
   in

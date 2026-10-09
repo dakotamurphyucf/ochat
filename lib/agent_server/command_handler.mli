@@ -20,6 +20,8 @@ val create
   -> blob_store:Agent_store.Blob_store.t
   -> session_store:Agent_store.Session_store.t
   -> lifecycle_service:Session_lifecycle_service.t
+  -> retained:Retained_session.t
+  -> archive_payload_limit:int
   -> initialize:
        (principal:Agent_protocol.Principal.t
         -> Agent_protocol.Initialize.Request.t

@@ -151,6 +151,9 @@ type extension_services =
         target/compiler/source restrictions; retrieval grants no effect authority. *)
   ; claim_lifecycle : event:Chat_response.Moderation.Event.t -> Moderator_event.claim
     (** Actual running-idle actor ownership. Never manufacture an operation. *)
+  ; run_actions :
+      Agent_protocol.Moderator_execution.t
+      -> (Run_action_service.t option, Agent_protocol.Error.t) result
   ; lifecycle_started : Agent_protocol.Invocation.observer -> bool
     (** Whether the current source/generation has a completed lifecycle receipt.
         An initial prepared checkpoint alone does not mean startup executed. *)
@@ -187,6 +190,7 @@ type extension_services =
 
 type moderator_activation =
   { pending : unit -> bool
+  ; startup_pending : unit -> bool
   ; run : unit -> (bool, Agent_protocol.Error.t) result
   }
 

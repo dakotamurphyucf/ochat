@@ -46,6 +46,7 @@ module Compaction_archive : sig
     | Upgrade
     | Edit
     | Delete
+    | Pending_input
   [@@deriving equal, sexp]
 
   (** Administrative reconciliation of an invocation in the checksummed archive.
@@ -72,7 +73,9 @@ end
 module Conversation : sig
   type t =
     { canonical_history : Agent_protocol.History.entry list
-    ; deferred_user_entries : Agent_protocol.History.entry list
+    ; deferred_user_entries : Pending_input_document.t list
+    ; pending_revision : Agent_protocol.Pending_input.Revision.t
+    ; pending_dispositions : Pending_disposition_document.t list
     ; initial_prompt_entry_count : int
     ; next_history_sequence : int64
       (** Nonnegative allocator high-water mark, exclusive of every retained ID
@@ -164,6 +167,7 @@ type t =
     (** Immutable stop admission identities, retained across target restart/reset.
         A retried old key must not stop a subsequent runtime lifetime. *)
   ; moderator_executions : Agent_protocol.Moderator_execution.t list [@sexp.list]
+  ; run_state : Run_state.t option [@sexp.option]
   ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
   ; deliveries : Agent_protocol.Delivery.t list [@sexp.list]
   ; ingress_registrations : External_ingress.t list [@sexp.list]

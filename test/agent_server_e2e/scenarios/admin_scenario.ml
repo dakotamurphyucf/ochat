@@ -414,7 +414,7 @@ let export_archive connection session revision =
         connection
         (Session_export
            { session_id = session.id
-           ; attachment_id = session.attachment_id
+           ; attachment_id = Some session.attachment_id
            ; format = Json
            ; revision = Some revision
            ; history = None
@@ -429,7 +429,7 @@ let export_archive connection session revision =
       connection
       (Blob_read
          { session_id = session.id
-         ; attachment_id = session.attachment_id
+         ; attachment_id = Some session.attachment_id
          ; blob_id = export.blob.id
          ; offset = 0L
          ; max_bytes = Agent_protocol.Blob.Read_request.max_chunk_bytes
@@ -467,7 +467,7 @@ let check_corrupt_archive
           connection
           (Session_export
              { session_id = session.id
-             ; attachment_id = session.attachment_id
+             ; attachment_id = Some session.attachment_id
              ; format = Json
              ; revision = Some revision
              ; history = None
@@ -484,31 +484,63 @@ let check_corrupt_archive
 let test_compact env environment =
   let fixture = fixture env environment "admin-compact" in
   let session, revision, original =
-    with_daemon env fixture (fun _sw _daemon connection ->
-      let session = create_session connection ~key:"admin:compact:create" in
-      let original =
-        (get_snapshot connection session.id).canonical_history.entries
-        |> List.map ~f:Agent_protocol.Public.History.to_json
-        |> fun entries -> `Array entries
-      in
-      let compacted =
-        request
-          connection
-          (compact_command session ~revision:session.revision "admin:compact")
-        |> mutation_session
-      in
-      ignore (operation_of_compaction compacted : Agent_protocol.Id.Operation.t);
-      let terminal = await_observed env connection session.id Stopped 250 in
-      require
-        Int64.(terminal.revision > compacted.revision)
-        "compaction did not terminate";
-      let snapshot = get_snapshot connection session.id in
-      let revision = List.hd_exn snapshot.archived_revisions in
-      let exported = export_archive connection session revision in
-      require
-        (Poly.equal (Jsonaf.member "history" exported) (Some original))
-        "archive lost original history";
-      session, revision, original)
+    Eio.Switch.run (fun sw ->
+      let port = reserve_port env in
+      let provider = Support.Compaction_json_provider.start ~sw ~env ~port in
+      Eio.Fiber.fork ~sw (fun () ->
+        let request =
+          Support.Compaction_json_provider.await_request provider ~env ~index:0
+        in
+        Support.Compaction_json_provider.release
+          request
+          (Summary "retained fixture summary");
+        Support.Compaction_json_provider.await_returned request ~env);
+      with_daemon
+        ~environment_overrides:
+          [ "OPENAI_API_KEY", "admin-compaction-local-test-key"
+          ; "API_URL", sprintf "http://127.0.0.1:%d" port
+          ]
+        env
+        fixture
+        (fun _sw _daemon connection ->
+           let session = create_session connection ~key:"admin:compact:create" in
+           let original =
+             (get_snapshot connection session.id).canonical_history.entries
+             |> List.map ~f:Agent_protocol.Public.History.to_json
+             |> fun entries -> `Array entries
+           in
+           let compacted =
+             request
+               connection
+               (compact_command session ~revision:session.revision "admin:compact")
+             |> mutation_session
+           in
+           ignore (operation_of_compaction compacted : Agent_protocol.Id.Operation.t);
+           let terminal = await_observed env connection session.id Stopped 250 in
+           require
+             Int64.(terminal.revision > compacted.revision)
+             "compaction did not terminate";
+           let snapshot = get_snapshot connection session.id in
+           require
+             (Support.Compaction_json_provider.request_count provider = 1)
+             "compaction did not use exactly one local provider request";
+           let revision =
+             match snapshot.archived_revisions with
+             | revision :: _ -> revision
+             | [] ->
+               raise_s
+                 [%sexp
+                   "compaction terminated without an archive"
+                 , (snapshot : Agent_protocol.Public.Snapshot.Fields.t)]
+           in
+           let exported = export_archive connection session revision in
+           require
+             (Option.equal
+                Jsonaf.exactly_equal
+                (Jsonaf.member "history" exported)
+                (Some original))
+             "archive lost original history";
+           session, revision, original))
   in
   let deleted_id =
     with_daemon env fixture (fun sw _daemon connection ->
@@ -530,7 +562,10 @@ let test_compact env environment =
       in
       let exported = export_archive connection session revision in
       require
-        (Poly.equal (Jsonaf.member "history" exported) (Some original))
+        (Option.equal
+           Jsonaf.exactly_equal
+           (Jsonaf.member "history" exported)
+           (Some original))
         "archive did not survive restart";
       check_corrupt_archive environment fixture session revision connection;
       let snapshot = get_snapshot connection session.id in
@@ -583,7 +618,7 @@ let test_export env environment =
     let command =
       Agent_protocol.Command.Session_export
         { session_id = session.id
-        ; attachment_id = session.attachment_id
+        ; attachment_id = Some session.attachment_id
         ; format = Json
         ; revision = Some session.revision
         ; history = None
@@ -907,7 +942,7 @@ let pending_create connection =
     Agent_protocol.Command.Session_create
       (create_request connection ~key:"idempotency:pending")
   in
-  match request connection command with
+  match request_public connection command with
   | Session_create created -> command, created.session.id
   | _ -> fail "pending fixture create returned the wrong result variant"
 ;;
@@ -929,24 +964,84 @@ let create_then_crash env fixture =
     created)
 ;;
 
-let rec replace_success replaced = function
-  | Sexp.List [ Atom "outcome"; List (Atom "Success" :: _) ] ->
-    Int.incr replaced;
-    Sexp.List [ Atom "outcome"; Atom "Pending" ]
-  | Sexp.List values -> Sexp.List (List.map values ~f:(replace_success replaced))
-  | Atom _ as atom -> atom
-;;
-
 let force_pending_receipt environment fixture =
   let receipt_path =
     Filename.concat (Config_fixture.data_dir fixture) "indexes/idempotency.sexp"
   in
   let file = path environment receipt_path in
-  let sexp = Eio.Path.load file |> Sexp.of_string in
+  let json = Eio.Path.load file |> Jsonaf.of_string in
   let replaced = ref 0 in
-  let pending = replace_success replaced sexp in
+  let replace_field json name f =
+    match json with
+    | `Object fields ->
+      require
+        (List.Assoc.mem fields ~equal:String.equal name)
+        "pending fixture lacks a required current document field";
+      `Object
+        (List.map fields ~f:(fun (key, value) ->
+           if String.equal key name then key, f value else key, value))
+    | _ -> fail "pending fixture expected a current document object"
+  in
+  let pending =
+    Eio.Path.with_open_dir
+      (path environment (Filename.dirname receipt_path))
+      (fun directory ->
+         let terminal outcome =
+           let decoded =
+             match Jsonaf.member "tag" outcome with
+             | Some (`String "terminal") ->
+               let reference =
+                 Agent_store.Idempotency_outcome.Reference.of_jsonaf outcome
+                 |> Result.map_error ~f:(fun error ->
+                   Sexp.to_string_hum ([%sexp_of: Document_schema.Error.t] error))
+                 |> Result.ok_or_failwith
+               in
+               Agent_store.Idempotency_outcome_store.load reference ~directory
+             | Some (`String ("success" | "failure")) ->
+               Agent_store.Idempotency_outcome.create outcome
+             | Some (`String "pending") -> fail "pending fixture receipt already Pending"
+             | Some (`String _) | Some _ | None ->
+               fail "pending fixture found an unsupported outcome tag"
+           in
+           decoded
+           |> Result.map_error ~f:(fun error ->
+             Sexp.to_string_hum ([%sexp_of: Agent_store.Store_error.t] error))
+           |> Result.ok_or_failwith
+           |> Agent_store.Idempotency_outcome.value
+         in
+         replace_field json "payload" (fun payload ->
+           replace_field payload "records" (function
+             | `Array records ->
+               `Array
+                 (List.map records ~f:(fun record ->
+                    let target =
+                      match Jsonaf.member "key" record with
+                      | Some key ->
+                        (match
+                           ( Jsonaf.member "method_name" key
+                           , Jsonaf.member "idempotency_key" key )
+                         with
+                         | Some (`String method_name), Some (`String key) ->
+                           String.equal method_name "session.create"
+                           && String.equal key "idempotency:pending"
+                         | _ -> fail "pending fixture lacks an owned receipt key")
+                      | None -> fail "pending fixture lacks a receipt key"
+                    in
+                    if not target
+                    then record
+                    else
+                      replace_field record "outcome" (fun outcome ->
+                        match terminal outcome with
+                        | Success _ ->
+                          Int.incr replaced;
+                          (* Only the index row grants authority. The immutable former
+                        reply remains an orphan and must not resolve Pending. *)
+                          `Object [ "tag", `String "pending" ]
+                        | Failure _ -> fail "pending fixture target was not successful")))
+             | _ -> fail "pending fixture expected current receipt records")))
+  in
   require (Int.equal !replaced 1) "pending fixture did not find one successful receipt";
-  Eio.Path.save ~create:(`Or_truncate 0o600) file (Sexp.to_string_mach pending)
+  Eio.Path.save ~create:(`Or_truncate 0o600) file (Jsonaf.to_string pending)
 ;;
 
 let session_count connection session_id =

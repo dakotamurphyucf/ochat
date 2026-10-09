@@ -432,7 +432,14 @@ type t =
   | Session_update_organization of Session_mutation.t
   | Session_stop of Session_mutation.t
   | Session_cancel_operation of Session_mutation.t
+  | Session_run_start of Run_receipt.t
   | Session_send_message of Send_message.t
+  | Session_runs of Run_query.View.t Page.t
+  | Session_run of Run_query.Outcome.t
+  | Session_pending_inputs of Pending_query.View.t
+  | Session_pending_input of Pending_query.Outcome.t
+  | Session_cancel_pending_input of Pending_control.Result.t
+  | Session_replace_pending_input of Pending_control.Result.t
   | Session_compact of Session_mutation.t
   | Session_edit_history of History_edit.t
   | Session_continue_history of History_continue.t
@@ -507,7 +514,14 @@ let method_name = function
   | Session_update_organization _ -> "session.update_organization"
   | Session_stop _ -> "session.stop"
   | Session_cancel_operation _ -> "session.cancel_operation"
+  | Session_run_start _ -> "session.run.start"
   | Session_send_message _ -> "session.send_message"
+  | Session_runs _ -> "session.runs"
+  | Session_run _ -> "session.run"
+  | Session_pending_inputs _ -> "session.pending_inputs"
+  | Session_pending_input _ -> "session.pending_input"
+  | Session_cancel_pending_input _ -> "session.cancel_pending_input"
+  | Session_replace_pending_input _ -> "session.replace_pending_input"
   | Session_compact _ -> "session.compact"
   | Session_edit_history _ -> "session.edit_history"
   | Session_continue_history _ -> "session.continue_history"
@@ -594,7 +608,14 @@ let to_json = function
   | Session_reset value
   | Session_rebuild value
   | Session_upgrade_prompt value -> Session_mutation.to_json value
+  | Session_run_start value -> Run_receipt.to_json value
   | Session_send_message value -> Send_message.to_json value
+  | Session_runs value -> Page.to_json Run_query.View.to_json value
+  | Session_run value -> Run_query.Outcome.to_json value
+  | Session_pending_inputs value -> Pending_query.View.to_json value
+  | Session_pending_input value -> Pending_query.Outcome.to_json value
+  | Session_cancel_pending_input value -> Pending_control.Result.to_json value
+  | Session_replace_pending_input value -> Pending_control.Result.to_json value
   | Session_export value -> Export.to_json value
   | Session_delete value -> Delete.to_json value
   | Session_restore value | Session_resume value -> Session_lifecycle.Result.to_json value
@@ -710,6 +731,17 @@ let decoders =
   ; "session.stop", map Session_mutation.of_json (fun x -> Session_stop x)
   ; ( "session.cancel_operation"
     , map Session_mutation.of_json (fun x -> Session_cancel_operation x) )
+  ; "session.runs", map (Page.of_json Run_query.View.of_json) (fun x -> Session_runs x)
+  ; "session.run", map Run_query.Outcome.of_json (fun x -> Session_run x)
+  ; ( "session.pending_inputs"
+    , map Pending_query.View.of_json (fun x -> Session_pending_inputs x) )
+  ; ( "session.pending_input"
+    , map Pending_query.Outcome.of_json (fun x -> Session_pending_input x) )
+  ; ( "session.cancel_pending_input"
+    , map Pending_control.Result.of_json (fun x -> Session_cancel_pending_input x) )
+  ; ( "session.replace_pending_input"
+    , map Pending_control.Result.of_json (fun x -> Session_replace_pending_input x) )
+  ; "session.run.start", map Run_receipt.of_json (fun x -> Session_run_start x)
   ; "session.send_message", map Send_message.of_json (fun x -> Session_send_message x)
   ; "session.compact", map Session_mutation.of_json (fun x -> Session_compact x)
   ; "session.edit_history", map History_edit.of_json (fun x -> Session_edit_history x)

@@ -5,6 +5,9 @@ type phase =
   | Final_cleanup
   | Rejection_completion
   | Actor_lock_release
+  | Pending_claim (** Action runs after actual pending-file rename. *)
+  | Mutation_completion
+  (** Fail terminal outcome replacement after pending and accepted-sequence writes. *)
 
 type t
 

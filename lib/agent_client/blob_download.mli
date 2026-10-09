@@ -1,11 +1,13 @@
 open! Core
 
 (** Streams one authenticated session blob through bounded [blob.read]
-    requests, validating identity, byte length, and SHA-256 before success. *)
+    requests, validating identity, byte length, and SHA-256 before success.
+    [None] requests retained access under the current principal policy; [Some]
+    requires that exact attachment to remain current. Neither grants execution. *)
 val download
   :  connection:Connection.t
   -> session_id:Agent_protocol.Id.Session.t
-  -> attachment_id:Agent_protocol.Id.Attachment.t
+  -> attachment_id:Agent_protocol.Id.Attachment.t option
   -> blob:Agent_protocol.Blob.Metadata.t
   -> output:_ Eio.Flow.sink
   -> (unit, Agent_protocol.Error.t) result

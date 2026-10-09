@@ -196,6 +196,20 @@ let project_receipt tag (builtin : S.builtin) =
   }
 ;;
 
+let run_module : S.builtin_module =
+  let operation name parameters =
+    task_builtin ~name ~op:("Run." ^ name) ~parameters ~result:S.TUnit ~spawn:false
+    |> project_receipt "Run_receipt"
+  in
+  { name = "Run"
+  ; exports =
+      [ operation "continue" []
+      ; operation "wait" [ S.json_ty ]
+      ; operation "finish" [ S.json_ty ]
+      ]
+  }
+;;
+
 let subscription_module : S.builtin_module =
   let operation name parameters result ~mutation =
     let builtin =
@@ -378,6 +392,7 @@ let moderator_v1 =
         :: notification_module
         :: schedule_module
         :: subscription_module
+        :: run_module
         :: job_module
         :: invocation
         :: overrides

@@ -30,6 +30,9 @@
   organization_membership_projection
   authorization
   principal_projection
+  pending_service
+  run_read_service
+  pending_projection
   work_projection
   activity_projection
   activity_service
@@ -39,6 +42,7 @@
   search_cursor
   search_source
   search_service
+  run_start_service
   pagination
   inference_query_budget
   managed_output_cursor
@@ -53,6 +57,11 @@
   schedule_scheduler
   maintenance
   session_factory
+  local_storage
+  local_selection
+  retained_session
+  recovery_parent
+  embedded_host_cleanup
   embedded
   startup_cleanup
   daemon

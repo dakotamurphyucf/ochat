@@ -513,7 +513,15 @@ let wake_disposition =
     ]
 ;;
 
-let delivery_ownership = f [ "script_id"; "source_sha256"; "creator_type"; "creator_id" ]
+let delivery_ownership =
+  o
+    [ "script_id", v
+    ; "source_sha256", v
+    ; "creator_type", v
+    ; "creator_id", v
+    ; "subscription_binding", n (f [ "subscription_id"; "epoch" ])
+    ]
+;;
 
 let result_reference =
   o

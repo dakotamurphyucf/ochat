@@ -103,13 +103,21 @@ let pending_job = function
 ;;
 
 let await_job env host id =
-  let job () =
-    List.find_exn (Host.snapshot host).jobs ~f:(fun job -> P.Id.Job.equal job.id id)
+  let completed = ref None in
+  let job snapshot =
+    List.find_exn snapshot.P.Public.Snapshot.Fields.jobs ~f:(fun job ->
+      P.Id.Job.equal job.id id)
   in
   (try
-     Background_shell_tests.wait env (fun () ->
-       match (job ()).delivery with
-       | Delivered _ -> Option.is_none (Host.snapshot host).session.active_operation
+     (* Delivery includes durable turn retirement after the job succeeds. The
+        watchdog bounds this composition test, not the shell execution policy. *)
+     Background_shell_tests.wait ~timeout:30. env (fun () ->
+       let snapshot = Host.snapshot host in
+       let current = job snapshot in
+       match current.delivery with
+       | Delivered _ when Option.is_none snapshot.session.active_operation ->
+         completed := P.Job.terminal_completion current |> protocol_ok;
+         Option.is_some !completed
        | _ -> false)
    with
    | Eio.Time.Timeout ->
@@ -117,9 +125,10 @@ let await_job env host id =
      raise_s
        [%sexp
          "lab job did not deliver"
-       , (job () : P.Job.t)
+       , (job snapshot : P.Job.t)
+       , (snapshot.session.active_operation : P.Operation.t option)
        , (snapshot.permissions : P.Permission.t list)]);
-  P.Job.terminal_completion (job ()) |> protocol_ok |> Option.value_exn
+  Option.value_exn !completed
 ;;
 
 let%expect_test

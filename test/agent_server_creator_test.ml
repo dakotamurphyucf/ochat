@@ -631,8 +631,8 @@ let%expect_test
               { prompt_file = prompt
               ; workspace = root
               ; tool_dir = root
-              ; home = root
-              ; data_root = None
+              ; home = Some root
+              ; storage = Agent_server.Local_storage.Transient
               ; start_immediately = true
               ; permission_profile
               ; attachment_mode = Read_write

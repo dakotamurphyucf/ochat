@@ -177,7 +177,7 @@ let validate_activity (t : Fields.t) =
   else Ok ()
 ;;
 
-let validate_fields t =
+let validate_relationships t =
   let open Result.Let_syntax in
   let same_session id = Id.Session.equal t.session.id id in
   let bounded generation = generation >= 0 && generation <= t.session.generation in
@@ -208,33 +208,48 @@ let validate_fields t =
       not (same_session s.session_id && bounded s.generation))
   then Error (Protocol_error.invalid_request "snapshot child ownership mismatch")
   else (
-    let%bind () = Projection_codec.validate (to_json t) in
     let%bind () = validate_activity t in
     let%bind () =
       Public_history.validate_unique_ids (t.canonical_history.entries @ t.deferred_entries)
     in
-    let%bind () =
-      match t.effective_history with
-      | None -> Ok ()
-      | Some window -> Public_history.Window.validate window
-    in
-    let%bind (_ : Session.t) = Session.of_json (Session.to_json t.session) in
-    let%bind (_ : Extension_status.t list) =
-      Extension_status.list_of_json
-        (`Array (List.map t.extension_status ~f:Extension_status.to_json))
-    in
-    let validate values encode decode =
-      Result.all_unit
-        (List.map values ~f:(fun value ->
-           Result.map (decode (encode value)) ~f:(fun _ -> ())))
-    in
-    let%bind () = validate t.permissions Permission.to_json Permission.of_json in
-    let%bind () = validate t.grants Grant.to_json Grant.of_json in
-    let%bind () = validate t.jobs Job.to_json Job.of_json in
-    validate t.schedules Schedule.to_json Schedule.of_json)
+    match t.effective_history with
+    | None -> Ok ()
+    | Some window -> Public_history.Window.validate window)
 ;;
 
-let create t = Result.map (validate_fields t) ~f:(fun () -> t)
+let validate_components t =
+  let open Result.Let_syntax in
+  let%bind (_ : Session.t) = Session.of_json (Session.to_json t.session) in
+  let%bind (_ : Extension_status.t list) =
+    Extension_status.list_of_json
+      (`Array (List.map t.extension_status ~f:Extension_status.to_json))
+  in
+  let validate values encode decode =
+    Result.all_unit
+      (List.map values ~f:(fun value ->
+         Result.map (decode (encode value)) ~f:(fun _ -> ())))
+  in
+  let%bind () = validate t.permissions Permission.to_json Permission.of_json in
+  let%bind () = validate t.grants Grant.to_json Grant.of_json in
+  let%bind () = validate t.jobs Job.to_json Job.of_json in
+  validate t.schedules Schedule.to_json Schedule.of_json
+;;
+
+let admit_normalized t =
+  let open Result.Let_syntax in
+  (* Decoding optional defaults or canonical children can increase encoded size.
+     Admission therefore covers the normalized output as well as wire input. *)
+  let%bind () = Projection_codec.validate (to_json t) in
+  let%map () = validate_relationships t in
+  t
+;;
+
+let create t =
+  let open Result.Let_syntax in
+  let%bind t = admit_normalized t in
+  let%map () = validate_components t in
+  t
+;;
 
 let of_json json =
   let open Result.Let_syntax in
@@ -271,7 +286,9 @@ let of_json json =
     || not (Int64.equal latest_event_sequence session.latest_event_sequence)
   then Error (Protocol_error.invalid_request "snapshot and session positions disagree")
   else
-    create
+    (* All components above already passed their public decoders. Repeat only
+       cross-component invariants and normalized aggregate admission. *)
+    admit_normalized
       { session
       ; lifecycle
       ; canonical_history

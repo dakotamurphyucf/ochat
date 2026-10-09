@@ -58,7 +58,11 @@ let%expect_test "retirement before Worker_ready prevents foreground dispatch" =
              Eio.Promise.await entered;
              Eio.Fiber.yield ());
        let submission =
-         A.submit_message actor ~attachment_id:writer.id (user_entry actor "first")
+         A.submit_message
+           ~submitting_principal:principal_id
+           actor
+           ~attachment_id:writer.id
+           (user_entry actor "first")
          |> protocol_ok
        in
        let join = Eio.Promise.await retirement in
@@ -168,13 +172,22 @@ let%expect_test "retirement joins worker cleanup without adopting deferred input
     in
     install actor worker;
     let first =
-      A.submit_message actor ~attachment_id:writer.id (user_entry actor "first")
+      A.submit_message
+        ~submitting_principal:principal_id
+        actor
+        ~attachment_id:writer.id
+        (user_entry actor "first")
       |> protocol_ok
     in
     Eio.Promise.await entered;
     let deferred = user_entry actor "second" in
     let second =
-      A.submit_message actor ~attachment_id:writer.id deferred |> protocol_ok
+      A.submit_message
+        ~submitting_principal:principal_id
+        actor
+        ~attachment_id:writer.id
+        deferred
+      |> protocol_ok
     in
     [%test_eq: P.Method_result.Send_message.disposition] Deferred second.disposition;
     let released = ref false in
@@ -199,7 +212,9 @@ let%expect_test "retirement joins worker cleanup without adopting deferred input
         List.equal
           P.History.equal_entry
           [ deferred ]
-          pending.conversation.deferred_user_entries);
+          (List.map
+             pending.conversation.deferred_user_entries
+             ~f:Agent_session.Pending_input_document.entry));
       release ();
       A.Runtime_retirement.await join |> protocol_ok;
       let final = A.state actor |> protocol_ok in
@@ -209,7 +224,9 @@ let%expect_test "retirement joins worker cleanup without adopting deferred input
         List.equal
           P.History.equal_entry
           [ deferred ]
-          final.conversation.deferred_user_entries);
+          (List.map
+             final.conversation.deferred_user_entries
+             ~f:Agent_session.Pending_input_document.entry));
       [%test_eq: bool] false (A.apply_observation_follow_up actor |> protocol_ok);
       [%test_eq: int] 1 !dispatched;
       detach actor;
@@ -339,7 +356,11 @@ let%expect_test "terminal persistence failure resolves retirement and keeps deta
             (Worker.create ~run:(fun ~sw:_ ~input:_ _ ->
                Eio.Promise.resolve entered_u ();
                Eio.Promise.await never));
-          A.submit_message actor ~attachment_id:writer.id (user_entry actor "first")
+          A.submit_message
+            ~submitting_principal:principal_id
+            actor
+            ~attachment_id:writer.id
+            (user_entry actor "first")
           |> protocol_ok
           |> ignore;
           Eio.Promise.await entered;

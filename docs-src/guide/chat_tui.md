@@ -8,7 +8,8 @@
 ## Current host modes
 
 For new local work use [native local TUI](../agent-server/tutorials/local-tui.md);
-it is transient and process-bound. For persistence/background work use
+it retains durable records under `$HOME/.ochat/agent-store` by default while
+remaining process-bound. Use `--transient` for temporary records. For background work use
 [daemon connections](../agent-server/tutorials/unix-daemon.md). The
 [CLI reference](../bin/chat_tui.doc.md) explains mode selection and incompatible
 flags. `--no-config` avoids ambient arguments selecting a legacy host.
@@ -42,7 +43,7 @@ this image is not a recording of the current native or daemon workflow.
 - **Multi-line drafts without accidental sends:** `Enter` inserts a newline; **`Meta+Enter` submits**.
 - **Chat, Agent, and Shell Security views:** Chat keeps the transcript/editor, Agent shows tool/nested-agent progress, and Shell Security shows authority, approvals and audit.
 - **Vim-ish interaction:** Insert / Normal / Cmdline modes, plus message selection and yank/edit/resubmit.
-- **Sessions:** daemon sessions are durable in their configured store; legacy snapshots use `$HOME/.ochat/sessions/<id>`; native local sessions are transient.
+- **Sessions:** daemon sessions are durable in their configured store; legacy snapshots use `$HOME/.ochat/sessions/<id>`; native local sessions default to durable `$HOME/.ochat/agent-store` records while remaining process-bound (`--transient` is explicit).
 - **Manual context compaction:** `:compact` produces a concise summary so long chats stay usable.
 - **Syntax highlighting:** Rich syntax highlighting enabled for Markdown, XML, Json, Ocaml with more to come.
 
@@ -489,8 +490,10 @@ Example rich input (after explicitly toggling Raw XML):
 ## Quitting & export (predictable rules)
 
 The automatic prompt-file export rules in this section describe the legacy
-file-backed host only. Native local quit closes its transient host; connected
-quit detaches. Use explicit daemon export commands for a remote transcript.
+file-backed host only. Native local quit closes its host and retains durable
+records unless `--transient` was selected; connected quit detaches. Use
+`--local --export-session ID --out FILE` for retained local transcripts, or
+connected export commands for a remote transcript.
 
 There are two distinct shutdown experiences:
 

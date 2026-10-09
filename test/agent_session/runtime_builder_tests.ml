@@ -368,6 +368,7 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
             ; one_off_policy = Chat_response.One_off_request.default_policy
             ; native_service_revision = None
             ; authoring_validation_host = None
+            ; run_actions = (fun _ -> Ok None)
             ; lifecycle_started = (fun _ -> false)
             ; idle_notifications = (fun ~source:_ ~tools:_ () -> Ok false)
             ; notification_input =
@@ -629,7 +630,11 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                   Agent_session.History_codec.user_text ~id:history_id "count twice"
                   |> Agent_session.History_codec.to_protocol
                 in
-                A.submit_message actor ~attachment_id:writer.id entry
+                A.submit_message
+                  ~submitting_principal:principal_id
+                  actor
+                  ~attachment_id:writer.id
+                  entry
                 |> protocol_ok
                 |> ignore;
                 let rec finished () =

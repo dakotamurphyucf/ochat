@@ -39,3 +39,10 @@ val can_read_blob
   -> bool
 
 val scope_identity : Agent_protocol.Principal.t -> string
+
+(** Same known Full/Visible/Redacted policy as snapshot history, with an explicit
+    current transcript gate before exposing one pending/canonical occurrence. *)
+val pending_history_entry
+  :  Agent_protocol.Principal.t
+  -> Agent_protocol.History.entry
+  -> (Agent_protocol.Public_history.t, Agent_protocol.Error.t) result

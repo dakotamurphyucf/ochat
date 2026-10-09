@@ -7,7 +7,7 @@ unless you have explicitly reviewed their sensitivity.
 | Symptom | Check / action |
 |---|---|
 | Wrong TUI behavior or rejected local flags | Run with `--no-config`; inspect `--print-effective-args`; distinguish native/legacy/connected modes. |
-| Native local history disappears on quit | Expected transient mode; use a durable daemon or supported persistent local host, not invented TUI data-root flags. |
+| Native local history disappears on quit | Check whether `--transient` was selected. Native local storage defaults to `$HOME/.ochat/agent-store`; reopen the same root with `--local --list-sessions`, or select an explicit absolute `--data-root`. |
 | Socket refused/missing | Correct absolute URI; daemon running; private owned parent; inspect startup diagnostics. Do not remove a live socket. |
 | Store already owned | Identify existing owner and shut it down normally; don't delete lock files or run two configs sharing a root. |
 | HTTP 401 | Raw token versus hash, one valid bearer header, principal/expiry and loaded token file; restart after credential-file replacement. |

@@ -6,6 +6,8 @@ type phase =
   | Final_cleanup
   | Rejection_completion
   | Actor_lock_release
+  | Pending_claim
+  | Mutation_completion
 
 type action =
   | Fail
@@ -25,8 +27,12 @@ let arm_action t phase action =
   t.rejection_skips
   <- (match phase with
       | Rejection_completion -> 1
-      | Authority_acknowledgement | Payload_deletion | Final_cleanup | Actor_lock_release
-        -> 0)
+      | Mutation_completion -> 2
+      | Authority_acknowledgement
+      | Payload_deletion
+      | Final_cleanup
+      | Actor_lock_release
+      | Pending_claim -> 0)
 ;;
 
 let arm t phase = arm_action t phase Fail
@@ -53,7 +59,9 @@ let actor_lock_file t (Eio.Resource.T (resource, handler)) =
           ( ( Authority_acknowledgement
             | Payload_deletion
             | Final_cleanup
-            | Rejection_completion )
+            | Rejection_completion
+            | Pending_claim
+            | Mutation_completion )
           , _ )
       | None -> Original.sync resource
     ;;
@@ -105,7 +113,11 @@ let rec directory
              && not (String.is_substring qualified ~substring:"/deleted-") ->
         Original.rename resource source destination target;
         trigger t action
-      | Some (Rejection_completion, action)
+      | Some (Pending_claim, action)
+        when String.is_suffix qualified ~suffix:"/idempotency.sexp" ->
+        Original.rename resource source destination target;
+        trigger t action
+      | Some ((Rejection_completion | Mutation_completion), action)
         when String.is_suffix qualified ~suffix:"/idempotency.sexp" ->
         if t.rejection_skips > 0
         then (
@@ -117,7 +129,9 @@ let rec directory
             | Payload_deletion
             | Final_cleanup
             | Rejection_completion
-            | Actor_lock_release )
+            | Actor_lock_release
+            | Pending_claim
+            | Mutation_completion )
           , _ )
       | None -> Original.rename resource source destination target
     ;;
@@ -134,7 +148,9 @@ let rec directory
               | Payload_deletion
               | Final_cleanup
               | Rejection_completion
-              | Actor_lock_release )
+              | Actor_lock_release
+              | Pending_claim
+              | Mutation_completion )
             , _ )
         | None -> None
       in

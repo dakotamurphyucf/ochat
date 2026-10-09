@@ -54,6 +54,16 @@ let session_count ~env root =
     Error (Store_error.of_exn ~operation:"inspect migration sessions" ~path:root exn)
 ;;
 
+let stored_server_id ~env root =
+  let open Result.Let_syntax in
+  let%bind bytes =
+    Durable_file.load_bounded ~env ~path:(Data_root.server_id_path root) ~max_bytes:256
+  in
+  Agent_protocol.Id.Server.of_string (String.strip bytes)
+  |> Document_fields.protocol
+  |> Document_fields.store
+;;
+
 let inspect ~env ~root ~mode =
   if not (Filename.is_absolute root)
   then
@@ -84,17 +94,7 @@ let inspect ~env ~root ~mode =
     in
     let%bind source_version = schema_version contents in
     let%bind data_root = Data_root.open_existing ~env ~path:root in
-    let%bind server_id_bytes =
-      Durable_file.load_bounded
-        ~env
-        ~path:(Data_root.server_id_path data_root)
-        ~max_bytes:256
-    in
-    let%bind server_id =
-      Agent_protocol.Id.Server.of_string (String.strip server_id_bytes)
-      |> Document_fields.protocol
-      |> Document_fields.store
-    in
+    let%bind server_id = stored_server_id ~env data_root in
     let%bind () =
       if source_version <= Session_store.current_schema_version
       then
@@ -138,8 +138,9 @@ let run ~env ~sw ~root ~server_id ~process_start_identity ~lock_nonce ~mode =
     let%bind plan = inspect ~env ~root ~mode in
     match mode, plan.status, plan.source_version with
     | Apply, Migration_required, 1 ->
+      let%bind stored_server_id = stored_server_id ~env data_root in
       let%bind organizations =
-        Organization_root.open_owned ~env ~sw ~root:data_root ~server_id
+        Organization_root.open_owned ~env ~sw ~root:data_root ~server_id:stored_server_id
       in
       Organization_store.close organizations;
       Ok { plan with status = Current }

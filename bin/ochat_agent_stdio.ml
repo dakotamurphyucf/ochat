@@ -14,7 +14,7 @@ let working_directory env =
     |> Option.value_map ~default:native ~f:(fun pwd -> Filename.concat pwd native)
 ;;
 
-let home () = Sys.getenv "HOME" |> Option.value ~default:"/"
+let home () = Sys.getenv "HOME"
 
 let report_protocol_error env error =
   Sexp.to_string_hum ([%sexp_of: Agent_protocol.Error.t] error)
@@ -56,14 +56,27 @@ let run_gateway env ~uri ~bearer_token_file =
       ~on_error:(report_protocol_error env))
 ;;
 
-let local_options env ~prompt ~workspace ~data_root =
+let local_options env ~prompt ~workspace ~data_root ~transient =
   let cwd = working_directory env in
+  let open Result.Let_syntax in
+  let%map storage =
+    match transient, data_root with
+    | true, Some _ ->
+      Error
+        (Agent_protocol.Error.invalid_request
+           "--transient and --data-root are mutually exclusive")
+    | true, None -> Ok Agent_server.Local_storage.Transient
+    | false, None -> Ok Agent_server.Local_storage.Default
+    | false, Some path ->
+      Agent_server.Local_storage.Root.create ~path ()
+      |> Result.map ~f:(fun root -> Agent_server.Local_storage.Durable root)
+  in
   Agent_server.Embedded.
     { prompt_file = absolute cwd prompt
     ; workspace = Option.value_map workspace ~default:cwd ~f:(absolute cwd)
     ; tool_dir = cwd
     ; home = home ()
-    ; data_root = Option.map data_root ~f:(absolute cwd)
+    ; storage
     ; start_immediately = true
     ; permission_profile = default_permission_profile
     ; attachment_mode = Read_write
@@ -77,16 +90,20 @@ let run_local
       ~prompt
       ~workspace
       ~data_root
+      ~transient
       ~authoring_package_files
       ~authoring_budget
   =
   let open Or_error.Let_syntax in
   Eio.Switch.run (fun sw ->
-    let options = local_options env ~prompt ~workspace ~data_root in
+    let%bind options =
+      local_options env ~prompt ~workspace ~data_root ~transient
+      |> Result.map_error ~f:protocol_error
+    in
     let authoring_package_files =
       List.map authoring_package_files ~f:(absolute (working_directory env))
     in
-    let%map embedded =
+    let%bind embedded =
       Agent_server.Embedded.start
         ~daemon_options:
           (Inference_composition.daemon_options_default_with_policy
@@ -101,23 +118,23 @@ let run_local
         options
       |> Result.map_error ~f:protocol_error
     in
-    Exn.protect
-      ~f:(fun () ->
-        Agent_transport_stdio.Server.run
-          ~sw
-          ~dispatcher:(Agent_server.Embedded.dispatcher embedded)
-          ~close_connection:(Agent_server.Embedded.close_connection embedded)
-          ~principal:(Agent_server.Embedded.principal embedded)
-          ~connection_id:
-            (Agent_protocol.Id.Attachment.create ()
-             |> Agent_protocol.Id.Attachment.to_string)
-          ~input:(Eio.Stdenv.stdin env)
-          ~output:(Eio.Stdenv.stdout env)
-          ~max_line_length:(16 * 1024 * 1024)
-          ~outgoing_capacity:1_024
-          ~max_attachments:64
-          ~on_error:(report_protocol_error env))
-      ~finally:(fun () -> Agent_server.Embedded.close embedded))
+    Agent_server.Embedded.with_session embedded ~f:(fun embedded ->
+      Agent_transport_stdio.Server.run
+        ~sw
+        ~dispatcher:(Agent_server.Embedded.dispatcher embedded)
+        ~close_connection:(Agent_server.Embedded.close_connection embedded)
+        ~principal:(Agent_server.Embedded.principal embedded)
+        ~connection_id:
+          (Agent_protocol.Id.Attachment.create ()
+           |> Agent_protocol.Id.Attachment.to_string)
+        ~input:(Eio.Stdenv.stdin env)
+        ~output:(Eio.Stdenv.stdout env)
+        ~max_line_length:(16 * 1024 * 1024)
+        ~outgoing_capacity:1_024
+        ~max_attachments:64
+        ~on_error:(report_protocol_error env);
+      Ok ())
+    |> Result.map_error ~f:protocol_error)
 ;;
 
 let run
@@ -128,6 +145,7 @@ let run
       ~prompt
       ~workspace
       ~data_root
+      ~transient
       ~authoring_package_files
       ~authoring_options
   =
@@ -153,6 +171,7 @@ let run
            ~prompt
            ~workspace
            ~data_root
+           ~transient
            ~authoring_package_files
            ~authoring_budget))
   | false, Some uri ->
@@ -161,12 +180,13 @@ let run
       || Option.is_some prompt
       || Option.is_some workspace
       || Option.is_some data_root
+      || transient
       || (not (List.is_empty authoring_package_files))
       || Agent_server.Authoring_options.is_configured authoring_options
     then
       Or_error.error_string
-        "--inference-transport, --prompt, --workspace, --data-root, authoring package \
-         and budget flags are local-mode options"
+        "--inference-transport, --prompt, --workspace, --data-root, --transient, \
+         authoring package and budget flags are local-mode options"
     else Eio_main.run (fun env -> run_gateway env ~uri ~bearer_token_file)
   | true, Some _ -> Or_error.error_string "--local and --connect are mutually exclusive"
   | false, None when Option.is_some bearer_token_file ->
@@ -193,7 +213,15 @@ let command =
      and prompt = flag "--prompt" (optional string) ~doc:"FILE Local ChatMD prompt."
      and workspace = flag "--workspace" (optional string) ~doc:"DIR Local workspace."
      and data_root =
-       flag "--data-root" (optional string) ~doc:"DIR Durable local data root."
+       flag
+         "--data-root"
+         (optional string)
+         ~doc:"DIR Absolute durable local data root (default HOME/.ochat/agent-store)."
+     and transient =
+       flag
+         "--transient"
+         no_arg
+         ~doc:"Use explicitly temporary process-bound local storage."
      and authoring_options = Agent_server.Authoring_options.param
      and authoring_package_files =
        flag
@@ -210,6 +238,7 @@ let command =
          ~prompt
          ~workspace
          ~data_root
+         ~transient
          ~authoring_package_files
          ~authoring_options)
 ;;

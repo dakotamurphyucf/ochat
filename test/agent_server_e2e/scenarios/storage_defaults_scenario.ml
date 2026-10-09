@@ -131,6 +131,13 @@ let run env report =
       C.configuration fixture ()
       |> String.substr_replace_all ~pattern:"    (snapshot_every_events 10)\n" ~with_:""
       |> String.substr_replace_all ~pattern:"    (snapshot_every_ms 1000)" ~with_:""
+      (* Actor-only checkpoint waits exceed the shared fixture's five-second
+         HTTP idle lifetime (the measured gap was 5.48s); the cadence probe also
+         deliberately waits 5.01s. Use the existing isolated load client policy,
+         independently of the production durability defaults checked below. *)
+      |> String.substr_replace_all
+           ~pattern:"(idle_connection_timeout_ms 5000)"
+           ~with_:"(idle_connection_timeout_ms 120000)"
       (* This isolated workload executes only the prompt's synthetic read_file
          and run_chatml tools; the shared E2E fixture otherwise denies all tools. *)
       |> String.substr_replace_all
@@ -299,6 +306,7 @@ let on_event ctx state event =
                   ; attachments = []
                   }
               ; idempotency_key = F.key (sprintf "storage-send-%d" index)
+              ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
               })
        with
        | Session_send_message _ -> ()

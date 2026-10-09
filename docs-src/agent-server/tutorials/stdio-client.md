@@ -52,10 +52,14 @@ payload, not for a new message. See [protocol synchronization](../protocol.md).
 EOF ends this local host. The explicit `--data-root` preserves durable records;
 it does not keep a process running after the client exits.
 
-Omit `--data-root` to use a private transient root that is removed on EOF.
-Embedded startup initializes the RNG before creating that root. The example above
-uses a durable root so records remain available after exit; this does not keep
-the host running. See [startup troubleshooting](../troubleshooting.md#local-stdio-rng-initialization)
+Omit `--data-root` to use durable `$HOME/.ochat/agent-store`. Use `--transient`
+explicitly for a private disposable root, removed after successful host shutdown.
+The two flags are mutually exclusive; durable root paths must be absolute.
+Default storage requires HOME and never falls back to cwd or migrates legacy
+records. Embedded startup initializes the RNG before allocating a transient root.
+Listing, inspecting and retained export do not select another saved session for
+execution. Export may omit `attachment_id`; a supplied stale attachment is still
+rejected, and every export/blob read rechecks current principal policy. See [startup troubleshooting](../troubleshooting.md#local-stdio-rng-initialization)
 if an older binary reports an uninitialized generator.
 
 ## Gateway to a detached daemon
