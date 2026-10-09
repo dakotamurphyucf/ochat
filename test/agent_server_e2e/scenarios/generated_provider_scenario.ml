@@ -109,6 +109,9 @@ let inference_policy env =
   Agent_server.Session_factory.
     { capture_inference_target =
         (fun ~prompt_revision_id:_ ~config -> Inference_host.capture_config host config)
+    ; select_inference_profile =
+        (fun ~current:_ ~profile:_ ->
+          Error Inference_runtime.Preparation_error.Target_unavailable)
     ; recapture_inference_target =
         (fun ~current ~prompt_revision_id:_ ~config ->
           Inference_host.recapture_config host ~current config)

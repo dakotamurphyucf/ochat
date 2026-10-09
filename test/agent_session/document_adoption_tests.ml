@@ -1402,7 +1402,7 @@ let%expect_test
     in
     print_s [%sexp (Jsonaf.to_string (member pair "future") : string)];
     let corrupt =
-      D.Document.create ~limits ~kind:"session.state" ~version:4 ~payload:legacy_payload
+      D.Document.create ~limits ~kind:"session.state" ~version:5 ~payload:legacy_payload
       |> document_ok
     in
     print_s

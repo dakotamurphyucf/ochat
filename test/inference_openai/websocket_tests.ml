@@ -768,3 +768,114 @@ let%expect_test "concurrent detached calls own independent ephemeral channels" =
          print_s [%sexp (!connections : int), (!full_requests : int)]));
   [%expect {| (2 2) |}]
 ;;
+
+let%expect_test
+    "graph root selection reuses B across operations and leaves moderator A alive"
+  =
+  run_env (fun env ->
+    let connections = ref 0 in
+    let bodies = ref [] in
+    with_server
+      env
+      (fun flow ->
+         incr connections;
+         let reader = Eio.Buf_read.of_flow flow ~max_size:1_000_000 in
+         let _, fields = headers reader in
+         upgrade flow fields;
+         while true do
+           let body = client_message reader in
+           bodies := !bodies @ [ body ];
+           Eio.Flow.copy_string (server_frame completed) flow
+         done)
+      (fun sw endpoint ->
+         let module Runtime = Inference_runtime in
+         let module R = Inference.Request in
+         let selected_profile = profile endpoint in
+         let driver = driver env in
+         let resolve revision model =
+           let target =
+             Openai.Inference_adapter.capture_target
+               selected_profile
+               ~profile_revision:(Some revision)
+               ~model
+               ~settings:[]
+               ~limits:Document_schema.Limits.default
+             |> ok
+           in
+           let adapter =
+             Openai.Inference_adapter.create
+               driver
+               ~profile:selected_profile
+               ~profile_revision:(Some revision)
+               ~auth:(Static (fun ~sw:_ _ -> Ok (lease ~revision:"credential" ())))
+               ~limits:Runtime.Limits.default
+             |> ok
+           in
+           Runtime.Context.create adapter ~target
+           |> ok
+           |> fun context ->
+           Runtime.Context.with_transport_policy context Require_websocket
+         in
+         let owner = Runtime.Session.create ~sw in
+         let original =
+           Runtime.Context.with_session (resolve "1" "model-A") owner |> ok
+         in
+         let root = Chat_response.Root_binding.create owner in
+         let item =
+           Agent_session.History_codec.user_text
+             ~id:(History_entry.Id.create ~namespace:"root-binding" ~sequence:0 |> ok)
+             "input"
+         in
+         let execute context =
+           let request =
+             R.create
+               ~target:(Runtime.Context.target context)
+               ~history:[ item ]
+               ~tools:[]
+               ~assets:[]
+               ~limits:Document_schema.Limits.default
+             |> ok
+           in
+           let prepared =
+             Runtime.Context.prepare context ~preparation_id:"root" request |> ok
+           in
+           let attempt =
+             Runtime.Prepared.start
+               prepared
+               ~scope:Adapter_tests.scope
+               ~accounting_id:Adapter_tests.accounting_id
+             |> ok
+           in
+           Runtime.Attempt.run attempt ~sw ~on_event:ignore ~on_observation:ignore
+           |> ok
+           |> ignore
+         in
+         let capture revision model =
+           Chat_response.Root_binding.with_context
+             root
+             ~resolved:(resolve revision model)
+             ~f:execute
+           |> ok
+         in
+         capture "1" "model-A";
+         capture "1" "model-B";
+         capture "1" "model-B";
+         assert (!connections = 1);
+         let has_previous body =
+           Option.is_some (Jsonaf.member "previous_response_id" body)
+         in
+         assert (not (has_previous (List.nth_exn !bodies 1)));
+         assert (has_previous (List.nth_exn !bodies 2));
+         capture "2" "model-B";
+         assert (!connections = 2);
+         execute original;
+         assert (!connections = 3);
+         Chat_response.Root_binding.close root;
+         assert (not (Runtime.Session.is_closed owner));
+         Runtime.Session.close owner;
+         print_endline
+           "B reuses qualified WS across operations; changed envelope/revision resets; \
+            moderator A survives"));
+  [%expect
+    {|B reuses qualified WS across operations; changed envelope/revision resets; moderator A survives|}]
+;;

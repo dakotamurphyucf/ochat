@@ -323,6 +323,8 @@ type t =
   | Blob_read of Blob.Chunk.t
   | Session_create of Create.t
   | Session_list of Session_catalog.t Page.t
+  | Session_configuration_get of Session_configuration.t
+  | Session_configuration_update of Session_configuration.t
   | Session_get of Snapshot.t
   | Session_inference_summary of Inference_query.Summary.t
   | Session_inference_observations of Inference_query.Response.t
@@ -377,6 +379,8 @@ let method_name = function
   | Blob_read _ -> "blob.read"
   | Session_create _ -> "session.create"
   | Session_list _ -> "session.list"
+  | Session_configuration_get _ -> "session.configuration_get"
+  | Session_configuration_update _ -> "session.configuration_update"
   | Session_get _ -> "session.get"
   | Session_inference_summary _ -> "session.inference_summary"
   | Session_inference_observations _ -> "session.inference_observations"
@@ -433,6 +437,8 @@ let to_json = function
   | Blob_read value -> Blob.Chunk.to_json value
   | Session_create value -> Create.to_json value
   | Session_list value -> Page.to_json Session_catalog.to_json value
+  | Session_configuration_get value | Session_configuration_update value ->
+    Session_configuration.to_json value
   | Session_get value -> Snapshot.to_json value
   | Session_inference_summary value -> Inference_query.Summary.to_json value
   | Session_inference_observations value -> Inference_query.Response.to_json value
@@ -515,6 +521,10 @@ let decoders =
   ; "blob.read", map Blob.Chunk.of_json (fun x -> Blob_read x)
   ; "session.create", map Create.of_json (fun x -> Session_create x)
   ; "session.list", map (Page.of_json Session_catalog.of_json) (fun x -> Session_list x)
+  ; ( "session.configuration_get"
+    , map Session_configuration.of_json (fun x -> Session_configuration_get x) )
+  ; ( "session.configuration_update"
+    , map Session_configuration.of_json (fun x -> Session_configuration_update x) )
   ; "session.get", map Snapshot.of_json (fun x -> Session_get x)
   ; ( "session.inference_summary"
     , map Inference_query.Summary.of_json (fun x -> Session_inference_summary x) )

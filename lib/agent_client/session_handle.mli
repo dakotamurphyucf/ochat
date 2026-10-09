@@ -164,3 +164,16 @@ val update_metadata
   -> expected_metadata_revision:int64
   -> patch:Agent_protocol.Session_metadata.Patch.t
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
+(** Host-authorized selected/pending/root-capture configuration. Unloaded reads
+    do not activate a runtime or credential resolver. *)
+val configuration
+  :  t
+  -> (Agent_protocol.Session_configuration.t, Agent_protocol.Error.t) Result.t
+
+val update_configuration
+  :  t
+  -> expected_generation:int
+  -> expected_revision:int64
+  -> Agent_protocol.Session_configuration.Patch.t
+  -> (Agent_protocol.Session_configuration.t, Agent_protocol.Error.t) Result.t

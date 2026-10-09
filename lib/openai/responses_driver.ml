@@ -223,6 +223,18 @@ module Profile = struct
       })
   ;;
 
+  let with_configuration t ~id ~defaults =
+    let%map.Or_error validated =
+      create
+        ~id
+        ~account:t.account
+        ~endpoint:t.endpoint
+        ~capabilities:t.capabilities
+        ~defaults
+    in
+    { t with id = validated.id; defaults = validated.defaults }
+  ;;
+
   let with_response_content_type_policy t response_content_type_policy =
     { t with response_content_type_policy }
   ;;

@@ -742,3 +742,34 @@ let update_metadata t ~expected_metadata_revision ~patch =
           (Agent_protocol.Error.invalid_request
              "unexpected session.update_metadata result"))
 ;;
+
+let configuration t =
+  let open Result.Let_syntax in
+  let%bind result =
+    Connection.request_without_history
+      t.connection
+      (Session_configuration_get { session_id = t.session_id })
+  in
+  match result with
+  | Session_configuration_get view -> Ok view
+  | _ -> Error (Agent_protocol.Error.invalid_request "unexpected configuration result")
+;;
+
+let update_configuration t ~expected_generation ~expected_revision patch =
+  mutation_command
+    t
+    (fun idempotency_key ->
+       Session_configuration_update
+         { session_id = t.session_id
+         ; attachment_id = t.attachment.id
+         ; expected_generation
+         ; expected_revision
+         ; patch
+         ; idempotency_key
+         })
+    (function
+      | Session_configuration_update view -> Ok view
+      | _ ->
+        Error
+          (Agent_protocol.Error.invalid_request "unexpected configuration update result"))
+;;

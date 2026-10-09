@@ -40,6 +40,10 @@
   durable_event_document
   model_job_target
   session_state
+  configuration_transition
+  configuration_update
+  configuration_capture
+  configuration_policy
   moderator_checkpoint
   delegation_authority
   automatic_turn_budget

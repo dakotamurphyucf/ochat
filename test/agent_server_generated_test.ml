@@ -140,6 +140,7 @@ let install_child
         }
     ; prompt_definition_id = None
     ; prompt_revision_id = artifact.revision_id
+    ; configuration_revision = 0L
     ; inference_target =
         Inference.Selection.captured
           (Option.value_exn admission.inference_target)

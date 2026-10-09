@@ -571,6 +571,7 @@ let with_fixture ?flow_seconds route f =
                 let runtime = ref None in
                 let factory ~sw ~server_id =
                   Provider_runtime_host.create
+                    ~compatible_profiles:[]
                     ~sw
                     ~env:host_env
                     ~server_id

@@ -48,7 +48,8 @@ val adopt
   -> t
   -> (t, Document_schema.Error.t) result
 
-(** Adjacent generic v1/v2/v3 to v4 conversion. Missing metadata revision
+(** Adjacent generic v1/v2/v3/v4 to v5 conversion. Missing configuration revision
+    is introduced in the v4 to v5 step. Missing metadata revision
     defaults to zero. Missing captured selection and job
     bindings become Unresolved; missing ledger becomes empty with UNKNOWN prior
     tracking coverage. An existing same-name ledger must admit under the durable

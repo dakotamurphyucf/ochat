@@ -325,6 +325,8 @@ let idempotency = function
   | Session_stop request -> standard (Some request.session_id) request.idempotency_key
   | Session_cancel_operation request ->
     standard (Some request.session_id) request.idempotency_key
+  | Session_configuration_update request ->
+    protected (Some request.session_id) request.idempotency_key
   | Session_send_message request ->
     protected (Some request.session_id) request.idempotency_key
   | Session_compact request -> protected (Some request.session_id) request.idempotency_key
@@ -353,6 +355,7 @@ let idempotency = function
   | Blob_read _
   | Session_list _
   | Session_get _
+  | Session_configuration_get _
   | Session_inference_summary _
   | Session_inference_observations _
   | Session_export _
@@ -1231,6 +1234,71 @@ let handle_session_compact t context command_audit request =
              ~expected_revision:request.expected_revision)
        |> Result.map ~f:(fun session ->
          Agent_protocol.Method_result.Session_compact (session_mutation session)))
+;;
+
+let configuration_projection principal value =
+  if Agent_protocol.Principal.has_scope principal Diagnostics
+  then Ok value
+  else Agent_session.Configuration_transition.redact_identity value
+;;
+
+let handle_configuration_get t context request =
+  let open Result.Let_syntax in
+  let principal = Connection_context.principal context in
+  let%bind state =
+    Session_registry.read_state
+      t.registry
+      request.Agent_protocol.Session_configuration.Get_request.session_id
+      ~authorize:(fun summary ->
+        if session_visible_to principal summary
+        then Ok ()
+        else Error (error Permission_denied "session is not visible"))
+  in
+  let%bind view =
+    match Session_registry.find t.registry state.identity.session_id with
+    | Some entry -> Agent_session.Session_actor.configuration entry.actor
+    | None ->
+      let%map selected =
+        match Inference.Selection.view state.spec.inference_target with
+        | Unresolved -> Ok None
+        | Captured target ->
+          Result.map
+            (Agent_session.Configuration_transition.safe_view target)
+            ~f:Option.some
+      in
+      Agent_protocol.Session_configuration.
+        { revision = state.spec.configuration_revision
+        ; selected
+        ; capture = None
+        ; pending = false
+        }
+  in
+  let%map view = configuration_projection principal view in
+  Agent_protocol.Method_result.Session_configuration_get view
+;;
+
+let handle_configuration_update
+      t
+      context
+      command_audit
+      (request : Agent_protocol.Session_configuration.Update_request.t)
+  =
+  let open Result.Let_syntax in
+  let principal = Connection_context.principal context in
+  with_writer
+    t
+    context
+    ~session_id:request.session_id
+    ~attachment_id:request.attachment_id
+    (fun entry ->
+       let%bind view =
+         Agent_session.Session_actor.update_configuration
+           entry.actor
+           ?command_audit
+           request
+       in
+       let%map view = configuration_projection principal view in
+       Agent_protocol.Method_result.Session_configuration_update view)
 ;;
 
 let handle_send_message t context command_audit request =
@@ -2117,6 +2185,7 @@ let mutation_attachment = function
   | Session_update_metadata r -> Some (r.session_id, r.attachment_id)
   | Session_stop r -> Some (r.session_id, r.attachment_id)
   | Session_cancel_operation r -> Some (r.session_id, r.attachment_id)
+  | Session_configuration_update r -> Some (r.session_id, r.attachment_id)
   | Session_send_message r -> Some (r.session_id, r.attachment_id)
   | Session_compact r -> Some (r.session_id, r.attachment_id)
   | Session_delete_history r -> Some (r.session_id, r.attachment_id)
@@ -2188,6 +2257,9 @@ let dispatch_authorized t ~actor ~context ~command_audit ~inference_budget = fun
   | Session_stop request -> handle_session_stop t context command_audit request
   | Session_cancel_operation request ->
     handle_session_cancel_operation t context command_audit request
+  | Session_configuration_get request -> handle_configuration_get t context request
+  | Session_configuration_update request ->
+    handle_configuration_update t context command_audit request
   | Session_send_message request -> handle_send_message t context command_audit request
   | Session_compact request -> handle_session_compact t context command_audit request
   | Session_delete_history request ->
@@ -2247,6 +2319,8 @@ let command_session_id = function
   | Blob_read request -> Some request.session_id
   | Audit_read request -> request.session_id
   | Session_get request -> Some request.Agent_protocol.Session.Get_request.session_id
+  | Session_configuration_get request -> Some request.session_id
+  | Session_configuration_update request -> Some request.session_id
   | Session_inference_summary request -> Some request.session_id
   | Session_inference_observations request -> Some request.session_id
   | Session_attach request -> Some request.session_id
@@ -2335,6 +2409,12 @@ let receipt_summary ~session_id result =
   | Session_rebuild value
   | Session_upgrade_prompt value ->
     Ok (R.Session_mutation { session_id = value.session.id; mutation = value.mutation })
+  | Session_configuration_update value ->
+    (match session_id with
+     | Some session_id ->
+       Ok (R.Configuration_updated { session_id; revision = value.revision })
+     | None ->
+       Error (error Invalid_request "configuration receipt requires session identity"))
   | Session_send_message value ->
     (match session_id with
      | None -> Error (error Invalid_request "message receipt requires session identity")
@@ -2365,6 +2445,7 @@ let receipt_summary ~session_id result =
   | Blob_read _
   | Session_list _
   | Session_get _
+  | Session_configuration_get _
   | Session_inference_summary _
   | Session_inference_observations _
   | Session_export _
@@ -2448,6 +2529,7 @@ let handle_command_receipt
               | Created_session session_id
               | Attached_session session_id
               | Deleted_session session_id
+              | Configuration_updated { session_id; _ }
               | Session_mutation { session_id; _ }
               | Sent_message { session_id; _ } -> visible session_id
               | Provider_setup _

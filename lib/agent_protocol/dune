@@ -48,6 +48,8 @@
   operation
   session_metadata
   session_catalog_query
+
+  session_configuration
   session
   session_catalog
   snapshot

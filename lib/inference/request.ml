@@ -283,6 +283,20 @@ module Target = struct
 
   let auth_binding t = t.auth_binding
 
+  let with_profile_from t ~approved ~limits =
+    let open Result.Let_syntax in
+    let%bind _ = of_json t.json ~limits in
+    let%bind _ = of_json approved.json ~limits in
+    let json = update_member_exn t.json "profile" (Some (`String approved.profile)) in
+    let json =
+      update_member_exn
+        json
+        "profile_revision"
+        (Option.map approved.profile_revision ~f:(fun value -> `String value))
+    in
+    of_json json ~limits
+  ;;
+
   let with_model t ~model ~limits =
     let open Result.Let_syntax in
     let%bind _ = of_json t.json ~limits in

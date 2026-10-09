@@ -1,3 +1,4 @@
+module Compatible_profile = Compatible_profile
 module Provider_profiles = Provider_profiles
 module Credential_bridge = Credential_bridge
 module Provider_configuration = Provider_configuration
@@ -15,7 +16,11 @@ module Backend : sig
       select the host default. resolve authorizes the captured target. Bounded
       views share credentials/epochs and narrow only driver response limits. *)
   val create
-    :  capture:
+    :  capture_profile:
+         (current:Inference.Request.Target.t
+          -> profile:string
+          -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) Result.t)
+    -> capture:
          (current:Inference.Request.Target.t option
           -> model:string
           -> settings:Openai.Responses_driver.Setting.t list
@@ -26,6 +31,12 @@ module Backend : sig
     -> t
 
   (** Trusted composition delegation; these preserve the owned backend ports. *)
+  val capture_profile
+    :  t
+    -> current:Inference.Request.Target.t
+    -> profile:string
+    -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) Result.t
+
   val capture
     :  t
     -> current:Inference.Request.Target.t option
@@ -110,3 +121,10 @@ val resolve : t -> Inference_runtime.resolver
     Counter exhaustion raises an invariant failure rather than wrapping/reusing
     an ID. This allocator neither persists an attempt nor grants dispatch. *)
 val identity : t -> Chat_response.Neutral_turn.Identity.t
+
+(** Explicit host-authorized profile selection. Never uses the host default. *)
+val capture_profile
+  :  t
+  -> current:Inference.Request.Target.t
+  -> profile:string
+  -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) Result.t

@@ -21,10 +21,28 @@ val exact_origin_only : t
     qualified same-family encrypted replay; no model-name heuristic is applied. *)
 val create : transitions:(string * string * Item_class.t list) list -> t Or_error.t
 
+(** Trusted host composition only: one explicitly qualified canonical owner and
+    its declared same-owner profile IDs. At most128 distinct bounded IDs; the
+    canonical ID must be a member. Replaces the previous group, preserves directed
+    cross-model declarations. This grants no authentication or capability support.
+    The host must independently prove exact shared credential ownership.
+
+    Cross-profile replay preserves original logical provenance and requires
+    consistent provider/profile IDs, identical known model, adapter, account,
+    endpoint and replay version. Only closed assistant text/function/custom call
+    shapes qualify. Unknown fields/classes and reasoning (including encrypted
+    reasoning) refuse. Cross-profile and cross-model permissions never compose. *)
+val with_compatible_profiles
+  :  t
+  -> canonical_profile:string
+  -> profiles:string list
+  -> t Or_error.t
+
 (** Requires available, identical adapter/provider/account/endpoint/profile and
     replay version. Same complete origin remains admitted. Cross-model input
     requires an explicit pair and a closed known wire shape; unknown fields or
-    classes refuse. This does not replace independent semantic/raw validation. *)
+    classes refuse. An explicitly qualified compatible profile group follows the
+    narrower rules above. Neither replaces independent semantic/raw validation. *)
 val permits
   :  t
   -> actual:History_entry.Payload.Origin.t

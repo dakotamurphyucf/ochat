@@ -148,6 +148,12 @@ let atom_to_jsonaf ~limits ~state_document delta =
           [ "kind", `String "permission_changed"; "value", P.Permission.to_json value ])
   | Grant_changed value ->
     Ok (`Object [ "kind", `String "grant_changed"; "value", P.Grant.to_json value ])
+  | Configuration_revision_changed revision ->
+    Ok
+      (`Object
+          [ "kind", `String "configuration_revision_changed"
+          ; "revision", X.int64_json revision
+          ])
   | Inference_target_captured target | Inference_target_changed target ->
     let%map () =
       Inference.Request.Target.validate target ~limits
@@ -442,6 +448,9 @@ let atom_of_jsonaf ~limits json =
   | "grant_changed" ->
     Result.map (X.required fields "value" P.Grant.of_json) ~f:(fun value ->
       Delta.Grant_changed value)
+  | "configuration_revision_changed" ->
+    Result.map (X.required fields "revision" X.nonnegative_int64) ~f:(fun revision ->
+      Delta.Configuration_revision_changed revision)
   | "inference_target_captured" | "inference_target_changed" ->
     let%map target =
       X.required fields "target" (fun json ->
@@ -649,6 +658,8 @@ let shape =
                    [ "kind", D.Shape.value; "value", Session_record_shapes.grant ] )
              ; ( "inference_target_captured"
                , X.shape_exn [ "kind", D.Shape.value; "target", D.Shape.value ] )
+             ; ( "configuration_revision_changed"
+               , X.shape_exn [ "kind", D.Shape.value; "revision", D.Shape.value ] )
              ; ( "inference_target_changed"
                , X.shape_exn [ "kind", D.Shape.value; "target", D.Shape.value ] )
              ; ( "model_job_target_captured"

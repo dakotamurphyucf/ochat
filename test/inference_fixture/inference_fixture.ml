@@ -258,7 +258,7 @@ let run_stream
   |> ok
 ;;
 
-let create ~namespace ~default_model ~post_stream =
+let create_with_observer ~on_prepare ~namespace ~default_model ~post_stream =
   let source = Transcript.Source_id.of_string namespace |> ok in
   let sequence = Atomic.make 0 in
   let next () = Atomic.fetch_and_add sequence 1 |> Int.to_string in
@@ -296,6 +296,7 @@ let create ~namespace ~default_model ~post_stream =
       ~limits:Runtime.Limits.default
       ~bind
       ~prepare:(fun ~preparation_id request ->
+        on_prepare request;
         let open Result.Let_syntax in
         let%bind configuration =
           O.Configuration.of_target
@@ -315,6 +316,10 @@ let create ~namespace ~default_model ~post_stream =
     |> ok
   in
   { default_model; adapter; identity }
+;;
+
+let create ~namespace ~default_model ~post_stream =
+  create_with_observer ~on_prepare:ignore ~namespace ~default_model ~post_stream
 ;;
 
 let capture_config t config =

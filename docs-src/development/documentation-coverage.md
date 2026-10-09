@@ -198,6 +198,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_protocol/session.mli` | [contract](../../lib/agent_protocol/session.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/session_catalog.mli` | [contract](../../lib/agent_protocol/session_catalog.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/session_catalog_query.mli` | [contract](../../lib/agent_protocol/session_catalog_query.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/session_configuration.mli` | [contract](../../lib/agent_protocol/session_configuration.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/session_metadata.mli` | [contract](../../lib/agent_protocol/session_metadata.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/session_ref.mli` | [contract](../../lib/agent_protocol/session_ref.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/snapshot.mli` | [contract](../../lib/agent_protocol/snapshot.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
@@ -264,6 +265,10 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/background_job_event.mli` | [contract](../../lib/agent_session/background_job_event.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/chatmd_export.mli` | [contract](../../lib/agent_session/chatmd_export.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/compaction_archive.mli` | [contract](../../lib/agent_session/compaction_archive.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/configuration_capture.mli` | [contract](../../lib/agent_session/configuration_capture.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/configuration_policy.mli` | [contract](../../lib/agent_session/configuration_policy.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/configuration_transition.mli` | [contract](../../lib/agent_session/configuration_transition.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/configuration_update.mli` | [contract](../../lib/agent_session/configuration_update.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/delegation_authority.mli` | [contract](../../lib/agent_session/delegation_authority.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/delivery_ownership.mli` | [contract](../../lib/agent_session/delivery_ownership.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/durable_event_document.mli` | [contract](../../lib/agent_session/durable_event_document.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
@@ -476,6 +481,8 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_response/one_off_request.mli` | [contract](../../lib/chat_response/one_off_request.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/one_off_script.mli` | [contract](../../lib/chat_response/one_off_script.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/response_loop.mli` | [contract](../../lib/chat_response/response_loop.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chat_response/root_binding.mli` | [contract](../../lib/chat_response/root_binding.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chat_response/root_context.mli` | [contract](../../lib/chat_response/root_context.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/runtime_request_scope.mli` | [contract](../../lib/chat_response/runtime_request_scope.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/runtime_semantics.mli` | [contract](../../lib/chat_response/runtime_semantics.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/schedule_delivery.mli` | [contract](../../lib/chat_response/schedule_delivery.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
@@ -626,6 +633,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/inference/request.mli` | [contract](../../lib/inference/request.mli) | [integration](../neutral-inference-contracts.md) | Public interface + current host guide. |
 | `lib/inference/selection.mli` | [contract](../../lib/inference/selection.mli) | [integration](../neutral-inference-contracts.md) | Public interface + current host guide. |
 | `lib/inference_client/inference_client.mli` | [contract](../../lib/inference_client/inference_client.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
+| `lib/inference_host/compatible_profile.mli` | [contract](../../lib/inference_host/compatible_profile.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
 | `lib/inference_host/credential_bridge.mli` | [contract](../../lib/inference_host/credential_bridge.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
 | `lib/inference_host/inference_host.mli` | [contract](../../lib/inference_host/inference_host.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
 | `lib/inference_host/provider_configuration.mli` | [contract](../../lib/inference_host/provider_configuration.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |

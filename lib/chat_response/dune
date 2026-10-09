@@ -1,7 +1,7 @@
 (library
  (name chat_response)
  (public_name ochat.chat_response)
- (modules
+ (modules root_binding root_context
   cache
   config
   converter

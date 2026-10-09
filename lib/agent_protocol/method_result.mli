@@ -121,6 +121,8 @@ type t =
   | Blob_read of Blob.Chunk.t
   | Session_create of Create.t
   | Session_list of Session_catalog.t Page.t
+  | Session_configuration_get of Session_configuration.t
+  | Session_configuration_update of Session_configuration.t
   | Session_get of Snapshot.t
   | Session_inference_summary of Inference_query.Summary.t
   | Session_inference_observations of Inference_query.Response.t

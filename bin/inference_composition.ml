@@ -212,6 +212,15 @@ let try_open configuration ~sw ~env ~default_model =
   let bridge = S.Opened.bridge opened in
   let rec backend bridge =
     Inference_host.Backend.create
+      ~capture_profile:(fun ~current ~profile ->
+        B.capture
+          bridge
+          ~principal:configuration.principal
+          ~default_profile:profile
+          ~current:None
+          ~model:(Inference.Request.Target.model current)
+          ~settings:[]
+        |> Result.map_error ~f:B.preparation_error)
       ~capture:(fun ~current ~model ~settings ->
         B.capture
           bridge
@@ -334,6 +343,7 @@ let daemon_options host =
   let inference_policy : Agent_server.Session_factory.inference_policy =
     { capture_inference_target =
         (fun ~prompt_revision_id:_ ~config -> Inference_host.capture_config host config)
+    ; select_inference_profile = Inference_host.capture_profile host
     ; recapture_inference_target =
         (fun ~current ~prompt_revision_id:_ ~config ->
           Inference_host.recapture_config host ~current config)

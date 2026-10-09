@@ -185,6 +185,7 @@ let spec_to_jsonaf (t : S.Spec.t) =
     ; ( "prompt_definition_id"
       , (X.option_json P.Id.Prompt_definition.to_json) t.prompt_definition_id )
     ; "prompt_revision_id", P.Id.Prompt_revision.to_json t.prompt_revision_id
+    ; "configuration_revision", X.int64_json t.configuration_revision
     ; "inference_target", Inference.Selection.to_json t.inference_target
     ; ( "delegation"
       , (X.option_json Agent_store.Delegation_store.reference_to_jsonaf) t.delegation )
@@ -205,6 +206,9 @@ let spec_of_jsonaf ~limits json =
   in
   let%bind prompt_revision_id =
     X.required fields "prompt_revision_id" P.Id.Prompt_revision.of_json
+  in
+  let%bind configuration_revision =
+    X.required fields "configuration_revision" X.nonnegative_int64
   in
   let%bind inference_target =
     X.required fields "inference_target" (fun json ->
@@ -229,6 +233,7 @@ let spec_of_jsonaf ~limits json =
     { protocol
     ; prompt_definition_id
     ; prompt_revision_id
+    ; configuration_revision
     ; inference_target
     ; delegation
     ; workspace_instance
@@ -246,6 +251,7 @@ let spec_shape =
     [ "protocol", Shapes.protocol_spec
     ; "prompt_definition_id", X.nullable_shape Document_schema.Shape.value
     ; "prompt_revision_id", Document_schema.Shape.value
+    ; "configuration_revision", Document_schema.Shape.value
     ; "inference_target", Document_schema.Shape.value
     ; "delegation", X.nullable_shape Agent_store.Delegation_store.reference_shape
     ; "workspace_instance", Workspace_instance.shape
@@ -958,13 +964,33 @@ let upgrade document ~limits =
       | _ ->
         Agent_store.Document_fields.invalid "identity" "metadata mirrors must be objects")
   in
+  let%bind configuration_step =
+    D.Conversion.Step.of_function ~kind:"session.state" ~from_version:4 ~f:(fun payload ->
+      let%bind spec = Agent_store.Document_fields.required payload "spec" Result.return in
+      let%bind spec =
+        match spec with
+        | `Object fields ->
+          Ok
+            (if List.Assoc.mem fields "configuration_revision" ~equal:String.equal
+             then spec
+             else `Object (fields @ [ "configuration_revision", `String "0" ]))
+        | _ -> Agent_store.Document_fields.invalid "spec" "must be an object"
+      in
+      match payload with
+      | `Object fields ->
+        Ok
+          (`Object
+              (List.map fields ~f:(fun (name, value) ->
+                 name, if String.equal name "spec" then spec else value)))
+      | _ -> Agent_store.Document_fields.invalid "payload" "must be an object")
+  in
   let%bind conversion =
     D.Conversion.create
       ~limits
-      ~targets:[ "session.state", 4 ]
-      ~max_steps:3
+      ~targets:[ "session.state", 5 ]
+      ~max_steps:4
       ~max_operations:100_000
-      ~steps:[ step; ledger_step; metadata_step ]
+      ~steps:[ step; ledger_step; metadata_step; configuration_step ]
   in
   D.Conversion.upgrade conversion document
 ;;
@@ -974,7 +1000,7 @@ let codec ~limits =
     D.Domain_codec.create_validated
       ~limits
       ~kind:"session.state"
-      ~version:4
+      ~version:5
       ~shape
       ~supported_semantics:[]
       ~validate:(fun state -> X.document_result (S.validate state))

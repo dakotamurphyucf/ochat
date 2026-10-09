@@ -14,6 +14,8 @@ let required_scope = function
   | Protocol_ping _
   | Server_info
   | Server_health _ -> None
+  | Session_configuration_get _ -> Some Agent_protocol.Scope.View_session_transcript
+  | Session_configuration_update _ -> Some Agent_protocol.Scope.Send_messages
   | Session_inference_summary _ -> None
   | Session_inference_observations _ -> Some Agent_protocol.Scope.View_session_transcript
   | Prompt_list _ | Prompt_get _ -> Some Agent_protocol.Scope.List_prompts
@@ -103,6 +105,15 @@ let authorize principal command =
   | Agent_protocol.Command.Session_create { requested_mode = Some mode; _ } ->
     authorize_attachment_mode principal mode
   | Session_attach request -> authorize_attachment_mode principal request.requested_mode
+  | Session_configuration_update request
+    when Option.is_some (Agent_protocol.Session_configuration.Patch.profile request.patch)
+         && not (Agent_protocol.Principal.has_scope principal Provider_select) ->
+    Error
+      (Agent_protocol.Error.create
+         Permission_denied
+         ~message:"profile selection requires provider.select"
+         ~retryable:false
+         ())
   | Session_inference_observations request
     when (request.include_configuration || request.include_diagnostics)
          && not (Agent_protocol.Principal.has_scope principal Diagnostics) ->

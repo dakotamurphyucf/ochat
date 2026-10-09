@@ -43,7 +43,8 @@ end
     item-appended callbacks once; restored history is not appended or re-emitted.
     All committed data is retained if a callback ends the session. *)
 val create
-  :  ?runtime_policy:Chat_response.Runtime_semantics.policy
+  :  ?root_binding:Chat_response.Root_binding.t
+  -> ?runtime_policy:Chat_response.Runtime_semantics.policy
   -> ?authoring_context:
        (input:Operation_worker.Input.t
         -> (Chat_response.Authoring_materialization.t, Agent_protocol.Error.t) result)

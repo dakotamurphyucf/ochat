@@ -92,6 +92,7 @@ module Capabilities = struct
         -> (unit, Agent_protocol.Error.t) result
     ; admit_moderator_turn : unit -> (unit, Agent_protocol.Error.t) result
     ; admit_notification_turn : unit -> (unit, Agent_protocol.Error.t) result
+    ; root_context : Chat_response.Root_context.t option
     ; consume_deferred : unit -> (History_entry.t list, Agent_protocol.Error.t) result
     ; request_permission :
         permission:Agent_protocol.Permission.t

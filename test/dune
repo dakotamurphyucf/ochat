@@ -1265,3 +1265,48 @@
  (libraries core uri expect_test_helpers_core ochat.agent_protocol ochat.agent_server)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_server_configuration_authorization_test)
+ (modules agent_server_configuration_authorization_test)
+ (libraries
+  agent_server_test_support
+  core
+  eio
+  eio_main
+  mirage-crypto-rng.unix
+  ochat.agent_protocol
+  ochat.agent_client
+  ochat.agent_server)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_server_configuration_profile_test)
+ (modules agent_server_configuration_profile_test)
+ (libraries
+  agent_server_test_support
+  credential_bridge_tests
+  inference_openai_tests
+  agent_session_test
+  core
+  jsonaf
+  eio
+  eio_main
+  mirage-crypto-rng.unix
+  ochat.agent_protocol
+  ochat.agent_client
+  ochat.agent_server
+  ochat.agent_session
+  ochat.inference_host
+  ochat.credential_registry
+  ochat.credential_registry_model
+  ochat.provider_secret_store
+  ochat.openai
+  ochat.inference
+  ochat.inference_runtime
+  ochat.inference_client
+  ochat.chat_response
+  ochat.transcript)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

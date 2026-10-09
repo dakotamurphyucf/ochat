@@ -229,6 +229,29 @@ module Adapter = struct
   type prepare =
     preparation_id:string -> Request.t -> (Plan.t, Preparation_error.t) Result.t
 
+  module Session_binding = struct
+    type t =
+      { prepare : prepare
+      ; close_resource : unit -> unit
+      ; mutable closed : bool
+      }
+
+    let create ~prepare ~close = { prepare; close_resource = close; closed = false }
+
+    let prepare t ~preparation_id request =
+      if t.closed
+      then Error Preparation_error.Session_closed
+      else t.prepare ~preparation_id request
+    ;;
+
+    let close t =
+      if not t.closed
+      then (
+        t.closed <- true;
+        Eio.Cancel.protect t.close_resource)
+    ;;
+  end
+
   type t =
     { id : string
     ; limits : Limits.t
@@ -241,7 +264,7 @@ module Adapter = struct
     ; open_session :
         (Session.t
          -> policy:Observation.Transport_policy.t
-         -> (prepare, Preparation_error.t) Result.t)
+         -> (Session_binding.t, Preparation_error.t) Result.t)
           option
     }
 
@@ -547,15 +570,76 @@ module Context = struct
     { t with policy; session = None; prepare = t.adapter.prepare ~policy }
   ;;
 
-  let with_session t session =
+  module Owned_binding = struct
+    type context = t
+
+    type t =
+      { context : context
+      ; session : Session.t
+      ; registration : Session.Registration.t option
+      ; alive : bool ref
+      }
+
+    let context t = t.context
+
+    let close t =
+      t.alive := false;
+      Option.iter t.registration ~f:(fun registration ->
+        match Session.release_registration t.session registration with
+        | Ok () -> ()
+        | Error Foreign_registration ->
+          failwith "context binding release ownership violated")
+    ;;
+  end
+
+  let open_owned_binding t session =
     if Session.is_closed session
     then Error Preparation_error.Session_closed
     else (
+      let alive = ref true in
+      let context prepare =
+        { t with
+          session = Some session
+        ; prepare =
+            (fun ~preparation_id request ->
+              if !alive
+              then prepare ~preparation_id request
+              else Error Preparation_error.Session_closed)
+        }
+      in
       match t.adapter.open_session with
-      | None -> Ok { t with session = Some session }
+      | None ->
+        Ok
+          ({ context = context t.prepare; session; registration = None; alive }
+           : Owned_binding.t)
       | Some open_session ->
-        Result.map (open_session session ~policy:t.policy) ~f:(fun prepare ->
-          { t with session = Some session; prepare }))
+        let open Result.Let_syntax in
+        let%bind binding = open_session session ~policy:t.policy in
+        (match
+           Session.register_release session (fun () ->
+             Adapter.Session_binding.close binding)
+         with
+         | Error Closed ->
+           Adapter.Session_binding.close binding;
+           Error Preparation_error.Session_closed
+         | Ok registration ->
+           let context = context (Adapter.Session_binding.prepare binding) in
+           Ok
+             ({ context; session; registration = Some registration; alive }
+              : Owned_binding.t)))
+  ;;
+
+  let with_session t session =
+    Result.map (open_owned_binding t session) ~f:Owned_binding.context
+  ;;
+
+  let with_preparation_lifetime t ~is_open =
+    let prepare ~preparation_id request =
+      if is_open ()
+      then t.prepare ~preparation_id request
+      else Error Preparation_error.Session_closed
+    in
+    { t with prepare }
   ;;
 
   let closed_receipt ~scope ~accounting_id ~limits =
@@ -650,6 +734,16 @@ module Context = struct
     if Document_schema.Json.equal (identity t.target) (identity target)
     then Result.map (t.adapter.bind target) ~f:(fun () -> { t with target })
     else Error Preparation_error.Target_mismatch
+  ;;
+
+  let reuse_unchanged t ~previous =
+    if
+      Request.Target.equal t.target previous.target
+      && Observation.Transport_policy.equal t.policy previous.policy
+      && (not (Option.exists previous.session ~f:Session.is_closed))
+      && Result.is_ok (previous.adapter.bind previous.target)
+    then previous
+    else t
   ;;
 
   let derive t ~target = derive_in_session (detach t) ~target

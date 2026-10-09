@@ -83,6 +83,13 @@ module Payload : sig
 
     val is_available : t -> bool
     val model : t -> string option
+    val provider : t -> string option
+    val profile : t -> string option
+
+    (** Known adapter/account/endpoint/replay-version equality only. This omits
+        logical provider/profile and model and grants no replay permission;
+        callers must separately qualify those fields under trusted policy. *)
+    val same_replay_transport_context : t -> t -> bool
 
     (** Known adapter/provider/account/endpoint/profile/replay version equality;
         model is deliberately excluded. Unavailable provenance never matches. *)

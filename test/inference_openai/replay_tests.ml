@@ -114,3 +114,94 @@ let%expect_test
   [%expect
     {| known classes admitted; raw extensions, reverse/transitive pairs, other accounts and unavailable origins refused |}]
 ;;
+
+let%expect_test "explicit same-owner profile group admits only closed same-model shapes" =
+  let policy =
+    Replay.create ~transitions:[ "a", "b", [ Function_call ] ]
+    |> ok
+    |> fun policy ->
+    Replay.with_compatible_profiles
+      policy
+      ~canonical_profile:"selected"
+      ~profiles:[ "selected"; "alternative"; "third" ]
+    |> ok
+  in
+  let selected
+        ?(provider = "selected")
+        ?(profile = "selected")
+        ?(adapter = "openai.responses")
+        ?(account = Some "account")
+        ?(endpoint = "https://api.openai.com/v1/responses")
+        ?(version = 1)
+        ?(model = Some "a")
+        ()
+    =
+    Origin.create
+      ~adapter
+      ~provider
+      ~account
+      ~endpoint
+      ~profile:(Some profile)
+      ~model
+      ~replay_version:version
+    |> ok
+  in
+  let actual = selected () in
+  let alternative = selected ~provider:"alternative" ~profile:"alternative" () in
+  let permits expected raw = Replay.permits policy ~actual ~expected ~raw in
+  assert (not (Origin.same_replay_context actual alternative));
+  List.iter [ message; function_call; custom_call ] ~f:(fun raw ->
+    assert (permits alternative raw);
+    assert (not (permits alternative (extension raw))));
+  assert (not (permits alternative reasoning));
+  List.iter
+    [ selected ~provider:"unrelated" ~profile:"unrelated" ()
+    ; selected ~provider:"alternative" ~profile:"alternative" ~account:(Some "other") ()
+    ; selected ~provider:"alternative" ~profile:"alternative" ~account:None ()
+    ; selected
+        ~provider:"alternative"
+        ~profile:"alternative"
+        ~endpoint:"https://other.example/v1/responses"
+        ()
+    ; selected
+        ~provider:"alternative"
+        ~profile:"alternative"
+        ~adapter:"other.responses"
+        ()
+    ; selected ~provider:"alternative" ~profile:"alternative" ~version:2 ()
+    ; selected ~provider:"alternative" ~profile:"alternative" ~model:(Some "b") ()
+    ; selected ~provider:"alternative" ~profile:"alternative" ~model:None ()
+    ; selected ~provider:"selected" ~profile:"alternative" ()
+    ; Origin.unavailable
+    ]
+    ~f:(fun expected -> assert (not (permits expected function_call)));
+  assert (
+    Replay.permits
+      policy
+      ~actual
+      ~expected:(selected ~model:(Some "b") ())
+      ~raw:function_call);
+  assert (Replay.permits policy ~actual ~expected:actual ~raw:(extension function_call));
+  assert (
+    Replay.permits
+      policy
+      ~actual:alternative
+      ~expected:(selected ~provider:"third" ~profile:"third" ())
+      ~raw:function_call);
+  List.iter
+    [ "absent", [ "selected"; "alternative" ]
+    ; "selected", [ "selected"; "selected" ]
+    ; "selected", [ "selected"; "bad\000id" ]
+    ; "selected", []
+    ; "selected", "selected" :: List.init 128 ~f:(fun i -> "alias-" ^ Int.to_string i)
+    ]
+    ~f:(fun (canonical_profile, profiles) ->
+      assert (
+        Result.is_error
+          (Replay.with_compatible_profiles policy ~canonical_profile ~profiles)));
+  print_endline
+    "explicit profiles only; exact transport/model and closed native shapes; original \
+     provenance unchanged";
+  [%expect
+    {|explicit profiles only; exact transport/model and closed native shapes; original provenance unchanged|}]
+;;

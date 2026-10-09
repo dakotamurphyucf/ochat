@@ -11,7 +11,8 @@ type t
 val new_namespace : Eio_unix.Stdenv.base -> string
 
 val create
-  :  ?transport_policy:Inference.Observation.Transport_policy.t
+  :  ?compatible_profiles:Inference_host.Compatible_profile.t list
+  -> ?transport_policy:Inference.Observation.Transport_policy.t
   -> sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
   -> home:string

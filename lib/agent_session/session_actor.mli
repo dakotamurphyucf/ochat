@@ -1733,3 +1733,20 @@ val update_metadata
   -> patch:Agent_protocol.Session_metadata.Patch.t
   -> unit
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
+(** Host-only authorization/resolver ports used outside the actor mailbox for root configuration. *)
+val set_configuration_policy
+  :  t
+  -> Configuration_policy.t
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+val configuration
+  :  t
+  -> (Agent_protocol.Session_configuration.t, Agent_protocol.Error.t) Result.t
+
+(** Writer-authorized atomic selection/receipt update; active captured work stays pinned. *)
+val update_configuration
+  :  t
+  -> ?command_audit:Document_schema.Document.t
+  -> Agent_protocol.Session_configuration.Update_request.t
+  -> (Agent_protocol.Session_configuration.t, Agent_protocol.Error.t) Result.t
