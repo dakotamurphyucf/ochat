@@ -36,8 +36,9 @@ specialist-conversations/
   LICENSE.txt
 ```
 
-Persistent child sessions need a durable host. Use this bundle's local Unix daemon,
-rather than transient `chat-tui --local`. From the extracted directory:
+Use this bundle's local Unix daemon for its configured workspace, tool policy and
+background child coordination. Native local records are durable by default, but
+work runs only while that local host is open. From the extracted directory:
 
 ```sh
 ochat-agent-server -config "$PWD/server.sexp" -validate-only
@@ -172,8 +173,8 @@ workspace at the entire bundle to make a missing-file error disappear.
 
 When finished, stop children, quit the TUI with Esc then `:q` and Enter, and stop
 the daemon with Ctrl-C. Keep the extracted directory to retain its private store;
-deleting it removes that local example's saved sessions. Native local transient
-mode cannot substitute for this durable setup.
+deleting it removes that local example's saved sessions. Native local mode does
+not replace this bundle's daemon configuration or background lifetime.
 
 Build the [complete persistent review team](../applications/persistent-review-team.md)
 to coordinate several roles, collect their receipt-correlated output with ChatML,

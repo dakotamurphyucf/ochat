@@ -696,7 +696,7 @@ let export t ~format ~revision =
       t.connection
       (Session_export
          { session_id = t.session_id
-         ; attachment_id = t.attachment.id
+         ; attachment_id = Some t.attachment.id
          ; format
          ; revision
          ; history = None
@@ -711,7 +711,7 @@ let download_blob t ~blob ~output =
   Blob_download.download
     ~connection:t.connection
     ~session_id:t.session_id
-    ~attachment_id:t.attachment.id
+    ~attachment_id:(Some t.attachment.id)
     ~blob
     ~output
 ;;

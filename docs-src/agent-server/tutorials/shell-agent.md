@@ -149,8 +149,9 @@ keep the complete bundle layout. For backend errors, consult
 [shell diagnostics](../../guide/chatmd-shell-host-integration.md); do not change
 `sandbox="required"` to bypass the problem. Truncated output is incomplete evidence.
 
-Quit with Esc, then `:q` and Enter after work finishes. Native local state ends
-with the process; source files remain. No background work was started.
+Quit with Esc, then `:q` and Enter after work finishes. The local host stops;
+durable records remain under `$HOME/.ochat/agent-store` unless `--transient`
+was selected. Source files remain. No background work was started.
 
 Next, [run checks with separate capabilities and approved report writes](../../tutorials/shell-guardrails.md).
 The next bundle includes the same project and all its companion files.

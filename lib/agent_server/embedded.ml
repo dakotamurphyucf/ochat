@@ -4,8 +4,8 @@ type options =
   { prompt_file : string
   ; workspace : string
   ; tool_dir : string
-  ; home : string
-  ; data_root : string option
+  ; home : string option
+  ; storage : Local_storage.t
   ; start_immediately : bool
   ; permission_profile : Config.Permission_profile.t
   ; attachment_mode : Agent_protocol.Session.attachment_mode
@@ -20,7 +20,7 @@ type host =
   ; max_attachments : int
   ; temporary_root : string option
   ; env : Eio_unix.Stdenv.base
-  ; mutable closed : bool
+  ; cleanup : Embedded_host_cleanup.t
   }
 
 type t =
@@ -79,10 +79,10 @@ let create_temporary_root env =
 ;;
 
 let data_root env options =
-  match options.data_root with
-  | Some path when Filename.is_absolute path -> Ok (path, None)
-  | Some _ ->
-    Error (Agent_protocol.Error.invalid_request "embedded data root must be absolute")
+  let open Result.Let_syntax in
+  let%bind durable = Local_storage.durable_root options.storage ~home:options.home in
+  match durable with
+  | Some root -> Ok (Local_storage.Root.path root, None)
   | None -> Result.map (create_temporary_root env) ~f:(fun path -> path, Some path)
 ;;
 
@@ -199,7 +199,7 @@ let principal id =
     ~attributes:[]
 ;;
 
-let make_connection daemon principal event_capacity ~max_attachments =
+let make_connection_owner daemon principal event_capacity ~max_attachments =
   let notifications = Eio.Stream.create event_capacity in
   let closed, close_resolver = Eio.Promise.create () in
   let publish_notification envelope =
@@ -220,13 +220,31 @@ let make_connection daemon principal event_capacity ~max_attachments =
       ~publish_notification
       ~max_attachments
   in
-  Agent_client.In_memory.create
-    ~request:(fun command ->
-      Dispatcher.dispatch_command (Daemon.dispatcher daemon) ~context command)
-    ~notifications
-    ~close:(fun () ->
-      ignore (Eio.Promise.try_resolve close_resolver ());
-      Daemon.close_connection daemon context)
+  let detached = ref false in
+  let detach_mutex = Eio.Mutex.create () in
+  let close_actual () =
+    Eio.Cancel.protect (fun () ->
+      Eio.Mutex.use_rw ~protect:true detach_mutex (fun () ->
+        if not !detached
+        then (
+          Daemon.close_connection daemon context;
+          detached := true)))
+  in
+  let connection =
+    Agent_client.In_memory.create
+      ~request:(fun command ->
+        Dispatcher.dispatch_command (Daemon.dispatcher daemon) ~context command)
+      ~notifications
+      ~close:(fun () ->
+        ignore (Eio.Promise.try_resolve close_resolver ());
+        close_actual ())
+  in
+  Embedded_host_cleanup.Connection_owner.create ~connection ~close_actual
+;;
+
+let make_connection daemon principal event_capacity ~max_attachments =
+  make_connection_owner daemon principal event_capacity ~max_attachments
+  |> Embedded_host_cleanup.Connection_owner.connection
 ;;
 
 let initialize connection =
@@ -262,7 +280,10 @@ let create_spec options =
     ~prompt:(Catalog (Catalog_identity.prompt_definition "embedded.prompt"))
     ~workspace:(Configured (Catalog_identity.workspace_definition "embedded.workspace"))
     ~liveness:Process_bound
-    ~persistence:(if Option.is_some options.data_root then Durable else Transient)
+    ~persistence:
+      (match options.storage with
+       | Transient -> Transient
+       | Default | Durable _ -> Durable)
     ~permission_profile:options.permission_profile.id
     ~start_immediately:options.start_immediately
     ~labels:[]
@@ -286,7 +307,7 @@ let create_session connection options =
   | Error _ as failure -> failure
 ;;
 
-let attach connection options session_id =
+let attach connection ~mode session_id =
   let open Result.Let_syntax in
   let%bind idempotency_key =
     Agent_protocol.Idempotency_key.of_string
@@ -295,7 +316,7 @@ let attach connection options session_id =
   let request =
     Agent_protocol.Session.Attach_request.
       { session_id
-      ; requested_mode = options.attachment_mode
+      ; requested_mode = mode
       ; subscribe = true
       ; after_sequence = None
       ; reclaim_token = None
@@ -329,7 +350,15 @@ let open_owned_host
     |> Result.map_error ~f:protocol_of_store
   in
   let operator_id = ref None in
+  let captured_store = ref None in
+  let namespace_transferred = ref false in
+  Eio.Switch.on_release sw (fun () ->
+    if not !namespace_transferred
+    then
+      Option.iter !captured_store ~f:(fun store ->
+        if Agent_store.Session_store.is_closed store then cleanup_root env temporary_root));
   let before_activation store =
+    captured_store := Some store;
     let%map id =
       match temporary_root with
       | Some _ -> Ok (Agent_protocol.Id.Principal.create ())
@@ -346,11 +375,13 @@ let open_owned_host
       ~options:daemon_options
       ~config
       ~tool_dir
-      ~home
+      ?home
       ~before_activation
       ~process_start_identity:None
       ()
   in
+  let cleanup = Embedded_host_cleanup.create ~sw ~env ~daemon ~temporary_root in
+  namespace_transferred := true;
   let finish () =
     let%bind id =
       Result.of_option
@@ -363,11 +394,11 @@ let open_owned_host
     let max_attachments =
       daemon_options.Daemon.protocol_limits.max_attachments_per_connection
     in
-    let connection = make_connection daemon principal event_capacity ~max_attachments in
+    let owner = make_connection_owner daemon principal event_capacity ~max_attachments in
+    Embedded_host_cleanup.adopt_connection_exn cleanup owner;
+    let connection = Embedded_host_cleanup.Connection_owner.connection owner in
     match initialize connection with
-    | Error failure ->
-      Agent_client.Connection.close connection;
-      Error failure
+    | Error _ as failure -> failure
     | Ok () ->
       Ok
         { daemon
@@ -377,21 +408,10 @@ let open_owned_host
         ; max_attachments
         ; temporary_root
         ; env
-        ; closed = false
+        ; cleanup
         }
   in
-  match finish () with
-  | Ok _ as result -> result
-  | Error failure ->
-    ignore (Daemon.shutdown daemon : (unit, Agent_protocol.Error.t) result);
-    cleanup_root env temporary_root;
-    Error failure
-  | exception exn ->
-    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-    Eio.Cancel.protect (fun () ->
-      ignore (Daemon.shutdown daemon : (unit, Agent_protocol.Error.t) result);
-      cleanup_root env temporary_root);
-    Exn.raise_with_original_backtrace exn backtrace
+  Embedded_host_cleanup.protect cleanup finish
 ;;
 
 let open_host
@@ -413,27 +433,18 @@ let open_host
       { daemon_options with startup_mode; extension_host = Embedded_durable }
     ~config
     ~tool_dir
-    ~home
+    ~home:(Some home)
     ~event_capacity
     ~temporary_root:None
 ;;
 
-let close_host host =
-  Eio.Cancel.protect (fun () ->
-    if not host.closed
-    then (
-      host.closed <- true;
-      Agent_client.Connection.close host.connection;
-      ignore (Daemon.shutdown host.daemon : (unit, Agent_protocol.Error.t) result);
-      cleanup_root host.env host.temporary_root))
-;;
-
+let close_host host = Embedded_host_cleanup.close host.cleanup
 let host_connection host = host.connection
 let host_principal host = host.principal
 let host_dispatcher host = Daemon.dispatcher host.daemon
 
 let connect_host host =
-  if host.closed
+  if Embedded_host_cleanup.is_closing host.cleanup
   then
     Error
       (Agent_protocol.Error.create
@@ -450,7 +461,7 @@ let connect_host host =
          ~max_attachments:host.max_attachments)
 ;;
 
-let start
+let open_local_host
       ~sw
       ~env
       ?(daemon_options = Daemon.default_options)
@@ -469,37 +480,65 @@ let start
   let config =
     { config with server = { config.server with authoring_packages; authoring_budget } }
   in
-  let host_result =
-    open_owned_host
+  open_owned_host
+    ~sw
+    ~env
+    ~daemon_options:
+      { daemon_options with
+        startup_mode = On_demand
+      ; extension_host =
+          (match options.storage with
+           | Transient -> Embedded_transient
+           | Default | Durable _ -> Embedded_durable)
+      }
+    ~config
+    ~tool_dir:options.tool_dir
+    ~home:options.home
+    ~event_capacity:options.event_capacity
+    ~temporary_root
+;;
+
+let with_local_host
       ~sw
       ~env
-      ~daemon_options:
-        { daemon_options with
-          startup_mode = Execute
-        ; extension_host =
-            (if Option.is_some options.data_root
-             then Embedded_durable
-             else Embedded_transient)
-        }
-      ~config
-      ~tool_dir:options.tool_dir
-      ~home:options.home
-      ~event_capacity:options.event_capacity
-      ~temporary_root
+      ?daemon_options
+      ?authoring_package_files
+      ?authoring_budget
+      options
+      ~f
+  =
+  let open Result.Let_syntax in
+  let%bind host =
+    open_local_host
+      ~sw
+      ~env
+      ?daemon_options
+      ?authoring_package_files
+      ?authoring_budget
+      options
   in
-  match host_result with
-  | Error failure ->
-    cleanup_root env temporary_root;
-    Error failure
-  | Ok host ->
-    let retained = ref false in
-    Exn.protect
-      ~finally:(fun () -> if not !retained then close_host host)
-      ~f:(fun () ->
-        let%bind session_id = create_session host.connection options in
-        let%map attachment = attach host.connection options session_id in
-        retained := true;
-        { host; session_id; attachment })
+  let%bind result = Embedded_host_cleanup.protect host.cleanup (fun () -> f host) in
+  close_host host;
+  Ok result
+;;
+
+let start ~sw ~env ?daemon_options ?authoring_package_files ?authoring_budget options =
+  let open Result.Let_syntax in
+  let%bind host =
+    open_local_host
+      ~sw
+      ~env
+      ?daemon_options
+      ?authoring_package_files
+      ?authoring_budget
+      options
+  in
+  Embedded_host_cleanup.protect host.cleanup (fun () ->
+    let%bind session_id = create_session host.connection options in
+    let%map attachment =
+      attach host.connection ~mode:options.attachment_mode session_id
+    in
+    { host; session_id; attachment })
 ;;
 
 let connection t = host_connection t.host
@@ -516,3 +555,44 @@ let connect t =
 
 let close_connection t = Daemon.close_connection t.host.daemon
 let close t = close_host t.host
+
+let connect_owned t =
+  Embedded_host_cleanup.adopt_additional_connection t.host.cleanup ~create:(fun () ->
+    make_connection_owner
+      t.host.daemon
+      t.host.principal
+      t.host.event_capacity
+      ~max_attachments:t.host.max_attachments)
+;;
+
+let with_session t ~f =
+  Embedded_host_cleanup.protect t.host.cleanup (fun () ->
+    let%bind.Result value = f t in
+    close t;
+    Ok value)
+;;
+
+let select_session host expected =
+  if Embedded_host_cleanup.is_closing host.cleanup
+  then
+    Error
+      (Agent_protocol.Error.create
+         Server_shutting_down
+         ~message:"embedded host is closing"
+         ~retryable:false
+         ())
+  else
+    Daemon.select_session host.daemon ~principal:host.principal ~expected
+    |> Result.map ~f:(fun (_ : Session_registry.entry) -> ())
+;;
+
+let attach_retained host ~mode ~expected =
+  let open Result.Let_syntax in
+  let%bind () = select_session host expected in
+  let session_id =
+    Agent_protocol.Session_lifecycle.Expected.reference expected
+    |> Agent_protocol.Session_ref.session_id
+  in
+  let%map attachment = attach host.connection ~mode session_id in
+  { host; session_id; attachment }
+;;

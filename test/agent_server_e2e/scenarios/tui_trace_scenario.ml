@@ -1,4 +1,14 @@
 open Core
+
+let durable_storage path =
+  let root =
+    Agent_server.Local_storage.Root.create ~path ()
+    |> Result.map_error ~f:(fun (error : Agent_protocol.Error.t) -> error.message)
+    |> Result.ok_or_failwith
+  in
+  Agent_server.Local_storage.Durable root
+;;
+
 module F = Support.Tui_fixture
 module Config = Support.Config_fixture
 module Temp = Support.Temporary_environment
@@ -12,8 +22,8 @@ let embedded_options fixture : Agent_server.Embedded.options =
   { prompt_file = Config.prompt_path fixture
   ; workspace = Config.physical_workspace fixture
   ; tool_dir = Config.physical_workspace fixture
-  ; home = roots.home
-  ; data_root = Some roots.data
+  ; home = Some roots.home
+  ; storage = durable_storage roots.data
   ; start_immediately = true
   ; permission_profile = Agent_server.Embedded.default_permission_profile
   ; attachment_mode = Read_write

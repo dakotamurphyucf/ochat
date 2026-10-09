@@ -110,16 +110,14 @@ module Lifecycle = struct
     let outcome t = Lifecycle_documents.Prepared.outcome t.documents
   end
 
-  module Installed = struct
+  module Current = struct
     type t =
       { owner : Handle.t
       ; epoch : unit ref
       ; entry : Session_index.Entry.t
-      ; outcome : R.Outcome.t
       }
 
     let entry t = t.entry
-    let outcome t = t.outcome
 
     (* Physical identity intentionally compares live ownership capabilities. *)
     let is_current t handle =
@@ -130,6 +128,18 @@ module Lifecycle = struct
       && Option.is_none handle.lifecycle_unavailable
       && Option.is_none handle.metadata_unavailable
     ;;
+  end
+
+  module Installed = struct
+    type t =
+      { current : Current.t
+      ; outcome : R.Outcome.t
+      }
+
+    let current t = t.current
+    let entry t = Current.entry t.current
+    let outcome t = t.outcome
+    let is_current t handle = Current.is_current t.current handle
   end
 
   module Removal = struct
@@ -1166,6 +1176,36 @@ let check_lifecycle_observation t handle observation =
     else Error (Store_error.Corrupt "lifecycle authority observation changed"))
 ;;
 
+let current_lifecycle t handle ~current_entry =
+  let open Result.Let_syntax in
+  let%bind observation = read_lifecycle t handle in
+  let%bind metadata = Handle.metadata_checked handle in
+  let%bind () =
+    if
+      Jsonaf.exactly_equal
+        (Agent_protocol.Session.to_json current_entry.Session_index.Entry.session)
+        (Agent_protocol.Session.to_json metadata.session)
+      && Option.is_none handle.Handle.canonical_projection
+    then Ok ()
+    else Error (Store_error.Corrupt "selection canonical projection is not current")
+  in
+  let%bind entry =
+    Session_index.Entry.with_lifecycle
+      current_entry
+      (Lifecycle.Observation.value observation)
+  in
+  let%bind indexed = Session_index.find_checked t.index (Handle.session_id handle) in
+  let%bind () = check_handle t handle in
+  let%bind () =
+    if
+      phys_equal observation.Lifecycle.Observation.epoch handle.Handle.lifecycle_epoch
+      && Option.equal Session_index.Entry.equal indexed (Some entry)
+    then Ok ()
+    else Error (Store_error.Corrupt "selection lifecycle projection is not current")
+  in
+  Ok ({ owner = handle; epoch = handle.lifecycle_epoch; entry } : Lifecycle.Current.t)
+;;
+
 let prepare_lifecycle t handle observation ~current_entry ~transition ~now =
   let open Result.Let_syntax in
   let%bind () = check_lifecycle_observation t handle observation in
@@ -1279,9 +1319,8 @@ let publish_lifecycle t handle prepared =
   | Remove _ -> Error (Store_error.Corrupt "removed authority needs a removal capability")
   | Upsert entry ->
     let%map () = publish_prepared_lifecycle t handle prepared in
-    { Lifecycle.Installed.owner = handle
-    ; epoch = handle.lifecycle_epoch
-    ; entry
+    { Lifecycle.Installed.current =
+        { Lifecycle.Current.owner = handle; epoch = handle.lifecycle_epoch; entry }
     ; outcome = Lifecycle_documents.Prepared.outcome prepared.documents
     }
 ;;

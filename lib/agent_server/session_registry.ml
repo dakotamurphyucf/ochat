@@ -1083,3 +1083,67 @@ let retains_cleanup_handle t handle =
       in
       Option.exists actual ~f:(phys_equal handle)))
 ;;
+
+let select_indexed t reservation ~store ~handle ~current ~authorize ~recover =
+  let module S = Agent_store.Session_store in
+  let module C = S.Lifecycle.Current in
+  let module Entry = Agent_store.Session_index.Entry in
+  let open Result.Let_syntax in
+  let session_id = reservation.Lifecycle_reservation.session_id in
+  let check_current current =
+    let entry = C.entry current in
+    let%bind () = authorize entry.session in
+    if
+      S.owns_handle store handle
+      && C.is_current current handle
+      && Agent_protocol.Id.Session.equal entry.session.id session_id
+      && (not entry.archived)
+      && Agent_store.Session_archive_record.Admission.equal entry.admission Automatic
+    then Ok ()
+    else Error (lifecycle_conflict "session selection projection is not current")
+  in
+  let check_reservation_open () =
+    let%bind () = check_reservation t reservation in
+    if Atomic.get t.closing
+    then Error (shutting_down ())
+    else if Option.is_some (find t session_id)
+    then Error (lifecycle_conflict "session selection already has a loaded owner")
+    else Ok ()
+  in
+  let%bind () =
+    Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+      let%bind () = check_reservation_open () in
+      let%bind () = check_current current in
+      match reservation.target with
+      | Indexed expected
+        when Entry.equal expected (C.entry current)
+             && Option.exists (Map.find t.indexed session_id) ~f:(Entry.equal expected) ->
+        Ok ()
+      | Indexed _ | Loaded _ | Absent ->
+        Error (lifecycle_conflict "session indexed selection basis changed"))
+  in
+  Eio.Cancel.protect (fun () ->
+    let%bind entry, fresh = recover () in
+    close_provisional t ~session_id entry (fun () ->
+      Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+        let%bind () = check_reservation_open () in
+        let%bind () = check_retained_owner entry in
+        let%bind () = check_current fresh in
+        let%bind () =
+          if
+            Option.exists entry.store_handle ~f:(phys_equal handle)
+            && Int.equal
+                 (C.entry fresh).session.generation
+                 (C.entry current).session.generation
+            && Agent_protocol.Session_lifecycle.Revision.equal
+                 (C.entry fresh).lifecycle_revision
+                 (C.entry current).lifecycle_revision
+          then Ok ()
+          else Error (lifecycle_conflict "session recovery returned a different owner")
+        in
+        Atomic.set
+          t.sessions
+          (Map.set (Atomic.get t.sessions) ~key:session_id ~data:entry);
+        t.indexed <- Map.remove t.indexed session_id;
+        Ok entry)))
+;;

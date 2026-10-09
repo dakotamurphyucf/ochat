@@ -37,8 +37,8 @@ let%expect_test
           { prompt_file
           ; workspace = root
           ; tool_dir = root
-          ; home = root
-          ; data_root = None
+          ; home = Some root
+          ; storage = Agent_server.Local_storage.Transient
           ; start_immediately = true
           ; permission_profile =
               E.interactive_permission_profile ~authorize_shell_manifest

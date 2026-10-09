@@ -378,6 +378,7 @@ let test_local_transient_bootstrap env environment =
       env
       fixture
       [ "--local"
+      ; "--transient"
       ; "--prompt"
       ; Config_fixture.prompt_path fixture
       ; "--workspace"

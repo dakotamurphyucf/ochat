@@ -2,11 +2,28 @@
 
 ## Save a session and resume work
 
-Persistence depends on the host. The native local TUI uses process-bound transient
-state: quitting ends that host. Use a detached daemon session when work must
-outlive the terminal; durable records survive daemon restart, but interrupted
-operations are not executable continuations. Local stdio or an embedding host can
-use a persistent data root while remaining process-bound.
+Native local TUI, local stdio and the embedding API default to durable records
+under `$HOME/.ochat/agent-store`. The host remains process-bound: quitting stops
+its work; it does not leave a daemon or an executable continuation. Explicit
+absolute `--data-root` selects another durable root. `--transient` opts into a
+private disposable root, removed only after host ownership is released. The
+embedding API expresses the same choice as `Local_storage.Default`, validated
+`Durable Root.t` (with an optional name), or `Transient`.
+
+Default storage requires an absolute HOME. Explicit roots do not depend on HOME;
+features needing a home must report that absence rather than using `/` or cwd.
+There is no migration from legacy `.ochat/sessions` and no replacement of a
+missing saved workspace with the launch directory.
+
+Opening an on-demand host, listing, inspecting, replaying receipts and exporting
+retained content do not activate actors or providers. Explicit selection consumes
+the exact current host/session/generation/canonical/lifecycle anchor and then
+recovers only that owner. A stopped selected session stays stopped. A retained
+child with a merely unselected parent keeps its pending initial-start intent;
+absence from the loaded registry does not mean the parent's authority ended.
+Restore remains gated until explicit Resume; a Resume gate commit is not a
+runtime start. Interrupted work is reconciled through the existing recovery path,
+not resumed as an OCaml continuation.
 
 Follow the [local TUI persistence guidance](tutorials/local-tui.md#persistence-and-compatibility)
 or the [Unix daemon reconnect tutorial](tutorials/unix-daemon.md) for the host you

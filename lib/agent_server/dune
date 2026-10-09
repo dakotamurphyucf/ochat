@@ -53,6 +53,11 @@
   schedule_scheduler
   maintenance
   session_factory
+  local_storage
+  local_selection
+  retained_session
+  recovery_parent
+  embedded_host_cleanup
   embedded
   startup_cleanup
   daemon

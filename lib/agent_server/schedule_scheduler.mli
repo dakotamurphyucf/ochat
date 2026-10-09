@@ -14,6 +14,13 @@ val reconcile_recovered
   -> startup_time:Agent_protocol.Timestamp.t
   -> (unit, Agent_protocol.Error.t) result
 
+(** Recover one actual uninstalled selected owner without discovering other IDs.
+    Does not clear the Store's global eager-recovery marker. *)
+val reconcile_entry
+  :  Session_registry.entry
+  -> startup_time:Agent_protocol.Timestamp.t
+  -> (unit, Agent_protocol.Error.t) Result.t
+
 (** Each pass also sweeps subscription deadlines through the actor, independently
     of any earlier callback holding this entry's runtime. Interrupted runtime
     delivery retries an uncommitted claim; it does not turn shutdown into a

@@ -23,6 +23,8 @@ type t =
   ; blob_store : Agent_store.Blob_store.t
   ; session_store : Agent_store.Session_store.t
   ; lifecycle_service : Session_lifecycle_service.t
+  ; retained : Retained_session.t
+  ; archive_payload_limit : int
   ; initialize :
       principal:Agent_protocol.Principal.t
       -> Agent_protocol.Initialize.Request.t
@@ -56,6 +58,8 @@ let create
       ~blob_store
       ~session_store
       ~lifecycle_service
+      ~retained
+      ~archive_payload_limit
       ~initialize
       ~ping
       ~server_info
@@ -86,6 +90,8 @@ let create
   ; blob_store
   ; session_store
   ; lifecycle_service
+  ; retained
+  ; archive_payload_limit
   ; initialize
   ; ping
   ; server_info
@@ -534,15 +540,7 @@ let principal_is_admin principal =
   Agent_protocol.Principal.has_scope principal Administer_configuration
 ;;
 
-let session_visible_to principal (session : Agent_protocol.Session.t) =
-  principal_is_admin principal
-  || Option.value_map
-       session.Agent_protocol.Session.creator
-       ~default:false
-       ~f:(fun creator ->
-         Agent_protocol.Id.Principal.compare creator principal.Agent_protocol.Principal.id
-         = 0)
-;;
+let session_visible_to = Authorization.session_visible_to
 
 let state_visible_to principal state =
   session_visible_to principal (Agent_session.Session_state.summary state)
@@ -561,6 +559,39 @@ let require_connection_attachment context ~session_id ~attachment_id =
   if Connection_context.owns_attachment context ~session_id ~attachment_id
   then Ok ()
   else Error (error Permission_denied "attachment is not owned by this connection")
+;;
+
+let with_retained_artifact t context ~session_id ~attachment_id f =
+  let open Result.Let_syntax in
+  let%bind () =
+    match attachment_id with
+    | None -> Ok ()
+    | Some attachment_id ->
+      require_connection_attachment context ~session_id ~attachment_id
+  in
+  let principal = Connection_context.principal context in
+  Retained_session.with_state
+    t.retained
+    ~session_id
+    ~authorize:(fun summary ->
+      if session_visible_to principal summary
+      then Ok ()
+      else Error (error Permission_denied "session is not visible to this principal"))
+    ~f:(fun handle state ->
+      let%bind () =
+        match attachment_id with
+        | None -> Ok ()
+        | Some attachment_id ->
+          if
+            Option.is_some (Session_registry.find t.registry session_id)
+            && List.exists
+                 state.Agent_session.Session_state.attachments
+                 ~f:(fun attachment ->
+                   Agent_protocol.Id.Attachment.equal attachment.id attachment_id)
+          then Ok ()
+          else Error (error Permission_denied "attachment is no longer current")
+      in
+      f handle state)
 ;;
 
 let require_connection_writer context attachment_id =
@@ -638,53 +669,51 @@ let handle_workspace_get t request =
   |> Result.map ~f:(fun workspace -> Agent_protocol.Method_result.Workspace_get workspace)
 ;;
 
-let handle_blob_read t context request =
-  let open Result.Let_syntax in
-  let%bind () =
-    require_connection_attachment
-      context
-      ~session_id:request.Agent_protocol.Blob.Read_request.session_id
-      ~attachment_id:request.attachment_id
-  in
-  let%bind entry, _ = find_visible_entry t context request.session_id in
-  let%bind store_handle =
-    entry.Session_registry.store_handle
-    |> Result.of_option ~error:(error Invalid_state "session has no durable blob store")
-  in
-  let%bind handle =
-    Agent_store.Blob_store.open_session t.blob_store store_handle request.blob_id
-    |> Result.map_error ~f:persistence_error
-  in
-  let%bind metadata =
-    Agent_store.Blob_store.Handle.metadata_checked handle
-    |> Result.map_error ~f:persistence_error
-  in
-  let blob = metadata.blob in
-  let%bind () =
-    if Principal_projection.can_read_blob (Connection_context.principal context) metadata
-    then Ok ()
-    else Error (error Permission_denied "blob requires additional principal scopes")
-  in
-  if Int64.(request.offset > blob.byte_length)
-  then Error (error Invalid_request "blob read offset exceeds the blob length")
-  else (
-    let%map data =
-      Agent_store.Blob_store.read_range
-        t.blob_store
-        ~sw:t.sw
-        handle
-        ~offset:request.offset
-        ~max_bytes:request.max_bytes
-      |> Result.map_error ~f:persistence_error
-    in
-    let next_offset = Int64.(request.offset + of_int (String.length data)) in
-    Agent_protocol.Method_result.Blob_read
-      { blob
-      ; offset = request.offset
-      ; next_offset
-      ; data_base64 = Base64.encode_exn data
-      ; eof = Int64.equal next_offset blob.byte_length
-      })
+let handle_blob_read t context (request : Agent_protocol.Blob.Read_request.t) =
+  with_retained_artifact
+    t
+    context
+    ~session_id:request.session_id
+    ~attachment_id:request.attachment_id
+    (fun store_handle _state ->
+       let open Result.Let_syntax in
+       let%bind handle =
+         Agent_store.Blob_store.open_session t.blob_store store_handle request.blob_id
+         |> Result.map_error ~f:persistence_error
+       in
+       let%bind metadata =
+         Agent_store.Blob_store.Handle.metadata_checked handle
+         |> Result.map_error ~f:persistence_error
+       in
+       let blob = metadata.blob in
+       let%bind () =
+         if
+           Principal_projection.can_read_blob
+             (Connection_context.principal context)
+             metadata
+         then Ok ()
+         else Error (error Permission_denied "blob requires additional principal scopes")
+       in
+       if Int64.(request.offset > blob.byte_length)
+       then Error (error Invalid_request "blob read offset exceeds the blob length")
+       else (
+         let%map data =
+           Agent_store.Blob_store.read_range
+             t.blob_store
+             ~sw:t.sw
+             handle
+             ~offset:request.offset
+             ~max_bytes:request.max_bytes
+           |> Result.map_error ~f:persistence_error
+         in
+         let next_offset = Int64.(request.offset + of_int (String.length data)) in
+         Agent_protocol.Method_result.Blob_read
+           { blob
+           ; offset = request.offset
+           ; next_offset
+           ; data_base64 = Base64.encode_exn data
+           ; eof = Int64.equal next_offset blob.byte_length
+           }))
 ;;
 
 let rec forward_subscriber context ~attachment subscriber =
@@ -1678,12 +1707,12 @@ let create_export_blob
   |> Result.map_error ~f:persistence_error
 ;;
 
-let export_snapshot t entry revision =
+let export_snapshot t handle state revision =
   let open Result.Let_syntax in
-  let%bind state = Agent_session.Session_actor.state entry.Session_registry.actor in
   match revision with
-  | None -> Agent_session.Session_actor.snapshot entry.actor
-  | Some revision when Int64.equal revision state.counters.revision ->
+  | None -> Ok (Agent_session.Session_state.snapshot ~now:(now t) state)
+  | Some revision
+    when Int64.equal revision state.Agent_session.Session_state.counters.revision ->
     Ok (Agent_session.Session_state.snapshot ~now:state.identity.updated_at state)
   | Some revision ->
     let%bind reference =
@@ -1692,73 +1721,65 @@ let export_snapshot t entry revision =
       |> Result.of_option
            ~error:(error Conflict "requested revision has no retained archive")
     in
-    let%bind handle =
-      entry.store_handle
-      |> Result.of_option
-           ~error:(error Invalid_state "session has no durable archive store")
-    in
     let%map archived =
       Agent_session.Compaction_archive.read
         ~env:t.env
         ~handle
-        ~max_payload_length:Int.max_value
+        ~max_payload_length:t.archive_payload_limit
         reference
     in
     Agent_session.Session_state.snapshot ~now:archived.identity.updated_at archived
 ;;
 
-let handle_session_export t context request =
-  let open Result.Let_syntax in
-  let%bind () =
-    require_connection_attachment
-      context
-      ~session_id:request.Agent_protocol.Session.Export_request.session_id
-      ~attachment_id:request.attachment_id
-  in
-  let%bind entry, _ = find_visible_entry t context request.session_id in
-  let%bind snapshot = export_snapshot t entry request.revision in
-  let%bind snapshot =
-    Pagination.history
-      t.pagination
-      (Connection_context.principal context)
-      { session_id = request.session_id; history = request.history }
-      snapshot
-  in
-  let%bind snapshot =
-    Principal_projection.snapshot (Connection_context.principal context) snapshot
-  in
-  let projected = Agent_protocol.Public.Snapshot.fields snapshot in
-  let entries =
-    if Option.exists request.history ~f:(fun history -> history.effective)
-    then
-      Option.value_map projected.effective_history ~default:[] ~f:(fun window ->
-        window.entries)
-    else projected.canonical_history.entries
-  in
-  let%bind media_type, display_name, content = render_export request snapshot entries in
-  let%bind store_handle =
-    entry.store_handle
-    |> Result.of_option ~error:(error Invalid_state "session has no durable blob store")
-  in
-  let%bind handle =
-    create_export_blob
-      t
-      (Connection_context.principal context)
-      request.session_id
-      store_handle
-      ~media_type
-      ~display_name
-      content
-  in
-  let%map metadata =
-    Agent_store.Blob_store.Handle.metadata_checked handle
-    |> Result.map_error ~f:persistence_error
-  in
-  Agent_protocol.Method_result.Session_export
-    { blob = metadata.blob
-    ; session_revision = projected.revision
-    ; latest_event_sequence = projected.latest_event_sequence
-    }
+let handle_session_export t context (request : Agent_protocol.Session.Export_request.t) =
+  with_retained_artifact
+    t
+    context
+    ~session_id:request.session_id
+    ~attachment_id:request.attachment_id
+    (fun store_handle state ->
+       let open Result.Let_syntax in
+       let%bind snapshot = export_snapshot t store_handle state request.revision in
+       let%bind snapshot =
+         Pagination.history
+           t.pagination
+           (Connection_context.principal context)
+           { session_id = request.session_id; history = request.history }
+           snapshot
+       in
+       let%bind snapshot =
+         Principal_projection.snapshot (Connection_context.principal context) snapshot
+       in
+       let projected = Agent_protocol.Public.Snapshot.fields snapshot in
+       let entries =
+         if Option.exists request.history ~f:(fun history -> history.effective)
+         then
+           Option.value_map projected.effective_history ~default:[] ~f:(fun window ->
+             window.entries)
+         else projected.canonical_history.entries
+       in
+       let%bind media_type, display_name, content =
+         render_export request snapshot entries
+       in
+       let%bind handle =
+         create_export_blob
+           t
+           (Connection_context.principal context)
+           request.session_id
+           store_handle
+           ~media_type
+           ~display_name
+           content
+       in
+       let%map metadata =
+         Agent_store.Blob_store.Handle.metadata_checked handle
+         |> Result.map_error ~f:persistence_error
+       in
+       Agent_protocol.Method_result.Session_export
+         { blob = metadata.blob
+         ; session_revision = projected.revision
+         ; latest_event_sequence = projected.latest_event_sequence
+         })
 ;;
 
 let validate_stopped_revision state expected_revision =

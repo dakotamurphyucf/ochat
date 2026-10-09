@@ -227,7 +227,7 @@ let download ~sw env parent path existing fault =
     Agent_client.Blob_download.download
       ~connection
       ~session_id:(Agent_protocol.Id.Session.create ())
-      ~attachment_id:(Agent_protocol.Id.Attachment.create ())
+      ~attachment_id:(Some (Agent_protocol.Id.Attachment.create ()))
       ~blob
       ~output
   in
@@ -334,7 +334,7 @@ let first_http_chunk client blob =
   let command =
     Agent_protocol.Command.Blob_read
       { session_id = Agent_protocol.Id.Session.create ()
-      ; attachment_id = Agent_protocol.Id.Attachment.create ()
+      ; attachment_id = Some (Agent_protocol.Id.Attachment.create ())
       ; blob_id = blob.Agent_protocol.Blob.Metadata.id
       ; offset = 0L
       ; max_bytes = 6

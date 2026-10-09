@@ -170,7 +170,7 @@ let export
       client
       (Session_export
          { session_id = session.id
-         ; attachment_id = attachment.id
+         ; attachment_id = Some attachment.id
          ; format = Json
          ; revision = None
          ; history = None
@@ -253,7 +253,7 @@ let exercise_actions client session attachment =
   let bad_read =
     Agent_protocol.Command.Blob_read
       { session_id = session.id
-      ; attachment_id = attachment.id
+      ; attachment_id = Some attachment.id
       ; blob_id = blob.id
       ; offset = Int64.succ blob.byte_length
       ; max_bytes = 1
@@ -509,7 +509,7 @@ let test_export env environment =
          Agent_client.Blob_download.download
            ~connection:(connection client)
            ~session_id:session.id
-           ~attachment_id:attachment.id
+           ~attachment_id:(Some attachment.id)
            ~blob
            ~output
        in

@@ -758,7 +758,7 @@ let%expect_test "blob reads are bounded and chunks validate exact cursors" =
   let generator = deterministic_generator () in
   let request : Blob.Read_request.t =
     { session_id = Id.Session.create_with generator
-    ; attachment_id = Id.Attachment.create_with generator
+    ; attachment_id = Some (Id.Attachment.create_with generator)
     ; blob_id = Id.Blob.create_with generator
     ; offset = 4L
     ; max_bytes = 32
@@ -769,7 +769,8 @@ let%expect_test "blob reads are bounded and chunks validate exact cursors" =
     Blob.Read_request.of_json
       (`Object
           [ "session_id", Id.Session.to_json request.session_id
-          ; "attachment_id", Id.Attachment.to_json request.attachment_id
+          ; ( "attachment_id"
+            , Id.Attachment.to_json (Option.value_exn request.attachment_id) )
           ; "blob_id", Id.Blob.to_json request.blob_id
           ; "offset", `Number "0"
           ; "max_bytes", `Number "0"
@@ -1292,4 +1293,42 @@ let%expect_test
        , Result.is_error (Session_catalog.of_json only_gate) )
        : int64 * Session_lifecycle.Result.Admission.t * bool)];
   [%expect {| (0 Automatic true) |}]
+;;
+
+let%expect_test "retained artifact access omits absent attachments and rejects null" =
+  let generator = deterministic_generator () in
+  let session_id = Id.Session.create_with generator in
+  let export : Session.Export_request.t =
+    { session_id; attachment_id = None; format = Json; revision = None; history = None }
+  in
+  let read : Blob.Read_request.t =
+    { session_id
+    ; attachment_id = None
+    ; blob_id = Id.Blob.create_with generator
+    ; offset = 0L
+    ; max_bytes = 32
+    }
+  in
+  let absent json =
+    match json with
+    | `Object fields -> not (List.Assoc.mem fields "attachment_id" ~equal:String.equal)
+    | _ -> false
+  in
+  let with_null json =
+    match json with
+    | `Object fields -> `Object (("attachment_id", `Null) :: fields)
+    | _ -> failwith "request object"
+  in
+  let export_json = Session.Export_request.to_json export in
+  let read_json = Blob.Read_request.to_json read in
+  print_s
+    [%sexp
+      (( absent export_json
+       , absent read_json
+       , Result.is_ok (Session.Export_request.of_json export_json)
+       , Result.is_ok (Blob.Read_request.of_json read_json)
+       , Result.is_error (Session.Export_request.of_json (with_null export_json))
+       , Result.is_error (Blob.Read_request.of_json (with_null read_json)) )
+       : bool * bool * bool * bool * bool * bool)];
+  [%expect {| (true true true true true true) |}]
 ;;

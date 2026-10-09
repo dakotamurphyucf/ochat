@@ -157,3 +157,9 @@ let authorize principal command =
          ())
   | _ -> Ok ()
 ;;
+
+let session_visible_to principal (session : Agent_protocol.Session.t) =
+  Agent_protocol.Principal.has_scope principal Administer_configuration
+  || Option.exists session.creator ~f:(fun creator ->
+    Agent_protocol.Id.Principal.equal creator principal.Agent_protocol.Principal.id)
+;;

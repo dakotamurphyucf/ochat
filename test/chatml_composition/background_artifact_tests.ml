@@ -85,7 +85,7 @@ let read_artifact client (reference : P.Job_artifact.t) =
             client
             (Blob_read
                { session_id = reference.session_id
-               ; attachment_id = attachment.id
+               ; attachment_id = Some attachment.id
                ; blob_id = reference.blob.id
                ; offset
                ; max_bytes = 4096

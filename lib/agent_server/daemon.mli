@@ -14,6 +14,7 @@ type status =
 
 type startup_mode =
   | Execute
+  | On_demand
   | Operator_only
 [@@deriving equal, sexp]
 
@@ -79,7 +80,7 @@ val start
   -> env:Eio_unix.Stdenv.base
   -> config:Config.t
   -> tool_dir:string
-  -> home:string
+  -> ?home:string
   -> process_start_identity:string option
   -> ?options:options
   -> ?before_activation:
@@ -156,3 +157,12 @@ val health : t -> include_details:bool -> Agent_protocol.Health.Response.t
     remain non-replayable. Actor/resource cleanup always runs under cancellation
     protection and can outlive that grace. *)
 val shutdown : t -> (unit, Agent_protocol.Error.t) result
+
+(** Explicit trusted-host execution selection, requiring current retained principal
+    visibility and owner scope plus exact canonical/lifecycle anchor. Does not imply
+    session.start; Operator_only rejects it. Reads/replay never invoke it. *)
+val select_session
+  :  t
+  -> principal:Agent_protocol.Principal.t
+  -> expected:Agent_protocol.Session_lifecycle.Expected.t
+  -> (Session_registry.entry, Agent_protocol.Error.t) Result.t

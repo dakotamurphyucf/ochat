@@ -17,6 +17,17 @@ val get_session
   -> Agent_protocol.Id.Session.t
   -> (Agent_protocol.Public.Snapshot.t, Agent_protocol.Error.t) result
 
+(** Export retained content without attaching or selecting execution. Current
+    method scopes and session visibility apply on every request. The resulting
+    blob can be read with [Blob_download.download ~attachment_id:None]. *)
+val export_session
+  :  Connection.t
+  -> session_id:Agent_protocol.Id.Session.t
+  -> format:Agent_protocol.Session.Export_request.format
+  -> revision:int64 option
+  -> history:Agent_protocol.History.Window_request.t option
+  -> (Agent_protocol.Method_result.Export.t, Agent_protocol.Error.t) result
+
 val list_sessions_page
   :  Connection.t
   -> Agent_protocol.Session.List_request.t
@@ -109,7 +120,8 @@ val enumerate_collections
   -> max_pages:int
   -> (Agent_protocol.Organization_group.Collection.t list, Agent_protocol.Error.t) result
 
-(** Restore retained state to explicit resume admission without activating work. *)
+(** Restore retained identity/content to Active while retaining the explicit
+    resume gate. Does not construct a runtime or start retained work. *)
 val restore_session
   :  Connection.t
   -> Agent_protocol.Session_lifecycle.Request.t

@@ -414,7 +414,7 @@ let export_archive connection session revision =
         connection
         (Session_export
            { session_id = session.id
-           ; attachment_id = session.attachment_id
+           ; attachment_id = Some session.attachment_id
            ; format = Json
            ; revision = Some revision
            ; history = None
@@ -429,7 +429,7 @@ let export_archive connection session revision =
       connection
       (Blob_read
          { session_id = session.id
-         ; attachment_id = session.attachment_id
+         ; attachment_id = Some session.attachment_id
          ; blob_id = export.blob.id
          ; offset = 0L
          ; max_bytes = Agent_protocol.Blob.Read_request.max_chunk_bytes
@@ -467,7 +467,7 @@ let check_corrupt_archive
           connection
           (Session_export
              { session_id = session.id
-             ; attachment_id = session.attachment_id
+             ; attachment_id = Some session.attachment_id
              ; format = Json
              ; revision = Some revision
              ; history = None
@@ -583,7 +583,7 @@ let test_export env environment =
     let command =
       Agent_protocol.Command.Session_export
         { session_id = session.id
-        ; attachment_id = session.attachment_id
+        ; attachment_id = Some session.attachment_id
         ; format = Json
         ; revision = Some session.revision
         ; history = None

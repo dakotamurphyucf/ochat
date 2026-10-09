@@ -85,9 +85,11 @@ session state, and compare the script to the source above. See
 
 ## Finish and continue
 
-Press Esc, type `:q`, and press Enter after work stops. Native local state is
-process-bound and is not resumed on the next launch; a new session resets this
-counter. Archive or remove only the recorded temporary directory after exit.
+Press Esc, type `:q`, and press Enter after work stops. The process-bound host
+stops and durable records remain under `$HOME/.ochat/agent-store` by default.
+A fresh launch creates a new session and resets this counter; selecting a retained
+session does not implicitly start it. Remove only the recorded example directory
+after exit; session records are managed separately.
 
 To grow beyond a turn counter, [build a stateful review tool](stateful-workflow.md)
 and then [deliver real background check results](background-results.md).

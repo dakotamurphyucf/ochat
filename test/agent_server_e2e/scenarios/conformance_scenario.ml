@@ -1,4 +1,14 @@
 open Core
+
+let durable_storage path =
+  let root =
+    Agent_server.Local_storage.Root.create ~path ()
+    |> Result.map_error ~f:(fun (error : Agent_protocol.Error.t) -> error.message)
+    |> Result.ok_or_failwith
+  in
+  Agent_server.Local_storage.Durable root
+;;
+
 module Config_fixture = Support.Config_fixture
 module Daemon_host = Support.Daemon_host
 module Daemon_process = Support.Daemon_process
@@ -571,8 +581,8 @@ let embedded_options environment fixture data_root =
     { prompt_file = Config_fixture.prompt_path fixture
     ; workspace = Config_fixture.physical_workspace fixture
     ; tool_dir = Config_fixture.physical_workspace fixture
-    ; home = roots.home
-    ; data_root = Some data_root
+    ; home = Some roots.home
+    ; storage = durable_storage data_root
     ; start_immediately = false
     ; permission_profile = default_permission_profile
     ; attachment_mode = Read_write
@@ -1110,7 +1120,7 @@ let export_session connection session attachment =
   let export_request =
     Agent_protocol.Session.Export_request.
       { session_id = session.Agent_protocol.Session.id
-      ; attachment_id = attachment.Agent_protocol.Session.Attachment.id
+      ; attachment_id = Some attachment.Agent_protocol.Session.Attachment.id
       ; format = Json
       ; revision = None
       ; history = None
@@ -1125,7 +1135,7 @@ let read_blob_chunk connection session attachment blob offset =
   let read_request =
     Agent_protocol.Blob.Read_request.
       { session_id = session.Agent_protocol.Session.id
-      ; attachment_id = attachment.Agent_protocol.Session.Attachment.id
+      ; attachment_id = Some attachment.Agent_protocol.Session.Attachment.id
       ; blob_id = blob.Agent_protocol.Blob.Metadata.id
       ; offset
       ; max_bytes = 64
@@ -1156,7 +1166,7 @@ let missing_blob_error connection session attachment =
   let read_request =
     Agent_protocol.Blob.Read_request.
       { session_id = session.Agent_protocol.Session.id
-      ; attachment_id = attachment.Agent_protocol.Session.Attachment.id
+      ; attachment_id = Some attachment.Agent_protocol.Session.Attachment.id
       ; blob_id = Agent_protocol.Id.Blob.create ()
       ; offset = 0L
       ; max_bytes = 64
@@ -1260,7 +1270,7 @@ let error_observations connection ~key_prefix =
     ; ( "blob-offset-invalid"
       , Blob_read
           { session_id = created.session.id
-          ; attachment_id = writer.id
+          ; attachment_id = Some writer.id
           ; blob_id = export.blob.id
           ; offset = Int64.(export.blob.byte_length + 1L)
           ; max_bytes = 64

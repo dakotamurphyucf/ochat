@@ -562,7 +562,7 @@ let%expect_test "blob download streams short chunks and verifies the final diges
         Agent_client.Blob_download.download
           ~connection:(blob_connection content valid_blob)
           ~session_id
-          ~attachment_id:(Agent_protocol.Id.Attachment.create_with generator)
+          ~attachment_id:(Some (Agent_protocol.Id.Attachment.create_with generator))
           ~blob:valid_blob
           ~output:(Eio.Flow.buffer_sink output)
         |> Result.is_ok
@@ -572,7 +572,7 @@ let%expect_test "blob download streams short chunks and verifies the final diges
         Agent_client.Blob_download.download
           ~connection:(blob_connection content invalid_blob)
           ~session_id
-          ~attachment_id:(Agent_protocol.Id.Attachment.create_with generator)
+          ~attachment_id:(Some (Agent_protocol.Id.Attachment.create_with generator))
           ~blob:invalid_blob
           ~output:(Eio.Flow.buffer_sink (Buffer.create 32))
         |> Result.is_error

@@ -10,6 +10,7 @@ type status =
 
 type startup_mode =
   | Execute
+  | On_demand
   | Operator_only
 [@@deriving equal, sexp]
 
@@ -59,6 +60,8 @@ type t =
   ; maintenance : Maintenance.t
   ; config_watcher : Config_watcher.t
   ; factory : Session_factory.t
+  ; selection : Local_selection.t option
+  ; start_queue : Agent_session.Start_queue.t
   ; http_authenticator : Authenticator.t option
   ; oauth_bearer_validator : Authenticator.bearer_validator option
   ; oauth_actor_validator : Authenticator.actor_validator option
@@ -990,8 +993,13 @@ let compose
       ~validate_removal:(Session_factory.validate_session_removal factory)
   in
   let%bind () =
-    if equal_startup_mode options.startup_mode Execute
+    if not (equal_startup_mode options.startup_mode Operator_only)
     then Session_lifecycle_service.recover_removals lifecycle_service
+    else Ok ()
+  in
+  let%bind () =
+    if equal_startup_mode options.startup_mode On_demand
+    then Session_factory.rebuild_index_projections factory
     else Ok ()
   in
   let%bind indexed_sessions =
@@ -1000,6 +1008,21 @@ let compose
   in
   Session_registry.index_all registry indexed_sessions;
   let execute = equal_startup_mode options.startup_mode Execute in
+  let execution_enabled = not (equal_startup_mode options.startup_mode Operator_only) in
+  let selection =
+    if execution_enabled
+    then
+      Some
+        (Local_selection.create
+           ~sw
+           ~now:(fun () -> timestamp env)
+           ~job_result_max_count:factory_limits.job_result_recovery_max_count
+           ~job_result_max_bytes:factory_limits.job_result_recovery_max_bytes
+           ~store
+           ~registry
+           ~factory)
+    else None
+  in
   if execute
   then Session_registry.install_loader registry (Session_factory.recover_session factory);
   Session_registry.install_reader registry (Session_factory.read_session factory);
@@ -1042,17 +1065,19 @@ let compose
   in
   let start_scheduler =
     Start_scheduler.start_controlled
-      ~enabled:execute
+      ~enabled:execution_enabled
       ~sw
       ~clock:(Eio.Stdenv.clock env)
       ~registry
       ~queue:start_queue
       ~resume_initial_starts:(fun () ->
-        Session_factory.resume_generated_initial_starts factory)
+        if execute
+        then Session_factory.resume_generated_initial_starts factory
+        else Session_factory.resume_selected_initial_starts factory)
   in
   let job_scheduler =
     Job_scheduler.start_controlled
-      ~enabled:execute
+      ~enabled:execution_enabled
       ~sw
       ~clock:(Eio.Stdenv.clock env)
       ~registry
@@ -1061,21 +1086,22 @@ let compose
   in
   let permission_scheduler =
     Permission_scheduler.start_controlled
-      ~enabled:execute
+      ~enabled:execution_enabled
       ~sw
       ~clock:(Eio.Stdenv.clock env)
       ~registry
   in
   let schedule_scheduler =
     Schedule_scheduler.start_controlled
-      ~enabled:execute
+      ~enabled:execution_enabled
       ~sw
       ~clock:(Eio.Stdenv.mono_clock env)
       ~registry
   in
   let maintenance =
     Maintenance.start_controlled
-      ~enabled:execute
+      ~collection_policy:(if execute then Load_retained else Selected_only)
+      ~enabled:execution_enabled
       ~env
       ~sw
       ~clock:(Eio.Stdenv.clock env)
@@ -1128,6 +1154,12 @@ let compose
       ~blob_store
       ~session_store:store
       ~lifecycle_service
+      ~retained:
+        (Retained_session.create
+           ~store
+           ~registry
+           ~read_owned:(Session_factory.read_owned_session factory))
+      ~archive_payload_limit:factory_limits.snapshot_payload_limit
       ~initialize:
         (initialize
            env
@@ -1148,7 +1180,7 @@ let compose
       ~provider_operator
   in
   let admit command =
-    if execute
+    if execution_enabled
     then Ok ()
     else (
       match command with
@@ -1251,6 +1283,8 @@ let compose
     ; maintenance
     ; config_watcher
     ; factory
+    ; selection
+    ; start_queue
     ; http_authenticator
     ; oauth_bearer_validator
     ; oauth_actor_validator =
@@ -1269,7 +1303,7 @@ let start
       ~env
       ~(config : Config.t)
       ~tool_dir
-      ~home
+      ?home
       ~process_start_identity
       ?(options = default_options)
       ?(before_activation = fun _ -> Ok ())
@@ -1278,7 +1312,7 @@ let start
   Mirage_crypto_rng_unix.use_default ();
   let options =
     match options.startup_mode with
-    | Execute -> options
+    | Execute | On_demand -> options
     | Operator_only ->
       { options with
         qualify_chatml_extensions = false
@@ -1404,4 +1438,22 @@ let shutdown t =
     Agent_store.Session_store.close t.store
     |> Result.map_error ~f:protocol_of_store
     |> Result.map ~f:(fun () -> t.status_ref := Stopped)
+;;
+
+let select_session t ~principal ~expected =
+  match t.selection with
+  | None ->
+    Error
+      (Agent_protocol.Error.create
+         Invalid_state
+         ~message:"operator-only host does not admit session selection"
+         ~retryable:false
+         ())
+  | Some selection ->
+    let open Result.Let_syntax in
+    let%bind entry = Local_selection.select selection ~principal ~expected in
+    let%map () =
+      Start_scheduler.seed_recovered ~registry:t.registry ~queue:t.start_queue
+    in
+    entry
 ;;

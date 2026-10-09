@@ -1,7 +1,9 @@
 # Prompt sessions — compatibility-host state
 
 This overview describes the **legacy file-backed TUI**, not the daemon store.
-Native `--local` runs transiently; daemon sessions use actor-owned journals and snapshots. See
+Native `--local` and daemon sessions use actor-owned journals and snapshots.
+Local records default to `$HOME/.ochat/agent-store`; `--transient` opts into
+temporary records, and quitting closes the process-bound local host. See
 [host modes](../agent-server/concepts.md) and
 [local TUI choices](../agent-server/tutorials/local-tui.md).
 

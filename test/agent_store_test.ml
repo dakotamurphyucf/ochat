@@ -2744,6 +2744,57 @@ let%expect_test
     {|staged canonical journal installs with exact full hints; clean restart remains indexed|}]
 ;;
 
+let%expect_test "current selection witness is read-only and binds exact live Handle" =
+  let module S = Agent_store.Session_store in
+  with_temp_directory "ochat-current-selection" (fun env root ->
+    Eio.Switch.run (fun sw ->
+      let store = crash_recovery_create ~sw env root in
+      crash_recovery_add store ~sw session_id 7L;
+      let handle =
+        S.open_session store ~sw ~actor_lock_nonce:"selection" session_id |> store_ok
+      in
+      let entry =
+        Agent_store.Session_index.find_checked (S.session_index store) session_id
+        |> store_ok
+        |> Option.value_exn
+      in
+      let paths =
+        [ crash_recovery_index_path root
+        ; Filename.concat (S.Handle.directory handle) "metadata.sexp"
+        ]
+      in
+      let bytes () =
+        List.map paths ~f:(fun path -> Eio.Path.load (crash_recovery_path env path))
+      in
+      let before = bytes () in
+      let current = S.current_lifecycle store handle ~current_entry:entry |> store_ok in
+      let foreign =
+        crash_recovery_create ~sw env (Filename.concat root "foreign-store")
+      in
+      let rejects_foreign =
+        Result.is_error (S.current_lifecycle foreign handle ~current_entry:entry)
+      in
+      let unchanged = List.equal String.equal before (bytes ()) in
+      let remains_current = S.Lifecycle.Current.is_current current handle in
+      let exact_entry =
+        Agent_store.Session_index.Entry.equal entry (S.Lifecycle.Current.entry current)
+      in
+      S.close foreign |> store_ok;
+      S.close_session store handle |> store_ok;
+      let reopened =
+        S.open_session store ~sw ~actor_lock_nonce:"selection-reopen" session_id
+        |> store_ok
+      in
+      let rejects_replacement = not (S.Lifecycle.Current.is_current current reopened) in
+      S.close_session store reopened |> store_ok;
+      S.close store |> store_ok;
+      print_s
+        [%sexp
+          ((rejects_foreign, unchanged, remains_current, exact_entry, rejects_replacement)
+           : bool * bool * bool * bool * bool)]));
+  [%expect {| (true true true true true) |}]
+;;
+
 let%expect_test
     "lifecycle publication preserves gated restore across stale catalog and rebuild"
   =

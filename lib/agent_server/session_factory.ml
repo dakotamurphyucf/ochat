@@ -106,7 +106,7 @@ type t =
   ; quota_manager : Agent_session.Quota_manager.t
   ; job_capacity : Job_capacity.t
   ; tool_dir : string
-  ; home : string
+  ; home : string option
   ; inference_policy : inference_policy
   ; qualify_chatml_extensions : bool
   ; session_helpers : Agent_session.Session_management_channel.grant list
@@ -698,7 +698,11 @@ type parent_stop_recovery =
   ; stop : bool
   }
 
-let parent_stop_recovery t (state : Agent_session.Session_state.t) =
+type parent_recovery_policy =
+  | Loaded_only
+  | Retained_unselected of Recovery_parent.t
+
+let parent_stop_recovery t ~policy (state : Agent_session.Session_state.t) =
   let module D = Agent_store.Delegation_store in
   let open Result.Let_syntax in
   match state.spec.delegation with
@@ -734,30 +738,54 @@ let parent_stop_recovery t (state : Agent_session.Session_state.t) =
                 (Agent_store.Store_error.Corrupt
                    "parent stop counter moved backwards during child recovery"))
        in
-       let stop =
-         Option.is_some record.revocation
-         || Int64.(epoch > previous)
-         || Option.value_map parent ~default:true ~f:(fun parent ->
-           Agent_protocol.Session.equal_desired_state parent.lifecycle.desired Stopped
-           || parent.halted
-           || Option.is_some parent.failure
-           || Result.is_error
-                (Agent_session.Delegation_authority.check_invocation_owner record parent))
+       let%bind stop =
+         match parent, policy with
+         | None, Retained_unselected retained ->
+           let%map disposition =
+             Recovery_parent.inspect retained ~reference ~expected_stop_epoch:previous
+           in
+           (match disposition with
+            | Retired -> true
+            | Retained _ -> false)
+         | Some _, (Loaded_only | Retained_unselected _) | None, Loaded_only ->
+           Ok
+             (Option.is_some record.revocation
+              || Int64.(epoch > previous)
+              || Option.value_map parent ~default:true ~f:(fun parent ->
+                Agent_protocol.Session.equal_desired_state
+                  parent.lifecycle.desired
+                  Stopped
+                || parent.halted
+                || Option.is_some parent.failure
+                || Result.is_error
+                     (Agent_session.Delegation_authority.check_invocation_owner
+                        record
+                        parent)))
        in
        Ok (Some { reference; epoch; stop }))
 ;;
 
 let runtime_paths t handle source state =
-  Agent_session.Runtime_paths.create
-    ~env:t.env
-    ~tool_dir:t.tool_dir
-    ~workspace:
-      state.Agent_session.Session_state.spec.workspace_instance.canonical_root.native_path
-    ~prompt_dir:(source_prompt_directory source)
-    ~session_dir:(Agent_store.Session_store.Handle.directory handle)
-    ~cache_dir:(Agent_store.Session_store.Handle.cache_directory handle)
-    ~home:t.home
-  |> Result.map_error ~f:protocol_of_store
+  match t.home with
+  | None ->
+    Error
+      (Agent_protocol.Error.create
+         Invalid_state
+         ~message:"native runtime qualification requires an explicit host home"
+         ~retryable:false
+         ())
+  | Some home ->
+    Agent_session.Runtime_paths.create
+      ~env:t.env
+      ~tool_dir:t.tool_dir
+      ~workspace:
+        state.Agent_session.Session_state.spec.workspace_instance.canonical_root
+          .native_path
+      ~prompt_dir:(source_prompt_directory source)
+      ~session_dir:(Agent_store.Session_store.Handle.directory handle)
+      ~cache_dir:(Agent_store.Session_store.Handle.cache_directory handle)
+      ~home
+    |> Result.map_error ~f:protocol_of_store
 ;;
 
 let shell_permission_choices scopes =
@@ -5571,7 +5599,7 @@ let persist_recovered_state t handle journal persistence state =
   persist_metadata t handle state |> Result.map_error ~f:protocol_of_store
 ;;
 
-let recover_open_handle t handle =
+let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t handle =
   let open Result.Let_syntax in
   let%bind owner =
     Session_recovery_owner.create
@@ -5581,6 +5609,7 @@ let recover_open_handle t handle =
       ~capacity:None
   in
   Session_registry.with_recovery_owner t.registry owner (fun () ->
+    let%bind parent_policy = prepare_parent_policy () in
     let%bind lifecycle =
       Agent_store.Session_store.read_lifecycle t.store handle
       |> Result.map_error ~f:protocol_of_store
@@ -5631,7 +5660,7 @@ let recover_open_handle t handle =
     let state =
       Agent_session.Session_persistence.Restored.state recovery.Agent_store.Recovery.state
     in
-    let%bind parent_stop = parent_stop_recovery t state in
+    let%bind parent_stop = parent_stop_recovery t ~policy:parent_policy state in
     let stopping = Option.exists parent_stop ~f:(fun parent -> parent.stop) in
     let%bind inference_target =
       match
@@ -5875,6 +5904,22 @@ let read_session t index_entry =
       read_owned_session t handle))
 ;;
 
+let owns_handle t handle = Agent_store.Session_store.owns_handle t.store handle
+
+let recover_owned_session t handle =
+  recover_open_handle
+    ~prepare_parent_policy:(fun () ->
+      Recovery_parent.create
+        ~store:t.store
+        ~registry:t.registry
+        ~max_depth:t.limits.delegation_max_depth
+        ~read_owned:(read_owned_session t)
+        ~authorize_independent:(authorize_independent t)
+      |> Result.map ~f:(fun retained -> Retained_unselected retained))
+    t
+    handle
+;;
+
 let recover_index_entry t index_entry =
   let session_id = index_entry.Agent_store.Session_index.Entry.session.id in
   let handle_result =
@@ -5954,6 +5999,19 @@ let rebuild_retained_projection t indexed =
       |> Result.map_error ~f:protocol_of_store
     in
     Session_registry.with_recovery_handle t.registry ~store:t.store handle reconcile)
+;;
+
+let rebuild_index_projections t =
+  let open Result.Let_syntax in
+  if not (Agent_store.Session_store.index_was_rebuilt t.store)
+  then Ok ()
+  else (
+    let%bind entries =
+      Agent_store.Session_store.list_sessions_checked t.store
+      |> Result.map_error ~f:protocol_of_store
+    in
+    List.fold_result entries ~init:() ~f:(fun () entry ->
+      rebuild_retained_projection t entry))
 ;;
 
 let recover_sessions t =
@@ -6498,6 +6556,40 @@ let resume_generated_initial_starts t =
           ignore
             (resume_generated_initial_start t entry
              : (unit, Agent_protocol.Error.t) result)))
+;;
+
+let resume_selected_initial_starts t =
+  let module A = Agent_session.Session_actor in
+  let module D = Agent_store.Delegation_store in
+  let open Result.Let_syntax in
+  let rec ancestry_selected depth reference =
+    if depth >= t.limits.delegation_max_depth
+    then Error (corrupt "selected initial-start ancestry exceeds depth limit")
+    else (
+      let%bind record =
+        D.resolve (Agent_store.Session_store.delegations t.store) reference
+        |> Result.map_error ~f:protocol_of_store
+      in
+      match Session_registry.find t.registry record.key.parent_session_id with
+      | None -> Ok false
+      | Some parent ->
+        let%bind state = A.state parent.actor in
+        (match state.spec.delegation with
+         | None -> Ok true
+         | Some ancestor -> ancestry_selected (depth + 1) ancestor))
+  in
+  let resume entry =
+    let%bind state = A.state entry.Session_registry.actor in
+    match state.pending_initial_start, state.spec.delegation with
+    | false, _ -> Ok ()
+    | true, None -> resume_generated_initial_start t entry
+    | true, Some reference ->
+      let%bind selected = ancestry_selected 0 reference in
+      if selected then resume_generated_initial_start t entry else Ok ()
+  in
+  with_generated_creation_lock t (fun () ->
+    List.iter (Session_registry.entries t.registry) ~f:(fun entry ->
+      ignore (resume entry : (unit, Agent_protocol.Error.t) Result.t)))
 ;;
 
 (* Source-specific admission runs under the parent's runtime lease. Everything

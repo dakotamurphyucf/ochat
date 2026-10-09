@@ -702,7 +702,7 @@ let test_scope_projection_clients ~sw ~token env admin reader =
       admin
       (Session_export
          { session_id
-         ; attachment_id = writer_id
+         ; attachment_id = Some writer_id
          ; format = Json
          ; revision = None
          ; history = None

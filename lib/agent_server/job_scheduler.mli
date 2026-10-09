@@ -27,6 +27,15 @@ val reconcile_recovered
   -> max_total_bytes:int
   -> (unit, Agent_protocol.Error.t) result
 
+(** Recover one actual uninstalled owner before selection admits it to schedulers.
+    Same bounded interrupted-job/result recovery as eager startup; does not load
+    other sessions or clear the Store's global recovery marker. *)
+val reconcile_entry
+  :  Session_registry.entry
+  -> max_count:int
+  -> max_total_bytes:int
+  -> (unit, Agent_protocol.Error.t) Result.t
+
 (** Internal composition: false constructs a stopped service and starts no fiber. *)
 val start_controlled
   :  enabled:bool

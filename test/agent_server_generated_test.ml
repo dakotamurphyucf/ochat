@@ -33,6 +33,7 @@ let install_child
       ~mode
       ~source
       ~capability_pins
+      ~pending_initial_start
       ~revoke
   =
   let store = Daemon.store daemon in
@@ -95,9 +96,16 @@ let install_child
     ; authored_tool = None
     ; inference_target
     ; authority_sha256 =
-        Agent_session.Delegation_authority.fingerprint parent |> protocol_ok
+        (let moderator =
+           Agent_session.Moderator_checkpoint.observer parent.moderator |> protocol_ok
+         in
+         Agent_session.Delegation_authority.fingerprint ?moderator parent |> protocol_ok)
     ; capability_pins
-    ; lifetime = Owned
+    ; lifetime =
+        (match mode with
+         | `Independent ->
+           Independent { authorization_sha256 = digest "retained-fixture-policy" }
+         | _ -> Owned)
     ; created_at = parent.identity.created_at
     }
   in
@@ -136,7 +144,7 @@ let install_child
       protocol =
         { parent.spec.protocol with
           prompt = Generated artifact.revision_id
-        ; start_immediately = false
+        ; start_immediately = pending_initial_start
         }
     ; prompt_definition_id = None
     ; prompt_revision_id = artifact.revision_id
@@ -161,7 +169,11 @@ let install_child
   in
   let state =
     { state with
-      conversation =
+      lifecycle = { desired = Stopped; observed = Stopped }
+    ; pending_initial_start
+    ; parent_stop_epoch =
+        (if pending_initial_start then Some parent.stop_epoch else state.parent_stop_epoch)
+    ; conversation =
         { state.conversation with
           next_history_sequence = 1L
         ; reserved_history_through = 1L
@@ -284,6 +296,7 @@ let%expect_test
                           ~mode
                           ~source:child_source
                           ~capability_pins:[]
+                          ~pending_initial_start:false
                           ~revoke:true
                       in
                       parent.id, child_id, retained)))
@@ -664,6 +677,7 @@ let on_event ctx state event = Task.pure(state)
                           ~source:
                             {|<config model="child-test" reasoning_effort="high"/><developer>Child.</developer><tool type="inherited" name="read_file"/>|}
                           ~capability_pins:pins
+                          ~pending_initial_start:false
                           ~revoke:false
                       in
                       let child =
@@ -1179,5 +1193,281 @@ let%expect_test
     {|
     (1 "active ancestry recovered; fresh inherited bindings execute")
     (2 "active ancestry recovered; fresh inherited bindings execute")
+    |}]
+;;
+
+let%expect_test "on-demand selected child defers initial start while parent is unselected"
+  =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let root = temporary_root env in
+    Exn.protect
+      ~finally:(fun () ->
+        Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+      ~f:(fun () ->
+        let prompt = Filename.concat root "parent.chatmd" in
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / prompt)
+          {|<developer>Saved parent fixture.</developer>
+<script id="saved_parent" language="chatml" kind="moderator" api="extensibility-v1">
+let initial_state = 0
+let on_event = fun ctx state event -> Task.pure(state)
+</script>|};
+        let configuration = config root root prompt in
+        let calls = ref 0 in
+        let start sw mode =
+          Daemon.start
+            ~sw
+            ~env
+            ~config:configuration
+            ~tool_dir:root
+            ~home:root
+            ~process_start_identity:None
+            ~options:
+              { Daemon.default_options with
+                startup_mode = mode
+              ; inference_policy =
+                  inference_policy
+                    ~default_model:"fixture-model"
+                    ~post_stream:(fun ~sw:_ ~inputs:_ ->
+                      Int.incr calls;
+                      failwith "unexpected provider")
+              }
+            ()
+          |> protocol_ok
+        in
+        let parent_id, stopped_parent_id =
+          Eio.Switch.run (fun sw ->
+            let daemon = start sw Execute in
+            let client = connection daemon (principal ()) in
+            Exn.protect
+              ~finally:(fun () ->
+                Agent_client.Connection.close client;
+                Daemon.shutdown daemon |> protocol_ok)
+              ~f:(fun () ->
+                initialize client;
+                let parent, _ = create_session ~start_immediately:true client in
+                let stopped, _ = create_session ~key:"retained-stopped-parent" client in
+                parent.id, stopped.id))
+        in
+        (* Install after the parent's orderly shutdown. The indexed-only owner
+           models a retained pending admission; stopping a loaded parent would
+           legitimately cancel that admission before the cold restart. *)
+        let child_id =
+          Eio.Switch.run (fun sw ->
+            let daemon = start sw On_demand in
+            Exn.protect
+              ~finally:(fun () -> Daemon.shutdown daemon |> protocol_ok)
+              ~f:(fun () ->
+                let store = Daemon.store daemon in
+                let handle =
+                  S.open_session
+                    store
+                    ~sw
+                    ~actor_lock_nonce:"pending-parent-fixture"
+                    parent_id
+                  |> store_ok
+                in
+                let parent_state =
+                  Exn.protect
+                    ~finally:(fun () -> S.close_session store handle |> store_ok)
+                    ~f:(fun () ->
+                      Agent_server.Session_factory.read_owned_session
+                        (Daemon.factory daemon)
+                        handle
+                      |> protocol_ok)
+                in
+                assert (
+                  P.Session.equal_desired_state parent_state.lifecycle.desired Running);
+                let read_parent session_id =
+                  let handle =
+                    S.open_session
+                      store
+                      ~sw
+                      ~actor_lock_nonce:"retained-parent-negative"
+                      session_id
+                    |> store_ok
+                  in
+                  Exn.protect
+                    ~finally:(fun () -> S.close_session store handle |> store_ok)
+                    ~f:(fun () ->
+                      Agent_server.Session_factory.read_owned_session
+                        (Daemon.factory daemon)
+                        handle
+                      |> protocol_ok)
+                in
+                let inspector =
+                  Agent_server.Recovery_parent.create
+                    ~store
+                    ~registry:(Daemon.registry daemon)
+                    ~max_depth:8
+                    ~read_owned:
+                      (Agent_server.Session_factory.read_owned_session
+                         (Daemon.factory daemon))
+                    ~authorize_independent:(fun record ->
+                      match record.D.admission.lifetime with
+                      | Independent { authorization_sha256 }
+                        when String.equal
+                               authorization_sha256
+                               (digest "retained-fixture-policy") -> Ok ()
+                      | Owned | Invocation_owned _ | Independent _ ->
+                        Error
+                          (P.Error.create
+                             Permission_denied
+                             ~message:"retained fixture policy denied"
+                             ~retryable:false
+                             ()))
+                  |> protocol_ok
+                in
+                let inspect_child child =
+                  let state = read_parent child in
+                  Agent_server.Recovery_parent.inspect
+                    inspector
+                    ~reference:(Option.value_exn state.spec.delegation)
+                    ~expected_stop_epoch:(Option.value_exn state.parent_stop_epoch)
+                  |> protocol_ok
+                in
+                let stopped_parent = read_parent stopped_parent_id in
+                let stopped_child, _ =
+                  install_child
+                    ~env
+                    ~sw
+                    ~daemon
+                    ~parent:stopped_parent
+                    ~mode:`Valid
+                    ~source:"<developer>Stopped parent child.</developer>"
+                    ~capability_pins:[]
+                    ~pending_initial_start:true
+                    ~revoke:false
+                in
+                let is_retired = function
+                  | Agent_server.Recovery_parent.Disposition.Retired -> true
+                  | Retained _ -> false
+                in
+                let stopped_retired = is_retired (inspect_child stopped_child) in
+                let independent_child, _ =
+                  install_child
+                    ~env
+                    ~sw
+                    ~daemon
+                    ~parent:stopped_parent
+                    ~mode:`Independent
+                    ~source:"<developer>Retained independent child.</developer>"
+                    ~capability_pins:[]
+                    ~pending_initial_start:true
+                    ~revoke:false
+                in
+                let independent_stopped_retained =
+                  not (is_retired (inspect_child independent_child))
+                in
+                S.archive_session store stopped_parent_id |> store_ok;
+                let independent_archived_retained =
+                  not (is_retired (inspect_child independent_child))
+                in
+                let owned_archived_retired = is_retired (inspect_child stopped_child) in
+                print_s
+                  [%sexp
+                    { independent_stopped_retained : bool
+                    ; independent_archived_retained : bool
+                    ; owned_archived_retired : bool
+                    }];
+                S.remove_session store stopped_parent_id |> store_ok;
+                assert (
+                  Option.is_none
+                    (Agent_server.Session_registry.remove
+                       (Daemon.registry daemon)
+                       stopped_parent_id));
+                let missing_retired = is_retired (inspect_child stopped_child) in
+                let revoked_child, _ =
+                  install_child
+                    ~env
+                    ~sw
+                    ~daemon
+                    ~parent:parent_state
+                    ~mode:`Valid
+                    ~source:"<developer>Revoked parent child.</developer>"
+                    ~capability_pins:[]
+                    ~pending_initial_start:true
+                    ~revoke:true
+                in
+                let revoked_retired = is_retired (inspect_child revoked_child) in
+                print_s
+                  [%sexp
+                    { stopped_retired : bool
+                    ; missing_retired : bool
+                    ; revoked_retired : bool
+                    }];
+                let child, _ =
+                  install_child
+                    ~env
+                    ~sw
+                    ~daemon
+                    ~parent:parent_state
+                    ~mode:`Valid
+                    ~source:"<developer>Saved pending child.</developer>"
+                    ~capability_pins:[]
+                    ~pending_initial_start:true
+                    ~revoke:false
+                in
+                child))
+        in
+        Eio.Switch.run (fun sw ->
+          let daemon = start sw On_demand in
+          Exn.protect
+            ~finally:(fun () -> Daemon.shutdown daemon |> protocol_ok)
+            ~f:(fun () ->
+              let store = Daemon.store daemon in
+              let indexed =
+                Agent_store.Session_index.find_checked (S.session_index store) child_id
+                |> store_ok
+                |> Option.value_exn
+              in
+              let expected =
+                P.Session_lifecycle.Expected.create
+                  ~reference:
+                    (P.Session_ref.create
+                       ~server_id:(S.server_id store)
+                       ~session_id:child_id)
+                  ~generation:indexed.session.generation
+                  ~session_revision:indexed.session.revision
+                  ~lifecycle_revision:indexed.lifecycle_revision
+                |> protocol_ok
+              in
+              let selected =
+                Daemon.select_session daemon ~principal:(principal ()) ~expected
+                |> protocol_ok
+              in
+              Agent_server.Session_factory.resume_selected_initial_starts
+                (Daemon.factory daemon);
+              let state = A.state selected.actor |> protocol_ok in
+              print_s
+                [%sexp
+                  (( state.pending_initial_start
+                   , (match state.lifecycle.observed with
+                      | Stopped -> true
+                      | Queued_for_slot
+                      | Starting
+                      | Recovering
+                      | Idle
+                      | Running_turn _
+                      | Compacting _
+                      | Waiting_for_permission _
+                      | Stopping
+                      | Failed _ -> false)
+                   , Option.is_none
+                       (Agent_server.Session_registry.find
+                          (Daemon.registry daemon)
+                          parent_id)
+                   , (Agent_server.Session_registry.stats (Daemon.registry daemon)).loaded
+                   , Owner.is_loaded selected.runtime
+                   , !calls )
+                   : bool * bool * bool * int * bool * int)]))));
+  [%expect
+    {|
+    ((independent_stopped_retained true) (independent_archived_retained true)
+     (owned_archived_retired true))
+    ((stopped_retired true) (missing_retired true) (revoked_retired true))
+    (true true true 1 false 0)
     |}]
 ;;

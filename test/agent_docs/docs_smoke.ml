@@ -196,8 +196,8 @@ let timer env root workspace =
             Filename.concat root "docs-src/examples/agent-server/prompts/timer.chatmd"
         ; workspace
         ; tool_dir = workspace
-        ; home = workspace
-        ; data_root = None
+        ; home = Some workspace
+        ; storage = Agent_server.Local_storage.Transient
         ; start_immediately = true
         ; permission_profile = default_permission_profile
         ; attachment_mode = Read_write

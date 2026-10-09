@@ -1,5 +1,13 @@
 open! Core
 
+module Collection_policy : sig
+  (** Load_retained admits eligible indexed owners for collection. Selected_only
+      defers unselected preparations without activation; selected errors remain errors. *)
+  type t =
+    | Load_retained
+    | Selected_only
+end
+
 (** Periodic Eio maintenance for daemon-global durable stores. *)
 
 type stats =
@@ -23,7 +31,8 @@ type status =
 [@@deriving sexp]
 
 val run_once
-  :  env:Eio_unix.Stdenv.base
+  :  collection_policy:Collection_policy.t
+  -> env:Eio_unix.Stdenv.base
   -> idempotency_store:Agent_store.Idempotency_store.t
   -> blob_store:Agent_store.Blob_store.t
   -> session_store:Agent_store.Session_store.t
@@ -35,7 +44,8 @@ val run_once
 
 (** Internal composition: false constructs a stopped service and starts no fiber. *)
 val start_controlled
-  :  enabled:bool
+  :  collection_policy:Collection_policy.t
+  -> enabled:bool
   -> sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
   -> clock:_ Eio.Time.clock
@@ -49,7 +59,8 @@ val start_controlled
   -> t
 
 val start
-  :  sw:Eio.Switch.t
+  :  collection_policy:Collection_policy.t
+  -> sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
   -> clock:_ Eio.Time.clock
   -> every:float

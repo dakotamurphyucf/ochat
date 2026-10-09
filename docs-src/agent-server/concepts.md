@@ -32,8 +32,8 @@ blocking every other reader or the agent.
 
 | Host | Workspace | State and lifetime | Entry point |
 |---|---|---|---|
-| Native local TUI | Launch cwd | Transient, process-bound | `chat-tui --local -file FILE` |
-| Local stdio | Cwd or `--workspace` | Process-bound; durable with `--data-root`, otherwise transient | `ochat-agent-stdio --local --prompt FILE` |
+| Native local TUI | Launch cwd, retained workspace on selection | Durable by default, process-bound; explicit transient | `chat-tui --local -file FILE` |
+| Local stdio | Cwd or `--workspace` for creation | Durable by default, process-bound; explicit transient | `ochat-agent-stdio --local --prompt FILE` |
 | Daemon-connected TUI | Configured catalog workspace | Durable; detached by default on creation, optional owner-bound | `chat-tui --connect URI ...` |
 | Daemon stdio gateway | Selected through protocol | Daemon session lifetime; gateway EOF only drops its connection | `ochat-agent-stdio --connect URI` |
 | HTTP/Unix client | Selected through protocol | Daemon session lifetime | Initialize, create/attach |
@@ -41,12 +41,15 @@ blocking every other reader or the agent.
 | Legacy local TUI | Launch cwd | Older file-backed session options | Implicit local mode with compatibility flags |
 
 Native local TUI is also the default without mode-selecting compatibility flags.
-For standalone local stdio, the current binary needs the
-[documented private-data-root workaround](troubleshooting.md#local-stdio-rng-initialization)
-for transient-root RNG startup.
-`--session`, `--new-session`, `--export-file`, `--no-persist`, `--auto-persist`,
-and parallel-tool flags select the older implicit local path and cannot be
-combined with explicit `--local`. `--authorize-shell-manifest` supports native
+Native local storage defaults to `$HOME/.ochat/agent-store`; `--data-root`
+selects an explicit absolute root and `--transient` opts out of retention. Neither
+starts a background daemon. Missing HOME has no cwd fallback. Legacy records
+are not implicitly migrated. In explicit `--local` mode, `--session ID` selects
+an existing native session; `--list-sessions`, `--session-info` and
+`--export-session` read the retained native catalog without selection. Without
+`--local`, compatibility flags such as `--new-session`, `--export-file`,
+`--no-persist`, `--auto-persist` and parallel-tool flags keep the older path.
+`--authorize-shell-manifest` supports native
 local mode when combined with `--local`; without it, the flag retains legacy
 compatibility behavior. Daemon `--session`
 instead selects a daemon session. See the [TUI CLI](../bin/chat_tui.doc.md).

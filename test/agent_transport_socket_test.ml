@@ -62,8 +62,8 @@ let with_embedded f =
               { prompt_file
               ; workspace
               ; tool_dir = workspace
-              ; home = root
-              ; data_root = None
+              ; home = Some root
+              ; storage = Agent_server.Local_storage.Transient
               ; start_immediately = false
               ; permission_profile = Agent_server.Embedded.default_permission_profile
               ; attachment_mode = Read_write

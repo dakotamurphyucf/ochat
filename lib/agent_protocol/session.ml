@@ -1287,7 +1287,7 @@ module Export_request = struct
 
   type t =
     { session_id : Id.Session.t
-    ; attachment_id : Id.Attachment.t
+    ; attachment_id : Id.Attachment.t option
     ; format : format
     ; revision : int64 option
     ; history : History.Window_request.t option
@@ -1306,7 +1306,7 @@ module Export_request = struct
   let to_json t =
     let fields =
       [ Some ("session_id", Id.Session.to_json t.session_id)
-      ; Some ("attachment_id", Id.Attachment.to_json t.attachment_id)
+      ; optional_field "attachment_id" t.attachment_id Id.Attachment.to_json
       ; Some ("format", `String (format_to_string t.format))
       ; optional_field "revision" t.revision int64_to_json
       ; optional_field "history" t.history History.Window_request.to_json
@@ -1319,7 +1319,10 @@ module Export_request = struct
   let of_json json =
     let open Result.Let_syntax in
     let%bind fields = Json_codec.fields json in
-    let%bind session_id, attachment_id = decode_session_attachment fields in
+    let%bind session_id = Json_codec.required_as fields "session_id" Id.Session.of_json in
+    let%bind attachment_id =
+      Json_codec.optional_as fields "attachment_id" Id.Attachment.of_json
+    in
     let%bind format = Json_codec.required_as fields "format" format_of_json in
     let%bind revision = Json_codec.optional_as fields "revision" nonnegative_int64 in
     let%map history =

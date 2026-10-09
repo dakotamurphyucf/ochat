@@ -1,4 +1,14 @@
 open Core
+
+let durable_storage path =
+  let root =
+    Agent_server.Local_storage.Root.create ~path ()
+    |> Result.map_error ~f:(fun (error : Agent_protocol.Error.t) -> error.message)
+    |> Result.ok_or_failwith
+  in
+  Agent_server.Local_storage.Durable root
+;;
+
 module Config_fixture = Support.Config_fixture
 module Daemon_host = Support.Daemon_host
 module Daemon_process = Support.Daemon_process
@@ -364,8 +374,8 @@ let test_local_workspace env environment =
         { prompt_file = Config_fixture.prompt_path fixture
         ; workspace = Config_fixture.physical_workspace fixture
         ; tool_dir
-        ; home = roots.home
-        ; data_root = Some data_root
+        ; home = Some roots.home
+        ; storage = durable_storage data_root
         ; start_immediately = true
         ; permission_profile = embedded_permission_profile
         ; attachment_mode = Read_write

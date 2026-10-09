@@ -1,4 +1,14 @@
 open Core
+
+let durable_storage path =
+  let root =
+    Agent_server.Local_storage.Root.create ~path ()
+    |> Result.map_error ~f:(fun (error : Agent_protocol.Error.t) -> error.message)
+    |> Result.ok_or_failwith
+  in
+  Agent_server.Local_storage.Durable root
+;;
+
 open Agent_server_test_support
 module P = Agent_protocol
 module Embedded = Agent_server.Embedded
@@ -76,8 +86,11 @@ let with_host
           { prompt_file = Filename.concat root "agent.chatmd"
           ; workspace
           ; tool_dir = root
-          ; home = root
-          ; data_root = Option.some_if durable (Filename.concat root "data")
+          ; home = Some root
+          ; storage =
+              (if durable
+               then durable_storage (Filename.concat root "data")
+               else Agent_server.Local_storage.Transient)
           ; start_immediately = true
           ; permission_profile
           ; attachment_mode = Read_write

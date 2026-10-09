@@ -1,5 +1,14 @@
 open! Core
 
+let durable_storage path =
+  let root =
+    Agent_server.Local_storage.Root.create ~path ()
+    |> Result.map_error ~f:(fun (error : Agent_protocol.Error.t) -> error.message)
+    |> Result.ok_or_failwith
+  in
+  Agent_server.Local_storage.Durable root
+;;
+
 let inference_options () =
   { Agent_server.Daemon.default_options with
     inference_policy =
@@ -84,8 +93,8 @@ let%expect_test "invalid authoring files fail before creating an embedded durabl
         { prompt_file
         ; workspace
         ; tool_dir = workspace
-        ; home = root
-        ; data_root = Some data_root
+        ; home = Some root
+        ; storage = durable_storage data_root
         ; start_immediately = true
         ; permission_profile = Agent_server.Embedded.default_permission_profile
         ; attachment_mode = Read_write
@@ -117,8 +126,8 @@ let%expect_test "embedded host uses the shared protocol and process-bound sessio
           { prompt_file
           ; workspace
           ; tool_dir = workspace
-          ; home = root
-          ; data_root = None
+          ; home = Some root
+          ; storage = Agent_server.Local_storage.Transient
           ; start_immediately = true
           ; permission_profile = Agent_server.Embedded.default_permission_profile
           ; attachment_mode = Read_write
@@ -196,8 +205,8 @@ let%expect_test "closing an embedded client releases its backpressured publisher
           { prompt_file
           ; workspace
           ; tool_dir = workspace
-          ; home = root
-          ; data_root = None
+          ; home = Some root
+          ; storage = Agent_server.Local_storage.Transient
           ; start_immediately = true
           ; permission_profile = Agent_server.Embedded.default_permission_profile
           ; attachment_mode = Read_write
@@ -245,8 +254,8 @@ let%expect_test "session creation returns the requested attachment after session
           { prompt_file
           ; workspace
           ; tool_dir = workspace
-          ; home = root
-          ; data_root = None
+          ; home = Some root
+          ; storage = Agent_server.Local_storage.Transient
           ; start_immediately = false
           ; permission_profile = Agent_server.Embedded.default_permission_profile
           ; attachment_mode = Read_write
@@ -407,8 +416,8 @@ let%expect_test "submitted user moderation runs once before turn-start or provid
           { prompt_file
           ; workspace
           ; tool_dir = workspace
-          ; home = root
-          ; data_root = None
+          ; home = Some root
+          ; storage = Agent_server.Local_storage.Transient
           ; start_immediately = true
           ; permission_profile = default_permission_profile
           ; attachment_mode = Read_write
@@ -453,8 +462,8 @@ let%expect_test "read-only sends do not consume history IDs" =
           { prompt_file
           ; workspace
           ; tool_dir = workspace
-          ; home = root
-          ; data_root = None
+          ; home = Some root
+          ; storage = Agent_server.Local_storage.Transient
           ; start_immediately = true
           ; permission_profile = Agent_server.Embedded.default_permission_profile
           ; attachment_mode = Read_write
@@ -567,8 +576,8 @@ let%expect_test "embedded close joins active root inference with a deferred user
           { prompt_file
           ; workspace
           ; tool_dir = workspace
-          ; home = root
-          ; data_root = None
+          ; home = Some root
+          ; storage = Agent_server.Local_storage.Transient
           ; start_immediately = true
           ; permission_profile = Agent_server.Embedded.default_permission_profile
           ; attachment_mode = Read_write
@@ -628,8 +637,8 @@ let%expect_test "mutating command idempotency replays and rejects conflicts" =
           { prompt_file
           ; workspace
           ; tool_dir = workspace
-          ; home = root
-          ; data_root = None
+          ; home = Some root
+          ; storage = Agent_server.Local_storage.Transient
           ; start_immediately = true
           ; permission_profile = Agent_server.Embedded.default_permission_profile
           ; attachment_mode = Read_write
@@ -727,8 +736,8 @@ let%expect_test "due schedules fail visibly when the prompt has no moderator" =
           { prompt_file
           ; workspace
           ; tool_dir = workspace
-          ; home = root
-          ; data_root = None
+          ; home = Some root
+          ; storage = Agent_server.Local_storage.Transient
           ; start_immediately = true
           ; permission_profile = Agent_server.Embedded.default_permission_profile
           ; attachment_mode = Read_write
@@ -822,8 +831,8 @@ let%expect_test "ChatML session startup persists delayed schedules" =
           { prompt_file
           ; workspace
           ; tool_dir = workspace
-          ; home = root
-          ; data_root = None
+          ; home = Some root
+          ; storage = Agent_server.Local_storage.Transient
           ; start_immediately = false
           ; permission_profile = Agent_server.Embedded.default_permission_profile
           ; attachment_mode = Read_write
@@ -896,8 +905,8 @@ let%expect_test "ChatML synchronous model calls persist intent and terminal stat
           { prompt_file
           ; workspace
           ; tool_dir = workspace
-          ; home = root
-          ; data_root = None
+          ; home = Some root
+          ; storage = Agent_server.Local_storage.Transient
           ; start_immediately = false
           ; permission_profile = Agent_server.Embedded.default_permission_profile
           ; attachment_mode = Read_write
@@ -992,8 +1001,8 @@ let%expect_test "ChatML startup model jobs persist and deliver while idle" =
           { prompt_file
           ; workspace
           ; tool_dir = workspace
-          ; home = root
-          ; data_root = None
+          ; home = Some root
+          ; storage = Agent_server.Local_storage.Transient
           ; start_immediately = true
           ; permission_profile = Agent_server.Embedded.default_permission_profile
           ; attachment_mode = Read_write
@@ -1087,8 +1096,8 @@ let%expect_test "due schedules drain ChatML while idle and honor end_session" =
           { prompt_file
           ; workspace
           ; tool_dir = workspace
-          ; home = root
-          ; data_root = None
+          ; home = Some root
+          ; storage = Agent_server.Local_storage.Transient
           ; start_immediately = true
           ; permission_profile = Agent_server.Embedded.default_permission_profile
           ; attachment_mode = Read_write
@@ -1150,8 +1159,8 @@ let%expect_test "session handle attaches, mutates, and reduces pushed events" =
           { prompt_file
           ; workspace
           ; tool_dir = workspace
-          ; home = root
-          ; data_root = None
+          ; home = Some root
+          ; storage = Agent_server.Local_storage.Transient
           ; start_immediately = true
           ; permission_profile = Agent_server.Embedded.default_permission_profile
           ; attachment_mode = Read_write
@@ -1228,8 +1237,8 @@ let%expect_test "reconnect reattaches from the durable cursor and applies replay
           { prompt_file
           ; workspace
           ; tool_dir = workspace
-          ; home = root
-          ; data_root = None
+          ; home = Some root
+          ; storage = Agent_server.Local_storage.Transient
           ; start_immediately = true
           ; permission_profile = Agent_server.Embedded.default_permission_profile
           ; attachment_mode = Read_write
@@ -1325,8 +1334,8 @@ let%expect_test "audit read returns redacted durable command outcomes" =
           { prompt_file
           ; workspace
           ; tool_dir = workspace
-          ; home = root
-          ; data_root = Some (Filename.concat root "audit-data")
+          ; home = Some root
+          ; storage = durable_storage (Filename.concat root "audit-data")
           ; start_immediately = true
           ; permission_profile = Agent_server.Embedded.default_permission_profile
           ; attachment_mode = Read_write
@@ -1389,8 +1398,8 @@ let%expect_test "reset and pinned rebuild require exact stopped revisions" =
           { prompt_file
           ; workspace
           ; tool_dir = workspace
-          ; home = root
-          ; data_root = Some (Filename.concat root "admin-data")
+          ; home = Some root
+          ; storage = durable_storage (Filename.concat root "admin-data")
           ; start_immediately = false
           ; permission_profile = Agent_server.Embedded.default_permission_profile
           ; attachment_mode = Read_write
@@ -1535,8 +1544,8 @@ let%expect_test "session export returns a durable server-owned blob" =
           { prompt_file
           ; workspace
           ; tool_dir = workspace
-          ; home = root
-          ; data_root = Some data_root
+          ; home = Some root
+          ; storage = durable_storage data_root
           ; start_immediately = true
           ; permission_profile = Agent_server.Embedded.default_permission_profile
           ; attachment_mode = Read_write
@@ -1558,7 +1567,12 @@ let%expect_test "session export returns a durable server-owned blob" =
         Agent_client.Connection.request_without_history
           connection
           (Session_export
-             { session_id; attachment_id; format = Json; revision = None; history = None })
+             { session_id
+             ; attachment_id = Some attachment_id
+             ; format = Json
+             ; revision = None
+             ; history = None
+             })
         |> protocol_ok
       in
       let export =
@@ -1582,7 +1596,7 @@ let%expect_test "session export returns a durable server-owned blob" =
       Agent_client.Blob_download.download
         ~connection
         ~session_id
-        ~attachment_id
+        ~attachment_id:(Some attachment_id)
         ~blob:export.blob
         ~output:(Eio.Flow.buffer_sink downloaded)
       |> protocol_ok;
@@ -1591,7 +1605,7 @@ let%expect_test "session export returns a durable server-owned blob" =
           connection
           (Blob_read
              { session_id
-             ; attachment_id = Agent_protocol.Id.Attachment.create ()
+             ; attachment_id = Some (Agent_protocol.Id.Attachment.create ())
              ; blob_id = export.blob.id
              ; offset = 0L
              ; max_bytes = 16
@@ -1627,8 +1641,8 @@ let%expect_test "stopped sessions require exact confirmation and can be removed"
           { prompt_file
           ; workspace
           ; tool_dir = workspace
-          ; home = root
-          ; data_root = Some data_root
+          ; home = Some root
+          ; storage = durable_storage data_root
           ; start_immediately = true
           ; permission_profile = Agent_server.Embedded.default_permission_profile
           ; attachment_mode = Read_write
@@ -1990,8 +2004,8 @@ let%expect_test
         { prompt_file
         ; workspace
         ; tool_dir = workspace
-        ; home = root
-        ; data_root = None
+        ; home = Some root
+        ; storage = Agent_server.Local_storage.Transient
         ; start_immediately = false
         ; permission_profile = Agent_server.Embedded.default_permission_profile
         ; attachment_mode = Read_write
@@ -2142,8 +2156,8 @@ let%expect_test
         { prompt_file
         ; workspace
         ; tool_dir = workspace
-        ; home = root
-        ; data_root = None
+        ; home = Some root
+        ; storage = Agent_server.Local_storage.Transient
         ; start_immediately = false
         ; permission_profile = Agent_server.Embedded.default_permission_profile
         ; attachment_mode = Read_write

@@ -6,9 +6,9 @@ policy/approval, and OS confinement. Allowing one does not bypass the others.
 
 | Host | Bootstrap and state | Administration |
 |---|---|---|
-| Native local TUI | Use `--local --authorize-shell-manifest` after reviewing the prompt; without authorization a fresh shell-enabled session rejects startup. State is transient and process-bound. | Client Shell Security and command approvals; legacy persistence flags remain unsupported. |
+| Native local TUI | Use `--local --authorize-shell-manifest` after reviewing the prompt; without authorization a fresh shell-enabled session rejects startup. State is durable by default under `$HOME/.ochat/agent-store` and process-bound; `--transient` is explicit. | Client Shell Security and command approvals; legacy persistence flags remain unsupported. |
 | Legacy local TUI | `--authorize-shell-manifest` authorizes the exact manifest for that process; legacy session persistence is separate. | `ochat shell` legacy-store commands and local Shell Security views. |
-| Local stdio | Embedded default profile requires grants; optional durable data root does not provide a manifest-authorize CLI flag. | Protocol views; custom embedding for different bootstrap policy. |
+| Local stdio | Embedded default profile requires grants; durable default or an explicit data root does not provide a manifest-authorize CLI flag. | Protocol views; custom embedding for different bootstrap policy. |
 | Daemon | Pinned permission profile and exact persisted/operator grants, or explicit `assume_authorized`/`deny`. | Protocol `permission.*`, `grant.*`, `audit.read`; connected Shell Security views. |
 | File-backed completion/legacy nested host | Existing host-supplied authorization/runtime policy; do not assume a TUI approver exists. | Corresponding legacy session/runtime integration. |
 | OCaml embedder | Explicit host runtime options, identity/path context, policy/reviewer hooks and persistence owner. | Host APIs; own switch/close/cancellation correctly. |

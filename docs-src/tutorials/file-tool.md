@@ -93,10 +93,11 @@ For model/connection failures use [provider setup](../agent-server/quickstart.md
 
 ## Finish and continue
 
-Wait for work to stop, press Esc, type `:q`, and press Enter. Native local mode
-ends with this process; it creates no resumable daemon session. Your copied files
-remain. Archive them or remove only the recorded temporary directory after exit.
-Review provider logs and runtime caches separately if they were produced.
+Wait for work to stop, press Esc, type `:q`, and press Enter. The local host stops
+and retains durable records under `$HOME/.ochat/agent-store` by default;
+`--transient` opts into temporary records. Your copied files remain. Archive them
+or remove only the recorded example directory after exit; session records are
+managed separately. Review provider logs and runtime caches separately if produced.
 
 You can now distinguish tool authority from instructions and verify a file read.
 Next, [give this agent a specialist reviewer](specialist.md), or

@@ -181,7 +181,7 @@ end
 module Read_request = struct
   type t =
     { session_id : Id.Session.t
-    ; attachment_id : Id.Attachment.t
+    ; attachment_id : Id.Attachment.t option
     ; blob_id : Id.Blob.t
     ; offset : int64
     ; max_bytes : int
@@ -192,12 +192,14 @@ module Read_request = struct
 
   let to_json t =
     `Object
-      [ "session_id", Id.Session.to_json t.session_id
-      ; "attachment_id", Id.Attachment.to_json t.attachment_id
-      ; "blob_id", Id.Blob.to_json t.blob_id
-      ; "offset", `Number (Int64.to_string t.offset)
-      ; "max_bytes", `Number (Int.to_string t.max_bytes)
-      ]
+      (List.filter_opt
+         [ Some ("session_id", Id.Session.to_json t.session_id)
+         ; Option.map t.attachment_id ~f:(fun id ->
+             "attachment_id", Id.Attachment.to_json id)
+         ; Some ("blob_id", Id.Blob.to_json t.blob_id)
+         ; Some ("offset", `Number (Int64.to_string t.offset))
+         ; Some ("max_bytes", `Number (Int.to_string t.max_bytes))
+         ])
   ;;
 
   let validate t =
@@ -216,7 +218,7 @@ module Read_request = struct
     let%bind fields = Json_codec.fields json in
     let%bind session_id = Json_codec.required_as fields "session_id" Id.Session.of_json in
     let%bind attachment_id =
-      Json_codec.required_as fields "attachment_id" Id.Attachment.of_json
+      Json_codec.optional_as fields "attachment_id" Id.Attachment.of_json
     in
     let%bind blob_id = Json_codec.required_as fields "blob_id" Id.Blob.of_json in
     let%bind offset = Json_codec.required_as fields "offset" nonnegative_int64 in
