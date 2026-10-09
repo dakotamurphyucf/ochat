@@ -4,6 +4,42 @@ module P = Agent_protocol
 module D = Agent_store.Delegation_store
 module S = Agent_store.Session_store
 module A = Agent_store.Prompt_artifact_store
+module Schema = Document_schema
+
+let document_ok result =
+  Result.map_error result ~f:(fun e -> Sexp.to_string_hum (Schema.Error.sexp_of_t e))
+  |> Result.ok_or_failwith
+;;
+
+let read_document path =
+  Agent_store.Document_record.decode_file
+    ~limits:Agent_store.Delegation_document.limits
+    ~expected_digest:None
+    (Eio.Path.load path)
+  |> Result.map_error ~f:Agent_store.Document_fields.record_error
+  |> store_ok
+  |> Agent_store.Document_record.document
+;;
+
+let replace_member json name value =
+  match json with
+  | `Object fields ->
+    `Object
+      (List.map fields ~f:(fun (key, old) ->
+         key, if String.equal key name then value else old))
+  | _ -> assert false
+;;
+
+let rewrite_document path json =
+  let limits = Agent_store.Delegation_document.limits in
+  let document = Schema.Document.inspect ~limits json |> document_ok in
+  let bytes =
+    Agent_store.Document_record.encode document ~limits ~flags:0
+    |> Result.map_error ~f:Agent_store.Document_fields.record_error
+    |> store_ok
+  in
+  Eio.Path.save ~create:(`Or_truncate 0o600) path bytes
+;;
 
 let digest text = Digestif.SHA256.(digest_string text |> to_hex)
 let max_records = 32
@@ -31,7 +67,7 @@ let admission () =
     ; capability_pins = [ "read_file", digest "registered parent root" ]
     ; lifetime = Owned
     ; created_at = timestamp
-    ; inference_target = None
+    ; inference_target = Some (delegation_inference_target ())
     }
 ;;
 
@@ -136,23 +172,14 @@ let%expect_test "authored delegation identity survives restart and cannot change
           lifetime = Invocation_owned { invocation_id = P.Id.Invocation.create () }
         };
       let forged_reference =
-        match D.Reference.sexp_of_t reference with
-        | Sexp.List fields ->
-          List.map fields ~f:(function
-            | List [ Atom "admission_sha256"; _ ] ->
-              let changed =
-                { candidate with authored_tool = Some { origin with name = "reviewer" } }
-              in
-              Sexp.List
-                [ Atom "admission_sha256"
-                ; Atom (D.Admission.sexp_of_t changed |> Sexp.to_string_mach |> digest)
-                ]
-            | field -> field)
-          |> fun fields -> D.Reference.t_of_sexp (Sexp.List fields)
-        | _ -> failwith "expected reference record"
+        D.reference_to_jsonaf reference
+        |> fun json ->
+        replace_member json "admission_sha256" (`String (digest "substituted admission"))
+        |> D.reference_of_jsonaf
+        |> store_ok
       in
       assert (Result.is_error (D.resolve ledger forged_reference));
-      let verify_version tested_key expected rejected =
+      let verify_version tested_key =
         let filename =
           digest (D.Key.sexp_of_t tested_key |> Sexp.to_string_mach) ^ ".frame"
         in
@@ -160,44 +187,20 @@ let%expect_test "authored delegation identity survives restart and cannot change
           Eio.Path.(Eio.Stdenv.fs env / Filename.concat root ("delegations/" ^ filename))
         in
         let original = Eio.Path.load path in
-        let payload =
-          match
-            Agent_store.Frame.decode
-              ~max_payload_length:262144
-              ~contents:original
-              ~offset:0
-          with
-          | Ok (Complete { frame; next_offset }) when next_offset = String.length original
-            -> Agent_store.Frame.payload frame |> Sexp.of_string
-          | _ -> failwith "expected complete delegation frame"
-        in
-        let fields =
-          match payload with
-          | Sexp.List fields -> fields
-          | _ -> failwith "expected frame record"
-        in
-        assert (
-          List.exists fields ~f:(function
-            | List [ Atom "version"; Atom actual ] -> String.equal actual expected
-            | _ -> false));
-        List.iter rejected ~f:(fun version ->
-          let forged =
-            List.map fields ~f:(function
-              | Sexp.List [ Atom "version"; _ ] ->
-                Sexp.List [ Atom "version"; Atom version ]
-              | field -> field)
-            |> fun fields -> Sexp.List fields |> Sexp.to_string_mach
-          in
-          let bytes =
-            Agent_store.Frame.encode ~max_payload_length:262144 ~flags:0 forged
-            |> frame_ok
-          in
-          Eio.Path.save ~create:(`Or_truncate 0o600) path bytes;
+        let document = read_document path in
+        assert (Int.equal (Schema.Document.version document) 6);
+        List.iter [ 5; 7 ] ~f:(fun version ->
+          rewrite_document
+            path
+            (replace_member
+               (Schema.Document.json document)
+               "schema_version"
+               (`Number (Int.to_string version)));
           assert (Result.is_error (D.find ledger tested_key)));
         Eio.Path.save ~create:(`Or_truncate 0o600) path original
       in
-      verify_version authored_key "4" [ "1"; "2"; "3"; "5" ];
-      verify_version scoped_key "5" [ "1"; "2"; "3"; "4" ];
+      verify_version authored_key;
+      verify_version scoped_key;
       S.close store |> store_ok;
       let store = reopen env sw root in
       let ledger = S.delegations store in
@@ -240,14 +243,14 @@ let%expect_test "authored delegation identity survives restart and cannot change
   print_endline
     "downgraded frames and malformed origins reject; generated reference unchanged";
   print_endline
-    "v5 retains one-off invocation ownership; scope changes and version substitution \
+    "v6 retains one-off invocation ownership; scope changes and version substitution \
      reject";
   [%expect
     {|
     v4 retains authored name/source and original instance across retry/restart/revocation
     changed name/source, generated/authored substitution and forged references reject
     downgraded frames and malformed origins reject; generated reference unchanged
-    v5 retains one-off invocation ownership; scope changes and version substitution reject
+    v6 retains one-off invocation ownership; scope changes and version substitution reject
     |}]
 ;;
 
@@ -289,6 +292,33 @@ let%expect_test
       let abandoned, doomed = make "abandoned" in
       let abandoned = D.advance ledger abandoned Artifact_installed |> store_ok in
       let abandoned = D.revoke ledger abandoned Admission_failed |> store_ok in
+      let abandoned_path =
+        Eio.Path.(
+          Eio.Stdenv.fs env
+          / root
+          / "delegations"
+          / (digest (D.Key.sexp_of_t abandoned.key |> Sexp.to_string_mach) ^ ".frame"))
+      in
+      let document = read_document abandoned_path in
+      let append json field =
+        match json with
+        | `Object fields -> `Object (fields @ [ field ])
+        | _ -> assert false
+      in
+      let original_admission =
+        match Schema.Json.field (Schema.Document.payload document) ~name:"admission" with
+        | Value json -> append json ("future_admission", `Number "1e+00")
+        | Null | Absent -> assert false
+      in
+      let payload =
+        replace_member (Schema.Document.payload document) "admission" original_admission
+        |> fun json -> append json ("future_disposition", `Null)
+      in
+      rewrite_document
+        abandoned_path
+        (replace_member (Schema.Document.json document) "payload" payload
+         |> fun json -> append json ("future_envelope", `String "retained"));
+      let abandoned = D.find ledger abandoned.key |> store_ok |> Option.value_exn in
       let active, active_artifact = make "active-intent" in
       let ambiguous, ambiguous_artifact = make "ambiguous-child-install" in
       let ambiguous = D.revoke ledger ambiguous Parent_stopped |> store_ok in
@@ -337,27 +367,17 @@ let%expect_test
           / (digest (D.Key.sexp_of_t active.key |> Sexp.to_string_mach) ^ ".frame"))
       in
       let saved_record = Eio.Path.load active_path in
-      let forged_record =
-        match D.sexp_of_record active with
-        | Sexp.List fields ->
-          Sexp.List
-            (fields @ [ Sexp.List [ Atom "artifact_collection"; Atom "Prepared" ] ])
-        | _ -> assert false
+      let document = read_document active_path in
+      let payload =
+        replace_member
+          (Schema.Document.payload document)
+          "artifact_collection"
+          (`String "prepared")
       in
-      let forged =
-        Sexp.List
-          [ List [ Atom "version"; Atom "3" ]; List [ Atom "record"; forged_record ] ]
-        |> Sexp.to_string_mach
-        |> Agent_store.Frame.encode ~flags:0 ~max_payload_length:262144
-        |> frame_ok
-      in
-      Eio.Path.save ~create:(`Or_truncate 0o600) active_path forged;
-      (match retention ledger observe with
-       | Error (Agent_store.Store_error.Corrupt message) ->
-         [%test_eq: string]
-           "invalid delegated creation identity or capability pins"
-           message
-       | _ -> failwith "expected rejection of collection intent on an active admission");
+      rewrite_document
+        active_path
+        (replace_member (Schema.Document.json document) "payload" payload);
+      assert (Result.is_error (retention ledger observe));
       assert (not !called);
       Eio.Path.save ~create:(`Or_truncate 0o600) active_path saved_record;
       let original_root =
@@ -410,6 +430,33 @@ let%expect_test
              Error (Agent_store.Store_error.Corrupt "interrupted deletion"))));
       let prepared = D.find ledger abandoned.key |> store_ok |> Option.value_exn in
       assert (Option.is_some prepared.artifact_collection);
+      let prepared_document = read_document abandoned_path in
+      assert (
+        Jsonaf.exactly_equal
+          original_admission
+          (match
+             Schema.Json.field
+               (Schema.Document.payload prepared_document)
+               ~name:"admission"
+           with
+           | Value json -> json
+           | Null | Absent -> assert false));
+      assert (
+        match
+          Schema.Json.field
+            (Schema.Document.json prepared_document)
+            ~name:"future_envelope"
+        with
+        | Value (`String "retained") -> true
+        | Absent | Null | Value _ -> false);
+      assert (
+        match
+          Schema.Json.field
+            (Schema.Document.payload prepared_document)
+            ~name:"future_disposition"
+        with
+        | Null -> true
+        | Absent | Value _ -> false);
       assert (D.Reference.equal (D.reference abandoned) (D.reference prepared));
       S.close store |> store_ok;
       let store = reopen env sw root in
@@ -488,30 +535,11 @@ let%expect_test
              ~max_records
              ~max_bytes));
       let installed = D.advance ledger first Artifact_installed |> store_ok in
-      (* An actual v1 frame must retain its original admission digest when read
-         and rewritten by the v2 ledger. Absent epoch fields preserve old hashes. *)
-      let private_path =
-        Filename.concat
-          root
-          ("delegations/"
-           ^ digest (D.Key.sexp_of_t request_key |> Sexp.to_string_mach)
-           ^ ".frame")
-      in
-      let legacy_frame =
-        [%sexp { version = (1 : int); record = (installed : D.record) }]
-        |> Sexp.to_string_mach
-        |> Agent_store.Frame.encode ~max_payload_length:262144 ~flags:0
-        |> frame_ok
-      in
-      Eio.Path.save
-        ~create:(`Or_truncate 0o600)
-        Eio.Path.(Eio.Stdenv.fs env / private_path)
-        legacy_frame;
-      let legacy_reference = D.reference installed in
+      let installed_reference = D.reference installed in
       S.close store |> store_ok;
       let store = reopen env sw root in
       let ledger = S.delegations store in
-      assert (D.equal_record installed (D.resolve ledger legacy_reference |> store_ok));
+      assert (D.equal_record installed (D.resolve ledger installed_reference |> store_ok));
       assert (
         D.equal_record installed (reserve ledger request_key (admission ()) |> record));
       let created = D.advance ledger first Child_installed |> store_ok in
@@ -832,4 +860,165 @@ let%expect_test "v6 captures independent target and binds complete original admi
      retained";
   [%expect
     {| v6 target survives parent changes; complete future admission identity and bytes retained |}]
+;;
+
+let%expect_test "delegation frame and original scoped owner precede current admission" =
+  with_temp_directory "ochat-delegation-admission-order" (fun env root ->
+    Eio.Switch.run (fun sw ->
+      let store = create env sw root in
+      let ledger = S.delegations store in
+      let request_key = key "owner-before-admission" in
+      let selected = reserve ledger request_key (admission ()) |> record in
+      let path =
+        Eio.Path.(
+          Eio.Stdenv.fs env
+          / root
+          / "delegations"
+          / (digest (D.Key.sexp_of_t request_key |> Sexp.to_string_mach) ^ ".frame"))
+      in
+      let original = Eio.Path.load path in
+      let document = read_document path in
+      let payload = Schema.Document.payload document in
+      let get json name =
+        match Schema.Json.field json ~name with
+        | Value value -> value
+        | Null | Absent -> assert false
+      in
+      let bad_admission =
+        replace_member (get payload "admission") "inference_target" `Null
+      in
+      let foreign_key =
+        replace_member (get payload "key") "parent_generation" (`String "4")
+      in
+      let payload =
+        replace_member payload "admission" bad_admission
+        |> fun json -> replace_member json "key" foreign_key
+      in
+      rewrite_document
+        path
+        (replace_member (Schema.Document.json document) "payload" payload);
+      (match D.find ledger request_key with
+       | Error (Agent_store.Store_error.Corrupt _) -> ()
+       | Ok _ | Error _ -> assert false);
+      let invalid_flags =
+        Agent_store.Frame.encode ~max_payload_length:262144 ~flags:1 "not json"
+        |> frame_ok
+      in
+      Eio.Path.save ~create:(`Or_truncate 0o600) path invalid_flags;
+      (match D.find ledger request_key with
+       | Error (Agent_store.Store_error.Corrupt _) -> ()
+       | Ok _ | Error _ -> assert false);
+      Eio.Path.save ~create:(`Or_truncate 0o600) path original;
+      assert (
+        D.Reference.equal
+          (D.reference selected)
+          (D.reference (D.find ledger request_key |> store_ok |> Option.value_exn)));
+      let before = List.length (records ledger) in
+      assert (
+        Result.is_error
+          (D.reserve
+             ledger
+             ~key:(key "uncaptured")
+             ~request_sha256:(digest "new")
+             ~admission:{ (admission ()) with inference_target = None }
+             ~max_records
+             ~max_bytes));
+      assert (Int.equal before (List.length (records ledger)));
+      S.close store |> store_ok));
+  print_endline
+    "framing and original owner fail first; uncaptured reserve publishes nothing";
+  [%expect
+    {|framing and original owner fail first; uncaptured reserve publishes nothing|}]
+;;
+
+let%expect_test
+    "explicit delegation cancellation preserves the usable owner and admission"
+  =
+  let armed = ref None in
+  with_temp_directory "ochat-delegation-cancel" (fun env root ->
+    let env =
+      Job_store_fixtures.fault_env
+        ~matches_rename:(fun path -> String.is_suffix path ~suffix:".frame")
+        ~on_failure:(fun _ -> raise Eio.Time.Timeout)
+        env
+        armed
+    in
+    Eio.Switch.run (fun sw ->
+      let store = create env sw root in
+      let ledger = S.delegations store in
+      let request_key = key "cancelled-stage" in
+      let selected = reserve ledger request_key (admission ()) |> record in
+      armed := Some false;
+      (try
+         ignore (D.advance ledger selected Artifact_installed);
+         assert false
+       with
+       | Eio.Time.Timeout -> ());
+      let retained = D.resolve ledger (D.reference selected) |> store_ok in
+      assert (D.equal_stage retained.stage Reserved);
+      let advanced = D.advance ledger retained Artifact_installed |> store_ok in
+      S.close store |> store_ok;
+      let store = reopen env sw root in
+      let restored = D.resolve (S.delegations store) (D.reference advanced) |> store_ok in
+      assert (D.equal_stage restored.stage Artifact_installed);
+      S.close store |> store_ok));
+  print_endline
+    "original Timeout propagated; owner retries and exact admitted reference reopens";
+  [%expect
+    {|original Timeout propagated; owner retries and exact admitted reference reopens|}]
+;;
+
+let%expect_test
+    "delegation setup and retained reads propagate cancellation without poisoning"
+  =
+  with_temp_directory "ochat-delegation-setup-cancel" (fun env root ->
+    let cancel_setup = ref false in
+    let cancel_read = ref false in
+    let armed = ref None in
+    let env =
+      Job_store_fixtures.fault_env
+        ~before_open_in:(fun path ->
+          if !cancel_setup && String.equal path (Filename.concat root ".")
+          then (
+            cancel_setup := false;
+            raise Eio.Time.Timeout);
+          if !cancel_read && String.is_suffix path ~suffix:".frame"
+          then (
+            cancel_read := false;
+            raise Eio.Time.Timeout))
+        env
+        armed
+    in
+    Eio.Switch.run (fun sw ->
+      let store = create env sw root in
+      let ledger = S.delegations store in
+      let request_key = key "setup-cancellation" in
+      cancel_setup := true;
+      (try
+         ignore (reserve ledger request_key (admission ()));
+         assert false
+       with
+       | Eio.Time.Timeout -> ());
+      assert (not !cancel_setup);
+      assert (Option.is_none (D.find ledger request_key |> store_ok));
+      let selected = reserve ledger request_key (admission ()) |> record in
+      cancel_read := true;
+      (try
+         ignore (D.resolve ledger (D.reference selected));
+         assert false
+       with
+       | Eio.Time.Timeout -> ());
+      assert (not !cancel_read);
+      assert (
+        D.Reference.equal
+          (D.reference selected)
+          (D.reference (D.find ledger request_key |> store_ok |> Option.value_exn)));
+      S.close store |> store_ok;
+      let store = reopen env sw root in
+      D.resolve (S.delegations store) (D.reference selected) |> store_ok |> ignore;
+      S.close store |> store_ok));
+  print_endline
+    "setup and bounded-read Timeout propagate; no partial admission or poisoned owner";
+  [%expect
+    {|setup and bounded-read Timeout propagate; no partial admission or poisoned owner|}]
 ;;

@@ -1,4 +1,16 @@
 open Core
+
+let with_owner mutex f =
+  let outcome =
+    Eio.Mutex.use_rw ~protect:true mutex (fun () ->
+      try Ok (f ()) with
+      | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+  in
+  match outcome with
+  | Ok value -> value
+  | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+;;
+
 module P = Agent_protocol
 module Artifact = P.Job_artifact
 
@@ -16,6 +28,7 @@ type prepared =
   ; intent : Job_result_intent.t
   ; reference : Artifact.t
   ; completion : P.Completion.t
+  ; content : string
   ; mutex : Eio.Mutex.t
   ; mutable phase : phase
   }
@@ -89,13 +102,14 @@ let allocate store ~env ~session ~job ~creating_principal ~now ~max_bytes comple
   ; intent
   ; reference
   ; completion
+  ; content
   ; mutex = Eio.Mutex.create ()
   ; phase = Allocated
   }
 ;;
 
 let ensure_prepared prepared ~sw =
-  Eio.Mutex.use_rw ~protect:true prepared.mutex (fun () ->
+  with_owner prepared.mutex (fun () ->
     match prepared.phase with
     | Retained | Discarded -> Error (Store_error.Corrupt "result preparation has ended")
     | (Allocated | Prepared _ | Attempted) as phase ->
@@ -103,13 +117,13 @@ let ensure_prepared prepared ~sw =
       let%bind () =
         Job_result_intent.save ~env:prepared.env ~session:prepared.session prepared.intent
       in
-      let content = P.Completion.to_json prepared.completion |> Jsonaf.to_string in
+      let content = prepared.content in
       let%map handle =
         Blob_store.ensure_staged_content
           prepared.store
           ~sw
           prepared.session
-          ~metadata:(Job_result_intent.metadata prepared.intent)
+          ~stage:(Job_result_intent.stage prepared.intent)
           content
       in
       (match phase with
@@ -128,7 +142,7 @@ let prepare store ~env ~sw ~session ~job ~creating_principal ~now ~max_bytes com
 ;;
 
 let commit prepared ~persist =
-  Eio.Mutex.use_rw ~protect:true prepared.mutex (fun () ->
+  with_owner prepared.mutex (fun () ->
     match prepared.phase with
     | Retained | Discarded ->
       Error
@@ -161,7 +175,7 @@ let commit prepared ~persist =
 ;;
 
 let discard prepared =
-  Eio.Mutex.use_rw ~protect:true prepared.mutex (fun () ->
+  with_owner prepared.mutex (fun () ->
     match prepared.phase with
     | Retained -> Error (Store_error.Corrupt "cannot discard a retained result artifact")
     | Allocated | Attempted ->
@@ -194,7 +208,7 @@ let load store ~sw ~session ~max_bytes reference =
     | false -> Error (Store_error.Corrupt "result artifact belongs to another session")
   in
   let%bind handle = Blob_store.open_session store session reference.blob.id in
-  let metadata = Blob_store.Handle.metadata handle in
+  let%bind metadata = Blob_store.Handle.metadata_checked handle in
   let%bind () =
     match
       String.equal metadata.allowed_use (Artifact.allowed_use reference)
@@ -300,7 +314,7 @@ module Publisher = struct
   ;;
 
   let publish t ~jobs ~job ~now completion ~persist =
-    Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+    with_owner t.mutex (fun () ->
       let open Result.Let_syntax in
       prune t jobs;
       let%bind () = check_completion t completion in
@@ -360,7 +374,7 @@ module Publisher = struct
   ;;
 
   let restore t ~jobs ~generation ~max_count ~max_total_bytes =
-    Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+    with_owner t.mutex (fun () ->
       let open Result.Let_syntax in
       let invalid message = Error (P.Error.invalid_request message) in
       let%bind () =
@@ -460,6 +474,7 @@ module Publisher = struct
               ; intent
               ; reference
               ; completion
+              ; content
               ; mutex = Eio.Mutex.create ()
               ; phase = Attempted
               }
@@ -612,7 +627,7 @@ module Publisher = struct
 
   let collect t ~jobs ~generation ~limits ~with_roots =
     let outcome =
-      Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+      with_owner t.mutex (fun () ->
         try Ok (collect_locked t ~jobs ~generation ~limits ~with_roots) with
         | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
     in

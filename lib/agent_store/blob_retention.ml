@@ -18,26 +18,22 @@ let protocol result =
   Result.map_error result ~f:(fun error -> Store_error.Corrupt error.P.Error.message)
 ;;
 
-let metadata contents =
+let metadata ~id contents =
   let open Result.Let_syntax in
-  let%bind value =
-    Result.try_with (fun () -> Sexp.of_string contents |> Metadata.t_of_sexp)
-    |> Result.map_error ~f:(fun _ -> Store_error.Corrupt "invalid retained blob metadata")
+  let%bind original =
+    Document_schema.Document.decode ~limits:Blob_metadata_document.limits contents
+    |> Document_fields.store
   in
-  let%bind _ = P.Blob.Metadata.of_json (P.Blob.Metadata.to_json value.blob) |> protocol in
-  let%bind _ =
-    P.Id.Principal.of_json (P.Id.Principal.to_json value.creating_principal) |> protocol
+  let%bind original_id =
+    Blob_metadata_document.stored_blob_id original |> Document_fields.store
   in
-  let%bind () =
-    Option.value_map value.target_session ~default:(Ok ()) ~f:(fun id ->
-      P.Id.Session.of_json (P.Id.Session.to_json id) |> protocol |> Result.map ~f:ignore)
-  in
-  match
-    Option.for_all value.expires_at ~f:(fun at ->
-      P.Timestamp.compare at value.created_at >= 0)
-  with
-  | true -> Ok value
-  | false -> corrupt "retained blob expiry precedes creation"
+  if not (Id.equal id original_id)
+  then corrupt "original retained blob identity differs from filename"
+  else (
+    let%map document =
+      Blob_metadata_document.of_document original |> Document_fields.store
+    in
+    Blob_metadata_document.value document, original)
 ;;
 
 let json_media_type value =
@@ -88,6 +84,9 @@ let scan ~scope ~session ~reader ~intents ~max_file_bytes =
     | true -> Ok ()
     | false -> corrupt "blob retention reader does not match its session or limits"
   in
+  let%bind content_limits =
+    Document_fields.limits ~max_bytes:max_file_bytes |> Document_fields.store
+  in
   let%bind temporary_reader = Retention_reader.at_root reader ~root:temporary_root in
   let%bind reserved_root = Blob_store.retention_reserved_directory scope in
   let%bind reserved_reader = Retention_reader.at_root reader ~root:reserved_root in
@@ -117,6 +116,13 @@ let scan ~scope ~session ~reader ~intents ~max_file_bytes =
   let complete = Hash_set.create (module Id) in
   let published = Hash_set.create (module Id) in
   let temporary_ids = Hash_set.create (module Id) in
+  List.iter intents ~f:(fun intent ->
+    let id = (Job_result_intent.reference intent).blob.id in
+    Blob_reference_scan.reset scanner;
+    Job_result_intent.iter_reference_strings intent ~f:(fun text ->
+      Blob_reference_scan.begin_root scanner;
+      Blob_reference_scan.feed ~ignore:id scanner text);
+    Hashtbl.set edges ~key:id ~data:(Blob_reference_scan.references scanner));
   let scan_directory reader directory ~temporary =
     let%bind groups = files reader directory in
     List.fold_result groups ~init:() ~f:(fun () (id, suffixes) ->
@@ -149,9 +155,24 @@ let scan ~scope ~session ~reader ~intents ~max_file_bytes =
            | None -> corrupt "retained blob data has no metadata")
         | true ->
           let%bind bytes = read ".sexp" in
-          let%map value = metadata bytes in
+          let%bind value, document = metadata ~id bytes in
+          let%map () =
+            match intent with
+            | None -> Ok ()
+            | Some intent ->
+              let stage = Job_result_intent.stage intent in
+              let expected =
+                if temporary
+                then Blob_stage_documents.temporary_bytes stage
+                else Blob_stage_documents.durable_bytes stage
+              in
+              if String.equal bytes expected
+              then Ok ()
+              else
+                corrupt "retained metadata bytes differ from selected private publication"
+          in
           feed bytes;
-          feed (Metadata.sexp_of_t value |> Sexp.to_string_mach);
+          Document_fields.iter_strings (Document_schema.Document.json document) ~f:feed;
           value
       in
       let%bind () =
@@ -171,11 +192,7 @@ let scan ~scope ~session ~reader ~intents ~max_file_bytes =
              let expected =
                { (Job_result_intent.metadata intent) with durable = not temporary }
              in
-             (match
-                Sexp.equal
-                  (Metadata.sexp_of_t expected)
-                  (Metadata.sexp_of_t stored_metadata)
-              with
+             (match Metadata.equal expected stored_metadata with
               | true -> Ok ()
               | false ->
                 corrupt "retained result metadata differs from its private intent"))
@@ -215,7 +232,11 @@ let scan ~scope ~session ~reader ~intents ~max_file_bytes =
                    | true -> corrupt "retained JSON blob is malformed"
                    | false -> Ok ())
                 | Ok json ->
-                  feed (Jsonaf.to_string json);
+                  let%bind _ =
+                    Document_schema.Json.validate_and_measure ~limits:content_limits json
+                    |> Document_fields.store
+                  in
+                  Document_fields.iter_strings json ~f:feed;
                   (match intent with
                    | None -> Ok ()
                    | Some intent ->

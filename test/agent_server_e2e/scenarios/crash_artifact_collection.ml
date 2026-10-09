@@ -57,7 +57,7 @@ let run_child env ~root ~boundary ~recover =
          ; capability_pins = []
          ; lifetime = Owned
          ; created_at = artifact.created_at
-         ; inference_target = None
+         ; inference_target = Some (delegation_inference_target ())
          }
        in
        let ledger = S.delegations store in

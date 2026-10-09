@@ -22,9 +22,15 @@
   session_index_recovery_document
   session_projection_update
   session_index
+  delegation_record
+  delegation_document
   delegation_store
   session_store
   local_operator
+  blob_metadata
+  blob_metadata_document
+  blob_stage_documents
+  job_result_intent_document
   blob_store
   blob_reference_scan
   blob_retention
@@ -35,7 +41,11 @@
   commit_writer
   recovery
   idempotency_store
+  audit_event_document
+  audit_evidence_document
   audit_store
+  prompt_manifest
+  prompt_manifest_document
   prompt_artifact_store
   migration)
  (libraries ochat.inference

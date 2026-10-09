@@ -1,4 +1,7 @@
-(** One append-only journal segment. *)
+(** One append-only journal segment. Expected filesystem failures return typed
+    errors; cancellation, timeouts and unexpected exceptions propagate unchanged.
+    Callers with mutable owner state must catch exceptions inside their mutex and
+    re-raise outside it, reconciling uncertain writes from verified authority. *)
 
 module Id : sig
   type t [@@deriving compare, equal, sexp]

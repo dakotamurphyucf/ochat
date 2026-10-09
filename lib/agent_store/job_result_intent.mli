@@ -5,6 +5,11 @@ type t
 
 val reference : t -> Agent_protocol.Job_artifact.t
 val metadata : t -> Blob_store.Metadata.t
+val stage : t -> Blob_stage_documents.t
+
+(** Full preserved document and embedded publication strings, including escaped
+    unknown references; the caller owns conservative root/edge policy. *)
+val iter_reference_strings : t -> f:(string -> unit) -> unit
 
 (** Protect a temporary blob from generic expiry only when its exact metadata
     matches a validated private intent in the owned data root. Labels alone do not

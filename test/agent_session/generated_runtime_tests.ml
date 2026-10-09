@@ -240,7 +240,7 @@ let%expect_test
                      Independent { authorization_sha256 = lifetime_digest }
                    | _ -> Owned)
               ; created_at = timestamp
-              ; inference_target = None
+              ; inference_target = Some (delegation_inference_target ())
               }
           in
           let reserved =

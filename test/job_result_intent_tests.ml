@@ -177,3 +177,95 @@ let%expect_test
   [%expect
     {| publication succeeded once; failed marker cleanup retained data and could retry independently |}]
 ;;
+
+let%expect_test
+    "original intent frame and stored identity gate malformed current payload before \
+     conversion"
+  =
+  with_store (fun env sw blobs _ session _ ->
+    let prepared =
+      prepare env sw blobs session (P.Completion.Succeeded (`String "guarded"))
+      |> store_ok
+    in
+    let reference = Store.reference prepared in
+    let path =
+      Eio.Path.(
+        Eio.Stdenv.fs env
+        / Agent_store.Session_store.Handle.directory session
+        / "result-preparations"
+        / (P.Id.Blob.to_string reference.blob.id ^ ".frame"))
+    in
+    let original = Eio.Path.load path in
+    let record =
+      Agent_store.Document_record.decode_file
+        ~limits:Agent_store.Job_result_intent_document.limits
+        ~expected_digest:None
+        original
+      |> Result.map_error ~f:Agent_store.Document_fields.record_error
+      |> store_ok
+    in
+    let document = Agent_store.Document_record.document record in
+    let replace json name value =
+      match json with
+      | `Object fields -> `Object (List.Assoc.add fields ~equal:String.equal name value)
+      | _ -> assert false
+    in
+    let payload = Document_schema.Document.payload document in
+    let stored_reference =
+      match Document_schema.Json.field payload ~name:"reference" with
+      | Value value -> value
+      | _ -> assert false
+    in
+    let forged =
+      replace stored_reference "session_id" (`String "ses_wrong_original")
+      |> fun json -> replace json "attempt" (`String "-1")
+    in
+    let json =
+      replace
+        (Document_schema.Document.json document)
+        "payload"
+        (replace payload "reference" forged)
+    in
+    let forged =
+      Agent_store.Frame.encode ~max_payload_length:32768 ~flags:0 (Jsonaf.to_string json)
+      |> frame_ok
+    in
+    Eio.Path.save ~create:(`Or_truncate 0o600) path forged;
+    (match Intent.list ~env ~session ~max_count:8 with
+     | Error (Agent_store.Store_error.Corrupt message) ->
+       assert (String.is_substring message ~substring:"original")
+     | _ -> failwith "stored identity must precede invalid current attempt");
+    assert (String.equal forged (Eio.Path.load path));
+    let unsupported =
+      replace
+        (Document_schema.Document.json document)
+        "required_semantics"
+        (`Array [ `String "future_result_owner" ])
+    in
+    let unsupported =
+      Agent_store.Frame.encode
+        ~max_payload_length:32768
+        ~flags:0
+        (Jsonaf.to_string unsupported)
+      |> frame_ok
+    in
+    Eio.Path.save ~create:(`Or_truncate 0o600) path unsupported;
+    assert (Result.is_error (Intent.list ~env ~session ~max_count:8));
+    assert (String.equal unsupported (Eio.Path.load path));
+    let flagged =
+      Agent_store.Frame.encode ~max_payload_length:32768 ~flags:1 "malformed JSON"
+      |> frame_ok
+    in
+    Eio.Path.save ~create:(`Or_truncate 0o600) path flagged;
+    (match Intent.list ~env ~session ~max_count:8 with
+     | Error (Agent_store.Store_error.Corrupt _) -> ()
+     | _ -> failwith "original flags must gate JSON decoding");
+    assert (String.equal flagged (Eio.Path.load path));
+    Eio.Path.save ~create:(`Or_truncate 0o600) path original;
+    assert (List.length (Intent.list ~env ~session ~max_count:8 |> store_ok) = 1);
+    print_endline
+      "original flags/session identity precede payload interpretation; unsupported \
+       semantics never rewrite evidence");
+  [%expect
+    {|original flags/session identity precede payload interpretation; unsupported semantics never rewrite evidence|}]
+;;

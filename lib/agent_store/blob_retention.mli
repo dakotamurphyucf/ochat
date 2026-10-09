@@ -15,7 +15,11 @@ val published : t -> Agent_protocol.Id.Blob.t -> bool
     partial is not a readable completion and supplies no dependency edges.
     Other blobs require complete matching metadata/data. Unknown files, unowned
     partials, identity/digest/JSON errors and exhausted budgets fail the entire
-    scan. Complete JSON is decoded before scanning escaped references.
+    scan. Original raw length/digest validation precedes JSON admission. The full
+    decoded content must satisfy the shared document depth/field/node profile
+    and [max_file_bytes] before recursive reference scanning or completion decoding.
+    All file bytes remain charged to the same aggregate reader; no subtree walk
+    resets a validation or retention allowance.
     Caller must retain actor, cache, publisher and storage serialization until
     combining this graph with every other root and using the result. *)
 val scan

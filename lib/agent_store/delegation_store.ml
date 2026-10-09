@@ -2,75 +2,29 @@ open Core
 module P = Agent_protocol
 module D = Document_schema
 module F = Document_fields
+module R = Delegation_record
+module C = Delegation_document
+module Key = R.Key
+module Admission = R.Admission
+module Reference = R.Reference
 
-module Key = struct
-  type t =
-    { parent_session_id : P.Id.Session.t
-    ; parent_generation : int
-    ; principal_id : P.Id.Principal.t
-    ; idempotency_key : P.Idempotency_key.t
-    }
-  [@@deriving equal, sexp]
-end
-
-module Admission = struct
-  type authored_tool =
-    { name : string
-    ; source_sha256 : string
-    }
-  [@@deriving equal, sexp]
-
-  type lifetime =
-    | Owned
-    | Invocation_owned of { invocation_id : P.Id.Invocation.t }
-    | Independent of { authorization_sha256 : string }
-  [@@deriving equal, sexp]
-
-  type t =
-    { child_session_id : P.Id.Session.t
-    ; revision_id : P.Id.Prompt_revision.t
-    ; transaction_id : P.Id.Transaction.t
-    ; manifest_sha256 : string
-    ; parent_revision_id : P.Id.Prompt_revision.t
-    ; parent_stop_epoch : int64 option [@sexp.option]
-    ; authority_sha256 : string
-    ; authored_tool : authored_tool option [@sexp.option]
-    ; capability_pins : (string * string) list
-    ; lifetime : lifetime
-    ; created_at : P.Timestamp.t
-    ; inference_target : (Inference.Request.Target.t[@sexp.opaque]) option [@sexp.option]
-    }
-  [@@deriving equal, sexp]
-end
-
-type stage =
+type stage = R.stage =
   | Reserved
   | Artifact_installed
   | Child_installed
   | Linked
 [@@deriving equal, sexp]
 
-module Reference = struct
-  type t =
-    { key : Key.t
-    ; child_session_id : P.Id.Session.t
-    ; revision_id : P.Id.Prompt_revision.t
-    ; request_sha256 : string
-    ; admission_sha256 : string
-    }
-  [@@deriving equal, sexp]
-end
-
-type revocation =
+type revocation = R.revocation =
   | Parent_stopped
   | Parent_deleted
   | Authority_changed
   | Admission_failed
 [@@deriving equal, sexp]
 
-type artifact_collection = Prepared [@@deriving equal, sexp]
+type artifact_collection = R.artifact_collection = Prepared [@@deriving equal, sexp]
 
-type record =
+type record = R.t =
   { key : Key.t
   ; request_sha256 : string
   ; admission : Admission.t
@@ -87,14 +41,6 @@ type reservation =
   | Replay of record
   | Conflict of record
 
-module Persisted = struct
-  type t =
-    { version : int
-    ; record : record
-    }
-  [@@deriving sexp]
-end
-
 type t =
   { env : Eio_unix.Stdenv.base
   ; root : Data_root.t
@@ -102,7 +48,7 @@ type t =
   }
 
 let create ~env ~data_root = { env; root = data_root; mutex = Eio.Mutex.create () }
-let max_payload_length = 262144
+let max_payload_length = C.max_payload_length
 let corrupt message = Error (Store_error.Corrupt message)
 let digest text = Digestif.SHA256.(digest_string text |> to_hex)
 let directory t = Filename.concat (Data_root.path t.root) "delegations"
@@ -110,10 +56,14 @@ let filename key = digest (Key.sexp_of_t key |> Sexp.to_string_mach) ^ ".frame"
 let path t key = Filename.concat (directory t) (filename key)
 
 let locked t f =
-  Eio.Mutex.use_rw ~protect:true t.mutex (fun () -> Result.try_with f)
-  |> function
+  let outcome =
+    Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+      try Ok (f ()) with
+      | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+  in
+  match outcome with
   | Ok value -> value
-  | Error exn -> Exn.reraise exn "delegation ledger"
+  | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
 let sha256 value =
@@ -127,413 +77,21 @@ let protocol result =
   Result.map_error result ~f:(fun error -> Store_error.Corrupt error.P.Error.message)
 ;;
 
-let validate_key (key : Key.t) =
-  let open Result.Let_syntax in
-  let%bind _ =
-    protocol (P.Id.Session.of_string (P.Id.Session.to_string key.parent_session_id))
-  in
-  let%bind _ =
-    protocol (P.Id.Principal.of_string (P.Id.Principal.to_string key.principal_id))
-  in
-  let%bind _ =
-    protocol
-      (P.Idempotency_key.of_string (P.Idempotency_key.to_string key.idempotency_key))
-  in
-  match key.parent_generation >= 0 with
-  | true -> Ok ()
-  | false -> corrupt "negative delegation parent generation"
-;;
-
-let validate (record : record) =
-  let open Result.Let_syntax in
-  let a = record.admission in
-  let%bind limits = F.limits ~max_bytes:max_payload_length |> F.store in
-  let%bind () =
-    Option.value_map a.inference_target ~default:(Ok ()) ~f:(fun target ->
-      Inference.Request.Target.validate target ~limits
-      |> Result.map_error ~f:(fun error ->
-        Store_error.Corrupt (Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))))
-  in
-  let%bind () = validate_key record.key in
-  let%bind _ =
-    protocol (P.Id.Session.of_string (P.Id.Session.to_string a.child_session_id))
-  in
-  let%bind _ =
-    protocol
-      (P.Id.Prompt_revision.of_string (P.Id.Prompt_revision.to_string a.revision_id))
-  in
-  let%bind _ =
-    protocol
-      (P.Id.Prompt_revision.of_string
-         (P.Id.Prompt_revision.to_string a.parent_revision_id))
-  in
-  let%bind _ =
-    protocol (P.Id.Transaction.of_string (P.Id.Transaction.to_string a.transaction_id))
-  in
-  let%bind _ = protocol (P.Timestamp.of_string (P.Timestamp.to_string a.created_at)) in
-  let lifetime_valid =
-    match a.lifetime with
-    | Owned -> true
-    | Invocation_owned { invocation_id } ->
-      Option.is_some a.authored_tool
-      && Result.is_ok
-           (P.Id.Invocation.of_string (P.Id.Invocation.to_string invocation_id))
-    | Independent { authorization_sha256 } -> sha256 authorization_sha256
-  in
-  let authored_valid =
-    Option.for_all a.authored_tool ~f:(fun authored ->
-      (not (String.is_empty authored.name))
-      && String.length authored.name <= 1024
-      && (not
-            (String.exists authored.name ~f:(fun c ->
-               Char.to_int c < 32 || Char.equal c '\127')))
-      && sha256 authored.source_sha256)
-  in
-  match
-    (not (P.Id.Session.equal record.key.parent_session_id a.child_session_id))
-    && (not (P.Id.Prompt_revision.equal a.parent_revision_id a.revision_id))
-    && sha256 record.request_sha256
-    && sha256 a.manifest_sha256
-    && sha256 a.authority_sha256
-    && Option.for_all a.parent_stop_epoch ~f:(fun epoch -> Int64.(epoch >= 0L))
-    && lifetime_valid
-    && authored_valid
-    && (match record.artifact_collection, record.stage, record.revocation with
-        | None, _, _ -> true
-        | Some Prepared, (Reserved | Artifact_installed), Some _ -> true
-        | Some Prepared, _, _ -> false)
-    && List.is_sorted_strictly a.capability_pins ~compare:(fun (left, _) (right, _) ->
-      String.compare left right)
-    && List.for_all a.capability_pins ~f:(fun (name, pin) ->
-      (not (String.is_empty name))
-      && String.length name <= 1024
-      && (not
-            (String.exists name ~f:(fun c -> Char.to_int c < 32 || Char.equal c '\127')))
-      && sha256 pin)
-  with
-  | true -> Ok ()
-  | false -> corrupt "invalid delegated creation identity or capability pins"
-;;
-
-let text value = `String value
-let nullable value ~f = F.option_json value ~f
-
-let key_to_json (key : Key.t) =
-  `Object
-    [ "parent_session_id", text (P.Id.Session.to_string key.parent_session_id)
-    ; "parent_generation", F.decimal_json (Int64.of_int key.parent_generation)
-    ; "principal_id", text (P.Id.Principal.to_string key.principal_id)
-    ; "idempotency_key", text (P.Idempotency_key.to_string key.idempotency_key)
-    ]
-;;
-
-let lifetime_to_json = function
-  | Admission.Owned -> `Object [ "kind", text "owned" ]
-  | Invocation_owned { invocation_id } ->
-    `Object
-      [ "kind", text "invocation_owned"
-      ; "invocation_id", text (P.Id.Invocation.to_string invocation_id)
-      ]
-  | Independent { authorization_sha256 } ->
-    `Object
-      [ "kind", text "independent"; "authorization_sha256", text authorization_sha256 ]
-;;
-
-let admission_to_json (a : Admission.t) =
-  `Object
-    [ "child_session_id", text (P.Id.Session.to_string a.child_session_id)
-    ; "revision_id", text (P.Id.Prompt_revision.to_string a.revision_id)
-    ; "transaction_id", text (P.Id.Transaction.to_string a.transaction_id)
-    ; "manifest_sha256", text a.manifest_sha256
-    ; "parent_revision_id", text (P.Id.Prompt_revision.to_string a.parent_revision_id)
-    ; "parent_stop_epoch", nullable a.parent_stop_epoch ~f:F.decimal_json
-    ; "authority_sha256", text a.authority_sha256
-    ; ( "authored_tool"
-      , nullable a.authored_tool ~f:(fun authored ->
-          `Object
-            [ "name", text authored.name; "source_sha256", text authored.source_sha256 ])
-      )
-    ; ( "capability_pins"
-      , `Array
-          (List.map a.capability_pins ~f:(fun (name, pin) ->
-             `Object [ "name", text name; "pin", text pin ])) )
-    ; "lifetime", lifetime_to_json a.lifetime
-    ; "created_at", text (P.Timestamp.to_string a.created_at)
-    ; "inference_target", nullable a.inference_target ~f:Inference.Request.Target.to_json
-    ]
-;;
-
-let stage_to_string = function
-  | Reserved -> "reserved"
-  | Artifact_installed -> "artifact_installed"
-  | Child_installed -> "child_installed"
-  | Linked -> "linked"
-;;
-
-let revocation_to_string = function
-  | Parent_stopped -> "parent_stopped"
-  | Parent_deleted -> "parent_deleted"
-  | Authority_changed -> "authority_changed"
-  | Admission_failed -> "admission_failed"
-;;
-
-let record_to_json (record : record) =
-  `Object
-    [ "key", key_to_json record.key
-    ; "request_sha256", text record.request_sha256
-    ; "admission", admission_to_json record.admission
-    ; "stage", text (stage_to_string record.stage)
-    ; ( "revocation"
-      , nullable record.revocation ~f:(fun value -> text (revocation_to_string value)) )
-    ; ( "artifact_collection"
-      , nullable record.artifact_collection ~f:(fun Prepared -> text "prepared") )
-    ]
-;;
-
-let identifier decode json =
-  Result.bind (F.string json) ~f:(fun value -> F.protocol (decode value))
-;;
-
-let generation json =
-  Result.bind (F.decimal json) ~f:(fun value ->
-    if Int64.(value > of_int Int.max_value)
-    then F.invalid "parent_generation" "generation exceeds native range"
-    else Ok (Int64.to_int_exn value))
-;;
-
-let key_of_json json =
-  let open Result.Let_syntax in
-  let%bind parent_session_id =
-    F.required json "parent_session_id" (identifier P.Id.Session.of_string)
-  in
-  let%bind parent_generation = F.required json "parent_generation" generation in
-  let%bind principal_id =
-    F.required json "principal_id" (identifier P.Id.Principal.of_string)
-  in
-  let%map idempotency_key =
-    F.required json "idempotency_key" (identifier P.Idempotency_key.of_string)
-  in
-  Key.{ parent_session_id; parent_generation; principal_id; idempotency_key }
-;;
-
-let lifetime_of_json json =
-  let open Result.Let_syntax in
-  match%bind F.required json "kind" F.string with
-  | "owned" -> Ok Admission.Owned
-  | "invocation_owned" ->
-    let%map invocation_id =
-      F.required json "invocation_id" (identifier P.Id.Invocation.of_string)
-    in
-    Admission.Invocation_owned { invocation_id }
-  | "independent" ->
-    let%map authorization_sha256 = F.required json "authorization_sha256" F.digest in
-    Admission.Independent { authorization_sha256 }
-  | _ -> F.invalid "lifetime" "unknown lifetime"
-;;
-
-let admission_of_json ~limits json =
-  let open Result.Let_syntax in
-  let%bind child_session_id =
-    F.required json "child_session_id" (identifier P.Id.Session.of_string)
-  in
-  let%bind revision_id =
-    F.required json "revision_id" (identifier P.Id.Prompt_revision.of_string)
-  in
-  let%bind transaction_id =
-    F.required json "transaction_id" (identifier P.Id.Transaction.of_string)
-  in
-  let%bind manifest_sha256 = F.required json "manifest_sha256" F.digest in
-  let%bind parent_revision_id =
-    F.required json "parent_revision_id" (identifier P.Id.Prompt_revision.of_string)
-  in
-  let%bind parent_stop_epoch = F.optional json "parent_stop_epoch" F.decimal in
-  let%bind authority_sha256 = F.required json "authority_sha256" F.digest in
-  let%bind authored_tool =
-    F.optional json "authored_tool" (fun json ->
-      let%bind name = F.required json "name" F.string in
-      let%map source_sha256 = F.required json "source_sha256" F.digest in
-      Admission.{ name; source_sha256 })
-  in
-  let%bind pins = F.required json "capability_pins" F.array in
-  let%bind capability_pins =
-    List.map pins ~f:(fun json ->
-      let%bind name = F.required json "name" F.string in
-      let%map pin = F.required json "pin" F.digest in
-      name, pin)
-    |> Result.all
-  in
-  let%bind lifetime = F.required json "lifetime" lifetime_of_json in
-  let%bind created_at = F.required json "created_at" (identifier P.Timestamp.of_string) in
-  let%map inference_target =
-    F.required json "inference_target" (fun json ->
-      Inference.Request.Target.of_json json ~limits
-      |> Result.map ~f:Option.some
-      |> Result.map_error ~f:(fun error ->
-        D.Error.Invalid_field
-          { path = [ "inference_target" ]
-          ; reason = Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error)
-          }))
-  in
-  Admission.
-    { child_session_id
-    ; revision_id
-    ; transaction_id
-    ; manifest_sha256
-    ; parent_revision_id
-    ; parent_stop_epoch
-    ; authority_sha256
-    ; authored_tool
-    ; capability_pins
-    ; lifetime
-    ; created_at
-    ; inference_target
-    }
-;;
-
-let record_of_json ~limits json =
-  let open Result.Let_syntax in
-  let%bind key = F.required json "key" key_of_json in
-  let%bind request_sha256 = F.required json "request_sha256" F.digest in
-  let%bind admission = F.required json "admission" (admission_of_json ~limits) in
-  let%bind stage =
-    F.required json "stage" (fun json ->
-      match%bind F.string json with
-      | "reserved" -> Ok Reserved
-      | "artifact_installed" -> Ok Artifact_installed
-      | "child_installed" -> Ok Child_installed
-      | "linked" -> Ok Linked
-      | _ -> F.invalid "stage" "unknown stage")
-  in
-  let%bind revocation =
-    F.optional json "revocation" (fun json ->
-      match%bind F.string json with
-      | "parent_stopped" -> Ok Parent_stopped
-      | "parent_deleted" -> Ok Parent_deleted
-      | "authority_changed" -> Ok Authority_changed
-      | "admission_failed" -> Ok Admission_failed
-      | _ -> F.invalid "revocation" "unknown revocation")
-  in
-  let%bind artifact_collection =
-    F.optional json "artifact_collection" (fun json ->
-      match%bind F.string json with
-      | "prepared" -> Ok Prepared
-      | _ -> F.invalid "artifact_collection" "unknown collection state")
-  in
-  let record =
-    { key
-    ; request_sha256
-    ; admission
-    ; stage
-    ; revocation
-    ; artifact_collection
-    ; preservation = None
-    }
-  in
-  let%map () =
-    validate record
-    |> Result.map_error ~f:(fun error ->
-      D.Error.Invalid_field
-        { path = []; reason = Sexp.to_string_hum (Store_error.sexp_of_t error) })
-  in
-  record
-;;
-
-let record_shape =
-  let scalar = D.Shape.value in
-  let key =
-    F.shape
-      [ "parent_session_id", scalar
-      ; "parent_generation", scalar
-      ; "principal_id", scalar
-      ; "idempotency_key", scalar
-      ]
-  in
-  let authored = F.shape [ "name", scalar; "source_sha256", scalar ] in
-  let pins =
-    D.Shape.array
-      (F.shape [ "name", scalar; "pin", scalar ])
-      ~identity_field:(Some "name")
-    |> Result.map_error ~f:(fun error -> Sexp.to_string_hum (D.Error.sexp_of_t error))
-    |> Result.ok_or_failwith
-  in
-  let lifetime =
-    D.Shape.tagged_object
-      ~discriminator:"kind"
-      [ "owned", F.shape [ "kind", scalar ]
-      ; "invocation_owned", F.shape [ "kind", scalar; "invocation_id", scalar ]
-      ; "independent", F.shape [ "kind", scalar; "authorization_sha256", scalar ]
-      ]
-    |> Result.map_error ~f:(fun error -> Sexp.to_string_hum (D.Error.sexp_of_t error))
-    |> Result.ok_or_failwith
-  in
-  let admission =
-    F.shape
-      [ "child_session_id", scalar
-      ; "revision_id", scalar
-      ; "transaction_id", scalar
-      ; "manifest_sha256", scalar
-      ; "parent_revision_id", scalar
-      ; "parent_stop_epoch", scalar
-      ; "authority_sha256", scalar
-      ; "authored_tool", D.Shape.nullable authored
-      ; "capability_pins", pins
-      ; "lifetime", lifetime
-      ; "created_at", scalar
-      ; "inference_target", scalar
-      ]
-  in
-  F.shape
-    [ "key", key
-    ; "request_sha256", scalar
-    ; "admission", admission
-    ; "stage", scalar
-    ; "revocation", scalar
-    ; "artifact_collection", scalar
-    ]
-;;
-
-let record_codec ~limits =
-  D.Domain_codec.create
-    ~limits
-    ~kind:"delegation.intent"
-    ~version:6
-    ~shape:record_shape
-    ~supported_semantics:[]
-    ~decode:(record_of_json ~limits)
-    ~encode:(fun record -> Ok (record_to_json record))
-;;
-
-let encode_document record ~limits =
-  let open Result.Let_syntax in
-  let%bind codec = record_codec ~limits in
-  let carrier =
-    Option.value_map
-      record.preservation
-      ~default:(D.Extension_carrier.of_authored_value record)
-      ~f:(fun previous -> D.Extension_carrier.with_value previous record)
-  in
-  D.Domain_codec.encode codec carrier
-;;
-
-let original_admission_json (record : record) =
-  match Option.bind record.preservation ~f:D.Extension_carrier.template with
-  | None -> admission_to_json record.admission
-  | Some document ->
-    (match D.Json.field (D.Document.payload document) ~name:"admission" with
-     | Value admission -> admission
-     | Absent | Null -> raise_s [%sexp "validated delegation admission is absent"])
-;;
+let validate_key = R.validate_key
+let validate record = R.validate record ~limits:C.limits
 
 let reference (record : record) =
+  let document =
+    C.of_record record
+    |> Result.map_error ~f:(fun error -> Sexp.to_string_hum (D.Error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
   Reference.
     { key = record.key
     ; child_session_id = record.admission.child_session_id
     ; revision_id = record.admission.revision_id
     ; request_sha256 = record.request_sha256
-    ; admission_sha256 =
-        (match record.admission.inference_target with
-         | None -> Admission.sexp_of_t record.admission |> Sexp.to_string_mach |> digest
-         | Some _ -> original_admission_json record |> Jsonaf.to_string |> digest)
+    ; admission_sha256 = C.admission_sha256 document
     }
 ;;
 
@@ -557,39 +115,12 @@ let validate_reference (reference : Reference.t) =
   | false -> corrupt "invalid delegated session reference"
 ;;
 
-let encode_legacy record =
-  let open Result.Let_syntax in
-  let%bind () = validate record in
-  Frame.encode
-    ~max_payload_length
-    ~flags:0
-    (Persisted.sexp_of_t
-       { version =
-           (match
-              ( record.admission.lifetime
-              , record.admission.authored_tool
-              , record.artifact_collection )
-            with
-            | Invocation_owned _, _, _ -> 5
-            | _, Some _, _ -> 4
-            | _, None, Some _ -> 3
-            | _, None, None -> 2)
-       ; record
-       }
-     |> Sexp.to_string_mach)
-  |> Result.map_error ~f:(fun _ ->
-    Store_error.Corrupt "delegation intent exceeds its frame limit")
-;;
-
 let encode record =
-  match record.admission.inference_target with
-  | None -> encode_legacy record
-  | Some _ ->
-    let open Result.Let_syntax in
-    let%bind () = validate record in
-    let%bind limits = F.limits ~max_bytes:max_payload_length |> F.store in
-    let%bind document = encode_document record ~limits |> F.store in
-    Document_record.encode document ~limits ~flags:0 |> Result.map_error ~f:F.record_error
+  let open Result.Let_syntax in
+  let%bind carrier = C.of_record record |> F.store in
+  let%bind document = C.to_document carrier |> F.store in
+  Document_record.encode document ~limits:C.limits ~flags:0
+  |> Result.map_error ~f:F.record_error
 ;;
 
 let decode ~name contents =
@@ -597,61 +128,17 @@ let decode ~name contents =
   match Frame.decode ~max_payload_length ~contents ~offset:0 with
   | Ok (Complete { frame; next_offset })
     when next_offset = String.length contents && Frame.flags frame = 0 ->
-    let payload = Frame.payload frame in
-    if String.is_prefix (String.lstrip payload) ~prefix:"{"
-    then (
-      let%bind limits = F.limits ~max_bytes:max_payload_length |> F.store in
-      let%bind stored =
-        Document_record.of_frame frame ~limits ~expected_digest:None
-        |> Result.map_error ~f:F.record_error
-      in
-      let%bind codec = record_codec ~limits |> F.store in
-      let%bind carrier =
-        D.Domain_codec.decode codec (Document_record.document stored) |> F.store
-      in
-      let record =
-        { (D.Extension_carrier.value carrier) with
-          preservation = Some (D.Extension_carrier.with_value carrier ())
-        }
-      in
-      if String.equal name (filename record.key)
-      then Ok record
-      else corrupt "delegation intent filename differs from its scoped key")
+    let%bind stored =
+      Document_record.of_frame frame ~limits:C.limits ~expected_digest:None
+      |> Result.map_error ~f:F.record_error
+    in
+    let original = Document_record.document stored in
+    let%bind key = C.stored_key original |> F.store in
+    if not (String.equal name (filename key))
+    then corrupt "original delegation intent filename differs from its scoped key"
     else (
-      let%bind persisted =
-        Result.try_with (fun () ->
-          Frame.payload frame |> Sexp.of_string |> Persisted.t_of_sexp)
-        |> Result.map_error ~f:(fun _ ->
-          Store_error.Corrupt "invalid delegation intent payload")
-      in
-      let%bind () =
-        match persisted.version, persisted.record.admission.lifetime with
-        | version, _ when version > 5 -> Error (Store_error.Schema_too_new version)
-        | 5, Invocation_owned _ -> Ok ()
-        | _, Invocation_owned _ ->
-          corrupt "invocation-owned delegation requires version 5"
-        | 5, _ -> corrupt "version 5 requires invocation ownership"
-        | _, (Owned | Independent _) ->
-          (match persisted.version, persisted.record.admission.authored_tool with
-           | 1, None
-             when Option.is_none persisted.record.admission.parent_stop_epoch
-                  && Option.is_none persisted.record.artifact_collection -> Ok ()
-           | 2, None when Option.is_none persisted.record.artifact_collection -> Ok ()
-           | 3, None when Option.is_some persisted.record.artifact_collection -> Ok ()
-           | 4, Some _ -> Ok ()
-           | _ -> corrupt "invalid delegation intent version")
-      in
-      let%bind () =
-        if
-          Option.is_none persisted.record.admission.inference_target
-          && Option.is_none persisted.record.preservation
-        then Ok ()
-        else corrupt "captured inference target requires named JSON ledger version 6"
-      in
-      let%bind () = validate persisted.record in
-      match String.equal name (filename persisted.record.key) with
-      | true -> Ok persisted.record
-      | false -> corrupt "delegation intent filename differs from its scoped key")
+      let%map carrier = C.of_document original |> F.store in
+      C.to_record carrier)
   | _ -> corrupt "delegation intent frame is incomplete or corrupt"
 ;;
 
@@ -663,6 +150,7 @@ let exists t =
     | `Directory -> Ok true
     | _ -> corrupt "delegation ledger is not a regular directory"
   with
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
   | exn -> Error (Store_error.of_exn ~operation:"inspect delegation ledger" ~path exn)
 ;;
 
@@ -676,6 +164,7 @@ let ensure_directory t =
      | false -> Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs t.env / path));
     Durable_file.sync_directory ~env:t.env ~path:(Data_root.path t.root)
   with
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
   | exn -> Error (Store_error.of_exn ~operation:"create delegation ledger" ~path exn)
 ;;
 
@@ -707,6 +196,7 @@ let find_locked t key =
          in
          Result.map (read reader (filename key)) ~f:Option.some
      with
+     | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
      | exn ->
        Error
          (Store_error.of_exn ~operation:"find delegation intent" ~path:(path t key) exn))
@@ -828,6 +318,7 @@ let with_artifact_retention
         | `Directory -> Ok true
         | _ -> corrupt "delegation retention found a linked or invalid destination"
       with
+      | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
       | exn ->
         Error (Store_error.of_exn ~operation:"inspect abandoned delegation" ~path exn)
     in
@@ -1011,6 +502,7 @@ let discard_uninstalled_staging t expected =
            | _ -> corrupt "delegation staging entry is not a directory")
         | _ -> corrupt "delegation destination is not a directory"
       with
+      | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
       | exn ->
         Error
           (Store_error.of_exn

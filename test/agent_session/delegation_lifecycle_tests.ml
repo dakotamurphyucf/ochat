@@ -87,7 +87,7 @@ let with_fixture ?(lifetime = D.Admission.Owned) ?(reject_transition = fun _ -> 
                 ; capability_pins = []
                 ; lifetime
                 ; created_at = timestamp
-                ; inference_target = None
+                ; inference_target = Some (delegation_inference_target ())
                 }
               ~max_records:8
               ~max_bytes:1048576

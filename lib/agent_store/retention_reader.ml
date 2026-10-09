@@ -90,6 +90,7 @@ let kind t ~path =
     | `Regular_file -> Ok `File
     | _ -> corrupt "retention root is missing, linked or unsupported"
   with
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
   | exn -> Error (Store_error.of_exn ~operation:"inspect retention root" ~path exn)
 ;;
 
@@ -116,6 +117,7 @@ let list t ~directory =
           in
           loop []))
   with
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
   | exn ->
     Error (Store_error.of_exn ~operation:"enumerate retention roots" ~path:directory exn)
 ;;
@@ -165,5 +167,6 @@ let read t ~path:relative ~max_bytes =
       in
       loop ())
   with
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
   | exn -> Error (Store_error.of_exn ~operation:"read retention root" ~path:relative exn)
 ;;

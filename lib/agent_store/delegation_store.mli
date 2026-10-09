@@ -6,76 +6,27 @@
     key and request digest returns the original identities. Records have no TTL
     and are not pruned by ordinary command-receipt retention. *)
 
-module Key : sig
-  type t =
-    { parent_session_id : Agent_protocol.Id.Session.t
-    ; parent_generation : int
-    ; principal_id : Agent_protocol.Id.Principal.t
-    ; idempotency_key : Agent_protocol.Idempotency_key.t
-    }
-  [@@deriving equal, sexp_of]
-end
+module Key = Delegation_record.Key
+module Admission = Delegation_record.Admission
 
-module Admission : sig
-  type authored_tool =
-    { name : string
-    ; source_sha256 : string
-    }
-  [@@deriving equal, sexp_of]
-
-  type lifetime =
-    | Owned
-    | Invocation_owned of { invocation_id : Agent_protocol.Id.Invocation.t }
-    (** Host-admitted one-off authored child. Execution additionally requires
-          this exact parent invocation to remain Dispatching. The immutable scope
-          survives restart; ledger v5 distinguishes it from reusable children. *)
-    | Independent of { authorization_sha256 : string }
-  [@@deriving equal, sexp_of]
-
-  type t =
-    { child_session_id : Agent_protocol.Id.Session.t
-    ; revision_id : Agent_protocol.Id.Prompt_revision.t
-    ; transaction_id : Agent_protocol.Id.Transaction.t
-    ; manifest_sha256 : string
-    ; parent_revision_id : Agent_protocol.Id.Prompt_revision.t
-    ; parent_stop_epoch : int64 option
-      (** Stop counter observed at creation admission; legacy absence means zero
-          and retains the original admission hash. New frames use ledger v2. *)
-    ; authority_sha256 : string
-    ; authored_tool : authored_tool option
-      (** Present only for a host-admitted authored specialist. Binds its named
-          declaration and captured source identity, independently of instance ID.
-          Capability pins and current authority still govern resource access.
-          Absence retains the legacy generated-admission hash and wire versions;
-          presence uses ledger v4 and participates in the immutable reference. *)
-    ; capability_pins : (string * string) list
-    ; lifetime : lifetime
-    ; created_at : Agent_protocol.Timestamp.t
-    ; inference_target : (Inference.Request.Target.t[@sexp.opaque]) option
-      (** Captured before a new child reservation. None is historical unresolved
-          evidence only; restoration may not derive a target from the current
-          parent. Captured records use named JSON ledger v6. *)
-    }
-  [@@deriving equal, sexp_of]
-end
-
-type stage =
+type stage = Delegation_record.stage =
   | Reserved
   | Artifact_installed
   | Child_installed
   | Linked
 [@@deriving equal, sexp_of]
 
-type revocation =
+type revocation = Delegation_record.revocation =
   | Parent_stopped
   | Parent_deleted
   | Authority_changed
   | Admission_failed
 [@@deriving equal, sexp_of]
 
-type artifact_collection = Prepared [@@deriving equal, sexp_of]
+type artifact_collection = Delegation_record.artifact_collection = Prepared
+[@@deriving equal, sexp_of]
 
-type record = private
+type record = Delegation_record.t = private
   { key : Key.t
   ; request_sha256 : string
   ; admission : Admission.t
@@ -93,7 +44,7 @@ type record = private
     and full admitted configuration, independently of later stage/revocation.
     Decoding alone does not validate or grant authority. *)
 module Reference : sig
-  type t = private
+  type t = Delegation_record.Reference.t = private
     { key : Key.t
     ; child_session_id : Agent_protocol.Id.Session.t
     ; revision_id : Agent_protocol.Id.Prompt_revision.t
@@ -179,8 +130,8 @@ val with_records
     artifact only when both final and staged child directories are absent and
     the complete artifact matches its admitted digest under bounded validation.
     Persist a collection intent before invoking [f]; future passes may finish
-    partially deleted artifacts under that same irrevocable intent. This uses
-    ledger v3 only for marked records; old records and reference hashes persist.
+    partially deleted artifacts under that same irrevocable intent. This preserves
+    the current named v6 carrier and original admission reference hash.
     Installed/linked children, unrevoked attempts and every parent revision remain
     protected. The immutable retry record is never removed or unrevoked.
     [f] receives protected revisions and must add all catalog/session references,

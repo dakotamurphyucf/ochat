@@ -211,7 +211,7 @@ let on_event ctx state event = match event with
                 |> protocol_ok
             ; lifetime = Owned
             ; created_at = timestamp
-            ; inference_target = None
+            ; inference_target = Some (delegation_inference_target ())
             }
           in
           let reserved =

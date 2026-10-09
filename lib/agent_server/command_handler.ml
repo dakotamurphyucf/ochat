@@ -615,12 +615,13 @@ let handle_blob_read t context request =
     Agent_store.Blob_store.open_session t.blob_store store_handle request.blob_id
     |> Result.map_error ~f:persistence_error
   in
-  let blob = (Agent_store.Blob_store.Handle.metadata handle).blob in
+  let%bind metadata =
+    Agent_store.Blob_store.Handle.metadata_checked handle
+    |> Result.map_error ~f:persistence_error
+  in
+  let blob = metadata.blob in
   let%bind () =
-    if
-      Principal_projection.can_read_blob
-        (Connection_context.principal context)
-        (Agent_store.Blob_store.Handle.metadata handle)
+    if Principal_projection.can_read_blob (Connection_context.principal context) metadata
     then Ok ()
     else Error (error Permission_denied "blob requires additional principal scopes")
   in
@@ -1394,7 +1395,7 @@ let handle_session_export t context request =
     entry.store_handle
     |> Result.of_option ~error:(error Invalid_state "session has no durable blob store")
   in
-  let%map handle =
+  let%bind handle =
     create_export_blob
       t
       (Connection_context.principal context)
@@ -1404,8 +1405,12 @@ let handle_session_export t context request =
       ~display_name
       content
   in
+  let%map metadata =
+    Agent_store.Blob_store.Handle.metadata_checked handle
+    |> Result.map_error ~f:persistence_error
+  in
   Agent_protocol.Method_result.Session_export
-    { blob = (Agent_store.Blob_store.Handle.metadata handle).blob
+    { blob = metadata.blob
     ; session_revision = projected.revision
     ; latest_event_sequence = projected.latest_event_sequence
     }

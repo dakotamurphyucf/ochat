@@ -161,21 +161,7 @@ let install artifact_store ~transaction_id artifact =
      creation timestamp. Catalog rebuilds must return the installed manifest,
      not a candidate with a new timestamp under the same revision ID. Verify all
      other candidate metadata before reusing that immutable artifact. *)
-  let%bind candidate =
-    Store.Artifact.create
-      ~revision_id:artifact.revision_id
-      ?prompt_definition_id:artifact.prompt_definition_id
-      ?canonical_source:artifact.canonical_source
-      ~root_relative_path:artifact.root_relative_path
-      ~root_chatmd:artifact.root_chatmd
-      ~sources:artifact.sources
-      ~parser_schema_version:artifact.parser_schema_version
-      ~runtime_schema_version:artifact.runtime_schema_version
-      ?shell_manifest_sha256:artifact.shell_manifest_sha256
-      ~created_at:retained.created_at
-      ()
-  in
-  match String.equal candidate.manifest_sha256 retained.manifest_sha256 with
+  match Store.Artifact.same_content artifact retained with
   | true -> Ok retained
   | false ->
     Error

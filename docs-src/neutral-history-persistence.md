@@ -392,4 +392,145 @@ until actor/journal hydration, with no invented pending initial start.
 | Session index | `Session_index` / `Session_index_document` | Checked startup/maintenance/workspace reads | Named document and keyed entry carrier |
 | Archive marker | `Session_store` / `Session_archive_document` | Index rebuild/archive reconciliation | Named identity document; file presence owns archived state |
 | Projection recovery marker | `Session_projection_update` / `Session_index_recovery_document` | Store reopen/eager hydration | Named document; serialized recovery ownership |
+| Blob metadata | `Blob_store` / `Blob_metadata_document` | Expiry, preparation protection and `Blob_retention` share decoder | Named carrier; original blob ID and raw content digest |
+| Private result intent | `Job_result_intent` / `Job_result_intent_document` | Publisher restart and independent retention | Verified frame, full reference, exact temporary/durable metadata strings |
+| Delegation intent | `Delegation_store` / `Delegation_document` | Admission resolution, revoke and independent artifact collection | Named current v6; original scoped filename and immutable admission hash |
+| Prompt manifest | `Prompt_artifact_store` / `Prompt_manifest_document.Publication` | Revision rebuild and independent retention | Exact immutable bytes/digest before conversion; known inventory validation |
+| Root audit evidence | `Audit_store` / `Audit_evidence_document` / `Audit_event_document` | Complete semantic admission before tail repair | Original embedded bytes/hash; verified canonical snapshot and signed pages |
 | Host server ID, actor/daemon locks, secrets | Existing host owners | Existing validation | Intentionally outside session JSON |
+
+## M3 blob metadata and private result intents
+
+Blob metadata retains existing `<blob>.sexp` filenames with `store.blob_metadata`
+version 1 named payloads. Every ordinary reader, expiry/protection consumer and
+retention scan uses that same validated owner. Handles carry nested/envelope
+unknown fields across adoption. IDs, exact durable/temporary namespace, target
+session, canonical SHA256 digest and nonnegative decimal length are validated;
+optional fields omit absent values and reject explicit null.
+
+Private `<blob>.frame` preparations contain `store.job_result_intent` version 1.
+Original frame checksum/version/flags/EOF are validated before JSON admission;
+original stored filename/session identity is checked before conversion. The full
+reference plus exact temporary/durable named metadata publication strings fit the
+unchanged 32768-byte payload bound. The publications differ only in durable flag,
+including field presence and unknown fields. They are prepared and validated before
+any intent/blob effect, retained across restart, and reused byte-for-byte for stage
+publication and atomic temporary-prefix cleanup. Converted or current reencoded
+JSON cannot replace this original evidence. Raw completion bytes and their length/
+SHA256 remain independent; recovered publisher retries retain original content
+bytes rather than reserializing the current typed completion.
+
+Retention keeps its existing live storage capability and shared reader entry/byte
+budget. It visits full named metadata/intent JSON strings, embedded publication
+strings and unknown nested references (including escaped IDs), preserves existing
+root/edge/self-reference policy, and rejects unsupported required semantics before
+deletion. Staged cleanup validates all exact metadata and raw content evidence,
+removes data before metadata, syncs their directories, and removes the private
+intent last. Partial/uncertain acknowledgement retains proof for retry. Cancellation
+propagates outside recoverable publisher/storage locks without poisoning them.
+
+Blob handles retain one immutable observation containing a validated metadata
+carrier and its actual locations. Availability is a single state transition;
+metadata is derived from that carrier. The diagnostic last observation cannot
+authorize a read or mutation. Adoption synchronizes a newly created blobs parent
+and both affected directory owners before success. Failed publication conservatively
+removes live authority, then verifies the exact old or new document and raw content
+length/digest under the storage owner. Only a proven pair restores availability.
+Protected rollback/reconciliation secondary failures never replace the primary
+result or exception/backtrace; mutation cancellation itself propagates outside the
+owner lock. A fresh verified reopen remains possible after uncertain acknowledgment.
+
+## M3 delegation ledger
+
+The private delegation owner admits only current `delegation.intent` version 6
+named documents inside complete checksum-verified, zero-flag frames. The original
+scoped key must match its deterministic existing filename before document
+conversion or current admission validation. Filename identity continues to use
+the current scoped key serialization; it does not admit historical ledger formats.
+Every admitted record has a captured inference target. Readers never guess a
+missing target from current parent policy or reinterpret older typed ledgers.
+
+`Delegation_record` owns the actual domain shapes and current invariants;
+`Delegation_document` owns the bounded carrier and immutable admission identity.
+References hash the original admitted JSON subtree with its ordering and numeric
+lexemes. Mutable stage, revocation and artifact-collection publication preserves
+that subtree, optional presence, nested extensions and envelope extensions. A
+changed immutable request or admission cannot reuse the carrier. Reservation,
+replay, resolution, stage advancement, revocation and independent artifact
+retention all use this same document owner. Record admission confers no authority:
+current generation, parent policy, stop/revocation and invocation lifetime checks
+still belong to the existing delegation coordination owner. Cancellation propagates
+outside the ledger mutex with its original exception/backtrace.
+
+## M3 prompt manifest publication
+
+Prompt artifacts retain `manifest.sexp` and `manifest.sha256` filenames with a
+`store.prompt_manifest` version 1 named document. `Prompt_manifest` owns the
+current inventory invariants; `Prompt_manifest_document.Publication` holds the
+validated carrier, exact immutable publication bytes and their original digest.
+Load and independent retention verify that digest and the original revision ID
+before document conversion and current validation. Root, source and materialized
+tree files retain their independent raw byte digests and exact inventory checks.
+A stored manifest is never reencoded to establish its admitted digest.
+
+Authored manifest admission has an explicit 262,144-byte limit for the complete
+inventory document, including envelope and metadata. This is a new beta admission
+restriction, separate from the source capture owner's 256-file and 8 MiB limits;
+long paths or extended metadata can exhaust the manifest allowance even when
+source content satisfies its limits. Admission completes before staging effects.
+
+Loaded and cached artifacts preserve unknown fields, optional presence and exact
+manifest whitespace through immutable publication custody. Revision rebuilds
+compare validated known source metadata and return the installed artifact with
+its original publication, timestamp and digest. Independently retained delegation
+admissions still pin that original digest; this comparison cannot substitute a
+changed manifest admission. Installation flushes exact files and all staging
+directories before final rename, then flushes the artifact parent before success.
+Failure preserves the primary result or exception/backtrace; private cleanup can
+remove only this invocation's created staging directory and never an installed
+or preexisting destination. Original byte evidence remains verifiable on reopen.
+## M3 audit evidence and recovery
+
+`Audit_store` retains the existing journal filename, framing and hash-chain rule:
+SHA-256(previous hash or empty string, NUL, exact embedded event bytes). Complete
+frame payloads are now `store.audit_evidence` version 1 named documents containing
+immutable `store.audit_event` version 1 byte evidence. Binary beta audit records
+are unsupported. Stored chain hashes cover the original embedded bytes, including
+whitespace, ordering and numeric lexemes; current conversion or projection can
+never replace that evidence. Original previous/hash/byte fields are checked before
+conversion and current event validation. Optional event IDs preserve absence and
+reject null; the opaque supported event payload may itself be null. Unknown event
+and evidence fields remain private on disk; public audit pages use only the
+current protocol projection and existing signed ordered paging/filter rules.
+
+Authored admission validates the complete escaped evidence envelope and frame
+against the configured payload byte limit before journal effects. Recovery first
+verifies framing, then all complete chain records and their current semantics,
+and only then repairs a short tail. A complete semantic failure followed by a
+torn tail leaves the entire file unchanged. Sequence overflow fails before effects.
+
+The audit owner keeps one immutable verified snapshot inside an availability
+variant. After uncertain append, protected reconciliation can install either the
+fully verified old or new canonical journal snapshot; if this proof fails, both
+reads and appends return the unavailable failure. Primary errors, exception
+backtraces and cancellation survive secondary recovery failures. Exceptions are
+captured inside the owner mutex and raised outside it, preventing poisoning.
+Journal helpers return expected filesystem errors and propagate cancellation,
+timeouts and unexpected exceptions. Aggregate segment scanning retains its
+existing complete-file ownership contract; this slice does not add a journal-size
+limit or invent another store. Cursor secrets remain raw host facts.
+
+The shared session `Commit_writer` also owns asynchronous exception replies.
+An interrupted journal commit marks the writer unavailable before resolving its
+initiating caller with the original exception and backtrace. Accepted queued and
+later commits fail without advancing or reusing uncertain journal counters.
+Synthetic operation failures leave the worker alive to process failure replies
+and close; genuine owning-context cancellation still stops it. Recovery uses a
+freshly reopened journal and writer, preserving canonical acknowledged or
+unacknowledged complete transactions and repairing only validated torn tails.
+
+The writer's protected stopped signal owns bounded admission and reply lifetime.
+Commit and close race their complete enqueue-and-reply waits against shutdown;
+shutdown cancels blocked producers and releases external queued callers even
+when they do not share the worker's cancellation scope. Already resolved normal
+or exceptional replies always take precedence over generic closed failures.

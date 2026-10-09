@@ -50,7 +50,7 @@ let%expect_test
        Eio.Path.save
          ~create:(`Exclusive 0o600)
          (path storage.temporary_directory ".sexp")
-         (Blob.Metadata.sexp_of_t metadata |> Sexp.to_string_mach);
+         (Agent_store.Blob_stage_documents.temporary_bytes (Intent.stage intent));
        let forged =
          Blob.begin_upload
            storage.blobs
@@ -127,7 +127,7 @@ let%expect_test
        Eio.Path.save
          ~create:(`Exclusive 0o600)
          alias
-         (Blob.Metadata.sexp_of_t metadata |> Sexp.to_string_mach);
+         (Agent_store.Blob_stage_documents.temporary_bytes (Intent.stage intent));
        assert (Result.is_error (maintenance ()));
        assert (Eio.Path.is_file alias);
        assert (Eio.Path.is_file (path storage.temporary_directory ".blob"));

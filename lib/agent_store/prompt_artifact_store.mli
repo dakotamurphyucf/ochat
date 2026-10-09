@@ -23,9 +23,17 @@ module Artifact : sig
     ; runtime_schema_version : int
     ; shell_manifest_sha256 : string option
     ; manifest_sha256 : string
+    ; manifest_publication : Prompt_manifest_document.Publication.t
     ; created_at : Agent_protocol.Timestamp.t
     }
 
+  (** Compare validated source/manifest metadata while ignoring creation timestamp.
+      This does not compare or replace original admitted publication digest. *)
+  val same_content : t -> t -> bool
+
+  (** Authors one exact named manifest publication. Its complete inventory is
+      limited to 262144 bytes, including metadata and envelope, before IO.
+      This is separate from the capture owner's 256-file and 8 MiB source limits. *)
   val create
     :  revision_id:Agent_protocol.Id.Prompt_revision.t
     -> ?prompt_definition_id:Agent_protocol.Id.Prompt_definition.t
@@ -45,8 +53,10 @@ type t
 
 val create : env:Eio_unix.Stdenv.base -> root:string -> (t, Store_error.t) result
 
-(** [install] writes owner-read-only files into an exclusive staging directory
-    and atomically renames it to the revision ID. Directories remain owner-managed
+(** [install] writes owner-read-only files into an exclusive staging directory,
+    flushes files and staging directories, then renames it to the revision ID and
+    flushes the artifact parent before acknowledgment. Uncertain final publication
+    never deletes an installed destination. Directories remain owner-managed
     for pruning. File permissions are not a sandbox against the owning account. *)
 val install
   :  t
@@ -54,7 +64,9 @@ val install
   -> Artifact.t
   -> (unit, Store_error.t) result
 
-(** [load] verifies the manifest, every source digest and the materialized tree.
+(** [load] verifies the original manifest bytes/digest and stored revision identity
+    before current named admission, every source digest and the materialized tree.
+    Returned artifacts preserve the exact publication rather than reauthoring it.
     Missing, altered, unexpected or symlinked tree files fail closed. *)
 val load : t -> Agent_protocol.Id.Prompt_revision.t -> (Artifact.t, Store_error.t) result
 

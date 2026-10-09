@@ -1,88 +1,66 @@
 open Core
 
-module Persisted = struct
+module Snapshot = struct
   type t =
-    { previous_hash : string option
-    ; record_json : string
-    ; record_hash : string
+    { records : Agent_protocol.Audit.t list
+    ; previous_hash : string option
+    ; next_sequence : int64
     }
-  [@@deriving bin_io]
 end
+
+type availability =
+  | Available of Snapshot.t
+  | Unavailable of Store_error.t
 
 type t =
   { env : Eio_unix.Stdenv.base
   ; segment : Journal_segment.t
   ; max_payload_length : int
+  ; limits : Document_schema.Limits.t
   ; cursor_secret : string
   ; mutex : Eio.Mutex.t
-  ; mutable records : Agent_protocol.Audit.t list
-  ; mutable previous_hash : string option
-  ; mutable next_sequence : int64
+  ; mutable availability : availability
   }
 
 let segment_id = Journal_segment.Id.first
 let secret_file directory = Filename.concat directory "cursor-secret"
 
-let encode_record record =
-  Agent_protocol.Audit.to_json record
-  |> Agent_protocol.Json_codec.canonical_string
-  |> Result.map_error ~f:(fun error -> Store_error.Corrupt error.message)
+let available t =
+  match t.availability with
+  | Available snapshot -> Ok snapshot
+  | Unavailable failure -> Error failure
 ;;
 
-let record_hash previous_hash record_json =
-  let previous_hash = Option.value previous_hash ~default:"" in
-  Digestif.SHA256.digest_string (previous_hash ^ "\000" ^ record_json)
-  |> Digestif.SHA256.to_hex
-;;
-
-let encode_persisted persisted =
-  Bin_prot.Utils.bin_dump ~header:false Persisted.bin_writer_t persisted
-  |> Bigstring.to_string
-;;
-
-let decode_persisted encoded =
-  try Ok (Bin_prot.Reader.of_string Persisted.bin_reader_t encoded) with
-  | exn ->
-    Error (Store_error.Corrupt ("audit record decode failed: " ^ Exn.to_string exn))
-;;
-
-let decode_record encoded =
-  try
-    Jsonaf.of_string encoded
-    |> Agent_protocol.Audit.of_json
-    |> Result.map_error ~f:(fun error -> Store_error.Corrupt error.message)
-  with
-  | exn -> Error (Store_error.Corrupt ("audit JSON decode failed: " ^ Exn.to_string exn))
-;;
-
-let validate_persisted previous_hash next_sequence persisted =
-  let open Result.Let_syntax in
-  if not (Option.equal String.equal persisted.Persisted.previous_hash previous_hash)
-  then Error (Store_error.Corrupt "audit hash chain is discontinuous")
-  else if
-    not
-      (String.equal
-         persisted.record_hash
-         (record_hash previous_hash persisted.record_json))
-  then Error (Store_error.Corrupt "audit record hash does not match")
-  else (
-    let%bind record = decode_record persisted.record_json in
-    if not (Int64.equal record.sequence next_sequence)
-    then Error (Store_error.Corrupt "audit sequence is discontinuous")
-    else Ok record)
-;;
-
-let recover_entries entries =
+let recover_entries entries ~limits =
   let rec loop previous_hash next_sequence records = function
-    | [] -> Ok (List.rev records, previous_hash, next_sequence)
+    | [] -> Ok Snapshot.{ records = List.rev records; previous_hash; next_sequence }
     | entry :: rest ->
       let open Result.Let_syntax in
-      let%bind persisted =
-        Frame.payload entry.Journal_segment.frame |> decode_persisted
+      let frame = entry.Journal_segment.frame in
+      let%bind () =
+        if Frame.flags frame = 0
+        then Ok ()
+        else Error (Store_error.Corrupt "audit frame flags must be zero")
       in
-      let%bind record = validate_persisted previous_hash next_sequence persisted in
+      let%bind named =
+        Document_record.of_frame frame ~limits ~expected_digest:None
+        |> Result.map_error ~f:Document_fields.record_error
+      in
+      let%bind evidence =
+        Audit_evidence_document.of_document
+          (Document_record.document named)
+          ~previous_hash
+          ~next_sequence
+          ~limits
+      in
+      let record = Audit_event_document.value (Audit_evidence_document.event evidence) in
+      let%bind () =
+        if Int64.equal next_sequence Int64.max_value
+        then Error (Store_error.Corrupt "audit sequence overflow")
+        else Ok ()
+      in
       loop
-        (Some persisted.record_hash)
+        (Some (Audit_evidence_document.record_hash evidence))
         Int64.(next_sequence + 1L)
         (record :: records)
         rest
@@ -128,13 +106,23 @@ let ensure_directory env directory =
     Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / directory);
     Ok ()
   with
-  | exn ->
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+  | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
     Error
       (Store_error.Io
          { operation = "create audit directory"
          ; path = directory
          ; message = Exn.to_string exn
          })
+;;
+
+let recover_snapshot ~env segment ~max_payload_length ~limits =
+  let open Result.Let_syntax in
+  let%bind scan = Journal_segment.scan ~env ~max_payload_length segment in
+  (* Complete framed semantics must be admitted before modifying a torn tail. *)
+  let%bind snapshot = recover_entries scan.entries ~limits in
+  let%map () = repair_tail env segment scan in
+  snapshot
 ;;
 
 let open_or_create ~env ~directory ~max_payload_length =
@@ -147,31 +135,54 @@ let open_or_create ~env ~directory ~max_payload_length =
          ; path = directory
          ; message = "path must be absolute"
          })
-  else if max_payload_length <= 0
-  then Error (Store_error.Corrupt "audit payload limit must be positive")
   else (
+    let%bind limits =
+      Document_fields.limits ~max_bytes:max_payload_length |> Document_fields.store
+    in
     let%bind () = ensure_directory env directory in
     let%bind segment = open_segment env directory in
-    let%bind scan = Journal_segment.scan ~env ~max_payload_length segment in
-    let%bind () = repair_tail env segment scan in
-    let%bind records, previous_hash, next_sequence = recover_entries scan.entries in
+    let%bind snapshot = recover_snapshot ~env segment ~max_payload_length ~limits in
     let%map cursor_secret = load_or_create_secret env directory in
     { env
     ; segment
     ; max_payload_length
+    ; limits
     ; cursor_secret
     ; mutex = Eio.Mutex.create ()
-    ; records
-    ; previous_hash
-    ; next_sequence
+    ; availability = Available snapshot
     })
+;;
+
+let reconcile_after_failure t failure =
+  t.availability <- Unavailable failure;
+  (* This entire journal is the authority. Either fully verified old or new
+     snapshot is honest; failed secondary recovery leaves reads unavailable. *)
+  Eio.Cancel.protect (fun () ->
+    try
+      match
+        recover_snapshot
+          ~env:t.env
+          t.segment
+          ~max_payload_length:t.max_payload_length
+          ~limits:t.limits
+      with
+      | Ok snapshot -> t.availability <- Available snapshot
+      | Error _ -> ()
+    with
+    | _ -> ())
 ;;
 
 let append_locked t ~timestamp ~level ~name ~session_id ~principal_id ~payload ~redacted =
   let open Result.Let_syntax in
+  let%bind snapshot = available t in
+  let%bind () =
+    if Int64.equal snapshot.next_sequence Int64.max_value
+    then Error (Store_error.Corrupt "audit sequence overflow")
+    else Ok ()
+  in
   let record =
     Agent_protocol.Audit.
-      { sequence = t.next_sequence
+      { sequence = snapshot.next_sequence
       ; timestamp
       ; level
       ; name
@@ -181,29 +192,69 @@ let append_locked t ~timestamp ~level ~name ~session_id ~principal_id ~payload ~
       ; redacted
       }
   in
-  let%bind record_json = encode_record record in
-  let record_hash = record_hash t.previous_hash record_json in
-  let persisted =
-    Persisted.{ previous_hash = t.previous_hash; record_json; record_hash }
+  let%bind event =
+    Audit_event_document.create record ~limits:t.limits |> Document_fields.store
+  in
+  let%bind evidence =
+    Audit_evidence_document.create
+      event
+      ~previous_hash:snapshot.previous_hash
+      ~limits:t.limits
+    |> Document_fields.store
+  in
+  let%bind document =
+    Audit_evidence_document.to_document evidence ~limits:t.limits |> Document_fields.store
   in
   let%bind frame =
-    Frame.encode
-      ~max_payload_length:t.max_payload_length
-      ~flags:0
-      (encode_persisted persisted)
-    |> Result.map_error ~f:(fun error ->
-      Store_error.Corrupt ([%sexp_of: Frame.error] error |> Sexp.to_string_hum))
+    Document_record.encode document ~limits:t.limits ~flags:0
+    |> Result.map_error ~f:Document_fields.record_error
   in
-  let%map _ = Journal_segment.append ~env:t.env ~durability:Flush t.segment ~frame in
-  t.records <- t.records @ [ record ];
-  t.previous_hash <- Some record_hash;
-  t.next_sequence <- Int64.(t.next_sequence + 1L);
-  record
+  try
+    match Journal_segment.append ~env:t.env ~durability:Flush t.segment ~frame with
+    | Error failure ->
+      reconcile_after_failure t failure;
+      Error failure
+    | Ok _ ->
+      t.availability
+      <- Available
+           Snapshot.
+             { records = snapshot.records @ [ record ]
+             ; previous_hash = Some (Audit_evidence_document.record_hash evidence)
+             ; next_sequence = Int64.(snapshot.next_sequence + 1L)
+             };
+      Ok record
+  with
+  | exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    reconcile_after_failure
+      t
+      (Store_error.of_exn
+         ~operation:"append audit evidence"
+         ~path:(Journal_segment.path t.segment)
+         exn);
+    Exn.raise_with_original_backtrace exn backtrace
 ;;
 
 let append t ~timestamp ~level ~name ~session_id ~principal_id ~payload ~redacted =
-  Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-    append_locked t ~timestamp ~level ~name ~session_id ~principal_id ~payload ~redacted)
+  let outcome =
+    Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+      try
+        Ok
+          (append_locked
+             t
+             ~timestamp
+             ~level
+             ~name
+             ~session_id
+             ~principal_id
+             ~payload
+             ~redacted)
+      with
+      | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+  in
+  match outcome with
+  | Ok result -> result
+  | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
 let cursor_signature secret sequence =
@@ -259,10 +310,11 @@ let matches
 
 let read_locked t request =
   let open Result.Let_syntax in
+  let%bind snapshot = available t in
   let%bind after_sequence =
     decode_cursor t request.Agent_protocol.Audit.Read_request.page.cursor
   in
-  let matching = List.filter t.records ~f:(matches request after_sequence) in
+  let matching = List.filter snapshot.records ~f:(matches request after_sequence) in
   let items = List.take matching request.page.limit in
   let%map next_cursor =
     match List.last items with

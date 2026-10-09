@@ -937,3 +937,19 @@ let audit_actor ?(with_invocation = false) ~sw ~env ~workspace_instance ~reject_
   in
   actor, backend
 ;;
+
+let delegation_inference_target () =
+  let limits = Agent_store.Delegation_document.limits in
+  Inference.Request.Target.create
+    ~adapter:"fixture.responses"
+    ~profile:"selected"
+    ~profile_revision:None
+    ~account:None
+    ~endpoint:"fixture://responses"
+    ~model:"fixture-model"
+    ~settings:[]
+    ~limits
+  |> Result.map_error ~f:(fun error ->
+    Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
+  |> Result.ok_or_failwith
+;;
