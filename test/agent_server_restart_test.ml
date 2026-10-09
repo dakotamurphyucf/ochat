@@ -340,7 +340,6 @@ let on_event = fun ctx state event -> match event with
                 (Session_get { session_id = id; history = None })
               |> protocol_ok
               |> ignore;
-              let actor = (entry daemon id).actor in
               let restarted_handle =
                 match mode with
                 | `Allow | `Ask | `Deny -> None
@@ -358,6 +357,7 @@ let on_event = fun ctx state event -> match event with
                   H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
                   Some handle
               in
+              let actor = (entry daemon id).actor in
               let settled =
                 match mode with
                 | `Allow | `Ask -> await actor (finished Session_resume)
@@ -1724,7 +1724,6 @@ let%expect_test "durable stopped session resets, recovers, and starts after rest
               (Agent_protocol.Public.Snapshot.fields snapshot).session
             | _ -> failwith "unexpected recovered session response"
           in
-          let grants_after_restart = manifest_grant_count second_daemon recovered.id in
           let handle =
             Agent_client.Session_handle.attach
               ~sw
@@ -1735,6 +1734,7 @@ let%expect_test "durable stopped session resets, recovers, and starts after rest
               ()
             |> protocol_ok
           in
+          let grants_after_restart = manifest_grant_count second_daemon recovered.id in
           let started =
             Agent_client.Session_handle.start handle ~queue_if_limited:false
             |> protocol_ok
@@ -1831,14 +1831,8 @@ let%expect_test "inactive stopped actors unload and reconstruct on demand" =
               (Agent_protocol.Public.Snapshot.fields snapshot).session
             | _ -> failwith "unexpected lazy session response"
           in
-          let present_after_get =
-            Option.is_some (Agent_server.Session_registry.find registry created.id)
-          in
-          let reconstructed_entry =
-            Agent_server.Session_registry.find registry created.id |> Option.value_exn
-          in
-          let runtime_deferred =
-            not (Agent_server.Runtime_owner.is_loaded reconstructed_entry.runtime)
+          let absent_after_get =
+            Option.is_none (Agent_server.Session_registry.find registry created.id)
           in
           let handle =
             Agent_client.Session_handle.attach
@@ -1850,6 +1844,12 @@ let%expect_test "inactive stopped actors unload and reconstruct on demand" =
               ~subscribe:false
               ()
             |> protocol_ok
+          in
+          let reconstructed_entry =
+            Agent_server.Session_registry.find registry created.id |> Option.value_exn
+          in
+          let runtime_deferred =
+            not (Agent_server.Runtime_owner.is_loaded reconstructed_entry.runtime)
           in
           Agent_client.Session_handle.start handle ~queue_if_limited:false
           |> protocol_ok
@@ -1867,7 +1867,7 @@ let%expect_test "inactive stopped actors unload and reconstruct on demand" =
               ; indexed_summary_visible : bool
               ; same_session =
                   (Agent_protocol.Id.Session.compare loaded.id created.id = 0 : bool)
-              ; present_after_get : bool
+              ; absent_after_get : bool
               ; runtime_deferred : bool
               ; runtime_loaded_on_start : bool
               }]))
@@ -1876,7 +1876,7 @@ let%expect_test "inactive stopped actors unload and reconstruct on demand" =
   [%expect
     {|
     ((unloaded 1) (absent_after_unload true) (indexed_summary_visible true)
-     (same_session true) (present_after_get true) (runtime_deferred true)
+     (same_session true) (absent_after_get true) (runtime_deferred true)
      (runtime_loaded_on_start true))
     |}]
 ;;

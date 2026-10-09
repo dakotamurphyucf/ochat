@@ -626,21 +626,22 @@ let%expect_test "independent ancestry retains temporary roots across stop and re
           read leaf_handle leaf "after-restart";
           let parent = find daemon parent_id in
           let parent_handle = attach sw client parent in
-          H.delete
-            parent_handle
-            ~expected_revision:(state parent).counters.revision
-            ~policy:Remove
-            ~confirmation:(P.Id.Session.to_string parent_id)
-          |> protocol_ok
-          |> ignore;
+          (match
+             H.delete
+               parent_handle
+               ~expected_revision:(state parent).counters.revision
+               ~policy:Remove
+               ~confirmation:(P.Id.Session.to_string parent_id)
+           with
+           | Error { code = Conflict; _ } -> ()
+           | Error _ | Ok _ ->
+             failwith "live independent descendants admitted parent removal");
+          assert (Option.is_some (Registry.find (Daemon.registry daemon) parent_id));
+          assert (Eio.Path.is_directory Eio.Path.(Eio.Stdenv.fs env / workspace));
+          H.stop leaf_handle ~mode:Cancel |> protocol_ok |> ignore;
+          H.stop child_handle ~mode:Cancel |> protocol_ok |> ignore;
           stopped child;
           stopped leaf;
-          assert (
-            match
-              Eio.Path.kind ~follow:false Eio.Path.(Eio.Stdenv.fs env / workspace)
-            with
-            | `Not_found -> true
-            | _ -> false);
           H.close child_handle;
           H.close leaf_handle;
           H.close parent_handle);
@@ -651,16 +652,15 @@ let%expect_test "independent ancestry retains temporary roots across stop and re
           "independent child and owned leaf read across restart; parent reset/eviction \
            excluded; owned stop preserved";
         print_endline
-          "lazy ancestor reload avoids execution; deleting parent stops child before \
-           removing roots";
+          "lazy ancestor reload avoids execution; explicit owned stop preserved";
         print_endline
-          "changed host policy denies restart; restored grant permits use; deletion \
-           joins owned descendants"));
+          "changed host policy denies restart; restored grant permits use; live \
+           descendants reject removal and preserve workspace"));
   [%expect
     {|
     explicit grant and stable replay; lifetime conflict; stopped ancestors retain roots and avoid execution
     independent child and owned leaf read across restart; parent reset/eviction excluded; owned stop preserved
-    lazy ancestor reload avoids execution; deleting parent stops child before removing roots
-    changed host policy denies restart; restored grant permits use; deletion joins owned descendants
+    lazy ancestor reload avoids execution; explicit owned stop preserved
+    changed host policy denies restart; restored grant permits use; live descendants reject removal and preserve workspace
   |}]
 ;;

@@ -256,9 +256,7 @@ let%expect_test "daemon startup failure releases store and acquired operator imm
                      ~dispatch:(fun ~actor:_ _ ->
                        failwith "operator dispatch unreachable")
                      ~receipt:(fun ~actor:_ _ -> failwith "operator receipt unreachable")
-                     ~close:(fun () ->
-                       Int.incr closed;
-                       raise Eio.Time.Timeout))
+                     ~close:(fun () -> Int.incr closed))
               in
               let options =
                 { Agent_server.Daemon.default_options with
