@@ -82,10 +82,10 @@ test.describe('dense protocol accessibility', () => {
     test(`dense protocol references reflow, scroll, and pass accessibility in ${theme}`, async ({
       page,
     }) => {
-      // The current reference has ~57,000 elements. Paired Firefox full-page
-      // audits reached the deadline while finishing results; run these two scans
-      // sequentially, retaining every rule, both themes, and the individual bound.
-      test.setTimeout(150_000);
+      // The reference grew from ~35,000 to ~57,000 elements. Full-page audits
+      // that complete take 138–144 seconds; Firefox/WebKit still exceed 150
+      // seconds sequentially. Keep both themes/all rules with a finite 300s bound.
+      test.setTimeout(300_000);
       await page.setViewportSize({ width: 320, height: 800 });
       await page.emulateMedia({ colorScheme: theme });
       await page.goto('/docs/reference/agent-server/protocol-types/#session');
