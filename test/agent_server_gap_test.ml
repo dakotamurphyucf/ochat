@@ -308,6 +308,8 @@ let mutations session_id attachment_id expected_revision target_revision =
       { session_id
       ; attachment_id
       ; job_id = Agent_protocol.Id.Job.create ()
+      ; expected_generation = None
+      ; expected_attempt = None
       ; idempotency_key
       }
   ; Schedule_create
@@ -322,6 +324,7 @@ let mutations session_id attachment_id expected_revision target_revision =
       { session_id
       ; attachment_id
       ; schedule_id = Agent_protocol.Id.Schedule.create ()
+      ; expected_generation = None
       ; idempotency_key
       }
   ]

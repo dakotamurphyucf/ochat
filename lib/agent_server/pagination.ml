@@ -137,6 +137,34 @@ let ordered ?(additional_binding = []) t principal command request encode values
     Agent_protocol.Page.{ items; next_cursor })
 ;;
 
+let activity
+      t
+      principal
+      (request : Agent_protocol.Activity_query.t)
+      ~organization_revision
+      values
+  =
+  ordered
+    t
+    principal
+    (Agent_protocol.Command.Activity_list request)
+    request.catalog.page
+    Agent_protocol.Session_activity.to_json
+    values
+    ~additional_binding:
+      [ "organization_revision", `String (Int64.to_string organization_revision) ]
+;;
+
+let work t principal (request : Agent_protocol.Session_work.Query.t) values =
+  ordered
+    t
+    principal
+    (Agent_protocol.Command.Session_work request)
+    request.page
+    Agent_protocol.Session_work.to_json
+    values
+;;
+
 let session_catalog t principal request ~host_id ~organization_revision values =
   ordered
     t
@@ -184,6 +212,8 @@ let lists t principal command result =
         p.items
     in
     Agent_protocol.Method_result.Collection_list p
+  | Activity_list _, Activity_list p -> Ok (Agent_protocol.Method_result.Activity_list p)
+  | Session_work _, Session_work p -> Ok (Agent_protocol.Method_result.Session_work p)
   | Session_list _, Session_list p -> Ok (Agent_protocol.Method_result.Session_list p)
   | Permission_list r, Permission_list p ->
     let%map p =

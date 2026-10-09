@@ -358,6 +358,7 @@ let cancel_schedule connection session index schedule =
       { session_id = session.id
       ; attachment_id = session.attachment_id
       ; schedule_id = schedule.Agent_protocol.Schedule.id
+      ; expected_generation = None
       ; idempotency_key = idempotency_key (sprintf "cancel-schedule:%d" index)
       }
   in

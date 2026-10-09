@@ -21,6 +21,8 @@ type t =
   | Blob_read of Blob.Read_request.t
   | Session_create of Session.Create_request.t
   | Session_list of Session.List_request.t
+  | Activity_list of Activity_query.t
+  | Session_work of Session_work.Query.t
   | Session_configuration_get of Session_configuration.Get_request.t
   | Session_configuration_update of Session_configuration.Update_request.t
   | Session_get of Session.Get_request.t

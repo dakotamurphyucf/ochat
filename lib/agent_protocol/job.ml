@@ -810,17 +810,28 @@ module Cancel_request = struct
     { session_id : Id.Session.t
     ; attachment_id : Id.Attachment.t
     ; job_id : Id.Job.t
+    ; expected_generation : int option [@sexp.option]
+    ; expected_attempt : int option [@sexp.option]
     ; idempotency_key : Idempotency_key.t
     }
   [@@deriving sexp]
 
   let to_json t =
+    let optional =
+      List.filter_opt
+        [ Option.map t.expected_generation ~f:(fun value ->
+            "expected_generation", `Number (Int.to_string value))
+        ; Option.map t.expected_attempt ~f:(fun value ->
+            "expected_attempt", `Number (Int.to_string value))
+        ]
+    in
     `Object
-      [ "session_id", Id.Session.to_json t.session_id
-      ; "attachment_id", Id.Attachment.to_json t.attachment_id
-      ; "job_id", Id.Job.to_json t.job_id
-      ; "idempotency_key", Idempotency_key.to_json t.idempotency_key
-      ]
+      (optional
+       @ [ "session_id", Id.Session.to_json t.session_id
+         ; "attachment_id", Id.Attachment.to_json t.attachment_id
+         ; "job_id", Id.Job.to_json t.job_id
+         ; "idempotency_key", Idempotency_key.to_json t.idempotency_key
+         ])
   ;;
 
   let of_json json =
@@ -831,10 +842,43 @@ module Cancel_request = struct
       Json_codec.required_as fields "attachment_id" Id.Attachment.of_json
     in
     let%bind job_id = Json_codec.required_as fields "job_id" Id.Job.of_json in
+    let%bind expected_generation =
+      Json_codec.optional_as
+        fields
+        "expected_generation"
+        (Json_codec.bounded_int ~min:0 ~max:Int.max_value)
+    in
+    let%bind expected_attempt =
+      Json_codec.optional_as
+        fields
+        "expected_attempt"
+        (Json_codec.bounded_int ~min:0 ~max:Int.max_value)
+    in
+    let%bind () =
+      match expected_generation, expected_attempt with
+      | None, None | Some _, Some _ -> Ok ()
+      | Some _, None | None, Some _ ->
+        Error
+          (Protocol_error.invalid_request
+             "job occurrence requires generation and attempt")
+    in
     let%map idempotency_key =
       Json_codec.required_as fields "idempotency_key" Idempotency_key.of_json
     in
-    { session_id; attachment_id; job_id; idempotency_key }
+    { session_id
+    ; attachment_id
+    ; job_id
+    ; expected_generation
+    ; expected_attempt
+    ; idempotency_key
+    }
+  ;;
+
+  let t_of_sexp sexp =
+    let raw = t_of_sexp sexp in
+    match of_json (to_json raw) with
+    | Ok value -> value
+    | Error error -> Sexplib.Conv.of_sexp_error error.message sexp
   ;;
 end
 

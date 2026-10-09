@@ -21,6 +21,8 @@ type t =
   | Blob_read of Blob.Read_request.t
   | Session_create of Session.Create_request.t
   | Session_list of Session.List_request.t
+  | Activity_list of Activity_query.t
+  | Session_work of Session_work.Query.t
   | Session_configuration_get of Session_configuration.Get_request.t
   | Session_configuration_update of Session_configuration.Update_request.t
   | Session_get of Session.Get_request.t
@@ -90,6 +92,8 @@ let method_name = function
   | Blob_read _ -> "blob.read"
   | Session_create _ -> "session.create"
   | Session_list _ -> "session.list"
+  | Activity_list _ -> "activity.list"
+  | Session_work _ -> "session.work"
   | Session_configuration_get _ -> "session.configuration_get"
   | Session_configuration_update _ -> "session.configuration_update"
   | Session_get _ -> "session.get"
@@ -161,6 +165,8 @@ let params = function
   | Blob_read request -> Blob.Read_request.to_json request
   | Session_create request -> Session.Create_request.to_json request
   | Session_list request -> Session.List_request.to_json request
+  | Activity_list request -> Activity_query.to_json request
+  | Session_work request -> Session_work.Query.to_json request
   | Session_configuration_get request -> Session_configuration.Get_request.to_json request
   | Session_configuration_update request ->
     Session_configuration.Update_request.to_json request
@@ -258,6 +264,8 @@ let decoders =
   ; "blob.read", map Blob.Read_request.of_json (fun x -> Blob_read x)
   ; "session.create", map Session.Create_request.of_json (fun x -> Session_create x)
   ; "session.list", map Session.List_request.of_json (fun x -> Session_list x)
+  ; "activity.list", map Activity_query.of_json (fun x -> Activity_list x)
+  ; "session.work", map Session_work.Query.of_json (fun x -> Session_work x)
   ; ( "session.configuration_get"
     , map Session_configuration.Get_request.of_json (fun x -> Session_configuration_get x)
     )

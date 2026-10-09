@@ -993,6 +993,8 @@ let missing_job_cancel_error connection session attachment ~key =
       { session_id = session.Agent_protocol.Session.id
       ; attachment_id = attachment.Agent_protocol.Session.Attachment.id
       ; job_id = Agent_protocol.Id.Job.create ()
+      ; expected_generation = None
+      ; expected_attempt = None
       ; idempotency_key = idempotency_key key
       }
   in
@@ -1045,6 +1047,7 @@ let cancel_schedule connection session attachment schedule ~key =
       { session_id = session.Agent_protocol.Session.id
       ; attachment_id = attachment.Agent_protocol.Session.Attachment.id
       ; schedule_id = schedule.Agent_protocol.Schedule.id
+      ; expected_generation = None
       ; idempotency_key = idempotency_key key
       }
   in
@@ -2108,6 +2111,166 @@ let test_session_metadata env environment =
                      "cross-transport metadata semantics differ"
                    , (baseline : metadata_observation)
                    , (actual : metadata_observation)]))))
+;;
+
+type activity_observation =
+  { retained_schedule : bool
+  ; work_count : int
+  ; repeated_read_unchanged : bool
+  ; stale_witness_error : Agent_protocol.Error.code
+  ; cancellation_retained : bool
+  ; retry_original : bool
+  }
+[@@deriving equal, sexp]
+
+let activity_observation connection ~key_prefix =
+  let server_id = (initialize connection).server_id in
+  let created, _ = create_session connection ~key:(key_prefix ^ ":activity-session") in
+  let attachment = (Option.value_exn created.attachment).attachment in
+  let patch =
+    Agent_protocol.Session_metadata.Patch.create
+      ~name:Keep
+      ~set_labels:[ "activity", key_prefix ]
+      ~remove_labels:[]
+    |> protocol_ok
+  in
+  ignore
+    (request
+       connection
+       (Session_update_metadata
+          { session_id = created.session.id
+          ; attachment_id = attachment.id
+          ; expected_metadata_revision = created.session.metadata_revision
+          ; patch
+          ; idempotency_key = idempotency_key (key_prefix ^ ":activity-label")
+          })
+     : Agent_protocol.Method_result.t);
+  let scheduled, _ =
+    create_schedule
+      connection
+      created.session
+      attachment
+      ~key:(key_prefix ^ ":activity-schedule")
+  in
+  let catalog =
+    Agent_protocol.Session.List_request.
+      { organization = Agent_protocol.Session_organization.Query.default
+      ; page = page_request ()
+      ; desired_state = None
+      ; prompt_id = None
+      ; workspace_id = None
+      ; owner_principal_id = None
+      ; creator_principal_id = None
+      ; active_owner_principal_id = None
+      ; sort = Agent_protocol.Session_catalog_query.Sort.default
+      ; archive = Active
+      ; labels = [ "activity", key_prefix ]
+      }
+  in
+  let query =
+    Agent_protocol.Activity_query.create ~server_id ~catalog ~reasons:[] ~scan_limit:8
+    |> protocol_ok
+  in
+  let activity () =
+    match request connection (Activity_list query) with
+    | Activity_list page -> List.hd_exn page.items
+    | _ -> fail "activity.list returned wrong variant"
+  in
+  let before = activity () in
+  let second = activity () in
+  let work_query =
+    Agent_protocol.Session_work.Query.
+      { session =
+          Agent_protocol.Session_ref.create ~server_id ~session_id:created.session.id
+      ; page = page_request ()
+      }
+  in
+  let work () =
+    match request connection (Session_work work_query) with
+    | Session_work page -> page.items
+    | _ -> fail "session.work returned wrong variant"
+  in
+  let key = Agent_protocol.Session_work.Key.Schedule scheduled.schedule.id in
+  let retained_schedule =
+    List.exists (work ()) ~f:(fun row ->
+      Agent_protocol.Session_work.Key.equal row.key key)
+  in
+  let cancel =
+    Agent_protocol.Schedule.Cancel_request.
+      { session_id = created.session.id
+      ; attachment_id = attachment.id
+      ; schedule_id = scheduled.schedule.id
+      ; expected_generation = Some created.session.generation
+      ; idempotency_key = idempotency_key (key_prefix ^ ":activity-cancel")
+      }
+  in
+  let stale_witness_error =
+    (request_error
+       connection
+       (Schedule_cancel
+          { cancel with
+            expected_generation = Some (created.session.generation + 1)
+          ; idempotency_key = idempotency_key (key_prefix ^ ":activity-stale")
+          }))
+      .code
+  in
+  let cancel_once () =
+    match request connection (Schedule_cancel cancel) with
+    | Schedule_cancel result -> result
+    | _ -> fail "schedule.cancel returned wrong variant"
+  in
+  let first = cancel_once () in
+  let retry = cancel_once () in
+  let cancellation_retained =
+    List.exists (work ()) ~f:(fun row ->
+      Agent_protocol.Session_work.Key.equal row.key key
+      && Agent_protocol.Session_work.Status.equal row.status Cancelled)
+  in
+  { retained_schedule
+  ; work_count = before.work_count
+  ; repeated_read_unchanged = Int64.equal before.summary.revision second.summary.revision
+  ; stale_witness_error
+  ; cancellation_retained
+  ; retry_original = Int64.equal first.mutation.revision retry.mutation.revision
+  }
+;;
+
+let test_session_activity env environment =
+  let fixture = fixture env environment "conformance-activity" in
+  Config_fixture.grant_public_scopes fixture [ View_security_state ];
+  Eio.Switch.run (fun sw ->
+    with_daemon ~sw env fixture (fun _daemon _health ->
+      with_transport_matrix
+        ~sw
+        env
+        environment
+        fixture
+        (fun unix http stdio_unix stdio_http ->
+           let baseline = activity_observation unix ~key_prefix:"unix" in
+           if
+             not
+               (baseline.retained_schedule
+                && Int.equal baseline.work_count 1
+                && baseline.repeated_read_unchanged
+                && baseline.cancellation_retained
+                && baseline.retry_original
+                && Agent_protocol.Error.equal_code baseline.stale_witness_error Conflict)
+           then
+             raise_s
+               [%sexp
+                 "activity conformance invariants failed"
+               , (baseline : activity_observation)];
+           List.iter
+             [ http, "http"; stdio_unix, "stdio-unix"; stdio_http, "stdio-http" ]
+             ~f:(fun (client, key_prefix) ->
+               let actual = activity_observation client ~key_prefix in
+               if not (equal_activity_observation baseline actual)
+               then
+                 raise_s
+                   [%sexp
+                     "cross-transport activity differs"
+                   , (baseline : activity_observation)
+                   , (actual : activity_observation)]))))
 ;;
 
 type configuration_observation =
@@ -3622,6 +3785,7 @@ let cases =
   ; "conformance.read-methods", test_read_methods
   ; "conformance.session-lifecycle", test_session_lifecycle
   ; "conformance.session-metadata", test_session_metadata
+  ; "conformance.session-activity", test_session_activity
   ; "conformance.session-organization", test_session_organization
   ; "conformance.session-configuration", test_session_configuration
   ; "conformance.organization-crud", test_organization_crud
@@ -3672,6 +3836,8 @@ let method_coverage =
   ; "session.list", "conformance.session-lifecycle"
   ; "session.get", "conformance.session-lifecycle"
   ; "session.update_metadata", "conformance.session-metadata"
+  ; "activity.list", "conformance.session-activity"
+  ; "session.work", "conformance.session-activity"
   ; "session.update_organization", "conformance.session-organization"
   ; "session.configuration_get", "conformance.session-configuration"
   ; "session.configuration_update", "conformance.session-configuration"

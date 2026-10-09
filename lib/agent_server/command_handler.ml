@@ -369,6 +369,8 @@ let idempotency = function
   | Collection_list _
   | Collection_update _
   | Collection_delete _
+  | Activity_list _
+  | Session_work _
   | Session_list _
   | Session_get _
   | Session_configuration_get _
@@ -807,7 +809,7 @@ let handle_session_create t context command_audit request =
     { session; mutation = mutation session; attachment }
 ;;
 
-let handle_session_list t context (request : Agent_protocol.Session.List_request.t) =
+let read_catalog t context (request : Agent_protocol.Session.List_request.t) =
   let principal = Connection_context.principal context in
   let open Result.Let_syntax in
   let%bind indexed_entries =
@@ -850,16 +852,75 @@ let handle_session_list t context (request : Agent_protocol.Session.List_request
         ~effective:entry.effective_organization)
     |> List.sort ~compare:(Session_catalog_policy.compare request.sort)
   in
+  Ok (projection, sessions)
+;;
+
+let handle_session_list t context (request : Agent_protocol.Session.List_request.t) =
+  let open Result.Let_syntax in
+  let%bind projection, sessions = read_catalog t context request in
   let%map page =
     Pagination.session_catalog
       t.pagination
-      principal
+      (Connection_context.principal context)
       request
       ~host_id:(Organization_membership_projection.host_id projection)
       ~organization_revision:(Organization_membership_projection.revision projection)
       sessions
   in
   Agent_protocol.Method_result.Session_list page
+;;
+
+let activity_service t context ~at =
+  let principal = Connection_context.principal context in
+  Activity_service.create
+    ~server_id:(Agent_store.Session_store.server_id t.session_store)
+    ~principal
+    ~now:at
+    ~read:(fun session_id ->
+      Session_registry.read_observation
+        t.registry
+        session_id
+        ~now:at
+        ~authorize:(fun summary ->
+          if session_visible_to principal summary
+          then Ok ()
+          else Error (error Permission_denied "session is not visible to this principal")))
+;;
+
+let handle_activity_list t context (request : Agent_protocol.Activity_query.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    if
+      Agent_protocol.Id.Server.equal
+        request.server_id
+        (Agent_store.Session_store.server_id t.session_store)
+    then Ok ()
+    else Error (error Invalid_request "activity query names another host")
+  in
+  let%bind projection, catalog = read_catalog t context request.catalog in
+  let%bind rows =
+    Activity_service.observe (activity_service t context ~at:(now t)) request ~catalog
+  in
+  let%map page =
+    Pagination.activity
+      t.pagination
+      (Connection_context.principal context)
+      request
+      ~organization_revision:(Organization_membership_projection.revision projection)
+      rows
+  in
+  Agent_protocol.Method_result.Activity_list page
+;;
+
+let handle_session_work t context (request : Agent_protocol.Session_work.Query.t) =
+  let open Result.Let_syntax in
+  let%bind rows =
+    Activity_service.work (activity_service t context ~at:(now t)) request
+  in
+  let%map page =
+    Pagination.work t.pagination (Connection_context.principal context) request rows
+  in
+  Agent_protocol.Method_result.Session_work page
 ;;
 
 let handle_session_get t context request =
@@ -878,7 +939,7 @@ let handle_session_get t context request =
   Agent_protocol.Method_result.Session_get snapshot
 ;;
 
-let read_inference_state t context session_id =
+let read_visible_state t context session_id =
   let principal = Connection_context.principal context in
   Session_registry.read_state t.registry session_id ~authorize:(fun summary ->
     if session_visible_to principal summary
@@ -892,7 +953,7 @@ let handle_inference_summary
       (request : Agent_protocol.Inference_query.Summary_request.t)
   =
   let open Result.Let_syntax in
-  let%map state = read_inference_state t context request.session_id in
+  let%map state = read_visible_state t context request.session_id in
   Agent_protocol.Method_result.Session_inference_summary
     (Agent_session.Inference_ledger.summary state.inference_ledger)
 ;;
@@ -918,7 +979,7 @@ let handle_inference_observations
     then Error (error Invalid_request "inference page exceeds the advertised page limit")
     else Ok ()
   in
-  let%bind state = read_inference_state t context request.session_id in
+  let%bind state = read_visible_state t context request.session_id in
   let ledger = state.inference_ledger in
   let%bind binding =
     Pagination.Inference.binding
@@ -2152,6 +2213,8 @@ let handle_job_cancel t context command_audit request =
              Agent_session.Session_actor.cancel_job
                entry.actor
                ~attachment_id:request.attachment_id
+               ?expected_generation:request.expected_generation
+               ?expected_attempt:request.expected_attempt
                ~job_id:request.job_id
                ())
            ~audited:(fun command_audit ->
@@ -2159,6 +2222,8 @@ let handle_job_cancel t context command_audit request =
                entry.actor
                ~command_audit
                ~attachment_id:request.attachment_id
+               ?expected_generation:request.expected_generation
+               ?expected_attempt:request.expected_attempt
                ~job_id:request.job_id
                ())
        in
@@ -2267,32 +2332,25 @@ let handle_schedule_cancel t context command_audit request =
     ~session_id:request.Agent_protocol.Schedule.Cancel_request.session_id
     ~attachment_id:request.attachment_id
     (fun entry ->
-       let%bind state = Agent_session.Session_actor.state entry.actor in
-       let%bind schedule = find_schedule state request.schedule_id in
-       match schedule.status with
-       | Cancelled | Delivered | Delivering | Failed _ ->
-         Error (error Already_resolved "schedule is already terminal")
-       | Scheduled ->
-         let schedule = { schedule with status = Cancelled } in
-         let%map session =
-           actor_command
-             command_audit
-             ~plain:(fun () ->
-               Agent_session.Session_actor.change_schedule
-                 entry.actor
-                 ~attachment_id:request.attachment_id
-                 ~event:`Cancelled
-                 schedule)
-             ~audited:(fun command_audit ->
-               Agent_session.Session_actor.change_schedule_with_command_audit
-                 entry.actor
-                 ~command_audit
-                 ~attachment_id:request.attachment_id
-                 ~event:`Cancelled
-                 schedule)
-         in
-         Agent_protocol.Method_result.Schedule_cancel
-           { schedule; mutation = mutation session })
+       let cancel ?command_audit () =
+         Agent_session.Session_actor.cancel_schedule
+           entry.actor
+           ?command_audit
+           ?expected_generation:request.expected_generation
+           ~attachment_id:request.attachment_id
+           ~schedule_id:request.schedule_id
+           ()
+       in
+       let%bind schedule =
+         actor_command
+           command_audit
+           ~plain:(fun () -> cancel ())
+           ~audited:(fun command_audit -> cancel ~command_audit ())
+       in
+       let%map state = Agent_session.Session_actor.state entry.actor in
+       let session = Agent_session.Session_state.summary state in
+       Agent_protocol.Method_result.Schedule_cancel
+         { schedule; mutation = mutation session })
 ;;
 
 let handle_ingress_submit t context (request : Agent_protocol.Ingress.Submit_request.t) =
@@ -2423,6 +2481,8 @@ let dispatch_authorized t ~actor ~context ~command_audit ~inference_budget = fun
   | Blob_read request -> handle_blob_read t context request
   | Session_create request -> handle_session_create t context command_audit request
   | Session_list request -> handle_session_list t context request
+  | Activity_list request -> handle_activity_list t context request
+  | Session_work request -> handle_session_work t context request
   | Session_get request -> handle_session_get t context request
   | Session_inference_summary request -> handle_inference_summary t context request
   | Session_inference_observations request ->
@@ -2510,7 +2570,9 @@ let command_session_id = function
   | Collection_list _
   | Collection_update _
   | Collection_delete _
+  | Activity_list _
   | Session_list _ -> None
+  | Session_work request -> Some (Agent_protocol.Session_ref.session_id request.session)
   | Blob_read request -> Some request.session_id
   | Audit_read request -> request.session_id
   | Session_get request -> Some request.Agent_protocol.Session.Get_request.session_id
@@ -2669,6 +2731,8 @@ let receipt_summary ~session_id result =
   | Collection_list _
   | Collection_update _
   | Collection_delete _
+  | Activity_list _
+  | Session_work _
   | Session_list _
   | Session_get _
   | Session_configuration_get _
@@ -2826,6 +2890,12 @@ let handle t ?actor ~context ~inference_budget command =
       | Agent_protocol.Command.Session_update_organization _
       | Session_edit_history _
       | Session_continue_history _ -> authorize_mutation t context command
+      | Job_cancel request ->
+        read_visible_state t context request.session_id |> Result.map ~f:(fun _ -> ())
+      | Schedule_cancel request ->
+        read_visible_state t context request.session_id |> Result.map ~f:(fun _ -> ())
+      | Permission_respond request ->
+        read_visible_state t context request.session_id |> Result.map ~f:(fun _ -> ())
       | _ -> Ok ()
     in
     let outcome =

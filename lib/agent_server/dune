@@ -27,6 +27,9 @@
   organization_membership_projection
   authorization
   principal_projection
+  work_projection
+  activity_projection
+  activity_service
   pagination
   inference_query_budget
   managed_output_cursor

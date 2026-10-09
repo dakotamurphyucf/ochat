@@ -57,6 +57,10 @@
   session_configuration
   session
   session_catalog
+  session_work
+  session_activity_summary
+  session_activity
+  activity_query
   snapshot
   envelope
   event

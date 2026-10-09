@@ -354,3 +354,109 @@ let%expect_test "permission timeout applies configured unattended fallback" =
       print_s [%sexp (resolution.choice : Agent_protocol.Permission.choice)]));
   [%expect {| Deny |}]
 ;;
+
+let%expect_test "fresh approval at the deadline cannot race queued expiry into a grant" =
+  with_actor_workspace (fun env workspace_instance ->
+    Eio.Switch.run (fun switch ->
+      let now = ref timestamp in
+      let deadline = Agent_protocol.Timestamp.add_ms timestamp 1 |> protocol_ok in
+      let actor =
+        Agent_session.Session_actor.create
+          ~sw:switch
+          ~clock:(Eio.Stdenv.clock env)
+          ~mailbox_capacity:16
+          ~compaction_env:None
+          ~initial_state:
+            (actor_state
+               ~workspace_instance
+               ~liveness:Process_bound
+               ~start_immediately:false)
+          ~persistence:
+            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+          ~operation_worker:None
+          ~services:
+            { now = (fun () -> !now)
+            ; create_attachment_id =
+                (fun () ->
+                  Agent_protocol.Id.Attachment.of_string "att_actor_permission"
+                  |> protocol_ok)
+            ; create_reclaim_token = (fun () -> "test-reclaim-token")
+            ; job_results = None
+            ; monotonic_now = (fun () -> Mtime.min_stamp)
+            ; schedule_limits = Agent_session.Staged_schedules.default_limits
+            ; notification_limits = Agent_session.Staged_notifications.default_limits
+            ; ingress_limits = Agent_session.Staged_ingress.default_limits
+            ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
+            ; state_committed = (fun _ _ -> ())
+            }
+      in
+      let attachment, _ =
+        Agent_session.Session_actor.attach actor ~mode:Read_write ~subscribe:false
+        |> protocol_ok
+      in
+      Agent_session.Session_actor.start actor ~attachment_id:attachment.id
+      |> protocol_ok
+      |> ignore;
+      let resolved_choice = ref None in
+      Eio.Fiber.both
+        (fun () ->
+           let resolution =
+             Agent_session.Session_actor.request_permission
+               actor
+               ~permission:
+                 { (permission_request ~id:permission_id) with
+                   expires_at = Some deadline
+                 ; choices = [ Approve_session; Deny ]
+                 }
+               ~timeout_seconds:None
+               ~fallback:Deny
+             |> protocol_ok
+           in
+           resolved_choice := Some resolution.choice)
+        (fun () ->
+           let rec await_pending () =
+             let state = Agent_session.Session_actor.state actor |> protocol_ok in
+             if List.is_empty state.permissions
+             then (
+               Eio.Fiber.yield ();
+               await_pending ())
+           in
+           await_pending ();
+           now := deadline;
+           let rejected =
+             Agent_session.Session_actor.respond_permission
+               actor
+               ~attachment_id:attachment.id
+               ~principal_id:(Some principal_id)
+               ~permission_id
+               ~permission_generation:0
+               ~choice:Approve_session
+               ~reason:None
+           in
+           (match rejected with
+            | Error error ->
+              assert (Agent_protocol.Error.equal_code error.code Already_resolved)
+            | Ok _ -> failwith "expired approval accepted");
+           let pending = Agent_session.Session_actor.state actor |> protocol_ok in
+           assert (List.is_empty pending.grants);
+           assert (
+             Agent_protocol.Permission.equal_state
+               (List.hd_exn pending.permissions).state
+               Pending);
+           Agent_session.Session_actor.expire_permission
+             actor
+             ~permission_id
+             ~permission_generation:0
+             ~fallback:Deny
+           |> protocol_ok);
+      let state = Agent_session.Session_actor.state actor |> protocol_ok in
+      Agent_session.Session_actor.shutdown actor;
+      print_s
+        [%sexp
+          { resolved_choice = (!resolved_choice : Agent_protocol.Permission.choice option)
+          ; observed = (state.lifecycle.observed : Agent_protocol.Session.observed_state)
+          ; permission_state =
+              ((List.hd_exn state.permissions).state : Agent_protocol.Permission.state)
+          }]));
+  [%expect {| ((resolved_choice (Deny)) (observed Idle) (permission_state Denied)) |}]
+;;

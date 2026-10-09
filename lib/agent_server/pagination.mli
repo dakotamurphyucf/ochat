@@ -29,6 +29,25 @@ val session_catalog
        , Agent_protocol.Error.t )
        result
 
+(** Ordered, current-authority/query/data-bound paging; a changed observation
+    or organization revision returns explicit Conflict/refresh_required. *)
+val activity
+  :  t
+  -> Agent_protocol.Principal.t
+  -> Agent_protocol.Activity_query.t
+  -> organization_revision:int64
+  -> Agent_protocol.Session_activity.t list
+  -> ( Agent_protocol.Session_activity.t Agent_protocol.Page.t
+       , Agent_protocol.Error.t )
+       result
+
+val work
+  :  t
+  -> Agent_protocol.Principal.t
+  -> Agent_protocol.Session_work.Query.t
+  -> Agent_protocol.Session_work.t list
+  -> (Agent_protocol.Session_work.t Agent_protocol.Page.t, Agent_protocol.Error.t) result
+
 val history
   :  t
   -> Agent_protocol.Principal.t
