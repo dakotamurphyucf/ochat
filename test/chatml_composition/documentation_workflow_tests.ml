@@ -59,9 +59,9 @@ let complete = function
   | outcome -> raise_s [%sexp (outcome : P.Invocation.outcome)]
 ;;
 
-let finish_call ?timeout env host call_id =
+let finish_call ?timeout ?on_poll env host call_id =
   try
-    Background_shell_tests.wait ?timeout env (fun () ->
+    Background_shell_tests.wait ?timeout ?on_poll env (fun () ->
       let snapshot = Host.snapshot host in
       List.iter snapshot.permissions ~f:(fun permission ->
         if
@@ -129,7 +129,9 @@ let%expect_test
               , `Object [ "action", `String action; "file", file; "note", note ] )
             ];
          send host id "Update the retained review ledger.";
-         finish_call env host id;
+         (* This fixture checks retained state across turns, not transaction
+            throughput. Keep a finite host watchdog independent of tool budgets. *)
+         finish_call ~timeout:30. env host id;
          Host.initial_outcome (Host.snapshot host) id
        in
        let record id file note =

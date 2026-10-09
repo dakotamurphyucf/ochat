@@ -47,6 +47,8 @@ let with_host
         ; "reports/report-b.json", Fixtures.report_b
         ])
       ?authoring_budget
+      ?(daemon_clocks =
+        fun env -> Eio.Stdenv.clock env, Eio.Stdenv.mono_clock env, ignore)
       ?(permission_profile =
         { Embedded.default_permission_profile with
           tool_default = Allow
@@ -98,14 +100,14 @@ let with_host
           ; event_capacity = 512
           }
         in
-        Eio.Switch.run (fun sw ->
+        Fixtures.with_daemon_switch env ~clocks:daemon_clocks (fun sw daemon_env ->
           let authoring_package_files =
             List.map package_files ~f:(Filename.concat root)
           in
           let embedded =
             Embedded.start
               ~sw
-              ~env
+              ~env:daemon_env
               ~daemon_options
               ~authoring_package_files
               ?authoring_budget

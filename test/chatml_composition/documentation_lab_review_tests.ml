@@ -14,28 +14,70 @@ let json_outcome outcome =
   | value -> value
 ;;
 
-let await_watch ?timeout env host id =
-  let delivered () =
-    List.find_map (Host.snapshot host).canonical_history.entries ~f:(fun entry ->
-      match entry.P.Public.History.provenance with
-      | Runtime_notification _ ->
-        (match Host.full_semantic entry |> History_entry.Payload.Semantic.view with
-         | Message { form = Input; content = [ Text { text; _ } ]; _ } ->
-           let _, body = String.lsplit2_exn text ~on:'\n' in
-           let data = Jsonaf.of_string body in
-           if
-             Jsonaf.exactly_equal
-               (Lab.field data "work")
-               (P.Invocation.work_to_json (Subscription id))
-           then Some (P.Completion.of_json (Lab.field data "completion") |> protocol_ok)
-           else None
-         | _ -> failwith "unexpected runtime notification framing")
-      | _ -> None)
+(* Real durability latency does not spend authored execution deadlines. Each
+   unsuccessful fixture observation advances both daemon clocks by one bounded
+   scheduler pulse (their scan interval is 0.05s). This lets jobs and timers
+   progress without coupling logical time to filesystem/CPU speed. Polling and
+   finite watchdogs retain the real environment; owning scope cleanup releases
+   clocks before joining sleepers. The application response budget stays finite. *)
+let review_clocks () =
+  let pulse = ref (fun () -> ()) in
+  let clocks env =
+    let initial = Eio.Time.now (Eio.Stdenv.clock env) in
+    let clock, pause_wall, resume_wall, advance_wall =
+      controlled_wall_clock (Eio.Stdenv.clock env) ~initial
+    in
+    let mono_clock, pause_mono, resume_mono, advance_mono =
+      controlled_monotonic_clock (Eio.Stdenv.mono_clock env)
+    in
+    pause_wall ();
+    pause_mono ();
+    let elapsed = ref 0. in
+    (pulse
+     := fun () ->
+          let next = !elapsed +. 0.051 in
+          assert (Float.(next < 300.));
+          advance_mono 0.051;
+          advance_wall (initial +. next);
+          elapsed := next);
+    ( clock
+    , mono_clock
+    , fun () ->
+        resume_wall ();
+        resume_mono () )
   in
-  Background_shell_tests.wait ?timeout env (fun () ->
-    Option.is_some (delivered ())
-    && Option.is_none (Host.snapshot host).session.active_operation);
-  Option.value_exn (delivered ())
+  clocks, fun () -> !pulse ()
+;;
+
+let await_watch ?timeout ?on_poll env host id =
+  let delivered snapshot =
+    List.find_map
+      snapshot.P.Public.Snapshot.Fields.canonical_history.entries
+      ~f:(fun entry ->
+        match entry.P.Public.History.provenance with
+        | Runtime_notification _ ->
+          (match Host.full_semantic entry |> History_entry.Payload.Semantic.view with
+           | Message { form = Input; content = [ Text { text; _ } ]; _ } ->
+             let _, body = String.lsplit2_exn text ~on:'\n' in
+             let data = Jsonaf.of_string body in
+             if
+               Jsonaf.exactly_equal
+                 (Lab.field data "work")
+                 (P.Invocation.work_to_json (Subscription id))
+             then Some (P.Completion.of_json (Lab.field data "completion") |> protocol_ok)
+             else None
+           | _ -> failwith "unexpected runtime notification framing")
+        | _ -> None)
+  in
+  let completed = ref None in
+  Background_shell_tests.wait ?timeout ?on_poll env (fun () ->
+    let snapshot = Host.snapshot host in
+    if Option.is_none snapshot.session.active_operation
+    then (
+      completed := delivered snapshot;
+      Option.is_some !completed)
+    else false);
+  Option.value_exn !completed
 ;;
 
 let pending_watch = function
@@ -119,7 +161,9 @@ let%expect_test
             )
           ]
   in
+  let daemon_clocks, pulse = review_clocks () in
   Host.with_host
+    ~daemon_clocks
     ~durable:true
     ~sources:Lab.sources
     ~workspace_files:Lab.workspace_files
@@ -138,11 +182,11 @@ let%expect_test
        Exn.protect ~finally:release_review ~f:(fun () ->
          (* These waits cover durable workflow completion, independently of the
             lab's unchanged response deadline and individual script budgets. *)
-         let await_watch = await_watch ~timeout:30. in
+         let await_watch = await_watch ~timeout:60. ~on_poll:pulse in
          let invoke id name fields =
            queued := [ id, name, `Object fields ];
            Workflow.send host id "Perform the requested lab review operation.";
-           Workflow.finish_call ~timeout:30. env host id;
+           Workflow.finish_call ~timeout:60. ~on_poll:pulse env host id;
            Host.initial_outcome (Host.snapshot host) id
          in
          let call id name fields = invoke id name fields |> json_outcome in
@@ -192,7 +236,7 @@ let%expect_test
          in
          let query = watch_fields "reviewer" session receipt in
          let watched = invoke "watch" "watch_lab_review" query |> pending_watch in
-         Background_shell_tests.wait env (fun () ->
+         Background_shell_tests.wait ~timeout:60. ~on_poll:pulse env (fun () ->
            List.exists (Host.snapshot host).schedules ~f:(fun timer ->
              match timer.status with
              | Scheduled -> Team.contains timer.payload "lab_review_tick"
@@ -317,7 +361,9 @@ let%expect_test "closing the lab cancels an outstanding reviewer and its respons
       queued := [];
       Fixtures.call_events calls
   in
+  let daemon_clocks, pulse = review_clocks () in
   Host.with_host
+    ~daemon_clocks
     ~durable:true
     ~sources:Lab.sources
     ~workspace_files:Lab.workspace_files
@@ -335,7 +381,7 @@ let%expect_test "closing the lab cancels an outstanding reviewer and its respons
            let invoke id name fields =
              queued := [ id, name, `Object fields ];
              Workflow.send host id "Perform the requested cancellation scenario.";
-             Workflow.finish_call env host id;
+             Workflow.finish_call ~timeout:60. ~on_poll:pulse env host id;
              Host.initial_outcome (Host.snapshot host) id
            in
            let call id name fields = invoke id name fields |> json_outcome in
@@ -359,7 +405,8 @@ let%expect_test "closing the lab cancels an outstanding reviewer and its respons
                ; "idempotency_key", `String "cancelled-review"
                ]
            in
-           Background_shell_tests.wait env (fun () -> !started);
+           Background_shell_tests.wait ~timeout:60. ~on_poll:pulse env (fun () ->
+             !started);
            let watch =
              invoke
                "watch"
@@ -371,7 +418,7 @@ let%expect_test "closing the lab cancels an outstanding reviewer and its respons
                ]
              |> pending_watch
            in
-           Background_shell_tests.wait env (fun () ->
+           Background_shell_tests.wait ~timeout:60. ~on_poll:pulse env (fun () ->
              List.exists (Host.snapshot host).schedules ~f:(fun timer ->
                match timer.status with
                | Scheduled -> Team.contains timer.payload "lab_review_tick"
@@ -380,10 +427,11 @@ let%expect_test "closing the lab cancels an outstanding reviewer and its respons
            assert (Jsonaf.bool_exn (Lab.field closed "closed"));
            let review = Lab.field closed "reviews" |> Jsonaf.list_exn |> List.hd_exn in
            [%test_eq: string] "cancelled" (Lab.text (Lab.field review "result") "type");
-           (match await_watch env host watch with
+           (match await_watch ~timeout:60. ~on_poll:pulse env host watch with
             | Cancelled "Lab closed." -> ()
             | result -> raise_s [%sexp (result : P.Completion.t)]);
-           Background_shell_tests.wait env (fun () -> !retired);
+           Background_shell_tests.wait ~timeout:60. ~on_poll:pulse env (fun () ->
+             !retired);
            let snapshot = Host.snapshot host in
            assert (
              List.for_all snapshot.schedules ~f:(fun timer ->
