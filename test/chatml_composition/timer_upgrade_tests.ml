@@ -52,8 +52,34 @@ let%expect_test
     (List.cartesian_product [ false; true ] [ false; true ])
     ~f:(fun (remove, queued) ->
       let host = ref None in
+      let advance_to = ref None in
       with_daemon
         ~sources
+        ~daemon_clocks:(fun env ->
+          let initial = Eio.Time.now (Eio.Stdenv.clock env) in
+          let clock, pause_wall, resume_wall, advance_wall =
+            controlled_wall_clock (Eio.Stdenv.clock env) ~initial
+          in
+          let mono_clock, pause_mono, resume_mono, advance_mono =
+            controlled_monotonic_clock (Eio.Stdenv.mono_clock env)
+          in
+          pause_wall ();
+          pause_mono ();
+          (* Timers must not reach the original running moderator before stop.
+             Advance only at the selected stopped/source-replacement boundary. *)
+          let elapsed_time = ref 0. in
+          advance_to
+          := Some
+               (fun deadline ->
+                 assert (Float.(deadline >= !elapsed_time));
+                 advance_mono (deadline -. !elapsed_time);
+                 advance_wall (initial +. deadline);
+                 elapsed_time := deadline);
+          ( clock
+          , mono_clock
+          , fun () ->
+              resume_wall ();
+              resume_mono () ))
         ~expect_moderator:true
         ~expected_schedules:1
         ~calls:[ "watch-call", "watch", `Null ]
@@ -67,6 +93,7 @@ let%expect_test
           (match queued with
            | false -> ()
            | true ->
+             Option.value_exn !advance_to 3.;
              Background_shell_tests.wait env (fun () ->
                match (List.hd_exn (state ()).schedules).status with
                | Delivered -> true
@@ -139,11 +166,13 @@ let%expect_test
           (match queued with
            | true -> ()
            | false ->
+             Option.value_exn !advance_to 3.;
              Background_shell_tests.wait env (fun () ->
                match (List.hd_exn (state ()).schedules).status with
                | Failed { code = Permission_denied; _ } -> true
                | Scheduled | Delivering -> false
                | _ -> failwith "obsolete timer was delivered or silently discarded"));
+          Option.value_exn !advance_to 6.;
           Subscription_tests.await_subscription env entry;
           let expired = state () in
           let saved = List.hd_exn expired.subscriptions in
