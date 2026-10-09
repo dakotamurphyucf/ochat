@@ -110,6 +110,10 @@ let rec backend_view t bound =
     | Some max_body_bytes -> B.with_response_limit opened.backend ~max_body_bytes
   in
   B.create
+    ~capture_profile:(fun ~current ~profile ->
+      let open Result.Let_syntax in
+      let%bind backend = selected () in
+      B.capture_profile backend ~current ~profile)
     ~capture:(fun ~current ~model ~settings ->
       let open Result.Let_syntax in
       let%bind backend = selected () in

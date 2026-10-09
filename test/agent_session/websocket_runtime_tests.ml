@@ -156,8 +156,11 @@ let%expect_test
           ~prepare_with_policy:prepare
           ~open_session:(fun owner ~policy ->
             incr opened;
-            Runtime.Session.on_release owner (fun () -> incr closed) |> admitted;
-            Ok (prepare ~policy))
+            ignore owner;
+            Ok
+              (Runtime.Adapter.Session_binding.create
+                 ~prepare:(prepare ~policy)
+                 ~close:(fun () -> incr closed)))
           ()
         |> admitted
       in

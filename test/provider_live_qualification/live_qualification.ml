@@ -1559,6 +1559,11 @@ let open_host
   in
   let rec backend bound =
     Inference_host.Backend.create
+      ~capture_profile:(fun ~current ~profile ->
+        Inference_host.Backend.capture_profile
+          (Runtime.backend (get_runtime ()))
+          ~current
+          ~profile)
       ~capture:(fun ~current ~model ~settings ->
         Inference_host.Backend.capture
           (Runtime.backend (get_runtime ()))
@@ -1644,6 +1649,7 @@ let open_host
   let factory ~sw ~server_id =
     let value =
       Provider_runtime_host.create
+        ~compatible_profiles:[]
         ~sw
         ~env:host_env
         ~server_id

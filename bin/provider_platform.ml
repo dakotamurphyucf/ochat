@@ -68,6 +68,7 @@ let factory t ~sw:_ ~server_id =
 ;;
 
 let create
+      ?(compatible_profiles = [])
       ?(transport_policy = Inference.Observation.Transport_policy.Http_sse)
       ~sw
       ~env
@@ -80,6 +81,12 @@ let create
       ()
   =
   let open Result.Let_syntax in
+  let%bind loaded_choices =
+    match lookup "OCHAT_PROVIDER_PROFILE_CHOICES" with
+    | None -> Ok []
+    | Some path -> Provider_profile_choices.load ~env ~path
+  in
+  let compatible_profiles = compatible_profiles @ loaded_choices in
   let generator = generator env in
   let new_operation () =
     M.Id.create P.Id.Operation.(create_with generator |> to_string) |> constant
@@ -97,6 +104,13 @@ let create
   let%bind codex_binding = M.Id.create "direct-codex-account" |> checked in
   let%bind api_id = DTO.Profile_id.of_string "first-party-openai-responses" |> checked in
   let%bind codex_id = DTO.Profile_id.of_string "direct-codex" |> checked in
+  let%bind () =
+    B.Compatible_profile.validate_set
+      compatible_profiles
+      ~credential_owners:
+        [ DTO.Profile_id.to_string api_id; DTO.Profile_id.to_string codex_id ]
+    |> checked
+  in
   let%bind policy =
     O.Policy.direct_codex ~expected_account:None ~callback_port () |> checked
   in
@@ -267,6 +281,9 @@ let create
         | Some max_body_bytes -> Backend.with_response_limit backend ~max_body_bytes
       in
       Backend.create
+        ~capture_profile:(fun ~current ~profile ->
+          let%bind backend = selected () in
+          Backend.capture_profile backend ~current ~profile)
         ~capture:(fun ~current ~model ~settings ->
           let%bind backend = selected () in
           Backend.capture backend ~current ~model ~settings)
@@ -303,6 +320,7 @@ let create
         ~driver
         ~templates:[ api_template; codex_template ]
         ~mappings:[ api_mapping ]
+        ~compatible_profiles
         ~default_profile:api_id
         ~environment:(Some environment)
         ~environment_sources:[ source ]
@@ -332,7 +350,8 @@ let create
         ~inference_principal:"local-runtime"
         ~authorize_bridge:(fun ~principal ~profile ~operation ->
           List.mem
-            [ DTO.Profile_id.to_string api_id; DTO.Profile_id.to_string codex_id ]
+            ([ DTO.Profile_id.to_string api_id; DTO.Profile_id.to_string codex_id ]
+             @ List.map compatible_profiles ~f:B.Compatible_profile.id)
             profile
             ~equal:String.equal
           &&

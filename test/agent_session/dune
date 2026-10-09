@@ -4,6 +4,7 @@
   fixtures
   inference_ports
   document_adoption_tests
+  configuration_tests
   inference_target_tests
   inference_ledger_state_tests
   inference_tracking_tests

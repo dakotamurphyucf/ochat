@@ -17,6 +17,14 @@ type t
     provider selection, credentials, network driver or transport fallback. *)
 val create : namespace:string -> default_model:string -> post_stream:post_stream -> t
 
+(** Observe the exact synthetic adapter request at real preparation. *)
+val create_with_observer
+  :  on_prepare:(Inference.Request.t -> unit)
+  -> namespace:string
+  -> default_model:string
+  -> post_stream:post_stream
+  -> t
+
 val capture_config
   :  t
   -> Chat_response.Config.t

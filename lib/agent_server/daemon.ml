@@ -164,6 +164,9 @@ let default_options =
       { capture_inference_target =
           (fun ~prompt_revision_id:_ ~config:_ ->
             Error Inference_runtime.Preparation_error.Target_unavailable)
+      ; select_inference_profile =
+          (fun ~current:_ ~profile:_ ->
+            Error Inference_runtime.Preparation_error.Target_unavailable)
       ; recapture_inference_target =
           (fun ~current:_ ~prompt_revision_id:_ ~config:_ ->
             Error Inference_runtime.Preparation_error.Target_unavailable)
@@ -1157,6 +1160,8 @@ let compose
       | Provider_configure_environment _ -> Ok ()
       | Session_create _
       | Session_get _
+      | Session_configuration_get _
+      | Session_configuration_update _
       | Session_attach _
       | Session_detach _
       | Session_renew_owner _

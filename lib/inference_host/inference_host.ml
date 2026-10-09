@@ -1,3 +1,4 @@
+module Compatible_profile = Compatible_profile
 module Provider_profiles = Provider_profiles
 module Credential_bridge = Credential_bridge
 module Provider_configuration = Provider_configuration
@@ -15,15 +16,20 @@ module Backend = struct
         -> model:string
         -> settings:D.Setting.t list
         -> (R.Target.t, Runtime.Preparation_error.t) Result.t
+    ; capture_profile :
+        current:R.Target.t
+        -> profile:string
+        -> (R.Target.t, Runtime.Preparation_error.t) Result.t
     ; resolve : Runtime.resolver
     ; with_response_limit :
         max_body_bytes:int -> (t, Runtime.Preparation_error.t) Result.t
     }
 
-  let create ~capture ~resolve ~with_response_limit =
-    { capture; resolve; with_response_limit }
+  let create ~capture_profile ~capture ~resolve ~with_response_limit =
+    { capture; capture_profile; resolve; with_response_limit }
   ;;
 
+  let capture_profile t = t.capture_profile
   let capture t = t.capture
   let resolve t = t.resolve
   let with_response_limit t = t.with_response_limit
@@ -125,6 +131,10 @@ let create
         Runtime.Context.with_transport_policy context transport_policy)
     in
     Backend.create
+      ~capture_profile:(fun ~current ~profile:requested ->
+        if String.equal requested (D.Profile.id profile)
+        then Ok current
+        else Error Runtime.Preparation_error.Target_unavailable)
       ~capture:(fun ~current ~model ~settings ->
         let%bind () =
           match current with
@@ -230,3 +240,4 @@ let recapture_config t ~current config =
 ;;
 
 let identity t = t.identity
+let capture_profile t ~current ~profile = t.backend.capture_profile ~current ~profile

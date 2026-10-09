@@ -59,6 +59,7 @@ let initial_state env workspace =
       { protocol
       ; prompt_definition_id = None
       ; delegation = None
+      ; configuration_revision = 0L
       ; inference_target =
           (let fixture =
              Inference_fixture.create

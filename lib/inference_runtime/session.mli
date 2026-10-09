@@ -21,3 +21,15 @@ val on_release : t -> (unit -> unit) -> (unit, error) Result.t
 (** Idempotent, closes admission before invoking callbacks in reverse order.
     May yield while joining bounded channel teardown under cancellation protection. All callbacks run even if one raises; the first exception then propagates. *)
 val close : t -> unit
+
+module Registration : sig
+  type t
+  type error = Foreign_registration [@@deriving equal, sexp_of]
+end
+
+(** Register one owned adapter resource; no authentication granted. *)
+val register_release : t -> (unit -> unit) -> (Registration.t, error) Result.t
+
+(** Removes callback before cancellation-protected bounded close. Idempotent for
+    this owner even after graph closure; foreign owner always rejects explicitly. *)
+val release_registration : t -> Registration.t -> (unit, Registration.error) Result.t

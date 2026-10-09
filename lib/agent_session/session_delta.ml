@@ -24,6 +24,7 @@ type t =
   | Permission_changed of Agent_protocol.Permission.t
   | Grant_changed of Agent_protocol.Grant.t
   | Inference_target_captured of (Inference.Request.Target.t[@sexp.opaque])
+  | Configuration_revision_changed of int64
   | Inference_target_changed of (Inference.Request.Target.t[@sexp.opaque])
   | Model_job_target_captured of Model_job_target.t
   | Model_job_recipe_target_captured of Model_job_target.t
@@ -399,6 +400,14 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
       |> Result.map_error ~f:inference_error
     in
     { state with spec = { state.spec with inference_target } }
+  | Configuration_revision_changed revision ->
+    if
+      Int64.(state.spec.configuration_revision = max_value)
+      || not (Int64.equal revision Int64.(state.spec.configuration_revision + 1L))
+    then
+      Error
+        (Agent_protocol.Error.invalid_request "configuration revision must advance once")
+    else Ok { state with spec = { state.spec with configuration_revision = revision } }
   | Inference_target_changed target ->
     let open Result.Let_syntax in
     let%map inference_target =

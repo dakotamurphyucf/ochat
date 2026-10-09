@@ -41,6 +41,10 @@ type committed =
       { session_id : Id.Session.t
       ; mutation : Mutation_result.t
       }
+  | Configuration_updated of
+      { session_id : Id.Session.t
+      ; revision : int64
+      }
   | Sent_message of
       { session_id : Id.Session.t
       ; history_id : History.Id.t
@@ -118,6 +122,12 @@ let committed_to_json = function
     `Object
       ([ "kind", `String "session_mutation"; "session_id", Id.Session.to_json session_id ]
        @ mutation_fields mutation)
+  | Configuration_updated { session_id; revision } ->
+    `Object
+      [ "kind", `String "configuration_updated"
+      ; "session_id", Id.Session.to_json session_id
+      ; "revision", `Number (Int64.to_string revision)
+      ]
   | Sent_message { session_id; history_id; operation_id; mutation } ->
     `Object
       ([ "kind", `String "sent_message"
@@ -183,6 +193,15 @@ let committed_of_json json =
     let%bind session_id = session () in
     let%map mutation = mutation () in
     Session_mutation { session_id; mutation }
+  | "configuration_updated" ->
+    let%bind session_id = session () in
+    let%map revision =
+      Json_codec.required_as
+        fields
+        "revision"
+        (Json_codec.bounded_int64 ~min:0L ~max:Int64.max_value)
+    in
+    Configuration_updated { session_id; revision }
   | "sent_message" ->
     let%bind session_id = session () in
     let%bind history_id = Json_codec.required_as fields "history_id" History.Id.of_json in

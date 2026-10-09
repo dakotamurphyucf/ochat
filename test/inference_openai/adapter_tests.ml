@@ -1106,3 +1106,58 @@ let%test_unit "actual HTTP rejection diagnostic survives ledger roundtrip withou
                  (Some Possibly_submitted))
            | _ -> assert false)))
 ;;
+
+let%expect_test
+    "actual captured native history preflights declared profile without reauthoring"
+  =
+  Eio_main.run (fun env ->
+    let raw_item =
+      Jsonaf.of_string
+        {|{"type":"function_call","id":"native","status":"completed","call_id":"native-call","name":"inspect","arguments":"{}"}|}
+    in
+    with_server
+      env
+      (fun _ -> terminal [ raw_item ])
+      (fun sw endpoint ->
+         let original_profile = profile endpoint in
+         let selected = target original_profile in
+         let original = context env original_profile ~target:selected ~auth in
+         let receipt = prepare original (request selected) |> run ~sw in
+         let captured = List.hd_exn (payloads receipt) in
+         let id =
+           History_entry.Id.create ~namespace:"compatible-native" ~sequence:0 |> ok
+         in
+         let history = [ History_entry.create_with_id ~id captured ] in
+         let replay =
+           Openai.Responses_replay.with_compatible_profiles
+             (D.Profile.replay_policy original_profile)
+             ~canonical_profile:"selected"
+             ~profiles:[ "selected"; "alternative" ]
+           |> ok
+         in
+         let alternative_profile =
+           D.Profile.with_configuration original_profile ~id:"alternative" ~defaults:[]
+           |> ok
+           |> fun profile -> D.Profile.with_replay_policy profile replay
+         in
+         let alternative = target alternative_profile in
+         let alternative_context =
+           context env alternative_profile ~target:alternative ~auth
+         in
+         Runtime.Context.preflight_history alternative_context history |> ok;
+         let unqualified_profile =
+           D.Profile.with_configuration original_profile ~id:"alternative" ~defaults:[]
+           |> ok
+         in
+         let unqualified = context env unqualified_profile ~target:alternative ~auth in
+         (match Runtime.Context.preflight_history unqualified history with
+          | Error Incompatible_replay -> ()
+          | Ok () | Error _ -> failwith "unqualified alias accepted native origin");
+         assert (Document_schema.Json.equal raw_item (raw captured));
+         (match P.representation captured with
+          | Captured { origin; _ } ->
+            [%test_eq: string option] (Some "selected") (P.Origin.profile origin)
+          | Authored | Reconstructed _ -> assert false);
+         print_endline "real captured A bytes/origin retained; only declared B preflights"));
+  [%expect {|real captured A bytes/origin retained; only declared B preflights|}]
+;;

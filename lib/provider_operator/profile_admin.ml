@@ -501,6 +501,15 @@ let select
 let backend t ~bridge ~principal =
   let rec view bridge =
     Inference_host.Backend.create
+      ~capture_profile:(fun ~current ~profile ->
+        Bridge.capture
+          bridge
+          ~principal
+          ~default_profile:profile
+          ~current:None
+          ~model:(Inference.Request.Target.model current)
+          ~settings:[]
+        |> Result.map_error ~f:Bridge.preparation_error)
       ~capture:(fun ~current ~model ~settings ->
         let open Result.Let_syntax in
         let%bind default_profile =

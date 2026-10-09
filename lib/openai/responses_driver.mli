@@ -79,6 +79,11 @@ module Profile : sig
     -> defaults:Setting.t list
     -> t Or_error.t
 
+  (** Derive a configuration choice while retaining the exact identity,
+      capability and qualified transport/replay policies. Defaults must have
+      Profile_default provenance and unique setting names. *)
+  val with_configuration : t -> id:string -> defaults:Setting.t list -> t Or_error.t
+
   (** Trusted endpoint compatibility only. Default requires one event-stream
       Content-Type. Allow_absent_event_stream accepts only an absent header and
       still requires bounded HTTP/SSE framing and a valid response terminal;

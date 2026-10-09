@@ -98,7 +98,10 @@ let context ?(on_prepare = ignore) ?on_session_prepare run =
   in
   let open_session =
     Option.map on_session_prepare ~f:(fun on_prepare _owner ~policy:_ ->
-      Ok (prepare ~on_prepare))
+      Ok
+        (Runtime.Adapter.Session_binding.create
+           ~prepare:(prepare ~on_prepare)
+           ~close:ignore))
   in
   Runtime.Adapter.create
     ~preflight_history:(fun ~target:_ _ -> Ok ())

@@ -377,10 +377,12 @@ let%expect_test
           ~open_session:(fun session ~policy ->
             incr opened;
             let owner = !opened in
-            Runtime.Session.on_release session (fun () -> incr releases) |> ok;
+            ignore session;
             Ok
-              (fun ~preparation_id request ->
-                prepare ~owner ~policy ~preparation_id request))
+              (Runtime.Adapter.Session_binding.create
+                 ~close:(fun () -> incr releases)
+                 ~prepare:(fun ~preparation_id request ->
+                   prepare ~owner ~policy ~preparation_id request)))
           ()
         |> ok
       in
@@ -466,4 +468,70 @@ let%expect_test
     (Failed (Transport Session_closed))
     Session_closed
     |}]
+;;
+
+let%expect_test
+    "graph close permits reentrant owned release and closes every registration once"
+  =
+  Eio_main.run (fun _ ->
+    Eio.Switch.run (fun sw ->
+      let owner = Runtime.Session.create ~sw in
+      let first_closed = ref 0
+      and second_closed = ref 0 in
+      let first =
+        Runtime.Session.register_release owner (fun () -> incr first_closed) |> ok
+      in
+      let second =
+        Runtime.Session.register_release owner (fun () ->
+          incr second_closed;
+          Runtime.Session.release_registration owner first |> ok)
+        |> ok
+      in
+      Runtime.Session.close owner;
+      Runtime.Session.release_registration owner first |> ok;
+      Runtime.Session.release_registration owner second |> ok;
+      Runtime.Session.close owner;
+      print_s [%sexp (!first_closed : int), (!second_closed : int)]));
+  [%expect {|(1 1)|}]
+;;
+
+let%expect_test "owned binding without adapter session rejects new prepare after close" =
+  Eio_main.run (fun _ ->
+    Eio.Switch.run (fun sw ->
+      let owner = Runtime.Session.create ~sw in
+      let base =
+        context
+          (fun
+              ~sw:_
+               ~scope
+               ~accounting_id
+               ~note_delivery:_
+               ~on_event:_
+               ~on_observation:_
+             -> receipt ~scope ~accounting_id ())
+      in
+      let binding = Runtime.Context.open_owned_binding base owner |> ok in
+      let captured = Runtime.Context.Owned_binding.context binding in
+      let admitted =
+        Runtime.Context.prepare captured ~preparation_id:"before" (request target) |> ok
+      in
+      Runtime.Context.Owned_binding.close binding;
+      Runtime.Context.Owned_binding.close binding;
+      assert (not (Runtime.Session.is_closed owner));
+      (match
+         Runtime.Context.prepare captured ~preparation_id:"after" (request target)
+       with
+       | Error error -> print_s [%sexp (error : Runtime.Preparation_error.t)]
+       | Ok _ -> failwith "retired binding prepared again");
+      let attempt = Runtime.Prepared.start admitted ~scope ~accounting_id |> ok in
+      Runtime.Attempt.run attempt ~sw ~on_event:ignore ~on_observation:ignore
+      |> ok
+      |> ignore;
+      Runtime.Context.prepare base ~preparation_id:"unrelated" (request target)
+      |> ok
+      |> ignore;
+      print_endline "admitted plan unchanged; unrelated graph context remains open"));
+  [%expect
+    {|Session_closed
+admitted plan unchanged; unrelated graph context remains open|}]
 ;;

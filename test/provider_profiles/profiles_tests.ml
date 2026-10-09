@@ -650,3 +650,69 @@ let%expect_test "disable and reenroll cancel old plan; same context prepares new
     (1 1 true)
     |}]
 ;;
+
+let%expect_test "batch replacement admission prevents partial canonical publication" =
+  Eio_main.run (fun env ->
+    let host =
+      registry env ~authorize:allow ~credentials:(fun ~sw:_ _ -> Error D.Auth.Missing)
+    in
+    add host (profile "one" "original-one");
+    add host (profile "two" "original-two");
+    let before_one = capture host "one"
+    and before_two = capture host "two" in
+    let changed = profile "one" "changed-one" in
+    assert (
+      Result.is_error
+        (H.replace_many host [ changed; changed ] ~owner:"runtime-host" ~generation:0L));
+    assert (R.Target.equal before_one (capture host "one"));
+    assert (R.Target.equal before_two (capture host "two"));
+    assert (
+      Result.is_error
+        (H.replace_many host [ changed; profile "three" "new" ] ~owner:"" ~generation:0L));
+    assert (
+      Result.is_error
+        (H.replace_many
+           host
+           [ changed; profile "three" "new" ]
+           ~owner:"runtime-host"
+           ~generation:(-1L)));
+    List.iter (List.range 2 128) ~f:(fun index ->
+      add host (profile (sprintf "existing-%d" index) "original"));
+    assert (
+      Result.is_error
+        (H.replace_many
+           host
+           [ changed; profile "three" "new" ]
+           ~owner:"runtime-host"
+           ~generation:0L));
+    assert (R.Target.equal before_one (capture host "one"));
+    assert (R.Target.equal before_two (capture host "two"));
+    H.replace_many
+      host
+      [ changed; profile "two" "changed-two" ]
+      ~owner:"runtime-host"
+      ~generation:0L
+    |> ok;
+    assert (
+      Option.equal
+        String.equal
+        (R.Target.profile_revision (capture host "one"))
+        (Some "changed-one"));
+    assert (
+      Option.equal
+        String.equal
+        (R.Target.profile_revision (capture host "two"))
+        (Some "changed-two"));
+    print_s
+      [%sexp
+        { duplicate_preserves_all = true
+        ; owner_generation_preserves_all = true
+        ; capacity_preserves_all = true
+        ; valid_batch_updates_all = true
+        }]);
+  [%expect
+    {|
+    ((duplicate_preserves_all true) (owner_generation_preserves_all true)
+     (capacity_preserves_all true) (valid_batch_updates_all true))
+  |}]
+;;

@@ -142,6 +142,28 @@ end
 module Session = Session
 
 module Adapter : sig
+  module Session_binding : sig
+    type t
+
+    val create
+      :  prepare:
+           (preparation_id:string
+            -> Inference.Request.t
+            -> (Plan.t, Preparation_error.t) Result.t)
+      -> close:(unit -> unit)
+      -> t
+
+    (** Closed resources reject preparation. Already admitted execution retains
+        original adapter evidence/cancellation, never a fabricated receipt. *)
+    val prepare
+      :  t
+      -> preparation_id:string
+      -> Inference.Request.t
+      -> (Plan.t, Preparation_error.t) Result.t
+
+    val close : t -> unit
+  end
+
   type t
 
   (** Trusted composition-root registration, not an ambient global registry.
@@ -157,11 +179,7 @@ module Adapter : sig
     -> ?open_session:
          (Session.t
           -> policy:Inference.Observation.Transport_policy.t
-          -> ( preparation_id:string
-               -> Inference.Request.t
-               -> (Plan.t, Preparation_error.t) Result.t
-               , Preparation_error.t )
-               Result.t)
+          -> (Session_binding.t, Preparation_error.t) Result.t)
     -> id:string
     -> limits:Limits.t
     -> bind:(Inference.Request.Target.t -> (unit, Preparation_error.t) Result.t)
@@ -250,7 +268,35 @@ module Context : sig
   val detach : t -> t
 
   val with_transport_policy : t -> Inference.Observation.Transport_policy.t -> t
+
+  module Owned_binding : sig
+    type context = t
+    type t
+
+    val context : t -> context
+
+    (** Retires only this adapter resource/registration; never graph Session.
+        Bounded cancellation-protected teardown may yield. *)
+    val close : t -> unit
+  end
+
+  val open_owned_binding
+    :  t
+    -> Session.t
+    -> (Owned_binding.t, Preparation_error.t) Result.t
+
   val with_session : t -> Session.t -> (t, Preparation_error.t) Result.t
+
+  (** After current host resolution, retain the qualified graph context only for
+      complete unchanged target/policy and the adapter's pure current-binding
+      validation. Existing live authority/epoch checks still run at actual preparation
+      and dispatch. Changed selection stays on the freshly resolved context. *)
+  val reuse_unchanged : t -> previous:t -> t
+
+  (** Restricts NEW preparation to an owning resource lifetime. Does not alter
+      already prepared/admitted plans or their evidence/cancellation. No authority
+      granted by this lifecycle guard. Callback must be pure/non-yielding. *)
+  val with_preparation_lifetime : t -> is_open:(unit -> bool) -> t
 
   val derive_in_session
     :  t

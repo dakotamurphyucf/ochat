@@ -273,6 +273,26 @@ module Payload = struct
       | Known known -> known.model
     ;;
 
+    let provider = function
+      | Unavailable -> None
+      | Known known -> Some known.provider
+    ;;
+
+    let profile = function
+      | Unavailable -> None
+      | Known known -> known.profile
+    ;;
+
+    let same_replay_transport_context left right =
+      match left, right with
+      | Known left, Known right ->
+        String.equal left.adapter right.adapter
+        && Option.equal String.equal left.account right.account
+        && String.equal left.endpoint right.endpoint
+        && Int.equal left.replay_version right.replay_version
+      | Unavailable, _ | _, Unavailable -> false
+    ;;
+
     let same_replay_context left right =
       match left, right with
       | Known left, Known right ->

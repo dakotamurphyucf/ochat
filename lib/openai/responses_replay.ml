@@ -10,9 +10,12 @@ module Item_class = struct
   [@@deriving equal, compare, sexp_of]
 end
 
-type t = (string * string * Item_class.t list) list
+type t =
+  { transitions : (string * string * Item_class.t list) list
+  ; compatible_profiles : String.Set.t option
+  }
 
-let exact_origin_only = []
+let exact_origin_only = { transitions = []; compatible_profiles = None }
 
 let create ~transitions =
   let valid_name name =
@@ -29,7 +32,27 @@ let create ~transitions =
          (List.map transitions ~f:(fun (source, destination, _) -> source, destination))
          ~compare:(Tuple2.compare ~cmp1:String.compare ~cmp2:String.compare)
   then Or_error.error_string "invalid directed replay declarations"
-  else Ok transitions
+  else Ok { transitions; compatible_profiles = None }
+;;
+
+let with_compatible_profiles t ~canonical_profile ~profiles =
+  let valid_id id =
+    (not (String.is_empty (String.strip id)))
+    && String.length id <= 256
+    && (not (String.exists id ~f:(fun c -> Char.to_int c < 32 || Char.to_int c = 127)))
+    && Result.is_ok
+         (Document_schema.Json.validate
+            (`String id)
+            ~limits:Document_schema.Limits.default)
+  in
+  if
+    List.is_empty profiles
+    || List.length profiles > 128
+    || (not (List.for_all profiles ~f:valid_id))
+    || List.contains_dup profiles ~compare:String.compare
+    || not (List.mem profiles canonical_profile ~equal:String.equal)
+  then Or_error.error_string "invalid compatible replay profile group"
+  else Ok { t with compatible_profiles = Some (String.Set.of_list profiles) }
 ;;
 
 let object_fields raw ~allowed =
@@ -146,17 +169,38 @@ let classify raw =
   | _ -> None
 ;;
 
+let compatible_profile_context t ~actual ~expected =
+  match t.compatible_profiles, Origin.profile actual, Origin.profile expected with
+  | Some profiles, Some source, Some destination ->
+    Set.mem profiles source
+    && Set.mem profiles destination
+    && Option.equal String.equal (Origin.provider actual) (Some source)
+    && Option.equal String.equal (Origin.provider expected) (Some destination)
+    && Origin.same_replay_transport_context actual expected
+    &&
+      (match Origin.model actual, Origin.model expected with
+      | Some source, Some destination -> String.equal source destination
+      | Some _, None | None, Some _ | None, None -> false)
+  | None, _, _ | Some _, None, _ | Some _, Some _, None -> false
+;;
+
 let permits t ~actual ~expected ~raw =
-  if not (Origin.same_replay_context actual expected)
-  then false
-  else if Option.equal String.equal (Origin.model actual) (Origin.model expected)
-  then true
-  else (
-    match Origin.model actual, Origin.model expected, classify raw with
-    | Some source, Some destination, Some item_class ->
-      List.exists t ~f:(fun (from, to_, classes) ->
-        String.equal source from
-        && String.equal destination to_
-        && List.mem classes item_class ~equal:Item_class.equal)
-    | _ -> false)
+  if Origin.same_replay_context actual expected
+  then
+    if Option.equal String.equal (Origin.model actual) (Origin.model expected)
+    then true
+    else (
+      match Origin.model actual, Origin.model expected, classify raw with
+      | Some source, Some destination, Some item_class ->
+        List.exists t.transitions ~f:(fun (from, to_, classes) ->
+          String.equal source from
+          && String.equal destination to_
+          && List.mem classes item_class ~equal:Item_class.equal)
+      | _ -> false)
+  else if compatible_profile_context t ~actual ~expected
+  then (
+    match classify raw with
+    | Some (Assistant_text | Function_call | Custom_call) -> true
+    | Some Reasoning | None -> false)
+  else false
 ;;

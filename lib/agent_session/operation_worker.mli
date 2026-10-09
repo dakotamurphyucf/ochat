@@ -176,6 +176,7 @@ module Capabilities : sig
       (** Every root provider request checks the running operation and atomically
           accepts its consumed notification wakes, including without a moderator.
           A failed save prevents provider dispatch. *)
+    ; root_context : Chat_response.Root_context.t option
     ; consume_deferred : unit -> (History_entry.t list, Agent_protocol.Error.t) result
     ; request_permission :
         permission:Agent_protocol.Permission.t

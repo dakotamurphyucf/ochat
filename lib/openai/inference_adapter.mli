@@ -40,6 +40,7 @@ end
     must be supplied from the capture only after host compatibility admission. *)
 val create
   :  ?auth_binding:Inference.Request.Auth_binding.t History_entry.Payload.Presence.t
+  -> ?check_current:(unit -> (unit, Inference_runtime.Preparation_error.t) Result.t)
   -> Responses_driver.t
   -> profile:Responses_driver.Profile.t
   -> profile_revision:string option

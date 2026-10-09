@@ -31,6 +31,7 @@ type t =
   | Permission_changed of Agent_protocol.Permission.t
   | Grant_changed of Agent_protocol.Grant.t
   | Inference_target_captured of (Inference.Request.Target.t[@sexp.opaque])
+  | Configuration_revision_changed of int64
   | Inference_target_changed of (Inference.Request.Target.t[@sexp.opaque])
   | Model_job_target_captured of Model_job_target.t
   | Model_job_recipe_target_captured of Model_job_target.t

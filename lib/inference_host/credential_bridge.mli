@@ -3,6 +3,8 @@ open! Core
 (** Trusted runtime-host provider credential composition. Borrows the shared credential
     lifecycle authority; owns only a nonsecret projection on one Eio domain.
     No client credential forwarding, alternate provider client or ambient lookup. *)
+module Compatible_profile = Compatible_profile
+
 module Operation : sig
   type t =
     | Inference
@@ -121,8 +123,23 @@ type t
     the lifecycle metadata lock at credential publication admission. Empty
     mappings permit an approved unknown-account OAuth template to bootstrap;
     inference remains unavailable until an exact verified mapping is published. *)
+
+(** Compatible declarations have immutable IDs/revisions/defaults and reference
+    canonical owners only. approved_profiles additionally reserves host-declared
+    unmapped templates, allowing OAuth choices to remain unavailable until an
+    exact verified mapping is published. All canonical and choice IDs are unique
+    and bounded to128. Capture/resolve authorize both requested logical ID and
+    owner ID; credential mutation APIs accept canonical IDs only. They share one
+    lifecycle snapshot/epoch and renewal authority. Before publication, the
+    canonical profile and all its explicitly declared choices receive one
+    compatible replay policy. It preserves logical origin IDs, existing model
+    declarations and driver capabilities; it grants neither authentication nor
+    unknown native item compatibility. *)
+
 val create
   :  ?oauth:OAuth.t
+  -> ?compatible_profiles:Compatible_profile.t list
+  -> ?approved_profiles:string list
   -> Openai.Responses_driver.t
   -> registry:Credential_registry.t
   -> mappings:Mapping.t list

@@ -16,6 +16,7 @@ let has_command_receipt = function
   | Session_update_metadata _
   | Session_stop _
   | Session_cancel_operation _
+  | Session_configuration_update _
   | Session_send_message _
   | Session_compact _
   | Session_delete_history _
@@ -46,6 +47,7 @@ let has_command_receipt = function
   | Blob_read _
   | Session_list _
   | Session_get _
+  | Session_configuration_get _
   | Session_inference_summary _
   | Session_inference_observations _
   | Session_export _

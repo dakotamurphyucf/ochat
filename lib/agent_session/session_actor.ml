@@ -412,6 +412,21 @@ type _ request =
   | Commit_extensions :
       int * int64 * Extension_change.t list
       -> Agent_protocol.Session.t request
+  | Configuration : Agent_protocol.Session_configuration.t request
+  | Set_configuration_policy : Configuration_policy.t -> unit request
+  | Prepare_configuration_update :
+      Agent_protocol.Session_configuration.Update_request.t
+      -> Configuration_update.t request
+  | Commit_configuration_update :
+      Configuration_update.Validated.t
+      -> Agent_protocol.Session_configuration.t request
+  | Begin_configuration_capture :
+      Agent_protocol.Id.Operation.t
+      -> Configuration_capture.Token.t request
+  | Mark_configuration_capture :
+      Configuration_capture.Token.t * Inference.Observation.Configuration.t
+      -> unit request
+  | Finish_configuration_capture : Configuration_capture.Token.t * bool -> unit request
   | State : Session_state.t request
   | Snapshot : Agent_protocol.Snapshot.t request
   | Authorize_writer : Agent_protocol.Id.Attachment.t -> unit request
@@ -757,6 +772,9 @@ type t =
   ; subscribers : (Agent_protocol.Id.Attachment.t, Subscriber.t) Map.Poly.t ref
   ; permission_waiters :
       (Agent_protocol.Id.Permission.t, permission_waiter) Map.Poly.t ref
+  ; mutable configuration_policy : Configuration_policy.t option
+  ; configuration_update_owner : Configuration_update.Owner.t
+  ; configuration_capture : Configuration_capture.t
   ; mutable operation_worker : Operation_worker.t option
   ; mutable compaction_inference : Compaction_inference.t option
   ; mutable inference_execution : Inference_client.Execution.t option
@@ -5224,6 +5242,108 @@ let commit_worker_moderator t operation_id moderator =
   else Result.map (change_moderator t moderator) ~f:(fun _ -> ())
 ;;
 
+let configuration_view t =
+  Configuration_capture.view
+    t.configuration_capture
+    ~generation:t.state.identity.generation
+    ~revision:t.state.spec.configuration_revision
+    ~selected:t.state.spec.inference_target
+;;
+
+let prepare_configuration_update t request =
+  let open Result.Let_syntax in
+  let%bind _ =
+    write_attachment
+      t
+      request.Agent_protocol.Session_configuration.Update_request.attachment_id
+  in
+  let%bind policy =
+    Result.of_option
+      t.configuration_policy
+      ~error:(error Invalid_state "host configuration policy is unavailable")
+  in
+  Configuration_update.create
+    ~owner:t.configuration_update_owner
+    ~policy
+    ~request
+    ~state:t.state
+;;
+
+let commit_configuration_update t validated =
+  let open Result.Let_syntax in
+  let request = Configuration_update.Validated.request validated in
+  let%bind _ = write_attachment t request.attachment_id in
+  let%bind policy =
+    Result.of_option
+      t.configuration_policy
+      ~error:(error Conflict "host configuration policy changed")
+  in
+  let%bind () =
+    Configuration_update.recheck
+      validated
+      ~owner:t.configuration_update_owner
+      ~policy
+      ~state:t.state
+  in
+  let proposed = Configuration_update.Validated.proposed validated in
+  let revision = Int64.(t.state.spec.configuration_revision + 1L) in
+  let delta =
+    Session_delta.Batch
+      [ Inference_target_changed proposed; Configuration_revision_changed revision ]
+  in
+  let%bind candidate = Session_delta.apply t.state delta in
+  let%bind _ =
+    transition
+      t
+      ~delta
+      ~payloads:
+        [ Agent_protocol.Event.Durable.Payload.Session_updated
+            (Session_state.summary candidate)
+        ]
+  in
+  configuration_view t
+;;
+
+let begin_configuration_capture t operation_id =
+  let open Result.Let_syntax in
+  let%bind _ = running_operation t operation_id in
+  let%bind () = require_runtime_admission t in
+  let%bind target = Configuration_transition.target t.state in
+  let%map policy =
+    Result.of_option
+      t.configuration_policy
+      ~error:(error Invalid_state "root configuration policy is unavailable")
+  in
+  Configuration_capture.begin_capture
+    t.configuration_capture
+    ~operation_id
+    ~generation:t.state.identity.generation
+    ~revision:t.state.spec.configuration_revision
+    ~target
+    ~policy
+;;
+
+let mark_configuration_capture t capture configuration =
+  let open Result.Let_syntax in
+  let%bind _ = running_operation t (Configuration_capture.Token.operation_id capture) in
+  let%bind () = require_runtime_admission t in
+  Configuration_capture.mark t.configuration_capture capture configuration
+;;
+
+let finish_configuration_capture t capture success =
+  Configuration_capture.finish t.configuration_capture capture ~success;
+  Ok ()
+;;
+
+let root_configuration_context t operation_id =
+  Configuration_capture.root_port
+    ~begin_capture:(fun () -> call t (Begin_configuration_capture operation_id))
+    ~mark:(fun capture configuration ->
+      call t (Mark_configuration_capture (capture, configuration)))
+    ~finish:(fun capture ~success ->
+      call t (Finish_configuration_capture (capture, success)))
+;;
+
 let consume_deferred t operation_id =
   if not (runtime_admission_open t)
   then Ok []
@@ -7154,6 +7274,9 @@ let worker_capabilities t operation_id id_source buffer =
     ; admit_moderator_turn = (fun () -> call t (Admit_moderator_turn operation_id))
     ; admit_notification_turn = (fun () -> call t (Admit_notification_turn operation_id))
     ; with_invocation = with_invocation t operation_id
+    ; root_context =
+        Option.map t.configuration_policy ~f:(fun _ ->
+          root_configuration_context t operation_id)
     ; consume_deferred = (fun () -> call t (Consume_deferred operation_id))
     ; request_permission =
         (fun ~permission ~timeout_seconds ~fallback ~review_on_timeout ->
@@ -10246,6 +10369,17 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
        let%bind job = find_job t id in
        let%bind () = validate_job_generation t job t.state.identity.generation in
        Result.map (cancel_job_internal t id) ~f:ignore)
+  | Configuration -> configuration_view t
+  | Set_configuration_policy policy ->
+    t.configuration_policy <- Some policy;
+    Ok ()
+  | Prepare_configuration_update request -> prepare_configuration_update t request
+  | Commit_configuration_update validated -> commit_configuration_update t validated
+  | Begin_configuration_capture operation_id -> begin_configuration_capture t operation_id
+  | Mark_configuration_capture (capture, configuration) ->
+    mark_configuration_capture t capture configuration
+  | Finish_configuration_capture (capture, success) ->
+    finish_configuration_capture t capture success
   | Snapshot -> Ok (current_snapshot t)
   | Set_operation_worker worker -> set_operation_worker t worker
   | Set_runtime_worker (worker, inference) -> set_runtime_worker t worker inference
@@ -10663,6 +10797,9 @@ let create_with_owner_lease_duration
     ; active_calls = Active_calls.create ()
     ; subscribers = ref Map.Poly.empty
     ; permission_waiters = ref Map.Poly.empty
+    ; configuration_policy = None
+    ; configuration_update_owner = Configuration_update.Owner.create ()
+    ; configuration_capture = Configuration_capture.create ()
     ; operation_worker
     ; compaction_inference = None
     ; inference_execution = None
@@ -11317,4 +11454,14 @@ let update_metadata t ?command_audit ~attachment_id ~expected_metadata_revision 
     t
     ?command_audit
     (Update_metadata (attachment_id, expected_metadata_revision, patch))
+;;
+
+let configuration t = call t Configuration
+let set_configuration_policy t policy = call t (Set_configuration_policy policy)
+
+let update_configuration t ?command_audit request =
+  let open Result.Let_syntax in
+  let%bind basis = call t (Prepare_configuration_update request) in
+  let%bind validated = Configuration_update.validate basis in
+  call t ?command_audit (Commit_configuration_update validated)
 ;;

@@ -307,6 +307,7 @@ let moderate_submission config input on_runtime_request =
 ;;
 
 let run
+      ?root_binding
       ?runtime_policy
       ?authoring_context
       ?dispatch_tool
@@ -382,6 +383,10 @@ let run
       Chat_response.In_memory_stream.run_completion_stream_in_memory_entries
         ~env:config.Config.env
         ~inference_context:config.inference_context
+        ?root_context:
+          (Option.map capabilities.root_context ~f:(fun source ->
+             Option.value_map root_binding ~default:source ~f:(fun binding ->
+               Chat_response.Root_binding.wrap binding source)))
         ~inference_identity:config.inference_identity
         ~on_inference_attempt:config.on_inference_attempt
         ~on_inference_completion:config.on_inference_completion
@@ -431,6 +436,7 @@ let run
 ;;
 
 let create
+      ?root_binding
       ?runtime_policy
       ?authoring_context
       ?dispatch_tool
@@ -442,6 +448,7 @@ let create
   Operation_worker.create ~run:(fun ~sw ~input capabilities ->
     match
       run
+        ?root_binding
         ?runtime_policy
         ?authoring_context
         ?dispatch_tool

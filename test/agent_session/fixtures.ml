@@ -321,6 +321,7 @@ let actor_state ~workspace_instance ~liveness ~start_immediately =
       ; prompt_definition_id = None
       ; delegation = None
       ; prompt_revision_id
+      ; configuration_revision = 0L
       ; inference_target = inference_selection ()
       ; workspace_instance
       ; permission_profile = "interactive"

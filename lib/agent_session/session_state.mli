@@ -21,6 +21,7 @@ module Spec : sig
     { protocol : Agent_protocol.Session.Spec.t
     ; prompt_definition_id : Agent_protocol.Id.Prompt_definition.t option
     ; prompt_revision_id : Agent_protocol.Id.Prompt_revision.t
+    ; configuration_revision : int64
     ; inference_target : (Inference.Selection.t[@sexp.opaque])
       (** Private frozen session selection, independent of children/model jobs.
           Historical absence converts to explicit Unresolved and grants no

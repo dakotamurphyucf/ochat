@@ -1133,6 +1133,7 @@ let build_with_services
   =
   let open Result.Let_syntax in
   let inference_session = Inference_runtime.Session.create ~sw in
+  let root_binding = Chat_response.Root_binding.create inference_session in
   let%bind inference_context =
     Inference_runtime.Context.with_session
       (Inference_runtime.Context.detach inference_context)
@@ -1724,6 +1725,7 @@ let build_with_services
   in
   let worker =
     Turn_worker.create
+      ~root_binding
       ?authoring_context:(Option.map authoring ~f:Authoring_runtime.materialize)
       ?runtime_policy:
         (Option.map extension_services ~f:(fun services -> services.runtime_policy))
@@ -1955,6 +1957,7 @@ let build_with_services
     ; enqueue_model_job_completion = enqueue_model_job_completion moderator
     ; close =
         (fun () ->
+          Chat_response.Root_binding.close root_binding;
           Inference_runtime.Session.close inference_session;
           close_runtime cache storage_paths session_id moderator)
     }

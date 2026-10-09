@@ -197,30 +197,44 @@ let add t configuration ~owner ~generation =
     Ok ())
 ;;
 
-let replace t configuration ~owner ~generation =
+let validate_replacements t configurations ~owner ~generation =
+  let ids = List.map configurations ~f:Profile.id in
+  let additional = List.count ids ~f:(fun id -> not (Hashtbl.mem t.entries id)) in
   if
     (not (valid_label owner))
     || Int64.(generation < 0L)
-    || ((not (Hashtbl.mem t.entries (Profile.id configuration)))
-        && Hashtbl.length t.entries >= 128)
+    || List.contains_dup ids ~compare:String.compare
+    || additional > 128 - Hashtbl.length t.entries
   then Error Error.Invalid_profile
-  else (
-    let replacement =
-      { configuration
-      ; owner
-      ; generation
-      ; disabled = false
-      ; revision_epoch = 0
-      ; removed = false
-      }
-    in
-    Option.iter
-      (Hashtbl.find t.entries (Profile.id configuration))
-      ~f:(fun old ->
-        old.removed <- true;
-        old.disabled <- true);
-    Hashtbl.set t.entries ~key:(Profile.id configuration) ~data:replacement;
-    Ok ())
+  else Ok ()
+;;
+
+let replace_many t configurations ~owner ~generation =
+  let open Result.Let_syntax in
+  let%map () = validate_replacements t configurations ~owner ~generation in
+  (* Construct every replacement before invalidating a live entry. This
+       admission and publication are non-yielding on the registry's owner. *)
+  let replacements =
+    List.map configurations ~f:(fun configuration ->
+      ( Profile.id configuration
+      , { configuration
+        ; owner
+        ; generation
+        ; disabled = false
+        ; revision_epoch = 0
+        ; removed = false
+        } ))
+  in
+  List.iter replacements ~f:(fun (id, replacement) ->
+    Option.iter (Hashtbl.find t.entries id) ~f:(fun old ->
+      old.removed <- true;
+      old.disabled <- true);
+    Hashtbl.set t.entries ~key:id ~data:replacement);
+  ()
+;;
+
+let replace t configuration ~owner ~generation =
+  replace_many t [ configuration ] ~owner ~generation
 ;;
 
 let remove t ~profile =
@@ -364,19 +378,20 @@ let resolve t ~principal target =
       | Error Error.Reauthorization_required -> Error D.Auth.Reauthorization_required
       | Error _ -> Error D.Auth.Missing)
   in
+  let check_preparation_admission () =
+    if entry.removed || entry.disabled
+    then Error Inference_runtime.Preparation_error.Target_unavailable
+    else
+      check_admission ()
+      |> Result.map_error ~f:(function
+        | D.Auth.Denied -> Inference_runtime.Preparation_error.Target_denied
+        | Reauthorization_required -> Reauthorization_required
+        | Profile_changed -> Target_mismatch
+        | Missing | Invalid_credential | Timed_out -> Target_unavailable)
+  in
   let capture_auth ~target:_ =
     let open Result.Let_syntax in
-    let%bind () =
-      if entry.removed || entry.disabled
-      then Error Inference_runtime.Preparation_error.Target_unavailable
-      else
-        check_admission ()
-        |> Result.map_error ~f:(function
-          | D.Auth.Denied -> Inference_runtime.Preparation_error.Target_denied
-          | Reauthorization_required -> Reauthorization_required
-          | Profile_changed -> Target_mismatch
-          | Missing | Invalid_credential | Timed_out -> Target_unavailable)
-    in
+    let%bind () = check_preparation_admission () in
     let captured = identity entry in
     let check_current () =
       let%bind () = check_admission () in
@@ -400,6 +415,7 @@ let resolve t ~principal target =
   let%bind adapter =
     A.create
       ~auth_binding:(R.Target.auth_binding target)
+      ~check_current:check_preparation_admission
       t.driver
       ~profile:entry.configuration.profile
       ~profile_revision:(R.Target.profile_revision target)

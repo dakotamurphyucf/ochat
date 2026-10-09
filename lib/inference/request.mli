@@ -123,6 +123,14 @@ module Target : sig
   val settings : t -> Setting.t list
   val equal : t -> t -> bool
 
+  (** Host-approved profile change, preserving private unknown target/settings.
+      Account/endpoint/binding compatibility is enforced by the owning host. *)
+  val with_profile_from
+    :  t
+    -> approved:t
+    -> limits:Document_schema.Limits.t
+    -> (t, Error.t) Result.t
+
   (** Preserve the original unknown target/settings members. These operations
       cannot change adapter/profile/account/endpoint. Original and result admit
       under limits. A model override is explicit; an omitted override inherits. *)

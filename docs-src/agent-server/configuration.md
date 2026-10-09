@@ -448,3 +448,64 @@ explicit defaults; do not infer them from this daemon table.
 A reviewer, deterministic policy or OAuth resolver ID selects a host-injected
 implementation; the stock binary does not download or synthesize one. See
 [embedding](embedding.md) and [permissions](permissions-and-security.md).
+
+## Compatible provider configuration choices
+
+The trusted local runtime host can load immutable session profile choices from
+an explicit absolute `OCHAT_PROVIDER_PROFILE_CHOICES` filename. The daemon, standalone
+CLI and local provider command composition use the same loader. The file is
+bounded to 1 MiB, at most 128 total canonical profiles and choices, and bounded
+JSON depth/nodes. Invalid or missing configured files fail host composition.
+
+```json
+[
+  {
+    "id": "openai-short",
+    "credential_owner": "first-party-openai-responses",
+    "revision": "short-v1",
+    "defaults": {}
+  }
+]
+```
+
+Each choice has a distinct ID and explicit configuration revision. Defaults use
+existing named Responses settings; unknown/duplicate settings or malformed
+values reject. Choices inherit the canonical owner's exact provider account,
+endpoint, credential binding, capabilities and qualified transport/replay
+policies. This file cannot declare credentials, accounts, endpoints, capability
+expansions or alternate billing. Changes require host restart; a restored target
+whose choice is absent fails unavailable without selecting a default profile.
+
+A choice referencing an approved OAuth template remains unavailable until the
+canonical mapping has a verified account. The host does not guess identity from
+this declaration. Canonical disable/removal and credential epoch changes apply
+to every choice. Credential enrollment, login, logout and environment
+configuration remain canonical operations; a choice owns no second credential
+lifecycle. Provider operator status and default selection inventory remain the
+canonical profiles, while session profile choices are named by this trusted file.
+Inference authorization must independently allow both the requested choice and
+its canonical owner. Session profile mutation also requires its normal writer
+and provider selection authority; declaring a choice grants no client scope.
+
+`session.configuration_update` can select a compatible choice once that method
+is installed. `session.configuration_get` inspects selected intent and the
+current request capture without selecting a different profile. An explicit
+model/settings patch controls request intent; changing
+the profile ID alone does not promise to replace existing captured settings with
+all profile defaults. The exact paid account/endpoint/binding guard still applies.
+
+A choice's effective configuration revision binds its declared revision and the
+canonical configuration revision. Saved choice targets reject a changed logical
+view on resolve or recapture; refresh the selected choice explicitly through the
+configuration mutation. This prevents changed inherited capabilities/policies
+from silently becoming a different saved choice. Canonical saved revisions retain
+their existing captured-default provenance contract: compatible canonical
+resolution preserves saved settings while checking current capabilities and
+credential authority. A failed multi-view publication disables all shared bridge
+views until the bridge is reconstructed; subsequent mapping publication cannot
+clear that failed authority.
+
+Named `max_output_tokens` defaults, when authored, must satisfy the Responses
+codec's minimum of 16 tokens; for example use `"max_output_tokens": 32` rather
+than a smaller positive integer. The configured filename is trusted host input;
+remote provider commands do not forward a client-local file into the daemon.

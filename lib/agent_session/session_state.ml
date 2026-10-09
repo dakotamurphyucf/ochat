@@ -19,6 +19,7 @@ module Spec = struct
     { protocol : Agent_protocol.Session.Spec.t
     ; prompt_definition_id : Agent_protocol.Id.Prompt_definition.t option
     ; prompt_revision_id : Agent_protocol.Id.Prompt_revision.t
+    ; configuration_revision : int64 [@sexp.default 0L]
     ; inference_target : (Inference.Selection.t[@sexp.opaque])
     ; delegation : Agent_store.Delegation_store.Reference.t option [@sexp.option]
     ; workspace_instance : Workspace_instance.t
@@ -523,6 +524,11 @@ let validate_model_job_targets t =
 
 let validate_domain t =
   let open Result.Let_syntax in
+  let%bind () =
+    if Int64.(t.spec.configuration_revision < 0L)
+    then Error (Agent_protocol.Error.invalid_request "negative configuration revision")
+    else Ok ()
+  in
   let%bind () = validate_delegation t in
   let%bind () = validate_model_job_targets t in
   let%bind moderator = Moderator_checkpoint.decode t.moderator in

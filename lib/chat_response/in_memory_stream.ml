@@ -215,6 +215,7 @@ type 'a prepared_turn =
 
 type ctx =
   { env : Eio_unix.Stdenv.base
+  ; root_context : Root_context.t option
   ; inference_context : Inference_runtime.Context.t
   ; fork_depth : int option
   ; inference_identity : Neutral_turn.Identity.t
@@ -280,6 +281,7 @@ type ctx =
 
 type args =
   { env : Eio_unix.Stdenv.base
+  ; root_context : Root_context.t option
   ; inference_context : Inference_runtime.Context.t
   ; fork_depth : int option
   ; inference_identity : Neutral_turn.Identity.t
@@ -1404,6 +1406,7 @@ let make_run_fork_admitted
   let child_ctx =
     { ctx with
       allocator = child_allocator
+    ; root_context = None
     ; inference_context = Inference_runtime.Context.detach ctx.inference_context
     ; fork_depth = Option.map ctx.fork_depth ~f:(fun depth -> depth + 1)
     ; id_source = History_entry.Id_source.of_allocator child_allocator
@@ -2211,17 +2214,6 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
             Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
           |> Result.ok_or_failwith)
       in
-      let request =
-        Inference.Request.create
-          ~target:(Inference_runtime.Context.target c.inference_context)
-          ~history:inputs
-          ~tools
-          ~assets:(c.resolve_inference_assets inputs)
-          ~limits:Transcript.Admission.default
-        |> Result.map_error ~f:(fun error ->
-          Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
-        |> Result.ok_or_failwith
-      in
       let st =
         ref
           { func_info = Map.empty (module String)
@@ -2234,37 +2226,59 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
       in
       c.neutral_items <- Map.empty (module Transcript.Item.Key);
       c.transcript_live <- None;
-      let receipt =
-        Neutral_turn.run
-          c.inference_context
-          ~sw
-          ~identity:c.inference_identity
-          ~relation:c.transcript_relation
-          ~request
-          ~before_dispatch:c.before_inference_dispatch
-          ~on_attempt:(fun attempt ->
-            c.on_inference_attempt attempt;
-            c.transcript_scope <- Some (Inference_runtime.Attempt.scope attempt))
-          ~on_event:(fun event ->
-            match Inference.Event.view event with
-            | Live event -> publish_inference_live c ~st:!st event
-            | Candidate_ready { item; payload; local_execution } ->
-              st
-              := accept_inference_candidate
-                   ~turn:turn_for_fork
-                   c
-                   ~hist
-                   ~st:!st
-                   ~sem
-                   ~item
-                   ~payload
-                   ~local_execution
-            | Terminal _ -> ())
-          ~on_observation:c.on_inference_observation
-          ~on_completion:c.on_inference_completion
-        |> Result.map_error ~f:(fun error ->
-          Sexp.to_string_hum (Neutral_turn.Error.sexp_of_t error))
-        |> Result.ok_or_failwith
+      let run_request inference_context ~on_dispatch =
+        let c = { c with inference_context } in
+        let request =
+          Inference.Request.create
+            ~target:(Inference_runtime.Context.target c.inference_context)
+            ~history:inputs
+            ~tools
+            ~assets:(c.resolve_inference_assets inputs)
+            ~limits:Transcript.Admission.default
+          |> Result.map_error ~f:(fun error ->
+            Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
+          |> Result.ok_or_failwith
+        in
+        let receipt =
+          Neutral_turn.run
+            c.inference_context
+            ~sw
+            ~identity:c.inference_identity
+            ~relation:c.transcript_relation
+            ~request
+            ~before_dispatch:c.before_inference_dispatch
+            ~on_attempt:(fun attempt ->
+              on_dispatch (Inference_runtime.Attempt.configuration attempt);
+              c.on_inference_attempt attempt;
+              c.transcript_scope <- Some (Inference_runtime.Attempt.scope attempt))
+            ~on_event:(fun event ->
+              match Inference.Event.view event with
+              | Live event -> publish_inference_live c ~st:!st event
+              | Candidate_ready { item; payload; local_execution } ->
+                st
+                := accept_inference_candidate
+                     ~turn:turn_for_fork
+                     c
+                     ~hist
+                     ~st:!st
+                     ~sem
+                     ~item
+                     ~payload
+                     ~local_execution
+              | Terminal _ -> ())
+            ~on_observation:c.on_inference_observation
+            ~on_completion:c.on_inference_completion
+          |> Result.map_error ~f:(fun error ->
+            Sexp.to_string_hum (Neutral_turn.Error.sexp_of_t error))
+          |> Result.ok_or_failwith
+        in
+        c, receipt
+      in
+      let c, receipt =
+        match c.root_context with
+        | None -> run_request c.inference_context ~on_dispatch:(fun _ -> ())
+        | Some source ->
+          source.with_context ~previous:c.inference_context ~history:inputs run_request
       in
       let st = !st in
       let new_entries_rev, tool_requests = await_calls c ~hist st in
@@ -2352,6 +2366,7 @@ let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
   let tools, tool_tbl = derive_tools_tool_tbl ~tools:a.tools ~tool_tbl:a.tool_tbl in
   let c =
     { env = a.env
+    ; root_context = a.root_context
     ; inference_context = a.inference_context
     ; fork_depth = a.fork_depth
     ; inference_identity = a.inference_identity
@@ -2422,6 +2437,7 @@ let run_completion_stream_in_memory_entries_impl ~sw (a : args) : History_entry.
 let run_completion_stream_in_memory_entries
       ~env
       ~inference_context
+      ?root_context
       ~inference_identity
       ~on_inference_attempt
       ~on_inference_completion
@@ -2531,6 +2547,7 @@ let run_completion_stream_in_memory_entries
   in
   let args =
     { env
+    ; root_context
     ; inference_context
     ; fork_depth
     ; inference_identity

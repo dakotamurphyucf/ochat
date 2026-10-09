@@ -67,6 +67,8 @@ actor state and authorization, not merely passing JSON validation.
 | `session.create` | `Session.Create_request` | `session.create` plus requested attachment scopes | Session, mutation acknowledgement and optional attachment/replay. |
 | `session.list` | `Session.List_request` | `session.transcript.read` | Paged visible sessions with filters. |
 | `session.get` | `Session.Get_request` | `session.transcript.read` | Scoped snapshot; optional history window. |
+| `session.configuration_get` | `Session_configuration.Get_request` | `session.transcript.read` | Safe selected/captured configuration and independent configuration revision; profile identity requires `diagnostics.read`. |
+| `session.configuration_update` | `Session_configuration.Update_request` | `session.message.send`; profile patches also require `provider.select` | Writable attachment, expected generation/configuration revision and nonempty model/profile/settings patch; next root capture selection. |
 | `session.inference_summary` | `Inference_query.Summary_request` | Authentication plus session visibility | Safe retained totals, coverage and host turns; not lifetime totals or pricing. |
 | `session.inference_observations` | `Inference_query.Request` | `session.transcript.read`; configuration and diagnostics also require `diagnostics.read` | Ordered, paginated retained attempts, with scoped disclosure. |
 | `session.attach` | `Session.Attach_request` | `session.transcript.read` plus requested mode | Attachment, replay decision, sequence and optional reclaim token. |
@@ -281,6 +283,35 @@ while recording its command receipt. Membership implementations share this
 organization revision. Names/labels never change the execution workspace, provider
 selection or tool grants. Archived records are listed without runtime activation;
 restoration remains a lifecycle operation.
+
+Configuration reads and updates do not start a stopped session or dispatch a
+provider request. An update supplies `expected_generation`,
+`expected_revision` (the independent configuration revision), a writable
+`attachment_id` and its original `idempotency_key`. The patch can supply a
+nonempty model, an explicitly authorized compatible profile, and validated
+named settings with omitted/null/value distinctions. Unknown retained target
+fields survive updates. Credentials are resolved only by the runtime host and
+never appear in these views or patches; profile selection cannot switch paid
+account, endpoint or credential binding.
+
+Each accepted fresh update advances configuration revision once, including a
+repeated identical intent. Retrying the exact original command replays its
+original result; `command.receipt` returns the committed session ID and
+configuration revision. A fresh command with stale generation/revision returns
+`conflict`. Profile patches require `provider.select` on fresh admission, replay
+and original receipt lookup; ordinary model/settings reads do not require broad
+diagnostics permission.
+
+The returned view separates selected intent from a root capture. `preparing`
+means resolution/preparation is in progress; `effective` identifies a currently
+dispatched immutable root request; `retained` is historical capture evidence.
+`pending` flags selected intent that differs from an existing retained capture;
+a stopped session with no capture has no pending flag. An admitted request,
+nested execution or job keeps its original context. Changes take effect at the
+next root request preparation boundary, including after an active native tool;
+they do not rewrite an already dispatched request. Failed/cancelled preparation
+clears preparing ownership and does not invent a dispatch. Restored sessions
+retain selection but have no process-local currently effective capture.
 
 Restart other list methods on `invalid_request` rather than editing a cursor. History windows support bounded before/after/tail/cursor selectors and
 canonical/effective views. Partial windows advertise structural incompleteness;

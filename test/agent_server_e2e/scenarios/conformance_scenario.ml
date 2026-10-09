@@ -2109,6 +2109,176 @@ let test_session_metadata env environment =
                    , (actual : metadata_observation)]))))
 ;;
 
+type configuration_observation =
+  { revision_delta : int64
+  ; repeated_intent_revision_delta : int64
+  ; model : string
+  ; retry_replays_original : bool
+  ; receipt_matches : bool
+  ; read_matches : bool
+  ; stopped_without_activation : bool
+  ; stale_generation_error : Agent_protocol.Error.code
+  ; stale_revision_error : Agent_protocol.Error.code
+  ; read_only_error : Agent_protocol.Error.code
+  }
+[@@deriving equal, sexp]
+
+let configuration_observation connection ~key_prefix =
+  let module C = Agent_protocol.Session_configuration in
+  ignore (initialize connection : Agent_protocol.Initialize.Response.t);
+  let created, _duplicate = create_session connection ~key:(key_prefix ^ ":create") in
+  let session_id = created.session.id in
+  let attachment = (Option.value_exn created.attachment).attachment in
+  let before = history_snapshot connection session_id in
+  let get () =
+    match request connection (Session_configuration_get { session_id }) with
+    | Session_configuration_get view -> view
+    | _ -> fail "configuration_get returned the wrong result variant"
+  in
+  let initial = get () in
+  let patch =
+    C.Patch.create ~model:"conformance-config-model" ~settings:[] () |> protocol_ok
+  in
+  let update_request =
+    C.Update_request.
+      { session_id
+      ; attachment_id = attachment.id
+      ; expected_generation = created.session.generation
+      ; expected_revision = initial.revision
+      ; patch
+      ; idempotency_key = idempotency_key (key_prefix ^ ":configuration")
+      }
+  in
+  let update request_ =
+    match request connection (Session_configuration_update request_) with
+    | Session_configuration_update view -> view
+    | _ -> fail "configuration_update returned the wrong result variant"
+  in
+  let updated = update update_request in
+  let retry = update update_request in
+  let receipt_matches =
+    match command_receipt connection (Session_configuration_update update_request) with
+    | Committed (Configuration_updated { session_id = actual_id; revision }) ->
+      Agent_protocol.Id.Session.equal actual_id session_id
+      && Int64.equal revision updated.revision
+    | _ -> false
+  in
+  let stale_revision_error =
+    request_error
+      connection
+      (Session_configuration_update
+         { update_request with
+           idempotency_key = idempotency_key (key_prefix ^ ":configuration-stale")
+         })
+  in
+  (* A fresh accepted command records repeated intent once, even if its selected
+     target is unchanged; an original retry is reconciliation, not new intent. *)
+  let repeated =
+    update
+      { update_request with
+        expected_revision = updated.revision
+      ; idempotency_key = idempotency_key (key_prefix ^ ":configuration-repeated")
+      }
+  in
+  let stale_generation_error =
+    request_error
+      connection
+      (Session_configuration_update
+         { update_request with
+           expected_generation = created.session.generation + 1
+         ; expected_revision = repeated.revision
+         ; idempotency_key = idempotency_key (key_prefix ^ ":configuration-generation")
+         })
+  in
+  let reader = attach_replay connection session_id ~key:(key_prefix ^ ":reader") in
+  let read_only_error =
+    request_error
+      connection
+      (Session_configuration_update
+         { update_request with
+           attachment_id = reader.attachment.id
+         ; expected_revision = repeated.revision
+         ; idempotency_key = idempotency_key (key_prefix ^ ":configuration-read-only")
+         })
+  in
+  let current = get () in
+  let after = history_snapshot connection session_id in
+  { revision_delta = Int64.(updated.revision - initial.revision)
+  ; repeated_intent_revision_delta = Int64.(repeated.revision - updated.revision)
+  ; model = Inference.Observation.Configuration.model (Option.value_exn current.selected)
+  ; retry_replays_original = Int64.equal retry.revision updated.revision
+  ; receipt_matches
+  ; read_matches = Jsonaf.exactly_equal (C.to_json repeated) (C.to_json current)
+  ; stopped_without_activation =
+      Agent_protocol.Session.equal_desired_state after.session.desired_state Stopped
+      && (match after.session.observed_state with
+          | Stopped -> true
+          | Queued_for_slot
+          | Starting
+          | Recovering
+          | Idle
+          | Running_turn _
+          | Compacting _
+          | Waiting_for_permission _
+          | Stopping
+          | Failed _ -> false)
+      && Option.is_none after.session.active_operation
+      && Option.is_none current.capture
+      && (not current.pending)
+      && Jsonaf.exactly_equal
+           (Agent_protocol.Public.History.Window.to_json before.canonical_history)
+           (Agent_protocol.Public.History.Window.to_json after.canonical_history)
+  ; stale_generation_error = stale_generation_error.code
+  ; stale_revision_error = stale_revision_error.code
+  ; read_only_error = read_only_error.code
+  }
+;;
+
+let test_session_configuration env environment =
+  let fixture = fixture env environment "conformance-configuration" in
+  Eio.Switch.run (fun sw ->
+    with_daemon ~sw env fixture (fun _daemon _health ->
+      with_transport_matrix
+        ~sw
+        env
+        environment
+        fixture
+        (fun unix http stdio_unix stdio_http ->
+           let baseline = configuration_observation unix ~key_prefix:"unix" in
+           if
+             not
+               (Int64.equal baseline.revision_delta 1L
+                && Int64.equal baseline.repeated_intent_revision_delta 1L
+                && String.equal baseline.model "conformance-config-model"
+                && baseline.retry_replays_original
+                && baseline.receipt_matches
+                && baseline.read_matches
+                && baseline.stopped_without_activation
+                && Agent_protocol.Error.equal_code
+                     baseline.stale_generation_error
+                     Conflict
+                && Agent_protocol.Error.equal_code baseline.stale_revision_error Conflict
+                && Agent_protocol.Error.equal_code
+                     baseline.read_only_error
+                     Permission_denied)
+           then
+             raise_s
+               [%sexp
+                 "configuration conformance invariants failed"
+               , (baseline : configuration_observation)];
+           List.iter
+             [ http, "http"; stdio_unix, "stdio-unix"; stdio_http, "stdio-http" ]
+             ~f:(fun (client, key_prefix) ->
+               let actual = configuration_observation client ~key_prefix in
+               if not (equal_configuration_observation baseline actual)
+               then
+                 raise_s
+                   [%sexp
+                     "cross-transport configuration semantics differ"
+                   , (baseline : configuration_observation)
+                   , (actual : configuration_observation)]))))
+;;
+
 let test_permissions_grants env environment =
   let fixture = fixture env environment "conformance-security" in
   Eio.Switch.run (fun sw ->
@@ -2364,6 +2534,7 @@ let cases =
   ; "conformance.read-methods", test_read_methods
   ; "conformance.session-lifecycle", test_session_lifecycle
   ; "conformance.session-metadata", test_session_metadata
+  ; "conformance.session-configuration", test_session_configuration
   ; "conformance.inference-reads", test_inference_reads
   ; "conformance.permissions-grants", test_permissions_grants
   ; "conformance.jobs-schedules", test_jobs_schedules
@@ -2398,6 +2569,8 @@ let method_coverage =
   ; "session.list", "conformance.session-lifecycle"
   ; "session.get", "conformance.session-lifecycle"
   ; "session.update_metadata", "conformance.session-metadata"
+  ; "session.configuration_get", "conformance.session-configuration"
+  ; "session.configuration_update", "conformance.session-configuration"
   ; "session.inference_summary", "conformance.inference-reads"
   ; "session.inference_observations", "conformance.inference-reads"
   ; "session.attach", "conformance.session-lifecycle"

@@ -5,6 +5,7 @@ module D = Openai.Responses_driver
 module H = Provider_profiles
 module R = Inference.Request
 module E = Inference_runtime.Preparation_error
+module Compatible_profile = Compatible_profile
 
 module Operation = struct
   type t =
@@ -199,14 +200,26 @@ type entry =
   ; mutable installed : (string * int64) option
   }
 
+type choice =
+  { descriptor : Compatible_profile.t
+  ; mutable derived_mapping : Mapping.t option
+  ; mutable installed : (string * int64) option
+  }
+
+type projection_state =
+  | Unchecked
+  | Current
+  | Publication_failed
+
 type shared =
   { registry : C.t
   ; entries : entry String.Table.t
+  ; choices : choice String.Table.t
   ; authorize : principal:string -> profile:string -> operation:Operation.t -> bool
   ; oauth : OAuth.t option
   ; clock : Eio.Time.Mono.ty Eio.Time.Mono.t
   ; maximum_wait : Time_ns.Span.t
-  ; mutable synchronized : bool
+  ; mutable projection_state : projection_state
   }
 
 type t =
@@ -238,8 +251,11 @@ let auth_error = function
   | Revision_quarantined -> Missing
 ;;
 
-let current shared entry =
-  if not shared.synchronized
+let current shared (entry : entry) =
+  if
+    match shared.projection_state with
+    | Current -> false
+    | Unchecked | Publication_failed -> true
   then None
   else
     Option.filter entry.snapshot ~f:(fun snapshot ->
@@ -249,7 +265,7 @@ let current shared entry =
         (Some entry.mapping.identity))
 ;;
 
-let profile_availability shared entry =
+let profile_availability shared (entry : entry) =
   match current shared entry with
   | None -> H.Status.Missing
   | Some snapshot ->
@@ -268,10 +284,73 @@ let profile_availability shared entry =
         | Oauth _, None -> Missing))
 ;;
 
+let owner_profile shared profile =
+  match Hashtbl.find shared.choices profile with
+  | None -> profile
+  | Some choice -> Compatible_profile.credential_owner choice.descriptor
+;;
+
+let owner_entry shared profile =
+  Hashtbl.find shared.entries (owner_profile shared profile)
+;;
+
+let authorized shared ~principal ~profile ~operation =
+  shared.authorize ~principal ~profile ~operation
+  && shared.authorize ~principal ~profile:(owner_profile shared profile) ~operation
+;;
+
+(* Only explicitly declared logical views sharing this credential owner join
+   the immutable replay policy. Identity, capabilities and existing model
+   declarations remain owned by the canonical driver profile. *)
+let qualify_mapping mapping ~compatible_profiles =
+  let canonical_profile = Mapping.profile mapping in
+  let profiles =
+    canonical_profile
+    :: List.filter_map compatible_profiles ~f:(fun descriptor ->
+      if String.equal (Compatible_profile.credential_owner descriptor) canonical_profile
+      then Some (Compatible_profile.id descriptor)
+      else None)
+  in
+  if List.length profiles = 1
+  then Ok mapping
+  else
+    Openai.Responses_replay.with_compatible_profiles
+      (D.Profile.replay_policy mapping.Mapping.profile)
+      ~canonical_profile
+      ~profiles
+    |> Result.map_error ~f:(fun _ -> Error.Invalid_mapping)
+    |> Result.bind ~f:(fun replay ->
+      Mapping.create
+        (D.Profile.with_replay_policy mapping.profile replay)
+        ~revision:mapping.revision
+        ~binding:mapping.binding
+        ~identity:mapping.identity)
+;;
+
+let derive_choice descriptor mapping =
+  let open Result.Let_syntax in
+  let%bind profile =
+    Compatible_profile.derive descriptor ~canonical:mapping.Mapping.profile
+    |> Result.map_error ~f:(fun _ -> Error.Invalid_mapping)
+  in
+  let revision =
+    `Array
+      [ `String "compatible-profile-v1"
+      ; `String mapping.revision
+      ; `String (Compatible_profile.revision descriptor)
+      ]
+    |> Jsonaf.to_string
+    |> Digestif.SHA256.digest_string
+    |> Digestif.SHA256.to_hex
+    |> fun digest -> "choice-v1-" ^ digest
+  in
+  Mapping.create profile ~revision ~binding:mapping.binding ~identity:mapping.identity
+;;
+
 let credentials shared ~sw identity =
   let open Result.Let_syntax in
   let%bind entry =
-    match Hashtbl.find shared.entries (H.Credential_identity.profile identity) with
+    match owner_entry shared (H.Credential_identity.profile identity) with
     | None -> Error D.Auth.Missing
     | Some entry -> Ok entry
   in
@@ -324,7 +403,12 @@ let credentials shared ~sw identity =
          port.lease
            admission
            ~identity:entry.mapping.identity
-           ~profile:entry.mapping.profile)
+           ~profile:
+             (match
+                Hashtbl.find shared.choices (H.Credential_identity.profile identity)
+              with
+              | Some { derived_mapping = Some mapping; _ } -> mapping.profile
+              | Some { derived_mapping = None; _ } | None -> entry.mapping.profile))
   in
   let%bind lease =
     D.Auth.with_identity
@@ -332,7 +416,9 @@ let credentials shared ~sw identity =
       ~owner:(C.Admission.owner admission)
       ~generation:(C.Admission.epoch admission)
       ~check_current:(fun () ->
-        C.Admission.check_current admission |> Result.map_error ~f:auth_error)
+        match shared.projection_state with
+        | Unchecked | Publication_failed -> Error D.Auth.Missing
+        | Current -> C.Admission.check_current admission |> Result.map_error ~f:auth_error)
   in
   match C.Admission.credential_revision admission with
   | None ->
@@ -342,16 +428,28 @@ let credentials shared ~sw identity =
   | Some revision -> D.Auth.with_credential_revision lease revision
 ;;
 
+let admit_projection shared =
+  match shared.projection_state with
+  | Publication_failed -> Error Error.Stale_authorization
+  | Unchecked | Current -> Ok ()
+;;
+
 let synchronize t =
   let open Result.Let_syntax in
+  let%bind () = admit_projection t.shared in
+  let observed = C.synchronize t.shared.registry in
+  (* Lifecycle synchronization acquires a lock and reads durable metadata, so
+     another fiber can fail publication while this call is suspended. Preserve
+     that shared failure even when lifecycle synchronization returns an error. *)
+  let%bind () = admit_projection t.shared in
   let%bind snapshot =
-    match C.synchronize t.shared.registry with
+    match observed with
     | Ok snapshot -> Ok snapshot
     | Error error ->
-      t.shared.synchronized <- false;
+      t.shared.projection_state <- Unchecked;
       Error (lifecycle_error error)
   in
-  t.shared.synchronized <- false;
+  t.shared.projection_state <- Unchecked;
   let snapshots = C.Host_snapshot.bindings snapshot in
   let result =
     Hashtbl.fold t.shared.entries ~init:(Ok ()) ~f:(fun ~key:_ ~data:entry result ->
@@ -394,28 +492,84 @@ let synchronize t =
            |> Result.map_error ~f:(fun error -> Error.Profile error)
          | Ready | Missing | Renewal_required | Renewal_uncertain -> Ok ()))
   in
-  let%map () = result in
-  t.shared.synchronized <- true
+  let%bind () = result in
+  let%map () =
+    Hashtbl.fold
+      t.shared.choices
+      ~init:(Ok ())
+      ~f:(fun ~key:profile ~data:choice result ->
+        let%bind () = result in
+        match owner_entry t.shared profile with
+        | None -> Ok ()
+        | Some owner ->
+          let%bind mapping = derive_choice choice.descriptor owner.mapping in
+          choice.derived_mapping <- Some mapping;
+          (match owner.snapshot with
+           | None ->
+             (match choice.installed with
+              | None -> Ok ()
+              | Some _ ->
+                H.disable t.profiles ~profile
+                |> Result.map_error ~f:(fun e -> Error.Profile e))
+           | Some snapshot ->
+             let owner_id = C.Host_snapshot.owner snapshot in
+             let epoch = C.Host_snapshot.epoch snapshot in
+             let%bind () =
+               (match choice.installed with
+                | None ->
+                  H.add t.profiles mapping.configuration ~owner:owner_id ~generation:epoch
+                | Some (old_owner, old_epoch) ->
+                  if String.equal owner_id old_owner && Int64.equal epoch old_epoch
+                  then Ok ()
+                  else H.reauthorize t.profiles ~profile ~owner:owner_id ~generation:epoch)
+               |> Result.map_error ~f:(fun e -> Error.Profile e)
+             in
+             choice.installed <- Some (owner_id, epoch);
+             (match C.Host_snapshot.availability snapshot with
+              | Disabled ->
+                H.disable t.profiles ~profile
+                |> Result.map_error ~f:(fun e -> Error.Profile e)
+              | Ready | Missing | Renewal_required | Renewal_uncertain -> Ok ())))
+  in
+  t.shared.projection_state <- Current
 ;;
 
 let mappings t = Hashtbl.data t.shared.entries |> List.map ~f:(fun entry -> entry.mapping)
 
 let publish_mapping t mapping =
   let open Result.Let_syntax in
+  let%bind () = admit_projection t.shared in
+  let%bind mapping =
+    qualify_mapping
+      mapping
+      ~compatible_profiles:
+        (Hashtbl.data t.shared.choices |> List.map ~f:(fun choice -> choice.descriptor))
+  in
   let profile = Mapping.profile mapping in
   let existing = Hashtbl.find t.shared.entries profile in
+  let%bind derived =
+    Hashtbl.data t.shared.choices
+    |> List.filter ~f:(fun choice ->
+      String.equal (Compatible_profile.credential_owner choice.descriptor) profile)
+    |> List.map ~f:(fun choice ->
+      Result.map (derive_choice choice.descriptor mapping) ~f:(fun mapping ->
+        choice, mapping))
+    |> Result.all
+  in
   let%bind () =
     if
-      (Option.is_none existing && Hashtbl.length t.shared.entries >= 128)
+      Hashtbl.mem t.shared.choices profile
+      || (Option.is_none existing
+          && Hashtbl.length t.shared.entries + Hashtbl.length t.shared.choices >= 128)
       || Hashtbl.exists t.shared.entries ~f:(fun entry ->
         (not (String.equal (Mapping.profile entry.mapping) profile))
         && M.Id.equal entry.mapping.binding mapping.Mapping.binding)
     then Error Error.Invalid_mapping
     else Ok ()
   in
-  let%bind snapshot =
-    C.synchronize t.shared.registry |> Result.map_error ~f:lifecycle_error
-  in
+  let observed = C.synchronize t.shared.registry in
+  let%bind () = admit_projection t.shared in
+  let%bind snapshot = Result.map_error observed ~f:lifecycle_error in
   let%bind selected =
     List.find (C.Host_snapshot.bindings snapshot) ~f:(fun item ->
       M.Id.equal (C.Host_snapshot.id item) mapping.binding)
@@ -444,23 +598,51 @@ let publish_mapping t mapping =
   else (
     let owner = C.Host_snapshot.owner selected in
     let epoch = C.Host_snapshot.epoch selected in
+    let configurations =
+      mapping.configuration
+      :: List.map derived ~f:(fun (_, mapping) -> mapping.Mapping.configuration)
+    in
     let%bind () =
-      H.replace t.profiles mapping.configuration ~owner ~generation:epoch
+      H.validate_replacements t.profiles configurations ~owner ~generation:epoch
+      |> Result.map_error ~f:(fun e -> Error.Profile e)
+    in
+    (* Every derived configuration is validated before this point. Registry
+       batch admission owns ID/capacity/owner/generation checks. Any unexpected
+       publication failure leaves all shared authority callbacks unavailable
+       until the bridge is reconstructed from trusted declarations. *)
+    t.shared.projection_state <- Publication_failed;
+    let%bind () =
+      H.replace_many t.profiles configurations ~owner ~generation:epoch
       |> Result.map_error ~f:(fun e -> Error.Profile e)
     in
     Hashtbl.set
       t.shared.entries
       ~key:profile
       ~data:{ mapping; snapshot = Some selected; installed = Some (owner, epoch) };
-    t.shared.synchronized <- true;
-    match C.Host_snapshot.availability selected with
-    | Disabled ->
-      H.disable t.profiles ~profile |> Result.map_error ~f:(fun e -> Error.Profile e)
-    | Ready | Missing | Renewal_required | Renewal_uncertain -> Ok ())
+    List.iter derived ~f:(fun (choice, mapping) ->
+      choice.derived_mapping <- Some mapping;
+      choice.installed <- Some (owner, epoch));
+    let%bind () =
+      match C.Host_snapshot.availability selected with
+      | Ready | Missing | Renewal_required | Renewal_uncertain -> Ok ()
+      | Disabled ->
+        List.fold_result
+          (profile
+           :: List.map derived ~f:(fun (choice, _) ->
+             Compatible_profile.id choice.descriptor))
+          ~init:()
+          ~f:(fun () profile ->
+            H.disable t.profiles ~profile
+            |> Result.map_error ~f:(fun e -> Error.Profile e))
+    in
+    t.shared.projection_state <- Current;
+    Ok ())
 ;;
 
 let create
       ?oauth
+      ?(compatible_profiles = [])
+      ?(approved_profiles = [])
       driver
       ~registry
       ~mappings
@@ -476,9 +658,24 @@ let create
     if Time_ns.Span.(maximum_wait < zero) then Error Error.Invalid_mapping else Ok ()
   in
   let%bind () =
-    if List.length mappings > 128 then Error Error.Invalid_mapping else Ok ()
+    if List.length mappings + List.length compatible_profiles > 128
+    then Error Error.Invalid_mapping
+    else Ok ()
   in
-  let entries = String.Table.create () in
+  let approved_profiles =
+    String.Set.of_list (approved_profiles @ List.map mappings ~f:Mapping.profile)
+  in
+  let%bind () =
+    Compatible_profile.validate_set
+      compatible_profiles
+      ~credential_owners:(Set.to_list approved_profiles)
+    |> Result.map_error ~f:(fun _ -> Error.Invalid_mapping)
+  in
+  let%bind mappings =
+    List.map mappings ~f:(fun mapping -> qualify_mapping mapping ~compatible_profiles)
+    |> Result.all
+  in
+  let entries : entry String.Table.t = String.Table.create () in
   let%bind () =
     List.fold_result mappings ~init:() ~f:(fun () mapping ->
       if
@@ -493,18 +690,39 @@ let create
           ~data:{ mapping; snapshot = None; installed = None };
         Ok ()))
   in
+  let choices : choice String.Table.t = String.Table.create () in
+  List.iter compatible_profiles ~f:(fun descriptor ->
+    Hashtbl.add_exn
+      choices
+      ~key:(Compatible_profile.id descriptor)
+      ~data:{ descriptor; derived_mapping = None; installed = None });
+  let%bind () =
+    List.fold_result compatible_profiles ~init:() ~f:(fun () descriptor ->
+      match Hashtbl.find entries (Compatible_profile.credential_owner descriptor) with
+      | None -> Ok ()
+      | Some entry ->
+        derive_choice descriptor entry.mapping |> Result.map ~f:(fun _ -> ()))
+  in
   let shared =
-    { registry; entries; authorize; oauth; clock; maximum_wait; synchronized = false }
+    { registry
+    ; entries
+    ; choices
+    ; authorize
+    ; oauth
+    ; clock
+    ; maximum_wait
+    ; projection_state = Unchecked
+    }
   in
   let profiles =
     H.create
       ~transport_policy
       driver
       ~authorize:(fun ~principal ~profile ~account:_ ~binding:_ ->
-        authorize ~principal ~profile ~operation:Operation.Inference)
+        authorized shared ~principal ~profile ~operation:Operation.Inference)
       ~credentials:(credentials shared)
       ~status:(fun identity ->
-        match Hashtbl.find entries (H.Credential_identity.profile identity) with
+        match owner_entry shared (H.Credential_identity.profile identity) with
         | None -> H.Status.Missing
         | Some entry -> profile_availability shared entry)
       ~limits
@@ -521,12 +739,32 @@ let with_response_limit t ~max_body_bytes =
 ;;
 
 let entry t ~principal ~profile ~operation =
-  if not (t.shared.authorize ~principal ~profile ~operation)
+  let open Result.Let_syntax in
+  let%bind () = admit_projection t.shared in
+  if not (authorized t.shared ~principal ~profile ~operation)
   then Error Error.Denied
   else (
-    match Hashtbl.find t.shared.entries profile with
+    match
+      match operation with
+      | Inference | Status -> owner_entry t.shared profile
+      | Configure | Remove -> Hashtbl.find t.shared.entries profile
+    with
     | None -> Error Error.Missing_profile
     | Some entry -> Ok entry)
+;;
+
+let check_choice_target t target =
+  match Hashtbl.find t.shared.choices (R.Target.profile target) with
+  | None -> Ok ()
+  | Some { derived_mapping = None; _ } -> Error Error.Missing_profile
+  | Some { derived_mapping = Some mapping; _ } ->
+    if
+      Option.equal
+        String.equal
+        (R.Target.profile_revision target)
+        (Some mapping.Mapping.revision)
+    then Ok ()
+    else Error (Error.Profile H.Error.Incompatible_identity)
 ;;
 
 let resolve t ~principal target =
@@ -535,6 +773,7 @@ let resolve t ~principal target =
     entry t ~principal ~profile:(R.Target.profile target) ~operation:Inference
   in
   let%bind () = synchronize t in
+  let%bind () = check_choice_target t target in
   H.resolve t.profiles ~principal target
   |> Result.map_error ~f:(fun error -> Error.Profile error)
 ;;
@@ -548,6 +787,7 @@ let capture t ~principal ~default_profile ~current ~model ~settings =
     match current with
     | None -> Ok ()
     | Some target ->
+      let%bind () = check_choice_target t target in
       H.resolve t.profiles ~principal target
       |> Result.map ~f:(fun _ -> ())
       |> Result.map_error ~f:(fun error -> Error.Profile error)
@@ -629,7 +869,7 @@ let finish_publication t ~binding ~operation result =
   | Ok (), Ok () -> Ok ()
 ;;
 
-let commit_authorized t ~principal ~profile ~captured ~authorize_commit () =
+let commit_authorized t ~principal ~profile ~(captured : entry) ~authorize_commit () =
   authorize_commit ()
   &&
   match api_entry t ~principal ~profile with

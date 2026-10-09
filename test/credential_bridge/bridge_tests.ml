@@ -305,7 +305,7 @@ let%expect_test
 ;;
 
 let%expect_test
-    "expired OAuth after restart refreshes during dispatch under a stable epoch"
+    "verified OAuth choice after restart refreshes once under the canonical epoch"
   =
   with_fixture (fun env sw anchor ->
     let identity =
@@ -412,6 +412,41 @@ let%expect_test
       |> ok
     in
     let registry = S.Opened.registry first in
+    let choices =
+      B.Compatible_profile.of_string
+        {|[{"id":"oauth-choice","credential_owner":"oauth","revision":"choice-v1","defaults":{}}]|}
+      |> ok
+    in
+    let compose registry mappings =
+      B.create
+        ~oauth
+        ~compatible_profiles:choices
+        ~approved_profiles:[ "oauth" ]
+        (D.create
+           ~net:(net :> [ `Generic ] Eio.Net.ty Eio.Net.t)
+           ~clock:(Eio.Stdenv.clock env)
+           ()
+         |> ok)
+        ~registry
+        ~mappings
+        ~authorize
+        ~clock:(Eio.Stdenv.mono_clock env)
+        ~maximum_wait:(Time_ns.Span.of_sec 0.05)
+        ~transport_policy:Http_sse
+        ~limits:RT.Limits.default
+      |> ok
+    in
+    let pending = compose registry [] in
+    assert (
+      Result.is_error
+        (B.capture
+           pending
+           ~principal:"operator"
+           ~default_profile:"oauth-choice"
+           ~current:None
+           ~model:"model"
+           ~settings:[]));
+    assert (Result.is_error (B.publish_mapping pending mapping));
     let candidate =
       C.begin_candidate
         registry
@@ -428,13 +463,29 @@ let%expect_test
          ~access:"synthetic-old-access"
          ~refresh:"synthetic-old-refresh")
     |> ok;
+    B.publish_mapping pending mapping |> ok;
+    let verified_choice =
+      B.capture
+        pending
+        ~principal:"operator"
+        ~default_profile:"oauth-choice"
+        ~current:None
+        ~model:"model"
+        ~settings:[]
+      |> ok
+    in
+    assert (
+      Option.equal
+        String.equal
+        (R.Target.account verified_choice)
+        (Some "fixture-account"));
     let before =
       C.synchronize registry |> ok |> C.Host_snapshot.bindings |> List.hd_exn
     in
     old_epoch := Some (C.Host_snapshot.epoch before);
     let old_revision = C.Host_snapshot.credential_revision before in
     C.close registry;
-    let bridge =
+    let reopened =
       open_host
         ~net:(net :> [ `Generic ] Eio.Net.ty Eio.Net.t)
         ~oauth
@@ -446,12 +497,22 @@ let%expect_test
         ~environment:None
         ~authorize
       |> ok
-      |> S.Opened.bridge
     in
-    (match availability bridge "oauth" with
+    let bridge = compose (S.Opened.registry reopened) [ mapping ] in
+    (match availability bridge "oauth-choice" with
      | Unavailable Renewal_required -> ()
      | _ -> failwith "expiry status hidden");
     let target =
+      B.capture
+        bridge
+        ~principal:"operator"
+        ~default_profile:"oauth-choice"
+        ~current:None
+        ~model:"model"
+        ~settings:[]
+      |> ok
+    in
+    let canonical_target =
       B.capture
         bridge
         ~principal:"operator"
@@ -461,6 +522,9 @@ let%expect_test
         ~settings:[]
       |> ok
     in
+    (match R.Target.auth_binding target, R.Target.auth_binding canonical_target with
+     | Value choice, Value canonical -> assert (R.Auth_binding.equal choice canonical)
+     | _ -> failwith "choice did not retain canonical OAuth binding");
     let context = B.resolve bridge ~principal:"operator" target |> ok in
     let request = R.create ~target ~history:[] ~tools:[] ~assets:[] ~limits |> ok in
     let prepared = RT.Context.prepare context ~preparation_id:"expired" request |> ok in
@@ -500,4 +564,432 @@ let%expect_test
     {|
     +oauth-refresh-dispatch: getaddrinfo ~service:9 127.0.0.1
     one refresh; stable authorization epoch; new credential revision; no login port |}]
+;;
+
+let%expect_test "compatible choices share binding without inheriting authorization" =
+  with_fixture (fun env sw anchor ->
+    let canonical, identity = mapping "one" in
+    let environment =
+      B.Environment.Entry.create
+        ~binding:(id "one")
+        ~identity
+        ~name:"ONE"
+        ~configuration_revision:None
+        ~resolve:(fun ~sw:_ ->
+          Ok
+            (C.Environment.resolved
+               ~access:
+                 (Provider_secret_store.Secret.of_bytes (Bytes.of_string "synthetic-key")
+                  |> ok)
+               ~configuration_revision:None
+               ~check_current:(fun () -> Ok ())))
+        ~status:(fun () -> Available)
+      |> ok
+      |> List.return
+      |> B.Environment.create
+      |> ok
+    in
+    let opened =
+      open_host
+        env
+        sw
+        anchor
+        (Initialize (id "incarnation"))
+        ~mappings:[ canonical ]
+        ~environment:(Some environment)
+        ~authorize
+      |> ok
+    in
+    let choices =
+      B.Compatible_profile.of_string
+        {|[{"id":"alternative","credential_owner":"one","revision":"choice-v1","defaults":{}}]|}
+      |> ok
+    in
+    let allowed = ref (String.Set.of_list [ "one"; "alternative" ]) in
+    let bridge =
+      B.create
+        ~compatible_profiles:choices
+        ~approved_profiles:[ "one"; "unmapped-oauth" ]
+        (D.create ~net:(Eio.Stdenv.net env) ~clock:(Eio.Stdenv.clock env) () |> ok)
+        ~registry:(S.Opened.registry opened)
+        ~mappings:[ canonical ]
+        ~authorize:(fun ~principal ~profile ~operation:_ ->
+          String.equal principal "operator" && Set.mem !allowed profile)
+        ~clock:(Eio.Stdenv.mono_clock env)
+        ~maximum_wait:(Time_ns.Span.of_sec 0.05)
+        ~transport_policy:Http_sse
+        ~limits:RT.Limits.default
+      |> ok
+    in
+    configure bridge "one" "configure-owner";
+    let capture profile =
+      B.capture
+        bridge
+        ~principal:"operator"
+        ~default_profile:profile
+        ~current:None
+        ~model:"model"
+        ~settings:[]
+    in
+    let one = capture "one" |> ok
+    and alternative = capture "alternative" |> ok in
+    print_s
+      [%sexp
+        { distinct_profile =
+            (not (String.equal (R.Target.profile one) (R.Target.profile alternative))
+             : bool)
+        ; same_endpoint =
+            (String.equal (R.Target.endpoint one) (R.Target.endpoint alternative) : bool)
+        ; same_account =
+            (Option.equal
+               String.equal
+               (R.Target.account one)
+               (R.Target.account alternative)
+             : bool)
+        ; same_binding =
+            ((match R.Target.auth_binding one, R.Target.auth_binding alternative with
+              | Value one, Value alternative -> R.Auth_binding.equal one alternative
+              | Absent, _ | Null, _ | Value _, (Absent | Null) -> false)
+             : bool)
+        }];
+    allowed := String.Set.singleton "one";
+    assert (Result.is_error (capture "alternative"));
+    allowed := String.Set.singleton "alternative";
+    assert (Result.is_error (capture "alternative"));
+    allowed := String.Set.of_list [ "one"; "alternative" ];
+    let read = ref false in
+    assert (
+      Result.is_error
+        (B.enroll
+           bridge
+           ~principal:"operator"
+           ~profile:"alternative"
+           ~operation:(id "choice-enroll")
+           ~sw
+           ~read:(fun ~sw:_ ->
+             read := true;
+             Error B.Error.Invalid_credential)));
+    assert (not !read);
+    assert (
+      Result.is_error (B.remove bridge ~principal:"operator" ~profile:"alternative" ~sw));
+    let held_context = B.resolve bridge ~principal:"operator" alternative |> ok in
+    let held_request =
+      R.create ~target:alternative ~history:[] ~tools:[] ~assets:[] ~limits |> ok
+    in
+    let held =
+      RT.Context.prepare held_context ~preparation_id:"before-owner-epoch" held_request
+      |> ok
+    in
+    let view = B.with_response_limit bridge ~max_body_bytes:1024 |> ok in
+    ignore (B.remove bridge ~principal:"operator" ~profile:"one" ~sw |> ok : C.removal);
+    assert (
+      Result.is_error
+        (B.capture
+           view
+           ~principal:"operator"
+           ~default_profile:"alternative"
+           ~current:None
+           ~model:"model"
+           ~settings:[]));
+    assert (B.Status.equal_availability (availability bridge "alternative") Disabled);
+    configure bridge "one" "owner-reenrolled";
+    ignore
+      (B.capture
+         view
+         ~principal:"operator"
+         ~default_profile:"alternative"
+         ~current:None
+         ~model:"model"
+         ~settings:[]
+       |> ok
+       : R.Target.t);
+    let scope =
+      Transcript.Scope.create
+        ~source:(Transcript.Source_id.of_string "choice-epoch" |> ok)
+        ~attempt:(Transcript.Attempt_id.of_string "held" |> ok)
+        ~relation:Root
+      |> ok
+    in
+    let attempt =
+      RT.Prepared.start
+        held
+        ~scope
+        ~accounting_id:(Inference.Observation.Observation_id.of_string "held" |> ok)
+      |> ok
+    in
+    let terminal =
+      RT.Attempt.run attempt ~sw ~on_event:ignore ~on_observation:ignore
+      |> ok
+      |> RT.Receipt.terminal
+    in
+    assert (
+      Inference.Event.Terminal.equal_delivery
+        (Inference.Event.Terminal.delivery terminal)
+        Definitely_not_submitted);
+    print_s [%sexp { held_choice_epoch_rejected = true; shared_view_reenrollment = true }];
+    print_s
+      [%sexp
+        { dual_authorization = true
+        ; choice_cannot_enroll = true
+        ; owner_disable_shared = true
+        }]);
+  [%expect
+    {|
+    ((distinct_profile true) (same_endpoint true) (same_account true)
+     (same_binding true))
+    ((held_choice_epoch_rejected true) (shared_view_reenrollment true))
+    ((dual_authorization true) (choice_cannot_enroll true)
+     (owner_disable_shared true))
+  |}]
+;;
+
+let%expect_test
+    "compatible authored descriptors reject identity policy and malformed defaults"
+  =
+  let bad =
+    [ {|[{"id":"choice","credential_owner":"one","revision":"r","defaults":{},"account":"guess"}]|}
+    ; {|[{"id":"one","credential_owner":"one","revision":"r","defaults":{}}]|}
+    ; {|[{"id":"choice","credential_owner":"one","revision":"r","defaults":{"temperature":"wrong"}}]|}
+    ; {|[{"id":"choice","credential_owner":"one","revision":"r","defaults":{"unknown":true}}]|}
+    ; {|[{"id":"choice","credential_owner":"one","revision":"r","defaults":{"temperature":0.5,"temperature":0.6}}]|}
+    ; {|[{"id":"choice","credential_owner":"one","revision":"r","defaults":{}},{"id":"choice","credential_owner":"one","revision":"r","defaults":{}}]|}
+    ]
+  in
+  List.iter bad ~f:(fun json ->
+    assert (Result.is_error (B.Compatible_profile.of_string json)));
+  assert (Result.is_error (B.Compatible_profile.of_string (String.make 1_048_577 ' ')));
+  let declaration id owner =
+    B.Compatible_profile.create ~id ~credential_owner:owner ~revision:"r" ~defaults:[]
+    |> ok
+  in
+  assert (
+    Result.is_error
+      (B.Compatible_profile.validate_set
+         [ declaration "choice" "unknown" ]
+         ~credential_owners:[ "one" ]));
+  assert (
+    Result.is_error
+      (B.Compatible_profile.validate_set
+         [ declaration "choice" "one"; declaration "other" "choice" ]
+         ~credential_owners:[ "one" ]));
+  let many =
+    List.init 128 ~f:(fun index -> declaration (sprintf "choice-%d" index) "one")
+  in
+  assert (
+    Result.is_error (B.Compatible_profile.validate_set many ~credential_owners:[ "one" ]));
+  print_s [%sexp { malformed_cases = (List.length bad : int); oversized = true }];
+  [%expect {| ((malformed_cases 6) (oversized true)) |}]
+;;
+
+let%expect_test "derived choice retains qualified policies and cannot guess account" =
+  let capabilities =
+    D.Capability.create
+      ~baseline:
+        [ Text_input, Supported
+        ; Websocket, Unsupported
+        ; Setting "temperature", Supported
+        ]
+      ~models:[]
+    |> ok
+  in
+  let canonical =
+    D.Profile.create
+      ~id:"canonical"
+      ~account:(Some "verified-account")
+      ~endpoint:"http://127.0.0.1:9/v1/responses"
+      ~capabilities
+      ~defaults:[]
+    |> ok
+    |> fun profile ->
+    D.Profile.with_response_content_type_policy profile Allow_absent_event_stream
+  in
+  let choice =
+    B.Compatible_profile.of_string
+      {|[{"id":"choice","credential_owner":"canonical","revision":"r","defaults":{"temperature":0.5}}]|}
+    |> ok
+    |> List.hd_exn
+  in
+  let derived = B.Compatible_profile.derive choice ~canonical |> ok in
+  assert (
+    Option.equal String.equal (D.Profile.account derived) (D.Profile.account canonical));
+  assert (String.equal (D.Profile.endpoint derived) (D.Profile.endpoint canonical));
+  assert (
+    D.Capability.equal_support
+      (D.Profile.capability derived ~model:"any" ~feature:Websocket)
+      Unsupported);
+  assert (
+    D.Profile.Response_content_type_policy.equal
+      (D.Profile.response_content_type_policy derived)
+      (D.Profile.response_content_type_policy canonical));
+  let defaults = D.Profile.effective_settings derived [] |> ok in
+  assert (List.length defaults = 1);
+  let unrelated =
+    D.Profile.with_configuration canonical ~id:"unrelated" ~defaults:[] |> ok
+  in
+  assert (Result.is_error (B.Compatible_profile.derive choice ~canonical:unrelated));
+  print_s
+    [%sexp
+      { inherited_identity = true
+      ; no_capability_expansion = true
+      ; inherited_transport_policy = true
+      ; distinct_defaults = true
+      ; wrong_owner_rejected = true
+      }];
+  [%expect
+    {|
+    ((inherited_identity true) (no_capability_expansion true)
+     (inherited_transport_policy true) (distinct_defaults true)
+     (wrong_owner_rejected true))
+  |}]
+;;
+
+let%expect_test "serialized choice revision binds canonical configuration across restart" =
+  with_fixture (fun env sw anchor ->
+    let canonical, identity = mapping "one" in
+    let environment =
+      B.Environment.Entry.create
+        ~binding:(id "one")
+        ~identity
+        ~name:"ONE"
+        ~configuration_revision:None
+        ~resolve:(fun ~sw:_ ->
+          Ok
+            (C.Environment.resolved
+               ~access:
+                 (Provider_secret_store.Secret.of_bytes (Bytes.of_string "synthetic-key")
+                  |> ok)
+               ~configuration_revision:None
+               ~check_current:(fun () -> Ok ())))
+        ~status:(fun () -> Available)
+      |> ok
+      |> List.return
+      |> B.Environment.create
+      |> ok
+    in
+    let choices =
+      B.Compatible_profile.of_string
+        {|[{"id":"choice","credential_owner":"one","revision":"declared-v1","defaults":{}}]|}
+      |> ok
+    in
+    let opened =
+      open_host
+        env
+        sw
+        anchor
+        (Initialize (id "incarnation"))
+        ~mappings:[ canonical ]
+        ~environment:(Some environment)
+        ~authorize
+      |> ok
+    in
+    let compose opened mapping =
+      B.create
+        ~compatible_profiles:choices
+        (D.create ~net:(Eio.Stdenv.net env) ~clock:(Eio.Stdenv.clock env) () |> ok)
+        ~registry:(S.Opened.registry opened)
+        ~mappings:[ mapping ]
+        ~authorize
+        ~clock:(Eio.Stdenv.mono_clock env)
+        ~maximum_wait:(Time_ns.Span.of_sec 0.05)
+        ~transport_policy:Http_sse
+        ~limits:RT.Limits.default
+      |> ok
+    in
+    let bridge = compose opened canonical in
+    configure bridge "one" "configure-owner";
+    let capture bridge name =
+      B.capture
+        bridge
+        ~principal:"operator"
+        ~default_profile:name
+        ~current:None
+        ~model:"model"
+        ~settings:[]
+      |> ok
+    in
+    let canonical_target = capture bridge "one" in
+    let saved =
+      capture bridge "choice"
+      |> R.Target.to_json
+      |> Jsonaf.to_string
+      |> Jsonaf.of_string
+      |> fun json -> R.Target.of_json json ~limits |> ok
+    in
+    let changed_profile =
+      D.Profile.create
+        ~id:"one"
+        ~account:None
+        ~endpoint:"http://127.0.0.1:9/v1/responses"
+        ~capabilities:
+          (D.Capability.create ~baseline:[ Text_input, Supported ] ~models:[] |> ok)
+        ~defaults:[]
+      |> ok
+    in
+    let changed =
+      B.Mapping.create
+        changed_profile
+        ~revision:"canonical-v2"
+        ~binding:(id "one")
+        ~identity
+      |> ok
+    in
+    B.publish_mapping bridge changed |> ok;
+    let require_stale bridge =
+      match B.resolve bridge ~principal:"operator" saved with
+      | Error (Profile Incompatible_identity) -> ()
+      | _ -> failwith "saved old choice accepted new canonical configuration"
+    in
+    require_stale bridge;
+    assert (
+      Result.is_error
+        (B.capture
+           bridge
+           ~principal:"operator"
+           ~default_profile:"one"
+           ~current:(Some saved)
+           ~model:"model"
+           ~settings:[]));
+    ignore (B.resolve bridge ~principal:"operator" canonical_target |> ok : RT.Context.t);
+    let fresh = capture bridge "choice" in
+    assert (
+      not
+        (Option.equal
+           String.equal
+           (R.Target.profile_revision saved)
+           (R.Target.profile_revision fresh)));
+    C.close (S.Opened.registry opened);
+    let reopened =
+      open_host
+        env
+        sw
+        anchor
+        Existing
+        ~mappings:[ changed ]
+        ~environment:(Some environment)
+        ~authorize
+      |> ok
+    in
+    let restarted = compose reopened changed in
+    require_stale restarted;
+    let restored_fresh = capture restarted "choice" in
+    assert (
+      Option.equal
+        String.equal
+        (R.Target.profile_revision fresh)
+        (R.Target.profile_revision restored_fresh));
+    ignore (B.resolve restarted ~principal:"operator" restored_fresh |> ok : RT.Context.t);
+    print_s
+      [%sexp
+        { changed_revision = true
+        ; saved_choice_rejected = true
+        ; recapture_rejected = true
+        ; canonical_provenance_preserved = true
+        ; restart_stable = true
+        }]);
+  [%expect
+    {|
+    ((changed_revision true) (saved_choice_rejected true)
+     (recapture_rejected true) (canonical_provenance_preserved true)
+     (restart_stable true))
+  |}]
 ;;

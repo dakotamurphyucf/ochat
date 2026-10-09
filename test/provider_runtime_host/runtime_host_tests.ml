@@ -145,6 +145,7 @@ let with_fixture f =
               in
               let create () =
                 Provider_runtime_host.create
+                  ~compatible_profiles:[]
                   ~sw
                   ~env
                   ~server_id

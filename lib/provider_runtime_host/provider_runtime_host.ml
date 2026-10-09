@@ -29,6 +29,7 @@ let create
       ~driver
       ~templates
       ~mappings
+      ~compatible_profiles
       ~default_profile
       ~environment
       ~environment_sources
@@ -132,6 +133,10 @@ let create
                 driver
                 ~registry
                 ~mappings
+                ~compatible_profiles
+                ~approved_profiles:
+                  (List.map templates ~f:(fun template ->
+                     DTO.Profile_id.to_string (Admin.Template.profile template)))
                 ~authorize:authorize_bridge
                 ~clock:(Eio.Stdenv.mono_clock env)
                 ~maximum_wait

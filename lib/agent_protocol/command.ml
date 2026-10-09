@@ -21,6 +21,8 @@ type t =
   | Blob_read of Blob.Read_request.t
   | Session_create of Session.Create_request.t
   | Session_list of Session.List_request.t
+  | Session_configuration_get of Session_configuration.Get_request.t
+  | Session_configuration_update of Session_configuration.Update_request.t
   | Session_get of Session.Get_request.t
   | Session_inference_summary of Inference_query.Summary_request.t
   | Session_inference_observations of Inference_query.Request.t
@@ -75,6 +77,8 @@ let method_name = function
   | Blob_read _ -> "blob.read"
   | Session_create _ -> "session.create"
   | Session_list _ -> "session.list"
+  | Session_configuration_get _ -> "session.configuration_get"
+  | Session_configuration_update _ -> "session.configuration_update"
   | Session_get _ -> "session.get"
   | Session_inference_summary _ -> "session.inference_summary"
   | Session_inference_observations _ -> "session.inference_observations"
@@ -131,6 +135,9 @@ let params = function
   | Blob_read request -> Blob.Read_request.to_json request
   | Session_create request -> Session.Create_request.to_json request
   | Session_list request -> Session.List_request.to_json request
+  | Session_configuration_get request -> Session_configuration.Get_request.to_json request
+  | Session_configuration_update request ->
+    Session_configuration.Update_request.to_json request
   | Session_get request -> Session.Get_request.to_json request
   | Session_inference_summary request -> Inference_query.Summary_request.to_json request
   | Session_inference_observations request -> Inference_query.Request.to_json request
@@ -212,6 +219,12 @@ let decoders =
   ; "blob.read", map Blob.Read_request.of_json (fun x -> Blob_read x)
   ; "session.create", map Session.Create_request.of_json (fun x -> Session_create x)
   ; "session.list", map Session.List_request.of_json (fun x -> Session_list x)
+  ; ( "session.configuration_get"
+    , map Session_configuration.Get_request.of_json (fun x -> Session_configuration_get x)
+    )
+  ; ( "session.configuration_update"
+    , map Session_configuration.Update_request.of_json (fun x ->
+        Session_configuration_update x) )
   ; "session.get", map Session.Get_request.of_json (fun x -> Session_get x)
   ; ( "session.inference_summary"
     , map Inference_query.Summary_request.of_json (fun x -> Session_inference_summary x) )

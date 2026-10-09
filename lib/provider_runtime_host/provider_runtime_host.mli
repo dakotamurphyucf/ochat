@@ -21,6 +21,7 @@ val create
   -> driver:Openai.Responses_driver.t
   -> templates:Provider_operator.Profile_admin.Template.t list
   -> mappings:Bridge.Mapping.t list
+  -> compatible_profiles:Bridge.Compatible_profile.t list
   -> default_profile:DTO.Profile_id.t
   -> environment:Bridge.Environment.t option
   -> environment_sources:Provider_operator.Environment_source.t list

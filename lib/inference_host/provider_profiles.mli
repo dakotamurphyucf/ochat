@@ -121,6 +121,27 @@ val replace
   -> generation:int64
   -> (unit, Error.t) Result.t
 
+(** Pure pre-admission for the exact replacement set. No mutation or callback;
+    batch publication rechecks the same constraints on the same owner domain. *)
+val validate_replacements
+  :  t
+  -> Profile.t list
+  -> owner:string
+  -> generation:int64
+  -> (unit, Error.t) Result.t
+
+(** Validate all IDs, owner/generation and total registry capacity, then build
+    every replacement before invalidating/installing any entry. No callback or
+    yield occurs. Typed validation failures preserve every existing entry.
+    Unexpected exceptions propagate; the owning bridge protects publication
+    with a fail-closed shared authority barrier. *)
+val replace_many
+  :  t
+  -> Profile.t list
+  -> owner:string
+  -> generation:int64
+  -> (unit, Error.t) Result.t
+
 val remove : t -> profile:string -> (unit, Error.t) Result.t
 val edit_profile : t -> Profile.t -> (unit, Error.t) Result.t
 

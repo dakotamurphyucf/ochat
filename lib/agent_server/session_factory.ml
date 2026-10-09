@@ -47,6 +47,10 @@ type inference_policy =
       prompt_revision_id:Agent_protocol.Id.Prompt_revision.t
       -> config:Chat_response.Config.t
       -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) Result.t
+  ; select_inference_profile :
+      current:Inference.Request.Target.t
+      -> profile:string
+      -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) Result.t
   ; recapture_inference_target :
       current:Inference.Request.Target.t
       -> prompt_revision_id:Agent_protocol.Id.Prompt_revision.t
@@ -266,6 +270,7 @@ let session_spec request definition revision instance profile ~inference_target 
     ; prompt_definition_id = Some definition.Agent_session.Prompt_definition.id
     ; delegation = None
     ; prompt_revision_id = Agent_session.Prompt_revision.id revision
+    ; configuration_revision = 0L
     ; inference_target
     ; workspace_instance = instance
     ; permission_profile = profile.Agent_session.Permission_policy.id
@@ -4350,6 +4355,26 @@ let install_compaction_inference t actor owner =
   A.set_compaction_inference actor (Some port)
 ;;
 
+(* Configuration policy is host composition, not graph activation. Both loaded
+   and stopped entries retain the same authorization/resolver ports. Resolution
+   runs outside the actor through Configuration_update's two-phase admission. *)
+let configuration_policy t : Agent_session.Configuration_policy.t =
+  let lower result =
+    Result.map_error result ~f:(fun _ ->
+      unavailable
+        Permission_denied
+        "selected profile or configuration is unavailable to this runtime host")
+  in
+  { select_profile =
+      (fun ~current ~profile ->
+        t.inference_policy.select_inference_profile ~current ~profile |> lower)
+  ; approve =
+      (fun ~current ~proposed ->
+        t.inference_policy.approve_inference_target_change ~current ~proposed |> lower)
+  ; resolve = (fun target -> t.inference_policy.resolve_inference_context target |> lower)
+  }
+;;
+
 let create_loaded_entry
       t
       handle
@@ -4408,6 +4433,9 @@ let create_loaded_entry
   actor_ref := Some actor;
   match
     let open Result.Let_syntax in
+    let%bind () =
+      Agent_session.Session_actor.set_configuration_policy actor (configuration_policy t)
+    in
     let%bind () =
       Agent_session.Session_actor.set_runtime_worker
         actor
@@ -4564,6 +4592,9 @@ let create_unloaded_entry
           Exn.protect
             ~f:(fun () -> Agent_session.Session_actor.shutdown actor)
             ~finally:close_borrowed);
+    let%bind () =
+      Agent_session.Session_actor.set_configuration_policy actor (configuration_policy t)
+    in
     let runtime =
       Runtime_owner.create_with_unload
         ~before_unload:(retire_owned_children t actor)
@@ -6560,6 +6591,7 @@ let create_delegated_session
                           }
                       ; prompt_definition_id = None
                       ; prompt_revision_id = record.admission.revision_id
+                      ; configuration_revision = 0L
                       ; inference_target
                       ; delegation = Some reference
                       ; quota_key = None

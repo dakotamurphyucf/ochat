@@ -147,7 +147,15 @@ module Auth_source = struct
     | Capture of (target:R.Target.t -> (D.Auth.resolver, E.t) Result.t)
 end
 
-let create ?(auth_binding = P.Absent) driver ~profile ~profile_revision ~auth ~limits =
+let create
+      ?(auth_binding = P.Absent)
+      ?(check_current = fun () -> Ok ())
+      driver
+      ~profile
+      ~profile_revision
+      ~auth
+      ~limits
+  =
   let bind target =
     if
       String.equal (R.Target.adapter target) "openai.responses"
@@ -159,7 +167,7 @@ let create ?(auth_binding = P.Absent) driver ~profile ~profile_revision ~auth ~l
       && Option.equal String.equal (R.Target.profile_revision target) profile_revision
       && Option.equal String.equal (R.Target.account target) (D.Profile.account profile)
       && String.equal (R.Target.endpoint target) (D.Profile.endpoint profile)
-    then Ok ()
+    then check_current ()
     else Error E.Target_mismatch
   in
   let prepare ?session ~policy ~preparation_id request =
@@ -335,13 +343,11 @@ let create ?(auth_binding = P.Absent) driver ~profile ~profile_revision ~auth ~l
     let session =
       D.Websocket_session.create ~sw:(Inference_runtime.Session.switch owner)
     in
-    match
-      Inference_runtime.Session.on_release owner (fun () ->
-        D.Websocket_session.close session)
-    with
-    | Error Closed -> Error E.Session_closed
-    | Ok () ->
-      Ok (fun ~preparation_id request -> prepare ~session ~policy ~preparation_id request)
+    Ok
+      (Inference_runtime.Adapter.Session_binding.create
+         ~prepare:(fun ~preparation_id request ->
+           prepare ~session ~policy ~preparation_id request)
+         ~close:(fun () -> D.Websocket_session.close session))
   in
   Inference_runtime.Adapter.create
     ~id:"openai.responses"

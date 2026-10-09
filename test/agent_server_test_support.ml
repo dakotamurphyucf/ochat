@@ -162,6 +162,9 @@ let inference_policy ~default_model ~post_stream =
     { capture_inference_target =
         (fun ~prompt_revision_id:_ ~config ->
           Inference_fixture.capture_config fixture config)
+    ; select_inference_profile =
+        (fun ~current:_ ~profile:_ ->
+          Error Inference_runtime.Preparation_error.Target_unavailable)
     ; recapture_inference_target =
         (fun ~current ~prompt_revision_id:_ ~config ->
           Inference_fixture.recapture_config fixture ~current config)

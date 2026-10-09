@@ -250,6 +250,22 @@ let project_result principal = function
     in
     P.Public.Result.Session_create
       { session = value.session; mutation = value.mutation; attachment }
+  | (Session_configuration_get configuration | Session_configuration_update configuration)
+    as value ->
+    let open Result.Let_syntax in
+    let%bind configuration =
+      if has principal Diagnostics
+      then Ok configuration
+      else Agent_session.Configuration_transition.redact_identity configuration
+    in
+    let value =
+      match value with
+      | Session_configuration_get _ ->
+        P.Method_result.Session_configuration_get configuration
+      | _ -> P.Method_result.Session_configuration_update configuration
+    in
+    Result.map (P.Public.Result.Non_history.of_internal value) ~f:(fun value ->
+      P.Public.Result.Non_history value)
   | value ->
     Result.map (P.Public.Result.Non_history.of_internal value) ~f:(fun value ->
       P.Public.Result.Non_history value)
