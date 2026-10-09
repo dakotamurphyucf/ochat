@@ -75,39 +75,43 @@ test('protocol anchors and source excerpts remain usable without JavaScript', as
   }
 });
 
-for (const theme of ['light', 'dark'] as const) {
-  test(`dense protocol references reflow, scroll, and pass accessibility in ${theme}`, async ({
-    page,
-  }) => {
-    // This reference has ~35,000 elements; its Firefox audit case took
-    // ~85s before the latest ~7% DOM growth. Keep every assertion and the whole
-    // page scan, with a separate bound for this workload and CI variation.
-    test.setTimeout(150_000);
-    await page.setViewportSize({ width: 320, height: 800 });
-    await page.emulateMedia({ colorScheme: theme });
-    await page.goto('/docs/reference/agent-server/protocol-types/#session');
-    await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
-    expect(
-      await page.evaluate(
-        () => document.documentElement.scrollWidth <= innerWidth,
-      ),
-    ).toBe(true);
-    const block = page
-      .locator('pre')
-      .filter({ hasText: 'module Delete_history_request' });
-    await block.focus();
-    await expect(block).toBeFocused();
-    const before = await block.evaluate((element) => element.scrollLeft);
-    await page.keyboard.press('ArrowRight');
-    await expect
-      .poll(() => block.evaluate((element) => element.scrollLeft))
-      .toBeGreaterThan(before);
-    const result = await new AxeBuilder({ page })
-      .withTags(['wcag2a', 'wcag2aa', 'wcag21aa'])
-      .analyze();
-    expect(result.violations).toEqual([]);
-  });
-}
+test.describe('dense protocol accessibility', () => {
+  test.describe.configure({ mode: 'default' });
+
+  for (const theme of ['light', 'dark'] as const) {
+    test(`dense protocol references reflow, scroll, and pass accessibility in ${theme}`, async ({
+      page,
+    }) => {
+      // The current reference has ~57,000 elements. Paired Firefox full-page
+      // audits reached the deadline while finishing results; run these two scans
+      // sequentially, retaining every rule, both themes, and the individual bound.
+      test.setTimeout(150_000);
+      await page.setViewportSize({ width: 320, height: 800 });
+      await page.emulateMedia({ colorScheme: theme });
+      await page.goto('/docs/reference/agent-server/protocol-types/#session');
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= innerWidth,
+        ),
+      ).toBe(true);
+      const block = page
+        .locator('pre')
+        .filter({ hasText: 'module Delete_history_request' });
+      await block.focus();
+      await expect(block).toBeFocused();
+      const before = await block.evaluate((element) => element.scrollLeft);
+      await page.keyboard.press('ArrowRight');
+      await expect
+        .poll(() => block.evaluate((element) => element.scrollLeft))
+        .toBeGreaterThan(before);
+      const result = await new AxeBuilder({ page })
+        .withTags(['wcag2a', 'wcag2aa', 'wcag21aa'])
+        .analyze();
+      expect(result.violations).toEqual([]);
+    });
+  }
+});
 
 test('protocol method search reaches the published contract and current daemon flags are visible', async ({
   page,
