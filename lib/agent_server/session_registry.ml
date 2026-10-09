@@ -87,6 +87,7 @@ module Cleanup_owner = struct
     | Entry of entry
     | Handle of Agent_store.Session_store.t * Agent_store.Session_store.Handle.t
     | Fence of entry * Agent_session.Session_actor.Lifecycle_fence.t
+    | Recovery of Session_recovery_owner.t
 
   let entry entry = Entry entry
   let handle ~store handle = Handle (store, handle)
@@ -102,6 +103,7 @@ let cleanup_owner = function
     Agent_store.Session_store.close_session store handle
     |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
   | Fence (entry, fence) -> Agent_session.Session_actor.abort_lifecycle entry.actor fence
+  | Recovery owner -> Session_recovery_owner.close owner
 ;;
 
 module Failed_cleanup = struct
@@ -295,6 +297,47 @@ let check_retained_owner entry =
 (* Actor identity is the retained ownership capability, not value equality. *)
 let same_owner first second = phys_equal first.actor second.actor
 
+let same_cleanup_owner (first : Cleanup_owner.t) (second : Cleanup_owner.t) =
+  match first, second with
+  | Entry first, Entry second -> same_owner first second
+  | Handle (_, first), Handle (_, second) -> phys_equal first second
+  | Fence (first, first_fence), Fence (second, second_fence) ->
+    same_owner first second && phys_equal first_fence second_fence
+  | Recovery first, Recovery second -> phys_equal first second
+  | Recovery owner, Entry entry | Entry entry, Recovery owner ->
+    Session_recovery_owner.owns_actor owner entry.actor
+  | Recovery owner, Handle (_, handle) | Handle (_, handle), Recovery owner ->
+    phys_equal (Session_recovery_owner.handle owner) handle
+  | Entry _, (Handle _ | Fence _)
+  | Handle _, (Entry _ | Fence _)
+  | Fence _, (Entry _ | Handle _ | Recovery _)
+  | Recovery _, Fence _ -> false
+;;
+
+let retain_failure t ~session_id ~owner ~primary ~failure =
+  Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+    if
+      not
+        (List.exists t.failed_cleanups ~f:(fun cleanup ->
+           same_cleanup_owner cleanup.Failed_cleanup.owner owner))
+    then (
+      let cleanup : Failed_cleanup.t = { owner; session_id; primary; failure } in
+      t.failed_cleanups <- cleanup :: t.failed_cleanups))
+;;
+
+let cleanup_after_failure t ~session_id ~owner ~primary =
+  Eio.Cancel.protect (fun () ->
+    let failure =
+      match cleanup_owner owner with
+      | Ok () -> None
+      | Error error -> Some (Cleanup_failure.rejected error)
+      | exception exn ->
+        Some (Cleanup_failure.raised exn (Stdlib.Printexc.get_raw_backtrace ()))
+    in
+    Option.iter failure ~f:(fun failure ->
+      retain_failure t ~session_id ~owner ~primary ~failure))
+;;
+
 let with_read_snapshot t ~capture ~check_current f =
   let open Result.Let_syntax in
   let%bind lease, snapshot =
@@ -328,22 +371,7 @@ let with_read_snapshot t ~capture ~check_current f =
 
 let close_provisional t ~session_id entry result =
   let close primary =
-    Eio.Cancel.protect (fun () ->
-      match entry.close () with
-      | () -> ()
-      | exception cleanup_exception ->
-        let cleanup_backtrace = Stdlib.Printexc.get_raw_backtrace () in
-        let cleanup : Failed_cleanup.t =
-          { owner = Cleanup_owner.entry entry
-          ; session_id
-          ; primary
-          ; failure = Cleanup_failure.raised cleanup_exception cleanup_backtrace
-          }
-        in
-        (* Retain both diagnostics and the actual owner before releasing its
-           reservation. Shutdown must finish this cleanup before store release. *)
-        Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-          t.failed_cleanups <- cleanup :: t.failed_cleanups))
+    cleanup_after_failure t ~session_id ~owner:(Cleanup_owner.entry entry) ~primary
   in
   match result () with
   | Ok _ as success -> success
@@ -353,6 +381,62 @@ let close_provisional t ~session_id entry result =
   | exception exn ->
     let backtrace = Stdlib.Printexc.get_raw_backtrace () in
     close (Cleanup_failure.Raised (exn, backtrace));
+    Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let with_recovery_owner t owner f =
+  let session_id = Session_recovery_owner.session_id owner in
+  let close primary =
+    cleanup_after_failure t ~session_id ~owner:(Cleanup_owner.Recovery owner) ~primary
+  in
+  let run () =
+    let open Result.Let_syntax in
+    let%bind entry = f () in
+    if
+      Session_recovery_owner.owns_actor owner entry.actor
+      && Option.exists
+           entry.store_handle
+           ~f:(phys_equal (Session_recovery_owner.handle owner))
+    then Ok entry
+    else Error (lifecycle_conflict "recovery returned a different resource owner")
+  in
+  match run () with
+  | Ok _ as success -> success
+  | Error error as failure ->
+    close (Cleanup_failure.Rejected error);
+    failure
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    close (Cleanup_failure.Raised (exn, backtrace));
+    Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let with_recovery_handle t ~store handle f =
+  let owner = Cleanup_owner.handle ~store handle in
+  let session_id = Agent_store.Session_store.Handle.session_id handle in
+  match f () with
+  | Ok () ->
+    (match cleanup_owner owner with
+     | Ok () -> Ok ()
+     | Error error as failure ->
+       let diagnostic = Cleanup_failure.rejected error in
+       retain_failure t ~session_id ~owner ~primary:diagnostic ~failure:diagnostic;
+       failure
+     | exception exn ->
+       let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+       let diagnostic = Cleanup_failure.raised exn backtrace in
+       retain_failure t ~session_id ~owner ~primary:diagnostic ~failure:diagnostic;
+       Exn.raise_with_original_backtrace exn backtrace)
+  | Error error as failure ->
+    cleanup_after_failure t ~session_id ~owner ~primary:(Cleanup_failure.rejected error);
+    failure
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    cleanup_after_failure
+      t
+      ~session_id
+      ~owner
+      ~primary:(Cleanup_failure.raised exn backtrace);
     Exn.raise_with_original_backtrace exn backtrace
 ;;
 
@@ -807,6 +891,11 @@ let shutdown t =
                  t.sessions
                  (Map.filter (Atomic.get t.sessions) ~f:(fun current ->
                     not (same_owner current entry)))
+             | Recovery owner ->
+               Atomic.set
+                 t.sessions
+                 (Map.filter (Atomic.get t.sessions) ~f:(fun current ->
+                    not (Session_recovery_owner.owns_actor owner current.actor)))
              | Handle _ | Fence _ -> ());
             t.failed_cleanups
             <- List.filter t.failed_cleanups ~f:(fun current ->
@@ -913,17 +1002,6 @@ let lifecycle_reserved t session_id =
     Map.mem t.reservations session_id || cleanup_pending t session_id)
 ;;
 
-let same_cleanup_owner (first : Cleanup_owner.t) (second : Cleanup_owner.t) =
-  match first, second with
-  | Cleanup_owner.Entry first, Entry second -> same_owner first second
-  | Handle (_, first), Handle (_, second) -> phys_equal first second
-  | Fence (first, first_fence), Fence (second, second_fence) ->
-    same_owner first second && phys_equal first_fence second_fence
-  | Entry _, (Handle _ | Fence _)
-  | Handle _, (Entry _ | Fence _)
-  | Fence _, (Entry _ | Handle _) -> false
-;;
-
 let cleanup_belongs_to_reservation reservation (owner : Cleanup_owner.t) =
   let same_handle handle =
     Agent_protocol.Id.Session.equal
@@ -939,6 +1017,10 @@ let cleanup_belongs_to_reservation reservation (owner : Cleanup_owner.t) =
     && Option.exists expected.store_handle ~f:(phys_equal handle)
   | Handle (store, handle), (Indexed _ | Absent) ->
     Agent_store.Session_store.owns_handle store handle && same_handle handle
+  | Recovery owner, Loaded expected ->
+    Session_recovery_owner.owns_actor owner expected.actor
+  | Recovery owner, (Indexed _ | Absent) ->
+    same_handle (Session_recovery_owner.handle owner)
   | (Entry _ | Fence _), (Indexed _ | Absent) -> false
 ;;
 
@@ -960,4 +1042,44 @@ let retain_cleanup t reservation ~owner ~primary ~failure =
         in
         t.failed_cleanups <- cleanup :: t.failed_cleanups)
     | Some _ | None -> failwith "cleanup capability differs from its issuing reservation")
+;;
+
+let rollback_recovered t ~primary entries =
+  Eio.Cancel.protect (fun () ->
+    List.iter entries ~f:(fun entry ->
+      let owner = Cleanup_owner.entry entry in
+      let session_id =
+        match entry.store_handle with
+        | Some handle -> Agent_store.Session_store.Handle.session_id handle
+        | None -> failwith "recovered entry has no retained handle"
+      in
+      match cleanup_owner owner with
+      | Ok () ->
+        Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+          Atomic.set
+            t.sessions
+            (Map.filter (Atomic.get t.sessions) ~f:(fun current ->
+               not (same_owner current entry))))
+      | Error error ->
+        retain_failure
+          t
+          ~session_id
+          ~owner
+          ~primary
+          ~failure:(Cleanup_failure.rejected error)
+      | exception exn ->
+        let failure = Cleanup_failure.raised exn (Stdlib.Printexc.get_raw_backtrace ()) in
+        retain_failure t ~session_id ~owner ~primary ~failure))
+;;
+
+let retains_cleanup_handle t handle =
+  Eio.Mutex.use_ro t.mutex (fun () ->
+    List.exists t.failed_cleanups ~f:(fun cleanup ->
+      let actual =
+        match cleanup.Failed_cleanup.owner with
+        | Entry entry | Fence (entry, _) -> entry.store_handle
+        | Handle (_, handle) -> Some handle
+        | Recovery owner -> Some (Session_recovery_owner.handle owner)
+      in
+      Option.exists actual ~f:(phys_equal handle)))
 ;;

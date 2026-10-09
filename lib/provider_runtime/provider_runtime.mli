@@ -19,6 +19,10 @@ module Opened : sig
     -> close:(unit -> unit)
     -> t
 
+  (** Invoke this trusted owner's cleanup callback. The enclosing runtime owns
+      admission and serializes retries; this wrapper does not stop initialization
+      or record cleanup completion. Callback must retain unfinished resources on
+      failure and tolerate retry of the same capability. *)
   val close : t -> unit
 end
 
@@ -82,4 +86,11 @@ val enroll_private_key
   -> (DTO.Configuration_result.t, DTO.Error.t) Result.t
 
 val operator_port : t -> Agent_server.Provider_operator_port.t
+
+(** Close admission before yielding; serialize callbacks and retain actual opened
+    ownership until cleanup succeeds. Initialization is stopped and joined before
+    closing a concurrently acquired owner. Failed close keeps the runtime Closing
+    for a retry of unfinished resources; original exceptions/backtraces propagate.
+    Cleanup is cancellation protected. Callbacks must tolerate retries after failure
+    and must not recursively close this runtime. *)
 val close : t -> unit

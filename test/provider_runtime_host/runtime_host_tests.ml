@@ -482,3 +482,245 @@ let%expect_test "runtime request cancellation leaves host-owned setup joined by 
   [%expect
     {| cancelled caller returns; host close cancels and joins exactly one blocked initializer |}]
 ;;
+
+let%expect_test "runtime close joins in-flight provisioning before acknowledging closure" =
+  Eio_main.run (fun _env ->
+    Eio.Switch.run (fun sw ->
+      let entered, entered_u = Eio.Promise.create () in
+      let release, release_u = Eio.Promise.create () in
+      let setup_done, setup_done_u = Eio.Promise.create () in
+      let close_done, close_done_u = Eio.Promise.create () in
+      let calls = ref 0 in
+      let runtime =
+        Runtime.create
+          ~sw
+          ~server_id
+          ~authorize_setup:authorized
+          ~authorize_status:authorized
+          ~setup_receipt:(fun ~actor:_ _ -> Error DTO.Error.Store_unavailable)
+          ~existing:(fun ~sw:_ -> Ok None)
+          ~initialize:(fun ~sw:_ ~actor:_ _ ->
+            Int.incr calls;
+            Eio.Promise.resolve entered_u ();
+            Eio.Cancel.protect (fun () -> Eio.Promise.await release);
+            Error DTO.Error.Store_unavailable)
+        |> ok
+      in
+      Eio.Fiber.fork ~sw (fun () ->
+        let result =
+          Runtime.dispatch runtime ~actor (P.Command.Provider_setup setup_request)
+        in
+        Eio.Promise.resolve setup_done_u result);
+      Eio.Promise.await entered;
+      Eio.Fiber.fork ~sw (fun () ->
+        Runtime.close runtime;
+        Eio.Promise.resolve close_done_u ());
+      Eio.Fiber.yield ();
+      let awaiting_actual_worker = Option.is_none (Eio.Promise.peek close_done) in
+      let admission_closed =
+        match
+          Runtime.dispatch runtime ~actor (P.Command.Provider_status { profile = None })
+        with
+        | Error Closed -> true
+        | Ok _ | Error _ -> false
+      in
+      Eio.Promise.resolve release_u ();
+      Eio.Promise.await close_done;
+      ignore (Eio.Promise.await setup_done : (P.Method_result.t, DTO.Error.t) Result.t);
+      Runtime.close runtime;
+      print_s
+        [%sexp ((awaiting_actual_worker, admission_closed, !calls) : bool * bool * int)]));
+  [%expect {| (true true 1) |}]
+;;
+
+let%expect_test
+    "opened runtime owner remains unavailable and retries exact failed cleanup"
+  =
+  with_fixture (fun env sw anchor _create _login_calls ->
+    let module Service = Provider_operator in
+    let directory =
+      S.Directory.open_or_create
+        ~sw
+        ~anchor
+        ~components:[ S.Name.create "close-owner" |> ok ]
+      |> ok
+    in
+    let secrets =
+      Secret.open_private_files
+        ~sw
+        ~directory
+        ~namespace:(Secret.Namespace.create "close-owner" |> ok)
+      |> ok
+    in
+    let registry =
+      C.initialize_new
+        ~metadata_admission:C.Metadata_admission.nonblocking
+        ~sw
+        ~wall_clock:(Eio.Stdenv.clock env)
+        ~new_operation:(fun () -> id "operation")
+        ~directory
+        ~secrets
+        ~environment:None
+        ~host:(id "host")
+        ~incarnation:(id "incarnation")
+      |> ok
+    in
+    let driver =
+      Openai.Responses_driver.create
+        ~net:(Eio.Stdenv.net env)
+        ~clock:(Eio.Stdenv.clock env)
+        ()
+      |> ok
+    in
+    let bridge =
+      B.create
+        driver
+        ~registry
+        ~mappings:[]
+        ~compatible_profiles:[]
+        ~approved_profiles:[ "approved" ]
+        ~authorize:(fun ~principal:_ ~profile:_ ~operation:_ -> false)
+        ~clock:(Eio.Stdenv.mono_clock env)
+        ~maximum_wait:(Time_ns.Span.of_sec 1.)
+        ~transport_policy:Http_sse
+        ~limits:RT.Limits.default
+      |> ok
+    in
+    let approved = profile "approved" in
+    let identity =
+      M.Identity.api_key
+        ~host:(id "host")
+        ~provider:"openai"
+        ~billing:"api"
+        ~account:None
+        ~key_reference:(id "binding")
+      |> ok
+    in
+    let template =
+      A.Template.create
+        ~profile:approved
+        ~binding:(id "binding")
+        ~revision:(DTO.Revision.of_string "config" |> ok)
+        ~authentication:Api_key
+        ~expectation:(M.Expectation.exact identity)
+        ~expected_account:None
+        ~mapping:(fun _ -> Error B.Error.Invalid_mapping)
+      |> ok
+    in
+    A.initialize
+      directory
+      ~incarnation:(id "incarnation")
+      ~templates:[ template ]
+      ~default_profile:approved
+      ~initial_revision:(DTO.Revision.of_string "initial" |> ok)
+    |> ok;
+    let profiles =
+      A.open_
+        directory
+        ~incarnation:(id "incarnation")
+        ~registry
+        ~templates:[ template ]
+        ~publish:(B.publish_mapping bridge)
+        ~new_revision:(fun () -> DTO.Revision.of_string "next" |> ok)
+      |> ok
+    in
+    let transport =
+      Provider_oauth.Transport.create
+        ~net:(Eio.Stdenv.net env)
+        ~clock:(Eio.Stdenv.mono_clock env)
+      |> ok
+    in
+    Exn.protect
+      ~finally:(fun () -> Provider_oauth.Transport.close transport)
+      ~f:(fun () ->
+        let oauth =
+          Provider_oauth_registry.create
+            ~transport
+            ~policy:
+              (Provider_oauth.Policy.direct_codex
+                 ~expected_account:None
+                 ~callback_port:1455
+                 ()
+               |> ok)
+            ~wall_clock:(Eio.Stdenv.clock env)
+        in
+        let records =
+          Service.Owner_records.create
+            directory
+            ~incarnation:(id "incarnation")
+            ~maximum_records:4
+          |> ok
+        in
+        let intents =
+          Service.Command_intents.create directory ~host:(id "host") ~maximum_records:4
+          |> ok
+        in
+        let service =
+          Service.create
+            ~sw
+            ~server_id
+            ~host:(id "host")
+            ~incarnation:(id "incarnation")
+            ~registry
+            ~bridge
+            ~profiles
+            ~oauth
+            ~owner_records:records
+            ~command_intents:intents
+            ~start_login:(fun ~sw:_ ~template:_ ~mode:_ ->
+              failwith "close activated login")
+            ~authorize:(fun _ ~operation:_ ~profile:_ -> false)
+            ~clock:(Eio.Stdenv.mono_clock env)
+            ~maximum_wait:(Time_ns.Span.of_sec 1.)
+            ~now:(fun () -> P.Timestamp.of_time_ns Time_ns.epoch)
+            ~new_operation:(fun () -> id "operation")
+            ~limits:DTO.Limits.default
+            ~environment:[]
+          |> ok
+        in
+        let attempts = ref 0 in
+        let opened =
+          Runtime.Opened.create
+            ~service
+            ~backend:(A.backend profiles ~bridge ~principal:"operator")
+            ~incarnation:(DTO.Revision.of_string "incarnation" |> ok)
+            ~setup_receipt:(fun ~actor:_ _ -> Error DTO.Error.Store_unavailable)
+            ~close:(fun () ->
+              Int.incr attempts;
+              if Int.equal !attempts 1
+              then failwith "original opened owner cleanup failure";
+              Service.close service;
+              C.close registry)
+        in
+        let runtime =
+          Runtime.create
+            ~sw
+            ~server_id
+            ~authorize_setup:authorized
+            ~authorize_status:authorized
+            ~setup_receipt:(fun ~actor:_ _ -> Error DTO.Error.Store_unavailable)
+            ~existing:(fun ~sw:_ -> Ok (Some opened))
+            ~initialize:(fun ~sw:_ ~actor:_ _ -> failwith "close reinitialized owner")
+          |> ok
+        in
+        let primary_preserved =
+          try
+            Runtime.close runtime;
+            false
+          with
+          | Failure message ->
+            String.equal message "original opened owner cleanup failure"
+        in
+        let admission_closed =
+          match
+            Runtime.dispatch runtime ~actor (P.Command.Provider_status { profile = None })
+          with
+          | Error Closed -> true
+          | Ok _ | Error _ -> false
+        in
+        Runtime.close runtime;
+        Runtime.close runtime;
+        print_s
+          [%sexp ((primary_preserved, admission_closed, !attempts) : bool * bool * int)]));
+  [%expect {| (true true 2) |}]
+;;

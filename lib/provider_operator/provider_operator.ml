@@ -70,6 +70,7 @@ type t =
   ; environment : Environment_source.t list
   ; live : live String.Table.t
   ; unpublished_terminal : (Owner_records.Record.t * DTO.Flow_result.phase) String.Table.t
+  ; close_mutex : Eio.Mutex.t
   ; mutable closed : bool
   }
 
@@ -290,12 +291,12 @@ let stop_live live =
 let join_live live = Eio.Cancel.protect (fun () -> Eio.Promise.await live.finished)
 
 let close t =
-  if not t.closed
-  then (
-    t.closed <- true;
-    let live = Hashtbl.data t.live in
-    List.iter live ~f:stop_live;
-    List.iter live ~f:join_live)
+  t.closed <- true;
+  Eio.Cancel.protect (fun () ->
+    Eio.Mutex.use_ro t.close_mutex (fun () ->
+      let live = Hashtbl.data t.live in
+      List.iter live ~f:stop_live;
+      List.iter live ~f:join_live))
 ;;
 
 let create
@@ -352,6 +353,7 @@ let create
     ; environment
     ; live = String.Table.create ()
     ; unpublished_terminal = String.Table.create ()
+    ; close_mutex = Eio.Mutex.create ()
     ; closed = false
     }
   in

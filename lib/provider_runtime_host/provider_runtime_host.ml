@@ -211,9 +211,8 @@ let create
                   revision
                 | _ -> Error DTO.Error.Submission_uncertain)
               ~close:(fun () ->
-                Exn.protect
-                  ~f:(fun () -> Service.close service)
-                  ~finally:(fun () -> C.close registry)))
+                Service.close service;
+                C.close registry))
       in
       let existing ~sw:_ =
         match open_registry () with

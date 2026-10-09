@@ -123,6 +123,10 @@ val login_receipt
   -> key:P.Idempotency_key.t
   -> (DTO.Flow_result.t option, DTO.Error.t) Result.t
 
+(** Deny fresh calls before yielding and serialize stop/join of actual live workers.
+    Repeated calls join the same unfinished workers after a failure; cancellation
+    is protected and original exceptions propagate. Borrowed registry ownership
+    must remain live until this operation completes. No recursive close callback. *)
 val close : t -> unit
 
 (** Read-only reconciliation of original provider command under current scopes;

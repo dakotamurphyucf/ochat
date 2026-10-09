@@ -826,7 +826,8 @@ let%expect_test
               match phase with
               | Authority_acknowledgement -> P.Session.Delete_request.Archive
               | Payload_deletion | Final_cleanup -> Remove
-              | Rejection_completion -> failwith "not an irreversible boundary"
+              | Rejection_completion | Actor_lock_release ->
+                failwith "not an irreversible boundary"
             in
             let command =
               delete_command
@@ -1412,4 +1413,386 @@ let%expect_test
                    , !calls )
                    : bool * bool * bool * bool * bool * bool * int * int)]))));
   [%expect {| (true true true true true true 3 0) |}]
+;;
+
+let%expect_test "startup rollback retains actual failed owner and its storage until retry"
+  =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let root = temporary_root env in
+    Exn.protect
+      ~finally:(fun () ->
+        Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+      ~f:(fun () ->
+        let workspace = Filename.concat root "workspace" in
+        Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / workspace);
+        let prompt = Filename.concat root "root.chatmd" in
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / prompt)
+          "<developer>Retained startup rollback ownership.</developer>";
+        Eio.Switch.run (fun sw ->
+          let module R = Agent_server.Session_registry in
+          let calls = ref 0 in
+          let daemon =
+            start_daemon sw env ~root ~configuration:(config root workspace prompt) calls
+          in
+          let client = connection daemon (principal ()) in
+          Exn.protect
+            ~finally:(fun () ->
+              C.Connection.close client;
+              Agent_server.Daemon.shutdown daemon |> protocol_ok)
+            ~f:(fun () ->
+              initialize client;
+              let session, _ = create_session ~key:"startup-rollback" client in
+              let registry = Agent_server.Daemon.registry daemon in
+              let original = R.remove registry session.id |> Option.value_exn in
+              let handle = original.store_handle |> Option.value_exn in
+              let attempts = ref 0 in
+              let retained =
+                { original with
+                  close =
+                    (fun () ->
+                      Int.incr attempts;
+                      if Int.equal !attempts 1
+                      then failwith "original startup close failure";
+                      original.close ())
+                }
+              in
+              R.add registry ~session_id:session.id retained |> protocol_ok;
+              let primary =
+                P.Error.create
+                  Persistence_error
+                  ~message:"original startup admission failure"
+                  ~retryable:false
+                  ()
+              in
+              R.rollback_recovered
+                registry
+                ~primary:(R.Cleanup_failure.rejected primary)
+                [ retained ];
+              let owns_handle = R.retains_cleanup_handle registry handle in
+              let directory_present =
+                Eio.Path.is_directory
+                  Eio.Path.(
+                    Eio.Stdenv.fs env / Agent_store.Session_store.Handle.directory handle)
+              in
+              let same_owner_still_bound =
+                Option.exists (R.find registry session.id) ~f:(fun entry ->
+                  phys_equal entry.actor original.actor)
+              in
+              let fresh_load_refused =
+                match R.load registry session.id with
+                | Error error -> P.Error.equal_code error.code Conflict
+                | Ok _ -> false
+              in
+              R.shutdown registry;
+              let owner_released = not (R.retains_cleanup_handle registry handle) in
+              print_s
+                [%sexp
+                  (( owns_handle
+                   , directory_present
+                   , same_owner_still_bound
+                   , fresh_load_refused
+                   , owner_released
+                   , !attempts
+                   , !calls )
+                   : bool * bool * bool * bool * bool * int * int)]))));
+  [%expect {| (true true true true true 2 0) |}]
+;;
+
+let%expect_test "provider close serializes retries and denies admission before yielding" =
+  Eio_main.run (fun _env ->
+    Eio.Switch.run (fun sw ->
+      let module Port = Agent_server.Provider_operator_port in
+      let entered, entered_u = Eio.Promise.create () in
+      let release, release_u = Eio.Promise.create () in
+      let first, first_u = Eio.Promise.create () in
+      let second, second_u = Eio.Promise.create () in
+      let attempts = ref 0 in
+      let dispatches = ref 0 in
+      let port =
+        Port.create
+          ~dispatch:(fun ~actor:_ _ ->
+            Int.incr dispatches;
+            Error P.Provider_operator.Error.Unsupported)
+          ~receipt:(fun ~actor:_ _ ->
+            Int.incr dispatches;
+            Error P.Provider_operator.Error.Unsupported)
+          ~close:(fun () ->
+            Int.incr attempts;
+            if Int.equal !attempts 1
+            then (
+              Eio.Promise.resolve entered_u ();
+              Eio.Promise.await release;
+              failwith "original provider close failure"))
+      in
+      Eio.Fiber.fork ~sw (fun () ->
+        let preserved =
+          try
+            Port.close port;
+            false
+          with
+          | Failure message -> String.equal message "original provider close failure"
+        in
+        Eio.Promise.resolve first_u preserved);
+      Eio.Promise.await entered;
+      let actor = Operator_authorization.trusted_local (principal ()) in
+      let denied =
+        match
+          Port.dispatch (Some port) ~actor (P.Command.Provider_status { profile = None })
+        with
+        | Error error -> P.Error.equal_code error.code Server_shutting_down
+        | Ok _ -> false
+      in
+      Eio.Fiber.fork ~sw (fun () ->
+        Port.close port;
+        Eio.Promise.resolve second_u ());
+      Eio.Fiber.yield ();
+      let serialized =
+        Option.is_none (Eio.Promise.peek second) && Int.equal !attempts 1
+      in
+      Eio.Promise.resolve release_u ();
+      let preserved = Eio.Promise.await first in
+      Eio.Promise.await second;
+      Port.close port;
+      print_s
+        [%sexp
+          ((denied, serialized, preserved, !attempts, !dispatches)
+           : bool * bool * bool * int * int)]));
+  [%expect {| (true true true 2 0) |}]
+;;
+
+let%expect_test "startup failure retains store until actual operator retry completes" =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let root = temporary_root env in
+    Exn.protect
+      ~finally:(fun () ->
+        Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+      ~f:(fun () ->
+        let workspace = Filename.concat root "workspace" in
+        Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / workspace);
+        let prompt = Filename.concat root "root.chatmd" in
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / prompt)
+          "<developer>Startup scope.</developer>";
+        let store_root =
+          Eio.Switch.run (fun sw ->
+            let daemon =
+              start_daemon
+                sw
+                env
+                ~root
+                ~configuration:(config root workspace prompt)
+                (ref 0)
+            in
+            let path =
+              Agent_server.Daemon.store daemon
+              |> Agent_store.Session_store.data_root
+              |> Agent_store.Data_root.path
+            in
+            Agent_server.Daemon.shutdown daemon |> protocol_ok;
+            path)
+        in
+        let attempts = ref 0 in
+        let open_store sw nonce =
+          Agent_store.Session_store.open_existing
+            ~env
+            ~sw
+            ~root:store_root
+            ~process_start_identity:None
+            ~lock_nonce:nonce
+        in
+        Eio.Switch.run (fun sw ->
+          let store = open_store sw "startup-owned" |> store_ok in
+          let guard = Agent_server.Startup_cleanup.create ~sw ~store in
+          let registry = Agent_server.Session_registry.create () in
+          Agent_server.Startup_cleanup.adopt_registry_exn guard registry;
+          let port =
+            Agent_server.Provider_operator_port.create
+              ~dispatch:(fun ~actor:_ _ -> Error P.Provider_operator.Error.Unsupported)
+              ~receipt:(fun ~actor:_ _ -> Error P.Provider_operator.Error.Unsupported)
+              ~close:(fun () ->
+                Int.incr attempts;
+                if Int.equal !attempts 1 then failwith "original operator cleanup failure")
+          in
+          Agent_server.Startup_cleanup.adopt_operator_exn guard port;
+          let primary =
+            P.Error.create
+              Persistence_error
+              ~message:"original startup failure"
+              ~retryable:false
+              ()
+          in
+          let original_preserved =
+            match
+              Agent_server.Startup_cleanup.protect guard (fun () -> Error primary)
+            with
+            | Error error -> String.equal error.message primary.message
+            | Ok () -> false
+          in
+          let still_owned =
+            match open_store sw "startup-competitor" with
+            | Error _ -> true
+            | Ok unexpected ->
+              Agent_store.Session_store.close unexpected |> store_ok;
+              false
+          in
+          print_s
+            [%sexp ((original_preserved, still_owned, !attempts) : bool * bool * int)]);
+        Eio.Switch.run (fun sw ->
+          let reopened = open_store sw "startup-after-retry" |> store_ok in
+          Agent_store.Session_store.close reopened |> store_ok;
+          print_s [%sexp (!attempts : int)])));
+  [%expect
+    {|
+    (true true 1)
+    2
+    |}]
+;;
+
+let%expect_test
+    "Factory activation failure retains concrete recovery cleanup after lock sync fault"
+  =
+  Eio_main.run (fun raw_env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let fault = Lifecycle_faults.create () in
+    let env = Lifecycle_faults.wrap_env fault raw_env in
+    let root = temporary_root env in
+    Exn.protect
+      ~finally:(fun () ->
+        Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+      ~f:(fun () ->
+        let workspace = Filename.concat root "workspace" in
+        Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / workspace);
+        let prompt = Filename.concat root "root.chatmd" in
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / prompt)
+          "<developer>Actual recovery activation ownership.</developer>";
+        Eio.Switch.run (fun sw ->
+          let module R = Agent_server.Session_registry in
+          let module S = Agent_store.Session_store in
+          let module A = Agent_session.Session_actor in
+          let fail_activation = ref false in
+          let failed_actor = ref None in
+          let providers = ref 0 in
+          let base =
+            inference_policy
+              ~default_model:"fixture-model"
+              ~post_stream:(fun ~sw:_ ~inputs:_ ->
+                Int.incr providers;
+                failwith "recovery cleanup activated provider")
+          in
+          let policy =
+            { base with
+              Agent_server.Session_factory.runtime_inference_ports =
+                (fun actor ->
+                  if !fail_activation
+                  then (
+                    failed_actor := Some actor;
+                    Lifecycle_faults.arm fault Actor_lock_release;
+                    Error Inference_runtime.Preparation_error.Target_unavailable)
+                  else base.runtime_inference_ports actor)
+            }
+          in
+          let daemon =
+            Agent_server.Daemon.start
+              ~options:
+                { Agent_server.Daemon.default_options with inference_policy = policy }
+              ~sw
+              ~env
+              ~config:(config root workspace prompt)
+              ~tool_dir:root
+              ~home:root
+              ~process_start_identity:None
+              ()
+            |> protocol_ok
+          in
+          let client = connection daemon (principal ()) in
+          Exn.protect
+            ~finally:(fun () ->
+              C.Connection.close client;
+              Agent_server.Daemon.shutdown daemon |> protocol_ok)
+            ~f:(fun () ->
+              initialize client;
+              let session, _ =
+                create_session
+                  ~start_immediately:true
+                  ~key:"factory-recovery-owner"
+                  client
+              in
+              let other, _ = create_session ~key:"factory-recovery-unrelated" client in
+              let registry = Agent_server.Daemon.registry daemon in
+              let original = R.remove registry session.id |> Option.value_exn in
+              Agent_server.Runtime_owner.close_and_wait original.runtime;
+              original.close ();
+              let store = Agent_server.Daemon.store daemon in
+              let indexed =
+                Agent_store.Session_index.find_checked (S.session_index store) session.id
+                |> store_ok
+                |> Option.value_exn
+              in
+              R.index registry indexed;
+              fail_activation := true;
+              let primary_preserved =
+                match
+                  Agent_server.Session_factory.recover_session
+                    (Agent_server.Daemon.factory daemon)
+                    indexed
+                with
+                | Error error ->
+                  P.Error.equal_code error.code Invalid_state
+                  && String.equal
+                       error.message
+                       (Sexp.to_string_hum
+                          (Inference_runtime.Preparation_error.sexp_of_t
+                             Target_unavailable))
+                | Ok unexpected ->
+                  unexpected.close ();
+                  false
+              in
+              let actor_was_owned = Option.is_some !failed_actor in
+              let completed_actor_stage =
+                Option.exists !failed_actor ~f:(fun actor ->
+                  Result.is_error (A.state actor))
+              in
+              let same_id_fenced =
+                match R.load registry session.id with
+                | Error error -> P.Error.equal_code error.code Conflict
+                | Ok _ -> false
+              in
+              let unrelated_progress =
+                Result.is_ok (R.with_lifecycle registry other.id (fun _ -> Ok ()))
+              in
+              let root_still_owned =
+                match
+                  S.open_existing
+                    ~env
+                    ~sw
+                    ~root:(S.data_root store |> Agent_store.Data_root.path)
+                    ~process_start_identity:None
+                    ~lock_nonce:"recovery-competitor"
+                with
+                | Error _ -> true
+                | Ok unexpected ->
+                  S.close unexpected |> store_ok;
+                  false
+              in
+              let triggered = Lifecycle_faults.was_triggered fault in
+              R.shutdown registry;
+              print_s
+                [%sexp
+                  (( primary_preserved
+                   , actor_was_owned
+                   , completed_actor_stage
+                   , same_id_fenced
+                   , unrelated_progress
+                   , root_still_owned
+                   , triggered
+                   , !providers )
+                   : bool * bool * bool * bool * bool * bool * bool * int)]))));
+  [%expect {| (true true true true true true true 0) |}]
 ;;

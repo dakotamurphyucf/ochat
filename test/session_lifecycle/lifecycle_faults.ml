@@ -5,6 +5,7 @@ type phase =
   | Payload_deletion
   | Final_cleanup
   | Rejection_completion
+  | Actor_lock_release
 
 type action =
   | Fail
@@ -24,7 +25,8 @@ let arm_action t phase action =
   t.rejection_skips
   <- (match phase with
       | Rejection_completion -> 1
-      | Authority_acknowledgement | Payload_deletion | Final_cleanup -> 0)
+      | Authority_acknowledgement | Payload_deletion | Final_cleanup | Actor_lock_release
+        -> 0)
 ;;
 
 let arm t phase = arm_action t phase Fail
@@ -37,6 +39,30 @@ let trigger t action =
   match action with
   | Fail -> raise (Core_unix.Unix_error (EIO, "injected lifecycle phase", "fixture"))
   | Cancel cancel -> cancel ()
+;;
+
+let actor_lock_file t (Eio.Resource.T (resource, handler)) =
+  let module Original = (val Eio.Resource.get handler Eio.File.Pi.Write) in
+  let module File = struct
+    include Original
+
+    let sync resource =
+      match t.armed with
+      | Some (Actor_lock_release, action) -> trigger t action
+      | Some
+          ( ( Authority_acknowledgement
+            | Payload_deletion
+            | Final_cleanup
+            | Rejection_completion )
+          , _ )
+      | None -> Original.sync resource
+    ;;
+  end
+  in
+  Eio.Resource.T
+    ( resource
+    , Eio.Resource.handler
+        (H (Eio.File.Pi.Write, (module File)) :: Eio.Resource.bindings handler) )
 ;;
 
 let rec directory
@@ -64,6 +90,13 @@ let rec directory
       |> fun child -> directory t child ~prefix:(qualify name)
     ;;
 
+    let open_out resource ~sw ~append ~create name =
+      let file = Original.open_out resource ~sw ~append ~create name in
+      if String.is_suffix (qualify name) ~suffix:"/actor.lock"
+      then actor_lock_file t file
+      else file
+    ;;
+
     let rename resource source destination target =
       let qualified = qualify target in
       match t.armed with
@@ -83,7 +116,8 @@ let rec directory
           ( ( Authority_acknowledgement
             | Payload_deletion
             | Final_cleanup
-            | Rejection_completion )
+            | Rejection_completion
+            | Actor_lock_release )
           , _ )
       | None -> Original.rename resource source destination target
     ;;
@@ -99,7 +133,8 @@ let rec directory
             ( ( Authority_acknowledgement
               | Payload_deletion
               | Final_cleanup
-              | Rejection_completion )
+              | Rejection_completion
+              | Actor_lock_release )
             , _ )
         | None -> None
       in

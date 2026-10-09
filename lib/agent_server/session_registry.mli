@@ -239,3 +239,33 @@ val cleanup_owner : Cleanup_owner.t -> (unit, Agent_protocol.Error.t) Result.t
 
 (** Shutdown preserves a retained expected cleanup failure through this exception. *)
 exception Cleanup_failed of Cleanup_failure.t
+
+(** Own all partial concrete reconstruction capabilities through the callback.
+    On success ownership transfers into the actual returned entry's close closure.
+    On failure close the same recovery owner and retain unfinished resources plus
+    primary/secondary diagnostics. Startup and already-reserved loaders share it. *)
+val with_recovery_owner
+  :  t
+  -> Session_recovery_owner.t
+  -> (unit -> (entry, Agent_protocol.Error.t) Result.t)
+  -> (entry, Agent_protocol.Error.t) Result.t
+
+(** Startup rollback closes the actual entry while preserving its loaded binding;
+    detach only successful close. Cleanup failure retains exact owner and both
+    diagnostics, excludes the issuing ID, and permits unrelated recovery cleanup.
+    This is not a fresh-session remove or lifecycle publication. *)
+val rollback_recovered : t -> primary:Cleanup_failure.t -> entry list -> unit
+
+(** Retained projection rebuilding borrows no actor. Close exact Handle preserving
+    reconciliation primary; failed release joins the existing registry cleanup
+    ownership before the exclusive startup owner can release its Store. *)
+val with_recovery_handle
+  :  t
+  -> store:Agent_store.Session_store.t
+  -> Agent_store.Session_store.Handle.t
+  -> (unit -> (unit, Agent_protocol.Error.t) Result.t)
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Pure ownership check under a short registry snapshot: true only when failed
+    cleanup retains this exact Handle capability. It does not grant admission. *)
+val retains_cleanup_handle : t -> Agent_store.Session_store.Handle.t -> bool

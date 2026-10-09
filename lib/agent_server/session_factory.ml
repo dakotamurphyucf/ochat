@@ -4575,7 +4575,37 @@ let create_loaded_entry
        Exn.raise_with_original_backtrace exn backtrace)
 ;;
 
+let close_recovered_entry t owner handle journal persistence actor =
+  Session_recovery_owner.with_entry_close owner (fun () ->
+    let first_close = not (Session_recovery_owner.is_closing owner) in
+    Session_recovery_owner.prepare_close owner;
+    let checkpoint_failure =
+      if first_close
+      then (
+        match Agent_store.Session_store.Handle.metadata_checked handle with
+        | Error _ -> None (* Unavailable projection cannot admit cache maintenance. *)
+        | Ok _ ->
+          (match checkpoint_entry t handle journal persistence actor with
+           | Ok () -> None
+           | Error failure ->
+             Session_recovery_owner.record_checkpoint_failure owner failure;
+             Some failure))
+      else None
+    in
+    match Session_recovery_owner.close owner with
+    | Error failure ->
+      raise
+        (Session_registry.Cleanup_failed
+           (Session_registry.Cleanup_failure.rejected failure))
+    | Ok () ->
+      Option.iter checkpoint_failure ~f:(fun failure ->
+        raise
+          (Session_registry.Cleanup_failed
+             (Session_registry.Cleanup_failure.rejected failure))))
+;;
+
 let create_unloaded_entry
+      ?recovery_owner
       t
       handle
       journal
@@ -4585,13 +4615,7 @@ let create_unloaded_entry
       initial_events
       capacity
   =
-  let close_borrowed () =
-    Exn.protect
-      ~f:(fun () -> Option.iter capacity ~f:Session_capacity.release)
-      ~finally:(fun () -> Agent_store.Commit_writer.close writer)
-  in
-  let cleanup = ref close_borrowed in
-  let create () =
+  let create owner () =
     let open Result.Let_syntax in
     let%bind profile =
       permission_profile_revision t state.spec.permission_profile_digest
@@ -4635,11 +4659,7 @@ let create_unloaded_entry
         ~operation_worker:None
         ~services
     in
-    (cleanup
-     := fun () ->
-          Exn.protect
-            ~f:(fun () -> Agent_session.Session_actor.shutdown actor)
-            ~finally:close_borrowed);
+    Session_recovery_owner.adopt_actor_exn owner actor;
     let%bind () =
       Agent_session.Session_actor.set_organization_admission
         actor
@@ -4656,7 +4676,7 @@ let create_unloaded_entry
         ~build:(fun () -> build_runtime_for_actor t handle actor)
     in
     runtime_owner := Some runtime;
-    (cleanup := fun () -> close_unregistered_entry t handle runtime writer actor capacity);
+    Session_recovery_owner.adopt_runtime_exn owner runtime;
     let%bind () = install_compaction_inference t actor runtime in
     match history_source t actor state.identity.session_id with
     | Error _ as failure ->
@@ -4683,25 +4703,22 @@ let create_unloaded_entry
                 runtime
                 actor
           ; close =
-              (fun () ->
-                close_entry t handle journal persistence runtime writer actor capacity)
+              (fun () -> close_recovered_entry t owner handle journal persistence actor)
           }
   in
-  let close_failed () =
-    (* Failed admission retains durable data, releases each borrowed resource
-       once, and preserves the original error if cleanup also fails. *)
-    try Eio.Cancel.protect !cleanup with
-    | _ -> ()
-  in
-  match create () with
-  | Ok _ as result -> result
-  | Error _ as failure ->
-    close_failed ();
-    failure
-  | exception exn ->
-    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-    close_failed ();
-    Exn.raise_with_original_backtrace exn backtrace
+  match recovery_owner with
+  | Some owner -> create owner ()
+  | None ->
+    let open Result.Let_syntax in
+    let%bind owner =
+      Session_recovery_owner.create
+        ~store:t.store
+        ~handle
+        ~job_capacity:t.job_capacity
+        ~capacity
+    in
+    Session_recovery_owner.adopt_writer_exn owner writer;
+    Session_registry.with_recovery_owner t.registry owner (create owner)
 ;;
 
 let cleanup_failed_session t handle =
@@ -5085,12 +5102,48 @@ let import_legacy t ~principal ~source_id ~source_path ~legacy request =
   match result with
   | Ok _ as success -> success
   | Error _ as failure ->
-    (try Eio.Cancel.protect (fun () -> cleanup_failed_session t handle) with
-     | _ -> ());
+    if not (Session_registry.retains_cleanup_handle t.registry handle)
+    then (
+      try Eio.Cancel.protect (fun () -> cleanup_failed_session t handle) with
+      | _ -> ());
     failure
 ;;
 
-let close_recovery_handle t handle = close_actor_lock_after_failure t handle
+let with_uninstalled_recovery_entry
+      t
+      (entry : Session_registry.entry)
+      ~session_id
+      ~fresh
+      f
+  =
+  let owned = ref fresh in
+  let installed () =
+    match Session_registry.find t.registry session_id with
+    | Some actual when phys_equal actual.actor entry.actor ->
+      owned := false;
+      Ok ()
+    | None | Some _ ->
+      Error (unavailable Conflict "recovered entry ownership did not transfer")
+  in
+  let cleanup primary =
+    if !owned then Session_registry.rollback_recovered t.registry ~primary [ entry ]
+  in
+  match f ~installed with
+  | Ok _ as success -> success
+  | Error error as failure ->
+    cleanup (Session_registry.Cleanup_failure.rejected error);
+    failure
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    cleanup (Session_registry.Cleanup_failure.raised exn backtrace);
+    Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let close_recovery_handle t handle =
+  if not (Session_registry.retains_cleanup_handle t.registry handle)
+  then close_actor_lock_after_failure t handle
+;;
+
 let corrupt message = protocol_of_store (Agent_store.Store_error.Corrupt message)
 
 let validate_snapshot handle installed state =
@@ -5520,244 +5573,242 @@ let persist_recovered_state t handle journal persistence state =
 
 let recover_open_handle t handle =
   let open Result.Let_syntax in
-  let%bind lifecycle =
-    Agent_store.Session_store.read_lifecycle t.store handle
-    |> Result.map_error ~f:protocol_of_store
+  let%bind owner =
+    Session_recovery_owner.create
+      ~store:t.store
+      ~handle
+      ~job_capacity:t.job_capacity
+      ~capacity:None
   in
-  let lifecycle = Agent_store.Session_store.Lifecycle.Observation.value lifecycle in
-  let%bind () =
-    if
-      Agent_store.Session_archive_record.Status.equal
-        (Agent_store.Session_archive_record.status lifecycle)
-        Active
-      && Agent_store.Session_archive_record.Admission.equal
-           (Agent_store.Session_archive_record.admission lifecycle)
-           Automatic
-    then Ok ()
-    else
-      Error
-        (unavailable
-           Invalid_state
-           "session lifecycle requires explicit restoration or resume")
-  in
-  let receipts =
-    Session_lifecycle_receipts.create
-      ~store:t.idempotency_store
-      ~server_id:(Agent_store.Session_store.server_id t.store)
-  in
-  let%bind () =
-    List.fold_result
-      (Agent_store.Session_archive_record.receipts lifecycle)
-      ~init:()
-      ~f:(fun () receipt ->
-        if receipt.Agent_store.Session_archive_record.Receipt.completion_acknowledged
-        then Ok ()
-        else
-          Agent_store.Session_store.complete_lifecycle_outcome
-            t.store
-            handle
-            ~key:receipt.key
-            ~request_digest:receipt.request_digest
-            ~complete:
-              (Session_lifecycle_receipts.complete
-                 receipts
-                 ~key:receipt.key
-                 ~request_digest:receipt.request_digest)
-          |> Result.map_error ~f:protocol_of_store)
-  in
-  let%bind journal, recovery = open_recovery t handle in
-  let%bind () = reconcile_command_audits t recovery in
-  let state =
-    Agent_session.Session_persistence.Restored.state recovery.Agent_store.Recovery.state
-  in
-  let%bind parent_stop = parent_stop_recovery t state in
-  let stopping = Option.exists parent_stop ~f:(fun parent -> parent.stop) in
-  let%bind inference_target =
-    match
-      ( Inference.Selection.view state.spec.inference_target
-      , state.lifecycle.desired
-      , stopping
-      , t.inference_policy.migrate_inference_target )
-    with
-    | Unresolved, Running, false, Some migrate ->
-      let%bind target =
-        migrate state.spec
-        |> Result.map_error ~f:(fun error ->
-          unavailable
-            Migration_required
-            (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
-      in
-      let%map _ =
-        Inference.Selection.capture
-          state.spec.inference_target
-          ~target
-          ~limits:t.document_limits
-        |> Result.map_error ~f:(fun error ->
-          unavailable
-            Migration_required
-            (Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error)))
-      in
-      Some target
-    | Captured _, _, _, _
-    | Unresolved, Stopped, _, _
-    | Unresolved, Running, true, _
-    | Unresolved, Running, false, None -> Ok None
-  in
-  let activation_blocked =
-    match state.runtime_initialization with
-    | Pending _ ->
-      Some
-        (unavailable
-           Invalid_state
-           "selected runtime initialization requires explicit activation")
-    | Ready ->
-      (match Inference.Selection.view state.spec.inference_target, inference_target with
-       | Unresolved, None
-         when Agent_protocol.Session.equal_desired_state state.lifecycle.desired Running
-         ->
-         Some
-           (unavailable
+  Session_registry.with_recovery_owner t.registry owner (fun () ->
+    let%bind lifecycle =
+      Agent_store.Session_store.read_lifecycle t.store handle
+      |> Result.map_error ~f:protocol_of_store
+    in
+    let lifecycle = Agent_store.Session_store.Lifecycle.Observation.value lifecycle in
+    let%bind () =
+      if
+        Agent_store.Session_archive_record.Status.equal
+          (Agent_store.Session_archive_record.status lifecycle)
+          Active
+        && Agent_store.Session_archive_record.Admission.equal
+             (Agent_store.Session_archive_record.admission lifecycle)
+             Automatic
+      then Ok ()
+      else
+        Error
+          (unavailable
+             Invalid_state
+             "session lifecycle requires explicit restoration or resume")
+    in
+    let receipts =
+      Session_lifecycle_receipts.create
+        ~store:t.idempotency_store
+        ~server_id:(Agent_store.Session_store.server_id t.store)
+    in
+    let%bind () =
+      List.fold_result
+        (Agent_store.Session_archive_record.receipts lifecycle)
+        ~init:()
+        ~f:(fun () receipt ->
+          if receipt.Agent_store.Session_archive_record.Receipt.completion_acknowledged
+          then Ok ()
+          else
+            Agent_store.Session_store.complete_lifecycle_outcome
+              t.store
+              handle
+              ~key:receipt.key
+              ~request_digest:receipt.request_digest
+              ~complete:
+                (Session_lifecycle_receipts.complete
+                   receipts
+                   ~key:receipt.key
+                   ~request_digest:receipt.request_digest)
+            |> Result.map_error ~f:protocol_of_store)
+    in
+    let%bind journal, recovery = open_recovery t handle in
+    let%bind () = reconcile_command_audits t recovery in
+    let state =
+      Agent_session.Session_persistence.Restored.state recovery.Agent_store.Recovery.state
+    in
+    let%bind parent_stop = parent_stop_recovery t state in
+    let stopping = Option.exists parent_stop ~f:(fun parent -> parent.stop) in
+    let%bind inference_target =
+      match
+        ( Inference.Selection.view state.spec.inference_target
+        , state.lifecycle.desired
+        , stopping
+        , t.inference_policy.migrate_inference_target )
+      with
+      | Unresolved, Running, false, Some migrate ->
+        let%bind target =
+          migrate state.spec
+          |> Result.map_error ~f:(fun error ->
+            unavailable
               Migration_required
-              "execution requires explicit inference migration")
-       | Captured _, _ | Unresolved, _ -> None)
-  in
-  let%bind revision = recovered_revision t state in
-  let%bind () =
-    match state.lifecycle.desired with
-    | Stopped -> Ok ()
-    | Running when not stopping -> check_source_for_execution t state revision
-    | Running -> Ok ()
-  in
-  let%bind profile = recovered_profile t state in
-  let%bind () = verify_recovered_workspace t state in
-  let%bind recovery_first = preparation_sequence t state in
-  let%bind invocations =
-    Agent_session.Invocation_recovery.plan
-      ~state
-      ~namespace:(Agent_protocol.Id.Session.to_string state.identity.session_id)
-      ~first_sequence:recovery_first
-      ~reason:"daemon restarted before the invocation recorded an outcome"
-  in
-  let%bind _first_sequence, reserved_history_through =
-    recovery_reservation t (Int64.of_int invocations.next_sequence)
-  in
-  let%bind recovered_event_documents = recovered_events t recovery in
-  let durable_events =
-    List.map recovered_event_documents ~f:Agent_session.Durable_event_document.value
-  in
-  let%bind observed, capacity =
-    match stopping, activation_blocked with
-    | false, Some failure -> Ok (Agent_protocol.Session.Failed failure, None)
-    | true, _ | false, None ->
-      prepare_recovery_capacity
-        t
-        (if stopping
-         then { state with lifecycle = { desired = Stopped; observed = Stopped } }
-         else state)
-  in
-  let%bind writer = create_recovery_writer t journal recovery state.identity.session_id in
-  let persistence =
-    Agent_session.Session_persistence.create
-      ~before_commit:
-        (Some
-           (fun state ->
-             Agent_store.Session_store.prepare_canonical_projection
-               t.store
-               handle
-               ~metadata:(metadata state)
-               ~entry:(index_entry state)
-             |> Result.map_error ~f:protocol_of_store))
-      ~retention_preflight:(Some (create_retention_preflight t handle journal))
-      ~limits:t.journal_document_limits
-      ~archive_limits:t.document_limits
-      ~restored:recovery.state
-      ~archive:
-        (Agent_session.Compaction_archive.write_document
-           ~env:t.env
-           ~handle
-           ~max_payload_length:t.limits.snapshot_payload_limit)
-      ~command_accepted:(mark_command_accepted t)
-      ~writer
-      ~durability:t.durability
-      ~previous_transaction_hash:recovery.latest_transaction_hash
-  in
-  Agent_session.Session_persistence.restore_replay_documents
-    persistence
-    recovered_event_documents;
-  match
-    commit_recovery_boundary
-      ~parent_stop
-      ~inference_target
-      t
+              (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
+        in
+        let%map _ =
+          Inference.Selection.capture
+            state.spec.inference_target
+            ~target
+            ~limits:t.document_limits
+          |> Result.map_error ~f:(fun error ->
+            unavailable
+              Migration_required
+              (Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error)))
+        in
+        Some target
+      | Captured _, _, _, _
+      | Unresolved, Stopped, _, _
+      | Unresolved, Running, true, _
+      | Unresolved, Running, false, None -> Ok None
+    in
+    let activation_blocked =
+      match state.runtime_initialization with
+      | Pending _ ->
+        Some
+          (unavailable
+             Invalid_state
+             "selected runtime initialization requires explicit activation")
+      | Ready ->
+        (match Inference.Selection.view state.spec.inference_target, inference_target with
+         | Unresolved, None
+           when Agent_protocol.Session.equal_desired_state state.lifecycle.desired Running
+           ->
+           Some
+             (unavailable
+                Migration_required
+                "execution requires explicit inference migration")
+         | Captured _, _ | Unresolved, _ -> None)
+    in
+    let%bind revision = recovered_revision t state in
+    let%bind () =
+      match state.lifecycle.desired with
+      | Stopped -> Ok ()
+      | Running when not stopping -> check_source_for_execution t state revision
+      | Running -> Ok ()
+    in
+    let%bind profile = recovered_profile t state in
+    let%bind () = verify_recovered_workspace t state in
+    let%bind recovery_first = preparation_sequence t state in
+    let%bind invocations =
+      Agent_session.Invocation_recovery.plan
+        ~state
+        ~namespace:(Agent_protocol.Id.Session.to_string state.identity.session_id)
+        ~first_sequence:recovery_first
+        ~reason:"daemon restarted before the invocation recorded an outcome"
+    in
+    let%bind _first_sequence, reserved_history_through =
+      recovery_reservation t (Int64.of_int invocations.next_sequence)
+    in
+    let%bind recovered_event_documents = recovered_events t recovery in
+    let durable_events =
+      List.map recovered_event_documents ~f:Agent_session.Durable_event_document.value
+    in
+    let%bind observed, capacity =
+      match stopping, activation_blocked with
+      | false, Some failure -> Ok (Agent_protocol.Session.Failed failure, None)
+      | true, _ | false, None ->
+        prepare_recovery_capacity
+          t
+          (if stopping
+           then { state with lifecycle = { desired = Stopped; observed = Stopped } }
+           else state)
+    in
+    Option.iter capacity ~f:(Session_recovery_owner.adopt_capacity_exn owner);
+    let%bind writer =
+      create_recovery_writer t journal recovery state.identity.session_id
+    in
+    Session_recovery_owner.adopt_writer_exn owner writer;
+    let persistence =
+      Agent_session.Session_persistence.create
+        ~before_commit:
+          (Some
+             (fun state ->
+               Agent_store.Session_store.prepare_canonical_projection
+                 t.store
+                 handle
+                 ~metadata:(metadata state)
+                 ~entry:(index_entry state)
+               |> Result.map_error ~f:protocol_of_store))
+        ~retention_preflight:(Some (create_retention_preflight t handle journal))
+        ~limits:t.journal_document_limits
+        ~archive_limits:t.document_limits
+        ~restored:recovery.state
+        ~archive:
+          (Agent_session.Compaction_archive.write_document
+             ~env:t.env
+             ~handle
+             ~max_payload_length:t.limits.snapshot_payload_limit)
+        ~command_accepted:(mark_command_accepted t)
+        ~writer
+        ~durability:t.durability
+        ~previous_transaction_hash:recovery.latest_transaction_hash
+    in
+    Agent_session.Session_persistence.restore_replay_documents
       persistence
-      state
-      reserved_history_through
-      observed
-      invocations
-  with
-  | Error _ as failure ->
-    Option.iter capacity ~f:Session_capacity.release;
-    Agent_store.Commit_writer.close writer;
-    failure
-  | Ok recovery_transition ->
-    let state = recovery_transition.Agent_session.Session_transition.state in
-    let durable_events = durable_events @ recovery_transition.events in
-    (match persist_recovered_state t handle journal persistence state with
-     | Error failure ->
-       Option.iter capacity ~f:Session_capacity.release;
-       Agent_store.Commit_writer.close writer;
-       Error failure
-     | Ok () ->
-       let%bind entry =
-         create_unloaded_entry
-           t
-           handle
-           journal
-           state
-           writer
-           persistence
-           durable_events
-           capacity
-       in
-       let restored () =
-         let%bind () =
-           Agent_session.Session_actor.reconcile_inference_recovery entry.actor
+      recovered_event_documents;
+    match
+      commit_recovery_boundary
+        ~parent_stop
+        ~inference_target
+        t
+        persistence
+        state
+        reserved_history_through
+        observed
+        invocations
+    with
+    | Error _ as failure -> failure
+    | Ok recovery_transition ->
+      let state = recovery_transition.Agent_session.Session_transition.state in
+      let durable_events = durable_events @ recovery_transition.events in
+      (match persist_recovered_state t handle journal persistence state with
+       | Error failure -> Error failure
+       | Ok () ->
+         let%bind entry =
+           create_unloaded_entry
+             ~recovery_owner:owner
+             t
+             handle
+             journal
+             state
+             writer
+             persistence
+             durable_events
+             capacity
          in
-         match parent_stop with
-         | Some { stop = true; reference; epoch } ->
-           let%bind _ =
-             Agent_session.Session_actor.stop_delegated_at_epoch
-               ~force:true
-               entry.actor
-               ~reference
-               ~epoch
+         let restored () =
+           let%bind () =
+             Agent_session.Session_actor.reconcile_inference_recovery entry.actor
            in
-           Runtime_owner.unload_and_wait entry.runtime
-         | None | Some { stop = false; _ } ->
-           (match state.lifecycle.observed, activation_blocked with
-            | Stopped, _ | _, Some _ -> Ok ()
-            | ( ( Queued_for_slot
-                | Starting
-                | Recovering
-                | Idle
-                | Running_turn _
-                | Compacting _
-                | Waiting_for_permission _
-                | Stopping
-                | Failed _ )
-              , None ) -> Runtime_owner.ensure_loaded entry.runtime)
-       in
-       (match restored () with
-        | Ok () -> Ok entry
-        | Error failure ->
-          (try Eio.Cancel.protect entry.close with
-           | _ -> ());
-          Error failure
-        | exception exn ->
-          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-          (try Eio.Cancel.protect entry.close with
-           | _ -> ());
-          Exn.raise_with_original_backtrace exn backtrace))
+           match parent_stop with
+           | Some { stop = true; reference; epoch } ->
+             let%bind _ =
+               Agent_session.Session_actor.stop_delegated_at_epoch
+                 ~force:true
+                 entry.actor
+                 ~reference
+                 ~epoch
+             in
+             Runtime_owner.unload_and_wait entry.runtime
+           | None | Some { stop = false; _ } ->
+             (match state.lifecycle.observed, activation_blocked with
+              | Stopped, _ | _, Some _ -> Ok ()
+              | ( ( Queued_for_slot
+                  | Starting
+                  | Recovering
+                  | Idle
+                  | Running_turn _
+                  | Compacting _
+                  | Waiting_for_permission _
+                  | Stopping
+                  | Failed _ )
+                , None ) -> Runtime_owner.ensure_loaded entry.runtime)
+         in
+         let%map () = restored () in
+         entry))
 ;;
 
 let read_owned_session t handle =
@@ -5848,12 +5899,7 @@ let recover_index_entry t index_entry =
   in
   match handle_result with
   | Error _ as failure -> failure
-  | Ok handle ->
-    (match recover_open_handle t handle with
-     | Ok entry -> Ok entry
-     | Error _ as failure ->
-       close_recovery_handle t handle;
-       failure)
+  | Ok handle -> recover_open_handle t handle
 ;;
 
 let recover_session = recover_index_entry
@@ -5908,7 +5954,6 @@ let rebuild_retained_projection t indexed =
         indexed.Agent_store.Session_index.Entry.session.id
       |> Result.map_error ~f:protocol_of_store
     in
-    let close () = Agent_store.Session_store.close_session t.store handle in
     let reconcile () =
       let%bind state = read_owned_session t handle in
       Agent_store.Session_store.write_metadata
@@ -5918,23 +5963,7 @@ let rebuild_retained_projection t indexed =
         (metadata state)
       |> Result.map_error ~f:protocol_of_store
     in
-    match reconcile () with
-    | Ok () -> close () |> Result.map_error ~f:protocol_of_store
-    | Error _ as failure ->
-      (try
-         Eio.Cancel.protect (fun () ->
-           ignore (close () : (unit, Agent_store.Store_error.t) Result.t))
-       with
-       | _ -> ());
-      failure
-    | exception exn ->
-      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-      (try
-         Eio.Cancel.protect (fun () ->
-           ignore (close () : (unit, Agent_store.Store_error.t) Result.t))
-       with
-       | _ -> ());
-      Exn.raise_with_original_backtrace exn backtrace)
+    Session_registry.with_recovery_handle t.registry ~store:t.store handle reconcile)
 ;;
 
 let recover_sessions t =
@@ -6030,26 +6059,39 @@ let recover_sessions t =
     List.fold_result indexed ~init:() ~f:(fun () entry ->
       Result.map (visit 0 entry.session.id) ~f:ignore)
   in
-  let rollback recovered =
-    List.iter recovered ~f:(fun (id, entry) ->
-      ignore (Session_registry.remove t.registry id : Session_registry.entry option);
-      entry.Session_registry.close ())
+  let rollback primary recovered =
+    Session_registry.rollback_recovered t.registry ~primary (List.map recovered ~f:snd)
   in
   let rec loop recovered = function
     | [] -> Ok (List.rev_map recovered ~f:snd)
     | index_entry :: rest ->
-      (match recover_index_entry t index_entry with
-       | Ok entry ->
-         let id = index_entry.session.id in
-         (match Session_registry.add t.registry ~session_id:id entry with
-          | Ok () -> loop ((id, entry) :: recovered) rest
-          | Error _ as failure ->
-            entry.close ();
-            rollback recovered;
-            failure)
-       | Error _ as failure ->
-         rollback recovered;
-         failure)
+      let pending = ref None in
+      let step () =
+        let open Result.Let_syntax in
+        let%bind entry = recover_index_entry t index_entry in
+        pending := Some entry;
+        let id = index_entry.session.id in
+        let%map () = Session_registry.add t.registry ~session_id:id entry in
+        (id, entry) :: recovered
+      in
+      let owned () =
+        Option.value_map !pending ~default:recovered ~f:(fun entry ->
+          (index_entry.session.id, entry) :: recovered)
+      in
+      let next =
+        match step () with
+        | Ok next -> Ok next
+        | Error error as failure ->
+          rollback (Session_registry.Cleanup_failure.rejected error) (owned ());
+          failure
+        | exception exn ->
+          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+          rollback (Session_registry.Cleanup_failure.raised exn backtrace) (owned ());
+          Exn.raise_with_original_backtrace exn backtrace
+      in
+      (match next with
+       | Ok next -> loop next rest
+       | Error _ as failure -> failure)
   in
   loop [] (List.rev !ordered)
 ;;
@@ -6847,19 +6889,21 @@ let create_delegated_session
               in
               Error error)
         in
-        let owned = ref fresh in
-        Exn.protect
-          ~finally:(fun () -> if !owned then entry.close ())
-          ~f:(fun () ->
-            let%bind () = publication () in
-            let%bind () =
-              match fresh with
-              | false -> Ok ()
-              | true -> Session_registry.add t.registry ~session_id:child_id entry
-            in
-            owned := false;
-            let%map () = resume_generated_initial_start t entry in
-            entry)))
+        with_uninstalled_recovery_entry
+          t
+          entry
+          ~session_id:child_id
+          ~fresh
+          (fun ~installed ->
+             let%bind () = publication () in
+             let%bind () =
+               match fresh with
+               | false -> Ok ()
+               | true -> Session_registry.add t.registry ~session_id:child_id entry
+             in
+             let%bind () = installed () in
+             let%map () = resume_generated_initial_start t entry in
+             entry)))
   in
   with_generated_creation_lock t run
 ;;
@@ -7260,127 +7304,129 @@ let reconcile_generated_creations t =
                              | Reserved | Artifact_installed -> Ok ()
                              | Linked -> assert false)
                           | Some (child, fresh) ->
-                            let owned = ref fresh in
-                            Exn.protect
-                              ~finally:(fun () -> if !owned then child.close ())
-                              ~f:(fun () ->
-                                let%bind state = A.state child.actor in
-                                let%bind () = verify state in
-                                let%bind () =
-                                  match record.admission.authored_tool with
-                                  | Some _ ->
-                                    Agent_session.Authored_agent_source.load_artifact
-                                      ~artifact_store:artifacts
-                                      ~reservation:record
-                                    |> Result.map ~f:ignore
-                                  | None ->
-                                    G.restore
-                                      ?limits:
-                                        (Option.map
-                                           t.authoring_validation_host
-                                           ~f:
-                                             Chat_response.Authoring_validation
-                                             .compilation_limits)
-                                      ?source_limits:
-                                        (Option.map
-                                           t.authoring_validation_host
-                                           ~f:
-                                             Chat_response.Authoring_validation
-                                             .bundle_limits)
-                                      ?catalog:
-                                        (Option.bind
-                                           t.authoring_validation_host
-                                           ~f:
-                                             Chat_response.Authoring_validation
-                                             .delegated_catalog)
-                                      ~env:t.env
-                                      ~artifact_store:artifacts
-                                      ~revision_id:record.admission.revision_id
-                                      ~manifest_sha256:record.admission.manifest_sha256
-                                      ~current_capabilities:(fun () -> current)
-                                      ~pins:record.admission.capability_pins
-                                      ()
-                                    |> Result.map_error ~f:diagnostics
-                                    |> Result.map ~f:ignore
-                                in
-                                let authority =
-                                  Authority.create
-                                    ~authored_capabilities:
-                                      (Authored_resources.resolve t.authored_resources)
-                                    ~max_depth:t.limits.delegation_max_depth
-                                    ~moderation:(parent_moderation_source t)
-                                    ~authorize_independent:(authorize_independent t)
-                                    ~host:
-                                      (host
-                                         ~parent_id:record.key.parent_session_id
-                                         ~runtime
-                                         ~current)
-                                    ~reference
-                                    ~capabilities:selected
-                                    ()
-                                in
-                                let%bind profile =
-                                  permission_profile_revision
-                                    t
-                                    state.spec.permission_profile_digest
-                                in
-                                let%bind () =
-                                  Authority.check_preparation
-                                    authority
-                                    ~session_id:child_id
-                                    ~revision_id:state.spec.prompt_revision_id
-                                    ~manifest_sha256:record.admission.manifest_sha256
-                                    ~permission_profile:profile
-                                in
-                                let%bind () =
-                                  Agent_store.Durable_file.sync_directory
-                                    ~env:t.env
-                                    ~path:
-                                      (Agent_store.Data_root.sessions_path
-                                         (S.data_root t.store))
-                                  |> Result.map_error ~f:protocol_of_store
-                                in
-                                let%bind record =
-                                  D.advance ledger record Child_installed
-                                  |> Result.map_error ~f:protocol_of_store
-                                in
-                                let%bind () =
-                                  A.checkpoint parent.actor ~persist:(fun latest ->
-                                    let%bind latest_fingerprint =
-                                      Authority.fingerprint ?moderator latest
-                                    in
-                                    match
-                                      ( latest.lifecycle.desired
-                                      , latest.halted
-                                      , latest.failure )
-                                    with
-                                    | Running, false, None
-                                      when String.equal fingerprint latest_fingerprint
-                                           && Int64.equal
-                                                latest.stop_epoch
-                                                before.stop_epoch ->
-                                      D.advance ledger record Linked
-                                      |> Result.map ~f:ignore
-                                      |> Result.map_error ~f:protocol_of_store
-                                    | Stopped, _, _ -> revoke record Parent_stopped
-                                    | _
-                                      when not
-                                             (Int64.equal
-                                                latest.stop_epoch
-                                                before.stop_epoch) ->
-                                      revoke record Parent_stopped
-                                    | _ -> revoke record Authority_changed)
-                                in
-                                let%map () =
-                                  match fresh with
-                                  | false -> Ok ()
-                                  | true ->
-                                    Session_registry.add
-                                      t.registry
-                                      ~session_id:child_id
-                                      child
-                                in
-                                owned := false))))))))
+                            with_uninstalled_recovery_entry
+                              t
+                              child
+                              ~session_id:child_id
+                              ~fresh
+                              (fun ~installed ->
+                                 let%bind state = A.state child.actor in
+                                 let%bind () = verify state in
+                                 let%bind () =
+                                   match record.admission.authored_tool with
+                                   | Some _ ->
+                                     Agent_session.Authored_agent_source.load_artifact
+                                       ~artifact_store:artifacts
+                                       ~reservation:record
+                                     |> Result.map ~f:ignore
+                                   | None ->
+                                     G.restore
+                                       ?limits:
+                                         (Option.map
+                                            t.authoring_validation_host
+                                            ~f:
+                                              Chat_response.Authoring_validation
+                                              .compilation_limits)
+                                       ?source_limits:
+                                         (Option.map
+                                            t.authoring_validation_host
+                                            ~f:
+                                              Chat_response.Authoring_validation
+                                              .bundle_limits)
+                                       ?catalog:
+                                         (Option.bind
+                                            t.authoring_validation_host
+                                            ~f:
+                                              Chat_response.Authoring_validation
+                                              .delegated_catalog)
+                                       ~env:t.env
+                                       ~artifact_store:artifacts
+                                       ~revision_id:record.admission.revision_id
+                                       ~manifest_sha256:record.admission.manifest_sha256
+                                       ~current_capabilities:(fun () -> current)
+                                       ~pins:record.admission.capability_pins
+                                       ()
+                                     |> Result.map_error ~f:diagnostics
+                                     |> Result.map ~f:ignore
+                                 in
+                                 let authority =
+                                   Authority.create
+                                     ~authored_capabilities:
+                                       (Authored_resources.resolve t.authored_resources)
+                                     ~max_depth:t.limits.delegation_max_depth
+                                     ~moderation:(parent_moderation_source t)
+                                     ~authorize_independent:(authorize_independent t)
+                                     ~host:
+                                       (host
+                                          ~parent_id:record.key.parent_session_id
+                                          ~runtime
+                                          ~current)
+                                     ~reference
+                                     ~capabilities:selected
+                                     ()
+                                 in
+                                 let%bind profile =
+                                   permission_profile_revision
+                                     t
+                                     state.spec.permission_profile_digest
+                                 in
+                                 let%bind () =
+                                   Authority.check_preparation
+                                     authority
+                                     ~session_id:child_id
+                                     ~revision_id:state.spec.prompt_revision_id
+                                     ~manifest_sha256:record.admission.manifest_sha256
+                                     ~permission_profile:profile
+                                 in
+                                 let%bind () =
+                                   Agent_store.Durable_file.sync_directory
+                                     ~env:t.env
+                                     ~path:
+                                       (Agent_store.Data_root.sessions_path
+                                          (S.data_root t.store))
+                                   |> Result.map_error ~f:protocol_of_store
+                                 in
+                                 let%bind record =
+                                   D.advance ledger record Child_installed
+                                   |> Result.map_error ~f:protocol_of_store
+                                 in
+                                 let%bind () =
+                                   A.checkpoint parent.actor ~persist:(fun latest ->
+                                     let%bind latest_fingerprint =
+                                       Authority.fingerprint ?moderator latest
+                                     in
+                                     match
+                                       ( latest.lifecycle.desired
+                                       , latest.halted
+                                       , latest.failure )
+                                     with
+                                     | Running, false, None
+                                       when String.equal fingerprint latest_fingerprint
+                                            && Int64.equal
+                                                 latest.stop_epoch
+                                                 before.stop_epoch ->
+                                       D.advance ledger record Linked
+                                       |> Result.map ~f:ignore
+                                       |> Result.map_error ~f:protocol_of_store
+                                     | Stopped, _, _ -> revoke record Parent_stopped
+                                     | _
+                                       when not
+                                              (Int64.equal
+                                                 latest.stop_epoch
+                                                 before.stop_epoch) ->
+                                       revoke record Parent_stopped
+                                     | _ -> revoke record Authority_changed)
+                                 in
+                                 let%bind () =
+                                   match fresh with
+                                   | false -> Ok ()
+                                   | true ->
+                                     Session_registry.add
+                                       t.registry
+                                       ~session_id:child_id
+                                       child
+                                 in
+                                 installed ()))))))))
 ;;
 
 let managed_child t borrowed child_id =

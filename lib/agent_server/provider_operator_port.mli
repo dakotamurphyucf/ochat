@@ -34,6 +34,14 @@ val receipt
   -> P.Command.t
   -> (P.Command_receipt.t, P.Error.t) Result.t
 
+(** Permanent close first denies new dispatch/receipt admission, then serializes
+    actual callback completion through a private close coordinator. Callback IO
+    runs under cancellation protection; concurrent close callers join that same
+    completion, and a failed callback retains Closing for an explicit retry.
+    Original exceptions/backtraces propagate, never a fabricated successful close.
+    The trusted callback must retain unfinished resources on failure, tolerate
+    retries, and must not recursively close this same port. *)
 val close : t -> unit
+
 val protocol_error : DTO.Error.t -> P.Error.t
 val is_provider_command : P.Command.t -> bool

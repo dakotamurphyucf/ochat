@@ -4,6 +4,7 @@ type phase =
   | Payload_deletion
   | Final_cleanup
   | Rejection_completion
+  | Actor_lock_release
 
 type t
 
