@@ -42,7 +42,10 @@ val complete_receipts
   -> complete:(R.Receipt.t -> (unit, Store_error.t) Result.t)
   -> (unit, Store_error.t) Result.t
 
-(** Reject any unacknowledged proof. Root marker survives recursive payload
-    cleanup and directory sync establishing payload absence. Only afterward
-    remove marker/container and sync lost+found. Symlinks are never followed. *)
+(** Reject any unacknowledged proof. Before destructive payload cleanup, move
+    any nested workspace directory whole beside the stable root marker and sync
+    both rename parents. Workspace and original proof remain permanently after
+    payload absence; retained containers never become indexed sessions. Without
+    a workspace, retire marker/container only after payload absence and its
+    parent sync, then sync lost+found. Symlinks are never followed. *)
 val cleanup : t -> (unit, Store_error.t) Result.t

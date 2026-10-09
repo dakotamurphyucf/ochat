@@ -92,7 +92,9 @@ let inspect_container t =
   else if
     not
       (List.for_all names ~f:(fun name ->
-         String.equal name "ARCHIVED" || String.equal name "payload"))
+         String.equal name "ARCHIVED"
+         || String.equal name "payload"
+         || String.equal name "workspace"))
   then Error (Store_error.Corrupt "removal container has unknown entries")
   else (
     let%bind root_kind = kind ~env:t.env (marker_path t Root) in
@@ -372,53 +374,61 @@ let complete_receipts t ~complete =
     List.filter (receipts t) ~f:(fun receipt ->
       not receipt.R.Receipt.completion_acknowledged)
   in
-  List.fold_result pending ~init:() ~f:(fun () receipt ->
-    let%bind () = complete receipt in
-    let%bind document =
-      document t
-      |> Result.of_option
-           ~error:(Store_error.Corrupt "removal proof vanished during completion")
-    in
-    let%bind acknowledged =
-      C.acknowledge document ~key:receipt.key ~request_digest:receipt.request_digest
-      |> Document_fields.store
-    in
-    let%bind bytes = Session_lifecycle_documents.encoded_document acknowledged in
-    let marker =
-      match t.location with
-      | Source _ -> Filename.concat t.source "ARCHIVED"
-      | Container { marker; document = _ } -> marker_path t marker
-      | Empty | Finished -> Filename.concat t.container "ARCHIVED"
-    in
-    let%bind () =
-      Durable_file.replace
-        ~env:t.env
-        ~durability:Flush_file_and_directory
-        ~path:marker
-        bytes
-    in
-    (match t.location with
-     | Source _ -> t.location <- Source acknowledged
-     | Container { marker; document = _ } ->
-       t.location <- Container { marker; document = acknowledged }
-     | Empty | Finished -> ());
-    Ok ())
-  |> Result.bind ~f:(fun () ->
-    match document t with
-    | None -> Ok ()
-    | Some document ->
-      let%bind bytes = Session_lifecycle_documents.encoded_document document in
+  if List.is_empty pending
+  then (
+    match t.location with
+    | Source _ -> sync t t.source
+    | Container { marker = Root; _ } -> sync t t.container
+    | Container { marker = Payload; _ } -> sync t (payload t)
+    | Empty | Finished -> Ok ())
+  else
+    List.fold_result pending ~init:() ~f:(fun () receipt ->
+      let%bind () = complete receipt in
+      let%bind document =
+        document t
+        |> Result.of_option
+             ~error:(Store_error.Corrupt "removal proof vanished during completion")
+      in
+      let%bind acknowledged =
+        C.acknowledge document ~key:receipt.key ~request_digest:receipt.request_digest
+        |> Document_fields.store
+      in
+      let%bind bytes = Session_lifecycle_documents.encoded_document acknowledged in
       let marker =
         match t.location with
         | Source _ -> Filename.concat t.source "ARCHIVED"
         | Container { marker; document = _ } -> marker_path t marker
         | Empty | Finished -> Filename.concat t.container "ARCHIVED"
       in
-      Durable_file.replace
-        ~env:t.env
-        ~durability:Flush_file_and_directory
-        ~path:marker
-        bytes)
+      let%bind () =
+        Durable_file.replace
+          ~env:t.env
+          ~durability:Flush_file_and_directory
+          ~path:marker
+          bytes
+      in
+      (match t.location with
+       | Source _ -> t.location <- Source acknowledged
+       | Container { marker; document = _ } ->
+         t.location <- Container { marker; document = acknowledged }
+       | Empty | Finished -> ());
+      Ok ())
+    |> Result.bind ~f:(fun () ->
+      match document t with
+      | None -> Ok ()
+      | Some document ->
+        let%bind bytes = Session_lifecycle_documents.encoded_document document in
+        let marker =
+          match t.location with
+          | Source _ -> Filename.concat t.source "ARCHIVED"
+          | Container { marker; document = _ } -> marker_path t marker
+          | Empty | Finished -> Filename.concat t.container "ARCHIVED"
+        in
+        Durable_file.replace
+          ~env:t.env
+          ~durability:Flush_file_and_directory
+          ~path:marker
+          bytes)
 ;;
 
 let cleanup t =
@@ -448,7 +458,16 @@ let cleanup t =
       in
       t.location <- Finished;
       sync t (Data_root.lost_and_found_path t.data_root)
-    | Container { marker = Root; document = _ } ->
+    | Container { marker = Root; document } ->
+      let%bind workspace =
+        Session_removal_workspace.create
+          ~env:t.env
+          ~data_root:t.data_root
+          ~session_id:t.session_id
+          ~container:t.container
+          ~document
+      in
+      let%bind () = Session_removal_workspace.preserve workspace in
       let%bind () =
         io ~operation:"remove terminal session payload" ~path:(payload t) (fun () ->
           Eio.Path.rmtree ~missing_ok:true (path t (payload t)))
@@ -459,16 +478,22 @@ let cleanup t =
         | `Not_found -> sync t t.container
         | _ -> Error (Store_error.Corrupt "removed payload still exists")
       in
-      Eio.Cancel.protect (fun () ->
-        let%bind () =
-          io ~operation:"retire terminal removal marker" ~path:t.container (fun () ->
-            Eio.Path.unlink (path t (marker_path t Root)))
-        in
-        t.location <- Empty;
-        let%bind () =
-          io ~operation:"retire terminal removal container" ~path:t.container (fun () ->
-            Eio.Path.rmdir (path t t.container))
-        in
-        t.location <- Finished;
-        sync t (Data_root.lost_and_found_path t.data_root)))
+      let%bind disposition = Session_removal_workspace.disposition workspace in
+      (match disposition with
+       | Retained -> Ok ()
+       | Absent ->
+         Eio.Cancel.protect (fun () ->
+           let%bind () =
+             io ~operation:"retire terminal removal marker" ~path:t.container (fun () ->
+               Eio.Path.unlink (path t (marker_path t Root)))
+           in
+           t.location <- Empty;
+           let%bind () =
+             io
+               ~operation:"retire terminal removal container"
+               ~path:t.container
+               (fun () -> Eio.Path.rmdir (path t t.container))
+           in
+           t.location <- Finished;
+           sync t (Data_root.lost_and_found_path t.data_root))))
 ;;

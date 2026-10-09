@@ -172,7 +172,12 @@ prompt/configuration and workspace contents, while closing runtime ownership.
 Use `session.list` with `archive: "archived"` or `"all"` to discover retained
 sessions and `session.get` to inspect them without loading a runtime. Permanent
 `policy: "remove"` removes session-owned storage after guarded cleanup; workspace
-contents are preserved. A live parent/child ownership obligation prevents removal.
+contents are preserved. For a session-directory workspace, Remove relocates the
+whole directory to `<data-root>/lost-and-found/deleted-<session-id>-<transaction-id>/workspace`,
+retaining the original terminal removal proof beside it. These directories are
+not cataloged or restored as sessions; subsequent cleanup preserves them, including
+empty directories and ownership markers. External and system-temporary workspaces
+keep their existing paths. A live parent/child ownership obligation prevents removal.
 
 `session.restore` and `session.resume` accept `expected` and `idempotency_key`.
 Copy the current inspection's lifecycle expected anchor: `reference` contains

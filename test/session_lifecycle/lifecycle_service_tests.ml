@@ -744,6 +744,16 @@ let%expect_test
             let client = connection daemon (principal ()) in
             initialize client;
             let session, attachment = create_session ~key:"remove-fault-create" client in
+            (* External workspace content is asserted below. Remove the unused
+               empty session-layout workspace to exercise terminal retirement. *)
+            let session_directory =
+              Agent_store.Data_root.session_path
+                (Agent_store.Session_store.data_root (Agent_server.Daemon.store daemon))
+                session.id
+            in
+            Eio.Path.rmdir
+              Eio.Path.(
+                Eio.Stdenv.fs raw_env / Filename.concat session_directory "workspace");
             let command =
               delete_command
                 client
@@ -829,6 +839,18 @@ let%expect_test
               | Rejection_completion | Actor_lock_release ->
                 failwith "not an irreversible boundary"
             in
+            (match policy with
+             | Archive -> ()
+             | Remove ->
+               let session_directory =
+                 Agent_store.Data_root.session_path
+                   (Agent_store.Session_store.data_root
+                      (Agent_server.Daemon.store daemon))
+                   session.id
+               in
+               Eio.Path.rmdir
+                 Eio.Path.(
+                   Eio.Stdenv.fs raw_env / Filename.concat session_directory "workspace"));
             let command =
               delete_command
                 client

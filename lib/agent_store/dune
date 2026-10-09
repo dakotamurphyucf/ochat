@@ -18,6 +18,7 @@
   session_index_entry
   session_index_document
   session_lifecycle_documents
+  session_removal_workspace
   session_removal_directory
   store_schema_document
   session_archive_record

@@ -3153,6 +3153,8 @@ module Removal_fault = struct
     | Proof_placement
     | Payload_deletion
     | Final_cleanup
+    | Workspace_placement
+    | Workspace_sync
 end
 
 let rec removal_fault_directory
@@ -3186,11 +3188,34 @@ let rec removal_fault_directory
 
     let rename directory source _destination target =
       match !phase with
+      | Some Removal_fault.Workspace_placement
+        when String.is_suffix (qualify target) ~suffix:"/workspace"
+             && String.is_substring (qualify target) ~substring:"/deleted-" ->
+        Original.rename directory source underlying_directory target;
+        fail ()
       | Some Removal_fault.Proof_placement when marker_in_root (qualify target) ->
         Original.rename directory source underlying_directory target;
         fail ()
-      | Some (Proof_placement | Payload_deletion | Final_cleanup) | None ->
-        Original.rename directory source underlying_directory target
+      | Some
+          ( Proof_placement
+          | Payload_deletion
+          | Final_cleanup
+          | Workspace_placement
+          | Workspace_sync )
+      | None -> Original.rename directory source underlying_directory target
+    ;;
+
+    let open_in directory ~sw name =
+      match !phase with
+      | Some Removal_fault.Workspace_sync
+        when String.is_suffix (qualify name) ~suffix:"/payload/." -> fail ()
+      | Some
+          ( Proof_placement
+          | Payload_deletion
+          | Final_cleanup
+          | Workspace_placement
+          | Workspace_sync )
+      | None -> Original.open_in directory ~sw name
     ;;
 
     let unlink directory name =
@@ -3199,8 +3224,13 @@ let rec removal_fault_directory
       | Some Removal_fault.Payload_deletion
         when String.is_substring qualified ~substring:"/payload/" -> fail ()
       | Some Final_cleanup when marker_in_root qualified -> fail ()
-      | Some (Proof_placement | Payload_deletion | Final_cleanup) | None ->
-        Original.unlink directory name
+      | Some
+          ( Proof_placement
+          | Payload_deletion
+          | Final_cleanup
+          | Workspace_placement
+          | Workspace_sync )
+      | None -> Original.unlink directory name
     ;;
   end
   in
@@ -3245,6 +3275,12 @@ let%expect_test
       let handle =
         S.open_session store ~sw ~actor_lock_nonce:"removal-crash" session_id |> store_ok
       in
+      (* This fixture covers complete container retirement with no workspace;
+         nested workspace retention has its own content/restart regression. *)
+      Eio.Path.rmdir
+        (crash_recovery_path
+           env
+           (Filename.concat (S.Handle.directory handle) "workspace"));
       let observed = S.read_lifecycle store handle |> store_ok in
       let state = S.Lifecycle.Observation.value observed in
       let session = (S.Handle.metadata handle).session in
@@ -3441,4 +3477,223 @@ let%expect_test "retained artifact store opens existing namespace without repair
          , unchanged )
          : bool * bool * bool * bool * bool * bool)]);
   [%expect {| (true true true true true true) |}]
+;;
+
+let%expect_test "removed nested workspace and original proof survive retry and reopen" =
+  let module S = Agent_store.Session_store in
+  let module M = Agent_store.Session_removal_directory in
+  let module R = Agent_store.Session_archive_record in
+  with_temp_directory "ochat-retained-removed-workspace" (fun raw_env root ->
+    let phase = ref None in
+    let env = removal_fault_env raw_env phase in
+    Eio.Switch.run (fun sw ->
+      let store = crash_recovery_create ~sw env root in
+      crash_recovery_add store ~sw session_id 7L;
+      let handle =
+        S.open_session store ~sw ~actor_lock_nonce:"workspace-remove" session_id
+        |> store_ok
+      in
+      let workspace = Filename.concat (S.Handle.directory handle) "workspace" in
+      Eio.Path.save
+        ~create:(`Exclusive 0o600)
+        (crash_recovery_path env (Filename.concat workspace "user-file"))
+        "exact user bytes";
+      Eio.Path.save
+        ~create:(`Exclusive 0o600)
+        (crash_recovery_path env (Filename.concat workspace "ownership-marker"))
+        "exact marker";
+      let observed = S.read_lifecycle store handle |> store_ok in
+      let state = S.Lifecycle.Observation.value observed in
+      let session = (S.Handle.metadata handle).session in
+      let anchor =
+        R.Anchor.create
+          ~generation:session.generation
+          ~session_revision:session.revision
+          ~latest_event_sequence:session.latest_event_sequence
+        |> protocol_ok
+      in
+      let key =
+        Agent_store.Idempotency_store.Key.
+          { principal_id =
+              Agent_protocol.Id.Principal.of_string "pri_terminal_owner" |> protocol_ok
+          ; session_id = Some session_id
+          ; method_name = "session.delete"
+          ; idempotency_key =
+              Agent_protocol.Idempotency_key.of_string "original-remove" |> protocol_ok
+          }
+      in
+      let request_digest = String.make 64 'c' in
+      let transition =
+        R.prepare
+          state
+          ~expected:(R.revision state)
+          ~anchor
+          ~action:Remove
+          ~key
+          ~request_digest
+          ~now:timestamp
+        |> protocol_ok
+      in
+      let current_entry =
+        Agent_store.Session_index.find_checked (S.session_index store) session_id
+        |> store_ok
+        |> Option.value_exn
+      in
+      let prepared =
+        S.prepare_lifecycle
+          store
+          handle
+          observed
+          ~current_entry
+          ~transition
+          ~now:timestamp
+        |> store_ok
+      in
+      let removal = S.begin_removal store handle prepared |> store_ok in
+      let fail_at phase_name =
+        phase := Some phase_name;
+        match
+          S.finish_removal
+            store
+            removal
+            ~complete:(fun _ -> Ok ())
+            ~retire:(S.close_session store)
+        with
+        | Error (Agent_store.Store_error.Io _) -> Option.is_none !phase
+        | Ok () | Error _ -> false
+      in
+      let placement_failed = fail_at Workspace_placement in
+      let sync_failed = fail_at Workspace_sync in
+      print_s [%sexp (placement_failed : bool), (sync_failed : bool)];
+      phase := Some Removal_fault.Payload_deletion;
+      let payload_failed =
+        match
+          S.finish_removal
+            store
+            removal
+            ~complete:(fun _ -> Ok ())
+            ~retire:(S.close_session store)
+        with
+        | Error (Agent_store.Store_error.Io _) -> Option.is_none !phase
+        | Ok () | Error _ -> false
+      in
+      print_s [%sexp (payload_failed : bool)];
+      S.finish_removal
+        store
+        removal
+        ~complete:(fun _ -> Ok ())
+        ~retire:(S.close_session store)
+      |> store_ok;
+      let directory = Agent_store.Data_root.lost_and_found_path (S.data_root store) in
+      let container =
+        Filename.concat
+          directory
+          (Eio.Path.read_dir (crash_recovery_path env directory) |> List.hd_exn)
+      in
+      let retained = Filename.concat container "workspace" in
+      let marker = Filename.concat container "ARCHIVED" in
+      let marker_before = Eio.Path.load (crash_recovery_path env marker) in
+      let check () =
+        String.equal
+          (Eio.Path.load (crash_recovery_path env (Filename.concat retained "user-file")))
+          "exact user bytes"
+        && String.equal
+             (Eio.Path.load
+                (crash_recovery_path env (Filename.concat retained "ownership-marker")))
+             "exact marker"
+      in
+      let proof =
+        M.discover ~env ~data_root:(S.data_root store) |> store_ok |> List.hd_exn
+      in
+      let payload = Filename.concat container "payload" in
+      let collision = Filename.concat payload "workspace" in
+      Eio.Path.mkdir ~perm:0o700 (crash_recovery_path env payload);
+      Eio.Path.mkdir ~perm:0o700 (crash_recovery_path env collision);
+      Eio.Path.save
+        ~create:(`Exclusive 0o600)
+        (crash_recovery_path env (Filename.concat collision "other-user-file"))
+        "other bytes";
+      let collision_rejected =
+        match M.cleanup proof with
+        | Error (Agent_store.Store_error.Corrupt _) -> true
+        | Ok () | Error _ -> false
+      in
+      let collision_preserved =
+        String.equal
+          (Eio.Path.load
+             (crash_recovery_path env (Filename.concat collision "other-user-file")))
+          "other bytes"
+        && check ()
+      in
+      Eio.Path.rmtree (crash_recovery_path env payload);
+      Eio.Path.mkdir ~perm:0o700 (crash_recovery_path env payload);
+      Eio.Path.symlink ~link_to:retained (crash_recovery_path env collision);
+      let symlink_rejected =
+        match M.cleanup proof with
+        | Error (Agent_store.Store_error.Corrupt _) -> true
+        | Ok () | Error _ -> false
+      in
+      Eio.Path.unlink (crash_recovery_path env collision);
+      Eio.Path.rmdir (crash_recovery_path env payload);
+      print_s
+        [%sexp
+          (collision_rejected : bool)
+        , (collision_preserved : bool)
+        , (symlink_rejected : bool)
+        , (check () : bool)];
+      M.complete_receipts proof ~complete:(fun _ ->
+        failwith "acknowledged receipt replayed")
+      |> store_ok;
+      M.cleanup proof |> store_ok;
+      print_s
+        [%sexp
+          (check () : bool)
+        , (String.equal marker_before (Eio.Path.load (crash_recovery_path env marker))
+           : bool)
+        , (not (path_exists env (S.Handle.directory handle)) : bool)];
+      S.close store |> store_ok;
+      let reopened = crash_recovery_open ~sw env root |> store_ok in
+      let proofs = M.discover ~env ~data_root:(S.data_root reopened) |> store_ok in
+      List.iter proofs ~f:(fun proof -> M.cleanup proof |> store_ok);
+      print_s
+        [%sexp
+          (check () : bool)
+        , (List.is_empty (S.list_sessions_checked reopened |> store_ok) : bool)
+        , (String.equal marker_before (Eio.Path.load (crash_recovery_path env marker))
+           : bool)];
+      (* User-side edits do not turn marker-only or empty directories into
+         cleanup authority. Every existing retained directory survives. *)
+      Eio.Path.unlink (crash_recovery_path env (Filename.concat retained "user-file"));
+      List.iter proofs ~f:(fun proof -> M.cleanup proof |> store_ok);
+      let marker_only =
+        String.equal
+          (Eio.Path.load
+             (crash_recovery_path env (Filename.concat retained "ownership-marker")))
+          "exact marker"
+      in
+      Eio.Path.unlink
+        (crash_recovery_path env (Filename.concat retained "ownership-marker"));
+      List.iter proofs ~f:(fun proof -> M.cleanup proof |> store_ok);
+      let empty_retained =
+        match Eio.Path.kind ~follow:false (crash_recovery_path env retained) with
+        | `Directory ->
+          List.is_empty (Eio.Path.read_dir (crash_recovery_path env retained))
+        | _ -> false
+      in
+      print_s
+        [%sexp
+          (marker_only : bool)
+        , (empty_retained : bool)
+        , (String.equal marker_before (Eio.Path.load (crash_recovery_path env marker))
+           : bool)];
+      S.close reopened |> store_ok));
+  [%expect
+    {|
+    (true true)
+    true
+    (true true true true)
+    (true true true)
+    (true true true)
+    (true true true)
+    |}]
 ;;
