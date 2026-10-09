@@ -5,7 +5,8 @@ module C = Agent_client
 
 let query ?cursor ~archive () =
   P.Session.List_request.
-    { page = P.Page.Request.create ~limit:1 ?cursor () |> protocol_ok
+    { organization = Agent_protocol.Session_organization.Query.default
+    ; page = P.Page.Request.create ~limit:1 ?cursor () |> protocol_ok
     ; desired_state = None
     ; prompt_id = None
     ; workspace_id = None
@@ -252,7 +253,8 @@ let%expect_test
   let owner = (principal_with_id "pri_owner_catalog").id in
   let entry id =
     P.Session_catalog.
-      { session =
+      { effective_organization = Agent_protocol.Session_organization.Values.empty
+      ; session =
           P.Session.
             { id = P.Id.Session.of_string id |> protocol_ok
             ; creator = Some creator
@@ -267,6 +269,7 @@ let%expect_test
             ; active_operation = None
             ; revision = 0L
             ; metadata_revision = 0L
+            ; organization = Agent_protocol.Session_organization.Values.empty
             ; latest_event_sequence = 0L
             ; inference_summary = History_entry.Payload.Presence.Absent
             }

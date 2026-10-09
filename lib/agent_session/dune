@@ -97,6 +97,8 @@
   administration
   session_delta
   session_metadata_transition
+  session_organization_admission
+  session_organization_transition
   mailbox
   subscriber
   history_id_source

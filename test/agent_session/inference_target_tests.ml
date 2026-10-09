@@ -274,7 +274,11 @@ let%test_unit
     in
     let payload = replace payload "runtime_initialization" initialization in
     let raw =
-      D.Document.create ~limits:document_limits ~kind:"session.state" ~version:5 ~payload
+      D.Document.create
+        ~limits:document_limits
+        ~kind:"session.state"
+        ~version:(D.Document.version authored)
+        ~payload
       |> document_ok
     in
     let original = D.Document.to_string raw in

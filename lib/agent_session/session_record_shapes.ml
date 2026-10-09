@@ -657,6 +657,7 @@ let session_summary_fields =
   ; "active_operation", n operation
   ; "revision", v
   ; "metadata_revision", v
+  ; "organization", Agent_store.Session_record_document.organization
   ; "inference_summary", n inference_summary
   ; "latest_event_sequence", v
   ]

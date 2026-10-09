@@ -320,6 +320,8 @@ let idempotency = function
   | Session_renew_owner request ->
     standard (Some request.session_id) request.idempotency_key
   | Session_start request -> standard (Some request.session_id) request.idempotency_key
+  | Session_update_organization request ->
+    standard (Some request.session_id) request.idempotency_key
   | Session_update_metadata request ->
     standard (Some request.session_id) request.idempotency_key
   | Session_stop request -> standard (Some request.session_id) request.idempotency_key
@@ -801,7 +803,7 @@ let handle_session_create t context command_audit request =
     { session; mutation = mutation session; attachment }
 ;;
 
-let handle_session_list t context request =
+let handle_session_list t context (request : Agent_protocol.Session.List_request.t) =
   let principal = Connection_context.principal context in
   let open Result.Let_syntax in
   let%bind indexed_entries =
@@ -809,14 +811,51 @@ let handle_session_list t context request =
     |> Result.map_error ~f:persistence_error
   in
   let%bind entries = Session_registry.catalog t.registry ~now:(now t) ~indexed_entries in
-  let sessions =
+  let%bind organization =
+    Agent_store.Organization_store.snapshot_checked
+      (Agent_store.Session_store.organizations t.session_store)
+    |> Result.map_error ~f:persistence_error
+  in
+  let projection = Organization_membership_projection.create organization in
+  let%bind () =
+    Organization_membership_projection.authorize_query
+      projection
+      ~principal
+      request.organization
+  in
+  let%bind sessions =
     entries
     |> List.filter ~f:(fun entry ->
       session_visible_to principal entry.Agent_protocol.Session_catalog.session)
+    |> List.map ~f:(fun entry ->
+      let%map effective_organization =
+        Organization_membership_projection.effective
+          projection
+          ~principal
+          entry.session.organization
+      in
+      { entry with Agent_protocol.Session_catalog.effective_organization })
+    |> Result.all
+  in
+  let sessions =
+    sessions
     |> List.filter ~f:(Session_catalog_policy.matches request)
+    |> List.filter ~f:(fun entry ->
+      Agent_protocol.Session_organization.Query.matches
+        request.organization
+        ~effective:entry.effective_organization)
     |> List.sort ~compare:(Session_catalog_policy.compare request.sort)
   in
-  Ok (Agent_protocol.Method_result.Session_list (page request.page.limit sessions))
+  let%map page =
+    Pagination.session_catalog
+      t.pagination
+      principal
+      request
+      ~host_id:(Organization_membership_projection.host_id projection)
+      ~organization_revision:(Organization_membership_projection.revision projection)
+      sessions
+  in
+  Agent_protocol.Method_result.Session_list page
 ;;
 
 let handle_session_get t context request =
@@ -1113,6 +1152,35 @@ and handle_capacity_start t entry capacity command_audit request =
     acquired_capacity_start entry capacity command_audit request ~newly_acquired:false
   | Queue_required _ -> queue_capacity_start t entry command_audit request
   | Rejected error -> Error error
+;;
+
+let handle_session_update_organization t context command_audit request =
+  with_writer
+    t
+    context
+    ~session_id:request.Agent_protocol.Session_organization.Request.session_id
+    ~attachment_id:request.attachment_id
+    (fun entry ->
+       let open Result.Let_syntax in
+       let%map session =
+         Agent_session.Session_actor.update_organization
+           entry.actor
+           ?command_audit
+           ~principal:(Connection_context.principal context)
+           request
+       in
+       Agent_protocol.Method_result.Session_update_organization (session_mutation session))
+;;
+
+let authorize_organization_mutation t principal = function
+  | Agent_protocol.Command.Session_update_organization request ->
+    Agent_store.Organization_store.authorize_membership
+      (Agent_store.Session_store.organizations t.session_store)
+      ~principal
+      ~host_id:request.host_id
+      ~references:
+        (Agent_protocol.Session_organization.Patch.requested_groups request.patch)
+  | _ -> Ok ()
 ;;
 
 let handle_session_update_metadata
@@ -2192,6 +2260,7 @@ let handle_ingress_submit t context (request : Agent_protocol.Ingress.Submit_req
 
 let mutation_attachment = function
   | Agent_protocol.Command.Session_start r -> Some (r.session_id, r.attachment_id)
+  | Session_update_organization r -> Some (r.session_id, r.attachment_id)
   | Session_update_metadata r -> Some (r.session_id, r.attachment_id)
   | Session_stop r -> Some (r.session_id, r.attachment_id)
   | Session_cancel_operation r -> Some (r.session_id, r.attachment_id)
@@ -2278,6 +2347,8 @@ let dispatch_authorized t ~actor ~context ~command_audit ~inference_budget = fun
   | Session_renew_owner request ->
     handle_session_renew_owner t context command_audit request
   | Session_start request -> handle_session_start t context command_audit request
+  | Session_update_organization request ->
+    handle_session_update_organization t context command_audit request
   | Session_update_metadata request ->
     handle_session_update_metadata t context command_audit request
   | Session_stop request -> handle_session_stop t context command_audit request
@@ -2363,6 +2434,7 @@ let command_session_id = function
   | Session_detach request -> Some request.session_id
   | Session_renew_owner request -> Some request.session_id
   | Session_start request -> Some request.session_id
+  | Session_update_organization request -> Some request.session_id
   | Session_update_metadata request -> Some request.session_id
   | Session_stop request -> Some request.session_id
   | Session_cancel_operation request -> Some request.session_id
@@ -2436,6 +2508,7 @@ let receipt_summary ~session_id result =
   | Session_attach value -> Ok (R.Attached_session value.attachment.session_id)
   | Session_detach value | Session_renew_owner (_, value) -> mutation value
   | Session_start value
+  | Session_update_organization value
   | Session_update_metadata value
   | Session_stop value
   | Session_cancel_operation value
@@ -2524,6 +2597,7 @@ let handle_command_receipt
       ~params:request.original_params
   in
   let%bind () = Authorization.authorize principal command in
+  let%bind () = authorize_organization_mutation t principal command in
   if Organization_service.handles command
   then
     Organization_service.receipt
@@ -2635,6 +2709,15 @@ let handle t ?actor ~context ~inference_budget command =
          (String.equal (Agent_protocol.Command.method_name command) "protocol.initialize")
   then Error (error Incompatible_protocol "connection must initialize first")
   else (
+    let%bind () =
+      authorize_organization_mutation t (Connection_context.principal context) command
+    in
+    let%bind () =
+      match command with
+      | Agent_protocol.Command.Session_update_organization _ ->
+        authorize_mutation t context command
+      | _ -> Ok ()
+    in
     let outcome =
       Result.bind
         (execute t ~actor context ~inference_budget command)

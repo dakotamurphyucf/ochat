@@ -44,7 +44,8 @@ let list_sessions connection =
   let%bind page = Agent_protocol.Page.Request.create ~limit:1000 () in
   let query =
     Agent_protocol.Session.List_request.
-      { page
+      { organization = Agent_protocol.Session_organization.Query.default
+      ; page
       ; desired_state = None
       ; prompt_id = None
       ; workspace_id = None

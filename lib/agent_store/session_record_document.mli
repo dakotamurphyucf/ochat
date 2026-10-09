@@ -6,6 +6,9 @@ open! Core
 
 type t = Agent_protocol.Session.t
 
+(** ID-only value record shape, shared by canonical Identity/delta and side projection. *)
+val organization : Document_schema.Shape.t
+
 val shape : Document_schema.Shape.t
 val of_json : Jsonaf.t -> (t, Document_schema.Error.t) Result.t
 val to_json : t -> (Jsonaf.t, Document_schema.Error.t) Result.t

@@ -343,6 +343,7 @@ type t =
   | Collection_update of Organization_group.Collection.t
   | Collection_delete of Organization_result.Collection_deleted.t
   | Session_update_metadata of Session_mutation.t
+  | Session_update_organization of Session_mutation.t
   | Session_stop of Session_mutation.t
   | Session_cancel_operation of Session_mutation.t
   | Session_send_message of Send_message.t
@@ -409,6 +410,7 @@ let method_name = function
   | Collection_update _ -> "collection.update"
   | Collection_delete _ -> "collection.delete"
   | Session_update_metadata _ -> "session.update_metadata"
+  | Session_update_organization _ -> "session.update_organization"
   | Session_stop _ -> "session.stop"
   | Session_cancel_operation _ -> "session.cancel_operation"
   | Session_send_message _ -> "session.send_message"
@@ -480,6 +482,7 @@ let to_json = function
   | Collection_delete value -> Organization_result.Collection_deleted.to_json value
   | Session_start value
   | Session_update_metadata value
+  | Session_update_organization value
   | Session_stop value
   | Session_cancel_operation value
   | Session_compact value
@@ -589,6 +592,8 @@ let decoders =
     , map Organization_result.Collection_deleted.of_json (fun value ->
         Collection_delete value) )
   ; "session.start", map Session_mutation.of_json (fun x -> Session_start x)
+  ; ( "session.update_organization"
+    , map Session_mutation.of_json (fun x -> Session_update_organization x) )
   ; ( "session.update_metadata"
     , map Session_mutation.of_json (fun x -> Session_update_metadata x) )
   ; "session.stop", map Session_mutation.of_json (fun x -> Session_stop x)

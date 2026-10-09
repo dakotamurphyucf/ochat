@@ -486,6 +486,8 @@ type t =
   ; active_operation : Operation.t option
   ; revision : int64
   ; metadata_revision : int64 [@sexp.default 0L]
+  ; organization : Session_organization.Values.t
+        [@sexp.default Session_organization.Values.empty]
   ; latest_event_sequence : int64
   ; inference_summary : Inference_summary.t
         [@sexp.default History_entry.Payload.Presence.Absent]
@@ -510,6 +512,7 @@ let to_json t =
     ; optional_field "active_operation" t.active_operation Operation.to_json
     ; Some ("revision", int64_to_json t.revision)
     ; Some ("metadata_revision", int64_to_json t.metadata_revision)
+    ; Some ("organization", Session_organization.Values.to_json t.organization)
     ; Some ("latest_event_sequence", int64_to_json t.latest_event_sequence)
     ]
     |> List.filter_opt
@@ -580,6 +583,12 @@ let of_json json =
     Json_codec.optional_as fields "metadata_revision" nonnegative_int64
   in
   let metadata_revision = Option.value metadata_revision ~default:0L in
+  let%bind organization =
+    Json_codec.optional_as fields "organization" Session_organization.Values.of_json
+  in
+  let organization =
+    Option.value organization ~default:Session_organization.Values.empty
+  in
   let%bind latest_event_sequence =
     Json_codec.required_as fields "latest_event_sequence" nonnegative_int64
   in
@@ -608,6 +617,7 @@ let of_json json =
       ; active_operation
       ; revision
       ; metadata_revision
+      ; organization
       ; latest_event_sequence
       ; inference_summary
       }
@@ -749,6 +759,7 @@ module List_request = struct
     ; prompt_id : Id.Prompt_definition.t option
     ; workspace_id : Id.Workspace_definition.t option
     ; owner_principal_id : Id.Principal.t option
+    ; organization : Session_organization.Query.t
     ; labels : (string * string) list
     ; sort : Session_catalog_query.Sort.t
     ; archive : Session_catalog_query.Archive_filter.t
@@ -775,7 +786,10 @@ module List_request = struct
       ]
       |> List.filter_opt
     in
-    `Object (Page.Request.to_fields t.page @ filters)
+    `Object
+      (Page.Request.to_fields t.page
+       @ filters
+       @ Session_organization.Query.to_fields t.organization)
   ;;
 
   let decode_filters fields =
@@ -802,6 +816,7 @@ module List_request = struct
     let%bind desired_state, prompt_id, workspace_id, owner_principal_id =
       decode_filters fields
     in
+    let%bind organization = Session_organization.Query.of_fields fields in
     let%bind labels = Json_codec.optional_as fields "labels" labels_of_json in
     let%bind labels = validate_labels (Option.value labels ~default:[]) in
     let%bind sort =
@@ -829,6 +844,7 @@ module List_request = struct
     ; prompt_id
     ; workspace_id
     ; owner_principal_id
+    ; organization
     ; labels
     ; creator_principal_id
     ; active_owner_principal_id

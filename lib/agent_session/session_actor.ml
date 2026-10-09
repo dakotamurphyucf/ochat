@@ -413,6 +413,7 @@ type _ request =
       int * int64 * Extension_change.t list
       -> Agent_protocol.Session.t request
   | Configuration : Agent_protocol.Session_configuration.t request
+  | Set_organization_admission : Session_organization_admission.t -> unit request
   | Set_configuration_policy : Configuration_policy.t -> unit request
   | Prepare_configuration_update :
       Agent_protocol.Session_configuration.Update_request.t
@@ -490,6 +491,9 @@ type _ request =
       -> Agent_protocol.Session.t request
   | Queue_start : Agent_protocol.Id.Attachment.t -> Agent_protocol.Session.t request
   | Activate_queued_start : Agent_protocol.Session.t request
+  | Update_organization :
+      Agent_protocol.Principal.t * Agent_protocol.Session_organization.Request.t
+      -> Agent_protocol.Session.t request
   | Update_metadata :
       Agent_protocol.Id.Attachment.t * int64 * Agent_protocol.Session_metadata.Patch.t
       -> Agent_protocol.Session.t request
@@ -772,6 +776,7 @@ type t =
   ; subscribers : (Agent_protocol.Id.Attachment.t, Subscriber.t) Map.Poly.t ref
   ; permission_waiters :
       (Agent_protocol.Id.Permission.t, permission_waiter) Map.Poly.t ref
+  ; mutable organization_admission : Session_organization_admission.t option
   ; mutable configuration_policy : Configuration_policy.t option
   ; configuration_update_owner : Configuration_update.Owner.t
   ; configuration_capture : Configuration_capture.t
@@ -953,19 +958,28 @@ let sync_extension_clock t =
     ~monotonic_now:(t.services.monotonic_now ())
 ;;
 
+let persist_transition t transition =
+  t.persistence.commit ~command_audit:t.command_audit ~previous:t.state transition
+;;
+
+let install_committed_transition t (transition : Session_transition.t) =
+  t.command_audit <- None;
+  t.state <- transition.state;
+  Atomic.set t.event_sequence t.state.counters.event_sequence
+;;
+
+let publish_committed_transition t (transition : Session_transition.t) =
+  sync_extension_clock t;
+  publish_durable t transition.events;
+  t.services.state_committed t.state transition.events
+;;
+
 let install t transition =
-  let previous = t.state in
-  let command_audit = t.command_audit in
-  match t.persistence.commit ~command_audit ~previous transition with
-  | Error error -> Error error
-  | Ok () ->
-    t.command_audit <- None;
-    t.state <- transition.state;
-    sync_extension_clock t;
-    Atomic.set t.event_sequence t.state.counters.event_sequence;
-    publish_durable t transition.events;
-    t.services.state_committed t.state transition.events;
-    Ok ()
+  let open Result.Let_syntax in
+  let%bind () = persist_transition t transition in
+  install_committed_transition t transition;
+  publish_committed_transition t transition;
+  Ok ()
 ;;
 
 let current_snapshot t =
@@ -10370,6 +10384,9 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
        let%bind () = validate_job_generation t job t.state.identity.generation in
        Result.map (cancel_job_internal t id) ~f:ignore)
   | Configuration -> configuration_view t
+  | Set_organization_admission admission ->
+    t.organization_admission <- Some admission;
+    Ok ()
   | Set_configuration_policy policy ->
     t.configuration_policy <- Some policy;
     Ok ()
@@ -10494,6 +10511,47 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Queue_start attachment_id ->
     with_writer t attachment_id (fun () -> queue_start_internal t)
   | Activate_queued_start -> activate_queued_start t
+  | Update_organization (principal, request) ->
+    with_writer t request.attachment_id (fun () ->
+      let open Result.Let_syntax in
+      let%bind admission =
+        Result.of_option
+          t.organization_admission
+          ~error:(error Invalid_state "organization admission is not configured")
+      in
+      let%bind plan =
+        Session_organization_transition.create
+          t.state
+          ~expected_metadata_revision:request.expected_metadata_revision
+          ~patch:request.patch
+      in
+      let delta = Session_organization_transition.delta plan in
+      let%bind candidate = Session_delta.apply t.state delta in
+      let payloads =
+        if Session_organization_transition.changed plan
+        then
+          [ Agent_protocol.Event.Durable.Payload.Session_updated
+              (Session_state.summary candidate)
+          ]
+        else []
+      in
+      let%bind transition =
+        Session_transition.apply ~now:(t.services.now ()) t.state ~delta ~payloads
+      in
+      let%bind () =
+        Eio.Cancel.protect (fun () ->
+          let%map () =
+            Session_organization_admission.persist
+              admission
+              ~principal
+              ~host_id:request.host_id
+              ~additions:(Session_organization_transition.additions plan)
+              ~commit:(fun () -> persist_transition t transition)
+          in
+          install_committed_transition t transition;
+          publish_committed_transition t transition)
+      in
+      Ok (Session_state.summary t.state))
   | Update_metadata (attachment_id, expected_metadata_revision, patch) ->
     with_writer t attachment_id (fun () ->
       let open Result.Let_syntax in
@@ -10797,6 +10855,7 @@ let create_with_owner_lease_duration
     ; active_calls = Active_calls.create ()
     ; subscribers = ref Map.Poly.empty
     ; permission_waiters = ref Map.Poly.empty
+    ; organization_admission = None
     ; configuration_policy = None
     ; configuration_update_owner = Configuration_update.Owner.create ()
     ; configuration_capture = Configuration_capture.create ()
@@ -11464,4 +11523,10 @@ let update_configuration t ?command_audit request =
   let%bind basis = call t (Prepare_configuration_update request) in
   let%bind validated = Configuration_update.validate basis in
   call t ?command_audit (Commit_configuration_update validated)
+;;
+
+let set_organization_admission t admission = call t (Set_organization_admission admission)
+
+let update_organization t ?command_audit ~principal request =
+  call t ?command_audit (Update_organization (principal, request))
 ;;

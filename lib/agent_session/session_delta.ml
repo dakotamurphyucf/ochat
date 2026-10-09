@@ -5,6 +5,7 @@ type t =
   | Created of Session_state.t
   | Lifecycle_changed of Session_state.Lifecycle.t
   | Metadata_changed of Agent_protocol.Session_metadata.Values.t * int64
+  | Organization_changed of Agent_protocol.Session_organization.Values.t * int64
   | Initial_start_consumed
   | Stop_epoch_changed of int64
   | Parent_stop_epoch_changed of int64
@@ -178,6 +179,20 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
           if Managed_submission.same_key value receipt then receipt else value)
     }
   | Lifecycle_changed lifecycle -> Ok { state with lifecycle }
+  | Organization_changed (values, metadata_revision) ->
+    let open Result.Let_syntax in
+    let%bind organization =
+      Agent_protocol.Session_organization.Values.create
+        ~project_id:values.project_id
+        ~collection_ids:values.collection_ids
+    in
+    if
+      Int64.equal state.identity.metadata_revision Int64.max_value
+      || not (Int64.equal metadata_revision (Int64.succ state.identity.metadata_revision))
+    then
+      Error (Agent_protocol.Error.invalid_request "metadata revision must advance once")
+    else
+      Ok { state with identity = { state.identity with organization; metadata_revision } }
   | Metadata_changed (values, metadata_revision) ->
     let open Result.Let_syntax in
     let%bind values =

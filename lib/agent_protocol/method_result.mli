@@ -141,6 +141,7 @@ type t =
   | Collection_update of Organization_group.Collection.t
   | Collection_delete of Organization_result.Collection_deleted.t
   | Session_update_metadata of Session_mutation.t
+  | Session_update_organization of Session_mutation.t
   | Session_stop of Session_mutation.t
   | Session_cancel_operation of Session_mutation.t
   | Session_send_message of Send_message.t

@@ -1209,6 +1209,7 @@ let compose
       | Session_detach _
       | Session_renew_owner _
       | Session_start _
+      | Session_update_organization _
       | Session_update_metadata _
       | Session_stop _
       | Session_cancel_operation _

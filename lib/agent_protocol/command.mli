@@ -41,6 +41,7 @@ type t =
   | Collection_update of Organization_request.Collection.Update.t
   | Collection_delete of Organization_request.Collection.Delete.t
   | Session_update_metadata of Session_metadata.Request.t
+  | Session_update_organization of Session_organization.Request.t
   | Session_stop of Session.Stop_request.t
   | Session_cancel_operation of Session.Cancel_operation_request.t
   | Session_send_message of Session.Send_message_request.t

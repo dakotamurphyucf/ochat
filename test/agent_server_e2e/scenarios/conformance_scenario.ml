@@ -741,7 +741,8 @@ let replay_events connection session_id ~key =
 let list_contains_session connection session_id =
   let list_request =
     Agent_protocol.Session.List_request.
-      { page = page_request ()
+      { organization = Agent_protocol.Session_organization.Query.default
+      ; page = page_request ()
       ; desired_state = None
       ; prompt_id = None
       ; workspace_id = None
@@ -2676,7 +2677,8 @@ let test_organization_crud env environment =
 let organization_sessions_empty connection =
   let list_request =
     Agent_protocol.Session.List_request.
-      { page = page_request ()
+      { organization = Agent_protocol.Session_organization.Query.default
+      ; page = page_request ()
       ; desired_state = None
       ; prompt_id = None
       ; workspace_id = None
@@ -2780,7 +2782,8 @@ let test_organization_authority_reopen env environment =
             then fail "organization list includes another creator's private group";
             let session_request =
               Agent_protocol.Session.List_request.
-                { page = page_request ()
+                { organization = Agent_protocol.Session_organization.Query.default
+                ; page = page_request ()
                 ; desired_state = None
                 ; prompt_id = None
                 ; workspace_id = None
@@ -2875,6 +2878,189 @@ let test_organization_missing_scopes env environment =
                   "missing organization scope was not denied"
                 , (command : Agent_protocol.Command.t)
                 , (denied : Agent_protocol.Error.t)]))))
+;;
+
+type membership_observation =
+  { revision_once : bool
+  ; retry_exact : bool
+  ; stale_error : Agent_protocol.Error.code
+  ; raw_visible : bool
+  ; effective_visible : bool
+  ; tombstone_effective_removed : bool
+  ; retained_no_op : bool
+  ; receipt_matches : bool
+  }
+[@@deriving equal, sexp]
+
+let membership_observation connection ~key_prefix =
+  let host_id = (initialize connection).server_id in
+  let create =
+    Agent_protocol.Organization_request.Create.
+      { host_id
+      ; name = organization_name "Membership"
+      ; idempotency_key = idempotency_key (key_prefix ^ ":project")
+      }
+  in
+  let project =
+    match request connection (Project_create create) with
+    | Project_create group -> group
+    | _ -> assert false
+  in
+  let collection =
+    match
+      request
+        connection
+        (Collection_create
+           { create with idempotency_key = idempotency_key (key_prefix ^ ":collection") })
+    with
+    | Collection_create group -> group
+    | _ -> assert false
+  in
+  let created, _ = create_session connection ~key:(key_prefix ^ ":session") in
+  let attachment = (Option.value_exn created.attachment).attachment in
+  let patch =
+    Agent_protocol.Session_organization.Patch.create
+      ~project:(Set project.id)
+      ~add_collections:[ collection.id ]
+      ~remove_collections:[]
+    |> protocol_ok
+  in
+  let update_request =
+    Agent_protocol.Session_organization.Request.
+      { host_id
+      ; session_id = created.session.id
+      ; attachment_id = attachment.id
+      ; expected_metadata_revision = 0L
+      ; patch
+      ; idempotency_key = idempotency_key (key_prefix ^ ":membership")
+      }
+  in
+  let update request_ =
+    match request connection (Session_update_organization request_) with
+    | Session_update_organization result -> result
+    | _ -> assert false
+  in
+  let original = update update_request in
+  let retry = update update_request in
+  let stale_error =
+    request_error
+      connection
+      (Session_update_organization
+         { update_request with idempotency_key = idempotency_key (key_prefix ^ ":stale") })
+  in
+  let catalog () =
+    let organization =
+      Agent_protocol.Session_organization.Query.create
+        ~project:Any
+        ~collection_all_of:[ collection.id ]
+      |> protocol_ok
+    in
+    let query =
+      Agent_protocol.Session.List_request.
+        { organization
+        ; page = page_request ()
+        ; desired_state = None
+        ; prompt_id = None
+        ; workspace_id = None
+        ; owner_principal_id = None
+        ; creator_principal_id = None
+        ; active_owner_principal_id = None
+        ; labels = []
+        ; sort = Agent_protocol.Session_catalog_query.Sort.default
+        ; archive = All
+        }
+    in
+    match request connection (Session_list query) with
+    | Session_list { items = [ entry ]; _ } -> entry
+    | _ -> fail "membership catalog does not select exactly one session"
+  in
+  let before = catalog () in
+  ignore
+    (request
+       connection
+       (Project_delete
+          { host_id
+          ; id = project.id
+          ; expected_revision = 0L
+          ; idempotency_key = idempotency_key (key_prefix ^ ":delete")
+          }));
+  let after = catalog () in
+  let no_op =
+    update
+      { update_request with
+        expected_metadata_revision = 1L
+      ; idempotency_key = idempotency_key (key_prefix ^ ":no-op")
+      }
+  in
+  let receipt_matches =
+    match command_receipt connection (Session_update_organization update_request) with
+    | Committed (Session_mutation { session_id; _ }) ->
+      Agent_protocol.Id.Session.equal session_id created.session.id
+    | _ -> false
+  in
+  { revision_once = Int64.equal original.session.metadata_revision 1L
+  ; retry_exact =
+      Document_schema.Json.equal
+        (Agent_protocol.Method_result.to_json (Session_update_organization original))
+        (Agent_protocol.Method_result.to_json (Session_update_organization retry))
+  ; stale_error = stale_error.code
+  ; raw_visible =
+      Agent_protocol.Session_organization.Values.equal
+        before.session.organization
+        original.session.organization
+  ; effective_visible =
+      Option.equal
+        Agent_protocol.Id.Project.equal
+        before.effective_organization.project_id
+        (Some project.id)
+  ; tombstone_effective_removed =
+      Option.is_none after.effective_organization.project_id
+      && List.equal
+           Agent_protocol.Id.Collection.equal
+           after.effective_organization.collection_ids
+           [ collection.id ]
+  ; retained_no_op = Int64.equal no_op.session.metadata_revision 1L
+  ; receipt_matches
+  }
+;;
+
+let test_session_organization env environment =
+  let fixture = fixture env environment "conformance-session-organization" in
+  Eio.Switch.run (fun sw ->
+    with_daemon ~sw env fixture (fun _daemon _health ->
+      with_transport_matrix
+        ~sw
+        env
+        environment
+        fixture
+        (fun unix http stdio_unix stdio_http ->
+           let baseline = membership_observation unix ~key_prefix:"unix" in
+           if
+             not
+               (baseline.revision_once
+                && baseline.retry_exact
+                && baseline.raw_visible
+                && baseline.effective_visible
+                && baseline.tombstone_effective_removed
+                && baseline.retained_no_op
+                && baseline.receipt_matches
+                && Agent_protocol.Error.equal_code baseline.stale_error Conflict)
+           then
+             raise_s
+               [%sexp
+                 "membership conformance invariants failed"
+               , (baseline : membership_observation)];
+           List.iter
+             [ http, "http"; stdio_unix, "stdio-unix"; stdio_http, "stdio-http" ]
+             ~f:(fun (client, key_prefix) ->
+               let actual = membership_observation client ~key_prefix in
+               if not (equal_membership_observation baseline actual)
+               then
+                 raise_s
+                   [%sexp
+                     "cross-transport membership semantics differ"
+                   , (baseline : membership_observation)
+                   , (actual : membership_observation)]))))
 ;;
 
 let test_permissions_grants env environment =
@@ -3132,6 +3318,7 @@ let cases =
   ; "conformance.read-methods", test_read_methods
   ; "conformance.session-lifecycle", test_session_lifecycle
   ; "conformance.session-metadata", test_session_metadata
+  ; "conformance.session-organization", test_session_organization
   ; "conformance.session-configuration", test_session_configuration
   ; "conformance.organization-crud", test_organization_crud
   ; "conformance.organization-authority-reopen", test_organization_authority_reopen
@@ -3180,6 +3367,7 @@ let method_coverage =
   ; "session.list", "conformance.session-lifecycle"
   ; "session.get", "conformance.session-lifecycle"
   ; "session.update_metadata", "conformance.session-metadata"
+  ; "session.update_organization", "conformance.session-organization"
   ; "session.configuration_get", "conformance.session-configuration"
   ; "session.configuration_update", "conformance.session-configuration"
   ; "session.inference_summary", "conformance.inference-reads"

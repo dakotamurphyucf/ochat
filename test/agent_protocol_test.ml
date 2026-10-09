@@ -312,6 +312,7 @@ let session_summary () : Session.t =
   ; active_operation = None
   ; revision = 4L
   ; metadata_revision = 0L
+  ; organization = Agent_protocol.Session_organization.Values.empty
   ; latest_event_sequence = 9L
   ; inference_summary = History_entry.Payload.Presence.Absent
   }
@@ -662,6 +663,7 @@ let architecture_methods =
   ; "session.renew_owner"
   ; "session.start"
   ; "session.update_metadata"
+  ; "session.update_organization"
   ; "session.configuration_get"
   ; "session.configuration_update"
   ; "session.stop"
@@ -702,7 +704,7 @@ let%expect_test "every architecture method has request and result dispatch" =
           (List.equal String.equal expected (normalize Method_result.supported_methods)
            : bool)
       }];
-  [%expect {| ((method_count 63) (requests true) (results true)) |}]
+  [%expect {| ((method_count 64) (requests true) (results true)) |}]
 ;;
 
 let%expect_test "history deletion requires stable ID, revision and idempotency" =

@@ -49,6 +49,13 @@ let atom_to_jsonaf ~limits ~state_document delta =
           [ "kind", `String "lifecycle_changed"
           ; "lifecycle", Session_state_document.lifecycle_to_jsonaf value
           ])
+  | Organization_changed (values, revision) ->
+    Ok
+      (`Object
+          [ "kind", `String "organization_changed"
+          ; "organization", P.Session_organization.Values.to_json values
+          ; "metadata_revision", X.int64_json revision
+          ])
   | Metadata_changed (values, revision) ->
     Ok
       (`Object
@@ -384,6 +391,12 @@ let atom_of_jsonaf ~limits json =
     let%bind values = P.Session_metadata.Values.create ~display_name ~labels in
     let%map revision = X.required fields "metadata_revision" X.nonnegative_int64 in
     Delta.Metadata_changed (values, revision)
+  | "organization_changed" ->
+    let%bind values =
+      X.required fields "organization" P.Session_organization.Values.of_json
+    in
+    let%map revision = X.required fields "metadata_revision" X.nonnegative_int64 in
+    Delta.Organization_changed (values, revision)
   | "initial_start_consumed" -> Ok Delta.Initial_start_consumed
   | "stop_epoch_changed" ->
     Result.map (X.required fields "epoch" X.nonnegative_int64) ~f:(fun value ->
@@ -588,6 +601,12 @@ let shape =
                          ~allow_empty_identity:true
                          ~identity_field:"name"
                          (X.fields_shape [ "name"; "value" ]) )
+                   ; "metadata_revision", D.Shape.value
+                   ] )
+             ; ( "organization_changed"
+               , X.shape_exn
+                   [ "kind", D.Shape.value
+                   ; "organization", Agent_store.Session_record_document.organization
                    ; "metadata_revision", D.Shape.value
                    ] )
              ; "initial_start_consumed", X.shape_exn [ "kind", D.Shape.value ]

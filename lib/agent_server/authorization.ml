@@ -36,6 +36,7 @@ let required_scope = function
   | Collection_create _
   | Collection_update _
   | Collection_delete _ -> Some Agent_protocol.Scope.Manage_organization
+  | Session_update_organization _
   | Session_update_metadata _
   | Session_start _
   | Session_send_message _
@@ -113,6 +114,14 @@ let authorize principal command =
   | Agent_protocol.Command.Session_create { requested_mode = Some mode; _ } ->
     authorize_attachment_mode principal mode
   | Session_attach request -> authorize_attachment_mode principal request.requested_mode
+  | Session_update_organization _
+    when not (Agent_protocol.Principal.has_scope principal Manage_organization) ->
+    Error
+      (Agent_protocol.Error.create
+         Permission_denied
+         ~message:"membership mutation requires organization.manage"
+         ~retryable:false
+         ())
   | Session_configuration_update request
     when Option.is_some (Agent_protocol.Session_configuration.Patch.profile request.patch)
          && not (Agent_protocol.Principal.has_scope principal Provider_select) ->

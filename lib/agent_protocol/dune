@@ -50,6 +50,7 @@
   organization_request
   organization_result
   session_metadata
+  session_organization
   session_catalog_query
 
   session_configuration

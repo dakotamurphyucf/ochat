@@ -100,6 +100,7 @@ let session_summary revision =
     ; active_operation = None
     ; revision
     ; metadata_revision = 0L
+    ; organization = Agent_protocol.Session_organization.Values.empty
     ; latest_event_sequence = revision
     ; inference_summary = History_entry.Payload.Presence.Absent
     }

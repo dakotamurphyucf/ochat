@@ -70,13 +70,19 @@ let page t principal command request encode values =
     Agent_protocol.Page.{ items; next_cursor })
 ;;
 
-let ordered t principal command request encode values =
+let ordered ?(additional_binding = []) t principal command request encode values =
   let open Result.Let_syntax in
   let authority =
     sign t (Jsonaf.to_string (Agent_protocol.Principal.to_json principal))
   in
   let query = sign t (Jsonaf.to_string (query command)) in
-  let data = sign t (Jsonaf.to_string (`Array (List.map values ~f:encode))) in
+  let encoded = `Array (List.map values ~f:encode) in
+  let encoded =
+    if List.is_empty additional_binding
+    then encoded
+    else `Object (("items", encoded) :: additional_binding)
+  in
+  let data = sign t (Jsonaf.to_string encoded) in
   let%bind offset =
     match request.Agent_protocol.Page.Request.cursor with
     | None -> Ok 0
@@ -131,6 +137,20 @@ let ordered t principal command request encode values =
     Agent_protocol.Page.{ items; next_cursor })
 ;;
 
+let session_catalog t principal request ~host_id ~organization_revision values =
+  ordered
+    t
+    principal
+    (Agent_protocol.Command.Session_list request)
+    request.Agent_protocol.Session.List_request.page
+    Agent_protocol.Session_catalog.to_json
+    values
+    ~additional_binding:
+      [ "organization_host_id", Agent_protocol.Id.Server.to_json host_id
+      ; "organization_revision", `String (Int64.to_string organization_revision)
+      ]
+;;
+
 let lists t principal command result =
   let open Result.Let_syntax in
   match command, result with
@@ -164,11 +184,7 @@ let lists t principal command result =
         p.items
     in
     Agent_protocol.Method_result.Collection_list p
-  | Session_list r, Session_list p ->
-    let%map p =
-      ordered t principal command r.page Agent_protocol.Session_catalog.to_json p.items
-    in
-    Agent_protocol.Method_result.Session_list p
+  | Session_list _, Session_list p -> Ok (Agent_protocol.Method_result.Session_list p)
   | Permission_list r, Permission_list p ->
     let%map p =
       page t principal command r.page Agent_protocol.Permission.to_json p.items
