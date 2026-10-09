@@ -86,11 +86,10 @@ test('selected Graphite identity ignores old palette settings across pages and t
       .getByRole('combobox', { name: 'Color theme', exact: true })
       .selectOption(theme);
     await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
-    expect(
-      await page.evaluate(
-        () => getComputedStyle(document.body).backgroundColor,
-      ),
-    ).toBe(theme === 'light' ? 'rgb(255, 255, 255)' : 'rgb(18, 21, 27)');
+    await expect(page.locator('body')).toHaveCSS(
+      'background-color',
+      theme === 'light' ? 'rgb(255, 255, 255)' : 'rgb(18, 21, 27)',
+    );
     expect(
       (
         await new AxeBuilder({ page })

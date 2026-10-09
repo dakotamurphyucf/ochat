@@ -6,6 +6,8 @@
   projection
   live_projection
   connection
+  page_enumeration
+  provider_login
   catalog
   admin
   in_memory
