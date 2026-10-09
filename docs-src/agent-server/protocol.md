@@ -390,6 +390,19 @@ edit a cursor or silently combine pages from different catalog observations.
 or returns an error. Legacy `Admin.list_sessions` maps entries to sessions and
 uses documented bounds of 100000 sessions and 100 pages.
 
+Prompt and workspace discovery also share the existing connection.
+`Catalog.prompts_page` and `workspaces_page` expose every server filter and the
+opaque continuation. `enumerate_prompts` and `enumerate_workspaces` accept explicit
+item/page bounds and complete the fresh query or return an error. An empty page
+with a continuation is not the end. The convenience `prompts`, `workspaces` and
+name-resolution functions enumerate at most 100000 items over 100 pages; they
+report bound exhaustion or cross-page name ambiguity instead of selecting an
+incomplete first-page result. Enumeration does not automatically retry a changed
+catalog cursor or take ownership of notifications. `Catalog.get_prompt` and
+`get_workspace` inspect the current host-admitted definition by stable ID without
+enumeration or runtime activation. They return path-redacted summaries and retain
+host availability, permission, not-found and unsupported errors.
+
 Metadata edits carry `expected_metadata_revision`, independently of streaming
 transaction revisions. Patches can set/clear names and set/remove labels, reject
 ambiguous duplicate/overlapping keys, and commit both persisted identity and
@@ -469,7 +482,29 @@ They contain no provider credentials or authority. Profile connection initialize
 and checks its server pin before sensitive operations. Provider profile selection
 is a separate host service.
 
+### Shared client qualification boundaries
+
+The shared client modules consume the same host contracts over direct, Unix,
+HTTP and stdio connections. Feature transport conformance exercises the backend
+methods across those transports; controlled-transport client expect tests exercise
+helper dispatch, bounded paging, original uncertainty/receipt retention and the
+exclusive notification-reader boundary. These are separate proofs. Client helpers
+do not implement a second runtime, authority cache, local credential store or
+frontend transcript mutation. Read-only and unsupported decisions remain typed
+host errors, and reconnect never makes an unresolved receipt safe to replay.
+
 ## Provider operator privacy and recovery
+
+Shared clients use `Agent_client.Provider_login` for status, begin, challenge,
+cancel, logout and profile selection over their existing `Connection`. Only
+`challenge` accepts the
+private challenge result; ordinary `request_without_history` still rejects it.
+These helpers do not poll, consume session notifications or create a client
+credential store. Failed mutation replies retain the connection's original
+command identity for reconciliation. `select_profile` uses the caller's exact
+selection revision and original idempotency key; setup and credential revisions
+cannot substitute for selection CAS. Selecting a host profile does not update
+session configuration or grant session ownership.
 
 Provider methods require an explicitly installed trusted host service. Protocol
 support alone does not provision a registry or discover a login. The host owns

@@ -803,8 +803,8 @@
 
 (library
  (name agent_client_test)
- (modules agent_client_test)
- (libraries core eio_main ochat.agent_protocol ochat.agent_client ochat.transcript ochat.document_schema mirage-crypto-rng.unix)
+ (modules agent_client_test agent_catalog_paging_test agent_provider_login_test)
+ (libraries core eio_main uri ochat.agent_protocol ochat.agent_client ochat.transcript ochat.document_schema mirage-crypto-rng.unix)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
