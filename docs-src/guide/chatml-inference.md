@@ -100,6 +100,12 @@ do not infer polymorphic recursion from the usual identity-function example.
 `let rec` and `and` bind functions, including annotated lambdas. They cannot
 construct cyclic refs, records or arbitrary self-referential values. Recursive
 calls share monomorphic placeholders while their definitions are checked.
+Parameter names within one lambda, and names within one simultaneous recursive
+group, must be distinct. Sequential bindings may still reuse a name; earlier
+closures retain their lexical bindings. Duplicate-parameter diagnostics currently
+point to the whole lambda, and duplicate recursive-name diagnostics to that
+binding's right-hand side, because the parsed AST does not retain individual
+binder-token spans.
 
 <!-- ochat-authoring-example: {"id":"inference.structural-aliases","surface":"one_off_v1","result":"ready"} -->
 ```ocaml

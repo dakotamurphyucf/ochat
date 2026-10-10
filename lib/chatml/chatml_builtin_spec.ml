@@ -1475,7 +1475,7 @@ let string_module : builtin_module =
              then failwith "String.slice: start and len must be non-negative"
              else if start > String.length s
              then failwith "String.slice: start out of bounds"
-             else if start + len > String.length s
+             else if len > String.length s - start
              then failwith "String.slice: start+len out of bounds"
              else VString (String.sub s ~pos:start ~len))
       ; make_binary_builtin
@@ -1582,7 +1582,7 @@ let array_module : builtin_module =
              then failwith "Array.sub: start and len must be non-negative"
              else if start > Array.length a
              then failwith "Array.sub: start out of bounds"
-             else if start + len > Array.length a
+             else if len > Array.length a - start
              then failwith "Array.sub: start+len out of bounds"
              else VArray (Array.sub a ~pos:start ~len))
       ; (* new: reverse (pure) *)
