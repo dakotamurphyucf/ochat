@@ -81,13 +81,18 @@ let%expect_test "readable signatures preserve recursive JSON, call arity and row
                 ; B.TFun ([], B.TVar "a")
                 ]
               , B.TVariant
-                  (B.TRow_extend
-                     ( [ "Pair", B.TTuple [ B.TVar "a"; B.json_ty ]; "Done", B.TUnit ]
-                     , B.TRow_var "cases" )) ) )
+                  (B.TVariant_row_extend
+                     ( [ "Pair", [ B.TVar "a"; B.json_ty ]
+                       ; "Done", []
+                       ; "One", [ B.TUnit ]
+                       ]
+                     , B.TVariant_row_var "cases" )) ) )
         ]
       S.core_surface
     |> Result.ok_or_failwith
   in
+  print_endline
+    (I.to_json inventory |> Jsonaf.member_exn "scheme_format" |> Jsonaf.string_exn);
   I.reference_items inventory
   |> List.iter ~f:(fun item ->
     let name = Jsonaf.member_exn "name" item |> Jsonaf.string_exn in
@@ -97,7 +102,8 @@ let%expect_test "readable signatures preserve recursive JSON, call arity and row
     | _ -> ());
   [%expect
     {|
-    inspect: ({ value: 'a; ..'fields }, () -> 'a) -> [ `Pair('a, json) | `Done | ..'cases ]
+    chatml-builtin-sexp-v2
+    inspect: ({ value: 'a; ..'fields }, () -> 'a) -> [ `Pair('a, json) | `Done | `One(unit) | ..'cases ]
     Task.bind: (task<'a>, ('a) -> task<'b>) -> task<'b>
     json: mu rec0. [ `Null | `Bool(bool) | `Number(float) | `String(string) | `Array(array<rec0>) | `Object(array<{ key: string; value: rec0 }>) ]
     |}]
