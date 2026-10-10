@@ -2553,14 +2553,13 @@ let rec infer_stmt_with_exports
     ignore (infer_expr state env types e);
     env, types, []
   | SModule (mname, stmts) ->
-    let module_placeholder = new_var state state.current_lvl in
-    let mod_env_start =
-      add_mono ~checkpoint:(fun () -> checkpoint state) env mname module_placeholder
-    in
+    (* A module declaration is non-recursive: its new name enters scope only
+       after its body has been checked. Functions capture the same lexical scope;
+       a deferred read does not make the module's own binding available. *)
     let mod_env_final, _mod_types_final, exported_names_rev =
       List.fold
         stmts
-        ~init:(mod_env_start, types, [])
+        ~init:(env, types, [])
         ~f:(fun (env_acc, types_acc, names_rev) stmt_node ->
           let env_next, types_next, stmt_exports =
             infer_stmt_with_exports state env_acc stmt_node.value types_acc
@@ -2571,7 +2570,7 @@ let rec infer_stmt_with_exports
     let seen = Hash_set.create (module String) in
     let exports_map =
       List.fold exported_names ~init:Env.empty ~f:(fun acc name ->
-        if String.equal name mname || Hash_set.mem seen name
+        if Hash_set.mem seen name
         then acc
         else (
           Hash_set.add seen name;
@@ -2580,7 +2579,6 @@ let rec infer_stmt_with_exports
           | None -> acc))
     in
     let module_typ = Module (Row (exports_map, Empty_row)) in
-    unify state module_placeholder module_typ;
     add_generalized state env mname module_typ, types, [ mname ]
   | SOpen mname ->
     (match lookup state env mname with

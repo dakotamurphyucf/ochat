@@ -184,6 +184,31 @@ constrains the helper to records: record annotations, exact or open record
 patterns, and copy-update cannot accept a module, including through an alias or
 a function parameter. `open` accepts modules only.
 
+Module declarations are non-recursive. The module being defined is not in
+scope inside its own body, including deferred function bodies. Use earlier local
+bindings directly, and `let rec` for recursive functions. The new module binding
+becomes available only after the whole body finishes. Existing enclosing bindings
+keep their normal lexical meaning; rebinding a module does not make the new
+module visible to its own initializer.
+
+<!-- ochat-authoring-example: {"id":"inference.module-local-reference","surface":"one_off_v1","result":42} -->
+```ocaml
+module M = struct
+  let x = 42
+  let read () = x
+end
+let main input = Task.pure(Json.parse(to_string(M.read())))
+```
+
+<!-- ochat-authoring-example: {"id":"inference.module-self-reference-rejected","surface":"one_off_v1","stage":"typecheck","contains":"Unknown variable 'M'","span":true} -->
+```ocaml
+module M = struct
+  let read () = M.x
+  let x = 42
+end
+let main input = Task.pure(Json.parse(to_string(M.read())))
+```
+
 <!-- ochat-authoring-example: {"id":"inference.module-record-projection","surface":"one_off_v1","result":5} -->
 ```ocaml
 let read value = value.x

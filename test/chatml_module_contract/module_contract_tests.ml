@@ -43,8 +43,8 @@ let%expect_test "modules retain their kind through record consumers" =
     {|
     module field: int 1
     module update: type-error Cannot unify module{x: int} with {...}
-    module exact pattern: type-error Cannot unify module{x: int} with {x: 'b}
-    module open pattern: type-error Cannot unify module{x: int} with {x: 'b; ...}
+    module exact pattern: type-error Cannot unify module{x: int} with {x: 'a}
+    module open pattern: type-error Cannot unify module{x: int} with {x: 'a; ...}
     record annotation: type-error Cannot unify module{x: int} with {x: int}
     aliased update: type-error Cannot unify module{x: int} with {...}
     higher order update: type-error Cannot unify {...} with module{x: int}
@@ -102,7 +102,7 @@ let%expect_test "field receivers generalize kinds without losing shared constrai
     independent keys calls: int 3
     returned receiver retains module kind: type-error Cannot unify module with record
     returned receiver accepts records: int 2
-    monomorphic receiver kind: type-error Cannot unify {x: 'k; ...} with module{x: int}
+    monomorphic receiver kind: type-error Cannot unify {x: 'j; ...} with module{x: int}
     module exported accessor: int 5
     nested module: int 4
     module join: int 4

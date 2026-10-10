@@ -2752,7 +2752,7 @@ let language_foundation ~sources =
       ; review =
           Audited
             { excerpt_sha256 =
-                [ "867b1f0f872bfd4a864ec1d569866387b20a9b782a4072862195ea0e2bdf9194" ]
+                [ "136c0b0fb91b43ab1cf6b3297c2b3d6ffffd31555da542b26266f11e674c67b5" ]
             ; evidence =
                 [ "lib/chatml/chatml_typechecker.ml"
                 ; "test/chatml_typechecker_test.ml"

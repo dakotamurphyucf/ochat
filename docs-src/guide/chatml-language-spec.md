@@ -1432,6 +1432,13 @@ Modules are not for:
 - generative module behavior
 - abstraction-heavy namespace engineering
 
+Module declarations are non-recursive: a new module binding is available only
+after its body finishes. The module's own name is not introduced inside that
+body, even in a function that will be called later. Refer to earlier local
+bindings directly; recursive functions use `let rec`. Enclosing bindings retain
+their lexical meaning. A failing initializer does not install the new module;
+effects already performed are not rolled back.
+
 ### 12.2 Export behavior
 
 Only names explicitly defined in the module body are exported.
@@ -1481,7 +1488,7 @@ hard-coded builtin universe.
 A builtin surface may contribute:
 
 - global builtin functions,
-- builtin modules installed as `VModule` values (typed as records of exports),
+- builtin modules installed as `VModule` values (with a distinct module type),
 - builtin type aliases injected into the initial type environment.
 
 The current implementation exposes two standard assembled surfaces:
