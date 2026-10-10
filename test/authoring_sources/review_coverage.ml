@@ -10,6 +10,7 @@ type selection =
 type request =
   | Missing
   | Grammar
+  | Compiler
   | Semantics
   | Declarations
   | Native
@@ -22,6 +23,7 @@ let () =
     match Array.to_list (Sys.get_argv ()) with
     | _ :: "--missing" :: surfaces -> Missing, surfaces
     | _ :: "--grammar" :: surfaces -> Grammar, surfaces
+    | _ :: "--compiler" :: surfaces -> Compiler, surfaces
     | _ :: "--semantics" :: surfaces -> Semantics, surfaces
     | _ :: "--declarations" :: surfaces -> Declarations, surfaces
     | _ :: "--native" :: surfaces -> Native, surfaces
@@ -34,8 +36,8 @@ let () =
     | _ ->
       failwith
         "usage: review_coverage (MODULE | --globals | --alias NAME) TOPIC_ID [SURFACE \
-         ...] | (--missing | --grammar | --semantics | --declarations | --native | \
-         --runtime | --changed-docs) [SURFACE ...]"
+         ...] | (--missing | --compiler | --grammar | --semantics | --declarations | \
+         --native | --runtime | --changed-docs) [SURFACE ...]"
   in
   let surfaces =
     match requested_surfaces with
@@ -69,6 +71,34 @@ let () =
         ; "targets", `Number (Int.to_string (List.length targets))
         ; "mapped", `Number (Int.to_string (List.length report.mapped))
         ; "missing", `Array (List.map report.missing ~f:(fun target -> `String target.id))
+        ]
+    | Compiler ->
+      let module C = Authoring_corpus.Coverage in
+      let targets =
+        C.compiler_targets ~sources ~surface_ids:surfaces |> Result.ok_or_failwith
+      in
+      let reviewed =
+        List.map C.reviewed_mappings ~f:(fun mapping -> mapping.C.target_id, mapping)
+        |> String.Map.of_alist_exn
+      in
+      `Object
+        [ "review_required", `True
+        ; ( "scope"
+          , `String "compiler binding candidates; no automatic documentation approval" )
+        ; ( "targets"
+          , `Array
+              (List.map targets ~f:(fun target ->
+                 let previous = Map.find reviewed target.C.id in
+                 `Object
+                   [ "id", `String target.id
+                   ; "contract_sha256", `String target.contract_sha256
+                   ; ( "previous_contract_sha256"
+                     , Option.value_map previous ~default:`Null ~f:(fun mapping ->
+                         `String mapping.C.contract_sha256) )
+                   ; ( "topic"
+                     , Option.value_map previous ~default:`Null ~f:(fun mapping ->
+                         `String mapping.C.topic_id) )
+                   ])) )
         ]
     | Grammar ->
       let module C = Authoring_corpus.Coverage in

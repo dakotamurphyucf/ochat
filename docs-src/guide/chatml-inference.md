@@ -157,6 +157,33 @@ patterns distinguish an exact field set from `{field = value; _}`. See the
 [match reference](chatml-match-semantics.md) for the conservative nested-pattern
 coverage rules; a plausible pattern list is not a general proof of exhaustiveness.
 
+Constructor argument count is part of the type. A nullary tag such as
+`Ready` differs from `Ready(())`, which carries one unit argument. The same
+rule applies to annotations and built-ins: `None` and JSON `Null` are nullary,
+whereas `Some(())` carries one argument. Multiple payload arguments keep their
+individual positions.
+
+<!-- ochat-authoring-example: {"id":"inference.variant-unit-arity","surface":"one_off_v1","result":"unit:pair"} -->
+```ocaml
+type message = [ `Empty | `Ready(unit) | `Pair(unit, string) ]
+let describe value =
+  let value : message = value in
+  match value with
+  | `Empty -> "empty"
+  | `Ready(()) -> "unit"
+  | `Pair((), text) -> text
+let main input =
+  let unit_label = match Option.some(()) with | `None -> "none" | `Some(()) -> describe(`Ready(())) in
+  Task.pure(`String(unit_label ++ ":" ++ describe(`Pair((), "pair"))))
+```
+
+<!-- ochat-authoring-example: {"id":"inference.variant-arity-rejected","surface":"one_off_v1","stage":"typecheck","contains":"Variant constructor arity mismatch","span":true} -->
+```ocaml
+type message = [ `Ready(unit) ]
+let value : message = `Ready
+let main input = Task.pure(`Null)
+```
+
 Arithmetic and ordering distinguish integers from floats and do not coerce
 between them. Equality unifies operand types. When those types are already known,
 it rejects arrays, refs, functions and tasks. A generic equality helper currently
