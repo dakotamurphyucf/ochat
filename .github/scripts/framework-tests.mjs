@@ -10,10 +10,12 @@ const commands = {
   e2e: ["build", "--force", "-j", "2", "@agent-e2e-pr"],
 };
 if (!Object.hasOwn(commands, tier)) throw new Error("Expected normal or e2e");
-// Linux qualification measured 55 summed minutes of tests and 15 of build work
-// on two workers before the old 35-minute aggregate limit stopped later tests.
-// Allow the whole suite to finish; individual test/runtime deadlines still apply.
-const timeoutMs = (tier === "normal" ? 45 : 25) * 60 * 1000;
+// An uncached Linux run reached the 45-minute aggregate limit with late tests
+// still running and no completed process failures. Its CPU-heavy tests took
+// 1.4–1.8 times the passing PR run; trace-based completion estimates were 52–56
+// minutes. Allow a bounded hour for compilation and the complete normal suite;
+// individual test/runtime deadlines and two-worker concurrency remain unchanged.
+const timeoutMs = (tier === "normal" ? 60 : 25) * 60 * 1000;
 fs.mkdirSync(".ci-evidence", { recursive: true });
 // Verbose output identifies started actions even while their output is buffered.
 // Write the trace inside the uploaded evidence directory, including on timeout.

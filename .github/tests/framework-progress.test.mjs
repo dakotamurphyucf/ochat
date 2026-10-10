@@ -102,7 +102,7 @@ process.exitCode = Number(process.env.FAKE_DUNE_EXIT);
     assert.equal(report.result, duneExit === 0 ? "pass" : "fail");
     assert.equal(report.exitCode, duneExit);
     assert.equal(report.signal, null);
-    assert.equal(report.timeoutSeconds, tier === "e2e" ? 1500 : 2700);
+    assert.equal(report.timeoutSeconds, tier === "e2e" ? 1500 : 3600);
     assert.deepEqual(report.command, ["dune", ...invocation]);
     assert.deepEqual(invocation, [tier === "e2e" ? "build" : "runtest", "--force", "-j", "2", ...(tier === "e2e" ? ["@agent-e2e-pr"] : []), "--display=verbose", `--trace-file=${path.join(directory, ".ci-evidence", `${tier}-dune-trace.json`)}`]);
     assert.equal(fs.readFileSync(path.join(directory, ".ci-evidence", `${tier}-dune.log`), "utf8"), "fake dune build log\n");
