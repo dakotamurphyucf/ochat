@@ -135,10 +135,10 @@ end = struct
     let phases = List.rev t.phases in
     let states = List.map t.states ~f:snd in
     Eio.traceln
-      "authored timeout diagnostic %s"
+      "authored fixture diagnostic %s"
       (Sexp.to_string_hum
          [%message
-           "fixture timeout"
+           "fixture failure"
              (context : Sexp.t)
              (wall : float)
              (cpu : float)
