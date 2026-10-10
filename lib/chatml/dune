@@ -3,6 +3,7 @@
  (public_name ochat.chatml)
  (modules
   chatml_lang
+  chatml_shape_kind
   chatml_eval
   chatml_parse
   chatml_slot_layout

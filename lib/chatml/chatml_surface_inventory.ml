@@ -110,7 +110,7 @@ let to_json t =
   `Object
     [ "version", `Number "1"
     ; "surface", `String t.surface_id
-    ; "scheme_format", `String "chatml-builtin-sexp-v2"
+    ; "scheme_format", `String "chatml-builtin-sexp-v3"
     ; "modules", `Array (List.map t.modules ~f:(fun name -> `String name))
     ; ( "items"
       , `Array
@@ -174,6 +174,8 @@ let reference_items t =
        | TFun (xs, result) -> "(" ^ args xs ^ ") -> " ^ nested result
        | TRecord row -> "{ " ^ render_row ~binders row ^ " }"
        | TVariant row -> "[ " ^ render_variant_row ~binders row ^ " ]"
+       | TModule row -> "module{ " ^ render_row ~binders row ^ " }"
+       | TField_receiver (_, row) -> "record_or_module{ " ^ render_row ~binders row ^ " }"
        | TMu (name, body) ->
          let display = "rec" ^ Int.to_string (List.length binders) in
          "mu "

@@ -53,6 +53,7 @@ open Core
 open Chatml.Chatml_lang
 module Builtin_spec = Chatml.Chatml_builtin_spec
 module Builtin_surface = Chatml.Chatml_builtin_surface
+module Shape_kind = Chatml.Chatml_shape_kind
 
 (***************************************************************************)
 (* A Hindley-Milner style type-checker for the ChatML language.            *)
@@ -106,6 +107,9 @@ type typ =
   | Rec_var of name
   | Ref of typ
   | Record of typ (* row *)
+  | Module of typ (* exported value row *)
+  | Field_receiver of typ * typ (* representation kind, accessible row *)
+  | Shape_kind of Shape_kind.t
   | Variant of typ (* row with Variant_payload fields *)
   | Variant_payload of typ list (* constructor arguments, never a value type *)
   | Tuple of typ list
@@ -245,7 +249,8 @@ let rec substitute_rec_var
   let substitute = substitute_rec_var ~checkpoint ~target ~replacement in
   match ty with
   | Fun (params, ret) -> Fun (List.map params ~f:substitute, substitute ret)
-  | Generic _ | Var _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> ty
+  | Generic _ | Var _ | TInt | TFloat | Boolean | String | Empty_row | Unit | Shape_kind _
+    -> ty
   | Con (name, args) -> Con (name, List.map args ~f:substitute)
   | Mu (binder, body) when String.equal binder target -> Mu (binder, body)
   | Mu (binder, body) -> Mu (binder, substitute body)
@@ -253,6 +258,8 @@ let rec substitute_rec_var
   | Rec_var _ -> ty
   | Ref t -> Ref (substitute t)
   | Record row -> Record (substitute row)
+  | Module row -> Module (substitute row)
+  | Field_receiver (kind, row) -> Field_receiver (substitute kind, substitute row)
   | Variant row -> Variant (substitute row)
   | Tuple ts -> Tuple (List.map ts ~f:substitute)
   | Variant_payload ts -> Variant_payload (List.map ts ~f:substitute)
@@ -275,6 +282,16 @@ let unfold_mu ?checkpoint (ty : typ) : typ =
 
 let instantiate (state : infer_state) ty =
   let table = Hashtbl.create (module String) in
+  let kinds = Hashtbl.create (module String) in
+  let rec inst_kind seen kind =
+    checkpoint state;
+    match kind with
+    | Generic name ->
+      Hashtbl.find_or_add kinds name ~default:(fun () -> new_var state state.current_lvl)
+    | Var ({ contents = Bound bound } as tv) ->
+      if tv_ref_mem tv seen then Var tv else inst_kind (tv :: seen) bound
+    | other -> other
+  in
   let rec inst (seen : tv ref list) ty =
     checkpoint state;
     match ty with
@@ -294,6 +311,8 @@ let instantiate (state : infer_state) ty =
     | Rec_var _ as rec_var -> rec_var
     | Ref t -> Ref (inst seen t)
     | Record r -> Record (inst seen r)
+    | Module r -> Module (inst seen r)
+    | Field_receiver (kind, row) -> Field_receiver (inst_kind seen kind, inst seen row)
     | Variant r -> Variant (inst seen r)
     | Tuple ts -> Tuple (List.map ts ~f:(inst seen))
     | Variant_payload ts -> Variant_payload (List.map ts ~f:(inst seen))
@@ -324,6 +343,8 @@ let generalise (state : infer_state) ty =
     | Rec_var _ as rec_var -> rec_var
     | Ref t -> Ref (gen seen t)
     | Record row -> Record (gen seen row)
+    | Module row -> Module (gen seen row)
+    | Field_receiver (kind, row) -> Field_receiver (gen seen kind, gen seen row)
     | Variant row -> Variant (gen seen row)
     | Tuple ts -> Tuple (List.map ts ~f:(gen seen))
     | Variant_payload ts -> Variant_payload (List.map ts ~f:(gen seen))
@@ -345,8 +366,10 @@ let has_recursive_type ?(checkpoint = fun () -> ()) (ty : typ) : bool =
     | Mu (_binder, _body) -> true
     | Rec_var _ -> true
     | Var { contents = Free _ }
-    | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> false
-    | Ref t | Record t | Variant t | Array t -> aux seen t
+    | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit | Shape_kind _ ->
+      false
+    | Ref t | Record t | Module t | Variant t | Array t -> aux seen t
+    | Field_receiver (kind, row) -> aux seen kind || aux seen row
     | Tuple ts | Variant_payload ts -> List.exists ts ~f:(aux seen)
     | Row (fields, tail) ->
       Env.exists fields (fun _field ty' -> aux seen ty') || aux seen tail
@@ -399,6 +422,7 @@ let check_contractive ?(checkpoint = fun () -> ()) (ty : typ) : (unit, string) r
     | Con (_n, args) -> check_list seen ~target ~guarded ~scope args
     | Var { contents = Free _ }
     | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> Ok ()
+    | Shape_kind _ -> Error "Representation kind is only valid in a field receiver"
     | Mu (binder, body) ->
       let scope' = binder :: scope in
       let outer_target =
@@ -417,15 +441,28 @@ let check_contractive ?(checkpoint = fun () -> ()) (ty : typ) : (unit, string) r
         | Some target_binder when String.equal target_binder binder && not guarded ->
           Error (Printf.sprintf "Unguarded recursive type variable '%s'" binder)
         | _ -> Ok ())
-    | Ref inner | Record inner | Array inner ->
+    | Ref inner | Record inner | Module inner | Array inner ->
       check_ty seen ~target ~guarded:true ~scope inner
     | Variant row -> check_variant_row seen ~target ~guarded:true ~scope row
     | Variant_payload _ -> Error "Variant payload is only valid in a variant row"
+    | Field_receiver (kind, row) ->
+      (match check_kind seen kind with
+       | Error _ as error -> error
+       | Ok () -> check_ty seen ~target ~guarded:true ~scope row)
     | Tuple tys -> check_list seen ~target ~guarded:true ~scope tys
     | Row (fields, tail) ->
       (match check_fields seen ~target ~guarded ~scope fields with
        | Ok () -> check_ty seen ~target ~guarded ~scope tail
        | Error _ as err -> err)
+  and check_kind seen kind =
+    checkpoint ();
+    match kind with
+    | Shape_kind _ | Generic _ | Var { contents = Free _ } -> Ok ()
+    | Var ({ contents = Bound bound } as tv) ->
+      if tv_ref_mem tv seen
+      then Error "Cyclic field receiver representation kind"
+      else check_kind (tv :: seen) bound
+    | _ -> Error "Invalid field receiver representation kind"
   and check_variant_row seen ~target ~guarded ~scope row =
     checkpoint ();
     match row with
@@ -467,7 +504,7 @@ let merge_fields ?(checkpoint = fun () -> ()) row =
       else aux seen (binder :: seen_rec) (unfold_mu ~checkpoint mu)
     | Rec_var _ as rec_var -> Env.empty, rec_var
     | Var _ as var -> Env.empty, var
-    | Record r -> aux seen seen_rec r
+    | Record r | Module r | Field_receiver (_, r) -> aux seen seen_rec r
     | Variant r -> aux seen seen_rec r
     | Row (fs, rest) ->
       (match aux seen seen_rec rest with
@@ -506,12 +543,15 @@ let occurs ?(checkpoint = fun () -> ()) tv ty =
       tv' := Free (name, new_lvl)
     | Mu (_binder, body) -> aux seen body
     | Rec_var _ -> ()
-    | Ref t | Record t | Variant t | Array t -> aux seen t
+    | Ref t | Record t | Module t | Variant t | Array t -> aux seen t
+    | Field_receiver (kind, row) ->
+      aux seen kind;
+      aux seen row
     | Tuple ts | Variant_payload ts -> List.iter ts ~f:(aux seen)
     | Row (fs, rest) ->
       Env.iter fs ~f:(fun _ t -> aux seen t);
       aux seen rest
-    | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> ()
+    | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit | Shape_kind _ -> ()
   in
   aux [] ty;
   !found
@@ -535,6 +575,11 @@ let resolve_bound_type ?(checkpoint = fun () -> ()) (ty : typ) : typ =
     match ty with
     | Var ({ contents = Bound bound_ty } as tv) ->
       if tv_ref_mem tv seen then Var tv else aux (tv :: seen) seen_rec bound_ty
+    | Field_receiver (kind, row) ->
+      (match aux seen seen_rec kind with
+       | Shape_kind Record -> Record row
+       | Shape_kind Module -> Module row
+       | _ -> Field_receiver (kind, row))
     | Mu (binder, _body) as mu ->
       if rec_name_mem binder seen_rec
       then mu
@@ -553,9 +598,9 @@ let rec can_infer_mu_through ?(checkpoint = fun () -> ()) (ty : typ) : bool =
   (* | Empty_row -> true  (* not needed *) *)
 
   (* disallow recursion through computational / mutable shapes *)
-  | Fun _ | Ref _ | Array _ -> false
+  | Fun _ | Ref _ | Array _ | Module _ | Field_receiver _ -> false
   (* be conservative for the rest *)
-  | TInt | TFloat | Boolean | String | Unit -> false
+  | TInt | TFloat | Boolean | String | Unit | Shape_kind _ -> false
   | Generic _ -> false
   | Var { contents = Free _ } -> false
   | Var { contents = Bound t } -> can_infer_mu_through ~checkpoint t
@@ -601,10 +646,12 @@ let ensure_guarded_cycle ?(checkpoint = fun () -> ()) (target : tv ref) (ty : ty
          For guardedness of inferred cycles, ignore it. *)
       false
     (* Base types *)
-    | TInt | TFloat | Boolean | String | Unit | Empty_row -> false
+    | TInt | TFloat | Boolean | String | Unit | Empty_row | Shape_kind _ -> false
     (* “Data guards” *)
     | Variant row -> bad seen_tv seen_mu ~guarded:true row
-    | Record row -> bad seen_tv seen_mu ~guarded:true row
+    | Record row | Module row -> bad seen_tv seen_mu ~guarded:true row
+    | Field_receiver (kind, row) ->
+      bad seen_tv seen_mu ~guarded kind || bad seen_tv seen_mu ~guarded:true row
     | Tuple ts | Variant_payload ts ->
       List.exists ts ~f:(bad seen_tv seen_mu ~guarded:true)
     | Con (_n, args) -> List.exists args ~f:(bad seen_tv seen_mu ~guarded:true)
@@ -705,7 +752,24 @@ let rec unify (state : infer_state) lhs rhs =
           tv := Bound t (* cyclic bind; NO Rec_var/Mu synthesis *))
         else tv := Bound t
       | Ref t1, Ref t2 | Array t1, Array t2 -> go active env_l env_r t1 t2
-      | Record r1, Record r2 | Variant r1, Variant r2 -> go active env_l env_r r1 r2
+      | Record r1, Record r2 | Module r1, Module r2 | Variant r1, Variant r2 ->
+        go active env_l env_r r1 r2
+      | Field_receiver (k1, r1), Field_receiver (k2, r2) ->
+        go active env_l env_r k1 k2;
+        go active env_l env_r r1 r2
+      | Field_receiver (kind, receiver_row), Record row ->
+        go active env_l env_r kind (Shape_kind Record);
+        go active env_l env_r receiver_row row
+      | Record row, Field_receiver (kind, receiver_row) ->
+        go active env_l env_r (Shape_kind Record) kind;
+        go active env_l env_r row receiver_row
+      | Field_receiver (kind, receiver_row), Module row ->
+        go active env_l env_r kind (Shape_kind Module);
+        go active env_l env_r receiver_row row
+      | Module row, Field_receiver (kind, receiver_row) ->
+        go active env_l env_r (Shape_kind Module) kind;
+        go active env_l env_r row receiver_row
+      | Shape_kind left, Shape_kind right when Shape_kind.equal left right -> ()
       | Variant_payload ts1, Variant_payload ts2 ->
         if List.length ts1 <> List.length ts2
         then raise (Type_error "Variant constructor arity mismatch");
@@ -811,6 +875,7 @@ and render_type ?(poll = fun () -> ()) ?bounds ty =
     | Boolean -> add "bool"
     | String -> add "string"
     | Unit -> add "unit"
+    | Shape_kind kind -> add (Shape_kind.name kind)
     | Array t ->
       postfix depth seen seen_rec t;
       add " array"
@@ -835,6 +900,17 @@ and render_type ?(poll = fun () -> ()) ?bounds ty =
     | Rec_var binder -> add binder
     | Record row ->
       add "{";
+      show_row_fields depth seen seen_rec false row;
+      add "}"
+    | Module row ->
+      add "module{";
+      show_row_fields depth seen seen_rec false row;
+      add "}"
+    | Field_receiver (kind, row) ->
+      (match resolve (depth + 1) seen kind with
+       | Shape_kind Record -> add "{"
+       | Shape_kind Module -> add "module{"
+       | _ -> add "record_or_module{");
       show_row_fields depth seen seen_rec false row;
       add "}"
     | Tuple ts | Variant_payload ts ->
@@ -887,7 +963,8 @@ and render_type ?(poll = fun () -> ()) ?bounds ty =
           (binder :: seen_rec)
           (unfold_mu ~checkpoint:(fun () -> step depth) mu)
     | Rec_var _ as rec_var -> Env.empty, rec_var
-    | Record r | Variant r -> row_fields (depth + 1) seen seen_rec r
+    | Record r | Module r | Field_receiver (_, r) | Variant r ->
+      row_fields (depth + 1) seen seen_rec r
     | Row (fs, rest) ->
       let rest_fields, tail = row_fields (depth + 1) seen seen_rec rest in
       let fields =
@@ -963,7 +1040,7 @@ and row_fields_and_tail row =
       then Env.empty, mu
       else aux seen (binder :: seen_rec) (unfold_mu mu)
     | Rec_var _ as rec_var -> Env.empty, rec_var
-    | Record r -> aux seen seen_rec r
+    | Record r | Module r | Field_receiver (_, r) -> aux seen seen_rec r
     | Variant r -> aux seen seen_rec r
     | Row (fs, rest) ->
       let rest_fields, tail = aux seen seen_rec rest in
@@ -1031,7 +1108,7 @@ and ensure_equality_type ?(checkpoint = fun () -> ()) ty =
   let rec ensure_equality_type_with_seen (seen : tv ref list) (seen_rec : name list) ty =
     checkpoint ();
     match resolve_bound_type_for_display_with_seen seen ty with
-    | TInt | TFloat | Boolean | String | Unit | Generic _ -> ()
+    | TInt | TFloat | Boolean | String | Unit | Generic _ | Shape_kind _ -> ()
     | Var { contents = Free _ } -> ()
     | Var ({ contents = Bound t } as tv) ->
       if tv_ref_mem tv seen
@@ -1051,7 +1128,8 @@ and ensure_equality_type ?(checkpoint = fun () -> ()) ty =
     | Rec_var _ -> ()
     | Tuple ts | Variant_payload ts ->
       List.iter ts ~f:(ensure_equality_type_with_seen seen seen_rec)
-    | Record row | Variant row -> ensure_equality_row_with_seen seen seen_rec row
+    | Record row | Module row | Field_receiver (_, row) | Variant row ->
+      ensure_equality_row_with_seen seen seen_rec row
     | Array _ -> raise (Type_error "Equality is not supported for arrays")
     | Ref _ -> raise (Type_error "Equality is not supported for refs")
     | Fun _ -> raise (Type_error "Equality is not supported for functions")
@@ -1092,7 +1170,8 @@ and ensure_equality_type ?(checkpoint = fun () -> ()) ty =
       else
         row_fields_and_tail_with_seen seen (binder :: seen_rec) (unfold_mu ~checkpoint mu)
     | Rec_var _ as rec_var -> Env.empty, rec_var
-    | Record r -> row_fields_and_tail_with_seen seen seen_rec r
+    | Record r | Module r | Field_receiver (_, r) ->
+      row_fields_and_tail_with_seen seen seen_rec r
     | Variant r -> row_fields_and_tail_with_seen seen seen_rec r
     | Row (fs, rest) ->
       let rest_fields, tail = row_fields_and_tail_with_seen seen seen_rec rest in
@@ -1148,11 +1227,12 @@ let contains_generic ?(checkpoint = fun () -> ()) (ty : typ) : bool =
     | Mu (_binder, body) -> aux seen body
     | Rec_var _ -> false
     | Var { contents = Free _ } -> false
-    | Ref t | Record t | Variant t | Array t -> aux seen t
+    | Ref t | Record t | Module t | Variant t | Array t -> aux seen t
+    | Field_receiver (kind, row) -> aux seen kind || aux seen row
     | Tuple ts | Variant_payload ts -> List.exists ts ~f:(aux seen)
     | Row (fields, tail) ->
       Env.exists fields (fun _field ty' -> aux seen ty') || aux seen tail
-    | TInt | TFloat | Boolean | String | Empty_row | Unit -> false
+    | TInt | TFloat | Boolean | String | Empty_row | Unit | Shape_kind _ -> false
   in
   aux [] ty
 ;;
@@ -1178,9 +1258,11 @@ let contains_rec_var_name ?(checkpoint = fun () -> ()) (target : name) (ty : typ
       if tv_ref_mem tv seen then false else aux (tv :: seen) t
     | Con (_n, args) -> List.exists args ~f:(aux seen)
     | Var { contents = Free _ }
-    | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> false
+    | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit | Shape_kind _ ->
+      false
     | Mu (binder, body) -> if String.equal binder target then false else aux seen body
-    | Ref t | Record t | Variant t | Array t -> aux seen t
+    | Ref t | Record t | Module t | Variant t | Array t -> aux seen t
+    | Field_receiver (kind, row) -> aux seen kind || aux seen row
     | Tuple ts | Variant_payload ts -> List.exists ts ~f:(aux seen)
     | Row (fields, tail) ->
       Env.exists fields (fun _field ty' -> aux seen ty') || aux seen tail
@@ -1308,6 +1390,9 @@ let rec typ_of_builtin_ty ?(checkpoint = fun () -> ()) (ty : Builtin_spec.ty) : 
   | Builtin_spec.TRef inner -> Ref (convert inner)
   | Builtin_spec.TTuple tys -> Tuple (List.map tys ~f:convert)
   | Builtin_spec.TRecord row -> Record (typ_of_builtin_row ~checkpoint row)
+  | Builtin_spec.TModule row -> Module (typ_of_builtin_row ~checkpoint row)
+  | Builtin_spec.TField_receiver (kind, row) ->
+    Field_receiver (Generic kind, typ_of_builtin_row ~checkpoint row)
   | Builtin_spec.TVariant row -> Variant (typ_of_builtin_variant_row ~checkpoint row)
   | Builtin_spec.TFun (params, ret) -> Fun (List.map params ~f:convert, convert ret)
   | Builtin_spec.TMu (binder, body) -> Mu (binder, convert body)
@@ -1483,7 +1568,7 @@ let restrict_free_vars_to_level ?(checkpoint = fun () -> ()) (max_level : int) (
     | Fun (params, ret) ->
       List.iter params ~f:(aux seen);
       aux seen ret
-    | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> ()
+    | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit | Shape_kind _ -> ()
     | Var ({ contents = Bound t } as tv) ->
       if not (tv_ref_mem tv seen) then aux (tv :: seen) t
     | Con (_n, args) -> List.iter args ~f:(aux seen)
@@ -1491,7 +1576,10 @@ let restrict_free_vars_to_level ?(checkpoint = fun () -> ()) (max_level : int) (
       if lvl > max_level then tv := Free (name, max_level)
     | Mu (_binder, body) -> aux seen body
     | Rec_var _ -> ()
-    | Ref t | Record t | Variant t | Array t -> aux seen t
+    | Ref t | Record t | Module t | Variant t | Array t -> aux seen t
+    | Field_receiver (kind, row) ->
+      aux seen kind;
+      aux seen row
     | Tuple ts | Variant_payload ts -> List.iter ts ~f:(aux seen)
     | Row (fields, tail) ->
       Env.iter fields ~f:(fun _field ty' -> aux seen ty');
@@ -1685,7 +1773,8 @@ and record_field_type ?(checkpoint = fun () -> ()) (row_ty : typ) (label : strin
   =
   checkpoint ();
   match resolve_bound_type ~checkpoint row_ty with
-  | Record row -> record_field_type ~checkpoint row label
+  | Record row | Module row | Field_receiver (_, row) ->
+    record_field_type ~checkpoint row label
   | Row (fields, tail) ->
     (match Env.find fields label with
      | Some ty -> Some ty
@@ -2042,6 +2131,7 @@ and reopen_lambda_param_type (state : infer_state) (ty : typ) : typ =
   checkpoint state;
   match resolve_bound_type ~checkpoint:(fun () -> checkpoint state) ty with
   | Record row -> Record (reopen_lambda_row state row)
+  | Field_receiver (kind, row) -> Field_receiver (kind, reopen_lambda_row state row)
   | Array elt_ty -> Array (reopen_lambda_param_type state elt_ty)
   | Ref inner_ty -> Ref (reopen_lambda_param_type state inner_ty)
   | Tuple tys -> Tuple (List.map tys ~f:(reopen_lambda_param_type state))
@@ -2184,6 +2274,7 @@ and join_type (state : infer_state) (lhs : typ) (rhs : typ) : typ =
     , resolve_bound_type ~checkpoint:(fun () -> checkpoint state) rhs )
   with
   | Record row_l, Record row_r -> Record (join_record_rows state row_l row_r)
+  | Module row_l, Module row_r -> Module (join_record_rows state row_l row_r)
   | lhs', rhs' ->
     unify state lhs' rhs';
     lhs
@@ -2329,7 +2420,11 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
         let obj_ty = infer_expr state env types obj in
         let field_ty = new_var state state.current_lvl in
         let tail_row = new_var state state.current_lvl in
-        unify state obj_ty (Record (Row (Env.singleton lbl field_ty, tail_row)));
+        unify
+          state
+          obj_ty
+          (Field_receiver
+             (new_var state state.current_lvl, Row (Env.singleton lbl field_ty, tail_row)));
         field_ty
       | EArray elts ->
         let elt_ty = new_var state state.current_lvl in
@@ -2484,12 +2579,12 @@ let rec infer_stmt_with_exports
           | Some ty -> Env.add name ty acc
           | None -> acc))
     in
-    let module_typ = Record (Row (exports_map, Empty_row)) in
+    let module_typ = Module (Row (exports_map, Empty_row)) in
     unify state module_placeholder module_typ;
     add_generalized state env mname module_typ, types, [ mname ]
   | SOpen mname ->
     (match lookup state env mname with
-     | Record row ->
+     | Module row ->
        let fields, tail = merge_fields ~checkpoint:(fun () -> checkpoint state) row in
        (match tail with
         | Empty_row | Var { contents = Free _ } -> ()

@@ -174,6 +174,31 @@ let main input =
   Task.pure(`String(label(updated) ++ ":" ++ updated.status))
 ```
 
+## Modules and records have different representations
+
+A module is an environment of exports, not a record value. Field projection and
+`record_keys` accept either representation. A helper inferred only from those
+operations can be used independently with modules and records; an ordinary
+record argument may still have extra fields. Using a record-only operation
+constrains the helper to records: record annotations, exact or open record
+patterns, and copy-update cannot accept a module, including through an alias or
+a function parameter. `open` accepts modules only.
+
+<!-- ochat-authoring-example: {"id":"inference.module-record-projection","surface":"one_off_v1","result":5} -->
+```ocaml
+let read value = value.x
+module M = struct let x = 2 end
+let main input =
+  Task.pure(Json.parse(to_string(read(M) + read({x=3; extra=true}))))
+```
+
+<!-- ochat-authoring-example: {"id":"inference.module-update-rejected","surface":"one_off_v1","stage":"typecheck","contains":"Cannot unify","span":true} -->
+```ocaml
+let update value = {value with x=3}
+module M = struct let x = 2 end
+let main input = Task.pure(Json.parse(to_string(update(M).x)))
+```
+
 ## Matching and equality use inferred types
 
 Variant rows track constructor names and payload types. A match may close a row;

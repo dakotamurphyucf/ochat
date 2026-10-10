@@ -29,6 +29,8 @@ and ty =
   | TRef of ty
   | TTuple of ty list
   | TRecord of row
+  | TModule of row
+  | TField_receiver of string * row
   | TVariant of variant_row
   | TFun of ty list * ty
   | TMu of string * ty
@@ -83,7 +85,7 @@ let apply_chatml (name : string) (fn : value) (args : value list) : value =
 ;;
 
 let module_scheme (m : builtin_module) : ty =
-  record (List.map m.exports ~f:(fun b -> b.name, b.scheme))
+  TModule (closed_row (List.map m.exports ~f:(fun b -> b.name, b.scheme)))
 ;;
 
 let option_ty (a : string) : ty = variant [ "None", []; "Some", [ TVar a ] ]
@@ -850,7 +852,7 @@ let builtins : builtin list =
       (fun v -> VArray (Array.copy (expect_array "array_copy" v)))
   ; make_unary_builtin
       "record_keys"
-      (TFun ([ TRecord (TRow_var "r") ], TArray TString))
+      (TFun ([ TField_receiver ("__record_keys_kind", TRow_var "r") ], TArray TString))
       (fun v ->
          let keys =
            expect_record_like "record_keys" v

@@ -1660,7 +1660,7 @@ module Coverage = struct
           ; ( "global/length"
             , "aeace1ff131b4ee17d25261203e769409faead1f8ceb016c5146c55c7ecada4a" )
           ; ( "global/record_keys"
-            , "efbbb1e24fb1713576736aa91c2beba8836307770cbec3ae430f9eee4dcd703a" )
+            , "8a2ca71008c82b1a7f097e025bc6612acc637c3eb73baf6fabaf7d99f58b913f" )
           ; ( "global/string_is_empty"
             , "aa275489b18cef598b4a907ca70ba380ab894b1beb72c895bfe536b8149d2655" )
           ; ( "global/string_length"
@@ -1683,7 +1683,7 @@ module Coverage = struct
           ; ( "global/length"
             , "8368904b15fc8a4b40f90b8e0e67cdbb0da831d38b651abc092820d21d84b93d" )
           ; ( "global/record_keys"
-            , "5b2cdb4712a64f62e1dd063565c048bdd948aecf5a0eb3b6aef7277170bc0a40" )
+            , "7591b1feecc7dbbc44149de158075985b88d2ee8857a42ab8acfd274770ece48" )
           ; ( "global/string_is_empty"
             , "8f24aa783e6637561c7d6a617ef244388296781ba97e2ca605f77ba49b087253" )
           ; ( "global/string_length"
@@ -1708,7 +1708,7 @@ module Coverage = struct
           ; ( "global/print"
             , "4c92a831438876c9857cae474b51af4bb6804574d605f6f4b190f8d4f8a5a80b" )
           ; ( "global/record_keys"
-            , "3b18c065f56fe4c9701711f2082ba2e9cf661323e3b1ca839c189fbe1ac79bd0" )
+            , "7fee73e71ae28d34fdea7c8fedff14587093f578019915ce8ec0cba628ac734b" )
           ; ( "global/string_is_empty"
             , "298e95885e51043d3fef9428f55e52fff5bff2aa0c7393d48081e89f5a801909" )
           ; ( "global/string_length"
@@ -1731,7 +1731,7 @@ module Coverage = struct
           ; ( "global/length"
             , "ddac7a36eb0b29756c08c9bbe22ce78df37ee3f3a53384057b309bd40cd10241" )
           ; ( "global/record_keys"
-            , "6b0ef823850e8b4b2b1c6da89dc66af42ebf05ce603f7e7a037bdc188dda56a8" )
+            , "f855eaa5b1acb221a86c2e624e34f0424be1a323ee6aa7f75e06e64c8a7d0de9" )
           ; ( "global/string_is_empty"
             , "0646ea2618ee94ed73cbafe60631d9404d6186bea2f2dc8b88017527e0c780f1" )
           ; ( "global/string_length"
@@ -2752,7 +2752,7 @@ let language_foundation ~sources =
       ; review =
           Audited
             { excerpt_sha256 =
-                [ "0c038b99ee2a28051c5ae93692054c9f67dfd3aec2ebd6b7bc3eb880f19c4d84" ]
+                [ "867b1f0f872bfd4a864ec1d569866387b20a9b782a4072862195ea0e2bdf9194" ]
             ; evidence =
                 [ "lib/chatml/chatml_typechecker.ml"
                 ; "test/chatml_typechecker_test.ml"
