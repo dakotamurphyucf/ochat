@@ -118,7 +118,10 @@ let%expect_test "ordinary structured and recursive diagnostics retain their disp
     ; T.Array (T.Fun ([ T.String ], T.Con ("task", [ T.Boolean ])))
     ; T.Variant
         (T.Row
-           ( T.Env.of_list [ "None", T.Unit; "Pair", T.Tuple [ T.TInt; T.String ] ]
+           ( T.Env.of_list
+               [ "None", T.Variant_payload []
+               ; "Pair", T.Variant_payload [ T.TInt; T.String ]
+               ]
            , T.Generic "rest" ))
     ; T.Record
         (T.Row

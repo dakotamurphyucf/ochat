@@ -1801,9 +1801,9 @@ let%test_unit "contractiveness accepts recursive variant type" =
       , Chatml_typechecker.Variant
           (Chatml_typechecker.Row
              ( Chatml_typechecker.Env.of_list
-                 [ "Int", Chatml_typechecker.TInt
+                 [ "Int", Chatml_typechecker.Variant_payload [ Chatml_typechecker.TInt ]
                  ; ( "Add"
-                   , Chatml_typechecker.Tuple
+                   , Chatml_typechecker.Variant_payload
                        [ Chatml_typechecker.Rec_var "a"; Chatml_typechecker.Rec_var "a" ]
                    )
                  ]
@@ -1908,9 +1908,9 @@ let%test_unit "bindings containing recursive types remain monomorphic" =
       , Chatml_typechecker.Variant
           (Chatml_typechecker.Row
              ( Chatml_typechecker.Env.of_list
-                 [ "Int", Chatml_typechecker.TInt
+                 [ "Int", Chatml_typechecker.Variant_payload [ Chatml_typechecker.TInt ]
                  ; ( "Add"
-                   , Chatml_typechecker.Tuple
+                   , Chatml_typechecker.Variant_payload
                        [ Chatml_typechecker.Rec_var "expr"
                        ; Chatml_typechecker.Rec_var "expr"
                        ] )
