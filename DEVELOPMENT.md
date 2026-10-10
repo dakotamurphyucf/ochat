@@ -52,7 +52,8 @@ When changing an inventoried implementation or its documentation:
    ```
 
    `--semantics`, `--declarations`, `--native` and `--grammar` select the other
-   maintained taxonomies. Compiler binding candidates use `MODULE TOPIC_ID`,
+   maintained taxonomies. `--compiler` reports all compiler binding candidates
+   alongside their previous reviewed pins and topics. Selected candidates use `MODULE TOPIC_ID`,
    `--globals TOPIC_ID` or `--alias NAME TOPIC_ID`. An optional list of exact
    surface IDs limits the report. Output contains candidate hashes for review;
    the exporter never rewrites approved mappings.
