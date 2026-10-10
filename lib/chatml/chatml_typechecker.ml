@@ -1530,6 +1530,9 @@ and infer_recursive_bindings
       (bindings : (string * expr node) list)
   : tenv
   =
+  validate_unique_binders
+    ~what:"recursive binding"
+    (List.map bindings ~f:(fun (name, rhs) -> name, rhs.span));
   List.iter bindings ~f:(fun (nm, rhs) ->
     if not (is_function_like_expr rhs.value)
     then
@@ -1637,6 +1640,30 @@ and validate_unique_record_labels_in_pattern (pat : pattern) (span : Source.span
       List.iter fields ~f:(fun (_lbl, subpat) -> loop subpat)
   in
   loop pat
+
+(* Binder names have no individual source spans in the AST. Anchor duplicate
+   parameters at their lambda, and recursive names at the duplicate RHS. *)
+and validate_unique_binders ~what binders =
+  let seen = Hash_set.create (module String) in
+  match
+    List.find binders ~f:(fun (name, _span) ->
+      if Hash_set.mem seen name
+      then true
+      else (
+        Hash_set.add seen name;
+        false))
+  with
+  | None -> ()
+  | Some (name, span) ->
+    raise (Type_error_with_loc (Printf.sprintf "Duplicate %s '%s'" what name, span))
+
+and validate_lambda_binders (expr : expr node) =
+  match expr.value with
+  | ELambda (params, _) | ELambdaSlots (params, _, _) ->
+    validate_unique_binders
+      ~what:"lambda parameter"
+      (List.map params ~f:(fun name -> name, expr.span))
+  | _ -> ()
 
 and validate_pattern_binders (pat : pattern) : unit =
   let seen = Hash_set.create (module String) in
@@ -2174,6 +2201,7 @@ and infer_expr_against_expected
       (expected_ty : typ)
   : typ
   =
+  validate_lambda_binders expr;
   match
     expr.value, resolve_bound_type ~checkpoint:(fun () -> checkpoint state) expected_ty
   with
@@ -2212,6 +2240,7 @@ and infer_expr_against_expected
 
 and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
   checkpoint state;
+  validate_lambda_binders expr;
   (* We first perform the usual inference work, then — if it succeeds — we
      record the resulting type in [state.span_types].  The resolver consults this
      table to choose an appropriate slot descriptor. *)
