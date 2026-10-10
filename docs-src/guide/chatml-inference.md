@@ -122,6 +122,27 @@ let rec cycle = {next = cycle}
 let main input = Task.pure(`Null)
 ```
 
+<!-- ochat-authoring-example: {"id":"inference.duplicate-parameter-rejected","surface":"one_off_v1","stage":"typecheck","contains":"Duplicate lambda parameter 'value'","span":true} -->
+```ocaml
+let duplicate value value = value
+let main input = Task.pure(`Null)
+```
+
+<!-- ochat-authoring-example: {"id":"inference.duplicate-recursive-name-rejected","surface":"one_off_v1","stage":"typecheck","contains":"Duplicate recursive binding 'repeat'","span":true} -->
+```ocaml
+let rec repeat value = value
+and repeat value = value
+let main input = Task.pure(`Null)
+```
+
+<!-- ochat-authoring-example: {"id":"inference.sequential-rebinding","surface":"one_off_v1","result":"first:second"} -->
+```ocaml
+let label = "first"
+let captured () = label
+let label = "second"
+let main input = Task.pure(`String(captured() ++ ":" ++ label))
+```
+
 ## Records retain only fields guaranteed by their type
 
 Field access constrains an inferred record parameter to contain that field.

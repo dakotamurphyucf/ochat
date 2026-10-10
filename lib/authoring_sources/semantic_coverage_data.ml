@@ -96,10 +96,16 @@ let features =
       ; "test/agent_docs/docs_chatml_authoring.ml"
       ] )
   ; ( "types.pattern_binders"
-    , "Unique labels/binders, structural and literal patterns"
+    , "Unique labels, pattern/lambda binders and simultaneous recursive names"
     , [ "lib/chatml/chatml_typechecker.ml" ]
     , "chatml.inference"
-    , [ "test/chatml_typechecker_test.ml"; "test/agent_docs/docs_chatml_authoring.ml" ] )
+    , [ "inference.duplicate-parameter-rejected"
+      ; "inference.duplicate-recursive-name-rejected"
+      ; "inference.sequential-rebinding"
+      ; "test/och159_verification/och159_verification_test.ml"
+      ; "test/chatml_typechecker_test.ml"
+      ; "test/agent_docs/docs_chatml_authoring.ml"
+      ] )
   ; ( "types.match_coverage"
     , "Conservative coverage, redundant arms and closed variants"
     , [ "lib/chatml/chatml_typechecker.ml" ]
