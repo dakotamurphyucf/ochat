@@ -7,6 +7,11 @@ module A = Agent_session.Session_actor
 module H = Agent_client.Session_handle
 module Res = Openai.Responses
 
+type fixture_client =
+  { connection : Agent_client.Connection.t
+  ; invocation_handles : (P.Id.Session.t, H.t) Hashtbl.t
+  }
+
 let field json name = Jsonaf.member_exn name json
 let text json name = field json name |> Jsonaf.string_exn
 
@@ -152,122 +157,154 @@ let%expect_test
           Failure_diagnostic.observe diagnostic current;
           current
         in
+        (* Each required operation has its own progress deadline. The workflow
+           has many independent invocations; their accumulated CPU time is not
+           a bound on any single invocation's liveness. *)
+        let run_phase name f =
+          phase := name;
+          Failure_diagnostic.mark diagnostic ("phase: " ^ name);
+          try Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 45. f with
+          | exn ->
+            let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+            Eio.Cancel.protect (fun () ->
+              Failure_diagnostic.report
+                diagnostic
+                ~context:
+                  [%sexp
+                    "authored fixture failure"
+                  , (name : string)
+                  , (Exn.to_string exn : string)
+                  , (!phase : string)
+                  , (!invocation_ordinal : int)
+                  , (!calls : int)
+                  , (!child_calls : int)]);
+            Exn.raise_with_original_backtrace exn backtrace
+        in
         let with_daemon f =
           Eio.Switch.run (fun sw ->
+            Failure_diagnostic.reset diagnostic;
             let before = !calls in
             let daemon =
-              D.start
-                ~sw
-                ~env
-                ~config:configuration
-                ~tool_dir:root
-                ~home:root
-                ~process_start_identity:None
-                ~options:
-                  { D.default_options with
-                    qualify_chatml_extensions = true
-                  ; inference_policy =
-                      Agent_server_test_support.inference_policy
-                        ~default_model:"fixture-model"
-                        ~post_stream:provider
-                  }
-                ()
-              |> protocol_ok
+              run_phase "start daemon" (fun () ->
+                D.start
+                  ~sw
+                  ~env
+                  ~config:configuration
+                  ~tool_dir:root
+                  ~home:root
+                  ~process_start_identity:None
+                  ~options:
+                    { D.default_options with
+                      qualify_chatml_extensions = true
+                    ; inference_policy =
+                        Agent_server_test_support.inference_policy
+                          ~default_model:"fixture-model"
+                          ~post_stream:provider
+                    }
+                  ()
+                |> protocol_ok)
             in
             [%test_eq: int] before !calls;
             Exn.protect
               ~finally:(fun () -> D.shutdown daemon |> protocol_ok)
               ~f:(fun () ->
-                Failure_diagnostic.reset diagnostic;
-                Failure_diagnostic.mark diagnostic "connect and initialize";
-                try
-                  (* This bounds the complete workflow on each daemon, including
-                     15 invocations on the first. A control run used 15.3 seconds
-                     of process CPU; allow scheduling headroom for concurrent CI. *)
-                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 45. (fun () ->
-                    let client =
-                      Agent_server_wire_fixture.connect_unix
-                        ~sw
-                        ~env
-                        ~daemon
-                        ~socket_path:(Filename.concat root "authored.sock")
-                    in
-                    Exn.protect
-                      ~finally:(fun () -> Agent_client.Connection.close client)
-                      ~f:(fun () ->
-                        initialize client;
-                        f sw daemon client))
-                with
-                | Eio.Time.Timeout ->
-                  Failure_diagnostic.report
-                    diagnostic
-                    ~context:
-                      [%sexp
-                        (!phase : string)
-                      , (!invocation_ordinal : int)
-                      , (!calls : int)
-                      , (!child_calls : int)];
-                  failwith ("authored fixture timeout: " ^ !phase)))
+                let client =
+                  { connection =
+                      run_phase "connect client" (fun () ->
+                        Agent_server_wire_fixture.connect_unix
+                          ~sw
+                          ~env
+                          ~daemon
+                          ~socket_path:(Filename.concat root "authored.sock"))
+                  ; invocation_handles = Hashtbl.create (module P.Id.Session)
+                  }
+                in
+                Exn.protect
+                  ~finally:(fun () ->
+                    Eio.Cancel.protect (fun () ->
+                      Exn.protect
+                        ~finally:(fun () ->
+                          Agent_client.Connection.close client.connection)
+                        ~f:(fun () ->
+                          let handles = Hashtbl.data client.invocation_handles in
+                          Hashtbl.clear client.invocation_handles;
+                          let rec close = function
+                            | [] -> ()
+                            | handle :: rest ->
+                              Exn.protect
+                                ~finally:(fun () -> close rest)
+                                ~f:(fun () ->
+                                  (* Shield cleanup from the failed phase while
+                                     giving this detach its own cancellable scope. *)
+                                  run_phase "detach invocation writer" (fun () ->
+                                    H.close handle))
+                          in
+                          close handles)))
+                  ~f:(fun () ->
+                    run_phase "initialize client" (fun () -> initialize client.connection);
+                    f sw daemon client)))
         in
-        let invoke_status sw daemon client parent name args =
-          phase := name;
-          Int.incr invocation_ordinal;
-          let mark stage =
-            Failure_diagnostic.mark
-              diagnostic
-              (sprintf "invocation %d %s: %s" !invocation_ordinal name stage)
-          in
-          mark "read before";
-          let before = state daemon parent in
-          mark "attach";
-          let handle =
+        (* Writers belong to the connection's daemon generation. Reusing them
+           avoids copying the growing transcript for each tool invocation. *)
+        let invocation_handle sw client parent =
+          Hashtbl.find_or_add client.invocation_handles parent ~default:(fun () ->
             H.attach
               ~sw
               ~clock:(Eio.Stdenv.clock env)
-              ~connection:client
+              ~connection:client.connection
               ~session_id:parent
               ~mode:Read_write
               ~subscribe:false
               ()
+            |> protocol_ok)
+        in
+        let invoke_status sw daemon client parent name args =
+          run_phase ("invoke " ^ name) (fun () ->
+            phase := name;
+            Int.incr invocation_ordinal;
+            let mark stage =
+              Failure_diagnostic.mark
+                diagnostic
+                (sprintf "invocation %d %s: %s" !invocation_ordinal name stage)
+            in
+            mark "read before";
+            let before = state daemon parent in
+            mark "attach";
+            let handle = invocation_handle sw client parent in
+            mark "send";
+            queued := Some (name, args);
+            H.send_message
+              handle
+              { kind = Plain_text
+              ; text = "Run the requested specialist operation."
+              ; attachments = []
+              }
             |> protocol_ok
-          in
-          Exn.protect
-            ~finally:(fun () -> H.close handle)
-            ~f:(fun () ->
-              mark "send";
-              queued := Some (name, args);
-              H.send_message
-                handle
-                { kind = Plain_text
-                ; text = "Run the requested specialist operation."
-                ; attachments = []
-                }
-              |> protocol_ok
-              |> ignore;
-              mark "wait for inactive parent";
-              let rec wait () =
-                let current = state daemon parent in
-                match current.active_operation with
-                | Some _ ->
-                  Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
-                  wait ()
-                | None -> current
-              in
-              let current = wait () in
-              mark "read invocation outcome";
-              let fresh =
-                List.filter current.invocations ~f:(fun invocation ->
-                  not
-                    (List.exists before.invocations ~f:(fun old ->
-                       P.Id.Invocation.equal
-                         invocation.P.Invocation.context.id
-                         old.context.id)))
-              in
-              let invocation =
-                List.find_exn fresh ~f:(fun invocation ->
-                  P.Invocation.equal_origin invocation.context.origin Model)
-              in
-              invocation.status)
+            |> ignore;
+            mark "wait for inactive parent";
+            let rec wait () =
+              let current = state daemon parent in
+              match current.active_operation with
+              | Some _ ->
+                Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                wait ()
+              | None -> current
+            in
+            let current = wait () in
+            mark "read invocation outcome";
+            let fresh =
+              List.filter current.invocations ~f:(fun invocation ->
+                not
+                  (List.exists before.invocations ~f:(fun old ->
+                     P.Id.Invocation.equal
+                       invocation.P.Invocation.context.id
+                       old.context.id)))
+            in
+            let invocation =
+              List.find_exn fresh ~f:(fun invocation ->
+                P.Invocation.equal_origin invocation.context.origin Model)
+            in
+            invocation.status)
         in
         let invoke sw daemon client parent name args =
           match invoke_status sw daemon client parent name args with
@@ -294,93 +331,98 @@ let%expect_test
           field result "session_id" |> P.Id.Session.of_json |> protocol_ok
         in
         let check_counter daemon child expected =
-          let current = state daemon child in
-          let values =
-            List.filter_map current.invocations ~f:(fun invocation ->
-              match invocation.status with
-              | Published (Complete (`String value))
-                when String.is_prefix value ~prefix:"count-" -> Some value
-              | _ -> None)
-          in
-          assert (List.mem values expected ~equal:String.equal);
-          let reads =
-            List.filter_map current.invocations ~f:(fun invocation ->
-              match invocation.status with
-              | (Published (Complete value) | Resolved (Complete value))
-                when String.is_substring
-                       (Jsonaf.to_string value)
-                       ~substring:"private-approved-content" -> Some value
-              | _ -> None)
-          in
-          assert (not (List.is_empty reads))
+          run_phase ("check private counter " ^ expected) (fun () ->
+            let current = state daemon child in
+            let values =
+              List.filter_map current.invocations ~f:(fun invocation ->
+                match invocation.status with
+                | Published (Complete (`String value))
+                  when String.is_prefix value ~prefix:"count-" -> Some value
+                | _ -> None)
+            in
+            assert (List.mem values expected ~equal:String.equal);
+            let reads =
+              List.filter_map current.invocations ~f:(fun invocation ->
+                match invocation.status with
+                | (Published (Complete value) | Resolved (Complete value))
+                  when String.is_substring
+                         (Jsonaf.to_string value)
+                         ~substring:"private-approved-content" -> Some value
+                | _ -> None)
+            in
+            assert (not (List.is_empty reads)))
         in
         let one_off_children = ref [] in
         let one_off sw daemon client caller =
-          let records () =
-            Agent_store.Delegation_store.with_records
-              (Agent_store.Session_store.delegations (D.store daemon))
-              ~max_records:128
-              ~max_bytes:1048576
-              ~f:(fun records -> Ok records)
-            |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
-            |> protocol_ok
-          in
-          let before = records () in
-          let value =
-            invoke
+          run_phase "one-off lifecycle" (fun () ->
+            let records () =
+              Agent_store.Delegation_store.with_records
+                (Agent_store.Session_store.delegations (D.store daemon))
+                ~max_records:128
+                ~max_bytes:1048576
+                ~f:(fun records -> Ok records)
+              |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+              |> protocol_ok
+            in
+            let before = records () in
+            let value =
+              invoke
+                sw
+                daemon
+                client
+                caller
+                "researcher"
+                (`Object [ "input", `String "A default one-off request." ])
+            in
+            assert (Jsonaf.exactly_equal value (`String "Specialist finished."));
+            let record =
+              records ()
+              |> List.filter ~f:(fun record ->
+                not
+                  (List.exists before ~f:(fun old ->
+                     P.Id.Session.equal
+                       old.Agent_store.Delegation_store.admission.child_session_id
+                       record.admission.child_session_id)))
+              |> function
+              | [ record ] -> record
+              | _ -> failwith "one-off did not create exactly one admitted child"
+            in
+            (match record.admission.lifetime with
+             | Invocation_owned { invocation_id } ->
+               let owner =
+                 List.find_exn (state daemon caller).invocations ~f:(fun invocation ->
+                   P.Id.Invocation.equal invocation.context.id invocation_id)
+               in
+               (match owner.status with
+                | Published (Complete _) -> ()
+                | _ -> failwith "one-off owner was not published")
+             | _ -> failwith "one-off received reusable lifetime");
+            let child = record.admission.child_session_id in
+            let stopped = state daemon child in
+            (match stopped.lifecycle.desired, stopped.lifecycle.observed with
+             | Stopped, Stopped -> ()
+             | _ -> failwith "one-off child cleanup did not finish");
+            assert (Option.is_none stopped.active_operation);
+            check_counter daemon child "count-1";
+            denied
               sw
               daemon
               client
               caller
               "researcher"
-              (`Object [ "input", `String "A default one-off request." ])
-          in
-          assert (Jsonaf.exactly_equal value (`String "Specialist finished."));
-          let record =
-            records ()
-            |> List.filter ~f:(fun record ->
-              not
-                (List.exists before ~f:(fun old ->
-                   P.Id.Session.equal
-                     old.Agent_store.Delegation_store.admission.child_session_id
-                     record.admission.child_session_id)))
-            |> function
-            | [ record ] -> record
-            | _ -> failwith "one-off did not create exactly one admitted child"
-          in
-          (match record.admission.lifetime with
-           | Invocation_owned { invocation_id } ->
-             let owner =
-               List.find_exn (state daemon caller).invocations ~f:(fun invocation ->
-                 P.Id.Invocation.equal invocation.context.id invocation_id)
-             in
-             (match owner.status with
-              | Published (Complete _) -> ()
-              | _ -> failwith "one-off owner was not published")
-           | _ -> failwith "one-off received reusable lifetime");
-          let child = record.admission.child_session_id in
-          let stopped = state daemon child in
-          (match stopped.lifecycle.desired, stopped.lifecycle.observed with
-           | Stopped, Stopped -> ()
-           | _ -> failwith "one-off child cleanup did not finish");
-          assert (Option.is_none stopped.active_operation);
-          check_counter daemon child "count-1";
-          denied
-            sw
-            daemon
-            client
-            caller
-            "researcher"
-            (`Object
-                [ "input", `String "Cannot continue a one-off."
-                ; "mode", `String "persistent"
-                ; "session_id", P.Id.Session.to_json child
-                ]);
-          one_off_children := child :: !one_off_children
+              (`Object
+                  [ "input", `String "Cannot continue a one-off."
+                  ; "mode", `String "persistent"
+                  ; "session_id", P.Id.Session.to_json child
+                  ]);
+            one_off_children := child :: !one_off_children)
         in
         let parent, child, caller, grandchild =
           with_daemon (fun sw daemon client ->
-            let parent, _ = create_session ~start_immediately:true client in
+            let parent, _ =
+              run_phase "create parent session" (fun () ->
+                create_session ~start_immediately:true client.connection)
+            in
             let child = call sw daemon client parent.id "First request." in
             check_counter daemon child "count-1";
             let continued =
@@ -482,67 +524,62 @@ let%expect_test
             [%test_eq: string] "idle" (text status "state");
             one_off sw daemon client parent.id;
             one_off sw daemon client caller;
-            let entered, entered_u = Eio.Promise.create () in
-            let never, _ = Eio.Promise.create () in
-            let provider_cleaned = ref false in
-            (child_preflight
-             := fun () ->
-                  Exn.protect
-                    ~finally:(fun () -> provider_cleaned := true)
-                    ~f:(fun () ->
-                      Eio.Promise.resolve entered_u ();
-                      Eio.Promise.await never));
-            Eio.Fiber.fork ~sw (fun () ->
-              Eio.Promise.await entered;
-              let handle =
-                H.attach
-                  ~sw
-                  ~clock:(Eio.Stdenv.clock env)
-                  ~connection:client
-                  ~session_id:parent.id
-                  ~mode:Read_write
-                  ~subscribe:false
-                  ()
-                |> protocol_ok
-              in
-              Exn.protect
-                ~finally:(fun () -> H.close handle)
-                ~f:(fun () ->
+            run_phase "cancel one-off and verify joined cleanup" (fun () ->
+              let entered, entered_u = Eio.Promise.create () in
+              let never, _ = Eio.Promise.create () in
+              let provider_cleaned = ref false in
+              (child_preflight
+               := fun () ->
+                    Exn.protect
+                      ~finally:(fun () -> provider_cleaned := true)
+                      ~f:(fun () ->
+                        Eio.Promise.resolve entered_u ();
+                        Eio.Promise.await never));
+              let handle = invocation_handle sw client parent.id in
+              Eio.Switch.run (fun cancellation_sw ->
+                let cancelled, cancelled_u = Eio.Promise.create () in
+                Eio.Fiber.fork ~sw:cancellation_sw (fun () ->
+                  Eio.Promise.await entered;
+                  Failure_diagnostic.mark diagnostic "cancel entered child provider";
                   let operation =
                     Option.value_exn (state daemon parent.id).active_operation
                   in
-                  H.cancel_operation handle operation.id |> protocol_ok |> ignore));
-            (match
-               invoke_status
-                 sw
-                 daemon
-                 client
-                 parent.id
-                 "researcher"
-                 (`Object [ "input", `String "Cancel while the specialist is working." ])
-             with
-             | Published (Cancelled _) | Resolved (Cancelled _) -> ()
-             | status ->
-               raise_s
-                 [%sexp "one-off cancellation failed", (status : P.Invocation.status)]);
-            assert !provider_cleaned;
-            let owned_records =
-              Agent_store.Delegation_store.with_records
-                (Agent_store.Session_store.delegations (D.store daemon))
-                ~max_records:128
-                ~max_bytes:1048576
-                ~f:(fun records -> Ok records)
-              |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
-              |> protocol_ok
-            in
-            List.iter owned_records ~f:(fun record ->
-              match record.admission.lifetime with
-              | Invocation_owned _ ->
-                let current = state daemon record.admission.child_session_id in
-                (match current.lifecycle.desired, current.lifecycle.observed with
-                 | Stopped, Stopped -> ()
-                 | _ -> failwith "cancellation left a one-off child running")
-              | _ -> ());
+                  H.cancel_operation handle operation.id |> protocol_ok |> ignore;
+                  Failure_diagnostic.mark diagnostic "parent cancellation accepted";
+                  Eio.Promise.resolve cancelled_u ());
+                (match
+                   invoke_status
+                     sw
+                     daemon
+                     client
+                     parent.id
+                     "researcher"
+                     (`Object
+                         [ "input", `String "Cancel while the specialist is working." ])
+                 with
+                 | Published (Cancelled _) | Resolved (Cancelled _) -> ()
+                 | status ->
+                   raise_s
+                     [%sexp "one-off cancellation failed", (status : P.Invocation.status)]);
+                Eio.Promise.await cancelled);
+              assert !provider_cleaned;
+              let owned_records =
+                Agent_store.Delegation_store.with_records
+                  (Agent_store.Session_store.delegations (D.store daemon))
+                  ~max_records:128
+                  ~max_bytes:1048576
+                  ~f:(fun records -> Ok records)
+                |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+                |> protocol_ok
+              in
+              List.iter owned_records ~f:(fun record ->
+                match record.admission.lifetime with
+                | Invocation_owned _ ->
+                  let current = state daemon record.admission.child_session_id in
+                  (match current.lifecycle.desired, current.lifecycle.observed with
+                   | Stopped, Stopped -> ()
+                   | _ -> failwith "cancellation left a one-off child running")
+                | _ -> ()));
             parent.id, child, caller, grandchild)
         in
         (* A new catalog revision must not replace either saved specialist's
@@ -562,9 +599,10 @@ let%expect_test
           assert (P.Id.Session.equal grandchild continued);
           check_counter daemon grandchild "count-2";
           List.iter !one_off_children ~f:(fun id ->
-            let stopped = state daemon id in
-            [%test_eq: P.Session.desired_state] Stopped stopped.lifecycle.desired;
-            check_counter daemon id "count-1"));
+            run_phase "verify one-off remains stopped after restart" (fun () ->
+              let stopped = state daemon id in
+              [%test_eq: P.Session.desired_state] Stopped stopped.lifecycle.desired;
+              check_counter daemon id "count-1")));
         print_endline
           "authored wrapper creates and continues a persisted child; generic management \
            sees it";
