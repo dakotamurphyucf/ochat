@@ -212,28 +212,28 @@ let implementation_sources =
 let topic_contracts =
   [ ( "one_off_v1"
     , "chatml.evaluation"
-    , "e1ba918c148663a43ff38bf75f544ebc806be0a43b7920dcc0a6864ab8e6f73a" )
+    , "25208912ca7f431b3ffa6b6edec9f72d9a643724a56bd90a849c2157b0df3b97" )
   ; ( "tool_v1"
     , "chatml.evaluation"
-    , "6e883a156ba23e5e239e545ee12ce296efc602e27f5596d5ce17ef08344fce96" )
+    , "19fb962eba914f35d2a1c40c15dc95ecfc49d7316a4e60557c4069f0a352e151" )
   ; ( "moderator_v1"
     , "chatml.evaluation"
-    , "4373f6e4445d7044dbfa6d7f34aab39a4610611cab68007a69118fb64452c9bc" )
+    , "0ab604ef8269be8b1d847f1538ea250ba25f7ad9456dab0e57189921166896f3" )
   ; ( "delegated_moderator_v1"
     , "chatml.evaluation"
-    , "c988090c83109be5295176e64ca7bdbad03fdd8caa41ae989826f9746ceff788" )
+    , "c45fe17514158eb2179be067170bfd9aba17c521c4260f5f75cfba4e3ccd1339" )
   ; ( "one_off_v1"
     , "chatml.inference"
-    , "817c07004170371628c14ebca4ac8154ce8b0be0ed44617b92ba8bcc7b90a122" )
+    , "61eb3932293b0703bda5075088e7f76b333a1598abed61a15b928371ad58c151" )
   ; ( "tool_v1"
     , "chatml.inference"
-    , "799e888156276c39c1964de435365187f04f0a613b8e29b625649bbbdbf0345e" )
+    , "c705228682baee23dc8ec03dfbb06d57808e79c754d374a433df558a627fbeaa" )
   ; ( "moderator_v1"
     , "chatml.inference"
-    , "0394fb16a07489b30e13b5cfea1bba1c4d284cbc99f9d86f87b029f0d3854e3c" )
+    , "7260940da59569567111de465beebf7a4c84875acd0ca02fa6f588904284516f" )
   ; ( "delegated_moderator_v1"
     , "chatml.inference"
-    , "666c785dbafd279f1f5a554a75d48f9ab1e9a26e4fd6e4056f01f2209394c207" )
+    , "f28b4409fd1497ae6a20cd76c89afda7c10f2ce57378588bd8f969710a7ddaa4" )
   ; ( "one_off_v1"
     , "chatml.task-effects"
     , "de4730371e88a3bea91ba98f2ef303c9ebf38aac237ba8d701153c8e644e4d19" )
