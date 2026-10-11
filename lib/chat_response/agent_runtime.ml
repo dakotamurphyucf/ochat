@@ -270,6 +270,7 @@ let inspect_shell ~env ~platform ~prompt_elements =
 ;;
 
 let instantiate
+      ~programs
       ~sw
       ~host
       ~admin_policy
@@ -285,7 +286,12 @@ let instantiate
   =
   let open Result.Let_syntax in
   let%bind prepared =
-    Shell_runtime.Registry.prepare_with_policy ~manifest ~material ~admin_policy
+    Shell_preparation.prepare
+      ?programs
+      ~env:host.Shell_runtime.Host.env
+      ~manifest
+      ~admin_policy
+      material
     |> Result.map_error ~f:(List.map ~f:diagnostic_of_registry)
   in
   let%bind security_status =
@@ -316,13 +322,15 @@ let instantiate
     ~extension_snapshots
     ?persist_extension_snapshots
     ~preflight:(fun staged ->
-      preflight (Native_tool_pool.Shell_view.Staged staged)
+      preflight
+        (Native_tool_pool.Shell_view.Staged staged)
+        ~shell_preparation:(Some prepared)
       |> Result.map_error ~f:(fun diagnostics ->
         preflight_diagnostics := Some diagnostics;
         List.map diagnostics ~f:(fun (diagnostic : diagnostic) ->
           Shell_runtime.Registry.
             { code = diagnostic.code; message = diagnostic.message; runtime_id = None })))
-    prepared
+    (Shell_preparation.registry prepared)
   |> Result.map_error ~f:(fun errors ->
     match !preflight_diagnostics with
     | Some diagnostics -> diagnostics
@@ -331,6 +339,7 @@ let instantiate
 ;;
 
 let shell_registry
+      ~programs
       ~sw
       ~host
       ~platform
@@ -350,11 +359,12 @@ let shell_registry
     && List.is_empty declarations.legacy_tools
     && Option.is_none declarations.moderator_runtime
   then
-    preflight Native_tool_pool.Shell_view.Absent
+    preflight Native_tool_pool.Shell_view.Absent ~shell_preparation:None
     |> Result.map ~f:(fun admitted -> None, None, None, admitted)
   else
     Result.bind (compile ~platform declarations) ~f:(fun (manifest, material) ->
       instantiate
+        ~programs
         ~sw
         ~host
         ~admin_policy
@@ -426,6 +436,7 @@ let moderator_process_handler t =
 
 let create_native
       ~extension_resources
+      ~programs
       ~preflight
       ?(native_registrations = [])
       ?native_service_revision
@@ -469,7 +480,7 @@ let create_native
       Shell_runtime.Admin_policy_loader.load_from_environment ~env:(Ctx.env ctx)
       |> Result.map_error ~f:(fun error -> [ diagnostic error.code error.message ])
     in
-    let prepare_pool shell =
+    let prepare_pool shell ~shell_preparation =
       let%bind pool =
         Native_tool_pool.create
           ~registrations:native_registrations
@@ -486,7 +497,7 @@ let create_native
                (List.map ~f:(fun error ->
                   diagnostic error.Native_tool_pool.Error.code error.message))
       in
-      let%map capabilities, admitted = preflight pool in
+      let%map capabilities, admitted = preflight pool ~shell_preparation in
       pool, capabilities, admitted
     in
     let%map
@@ -496,6 +507,7 @@ let create_native
         , (pool, capabilities, admitted) )
       =
       shell_registry
+        ~programs
         ~sw
         ~host
         ~platform
@@ -541,7 +553,9 @@ let create
   =
   create_native
     ~extension_resources:false
-    ~preflight:(fun pool -> Ok (Native_tool_pool.capabilities pool, ()))
+    ~programs:None
+    ~preflight:(fun pool ~shell_preparation:_ ->
+      Ok (Native_tool_pool.capabilities pool, ()))
     ?native_service_revision
     ~sw
     ~ctx
@@ -568,6 +582,7 @@ let prepare_extensions
       ?native_service_revision
       ?(native_registrations = [])
       ?(delegated_moderator = false)
+      ?programs
       ~sw
       ~ctx
       ~host
@@ -598,15 +613,16 @@ let prepare_extensions
               "invalid captured extension declarations"
           ])
   in
-  let prepare_managed pool =
+  let prepare_managed pool ~shell_preparation =
     let%bind capabilities =
       Lazy.force (Native_tool_pool.capabilities pool)
       |> Result.map_error ~f:(fun error ->
         [ diagnostic error.Tool_capability.code error.message ])
     in
-    let%map managed =
+    let%bind managed =
       Managed_tool_registry.prepare
         ~delegated_moderator
+        ?programs
         ~env:(Ctx.env ctx)
         ~owner:host.Shell_runtime.Host.session_id
         ~capabilities
@@ -622,11 +638,21 @@ let prepare_extensions
                 ; source = error.source
                 }))
     in
-    lazy (Ok (Managed_tool_registry.capabilities managed)), managed
+    let capabilities = Managed_tool_registry.capabilities managed in
+    let%map () =
+      match shell_preparation with
+      | None -> Ok ()
+      | Some prepared ->
+        Shell_preparation.admit_tools prepared ~capabilities ~checkpoint:Eio.Fiber.check
+        |> Result.map_error ~f:(fun error ->
+          [ diagnostic error.Chatml_compilation.code error.message ])
+    in
+    lazy (Ok capabilities), managed
   in
   let%map native, managed =
     create_native
       ~extension_resources:true
+      ~programs
       ~preflight:prepare_managed
       ~native_registrations
       ?native_service_revision

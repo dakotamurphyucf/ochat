@@ -98,28 +98,8 @@ let graph ?(moderator = false) ?contract dependency =
   |> ok
 ;;
 
-let fixture ?(moderator = false) ?legacy_surface env =
-  let contract =
-    match legacy_surface with
-    | Some surface -> Chat_response.Moderator_program.contract surface ~checkpoint
-    | None ->
-      Contract.for_target (if moderator then Moderator_v1 else Tool_v1) ~checkpoint
-  in
-  let digest = Contract.fingerprint contract ~checkpoint in
+let custody_fixture env raw =
   let dir = Eio.Stdenv.cwd env in
-  let raw =
-    if moderator
-    then
-      "<script id=\"handler\" language=\"chatml\" kind=\"moderator\" "
-      ^ (if Option.is_some legacy_surface then "" else "api=\"extensibility-v1\"")
-      ^ ">let initial_state = Graph.value\n\
-         let on_event = fun ctx state event -> Task.pure(state)</script>"
-    else
-      "<script id=\"handler\" language=\"chatml\" kind=\"tool\">"
-      ^ body
-      ^ "</script><tool name=\"custom\" type=\"chatml\" script=\"handler\" \
-         entrypoint=\"run\" input_schema=\"schema.json\" output_schema=\"schema.json\"/>"
-  in
   let sources = [ "root.chatmd", raw; "schema.json", "true" ] in
   let authored =
     Chatmd_source_bundle.create ~root_file:"root.chatmd" ~sources ()
@@ -141,21 +121,16 @@ let fixture ?(moderator = false) ?legacy_surface env =
       ~checkpoint
       raw
   in
-  let declaration = List.hd_exn (CM.Parsed.declarations parsed) in
-  let binding =
-    C.Binding.of_declaration parsed declaration ~checkpoint |> Or_error.ok_exn
-  in
-  let restore prepared =
+  let restore programs =
     let custody =
       C.capture
         authored
         ~parsed_contexts:[ parsed ]
         ~root:(CM.Parsed.root_input parsed)
-        ~programs:
-          (Option.to_list
-             (Option.map prepared ~f:(fun graph -> binding, C.Input.Provided graph)))
+        ~programs:(List.map programs ~f:(fun (binding, input, _) -> binding, input))
         ~active_programs:
-          (Option.to_list (Option.map prepared ~f:(fun _ -> binding, digest)))
+          (List.map programs ~f:(fun (binding, _, contract) ->
+             binding, Contract.fingerprint contract ~checkpoint))
         ~limits
         ~checkpoint
       |> ok
@@ -163,10 +138,43 @@ let fixture ?(moderator = false) ?legacy_surface env =
     C.restore
       custody
       ~parsed
-      ~contracts:(Option.to_list (Option.map prepared ~f:(fun _ -> binding, contract)))
+      ~contracts:(List.map programs ~f:(fun (binding, _, contract) -> binding, contract))
       ~limits
       ~checkpoint
     |> ok
+  in
+  CM.Parsed.elements parsed, CM.Parsed.declarations parsed, parsed, restore
+;;
+
+let fixture ?(moderator = false) ?legacy_surface env =
+  let contract =
+    match legacy_surface with
+    | Some surface -> Chat_response.Moderator_program.contract surface ~checkpoint
+    | None ->
+      Contract.for_target (if moderator then Moderator_v1 else Tool_v1) ~checkpoint
+  in
+  let raw =
+    if moderator
+    then
+      "<script id=\"handler\" language=\"chatml\" kind=\"moderator\" "
+      ^ (if Option.is_some legacy_surface then "" else "api=\"extensibility-v1\"")
+      ^ ">let initial_state = Graph.value\n\
+         let on_event = fun ctx state event -> Task.pure(state)</script>"
+    else
+      "<script id=\"handler\" language=\"chatml\" kind=\"tool\">"
+      ^ body
+      ^ "</script><tool name=\"custom\" type=\"chatml\" script=\"handler\" \
+         entrypoint=\"run\" input_schema=\"schema.json\" output_schema=\"schema.json\"/>"
+  in
+  let elements, declarations, parsed, restore_programs = custody_fixture env raw in
+  let binding =
+    C.Binding.of_declaration parsed (List.hd_exn declarations) ~checkpoint
+    |> Or_error.ok_exn
+  in
+  let restore prepared =
+    restore_programs
+      (Option.to_list
+         (Option.map prepared ~f:(fun graph -> binding, C.Input.Provided graph, contract)))
   in
   let capabilities =
     Chat_response.Tool_capability.create
@@ -175,7 +183,7 @@ let fixture ?(moderator = false) ?legacy_surface env =
       []
     |> ok
   in
-  CM.Parsed.elements parsed, capabilities, restore
+  elements, capabilities, restore
 ;;
 
 let compile env elements capabilities programs =

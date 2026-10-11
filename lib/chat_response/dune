@@ -57,6 +57,7 @@
   prepared_script
   captured_script
   shell_program
+  shell_preparation
   extension_compiler
   managed_tool_registry
   one_off_script
