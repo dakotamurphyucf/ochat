@@ -1,13 +1,8 @@
 open Core
 
-module Root_role : sig
-  (** Host invocation role, independent of authored source selection. Persistent
-      child references still request the existing delegated UI role. *)
-  type t =
-    | Ui
-    | Headless
-  [@@deriving equal]
-end
+(** Existing host-selected invocation family, independent of authored source
+    selection. Persistent child references still request delegated UI. *)
+module Root_role = Chat_response.Script_contract_plan.Program.Role.Moderator_invocation
 
 (** Source-capture policy is distinct from runtime restoration policy; there is no
     tool registry, inference worker, semantic restoration policy or initialized

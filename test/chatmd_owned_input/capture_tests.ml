@@ -20,6 +20,7 @@ let with_directory f =
 
 let definition root =
   Agent_session.Prompt_definition.create
+    ~root_invocation:Ui
     ~id:
       (Agent_protocol.Id.Prompt_definition.of_string "prd_owned_input"
        |> Result.map_error ~f:(fun error ->

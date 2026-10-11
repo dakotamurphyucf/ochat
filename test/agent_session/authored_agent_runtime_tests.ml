@@ -61,6 +61,7 @@ let on_event ctx state event = match event with
 <tool name="counter" type="moderator" moderator="owner" input_schema="input.json" output_schema="output.json"/>|};
       let catalog =
         Agent_session.Prompt_definition.create
+          ~root_invocation:Ui
           ~id:prompt_id
           ~config_name:"authored-runtime"
           ~root_file:(Eio.Path.native_exn Eio.Path.(root / "root.chatmd"))
@@ -117,6 +118,7 @@ let on_event ctx state event = match event with
                 ()
             in
             B.prepare_authored_resources
+              ~startup:None
               ~script_preparation:(Some (Fixtures.script_preparation ()))
               ~content_limits:None
               ~inference_context:inference.context

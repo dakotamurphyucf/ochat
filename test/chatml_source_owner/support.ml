@@ -30,6 +30,7 @@ let save root name text =
 
 let definition ?(enabled = true) root =
   Agent_session.Prompt_definition.create
+    ~root_invocation:Ui
     ~id:(Agent_protocol.Id.Prompt_definition.of_string "prd_original" |> ok)
     ~config_name:"original"
     ~root_file:(Eio.Path.native_exn Eio.Path.(root / "root.chatmd"))

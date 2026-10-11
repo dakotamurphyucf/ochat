@@ -259,6 +259,7 @@ let session_spec request definition revision instance profile ~inference_target 
     { protocol = request.Agent_protocol.Session.Create_request.spec
     ; prompt_definition_id = Some definition.Agent_session.Prompt_definition.id
     ; delegation = None
+    ; root_invocation = Agent_session.Prompt_definition.root_invocation definition
     ; prompt_revision_id = Agent_session.Prompt_revision.id revision
     ; configuration_revision = 0L
     ; inference_target
@@ -2516,6 +2517,7 @@ let source_attachment_error error =
 
 let prepare_authored_graph
       t
+      ~startup
       ~sw
       ~revision
       ~source_lease
@@ -2540,6 +2542,7 @@ let prepare_authored_graph
     ~services:t.authored_services
     ~build:(fun ~parent_revision ~tool_name ~native_registrations ->
       Agent_session.Runtime_builder.prepare_authored_resources
+        ~startup
         ~script_preparation:t.script_preparation
         ~content_limits:t.content_limits
         ~native_registrations
@@ -2648,71 +2651,85 @@ let independent_resource_host t =
           Error
             (unavailable Permission_denied "independent ancestry has no authored root")
         | Authored revision ->
-          let%bind paths = runtime_paths t handle source state in
-          let%bind profile = restore_state_profile t state in
-          let actor_ref = ref (Some parent.actor) in
-          let shell_state = ref state.shell in
-          let%bind tracking = create_graph_tracking t actor_ref in
-          register_tracking tracking;
-          let source_lease = original_source_lease t ~sw ~revision in
-          let%bind prepared, native_registrations =
-            prepare_authored_graph
-              t
-              ~sw
-              ~revision
-              ~source_lease
-              ~paths
-              ~storage_paths:paths
-              ~state
-              ~profile
-              ~actor_ref
-              ~tracking
-              ~shell_state
-              ~native_service_revision:
-                (Agent_session.Session_management_channel.policy_fingerprint
-                   t.session_helpers)
-              ~one_off_policy:Chat_response.One_off_request.default_policy
-              ~authoring_validation_host:t.authoring_validation_host
-          in
-          let%bind inference_context = resolve_state_inference_context t state in
-          let%bind resources =
-            B.prepare_resources
-              ~script_preparation:t.script_preparation
-              ~inference_context
-              ~inference_identity:(Graph_tracking.identity tracking)
-              ~on_inference_attempt:(Graph_tracking.on_attempt tracking)
-              ~on_inference_completion:(Graph_tracking.on_completion tracking)
-              ~on_inference_observation:(Graph_tracking.on_observation tracking)
-              ~native_registrations
-              ~native_service_revision:
-                (Agent_session.Session_management_channel.policy_fingerprint
-                   t.session_helpers)
-              ~env:t.env
-              ~sw
-              ~paths
-              ~storage_paths:paths
-              ~revision
-              ~session_id:state.identity.session_id
-              ~one_off_policy:Chat_response.One_off_request.default_policy
-              ~authoring_validation_host:t.authoring_validation_host
-              ~manifest_authorizer:
-                (manifest_authorizer t profile revision state actor_ref shell_state)
-              ~approval_provider:(shell_approval_provider t profile actor_ref)
-              ~approval_store:(shell_approval_store state actor_ref shell_state)
-          in
-          let%bind resources =
-            B.with_resource_source_lease resources ~source_lease
-            |> Result.map_error ~f:source_attachment_error
-          in
-          let%bind public =
-            Lazy.force resources.native.capabilities
-            |> Result.map_error ~f:(fun error ->
-              unavailable Permission_denied error.Chat_response.Tool_capability.message)
-          in
-          let%map () =
-            Authored_resources.install t.authored_resources ~sw ~public prepared
-          in
-          resources)
+          Agent_session.Runtime_script_preparation.with_revision
+            t.script_preparation
+            revision
+            ~env:t.env
+            ~invocation:
+              (Agent_session.Runtime_script_preparation.Invocation.of_root
+                 state.spec.root_invocation)
+            ~checkpoint:Eio.Fiber.check
+            ~f:(fun startup ~compilation_limits:_ ~programs:_ ->
+              let%bind paths = runtime_paths t handle source state in
+              let%bind profile = restore_state_profile t state in
+              let actor_ref = ref (Some parent.actor) in
+              let shell_state = ref state.shell in
+              let%bind tracking = create_graph_tracking t actor_ref in
+              register_tracking tracking;
+              let source_lease = original_source_lease t ~sw ~revision in
+              let%bind prepared, native_registrations =
+                prepare_authored_graph
+                  t
+                  ~startup:(Some startup)
+                  ~sw
+                  ~revision
+                  ~source_lease
+                  ~paths
+                  ~storage_paths:paths
+                  ~state
+                  ~profile
+                  ~actor_ref
+                  ~tracking
+                  ~shell_state
+                  ~native_service_revision:
+                    (Agent_session.Session_management_channel.policy_fingerprint
+                       t.session_helpers)
+                  ~one_off_policy:Chat_response.One_off_request.default_policy
+                  ~authoring_validation_host:t.authoring_validation_host
+              in
+              let%bind inference_context = resolve_state_inference_context t state in
+              let%bind resources =
+                B.prepare_resources
+                  ~startup:(Some startup)
+                  ~root_invocation:state.Agent_session.Session_state.spec.root_invocation
+                  ~script_preparation:t.script_preparation
+                  ~inference_context
+                  ~inference_identity:(Graph_tracking.identity tracking)
+                  ~on_inference_attempt:(Graph_tracking.on_attempt tracking)
+                  ~on_inference_completion:(Graph_tracking.on_completion tracking)
+                  ~on_inference_observation:(Graph_tracking.on_observation tracking)
+                  ~native_registrations
+                  ~native_service_revision:
+                    (Agent_session.Session_management_channel.policy_fingerprint
+                       t.session_helpers)
+                  ~env:t.env
+                  ~sw
+                  ~paths
+                  ~storage_paths:paths
+                  ~revision
+                  ~session_id:state.identity.session_id
+                  ~one_off_policy:Chat_response.One_off_request.default_policy
+                  ~authoring_validation_host:t.authoring_validation_host
+                  ~manifest_authorizer:
+                    (manifest_authorizer t profile revision state actor_ref shell_state)
+                  ~approval_provider:(shell_approval_provider t profile actor_ref)
+                  ~approval_store:(shell_approval_store state actor_ref shell_state)
+              in
+              let%bind resources =
+                B.with_resource_source_lease resources ~source_lease
+                |> Result.map_error ~f:source_attachment_error
+              in
+              let%bind public =
+                Lazy.force resources.native.capabilities
+                |> Result.map_error ~f:(fun error ->
+                  unavailable
+                    Permission_denied
+                    error.Chat_response.Tool_capability.message)
+              in
+              let%map () =
+                Authored_resources.install t.authored_resources ~sw ~public prepared
+              in
+              resources))
   ; build_generated =
       (fun ~sw:_ ~parent ancestor ->
         let state = ancestor.R.state in
@@ -3228,80 +3245,96 @@ let prepare_runtime_at_paths
       match source with
       | Authored revision ->
         let construct_root sw =
-          let source_lease = original_source_lease t ~sw ~revision in
-          let built =
-            match t.qualify_chatml_extensions with
-            | false ->
-              construct
-                sw
-                (Agent_session.Runtime_builder.build
-                   ~script_preparation:t.script_preparation
-                   ~revision)
-                (manifest_authorizer
-                   ~run_preparation
-                   t
-                   profile
-                   revision
-                   state
-                   actor_ref
-                   shell_state)
-            | true ->
-              let module B = Agent_session.Runtime_builder in
-              let services = extension_services t profile actor_ref ~state in
-              let%bind prepared, native_registrations =
-                prepare_authored_graph
-                  t
-                  ~sw
-                  ~revision
-                  ~source_lease
-                  ~paths
-                  ~storage_paths
-                  ~state
-                  ~profile
-                  ~actor_ref
-                  ~tracking
-                  ~shell_state
-                  ~native_service_revision:services.native_service_revision
-                  ~one_off_policy:services.one_off_policy
-                  ~authoring_validation_host:services.authoring_validation_host
+          Agent_session.Runtime_script_preparation.with_revision
+            t.script_preparation
+            revision
+            ~env:t.env
+            ~invocation:
+              (Agent_session.Runtime_script_preparation.Invocation.of_root
+                 state.spec.root_invocation)
+            ~checkpoint:Eio.Fiber.check
+            ~f:(fun startup ~compilation_limits:_ ~programs:_ ->
+              let source_lease = original_source_lease t ~sw ~revision in
+              let built =
+                match t.qualify_chatml_extensions with
+                | false ->
+                  construct
+                    sw
+                    (Agent_session.Runtime_builder.build
+                       ~startup:(Some startup)
+                       ~root_invocation:
+                         state.Agent_session.Session_state.spec.root_invocation
+                       ~script_preparation:t.script_preparation
+                       ~revision)
+                    (manifest_authorizer
+                       ~run_preparation
+                       t
+                       profile
+                       revision
+                       state
+                       actor_ref
+                       shell_state)
+                | true ->
+                  let module B = Agent_session.Runtime_builder in
+                  let services = extension_services t profile actor_ref ~state in
+                  let%bind prepared, native_registrations =
+                    prepare_authored_graph
+                      t
+                      ~startup:(Some startup)
+                      ~sw
+                      ~revision
+                      ~source_lease
+                      ~paths
+                      ~storage_paths
+                      ~state
+                      ~profile
+                      ~actor_ref
+                      ~tracking
+                      ~shell_state
+                      ~native_service_revision:services.native_service_revision
+                      ~one_off_policy:services.one_off_policy
+                      ~authoring_validation_host:services.authoring_validation_host
+                  in
+                  let%bind runtime =
+                    construct
+                      sw
+                      (B.build_with_extensions
+                         ~startup:(Some startup)
+                         ~root_invocation:
+                           state.Agent_session.Session_state.spec.root_invocation
+                         ~script_preparation:t.script_preparation
+                         ~native_registrations
+                         ~revision
+                         ~services)
+                      (manifest_authorizer
+                         ~run_preparation
+                         t
+                         profile
+                         revision
+                         state
+                         actor_ref
+                         shell_state)
+                  in
+                  let installed =
+                    let%bind public =
+                      Lazy.force (Option.value_exn runtime.native_runtime).capabilities
+                      |> Result.map_error ~f:(fun error ->
+                        unavailable
+                          Permission_denied
+                          error.Chat_response.Tool_capability.message)
+                    in
+                    Authored_resources.install t.authored_resources ~sw ~public prepared
+                  in
+                  (match installed with
+                   | Ok () -> Ok runtime
+                   | Error error ->
+                     (try Eio.Cancel.protect runtime.close with
+                      | _ -> ());
+                     Error error)
               in
-              let%bind runtime =
-                construct
-                  sw
-                  (B.build_with_extensions
-                     ~script_preparation:t.script_preparation
-                     ~native_registrations
-                     ~revision
-                     ~services)
-                  (manifest_authorizer
-                     ~run_preparation
-                     t
-                     profile
-                     revision
-                     state
-                     actor_ref
-                     shell_state)
-              in
-              let installed =
-                let%bind public =
-                  Lazy.force (Option.value_exn runtime.native_runtime).capabilities
-                  |> Result.map_error ~f:(fun error ->
-                    unavailable
-                      Permission_denied
-                      error.Chat_response.Tool_capability.message)
-                in
-                Authored_resources.install t.authored_resources ~sw ~public prepared
-              in
-              (match installed with
-               | Ok () -> Ok runtime
-               | Error error ->
-                 (try Eio.Cancel.protect runtime.close with
-                  | _ -> ());
-                 Error error)
-          in
-          Result.bind built ~f:(fun runtime ->
-            Agent_session.Runtime_builder.with_source_lease runtime ~source_lease
-            |> Result.map_error ~f:source_attachment_error)
+              Result.bind built ~f:(fun runtime ->
+                Agent_session.Runtime_builder.with_source_lease runtime ~source_lease
+                |> Result.map_error ~f:source_attachment_error))
         in
         prepare_extension_runtime_scope t construct_root
       | Generated_artifact { artifact; _ } ->

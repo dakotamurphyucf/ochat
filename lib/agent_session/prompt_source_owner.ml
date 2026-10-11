@@ -233,11 +233,14 @@ module Capture = struct
   type t =
     { value : Prompt_revision_builder.Capture.t
     ; receipt : Receipt.t
+    ; root_invocation :
+        Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
     ; affinity : unit ref
     }
 
   let value t = t.value
   let receipt t = t.receipt
+  let root_invocation t = t.root_invocation
 
   module Route = struct
     type t =
@@ -479,7 +482,11 @@ module Scope = struct
              | Ok value ->
                poll ();
                let capture : Capture.t =
-                 { value; receipt; affinity = t.owner.capture_affinity }
+                 { value
+                 ; receipt
+                 ; root_invocation = Prompt_definition.root_invocation definition
+                 ; affinity = t.owner.capture_affinity
+                 }
                in
                Ok capture
            with

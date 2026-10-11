@@ -255,6 +255,7 @@ let run_agent
 ;;
 
 let create_agent_runtime
+      ~invocation
       ~startup
       ~compilation_limits
       ~programs
@@ -277,7 +278,7 @@ let create_agent_runtime
       ~startup
       ~compilation_limits
       ?programs
-      ~moderator_surface:Chatml.Chatml_builtin_surface.ui_moderator_surface
+      ~moderator_surface:(Script_preparation.Invocation.moderator_surface invocation)
       ?native_service_revision
       ~sw
       ~ctx
@@ -296,7 +297,7 @@ let create_agent_runtime
       ~startup
       ~compilation_limits
       ?programs
-      ~moderator_surface:Chatml.Chatml_builtin_surface.ui_moderator_surface
+      ~moderator_surface:(Script_preparation.Invocation.moderator_surface invocation)
       ~delegated_moderator
       ?native_service_revision
       ~native_registrations
@@ -324,7 +325,7 @@ let create_authored_resources
       ~revision
       ~additional_native_registrations
       ~native_service_revision
-      ~delegated_moderator
+      ~invocation
       ~env
       ~sw
       ~ctx
@@ -336,12 +337,13 @@ let create_authored_resources
       ~approval_store
       ~response_dir
   =
+  let delegated_moderator = Script_preparation.Invocation.equal invocation Delegated_ui in
   Script_preparation.with_revision
     script_preparation
     ?startup
     revision
     ~env
-    ~invocation:(if delegated_moderator then Delegated_ui else Ui)
+    ~invocation
     ~checkpoint:Eio.Fiber.check
     ~f:(fun startup ~compilation_limits ~programs ->
       let elements = Prompt_revision.elements revision in
@@ -424,6 +426,7 @@ let create_authored_resources
       in
       let%bind native, definition, managed =
         create_agent_runtime
+          ~invocation
           ~startup
           ~compilation_limits
           ~programs
@@ -464,7 +467,7 @@ let prepare_resources_internal
       ~startup
       ~script_preparation
       ~native_registrations
-      ~delegated_moderator
+      ~invocation
       ~native_service_revision
       ~env
       ~inference_context
@@ -511,7 +514,7 @@ let prepare_resources_internal
     ~revision
     ~additional_native_registrations:native_registrations
     ~native_service_revision
-    ~delegated_moderator
+    ~invocation
     ~env
     ~sw
     ~ctx
@@ -524,8 +527,10 @@ let prepare_resources_internal
     ~response_dir
 ;;
 
-let prepare_resources =
-  prepare_resources_internal ~startup:None ~delegated_moderator:false
+let prepare_resources ~startup ~root_invocation =
+  prepare_resources_internal
+    ~startup
+    ~invocation:(Script_preparation.Invocation.of_root root_invocation)
 ;;
 
 type authored_resources =
@@ -535,6 +540,7 @@ type authored_resources =
   }
 
 let prepare_authored_resources
+      ~startup
       ~script_preparation
       ~content_limits
       ~native_registrations
@@ -558,6 +564,7 @@ let prepare_authored_resources
       ~approval_store
   =
   Script_preparation.with_authored_child
+    ?startup
     script_preparation
     ~parent:parent_revision
     ~tool_name
@@ -579,7 +586,7 @@ let prepare_authored_resources
           ~startup:(Some startup)
           ~script_preparation
           ~native_registrations
-          ~delegated_moderator:true
+          ~invocation:Delegated_ui
           ~inference_context
           ~inference_identity
           ~on_inference_attempt
@@ -1118,6 +1125,8 @@ type source =
   | Authored of
       { revision : Prompt_revision.t
       ; script_preparation : Script_preparation.t option
+      ; root_invocation :
+          Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
       }
   | Authored_child of
       { revision : Prompt_revision.t
@@ -1166,6 +1175,7 @@ let guarded_services authority (services : extension_services) =
 ;;
 
 let build_with_services
+      ~startup
       ~native_registrations
       ~extension_services
       ~sw
@@ -1341,15 +1351,15 @@ let build_with_services
           ~definition
       in
       resources.native, resources.definition, resources.managed, resources.authoring
-    | Authored { revision; script_preparation } ->
+    | Authored { revision; script_preparation; root_invocation } ->
       let%bind host = host ~env ~paths ~session_id ~elements in
       let%map resources =
         create_authored_resources
-          ~startup:None
+          ~startup
           ~script_preparation
           ~revision
           ~additional_native_registrations:native_registrations
-          ~delegated_moderator:false
+          ~invocation:(Script_preparation.Invocation.of_root root_invocation)
           ~native_service_revision:
             (Option.bind extension_services ~f:(fun services ->
                services.native_service_revision))
@@ -2037,6 +2047,8 @@ let build_with_services
 ;;
 
 let build
+      ~startup
+      ~root_invocation
       ~script_preparation
       ~sw
       ~env
@@ -2050,6 +2062,7 @@ let build
       ~revision
   =
   build_with_services
+    ~startup
     ~native_registrations:[]
     ~sw
     ~env
@@ -2060,11 +2073,13 @@ let build
     ~on_inference_observation
     ~paths
     ~storage_paths
-    ~source:(Authored { revision; script_preparation })
+    ~source:(Authored { revision; script_preparation; root_invocation })
     ~extension_services:None
 ;;
 
 let build_with_extensions
+      ~startup
+      ~root_invocation
       ~script_preparation
       ~native_registrations
       ~services
@@ -2080,6 +2095,7 @@ let build_with_extensions
       ~revision
   =
   build_with_services
+    ~startup
     ~native_registrations
     ~sw
     ~env
@@ -2090,7 +2106,7 @@ let build_with_extensions
     ~on_inference_observation
     ~paths
     ~storage_paths
-    ~source:(Authored { revision; script_preparation })
+    ~source:(Authored { revision; script_preparation; root_invocation })
     ~extension_services:(Some services)
 ;;
 
@@ -2103,6 +2119,7 @@ let build_generated
       ~authority
   =
   build_with_services
+    ~startup:None
     ~native_registrations:[]
     ~source:
       (Generated
@@ -2112,6 +2129,7 @@ let build_generated
 
 let build_authored_child ~services ~revision ~prepared ~authority ~history =
   build_with_services
+    ~startup:None
     ~native_registrations:[]
     ~source:(Authored_child { revision; prepared; authority })
     ~existing_history:(Some history)

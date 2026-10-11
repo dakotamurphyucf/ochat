@@ -62,7 +62,7 @@ module Stored = struct
       F.expect_versions
         state
         ~kind:"session.state"
-        ~versions:[ 1; 2; 3; 4; 5; 6; 7; 8; 9 ]
+        ~versions:[ 1; 2; 3; 4; 5; 6; 7; 8; 9; 10 ]
     in
     let state = D.Document.payload state in
     let%bind identity = F.required state "identity" Result.return in

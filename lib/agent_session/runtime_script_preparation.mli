@@ -13,6 +13,14 @@ module Invocation : sig
     | Headless
     | Delegated_ui
   [@@deriving equal, sexp_of]
+
+  val of_root
+    :  Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+    -> t
+
+  (** Same authentic legacy surface used for planning and native preparation.
+      Delegated_ui retains its separate versioned moderator contract. *)
+  val moderator_surface : t -> Chatml.Chatml_builtin_surface.surface
 end
 
 (** All component policies are already validated. Compilation limits and the
@@ -78,6 +86,8 @@ val with_revision
     roles reject without compiling a replacement entry body. Genuine legacy
     sources retain their existing path. Content replay uses [content_limits].
 
+    Optional [startup] borrows its exact original limits/deadline; absence starts
+    an independent context. It is never retained in the returned source/revision.
     The callback borrows the same startup context that bounded child capture,
     role planning, selection and adoption. It must forward that context into
     resource construction and must not retain it. The callback may activate after
@@ -85,7 +95,8 @@ val with_revision
     source acquisition, tool initialization or artifact installation occurs before
     the callback. Original callback exceptions and cancellation propagate. *)
 val with_authored_child
-  :  t option
+  :  ?startup:Chat_response.Startup_compilation.t
+  -> t option
   -> parent:Prompt_revision.t
   -> tool_name:string
   -> content_limits:Chatmd_prompt_content.Limits.t option

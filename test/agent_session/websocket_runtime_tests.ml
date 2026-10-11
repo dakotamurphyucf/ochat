@@ -27,6 +27,7 @@ let%expect_test
         "<developer>Graph-owned inference.</developer>";
       let definition =
         Agent_session.Prompt_definition.create
+          ~root_invocation:Ui
           ~id:prompt_id
           ~config_name:"ws-runtime"
           ~root_file:(Eio.Path.native_exn Eio.Path.(root / "ws-root.chatmd"))
@@ -180,6 +181,8 @@ let%expect_test
       and selection = ref None in
       let runtime =
         B.build
+          ~startup:None
+          ~root_invocation:Ui
           ~script_preparation:(Some (Fixtures.script_preparation ()))
           ~sw
           ~env

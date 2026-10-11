@@ -54,6 +54,7 @@ let%test_module "actual prompt and retained-child custody owners" =
 
     let definition root =
       Agent_session.Prompt_definition.create
+        ~root_invocation:Ui
         ~id:(Protocol.Id.Prompt_definition.of_string "prd_program_custody" |> ok)
         ~config_name:"program-custody"
         ~root_file:(Eio.Path.native_exn Eio.Path.(root / "root.chatmd"))

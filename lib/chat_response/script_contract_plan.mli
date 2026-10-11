@@ -24,7 +24,7 @@ module Program : sig
       type t =
         | Ui
         | Headless
-      [@@deriving equal, sexp_of]
+      [@@deriving equal, sexp]
     end
 
     (** The actual host role selected in the authoritative planner branches.

@@ -280,7 +280,7 @@ let prepare t ~sources ~sw ~env ~mode ~created_at ~checkpoint definitions =
             ~artifact_store:t.artifacts
             ~baseline_limits:t.policy.baseline_limits
             ~custody_limits:t.policy.custody_limits
-            ~root_role:Ui
+            ~root_role:(Owner.Capture.root_invocation captured)
             ~host:sources
             ~scope
             ~capture:captured

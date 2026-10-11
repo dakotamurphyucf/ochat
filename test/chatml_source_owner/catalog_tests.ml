@@ -10,6 +10,7 @@ let%expect_test "retained revisions keep their definition on cache hits and rest
     let original = definition root in
     let other =
       Agent_session.Prompt_definition.create
+        ~root_invocation:Ui
         ~id:(Agent_protocol.Id.Prompt_definition.of_string "prd_other" |> ok)
         ~config_name:"other"
         ~root_file:original.root_file

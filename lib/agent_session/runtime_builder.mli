@@ -28,6 +28,12 @@ type resources = private
     preparation and full runtime construction. *)
 module Script_preparation = Runtime_script_preparation
 
+(** On [prepare_resources], [prepare_authored_resources], [build] and
+    [build_with_extensions], [startup = Some context] borrows the host's exact
+    original compilation limits/deadline for joined preparation. [None] starts an
+    independent preparation. Returned resources/runtime never retain the context;
+    activation follows complete preflight outside the compilation timer. *)
+
 (** Reconstruct an authored revision's resources using the same native/extension
     registration path as normal runtime construction, including contextual one-off
     and validation helpers. Verify the stored source tree first. Does not convert
@@ -35,10 +41,14 @@ module Script_preparation = Runtime_script_preparation
     program custody requires [Some script_preparation], including parser-only
     revisions. Planning uses the original parser before helper augmentation;
     native resources consume its admitted document projection. Compilation and
-    restoration share one startup deadline. After complete preflight, native shell
-    hooks may activate under their separate execution controls. Authorized native
+    restoration share one startup deadline. [root_invocation] is the explicitly
+    retained root contract: both captured-role restoration and native legacy
+    compilation use it; neither source nor the current frontend selects a role.
+    After complete preflight, native shell hooks may activate under their separate
+    execution controls. Authorized native
     setup (including shell policy checks and MCP connections) can perform IO;
     this is not the no-effect authoring validator.
+
 
     Resources belong to [sw]. The host must retain it through every borrower and
     release it after failed preparation. This does not authorize delegation:
@@ -50,7 +60,10 @@ module Script_preparation = Runtime_script_preparation
     standard helpers. Explicit declarations select them; duplicate/mismatched
     registrations reject. An empty list supplies no additional implementations. *)
 val prepare_resources
-  :  script_preparation:Script_preparation.t option
+  :  startup:Chat_response.Startup_compilation.t option
+  -> root_invocation:
+       Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+  -> script_preparation:Script_preparation.t option
   -> native_registrations:Chat_response.Agent_runtime.native_registration list
   -> native_service_revision:string option
   -> env:Eio_unix.Stdenv.base
@@ -99,7 +112,8 @@ type authored_resources = private
     root's operator/workspace/principal authority. It must not grant execution
     approvals or derive authority from model-supplied arguments. *)
 val prepare_authored_resources
-  :  script_preparation:Script_preparation.t option
+  :  startup:Chat_response.Startup_compilation.t option
+  -> script_preparation:Script_preparation.t option
   -> content_limits:Chatmd_prompt_content.Limits.t option
   -> native_registrations:Chat_response.Agent_runtime.native_registration list
   -> parent_revision:Prompt_revision.t
@@ -348,7 +362,10 @@ val moderator_snapshot_observer
     Supply the same paths outside detached administrative preparation. Initializer
     effects on external tools/files are not rolled back by session transactions. *)
 val build
-  :  script_preparation:Script_preparation.t option
+  :  startup:Chat_response.Startup_compilation.t option
+  -> root_invocation:
+       Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+  -> script_preparation:Script_preparation.t option
   -> sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
   -> inference_context:Inference_runtime.Context.t
@@ -388,7 +405,10 @@ val build
     delivery remain under implementation. Public feature negotiation is unchanged;
     ordinary hosts continue using [build]. *)
 val build_with_extensions
-  :  script_preparation:Script_preparation.t option
+  :  startup:Chat_response.Startup_compilation.t option
+  -> root_invocation:
+       Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+  -> script_preparation:Script_preparation.t option
   -> native_registrations:Chat_response.Agent_runtime.native_registration list
   -> services:extension_services
   -> sw:Eio.Switch.t

@@ -272,6 +272,8 @@ let%expect_test
         in
         let resources =
           B.prepare_resources
+            ~startup:None
+            ~root_invocation:Ui
             ~script_preparation:(Some (policy ()))
             ~native_registrations:[]
             ~native_service_revision:None

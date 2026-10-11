@@ -69,6 +69,7 @@ let%test_module "actual prompt content custody owners" =
                save "guide.md" "original";
                let definition =
                  Agent_session.Prompt_definition.create
+                   ~root_invocation:Ui
                    ~id:(P.Id.Prompt_definition.of_string "prd_content_fixture" |> ok)
                    ~config_name:"content-fixture"
                    ~root_file:(Eio.Path.native_exn Eio.Path.(root / "root.chatmd"))

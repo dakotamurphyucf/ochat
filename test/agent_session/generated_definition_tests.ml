@@ -332,6 +332,7 @@ let%expect_test
       (Store.load artifact_store revision_id |> store_ok).manifest_sha256;
     let definition =
       Agent_session.Prompt_definition.create
+        ~root_invocation:Ui
         ~id:prompt_id
         ~config_name:"ordinary"
         ~root_file:(Filename.concat temporary "ordinary.chatmd")

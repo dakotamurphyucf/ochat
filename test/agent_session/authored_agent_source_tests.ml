@@ -46,6 +46,7 @@ let%expect_test
        let on_event ctx state event = Task.pure(state)";
     let definition =
       Agent_session.Prompt_definition.create
+        ~root_invocation:Ui
         ~id:prompt_id
         ~config_name:"authored-source"
         ~root_file:(Eio.Path.native_exn Eio.Path.(root / "root.chatmd"))
@@ -203,6 +204,7 @@ let%expect_test "uncaptured external and ambiguous authored definitions cannot b
     in
     let definition =
       Agent_session.Prompt_definition.create
+        ~root_invocation:Ui
         ~id:prompt_id
         ~config_name:"external-source"
         ~root_file:(Filename.concat temporary "root.chatmd")

@@ -20,6 +20,10 @@ module Spec = struct
   type t =
     { protocol : Agent_protocol.Session.Spec.t
     ; prompt_definition_id : Agent_protocol.Id.Prompt_definition.t option
+    ; root_invocation :
+        Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+          [@sexp.default
+            Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.Ui]
     ; prompt_revision_id : Agent_protocol.Id.Prompt_revision.t
     ; configuration_revision : int64 [@sexp.default 0L]
     ; inference_target : (Inference.Selection.t[@sexp.opaque])
@@ -143,11 +147,25 @@ type t =
   }
 [@@deriving sexp]
 
-let current_schema_version = 24
+let current_schema_version = 25
 
 let upgrade_schema t =
   if t.schema_version = current_schema_version
   then Ok t
+  else if
+    t.schema_version < current_schema_version
+    && Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.equal
+         t.spec.root_invocation
+         Headless
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"headless root invocation requires session schema 25"
+         ~retryable:false
+         ())
+  else if t.schema_version = 24
+  then Ok { t with schema_version = current_schema_version }
   else if t.schema_version = 23
   then Ok { t with schema_version = current_schema_version }
   else if t.schema_version = 22

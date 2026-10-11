@@ -235,6 +235,7 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
              | _ -> source);
           let definition =
             Agent_session.Prompt_definition.create
+              ~root_invocation:Ui
               ~id:prompt_id
               ~config_name:"extension-runtime"
               ~root_file:(Eio.Path.native_exn Eio.Path.(root / "root.chatmd"))
@@ -557,13 +558,18 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
              assert (
                Result.is_error
                  (build
-                    (B.build ~script_preparation:(Some (Fixtures.script_preparation ())))));
+                    (B.build
+                       ~startup:None
+                       ~root_invocation:Ui
+                       ~script_preparation:(Some (Fixtures.script_preparation ())))));
              assert (Int.equal !requests 0);
              assert (Int.equal !authorized 0)
            | _ -> ());
           let runtime =
             build
               (B.build_with_extensions
+                 ~startup:None
+                 ~root_invocation:Ui
                  ~script_preparation:(Some (Fixtures.script_preparation ()))
                  ~native_registrations:[]
                  ~services)
@@ -977,6 +983,7 @@ let on_event : context -> state -> event -> state task =
 </script>|};
       let definition =
         Agent_session.Prompt_definition.create
+          ~root_invocation:Ui
           ~id:prompt_id
           ~config_name:"startup-checkpoint"
           ~root_file:(Eio.Path.native_exn Eio.Path.(root / "root.chatmd"))
@@ -1017,6 +1024,8 @@ let on_event : context -> state -> event -> state task =
       let inference = Inference_ports.create ~config:Chat_response.Config.default () in
       let runtime =
         B.build
+          ~startup:None
+          ~root_invocation:Ui
           ~script_preparation:(Some (Fixtures.script_preparation ()))
           ~sw
           ~env

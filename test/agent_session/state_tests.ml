@@ -434,7 +434,7 @@ let%expect_test
         }]);
   [%expect
     {|
-    ((schema 24)
+    ((schema 25)
      (recovered
       ((mex_failed failed) (mex_pending completed.pending)
        (mex_running interrupted) (mex_waiting completed.waiting_compaction)))
@@ -736,7 +736,7 @@ let%expect_test
          : bool)]);
   [%expect
     {|
-    ((version 24) (records 0))
+    ((version 25) (records 0))
     true
     true
     true
@@ -1098,7 +1098,7 @@ let%expect_test "named compaction archives admit typed state and preserve captur
           }];
       Agent_store.Session_store.close_session store handle |> store_ok;
       Agent_store.Session_store.close store |> store_ok));
-  [%expect {| ((version 24) (records 0)) |}]
+  [%expect {| ((version 25) (records 0)) |}]
 ;;
 
 let%expect_test
@@ -1301,7 +1301,7 @@ let%expect_test "named invocation snapshots preserve pending publication" =
         ((List.hd_exn restored.invocations).status : Agent_protocol.Invocation.status)]);
   [%expect
     {|
-    ((version 24) (invocations 1) (subscriptions 0) (deliveries 0))
+    ((version 25) (invocations 1) (subscriptions 0) (deliveries 0))
     (Resolved (Complete Null))
     |}]
 ;;

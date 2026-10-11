@@ -25,6 +25,7 @@ let%expect_test
       save "leaf.chatmd" {|<developer>Leaf.</developer><tool name="read_file"/>|};
       let definition =
         Agent_session.Prompt_definition.create
+          ~root_invocation:Ui
           ~id:prompt_id
           ~config_name:"graph-preflight"
           ~root_file:(Eio.Path.native_exn Eio.Path.(root / "root.chatmd"))
@@ -120,6 +121,7 @@ let run ctx input =
   | `Error(message) -> Task.pure(`Fail({code = "read"; message = message; retryable = false; details = `Null}))|};
       let definition =
         Agent_session.Prompt_definition.create
+          ~root_invocation:Ui
           ~id:prompt_id
           ~config_name:"authored-private-resources"
           ~root_file:(Eio.Path.native_exn Eio.Path.(root / "root.chatmd"))
@@ -162,6 +164,7 @@ let run ctx input =
             ()
         in
         B.prepare_authored_resources
+          ~startup:None
           ~script_preparation:(Some (Fixtures.script_preparation ()))
           ~content_limits:None
           ~inference_context:inference.context
@@ -203,6 +206,8 @@ let run ctx input =
             ()
         in
         B.prepare_resources
+          ~startup:None
+          ~root_invocation:Ui
           ~script_preparation:(Some (Fixtures.script_preparation ()))
           ~inference_context:inference.context
           ~inference_identity:inference.identity

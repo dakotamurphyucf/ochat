@@ -17,6 +17,16 @@ module Invocation = struct
     | Headless
     | Delegated_ui
   [@@deriving equal, sexp_of]
+
+  let of_root : Plan.Program.Role.Moderator_invocation.t -> t = function
+    | Ui -> Ui
+    | Headless -> Headless
+  ;;
+
+  let moderator_surface = function
+    | Ui | Delegated_ui -> Chatml.Chatml_builtin_surface.ui_moderator_surface
+    | Headless -> Chatml.Chatml_builtin_surface.moderator_surface
+  ;;
 end
 
 let create ~compilation ~planning ~restoration ~max_custody_work_steps =
@@ -57,15 +67,13 @@ let plan t ~startup ~parsed ~invocation =
         ~prompt_elements:(Prompt.Chat_markdown.Parsed.elements parsed)
       |> map_diagnostics ~to_string:Runtime.diagnostic_to_string
     in
-    let moderator_invocation, moderator_surface, delegated_moderator =
+    let moderator_invocation, delegated_moderator =
       match invocation with
-      | Invocation.Ui ->
-        ( Plan.Program.Role.Moderator_invocation.Ui
-        , Chatml.Chatml_builtin_surface.ui_moderator_surface
-        , false )
-      | Headless -> Headless, Chatml.Chatml_builtin_surface.moderator_surface, false
-      | Delegated_ui -> Ui, Chatml.Chatml_builtin_surface.ui_moderator_surface, true
+      | Invocation.Ui -> Plan.Program.Role.Moderator_invocation.Ui, false
+      | Headless -> Headless, false
+      | Delegated_ui -> Ui, true
     in
+    let moderator_surface = Invocation.moderator_surface invocation in
     Plan.create
       parsed
       ~moderator_invocation
@@ -205,11 +213,21 @@ let select_child policy ~startup ~parent source =
     source, revision
 ;;
 
-let with_authored_child policy ~parent ~tool_name ~content_limits ~env ~checkpoint ~f =
+let with_authored_child
+      ?startup
+      policy
+      ~parent
+      ~tool_name
+      ~content_limits
+      ~env
+      ~checkpoint
+      ~f
+  =
   let compilation_limits =
     Option.value_map policy ~default:Compiler.default_limits ~f:compilation
   in
   Startup.with_context
+    ?startup
     ~limits:compilation_limits
     ~env
     ~checkpoint

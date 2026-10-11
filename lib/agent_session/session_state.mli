@@ -22,6 +22,12 @@ module Spec : sig
   type t =
     { protocol : Agent_protocol.Session.Spec.t
     ; prompt_definition_id : Agent_protocol.Id.Prompt_definition.t option
+    ; root_invocation :
+        Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+      (** Schema25. For an authored root, its frozen contract beside the pinned
+          revision. Generated/delegated branches preserve their separate actual
+          contracts and do not use this field to choose child execution.
+          Historical absence converts to Ui, the previous native root contract. *)
     ; prompt_revision_id : Agent_protocol.Id.Prompt_revision.t
     ; configuration_revision : int64
     ; inference_target : (Inference.Selection.t[@sexp.opaque])

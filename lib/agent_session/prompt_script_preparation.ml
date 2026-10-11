@@ -7,13 +7,7 @@ module Sources = Prompt_script_sources
 module Builder = Prompt_revision_builder
 module Owner = Prompt_source_owner
 module Roles = Prompt_script_roles
-
-module Root_role = struct
-  type t =
-    | Ui
-    | Headless
-  [@@deriving equal]
-end
+module Root_role = Plan.Program.Role.Moderator_invocation
 
 module Source_policy = struct
   type t =

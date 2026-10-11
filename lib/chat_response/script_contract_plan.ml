@@ -30,7 +30,7 @@ module Program = struct
       type t =
         | Ui
         | Headless
-      [@@deriving equal, sexp_of]
+      [@@deriving equal, sexp]
     end
 
     type t =

@@ -4,6 +4,8 @@ type t =
   { id : Agent_protocol.Id.Prompt_definition.t
   ; config_name : string
   ; root_file : string
+  ; root_invocation :
+      Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
   ; allowed_workspaces : Agent_protocol.Id.Workspace_definition.t list
   ; permission_profile : string
   ; runtime_policy : string option
@@ -16,6 +18,7 @@ let create
       ~id
       ~config_name
       ~root_file
+      ~root_invocation
       ~allowed_workspaces
       ~permission_profile
       ~runtime_policy
@@ -40,6 +43,7 @@ let create
       { id
       ; config_name
       ; root_file
+      ; root_invocation
       ; allowed_workspaces
       ; permission_profile
       ; runtime_policy
@@ -52,3 +56,5 @@ let allows_workspace t workspace_id =
   List.mem t.allowed_workspaces workspace_id ~equal:(fun left right ->
     Agent_protocol.Id.Workspace_definition.compare left right = 0)
 ;;
+
+let root_invocation t = t.root_invocation

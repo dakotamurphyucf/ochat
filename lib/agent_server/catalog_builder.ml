@@ -68,6 +68,7 @@ let workspace (value : Config.Workspace.t) =
 
 let prompt (value : Config.Prompt.t) =
   Agent_session.Prompt_definition.create
+    ~root_invocation:Ui
     ~id:(prompt_id value.id)
     ~config_name:value.id
     ~root_file:value.path

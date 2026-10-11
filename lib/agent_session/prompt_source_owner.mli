@@ -93,6 +93,12 @@ module Capture : sig
   val value : t -> Prompt_revision_builder.Capture.t
   val receipt : t -> Receipt.t
 
+  (** Immutable host contract copied from the genuine definition at capture.
+      This metadata grants no native source or execution authority. *)
+  val root_invocation
+    :  t
+    -> Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+
   module Route : sig
     (** Positive original-root member of an actual input from this capture. No
         native authority; permits207 to supply genuine file-member relationship. *)

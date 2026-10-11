@@ -338,6 +338,7 @@ let actor_state ~workspace_instance ~liveness ~start_immediately =
       { protocol
       ; prompt_definition_id = None
       ; delegation = None
+      ; root_invocation = Ui
       ; prompt_revision_id
       ; configuration_revision = 0L
       ; inference_target = inference_selection ()

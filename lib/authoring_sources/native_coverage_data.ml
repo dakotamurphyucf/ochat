@@ -201,7 +201,7 @@ let implementation_sources =
   ; ( "lib/agent_server/managed_output_page.ml"
     , "a14130666a4495de0c35df1c01974922da31daed064f1f7622a9b686b9c38ba5" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "e637bd3f7c5dc48dfd03ece16dce87a7df31d295d5315843c2138c28c4f7b38a" )
+    , "153041ed1a86674f605efdc2c6457de4ff1f3a9e94bf618f89bd6fe231a10dd4" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "46e1d8969a881efd0a3600ac521dc3d810acef6648410d01b8591c8be084f4bd" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"
@@ -261,13 +261,13 @@ let implementation_sources =
   ; ( "lib/chat_response/one_off_script.ml"
     , "cffac7c805a03e71b84b168d7686b0bac019db7c4d431210d4560331a8f43986" )
   ; ( "lib/agent_session/prompt_source_owner.ml"
-    , "d24f0f96141a3af01e43536c61725064778a19be11570d913c3bd1c6398314ec" )
+    , "969585145f8f57ed90e89c1837a44325e8c718d8121e9760886a61e26e4b70e9" )
   ; ( "lib/agent_session/prompt_source_lease.ml"
     , "7413c0ed3e84375cd7e95343ceb83d9485c02b4d378ff940336beb449680dbe0" )
   ; ( "lib/agent_session/prompt_catalog.ml"
     , "8d98bdda6b271ca6d1043b04efa2588062a059f10e467500d8ccf8341f2a7acd" )
   ; ( "lib/agent_session/runtime_builder.ml"
-    , "f479270d792fb2df460bf1a51ef885617386274706d90ab3e9f407b0a63b949d" )
+    , "b3772c512ce40af7c7419fee9867bd4e83224864941fb2104cbca6f64c84a403" )
   ; ( "lib/agent_store/prompt_source_receipt.ml"
     , "d1089027dc9f0e69fb6db67815b2de78086d88a29334ac7c12ec6aa9f9b8258e" )
   ]

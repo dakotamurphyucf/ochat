@@ -65,7 +65,12 @@ val adopt
   -> t
   -> (t, Document_schema.Error.t) result
 
-(** Adjacent generic v1 through v9 conversion. The v8 to v9 step wraps each
+(** Adjacent generic v1 through v10 conversion. The v9 to v10 step introduces
+    required spec.root_invocation. Historical absence converts to Ui, the actual
+    previous native root contract; present invalid values reject. Existing unknown
+    fields remain in the original preservation carrier. The native state schema25
+    also rejects Headless claims in an older native schema.
+     The v8 to v9 step wraps each
     original pending entry, preserving its entire raw document, and introduces
     independent pending revision/disposition fields with unknown legacy owner. The v7 to v8 step is
     structural identity: absent run_state is not filled with an invented value. The v5 to v6 step introduces
