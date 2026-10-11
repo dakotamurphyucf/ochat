@@ -1,0 +1,9 @@
+(library
+ (name regex_gc_tests)
+ (libraries core oniguruma)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(env
+ (_
+  (env-vars (OCAMLRUNPARAM s=4k,o=1,O=1))))
