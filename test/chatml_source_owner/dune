@@ -2,7 +2,7 @@
 
 (library
  (name chatml_source_owner_tests)
- (modules support receipt_tests owner_tests catalog_tests lifecycle_tests project_tests script_tests preparation_tests runtime_preparation_tests captured_child_tests captured_runner_tests selection_tests baseline_tests project_preparation_tests crash_fault_io)
+ (modules support receipt_tests owner_tests catalog_tests seal_tests lifecycle_tests project_tests script_tests preparation_tests runtime_preparation_tests captured_child_tests captured_runner_tests selection_tests baseline_tests project_preparation_tests crash_fault_io)
  (libraries core eio eio.unix eio.mock eio_main mirage-crypto-rng.unix inference_fixture ochat.agent_session ochat.agent_store ochat.chatml_project_prepare)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))

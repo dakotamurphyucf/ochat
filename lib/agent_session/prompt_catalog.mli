@@ -13,6 +13,13 @@ type entry =
 type prepared
 type t
 
+(** Catalogs, source selections and mutable preparation/publication tokens belong
+    to the creating Eio domain. Read accessors touching mutable state and legacy raising APIs reject a
+    foreign domain with Invalid_argument before inspecting mutable state;
+    prepare_owned/install_owned return Error, and Seal operations return
+    Foreign_domain. prepared_entries is an immutable projection and inspects no
+    token state. Native values inside revisions retain their own lifetime rules. *)
+
 (** [content_limits] is the catalog's fixed host policy for stored document
     restoration. [None] rejects content-bearing stored revisions. Cached revisions
     already own their validated projection and are reused without another replay;
@@ -33,10 +40,17 @@ val prepare
   -> Prompt_definition.t list
   -> prepared
 
-(** [install] atomically publishes a complete prepared catalog. *)
+(** [install] atomically publishes a complete prepared catalog. It is the
+    raising compatibility adapter for [install_owned]; a sealed or uncertain
+    publication rejects without invalidating its candidate. *)
 val install : t -> prepared -> unit
 
 val entries : t -> entry list
+
+(** Immutable candidate availability snapshot for host success finalization before
+    sealing. This projection supplies no install admission or durable authority. *)
+val prepared_entries : prepared -> entry list
+
 val find : t -> Agent_protocol.Id.Prompt_definition.t -> entry option
 val find_by_name : t -> string -> entry option
 
@@ -138,11 +152,100 @@ val prepare_owned
   -> Prompt_definition.t list
   -> prepared Or_error.t
 
-(** Idempotently closes unused candidate owners; installed candidate is a no-op.
+(** Idempotently closes unused candidate owners; installed, sealed and uncertain
+    candidates are a no-op. Only the affine Seal may dispose its sealed candidate.
     Does not revoke shared installed read policy or immutable captured revisions. *)
 val discard_prepared : prepared -> unit
 
 (** Typed ownership/generation admission for an owned candidate. A foreign,
     discarded or stale candidate cannot publish policy. Legacy install invalidates
-    an outstanding owned candidate; subsequent owned install rejects. *)
+    an outstanding unsealed owned candidate; subsequent owned install rejects.
+    All install paths reject while a Seal is pending or publication is uncertain. *)
 val install_owned : t -> prepared -> unit Or_error.t
+
+module Publication_state : sig
+  type t =
+    | Available
+    | Sealed
+    | Uncertain
+  [@@deriving equal, sexp_of]
+end
+
+(** Single opening Eio domain only. Sealing blocks owned preparation and installers,
+    not immutable
+    revision lookups/restoration. Uncertainty blocks new owned preparation and
+    installation until the actual host restarts/reconciles its durable baseline;
+    this module performs no durable writing or repair. *)
+val publication_state : t -> Publication_state.t
+
+module Seal : sig
+  module Error : sig
+    type t =
+      | Busy
+      | Foreign_domain
+      | Publication_uncertain
+      | Unowned_candidate
+      | Foreign_candidate
+      | Stale_candidate
+      | Discarded_candidate
+      | Already_installed
+      | Generation_exhausted
+      | Conflicting_revision of Agent_protocol.Id.Prompt_revision.t
+      | Aborted
+      | Committed
+      | Pending
+    [@@deriving equal, sexp_of]
+  end
+
+  (** Affine to its actual Catalog and owned candidate. Contains preallocated
+      install maps, revocations, retirements, next generation and result carriers;
+      no preparation/checkpoint callback is retained. Existing candidate/retired
+      Source_owner capabilities keep their scoped explicit close ownership. *)
+  type t
+
+  (** Before durable acknowledgment only. First releases seal/install admission
+      without yielding, then closes unused candidate owners outside the catalog
+      mutex under cancellation protection. Idempotent after successful abort.
+      Never revokes shared installed policies. Committed/uncertain seals reject. *)
+  val abort : t -> (unit, Error.t) Result.t
+
+  (** Record an uncertain external durable publication, without choosing old/new
+      durable bytes. Idempotent; no callback, poll, IO, allocation or yielding.
+      Existing installed pointers and captured revisions remain intact. Blocks
+      replacement admission and retains pending revision prune protection.
+      Call [retire] separately to close unused candidate owners. *)
+  val mark_uncertain : t -> (unit, Error.t) Result.t
+
+  (** Host final pointer phase AFTER acknowledged durable publication. One-shot,
+      idempotent after commit; aborted/uncertain seals reject. Nonyielding and
+      nonallocating: only precomputed policy revocations and pointer assignments,
+      with no mutex acquisition, callback, poll, IO or fresh admission. Work is
+      proportional to preadmitted replaced/removed policies. This operation never
+      overwrites the separate restored-revision cache. The host coordinates its
+      other already-preallocated pointer swaps in the SAME nonyielding protected
+      phase; this token alone promises no cross-service/durable transaction. *)
+  val commit : t -> (unit, Error.t) Result.t
+
+  (** After commit close retired installed owners; after uncertainty close unused
+      candidate owners. Native cancellation/join may suspend, so cleanup must run
+      after the complete host pointer phase, outside every catalog mutex.
+      Idempotent. A pending seal rejects; cleanup exceptions preserve their original
+      identity/backtrace and cannot roll back acknowledged publication. Concurrent
+      cleanup returns Busy until the admitted join has completed. *)
+  val retire : t -> (unit, Error.t) Result.t
+end
+
+(** Allocate and validate before external durable IO. Require SAME pending owned
+    candidate and current catalog generation, reject installed/discarded/foreign
+    candidates, overflow and revision-ID collisions with different definition or
+    original manifest digest. Identical revision identity is reusable. All scans,
+    comparisons and allocations happen before sealing, with cooperative checkpoint
+    polls outside the catalog mutex. Final callback/Eio checks precede the short
+    exact generation/token admission. No IO occurs under that mutex.
+
+    Once admitted, legacy/owned install, new owned preparation and generic discard cannot
+    invalidate this seal. Immutable restorations may still populate their separate
+    cache while external durable writing proceeds. Original checkpoint exceptions
+    and cancellation propagate, with no seal/partial policy publication on failure.
+    This module neither constructs Baseline.Success nor writes the baseline. *)
+val seal : t -> prepared -> checkpoint:(unit -> unit) -> (Seal.t, Seal.Error.t) Result.t
