@@ -1,0 +1,7 @@
+(library
+ (name chatmd_prompt_content)
+ (public_name ochat.chatmd_prompt_content)
+ (modules chatmd_prompt_content content_budget content_rendered content_record content_inventory content_document)
+ (private_modules content_budget content_rendered content_record content_inventory content_document)
+ (libraries core jsonaf document_schema source chatml_source chatmd builtin_instructions webpage_markdown agent_store)
+ (preprocess (pps ppx_jane)))

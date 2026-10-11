@@ -50,6 +50,14 @@ val generated_filesystem
   -> sources:(string * string) list
   -> t
 
+(** Add a per-read byte ceiling without replacing an existing ceiling. The
+    callback returns0..8MiB and is evaluated before any read; installing multiple
+    bounds takes their minimum. Observer/agent wrappers preserve it. Callback
+    exceptions propagate unchanged. Both filesystem and captured reads enforce
+    it; captured mode still never falls back to disk. Legacy loaders have no
+    implicit bound. Hosts can supply their current remaining aggregate allowance. *)
+val with_read_limit : t -> max_bytes:(source -> int) -> t
+
 (** [with_observer t ~f] invokes [f] after each successful source read. *)
 val with_observer : t -> f:(source -> string -> unit) -> t
 
@@ -69,6 +77,24 @@ val file_name : source -> string
 val relative_path : source -> string
 val materialized_dir : source -> Eio.Fs.dir_ty Eio.Path.t
 val root_dir : t -> Eio.Fs.dir_ty Eio.Path.t
+
+(** Whether reads are restricted to an immutable supplied inventory, with no
+    filesystem fallback. This is a mode projection, never an execution grant. *)
+val is_captured : t -> bool
+
+(** Pure confined member resolution from an admitted logical declaring-file path.
+    The reference byte ceiling must lie in [0,1024]; admission precedes scanning
+    or concatenation. Reject absolute paths, URL/colon/backslash/control hazards
+    and root escapes. Uses the same lexical normalization as captured loading;
+    no native directory, filesystem I/O or display source context is authority.
+    Individual admitted path primitives scan at most2049 bytes; checkpoints
+    bracket this bounded work and propagate unchanged. *)
+val resolve_member
+  :  Source.Portable_path.t
+  -> reference:string
+  -> max_reference_bytes:int
+  -> checkpoint:(unit -> unit)
+  -> Source.Portable_path.t Core.Or_error.t
 
 (** Resolve a relative extension source without lexical escape, even with the
     legacy filesystem loader. Captured loaders still forbid unknown edges.

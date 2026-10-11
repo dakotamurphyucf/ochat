@@ -76,18 +76,7 @@ let role_name = function
   | Import -> "import"
 ;;
 
-let input_key input ~checkpoint =
-  hash
-    [ "ochat.parser-input.v1"
-    ; role_name (Input.role input)
-    ; Input.path input
-    ; Input.authored_sha256 input
-    ; Input.effective_sha256 input
-    ; Int.to_string (Input.authored_byte_length input)
-    ; Int.to_string (Input.effective_byte_length input)
-    ]
-    ~checkpoint
-;;
+let input_key input ~checkpoint = Input.identity_digest input ~checkpoint
 
 let of_metadata
       input

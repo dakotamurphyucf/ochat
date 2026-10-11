@@ -30,6 +30,9 @@ let features =
       ; "test/chatmd_source_bundle_test.ml"
       ; "test/chatmd_owned_input/input_tests.ml"
       ; "test/chatmd_owned_input/capture_tests.ml"
+      ; "test/chatmd_documents/document_tests.ml"
+      ; "test/chatmd_prompt_content/content_tests.ml"
+      ; "test/builtin_instructions/builtin_instructions_tests.ml"
       ; "test/agent_docs/docs_child_authoring.ml"
       ] )
   ; ( "generated.messages"
@@ -221,9 +224,9 @@ let implementation_sources =
   ; ( "lib/chatmd/chatmd_source_bundle.ml"
     , "c3e0f8f89c8538ddcec98873739455a673b0e6e894282c21c96046c096bb6ae5" )
   ; ( "lib/chatmd/prompt.ml"
-    , "e34f84c4c8a58d4aec2ac18688954f664a49bf95650ce8161245bd41bf8af807" )
+    , "6d4e6ab7ca62e6ddf6c965d32f83370b00fc0ffc4b8315306c71f58b30315842" )
   ; ( "lib/chatmd/source_loader.ml"
-    , "11c3cb384664c37d243ca6e80a54d9599e3adad1c4bd1f94baa5390014c732c4" )
+    , "c9d72bd6fa376b4f6513c26fe3a11713243d00dd0c230570afc4cf4d403e2461" )
   ; ( "lib/chatmd_shell_spec/authoring_metadata.ml"
     , "8fa283f545896b7efbaab8bcf17a3ab7549d61c04873403c94961fc4ca0b789d" )
   ; ( "lib/chatmd_shell_spec/duration.ml"
@@ -270,7 +273,7 @@ let implementation_sources =
   ; ( "lib/chatmd/chatmd_tokens.ml"
     , "12d64ec1df81a7ebf9156e4db78a350b7bf45bd112b8e000e8b96d4354225e78" )
   ; ( "lib/chatmd/chatmd_parser_input.ml"
-    , "05b5658144dda7c829a10713b4799d4e38558c8366d1ea6f0c1cd8d968a9ac37" )
+    , "ff5449579e75dad66338700683d56b373ee9baedbb6433214e21af5a4df1ab57" )
   ; ( "lib/chatmd/chatmd_owned_parser.ml"
     , "42130395da8eb0465c96d59a5233ae24adb300e5bd6094609a5cf60d007ca573" )
   ]
@@ -279,13 +282,13 @@ let implementation_sources =
 let topic_contracts =
   [ ( "tool_v1"
     , "chatmd.definitions"
-    , "5780c40d276e427f2509e94b27ec93c17a320326fe5a5f1b57e60594f65ca77b" )
+    , "58444d523a000fa5599467b629823b5041914b1c3e6d86b357616b36246ef948" )
   ; ( "moderator_v1"
     , "chatmd.definitions"
-    , "f1735c27c45582ea5bc9a763bd2710a9cddfd1d47018d725da6247ba097e57ba" )
+    , "ce3bab32ee02963939cd6a7d2fa4dda8fc7b56406550c21a3fa23bfb5c6d6465" )
   ; ( "delegated_moderator_v1"
     , "chatmd.definitions"
-    , "84e3cfba4bffead1d7cbe320dccd8aca1ce10b5b679f2b2ff05e865887df1e03" )
+    , "4630a7cccd765e162431feb20472ec36665deae8f28a29bf213a2fab6e5a414b" )
   ; ( "tool_v1"
     , "chatmd.declarations.schemas"
     , "532ae64b35fbc2026dcc3fd9a8f92bac3364522e59d6ba9ebac32f0ba810484d" )
@@ -297,12 +300,12 @@ let topic_contracts =
     , "a00242c0b64b0ad0fc4b4f0566d72e4e3c4265ea907aa2bccc0387396c22c514" )
   ; ( "tool_v1"
     , "chatmd.capabilities"
-    , "3aa990d17f17380a6b39ab17f4d3b8bfa12afca8ea05a46163da731816eccdd6" )
+    , "db79d06691be96ee2b87182a1648784e929e647305496c240cb8557d033f776c" )
   ; ( "moderator_v1"
     , "chatmd.capabilities"
-    , "eae1dc4c9c5b8b90ba2d21dc31a8d0b39493cde96d3040e4662d3e2666d9ffb3" )
+    , "7a46f2933297a8f4ae8a5cbff9297fcbe1c886ae3a8aec262fe1d624918496e5" )
   ; ( "delegated_moderator_v1"
     , "chatmd.capabilities"
-    , "686fcc236f65bdec51fb8264a621cb3d70ca896d4496d4bf28d2b6bc2f05cce1" )
+    , "deea15ff07097606844fd4ed1927a83cedcfb1e646e9538ed21944bcbeabf998" )
   ]
 ;;

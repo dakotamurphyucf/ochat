@@ -242,3 +242,16 @@ diagnostics, repair the indicated source, and validate again before creation.
 <!-- META_REFINE -->
 <developer>Rewrite these instructions before parsing.</developer>
 ```
+
+## Captured document declarations
+
+`<doc src="./guide.md" local capture />` records an explicit request for frozen
+local content. `<doc src="builtin:chatml" />` selects bundled ChatML instructions.
+The parser and pure content API retain exact declaration ownership and can replay
+captured output as literal message text; unmarked document imports remain dynamic.
+The builtin catalog currently contains only `chatml`; other names reject.
+
+These declarations do not themselves read a file, grant a tool, or install content
+in a session artifact. Host acquisition and session integration are separate work.
+See the [content contract](../development/captured-document-content.md) for current
+API behavior and its ownership and resource limits.

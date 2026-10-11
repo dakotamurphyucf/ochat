@@ -1262,3 +1262,212 @@ module Domain_codec = struct
     decode t document
   ;;
 end
+
+module Encoding = struct
+  module Mode = struct
+    type t =
+      | Measure
+      | Construct
+  end
+
+  open Mode
+
+  module Value = struct
+    type t =
+      { bytes : int
+      ; json : Jsonaf.t option
+      }
+  end
+
+  open Value
+
+  type t =
+    { mode : Mode.t
+    ; limits : Limits.t
+    ; checkpoint : unit -> unit
+    ; nodes : int ref
+    ; fields : int ref
+    ; depth : int
+    ; byte_limit_context : string
+    }
+
+  let exceeded t = Error (Error.Limit_exceeded t.byte_limit_context)
+
+  let add t left right =
+    let maximum = Limits.max_bytes t.limits in
+    if left < 0 || right < 0 || left > maximum || right > maximum - left
+    then exceeded t
+    else Ok (left + right)
+  ;;
+
+  let child t = { t with depth = t.depth + 1 }
+
+  let admit_value t =
+    t.checkpoint ();
+    if t.depth > Limits.max_depth t.limits
+    then Error (Error.Limit_exceeded "depth")
+    else if !(t.nodes) >= Limits.max_nodes t.limits
+    then Error (Error.Limit_exceeded "nodes")
+    else (
+      Int.incr t.nodes;
+      Ok ())
+  ;;
+
+  let admit_field t =
+    if !(t.fields) >= Limits.max_fields t.limits
+    then Error (Error.Limit_exceeded "fields")
+    else (
+      Int.incr t.fields;
+      Ok ())
+  ;;
+
+  let scalar t json =
+    let open Result.Let_syntax in
+    let%bind () = admit_value t in
+    Result.map (Json.validate_and_measure ~limits:t.limits json) ~f:(fun bytes ->
+      { bytes
+      ; json =
+          (match t.mode with
+           | Measure -> None
+           | Construct -> Some json)
+      })
+  ;;
+
+  let string t value = scalar t (`String value)
+  let number t value = scalar t (`Number (Int.to_string value))
+
+  let hex t value =
+    let open Result.Let_syntax in
+    let%bind () = admit_value t in
+    let maximum = Limits.max_bytes t.limits in
+    let length = String.length value in
+    if maximum < 2 || length > (maximum - 2) / 2
+    then exceeded t
+    else (
+      let bytes = (2 * length) + 2 in
+      match t.mode with
+      | Measure -> Ok { bytes; json = None }
+      | Construct ->
+        let output = Bytes.create (2 * length) in
+        let digits = "0123456789abcdef" in
+        for index = 0 to length - 1 do
+          if index % 2048 = 0 then t.checkpoint ();
+          let byte = Char.to_int value.[index] in
+          Bytes.set output (2 * index) digits.[byte / 16];
+          Bytes.set output ((2 * index) + 1) digits.[byte % 16]
+        done;
+        Ok { bytes; json = Some (`String (Bytes.to_string output)) })
+  ;;
+
+  let object_ t fields =
+    let open Result.Let_syntax in
+    let%bind () = admit_value t in
+    let rec loop bytes output first = function
+      | [] ->
+        let%map bytes = add t bytes 1 in
+        { bytes
+        ; json =
+            (match t.mode with
+             | Measure -> None
+             | Construct -> Some (`Object (List.rev output)))
+        }
+      | (name, encode) :: rest ->
+        t.checkpoint ();
+        let%bind () = admit_field t in
+        let%bind key_bytes = Json.validate_and_measure ~limits:t.limits (`String name) in
+        let%bind value = encode (child t) in
+        let%bind bytes = add t bytes (if first then 1 else 2) in
+        let%bind bytes = add t bytes key_bytes in
+        let%bind bytes = add t bytes value.bytes in
+        let output =
+          match t.mode with
+          | Measure -> output
+          | Construct -> (name, Option.value_exn value.json) :: output
+        in
+        loop bytes output false rest
+    in
+    loop 1 [] true fields
+  ;;
+
+  let array t values ~f =
+    let open Result.Let_syntax in
+    let%bind () = admit_value t in
+    let rec loop bytes output first = function
+      | [] ->
+        let%map bytes = add t bytes 1 in
+        { bytes
+        ; json =
+            (match t.mode with
+             | Measure -> None
+             | Construct -> Some (`Array (List.rev output)))
+        }
+      | value :: rest ->
+        t.checkpoint ();
+        let%bind value = f (child t) value in
+        let%bind bytes = add t bytes (if first then 0 else 1) in
+        let%bind bytes = add t bytes value.bytes in
+        let output =
+          match t.mode with
+          | Measure -> output
+          | Construct -> Option.value_exn value.json :: output
+        in
+        loop bytes output false rest
+    in
+    loop 1 [] true values
+  ;;
+
+  let raw t json =
+    let open Result.Let_syntax in
+    let%bind bytes = Json.validate_and_measure ~limits:t.limits json in
+    let rec visit t json =
+      let%bind () = admit_value t in
+      match json with
+      | `Object fields ->
+        List.fold_result fields ~init:() ~f:(fun () value ->
+          let _, value = value in
+          let%bind () = admit_field t in
+          visit (child t) value)
+      | `Array values ->
+        List.fold_result values ~init:() ~f:(fun () value -> visit (child t) value)
+      | `String _ | `Number _ | `True | `False | `Null -> Ok ()
+    in
+    let%map () = visit t json in
+    { bytes
+    ; json =
+        (match t.mode with
+         | Measure -> None
+         | Construct -> Some json)
+    }
+  ;;
+
+  let mode t = t.mode
+  let checkpoint t = t.checkpoint ()
+  let bool t value = scalar t (if value then `True else `False)
+  let null t = scalar t `Null
+
+  let render ~limits ~byte_limit_context ~checkpoint ~f =
+    let make mode =
+      { mode
+      ; limits
+      ; checkpoint
+      ; nodes = ref 0
+      ; fields = ref 0
+      ; depth = 1
+      ; byte_limit_context
+      }
+    in
+    let open Result.Let_syntax in
+    let%bind () =
+      if String.length byte_limit_context > 256
+      then
+        Error (Error.Invalid_configuration "encoding diagnostic context exceeds256 bytes")
+      else Ok ()
+    in
+    let%bind _ = f (make Measure) in
+    let%bind value = f (make Construct) in
+    match value.json with
+    | Some json -> Ok json
+    | None ->
+      Error (Error.Invalid_configuration "encoding callback returned a measurement value")
+  ;;
+end

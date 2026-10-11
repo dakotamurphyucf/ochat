@@ -41,3 +41,6 @@ retain their existing compatibility behavior through the same private cores.
 invariants for independent limits, retained-copy accounting, deep/wide inputs,
 checkpoint interruption and nested invocation ownership. It also runs the existing
 renderer examples from their original test source.
+
+The [captured document content owner](captured-document-content.md) composes these
+receipts with parser-owned occurrences, immutable storage and bounded replay.

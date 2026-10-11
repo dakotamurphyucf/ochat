@@ -76,6 +76,27 @@ let normalize path =
   |> Result.map ~f:(fun parts -> List.rev parts |> String.concat ~sep:"/")
 ;;
 
+let resolve_member base ~reference ~max_reference_bytes ~checkpoint =
+  checkpoint ();
+  if max_reference_bytes < 0 || max_reference_bytes > 1024
+  then Or_error.error_string "invalid document reference byte ceiling"
+  else if String.length reference > max_reference_bytes
+  then Or_error.error_string "document reference byte limit"
+  else if (not (portable_reference reference)) || Filename.is_absolute reference
+  then Or_error.error_string "document reference must be a portable relative path"
+  else (
+    let parent = Filename.dirname (Source.Portable_path.to_string base) in
+    let candidate =
+      if String.equal parent "." then reference else Filename.concat parent reference
+    in
+    checkpoint ();
+    match normalize candidate with
+    | Error reason -> Or_error.error_string reason
+    | Ok path ->
+      checkpoint ();
+      Source.Portable_path.create path)
+;;
+
 let unconfined_relative path =
   match normalize path with
   | Ok value -> value

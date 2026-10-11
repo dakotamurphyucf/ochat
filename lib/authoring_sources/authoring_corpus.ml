@@ -2860,7 +2860,7 @@ let runtime_foundation ~sources =
       ; review =
           Audited
             { excerpt_sha256 =
-                [ "0309f7693f172a95000878f412e582acb7c73b6197fb02ec75c3281cdadfc8da" ]
+                [ "a47f3aa148fe551488e03f30d7ab1e567e8b39ac2ae9017ddfdf16c728dfbb49" ]
             ; evidence =
                 [ "test/agent_docs/docs_chatmd_authoring.ml"
                 ; "lib/chatmd/prompt.ml"
