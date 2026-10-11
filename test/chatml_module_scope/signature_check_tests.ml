@@ -10,7 +10,7 @@ let implementation ?checkpoint body =
   let stmt = List.hd_exn program.stmts in
   let env, types = T.infer_stmt state (T.init_env ()) T.Type_alias.empty stmt.value in
   let values =
-    match T.Env.find_exn env "Implementation" with
+    match T.lookup_scheme env "Implementation" with
     | Module (Row (fields, Empty_row)) -> fields
     | _ -> failwith "expected inferred module exports"
   in

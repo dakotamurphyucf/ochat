@@ -36,7 +36,7 @@ let alias_result = function
   | Error error -> raise (Rejected error)
 ;;
 
-let check ?source engine ~values ~types ~outer_types ~signature ~span =
+let check ?source ?lookup engine ~values ~types ~outer_types ~signature ~span =
   let { Engine.instantiate; unify; fresh_name; checkpoint } = engine in
   let reject span message =
     let diagnostic = Chatml_diagnostic.create ~span message in
@@ -87,7 +87,8 @@ let check ?source engine ~values ~types ~outer_types ~signature ~span =
       match item.desc with
       | Type declaration ->
         local_types
-        := Type_alias.declare ?source !local_types declaration ~checkpoint |> alias_result;
+        := Type_alias.declare ?source ?lookup !local_types declaration ~checkpoint
+           |> alias_result;
         let count = List.length declaration.parameters in
         (match Type_alias.declared_arity implementation_types ~name:declaration.name with
          | Some arity when arity = count -> ()
@@ -127,6 +128,7 @@ let check ?source engine ~values ~types ~outer_types ~signature ~span =
         let expected =
           Type_alias.elaborate_scheme
             ?source
+            ?lookup
             !local_types
             annotation
             ~equality_parameters
@@ -198,7 +200,7 @@ let check ?source engine ~values ~types ~outer_types ~signature ~span =
   | Rejected error -> Error error
 ;;
 
-let check_captured interface engine ~values ~types ~outer_types =
+let check_captured interface ?lookup engine ~values ~types ~outer_types =
   let source = Chatml.Chatml_parse.Interface.source interface in
   let checkpoint = engine.Engine.checkpoint in
   (* This whole-unit range is constructed before checking or committing cells. *)
@@ -213,6 +215,7 @@ let check_captured interface engine ~values ~types ~outer_types =
   in
   check
     ~source
+    ?lookup
     engine
     ~values
     ~types

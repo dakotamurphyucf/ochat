@@ -32,6 +32,9 @@ type t =
   ; modules : t String.Map.t
   ; opened_aliases : t Alias.t String.Map.t
   ; opened_modules : t String.Map.t
+  ; fallback_modules : t String.Map.t
+  ; origin : Chatml_configured_lookup.Origin.t option
+  ; opened_alias_origins : Chatml_configured_lookup.Origin.t String.Map.t
   ; outer : t option
   }
 
@@ -40,9 +43,31 @@ let empty =
   ; modules = String.Map.empty
   ; opened_aliases = String.Map.empty
   ; opened_modules = String.Map.empty
+  ; fallback_modules = String.Map.empty
+  ; origin = None
+  ; opened_alias_origins = String.Map.empty
   ; outer = None
   }
 ;;
+
+module Lookup = struct
+  type namespace =
+    { exports : t
+    ; origin : Chatml_configured_lookup.Origin.t
+    }
+
+  type t =
+    { resolve :
+        name:string
+        -> member_path:string list
+        -> span:Source.span
+        -> (namespace, Chatml_diagnostic.t) Result.t
+    ; observe :
+        Chatml_configured_lookup.Origin.t
+        -> span:Source.span
+        -> (unit, Chatml_diagnostic.t) Result.t
+    }
+end
 
 let enter_scope t = { empty with outer = Some t }
 
@@ -97,51 +122,103 @@ let find_local_alias t ~checkpoint name =
     name
 ;;
 
+let visible_module t ~name ~checkpoint = find_module t ~checkpoint name
+let with_origin t origin = { t with origin = Some origin }
+
+let descend scope name =
+  Option.map (Map.find scope.modules name) ~f:(fun child ->
+    match scope.origin with
+    | None -> child
+    | Some origin ->
+      with_origin child (Chatml_configured_lookup.Origin.member origin ~name))
+;;
+
+let nested_module t ~path ~checkpoint =
+  List.fold path ~init:(Some t) ~f:(fun scope name ->
+    checkpoint ();
+    Option.bind scope ~f:(fun scope -> descend scope name))
+;;
+
+let rec frozen_module t ~checkpoint name =
+  checkpoint ();
+  match Map.find t.fallback_modules name with
+  | Some _ as found -> found
+  | None -> Option.bind t.outer ~f:(fun outer -> frozen_module outer ~checkpoint name)
+;;
+
+let root_module t ~checkpoint name =
+  match find_module t ~checkpoint name with
+  | Some _ as found -> found
+  | None -> frozen_module t ~checkpoint name
+;;
+
 let find_alias t ~checkpoint ({ Syntax.Name.modules; name } : Syntax.Name.t) =
   match modules with
   | [] -> find_local_alias t ~checkpoint name
   | first :: rest ->
-    List.fold rest ~init:(find_module t ~checkpoint first) ~f:(fun scope name ->
-      checkpoint ();
-      Option.bind scope ~f:(fun scope -> Map.find scope.modules name))
+    Option.bind (root_module t ~checkpoint first) ~f:(fun scope ->
+      nested_module scope ~path:rest ~checkpoint)
     |> Option.bind ~f:(fun scope -> Map.find scope.aliases name)
+;;
+
+let open_exports t ~name ~exports:scope ?origin ~checkpoint () =
+  let type_conflict =
+    List.find (Map.keys scope.aliases) ~f:(fun name ->
+      checkpoint ();
+      Option.is_some (find_local_alias t ~checkpoint name))
+  in
+  let conflict =
+    match type_conflict with
+    | Some _ -> type_conflict
+    | None ->
+      List.find (Map.keys scope.modules) ~f:(fun name ->
+        checkpoint ();
+        Option.is_some (find_module t ~checkpoint name))
+  in
+  match conflict with
+  | Some member ->
+    Error (Printf.sprintf "open %s would shadow existing type binding '%s'" name member)
+  | None ->
+    let opened_alias_origins, imported_modules =
+      match origin with
+      | None -> t.opened_alias_origins, scope.modules
+      | Some origin ->
+        let origins =
+          Map.fold
+            scope.aliases
+            ~init:t.opened_alias_origins
+            ~f:(fun ~key ~data:_ origins ->
+              checkpoint ();
+              Map.set
+                origins
+                ~key
+                ~data:(Chatml_configured_lookup.Origin.member origin ~name:key))
+        in
+        let modules =
+          Map.mapi scope.modules ~f:(fun ~key ~data ->
+            checkpoint ();
+            with_origin data (Chatml_configured_lookup.Origin.member origin ~name:key))
+        in
+        origins, modules
+    in
+    Ok
+      { t with
+        opened_aliases =
+          Map.merge_skewed t.opened_aliases scope.aliases ~combine:(fun ~key:_ _ right ->
+            right)
+      ; opened_modules =
+          Map.merge_skewed
+            t.opened_modules
+            imported_modules
+            ~combine:(fun ~key:_ _ right -> right)
+      ; opened_alias_origins
+      }
 ;;
 
 let open_module t ~name ~checkpoint =
   match find_module t ~checkpoint name with
   | None -> Ok t
-  | Some scope ->
-    let type_conflict =
-      List.find (Map.keys scope.aliases) ~f:(fun name ->
-        checkpoint ();
-        Option.is_some (find_local_alias t ~checkpoint name))
-    in
-    let conflict =
-      match type_conflict with
-      | Some _ -> type_conflict
-      | None ->
-        List.find (Map.keys scope.modules) ~f:(fun name ->
-          checkpoint ();
-          Option.is_some (find_module t ~checkpoint name))
-    in
-    (match conflict with
-     | Some member ->
-       Error
-         (Printf.sprintf "open %s would shadow existing type binding '%s'" name member)
-     | None ->
-       Ok
-         { t with
-           opened_aliases =
-             Map.merge_skewed
-               t.opened_aliases
-               scope.aliases
-               ~combine:(fun ~key:_ _ right -> right)
-         ; opened_modules =
-             Map.merge_skewed
-               t.opened_modules
-               scope.modules
-               ~combine:(fun ~key:_ _ right -> right)
-         })
+  | Some scope -> open_exports t ~name ~exports:scope ~checkpoint ()
 ;;
 
 let primitive = function
@@ -275,6 +352,95 @@ let ensure_unique ?source syntax ~what ~checkpoint names =
     Hash_set.add seen name)
 ;;
 
+module Resolution = struct
+  type t =
+    { lookup : Lookup.t
+    ; mutable namespaces : Lookup.namespace String.Map.t
+    }
+
+  let create lookup = { lookup; namespaces = String.Map.empty }
+
+  let freeze resolution environment ~checkpoint =
+    match resolution with
+    | None -> environment
+    | Some resolution ->
+      { environment with
+        fallback_modules =
+          Map.fold
+            resolution.namespaces
+            ~init:environment.fallback_modules
+            ~f:(fun ~key ~data fallback ->
+              checkpoint ();
+              Map.set fallback ~key ~data:data.Lookup.exports)
+      }
+  ;;
+end
+
+let rec alias_origin t ~checkpoint name =
+  checkpoint ();
+  if Map.mem t.aliases name
+  then None
+  else if Map.mem t.opened_aliases name
+  then Map.find t.opened_alias_origins name
+  else Option.bind t.outer ~f:(fun outer -> alias_origin outer ~checkpoint name)
+;;
+
+let resolved_alias
+      t
+      ~resolution
+      ~checkpoint
+      (syntax : Syntax.t)
+      (qualified : Syntax.Name.t)
+  =
+  let observe origin =
+    match resolution, origin with
+    | Some resolution, Some origin ->
+      (match resolution.Resolution.lookup.observe origin ~span:syntax.span with
+       | Ok () -> ()
+       | Error diagnostic -> raise (Invalid diagnostic))
+    | _ -> ()
+  in
+  match qualified.modules with
+  | [] ->
+    let alias = find_local_alias t ~checkpoint qualified.name in
+    if Option.is_some alias then observe (alias_origin t ~checkpoint qualified.name);
+    alias
+  | root :: rest ->
+    let scope, observed =
+      match root_module t ~checkpoint root with
+      | Some scope -> Some scope, false
+      | None ->
+        (match resolution with
+         | None -> None, false
+         | Some resolution ->
+           (* Every caller syntax occurrence emits one event with its exact path.
+              The collected namespace only freezes definitions; it is not a
+              callback or a cache that suppresses later located observations. *)
+           (match
+              resolution.lookup.resolve
+                ~name:root
+                ~member_path:(rest @ [ qualified.name ])
+                ~span:syntax.span
+            with
+            | Error diagnostic -> raise (Invalid diagnostic)
+            | Ok namespace ->
+              resolution.namespaces
+              <- Map.set resolution.namespaces ~key:root ~data:namespace;
+              Some (with_origin namespace.exports namespace.origin), true))
+    in
+    let scope =
+      Option.bind scope ~f:(fun scope -> nested_module scope ~path:rest ~checkpoint)
+    in
+    Option.bind scope ~f:(fun scope ->
+      let alias = Map.find scope.aliases qualified.name in
+      if Option.is_some alias && not observed
+      then
+        observe
+          (Option.map scope.origin ~f:(fun origin ->
+             Chatml_configured_lookup.Origin.member origin ~name:qualified.name));
+      alias)
+;;
+
 module Self = struct
   type t =
     { name : string
@@ -286,7 +452,7 @@ end
 
 let parameter_name name = "'" ^ name
 
-let rec convert ?source (t : t) ~parameters ~self ~checkpoint syntax =
+let rec convert ?source ?resolution (t : t) ~parameters ~self ~checkpoint syntax =
   let rec expression (syntax : Syntax.t) =
     checkpoint ();
     match syntax.desc with
@@ -393,7 +559,7 @@ let rec convert ?source (t : t) ~parameters ~self ~checkpoint syntax =
          arity 1;
          Con ("task", arguments)
        | None, _, _ ->
-         (match find_alias t ~checkpoint qualified with
+         (match resolved_alias t ~resolution ~checkpoint syntax qualified with
           | None ->
             reject ?source ~checkpoint syntax (Printf.sprintf "Unknown type '%s'" name)
           | Some alias ->
@@ -423,6 +589,7 @@ and apply alias ~arguments ~checkpoint =
 
 let declare
       ?source
+      ?lookup
       t
       ({ Syntax.Declaration.name; parameters; body } : Syntax.Declaration.t)
       ~checkpoint
@@ -442,8 +609,10 @@ let declare
         body
         (Printf.sprintf "Cannot redefine builtin type constructor '%s'" name);
     ensure_unique ?source body ~what:"type parameter" ~checkpoint parameters;
+    let resolution = Option.map lookup ~f:Resolution.create in
     let template =
       convert
+        ?resolution
         ?source
         t
         ~parameters:
@@ -466,14 +635,29 @@ let declare
             Chatml.Chatml_owned_source.site source body.span ~checkpoint)
         in
         Alias.Closed { body = template; definition_site })
-      else Alias.Parameterized { name; parameters; body; environment = t; source }
+      else
+        Alias.Parameterized
+          { name
+          ; parameters
+          ; body
+          ; environment = Resolution.freeze resolution t ~checkpoint
+          ; source
+          }
     in
     { t with aliases = Map.set t.aliases ~key:name ~data:definition })
 ;;
 
-let elaborate ?source t syntax ~checkpoint =
+let elaborate ?source ?lookup t syntax ~checkpoint =
+  let resolution = Option.map lookup ~f:Resolution.create in
   protect (fun () ->
-    convert ?source t ~parameters:String.Map.empty ~self:None ~checkpoint syntax)
+    convert
+      ?source
+      ?resolution
+      t
+      ~parameters:String.Map.empty
+      ~self:None
+      ~checkpoint
+      syntax)
 ;;
 
 (* Unlike [convert], this expansion retains the conditional behavior of legacy
@@ -596,7 +780,8 @@ let require_fixed_function_arity ?source syntax expanded ~checkpoint =
   check expanded
 ;;
 
-let elaborate_scheme ?source t syntax ~equality_parameters ~fresh_name ~checkpoint =
+let elaborate_scheme ?source ?lookup t syntax ~equality_parameters ~fresh_name ~checkpoint
+  =
   protect (fun () ->
     let rec collect names (syntax : Syntax.t) =
       checkpoint ();
@@ -640,7 +825,11 @@ let elaborate_scheme ?source t syntax ~equality_parameters ~fresh_name ~checkpoi
         in
         Map.set parameters ~key:name ~data:(Generic { name = fresh_name (); equality }))
     in
-    let declared = convert ?source t ~parameters ~self:None ~checkpoint syntax in
+    let resolution = Option.map lookup ~f:Resolution.create in
+    let declared =
+      convert ?source ?resolution t ~parameters ~self:None ~checkpoint syntax
+    in
+    let t = Resolution.freeze resolution t ~checkpoint in
     let symbolic_parameters =
       Set.to_list names
       |> List.mapi ~f:(fun index name -> name, Equivalence.Parameter index)

@@ -469,3 +469,20 @@ Validation checks these static rules without executing a candidate. It does not
 prove termination, bounds safety, tool availability, schema validity or success
 of later effects. Inspect linked diagnostics, repair the submitted source, and
 validate that exact revision again before execution.
+
+## Configured module checking
+
+The compiler also provides a configured-source checking API over an already
+captured project inventory. It resolves lexical bindings first, then the selected
+module scope for that file. Imported files use their own scopes; aliases for the
+same module share its checked exports and weak type variables. Errors retain the
+source revision and relevant configuration location.
+
+Checking dependencies and initialization dependencies are distinct. A qualified
+type or `open Catalog` alone requires checking Catalog. A value reference,
+including one inside an uncalled function, also selects Catalog for initialization.
+The runtime selection follows value references transitively from the entry;
+merely making a module available does not select it. The checking API executes
+no initializers. Configured project linking and execution are separate integration
+steps; existing single-file host entrypoints do not acquire project loading from
+this API alone.

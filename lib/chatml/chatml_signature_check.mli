@@ -44,6 +44,7 @@ val visibility : t -> Visibility.t
     No initializer or host capability is invoked. *)
 val check
   :  ?source:Chatml_source.t
+  -> ?lookup:Chatml_type_alias.Lookup.t
   -> Engine.t
   -> values:typ Env.t
   -> types:Chatml_type_alias.t
@@ -58,6 +59,7 @@ val check
     No checkpoint or captured inventory is retained by the result. *)
 val check_captured
   :  Chatml.Chatml_parse.Interface.t
+  -> ?lookup:Chatml_type_alias.Lookup.t
   -> Engine.t
   -> values:typ Env.t
   -> types:Chatml_type_alias.t

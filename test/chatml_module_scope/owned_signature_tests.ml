@@ -40,7 +40,7 @@ let implementation ?(checkpoint = checkpoint) body =
     Checker.infer_stmt state (Checker.init_env ()) Checker.Type_alias.empty stmt.value
   in
   let values =
-    match Checker.Env.find_exn env "Implementation" with
+    match Checker.lookup_scheme env "Implementation" with
     | Module (Row (fields, Empty_row)) -> fields
     | _ -> failwith "expected module exports"
   in

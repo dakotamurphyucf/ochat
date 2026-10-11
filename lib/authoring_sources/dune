@@ -27,6 +27,12 @@
     lib/chatml_sources/chatml_source.ml %{dep:../chatml_sources/chatml_source.ml}
     lib/chatml_sources/chatml_diagnostic.ml %{dep:../chatml_sources/chatml_diagnostic.ml}
     lib/chatml/chatml_typechecker.ml %{dep:../chatml/chatml_typechecker.ml}
+    lib/chatml_graph/chatml_configured_lookup.ml %{dep:../chatml_graph/chatml_configured_lookup.ml}
+    lib/chatml_graph/chatml_dependency_graph.ml %{dep:../chatml_graph/chatml_dependency_graph.ml}
+    lib/chatml_graph/chatml_dependency_session.ml %{dep:../chatml_graph/chatml_dependency_session.ml}
+    lib/chatml/chatml_value_scope.ml %{dep:../chatml/chatml_value_scope.ml}
+    lib/chatml/chatml_configured_resolution.ml %{dep:../chatml/chatml_configured_resolution.ml}
+    lib/chatml/chatml_configured_check.ml %{dep:../chatml/chatml_configured_check.ml}
     lib/chatml/chatml_type_expr.ml %{dep:../chatml/chatml_type_expr.ml}
     lib/chatml/chatml_inferred_type.ml %{dep:../chatml/chatml_inferred_type.ml}
     lib/chatml/chatml_type_alias.ml %{dep:../chatml/chatml_type_alias.ml}

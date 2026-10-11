@@ -46,14 +46,16 @@ let%expect_test "inference-owned type inspections and row operations cooperate" 
   let left = T.Record (row "left") in
   let right = T.Record (row "right") in
   cancelled "lookup" (fun state _ ->
-    ignore (T.lookup state (T.Env.singleton "value" ty) "value" : T.typ));
+    ignore
+      (T.lookup state (T.Value_scope.of_schemes (T.Env.singleton "value" ty)) "value"
+       : T.typ));
   cancelled "pattern binding" (fun state _ ->
-    ignore (T.infer_pattern state T.Env.empty (L.PVar "value") ty : T.tenv));
+    ignore (T.infer_pattern state T.Value_scope.empty (L.PVar "value") ty : T.tenv));
   cancelled "type declaration" (fun state _ ->
     ignore
       (T.infer_stmt
          state
-         T.Env.empty
+         T.Value_scope.empty
          (Result.ok_or_failwith
             (T.Type_alias.add_host
                T.Type_alias.empty
@@ -187,7 +189,11 @@ let%expect_test
                      ()
                  in
                  ignore
-                   (T.lookup state (T.Env.singleton "value" (shared_type 16)) "value"
+                   (T.lookup
+                      state
+                      (T.Value_scope.of_schemes
+                         (T.Env.singleton "value" (shared_type 16)))
+                      "value"
                     : T.typ);
                  "completed")))
         (fun () ->

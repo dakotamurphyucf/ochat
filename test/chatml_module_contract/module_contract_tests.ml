@@ -136,7 +136,7 @@ let%expect_test "resolved receiver kinds preserve record coverage and mutable ex
 let%expect_test "internal module admission rejects record open and malformed kinds" =
   let module T = Chatml_typechecker in
   let state = T.create_state () in
-  let env = T.add_mono T.Env.empty "R" (T.Record T.Empty_row) in
+  let env = T.add_mono T.Value_scope.empty "R" (T.Record T.Empty_row) in
   (match T.infer_stmt state env T.Type_alias.empty (L.SOpen "R") with
    | _ -> failwith "record admitted by open"
    | exception T.Type_error message -> print_endline message);

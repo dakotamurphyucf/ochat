@@ -18,6 +18,28 @@ module Error : sig
   type t = Chatml_diagnostic.t
 end
 
+module Lookup : sig
+  (** Borrowed resolver/observer for one owned syntax traversal. No callback is
+      retained in namespaces/aliases. A resolved namespace is frozen separately
+      from lexical bindings before private alias expansion. *)
+  type namespace =
+    { exports : t
+    ; origin : Chatml_configured_lookup.Origin.t
+    }
+
+  type t =
+    { resolve :
+        name:string
+        -> member_path:string list
+        -> span:Source.span
+        -> (namespace, Chatml_diagnostic.t) Result.t
+    ; observe :
+        Chatml_configured_lookup.Origin.t
+        -> span:Source.span
+        -> (unit, Chatml_diagnostic.t) Result.t
+    }
+end
+
 val empty : t
 
 (** Start a lexical type scope. Outer names remain visible, but declarations
@@ -82,6 +104,7 @@ val add_host
     its exceptions (including cancellation) propagate unchanged. *)
 val declare
   :  ?source:Chatml_source.t
+  -> ?lookup:Lookup.t
   -> t
   -> Syntax.Declaration.t
   -> checkpoint:(unit -> unit)
@@ -90,6 +113,7 @@ val declare
 (** Elaborate an annotation with no implicitly quantified parameters. *)
 val elaborate
   :  ?source:Chatml_source.t
+  -> ?lookup:Lookup.t
   -> t
   -> Syntax.t
   -> checkpoint:(unit -> unit)
@@ -113,9 +137,28 @@ val elaborate
     [elaborate], which rejects unbound parameters. *)
 val elaborate_scheme
   :  ?source:Chatml_source.t
+  -> ?lookup:Lookup.t
   -> t
   -> Syntax.t
   -> equality_parameters:string list
   -> fresh_name:(unit -> string)
   -> checkpoint:(unit -> unit)
   -> (typ, Error.t) result
+
+(** Merge completed public types using the same collision policy as open_module.
+    Imported names retain immutable provenance; actual use is observed only while
+    elaborating caller syntax, never replayed when expanding private alias bodies. *)
+val open_exports
+  :  t
+  -> name:string
+  -> exports:t
+  -> ?origin:Chatml_configured_lookup.Origin.t
+  -> checkpoint:(unit -> unit)
+  -> unit
+  -> (t, string) Result.t
+
+(** Existing lexical static lookup, including opened modules and outer scopes. *)
+val visible_module : t -> name:string -> checkpoint:(unit -> unit) -> t option
+
+(** Select actual public nested module paths from a completed namespace. *)
+val nested_module : t -> path:string list -> checkpoint:(unit -> unit) -> t option
