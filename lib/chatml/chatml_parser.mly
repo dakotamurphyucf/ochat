@@ -97,6 +97,10 @@ let site_name role startp endp name =
   then Chatml_syntax_name.located name (Sites.add role ~name ~span:(span_of_lex startp endp))
   else Chatml_syntax_name.unlocated name
 
+let record_site role startp endp name =
+  if Sites.enabled
+  then ignore (Sites.add role ~name ~span:(span_of_lex startp endp))
+
 let mk_type startp endp desc =
   { desc; span = span_of_lex startp endp }
 
@@ -107,6 +111,8 @@ let mk_binding startp endp value =
   { Chatml_binding_pattern.value; span = span_of_lex startp endp }
 
 let mk_name startp endp name =
+  if Sites.enabled
+  then ignore (Sites.add Value_binder ~name ~span:(span_of_lex startp endp));
   mk_binding startp endp (Chatml_binding_pattern.Name name)
 
 let mk_node startp endp value =
@@ -461,8 +467,8 @@ field_decl:
     LIDENT EQ expr { (site_name Field_label $startpos($1) $endpos($1) $1, $3) }
 
 ident:
-| LIDENT   { EVar $1 }
-| UIDENT   { EVar $1 }
+| LIDENT   { record_site Value_reference $startpos($1) $endpos($1) $1; EVar $1 }
+| UIDENT   { record_site Value_reference $startpos($1) $endpos($1) $1; EVar $1 }
 
 rec_bindings:
 | rec_binding                  { [$1] }

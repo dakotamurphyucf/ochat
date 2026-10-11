@@ -179,7 +179,7 @@ let%test_unit "recursive and repeated match names are keyed on their actual node
         (Sites.Id.equal
            (Option.value_exn (Name.site first_label))
            (Option.value_exn (Name.site second_label))));
-    [%test_eq: int] (Sites.site_count table) 7
+    [%test_eq: int] (Sites.site_count table) 14
   | _ -> assert false
 ;;
 
@@ -292,7 +292,7 @@ let%test_unit "module, open, selector and tag sites exclude generated task sugar
        ]
        ~f:(fun (name, spelling, role, start_byte, end_byte) ->
          require_site table name spelling role start_byte end_byte);
-     [%test_eq: int] (Sites.site_count table) 5
+     [%test_eq: int] (Sites.site_count table) 8
    | _ -> assert false);
   let parsed =
     Parse.parse_captured_with_sites
@@ -312,10 +312,31 @@ let%test_unit "module, open, selector and tag sites exclude generated task sugar
     ] ->
     assert (String.equal (Name.name generated_method) "bind");
     assert (Option.is_none (Name.site generated_method));
-    [%test_eq: int] (Sites.site_count table) 2;
+    let actual =
+      Sites.sites table
+      |> List.map ~f:(fun site ->
+        let span = Sites.Site.location site |> Source.Location.span in
+        Sites.Site.name site, Sites.Site.role site, span.left.offset, span.right.offset)
+      |> List.sort ~compare:(fun (_, _, left, _) (_, _, right, _) ->
+        Int.compare left right)
+    in
     assert (
-      List.for_all (Sites.sites table) ~f:(fun site ->
-        String.equal (Sites.Site.name site) "return"))
+      List.equal
+        (fun (name, role, left, right)
+          (expected_name, expected_role, expected_left, expected_right) ->
+           String.equal name expected_name
+           && Sites.Role.equal role expected_role
+           && Int.equal left expected_left
+           && Int.equal right expected_right)
+        actual
+        [ "work", Value_binder, 4, 8
+        ; "value", Value_binder, 16, 21
+        ; "Task", Value_reference, 24, 28
+        ; "return", Field_label, 29, 35
+        ; "Task", Value_reference, 42, 46
+        ; "return", Field_label, 47, 53
+        ; "value", Value_reference, 54, 59
+        ])
   | _ -> assert false
 ;;
 

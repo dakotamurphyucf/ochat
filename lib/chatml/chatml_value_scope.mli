@@ -7,6 +7,7 @@ module Origin = Chatml_configured_lookup.Origin
 module Binding : sig
   type t
 
+  val semantic : t -> Chatml_semantic_binding.t option
   val scheme : t -> Chatml_inferred_type.typ
   val origin : t -> Origin.t option
 
@@ -39,3 +40,14 @@ val add_imported
 
 (** Functional update for already inserted bindings, preserving raw schemes/origin. *)
 val with_span : t -> name:string -> span:Source.span -> t
+
+(** Optional compiler-owned fact metadata only. Ordinary environments carry None;
+    no recorder, source inventory, callback or inference machine is retained. *)
+val semantic_context : t -> Chatml_semantic_recorder.Context.t option
+
+val with_semantic_exn
+  :  t
+  -> name:string
+  -> binding:Chatml_semantic_binding.t
+  -> context:Chatml_semantic_recorder.Context.t
+  -> t

@@ -49,7 +49,17 @@ val check_unit
   -> (Checked_unit.t, Chatml_diagnostic.t) Result.t
 
 (** Static-only engine; runtime wrapper above immediately projects. *)
-val create_static : Chatml.Chatml_static_surface.t -> checkpoint:(unit -> unit) -> t
+val create_static
+  :  ?recorder:Chatml_typechecker.Semantic.t
+  -> Chatml.Chatml_static_surface.t
+  -> checkpoint:(unit -> unit)
+  -> t
+
+(** Recording is compiler-private and runs beneath Recorder.with_recording in
+    the common checked-graph driver. Enabled parser units must carry owned sites;
+    each unit retains its own immutable context while inference identities and
+    imported weak cells still belong to this ONE engine. No facts are certified
+    until companions/importers/selected host constraints have all succeeded. *)
 
 (** Validate source IDs/digests/phases for both units before inference. Each unit
     owns its selected lookup scope, sharing identity/weak cells/root level only.

@@ -10,6 +10,7 @@ module Public_module = Checker.Configured_resolution.Public_module
 module Visibility = Chatml.Chatml_module_visibility
 module Static = Chatml.Chatml_static_surface
 module Signature = Checker.Signature_check
+module Semantic = Checker.Semantic
 
 module Checked_unit = struct
   type t =
@@ -19,6 +20,7 @@ module Checked_unit = struct
     ; scope : Scope.t
     ; context : Lookup.t
     ; invocation : unit ref
+    ; semantic_unit : Semantic.Unit.t option
     }
 
   let annotations t = t.annotations
@@ -30,10 +32,15 @@ type t =
   { machine : Checker.infer_state
   ; surface : Static.t
   ; invocation : unit ref
+  ; recorder : Semantic.t option
   }
 
-let create_static surface ~checkpoint =
-  { machine = Checker.create_state ~checkpoint (); surface; invocation = ref () }
+let create_static ?recorder surface ~checkpoint =
+  { machine = Checker.create_state ~checkpoint ()
+  ; surface
+  ; invocation = ref ()
+  ; recorder
+  }
 ;;
 
 let create surface ~checkpoint =
@@ -50,7 +57,7 @@ let paired source captured phase =
 
 (* Both borrowed callbacks have origin protection outside compiler-domain handlers.
    No state/callback is retained by Checked_unit. *)
-let with_state t context ~require ~f =
+let with_state ?semantic_unit t context ~require ~f =
   let exception Callback_raised of exn * Stdlib.Printexc.raw_backtrace in
   let guarded_require ~source reference =
     try require ~source reference with
@@ -62,7 +69,25 @@ let with_state t context ~require ~f =
       let configured =
         Checker.Configured_resolution.create context ~require:guarded_require ~checkpoint
       in
-      let state = { state with checkpoint; configured = Some configured } in
+      let semantic =
+        match t.recorder, semantic_unit with
+        | Some recorder, Some unit ->
+          Some (Semantic.frame recorder unit ~checkpoint |> Semantic.take_exn)
+        | None, None -> None
+        | Some _, None | None, Some _ ->
+          invalid_arg "Configured_check.with_state: inconsistent recorder unit"
+      in
+      let semantic_members =
+        Option.map semantic ~f:(fun _ -> Checker.SpanTbl.create ())
+      in
+      let state =
+        { state with
+          checkpoint
+        ; configured = Some configured
+        ; semantic
+        ; semantic_members
+        }
+      in
       Checker.with_unit_level state ~f:(fun () ->
         try f state with
         | Checker.Type_diagnostic diagnostic -> Error diagnostic
@@ -98,8 +123,17 @@ let check_implementation t ~source ~require implementation =
     Error
       (Diagnostic.create
          "Configured parser unit does not match its admitted implementation context")
-  else
-    with_state t source ~require ~f:(fun state ->
+  else (
+    let semantic_unit =
+      Option.map t.recorder ~f:(fun recorder ->
+        Semantic.implementation
+          recorder
+          source
+          implementation
+          ~checkpoint:t.machine.checkpoint
+        |> Semantic.take_exn)
+    in
+    with_state ?semantic_unit t source ~require ~f:(fun state ->
       let annotations, exports, scope =
         Checker.infer_configured_unit_static
           state
@@ -115,10 +149,25 @@ let check_implementation t ~source ~require implementation =
         ; scope
         ; context = source
         ; invocation = t.invocation
-        })
+        ; semantic_unit
+        }))
 ;;
 
-let check_unit = check_implementation
+let record_exports t checked =
+  match
+    t.recorder, checked.Checked_unit.semantic_unit, Public_module.members checked.exports
+  with
+  | Some recorder, Some unit, Some members ->
+    Semantic.exports recorder unit members ~checkpoint:t.machine.checkpoint
+    |> Semantic.take_exn
+  | None, _, _ | Some _, None, _ | Some _, Some _, None -> ()
+;;
+
+let check_unit t ~source ~require implementation =
+  Result.map (check_implementation t ~source ~require implementation) ~f:(fun checked ->
+    record_exports t checked;
+    checked)
+;;
 
 let check_node t node ~require ~implementation ~interface =
   let source = Chatml_dependency_session.Unit.implementation node in
@@ -142,12 +191,27 @@ let check_node t node ~require ~implementation ~interface =
     let open Result.Let_syntax in
     let%bind checked = check_implementation t ~source ~require implementation in
     match companion, interface with
-    | None, None -> Ok checked
+    | None, None ->
+      record_exports t checked;
+      Ok checked
     | Some context, Some interface ->
-      with_state t context ~require ~f:(fun state ->
-        let env = Checker.init_env_with_static ~checkpoint:state.checkpoint t.surface in
+      let semantic_unit =
+        Option.map t.recorder ~f:(fun recorder ->
+          Semantic.interface recorder context interface ~checkpoint:t.machine.checkpoint
+          |> Semantic.take_exn)
+      in
+      with_state ?semantic_unit t context ~require ~f:(fun state ->
+        let env =
+          Checker.init_env_with_static
+            ?semantic:state.semantic
+            ~checkpoint:state.checkpoint
+            t.surface
+        in
         let outer_types =
-          Checker.init_types_with_static ~checkpoint:state.checkpoint t.surface
+          Checker.init_types_with_static
+            ?semantic:state.semantic
+            ~checkpoint:state.checkpoint
+            t.surface
         in
         let values =
           match Public_module.value_scheme checked.exports with
@@ -157,6 +221,8 @@ let check_node t node ~require ~implementation ~interface =
         in
         let%bind signature =
           Checker.check_captured_module_signature
+            ~semantic_values:env
+            ?semantic_members:(Public_module.members checked.exports)
             ?lookup:(Checker.type_lookup state env)
             state
             interface
@@ -168,9 +234,18 @@ let check_node t node ~require ~implementation ~interface =
           Public_module.create
             ~values:(Signature.values signature)
             ~types:(Signature.types signature)
+          |> fun exports ->
+          Option.value_map
+            (Signature.members signature)
+            ~default:exports
+            ~f:(Public_module.with_members exports)
         in
         state.checkpoint ();
-        Ok { checked with exports; visibility = Signature.visibility signature })
+        let checked =
+          { checked with exports; visibility = Signature.visibility signature }
+        in
+        record_exports t checked;
+        Ok checked)
     | None, Some _ | Some _, None -> assert false
 ;;
 
@@ -202,7 +277,7 @@ let check_entrypoints t (checked : Checked_unit.t) ~source ~require ~required_bi
          "Host entrypoint bindings do not belong to this compiler invocation and \
           admitted implementation")
   else
-    with_state t source ~require ~f:(fun state ->
+    with_state ?semantic_unit:checked.semantic_unit t source ~require ~f:(fun state ->
       let targets = ref [] in
       let lookup_binding name =
         state.checkpoint ();
@@ -249,6 +324,7 @@ let check_entrypoints t (checked : Checked_unit.t) ~source ~require ~required_bi
         else scheme
       in
       Checker.check_required_bindings
+        ~semantic_scope:checked.scope
         ~binding_span:(fun name ->
           Option.bind (Scope.find checked.scope ~name) ~f:Scope.Binding.span)
         state

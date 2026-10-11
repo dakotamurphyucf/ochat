@@ -11,14 +11,20 @@ module Public_module = struct
   type t =
     { value_scheme : Inferred.typ
     ; types : Alias.t
+    ; members : Chatml_semantic_binding.Members.t option
     }
 
   let create ~values ~types =
-    { value_scheme = Inferred.Module (Inferred.Row (values, Inferred.Empty_row)); types }
+    { value_scheme = Inferred.Module (Inferred.Row (values, Inferred.Empty_row))
+    ; types
+    ; members = None
+    }
   ;;
 
   let value_scheme t = t.value_scheme
   let types t = t.types
+  let members t = t.members
+  let with_members t members = { t with members = Some members }
 end
 
 module Annotation = struct
@@ -43,22 +49,50 @@ let reference t ?origin ~reason ~span name =
   | Some origin -> Lookup.at_use t.context origin ~reason ~span ~checkpoint:t.checkpoint
 ;;
 
-let value t ~env ~name ~span =
+module Selection = struct
+  type t =
+    { scheme : Inferred.typ
+    ; origin : Origin.t option
+    ; members : Chatml_semantic_binding.Members.t option
+    }
+end
+
+let value_with_metadata t ~env ~name ~span =
   let open Result.Let_syntax in
   match Scope.find env ~name with
   | Some binding ->
     (match Scope.Binding.origin binding with
-     | None -> Ok (Scope.Binding.scheme binding, None)
+     | None ->
+       Ok
+         { Selection.scheme = Scope.Binding.scheme binding
+         ; origin = None
+         ; members =
+             Option.bind
+               (Scope.Binding.semantic binding)
+               ~f:Chatml_semantic_binding.members
+         }
      | Some origin ->
        let%bind reference =
          reference t ~origin ~reason:Lookup.Reason.Value_reference ~span name
        in
        let%map _ = require t reference in
-       Scope.Binding.scheme binding, Some origin)
+       { Selection.scheme = Scope.Binding.scheme binding
+       ; origin = Some origin
+       ; members =
+           Option.bind (Scope.Binding.semantic binding) ~f:Chatml_semantic_binding.members
+       })
   | None ->
     let%bind reference = reference t ~reason:Lookup.Reason.Value_reference ~span name in
     let%map exports = require t reference in
-    Public_module.value_scheme exports, Some (Reference.origin reference)
+    { Selection.scheme = Public_module.value_scheme exports
+    ; origin = Some (Reference.origin reference)
+    ; members = Public_module.members exports
+    }
+;;
+
+let value t ~env ~name ~span =
+  Result.map (value_with_metadata t ~env ~name ~span) ~f:(fun selected ->
+    selected.Selection.scheme, selected.origin)
 ;;
 
 let type_lookup t ~env =
@@ -116,6 +150,7 @@ module Opened = struct
         { scheme : Inferred.typ
         ; types : Alias.t
         ; reference : Reference.t
+        ; members : Chatml_semantic_binding.Members.t option
         }
 
   let diagnostic t ~message =
@@ -151,8 +186,22 @@ let open_module t ~env ~name ~span =
     let types =
       Alias.nested_module (Public_module.types public) ~path ~checkpoint:t.checkpoint
     in
+    let members =
+      match Public_module.members public with
+      | None -> None
+      | Some root ->
+        List.fold path ~init:(Some root) ~f:(fun members name ->
+          t.checkpoint ();
+          Option.bind members ~f:(fun members ->
+            Chatml_semantic_binding.Members.find
+              members
+              ~namespace:Value
+              ~name
+              ~checkpoint:t.checkpoint
+            |> Option.bind ~f:Chatml_semantic_binding.members))
+    in
     (* A first-class module value has a value scheme without a declared static
        namespace. Explicit static modules were validated by export collection. *)
     Opened.Configured
-      { scheme; types = Option.value types ~default:Alias.empty; reference }
+      { scheme; types = Option.value types ~default:Alias.empty; reference; members }
 ;;

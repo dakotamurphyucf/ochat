@@ -14,6 +14,8 @@ module Public_module : sig
   val create : values:Inferred.typ Inferred.Env.t -> types:Alias.t -> t
   val value_scheme : t -> Inferred.typ
   val types : t -> Alias.t
+  val members : t -> Chatml_semantic_binding.Members.t option
+  val with_members : t -> Chatml_semantic_binding.Members.t -> t
 end
 
 module Annotation : sig
@@ -47,6 +49,23 @@ val value
   -> span:Source.span
   -> (Inferred.typ * Origin.t option, Chatml_diagnostic.t) Result.t
 
+module Selection : sig
+  (** Metadata follows the SAME successful lexical/configured selection before
+      instantiation. No extra resolution, scanner or inference is performed. *)
+  type t =
+    { scheme : Inferred.typ
+    ; origin : Origin.t option
+    ; members : Chatml_semantic_binding.Members.t option
+    }
+end
+
+val value_with_metadata
+  :  t
+  -> env:Scope.t
+  -> name:string
+  -> span:Source.span
+  -> (Selection.t, Chatml_diagnostic.t) Result.t
+
 (** Borrowed by existing alias conversion only. Static lexical namespaces win;
     a present lexical value root blocks configured fallback. Direct qualified
     occurrences emit one located full-path event. Alias freezes namespaces,
@@ -60,6 +79,7 @@ module Opened : sig
         { scheme : Inferred.typ
         ; types : Alias.t
         ; reference : Reference.t
+        ; members : Chatml_semantic_binding.Members.t option
         }
 
   (** Source/configuration-owned error using the validated configured open site;

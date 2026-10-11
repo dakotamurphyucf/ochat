@@ -21,6 +21,7 @@ end
 
 module Role = struct
   type t =
+    | Value_reference
     | Value_binder
     | Module_binder
     | Module_reference
@@ -71,8 +72,25 @@ module Site = struct
   let location t = t.location
 end
 
+module Span_key = struct
+  module T = struct
+    type t = int * int [@@deriving compare, sexp]
+  end
+
+  include T
+  include Comparator.Make (T)
+end
+
+module At_span = struct
+  type t =
+    | Missing
+    | Unique of Site.t
+    | Ambiguous
+end
+
 type t =
-  { owner : Owner.t
+  { by_span : Site.t list Map.M(Span_key).t
+  ; owner : Owner.t
   ; source : Chatml_source.t
   ; sites : Site.t list
   ; index : Site.t option array
@@ -88,6 +106,22 @@ let find t (id : Id.t) =
   if phys_equal t.owner id.owner && id.index >= 0 && id.index < Array.length t.index
   then t.index.(id.index)
   else None
+;;
+
+let at_span t ~role ~checkpoint (span : Source.span) =
+  checkpoint ();
+  let rows = Map.find t.by_span (span.left.offset, span.right.offset) in
+  match rows with
+  | None -> At_span.Missing
+  | Some rows ->
+    List.fold rows ~init:At_span.Missing ~f:(fun found row ->
+      checkpoint ();
+      if Role.equal row.Site.role role
+      then (
+        match found with
+        | Missing -> Unique row
+        | Unique _ | Ambiguous -> Ambiguous)
+      else found)
 ;;
 
 module type Sink = sig
@@ -136,16 +170,23 @@ let collect source ~limits ~checkpoint ~f =
       let value = f (module Sink : Sink) in
       checkpoint ();
       let index = Array.create ~len:!count None in
-      let rec publish acc = function
-        | [] -> acc
+      let rec publish acc by_span = function
+        | [] -> acc, by_span
         | row :: rest ->
           checkpoint ();
           index.(row.Site.id.index) <- Some row;
-          publish (row :: acc) rest
+          let span = Chatml_source.Location.span row.Site.location in
+          let key = span.left.offset, span.right.offset in
+          let by_span =
+            Map.update by_span key ~f:(function
+              | None -> [ row ]
+              | Some rows -> row :: rows)
+          in
+          publish (row :: acc) by_span rest
       in
-      let sites = publish [] !reversed in
+      let sites, by_span = publish [] (Map.empty (module Span_key)) !reversed in
       checkpoint ();
-      Ok (value, { owner; source; sites; index; name_bytes = !name_bytes })
+      Ok (value, { by_span; owner; source; sites; index; name_bytes = !name_bytes })
     with
     | Rejected error -> Error error)
 ;;

@@ -8,6 +8,7 @@ end
 
 module Role : sig
   type t =
+    | Value_reference
     | Value_binder
     | Module_binder
     | Module_reference
@@ -57,6 +58,19 @@ type t
 
 val source : t -> Chatml_source.t
 val find : t -> Id.t -> Site.t option
+
+module At_span : sig
+  type t =
+    | Missing
+    | Unique of Site.t
+    | Ambiguous
+end
+
+(** Exact role/range lookup within this source owner. Duplicate rows produce
+    Ambiguous, never a guessed first match. Built only on the enabled parser
+    path, with admitted row counts and cooperative publication. *)
+val at_span : t -> role:Role.t -> checkpoint:(unit -> unit) -> Source.span -> At_span.t
+
 val sites : t -> Site.t list
 val site_count : t -> int
 val name_bytes : t -> int
