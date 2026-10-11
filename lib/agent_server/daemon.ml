@@ -414,7 +414,17 @@ let open_store ~sw ~env config ~process_start_identity =
   | _ -> Error (Agent_store.Store_error.Corrupt "host root schema is not a regular file")
 ;;
 
-let build_catalog ~env store config reviewer_resolver policy_evaluator_resolver =
+(* Explicit daemon host ceilings. Portable source members are at most1024
+   bytes, hence at most512 nonempty slash-separated components. Runtime loans
+   share policy counts; independent library hosts supply their own ceilings. *)
+let original_source_limits () =
+  Agent_session.Prompt_source_owner.Limits.create
+    ~max_path_components:512
+    ~max_runtime_leases:4096
+  |> Or_error.ok_exn
+;;
+
+let build_catalog ~sw ~env store config reviewer_resolver policy_evaluator_resolver =
   let open Result.Let_syntax in
   let%bind built =
     Catalog_builder.build ?reviewer_resolver ?policy_evaluator_resolver config
@@ -427,14 +437,26 @@ let build_catalog ~env store config reviewer_resolver policy_evaluator_resolver 
          |> Agent_store.Data_root.prompt_artifacts_path)
   in
   let prompts = Agent_session.Prompt_catalog.create ~env ~artifact_store in
-  let prepared =
-    Agent_session.Prompt_catalog.prepare
+  let%bind prepared =
+    Agent_session.Prompt_catalog.prepare_owned
       prompts
+      ~sw
+      ~source_limits:(original_source_limits ())
+      ~max_roots:1024
+      ~checkpoint:Eio.Fiber.check
       ~transaction_id:(fun _ -> Agent_protocol.Id.Transaction.create ())
       ~created_at:(timestamp env)
       built.prompts
+    |> Result.map_error ~f:(fun error ->
+      Agent_store.Store_error.Corrupt (Core.Error.to_string_hum error))
   in
-  Agent_session.Prompt_catalog.install prompts prepared;
+  let%bind () =
+    Fun.protect
+      ~finally:(fun () -> Agent_session.Prompt_catalog.discard_prepared prepared)
+      (fun () -> Agent_session.Prompt_catalog.install_owned prompts prepared)
+    |> Result.map_error ~f:(fun error ->
+      Agent_store.Store_error.Corrupt (Core.Error.to_string_hum error))
+  in
   Ok (built, prompts)
 ;;
 
@@ -769,25 +791,44 @@ let config_watcher
       | Error error -> Error [ config_build_diagnostic candidate error ]
       | Ok built ->
         let prompt_revisions =
-          Agent_session.Prompt_catalog.prepare
+          Agent_session.Prompt_catalog.prepare_owned
             prompts
+            ~sw
+            ~source_limits:(original_source_limits ())
+            ~max_roots:1024
+            ~checkpoint:Eio.Fiber.check
             ~transaction_id:(fun _ -> Agent_protocol.Id.Transaction.create ())
             ~created_at:(timestamp env)
             built.prompts
         in
-        prepared := Some (built, prompt_revisions);
-        Ok ())
+        (match prompt_revisions with
+         | Error error ->
+           Error
+             [ config_build_diagnostic
+                 candidate
+                 (Agent_store.Store_error.Corrupt (Core.Error.to_string_hum error))
+             ]
+         | Ok prompt_revisions ->
+           prepared := Some (built, prompt_revisions);
+           Ok ()))
   in
   let commit _ candidate =
     let built, prompt_revisions = Option.value_exn !prepared in
-    prepared := None;
     Session_factory.install_catalogs
       factory
       ~workspaces:built.Catalog_builder.workspaces
       ~permission_profiles:built.permission_profiles
       ~manifest_grants:built.manifest_grants;
-    Agent_session.Prompt_catalog.install prompts prompt_revisions;
+    Agent_session.Prompt_catalog.install_owned prompts prompt_revisions |> Or_error.ok_exn;
+    prepared := None;
     ignore candidate
+  in
+  let discard_prepared () =
+    match !prepared with
+    | None -> ()
+    | Some (_, revisions) ->
+      prepared := None;
+      Agent_session.Prompt_catalog.discard_prepared revisions
   in
   let audit diff =
     ignore
@@ -809,7 +850,7 @@ let config_watcher
       ~env
       ~path:config.Config.source_file
       ~initial:config
-      ~hooks:{ prepare; commit; audit }
+      ~hooks:{ prepare; commit; discard_prepared; audit }
   in
   if enabled then Config_watcher.run ~sw ~clock:(Eio.Stdenv.clock env) ~every:1. watcher;
   if not enabled then Config_watcher.close watcher;
@@ -1369,6 +1410,7 @@ let start
     in
     let%bind built, prompts =
       build_catalog
+        ~sw
         ~env
         store
         config

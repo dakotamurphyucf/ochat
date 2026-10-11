@@ -399,8 +399,11 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/persistence_codec.mli` | [contract](../../lib/agent_session/persistence_codec.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_session/prompt_catalog.mli` | [contract](../../lib/agent_session/prompt_catalog.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/prompt_definition.mli` | [contract](../../lib/agent_session/prompt_definition.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/prompt_program_custody.mli` | [contract](../../lib/agent_session/prompt_program_custody.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/prompt_revision.mli` | [contract](../../lib/agent_session/prompt_revision.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/prompt_revision_builder.mli` | [contract](../../lib/agent_session/prompt_revision_builder.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/prompt_source_lease.mli` | [contract](../../lib/agent_session/prompt_source_lease.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/prompt_source_owner.mli` | [contract](../../lib/agent_session/prompt_source_owner.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/queued_moderator_event.mli` | [contract](../../lib/agent_session/queued_moderator_event.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_session/quota_key.mli` | [contract](../../lib/agent_session/quota_key.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/quota_manager.mli` | [contract](../../lib/agent_session/quota_manager.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
@@ -493,6 +496,11 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_store/durable_file.mli` | [contract](../../lib/agent_store/durable_file.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/frame.mli` | [contract](../../lib/agent_store/frame.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/history_revision_conversion.mli` | [contract](../../lib/agent_store/history_revision_conversion.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/agent_store/idempotency_capacity.mli` | [contract](../../lib/agent_store/idempotency_capacity.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/agent_store/idempotency_outcome.mli` | [contract](../../lib/agent_store/idempotency_outcome.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/agent_store/idempotency_outcome_cleanup.mli` | [contract](../../lib/agent_store/idempotency_outcome_cleanup.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/agent_store/idempotency_outcome_projection.mli` | [contract](../../lib/agent_store/idempotency_outcome_projection.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/agent_store/idempotency_outcome_store.mli` | [contract](../../lib/agent_store/idempotency_outcome_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/idempotency_store.mli` | [contract](../../lib/agent_store/idempotency_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/job_result_intent.mli` | [contract](../../lib/agent_store/job_result_intent.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/job_result_intent_document.mli` | [contract](../../lib/agent_store/job_result_intent_document.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
@@ -509,6 +517,8 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_store/prompt_artifact_store.mli` | [contract](../../lib/agent_store/prompt_artifact_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/prompt_manifest.mli` | [contract](../../lib/agent_store/prompt_manifest.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/prompt_manifest_document.mli` | [contract](../../lib/agent_store/prompt_manifest_document.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/agent_store/prompt_program_bundle.mli` | [contract](../../lib/agent_store/prompt_program_bundle.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/agent_store/prompt_source_receipt.mli` | [contract](../../lib/agent_store/prompt_source_receipt.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/recovery.mli` | [contract](../../lib/agent_store/recovery.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/retention_reader.mli` | [contract](../../lib/agent_store/retention_reader.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/session_archive_document.mli` | [contract](../../lib/agent_store/session_archive_document.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
@@ -523,6 +533,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_store/session_projection_update.mli` | [contract](../../lib/agent_store/session_projection_update.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/session_record_document.mli` | [contract](../../lib/agent_store/session_record_document.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/session_removal_directory.mli` | [contract](../../lib/agent_store/session_removal_directory.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/agent_store/session_removal_workspace.mli` | [contract](../../lib/agent_store/session_removal_workspace.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/session_store.mli` | [contract](../../lib/agent_store/session_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/snapshot.mli` | [contract](../../lib/agent_store/snapshot.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/store_error.mli` | [contract](../../lib/agent_store/store_error.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
@@ -692,7 +703,11 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chatmd/chatmd_attributes.mli` | [contract](../../lib/chatmd/chatmd_attributes.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_extension_declaration.mli` | [contract](../../lib/chatmd/chatmd_extension_declaration.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_import_expansion.mli` | [contract](../../lib/chatmd/chatmd_import_expansion.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chatmd/chatmd_located_ast.mli` | [contract](../../lib/chatmd/chatmd_located_ast.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_moderator_runtime_declaration.mli` | [contract](../../lib/chatmd/chatmd_moderator_runtime_declaration.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatmd/chatmd_owned_parser.mli` | [contract](../../lib/chatmd/chatmd_owned_parser.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chatmd/chatmd_parser_builder.mli` | [contract](../../lib/chatmd/chatmd_parser_builder.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chatmd/chatmd_parser_input.mli` | [contract](../../lib/chatmd/chatmd_parser_input.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_read_file_declaration.mli` | [contract](../../lib/chatmd/chatmd_read_file_declaration.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_read_file_spec.mli` | [contract](../../lib/chatmd/chatmd_read_file_spec.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_script_declaration.mli` | [contract](../../lib/chatmd/chatmd_script_declaration.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
@@ -718,22 +733,61 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chatmd_shell_spec/shell_tool_spec.mli` | [contract](../../lib/chatmd_shell_spec/shell_tool_spec.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chatmd_shell_spec/source_ref.mli` | [contract](../../lib/chatmd_shell_spec/source_ref.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chatmd_shell_spec/tool_schema.mli` | [contract](../../lib/chatmd_shell_spec/tool_schema.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_alias_equivalence.mli` | [contract](../../lib/chatml/chatml_alias_equivalence.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_binding_pattern.mli` | [contract](../../lib/chatml/chatml_binding_pattern.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_binding_value.mli` | [contract](../../lib/chatml/chatml_binding_value.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_builtin_callback.mli` | [contract](../../lib/chatml/chatml_builtin_callback.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_builtin_composition.mli` | [contract](../../lib/chatml/chatml_builtin_composition.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_builtin_modules.mli` | [contract](../../lib/chatml/chatml_builtin_modules.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_builtin_spec.mli` | [contract](../../lib/chatml/chatml_builtin_spec.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_builtin_surface.mli` | [contract](../../lib/chatml/chatml_builtin_surface.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_checkpoint.mli` | [contract](../../lib/chatml/chatml_checkpoint.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_compilation.mli` | [contract](../../lib/chatml/chatml_compilation.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_compiler_contract.mli` | [contract](../../lib/chatml/chatml_compiler_contract.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_configured_check.mli` | [contract](../../lib/chatml/chatml_configured_check.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_configured_resolution.mli` | [contract](../../lib/chatml/chatml_configured_resolution.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_contract_encoding.mli` | [contract](../../lib/chatml/chatml_contract_encoding.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_debug_log.mli` | [contract](../../lib/chatml/chatml_debug_log.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_equality_requirement.mli` | [contract](../../lib/chatml/chatml_equality_requirement.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_eval.mli` | [contract](../../lib/chatml/chatml_eval.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_execution.mli` | [contract](../../lib/chatml/chatml_execution.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_extension_surface.mli` | [contract](../../lib/chatml/chatml_extension_surface.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_host_runtime.mli` | [contract](../../lib/chatml/chatml_host_runtime.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_inferred_type.mli` | [contract](../../lib/chatml/chatml_inferred_type.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_lang.mli` | [contract](../../lib/chatml/chatml_lang.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_lexer.mli` | [contract](../../lib/chatml/chatml_lexer.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_moderator_runtime.mli` | [contract](../../lib/chatml/chatml_moderator_runtime.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_module_reference.mli` | [contract](../../lib/chatml/chatml_module_reference.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_module_signature.mli` | [contract](../../lib/chatml/chatml_module_signature.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_module_visibility.mli` | [contract](../../lib/chatml/chatml_module_visibility.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_owned_source.mli` | [contract](../../lib/chatml/chatml_owned_source.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_parse.mli` | [contract](../../lib/chatml/chatml_parse.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_resolver.mli` | [contract](../../lib/chatml/chatml_resolver.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_runtime.mli` | [contract](../../lib/chatml/chatml_runtime.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_semantic_binding.mli` | [contract](../../lib/chatml/chatml_semantic_binding.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_semantic_elaboration.mli` | [contract](../../lib/chatml/chatml_semantic_elaboration.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_semantic_host.mli` | [contract](../../lib/chatml/chatml_semantic_host.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_semantic_recorder.mli` | [contract](../../lib/chatml/chatml_semantic_recorder.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_semantic_scope.mli` | [contract](../../lib/chatml/chatml_semantic_scope.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_shape_kind.mli` | [contract](../../lib/chatml/chatml_shape_kind.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_signature_check.mli` | [contract](../../lib/chatml/chatml_signature_check.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_static_surface.mli` | [contract](../../lib/chatml/chatml_static_surface.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_surface_inventory.mli` | [contract](../../lib/chatml/chatml_surface_inventory.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_syntax_name.mli` | [contract](../../lib/chatml/chatml_syntax_name.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_syntax_sites.mli` | [contract](../../lib/chatml/chatml_syntax_sites.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_table_snapshot.mli` | [contract](../../lib/chatml/chatml_table_snapshot.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_task_array.mli` | [contract](../../lib/chatml/chatml_task_array.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_task_array_mode.mli` | [contract](../../lib/chatml/chatml_task_array_mode.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_tokens.mli` | [contract](../../lib/chatml/chatml_tokens.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_tuple.mli` | [contract](../../lib/chatml/chatml_tuple.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_type_alias.mli` | [contract](../../lib/chatml/chatml_type_alias.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_type_expr.mli` | [contract](../../lib/chatml/chatml_type_expr.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_type_probe.mli` | [contract](../../lib/chatml/chatml_type_probe.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_type_scheme.mli` | [contract](../../lib/chatml/chatml_type_scheme.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_type_snapshot.mli` | [contract](../../lib/chatml/chatml_type_snapshot.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_type_validity.mli` | [contract](../../lib/chatml/chatml_type_validity.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_value_codec.mli` | [contract](../../lib/chatml/chatml_value_codec.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_value_scope.mli` | [contract](../../lib/chatml/chatml_value_scope.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/credential_registry/credential_registry.mli` | [contract](../../lib/credential_registry/credential_registry.mli) | [integration](../lib/credential_registry.doc.md) | Public interface + current host guide. |
 | `lib/credential_registry_model/credential_registry_model.mli` | [contract](../../lib/credential_registry_model/credential_registry_model.mli) | [integration](../lib/credential_registry_model.doc.md) | Public interface + current host guide. |
 | `lib/history_chatmd/history_chatmd.mli` | [contract](../../lib/history_chatmd/history_chatmd.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
@@ -781,6 +835,8 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/provider_runtime_host/provider_runtime_host.mli` | [contract](../../lib/provider_runtime_host/provider_runtime_host.mli) | [integration](../lib/provider_operator.doc.md) | Public interface + current host guide. |
 | `lib/provider_secret_store/provider_secret_store.mli` | [contract](../../lib/provider_secret_store/provider_secret_store.mli) | [integration](../lib/provider_secret_store.doc.md) | Public interface + current host guide. |
 | `lib/session_store.mli` | [contract](../../lib/session_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/shell_access/bounded_process.mli` | [contract](../../lib/shell_access/bounded_process.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
+| `lib/shell_access/process_control.mli` | [contract](../../lib/shell_access/process_control.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/shell_access/process_spawn.mli` | [contract](../../lib/shell_access/process_spawn.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/shell_access/request_channel.mli` | [contract](../../lib/shell_access/request_channel.mli) | [integration](../bin/ochat_agent_helper.doc.md) | Public interface + current host guide. |
 | `lib/shell_access/shell_access.mli` | [contract](../../lib/shell_access/shell_access.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
@@ -914,6 +970,9 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../design/ochat-agent-server-spec.md) | `docs-src/design/ochat-agent-server-spec.md` | Canonical design; conceptual/compatibility qualifications retained. |
 | [page](../development/admin-remediation-notes.md) | `docs-src/development/admin-remediation-notes.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/chatml-extensibility-handoff.md) | `docs-src/development/chatml-extensibility-handoff.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../development/chatml-program-custody.md) | `docs-src/development/chatml-program-custody.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../development/chatml-semantic-queries.md) | `docs-src/development/chatml-semantic-queries.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../development/chatml-source-preparation.md) | `docs-src/development/chatml-source-preparation.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/code-documentation-audit.md) | `docs-src/development/code-documentation-audit.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/documentation-coverage.md) | `docs-src/development/documentation-coverage.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/documentation-worklog.md) | `docs-src/development/documentation-worklog.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
@@ -929,6 +988,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../examples/applications/documentation-lab/sample-project/tutorials/passing.md) | `docs-src/examples/applications/documentation-lab/sample-project/tutorials/passing.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../examples/applications/guarded-engineering/README.md) | `docs-src/examples/applications/guarded-engineering/README.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../examples/applications/persistent-review-team/README.md) | `docs-src/examples/applications/persistent-review-team/README.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../examples/chatml/projects/shared-counter/README.md) | `docs-src/examples/chatml/projects/shared-counter/README.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../examples/learning/lantern/sample-project/docs/reference.md) | `docs-src/examples/learning/lantern/sample-project/docs/reference.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../examples/learning/lantern/sample-project/docs/setup.md) | `docs-src/examples/learning/lantern/sample-project/docs/setup.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../examples/prompt-patterns.md) | `docs-src/examples/prompt-patterns.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |

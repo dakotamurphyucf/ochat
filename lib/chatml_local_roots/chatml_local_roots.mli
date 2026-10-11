@@ -67,6 +67,19 @@ module Anchor : sig
     -> limits:Limits.t
     -> checkpoint:(unit -> unit)
     -> (t, Error.t) Result.t
+
+  (** Borrowed already-admitted Local owner, not a native path or new permission.
+      The host keeps it live through [with_anchors]. Resolver admission clones the
+      same retained directory via empty [Local.open_subroot], with its existing
+      component ceiling and normal joined cleanup/accounting. Construction only
+      validates lexical prefix metadata; a closed owner fails during acquisition.
+      No original Eio directory is retained or reopened by this alternative. *)
+  val of_local
+    :  Local.t
+    -> host_prefix:string
+    -> limits:Limits.t
+    -> checkpoint:(unit -> unit)
+    -> (t, Error.t) Result.t
 end
 
 module Cursor : sig

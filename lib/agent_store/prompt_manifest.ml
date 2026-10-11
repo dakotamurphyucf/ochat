@@ -14,6 +14,7 @@ type t =
   { version : int
   ; revision_id : P.Id.Prompt_revision.t
   ; prompt_definition_id : P.Id.Prompt_definition.t option
+  ; source_receipt : Prompt_source_receipt.t option
   ; canonical_source : string option
   ; root_relative_path : string
   ; root_sha256 : string
@@ -48,6 +49,16 @@ let validate t =
     | Some id ->
       F.protocol (P.Id.Prompt_definition.of_string (P.Id.Prompt_definition.to_string id))
       |> Result.map ~f:Option.some
+  in
+  let%bind () =
+    match t.prompt_definition_id, t.source_receipt with
+    | Some id, Some receipt
+      when not
+             (P.Id.Prompt_definition.equal
+                id
+                (Prompt_source_receipt.definition_id receipt)) ->
+      F.invalid "source_receipt" "original source selection definition differs"
+    | None, None | None, Some _ | Some _, None | Some _, Some _ -> Ok ()
   in
   let%bind _ = F.protocol (P.Timestamp.of_string (P.Timestamp.to_string t.created_at)) in
   let%bind _ = F.digest (`String t.root_sha256) in

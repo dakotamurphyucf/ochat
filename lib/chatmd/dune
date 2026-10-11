@@ -29,6 +29,7 @@
   core
   source
   chatml_source
+  ochat.chatml_local_source
   cstruct
   str
   menhirLib

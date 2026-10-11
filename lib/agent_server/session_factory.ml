@@ -2506,10 +2506,30 @@ let resolve_state_inference_context t (state : Agent_session.Session_state.t) =
         (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
 ;;
 
+let original_source_lease (t : t) ~sw ~revision =
+  let receipt = (Agent_session.Prompt_revision.artifact revision).source_receipt in
+  let selection =
+    Option.bind receipt ~f:(fun receipt ->
+      Agent_session.Prompt_catalog.source_selection
+        t.prompts
+        (Agent_store.Prompt_source_receipt.definition_id receipt))
+  in
+  Agent_session.Prompt_source_lease.create
+    receipt
+    ~selection
+    ~sw
+    ~checkpoint:Eio.Fiber.check
+;;
+
+let source_attachment_error error =
+  unavailable Invalid_state (Core.Error.to_string_hum error)
+;;
+
 let prepare_authored_graph
       t
       ~sw
       ~revision
+      ~source_lease
       ~paths
       ~storage_paths
       ~(state : Agent_session.Session_state.t)
@@ -2568,7 +2588,10 @@ let prepare_authored_graph
               actor_ref
               shell_state)
         ~approval_provider:(shell_approval_provider t profile actor_ref)
-        ~approval_store:(shell_approval_store state actor_ref shell_state))
+        ~approval_store:(shell_approval_store state actor_ref shell_state)
+      |> Result.bind ~f:(fun prepared ->
+        Agent_session.Runtime_builder.with_authored_source_lease prepared ~source_lease
+        |> Result.map_error ~f:source_attachment_error))
 ;;
 
 let independent_resource_host t =
@@ -2640,11 +2663,13 @@ let independent_resource_host t =
           let shell_state = ref state.shell in
           let%bind tracking = create_graph_tracking t actor_ref in
           register_tracking tracking;
+          let source_lease = original_source_lease t ~sw ~revision in
           let%bind prepared, native_registrations =
             prepare_authored_graph
               t
               ~sw
               ~revision
+              ~source_lease
               ~paths
               ~storage_paths:paths
               ~state
@@ -2682,6 +2707,10 @@ let independent_resource_host t =
                 (manifest_authorizer t profile revision state actor_ref shell_state)
               ~approval_provider:(shell_approval_provider t profile actor_ref)
               ~approval_store:(shell_approval_store state actor_ref shell_state)
+          in
+          let%bind resources =
+            B.with_resource_source_lease resources ~source_lease
+            |> Result.map_error ~f:source_attachment_error
           in
           let%bind public =
             Lazy.force resources.native.capabilities
@@ -3207,42 +3236,13 @@ let prepare_runtime_at_paths
       match source with
       | Authored revision ->
         let construct_root sw =
-          match t.qualify_chatml_extensions with
-          | false ->
-            construct
-              sw
-              (Agent_session.Runtime_builder.build ~revision)
-              (manifest_authorizer
-                 ~run_preparation
-                 t
-                 profile
-                 revision
-                 state
-                 actor_ref
-                 shell_state)
-          | true ->
-            let module B = Agent_session.Runtime_builder in
-            let services = extension_services t profile actor_ref ~state in
-            let%bind prepared, native_registrations =
-              prepare_authored_graph
-                t
-                ~sw
-                ~revision
-                ~paths
-                ~storage_paths
-                ~state
-                ~profile
-                ~actor_ref
-                ~tracking
-                ~shell_state
-                ~native_service_revision:services.native_service_revision
-                ~one_off_policy:services.one_off_policy
-                ~authoring_validation_host:services.authoring_validation_host
-            in
-            let%bind runtime =
+          let source_lease = original_source_lease t ~sw ~revision in
+          let built =
+            match t.qualify_chatml_extensions with
+            | false ->
               construct
                 sw
-                (B.build_with_extensions ~native_registrations ~revision ~services)
+                (Agent_session.Runtime_builder.build ~revision)
                 (manifest_authorizer
                    ~run_preparation
                    t
@@ -3251,23 +3251,59 @@ let prepare_runtime_at_paths
                    state
                    actor_ref
                    shell_state)
-            in
-            let installed =
-              let%bind public =
-                Lazy.force (Option.value_exn runtime.native_runtime).capabilities
-                |> Result.map_error ~f:(fun error ->
-                  unavailable
-                    Permission_denied
-                    error.Chat_response.Tool_capability.message)
+            | true ->
+              let module B = Agent_session.Runtime_builder in
+              let services = extension_services t profile actor_ref ~state in
+              let%bind prepared, native_registrations =
+                prepare_authored_graph
+                  t
+                  ~sw
+                  ~revision
+                  ~source_lease
+                  ~paths
+                  ~storage_paths
+                  ~state
+                  ~profile
+                  ~actor_ref
+                  ~tracking
+                  ~shell_state
+                  ~native_service_revision:services.native_service_revision
+                  ~one_off_policy:services.one_off_policy
+                  ~authoring_validation_host:services.authoring_validation_host
               in
-              Authored_resources.install t.authored_resources ~sw ~public prepared
-            in
-            (match installed with
-             | Ok () -> Ok runtime
-             | Error error ->
-               (try Eio.Cancel.protect runtime.close with
-                | _ -> ());
-               Error error)
+              let%bind runtime =
+                construct
+                  sw
+                  (B.build_with_extensions ~native_registrations ~revision ~services)
+                  (manifest_authorizer
+                     ~run_preparation
+                     t
+                     profile
+                     revision
+                     state
+                     actor_ref
+                     shell_state)
+              in
+              let installed =
+                let%bind public =
+                  Lazy.force (Option.value_exn runtime.native_runtime).capabilities
+                  |> Result.map_error ~f:(fun error ->
+                    unavailable
+                      Permission_denied
+                      error.Chat_response.Tool_capability.message)
+                in
+                Authored_resources.install t.authored_resources ~sw ~public prepared
+              in
+              (match installed with
+               | Ok () -> Ok runtime
+               | Error error ->
+                 (try Eio.Cancel.protect runtime.close with
+                  | _ -> ());
+                 Error error)
+          in
+          Result.bind built ~f:(fun runtime ->
+            Agent_session.Runtime_builder.with_source_lease runtime ~source_lease
+            |> Result.map_error ~f:source_attachment_error)
         in
         prepare_extension_runtime_scope t construct_root
       | Generated_artifact { artifact; _ } ->
@@ -3327,7 +3363,15 @@ let prepare_runtime_at_paths
              | Error { code = Server_shutting_down; _ }, _ | Ok _, _ -> Ok ()
              | Error error, _ -> Error error)
         in
-        let build ~sw ~native ~current ~managed ~managed_current ~ancestor_capabilities =
+        let build
+              ~sw
+              ~native
+              ~current
+              ~managed
+              ~managed_current
+              ~ancestor_capabilities
+              ~source_lease
+          =
           let%bind source, selected =
             match record.admission.authored_tool with
             | Some origin ->
@@ -3508,10 +3552,16 @@ let prepare_runtime_at_paths
                   ~history_namespace
                   ~next_history_sequence
           in
-          let%map runtime =
+          let%bind runtime =
             construct sw build (fun _ ->
               Shell_runtime.Manifest_authorizer.Reject
                 "generated definitions cannot authorize new shell manifests")
+          in
+          let%map runtime =
+            Agent_session.Runtime_builder.with_source_lease
+              runtime
+              ~source_lease:(Agent_session.Prompt_source_lease.borrow source_lease)
+            |> Result.map_error ~f:source_attachment_error
           in
           { runtime with ancestor_capabilities = Some ancestor_capabilities }
         in
@@ -3550,7 +3600,14 @@ let prepare_runtime_at_paths
                    Agent_session.Script_tool_calls.current_capabilities tools
                  | None -> current
                in
-               build ~sw ~native ~current ~managed ~managed_current ~ancestor_capabilities)
+               build
+                 ~sw
+                 ~native
+                 ~current
+                 ~managed
+                 ~managed_current
+                 ~ancestor_capabilities
+                 ~source_lease:parent_runtime.source_lease)
          | Independent _ ->
            let retained = ref None in
            let with_resources f =
@@ -3600,7 +3657,8 @@ let prepare_runtime_at_paths
                  ~current
                  ~managed:parent_resources.managed
                  ~managed_current:(fun () -> current)
-                 ~ancestor_capabilities))
+                 ~ancestor_capabilities
+                 ~source_lease:parent_resources.source_lease))
     in
     runtime, shell_state
   in

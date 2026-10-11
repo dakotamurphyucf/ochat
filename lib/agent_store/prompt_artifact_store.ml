@@ -25,6 +25,7 @@ module Artifact = struct
   type t =
     { revision_id : Agent_protocol.Id.Prompt_revision.t
     ; prompt_definition_id : Agent_protocol.Id.Prompt_definition.t option
+    ; source_receipt : Prompt_source_receipt.t option
     ; canonical_source : string option
     ; root_relative_path : string
     ; root_chatmd : string
@@ -43,6 +44,7 @@ module Artifact = struct
     { version = 1
     ; revision_id = artifact.revision_id
     ; prompt_definition_id = artifact.prompt_definition_id
+    ; source_receipt = artifact.source_receipt
     ; canonical_source = artifact.canonical_source
     ; root_relative_path = artifact.root_relative_path
     ; root_sha256 = artifact.root_sha256
@@ -62,6 +64,7 @@ module Artifact = struct
     let artifact =
       { revision_id = known.revision_id
       ; prompt_definition_id = known.prompt_definition_id
+      ; source_receipt = known.source_receipt
       ; canonical_source = known.canonical_source
       ; root_relative_path = known.root_relative_path
       ; root_chatmd
@@ -144,6 +147,7 @@ module Artifact = struct
   let create
         ~revision_id
         ?prompt_definition_id
+        ?source_receipt
         ?canonical_source
         ?(root_relative_path = "root.chatmd")
         ~root_chatmd
@@ -161,6 +165,7 @@ module Artifact = struct
       { version = 1
       ; revision_id
       ; prompt_definition_id
+      ; source_receipt
       ; canonical_source
       ; root_relative_path
       ; root_sha256 = sha256 root_chatmd

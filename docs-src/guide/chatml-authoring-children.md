@@ -108,6 +108,13 @@ parent/child IDs. These identify a retained relationship and are not bearer
 credentials. A retry does not replay the child's conversation or restart a child
 that has since stopped. Captured sources remain pinned across live file edits.
 
+Captured code and live source access have separate ownership. An artifact may
+retain its original operator-selection receipt, but that metadata grants no
+filesystem access. The host admits a matching current source selection separately;
+removing or revoking it denies further source reads without changing retained
+code. Private descendants borrow the ancestor's source loan within its actual
+resource lifetime. Missing receipts or live roots still permit captured replay.
+
 Management uses the actual calling session's direct recorded relationship and
 current policy. Knowing an ID, sharing an operator, or being an ancestor does not
 grant access. A nested script uses its narrowed capability set, not the entire

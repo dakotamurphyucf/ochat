@@ -74,11 +74,11 @@ let build_manifest
   |> Sexp.to_string_mach
 ;;
 
-let source_capture_loader root_path root captures dependencies ~private_bytes =
+let source_capture_loader source_loader root captures dependencies ~private_bytes =
   let captured_bytes = ref (String.length root) in
   if !captured_bytes > 8 * 1024 * 1024 then failwith "prompt source byte limit exceeded";
   let loader =
-    Source_loader.filesystem ~root:root_path
+    source_loader
     |> Source_loader.with_read_limit ~max_bytes:(fun source ->
       match Hashtbl.find captures (Source_loader.relative_path source) with
       | Some contents -> String.length contents
@@ -132,16 +132,13 @@ let inspection_diagnostics diagnostics =
     diagnostic ?source value.code value.message)
 ;;
 
-let capture ~env ~preprocess ~limits ~checkpoint (definition : Prompt_definition.t) =
+let capture_loader ~loader:root_loader ~root_name ~env ~preprocess ~limits ~checkpoint =
   let poll () =
     Eio.Fiber.check ();
     checkpoint ();
     Eio.Fiber.check ()
   in
-  let root_directory = Filename.dirname definition.root_file in
-  let root_name = Filename.basename definition.root_file in
-  let root_path = Eio.Path.(Eio.Stdenv.fs env / root_directory) in
-  let root_loader = Source_loader.filesystem ~root:root_path in
+  let root_path = Source_loader.root_dir root_loader in
   let root_source =
     Source_loader.root root_loader ~file:root_name |> Result.ok_or_failwith
   in
@@ -159,7 +156,7 @@ let capture ~env ~preprocess ~limits ~checkpoint (definition : Prompt_definition
   let dependencies = Queue.create () in
   let private_bytes = ref 0 in
   let loader, authored_bytes =
-    source_capture_loader root_path authored captures dependencies ~private_bytes
+    source_capture_loader root_loader authored captures dependencies ~private_bytes
   in
   let private_inputs = Hashtbl.create (module String) in
   let retain_effective parsed =
@@ -233,6 +230,37 @@ let capture ~env ~preprocess ~limits ~checkpoint (definition : Prompt_definition
       }
     in
     result)
+;;
+
+let capture_with_loader
+      ~loader
+      ~entry
+      ~env
+      ~preprocess
+      ~limits
+      ~checkpoint
+      (_definition : Prompt_definition.t)
+  =
+  capture_loader
+    ~loader
+    ~root_name:(Source.Portable_path.to_string entry)
+    ~env
+    ~preprocess
+    ~limits
+    ~checkpoint
+;;
+
+let capture ~env ~preprocess ~limits ~checkpoint (definition : Prompt_definition.t) =
+  let root_directory = Filename.dirname definition.root_file in
+  let root_name = Filename.basename definition.root_file in
+  let root_path = Eio.Path.(Eio.Stdenv.fs env / root_directory) in
+  capture_loader
+    ~loader:(Source_loader.filesystem ~root:root_path)
+    ~root_name
+    ~env
+    ~preprocess
+    ~limits
+    ~checkpoint
 ;;
 
 let capture_limits () =
@@ -415,28 +443,17 @@ let restore ~artifact_store (definition : Prompt_definition.t) revision_id =
      | exn -> Error [ exception_error ~source:definition.root_file exn ])
 ;;
 
-let build
+let publish_capture
       ?prepare_programs
-      ~env
+      ~source_receipt
+      ~canonical_source
       ~artifact_store
       ~transaction_id
       ~created_at
       (definition : Prompt_definition.t)
+      captured
   =
-  let captured =
-    try
-      capture
-        ~env
-        ~preprocess:Meta_prompting.Preprocessor.preprocess
-        ~limits:(capture_limits ())
-        ~checkpoint:Eio.Fiber.check
-        definition
-    with
-    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
-    | exn -> Error [ exception_error ~source:definition.root_file exn ]
-  in
   let open Result.Let_syntax in
-  let%bind captured = captured in
   (* Host preparation failures/exceptions retain their original identity. Its
      closure may own capabilities; only the immutable Capture is passed here. *)
   let%bind supplied =
@@ -468,7 +485,7 @@ let build
         [ diagnostic "prompt.custody" "Preparation custody does not match actual capture"
         ])
     in
-    let canonical_source = canonical_source ~env definition.root_file in
+    let canonical_source = canonical_source () in
     let shell_manifest_sha256 = Capture.shell_manifest_sha256 captured in
     let%bind programs_sha256 =
       Prompt_program_custody.fingerprint programs ~checkpoint:Eio.Fiber.check
@@ -485,6 +502,14 @@ let build
         ~shell_manifest_sha256
         ~programs_sha256
     in
+    let manifest =
+      match source_receipt with
+      | None -> manifest
+      | Some receipt ->
+        manifest
+        ^ "#source-selection:"
+        ^ Agent_store.Prompt_source_receipt.fingerprint receipt
+    in
     let revision_id = revision_id manifest in
     let%bind source_values =
       artifact_sources sources |> Result.map_error ~f:(fun error -> [ store_error error ])
@@ -493,6 +518,7 @@ let build
       Agent_store.Prompt_artifact_store.Artifact.create
         ~revision_id
         ~prompt_definition_id:definition.id
+        ?source_receipt
         ~canonical_source
         ~root_relative_path
         ~root_chatmd:root
@@ -513,4 +539,75 @@ let build
   with
   | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
   | exn -> Error [ exception_error ~source:definition.root_file exn ]
+;;
+
+let build
+      ?prepare_programs
+      ~env
+      ~artifact_store
+      ~transaction_id
+      ~created_at
+      (definition : Prompt_definition.t)
+  =
+  let captured =
+    try
+      capture
+        ~env
+        ~preprocess:Meta_prompting.Preprocessor.preprocess
+        ~limits:(capture_limits ())
+        ~checkpoint:Eio.Fiber.check
+        definition
+    with
+    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+    | exn -> Error [ exception_error ~source:definition.root_file exn ]
+  in
+  Result.bind captured ~f:(fun captured ->
+    publish_capture
+      ?prepare_programs
+      ~source_receipt:None
+      ~canonical_source:(fun () -> canonical_source ~env definition.root_file)
+      ~artifact_store
+      ~transaction_id
+      ~created_at
+      definition
+      captured)
+;;
+
+let build_captured
+      ?prepare_programs
+      ~capture
+      ~source_receipt
+      ~artifact_store
+      ~transaction_id
+      ~created_at
+      (definition : Prompt_definition.t)
+  =
+  let module Receipt = Agent_store.Prompt_source_receipt in
+  let root_input = Prompt.Chat_markdown.Parsed.root_input (Capture.root capture) in
+  if
+    (not
+       (Agent_protocol.Id.Prompt_definition.equal
+          definition.id
+          (Receipt.definition_id source_receipt)))
+    || (not (String.equal definition.root_file (Receipt.root_file source_receipt)))
+    || not
+         (String.equal
+            (Chatmd_parser_input.path root_input)
+            (Filename.basename definition.root_file))
+  then
+    Error
+      [ diagnostic
+          "prompt.source_selection"
+          "Captured root does not match admitted original selection"
+      ]
+  else
+    publish_capture
+      ?prepare_programs
+      ~source_receipt:(Some source_receipt)
+      ~canonical_source:(fun () -> Receipt.root_file source_receipt)
+      ~artifact_store
+      ~transaction_id
+      ~created_at
+      definition
+      capture
 ;;

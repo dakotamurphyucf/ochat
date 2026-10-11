@@ -14,6 +14,12 @@ extracted script body. The range belongs to the effective parser input, which ca
 differ from authored text after preprocessing. Restart replays that retained input
 without running preprocessing again. Imported files retain their captured bytes.
 
+Original operator-selected source access is a separate runtime loan. Its bounded
+receipt survives artifact restoration, but only a matching current catalog
+selection can admit live reads; missing roots do not prevent captured replay.
+See [original source ownership](../../lib/agent_session/original_sources.md) for
+shared revocation, retained directory capabilities and scoped source preparation.
+
 Source IDs are local to a prepared graph. Different script projects may use the
 same package namespace and relative path with different contents. The outer
 custody inventory distinguishes these by source ID, digest and byte length. Each

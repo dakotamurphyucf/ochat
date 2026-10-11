@@ -11,6 +11,7 @@ type t =
   { version : int
   ; revision_id : Agent_protocol.Id.Prompt_revision.t
   ; prompt_definition_id : Agent_protocol.Id.Prompt_definition.t option
+  ; source_receipt : Prompt_source_receipt.t option
   ; canonical_source : string option
   ; root_relative_path : string
   ; root_sha256 : string

@@ -59,6 +59,7 @@
   audit_evidence_document
   audit_store
   prompt_program_bundle
+  prompt_source_receipt
   prompt_manifest
   prompt_manifest_document
   prompt_artifact_store
