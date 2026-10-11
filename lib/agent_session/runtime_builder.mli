@@ -269,6 +269,9 @@ type t =
       ?prepare:prepare_enqueue
       -> Jsonaf.t
       -> (Jsonaf.t option, Agent_protocol.Error.t) result
+    (** Raw event JSON passes existing bounded Session snapshot admission before
+        runtime value conversion or [prepare]. Rejection leaves the live moderator
+        snapshot/queue unchanged and uses the existing Invalid_state error mapping. *)
   ; drain_internal_events :
       History_entry.t list -> (moderator_drain, Agent_protocol.Error.t) result
   ; execute_model_job :

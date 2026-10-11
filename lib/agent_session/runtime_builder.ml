@@ -862,9 +862,7 @@ let enqueue_internal_value ?prepare moderator value =
 
 let enqueue_internal_event moderator ?prepare payload =
   let open Result.Let_syntax in
-  let%bind snapshot =
-    Chatml.Chatml_value_codec.Snapshot.of_jsonaf payload |> Result.map_error ~f:failure
-  in
+  let%bind snapshot = Session.Snapshot.of_jsonaf payload |> Result.map_error ~f:failure in
   let%bind value =
     Chatml.Chatml_value_codec.Snapshot.to_value snapshot |> Result.map_error ~f:failure
   in
