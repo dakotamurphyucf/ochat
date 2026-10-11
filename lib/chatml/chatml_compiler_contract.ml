@@ -38,6 +38,22 @@ let for_target target ~checkpoint =
 ;;
 
 let kind t = t.kind
+
+let compiler_family t =
+  match t.kind with
+  | Standard _ -> "ochat.chatml.compiler.v1"
+  | Native -> "ochat.chatml.compiler.native.v1"
+;;
+
+let target_name t =
+  match t.kind with
+  | Standard One_off_v1 -> "one_off_v1"
+  | Standard Tool_v1 -> "tool_v1"
+  | Standard Moderator_v1 -> "moderator_v1"
+  | Standard Delegated_moderator_v1 -> "delegated_moderator_v1"
+  | Native -> "native"
+;;
+
 let static_surface t = t.surface
 let required_bindings t = t.required_bindings
 
@@ -73,13 +89,14 @@ let identity t ~checkpoint =
     Sexp.List
       (List.map t.required_bindings ~f:(fun (name, scheme) -> binding name scheme))
   in
-  let tag, target =
+  let target =
     match t.kind with
-    | Standard target -> "ochat.chatml.compiler.v1", Target.sexp_of_t target
-    | Native -> "ochat.chatml.compiler.native.v1", Sexp.Atom "Native"
+    | Standard target -> Target.sexp_of_t target
+    | Native -> Sexp.Atom "Native"
   in
   checkpoint ();
-  Sexp.List [ Sexp.Atom tag; target; globals; modules; aliases; requirements ]
+  Sexp.List
+    [ Sexp.Atom (compiler_family t); target; globals; modules; aliases; requirements ]
 ;;
 
 let fingerprint t ~checkpoint =

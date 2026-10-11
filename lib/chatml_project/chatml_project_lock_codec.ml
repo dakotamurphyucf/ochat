@@ -223,7 +223,8 @@ module Decode = struct
       Reader.object_fields
         reader
         path
-        ~allowed:[ "kind"; "path"; "repository"; "object_format"; "commit" ]
+        ~allowed:
+          [ "kind"; "path"; "repository"; "object_format"; "commit"; "package_root" ]
         value
     in
     let%bind kind =
@@ -234,11 +235,32 @@ module Decode = struct
       let%map _ = Reader.object_fields reader path ~allowed:[ "kind" ] value in
       Receipt.Catalog.Local
     | "git" ->
+      let%bind package_root =
+        let path = path @ [ "package_root" ] in
+        match Document_schema.Json.field (`Object fields) ~name:"package_root" with
+        | Absent -> Reader.fail reader path "required field is absent"
+        | Null -> Ok None
+        | Value value ->
+          let%bind value = Reader.nonempty_string reader path value in
+          primitive
+            reader
+            path
+            (Source.Portable_path.create value)
+            "invalid portable repository package root"
+          |> Result.map ~f:Option.some
+      in
+      (* Reuse the authored source-kind/pin decoder without admitting this receipt-
+         only field into user dependency syntax. *)
+      let value =
+        `Object
+          (List.filter fields ~f:(fun (name, _) -> not (String.equal name "package_root")))
+      in
       let%bind source =
         Chatml_project_decode.Decode.dependency_source reader path value
       in
       (match source with
-       | Git { repository; pin } -> Ok (Receipt.Catalog.Git { repository; pin })
+       | Git { repository; pin } ->
+         Ok (Receipt.Catalog.Git { repository; pin; package_root })
        | Local _ -> Reader.fail reader path "expected a Git catalog origin")
     | _ -> Reader.fail reader path "expected local or git catalog origin"
   ;;
@@ -547,7 +569,7 @@ module Encode = struct
       let open Result.Let_syntax in
       let%bind kind = string t "local" in
       object_fields t [ "kind", kind ]
-    | Git { repository; pin } ->
+    | Git { repository; pin; package_root } ->
       let open Result.Let_syntax in
       let%bind kind = string t "git" in
       let%bind repository = string t repository in
@@ -559,12 +581,18 @@ module Encode = struct
            | Sha256 -> "sha256")
       in
       let%bind commit = string t (Project.Git_pin.commit pin) in
+      let%bind package_root =
+        match package_root with
+        | None -> Result.map (charge t 4) ~f:(fun () -> `Null)
+        | Some root -> string t (Source.Portable_path.to_string root)
+      in
       object_fields
         t
         [ "kind", kind
         ; "repository", repository
         ; "object_format", object_format
         ; "commit", commit
+        ; "package_root", package_root
         ]
   ;;
 

@@ -149,6 +149,7 @@ module Catalog = struct
     | Git of
         { repository : string
         ; pin : Chatml_project_declaration.Git_pin.t
+        ; package_root : Source.Portable_path.t option
         }
 
   type t =
@@ -167,7 +168,7 @@ module Catalog = struct
     | Local ->
       checkpoint ();
       true
-    | Git { repository; pin = _ } ->
+    | Git { repository; pin = _; package_root = _ } ->
       Chatml_project_declaration.Dependency.is_valid_locator repository ~checkpoint
   ;;
 

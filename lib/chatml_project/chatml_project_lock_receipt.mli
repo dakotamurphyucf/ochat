@@ -105,6 +105,7 @@ module Catalog : sig
     | Git of
         { repository : string
         ; pin : Chatml_project_declaration.Git_pin.t
+        ; package_root : Source.Portable_path.t option
         }
 
   type t
@@ -120,7 +121,7 @@ module Catalog : sig
       after192 reconciles the receipt against actual captured bytes and selections.
       Aliases live in scopes, not duplicated inventory entries. Local/Git locators
       remain in incoming captured declarations; Git repository/pin is validated
-      provenance intent, never a granted capability or ephemeral native identity.
+      provenance intent, never a granted capability or ephemeral native identity. Git package_root is a portable repository prefix (None means repository root); source IDs remain package-relative. The exact repository declaration member is prefix plus declaration relative path.
       Dependency names are canonical owner-local keys; their targets may cross
       namespaces. No second graph validator or placeholder captures. *)
   val create

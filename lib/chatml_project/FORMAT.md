@@ -177,7 +177,17 @@ these facts and every overlapping catalog source before admission.
 Each catalog has required `namespace`, `origin`, `declaration`,
 `selected_environment`, `dependencies`, `sources`, `modules`, and `scopes`.
 Origin is `{ "kind": "local" }` or a Git object with `kind: git` and the exact
-`repository`, `object_format`, and full `commit`. Local locators stay in incoming
+`repository`, `object_format`, full `commit`, and required `package_root`.
+`package_root: null` means the repository root; a string is an exact validated
+portable repository directory prefix. Absence, empty strings, dot/parent paths
+and other non-string values reject. Local origins reject this field. Source IDs
+remain relative to the selected package root, so prefix plus declaration ID path
+identifies its repository member. Explicit Git dependencies select repository
+root. A Git-owned declaration's relative Local dependency resolves from that
+repository member's containing directory into the same repository/full pin;
+escaping the repository root rejects. An absolute Local dependency instead needs
+separate host Local admission. No resolution here proves native filesystem identity.
+Local locators stay in incoming
 captured dependency declarations: different relative locators can select the same
 host-admitted root, so the receipt cannot choose one arbitrary incoming path as
 canonical provenance. No native device/inode/acquisition key is serialized.

@@ -7,3 +7,12 @@ let canonical =
 let minimal =
   {|{"schema_version":1,"root":{"namespace":"app","path":"chatml.project.json"},"entry":{"source":{"id":{"namespace":"app","path":"a.chatml"},"sha256":"0000000000000000000000000000000000000000000000000000000000000000","byte_length":0},"selection":{"kind":"declared","name":"main"}},"environment":"app-env","compiler":{"family":"intent-family","target":"intent-target","contract_sha256":"0000000000000000000000000000000000000000000000000000000000000000"},"required_tools":[],"catalogs":[]}|}
 ;;
+
+(* Receipt-only Git package prefixes; source identities remain package-relative. *)
+let git_root_origin =
+  {|{"kind":"git","repository":"https://example.invalid/library.git","object_format":"sha1","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","package_root":null}|}
+;;
+
+let git_package_origin =
+  {|{"kind":"git","repository":"https://example.invalid/library.git","object_format":"sha1","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","package_root":"packages/shared"}|}
+;;

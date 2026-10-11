@@ -216,6 +216,7 @@ let%test_unit "required absence/null, optional interface null and primitive erro
           ; "repository", `String "https://example.invalid/r"
           ; "object_format", `String "sha1"
           ; "commit", `String "HEAD"
+          ; "package_root", `Null
           ] )
     ]
     ~f:(fun (path, replacement) ->
@@ -444,4 +445,77 @@ let%expect_test
     (declared:main ((shared shared) (shared_alias shared)))
     (captured ((shared shared) (shared_alias shared)))
   |}]
+;;
+
+let%expect_test "Git package prefix preserves package-relative declaration identity" =
+  let tree = Jsonaf.of_string Lock_fixtures.canonical in
+  let selected origin =
+    Wire.change
+      tree
+      Wire.[ Field "catalogs"; Index 1; Field "origin" ]
+      ~f:(fun _ -> Jsonaf.of_string origin)
+    |> Jsonaf.to_string
+    |> S.capture
+    |> decode
+  in
+  List.iter
+    [ Lock_fixtures.git_root_origin; Lock_fixtures.git_package_origin ]
+    ~f:(fun wire ->
+      let receipt = selected wire in
+      let catalog =
+        List.find_exn (L.catalogs receipt) ~f:(fun catalog ->
+          String.equal (L.Catalog.namespace catalog) "shared")
+      in
+      let root =
+        match L.Catalog.origin catalog with
+        | Local -> failwith "Expected Git origin"
+        | Git { repository = _; pin = _; package_root } ->
+          Option.map package_root ~f:Source.Portable_path.to_string
+      in
+      [%test_eq: string]
+        (C.Id.relative_path (L.Catalog.declaration catalog))
+        "chatml.project.json";
+      print_s
+        [%sexp
+          (root : string option)
+        , (C.Id.relative_path (L.Catalog.declaration catalog) : string)];
+      let encoded = encode receipt in
+      [%test_eq: string] (S.capture encoded |> decode |> encode) encoded);
+  [%expect
+    {|
+    (() chatml.project.json)
+    ((packages/shared) chatml.project.json)
+    |}]
+;;
+
+let%test_unit "Git prefix requires explicit nullable presence and portable directory" =
+  let tree = Jsonaf.of_string Lock_fixtures.canonical in
+  let origin = Jsonaf.of_string Lock_fixtures.git_package_origin in
+  let malformed =
+    Wire.without_field "package_root" origin
+    :: List.map
+         [ `String ""; `String "."; `String "../shared"; `String "/shared"; `Number "1" ]
+         ~f:(fun replacement ->
+           Wire.change origin Wire.[ Field "package_root" ] ~f:(fun _ -> replacement))
+  in
+  assert (List.length malformed = 6);
+  List.iter malformed ~f:(fun origin ->
+    let source =
+      Wire.change
+        tree
+        Wire.[ Field "catalogs"; Index 1; Field "origin" ]
+        ~f:(fun _ -> origin)
+      |> Jsonaf.to_string
+      |> S.capture
+    in
+    L.decode source ~limits:D.Limits.default ~checkpoint |> assert_field_rejected source);
+  let source =
+    Wire.change
+      tree
+      Wire.[ Field "catalogs"; Index 1; Field "origin" ]
+      ~f:(fun _ -> `Object [ "kind", `String "local"; "package_root", `Null ])
+    |> Jsonaf.to_string
+    |> S.capture
+  in
+  L.decode source ~limits:D.Limits.default ~checkpoint |> assert_field_rejected source
 ;;

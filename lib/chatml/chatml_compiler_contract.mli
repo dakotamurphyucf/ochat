@@ -28,6 +28,14 @@ end
 val for_target : Target.t -> checkpoint:(unit -> unit) -> t
 
 val kind : t -> Kind.t
+
+(** Authoritative compatibility names for project requirements and receipts.
+    Standard targets use their public lower-case target names; native metadata
+    uses the distinct native compiler family and ["native"] target. These names
+    describe this already selected contract and never choose or grant a target. *)
+val compiler_family : t -> string
+
+val target_name : t -> string
 val static_surface : t -> Static.t
 val required_bindings : t -> (string * Chatml_builtin_spec.ty) list
 
