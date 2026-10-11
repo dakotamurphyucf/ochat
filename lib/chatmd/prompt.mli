@@ -253,6 +253,29 @@ module Chat_markdown : sig
     val script_body : t -> string
   end
 
+  module Agent_reference : sig
+    (** Actual emitted invocation descriptor. The parser records the distinction;
+        host role/source-mode policy remains with the caller. *)
+    type invocation =
+      | Tool of agent_tool
+      | Persistent_tool of agent_tool * agent_persistence
+      | Content of agent_content
+
+    type t
+
+    val invocation : t -> invocation
+
+    (** Genuine effective Root/Import tag range. Display source context and
+        materialized paths remain separate from this declaration owner. *)
+    val range : t -> Chatmd_parser_input.Range.t
+
+    (** Exact key from the same successful relative-local Source_loader
+        resolution that notifies the capture queue. Nonlocal and absolute local
+        external references have no queued key. This is immutable provenance,
+        not native authority; never infer a key from the runtime path string. *)
+    val queued_key : t -> string option
+  end
+
   module Parsed : sig
     type t
 
@@ -260,6 +283,13 @@ module Chat_markdown : sig
     val root_input : t -> Chatmd_parser_input.t
     val inputs : t -> Chatmd_parser_input.t list
     val declarations : t -> Declaration.t list
+
+    (** Only actual emitted top-level agent tools and message content-agent
+        invocations, including nested items. Owned conversion resolves against
+        each actual declaration source node, preserving existing display context.
+        Ignored markup is not an invocation. Legacy AST/wire representations are
+        unchanged; ordinary legacy wrappers allocate no reference inventory. *)
+    val agent_references : t -> Agent_reference.t list
 
     (** Only documents actually included in message/Agent content, in emitted
         order; ignored markup does not become an acquisition request. *)

@@ -281,7 +281,7 @@ let resolve_within_root t ~base ~reference =
            ~path:Eio.Path.(t.root / relative_path)))
 ;;
 
-let agent_reference t ~base ~reference =
+let agent_reference ?on_member t ~base ~reference =
   if t.generated && Filename.is_absolute reference
   then Error "generated agent source must belong to the supplied bundle"
   else if Filename.is_absolute reference
@@ -295,6 +295,7 @@ let agent_reference t ~base ~reference =
                 Map.mem sources source.relative_path))
       then Error "generated agent source is not in the supplied bundle"
       else (
+        Option.iter on_member ~f:(fun observe -> observe source.relative_path);
         Option.iter t.agent_observer ~f:(fun observe -> observe source);
         Ok (Option.value (Eio.Path.native source.path) ~default:reference)))
 ;;

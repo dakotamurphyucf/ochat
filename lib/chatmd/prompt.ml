@@ -222,6 +222,23 @@ module Chat_markdown = struct
   include Chat_content
   module Document_occurrence = Chatmd_document_occurrence
 
+  module Agent_reference = struct
+    type invocation =
+      | Tool of agent_tool
+      | Persistent_tool of agent_tool * agent_persistence
+      | Content of agent_content
+
+    type t =
+      { invocation : invocation
+      ; range : Chatmd_parser_input.Range.t
+      ; queued_key : string option
+      }
+
+    let invocation t = t.invocation
+    let range t = t.range
+    let queued_key t = t.queued_key
+  end
+
   (* The internal chat_element used while building the final messages. *)
   type chat_element =
     | Message of msg
@@ -246,9 +263,20 @@ module Chat_markdown = struct
     | Image of string * bool
     | Document of string * bool * bool * bool * Document_occurrence.Source.t option
     | Agent of string (* url *) * bool (* is_local *) * chat_element list
+    | Owned_agent_tool of
+        agent_tool
+        * agent_persistence option
+        * Chatmd_parser_input.Range.t
+        * string option
+    | Owned_agent_content of
+        string * bool * chat_element list * Chatmd_parser_input.Range.t * string option
   (* Convert a <msg> element’s children into an Items or a single Text. *)
 
-  let content_items_of_elements ?(on_document = fun _ ~items:_ -> ()) elts =
+  let content_items_of_elements
+        ?(on_document = fun _ ~items:_ -> ())
+        ?(on_agent = ignore)
+        elts
+    =
     let rec build ~path_rev ~index = function
       | [] -> []
       | Text text :: rest ->
@@ -289,6 +317,13 @@ module Chat_markdown = struct
       | Agent (url, is_local, children) :: rest ->
         let items = build ~path_rev:(index :: path_rev) ~index:0 children in
         Agent { url; is_local; items } :: build ~path_rev ~index:(index + 1) rest
+      | Owned_agent_content (url, is_local, children, range, queued_key) :: rest ->
+        let items = build ~path_rev:(index :: path_rev) ~index:0 children in
+        let agent = { url; is_local; items } in
+        on_agent
+          ({ invocation = Agent_reference.Content agent; range; queued_key }
+           : Agent_reference.t);
+        Agent agent :: build ~path_rev ~index:(index + 1) rest
       | ( Message _
         | Developer_msg _
         | System_msg _
@@ -300,6 +335,7 @@ module Chat_markdown = struct
         | Reasoning _
         | Summary _
         | Tool _
+        | Owned_agent_tool _
         | Shell_runtime _
         | Moderator_runtime _
         | Script _
@@ -315,10 +351,10 @@ module Chat_markdown = struct
   (* Actually parse the child elements to produce a (Text ...) or (Items ...). *)
   (* Converts a list of child chat_elements into either a single text or a list
      of content items, stored in chat_message_content. *)
-  let parse_msg_children ?on_document (children : chat_element list)
+  let parse_msg_children ?on_document ?on_agent (children : chat_element list)
     : chat_message_content option
     =
-    let items = content_items_of_elements ?on_document children in
+    let items = content_items_of_elements ?on_document ?on_agent children in
     match items with
     | [] -> None
     (* If there is exactly one Basic text item, store as Text. Otherwise use Items. *)
@@ -410,7 +446,8 @@ module Chat_markdown = struct
     | Reasoning r ->
       let ss = List.map r.summary ~f:(fun s -> s.text) |> String.concat ~sep:" " in
       Printf.sprintf "<reasoning id=\"%s\">%s</reasoning>" r.id ss
-    | Agent (url, is_local, children) ->
+    | Agent (url, is_local, children) | Owned_agent_content (url, is_local, children, _, _)
+      ->
       let sub_items = List.map children ~f:chat_element_to_string in
       Printf.sprintf
         "<agent src=\"%s\" local=\"%b\">%s</agent>"
@@ -462,6 +499,13 @@ module Chat_markdown = struct
     | Extension_script script -> Chatmd_extension_declaration.serialize_script script
     | Authoring_context config -> Chatmd_extension_declaration.serialize_authoring config
     | Authoring_help help -> Chatmd_extension_declaration.serialize_help help
+    | Owned_agent_tool (specification, policy, _, _) ->
+      let tool =
+        match policy with
+        | None -> (Agent specification : tool)
+        | Some policy -> Persistent_agent (specification, policy)
+      in
+      chat_element_to_string (Tool tool)
     | Tool t ->
       (match t with
        | Extension tool -> Chatmd_extension_declaration.serialize_tool tool
@@ -633,6 +677,7 @@ module Chat_markdown = struct
       f
         ~source_ref:display.source
         ~source_node:display.source_node
+        ~actual_source_node:sourced.source_node
         ~range:sourced.range
         ~is_root
         sourced.node
@@ -642,9 +687,28 @@ module Chat_markdown = struct
   ;;
 
   (* Convert AST nodes into internal chat elements before exposing top-level values. *)
+  let resolve_owned_agent loader ~base ~reference ~is_local =
+    if not is_local
+    then reference, None
+    else (
+      let queued_key = ref None in
+      let resolved =
+        Source_loader.agent_reference loader ~base ~reference ~on_member:(fun key ->
+          queued_key := Some key)
+        |> Result.ok_or_failwith
+      in
+      resolved, !queued_key)
+  ;;
+
+  let owned_agent_range = function
+    | Some range -> range
+    | None -> failwith "Owned agent declaration lacks its parser range"
+  ;;
+
   let parse_chat_element
         ?(owned_documents = false)
         ?(on_document = fun _ ~items:_ -> ())
+        ?(on_agent = ignore)
         ?(checkpoint = ignore)
         ~dir
         ~loader
@@ -654,11 +718,14 @@ module Chat_markdown = struct
     tree
       ~preserve_child_sources
       sourced
-      ~f:(fun ~source_ref ~source_node ~range ~is_root node children ->
+      ~f:
+        (fun
+          ~source_ref ~source_node ~actual_source_node ~range ~is_root node children ->
         checkpoint ();
         let parse_msg_children children =
           parse_msg_children
             ?on_document:(if is_root then Some on_document else None)
+            ?on_agent:(if is_root then Some on_agent else None)
             children
         in
         let source_context = source_ref.Chatmd_shell_spec.Source_ref.file in
@@ -823,14 +890,29 @@ module Chat_markdown = struct
           let agent_is_local =
             List.exists attr ~f:(fun (nm, _) -> String.(nm = "local"))
           in
-          let agent_url =
-            if agent_is_local
-            then
-              Source_loader.agent_reference loader ~base:source_node ~reference:agent_url
-              |> Result.ok_or_failwith
-            else agent_url
-          in
-          Agent (agent_url, agent_is_local, children)
+          if owned_documents
+          then (
+            let range = owned_agent_range range in
+            let agent_url, queued_key =
+              resolve_owned_agent
+                loader
+                ~base:actual_source_node
+                ~reference:agent_url
+                ~is_local:agent_is_local
+            in
+            Owned_agent_content (agent_url, agent_is_local, children, range, queued_key))
+          else (
+            let agent_url =
+              if agent_is_local
+              then
+                Source_loader.agent_reference
+                  loader
+                  ~base:source_node
+                  ~reference:agent_url
+                |> Result.ok_or_failwith
+              else agent_url
+            in
+            Agent (agent_url, agent_is_local, children))
         | Element (Tool, attrs, _) ->
           let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
           let tbl = Hashtbl.create (module String) in
@@ -951,20 +1033,34 @@ module Chat_markdown = struct
               let agent_url = String.strip agent_url in
               if String.is_empty agent_url then failwith "Tool agent URL cannot be empty.";
               let description = Option.map description ~f:String.strip in
-              let agent =
-                if is_local
-                then
-                  Source_loader.agent_reference
+              if owned_documents
+              then (
+                let range = owned_agent_range range in
+                let agent, queued_key =
+                  resolve_owned_agent
                     loader
-                    ~base:source_node
+                    ~base:actual_source_node
                     ~reference:agent_url
-                  |> Result.ok_or_failwith
-                else agent_url
-              in
-              let specification = { name; description; agent; is_local } in
-              (match Option.join persistence with
-               | None -> Tool (Agent specification)
-               | Some policy -> Tool (Persistent_agent (specification, policy)))
+                    ~is_local
+                in
+                let specification = { name; description; agent; is_local } in
+                Owned_agent_tool
+                  (specification, Option.join persistence, range, queued_key))
+              else (
+                let agent =
+                  if is_local
+                  then
+                    Source_loader.agent_reference
+                      loader
+                      ~base:source_node
+                      ~reference:agent_url
+                    |> Result.ok_or_failwith
+                  else agent_url
+                in
+                let specification = { name; description; agent; is_local } in
+                match Option.join persistence with
+                | None -> Tool (Agent specification)
+                | Some policy -> Tool (Persistent_agent (specification, policy)))
             | None, None, Some mcp_uri ->
               let mcp_uri = String.strip mcp_uri in
               if String.is_empty mcp_uri
@@ -1074,7 +1170,7 @@ module Chat_markdown = struct
 
   (* Transform the final “Maybe chat_element” from parse_chat_elements
      into top_level_elements we can store. *)
-  let to_top_level = function
+  let to_top_level ?(on_agent = ignore) = function
     | Message m -> Some (Msg m)
     | User_msg m -> Some (User m)
     | Assistant_msg m -> Some (Assistant m)
@@ -1083,6 +1179,15 @@ module Chat_markdown = struct
     | Config c -> Some (Config c)
     | Reasoning r -> Some (Reasoning r)
     | Tool t -> Some (Tool t)
+    | Owned_agent_tool (specification, policy, range, queued_key) ->
+      let tool, invocation =
+        match policy with
+        | None -> (Agent specification : tool), Agent_reference.Tool specification
+        | Some policy ->
+          Persistent_agent (specification, policy), Persistent_tool (specification, policy)
+      in
+      on_agent ({ invocation; range; queued_key } : Agent_reference.t);
+      Some (Tool tool)
     | Shell_runtime runtime -> Some (Shell_runtime runtime)
     | Moderator_runtime moderator -> Some (Moderator_runtime moderator)
     | Script s -> Some (Script s)
@@ -1095,8 +1200,8 @@ module Chat_markdown = struct
     | _ -> None
   ;;
 
-  let of_chat_elements (elts : chat_element list) : top_level_elements list =
-    List.filter_map elts ~f:to_top_level
+  let of_chat_elements ?on_agent (elts : chat_element list) : top_level_elements list =
+    List.filter_map elts ~f:(to_top_level ?on_agent)
   ;;
 
   let validate_scripts (elements : top_level_elements list) =
@@ -1313,7 +1418,9 @@ module Chat_markdown = struct
         | Text _
         | Image _
         | Document _
-        | Agent _ -> None
+        | Agent _
+        | Owned_agent_tool _
+        | Owned_agent_content _ -> None
       in
       match range, script with
       | ( Some range
@@ -1329,6 +1436,7 @@ module Chat_markdown = struct
       ; root_input : Chatmd_parser_input.t
       ; inputs : Chatmd_parser_input.t list
       ; declarations : Declaration.t list
+      ; agents : Agent_reference.t list
       ; documents : Document_occurrence.t list
       ; document_owner : Document_occurrence.Owner.t
       }
@@ -1337,6 +1445,7 @@ module Chat_markdown = struct
     let root_input t = t.root_input
     let inputs t = t.inputs
     let declarations t = t.declarations
+    let agent_references t = t.agents
     let document_occurrences t = t.documents
   end
 
@@ -1611,6 +1720,11 @@ module Chat_markdown = struct
         document
     in
     let declarations = ref [] in
+    let agents = ref [] in
+    let on_agent reference =
+      checkpoint ();
+      agents := reference :: !agents
+    in
     let documents = ref [] in
     let document_owner = Document_occurrence.Owner.create () in
     let ordinal = ref 0 in
@@ -1620,6 +1734,7 @@ module Chat_markdown = struct
         let converted =
           parse_chat_element
             ~owned_documents:true
+            ~on_agent
             ~checkpoint
             ~on_document:(fun source ~items ->
               checkpoint ();
@@ -1639,13 +1754,14 @@ module Chat_markdown = struct
           ~f:(fun declaration -> declarations := declaration :: !declarations);
         converted)
     in
-    let elements = of_chat_elements converted |> validate_scripts in
+    let elements = of_chat_elements ~on_agent converted |> validate_scripts in
     checkpoint ();
     let result : Parsed.t =
       { elements
       ; root_input
       ; inputs = root_input :: List.rev !imported_inputs
       ; declarations = List.rev !declarations
+      ; agents = List.rev !agents
       ; documents = List.rev !documents
       ; document_owner
       }

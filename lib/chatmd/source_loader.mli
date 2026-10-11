@@ -50,8 +50,19 @@ val with_agent_observer : t -> f:(source -> unit) -> t
 
 (** [agent_reference t ~base ~reference] resolves relative agent references at
     their declaration, without a process-cwd fallback. Absolute references remain
-    explicit external dependencies and are not captured. *)
-val agent_reference : t -> base:source -> reference:string -> (string, string) result
+    explicit external dependencies and are not captured.
+
+    [on_member], when supplied, receives the exact loader-relative key from a
+    successful relative-local resolution, before the existing agent observer.
+    Absolute references do not have a queued member. It performs no extra read
+    or resolution and conveys no native authority. Callback exceptions propagate
+    unchanged. Legacy callers may omit it and retain existing return semantics. *)
+val agent_reference
+  :  ?on_member:(string -> unit)
+  -> t
+  -> base:source
+  -> reference:string
+  -> (string, string) result
 
 val root : t -> file:string -> (source, string) result
 val resolve : t -> base:source -> reference:string -> (source, string) result
