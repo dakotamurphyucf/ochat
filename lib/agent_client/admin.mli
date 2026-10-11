@@ -133,3 +133,20 @@ val resume_session
   :  Connection.t
   -> Agent_protocol.Session_lifecycle.Request.t
   -> (Agent_protocol.Session_lifecycle.Result.t, Agent_protocol.Error.t) result
+
+(** Read last installed dependency history plus publication admission state.
+    Requires configuration.admin; no source acquisition or mutation receipt. *)
+val dependency_selection_status
+  :  Connection.t
+  -> (Agent_protocol.Prompt_dependency_selection.Status.t, Agent_protocol.Error.t) result
+
+(** Explicit bounded update of actual configured prompt definitions. Requires
+    configuration.admin and the host's original source grants. This helper never
+    retries; interrupted replies retain the original command in Connection.
+    Reconcile that exact method/params/key before another operator admission. *)
+val update_dependencies
+  :  Connection.t
+  -> Agent_protocol.Prompt_dependency_selection.Update_request.t
+  -> ( Agent_protocol.Prompt_dependency_selection.Update_result.t
+       , Agent_protocol.Error.t )
+       result

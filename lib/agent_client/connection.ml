@@ -8,6 +8,7 @@ type pending_command =
   }
 
 let has_command_receipt = function
+  | P.Command.Prompt_dependencies_update _ -> true
   | P.Command.Session_create _
   | Session_attach _
   | Session_detach _
@@ -56,6 +57,7 @@ let has_command_receipt = function
   | Server_health _
   | Prompt_list _
   | Prompt_get _
+  | Prompt_dependencies_status
   | Workspace_list _
   | Workspace_get _
   | Blob_read _
@@ -266,7 +268,27 @@ let request t command =
         match Transport.request t.transport command with
         | Error _ as result -> result
         | Ok value ->
-          if
+          let dependency_affinity =
+            match command, value with
+            | ( P.Command.Prompt_dependencies_update request
+              , P.Public.Result.Non_history public ) ->
+              (match P.Public.Result.Non_history.value public with
+               | P.Method_result.Prompt_dependencies_update result ->
+                 P.Prompt_dependency_selection.Update_result.matches_request
+                   result
+                   request
+               | _ -> false)
+            | _, _ -> true
+          in
+          if not dependency_affinity
+          then
+            Error
+              (P.Error.create
+                 Interrupted
+                 ~message:"dependency update response does not match its original request"
+                 ~retryable:false
+                 ())
+          else if
             not
               (String.equal
                  (P.Command.method_name command)
@@ -510,6 +532,28 @@ let reconcile t pending =
   let%bind result = request_without_history t (Command_receipt query) in
   match result with
   | Command_receipt receipt ->
+    let%bind () =
+      match pending.command, receipt with
+      | ( P.Command.Prompt_dependencies_update request
+        , P.Command_receipt.Committed (Prompt_dependencies_updated result) ) ->
+        if P.Prompt_dependency_selection.Update_result.matches_request result request
+        then Ok ()
+        else
+          Error
+            (P.Error.create
+               Interrupted
+               ~message:"dependency receipt does not match its original request"
+               ~retryable:false
+               ())
+      | P.Command.Prompt_dependencies_update _, P.Command_receipt.Committed _ ->
+        Error
+          (P.Error.create
+             Interrupted
+             ~message:"unexpected committed dependency receipt"
+             ~retryable:false
+             ())
+      | _, _ -> Ok ()
+    in
     (match receipt with
      | Committed _ | Failed _ ->
        Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->

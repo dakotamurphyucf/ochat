@@ -395,6 +395,8 @@ let idempotency = function
   | Server_health _
   | Prompt_list _
   | Prompt_get _
+  | Prompt_dependencies_status
+  | Prompt_dependencies_update _
   | Workspace_list _
   | Workspace_get _
   | Blob_read _
@@ -2697,6 +2699,8 @@ let prepared_writer_attachment command =
   | Server_health _
   | Prompt_list _
   | Prompt_get _
+  | Prompt_dependencies_status
+  | Prompt_dependencies_update _
   | Workspace_list _
   | Workspace_get _
   | Blob_read _
@@ -2826,6 +2830,8 @@ let dispatch_authorized
     Ok (Agent_protocol.Method_result.Server_health (t.server_health request))
   | Prompt_list request -> handle_prompt_list t request
   | Prompt_get request -> handle_prompt_get t request
+  | Prompt_dependencies_status | Prompt_dependencies_update _ ->
+    Error (error Invalid_state "dependency administration is not installed")
   | Workspace_list request -> handle_workspace_list t request
   | Workspace_get request -> handle_workspace_get t request
   | ( Project_create _
@@ -2965,6 +2971,8 @@ let command_session_id = function
   | Server_health _
   | Prompt_list _
   | Prompt_get _
+  | Prompt_dependencies_status
+  | Prompt_dependencies_update _
   | Workspace_list _
   | Workspace_get _
   | Project_create _
@@ -3068,6 +3076,8 @@ let receipt_summary ~session_id result =
     | None -> Error (error Invalid_request "receipt requires a session identity")
   in
   match result with
+  | Agent_protocol.Method_result.Prompt_dependencies_update value ->
+    Ok (R.Prompt_dependencies_updated value)
   | Agent_protocol.Method_result.Provider_setup value -> Ok (R.Provider_setup value)
   | Provider_login_begin value -> Ok (R.Provider_login value)
   | Provider_login_cancel value -> Ok (R.Provider_cancel value)
@@ -3147,6 +3157,7 @@ let receipt_summary ~session_id result =
   | Job_cancel value -> Ok (R.Cancelled_job (value.job.id, value.mutation))
   | Schedule_create value | Schedule_cancel value ->
     Ok (R.Schedule_mutation (value.schedule.id, value.mutation))
+  | Prompt_dependencies_status _
   | Protocol_initialize _
   | Command_receipt _
   | Protocol_ping _
@@ -3353,6 +3364,7 @@ let handle_command_receipt
               | Session_mutation { session_id; _ }
               | Accepted_run { session_id; _ }
               | Sent_message { session_id; _ } -> visible_original session_id
+              | Prompt_dependencies_updated _
               | Project_mutation _
               | Deleted_project _
               | Collection_mutation _

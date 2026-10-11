@@ -61,6 +61,8 @@ actor state and authorization, not merely passing JSON validation.
 | `server.health` | `Health.Request` | Authentication only; details scoped | Current health projection. |
 | `prompt.list` | `Prompt.List_request` | `prompt.list` | Paged catalog. |
 | `prompt.get` | `Prompt.Get_request` | `prompt.list` | Prompt definition/revision projection. |
+| `prompt.dependencies.status` | `Prompt_dependency_selection.Status_request` | `configuration.admin` | Last installed dependency-history generation or missing/invalid history, plus available/busy/uncertain/closed publication state; no acquisition or repair. |
+| `prompt.dependencies.update` | `Prompt_dependency_selection.Update_request` | `configuration.admin` | Explicit bounded target set and expected generation; one installed publication result with each actual Ready revision or Unavailable outcome. No automatic retry. |
 | `workspace.list` | `Workspace.List_request` | `workspace.list` | Paged catalog. |
 | `workspace.get` | `Workspace.Get_request` | `workspace.list` | Workspace projection. |
 | `project.create` | `Organization_request.Create` | `organization.manage` plus owner/admin visibility | Host-qualified logical project create. |
@@ -831,3 +833,53 @@ exclusive notification-reader boundary. These are separate proofs. Client helper
 do not implement a second runtime, authority cache, local credential store or
 frontend transcript mutation. Read-only and unsupported decisions remain typed
 host errors, and reconnect never makes an unresolved receipt safe to replay.
+
+
+## Explicit prompt dependency updates
+
+`prompt.dependencies.status` accepts exactly `{}`. Its history is
+`{"state":"tracked","generation":7}`, `{"state":"missing"}`, or
+`{"state":"invalid"}`; publication is `available`, `busy`, `uncertain`, or
+`closed`. The generation describes the last installed catalog history. During an
+uncertain publication it does not prove the current durable generation or which
+command caused it. Missing/invalid history is preserved, never treated as an empty
+first admission.
+
+An operator with `configuration.admin` can explicitly update 1..1024 distinct
+prompt-definition IDs from the installed configuration. IDs are normalized into
+canonical order. Empty sets, duplicate IDs, unknown fields and invalid generation
+or key values reject; the host also rejects unknown/disabled targets, stale
+history and missing/invalid history before source acquisition.
+
+```json
+{"jsonrpc":"2.0","id":"update-dependencies","method":"prompt.dependencies.update","params":{"definitions":["prd_main"],"expected_generation":7,"idempotency_key":"dependencies:main:7"}}
+```
+
+This is separate from organization `project.update`. The request supplies no
+repository pins, source paths, credentials or tool grants. The host uses its
+existing admitted source configuration and finite capture limits. A successful
+result reports `previous_generation`, `generation` and the exact `targets` set.
+Each target has an `outcome` of `{"state":"ready","revision":"prv_..."}` or
+`{"state":"unavailable","reason":"source unavailable"}`. A published catalog
+can mark a target unavailable while preserving its last successful dependency
+history. The result advances the installed index generation once; existing
+sessions retain their captured prompt revisions.
+
+The client helpers are `Agent_client.Admin.dependency_selection_status` and
+`Agent_client.Admin.update_dependencies`, over the existing typed connection and
+all existing transports. Hosts without dependency administration return
+`invalid_state`; wire support alone grants no administrative authority.
+
+An interrupted update retains its exact method, normalized parameters and key.
+Read `command.receipt` with that original request; it never executes the update.
+A committed summary has kind `prompt_dependencies_updated` and the same bounded
+result. Missing, unavailable or pending receipts do not establish noncommit and
+must not trigger a new-key admission. Unknown publication leaves Protected
+Pending, suppressing reexecution; current administrative authorization applies
+to request, replay and receipt reads. Status reads remain useful while the result
+is unknown, but cannot resolve an individual pending receipt from generation
+alone. Do not automatically retry, initialize missing history or infer rollback
+from cancellation. Durable baseline publication and terminal receipt completion
+are separate writes; a lost receipt acknowledgment can follow a committed
+catalog. See [operations](operations.md#explicit-dependency-selection) for operator
+reconciliation.

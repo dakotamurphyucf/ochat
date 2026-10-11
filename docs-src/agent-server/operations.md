@@ -201,3 +201,44 @@ Reset/rebuild/delete are authorized protocol mutations with revision checks.
 Review preservation flags and archive/remove choices in [the protocol](protocol.md).
 Never delete locks, broad directories or unknown processes as a generic fix for
 contention. [Troubleshooting](troubleshooting.md) lists safer checks.
+
+
+## Explicit dependency selection
+
+Ordinary configuration reload, prompt/import edits and `SIGHUP` rebuild against
+retained dependency selections. They do not authorize a changed Git pin or a
+changed selected dependency source. Use `prompt.dependencies.status` to inspect
+the last installed generation, then `prompt.dependencies.update` with the exact
+actual definition IDs and expected generation to make an explicit update.
+Project paths still come from each script declaration and source access still
+comes from the daemon's administrative grants. Update does not load a separately
+edited configuration file, grant new filesystem/network access or initialize
+ChatML hooks. Existing sessions keep their captured revisions.
+
+```ocaml
+let open Agent_protocol.Prompt_dependency_selection in
+let status = Agent_client.Admin.dependency_selection_status connection in
+(* On Tracked generation + Available, choose actual IDs from prompt.list. *)
+let request = Update_request.create
+  ~definitions:[prompt_definition_id]
+  ~expected_generation:generation
+  ~idempotency_key:key
+in
+(* Pass a validated request to Agent_client.Admin.update_dependencies. *)
+```
+
+The helper never retries. Retain the original command on transport failure or
+cancellation and reconcile its existing command receipt on the same authenticated
+host. A Protected Pending receipt blocks duplicate execution even after restart.
+Missing/invalid historical metadata requires explicit host recovery, never a
+fresh Update or an inferred empty index. If publication is uncertain, the old
+installed catalog remains observable and further publication is blocked until
+host reconciliation or restart. A displayed generation cannot prove whether an
+individual pending command committed; do not replace its key just because status
+changed. A cancellation may follow successful durable publication, so it does
+not imply rollback. See the [protocol contract](protocol.md#explicit-prompt-dependency-updates).
+
+Publication success can include Unavailable target outcomes. Inspect those
+outcomes and the existing prompt summary before assuming a new source was
+adopted. Refresh/rebuild future sessions deliberately; an update does not rewrite
+running or retained sessions.

@@ -1,6 +1,8 @@
 open Core
 
 let required_scope = function
+  | Agent_protocol.Command.Prompt_dependencies_status | Prompt_dependencies_update _ ->
+    Some Agent_protocol.Scope.Administer_configuration
   | Agent_protocol.Command.Provider_status _ -> Some Agent_protocol.Scope.Provider_view
   | Provider_select _ -> Some Agent_protocol.Scope.Provider_select
   | Provider_setup _

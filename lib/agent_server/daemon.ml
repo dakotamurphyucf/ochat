@@ -1356,6 +1356,8 @@ let compose
       | Server_health _
       | Prompt_list _
       | Prompt_get _
+      | Prompt_dependencies_status
+      | Prompt_dependencies_update _
       | Workspace_list _
       | Workspace_get _
       | Project_create _

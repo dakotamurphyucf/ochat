@@ -176,3 +176,19 @@ let resume_session connection request =
   | Ok _ -> Error (invalid "unexpected session.resume result")
   | Error _ as failure -> failure
 ;;
+
+let dependency_selection_status connection =
+  match Connection.request_without_history connection Prompt_dependencies_status with
+  | Ok (Prompt_dependencies_status value) -> Ok value
+  | Ok _ -> Error (invalid "unexpected prompt.dependencies.status result")
+  | Error _ as failure -> failure
+;;
+
+let update_dependencies connection request =
+  match
+    Connection.request_without_history connection (Prompt_dependencies_update request)
+  with
+  | Ok (Prompt_dependencies_update value) -> Ok value
+  | Ok _ -> Error (invalid "unexpected prompt.dependencies.update result")
+  | Error _ as failure -> failure
+;;
