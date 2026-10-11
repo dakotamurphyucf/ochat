@@ -60,6 +60,10 @@ let host_result result = Result.map_error result ~f:Failure.plain
 
 module Value_codec = Chatml.Chatml_value_codec
 
+type event_arguments =
+  | Context_state_event
+  | Event_state
+
 type compiled_script =
   { surface : Builtin_surface.surface
   ; resolved : Lang.resolved_program
@@ -189,6 +193,7 @@ and session =
   { env : Lang.env
   ; mutable state : Lang.value
   ; on_event : Lang.value
+  ; event_arguments : event_arguments
   ; queue : Lang.value Queue.t
   ; operations : op_def String.Map.t
   ; source_text : string
@@ -912,10 +917,19 @@ let compiled_surface (compiled : compiled_script) : Builtin_surface.surface =
   compiled.surface
 ;;
 
-let create_session env ~state ~on_event ~operations ~source_text ~current_exec =
+let create_session
+      ?(event_arguments = Context_state_event)
+      env
+      ~state
+      ~on_event
+      ~operations
+      ~source_text
+      ~current_exec
+  =
   { env
   ; state
   ; on_event
+  ; event_arguments
   ; queue = Queue.create ()
   ; operations
   ; source_text
@@ -1680,11 +1694,12 @@ let handle_event_impl_detailed
           let result =
             Exn.protect
               ~f:(fun () ->
-                match
-                  Eval.apply_value_result
-                    session.on_event
-                    [ context; execution_state; event ]
-                with
+                let arguments =
+                  match session.event_arguments with
+                  | Context_state_event -> [ context; execution_state; event ]
+                  | Event_state -> [ event; execution_state ]
+                in
+                match Eval.apply_value_result session.on_event arguments with
                 | Error err -> Error (Failure.runtime err)
                 | Ok value ->
                   (match expect_task_value value with
@@ -1969,12 +1984,24 @@ let enqueue_internal_event (session : session) (event : Lang.value)
   install ()
 ;;
 
-let instantiate_prepared_session_detailed config program ~entrypoints ?control () =
+let instantiate_prepared_session_internal
+      event_arguments
+      config
+      program
+      ~entrypoints
+      ?control
+      ()
+  =
   let open Result.Let_syntax in
   let checkpoint () = Option.iter control ~f:(fun c -> c.Lang.diagnostic_checkpoint ()) in
   let allocate bytes = Option.iter control ~f:(fun c -> c.Lang.allocate bytes) in
   let%bind invocation =
-    Chatml.Chatml_compiler_contract.Invocation.session
+    let admit =
+      match event_arguments with
+      | Context_state_event -> Chatml.Chatml_compiler_contract.Invocation.session
+      | Event_state -> Chatml.Chatml_compiler_contract.Invocation.event_state_session
+    in
+    admit
       (Chatml_linked_program.static_contract program)
       ~initial_state:entrypoints.initial_state_name
       ~on_event:entrypoints.on_event_name
@@ -2006,12 +2033,21 @@ let instantiate_prepared_session_detailed config program ~entrypoints ?control (
   Option.iter control ~f:(fun control -> control.check_value initial_state);
   Ok
     (create_session
+       ~event_arguments
        (Chatml_linked_runtime.entry_env instance)
        ~state:initial_state
        ~on_event
        ~operations
        ~source_text:(Captured.contents (Chatml_linked_runtime.entry_source instance))
        ~current_exec:None)
+;;
+
+let instantiate_prepared_session_detailed =
+  instantiate_prepared_session_internal Context_state_event
+;;
+
+let instantiate_prepared_event_state_session_detailed =
+  instantiate_prepared_session_internal Event_state
 ;;
 
 let run_prepared_entrypoint_detailed

@@ -115,3 +115,46 @@ val compile_prepared_with_policy
   -> target:target
   -> unit
   -> (Chatml_linked_program.t, error) Result.t
+
+module Entry_expectation : sig
+  (** Comparison constraints from the entry's existing source owner. This is not
+      another source identity, capture or execution authority. *)
+  type t =
+    { contents : string
+    ; digest : Chatml_source.Digest.t
+    }
+end
+
+(** Native/custom graph compilation through the same joined worker. [contract]
+    contains only authentic callback-free static metadata; no runtime installer
+    crosses the domain. Source admission covers Prepared canonical input plus
+    actual canonical contract bytes. Conversion/encoding also has a separate
+    conservative allocation-debit allowance: 32 times the remaining contract
+    input allowance, checked before allocation. This is not heap accounting; a
+    tight canonical limit does not guarantee sufficient conversion allowance.
+    An optional expected original body is
+    checked by exact length, digest and chunked bytes under the SAME elapsed
+    checkpoint before compilation. Additional expected contents count against
+    input admission unless physically the same immutable retained entry string;
+    equal separate strings are not silently deduplicated. Never rewrite/reopen
+    source or initialize it.
+    Compiler and cancellation/error semantics follow compile_prepared. *)
+val compile_prepared_with_contract
+  :  Chatml_prepared_program.t
+  -> contract:Chatml.Chatml_compiler_contract.t
+  -> ?expected_entry:Entry_expectation.t
+  -> ?limits:limits
+  -> max_dependency_depth:int
+  -> env:Eio_unix.Stdenv.base
+  -> unit
+  -> (Chatml_linked_program.t, error) Result.t
+
+val compile_prepared_with_contract_and_policy
+  :  Chatml_prepared_program.t
+  -> contract:Chatml.Chatml_compiler_contract.t
+  -> ?expected_entry:Entry_expectation.t
+  -> policy:policy
+  -> max_dependency_depth:int
+  -> env:Eio_unix.Stdenv.base
+  -> unit
+  -> (Chatml_linked_program.t, error) Result.t

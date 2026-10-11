@@ -43,8 +43,10 @@ val compile
   :  script:Chatmd_shell_spec.Chatmd_script_spec.t
   -> (compiled, Chatmd_shell_spec.Diagnostic.t list) result
 
-(** [with_entrypoint t name] recompiles [t]'s exact source with [name] as the
-    kind-specific public entrypoint. *)
+(** Legacy [with_entrypoint] recompiles the original text with the selected ABI
+    adapter. Prepared programs return unchanged for the same entrypoint; changing
+    it rejects before initialization. Prepare a new authentic role/graph and call
+    [compile_prepared] instead; there is no text-only fallback. *)
 val with_entrypoint
   :  compiled
   -> string
@@ -83,10 +85,46 @@ val restore
   -> Session.Snapshot.t
   -> (unit, Chatmd_shell_spec.Diagnostic.t) result
 
-(** [set_snapshot_handler instance handler] checkpoints every successful
-    state transition. A failed checkpoint restores the prior in-memory state
-    before the hook returns an error. *)
+(** Persist the complete prospective state/queue/halted snapshot BEFORE commit.
+    Conversion/validation/cancellation checks precede persistence; successful
+    persistence is followed immediately by nonyielding runtime installation.
+    The write boundary is protected from asynchronous cancellation. A callback
+    Error or exception before success leaves state uncommitted; original
+    exceptions propagate after releasing the serialization lock. Successful
+    protected persistence and nonyielding installation form the commit boundary.
+    Pending owner cancellation can surface when joining the execution scope after
+    that commit; persisted and installed state still agree.
+    Prepared hooks, and persistent Legacy hooks with a handler, defensively copy
+    validated data state before evaluation; module-global/native effects are not
+    rolled back. Invocation-scoped hooks do not persist snapshots. *)
 val set_snapshot_handler
   :  instance
   -> (Session.Snapshot.t -> (unit, string) result)
   -> unit
+
+(** Project this owner's actual fixed kind-specific runtime metadata once.
+    Entry names must be nonempty and at most 1024 bytes; work polls checkpoint.
+    Shell hooks require (event,state)->state task with initial_state sharing the
+    same grouped state variable. Moderator is a distinct three-argument role and
+    rejects here. This static contract grants no runtime installer/authority. *)
+val compiler_contract
+  :  Chatmd_shell_spec.Chatmd_script_spec.kind
+  -> entrypoint:string
+  -> checkpoint:(unit -> unit)
+  -> (Chatml.Chatml_compiler_contract.t, Chatmd_shell_spec.Diagnostic.t) Result.t
+
+(** Preserve exact original hook source and declared digest. Compile the admitted
+    graph under its authentic native role using the existing joined worker and
+    limits; match original entry bytes inside its elapsed checkpoint. No wrapper
+    source is appended. The caller must supply a legitimately admitted graph for
+    this entrypoint/contract (selected roles use real captured-only recomposition).
+    Successful compilation does not initialize or authorize a shell runtime. *)
+val compile_prepared
+  :  Chatml_prepared_program.t
+  -> script:Chatmd_shell_spec.Chatmd_script_spec.t
+  -> entrypoint:string
+  -> limits:Chatml_compilation.limits
+  -> max_dependency_depth:int
+  -> env:Eio_unix.Stdenv.base
+  -> unit
+  -> (compiled, Chatmd_shell_spec.Diagnostic.t list) Result.t

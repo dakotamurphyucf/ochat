@@ -99,6 +99,15 @@ let identity t ~checkpoint =
     [ Sexp.Atom (compiler_family t); target; globals; modules; aliases; requirements ]
 ;;
 
+let input_bytes t ~checkpoint ~allocate =
+  let converted_checkpoint () =
+    checkpoint ();
+    allocate 512
+  in
+  let identity = identity t ~checkpoint:converted_checkpoint in
+  Chatml_contract_encoding.to_string identity ~checkpoint ~allocate |> String.length
+;;
+
 let fingerprint t ~checkpoint =
   let encoded = Chatml_contract_encoding.to_string (identity t ~checkpoint) ~checkpoint in
   Chatml_source.Digest.of_contents encoded ~checkpoint
@@ -191,6 +200,24 @@ module Invocation = struct
       else reject "Host arguments do not match the compiled fixed function arity"
   ;;
 
+  let matching_state state input result ~checkpoint ~allocate =
+    let digest scheme =
+      let checkpoint_type () =
+        checkpoint ();
+        allocate 512
+      in
+      let encoded =
+        Chatml_contract_encoding.type_scheme scheme ~checkpoint:checkpoint_type
+        |> Chatml_contract_encoding.to_string ~checkpoint ~allocate
+      in
+      Chatml_source.Digest.of_contents encoded ~checkpoint
+    in
+    let state = digest state in
+    let input = digest input in
+    let result = digest result in
+    Chatml_source.Digest.equal state input && Chatml_source.Digest.equal state result
+  ;;
+
   let session
         (contract : contract)
         ~initial_state
@@ -217,26 +244,39 @@ module Invocation = struct
     let%bind event = requirement contract on_event ~checkpoint in
     match task_function event with
     | Some ([ _context; input; _event ], result) ->
-      let digest scheme =
-        let checkpoint_type () =
-          checkpoint ();
-          allocate 512
-        in
-        let encoded =
-          Chatml_contract_encoding.type_scheme scheme ~checkpoint:checkpoint_type
-          |> Chatml_contract_encoding.to_string ~checkpoint ~allocate
-        in
-        Chatml_source.Digest.of_contents encoded ~checkpoint
-      in
-      let state = digest state in
-      let input = digest input in
-      let result = digest result in
-      if Chatml_source.Digest.equal state input && Chatml_source.Digest.equal state result
+      if matching_state state input result ~checkpoint ~allocate
       then Ok { entrypoints = [ initial_state; on_event ] }
       else
         reject
           "Session state contracts must agree for initial_state and on_event input/result"
     | Some (_, _) | None ->
       reject "Session on_event requires an explicit three-argument task function contract"
+  ;;
+
+  let event_state_session
+        (contract : contract)
+        ~initial_state
+        ~on_event
+        ~checkpoint
+        ?(allocate = fun _ -> ())
+        ()
+    =
+    let open Result.Let_syntax in
+    checkpoint ();
+    let%bind () =
+      match contract.kind with
+      | Native -> Ok ()
+      | Standard (One_off_v1 | Tool_v1 | Moderator_v1 | Delegated_moderator_v1) ->
+        reject "Event/state hooks require an authentic native compiler contract"
+    in
+    let%bind state = requirement contract initial_state ~checkpoint in
+    let%bind event = requirement contract on_event ~checkpoint in
+    match task_function event with
+    | Some ([ _event; input ], result) ->
+      if matching_state state input result ~checkpoint ~allocate
+      then Ok { entrypoints = [ initial_state; on_event ] }
+      else reject "Hook state contracts must agree for initial_state and input/result"
+    | Some (_, _) | None ->
+      reject "Event/state hook requires an explicit two-argument task function contract"
   ;;
 end

@@ -172,6 +172,28 @@ let compile_captured source ?(limits = default_limits) ~env ~target () =
   compile_captured_with_policy source ~policy:(Bounded limits) ~env ~target ()
 ;;
 
+let compile_graph input contract ~max_dependency_depth ~checkpoint =
+  match
+    Chatml_linked_program.compile input ~contract ~max_dependency_depth ~checkpoint
+  with
+  | Ok compiled -> Ok compiled
+  | Error failure ->
+    let stage =
+      match Chatml_linked_program.Failure.stage failure with
+      | Parse -> Chatml_host_runtime.Parse
+      | Typecheck -> Typecheck
+      | Link -> Link
+    in
+    let diagnostic =
+      Chatml_host_runtime.compilation_diagnostic
+        (Chatml_linked_program.Failure.diagnostic failure)
+        ~stage
+        ~source_text:None
+        ~checkpoint
+    in
+    error ~diagnostic "chatml.invalid_handler" diagnostic.formatted
+;;
+
 let compile_prepared_with_policy input ~policy ~max_dependency_depth ~env ~target () =
   run_worker
     ~input_bytes:
@@ -184,25 +206,7 @@ let compile_prepared_with_policy input ~policy ~max_dependency_depth ~env ~targe
         ( input
         , Chatml.Chatml_compiler_contract.for_target (static_target target) ~checkpoint ))
     ~compile:(fun (input, contract) ~checkpoint ->
-      match
-        Chatml_linked_program.compile input ~contract ~max_dependency_depth ~checkpoint
-      with
-      | Ok compiled -> Ok compiled
-      | Error failure ->
-        let stage =
-          match Chatml_linked_program.Failure.stage failure with
-          | Parse -> Chatml_host_runtime.Parse
-          | Typecheck -> Typecheck
-          | Link -> Link
-        in
-        let diagnostic =
-          Chatml_host_runtime.compilation_diagnostic
-            (Chatml_linked_program.Failure.diagnostic failure)
-            ~stage
-            ~source_text:None
-            ~checkpoint
-        in
-        error ~diagnostic "chatml.invalid_handler" diagnostic.formatted)
+      compile_graph input contract ~max_dependency_depth ~checkpoint)
 ;;
 
 let compile_prepared
@@ -219,5 +223,143 @@ let compile_prepared
     ~max_dependency_depth
     ~env
     ~target
+    ()
+;;
+
+module Entry_expectation = struct
+  type t =
+    { contents : string
+    ; digest : Chatml_source.Digest.t
+    }
+end
+
+exception Metadata_limit
+exception Metadata_allocation_limit
+
+let compile_prepared_with_contract_and_policy
+      input
+      ~contract
+      ?expected_entry
+      ~policy
+      ~max_dependency_depth
+      ~env
+      ()
+  =
+  let module Prepared = Chatml_prepared_program in
+  let module Captured = Chatml_source in
+  let module Contract = Chatml.Chatml_compiler_contract in
+  let input_bytes = Prepared.Accounting.input_bytes (Prepared.accounting input) in
+  run_worker
+    ~input_bytes
+    ~policy
+    ~env
+    ~prepare:(fun ~checkpoint ->
+      let open Result.Let_syntax in
+      let remaining =
+        match policy with
+        | Unrestricted -> None
+        | Bounded limits -> Some (ref (limits.max_source_bytes - input_bytes))
+      in
+      let retain bytes =
+        match remaining with
+        | None -> ()
+        | Some remaining ->
+          if bytes > !remaining then raise Metadata_limit;
+          remaining := !remaining - bytes
+      in
+      try
+        let%bind entry =
+          match Prepared.find_source input (Prepared.entry input) with
+          | Some source -> Ok source
+          | None -> error "chatml.entry_mismatch" "prepared entry is unavailable"
+        in
+        let%bind () =
+          match expected_entry with
+          | None -> Ok ()
+          | Some (expected : Entry_expectation.t) ->
+            let actual = Captured.contents entry in
+            (* Identity here is deliberately physical retained-string sharing;
+               equal separately retained strings still consume both allowances. *)
+            if not (phys_equal actual expected.contents)
+            then retain (String.length expected.contents);
+            checkpoint ();
+            if
+              (not (Int.equal (String.length actual) (String.length expected.contents)))
+              || not (Captured.Digest.equal (Captured.digest entry) expected.digest)
+            then
+              error "chatml.entry_mismatch" "prepared entry differs from its source owner"
+            else (
+              let rec equal offset =
+                checkpoint ();
+                if offset >= String.length actual
+                then true
+                else (
+                  let stop = Int.min (String.length actual) (offset + 4096) in
+                  let rec bytes index =
+                    if index >= stop
+                    then equal stop
+                    else if Char.equal actual.[index] expected.contents.[index]
+                    then bytes (index + 1)
+                    else false
+                  in
+                  bytes offset)
+              in
+              if equal 0
+              then Ok ()
+              else
+                error
+                  "chatml.entry_mismatch"
+                  "prepared entry differs from its source owner")
+        in
+        (* Division/remainder represents 32 times the source allowance without
+           multiplying a potentially maximal host integer. These are conservative
+           conversion debits, separate from actual canonical input bytes. *)
+        let conversion_remaining =
+          Option.map remaining ~f:(fun remaining -> ref (!remaining, 0))
+        in
+        let allocate bytes =
+          Option.iter conversion_remaining ~f:(fun remaining ->
+            let units, residue = !remaining in
+            let whole = bytes / 32 in
+            let part = bytes % 32 in
+            if whole > units || (Int.equal whole units && part > residue)
+            then raise Metadata_allocation_limit;
+            remaining
+            := if part <= residue
+               then units - whole, residue - part
+               else units - whole - 1, residue + 32 - part)
+        in
+        retain (Contract.input_bytes contract ~checkpoint ~allocate);
+        checkpoint ();
+        Ok (input, contract)
+      with
+      | Metadata_limit ->
+        error
+          "chatml.source_limit"
+          "native entry/contract exceeds compiler input allowance"
+      | Metadata_allocation_limit ->
+        error
+          "chatml.metadata_allocation_limit"
+          "native contract exceeds conservative conversion allowance")
+    ~compile:(fun (input, contract) ~checkpoint ->
+      compile_graph input contract ~max_dependency_depth ~checkpoint)
+;;
+
+let compile_prepared_with_contract
+      input
+      ~contract
+      ?expected_entry
+      ?(limits = default_limits)
+      ~max_dependency_depth
+      ~env
+      ()
+  =
+  compile_prepared_with_contract_and_policy
+    input
+    ~contract
+    ?expected_entry
+    ~policy:(Bounded limits)
+    ~max_dependency_depth
+    ~env
     ()
 ;;
