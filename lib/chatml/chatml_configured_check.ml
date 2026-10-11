@@ -169,7 +169,22 @@ let check_unit t ~source ~require implementation =
     checked)
 ;;
 
-let check_node t node ~require ~implementation ~interface =
+module Failure = struct
+  type phase =
+    | Implementation
+    | Companion
+    | Admission
+
+  type t =
+    { phase : phase
+    ; diagnostic : Chatml_diagnostic.t
+    }
+
+  let phase t = t.phase
+  let diagnostic t = t.diagnostic
+end
+
+let check_node_detailed t node ~require ~implementation ~interface =
   let source = Chatml_dependency_session.Unit.implementation node in
   let companion = Chatml_dependency_session.Unit.interface node in
   let interface_paired =
@@ -185,11 +200,18 @@ let check_node t node ~require ~implementation ~interface =
        && interface_paired)
   then
     Error
-      (Diagnostic.create
-         "Configured implementation/interface does not match its admitted node")
+      { Failure.phase = Admission
+      ; diagnostic =
+          Diagnostic.create
+            "Configured implementation/interface does not match its admitted node"
+      }
   else
     let open Result.Let_syntax in
-    let%bind checked = check_implementation t ~source ~require implementation in
+    let%bind checked =
+      check_implementation t ~source ~require implementation
+      |> Result.map_error ~f:(fun diagnostic ->
+        { Failure.phase = Implementation; diagnostic })
+    in
     match companion, interface with
     | None, None ->
       record_exports t checked;
@@ -246,7 +268,13 @@ let check_node t node ~require ~implementation ~interface =
         in
         record_exports t checked;
         Ok checked)
+      |> Result.map_error ~f:(fun diagnostic -> { Failure.phase = Companion; diagnostic })
     | None, Some _ | Some _, None -> assert false
+;;
+
+let check_node t node ~require ~implementation ~interface =
+  check_node_detailed t node ~require ~implementation ~interface
+  |> Result.map_error ~f:Failure.diagnostic
 ;;
 
 module Entrypoint = struct

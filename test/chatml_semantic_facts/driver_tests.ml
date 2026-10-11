@@ -60,7 +60,7 @@ let%test_unit "metadata limits and invalid programs never return settled facts" 
       | Error failure ->
         (match Driver.Failure.kind failure with
          | Recording _ | Sites _ -> ()
-         | Compiler _ -> failwith "expected metadata admission")
+         | Compiler _ | Admission -> failwith "expected metadata admission")
       | Ok _ -> failwith "bounded metadata unexpectedly admitted");
   List.iter [ "let ="; "let value = 1 + true" ] ~f:(fun body ->
     let prepared = Support.input contract [ "entry.chatml", body, [] ] in
@@ -68,7 +68,7 @@ let%test_unit "metadata limits and invalid programs never return settled facts" 
     | Error failure ->
       (match Driver.Failure.kind failure with
        | Compiler _ -> ()
-       | Recording _ | Sites _ -> failwith "expected compiler error")
+       | Recording _ | Sites _ | Admission -> failwith "expected compiler error")
     | Ok _ -> failwith "invalid program cannot have settled facts")
 ;;
 

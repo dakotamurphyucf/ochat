@@ -119,7 +119,7 @@
  (name chatml_compilation)
  (public_name ochat.chatml_compilation)
  (modules chatml_compilation)
- (libraries core eio eio.unix mtime chatml chatml_source chatml_prepared_program chatml_linked_program chatml_host_runtime)
+ (libraries core eio eio.unix mtime chatml chatml_source chatml_prepared_program chatml_linked_program chatml_host_runtime chatml_semantics)
  (preprocess (pps ppx_jane)))
 
 (library

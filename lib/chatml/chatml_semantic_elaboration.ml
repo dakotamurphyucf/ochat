@@ -175,18 +175,16 @@ let parameters_exn t parameters ~checkpoint =
             ~checkpoint
           |> take
       in
-      if not (Map.mem t.parameters parameter.name)
-      then
-        t.context
-        <- Recorder.define_context
-             recorder
-             unit
-             t.context
-             ~namespace:Type_parameter
-             ~name:parameter.name
-             ~binding
-             ~checkpoint
-           |> take;
+      t.context
+      <- Recorder.define_context
+           recorder
+           unit
+           t.context
+           ~namespace:Type_parameter
+           ~name:parameter.name
+           ~binding
+           ~checkpoint
+         |> take;
       t.parameters <- Map.set t.parameters ~key:parameter.name ~data:binding;
       binding)
   in

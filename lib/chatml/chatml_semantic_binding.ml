@@ -126,6 +126,7 @@ module Private = struct
   let owns_root = Root_id.owns
   let owns_context = Context_id.owns
   let root_index (root : Root_id.t) = root.Id.index
+  let symbol_index (symbol : Symbol_id.t) = symbol.Id.index
   let context_index (context : Context_id.t) = context.Id.index
   let equal_name left right ~checkpoint = Members.equal_name left right checkpoint
 

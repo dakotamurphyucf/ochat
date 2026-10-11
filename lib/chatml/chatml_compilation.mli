@@ -115,3 +115,37 @@ val compile_prepared_with_policy
   -> target:target
   -> unit
   -> (Chatml_linked_program.t, error) Result.t
+
+module Analysis_error : sig
+  type t =
+    | Policy of error
+    | Analysis of Chatml_semantics.Error.t
+end
+
+(** Analyze an admitted inventory through the same joined compiler worker.
+    Source/metadata admission precedes domain creation. The fixed standard static
+    contract projection runs under the elapsed policy; the explicit semantic work
+    ledger starts inside [Chatml_semantics.analyze], before fingerprinting,
+    checking, freezing and indexing. Invalid programs return [Ok (Failed _)] with
+    same-run syntax only. No initializer executes. Unexpected compiler exceptions
+    and cancellation escape unchanged after joined cleanup; resource admission
+    failures are typed errors. Neither callbacks nor inference cells escape. *)
+val analyze_prepared
+  :  Chatml_prepared_program.t
+  -> ?limits:limits
+  -> semantic_limits:Chatml_semantics.Limits.t
+  -> max_dependency_depth:int
+  -> env:Eio_unix.Stdenv.base
+  -> target:target
+  -> unit
+  -> (Chatml_semantics.t, Analysis_error.t) Result.t
+
+val analyze_prepared_with_policy
+  :  Chatml_prepared_program.t
+  -> policy:policy
+  -> semantic_limits:Chatml_semantics.Limits.t
+  -> max_dependency_depth:int
+  -> env:Eio_unix.Stdenv.base
+  -> target:target
+  -> unit
+  -> (Chatml_semantics.t, Analysis_error.t) Result.t

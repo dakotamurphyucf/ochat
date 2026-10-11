@@ -30,11 +30,11 @@ let resolve facts context ~namespace ~name =
     match fact.transition with
     | Root -> None
     | Enter parent -> visit parent
-    | Define { parent; namespace = declared_namespace; binding = symbol } ->
+    | Define { parent; namespace = declared_namespace; binding = selected } ->
       if
         B.Namespace.equal namespace declared_namespace
-        && String.equal name (B.name (binding facts symbol))
-      then Some symbol
+        && String.equal name (B.name selected)
+      then Some (B.symbol selected)
       else visit parent
     | Join { values; types } ->
       Option.bind

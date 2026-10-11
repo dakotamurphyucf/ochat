@@ -548,3 +548,20 @@ checked public boundaries and the entry-rooted initialization order. It contains
 no initialized modules or native tool callbacks. Execution and project loading
 remain separate host integration steps; existing single-file entrypoints do not
 acquire them from this compilation API alone.
+
+## Immutable semantic queries
+
+Editor integrations can analyze an admitted project with `Chatml_semantics.analyze`
+without initializing modules. Successful analysis freezes all type groups after
+imports, companion interfaces and host requirements have settled. Definition and
+reference queries preserve the original source bytes; an exported binding retains
+its public interface view separately from its implementation's principal type.
+
+Points use byte offsets and belong to one snapshot. Reusing a point, symbol or
+context from another snapshot is rejected. Context queries use recorded lexical
+anchors; an unsupported whitespace gap is reported as unavailable rather than
+guessed from nearby syntax. Invalid programs expose a separate partial result
+with diagnostics and syntax from that same checking attempt, without certified
+types or exports. Analysis and queries have explicit work and result limits.
+See the [semantic query contracts](../development/chatml-semantic-queries.md) for
+host integration, failure distinctions and ownership.

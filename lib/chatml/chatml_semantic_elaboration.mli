@@ -48,7 +48,9 @@ end
 (** Before body conversion, install exactly its actual parameter bindings into
     a private persistent Type_parameter context. Alias and parameter names may
     have equal spelling. Each parameter root and the final whole type belong to
-    this one actual lexical quantification group. *)
+    this one actual lexical quantification group. An implicit collector placeholder
+    keeps its symbol identity; body contexts select its finalized grouped root.
+    Earlier immutable collection contexts are not retroactively rewritten. *)
 val parameters_exn : t -> Parameter.t list -> checkpoint:(unit -> unit) -> unit
 
 (** Called by the EXISTING specification parameter collector. The first genuine

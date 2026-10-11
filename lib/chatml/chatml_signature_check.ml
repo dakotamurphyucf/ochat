@@ -50,7 +50,17 @@ let alias_result = function
   | Error error -> raise (Rejected error)
 ;;
 
-let check ?recording ?source ?lookup engine ~values ~types ~outer_types ~signature ~span =
+let check
+      ?recording
+      ?source
+      ?lookup
+      engine
+      ~values
+      ~types
+      ~outer_types
+      ~signature
+      ~(span : Source.span)
+  =
   let { Engine.instantiate; unify; fresh_name; checkpoint } = engine in
   Option.iter recording ~f:(fun recording ->
     let expected = Semantic.source (Semantic.Frame.unit recording.Recording.frame) in
@@ -94,6 +104,7 @@ let check ?recording ?source ?lookup engine ~values ~types ~outer_types ~signatu
   in
   let rec check_module
             ?recording
+            ?(anchors = false)
             ~implementation
             ~implementation_types
             ~outer_types
@@ -113,6 +124,19 @@ let check ?recording ?source ?lookup engine ~values ~types ~outer_types ~signatu
         ~checkpoint
       |> Semantic.take_exn
     in
+    let anchor position =
+      if anchors
+      then
+        Option.iter recording ~f:(fun r ->
+          Semantic.region
+            (Semantic.Frame.recorder r.Recording.frame)
+            (Semantic.Frame.unit r.frame)
+            ~context:(context r)
+            ~span:{ Source.left = position; right = position }
+            ~checkpoint
+          |> Semantic.take_exn)
+    in
+    anchor span.left;
     let project r name specification nested_members =
       let recorder = Semantic.Frame.recorder r.Recording.frame in
       let implementation =
@@ -358,6 +382,7 @@ let check ?recording ?source ?lookup engine ~values ~types ~outer_types ~signatu
           ~checkpoint
         |> Semantic.take_exn)
     in
+    anchor span.right;
     ( { values = !selected
       ; types
       ; visibility = List.rev !visibility
@@ -369,6 +394,10 @@ let check ?recording ?source ?lookup engine ~values ~types ~outer_types ~signatu
     let checked, specification =
       check_module
         ?recording
+        ~anchors:
+          (Option.value_map source ~default:false ~f:(fun source ->
+             Int.equal span.left.offset 0
+             && Int.equal span.right.offset (Chatml_source.byte_length source)))
         ~implementation:copied_values
         ~implementation_types:types
         ~outer_types

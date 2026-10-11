@@ -381,7 +381,7 @@ module Fact : sig
     | Define of
         { parent : Binding.Context_id.t
         ; namespace : Binding.Namespace.t
-        ; binding : Binding.Symbol_id.t
+        ; binding : Binding.t
         }
 
   type context =

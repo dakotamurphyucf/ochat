@@ -73,7 +73,7 @@ let compile prepared ~contract ~max_dependency_depth ~checkpoint =
         match Checked_graph.Failure.kind error with
         | Compiler Parse -> Stage.Parse
         | Compiler Typecheck -> Typecheck
-        | Sites _ | Recording _ -> Typecheck
+        | Sites _ | Recording _ | Admission -> Typecheck
       in
       { Failure.stage; diagnostic = Checked_graph.Failure.diagnostic error })
   in

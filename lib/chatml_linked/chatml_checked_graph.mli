@@ -14,6 +14,31 @@ module Stage : sig
   [@@deriving equal, sexp_of]
 end
 
+module Invalidity : sig
+  type t =
+    | Parse of
+        { source : Chatml_source.Id.t
+        ; phase : Chatml_configured_lookup.Phase.t
+        }
+    | Implementation of Chatml_source.Id.t
+    | Companion of Chatml_source.Id.t
+    | Host_requirements
+    | Dependency
+  [@@deriving sexp_of]
+end
+
+module Parsed : sig
+  (** Recording-only journal row from THIS successful parse, before inference.
+      Contains syntax sites/immutable source ownership only, no AST annotations,
+      raw scheme, inference engine or callback. A failing parse has no row. *)
+  type t
+
+  val source : t -> Chatml_source.t
+  val owner : t -> Prepared.Module_id.t
+  val phase : t -> Chatml_configured_lookup.Phase.t
+  val sites : t -> Chatml.Chatml_syntax_sites.t
+end
+
 module Failure : sig
   (** Metadata rejection remains typed and separate from language failure. No
       partial facts survive either; cancellation/callback exceptions are raised
@@ -22,11 +47,14 @@ module Failure : sig
     | Compiler of Stage.t
     | Sites of Chatml.Chatml_syntax_sites.Error.t
     | Recording of Recorder.Error.t
+    | Admission
 
   type t
 
   val kind : t -> kind
   val diagnostic : t -> Chatml_diagnostic.t
+  val invalidity : t -> Invalidity.t option
+  val parsed : t -> Parsed.t list
 end
 
 module Unit : sig
@@ -63,3 +91,4 @@ val graph : t -> Graph.t
 val entry : t -> Unit.t
 val checked : t -> Prepared.Module_id.t -> Unit.t option
 val semantic_facts : t -> Recorder.Settled.t option
+val parsed : t -> Parsed.t list

@@ -3135,6 +3135,30 @@ let infer_configured_unit_static state surface (program : program) =
   let types =
     init_types_with_static ?semantic:state.semantic ~checkpoint:state.checkpoint surface
   in
+  let unit_boundary env types ~byte_offset =
+    Option.iter state.semantic ~f:(fun frame ->
+      let recorder = Semantic.Frame.recorder frame in
+      let unit = Semantic.Frame.unit frame in
+      let location =
+        Chatml_source.locate
+          (Semantic.source unit)
+          ~start_byte:byte_offset
+          ~end_byte:byte_offset
+          ~checkpoint:state.checkpoint
+        |> Or_error.ok_exn
+      in
+      let context =
+        Semantic_scope.context_exn frame ~values:env ~types ~checkpoint:state.checkpoint
+      in
+      Semantic.region
+        recorder
+        unit
+        ~context
+        ~span:(Chatml_source.Location.span location)
+        ~checkpoint:state.checkpoint
+      |> Semantic.take_exn)
+  in
+  unit_boundary env types ~byte_offset:0;
   let env, types, names_rev =
     List.fold program.stmts ~init:(env, types, []) ~f:(fun (env, types, names_rev) node ->
       checkpoint state;
@@ -3144,6 +3168,12 @@ let infer_configured_unit_static state surface (program : program) =
       in
       env, types, List.rev_append names names_rev)
   in
+  Option.iter state.semantic ~f:(fun frame ->
+    unit_boundary
+      env
+      types
+      ~byte_offset:
+        (Chatml_source.byte_length (Semantic.source (Semantic.Frame.unit frame))));
   let values =
     List.fold names_rev ~init:Env.empty ~f:(fun values name ->
       checkpoint state;

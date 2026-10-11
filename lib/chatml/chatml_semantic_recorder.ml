@@ -93,7 +93,7 @@ module Fact = struct
     | Define of
         { parent : Binding.Context_id.t
         ; namespace : Binding.Namespace.t
-        ; binding : Binding.Symbol_id.t
+        ; binding : Binding.t
         }
 
   type context =
@@ -520,9 +520,7 @@ let define_context t unit context ~namespace ~name ~binding ~checkpoint =
     then raise (Rejected Foreign_binding);
     admit t ~facts:1 ~edges:2 ~labels:0;
     let id = Private.context t.owner (fresh t) in
-    let transition =
-      Fact.Define { parent = context.id; namespace; binding = Binding.symbol binding }
-    in
+    let transition = Fact.Define { parent = context.id; namespace; binding } in
     t.contexts <- { Fact.id; source = Captured.id unit.source; transition } :: t.contexts;
     { Context.id; unit })
 ;;

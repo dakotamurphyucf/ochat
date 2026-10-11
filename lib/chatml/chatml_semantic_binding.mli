@@ -105,6 +105,7 @@ module Private : sig
   val owns_root : Owner.t -> Root_id.t -> bool
   val owns_context : Owner.t -> Context_id.t -> bool
   val root_index : Root_id.t -> int
+  val symbol_index : Symbol_id.t -> int
   val context_index : Context_id.t -> int
   val equal_name : string -> string -> checkpoint:(unit -> unit) -> bool
 
