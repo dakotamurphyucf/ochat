@@ -106,9 +106,10 @@ let catalog env parent =
   Catalog.create ~env ~artifact_store
 ;;
 
-let prepare ?(checkpoint = ignore) catalog sw definitions =
+let prepare ?prepare_programs ?(checkpoint = ignore) catalog sw definitions =
   Catalog.prepare_owned
     catalog
+    ?prepare_programs
     ~sw
     ~source_limits:(limits ())
     ~max_roots:8

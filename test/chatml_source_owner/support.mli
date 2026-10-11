@@ -37,7 +37,11 @@ val error : ('a, Owner.Error.t) Result.t -> Owner.Error.code -> unit
 val catalog : Eio_unix.Stdenv.base -> _ Eio.Path.t -> Catalog.t
 
 val prepare
-  :  ?checkpoint:(unit -> unit)
+  :  ?prepare_programs:
+       (Owner.Scope.t
+        -> Owner.Capture.t
+        -> (Chatml_prompt_programs.t, Builder.Diagnostic.t list) Result.t)
+  -> ?checkpoint:(unit -> unit)
   -> Catalog.t
   -> Eio.Switch.t
   -> Agent_session.Prompt_definition.t list

@@ -91,9 +91,18 @@ val source_selection
     discard never revokes installed policy. Cleanup
     every candidate on failure BEFORE return, without held catalog mutex. [sw]
     owns installed descriptors; explicit discard/retirement releases them sooner.
-    No receipt path is used to acquire authority. Legacy [prepare] stays unchanged. *)
+    No receipt path is used to acquire authority. Legacy [prepare] stays unchanged.
+    [prepare_programs] borrows the SAME live source scope and its actual capture
+    before artifact publication. It may acquire source graphs, never initialize
+    executable scripts. The callback is not retained; original exceptions and
+    cancellation propagate after candidate cleanup. Without it, the existing
+    parser-only custody path remains. *)
 val prepare_owned
   :  t
+  -> ?prepare_programs:
+       (Prompt_source_owner.Scope.t
+        -> Prompt_source_owner.Capture.t
+        -> (Chatml_prompt_programs.t, Prompt_revision_builder.Diagnostic.t list) Result.t)
   -> sw:Eio.Switch.t
   -> source_limits:Prompt_source_owner.Limits.t
   -> max_roots:int

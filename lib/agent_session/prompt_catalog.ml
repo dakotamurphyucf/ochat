@@ -172,6 +172,7 @@ let source_error definition error =
 
 let prepare_owned
       t
+      ?prepare_programs
       ~sw
       ~source_limits
       ~max_roots
@@ -311,19 +312,22 @@ let prepare_owned
                                 ~max_tokens:100_000
                                 ~max_depth:128
                               |> Or_error.ok_exn)
-                           ~checkpoint)
+                           ~checkpoint
+                         |> Result.map ~f:(fun capture ->
+                           Prompt_revision_builder.build_captured
+                             ?prepare_programs:
+                               (Option.map prepare_programs ~f:(fun prepare _ ->
+                                  prepare scope capture))
+                             ~capture:(Owner.Capture.value capture)
+                             ~source_receipt:receipt
+                             ~artifact_store:t.artifact_store
+                             ~transaction_id:(transaction_id definition)
+                             ~created_at
+                             definition))
                      with
                      | Error error -> source_error definition error
-                     | Ok capture ->
-                       (match
-                          Prompt_revision_builder.build_captured
-                            ~capture:(Owner.Capture.value capture)
-                            ~source_receipt:receipt
-                            ~artifact_store:t.artifact_store
-                            ~transaction_id:(transaction_id definition)
-                            ~created_at
-                            definition
-                        with
+                     | Ok prepared ->
+                       (match prepared with
                         | Error diagnostics ->
                           { definition; availability = Unavailable diagnostics }, None
                         | Ok revision ->

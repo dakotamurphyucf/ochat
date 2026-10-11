@@ -287,3 +287,66 @@ let%test_unit
       Catalog.install_owned catalog (prepare catalog sw [ definition ] |> ok) |> ok;
       live old))
 ;;
+
+let%test_unit "catalog program capture borrows its live scope and cleans up failed hooks" =
+  with_workspace (fun env parent root ->
+    save root "root.chatmd" "<user>captured</user>";
+    let definition = definition root in
+    let catalog = catalog env parent in
+    let escaped = ref None in
+    let borrow scope captured =
+      assert (Result.is_ok (Owner.Scope.check scope));
+      [%test_eq: string] (root_text captured) "<user>captured</user>";
+      escaped := Some scope
+    in
+    let closed () = error (Owner.Scope.check (Option.value_exn !escaped)) Closed in
+    Eio.Switch.run (fun sw ->
+      let failure = Failure "original preparation callback" in
+      (match
+         prepare
+           ~prepare_programs:(fun scope captured ->
+             borrow scope captured;
+             raise failure)
+           catalog
+           sw
+           [ definition ]
+       with
+       | exception actual -> assert (phys_equal actual failure)
+       | _ -> failwith "source callback exception was converted");
+      closed ();
+      assert (List.is_empty (Catalog.entries catalog));
+      let candidate =
+        prepare
+          ~prepare_programs:(fun scope captured ->
+            borrow scope captured;
+            let module Custody = Agent_session.Prompt_program_custody in
+            let value = Owner.Capture.value captured in
+            let parsed = Builder.Capture.root value in
+            let root = Prompt.Chat_markdown.Parsed.root_input parsed in
+            let authored =
+              Custody.authored
+                ~root_file:(Chatmd_parser_input.path root)
+                ~sources:
+                  ((Chatmd_parser_input.path root, Chatmd_parser_input.authored root)
+                   :: Builder.Capture.sources value)
+              |> ok
+            in
+            Ok
+              (Custody.prepare
+                 authored
+                 ~parsed_contexts:[ parsed ]
+                 ~root
+                 ~supplied:None
+                 ~checkpoint:ignore
+               |> ok))
+          catalog
+          sw
+          [ definition ]
+        |> ok
+      in
+      closed ();
+      Catalog.install_owned catalog candidate |> ok;
+      [%test_eq: string]
+        (Agent_session.Prompt_revision.artifact (revision catalog definition)).root_chatmd
+        "<user>captured</user>"))
+;;
