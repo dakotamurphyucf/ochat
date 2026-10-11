@@ -295,6 +295,9 @@ let capture
                 ~clock:(Eio.Stdenv.mono_clock env)
                 ~checkpoint:poll
             in
+            (* The inventory is already bounded by custody admission. Project it
+               once, rather than allocating it again for each requested role. *)
+            let bindings = Chatml_prompt_programs.bindings programs in
             let captured_plans =
               List.filter plans ~f:(fun plan ->
                 poll ();
@@ -304,15 +307,13 @@ let capture
                 let identity =
                   Chatmd_parser_input.identity_digest root ~checkpoint:poll
                 in
-                List.exists
-                  (Chatml_prompt_programs.bindings programs)
-                  ~f:(fun (binding, _) ->
-                    poll ();
-                    String.equal
-                      identity
-                      (Chatmd_parser_input.identity_digest
-                         (Chatml_prompt_programs.Binding.registration_input binding)
-                         ~checkpoint:poll)))
+                List.exists bindings ~f:(fun (binding, _) ->
+                  poll ();
+                  String.equal
+                    identity
+                    (Chatmd_parser_input.identity_digest
+                       (Chatml_prompt_programs.Binding.registration_input binding)
+                       ~checkpoint:poll)))
             in
             { Prepared.programs; plans; captured_plans }
         with
