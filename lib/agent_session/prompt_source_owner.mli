@@ -124,6 +124,12 @@ module Scope : sig
 
   val check : t -> (unit, Error.t) Result.t
 
+  (** Pure same-original-admission check, sharing [prepare_sources]'s affinity and
+      receipt validation. No anchor/backend acquisition. Policy, closure and
+      cancellation observation match [check]; foreign captures reject even when
+      no selected project request is needed. *)
+  val check_capture : t -> Capture.t -> (unit, Error.t) Result.t
+
   (** Same actual bounded Builder walker, via Local retained backend. No second
       scanner or source fallback. Env supplies transient shell inspection only.
       Definition must match admitted receipt before any read. Caller exceptions

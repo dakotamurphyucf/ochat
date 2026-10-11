@@ -80,6 +80,19 @@ module Anchor : sig
     -> limits:Limits.t
     -> checkpoint:(unit -> unit)
     -> (t, Error.t) Result.t
+
+  (** Pure query using the resolver's SAME bounded locator normalization and
+      component-prefix semantics. True means this explicit lexical mapping may
+      tie or outrank the original prefix for [locator]. No directory identity,
+      native lookup, permission grant or live descriptor is exposed. Equal
+      prefixes remain duplicate errors at actual batch admission. *)
+  val may_override
+    :  t
+    -> original_prefix:string
+    -> locator:string
+    -> limits:Limits.t
+    -> checkpoint:(unit -> unit)
+    -> (bool, Error.t) Result.t
 end
 
 module Cursor : sig

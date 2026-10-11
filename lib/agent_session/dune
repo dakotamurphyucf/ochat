@@ -35,6 +35,8 @@
   session_replacement_delta
   managed_submission_tracking
   prompt_source_owner
+  prompt_project_route
+  prompt_script_sources
   prompt_catalog
   prompt_source_lease
   security_grant

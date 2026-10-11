@@ -136,6 +136,27 @@ module Anchor = struct
       ~limits
       ~checkpoint
   ;;
+
+  let may_override t ~original_prefix ~locator ~limits ~checkpoint =
+    let normalize spelling =
+      Locator.normalize
+        spelling
+        ~base:None
+        ~max_bytes:limits.Limits.locator_bytes
+        ~max_components:limits.locator_components
+        ~checkpoint
+      |> Result.map_error ~f:(function
+        | Locator.Invalid -> Error.create Invalid_locator
+        | Limit_exceeded -> Error.create Limit_exceeded)
+    in
+    let open Result.Let_syntax in
+    let%bind original = normalize original_prefix in
+    let%bind target = normalize locator in
+    checkpoint ();
+    Ok
+      (Locator.component_count t.prefix >= Locator.component_count original
+       && Option.is_some (Locator.suffix target ~prefix:t.prefix ~checkpoint))
+  ;;
 end
 
 type lifecycle =
