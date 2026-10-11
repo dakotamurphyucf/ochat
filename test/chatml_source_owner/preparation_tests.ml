@@ -85,8 +85,7 @@ let on_event = fun ctx state event -> Task.pure(state)</script>|}
     save
       root
       "root.chatmd"
-      (moderator "root.project.json"
-       ^ {|<script id="legacy" language="chatml" kind="moderator" project="root.project.json">let initial_state = 0
+      ({|<script id="legacy" language="chatml" kind="moderator" project="root.project.json">let initial_state = 0
 let on_event = fun event state -> Task.pure(state)</script>|}
        ^ {|<import src="parts/references.chatmd"/>
 <tool name="remote" agent="https://example.invalid/agent"/>
@@ -111,7 +110,11 @@ let on_event = fun event state -> Task.pure(state)</script>|}
     Eio.Switch.run (fun sw ->
       let owner = open_owner sw root definition in
       Owner.with_scope owner ~f:(fun scope ->
-        let captured = capture env scope definition |> ok in
+        let captured =
+          match capture env scope definition with
+          | Ok captured -> captured
+          | Error error -> raise_s [%sexp (error : Owner.Error.t)]
+        in
         let value = Owner.Capture.value captured in
         assert (List.length (Builder.Capture.agents value) = 1);
         let calls = ref 0 in
@@ -128,8 +131,8 @@ let on_event = fun event state -> Task.pure(state)</script>|}
           prepare ~operation ~policy:(policy ~roles:5 ~references:7 ()) env scope captured
           |> ok
         in
-        assert (!calls = 6);
-        assert (List.length (C.bindings custody) = 6);
+        assert (!calls = 4);
+        assert (List.length (C.bindings custody) = 4);
         let root_plan = Script_tests.plan (Builder.Capture.root value) in
         let root_programs =
           Chat_response.Restored_programs.restore
@@ -140,7 +143,7 @@ let on_event = fun event state -> Task.pure(state)</script>|}
           |> ok
           |> Option.value_exn
         in
-        assert (List.length (C.Restored.programs root_programs) = 2);
+        assert (List.length (C.Restored.programs root_programs) = 1);
         let headless_plan =
           Script_tests.plan
             ~moderator_surface:Chatml.Chatml_builtin_surface.moderator_surface
@@ -164,8 +167,8 @@ let on_event = fun event state -> Task.pure(state)</script>|}
           |> ok
           |> Option.value_exn
         in
-        assert (List.length (C.Restored.programs headless_programs) = 2);
-        assert (List.length (C.bindings headless_custody) = 6);
+        assert (List.length (C.Restored.programs headless_programs) = 1);
+        assert (List.length (C.bindings headless_custody) = 4);
         let legacy_contract programs =
           List.find_map (C.Restored.programs programs) ~f:(fun program ->
             if
@@ -239,7 +242,7 @@ let on_event = fun event state -> Task.pure(state)</script>|}
             }];
         Ok ())
       |> ok));
-  [%expect {| ((retained_variants 6) (configured_requests 6) (active_root 2)) |}]
+  [%expect {| ((retained_variants 4) (configured_requests 4) (active_root 1)) |}]
 ;;
 
 let%test_unit "unused markup stays unreachable and whole helper work is not reset" =
