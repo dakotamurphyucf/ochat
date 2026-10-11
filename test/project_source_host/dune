@@ -5,8 +5,8 @@
 
 (library
  (name project_source_host_tests)
- (modules support configuration_tests configuration_codec_tests lifecycle_tests native_tests git_fixture_support tls_fixture https_fixture project_source_header project_source_configuration)
- (libraries core core_unix eio eio.unix eio_main tls-eio x509 digestif mirage-crypto-rng.unix ochat.agent_server ochat.agent_store ochat.agent_session ochat.chatml_git_host)
+ (modules support configuration_tests configuration_codec_tests lifecycle_tests native_tests daemon_dependency_tests git_fixture_support tls_fixture https_fixture project_source_header project_source_configuration)
+ (libraries core core_unix eio eio.unix eio_main tls-eio x509 digestif mirage-crypto-rng.unix agent_server_test_support ochat.agent_server ochat.agent_store ochat.agent_session ochat.chatml_git_host)
  (inline_tests)
  (foreign_stubs (language c) (names test_limits_stubs))
  (preprocess (pps ppx_jane ppx_expect)))
