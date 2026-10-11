@@ -103,6 +103,15 @@ module Selection_gate : sig
       acquisition and pass this same policy to composition. *)
   type t
 
+  module Owner : sig
+    (** Prior catalog association affine to this exact immutable gate instance.
+        Constructed only by root validation and named prior owner-local edge
+        traversal. Namespace is configuration, never its lookup identity. *)
+    type t
+
+    val declaration : t -> Chatml_source.Id.t
+  end
+
   (** Return decode work with the immutable policy. Failure has no partial
       receipt: abort the host attempt rather than resetting its allowance. *)
   val create
@@ -126,7 +135,7 @@ module Selection_gate : sig
     -> project:Source.Portable_path.t
     -> limits:Limits.t
     -> checkpoint:(unit -> unit)
-    -> (Accounting.t, Error.t) Result.t
+    -> (Owner.t option * Accounting.t, Error.t) Result.t
 
   (** Check the owner's authored selected dependency before the host acquires
       code. Relative Local references under a Git owner resolve within its exact
@@ -138,16 +147,22 @@ module Selection_gate : sig
       the whole host attempt on Error; no failed partial receipt authorizes retry.
       Checkpoint exceptions propagate unchanged.
 
-      Environment/namespace behavior is deliberately not promised here until the
-      current user decision and nested previous-owner mapping are reconciled. *)
+      Environment/namespace selections may change on Build when code intent stays
+      fixed; complete composition validates their actual declarations and scopes.
+      Pass the prior owner returned by root/incoming edge; None denotes no prior
+      selected association. Foreign gate owners reject. Return the prior target
+      association for the next package; Initial/Update return None. Hosts check
+      every incoming prior route when current aliases converge, not an arbitrary
+      first route. No global namespace/basename search identifies an owner. *)
   val check_dependency
     :  t
+    -> previous_owner:Owner.t option
     -> owner:Chatml_project.t
     -> owner_origin:Chatml_project.Lock.Catalog.origin
     -> Chatml_project.Dependency.t
     -> limits:Limits.t
     -> checkpoint:(unit -> unit)
-    -> (Accounting.t, Error.t) Result.t
+    -> (Owner.t option * Accounting.t, Error.t) Result.t
 end
 
 (** Selected available declaration edges only: the dependency aliases referenced

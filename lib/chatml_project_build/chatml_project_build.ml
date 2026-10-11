@@ -27,6 +27,8 @@ end
 module Selection_gate = struct
   type t = Gate.t
 
+  module Owner = Gate.Owner
+
   let create operation ~limits ~checkpoint =
     Budget.run limits ~checkpoint ~f:(fun budget ->
       let checkpoint () = Budget.checkpoint budget in
@@ -43,13 +45,19 @@ module Selection_gate = struct
   let check_root t ~origin ~project ~limits ~checkpoint =
     Budget.run limits ~checkpoint ~f:(fun budget ->
       Gate.check_root t ~origin ~project ~budget)
-    |> Result.map ~f:snd
   ;;
 
-  let check_dependency t ~owner ~owner_origin dependency ~limits ~checkpoint =
+  let check_dependency
+        t
+        ~previous_owner
+        ~owner
+        ~owner_origin
+        dependency
+        ~limits
+        ~checkpoint
+    =
     Budget.run limits ~checkpoint ~f:(fun budget ->
-      Gate.check_dependency t ~owner ~owner_origin dependency ~budget)
-    |> Result.map ~f:snd
+      Gate.check_dependency t ~previous_owner ~owner ~owner_origin dependency ~budget)
   ;;
 end
 
@@ -100,9 +108,7 @@ let accounting t = t.accounting
 let compose root ~catalogs ~entry ~selection_gate ~contract ~lock_id ~limits ~checkpoint =
   Budget.run limits ~checkpoint ~f:(fun budget ->
     let open Result.Let_syntax in
-    let%bind catalogs =
-      Project_build_closure.select budget root ~catalogs ~gate:selection_gate
-    in
+    let%bind catalogs = Project_build_closure.select budget root ~catalogs in
     let%bind () = Gate.validate_captures selection_gate ~budget ~root ~catalogs in
     Assembly.create
       budget

@@ -2,7 +2,6 @@ open Core
 module Model = Project_build_model
 module Budget = Project_build_budget
 module Scope = Project_build_scope
-module Gate = Project_build_selection_gate
 module Dependency = Project_build_dependency
 module Input = Model.Catalog_input
 module Project = Chatml_project
@@ -198,7 +197,7 @@ let check_target budget owner dependency target =
   else failure owner (Invalid_dependency (Project.Dependency.name dependency))
 ;;
 
-let select budget root ~catalogs ~gate =
+let select budget root ~catalogs =
   let checkpoint () = Budget.checkpoint budget in
   let same_id left right = Budget.compare_id budget left right = 0 in
   let open Result.Let_syntax in
@@ -236,14 +235,6 @@ let select budget root ~catalogs ~gate =
               <> 0
             then failure owner (Invalid_dependency name)
             else (
-              let%bind () =
-                Gate.check_dependency
-                  gate
-                  ~owner:(Catalog.project owner.catalog)
-                  ~owner_origin:owner.origin
-                  dependency
-                  ~budget
-              in
               let target_id = Lock.Dependency_selection.declaration selected in
               let%bind target =
                 match find target_id with

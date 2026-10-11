@@ -11,7 +11,12 @@ selected dependency against that gate before acquisition. Use
 `selected_dependencies` and `Dependency` projections to reuse the same captured
 scope and owner-relative path rules as composition. Pass explicit remaining work
 limits to each call and charge its immutable receipt exactly once, then
-pass the same gate to `compose`. Each `Catalog_input` carries its captured catalog,
+pass the same gate to `compose`. Root validation returns an immutable prior-owner
+association; each dependency check takes that association and returns the prior
+target association for the next package. These values belong to the exact gate
+instance. Traverse prior owner-local edges explicitly, checking every incoming
+route when aliases converge. Namespace or project basename alone never locates
+a previous owner. Each `Catalog_input` carries its captured catalog,
 origin, attempt-local acquisition identity, and owner-local dependency selections.
 The acquisition identity is used to reconcile repeated aliases and does not enter
 the completed result or lock. Different aliases may reference one catalog;
@@ -69,8 +74,19 @@ explicit remaining limits and return their observed work receipts. The immutable
 gate retains no limits or counter. The host charges those receipts across its
 one aggregate preparation budget and deadline, including acquisition and final
 composition. A failed projection has no partial accounting receipt: abort the
-host attempt rather than retrying with a reset allowance. Environment/namespace
-changes on normal Build remain subject to the pending selection policy decision.
+host attempt rather than retrying with a reset allowance.
+
+Normal Build permits different selected environments and effective namespaces
+while preserving Git repository, object format, full commit, package root and
+project member. Newly selected Git dependencies and source-kind/code changes
+require Update. Actual declarations/scopes still validate configuration; this
+permission does not grant native access or bypass compiler compatibility.
+Selected source subsets can differ at the same pin. Overlapping package-relative
+members retain their digest and byte length despite namespace changes. A prior
+omission does not prove a member was absent; authentic current Git object reads
+remain the acquisition owner's responsibility. Complete composition independently
+walks every current/prior owner pair, including finite declaration cycles and
+converging aliases, under its bounded invocation budget.
 
 The public tests in `test/chatml_project_build` use actual declarations and
 catalogs with independently stated scope and identity expectations. They exercise

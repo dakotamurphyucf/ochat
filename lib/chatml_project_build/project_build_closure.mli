@@ -10,5 +10,4 @@ val select
   :  Project_build_budget.t
   -> Model.Catalog_input.t
   -> catalogs:Model.Catalog_input.t list
-  -> gate:Project_build_selection_gate.t
   -> (Model.Catalog_input.t list, Model.Error.t) Result.t
