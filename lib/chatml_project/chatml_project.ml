@@ -9,6 +9,7 @@ module Compiler_requirement = Chatml_project_declaration.Compiler_requirement
 module Scope_spec = Chatml_project_declaration.Scope_spec
 module Entry = Chatml_project_declaration.Entry
 module Selection = Chatml_project_declaration.Selection
+module Namespace = Chatml_project_namespace
 
 type t = Chatml_project_declaration.t
 

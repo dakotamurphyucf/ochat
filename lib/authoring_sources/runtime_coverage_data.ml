@@ -239,7 +239,7 @@ let implementation_sources =
   ; ( "lib/chatml/chatml_builtin_modules.ml"
     , "4d005f60b55cee3263e7925bae6d1c81129ca383cf6218b3cc2dc86270def236" )
   ; ( "lib/chatml/chatml_compiler_contract.ml"
-    , "cfcfb1f24a1a3c45fb85e91fca1bf028c57df9b89a0e336b440a15c5021ec01f" )
+    , "172cd116b1680c9ad2bdf0a94debf38f196090c984668e1bcb6d235f0a3331b4" )
   ; ( "lib/chatml/chatml_contract_encoding.ml"
     , "7f8c6c1a49818abaf5ecbfe7cc1df2f4511930939cc1c573e3d422c94548c138" )
   ; ( "lib/chatml/chatml_eval.ml"
@@ -257,7 +257,7 @@ let implementation_sources =
   ; ( "lib/agent_server/delegation_lifecycle.ml"
     , "5bfed8ecc3cd3f7976457adbab4a5e875f8b56bd08f4856d18149c694303ad49" )
   ; ( "lib/chatml/chatml_compilation.ml"
-    , "f15466510b48217410039497a1d57ed9d83030c445d5045deb1a1638ee7f23dc" )
+    , "2bf92aae5a707fc61243919c3869438d56f0c1e5246cc750552e427804f2f718" )
   ; ( "lib/chatml/chatml_execution.ml"
     , "f8f85d98bef83a4dd18bbb635be3059fe6c319c9658fb27133a74059c611b142" )
   ; ( "lib/chatml/chatml_value_codec.ml"
@@ -327,7 +327,7 @@ let implementation_sources =
   ; ( "lib/chat_response/subscription_operations.ml"
     , "88aa4ac9bd7c2100a9614f8b30639c6fd30e7ae0c11e86e423a57badd69c0603" )
   ; ( "lib/chatml/chatml_host_runtime.ml"
-    , "e8b91417a2826579b9ea24e88d13a88a330abe115efd88b2cf73c14ed6827b83" )
+    , "8b885173843940775592049aa8c003c7489a39c07c348ce969d26557bd95a0fc" )
   ; ( "lib/chatml/chatml_lang.ml"
     , "cffe0b48ae424c94993392b748bbad87727a0207d372d84600e4eed2dcfbdf36" )
   ; ( "lib/chatml_sources/chatml_diagnostic.ml"
@@ -350,16 +350,16 @@ let topic_contracts =
     , "e1c3aaa7ed7aedb2e13188a16276413e547488619cc322b596704abf4bd5d9b7" )
   ; ( "one_off_v1"
     , "runtime.execution"
-    , "4c930e0431a0534667446379e4d190107d751ead66420792af8bf0aa88c7c8e1" )
+    , "d7ab2889852040482425417d9b89cea89286168ed3185e6d3ad34bdcd652da63" )
   ; ( "tool_v1"
     , "runtime.execution"
-    , "50fc26b2591a71a0582e2ff267d66e6e99c221fd4cf47830fd4e4a309afc8689" )
+    , "353a7365ebeb8ad02c0928403c6922bc41e36a4b7305abc9c57d1c13fbd3d00b" )
   ; ( "moderator_v1"
     , "runtime.execution"
-    , "28416715133a81369dffe0313b19e0400d53de52b1c67b110c8a428aec101149" )
+    , "d8519e99a67f42948d2a22b6ebe8f9f8ae5794a39950e421adc7e9adbeac966d" )
   ; ( "delegated_moderator_v1"
     , "runtime.execution"
-    , "966524097356cfeb00ba3c07adc2ef63b22adbb12013ab0b152fb7cce87be762" )
+    , "f93693dcf1cbd7ae10c04a7b82d90cc2a1c0592242f01f20fa7fecbcc8d12d4a" )
   ; ( "one_off_v1"
     , "runtime.jobs.owned"
     , "b9ae2125f3db7caf8088dbeed3d435aa99340fc98d427f73107d278b437f98ce" )

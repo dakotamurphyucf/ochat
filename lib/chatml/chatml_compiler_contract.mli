@@ -54,6 +54,13 @@ val for_static_surface
     projected globals/module exports/aliases and grouped entrypoint contracts. *)
 val identity : t -> checkpoint:(unit -> unit) -> Sexp.t
 
+(** Return the actual canonical encoded identity byte length. [allocate] debits
+    conservative conversion/encoding allocation estimates BEFORE construction;
+    callers may reject admission by raising from it. This is not retained-byte
+    accounting or a heap sandbox. Uses the existing identity codec and polls
+    actual work; retains no encoded identity or callback. *)
+val input_bytes : t -> checkpoint:(unit -> unit) -> allocate:(int -> unit) -> int
+
 (** Compute SHA256 from this ACTUAL identity during compilation. Linked.compile
     checks it against Prepared.compiler_contract before parsing. No independent
     digest claim is trusted. Compilation.target/contract remain adapters here. *)
@@ -104,6 +111,19 @@ module Invocation : sig
       Poll actual conversion/encoding/hash and charge allocations when supplied.
       Legacy caller-selected session APIs keep their existing behavior. *)
   val session
+    :  contract
+    -> initial_state:string
+    -> on_event:string
+    -> checkpoint:(unit -> unit)
+    -> ?allocate:(int -> unit)
+    -> unit
+    -> (t, Chatml_diagnostic.t) Result.t
+
+  (** Native event/state hook session. Require an explicit outer two-argument
+      task function and identical canonical state requirement/input/result types.
+      Standard contracts reject before initialization. Reuses session admission
+      encoding and allocation checkpoints, without runtime type inference. *)
+  val event_state_session
     :  contract
     -> initial_state:string
     -> on_event:string

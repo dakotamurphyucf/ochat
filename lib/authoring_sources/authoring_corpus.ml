@@ -3345,7 +3345,7 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "c3363bbc5a826d476c2938832dc97081aa7901b3ebb82b52b379da6063bd6f3b" ]
+                   [ "fb5e3e32539f4ad5ba51d980899d71ff2437d382e966564712ab98781275e19a" ]
                ; evidence =
                    [ "lib/chatml/chatml_compilation.ml"
                    ; "lib/chatml/chatml_execution.ml"

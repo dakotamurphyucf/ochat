@@ -14,6 +14,16 @@ module Limits : sig
     -> max_retained_roots:int
     -> max_work_steps:int
     -> t Or_error.t
+
+  (** Literal configured ceilings, not consumed accounting. Host composition
+      uses these to construct smaller remaining allowances without resetting
+      aggregate limits or raising any backend ceiling. *)
+  val locator_bytes : t -> int
+
+  val locator_components : t -> int
+  val anchors : t -> int
+  val retained_roots : t -> int
+  val work_steps : t -> int
 end
 
 module Error : sig
@@ -68,6 +78,13 @@ module Cursor : sig
 
   val owner : t -> Local.t
   val identity : t -> Local.Directory_identity.t
+
+  (** Constant-time identity of a canonical normalized lexical route within one
+      resolver bracket. Repeated resolution of that route returns an equal cursor;
+      distinct host labels are unequal even when directory identity is equal.
+      Foreign brackets are unequal. This ephemeral identity grants no authority
+      and is never persisted or compared across resolver lifetimes. *)
+  val equal_route : t -> t -> bool
 end
 
 module Accounting : sig

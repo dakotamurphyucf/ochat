@@ -11,6 +11,12 @@ module Limits = struct
     ; work_steps : int
     }
 
+  let locator_bytes t = t.locator_bytes
+  let locator_components t = t.locator_components
+  let anchors t = t.anchors
+  let retained_roots t = t.retained_roots
+  let work_steps t = t.work_steps
+
   let create
         ~max_locator_bytes
         ~max_locator_components
@@ -129,6 +135,10 @@ module Cursor = struct
 
   let owner t = t.owner
   let identity t = t.identity
+
+  (* The resolver admits exactly one cursor per normalized route in its cache.
+     Physical identity here deliberately denotes that affine route, not files. *)
+  let equal_route = phys_equal
 end
 
 module Accounting = struct

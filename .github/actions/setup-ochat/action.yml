@@ -5,7 +5,7 @@ inputs:
     description: Bypass project dependency and Dune caches for a clean audit
     default: "false"
   tier:
-    description: Semantic, normal or E2E compilation cache namespace
+    description: Semantic, normal, E2E or native Git compilation cache namespace
     required: true
 runs:
   using: composite

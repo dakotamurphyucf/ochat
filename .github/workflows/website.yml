@@ -102,10 +102,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tier: [normal, e2e]
-    runs-on: ubuntu-24.04
-    # Keep setup and evidence upload outside the normal suite's 60-minute budget.
-    timeout-minutes: ${{ matrix.tier == 'normal' && 90 || 60 }}
+        include:
+          - tier: normal
+            arch: x64
+            runner: ubuntu-24.04
+          - tier: e2e
+            arch: x64
+            runner: ubuntu-24.04
+          - tier: git-native
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    # Setup/evidence remain outside each bounded suite's operational deadline.
+    timeout-minutes: ${{ matrix.tier == 'e2e' && 60 || 90 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -119,12 +128,16 @@ jobs:
         with:
           cold: ${{ needs.changes.outputs.cold }}
           tier: ${{ matrix.tier }}
+      - name: Provision pinned Git candidate for real native qualification
+        if: matrix.tier != 'e2e'
+        timeout-minutes: 20
+        run: bash .github/scripts/provision-git-host.sh
       - name: Run framework tests
         run: opam exec -- node .github/scripts/framework-tests.mjs ${{ matrix.tier }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: framework-evidence-${{ matrix.tier }}
+          name: framework-evidence-${{ matrix.tier }}-${{ matrix.arch }}
           overwrite: true
           include-hidden-files: true
           retention-days: 90

@@ -79,7 +79,7 @@ process.exitCode = Number(process.env.FAKE_DUNE_EXIT);
     fs.writeFileSync(path.join(bin, "dune"), `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(fake)} "$@"\n`, { mode: 0o700 });
     child = spawn(process.execPath, [frameworkScript, tier], {
       cwd: directory,
-      env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH, FAKE_DUNE_EXIT: String(duneExit), DUNE_BUILD_DIR: "_build", GITHUB_STEP_SUMMARY: path.join(directory, "summary.md") },
+      env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH, FAKE_DUNE_EXIT: String(duneExit), DUNE_BUILD_DIR: "_build", GITHUB_STEP_SUMMARY: path.join(directory, "summary.md"), OCHAT_TEST_GIT_2_56_DIRECTORY: bin },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let output = "";
@@ -102,9 +102,15 @@ process.exitCode = Number(process.env.FAKE_DUNE_EXIT);
     assert.equal(report.result, duneExit === 0 ? "pass" : "fail");
     assert.equal(report.exitCode, duneExit);
     assert.equal(report.signal, null);
-    assert.equal(report.timeoutSeconds, tier === "e2e" ? 1500 : 3600);
+    assert.equal(report.architecture, process.arch);
+    assert.equal(report.timeoutSeconds, { e2e: 1500, normal: 3600, "git-native": 2700 }[tier]);
     assert.deepEqual(report.command, ["dune", ...invocation]);
-    assert.deepEqual(invocation, [tier === "e2e" ? "build" : "runtest", "--force", "-j", "2", ...(tier === "e2e" ? ["@agent-e2e-pr"] : []), "--display=verbose", `--trace-file=${path.join(directory, ".ci-evidence", `${tier}-dune-trace.json`)}`]);
+    const aliases = {
+      e2e: ["@agent-e2e-pr"],
+      normal: [],
+      "git-native": ["@test/chatml_git_host/runtest", "@test/bounded_process/runtest", "@test/private_storage/runtest"],
+    }[tier];
+    assert.deepEqual(invocation, [tier === "normal" ? "runtest" : "build", "--force", "-j", "2", ...aliases, "--display=verbose", `--trace-file=${path.join(directory, ".ci-evidence", `${tier}-dune-trace.json`)}`]);
     assert.equal(fs.readFileSync(path.join(directory, ".ci-evidence", `${tier}-dune.log`), "utf8"), "fake dune build log\n");
     const progress = output.split("\n").filter((line) => line.startsWith('{"frameworkProgress":')).map((line) => JSON.parse(line));
     if (tier === "e2e") {
@@ -121,7 +127,7 @@ process.exitCode = Number(process.env.FAKE_DUNE_EXIT);
   }
 }
 
-for (const [tier, duneExit] of [["e2e", 0], ["e2e", 7], ["normal", 0]]) {
+for (const [tier, duneExit] of [["e2e", 0], ["e2e", 7], ["normal", 0], ["git-native", 0], ["git-native", 7]]) {
   test(`actual framework wrapper preserves ${tier} exit ${duneExit} and closes owned monitor`, { timeout: 10_000 }, async () => {
     await runFrameworkFixture(tier, duneExit);
   });

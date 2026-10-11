@@ -126,3 +126,43 @@ let restore lock_source ~sources ~contract ~limits ~checkpoint =
     Project_build_restore.restore budget ~limits ~contract ~lock_source ~sources)
   |> Result.map ~f:(fun (assembly, accounting) -> { assembly; accounting })
 ;;
+
+let recompose t ~contract ~lock_id ~limits ~checkpoint =
+  Budget.run limits ~checkpoint ~f:(fun budget ->
+    let module Lock = Chatml_project.Lock in
+    let module Captured = Chatml_source in
+    let old_lock = lock_source t in
+    let fail problem = Error (Error.create problem) in
+    let open Result.Let_syntax in
+    Budget.checkpoint budget;
+    let%bind () =
+      match Lock.Entry.selection (Lock.entry_selection (lock t)) with
+      | Declared _ -> fail Invalid_entry_selection
+      | Captured -> Ok ()
+    in
+    let%bind sources =
+      List.fold_result
+        (Chatml_prepared_program.sources (prepared t))
+        ~init:[]
+        ~f:(fun sources source ->
+          let id = Captured.id source in
+          if Budget.compare_id budget id lock_id = 0
+          then fail Invalid_lock_identity
+          else if Budget.compare_id budget id (Captured.id old_lock) = 0
+          then Ok sources
+          else Ok (source :: sources))
+    in
+    let%bind { Project_build_restore.Reconstruction.receipt = _; root; catalogs; entry } =
+      Project_build_restore.reconstruct budget ~limits ~lock_source:old_lock ~sources
+    in
+    let%bind catalogs = Project_build_closure.select budget root ~catalogs in
+    Assembly.create
+      budget
+      root
+      ~catalogs
+      ~entry
+      ~contract
+      ~lock:(Generate lock_id)
+      ~limits)
+  |> Result.map ~f:(fun (assembly, accounting) -> { assembly; accounting })
+;;

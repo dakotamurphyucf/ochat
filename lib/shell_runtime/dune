@@ -52,6 +52,12 @@
   chatml
   chatml_moderator_runtime
   chatml_host_runtime
+  chatml_compilation
+  chatml_execution
+  chatml_linked_program
+  chatml_prepared_program
+  chatml_source
+  chatml_diagnostic
   ochat.shell_access
   ochat.session
   ochat.bin_prot_utils_eio

@@ -1,6 +1,25 @@
 open Core
 module Model = Project_build_model
 
+(** Exact capture validation and own-catalog reconstruction shared by restoration
+    and recomposition. No closure or contract admission has occurred yet. The
+    caller retains one Budget through reconstruction and final assembly. *)
+module Reconstruction : sig
+  type t =
+    { receipt : Chatml_project.Lock.t
+    ; root : Model.Catalog_input.t
+    ; catalogs : Model.Catalog_input.t list
+    ; entry : Model.Entry.t
+    }
+end
+
+val reconstruct
+  :  Project_build_budget.t
+  -> limits:Model.Limits.t
+  -> lock_source:Chatml_source.t
+  -> sources:Chatml_source.t list
+  -> (Reconstruction.t, Model.Error.t) Result.t
+
 (** Capture-only reconstruction of a selected project. [sources] excludes the
     separately supplied exact [lock_source]. Reject duplicate, missing, surplus
     or conflicting captures and reconcile every receipt fact through the existing
