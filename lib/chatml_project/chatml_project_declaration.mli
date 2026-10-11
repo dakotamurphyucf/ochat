@@ -237,6 +237,7 @@ type t =
   }
 
 val source : t -> Chatml_source.t
+val declared_at : t -> Declared_at.t
 val namespace : t -> string
 val source_dirs : t -> Source_dir.t list
 val exclusions : t -> (Source.Portable_path.t * Declared_at.t) list
