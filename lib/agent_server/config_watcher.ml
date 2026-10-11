@@ -27,12 +27,29 @@ module Failure = struct
   ;;
 end
 
+module Operation = struct
+  type t =
+    | Reload
+    | Update of Agent_protocol.Prompt_dependency_selection.Update_request.t
+end
+
+module Prepared_result = struct
+  type t =
+    | Reloaded of Config_diff.t
+    | Dependencies_updated of Agent_protocol.Prompt_dependency_selection.Update_result.t
+end
+
 type hooks =
-  { prepare : Config_diff.t -> Config.t -> (unit, Failure.t) Result.t
-  ; publish : Config_diff.t -> Config.t -> (unit, Failure.t) Result.t
-  ; commit : Config_diff.t -> Config.t -> unit
+  { prepare :
+      Operation.t
+      -> Config_diff.t
+      -> Config.t
+      -> checkpoint:(unit -> unit)
+      -> (Prepared_result.t, Failure.t) Result.t
+  ; publish : Operation.t -> Config_diff.t -> Config.t -> (unit, Failure.t) Result.t
+  ; commit : Operation.t -> Config_diff.t -> Config.t -> unit
   ; discard_prepared : unit -> Certainty.t
-  ; audit : Config_diff.t -> unit
+  ; audit : Operation.t -> Config_diff.t -> unit
   ; retire : unit -> unit
   }
 
@@ -86,7 +103,9 @@ let denied t = function
   | State.Available -> None
   | Busy ->
     Some
-      (Failure.Rejected [ diagnostic t "config.reload_busy" "a reload is in progress" ])
+      (Failure.Rejected
+         [ diagnostic t "config.reload_busy" "a configuration publication is in progress"
+         ])
   | Uncertain ->
     Some
       (Failure.Uncertain
@@ -214,8 +233,8 @@ let reject t pending failure =
   Error failure
 ;;
 
-let postcommit t diff =
-  match t.hooks.audit diff with
+let postcommit t operation diff =
+  match t.hooks.audit operation diff with
   | () -> Eio.Cancel.protect t.hooks.retire
   | exception exn ->
     let trace = Stdlib.Printexc.get_raw_backtrace () in
@@ -225,27 +244,76 @@ let postcommit t diff =
     Exn.raise_with_original_backtrace exn trace
 ;;
 
-let perform t pending previous =
+let unchanged_diff =
+  let ids : Config_diff.ids = { added = []; removed = []; changed = [] } in
+  Config_diff.
+    { server_changed = false
+    ; workspaces = ids
+    ; prompts = ids
+    ; permission_profiles = ids
+    ; manifest_grants = ids
+    }
+;;
+
+let candidate t previous = function
+  | Operation.Reload ->
+    let open Result.Let_syntax in
+    let observed = mtime t.env t.path in
+    let%map config = load_validated t in
+    ( { config; mtime = observed }
+    , Config_diff.between ~previous:previous.config ~current:config )
+  | Update _ -> Ok (previous, unchanged_diff)
+;;
+
+let validate_result t operation diff result =
+  let matches =
+    match operation, result with
+    | Operation.Reload, Prepared_result.Reloaded returned ->
+      Config_diff.equal diff returned
+    | Update request, Dependencies_updated returned ->
+      Agent_protocol.Prompt_dependency_selection.Update_result.matches_request
+        returned
+        request
+    | Reload, Dependencies_updated _ | Update _, Reloaded _ -> false
+  in
+  if matches
+  then Ok ()
+  else
+    Error
+      (Failure.Rejected
+         [ diagnostic
+             t
+             "config.operation_result_mismatch"
+             "prepared publication result does not match the admitted operation"
+         ])
+;;
+
+let poll checkpoint =
+  Eio.Fiber.check ();
+  checkpoint ();
+  Eio.Fiber.check ()
+;;
+
+let perform t pending previous operation ~checkpoint =
   let open Result.Let_syntax in
-  let observed = mtime t.env t.path in
-  let%bind candidate = load_validated t in
-  let diff = Config_diff.between ~previous:previous.config ~current:candidate in
-  let%bind () = t.hooks.prepare diff candidate in
+  let%bind next, diff = candidate t previous operation in
+  poll checkpoint;
+  let%bind prepared = t.hooks.prepare operation diff next.config ~checkpoint in
+  let%bind () = validate_result t operation diff prepared in
   (* Everything installed after durable acknowledgment is already allocated.
      Same-domain confinement and a nonyielding commit permit one protected
      pointer installation without invoking any callback under the mutex. *)
-  let next = { config = candidate; mtime = observed } in
-  let result = Ok diff in
-  Eio.Fiber.check ();
-  let%bind () = t.hooks.publish diff candidate in
+  let result = Ok prepared in
+  poll checkpoint;
+  let%bind () = t.hooks.publish operation diff next.config in
   pending.acknowledged <- true;
   Eio.Fiber.check ();
   Eio.Cancel.protect (fun () ->
-    t.hooks.commit diff candidate;
+    t.hooks.commit operation diff next.config;
     t.installed <- next;
     pending.committed <- true;
     t.last_error <- None);
-  postcommit t diff;
+  postcommit t operation diff;
   result
 ;;
 
@@ -280,7 +348,7 @@ let record_exception t pending =
     <- Some [ diagnostic t "config.reload_exception" "reload raised before installation" ])
 ;;
 
-let run_worker t pending previous =
+let run_worker t pending previous operation ~checkpoint =
   pending.started <- true;
   Eio.Cancel.sub (fun context ->
     pending.context <- Some context;
@@ -290,7 +358,7 @@ let run_worker t pending previous =
          match
            if pending.cancel_requested then Eio.Cancel.cancel context Exit;
            Eio.Fiber.check ();
-           match perform t pending previous with
+           match perform t pending previous operation ~checkpoint with
            | Ok _ as result -> result
            | Error failure -> reject t pending failure
          with
@@ -303,7 +371,7 @@ let run_worker t pending previous =
            Exn.raise_with_original_backtrace exn trace))
 ;;
 
-let reload t =
+let operate t operation ~checkpoint =
   check_domain t;
   Eio.Fiber.check ();
   let completed, resolve_completed = Eio.Promise.create () in
@@ -338,7 +406,7 @@ let reload t =
          match
            let result =
              Agent_session.Runtime_activity.run t.activity (fun () ->
-               run_worker t pending previous)
+               run_worker t pending previous operation ~checkpoint)
            in
            (* A resolved promise can deliver after cancellation without checking
               its caller. The worker has already joined all hook cleanup. *)
@@ -362,6 +430,21 @@ let reload t =
                         "configuration installed; result delivery failed"
                     ];
            Exn.raise_with_original_backtrace exn trace)
+;;
+
+let reload t =
+  match operate t Operation.Reload ~checkpoint:Eio.Fiber.check with
+  | Error _ as error -> error
+  | Ok (Prepared_result.Reloaded diff) -> Ok diff
+  | Ok (Dependencies_updated _) ->
+    invalid_arg "Config_watcher: validated reload result changed kind"
+;;
+
+let update_dependencies t request ~checkpoint =
+  match operate t (Operation.Update request) ~checkpoint with
+  | Error _ as error -> error
+  | Ok (Prepared_result.Dependencies_updated result) -> Ok result
+  | Ok (Reloaded _) -> invalid_arg "Config_watcher: validated update result changed kind"
 ;;
 
 let changed t =

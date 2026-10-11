@@ -844,11 +844,13 @@ let%test_unit "configuration polling publishes edits without an explicit reload"
           ~path
           ~initial
           ~hooks:
-            { prepare = (fun _ _ -> Ok ())
-            ; publish = (fun _ _ -> Ok ())
-            ; commit = (fun _ _ -> incr commits)
+            { prepare =
+                (fun _ diff _ ~checkpoint:_ ->
+                  Ok (Agent_server.Config_watcher.Prepared_result.Reloaded diff))
+            ; publish = (fun _ _ _ -> Ok ())
+            ; commit = (fun _ _ _ -> incr commits)
             ; discard_prepared = (fun () -> Rejected)
-            ; audit = (fun _ -> ())
+            ; audit = (fun _ _ -> ())
             ; retire = (fun () -> ())
             }
       in
@@ -1220,13 +1222,54 @@ let%expect_test "proxy actor policy cannot replace authenticated authority" =
 let%test_module "fallible configuration publication" =
   (module struct
     module W = Agent_server.Config_watcher
+    module Selection = Agent_protocol.Prompt_dependency_selection
+
+    let protocol_value = function
+      | Ok value -> value
+      | Error error -> raise_s [%sexp (error : Agent_protocol.Error.t)]
+    ;;
+
+    let request () =
+      Selection.Update_request.create
+        ~definitions:[ Agent_server.Catalog_identity.prompt_definition "coding-agent" ]
+        ~expected_generation:(Selection.Generation.of_int 3 |> protocol_value)
+        ~idempotency_key:
+          (Agent_protocol.Idempotency_key.of_string "dependency-update" |> protocol_value)
+      |> protocol_value
+    ;;
+
+    let result request =
+      let previous_generation = Selection.Update_request.expected_generation request in
+      Selection.Update_result.create
+        ~previous_generation
+        ~generation:
+          (Selection.Generation.of_int
+             (Selection.Generation.to_int previous_generation + 1)
+           |> protocol_value)
+        ~targets:
+          (List.map
+             (Selection.Update_request.definitions request)
+             ~f:(fun definition_id ->
+               Selection.Update_result.Target.
+                 { definition_id
+                 ; outcome = Unavailable { reason = "fixture unavailable" }
+                 }))
+      |> protocol_value
+    ;;
+
+    let prepared operation diff =
+      Ok
+        (match operation with
+         | W.Operation.Reload -> W.Prepared_result.Reloaded diff
+         | Update request -> Dependencies_updated (result request))
+    ;;
 
     let hooks : W.hooks =
-      { prepare = (fun _ _ -> Ok ())
-      ; publish = (fun _ _ -> Ok ())
-      ; commit = (fun _ _ -> ())
+      { prepare = (fun operation diff _ ~checkpoint:_ -> prepared operation diff)
+      ; publish = (fun _ _ _ -> Ok ())
+      ; commit = (fun _ _ _ -> ())
       ; discard_prepared = (fun () -> Rejected)
-      ; audit = (fun _ -> ())
+      ; audit = (fun _ _ -> ())
       ; retire = (fun () -> ())
       }
     ;;
@@ -1282,15 +1325,15 @@ let%test_module "fallible configuration publication" =
             ~hooks:
               { hooks with
                 prepare =
-                  (fun _ _ ->
+                  (fun operation diff _ ~checkpoint:_ ->
                     record "prepare";
-                    Ok ())
+                    prepared operation diff)
               ; publish =
-                  (fun _ _ ->
+                  (fun _ _ _ ->
                     record "durable acknowledgment";
                     Ok ())
-              ; commit = (fun _ _ -> record "synchronous commit")
-              ; audit = (fun _ -> record "audit")
+              ; commit = (fun _ _ _ -> record "synchronous commit")
+              ; audit = (fun _ _ -> record "audit")
               ; retire = (fun () -> record "retire")
               }
         in
@@ -1331,7 +1374,7 @@ let%test_module "fallible configuration publication" =
               ~hooks:
                 { hooks with
                   publish =
-                    (fun _ _ ->
+                    (fun _ _ _ ->
                       incr publications;
                       Error
                         (match certainty with
@@ -1378,22 +1421,22 @@ let%test_module "fallible configuration publication" =
               ~initial
               ~hooks:
                 { prepare =
-                    (fun _ _ ->
+                    (fun operation diff _ ~checkpoint:_ ->
                       match phase with
                       | Prepare -> fail ()
-                      | _ -> Ok ())
+                      | _ -> prepared operation diff)
                 ; publish =
-                    (fun _ _ ->
+                    (fun _ _ _ ->
                       match phase with
                       | Publish -> fail ()
                       | _ -> Ok ())
                 ; commit =
-                    (fun _ _ ->
+                    (fun _ _ _ ->
                       match phase with
                       | Commit -> fail ()
                       | _ -> ())
                 ; audit =
-                    (fun _ ->
+                    (fun _ _ ->
                       match phase with
                       | Audit -> fail ()
                       | _ -> ())
@@ -1448,14 +1491,14 @@ let%test_module "fallible configuration publication" =
             ~hooks:
               { hooks with
                 prepare =
-                  (fun _ _ ->
+                  (fun operation diff _ ~checkpoint:_ ->
                     incr calls;
                     Eio.Promise.resolve enter ();
                     Fun.protect
                       ~finally:(fun () -> cleaned := true)
                       (fun () ->
                          Eio.Promise.await leave;
-                         Ok ()))
+                         prepared operation diff))
               }
         in
         let reload = Eio.Fiber.fork_promise ~sw (fun () -> W.reload watcher) in
@@ -1476,14 +1519,17 @@ let%test_module "fallible configuration publication" =
     ;;
 
     let%test_unit
-        "cancel before publish rejects; cancel after acknowledgment is uncertain"
+        "caller cancellation preserves exact cause and complete publication correlations"
       =
       List.iter [ false; true ] ~f:(fun cancel_after_ack ->
         with_file (fun env sw path initial ->
           let context = ref None in
-          let cancel () = Eio.Cancel.cancel (Option.value_exn !context) Exit in
+          let sentinel = Failure "original caller cancellation" in
+          let cancel () = Eio.Cancel.cancel (Option.value_exn !context) sentinel in
           let publications = ref 0 in
           let commits = ref 0 in
+          let discards = ref 0 in
+          let retirements = ref 0 in
           let watcher =
             W.create
               ~sw
@@ -1493,15 +1539,20 @@ let%test_module "fallible configuration publication" =
               ~hooks:
                 { hooks with
                   prepare =
-                    (fun _ _ ->
+                    (fun operation diff _ ~checkpoint:_ ->
                       if not cancel_after_ack then cancel ();
-                      Ok ())
+                      prepared operation diff)
                 ; publish =
-                    (fun _ _ ->
+                    (fun _ _ _ ->
                       incr publications;
                       cancel ();
                       Ok ())
-                ; commit = (fun _ _ -> incr commits)
+                ; commit = (fun _ _ _ -> incr commits)
+                ; discard_prepared =
+                    (fun () ->
+                      incr discards;
+                      Rejected)
+                ; retire = (fun () -> incr retirements)
                 }
           in
           (match
@@ -1510,13 +1561,28 @@ let%test_module "fallible configuration publication" =
                W.reload watcher)
            with
            | _ -> assert false
-           | exception Eio.Cancel.Cancelled _ -> ());
-          [%test_eq: int] (if cancel_after_ack then 1 else 0) !publications;
-          [%test_eq: int] 0 !commits;
-          assert_description watcher "Coding agent";
-          assert_state
-            (if cancel_after_ack then Uncertain else Available)
-            (fst (W.status watcher));
+           | exception Eio.Cancel.Cancelled reason -> assert (phys_equal reason sentinel));
+          (* The worker may finish before its caller forwards cancellation. These
+             are the complete legal outcomes, including acknowledged-but-uninstalled
+             uncertainty and already-installed result-delivery cancellation. *)
+          if cancel_after_ack then [%test_eq: int] 1 !publications;
+          (match !publications, !commits with
+           | 0, 0 ->
+             assert_description watcher "Coding agent";
+             assert_state Available (fst (W.status watcher));
+             [%test_eq: int] !discards 1;
+             [%test_eq: int] !retirements 0
+           | 1, 0 ->
+             assert_description watcher "Coding agent";
+             assert_state Uncertain (fst (W.status watcher));
+             [%test_eq: int] !discards 1;
+             [%test_eq: int] !retirements 0
+           | 1, 1 ->
+             assert_description watcher "Next configuration";
+             assert_state Available (fst (W.status watcher));
+             [%test_eq: int] !discards 0;
+             [%test_eq: int] !retirements 1
+           | _ -> assert false);
           W.close_and_wait watcher))
     ;;
 
@@ -1535,7 +1601,7 @@ let%test_module "fallible configuration publication" =
             ~initial
             ~hooks:
               { hooks with
-                commit = (fun _ _ -> incr commits)
+                commit = (fun _ _ _ -> incr commits)
               ; retire =
                   (fun () ->
                     incr retirements;
@@ -1565,6 +1631,281 @@ let%test_module "fallible configuration publication" =
         assert_state Available (fst (W.status watcher));
         let _, diagnostic = W.status watcher in
         assert (Option.is_some diagnostic);
+        W.close_and_wait watcher)
+    ;;
+
+    let%expect_test "dependency update retains installed config and pending file edit" =
+      with_file (fun env sw path initial ->
+        let operation_names = ref [] in
+        let watcher =
+          W.create
+            ~sw
+            ~env
+            ~path
+            ~initial
+            ~hooks:
+              { hooks with
+                prepare =
+                  (fun operation diff config ~checkpoint ->
+                    checkpoint ();
+                    (match operation with
+                     | Reload -> ()
+                     | Update _ ->
+                       assert (phys_equal config initial);
+                       assert (Agent_server.Config_diff.is_empty diff));
+                    prepared operation diff)
+              ; audit =
+                  (fun operation _ ->
+                    operation_names
+                    := (match operation with
+                        | Reload -> "reload"
+                        | Update _ -> "update")
+                       :: !operation_names)
+              }
+        in
+        let request = request () in
+        let file = Eio.Path.(Eio.Stdenv.fs env / path) in
+        let edited_contents = Eio.Path.load file in
+        Eio.Path.unlink file;
+        let updated = W.update_dependencies watcher request ~checkpoint:Eio.Fiber.check in
+        (match updated with
+         | Ok updated -> assert (Selection.Update_result.matches_request updated request)
+         | Error failure -> raise_s [%sexp (failure : W.Failure.t)]);
+        assert (phys_equal (W.current watcher) initial);
+        print_s [%sexp (description watcher : string option)];
+        Eio.Path.save ~create:(`Exclusive 0o600) file edited_contents;
+        assert (Result.is_ok (W.reload watcher));
+        print_s [%sexp (description watcher : string option)];
+        print_s [%sexp (List.rev !operation_names : string list)];
+        W.close_and_wait watcher);
+      [%expect
+        {| ("Coding agent")
+        ("Next configuration")
+        (update reload) |}]
+    ;;
+
+    let%test_unit "operation response affinity is checked before any writer" =
+      List.iter [ false; true ] ~f:(fun update ->
+        with_file (fun env sw path initial ->
+          let publications = ref 0 in
+          let discards = ref 0 in
+          let watcher =
+            W.create
+              ~sw
+              ~env
+              ~path
+              ~initial
+              ~hooks:
+                { hooks with
+                  prepare =
+                    (fun operation diff _ ~checkpoint:_ ->
+                      Ok
+                        (match operation with
+                         | Reload -> Dependencies_updated (result (request ()))
+                         | Update _ -> Reloaded diff))
+                ; publish =
+                    (fun _ _ _ ->
+                      incr publications;
+                      Ok ())
+                ; discard_prepared =
+                    (fun () ->
+                      incr discards;
+                      Rejected)
+                }
+          in
+          let denied =
+            if update
+            then
+              W.update_dependencies watcher (request ()) ~checkpoint:Eio.Fiber.check
+              |> Result.map ~f:(fun _ -> ())
+            else W.reload watcher |> Result.map ~f:(fun _ -> ())
+          in
+          (match denied with
+           | Error (Rejected [ diagnostic ]) ->
+             [%test_eq: string] "config.operation_result_mismatch" diagnostic.code
+           | Ok () | Error (Rejected _ | Uncertain _) -> assert false);
+          [%test_eq: int] 0 !publications;
+          [%test_eq: int] 1 !discards;
+          assert_state Available (fst (W.status watcher));
+          assert (phys_equal (W.current watcher) initial);
+          W.close_and_wait watcher));
+      with_file (fun env sw path initial ->
+        let original_request = request () in
+        let foreign_request =
+          Selection.Update_request.create
+            ~definitions:(Selection.Update_request.definitions original_request)
+            ~expected_generation:(Selection.Generation.of_int 9 |> protocol_value)
+            ~idempotency_key:(Selection.Update_request.idempotency_key original_request)
+          |> protocol_value
+        in
+        let publications = ref 0 in
+        let watcher =
+          W.create
+            ~sw
+            ~env
+            ~path
+            ~initial
+            ~hooks:
+              { hooks with
+                prepare =
+                  (fun _ _ _ ~checkpoint:_ ->
+                    Ok (Dependencies_updated (result foreign_request)))
+              ; publish =
+                  (fun _ _ _ ->
+                    incr publications;
+                    Ok ())
+              }
+        in
+        assert (
+          Result.is_error
+            (W.update_dependencies watcher original_request ~checkpoint:Eio.Fiber.check));
+        [%test_eq: int] 0 !publications;
+        assert_state Available (fst (W.status watcher));
+        W.close_and_wait watcher)
+    ;;
+
+    let%test_unit "borrowed update checkpoint preserves exceptions only before writer" =
+      List.iter [ None; Some 1; Some 2; Some 3 ] ~f:(fun stop_at ->
+        with_file (fun env sw path initial ->
+          let sentinel = Failure "original actor checkpoint" in
+          let polls = ref 0 in
+          let publications = ref 0 in
+          let commits = ref 0 in
+          let discards = ref 0 in
+          let checkpoint () =
+            incr polls;
+            (* Any arbitrary callback after writer entry is a contract violation. *)
+            [%test_eq: int] 0 !publications;
+            if Option.equal Int.equal stop_at (Some !polls) then raise sentinel
+          in
+          let watcher =
+            W.create
+              ~sw
+              ~env
+              ~path
+              ~initial
+              ~hooks:
+                { hooks with
+                  prepare =
+                    (fun operation diff _ ~checkpoint:borrowed ->
+                      assert (phys_equal borrowed checkpoint);
+                      borrowed ();
+                      prepared operation diff)
+                ; publish =
+                    (fun _ _ _ ->
+                      incr publications;
+                      Ok ())
+                ; commit = (fun _ _ _ -> incr commits)
+                ; discard_prepared =
+                    (fun () ->
+                      incr discards;
+                      Rejected)
+                }
+          in
+          (match stop_at with
+           | None ->
+             assert (Result.is_ok (W.update_dependencies watcher (request ()) ~checkpoint));
+             [%test_eq: int] 3 !polls;
+             [%test_eq: int] 1 !publications;
+             [%test_eq: int] 1 !commits;
+             [%test_eq: int] 0 !discards
+           | Some stop ->
+             (match W.update_dependencies watcher (request ()) ~checkpoint with
+              | _ -> assert false
+              | exception exn -> assert (phys_equal sentinel exn));
+             [%test_eq: int] stop !polls;
+             [%test_eq: int] 0 !publications;
+             [%test_eq: int] 0 !commits;
+             [%test_eq: int] 1 !discards);
+          assert_state Available (fst (W.status watcher));
+          W.close_and_wait watcher))
+    ;;
+
+    let%test_unit "update audit exception preserves original failure after commit" =
+      with_file (fun env sw path initial ->
+        let sentinel = Failure "original update audit" in
+        let commits = ref 0 in
+        let retirements = ref 0 in
+        let discards = ref 0 in
+        let watcher =
+          W.create
+            ~sw
+            ~env
+            ~path
+            ~initial
+            ~hooks:
+              { hooks with
+                commit = (fun _ _ _ -> incr commits)
+              ; audit = (fun _ _ -> raise sentinel)
+              ; retire = (fun () -> incr retirements)
+              ; discard_prepared =
+                  (fun () ->
+                    incr discards;
+                    Rejected)
+              }
+        in
+        (match W.update_dependencies watcher (request ()) ~checkpoint:Eio.Fiber.check with
+         | _ -> assert false
+         | exception exn -> assert (phys_equal sentinel exn));
+        [%test_eq: int] 1 !commits;
+        [%test_eq: int] 1 !retirements;
+        [%test_eq: int] 0 !discards;
+        assert (phys_equal (W.current watcher) initial);
+        assert_state Available (fst (W.status watcher));
+        assert (Option.is_some (snd (W.status watcher)));
+        W.close_and_wait watcher)
+    ;;
+
+    let%test_unit "update and reload share Busy and uncertain admission" =
+      with_file (fun env sw path initial ->
+        let entered, enter = Eio.Promise.create () in
+        let leave, release = Eio.Promise.create () in
+        let diagnostic =
+          Agent_server.Config.Diagnostic.
+            { code = "test.uncertain"
+            ; config_path = "$"
+            ; source_file = path
+            ; message = "writer acknowledgment unavailable"
+            ; remediation = "reconcile history"
+            }
+        in
+        let watcher =
+          W.create
+            ~sw
+            ~env
+            ~path
+            ~initial
+            ~hooks:
+              { hooks with
+                prepare =
+                  (fun operation diff _ ~checkpoint:_ ->
+                    Eio.Promise.resolve enter ();
+                    Eio.Promise.await leave;
+                    prepared operation diff)
+              ; publish = (fun _ _ _ -> Error (Uncertain [ diagnostic ]))
+              }
+        in
+        let update =
+          Eio.Fiber.fork_promise ~sw (fun () ->
+            W.update_dependencies watcher (request ()) ~checkpoint:Eio.Fiber.check)
+        in
+        Eio.Promise.await entered;
+        assert_state Busy (fst (W.status watcher));
+        assert (Result.is_error (W.reload watcher));
+        assert (
+          Result.is_error
+            (W.update_dependencies watcher (request ()) ~checkpoint:Eio.Fiber.check));
+        Eio.Promise.resolve release ();
+        (match Eio.Promise.await update with
+         | Ok (Error (Uncertain _)) -> ()
+         | Ok _ -> assert false
+         | Error exn -> raise exn);
+        assert_state Uncertain (fst (W.status watcher));
+        assert (phys_equal (W.current watcher) initial);
+        assert (Result.is_error (W.reload watcher));
+        assert (
+          Result.is_error
+            (W.update_dependencies watcher (request ()) ~checkpoint:Eio.Fiber.check));
         W.close_and_wait watcher)
     ;;
 
