@@ -138,7 +138,6 @@ module SpanTbl = Hashtbl.Make (struct
 type infer_state =
   { mutable current_id : int
   ; mutable current_lvl : int
-  ; mutable id_checkpoints : int list
   ; mutable mu_id : int (* NEW: never reset *)
   ; span_types : typ SpanTbl.t
   ; checkpoint : unit -> unit
@@ -148,7 +147,6 @@ type infer_state =
 let create_state ?(checkpoint = fun () -> ()) () : infer_state =
   { current_id = 0
   ; current_lvl = 0
-  ; id_checkpoints = []
   ; mu_id = 0
   ; span_types = SpanTbl.create ()
   ; checkpoint
@@ -164,18 +162,15 @@ let checkpoint state =
     state.checkpoint ())
 ;;
 
-let enter_level (state : infer_state) =
-  state.id_checkpoints <- state.current_id :: state.id_checkpoints;
-  state.current_lvl <- state.current_lvl + 1
-;;
+(* Levels govern generalization, not variable identity. An inferred variable can
+   escape an inner level through an outer parameter or captured mutable value.
+   Reusing its name would conflate distinct binders when schemes instantiate. *)
+let enter_level (state : infer_state) = state.current_lvl <- state.current_lvl + 1
 
 let exit_level (state : infer_state) =
-  match state.id_checkpoints with
-  | previous_id :: tl ->
-    state.current_id <- previous_id;
-    state.current_lvl <- state.current_lvl - 1;
-    state.id_checkpoints <- tl
-  | [] -> failwith "Typechecker level stack underflow"
+  if state.current_lvl <= 0
+  then failwith "Typechecker level stack underflow"
+  else state.current_lvl <- state.current_lvl - 1
 ;;
 
 let gensym (state : infer_state) : string =
