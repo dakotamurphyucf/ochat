@@ -3,6 +3,9 @@
  (public_name ochat.chatml)
  (modules
   chatml_lang
+  chatml_task_array_mode
+  chatml_task_array
+  chatml_table_snapshot
   chatml_shape_kind
   chatml_eval
   chatml_parse

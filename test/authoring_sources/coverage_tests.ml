@@ -37,10 +37,10 @@ let%expect_test "reviewed module coverage includes every export on each exact su
               (name : string), (surface_id : string), (List.length coverage.mapped : int)]));
   [%expect
     {|
-    (Task one_off_v1 6)
-    (Task tool_v1 6)
-    (Task moderator_v1 6)
-    (Task delegated_moderator_v1 6)
+    (Task one_off_v1 8)
+    (Task tool_v1 8)
+    (Task moderator_v1 8)
+    (Task delegated_moderator_v1 8)
     (String one_off_v1 15)
     (String tool_v1 15)
     (String moderator_v1 15)
@@ -61,10 +61,10 @@ let%expect_test "reviewed module coverage includes every export on each exact su
     (Json tool_v1 18)
     (Json moderator_v1 18)
     (Json delegated_moderator_v1 18)
-    (Hashtbl one_off_v1 6)
-    (Hashtbl tool_v1 6)
-    (Hashtbl moderator_v1 6)
-    (Hashtbl delegated_moderator_v1 6)
+    (Hashtbl one_off_v1 7)
+    (Hashtbl tool_v1 7)
+    (Hashtbl moderator_v1 7)
+    (Hashtbl delegated_moderator_v1 7)
   |}]
 ;;
 
@@ -105,10 +105,10 @@ let%expect_test "shared core inventory is fully mapped with exact print availabi
       print_s [%sexp (surface : string), (List.length selected : int)]);
   [%expect
     {|
-    (one_off_v1 92)
-    (tool_v1 92)
-    (moderator_v1 93)
-    (delegated_moderator_v1 92)
+    (one_off_v1 95)
+    (tool_v1 95)
+    (moderator_v1 96)
+    (delegated_moderator_v1 95)
     |}]
 ;;
 

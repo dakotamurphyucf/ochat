@@ -236,6 +236,13 @@ let rec value_to_string (v : value) : string =
       | TPure v -> "pure(" ^ value_to_string v ^ ")"
       | TBind (t, v) -> "bind(" ^ print_task t ^ ", " ^ value_to_string v ^ ")"
       | TMap (t, v) -> "map(" ^ print_task t ^ ", " ^ value_to_string v ^ ")"
+      | TArray (mode, input, fn) ->
+        Chatml_task_array_mode.name mode
+        ^ "("
+        ^ value_to_string (VArray input)
+        ^ ", "
+        ^ value_to_string fn
+        ^ ")"
       | TFail s -> "fail(" ^ s ^ ")"
       | TCatch (t, v) -> "catch(" ^ print_task t ^ ", " ^ value_to_string v ^ ")"
       | TPerform eff -> "perform(" ^ eff_to_string eff ^ ")"
@@ -346,6 +353,13 @@ let render_debug ?(max_bytes = 4096) ?(max_nodes = 256) ?(max_depth = 16) render
         add ", ";
         child fn;
         add ")"
+      | VTask (TArray (mode, input, fn)) ->
+        add (Chatml_task_array_mode.name mode);
+        add "(";
+        child (VArray input);
+        add ", ";
+        child fn;
+        add ")"
       | VTask (TCatch (nested, fn)) ->
         add "catch(";
         task nested;
@@ -449,6 +463,15 @@ let rec value_to_pretty_string_with_depth ?(depth = 0) (v : value) : string =
     | TMap (task, fn) ->
       "map(\n"
       ^ indent_block (depth + 1) (compact_task task)
+      ^ ",\n"
+      ^ indent_block (depth + 1) (value_to_string fn)
+      ^ "\n"
+      ^ indent depth
+      ^ ")"
+    | TArray (mode, input, fn) ->
+      Chatml_task_array_mode.name mode
+      ^ "(\n"
+      ^ indent_block (depth + 1) (compact_nested (VArray input))
       ^ ",\n"
       ^ indent_block (depth + 1) (value_to_string fn)
       ^ "\n"
@@ -1814,6 +1837,16 @@ let task_module : builtin_module =
           "map"
           (TFun ([ task_ty (TVar "a"); TFun ([ TVar "a" ], TVar "b") ], task_ty (TVar "b")))
           (fun t f -> VTask (TMap (expect_task "Task.map" t, f)))
+      ; make_binary_builtin
+          "map_array"
+          (TFun
+             ( [ TArray (TVar "a"); TFun ([ TVar "a" ], task_ty (TVar "b")) ]
+             , task_ty (TArray (TVar "b")) ))
+          (fun input f -> VTask (TArray (Map, expect_array "Task.map_array" input, f)))
+      ; make_binary_builtin
+          "iter_array"
+          (TFun ([ TArray (TVar "a"); TFun ([ TVar "a" ], task_ty TUnit) ], task_ty TUnit))
+          (fun input f -> VTask (TArray (Iter, expect_array "Task.iter_array" input, f)))
       ; make_unary_builtin
           "fail"
           (TFun ([ TString ], task_ty (TVar "a")))
@@ -1908,6 +1941,10 @@ let modules : builtin_module list =
             "create"
             (TFun ([], tbl_ty "a"))
             (fun () -> VRef (ref (VArray [||])))
+        ; make_unary_builtin
+            "to_array"
+            (TFun ([ tbl_ty "a" ], TArray (entry_ty "a")))
+            (fun table -> VArray (Chatml_table_snapshot.to_array table))
         ; make_ternary_builtin
             "set"
             (TFun ([ tbl_ty "a"; TString; TVar "a" ], TUnit))

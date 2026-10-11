@@ -26,6 +26,8 @@ let%expect_test
                [ "lib/chatml/chatml_host_runtime.ml"
                ; "lib/chatml/chatml_compilation.ml"
                ; "lib/chatml/chatml_execution.ml"
+               ; "lib/chatml/chatml_task_array.ml"
+               ; "lib/chatml/chatml_task_array_mode.ml"
                ]
                path
                ~equal:String.equal)))

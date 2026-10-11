@@ -277,7 +277,7 @@ module Coverage : sig
       this list alone is not the full public-feature coverage manifest. *)
   val entrypoint_mappings : mapping list
 
-  (** Exact reviewed Task module and pure/bind/map/fail/catch contracts on all
+  (** Exact reviewed Task composition and sequential traversal contracts on all
       four extensibility surfaces, including checked recovery/error boundaries. *)
   val task_mappings : mapping list
 
@@ -299,7 +299,7 @@ module Coverage : sig
       including duplicates, payload aliasing and numeric export boundaries. *)
   val json_mappings : mapping list
 
-  (** Reviewed string-keyed Hashtbl module and its five exports on each surface. *)
+  (** Reviewed string-keyed Hashtbl module and its exports on each surface. *)
   val hashtbl_mappings : mapping list
 
   (** All ten shared globals, plus print only on the ordinary moderator surface. *)

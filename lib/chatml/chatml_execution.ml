@@ -193,6 +193,9 @@ let make_control ~env budget =
          | TBind (task, fn) | TMap (task, fn) | TCatch (task, fn) ->
            visit (depth + 1) (VTask task);
            visit (depth + 1) fn
+         | TArray (_, input, fn) ->
+           visit (depth + 1) (VArray input);
+           visit (depth + 1) fn
          | TFail message -> add (String.length message)
          | TPerform eff | TSpawn eff ->
            add (String.length eff.op);
@@ -388,6 +391,12 @@ let make_control ~env budget =
       (match !cell with
        | VArray values -> array_size (Array.length values)
        | _ -> ())
+    | "Hashtbl.to_array", [ VRef { contents = VArray entries } ] ->
+      let count = Array.length entries in
+      array_size count;
+      if count > Atomic.get allocation_remaining / 64
+      then exhaust budget allocation_failure;
+      allocate (64 * count)
     | _ -> allocate 16
   in
   let calls = Atomic.make limits.max_calls in
@@ -416,6 +425,7 @@ let make_control ~env budget =
   in
   { Chatml.Chatml_lang.checkpoint
   ; allocate
+  ; allocate_array = array_size
   ; before_builtin
   ; check_value
   ; before_json_import
@@ -515,6 +525,7 @@ let with_scope
           Chatml.Chatml_lang.
             { checkpoint = (fun () -> each (fun c -> c.checkpoint ()))
             ; allocate = (fun bytes -> each (fun c -> c.allocate bytes))
+            ; allocate_array = (fun count -> each (fun c -> c.allocate_array count))
             ; check_value = (fun value -> each (fun c -> c.check_value value))
             ; before_json_import =
                 (fun value -> each (fun c -> c.before_json_import value))
@@ -574,6 +585,7 @@ let create_runner ~env ~policy () =
   let control : Chatml.Chatml_lang.execution_control =
     { checkpoint = (fun () -> apply (fun c -> c.checkpoint ()))
     ; allocate = (fun bytes -> apply (fun c -> c.allocate bytes))
+    ; allocate_array = (fun count -> apply (fun c -> c.allocate_array count))
     ; check_value = (fun value -> apply (fun c -> c.check_value value))
     ; before_json_import = (fun value -> apply (fun c -> c.before_json_import value))
     ; before_json_export = (fun value -> apply (fun c -> c.before_json_export value))
