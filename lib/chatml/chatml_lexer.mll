@@ -83,6 +83,9 @@ rule token = parse
 | "rec"                    { REC }
 | "and"                    { AND }
 | "type"                   { TYPE }
+| "sig"                    { SIG }
+| "val"                    { VAL }
+| "where"                  { WHERE }
 
     (* Operators / punctuation *)
 | "->"                     { ARROW }
@@ -115,6 +118,7 @@ rule token = parse
 | "}"                      { RBRACE }
 | "["                      { LBRACKET }
 | "]"                      { RBRACKET }
+| ";;"                     { SEMISEMI }
 | ";"                      { SEMI }
 | ","                      { COMMA }
 | "."                      { DOT }

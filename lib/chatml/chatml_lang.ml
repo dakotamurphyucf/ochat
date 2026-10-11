@@ -173,7 +173,11 @@ type stmt =
   | SLet of string * expr node
   | SLetRec of (string * expr node) list
   | SType of Chatml_type_expr.Declaration.t
-  | SModule of string * stmt node list
+  | SModule of
+      { name : string
+      ; signature : Chatml_module_signature.t node option
+      ; body : stmt node list
+      }
   | SOpen of string
   | SExpr of expr node
 [@@deriving sexp]
@@ -181,7 +185,11 @@ type stmt =
 type resolved_stmt =
   | RSLet of string * resolved_expr node
   | RSLetRec of (string * resolved_expr node) list
-  | RSModule of string * resolved_stmt node list
+  | RSModule of
+      { name : string
+      ; visibility : Chatml_module_visibility.t option
+      ; body : resolved_stmt node list
+      }
   | RSOpen of string
   | RSExpr of resolved_expr node
 [@@deriving sexp]

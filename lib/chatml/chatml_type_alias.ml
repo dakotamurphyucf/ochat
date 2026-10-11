@@ -1,6 +1,7 @@
 open Core
 open Chatml_inferred_type
 module Syntax = Chatml.Chatml_type_expr
+module Equivalence = Chatml_alias_equivalence
 
 module Error = struct
   type t =
@@ -10,13 +11,13 @@ module Error = struct
 end
 
 module Alias = struct
-  type t =
+  type 'scope t =
     | Closed of typ
     | Parameterized of
         { name : string
         ; parameters : string list
         ; body : Syntax.t
-        ; environment : t String.Map.t
+        ; environment : 'scope
         }
 
   let arity = function
@@ -25,9 +26,122 @@ module Alias = struct
   ;;
 end
 
-type t = Alias.t String.Map.t
+type t =
+  { aliases : t Alias.t String.Map.t
+  ; modules : t String.Map.t
+  ; opened_aliases : t Alias.t String.Map.t
+  ; opened_modules : t String.Map.t
+  ; outer : t option
+  }
 
-let empty = String.Map.empty
+let empty =
+  { aliases = String.Map.empty
+  ; modules = String.Map.empty
+  ; opened_aliases = String.Map.empty
+  ; opened_modules = String.Map.empty
+  ; outer = None
+  }
+;;
+
+let enter_scope t = { empty with outer = Some t }
+
+let add_module t ~name ~exports =
+  { t with modules = Map.set t.modules ~key:name ~data:exports }
+;;
+
+let declared_arity t ~name = Option.map (Map.find t.aliases name) ~f:Alias.arity
+let declared_module t ~name = Map.find t.modules name
+
+let exports t ~type_names ~module_names ~checkpoint =
+  let select bindings names =
+    List.fold_result names ~init:String.Map.empty ~f:(fun selected name ->
+      checkpoint ();
+      match Map.find bindings name with
+      | None -> Error (Printf.sprintf "Unknown local type binding '%s'" name)
+      | Some binding -> Ok (Map.set selected ~key:name ~data:binding))
+  in
+  let open Result.Let_syntax in
+  let%bind aliases = select t.aliases type_names in
+  let%map modules = select t.modules module_names in
+  { empty with aliases; modules }
+;;
+
+let rec find_visible t ~bindings ~opened ~checkpoint name =
+  checkpoint ();
+  match Map.find (bindings t) name with
+  | Some _ as found -> found
+  | None ->
+    (match Map.find (opened t) name with
+     | Some _ as found -> found
+     | None ->
+       Option.bind t.outer ~f:(fun outer ->
+         find_visible outer ~bindings ~opened ~checkpoint name))
+;;
+
+let find_module t ~checkpoint name =
+  find_visible
+    t
+    ~bindings:(fun t -> t.modules)
+    ~opened:(fun t -> t.opened_modules)
+    ~checkpoint
+    name
+;;
+
+let find_local_alias t ~checkpoint name =
+  find_visible
+    t
+    ~bindings:(fun t -> t.aliases)
+    ~opened:(fun t -> t.opened_aliases)
+    ~checkpoint
+    name
+;;
+
+let find_alias t ~checkpoint ({ Syntax.Name.modules; name } : Syntax.Name.t) =
+  match modules with
+  | [] -> find_local_alias t ~checkpoint name
+  | first :: rest ->
+    List.fold rest ~init:(find_module t ~checkpoint first) ~f:(fun scope name ->
+      checkpoint ();
+      Option.bind scope ~f:(fun scope -> Map.find scope.modules name))
+    |> Option.bind ~f:(fun scope -> Map.find scope.aliases name)
+;;
+
+let open_module t ~name ~checkpoint =
+  match find_module t ~checkpoint name with
+  | None -> Ok t
+  | Some scope ->
+    let type_conflict =
+      List.find (Map.keys scope.aliases) ~f:(fun name ->
+        checkpoint ();
+        Option.is_some (find_local_alias t ~checkpoint name))
+    in
+    let conflict =
+      match type_conflict with
+      | Some _ -> type_conflict
+      | None ->
+        List.find (Map.keys scope.modules) ~f:(fun name ->
+          checkpoint ();
+          Option.is_some (find_module t ~checkpoint name))
+    in
+    (match conflict with
+     | Some member ->
+       Error
+         (Printf.sprintf "open %s would shadow existing type binding '%s'" name member)
+     | None ->
+       Ok
+         { t with
+           opened_aliases =
+             Map.merge_skewed
+               t.opened_aliases
+               scope.aliases
+               ~combine:(fun ~key:_ _ right -> right)
+         ; opened_modules =
+             Map.merge_skewed
+               t.opened_modules
+               scope.modules
+               ~combine:(fun ~key:_ _ right -> right)
+         })
+;;
 
 let primitive = function
   | "int" -> Some TInt
@@ -41,7 +155,7 @@ let primitive = function
 let available t name =
   if Option.is_some (primitive name)
   then Error (Printf.sprintf "Cannot redefine primitive type '%s'" name)
-  else if Map.mem t name
+  else if Map.mem t.aliases name
   then Error (Printf.sprintf "Duplicate type declaration '%s'" name)
   else Ok ()
 ;;
@@ -71,7 +185,7 @@ let add_host t ~name ~body ~checkpoint =
   if template_is_immutable ~checkpoint body
   then (
     let%bind () = Chatml_type_validity.check_contractive ~checkpoint body in
-    Ok (Map.set t ~key:name ~data:(Alias.Closed body)))
+    Ok { t with aliases = Map.set t.aliases ~key:name ~data:(Alias.Closed body) })
   else
     Error
       (Printf.sprintf
@@ -201,7 +315,8 @@ let rec convert (t : t) ~parameters ~self ~checkpoint syntax =
                (List.map cases ~f:(fun (name, bodies) ->
                   name, Variant_payload (List.map bodies ~f:expression)))
            , Empty_row ))
-  and constructor syntax name arguments =
+  and constructor syntax (qualified : Syntax.Name.t) arguments =
+    let name = Syntax.Name.to_string qualified in
     let arity expected =
       let actual = List.length arguments in
       if actual <> expected
@@ -250,7 +365,7 @@ let rec convert (t : t) ~parameters ~self ~checkpoint syntax =
          arity 1;
          Con ("task", arguments)
        | None, _, _ ->
-         (match Map.find t name with
+         (match find_alias t ~checkpoint qualified with
           | None -> reject syntax (Printf.sprintf "Unknown type '%s'" name)
           | Some alias ->
             arity (Alias.arity alias);
@@ -311,9 +426,209 @@ let declare
       then Alias.Closed template
       else Alias.Parameterized { name; parameters; body; environment = t }
     in
-    Map.set t ~key:name ~data:definition)
+    { t with aliases = Map.set t.aliases ~key:name ~data:definition })
 ;;
 
 let elaborate t syntax ~checkpoint =
   protect (fun () -> convert t ~parameters:String.Map.empty ~self:None ~checkpoint syntax)
+;;
+
+(* Unlike [convert], this expansion retains the conditional behavior of legacy
+   arrows. Alias equality and universal specification arity checks share this
+   symbolic traversal; it never produces an inference type. *)
+let symbolic_expansion ~fresh_binder ~checkpoint =
+  let rec expression environment parameters self (syntax : Syntax.t) =
+    checkpoint ();
+    let expression = expression environment parameters self in
+    match syntax.desc with
+    | TEName name -> constructor environment self syntax name []
+    | TEParameter name ->
+      (match Map.find parameters name with
+       | Some argument -> argument
+       | None -> reject syntax (Printf.sprintf "Unbound type parameter '%s" name))
+    | TEConstr (name, arguments) ->
+      constructor environment self syntax name (List.map arguments ~f:expression)
+    | TEFunction (parameters, result) ->
+      Equivalence.Function (List.map parameters ~f:expression, expression result)
+    | TEArrow (left, right) ->
+      Equivalence.arrow (expression left) ~result:(expression right) ~checkpoint
+    | TERecord fields ->
+      Equivalence.Node
+        ( Record
+        , [ Equivalence.Row
+              ( String.Map.of_alist_exn
+                  (List.map fields ~f:(fun (name, body) -> name, expression body))
+              , Equivalence.Node (Empty_row, []) )
+          ] )
+    | TEVariant cases ->
+      Equivalence.Node
+        ( Variant
+        , [ Equivalence.Row
+              ( String.Map.of_alist_exn
+                  (List.map cases ~f:(fun (name, bodies) ->
+                     ( name
+                     , Equivalence.Node (Variant_payload, List.map bodies ~f:expression) )))
+              , Equivalence.Node (Empty_row, []) )
+          ] )
+  and constructor environment self syntax qualified arguments =
+    let name = Syntax.Name.to_string qualified in
+    let builtin_application =
+      (not (List.is_empty arguments))
+      && (String.equal name "array" || String.equal name "task")
+    in
+    match self with
+    | Some (self_name, binder) when String.equal name self_name && not builtin_application
+      -> Equivalence.Recursive_variable binder
+    | _ ->
+      (match primitive name, name, arguments with
+       | Some ty, _, _ -> closed syntax ty
+       | None, "array", _ :: _ -> Equivalence.Node (Array, arguments)
+       | None, "task", _ :: _ -> Equivalence.Node (Con "task", arguments)
+       | None, _, _ ->
+         (match find_alias environment ~checkpoint qualified with
+          | Some alias -> apply alias arguments
+          | None -> reject syntax (Printf.sprintf "Unknown type '%s'" name)))
+  and closed syntax ty =
+    match Equivalence.of_closed_type ty ~fresh_binder ~checkpoint with
+    | Ok ty -> ty
+    | Error message -> reject syntax message
+  and apply alias arguments =
+    checkpoint ();
+    match alias with
+    | Alias.Closed ty ->
+      (* Closed templates are already validated. Their source location is never
+         needed for a projection failure, which is an internal invariant. *)
+      (match Equivalence.of_closed_type ty ~fresh_binder ~checkpoint with
+       | Ok ty -> ty
+       | Error message -> failwith message)
+    | Parameterized { name; parameters; body; environment } ->
+      let binder = fresh_binder () in
+      let parameters = String.Map.of_alist_exn (List.zip_exn parameters arguments) in
+      expression environment parameters (Some (name, binder)) body
+      |> Equivalence.recursive ~binder ~checkpoint
+  in
+  expression, apply
+;;
+
+let symbolic_application alias ~arguments ~fresh_binder ~checkpoint =
+  let _, apply = symbolic_expansion ~fresh_binder ~checkpoint in
+  apply alias arguments
+;;
+
+let require_fixed_function_arity syntax expanded ~checkpoint =
+  let reject_ambiguous () =
+    reject
+      syntax
+      "Universal value specifications require fixed function arity; use explicit \
+       fun(...) -> ... for parameter-dependent legacy arrows"
+  in
+  let rec check expanded =
+    checkpoint ();
+    match expanded with
+    | Equivalence.Parameter _ | Recursive_variable _ -> ()
+    | Function (parameters, result) ->
+      List.iter parameters ~f:check;
+      check result
+    | Legacy_function (arguments, result) ->
+      List.iter arguments ~f:(function
+        | Equivalence.Required argument -> check argument
+        | Unless_unit _ -> reject_ambiguous ());
+      (match result with
+       | Equivalence.Direct result -> check result
+       | Flatten _ -> reject_ambiguous ())
+    | Node (_, arguments) -> List.iter arguments ~f:check
+    | Row (fields, tail) ->
+      Map.iter fields ~f:check;
+      check tail
+    | Recursive (_, body) -> check body
+  in
+  check expanded
+;;
+
+let elaborate_scheme t syntax ~equality_parameters ~fresh_name ~checkpoint =
+  protect (fun () ->
+    let rec collect names (syntax : Syntax.t) =
+      checkpoint ();
+      match syntax.desc with
+      | TEName _ -> names
+      | TEParameter name -> Set.add names name
+      | TEArrow (left, right) -> collect (collect names left) right
+      | TEFunction (parameters, result) ->
+        List.fold parameters ~init:(collect names result) ~f:collect
+      | TEConstr (_, arguments) -> List.fold arguments ~init:names ~f:collect
+      | TERecord fields ->
+        List.fold fields ~init:names ~f:(fun names (_, field) -> collect names field)
+      | TEVariant cases ->
+        List.fold cases ~init:names ~f:(fun names (_, arguments) ->
+          List.fold arguments ~init:names ~f:collect)
+    in
+    let names = collect String.Set.empty syntax in
+    ensure_unique syntax ~what:"equality requirement" ~checkpoint equality_parameters;
+    let equality_names =
+      List.fold equality_parameters ~init:String.Set.empty ~f:(fun equalities name ->
+        checkpoint ();
+        if not (Set.mem names name)
+        then
+          reject syntax (Printf.sprintf "Equality parameter '%s is not quantified" name);
+        Set.add equalities name)
+    in
+    let parameters =
+      Set.fold names ~init:String.Map.empty ~f:(fun parameters name ->
+        checkpoint ();
+        let equality =
+          if Set.mem equality_names name then Some Equality_requirement.Value else None
+        in
+        Map.set parameters ~key:name ~data:(Generic { name = fresh_name (); equality }))
+    in
+    let declared = convert t ~parameters ~self:None ~checkpoint syntax in
+    let symbolic_parameters =
+      Set.to_list names
+      |> List.mapi ~f:(fun index name -> name, Equivalence.Parameter index)
+      |> String.Map.of_alist_exn
+    in
+    let next_binder = ref 0 in
+    let fresh_binder () =
+      checkpoint ();
+      let binder = !next_binder in
+      Int.incr next_binder;
+      binder
+    in
+    let expression, _ = symbolic_expansion ~fresh_binder ~checkpoint in
+    let expanded = expression t symbolic_parameters None syntax in
+    require_fixed_function_arity syntax expanded ~checkpoint;
+    declared)
+;;
+
+let check_declared_equivalent t ~other ~name ~checkpoint =
+  checkpoint ();
+  match Map.find t.aliases name, Map.find other.aliases name with
+  | Some actual, Some expected ->
+    let arity = Alias.arity actual in
+    if arity <> Alias.arity expected
+    then Error (Printf.sprintf "Type alias '%s' has different parameter counts" name)
+    else (
+      let next_binder = ref 0 in
+      let fresh_binder () =
+        checkpoint ();
+        let binder = !next_binder in
+        Int.incr next_binder;
+        binder
+      in
+      let arguments = List.init arity ~f:(fun index -> Equivalence.Parameter index) in
+      let expand alias =
+        symbolic_application alias ~arguments ~fresh_binder ~checkpoint
+      in
+      match
+        protect (fun () ->
+          Equivalence.equivalent (expand actual) (expand expected) ~checkpoint)
+      with
+      | Error error -> Error error.message
+      | Ok true -> Ok ()
+      | Ok false ->
+        Error
+          (Printf.sprintf
+             "Cannot establish universal equivalence of type alias '%s': normalized \
+              symbolic expansions differ"
+             name))
+  | None, _ | _, None -> Error (Printf.sprintf "Module does not declare type '%s'" name)
 ;;

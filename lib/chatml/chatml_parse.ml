@@ -36,15 +36,19 @@ let format_diagnostic (source_text : string) (diagnostic : diagnostic) : string 
       diagnostic.message
 ;;
 
-let parse_program (source_text : string) : (program, diagnostic) result =
+let parse_with entrypoint source_text =
   let lexbuf = Lexing.from_string source_text in
-  try
-    let stmts = Chatml_parser.program Chatml_lexer.token lexbuf in
-    Ok { stmts; source_text }
-  with
+  try Ok (entrypoint Chatml_lexer.token lexbuf) with
   | Chatml_parser.Error -> Error (diagnostic_of_lexbuf lexbuf "Syntax error")
   | Failure msg -> Error (diagnostic_of_lexbuf lexbuf msg)
 ;;
+
+let parse_program (source_text : string) : (program, diagnostic) result =
+  Result.map (parse_with Chatml_parser.program source_text) ~f:(fun stmts ->
+    ({ stmts; source_text } : program))
+;;
+
+let parse_interface source_text = parse_with Chatml_parser.module_interface source_text
 
 let parse_program_exn (source_text : string) : program =
   match parse_program source_text with

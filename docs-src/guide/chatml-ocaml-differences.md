@@ -209,10 +209,40 @@ let main input =
 
 ## Modules export their own declarations
 
-Modules can refer to outer bindings while being defined. Those bindings are not
-implicitly exported. An `open` inside a module does not re-export the imported
-names either. Prefer qualified builtin access such as `Array.length(values)`;
-`open` rejects shadowing rather than silently replacing an existing binding.
+Modules can refer to earlier lexical bindings while being defined. They are
+non-recursive: the new module name is unavailable within its own body, even in a
+function called later. Use local names and `let rec` for recursive functions.
+Initialization installs the new module only after its body succeeds; earlier
+effects are not rolled back if it fails.
+
+An unsigned module exports its own values, transparent type aliases and nested
+modules. Outer bindings and names introduced only by `open` are not implicitly
+exported. Refer to public types with paths such as `Data.t` or `Outer.Inner.t`;
+`open` also brings public types into scope and preserves value polymorphism and
+shared mutable state. Prefer qualified builtin access such as
+`Array.length(values)`; `open` rejects collisions rather than silently replacing
+an existing binding.
+
+Inline contracts use `module M : sig ... end = struct ... end`, with transparent
+`type t = ...`, `val name : ...` and nested `module Name : sig ... end` items.
+Unlike an OCaml abstract `type t` specification, these aliases expose their
+structural definition. `val identity : fun('a) -> 'a` is an explicit universal
+claim that the implementation must satisfy. Equality-using generic specifications
+carry `where equality('a)`. The checked signature selects public runtime members;
+exported closures retain private implementation bindings. There are no module
+type declarations or functors. See the [checked inline interface](chatml-inference.md#modules-and-records-have-different-representations).
+
+Modules have a distinct kind from ordinary records. Projection and `record_keys`
+support both, while record annotations, patterns and copy-updates require records
+and `open` requires a module.
+
+Optional `;;` separates statements at the top level and inside modules. It is
+useful for a boundary such as `type t = int ;; Graph.run()`; ordinary declaration
+sequences still need no separators, and `;` continues to sequence expressions.
+The [module type and separator example](chatml-inference.md#modules-and-records-have-different-representations)
+demonstrates the distinction. Configured multi-file module loading and companion
+`.chatmli` linkage are still pending; the interface parser does not itself load
+or link another file.
 
 **Rejected during typechecking:** `M` exports `y`, not the outer `x`.
 

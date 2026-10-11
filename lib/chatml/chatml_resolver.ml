@@ -13,6 +13,7 @@ type frame_map = (string, slot_info) Hashtbl.t
 
 type resolve_ctx =
   { lookup_type : Source.span -> Chatml_typechecker.typ option
+  ; lookup_module_visibility : Source.span -> Chatml_module_visibility.t option
   ; stack : frame_map list ref
   }
 
@@ -307,12 +308,18 @@ let rec resolve_stmt (ctx : resolve_ctx) (snode : L.stmt L.node) : L.resolved_st
     Some (L.RSLetRec binds')
   | L.SType _ -> None
   | L.SExpr e -> Some (L.RSExpr (with_value e (resolve_expr ctx e)))
-  | L.SModule (mname, stmts) ->
+  | L.SModule { name; signature; body } ->
     let stmts' =
-      List.filter_map stmts ~f:(fun st ->
+      List.filter_map body ~f:(fun st ->
         Option.map (resolve_stmt ctx st) ~f:(with_stmt_value st))
     in
-    Some (L.RSModule (mname, stmts'))
+    let visibility =
+      Option.map signature ~f:(fun signature ->
+        match ctx.lookup_module_visibility signature.span with
+        | Some visibility -> visibility
+        | None -> failwith "Resolver: missing checked module signature")
+    in
+    Some (L.RSModule { name; visibility; body = stmts' })
   | L.SOpen nm -> Some (L.RSOpen nm)
 ;;
 
@@ -322,7 +329,12 @@ let resolve_checked_program
   : L.resolved_program
   =
   let lookup_fun = Chatml_typechecker.checked_lookup_span_type checked in
-  let ctx = { lookup_type = lookup_fun; stack = ref [] } in
+  let ctx =
+    { lookup_type = lookup_fun
+    ; lookup_module_visibility = Chatml_typechecker.checked_module_visibility checked
+    ; stack = ref []
+    }
+  in
   let stmts' =
     prog.stmts
     |> List.filter_map ~f:(fun sn ->

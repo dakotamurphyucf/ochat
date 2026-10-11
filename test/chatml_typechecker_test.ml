@@ -234,7 +234,14 @@ let%expect_test "open shadowing is rejected" =
     |}
   in
   print_endline (check_program_formatted code);
-  [%expect {| Type error: open M would shadow existing binding 'x' |}]
+  [%expect
+    {|
+    line 6, characters 6-12:
+    6|    open M
+          ^^^^^^
+
+    Type error: open M would shadow existing binding 'x'
+    |}]
 ;;
 
 let%expect_test "record_keys accepts wider records" =

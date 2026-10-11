@@ -266,6 +266,91 @@ becomes available only after the whole body finishes. Existing enclosing binding
 keep their normal lexical meaning; rebinding a module does not make the new
 module visible to its own initializer.
 
+Modules can declare transparent type aliases, including generic aliases. Refer
+to them as `Data.item` or `int Data.box`; nested modules keep their qualified
+paths. Each alias resolves names in its defining scope. `open Data` brings
+exported types into scope alongside values, rejecting existing-name collisions.
+Names inherited from an outer scope or introduced only by `open` are not
+automatically exported from the enclosing module.
+
+An optional `sig ... end` interface selects the public value, type and nested
+module members. Type definitions remain transparent: the implementation must
+agree with each public alias. Unlisted values are private, including at runtime
+when inspected with `record_keys`; exported closures can still use their private
+bindings. A signature does not run an initializer during checking.
+
+Generic aliases must agree for every argument type, including arguments that
+change legacy arrow normalization. For example, `'a -> int` and
+`fun('a) -> int` are not interchangeable aliases: substituting `unit` gives
+different arities. Interface checking compares normalized symbolic definitions
+with private aliases expanded and recursive binders renamed. It conservatively
+rejects definitions whose equivalence it cannot establish, including different
+unfoldings of the same recursive shape; use matching recursive definitions on
+both sides of the interface.
+
+Parameters in a `val` specification are universally quantified. For example,
+`val identity : fun('a) -> 'a` requires a function that works independently at
+each caller's type. It cannot generalize shared mutable storage. A function that
+compares its arguments must expose that requirement, for example
+`val same : fun('a, 'a) -> bool where equality('a)`. Opening the module preserves
+its member schemes and shared mutable types; it does not choose one instance of
+a polymorphic export for every subsequent use.
+
+An explicitly polymorphic value specification must also keep a fixed function
+arity for every substitution. Legacy arrows can erase a `unit` argument or
+flatten a function-valued result. Use `fun('a) -> int` instead of `'a -> int`,
+and `fun(int) -> 'a` instead of `int -> 'a`, when making these universal claims.
+This check expands aliases, so an alias cannot hide the arity change. Ordinary
+alias declarations, concrete applications and inferred functions retain their
+existing behavior; already fixed-arity legacy arrows remain valid.
+
+<!-- ochat-authoring-example: {"id":"inference.checked-module-interface","surface":"one_off_v1","result":43} -->
+```ocaml
+module Counter : sig
+  type total = int
+  val next : fun() -> total
+  val identity : fun('a) -> 'a
+end = struct
+  let count = ref(0)
+  type total = int
+  let next () = count := !count + 1; !count
+  let identity value = value
+end
+open Counter
+let main input =
+  let result = if identity(true) then identity(42) + next() else 0 in
+  Task.pure(Json.parse(to_string(result)))
+```
+
+<!-- ochat-authoring-example: {"id":"inference.universal-arity-rejected","surface":"one_off_v1","stage":"typecheck","contains":"fixed function arity","span":true} -->
+```ocaml
+type 'a callback = 'a -> int
+module Handler : sig
+  val run : 'a callback
+end = struct
+  let run ignored = 1
+end
+let main input = Task.pure(`Null)
+```
+
+Newlines do not separate statements. Use optional `;;` when a type declaration
+is followed by a bare qualified call: without the separator, the parser can
+read the module path as part of a postfix type application. Separators also
+work inside modules. A single `;` continues to sequence expressions.
+
+<!-- ochat-authoring-example: {"id":"inference.module-types-and-separators","surface":"one_off_v1","result":1} -->
+```ocaml
+let count = ref(0)
+module Counter = struct
+  type total = int
+  let tick () = count := !count + 1
+end
+type total = Counter.total ;; Counter.tick();;
+let main input =
+  let result : total = !count in
+  Task.pure(Json.parse(to_string(result)))
+```
+
 <!-- ochat-authoring-example: {"id":"inference.module-local-reference","surface":"one_off_v1","result":42} -->
 ```ocaml
 module M = struct

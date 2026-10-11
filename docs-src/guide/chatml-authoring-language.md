@@ -16,6 +16,9 @@ tokens; indentation does not define blocks. Use lowercase names for bindings and
 uppercase names for modules. Identifiers contain ASCII letters, digits and
 underscores and cannot start with a digit. `_` is a wildcard, not an ordinary name.
 Variant tags begin with a backtick. There is no OCaml character literal syntax.
+Optional `;;` separates statements at the top level or inside a module, including
+ambiguous boundaries such as `type t = int ;; Graph.run()`. Ordinary declaration
+sequences do not require it. A single `;` still sequences expressions.
 
 Literals include decimal integers, decimal floats with digits on both sides of
 the dot, booleans, double-quoted strings and unit `()`. A negative number uses a
@@ -39,9 +42,9 @@ including CRLF line endings. There are no `//` or `#` line comments.
 | Mutation | `cell := value`, `array[index] <- value`; both return unit |
 | Sequencing | `first; second` evaluates both and returns the second value |
 
-Arithmetic does not implicitly convert integers to floats. Direct equality on
-known array, ref, function and task types is rejected. Generic helpers currently
-can bypass that static restriction and compare such values by identity; see the
+Arithmetic does not implicitly convert integers to floats. Equality on array,
+ref, function, task and module types is rejected, including through generic
+helpers whose equality requirements are preserved; see the
 [inference boundary](chatml-inference.md#matching-and-equality-use-inferred-types).
 Equality is not a general serialization/comparison operation. `=` introduces
 bindings and record fields, not equality. There are no
@@ -81,11 +84,36 @@ to choose a result. Arrays are homogeneous and mutable; `ref(value)` creates a
 mutable cell, read with `!cell`. Copy-updating a record creates a new record;
 referenced mutable arrays/cells are not deep-copied.
 
-Modules group definitions in `module Name = struct ... end`. They can use outer
-bindings, but export only their own definitions. `open Name` imports values
-without re-exporting them and rejects name collisions, including builtins.
-Qualified calls such as `Array.fold(...)` avoid collisions. There are no functors,
-signatures, module type declarations or module-local type declarations.
+Modules group definitions in `module Name = struct ... end`. A module is
+non-recursive: its new binding is not in scope inside its body, even in a function
+called later. The binding is installed only after the body succeeds. Earlier
+lexical bindings remain available; recursive functions use `let rec`. An unsigned
+module exports its own value, type and nested module declarations. Outer or
+opened-only bindings are not
+implicitly exported. Module values have a distinct type from ordinary records.
+
+Declare transparent type aliases inside modules and refer to them with qualified
+paths such as `Counter.total` or `Outer.Inner.t`. `open Name` brings public values,
+types and nested module names into scope without re-exporting them, and rejects
+name collisions, including builtins. Opened polymorphic functions remain
+polymorphic; mutable exports retain shared state and type constraints. Qualified
+calls such as `Array.fold(...)` avoid collisions.
+
+An optional inline contract has the form
+`module Name : sig ... end = struct ... end`. Its items are transparent
+`type name = type_expr`, `val name : type_expr` and nested
+`module Name : sig ... end` declarations. A value specification such as
+`val identity : fun('a) -> 'a` claims universal polymorphism; an equality-using
+generic function requires a specification such as
+`val same : fun('a, 'a) -> bool where equality('a)`. The implementation must
+satisfy these claims. A signed module exposes only its specified public members
+in checking and at runtime, while public closures retain private implementation
+bindings. See the [checked module examples](chatml-inference.md#modules-and-records-have-different-representations).
+
+There are no functors, module type declarations or abstract signature types.
+Inline modules work within the submitted program. Configured multi-file module
+loading and companion `.chatmli` linkage are not yet implemented; interface syntax
+parsing alone does not load or link a file.
 
 <!-- ochat-authoring-example: {"id":"language.closures-loops-recursion","surface":"one_off_v1","result":"6:10:true"} -->
 ```ocaml

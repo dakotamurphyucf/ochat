@@ -358,10 +358,16 @@ Top-level statement forms:
 - `let rec f : type_expr = expr and g : type_expr = expr`
 - `let rec f x = expr and g y = expr`
 - `module M = struct ... end`
+- `module M : sig ... end = struct ... end`
 - `open M`
 - a bare expression statement
 
 Evaluation proceeds top-to-bottom in source order.
+
+Optional `;;` separates statements at the top level and inside module bodies.
+It can disambiguate a type declaration followed by a qualified call, for example
+`type t = int ;; Graph.run()`. Ordinary declaration sequences remain valid without
+separators. A single `;` retains expression-sequencing behavior.
 
 The top level is mutable in the sense that each statement extends the
 current environment, but closures capture lexical bindings stably.
@@ -415,7 +421,7 @@ Operationally:
   visible
 - placeholders are updated with the final values
 
-### 6.3 Top-level `type`
+### 6.3 Type declarations
 
 Examples:
 
@@ -430,10 +436,12 @@ Properties:
 
 - type declarations are compile-time only
 - they introduce names into a separate type namespace
-- they are currently allowed only at the top level
+- they are allowed at the top level and inside module bodies
 - later statements may refer to earlier type declarations
 - module bodies may refer to earlier top-level type declarations
-- `open` does not import type names
+- local module type declarations are exported unless an inline signature hides them
+- qualified names such as `Data.t` and `Outer.Inner.t` select public type aliases
+- `open` brings public type and nested module names into the lexical type namespace
 - type declarations are alias-like, not nominal runtime entities
 
 Parameterized aliases are applied using postfix syntax: `int tree` or
@@ -457,7 +465,6 @@ The typechecker also validates **contractiveness**:
 Current intentional limitations:
 
 - no `type ... and ...`
-- no module-local type declarations
 - no forward references to later type declarations
 
 ### 6.4 Modules
@@ -478,11 +485,38 @@ Properties:
 - module bodies may reference outer bindings
 - only names explicitly defined in the module body are exported
 - names imported via `open` inside a module are not re-exported
-- modules are represented as records by the typechecker and as `VModule`
-  values at runtime
+- modules have a distinct static module kind and are `VModule` values at runtime
+- module bodies may contain transparent type declarations
+- module declarations are non-recursive; the new module name is available only
+  after its body succeeds and is not in scope within that body, even in functions
 
-Type declarations are not statements inside module bodies in the current
-surface grammar.
+Optional inline signatures select a module's public interface using
+`module M : sig ... end = struct ... end`. The
+[checked module examples](chatml-inference.md#modules-and-records-have-different-representations)
+demonstrate private state, transparent types and polymorphic public members.
+
+Signature items are transparent `type` aliases, `val` specifications and nested
+`module Name : sig ... end` specifications. The implementation must satisfy each
+claim. Type parameters in a `val` specification are universally quantified;
+equality-using generic functions specify the obligation with, for example,
+`val same : fun('a, 'a) -> bool where equality('a)`. There are no abstract type
+specifications, module type declarations or functors.
+
+Universally quantified value specifications require fixed function arity after
+alias expansion. If substituting a parameter could erase a legacy arrow's unit
+argument or flatten its function-valued result, use an explicit `fun(...) -> ...`
+type. This restriction applies to the universal value claim; ordinary aliases,
+concrete applications and inferred functions retain their existing behavior.
+
+A signed module exposes only specified values, types and nested modules.
+The same checked selection limits runtime value fields; omitted implementation
+bindings remain available privately to exported closures. Type aliases remain
+transparent and have no runtime fields. Without a signature, the public interface
+is inferred from the module's local declarations.
+
+The declaration-only signature syntax also has a companion `.chatmli` parser.
+The current script compiler does not load companion files or configured modules
+from other source files; multi-file graph linkage remains separate pending work.
 
 ### 6.5 `open`
 
@@ -495,6 +529,8 @@ open Flow
 Semantics:
 
 - imports all exported names from the module into the current scope
+- includes public type and nested module names in the static namespace
+- preserves polymorphic value schemes and shared mutable export constraints
 - does not create a module alias
 - is shallow; there is no selective import syntax
 - now **rejects shadowing** of existing names
@@ -1296,21 +1332,16 @@ Users still do not write builtin-only forms such as ref types, tuple types, open
 
 ### 10.9 Module typing
 
-Modules are typed as records of exports.
+Modules have a distinct static module kind containing their public value members,
+and are represented as `VModule` at runtime. Ordinary record annotations, record
+patterns and copy-updates do not accept module values; `open` requires a module.
+Field projection works on both kinds, and `record_keys` explicitly supports both.
 
-This is intentionally simple and matches the intended “modules are just
-structuring” design.
-
-Implementation note:
-
-- runtime modules are represented as `VModule`
-- the typechecker models them as record types of exports
-
-This is usually ergonomic, but it also means module values are not a fully
-separate static category.
-
-Type declarations are not exported as module fields, because they do not
-exist at runtime and `open` affects only value bindings.
+Module-local type aliases and nested type namespaces are static exports, not
+runtime fields. Qualified type paths and `open` use that static namespace. Inline
+signatures check transparent type/value/nested-module claims and select one public
+interface for both checking and runtime visibility. Opening that interface does
+not specialize polymorphic members or duplicate shared mutable state.
 
 ---
 
@@ -1437,11 +1468,12 @@ Modules are for:
 - grouping helper functions
 - reducing naming clutter
 - structuring scripts
+- exposing transparent local types and checked public member boundaries
 
 Modules are not for:
 
-- signatures
 - functors
+- module type declarations or abstract signature types
 - generative module behavior
 - abstraction-heavy namespace engineering
 
@@ -1454,7 +1486,10 @@ effects already performed are not rolled back.
 
 ### 12.2 Export behavior
 
-Only names explicitly defined in the module body are exported.
+An unsigned module exports only its locally defined values, types and nested
+modules. An inline signature selects a subset and checks its declared types;
+unselected runtime members are hidden while exported closures retain private
+bindings. Outer bindings and names introduced only by `open` are not re-exported.
 
 Example:
 
@@ -1480,7 +1515,8 @@ M.x
 ### 12.3 `open` behavior
 
 `open M` copies module exports into the current environment for subsequent
-lookup.
+value lookup and brings public type/nested-module names into the static namespace.
+It preserves the exported polymorphic schemes and mutable value identity.
 
 It does not:
 
@@ -1534,7 +1570,7 @@ Notes:
 - to_string returns that representation.
 - length works on arrays only.
 - array_copy is a shallow copy of the array container.
-- record_keys works on record values, and also on module values because modules are record-like at the type level.
+- record_keys explicitly supports ordinary records and module values; for a signed module it returns only public runtime member names, not type names.
 - variant_tag returns only the constructor/tag name, not the payload.
 - swap_ref r v stores v into r and returns the old contents.
 - fail raises a runtime failure and is polymorphic in its result position.
@@ -1583,7 +1619,7 @@ Additional builtin type aliases:
 - `context`
 
 Each builtin module is a `VModule` value at runtime and is typed as a
-record of its exports by the typechecker.
+module of its exports, distinct from an ordinary record, by the typechecker.
 
 #### 13.2.2.1 `ui_moderator_surface`
 
@@ -2022,9 +2058,15 @@ let f () = expr
 let rec f : type_expr = expr
 let rec f x = expr and g y = expr
 module M = struct stmts end
+module M : sig signature_items end = struct stmts end
 open M
 expr
 ```
+
+Signature items are `type t = type_expr`, `val name : type_expr` (optionally
+followed by `where equality('a)` constraints joined with `and`) and
+`module M : sig signature_items end`. Optional `;;` separates statements and
+signature items; a single `;` remains an expression separator.
 
 ### 14.2 Expressions
 
@@ -2200,7 +2242,6 @@ ChatML currently does **not** provide:
 
 - tuple syntax as a general user-facing feature
 - mutual recursive type declarations
-- module-local type declarations
 - general expression ascription syntax
 - tuple type syntax as a general user-facing feature
 - ref type syntax
@@ -2208,7 +2249,8 @@ ChatML currently does **not** provide:
 - full user-facing algebraic datatype declarations beyond alias-style
   structural `type` declarations
 - selective imports
-- signatures or functors
+- abstract signature types, module type declarations or functors
+- configured multi-file module loading and companion interface linkage
 - layout-sensitive syntax
 - Unicode identifiers
 - full ML-style match usefulness analysis
@@ -2222,13 +2264,15 @@ The language remains intentionally conservative and small.
 
 These are worth documenting because they shape current behavior.
 
-### 18.1 Modules are statically record-like, but runtime-distinct
+### 18.1 Module and record operations retain their kind
 
-The typechecker models modules as records of exports, while the runtime
-represents them as `VModule`.
-
-This is deliberate and ergonomic, but it means “module values” are not a
-fully separate static category.
+The typechecker distinguishes modules from ordinary records, and the runtime
+represents them as `VModule` and `VRecord` respectively. Projection and
+`record_keys` support both. Record patterns, annotations and copy-updates require
+ordinary records; `open` requires a module. Inferred aliases and higher-order
+helpers retain these constraints. Public type aliases exist only in the static
+module namespace, while signed runtime modules contain only selected value and
+nested-module members.
 
 ### 18.2 Records get stronger row ergonomics than variants
 
@@ -2253,7 +2297,8 @@ For the current language, the most ergonomic and robust style is:
 - annotate recursive helper functions against those declared types
 - write small helpers over row-polymorphic state records
 - use variants for finite event/state tags
-- use modules only for grouping
+- use modules to group helpers and transparent types; add inline signatures when
+  a public member boundary helps
 - keep arithmetic explicit by numeric kind
 - prefer `M.name` over aggressive `open` use when readability matters
 - push complex host interaction into builtins/runtime services

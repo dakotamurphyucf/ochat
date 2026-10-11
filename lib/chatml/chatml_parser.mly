@@ -94,6 +94,9 @@ let span_of_lex (startp : Lexing.position) (endp : Lexing.position) : Source.spa
 let mk_type startp endp desc =
   { desc; span = span_of_lex startp endp }
 
+let mk_signature_item startp endp desc =
+  { Chatml_module_signature.desc; span = span_of_lex startp endp }
+
 let mk_node startp endp value =
   { value; span = span_of_lex startp endp }
 
@@ -148,15 +151,18 @@ let maybe_annotate_expr (expr_node : expr node) (type_opt : type_expr option) : 
 %token <string> TYPEVAR
 %token FUN IF THEN ELSE WHILE DO DONE LET IN MATCH WITH MODULE STRUCT END OPEN REF REC AND TYPE
 %token LETSTAR LETPLUS
+%token SIG VAL WHERE
 %token ARROW LEFTARROW COLON COLONEQ BANGEQ EQ EQEQ
 %token LTEQ GTEQ LT GT LTEQDOT GTEQDOT LTDOT GTDOT
 %token PLUS MINUS PLUSPLUS PLUSDOT MINUSDOT STAR SLASH STARDOT SLASHDOT
 %token LPAREN RPAREN UNDERSCORE
-%token LBRACE RBRACE LBRACKET RBRACKET SEMI COMMA DOT BAR BANG
+%token LBRACE RBRACE LBRACKET RBRACKET SEMI SEMISEMI COMMA DOT BAR BANG
 %token EOF
 
 %start program
 %type <Chatml_lang.stmt_node list> program
+%start module_interface
+%type <Chatml_module_signature.t> module_interface
 
 %left ELSE
 %left EQ EQEQ BANGEQ LT GT LTEQ GTEQ LTDOT GTDOT LTEQDOT GTEQDOT
@@ -174,28 +180,65 @@ let maybe_annotate_expr (expr_node : expr node) (type_opt : type_expr option) : 
 program:
     program_stmts EOF  { $1 }
 
+module_interface:
+    signature_items EOF { $1 }
+
+signature_items:
+    signature_items signature_item { $1 @ [$2] }
+| signature_items SEMISEMI { $1 }
+| /* empty */ { [] }
+
+signature_item:
+    TYPE type_parameters LIDENT EQ type_expr
+      { mk_signature_item $startpos $endpos
+          (Chatml_module_signature.Type { name = $3; parameters = $2; body = $5 }) }
+| VAL LIDENT COLON type_expr signature_requirements
+      { mk_signature_item $startpos $endpos
+          (Chatml_module_signature.Value { name = $2; annotation = $4; requirements = $5 }) }
+| MODULE UIDENT COLON SIG signature_items END
+      { mk_signature_item $startpos $endpos
+          (Chatml_module_signature.Module { name = $2; signature = $5 }) }
+
+signature_requirements:
+    /* empty */ { [] }
+| WHERE separated_nonempty_list(AND, signature_requirement) { $2 }
+
+signature_requirement:
+    LIDENT LPAREN TYPEVAR RPAREN
+      { { Chatml_module_signature.Requirement.name = $1
+        ; parameter = $3
+        ; span = span_of_lex $startpos $endpos } }
+
 program_stmts:
     program_stmts program_stmt { $1 @ [$2] }
+| program_stmts SEMISEMI { $1 }
 | /* empty */ { [] }
 
 module_stmts:
     module_stmts module_stmt { $1 @ [$2] }
+| module_stmts SEMISEMI { $1 }
 | /* empty */ { [] }
 
 program_stmt:
-  TYPE type_parameters LIDENT EQ type_expr
-    { mk_node $startpos $endpos (SType { name = $3; parameters = $2; body = $5 }) }
-| module_stmt                  { $1 }
+  module_stmt                  { $1 }
 
 module_stmt:
-  LET REC rec_bindings          { mk_node $startpos $endpos (SLetRec( $3)) }
+  TYPE type_parameters LIDENT EQ type_expr
+    { mk_node $startpos $endpos (SType { name = $3; parameters = $2; body = $5 }) }
+| LET REC rec_bindings          { mk_node $startpos $endpos (SLetRec( $3)) }
 | LET REC rec_bindings IN expr_sequence  { mk_node $startpos $endpos (SExpr( mk_exprnode $startpos $endpos (ELetRec($3, $5)) )) }
 | LET LIDENT COLON type_expr EQ expr_sequence
     { mk_node $startpos $endpos (SLet($2, maybe_annotate_expr $6 (Some $4))) }
 | LET LIDENT params EQ expr_sequence { mk_node $startpos $endpos (SLet($2, mk_exprnode $startpos $endpos (ELambda($3, ($5))))) }
 | LET LIDENT LPAREN RPAREN EQ expr_sequence { mk_node $startpos $endpos (SLet($2, mk_exprnode $startpos $endpos (ELambda([], ($6))))) }
 | LET LIDENT EQ expr_sequence        { mk_node $startpos $endpos (SLet($2, $4)) }
-| MODULE UIDENT EQ STRUCT module_stmts END { mk_node $startpos $endpos (SModule($2, $5)) }
+| MODULE UIDENT EQ STRUCT module_stmts END
+    { mk_node $startpos $endpos (SModule { name = $2; signature = None; body = $5 }) }
+| MODULE UIDENT COLON SIG signature_items END EQ STRUCT module_stmts END
+    { mk_node $startpos $endpos
+        (SModule { name = $2
+                 ; signature = Some (mk_node $startpos($4) $endpos($6) $5)
+                 ; body = $9 }) }
 | OPEN UIDENT               { mk_node $startpos $endpos (SOpen($2)) }
 | expr                      { mk_node $startpos $endpos (SExpr($1)) }
 
@@ -276,6 +319,7 @@ expr:
 
     (* record field access, e.g. expr.field *)
     | expr DOT LIDENT              { mk_exprnode $startpos $endpos (EFieldGet($1, $3)) }
+    | expr DOT UIDENT              { mk_exprnode $startpos $endpos (EFieldGet($1, $3)) }
 
     | expr DOT LIDENT LPAREN expr_list RPAREN
 		    { mk_exprnode $startpos $endpos (EApp( mk_exprnode $startpos $endpos (EFieldGet($1, $3)),  $5)) }
@@ -413,12 +457,20 @@ type_arrow:
 
 type_postfix:
 | type_primary { $1 }
-| type_postfix LIDENT { mk_type $startpos $endpos (TEConstr ($2, [ $1 ])) }
-| LPAREN type_expr COMMA type_expr_list RPAREN LIDENT
+| type_postfix type_name { mk_type $startpos $endpos (TEConstr ($2, [ $1 ])) }
+| LPAREN type_expr COMMA type_expr_list RPAREN type_name
     { mk_type $startpos $endpos (TEConstr ($6, $2 :: $4)) }
 
+type_name:
+| LIDENT { Name.local $1 }
+| type_module_path DOT LIDENT { { Name.modules = $1; name = $3 } }
+
+type_module_path:
+| UIDENT { [$1] }
+| type_module_path DOT UIDENT { $1 @ [$3] }
+
 type_primary:
-| LIDENT { mk_type $startpos $endpos (TEName $1) }
+| type_name { mk_type $startpos $endpos (TEName $1) }
 | TYPEVAR { mk_type $startpos $endpos (TEParameter $1) }
 | LPAREN type_expr RPAREN { $2 }
 | LBRACE type_field_list RBRACE { mk_type $startpos $endpos (TERecord $2) }

@@ -253,87 +253,87 @@ let implementation_sources =
 let topic_contracts =
   [ ( "one_off_v1"
     , "runtime.native.requests"
-    , "00e10f25bcf7c6c3e1dc3d87f5c8aa37b147a623e55cca285e8b66468f2e0efe" )
+    , "42b68b0e434f66f437dbe885ca09e94d1f03bfd74ddf990f57b42a168e805ccb" )
   ; ( "one_off_v1"
     , "authoring.reference"
     , "551884bf0e3eec7b15c19abef77502c75744211a8a51494ca79cf603e9c56e97" )
   ; ( "one_off_v1"
     , "runtime.delegation.generated"
-    , "5aadb19cecef0a9f13691241760f393b5352949c24085d24002599a72afa1e92" )
+    , "ca3094b57db292072ae875701bc11599631aae5c40008728411490374563c215" )
   ; ( "one_off_v1"
     , "runtime.delegation.creation"
-    , "aae4cf0015c7796135c28881dca0465d67de1fb7524ed440959374f255433189" )
+    , "0b1307b7ec44c245f2694a3e359ae6512d702b8bce3e807f8db45a75b7d64afe" )
   ; ( "one_off_v1"
     , "runtime.delegation.submissions"
-    , "ab80469e7699a5df2a1de8f6e99704e7adeb96aee0d6aca5fe5eb0edbb3e1a1f" )
+    , "db1808205db5112dae4a6cab9d169ae068cc67528191b668e5641a15f0933957" )
   ; ( "one_off_v1"
     , "runtime.delegation.output"
-    , "a1a06acfd29d25b6a64036bd1d1e146567e7c17757bcf888c515b2f3034dab98" )
+    , "a13e7c6267d9ebc92ef0c474aa52b5278e5f6d68f14e3692639fe2a94edc03d9" )
   ; ( "one_off_v1"
     , "runtime.delegation.stop-helper"
-    , "4ce34639b7a0f7c417f086387f0aaea562d3a8124eb8cfade06e1277143757bc" )
+    , "2cfc319c8c545479f04d66f6140967655a4a71f3f84ed0af3d92c77b3344b7e6" )
   ; ( "tool_v1"
     , "runtime.native.requests"
-    , "a4c6d9b0ffeded9966b9573e8c1b7fc34a703884e4f6326deb3edde38ac2cb10" )
+    , "12f52021d2ca8e0adb6ef23163cad13a546483b4f92a8978d9076caecb3c5db6" )
   ; ( "tool_v1"
     , "authoring.reference"
     , "dd874d6d66ab4fd587ad87e581c41eb6600770a503fd9194ced62ae506e0f4ca" )
   ; ( "tool_v1"
     , "runtime.delegation.generated"
-    , "6a8c797075b669e7570fa0382446b93174c6405bbccb5cef648c0a899c70b6eb" )
+    , "e0f883ed2444f77430492d6a55dd17ef723255c7f4977cec7cfe46e5bea25801" )
   ; ( "tool_v1"
     , "runtime.delegation.creation"
-    , "ed1a6f5a8c3c127788ba07a33fd71065300f2ab6ff897a632484083cffe60e85" )
+    , "b6ff2b70006dd419539d76e8cc51b9e3692875c0123c29f8591c71df4b5b8b0a" )
   ; ( "tool_v1"
     , "runtime.delegation.submissions"
-    , "a0f0ccab0c70139a11edabed13c42cb214d37cfaa103201ba8df5a5238632c0b" )
+    , "a0567a3fea67cb46d9b51df0fae31b496c207f01a5d72cd75fb588d5723d3bf5" )
   ; ( "tool_v1"
     , "runtime.delegation.output"
-    , "dbc402b1551d697d85bea1769b17d52422de4bdfdf07ac333510546887929487" )
+    , "a6da306a307f5f67337ba10b4c0f34eadb3d5678520665e429e570ac7bcd5a69" )
   ; ( "tool_v1"
     , "runtime.delegation.stop-helper"
-    , "f74b431ef13b0084be3819fe0fe53977dc69ac125926314fa674b070fe121293" )
+    , "ac16fe2d9aaf5f2c01444186dc18471dd18eda12268b6ed22c4d7bd60449cae8" )
   ; ( "moderator_v1"
     , "runtime.native.requests"
-    , "42268f41dfdbe8941fce7c21e16960c2cbd21b670162692a709fa1ebd4218c0d" )
+    , "fde4ad5205bc3defd13c2c68259543d8b02388fc36201c9db8541bcd5341f3e6" )
   ; ( "moderator_v1"
     , "authoring.reference"
     , "ad8e067d874c286eb4b067084b9558113617985ba0a190284290c15c583c3294" )
   ; ( "moderator_v1"
     , "runtime.delegation.generated"
-    , "cdf0021470b3e5f075f6bc68f0487b43171b44ffc0753db69f8d975d19150e69" )
+    , "b5509724fe57705d08b8a97b6749e4d8b94ef16f81f0dffd3588d568bb9bc4ff" )
   ; ( "moderator_v1"
     , "runtime.delegation.creation"
-    , "ea895781dfb0dcb1b0c134db6c0cbedd87a0c46698861d01f4fd119473a7ff12" )
+    , "cd7fb7b65643bafa66af6be3565486de7c41ee664033fdf49244f91b0ffe2587" )
   ; ( "moderator_v1"
     , "runtime.delegation.submissions"
-    , "2878778f588f8a009e0a62a0fac5c2480deb7bde0d34aa47cd8e808fbbc6fcaa" )
+    , "7fc48007cc0bac8d58a7375a5c83008e90aa52c87a6645cc6df0f104467b11bd" )
   ; ( "moderator_v1"
     , "runtime.delegation.output"
-    , "f7d40848bf064c0c375faa2b62c6daa0e1153fd06e0b539b804dd7cd0a5518e9" )
+    , "d65dfd1620968574ad1989afd28d3a01662f286fc9519ea04565c9aac92e80fb" )
   ; ( "moderator_v1"
     , "runtime.delegation.stop-helper"
-    , "a8dbb3355dc99a984a57eb88fbf4efa3012267b9a760afe782f82928e85f11ba" )
+    , "0006d3398e2bf4f103e228d12ca6b783b141a25a10fecbdea2bd1d28d59bdd75" )
   ; ( "delegated_moderator_v1"
     , "runtime.native.requests"
-    , "a14d7748cc8b885a0e5f95fd067b1b2bc096cb9250d01d0e55602e172e40cc52" )
+    , "edfc67943b4c08e8438fff6bf18c863c78e19d7ce83c8d59ae127e9ab791e9f0" )
   ; ( "delegated_moderator_v1"
     , "authoring.reference"
     , "4abe98ad1b9f860a28a97775f1c35c2e232f41f4c8c93e6e3c7ceb78ba38bd40" )
   ; ( "delegated_moderator_v1"
     , "runtime.delegation.generated"
-    , "67b2162325c6240303efb57214851908104641b167590d6927bb10ff939644be" )
+    , "f909d401ac660c3613e01b48867155a821a18f948361ba002a1d80bd7255da12" )
   ; ( "delegated_moderator_v1"
     , "runtime.delegation.creation"
-    , "64ca6130782a042495dde6fd86251cd74835b857380167fea194151c6c044e9d" )
+    , "ec623e744faae93089f72bf7890cb2f482512874c71553ed0c683f6ed44470dd" )
   ; ( "delegated_moderator_v1"
     , "runtime.delegation.submissions"
-    , "a5a2c9159bf23eeca50540e5ca4dc2eb6ae5b1aea9e41998b0eee5c5c6771281" )
+    , "baef53bd0eb07cb7ac43e47d6325c89a1861854d5f456e7b68117969ca36918d" )
   ; ( "delegated_moderator_v1"
     , "runtime.delegation.output"
-    , "f7bc13c5445d553ed67c7b3239e415ed985cbcc64f70c692377017400c1e3eaf" )
+    , "cf531a4df9149fa8b272e309f19f2432871dbe58560fd7a0da3148b37612fa92" )
   ; ( "delegated_moderator_v1"
     , "runtime.delegation.stop-helper"
-    , "809796c5041b8f40ab178bbabf11af9417fadc78f0d5ffd0a9e6dc275a52ab6e" )
+    , "9f69f563bf227fb17317874160ad00b6464077891825635b93276e4011166606" )
   ]
 ;;

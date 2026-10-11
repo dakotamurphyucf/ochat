@@ -52,7 +52,7 @@ let%expect_test "compiled syntax inventory is separate from binding coverage" =
        coverage"];
   [%expect
     {|
-    (155
+    (175
      "compiled productions on each of four surfaces; unmapped syntax cannot pass coverage")
     |}]
 ;;

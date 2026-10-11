@@ -411,6 +411,33 @@ and eval_module_value
       | None -> ()));
   module_export_env
 
+and select_module_exports ~span (env : env) visibility =
+  allocate env (32 * List.length visibility);
+  let selected = create_env ?control:env.control () in
+  List.iter visibility ~f:(fun member ->
+    Option.iter env.control ~f:(fun control -> control.checkpoint ());
+    let name =
+      match member with
+      | Chatml_module_visibility.Value name | Module (name, _) -> name
+    in
+    if Hashtbl.mem selected.bindings name
+    then raise_runtime_error ~span ("Duplicate checked module export '" ^ name ^ "'");
+    let value =
+      match find_var env name with
+      | None -> raise_runtime_error ~span ("Missing checked module export '" ^ name ^ "'")
+      | Some value -> value
+    in
+    let value =
+      match member, value with
+      | Value _, value -> value
+      | Module (_, visibility), VModule nested ->
+        VModule (select_module_exports ~span nested visibility)
+      | Module _, _ ->
+        raise_runtime_error ~span ("Checked export is not a module: " ^ name)
+    in
+    define_var selected name value);
+  selected
+
 and eval_stmt_with_exports (env : env) (frames : Frame_env.env) (s : resolved_stmt node)
   : string list
   =
@@ -425,10 +452,15 @@ and eval_stmt_with_exports (env : env) (frames : Frame_env.env) (s : resolved_st
       let v = finish_eval frames (eval_expr env frames rhs_expr) in
       update_var env nm v);
     List.map bindings ~f:fst
-  | RSModule (mname, stmts) ->
-    let menv = eval_module_value env frames stmts in
-    define_var env mname (VModule menv);
-    [ mname ]
+  | RSModule { name; visibility; body } ->
+    let menv = eval_module_value env frames body in
+    let menv =
+      match visibility with
+      | None -> menv
+      | Some visibility -> select_module_exports ~span:s.span menv visibility
+    in
+    define_var env name (VModule menv);
+    [ name ]
   | RSOpen mname ->
     let _imported = import_module_bindings ~span:s.span env mname in
     []

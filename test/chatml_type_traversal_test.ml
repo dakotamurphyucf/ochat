@@ -61,7 +61,10 @@ let%expect_test "inference-owned type inspections and row operations cooperate" 
                ~body:ty
                ~checkpoint:ignore))
          (L.SType
-            { name = "alias"; parameters = []; body = syntax (Syntax.TEName "seed") })
+            { name = "alias"
+            ; parameters = []
+            ; body = syntax (Syntax.TEName (Syntax.Name.local "seed"))
+            })
        : T.tenv * T.type_env));
   cancelled "record coverage" (fun state _ ->
     T.validate_match_exhaustiveness state left [ L.PRecord ([], false) ]);
@@ -130,7 +133,7 @@ let%expect_test
   =
   let rec annotation depth =
     match depth with
-    | 0 -> syntax (Syntax.TEName "int")
+    | 0 -> syntax (Syntax.TEName (Syntax.Name.local "int"))
     | _ ->
       let nested = annotation (depth - 1) in
       syntax (Syntax.TERecord [ "left", nested; "right", nested ])
