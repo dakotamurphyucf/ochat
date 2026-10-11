@@ -554,12 +554,19 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
           in
           (match mode with
            | `One_off_only ->
-             assert (Result.is_error (build B.build));
+             assert (
+               Result.is_error
+                 (build
+                    (B.build ~script_preparation:(Some (Fixtures.script_preparation ())))));
              assert (Int.equal !requests 0);
              assert (Int.equal !authorized 0)
            | _ -> ());
           let runtime =
-            build (B.build_with_extensions ~native_registrations:[] ~services)
+            build
+              (B.build_with_extensions
+                 ~script_preparation:(Some (Fixtures.script_preparation ()))
+                 ~native_registrations:[]
+                 ~services)
             |> protocol_ok
           in
           let owner =
@@ -1010,6 +1017,7 @@ let on_event : context -> state -> event -> state task =
       let inference = Inference_ports.create ~config:Chat_response.Config.default () in
       let runtime =
         B.build
+          ~script_preparation:(Some (Fixtures.script_preparation ()))
           ~sw
           ~env
           ~inference_context:inference.context

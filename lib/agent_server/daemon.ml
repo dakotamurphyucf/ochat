@@ -33,6 +33,7 @@ type options =
   ; chatml_runtime_policy : Chat_response.Runtime_semantics.policy
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
   ; content_limits : Chatmd_prompt_content.Limits.t option
+  ; script_preparation : Agent_session.Runtime_script_preparation.t option
   ; provider_operator_factory : Provider_operator_port.factory option
   ; oauth_resolver : (string -> Authenticator.bearer_validator option) option
   ; oauth_actor_resolver : (string -> Authenticator.actor_validator option) option
@@ -189,7 +190,41 @@ let default_options =
   ; independent_lifetime_policy = None
   ; chatml_runtime_policy = Chat_response.Runtime_semantics.default_policy
   ; authoring_validation_host = None
-  ; content_limits = None
+  ; content_limits =
+      Some
+        (Chatmd_prompt_content.Limits.create
+           ~max_occurrences:1024
+           ~max_parser_inputs:512
+           ~max_input_bytes:(8 * 1024 * 1024)
+           ~max_output_bytes:(8 * 1024 * 1024)
+           ~max_work_steps:10_000_000
+           ~max_nodes:1_000_000
+           ~max_depth:128
+           ~max_payloads:256
+           ~max_payload_bytes:(8 * 1024 * 1024)
+           ~document:Document_schema.Limits.default
+         |> Or_error.ok_exn)
+  ; script_preparation =
+      Some
+        (Agent_session.Runtime_script_preparation.create
+           ~compilation:Chatml_compilation.default_limits
+           ~planning:
+             (Chat_response.Script_contract_plan.Limits.create
+                ~max_programs:(262144 / 100)
+                ~max_metadata_bytes:(8 * 1024 * 1024)
+                ~max_work_steps:10_000_000
+              |> Or_error.ok_exn)
+           ~restoration:
+             (Chatml_prompt_programs.Limits.create
+                ~max_programs:(262144 / 100)
+                ~max_parser_inputs:512
+                ~max_logical_sources:(262144 / 100)
+                ~max_total_input_bytes:(8 * 1024 * 1024)
+                ~project_work_steps:10_000_000
+                ~document:Document_schema.Limits.default
+              |> Or_error.ok_exn)
+           ~max_custody_work_steps:10_000_000
+         |> Or_error.ok_exn)
   ; provider_operator_factory = None
   ; oauth_resolver = None
   ; oauth_actor_resolver = None
@@ -1029,6 +1064,8 @@ let compose
       ~independent_lifetime_policy:options.independent_lifetime_policy
       ~chatml_runtime_policy:options.chatml_runtime_policy
       ~authoring_validation_host:options.authoring_validation_host
+      ~script_preparation:options.script_preparation
+      ~content_limits:options.content_limits
       ~durability:(durability config.server)
       ~limits:factory_limits
   in

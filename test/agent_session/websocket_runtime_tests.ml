@@ -180,6 +180,7 @@ let%expect_test
       and selection = ref None in
       let runtime =
         B.build
+          ~script_preparation:(Some (Fixtures.script_preparation ()))
           ~sw
           ~env
           ~inference_context:context

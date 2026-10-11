@@ -14,6 +14,11 @@ let store_ok = function
     raise_s [%sexp "unexpected store error", (error : Agent_store.Store_error.t)]
 ;;
 
+(* Exercise the actual daemon composition policy across runtime fixtures. *)
+let script_preparation () =
+  Option.value_exn Agent_server.Daemon.default_options.script_preparation
+;;
+
 let document_limits = Document_schema.Limits.default
 
 let document_ok = function

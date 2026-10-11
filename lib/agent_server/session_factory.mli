@@ -118,6 +118,8 @@ val create
   -> independent_lifetime_policy:string option
   -> chatml_runtime_policy:Chat_response.Runtime_semantics.policy
   -> authoring_validation_host:Chat_response.Authoring_validation.host option
+  -> script_preparation:Agent_session.Runtime_script_preparation.t option
+  -> content_limits:Chatmd_prompt_content.Limits.t option
   -> durability:Agent_store.Journal_segment.durability
   -> limits:limits
   -> t

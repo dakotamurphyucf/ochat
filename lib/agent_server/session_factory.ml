@@ -113,6 +113,8 @@ type t =
   ; independent_lifetime_policy : string option
   ; chatml_runtime_policy : Chat_response.Runtime_semantics.policy
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
+  ; script_preparation : Agent_session.Runtime_script_preparation.t option
+  ; content_limits : Chatmd_prompt_content.Limits.t option
   ; generated_creation : Agent_session.Generated_session_request.service
   ; managed_sessions : Agent_session.Managed_session_service.t
   ; managed_output_cursors : Managed_output_cursor.t
@@ -2551,6 +2553,8 @@ let prepare_authored_graph
     ~services:t.authored_services
     ~build:(fun ~parent_revision ~tool_name ~native_registrations ->
       Agent_session.Runtime_builder.prepare_authored_resources
+        ~script_preparation:t.script_preparation
+        ~content_limits:t.content_limits
         ~native_registrations
         ~parent_revision
         ~tool_name
@@ -2686,6 +2690,7 @@ let independent_resource_host t =
           let%bind inference_context = resolve_state_inference_context t state in
           let%bind resources =
             B.prepare_resources
+              ~script_preparation:t.script_preparation
               ~inference_context
               ~inference_identity:(Graph_tracking.identity tracking)
               ~on_inference_attempt:(Graph_tracking.on_attempt tracking)
@@ -3242,7 +3247,9 @@ let prepare_runtime_at_paths
             | false ->
               construct
                 sw
-                (Agent_session.Runtime_builder.build ~revision)
+                (Agent_session.Runtime_builder.build
+                   ~script_preparation:t.script_preparation
+                   ~revision)
                 (manifest_authorizer
                    ~run_preparation
                    t
@@ -3274,7 +3281,11 @@ let prepare_runtime_at_paths
               let%bind runtime =
                 construct
                   sw
-                  (B.build_with_extensions ~native_registrations ~revision ~services)
+                  (B.build_with_extensions
+                     ~script_preparation:t.script_preparation
+                     ~native_registrations
+                     ~revision
+                     ~services)
                   (manifest_authorizer
                      ~run_preparation
                      t
@@ -3391,6 +3402,7 @@ let prepare_runtime_at_paths
               in
               let%map revision =
                 Agent_session.Prompt_revision_builder.reparse
+                  ?content_limits:t.content_limits
                   ~definition:(Agent_session.Prompt_revision.definition prepared.revision)
                   ~artifact
                   ~materialized_tree:
@@ -8588,6 +8600,8 @@ let create
       ~independent_lifetime_policy
       ~chatml_runtime_policy
       ~authoring_validation_host
+      ~script_preparation
+      ~content_limits
       ~durability
       ~limits
   =
@@ -8646,6 +8660,8 @@ let create
     ; independent_lifetime_policy
     ; chatml_runtime_policy
     ; authoring_validation_host
+    ; script_preparation
+    ; content_limits
     ; durability
     ; limits
     ; document_limits =

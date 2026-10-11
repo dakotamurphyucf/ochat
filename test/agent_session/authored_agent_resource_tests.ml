@@ -162,6 +162,8 @@ let run ctx input =
             ()
         in
         B.prepare_authored_resources
+          ~script_preparation:(Some (Fixtures.script_preparation ()))
+          ~content_limits:None
           ~inference_context:inference.context
           ~inference_identity:inference.identity
           ~on_inference_attempt:ignore
@@ -201,6 +203,7 @@ let run ctx input =
             ()
         in
         B.prepare_resources
+          ~script_preparation:(Some (Fixtures.script_preparation ()))
           ~inference_context:inference.context
           ~inference_identity:inference.identity
           ~on_inference_attempt:ignore

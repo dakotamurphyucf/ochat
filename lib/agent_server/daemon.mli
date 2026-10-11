@@ -58,6 +58,10 @@ type options =
     (** Fixed host policy for restoring captured documents in the prompt catalog.
         None rejects content-bearing stored revisions. Source acquisition needs
         its own preparation hook; stored metadata never selects these limits. *)
+  ; script_preparation : Agent_session.Runtime_script_preparation.t option
+    (** Host compilation, role planning and semantic graph restoration ceilings.
+        Required for owned prompt revisions, including parser-only custody.
+        Independent of storage admission and readonly authoring helper policy. *)
   ; provider_operator_factory : Provider_operator_port.factory option
     (** Optional host-owned provider service. Initialize once with actual server
         identity; missing service advertises no provider.operator capability.

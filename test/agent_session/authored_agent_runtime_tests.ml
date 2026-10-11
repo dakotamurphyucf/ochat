@@ -117,6 +117,8 @@ let on_event ctx state event = match event with
                 ()
             in
             B.prepare_authored_resources
+              ~script_preparation:(Some (Fixtures.script_preparation ()))
+              ~content_limits:None
               ~inference_context:inference.context
               ~inference_identity:inference.identity
               ~on_inference_attempt:ignore
