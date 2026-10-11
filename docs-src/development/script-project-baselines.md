@@ -94,3 +94,21 @@ uncertain publication; that old observation does not describe current disk bytes
 or authorize a retry. The existing publication tests check this distinction at
 the real writer boundary, and the daemon fixture verifies configured-project
 startup, restart after a local edit, and refusal to recreate a missing old index.
+
+Explicit dependency updates and configuration reload share the same watcher
+admission and publication hooks. An update prepares against the exact installed
+configuration without reading a staged configuration edit or consuming its
+modification time. Its response is derived from the prepared history and actual
+target outcomes before the durable write. On-demand and operator-only hosts keep
+this owner available for explicit operations while leaving automatic polling and
+runtime activation disabled.
+
+The command handler acknowledges a Protected Pending receipt in the existing
+idempotency store before entering the host. It releases the idempotency mutex
+before cancellable preparation; original operator authorization is checked at
+admission and preparation checkpoints. Known rejection or acknowledged success
+can complete the receipt. Uncertainty or an exception leaves Pending, including
+when the catalog committed but result delivery failed. Receipt completion records
+an already admitted effect and does not reclassify a committed update when its
+operator is subsequently revoked. Replay and receipt reads still require current
+authorization. The receipt and dependency index are separate durable writes.

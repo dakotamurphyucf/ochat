@@ -1336,6 +1336,29 @@ let compose
     ; health_status_ref = status_ref
     }
   in
+  let dependency_administration =
+    Dependency_administration.create
+      ~status:(fun () ->
+        let publication, _ = Config_watcher.status config_watcher in
+        Prompt_dependency_projection.status project_catalog ~publication)
+      ~update:(fun request ~checkpoint ->
+        Config_watcher.update_dependencies config_watcher request ~checkpoint
+        |> Result.map_error ~f:(function
+          | Config_watcher.Failure.Rejected _ ->
+            Dependency_administration.Failure.Rejected
+              (Agent_protocol.Error.create
+                 Invalid_state
+                 ~message:"dependency update rejected before publication"
+                 ~retryable:false
+                 ())
+          | Uncertain _ ->
+            Dependency_administration.Failure.Uncertain
+              (Agent_protocol.Error.create
+                 Interrupted
+                 ~message:"dependency publication is uncertain; do not repeat the update"
+                 ~retryable:false
+                 ())))
+  in
   let handler =
     Command_handler.create
       ~sw
@@ -1373,6 +1396,7 @@ let compose
       ~workspace_retained:(Session_factory.workspace_retained factory)
       ~prepare_administration:(Session_factory.prepare_administration factory)
       ~provider_operator
+      ~dependency_administration:(Some dependency_administration)
   in
   let admit command =
     if execution_enabled
