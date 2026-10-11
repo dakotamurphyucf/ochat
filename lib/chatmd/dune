@@ -8,6 +8,7 @@
   chatmd_parser_builder
   chatmd_located_ast
   chatmd_owned_parser
+  chatmd_document_occurrence
   chatmd_parser_engine
   chatmd_parser_tokens
   chatmd_tokens
@@ -25,8 +26,11 @@
   chatmd_shell_declaration
   chatmd_shell_serialization
   prompt)
+ (private_modules chatmd_document_occurrence)
  (libraries
+  builtin_instructions
   core
+  digestif
   source
   chatml_source
   ochat.chatml_local_source

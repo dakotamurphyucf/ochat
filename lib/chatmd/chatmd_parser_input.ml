@@ -37,6 +37,37 @@ let effective_sha256 t = t.effective_sha256
 let authored_byte_length t = String.length t.authored
 let effective_byte_length t = String.length t.effective
 
+let identity_digest t ~checkpoint =
+  let role =
+    match t.role with
+    | Role.Root -> "root"
+    | Import -> "import"
+  in
+  let context = ref (Digestif.SHA256.init ()) in
+  List.iter
+    [ "ochat.parser-input.v1"
+    ; role
+    ; t.path
+    ; t.authored_sha256
+    ; t.effective_sha256
+    ; Int.to_string (authored_byte_length t)
+    ; Int.to_string (effective_byte_length t)
+    ]
+    ~f:(fun value ->
+      checkpoint ();
+      context
+      := Digestif.SHA256.feed_string !context (Int.to_string (String.length value));
+      context := Digestif.SHA256.feed_string !context ":";
+      let offset = ref 0 in
+      while !offset < String.length value do
+        checkpoint ();
+        let len = Int.min 4096 (String.length value - !offset) in
+        context := Digestif.SHA256.feed_string !context ~off:!offset ~len value;
+        offset := !offset + len
+      done);
+  Digestif.SHA256.(get !context |> to_hex)
+;;
+
 let equal_bytes first second ~checkpoint =
   if String.length first <> String.length second
   then false

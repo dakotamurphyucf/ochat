@@ -31,6 +31,9 @@ let features =
       ; "test/chatmd_source_bundle_test.ml"
       ; "test/chatmd_owned_input/input_tests.ml"
       ; "test/chatmd_owned_input/capture_tests.ml"
+      ; "test/chatmd_documents/document_tests.ml"
+      ; "test/chatmd_prompt_content/content_tests.ml"
+      ; "test/builtin_instructions/builtin_instructions_tests.ml"
       ; "test/agent_docs/docs_child_authoring.ml"
       ; "test/chatml_source_owner/owner_tests.ml"
       ; "test/chatml_source_owner/project_tests.ml"
@@ -225,7 +228,7 @@ let implementation_sources =
   ; ( "lib/chatmd/chatmd_source_bundle.ml"
     , "c3e0f8f89c8538ddcec98873739455a673b0e6e894282c21c96046c096bb6ae5" )
   ; ( "lib/chatmd/prompt.ml"
-    , "e34f84c4c8a58d4aec2ac18688954f664a49bf95650ce8161245bd41bf8af807" )
+    , "6d4e6ab7ca62e6ddf6c965d32f83370b00fc0ffc4b8315306c71f58b30315842" )
   ; ( "lib/chatmd/source_loader.ml"
     , "f505418ca38265841dc2a761717861150810395fd66d69071d645b00112419ff" )
   ; ( "lib/chatmd_shell_spec/authoring_metadata.ml"
@@ -274,7 +277,7 @@ let implementation_sources =
   ; ( "lib/chatmd/chatmd_tokens.ml"
     , "12d64ec1df81a7ebf9156e4db78a350b7bf45bd112b8e000e8b96d4354225e78" )
   ; ( "lib/chatmd/chatmd_parser_input.ml"
-    , "05b5658144dda7c829a10713b4799d4e38558c8366d1ea6f0c1cd8d968a9ac37" )
+    , "ff5449579e75dad66338700683d56b373ee9baedbb6433214e21af5a4df1ab57" )
   ; ( "lib/chatmd/chatmd_owned_parser.ml"
     , "42130395da8eb0465c96d59a5233ae24adb300e5bd6094609a5cf60d007ca573" )
   ; ( "lib/agent_session/prompt_revision_builder.ml"

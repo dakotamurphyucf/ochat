@@ -65,6 +65,20 @@ val root_dir : t -> Eio.Fs.dir_ty Eio.Path.t
     filesystem fallback. This is a mode projection, never an execution grant. *)
 val is_captured : t -> bool
 
+(** Pure confined member resolution from an admitted logical declaring-file path.
+    The reference byte ceiling must lie in [0,1024]; admission precedes scanning
+    or concatenation. Reject absolute paths, URL/colon/backslash/control hazards
+    and root escapes. Uses the same lexical normalization as captured loading;
+    no native directory, filesystem I/O or display source context is authority.
+    Individual admitted path primitives scan at most2049 bytes; checkpoints
+    bracket this bounded work and propagate unchanged. *)
+val resolve_member
+  :  Source.Portable_path.t
+  -> reference:string
+  -> max_reference_bytes:int
+  -> checkpoint:(unit -> unit)
+  -> Source.Portable_path.t Core.Or_error.t
+
 (** Resolve a relative extension source without lexical escape, even with the
     legacy filesystem loader. Captured loaders still forbid unknown edges.
     This is not a symlink sandbox; captured artifact verification remains required. *)

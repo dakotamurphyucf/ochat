@@ -1,0 +1,5 @@
+(library
+ (name chatmd_documents_tests)
+ (libraries core eio_main chatmd expect_test_helpers_core)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

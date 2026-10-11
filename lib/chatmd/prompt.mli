@@ -211,6 +211,29 @@ module Chat_markdown : sig
     | Authoring_help of Chatmd_shell_spec.Extension_spec.authoring_help
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
+  module Document_occurrence : sig
+    (** One actual included document content slot, owned by this Parsed result.
+        A repeated import creates a distinct slot even for an equal input/range.
+        No native directory or authored display source_context is authority. *)
+    type t
+
+    module Selection : sig
+      type t =
+        | Dynamic
+        | Local_capture
+        | Builtin of string
+      [@@deriving equal, sexp_of]
+    end
+
+    val range : t -> Chatmd_parser_input.Range.t
+    val ordinal : t -> int
+    val src : t -> string
+    val selection : t -> Selection.t
+    val local : t -> bool
+    val cleanup_html : t -> bool
+    val markdown : t -> bool
+  end
+
   module Declaration : sig
     type t
 
@@ -237,7 +260,41 @@ module Chat_markdown : sig
     val root_input : t -> Chatmd_parser_input.t
     val inputs : t -> Chatmd_parser_input.t list
     val declarations : t -> Declaration.t list
+
+    (** Only documents actually included in message/Agent content, in emitted
+        order; ignored markup does not become an acquisition request. *)
+    val document_occurrences : t -> Document_occurrence.t list
   end
+
+  module Document_projection : sig
+    (** Literal content projection authenticated against its original Parsed.
+        Declaration/input provenance stays in that unchanged parser result. *)
+    type t
+
+    val parsed : t -> Parsed.t
+    val elements : t -> top_level_elements list
+
+    (** Logical traversal/comparison/list-copy units consumed by materialization. *)
+    val work_steps : t -> int
+  end
+
+  (** Replace exact actual Local_capture/Builtin slots with literal Basic text.
+      Reject foreign, duplicate, surplus or missing occurrences before projection
+      allocation. Dynamic slots remain unchanged. Preserve roles, ordering, IDs,
+      display source_context and all other message fields. Nonnegative explicit
+      occurrence/output-byte/work ceilings apply before list/string retention.
+      Work includes validation, slot comparisons and copying every plain item,
+      including items with no document. It is a logical admission model, not a
+      CPU or wall-clock bound. No I/O
+      or content lookup; borrowed checkpoint exceptions propagate unchanged. *)
+  val materialize_documents
+    :  Parsed.t
+    -> rendered:(Document_occurrence.t * string) list
+    -> max_occurrences:int
+    -> max_output_bytes:int
+    -> max_work_steps:int
+    -> checkpoint:(unit -> unit)
+    -> Document_projection.t Core.Or_error.t
 
   module Limits : sig
     type t

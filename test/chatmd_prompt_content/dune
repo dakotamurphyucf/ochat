@@ -1,0 +1,5 @@
+(library
+ (name chatmd_prompt_content_tests)
+ (libraries core eio_main chatmd chatmd_prompt_content builtin_instructions document_schema agent_store jsonaf expect_test_helpers_core)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

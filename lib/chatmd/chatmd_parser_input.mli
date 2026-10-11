@@ -50,6 +50,13 @@ val effective_sha256 : t -> string
 val authored_byte_length : t -> int
 val effective_byte_length : t -> int
 
+(** Stable parser-input v1 identity: length-prefixed role, exact logical path,
+    authored/effective SHA256 and byte lengths. Matches persisted custody keys.
+    This hashes metadata, not a native locator; callers separately admit path
+    size/portable policy. Input-sized fields poll in4096-byte batches; callback
+    exceptions propagate unchanged. *)
+val identity_digest : t -> checkpoint:(unit -> unit) -> string
+
 (** Bounded exact authored-byte comparison for replay/admission. *)
 val authored_matches : t -> string -> checkpoint:(unit -> unit) -> bool
 

@@ -1,6 +1,7 @@
 (library
  (name webpage_markdown)
  (public_name ochat.webpage_markdown)
+ (private_modules conversion_budget conversion_output conversion_dom html_to_md_core md_render_core)
  (libraries
   core
   io

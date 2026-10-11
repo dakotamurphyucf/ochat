@@ -701,6 +701,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_tui/utf8_edit.mli` | [contract](../../lib/chat_tui/utf8_edit.mli) | [integration](../guide/chat_tui.md) | Public interface + current host guide. |
 | `lib/chat_tui/util.mli` | [contract](../../lib/chat_tui/util.mli) | [integration](../guide/chat_tui.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_attributes.mli` | [contract](../../lib/chatmd/chatmd_attributes.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chatmd/chatmd_document_occurrence.mli` | [contract](../../lib/chatmd/chatmd_document_occurrence.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_extension_declaration.mli` | [contract](../../lib/chatmd/chatmd_extension_declaration.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_import_expansion.mli` | [contract](../../lib/chatmd/chatmd_import_expansion.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_located_ast.mli` | [contract](../../lib/chatmd/chatmd_located_ast.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
@@ -970,6 +971,8 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../design/ochat-agent-server-implementation-spec.md) | `docs-src/design/ochat-agent-server-implementation-spec.md` | Canonical design; conceptual/compatibility qualifications retained. |
 | [page](../design/ochat-agent-server-spec.md) | `docs-src/design/ochat-agent-server-spec.md` | Canonical design; conceptual/compatibility qualifications retained. |
 | [page](../development/admin-remediation-notes.md) | `docs-src/development/admin-remediation-notes.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../development/bounded-document-conversion.md) | `docs-src/development/bounded-document-conversion.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../development/captured-document-content.md) | `docs-src/development/captured-document-content.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/chatml-extensibility-handoff.md) | `docs-src/development/chatml-extensibility-handoff.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/chatml-program-custody.md) | `docs-src/development/chatml-program-custody.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/chatml-semantic-queries.md) | `docs-src/development/chatml-semantic-queries.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
