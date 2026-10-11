@@ -267,20 +267,34 @@ let main input = Task.pure(`Null)
 ```
 
 Arithmetic and ordering distinguish integers from floats and do not coerce
-between them. Equality unifies operand types. When those types are already known,
-it rejects arrays, refs, functions and tasks. A generic equality helper currently
-does not retain that restriction for later specialization: it can accept these
-values and compare them by identity at runtime. This is a compiler limitation,
-not structural array equality. Compare elements explicitly when contents matter.
+between them. Equality unifies operand types and checks every visible component.
+Arrays, refs, functions, tasks and module identities cannot be compared, directly
+or through a generic helper. Inferred equality requirements survive aliases,
+higher-order calls and module exports; open record helpers also check additional
+fields supplied by the caller. These are compiler-maintained requirements, not a
+user-defined type-class system. Diagnostics may label an inferred variable with
+`[equality]`; that label is explanatory, not annotation syntax.
 
-<!-- ochat-authoring-example: {"id":"inference.generic-equality-boundary","surface":"one_off_v1","result":true} -->
+<!-- ochat-authoring-example: {"id":"inference.generic-equality-boundary","surface":"one_off_v1","stage":"typecheck","contains":"Equality is not supported for arrays","span":true} -->
 ```ocaml
 let same left right = left == right
+let main input = Task.pure(`Bool(same([1, 2], [1, 2])))
+```
+
+Ordinary comparable values remain polymorphic. A copy-update compares the copy's
+visible fields, so replacing a function-valued field with an integer does not
+require the original function to support equality. Accessing and comparing an
+exported value is also allowed; comparing the module itself is not.
+
+<!-- ochat-authoring-example: {"id":"inference.equality-visible-fields","surface":"one_off_v1","result":true} -->
+```ocaml
+let same left right = left == right
+let compare_copy original =
+  let copy = {original with callback = 1} in same(copy, copy)
+module Settings = struct let enabled = true end
 let main input =
-  let first = [1, 2] in
-  let alias = first in
-  let copy = Array.copy(first) in
-  if same(first, alias) then Task.pure(`Bool(if same(first, copy) then false else true))
+  let original = {callback = (fun x -> x); label = "kept"} in
+  if same(Settings.enabled, true) then Task.pure(`Bool(compare_copy(original)))
   else Task.pure(`Bool(false))
 ```
 

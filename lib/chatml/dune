@@ -4,6 +4,7 @@
  (modules
   chatml_lang
   chatml_shape_kind
+  chatml_equality_requirement
   chatml_eval
   chatml_parse
   chatml_slot_layout

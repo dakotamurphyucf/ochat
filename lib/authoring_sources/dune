@@ -21,6 +21,7 @@
     lib/chatml/chatml_lexer.mll %{dep:../chatml/chatml_lexer.mll}
     lib/chatml/chatml_parser.mly %{dep:../chatml/chatml_parser.mly}
     lib/chatml/chatml_typechecker.ml %{dep:../chatml/chatml_typechecker.ml}
+    lib/chatml/chatml_equality_requirement.ml %{dep:../chatml/chatml_equality_requirement.ml}
     lib/chatml/chatml_resolver.ml %{dep:../chatml/chatml_resolver.ml}
     lib/chatml/chatml_eval.ml %{dep:../chatml/chatml_eval.ml}
     lib/chatml/chatml_lang.ml %{dep:../chatml/chatml_lang.ml}

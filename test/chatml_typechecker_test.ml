@@ -1774,7 +1774,7 @@ let%test_unit "explicit recursive type helpers are cycle-safe" =
   in
   let rendered = Chatml_typechecker.show_type ty in
   if not (String.is_substring rendered ~substring:"mu a.") then failwith rendered;
-  Chatml_typechecker.ensure_equality_type ty;
+  Chatml_typechecker.ensure_equality_type (Chatml_typechecker.create_state ()) ty;
   match Chatml_typechecker.record_field_type ty "next" with
   | Some _ -> ()
   | None -> failwith "expected to find recursive record field through Mu"
@@ -1890,7 +1890,10 @@ let%test_unit "unguarded recursive type declaration is rejected" =
 
 let%test_unit "ordinary non-recursive bindings still generalize" =
   let state = Chatml_typechecker.create_state () in
-  let free = Chatml_typechecker.Var (ref (Chatml_typechecker.Free ("z", 1))) in
+  let free =
+    Chatml_typechecker.Var
+      (ref (Chatml_typechecker.Free { name = "z"; level = 1; equality = None }))
+  in
   let ty = Chatml_typechecker.Fun ([ Chatml_typechecker.TInt ], free) in
   let env = Chatml_typechecker.Env.empty in
   let env' = Chatml_typechecker.add_generalized state env "f" ty in
@@ -1901,7 +1904,10 @@ let%test_unit "ordinary non-recursive bindings still generalize" =
 
 let%test_unit "bindings containing recursive types remain monomorphic" =
   let state = Chatml_typechecker.create_state () in
-  let free = Chatml_typechecker.Var (ref (Chatml_typechecker.Free ("z", 1))) in
+  let free =
+    Chatml_typechecker.Var
+      (ref (Chatml_typechecker.Free { name = "z"; level = 1; equality = None }))
+  in
   let recursive_expr_ty =
     Chatml_typechecker.Mu
       ( "expr"
@@ -2060,7 +2066,7 @@ let%expect_test "recursive unification preserves payload constraints and binder 
   let open Chatml_typechecker in
   let record fields = Record (Row (Env.of_list fields, Empty_row)) in
   let graph payload =
-    let knot = ref (Free ("knot", 0)) in
+    let knot = ref (Free { name = "knot"; level = 0; equality = None }) in
     let ty = record [ "next", Var knot; "value", payload ] in
     knot := Bound ty;
     ty
@@ -2081,12 +2087,14 @@ let%expect_test "recursive unification preserves payload constraints and binder 
   check "payload mismatch after back edge" (graph TInt) (graph String);
   check "inferred against explicit" (graph TInt) (declared "node" TInt);
   check "explicit against inferred" (declared "node" TInt) (graph TInt);
-  let shared_free = Var (ref (Free ("shared_free", 0))) in
+  let shared_free =
+    Var (ref (Free { name = "shared_free"; level = 0; equality = None }))
+  in
   check
     "shared free payload under alpha renamed binders"
     (declared "a" shared_free)
     (declared "b" shared_free);
-  let shared = Var (ref (Free ("shared", 0))) in
+  let shared = Var (ref (Free { name = "shared"; level = 0; equality = None })) in
   check
     "sibling constraints are rechecked"
     (Tuple [ graph shared; graph shared ])

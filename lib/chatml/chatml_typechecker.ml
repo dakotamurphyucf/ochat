@@ -53,6 +53,7 @@ open Chatml.Chatml_lang
 module Builtin_spec = Chatml.Chatml_builtin_spec
 module Builtin_surface = Chatml.Chatml_builtin_surface
 module Shape_kind = Chatml.Chatml_shape_kind
+module Equality_requirement = Chatml.Chatml_equality_requirement
 
 (***************************************************************************)
 (* A Hindley-Milner style type-checker for the ChatML language.            *)
@@ -99,7 +100,10 @@ type name = string
 
 type typ =
   | Fun of typ list * typ
-  | Generic of name
+  | Generic of
+      { name : name
+      ; equality : Equality_requirement.t option
+      }
   | Var of tv ref
   | Con of string * typ list
   | Mu of name * typ
@@ -123,7 +127,11 @@ type typ =
 
 and tv =
   | Bound of typ
-  | Free of name * int (* name, level *)
+  | Free of
+      { name : name
+      ; level : int
+      ; equality : Equality_requirement.t option
+      }
 
 (** --------------------------------------------------------------------- *)
 
@@ -227,7 +235,25 @@ let format_diagnostic (source_text : string) (diagnostic : diagnostic) : string 
       diagnostic.message
 ;;
 
-let new_var (state : infer_state) level = Var (ref (Free (gensym state, level)))
+let new_var (state : infer_state) ?equality level =
+  Var (ref (Free { name = gensym state; level; equality }))
+;;
+
+let add_free_equality tv required =
+  match !tv with
+  | Bound _ -> failwith "internal: equality requirement expected a free variable"
+  | Free info ->
+    let equality =
+      match info.equality with
+      | None -> required
+      | Some previous ->
+        (match Equality_requirement.combine previous required with
+         | Ok combined -> combined
+         | Error Value_and_row ->
+           raise (Type_error "Type variable cannot be both a value and a record row"))
+    in
+    tv := Free { info with equality = Some equality }
+;;
 
 let tv_ref_mem (needle : tv ref) (haystack : tv ref list) : bool =
   List.exists haystack ~f:(fun candidate -> phys_equal needle candidate)
@@ -285,8 +311,10 @@ let instantiate (state : infer_state) ty =
   let rec inst_kind seen kind =
     checkpoint state;
     match kind with
-    | Generic name ->
+    | Generic { name; equality = None } ->
       Hashtbl.find_or_add kinds name ~default:(fun () -> new_var state state.current_lvl)
+    | Generic { equality = Some _; _ } ->
+      raise (Type_error "A representation kind cannot carry value equality")
     | Var ({ contents = Bound bound } as tv) ->
       if tv_ref_mem tv seen then Var tv else inst_kind (tv :: seen) bound
     | other -> other
@@ -295,13 +323,15 @@ let instantiate (state : infer_state) ty =
     checkpoint state;
     match ty with
     | Fun (ps, r) -> Fun (List.map ps ~f:(inst seen), inst seen r)
-    | Generic x ->
-      (match Hashtbl.find table x with
-       | Some t -> t
-       | None ->
-         let v = new_var state state.current_lvl in
-         Hashtbl.add_exn table ~key:x ~data:v;
-         v)
+    | Generic { name; equality } ->
+      let variable =
+        Hashtbl.find_or_add table name ~default:(fun () ->
+          new_var state ?equality state.current_lvl)
+      in
+      (match variable with
+       | Var tv -> Option.iter equality ~f:(add_free_equality tv)
+       | _ -> assert false);
+      variable
     | Con (n, args) -> Con (n, List.map args ~f:(inst seen))
     | Var ({ contents = Bound t } as tvref) ->
       if tv_ref_mem tvref seen then Var tvref else inst (tvref :: seen) t
@@ -335,7 +365,8 @@ let generalise (state : infer_state) ty =
     | Fun (params, ret) -> Fun (List.map params ~f:(gen seen), gen seen ret)
     | Var ({ contents = Bound t } as tvref) ->
       if tv_ref_mem tvref seen then Var tvref else gen (tvref :: seen) t
-    | Var { contents = Free (name, lvl) } when lvl > state.current_lvl -> Generic name
+    | Var { contents = Free { name; level; equality } } when level > state.current_lvl ->
+      Generic { name; equality }
     | Var ({ contents = Free _ } as tvref) -> Var tvref
     | Con (n, args) -> Con (n, List.map args ~f:(gen seen))
     | Mu (binder, body) -> Mu (binder, gen seen body)
@@ -533,13 +564,13 @@ let occurs ?(checkpoint = fun () -> ()) tv ty =
     | Var tv' when phys_equal tv tv' -> found := true
     | Var ({ contents = Bound ty } as tv') ->
       if not (tv_ref_mem tv' seen) then aux (tv' :: seen) ty
-    | Var ({ contents = Free (name, lvl) } as tv') ->
+    | Var ({ contents = Free ({ level = lvl; _ } as info) } as tv') ->
       let new_lvl =
         match !tv with
-        | Free (_, lvl_tv) -> Int.min lvl lvl_tv
+        | Free { level = lvl_tv; _ } -> Int.min lvl lvl_tv
         | _ -> lvl
       in
-      tv' := Free (name, new_lvl)
+      tv' := Free { info with level = new_lvl }
     | Mu (_binder, body) -> aux seen body
     | Rec_var _ -> ()
     | Ref t | Record t | Module t | Variant t | Array t -> aux seen t
@@ -742,7 +773,10 @@ let rec unify (state : infer_state) lhs rhs =
       | Rec_var _, _ | _, Rec_var _ ->
         raise (Type_error "Cannot unify recursive type variable with non-recursive type")
       (* Your occurs-knot case (possibly gated to reject Fun recursion like x(x)) *)
-      | Var ({ contents = Free _ } as tv), t | t, Var ({ contents = Free _ } as tv) ->
+      | Var ({ contents = Free info } as tv), t | t, Var ({ contents = Free info } as tv)
+        ->
+        Option.iter info.equality ~f:(fun requirement ->
+          require_equality state requirement t);
         if occurs ~checkpoint:(fun () -> checkpoint state) tv t
         then (
           if not (can_infer_mu_through ~checkpoint:(fun () -> checkpoint state) t)
@@ -840,7 +874,7 @@ let rec unify (state : infer_state) lhs rhs =
             (match !tv with
              | Bound _ -> raise (Type_error "Recursive row types")
              | _ -> ());
-            tv := Bound (Row (missing_l, row_var))
+            go active env_l env_r (Var tv) (Row (missing_l, row_var))
           | Empty_row -> go active env_l env_r tail_l (Row (missing_l, new_var state 0))
           | _ -> assert false))
   in
@@ -936,10 +970,13 @@ and render_type ?(poll = fun () -> ()) ?bounds ty =
       add "]"
     | Row _ as row -> show_row_fields depth seen seen_rec false row
     | Empty_row -> ()
-    | Generic n -> add n
-    | Var { contents = Free (n, _) } ->
+    | Generic { name; equality } ->
+      add name;
+      qualification equality
+    | Var { contents = Free { name; equality; _ } } ->
       add "'";
-      add n
+      add name;
+      qualification equality
     | Var ({ contents = Bound t } as tv) ->
       (match tv_ref_mem tv seen with
        | true -> add "'rec"
@@ -952,6 +989,16 @@ and render_type ?(poll = fun () -> ()) ?bounds ty =
       add "(";
       separated ", " args child;
       add ")"
+  and qualification = function
+    | None -> ()
+    | Some Equality_requirement.Value -> add " [equality]"
+    | Some (Equality_requirement.Row excluded) ->
+      add " [row equality";
+      if not (Set.is_empty excluded)
+      then (
+        add " except ";
+        separated ", " (Set.to_list excluded) add);
+      add "]"
   and postfix depth seen seen_rec ty =
     match resolve (depth + 1) seen ty with
     | Fun _ ->
@@ -1117,93 +1164,113 @@ and show_variant_row row =
   in
   fields_str ^ tail_str
 
-and ensure_equality_type ?(checkpoint = fun () -> ()) ty =
-  let rec ensure_equality_type_with_seen (seen : tv ref list) (seen_rec : name list) ty =
-    checkpoint ();
-    match resolve_bound_type_for_display_with_seen seen ty with
-    | TInt | TFloat | Boolean | String | Unit | Generic _ | Shape_kind _ -> ()
-    | Var { contents = Free _ } -> ()
-    | Var ({ contents = Bound t } as tv) ->
-      if tv_ref_mem tv seen
-      then ()
-      else ensure_equality_type_with_seen (tv :: seen) seen_rec t
-    | Con (name, args) ->
-      (* If you want equality for some constructed types, recurse.
-             Tasks should almost certainly NOT be equality-comparable. *)
-      if String.equal name "task"
-      then raise (Type_error "Equality is not supported for Task values")
-      else List.iter args ~f:(ensure_equality_type_with_seen seen seen_rec)
-    | Mu (binder, body) ->
-      if rec_name_mem binder seen_rec
-      then ()
-      else ensure_equality_type_with_seen seen (binder :: seen_rec) body
-    | Rec_var binder when rec_name_mem binder seen_rec -> ()
-    | Rec_var _ -> ()
-    | Tuple ts | Variant_payload ts ->
-      List.iter ts ~f:(ensure_equality_type_with_seen seen seen_rec)
-    | Record row | Module row | Field_receiver (_, row) | Variant row ->
-      ensure_equality_row_with_seen seen seen_rec row
-    | Array _ -> raise (Type_error "Equality is not supported for arrays")
-    | Ref _ -> raise (Type_error "Equality is not supported for refs")
-    | Fun _ -> raise (Type_error "Equality is not supported for functions")
-    | Row _ | Empty_row -> ensure_equality_row_with_seen seen seen_rec ty
-  and ensure_equality_row_with_seen (seen : tv ref list) (seen_rec : name list) row =
-    checkpoint ();
-    let fields, tail = row_fields_and_tail_with_seen seen seen_rec row in
-    Env.iter fields ~f:(fun _field ty -> ensure_equality_type_with_seen seen seen_rec ty);
-    match tail with
-    | Empty_row | Var { contents = Free _ } | Generic _ | Rec_var _ -> ()
-    | Mu (binder, body) ->
-      if rec_name_mem binder seen_rec
-      then ()
-      else ensure_equality_row_with_seen seen (binder :: seen_rec) body
-    | Var ({ contents = Bound t } as tv) ->
-      if tv_ref_mem tv seen
-      then ()
-      else ensure_equality_row_with_seen (tv :: seen) seen_rec t
-    | _ -> ()
-  and resolve_bound_type_for_display_with_seen (seen : tv ref list) ty =
-    checkpoint ();
-    match ty with
-    | Var ({ contents = Bound bound_ty } as tv) ->
-      if tv_ref_mem tv seen
-      then Var tv
-      else resolve_bound_type_for_display_with_seen (tv :: seen) bound_ty
-    | _ -> ty
-  and row_fields_and_tail_with_seen (seen : tv ref list) (seen_rec : name list) row =
-    checkpoint ();
-    match row with
-    | Var ({ contents = Bound ty } as tv) ->
-      if tv_ref_mem tv seen
-      then Env.empty, Var tv
-      else row_fields_and_tail_with_seen (tv :: seen) seen_rec ty
-    | Mu (binder, _body) as mu ->
-      if rec_name_mem binder seen_rec
-      then Env.empty, mu
-      else
-        row_fields_and_tail_with_seen seen (binder :: seen_rec) (unfold_mu ~checkpoint mu)
-    | Rec_var _ as rec_var -> Env.empty, rec_var
-    | Record r | Module r | Field_receiver (_, r) ->
-      row_fields_and_tail_with_seen seen seen_rec r
-    | Variant r -> row_fields_and_tail_with_seen seen seen_rec r
-    | Row (fs, rest) ->
-      let rest_fields, tail = row_fields_and_tail_with_seen seen seen_rec rest in
-      Env.merge fs rest_fields, tail
-    | Empty_row -> Env.empty, Empty_row
-    | Var _ as var -> Env.empty, var
-    | Generic _ as generic -> Env.empty, generic
-    | other -> Env.empty, other
+and require_equality state requirement ty =
+  let module Binder = struct
+    type t =
+      { name : name
+      ; body : typ
+      ; outer : t list
+      }
+  end
   in
-  ensure_equality_type_with_seen [] [] ty
+  let same_scope left right = List.equal phys_equal left right in
+  let unsupported what = raise (Type_error ("Equality is not supported for " ^ what)) in
+  let rec require seen seen_rec scope requirement ty =
+    checkpoint state;
+    match ty with
+    | Var ({ contents = Free _ } as tv) -> add_free_equality tv requirement
+    | Var ({ contents = Bound bound } as tv) ->
+      if
+        not
+          (List.exists seen ~f:(fun (prior, obligation, prior_scope) ->
+             phys_equal tv prior
+             && Equality_requirement.equal requirement obligation
+             && same_scope scope prior_scope))
+      then require ((tv, requirement, scope) :: seen) seen_rec scope requirement bound
+    | Generic { name; equality } ->
+      let sufficient =
+        match equality with
+        | None -> false
+        | Some declared ->
+          (match Equality_requirement.combine declared requirement with
+           | Error _ -> false
+           | Ok combined -> Equality_requirement.equal declared combined)
+      in
+      if not sufficient
+      then raise (Type_error ("Equality requires a constrained type parameter '" ^ name))
+    | Mu (name, body) ->
+      require_binder seen seen_rec requirement { Binder.name; body; outer = scope }
+    | Rec_var name ->
+      (match List.find scope ~f:(fun binder -> String.equal binder.Binder.name name) with
+       | Some binder -> require_binder seen seen_rec requirement binder
+       | None -> raise (Type_error ("Unbound recursive equality variable '" ^ name)))
+    | _ ->
+      (match requirement with
+       | Equality_requirement.Value ->
+         (match ty with
+          | TInt | TFloat | Boolean | String | Unit -> ()
+          | Record row | Variant row ->
+            require seen seen_rec scope (Row String.Set.empty) row
+          | Field_receiver (kind, row) ->
+            unify state kind (Shape_kind Record);
+            require seen seen_rec scope (Row String.Set.empty) row
+          | Module _ -> unsupported "modules"
+          | Array _ -> unsupported "arrays"
+          | Ref _ -> unsupported "refs"
+          | Fun _ -> unsupported "functions"
+          | Con ("task", _) -> unsupported "Task values"
+          | Con (_, args) | Tuple args | Variant_payload args ->
+            List.iter args ~f:(require seen seen_rec scope Value)
+          | Row _ | Empty_row -> require seen seen_rec scope (Row String.Set.empty) ty
+          | Shape_kind _ -> unsupported "representation kinds"
+          | Var _ | Generic _ | Mu _ | Rec_var _ -> assert false)
+       | Row excluded ->
+         (match ty with
+          | Empty_row -> ()
+          | Row (fields, tail) ->
+            Env.iter fields ~f:(fun label field ->
+              checkpoint state;
+              if not (Set.mem excluded label) then require seen seen_rec scope Value field);
+            let shadowed =
+              Set.union excluded (Set.of_list (module String) (Map.keys fields))
+            in
+            require seen seen_rec scope (Row shadowed) tail
+          | Record row | Variant row -> require seen seen_rec scope requirement row
+          | Field_receiver (kind, row) ->
+            unify state kind (Shape_kind Record);
+            require seen seen_rec scope requirement row
+          | Module _ -> unsupported "modules"
+          | TInt
+          | TFloat
+          | Boolean
+          | String
+          | Unit
+          | Array _
+          | Ref _
+          | Fun _
+          | Con _
+          | Tuple _
+          | Variant_payload _
+          | Shape_kind _ -> raise (Type_error "Equality expected a record or variant row")
+          | Var _ | Generic _ | Mu _ | Rec_var _ -> assert false))
+  and require_binder seen seen_rec requirement binder =
+    (* Names are lexical: shadowing a binder must not discharge a different
+       obligation. Identity here belongs to one scoped traversal binding. *)
+    if
+      not
+        (List.exists seen_rec ~f:(fun (prior, obligation) ->
+           phys_equal binder prior && Equality_requirement.equal requirement obligation))
+    then
+      require
+        seen
+        ((binder, requirement) :: seen_rec)
+        (binder :: binder.Binder.outer)
+        requirement
+        binder.body
+  in
+  require [] [] [] requirement ty
 
-and ensure_equality_row row =
-  let fields, tail = row_fields_and_tail row in
-  Env.iter fields ~f:(fun _field ty -> ensure_equality_type ty);
-  match tail with
-  | Empty_row | Var { contents = Free _ } | Generic _ -> ()
-  | Var { contents = Bound t } -> ensure_equality_row t
-  | _ -> ()
-;;
+and ensure_equality_type state ty = require_equality state Equality_requirement.Value ty
 
 (** --------------------------------------------------------------------- *)
 
@@ -1392,7 +1459,7 @@ let rec typ_of_builtin_ty ?(checkpoint = fun () -> ()) (ty : Builtin_spec.ty) : 
   checkpoint ();
   let convert = typ_of_builtin_ty ~checkpoint in
   match ty with
-  | Builtin_spec.TVar name -> Generic name
+  | Builtin_spec.TVar name -> Generic { name; equality = None }
   | Builtin_spec.TCon (n, args) -> Con (n, List.map args ~f:convert)
   | Builtin_spec.TInt -> TInt
   | Builtin_spec.TFloat -> TFloat
@@ -1405,7 +1472,8 @@ let rec typ_of_builtin_ty ?(checkpoint = fun () -> ()) (ty : Builtin_spec.ty) : 
   | Builtin_spec.TRecord row -> Record (typ_of_builtin_row ~checkpoint row)
   | Builtin_spec.TModule row -> Module (typ_of_builtin_row ~checkpoint row)
   | Builtin_spec.TField_receiver (kind, row) ->
-    Field_receiver (Generic kind, typ_of_builtin_row ~checkpoint row)
+    Field_receiver
+      (Generic { name = kind; equality = None }, typ_of_builtin_row ~checkpoint row)
   | Builtin_spec.TVariant row -> Variant (typ_of_builtin_variant_row ~checkpoint row)
   | Builtin_spec.TFun (params, ret) -> Fun (List.map params ~f:convert, convert ret)
   | Builtin_spec.TMu (binder, body) -> Mu (binder, convert body)
@@ -1415,7 +1483,8 @@ and typ_of_builtin_row ?(checkpoint = fun () -> ()) (row : Builtin_spec.row) : t
   checkpoint ();
   match row with
   | Builtin_spec.TRow_empty -> Empty_row
-  | Builtin_spec.TRow_var name -> Generic (builtin_row_var_name name)
+  | Builtin_spec.TRow_var name ->
+    Generic { name = builtin_row_var_name name; equality = None }
   | Builtin_spec.TRow_extend (fields, tail) ->
     Row
       ( Env.of_list
@@ -1426,7 +1495,8 @@ and typ_of_builtin_variant_row ?(checkpoint = fun () -> ()) row : typ =
   checkpoint ();
   match row with
   | Builtin_spec.TVariant_row_empty -> Empty_row
-  | Builtin_spec.TVariant_row_var name -> Generic (builtin_row_var_name name)
+  | Builtin_spec.TVariant_row_var name ->
+    Generic { name = builtin_row_var_name name; equality = None }
   | Builtin_spec.TVariant_row_extend (cases, tail) ->
     Row
       ( Env.of_list
@@ -1585,8 +1655,8 @@ let restrict_free_vars_to_level ?(checkpoint = fun () -> ()) (max_level : int) (
     | Var ({ contents = Bound t } as tv) ->
       if not (tv_ref_mem tv seen) then aux (tv :: seen) t
     | Con (_n, args) -> List.iter args ~f:(aux seen)
-    | Var ({ contents = Free (name, lvl) } as tv) ->
-      if lvl > max_level then tv := Free (name, max_level)
+    | Var ({ contents = Free ({ level = lvl; _ } as info) } as tv) ->
+      if lvl > max_level then tv := Free { info with level = max_level }
     | Mu (_binder, body) -> aux seen body
     | Rec_var _ -> ()
     | Ref t | Record t | Module t | Variant t | Array t -> aux seen t
@@ -2195,7 +2265,7 @@ and infer_binary_prim
     Boolean
   | BEq | BNeq ->
     unify state lhs_ty rhs_ty;
-    ensure_equality_type ~checkpoint:(fun () -> checkpoint state) lhs_ty;
+    ensure_equality_type state lhs_ty;
     Boolean
 
 and join_type (state : infer_state) (lhs : typ) (rhs : typ) : typ =
