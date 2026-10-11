@@ -308,6 +308,7 @@ let make_control ~env budget =
         | "Array.map"
         | "Array.mapi"
         | "Array.filter"
+        | "Array.filter_map"
         | "array_copy" )
       , VArray values :: _ ) -> array_size (Array.length values)
     | "record_keys", [ VRecord fields ] -> array_size (Map.length fields)
@@ -358,7 +359,8 @@ let make_control ~env budget =
       in
       array_size (count 0 1);
       string_size (String.length text)
-    | ("Json.parse" | "Json.parse_opt" | "Json.validate"), [ VString text ] ->
+    | ( ("Json.parse" | "Json.parse_opt" | "Json.parse_result" | "Json.validate")
+      , [ VString text ] ) ->
       (* Bound parser expansion conservatively before entering Jsonaf. *)
       check_json_text text;
       if String.length text > Atomic.get allocation_remaining / 32

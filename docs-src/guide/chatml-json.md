@@ -1,10 +1,36 @@
 # JSON values, access and conversion
 
 Use `Json` for tool inputs, results, serializable workflow data and JSON text.
-Its sixteen exports are available on all four extensibility surfaces. They run
+Its exports are available on all four extensibility surfaces. They run
 immediately rather than returning tasks. The examples are complete one-off
 programs checked without tools or provider calls. See [execution contracts](chatml-authoring-runtime.md)
 for passing their results across the runtime boundary.
+
+## Recoverable syntax errors
+
+`Json.parse_result` exposes syntax failures as typed values. Its error contains a
+human-readable `message`; the exact parser wording is not a stable contract.
+It does not convert cancellation or unexpected implementation failures into
+syntax errors. Existing `Json.parse` still raises on invalid input, and
+`Json.parse_opt` still supplies the simpler optional result.
+
+<!-- ochat-authoring-example: {"id":"json.parse-result","surface":"one_off_v1","result":{"valid":true,"invalid":true}} -->
+```ocaml
+let main input =
+  let valid = match Json.parse_result("null") with
+    | `Ok(value) -> Json.tag(value) == "Null"
+    | `Error(error) -> false
+  in
+  let invalid = match Json.parse_result("{") with
+    | `Ok(value) -> false
+    | `Error(error) -> match error with
+      | `Invalid_syntax(diagnostic) -> String.length(diagnostic.message) > 0
+  in
+  Task.pure(`Object([
+    {key = "valid"; value = `Bool(valid)},
+    {key = "invalid"; value = `Bool(invalid)}
+  ]))
+```
 
 ## Representation and operations
 
@@ -19,6 +45,7 @@ constructing variants and mutable arrays; see [inference differences](chatml-oca
 | Call | Meaning |
 |---|---|
 | `Json.parse(text)` | Parse JSON text and convert it to the recursive value representation; failure raises immediately. |
+| `Json.parse_result(text)` | `Ok(value)` for valid JSON, or `Error(Invalid_syntax({message = diagnostic}))` for malformed text. |
 | `Json.parse_opt(text)` | Same parse/conversion, returning `Some(value)` or `None` on failure. |
 | `Json.validate(text)` | Check JSON text syntax only; returns a boolean. It does not validate a schema or guarantee lossless numeric conversion. |
 | `Json.stringify(value)` | Encode JSON as compact text. This is JSON encoding, unlike the general `to_string` renderer. |

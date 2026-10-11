@@ -285,15 +285,17 @@ module Coverage : sig
       surface, with byte offsets, literal matching and immediate error examples. *)
   val string_mappings : mapping list
 
-  (** Reviewed Array module and all twenty-two exports on each extensibility
+  (** Reviewed Array module and its exports on each extensibility
       surface, including shallow aliases and explicit task sequencing. *)
   val array_mappings : mapping list
 
-  (** Reviewed Option module and its five exports on each extensibility surface,
-      including eager defaults and structural variants. *)
+  (** Reviewed Outcome composition over typed Ok/Error variants. *)
+  val outcome_mappings : mapping list
+
+  (** Reviewed Option exports, including eager defaults and structural variants. *)
   val option_mappings : mapping list
 
-  (** Reviewed Json module and all sixteen exports on each extensibility surface,
+  (** Reviewed Json module and its exports on each extensibility surface,
       including duplicates, payload aliasing and numeric export boundaries. *)
   val json_mappings : mapping list
 

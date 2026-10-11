@@ -260,16 +260,16 @@ let topic_contracts =
     , "11f63fb503104c5515168c91d1d13a53043320ead580f0062c459aaa39ea40e4" )
   ; ( "one_off_v1"
     , "chatml.json"
-    , "4a976060eb6ae6a23fba932336c0dd428e807e8b15515111831e4fd938f06ead" )
+    , "bfb906470511a2e72344a1ed94ae62fd562c2055fe32ea66ab7cbf1c6533ada8" )
   ; ( "tool_v1"
     , "chatml.json"
-    , "956722cbdf85e6e4cb18963d1781341afb2a381cf5b96ebf366db0f8d5755ad7" )
+    , "c9585546808219af565be31b11261390606e277e7400d61feb385acffdba2f8e" )
   ; ( "moderator_v1"
     , "chatml.json"
-    , "22e825b5f5c99e7cdeb7843ce3717979b98c55ad6239278d608deff4047ec6d3" )
+    , "a058ee9bd9ac213c287b087ce1718d4c687811ad1e4c96f46ffec1c2ad7347cf" )
   ; ( "delegated_moderator_v1"
     , "chatml.json"
-    , "dd02b454b31316ded12a324c4ac8fdd6f19fc929eafcd2e26fb8ee047b8dd439" )
+    , "7cf8b36f18e8ef39a7059b93d6d868601b4289fec9025d9bee7c5f165554ed8f" )
   ; ( "one_off_v1"
     , "chatml.modules"
     , "1e1957c1a62ae270794aff600519fe5786a872f7ffed188f3c02a12d36d03fa8" )

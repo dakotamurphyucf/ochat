@@ -1,7 +1,7 @@
 open! Core
 open Chatml_lang
 open Jsonaf
-module Eval = Chatml_eval
+module Composition = Chatml_builtin_composition
 module Debug_log = Chatml_debug_log
 module Value_codec = Chatml_value_codec
 
@@ -68,27 +68,14 @@ type builtin_module =
   ; exports : builtin list
   }
 
-let apply_chatml (name : string) (fn : value) (args : value list) : value =
-  match Eval.apply_value_result fn args with
-  | Ok value -> value
-  | Error err ->
-    let message =
-      match fn with
-      | VClosure _ when String.equal err.message "Function arity mismatch" ->
-        Printf.sprintf "%s: function arity mismatch" name
-      | VBuiltin _ | VClosure _ -> err.message
-      | _ -> Printf.sprintf "%s: expected a function" name
-    in
-    (* Re-raise as [Failure] so the outer VBuiltin call site converts it
-       into a span-attached ChatML runtime error. *)
-    failwith message
-;;
+let apply_chatml name fn args = Chatml_builtin_callback.apply fn ~name args
 
 let module_scheme (m : builtin_module) : ty =
   TModule (closed_row (List.map m.exports ~f:(fun b -> b.name, b.scheme)))
 ;;
 
 let option_ty (a : string) : ty = variant [ "None", []; "Some", [ TVar a ] ]
+let outcome_of_ty value error = variant [ "Ok", [ value ]; "Error", [ error ] ]
 let task_ty (a : ty) : ty = TCon ("task", [ a ])
 let string_array_ty : ty = TArray TString
 let option_of_ty ty = variant [ "None", []; "Some", [ ty ] ]
@@ -1220,6 +1207,27 @@ let json_module =
              try jsonaf_to_value (Jsonaf.of_string s) with
              | exn -> failwith (Printf.sprintf "Json.parse: %s" (Exn.to_string exn)))
       ; make_unary_builtin
+          "parse_result"
+          (TFun
+             ( [ TString ]
+             , outcome_of_ty
+                 json_ty
+                 (variant [ "Invalid_syntax", [ record [ "message", TString ] ] ]) ))
+          (fun value ->
+             match Jsonaf.parse (expect_string "Json.parse_result" value) with
+             | Ok json -> VVariant ("Ok", [ jsonaf_to_value json ])
+             | Error error ->
+               VVariant
+                 ( "Error"
+                 , [ VVariant
+                       ( "Invalid_syntax"
+                       , [ VRecord
+                             (String.Map.singleton
+                                "message"
+                                (VString (Error.to_string_hum error)))
+                         ] )
+                   ] ))
+      ; make_unary_builtin
           "stringify"
           (TFun ([ json_ty ], TString))
           (fun v ->
@@ -1715,6 +1723,12 @@ let array_module : builtin_module =
                |> Array.of_list
              in
              VArray kept)
+      ; make_binary_builtin
+          "filter_map"
+          (TFun
+             ([ TArray (TVar "a"); TFun ([ TVar "a" ], option_ty "b") ], TArray (TVar "b")))
+          (fun values f ->
+             VArray (Composition.filter_map (expect_array "Array.filter_map" values) ~f))
       ; (* exists : 'a array -> ('a -> bool) -> bool *)
         make_binary_builtin
           "exists"
@@ -1814,11 +1828,35 @@ let task_module : builtin_module =
   }
 ;;
 
+let outcome_module : builtin_module =
+  let a = TVar "a" in
+  let b = TVar "b" in
+  let e = TVar "e" in
+  let f = TVar "f" in
+  { name = "Outcome"
+  ; exports =
+      [ make_binary_builtin
+          "map"
+          (TFun ([ outcome_of_ty a e; TFun ([ a ], b) ], outcome_of_ty b e))
+          (fun value f -> Composition.Outcome.map value ~f)
+      ; make_binary_builtin
+          "bind"
+          (TFun ([ outcome_of_ty a e; TFun ([ a ], outcome_of_ty b e) ], outcome_of_ty b e))
+          (fun value f -> Composition.Outcome.bind value ~f)
+      ; make_binary_builtin
+          "map_error"
+          (TFun ([ outcome_of_ty a e; TFun ([ e ], f) ], outcome_of_ty a f))
+          (fun value f -> Composition.Outcome.map_error value ~f)
+      ]
+  }
+;;
+
 let modules : builtin_module list =
   [ string_module
   ; array_module
   ; json_module
   ; task_module
+  ; outcome_module
   ; { name = "Option"
     ; exports =
         [ make_nullary_builtin
@@ -1845,6 +1883,14 @@ let modules : builtin_module list =
                | VVariant ("None", []) -> VBool false
                | VVariant ("Some", [ _ ]) -> VBool true
                | _ -> failwith "Option.is_some: expected `None or `Some(_)")
+        ; make_binary_builtin
+            "map"
+            (TFun ([ option_ty "a"; TFun ([ TVar "a" ], TVar "b") ], option_ty "b"))
+            (fun value f -> Composition.Option.map value ~f)
+        ; make_binary_builtin
+            "bind"
+            (TFun ([ option_ty "a"; TFun ([ TVar "a" ], option_ty "b") ], option_ty "b"))
+            (fun value f -> Composition.Option.bind value ~f)
         ; make_binary_builtin
             "get_or"
             (TFun ([ option_ty "a"; TVar "a" ], TVar "a"))

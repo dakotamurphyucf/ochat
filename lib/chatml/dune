@@ -12,6 +12,8 @@
   chatml_debug_log
   frame_env
   chatml_value_codec
+  chatml_builtin_callback
+  chatml_builtin_composition
   chatml_builtin_spec
   chatml_builtin_surface
   chatml_extension_surface
