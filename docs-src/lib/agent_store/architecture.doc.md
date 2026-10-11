@@ -2,6 +2,10 @@
 
 Eio-backed durable files, journals, snapshots, transaction commits, artifacts, blobs, audit, locks and recovery. Preserve typed missing/corrupt/I/O distinctions and exclusive ownership.
 
+Prompt artifacts may retain bounded original operator-selection receipts. These
+are immutable metadata, distinct from current source-read authority; restoration
+never opens a native path from a receipt. See [original source ownership](../../../lib/agent_session/original_sources.md).
+
 See [embedding](../../agent-server/embedding.md), [protocol](../../agent-server/protocol.md)
 and the [implementation specification](../../design/ochat-agent-server-implementation-spec.md).
 Public interfaces are the exact callable API; the table below is the complete
@@ -22,6 +26,7 @@ resource ownership, return types and cancellation/error behavior.
 | `lock` | [contract](../../../lib/agent_store/lock.mli) | [source](../../../lib/agent_store/lock.ml) |
 | `migration` | [contract](../../../lib/agent_store/migration.mli) | [source](../../../lib/agent_store/migration.ml) |
 | `prompt_artifact_store` | [contract](../../../lib/agent_store/prompt_artifact_store.mli) | [source](../../../lib/agent_store/prompt_artifact_store.ml) |
+| `prompt_source_receipt` | [contract](../../../lib/agent_store/prompt_source_receipt.mli) | [source](../../../lib/agent_store/prompt_source_receipt.ml) |
 | `recovery` | [contract](../../../lib/agent_store/recovery.mli) | [source](../../../lib/agent_store/recovery.ml) |
 | `session_index` | [contract](../../../lib/agent_store/session_index.mli) | [source](../../../lib/agent_store/session_index.ml) |
 | `session_store` | [contract](../../../lib/agent_store/session_store.mli) | [source](../../../lib/agent_store/session_store.ml) |

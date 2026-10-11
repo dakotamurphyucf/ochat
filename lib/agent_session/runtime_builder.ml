@@ -18,7 +18,8 @@ type model_job_outcome =
   | Model_failed of string
 
 type resources =
-  { native : Agent_runtime.t
+  { source_lease : Prompt_source_lease.t
+  ; native : Agent_runtime.t
   ; definition : Chat_response.Extension_compiler.definition option
   ; managed : Chat_response.Managed_tool_registry.t option
   ; authoring : Authoring_runtime.t option
@@ -91,7 +92,8 @@ type background_executor =
   }
 
 type t =
-  { worker : Operation_worker.t
+  { source_lease : Prompt_source_lease.t
+  ; worker : Operation_worker.t
   ; inference_execution : Inference_client.Execution.t
   ; now : unit -> Agent_protocol.Timestamp.t
   ; parse_user_content :
@@ -417,7 +419,7 @@ let create_authored_resources
       Authoring_runtime.prepare ~host ~elements:source_elements ~capabilities ()
       |> Result.map_error ~f:failure
   in
-  { native; definition; managed; authoring }
+  { source_lease = Prompt_source_lease.legacy; native; definition; managed; authoring }
 ;;
 
 let prepare_resources_internal
@@ -558,7 +560,8 @@ let inherit_prepared_resources ~parent_runtime ~inherited_managed ~definition =
       ()
     |> map_diagnostics
   in
-  { native
+  { source_lease = Prompt_source_lease.legacy
+  ; native
   ; authoring = None
   ; definition = Some (Chat_response.Generated_admission.definition admission)
   ; managed =
@@ -588,6 +591,8 @@ let inherit_resources ~(parent : resources) ~definition =
           ())
   in
   inherit_prepared_resources ~parent_runtime:parent.native ~inherited_managed ~definition
+  |> Result.map ~f:(fun resources ->
+    { resources with source_lease = Prompt_source_lease.borrow parent.source_lease })
 ;;
 
 let initial_items ~ctx ~elements ~manifest_authorizer ~approval_provider ~response_dir =
@@ -1832,7 +1837,8 @@ let build_with_services
   in
   let published_moderator_snapshot = ref moderator_snapshot in
   let runtime =
-    { worker
+    { source_lease = Prompt_source_lease.legacy
+    ; worker
     ; inference_execution = Chat_response.Ctx.inference_execution ctx
     ; now
     ; parse_user_content
@@ -2059,3 +2065,41 @@ let build_authored_child ~services ~revision ~prepared ~authority ~history =
 ;;
 
 let inference_execution t = t.inference_execution
+
+let admit_source_attachment current incoming =
+  if not (Prompt_source_lease.is_legacy current)
+  then Or_error.error_string "runtime original-source loan already attached"
+  else Prompt_source_lease.claim incoming
+;;
+
+let with_resource_source_lease (resources : resources) ~source_lease =
+  let open Or_error.Let_syntax in
+  let%map () = admit_source_attachment resources.source_lease source_lease in
+  { resources with source_lease }
+;;
+
+let with_authored_source_lease (prepared : authored_resources) ~source_lease =
+  let open Or_error.Let_syntax in
+  let%map resources =
+    with_resource_source_lease
+      prepared.resources
+      ~source_lease:(Prompt_source_lease.borrow source_lease)
+  in
+  { prepared with resources }
+;;
+
+let with_source_lease (runtime : t) ~source_lease =
+  let open Or_error.Let_syntax in
+  let%map () = admit_source_attachment runtime.source_lease source_lease in
+  let close () =
+    match runtime.close () with
+    | () -> Prompt_source_lease.close source_lease
+    | exception exn ->
+      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      Eio.Cancel.protect (fun () ->
+        try Prompt_source_lease.close source_lease with
+        | _ -> ());
+      Stdlib.Printexc.raise_with_backtrace exn backtrace
+  in
+  { runtime with source_lease; close }
+;;

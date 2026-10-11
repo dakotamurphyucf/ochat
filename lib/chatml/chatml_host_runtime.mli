@@ -352,6 +352,20 @@ val instantiate_prepared_session_detailed
   -> unit
   -> (session, Chatml_diagnostic.t) result
 
+(** Native two-argument hook variant. Validate authentic event/state session
+    metadata before any initializer; validate the live installer and instantiate
+    the exact graph once. Invoke its ORIGINAL hook as [hook(event,state)] using
+    the existing session transaction/queue/suspension engine. No generated source
+    or native callback wrapper. Caller serializes the session and owns control
+    lifetime exactly as for instantiate_prepared_session_detailed. *)
+val instantiate_prepared_event_state_session_detailed
+  :  runtime_config
+  -> Chatml_linked_program.t
+  -> entrypoints:compiled_entrypoints
+  -> ?control:execution_control
+  -> unit
+  -> (session, Chatml_diagnostic.t) Result.t
+
 (** Fresh linked instance and compiled selected task entrypoint. Shared operation
     filtering, task/catch semantics, reservation cleanup and result installation
     are identical to run_entrypoint_detailed. All initializer work inherits the

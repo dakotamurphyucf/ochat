@@ -272,6 +272,7 @@ let with_programs t incoming =
 let artifact t ~revision_id ~created_at =
   Store.Artifact.create
     ~revision_id
+    ?source_receipt:t.parent_artifact.source_receipt
     ~root_relative_path:t.identity.root_relative_path
     ~root_chatmd:t.root_chatmd
     ~sources:t.sources

@@ -139,9 +139,19 @@ the declaration's parameters, in order. For example, ``type 'a tree =
 to `'a array` is not. Aliases resolve names in their declaration environment.
 Duplicate/free parameters, missing or extra arguments, and unguarded or
 nonregular recursion are rejected at a type-expression source span. There are no
-mutually recursive type declarations. A binding whose inferred type contains an
-explicit recursive type stays monomorphic, even if its expression is a lambda;
-do not infer polymorphic recursion from the usual identity-function example.
+mutually recursive type declarations. A non-expansive function involving regular
+recursive data can generalize its independent variables. For example, a pure
+function taking JSON can return different callback result types at separate
+calls. Captured weak variables and mutable storage still share their constraints.
+
+<!-- ochat-authoring-example: {"id":"types.recursive-json-callback","surface":"one_off_v1","result":true} -->
+```ocaml
+let decode value f = f(Json.tag(value))
+let number = decode(`Null, fun tag -> 7)
+let text = decode(`Null, fun tag -> "checked")
+let main input =
+  Task.pure(`Bool(if number == 7 then text == "checked" else false))
+```
 
 `let rec` and `and` bind functions, including annotated lambdas. They cannot
 construct cyclic refs, records or arbitrary self-referential values. Recursive
@@ -539,3 +549,20 @@ checked public boundaries and the entry-rooted initialization order. It contains
 no initialized modules or native tool callbacks. Execution and project loading
 remain separate host integration steps; existing single-file entrypoints do not
 acquire them from this compilation API alone.
+
+## Immutable semantic queries
+
+Editor integrations can analyze an admitted project with `Chatml_semantics.analyze`
+without initializing modules. Successful analysis freezes all type groups after
+imports, companion interfaces and host requirements have settled. Definition and
+reference queries preserve the original source bytes; an exported binding retains
+its public interface view separately from its implementation's principal type.
+
+Points use byte offsets and belong to one snapshot. Reusing a point, symbol or
+context from another snapshot is rejected. Context queries use recorded lexical
+anchors; an unsupported whitespace gap is reported as unavailable rather than
+guessed from nearby syntax. Invalid programs expose a separate partial result
+with diagnostics and syntax from that same checking attempt, without certified
+types or exports. Analysis and queries have explicit work and result limits.
+See the [semantic query contracts](../development/chatml-semantic-queries.md) for
+host integration, failure distinctions and ownership.

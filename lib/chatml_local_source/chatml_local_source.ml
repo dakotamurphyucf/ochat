@@ -100,6 +100,7 @@ type t =
   ; gate : Eio.Mutex.t
   ; mutable active : int
   ; mutable closing : bool
+  ; mutable release_hook : Eio.Switch.hook
   ; drained : unit Eio.Promise.t
   ; resolve_drained : unit Eio.Promise.u
   ; closed : unit Eio.Promise.t
@@ -123,6 +124,8 @@ let close t =
         then false
         else (
           t.closing <- true;
+          Eio.Switch.remove_hook t.release_hook;
+          t.release_hook <- Eio.Switch.null_hook;
           if t.active = 0 then Eio.Promise.resolve t.resolve_drained ();
           true))
     in
@@ -148,6 +151,7 @@ let create_owner ~max_path_components =
   ; gate = Eio.Mutex.create ()
   ; active = 0
   ; closing = false
+  ; release_hook = Eio.Switch.null_hook
   ; drained
   ; resolve_drained
   ; closed
@@ -167,7 +171,7 @@ let acquire_owner ~sw ~max_path_components ~checkpoint ~acquire =
        | Error error -> Error error
        | Ok () ->
          poll checkpoint;
-         Eio.Switch.on_release sw release;
+         t.release_hook <- Eio.Switch.on_release_cancellable sw release;
          transferred := true;
          success)
 ;;

@@ -126,3 +126,19 @@ let%expect_test "delayed task failure reports its construction expression" =
     Task.fail("delayed failure")
     |}]
 ;;
+
+let%test_unit "array traversal keeps callback owners and delayed task sites" =
+  List.iter
+    [ "let main () = Task.map_array([0], fun value -> Task.pure(1 / value))", "1 / value"
+    ; ( "let main () = Task.iter_array([0], fun value -> Task.fail(\"array failure\"))"
+      , "Task.fail(\"array failure\")" )
+    ; "let main () = Task.pure(Array.map([0], fun value -> 1 / value))", "1 / value"
+    ]
+    ~f:(fun (text, expected) ->
+      let source, compiled = compile text in
+      match run compiled with
+      | Ok _ -> assert false
+      | Error diagnostic ->
+        let location = Helpers.require_owner source diagnostic in
+        assert (String.equal (Captured.read source location |> Or_error.ok_exn) expected))
+;;

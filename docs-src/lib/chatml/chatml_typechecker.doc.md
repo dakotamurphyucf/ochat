@@ -10,9 +10,8 @@ repository who prefer Markdown over generated API docs.
 
 `Chatml_typechecker` implements a classic Hindley–Milner (HM) type-inference
 algorithm (Algorithm W) extended with row polymorphism for records and
-variants.  It operates directly on the abstract-syntax tree produced by the
-ChatML parser and resolver and can be executed independently from the
-interpreter.
+variants.  It checks the parsed abstract-syntax tree before resolution and executes
+independently from the interpreter.
 
 Running the checker:
 
@@ -47,11 +46,10 @@ mutable type variables or a global span table. Host checkpoint exceptions propag
 val type_lookup_for_program : program -> Source.span -> typ option
 ```
 
-Creates a *snapshot* of the span-to-type mapping for the given program and
-returns a lookup closure.  The closure is pure: further calls to
-`infer_program` will not invalidate it.
-
-This is the recommended entry-point for editor integrations.
+Returns an invocation-local lookup over the inferred span-to-type mapping.
+Separate compilations do not invalidate it, but its values are raw compiler types
+and can contain mutable inference cells. It is not an immutable, source-qualified
+editor snapshot or a domain-transfer contract. See the semantic-facts boundary below.
 
 ---
 
@@ -68,8 +66,9 @@ This is the recommended entry-point for editor integrations.
 The built-in environment ({!init_env} in the source) contains a small set of
 primitives such as arithmetic operators and a `print` function.  New
 non-expansive bindings introduced by `let` can be generalised. The value
-restriction prevents polymorphic mutable storage; bindings containing recursive
-types remain monomorphic.
+restriction prevents polymorphic mutable storage. Pure functions involving recursive
+types may generalize unrelated variables; instantiation copies their recursive
+type graph while preserving shared weak cells and equality constraints.
 
 ---
 
@@ -148,3 +147,13 @@ instantiation, generalization and unification invoke it periodically. With no
 checkpoint, the typechecker imposes no resource policy. The Eio compiler service
 uses it to observe caller cancellation and elapsed-time budgets; work between
 checkpoints is still cooperative. Compilation never evaluates the function above.
+
+### Authoritative semantic facts
+
+`Chatml_checked_graph.check` is the shared static checking driver used by linked compilation. It checks the admitted dependency graph, companion interfaces and authentic host-required entrypoints without evaluating initializers. Its optional `recording` limit enables compiler-private semantic facts; ordinary compilation does not allocate the recorder or parser identifier tables.
+
+The checker records its actual lexical contexts, binding identities and resolved references while it infers the program. Shadowing creates a new identity, closures retain the earlier binding, and `open` retains the selected member's identity. Value and type namespaces remain distinct. Parser-owned identifier ranges identify exact source revisions; generated expressions and structural field labels do not acquire invented declaration locations. Native members retain their selected host contract and member path.
+
+Binding schemes and inferred use-site roots are separate. Whole-binding tuple projections share a quantification group; independent recursive generalization boundaries do not. Companion and inline signatures retain implementation-to-specification links and their selected public members. Signature metadata is staged before the existing type-probe commit.
+
+Successful `semantic_facts` are still compiler-domain data containing borrowed inferred types. They are not immutable editor snapshots and must not cross the compiler domain. A later publication boundary must freeze all grouped roots after checking has settled, then construct source-qualified queries. Failed checking publishes no settled facts. Limits bound facts, edges, labels and recording work; checkpoint exceptions keep their original identity.

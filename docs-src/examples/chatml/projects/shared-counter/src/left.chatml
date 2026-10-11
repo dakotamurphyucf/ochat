@@ -1,0 +1,2 @@
+let initialized = to_string("left")
+let next () = Common.next()

@@ -11,6 +11,12 @@ module Limits = struct
     ; work_steps : int
     }
 
+  let locator_bytes t = t.locator_bytes
+  let locator_components t = t.locator_components
+  let anchors t = t.anchors
+  let retained_roots t = t.retained_roots
+  let work_steps t = t.work_steps
+
   let create
         ~max_locator_bytes
         ~max_locator_components
@@ -88,17 +94,19 @@ let product left right =
 ;;
 
 module Anchor = struct
+  type source =
+    | Directory of [ `Close | Eio.Fs.dir_ty ] Eio.Path.t
+    | Retained of Local.t
+
   type t =
-    { root : [ `Close | Eio.Fs.dir_ty ] Eio.Path.t
+    { source : source
     ; prefix : Locator.t
     ; max_path_components : int
     }
 
-  let create root ~host_prefix ~max_path_components ~limits ~checkpoint =
-    let _, path = root in
+  let admit source ~host_prefix ~max_path_components ~limits ~checkpoint =
     if
-      (not (String.is_empty path))
-      || max_path_components <= 0
+      max_path_components <= 0
       || String.is_empty host_prefix
       || not (Char.equal host_prefix.[0] '/')
     then failure ~locator:host_prefix Invalid_anchor
@@ -110,7 +118,23 @@ module Anchor = struct
         ~max_components:limits.locator_components
         ~checkpoint:(fun () -> poll checkpoint)
       |> Result.map_error ~f:(fun _ -> Error.create ~locator:host_prefix Invalid_anchor)
-      |> Result.map ~f:(fun prefix -> { root; prefix; max_path_components })
+      |> Result.map ~f:(fun prefix -> { source; prefix; max_path_components })
+  ;;
+
+  let create root ~host_prefix ~max_path_components ~limits ~checkpoint =
+    let _, path = root in
+    if not (String.is_empty path)
+    then failure ~locator:host_prefix Invalid_anchor
+    else admit (Directory root) ~host_prefix ~max_path_components ~limits ~checkpoint
+  ;;
+
+  let of_local owner ~host_prefix ~limits ~checkpoint =
+    admit
+      (Retained owner)
+      ~host_prefix
+      ~max_path_components:(Local.path_component_limit owner)
+      ~limits
+      ~checkpoint
   ;;
 end
 
@@ -129,6 +153,10 @@ module Cursor = struct
 
   let owner t = t.owner
   let identity t = t.identity
+
+  (* The resolver admits exactly one cursor per normalized route in its cache.
+     Physical identity here deliberately denotes that affine route, not files. *)
+  let equal_route = phys_equal
 end
 
 module Accounting = struct
@@ -223,11 +251,19 @@ let acquire_anchors t anchors ~checkpoint =
       let%bind () = reserve t 16 in
       poll checkpoint;
       let%bind owner =
-        Local.open_root
-          anchor.Anchor.root
-          ~sw:t.sw
-          ~max_path_components:anchor.max_path_components
-          ~checkpoint
+        (match anchor.Anchor.source with
+         | Directory root ->
+           Local.open_root
+             root
+             ~sw:t.sw
+             ~max_path_components:anchor.max_path_components
+             ~checkpoint
+         | Retained parent ->
+           let directory =
+             Local.Directory_path.create [] ~max_bytes:0 ~max_components:0 ~checkpoint
+             |> Or_error.ok_exn
+           in
+           Local.open_subroot parent ~sw:t.sw ~directory ~checkpoint)
         |> filesystem ~locator:(Locator.key anchor.prefix)
       in
       t.retained_roots <- t.retained_roots + 1;

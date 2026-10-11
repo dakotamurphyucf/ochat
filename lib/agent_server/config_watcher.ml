@@ -3,6 +3,7 @@ open Core
 type hooks =
   { prepare : Config_diff.t -> Config.t -> (unit, Config.Diagnostic.t list) result
   ; commit : Config_diff.t -> Config.t -> unit
+  ; discard_prepared : unit -> unit
   ; audit : Config_diff.t -> unit
   }
 
@@ -56,12 +57,26 @@ let reload t =
     let%bind candidate = load_validated t in
     Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
       let diff = Config_diff.between ~previous:t.current ~current:candidate in
-      let%bind () = t.hooks.prepare diff candidate in
-      t.current <- candidate;
-      t.last_mtime <- mtime t;
-      t.hooks.commit diff candidate;
-      t.hooks.audit diff;
-      Ok diff)
+      let prepared =
+        match
+          let%bind () = t.hooks.prepare diff candidate in
+          t.current <- candidate;
+          t.last_mtime <- mtime t;
+          t.hooks.commit diff candidate;
+          t.hooks.audit diff;
+          Ok diff
+        with
+        | result ->
+          t.hooks.discard_prepared ();
+          result
+        | exception exn ->
+          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+          Eio.Cancel.protect (fun () ->
+            try t.hooks.discard_prepared () with
+            | _ -> ());
+          Stdlib.Printexc.raise_with_backtrace exn backtrace
+      in
+      prepared)
   in
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () -> t.last_error <- Result.error result);
   result

@@ -14,6 +14,16 @@ module Limits : sig
     -> max_retained_roots:int
     -> max_work_steps:int
     -> t Or_error.t
+
+  (** Literal configured ceilings, not consumed accounting. Host composition
+      uses these to construct smaller remaining allowances without resetting
+      aggregate limits or raising any backend ceiling. *)
+  val locator_bytes : t -> int
+
+  val locator_components : t -> int
+  val anchors : t -> int
+  val retained_roots : t -> int
+  val work_steps : t -> int
 end
 
 module Error : sig
@@ -57,6 +67,19 @@ module Anchor : sig
     -> limits:Limits.t
     -> checkpoint:(unit -> unit)
     -> (t, Error.t) Result.t
+
+  (** Borrowed already-admitted Local owner, not a native path or new permission.
+      The host keeps it live through [with_anchors]. Resolver admission clones the
+      same retained directory via empty [Local.open_subroot], with its existing
+      component ceiling and normal joined cleanup/accounting. Construction only
+      validates lexical prefix metadata; a closed owner fails during acquisition.
+      No original Eio directory is retained or reopened by this alternative. *)
+  val of_local
+    :  Local.t
+    -> host_prefix:string
+    -> limits:Limits.t
+    -> checkpoint:(unit -> unit)
+    -> (t, Error.t) Result.t
 end
 
 module Cursor : sig
@@ -68,6 +91,13 @@ module Cursor : sig
 
   val owner : t -> Local.t
   val identity : t -> Local.Directory_identity.t
+
+  (** Constant-time identity of a canonical normalized lexical route within one
+      resolver bracket. Repeated resolution of that route returns an equal cursor;
+      distinct host labels are unequal even when directory identity is equal.
+      Foreign brackets are unequal. This ephemeral identity grants no authority
+      and is never persisted or compared across resolver lifetimes. *)
+  val equal_route : t -> t -> bool
 end
 
 module Accounting : sig

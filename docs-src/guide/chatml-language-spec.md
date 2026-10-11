@@ -528,8 +528,11 @@ session retains its initialized graph. See
 [prepared execution](chatml-execution-limits.md#prepared-execution-validates-before-initialization).
 
 The legacy text compiler does not discover companion files or configured sources.
-These explicit prepared/linked APIs do not supply filesystem discovery, bundle
-custody or automatic ChatMD host routing.
+Explicit host project preparation captures Local directories and full-pin Git
+catalogs under admitted host authority, then supplies immutable inputs to these
+prepared/linked APIs. See the [working shared-counter project](../examples/chatml/projects/shared-counter/README.md).
+The graph compiler itself performs no discovery or native reads. Bundle custody
+and automatic ChatMD host routing have separate host owners.
 
 ### 6.5 `open`
 
@@ -1217,15 +1220,16 @@ This is necessary for soundness with:
 - arrays
 - mutable aliasing
 
-### 10.4.1 Recursive types remain monomorphic
+### 10.4.1 Generalization with recursive data
 
-Bindings whose type contains an explicit recursive type are kept
-monomorphic in the current design.
+Non-expansive functions involving regular recursive types follow the same
+generalization and value restriction as other functions. A pure JSON helper's
+independent callback or result variable can be instantiated differently at
+separate calls. Captured weak variables remain shared, and expansive bindings
+such as refs and arrays are not generalized.
 
-This applies even when the binding is otherwise non-expansive.
-
-The implementation intentionally does **not** attempt polymorphic
-recursion.
+Recursive calls within a simultaneous function definition use monomorphic
+placeholders. This does not permit polymorphic recursion.
 
 ### 10.5 Records and row polymorphism
 
@@ -2296,7 +2300,7 @@ The current implementation intentionally enforces or relies on:
 - ordinary inference variables being acyclic
 - recursive types being explicit and checked
 - recursive type declarations being contractive
-- recursive types remaining monomorphic
+- regular recursive data preserving ordinary generalization and value restriction
 - recursive bindings being function-only
 - mutation interacting with polymorphism via a value restriction
 - explicit separation of integer and float operators
@@ -2330,7 +2334,8 @@ ChatML currently does **not** provide:
   structural `type` declarations
 - selective imports
 - abstract signature types, module type declarations or functors
-- automatic filesystem discovery and ChatMD routing of configured source graphs
+- ambient project discovery for submitted source strings
+- automatic ChatMD routing of configured source graphs
 - layout-sensitive syntax
 - Unicode identifiers
 - full ML-style match usefulness analysis

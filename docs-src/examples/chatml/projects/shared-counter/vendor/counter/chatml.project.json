@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "namespace": "counter",
+  "source_dirs": ["src"],
+  "environments": {"empty": {"modules": {}}},
+  "default_environment": "empty"
+}

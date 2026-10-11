@@ -20,13 +20,20 @@
    (run %{exe:embed_contracts.exe}
     lib/chatml/chatml_lexer.mll %{dep:../chatml/chatml_lexer.mll}
     lib/chatml/chatml_parser.mly %{dep:../chatml/chatml_parser.mly}
+    lib/chatml/chatml_syntax_sites.ml %{dep:../chatml/chatml_syntax_sites.ml}
+    lib/chatml/chatml_syntax_name.ml %{dep:../chatml/chatml_syntax_name.ml}
+    lib/chatml/chatml_tokens.ml %{dep:../chatml/chatml_tokens.ml}
     lib/chatml/chatml_parse.ml %{dep:../chatml/chatml_parse.ml}
     lib/chatml/chatml_owned_source.ml %{dep:../chatml/chatml_owned_source.ml}
     lib/chatml/chatml_checkpoint.ml %{dep:../chatml/chatml_checkpoint.ml}
     lib/chatml/chatml_builtin_spec.ml %{dep:../chatml/chatml_builtin_spec.ml}
+    lib/chatml/chatml_builtin_callback.ml %{dep:../chatml/chatml_builtin_callback.ml}
+    lib/chatml/chatml_builtin_composition.ml %{dep:../chatml/chatml_builtin_composition.ml}
+    lib/chatml/chatml_table_snapshot.ml %{dep:../chatml/chatml_table_snapshot.ml}
     lib/chatml_sources/chatml_source.ml %{dep:../chatml_sources/chatml_source.ml}
     lib/chatml_sources/chatml_diagnostic.ml %{dep:../chatml_sources/chatml_diagnostic.ml}
     lib/chatml/chatml_typechecker.ml %{dep:../chatml/chatml_typechecker.ml}
+    lib/chatml/chatml_type_scheme.ml %{dep:../chatml/chatml_type_scheme.ml}
     lib/chatml_graph/chatml_configured_lookup.ml %{dep:../chatml_graph/chatml_configured_lookup.ml}
     lib/chatml_graph/chatml_dependency_graph.ml %{dep:../chatml_graph/chatml_dependency_graph.ml}
     lib/chatml_graph/chatml_dependency_session.ml %{dep:../chatml_graph/chatml_dependency_session.ml}
@@ -38,6 +45,21 @@
     lib/chatml/chatml_module_reference.ml %{dep:../chatml/chatml_module_reference.ml}
     lib/chatml/chatml_contract_encoding.ml %{dep:../chatml/chatml_contract_encoding.ml}
     lib/chatml_linked/chatml_linked_program.ml %{dep:../chatml_linked/chatml_linked_program.ml}
+    lib/chatml/chatml_semantic_binding.ml %{dep:../chatml/chatml_semantic_binding.ml}
+    lib/chatml/chatml_semantic_recorder.ml %{dep:../chatml/chatml_semantic_recorder.ml}
+    lib/chatml/chatml_semantic_elaboration.ml %{dep:../chatml/chatml_semantic_elaboration.ml}
+    lib/chatml/chatml_semantic_scope.ml %{dep:../chatml/chatml_semantic_scope.ml}
+    lib/chatml/chatml_semantic_host.ml %{dep:../chatml/chatml_semantic_host.ml}
+    lib/chatml_linked/chatml_checked_graph.ml %{dep:../chatml_linked/chatml_checked_graph.ml}
+    lib/chatml_semantics/chatml_semantic_budget.ml %{dep:../chatml_semantics/chatml_semantic_budget.ml}
+    lib/chatml_semantics/chatml_semantic_error.ml %{dep:../chatml_semantics/chatml_semantic_error.ml}
+    lib/chatml_semantics/chatml_semantic_identity.ml %{dep:../chatml_semantics/chatml_semantic_identity.ml}
+    lib/chatml_semantics/chatml_semantic_limits.ml %{dep:../chatml_semantics/chatml_semantic_limits.ml}
+    lib/chatml_semantics/chatml_semantic_partial.ml %{dep:../chatml_semantics/chatml_semantic_partial.ml}
+    lib/chatml_semantics/chatml_semantic_publication.ml %{dep:../chatml_semantics/chatml_semantic_publication.ml}
+    lib/chatml_semantics/chatml_semantic_query.ml %{dep:../chatml_semantics/chatml_semantic_query.ml}
+    lib/chatml_semantics/chatml_semantic_snapshot.ml %{dep:../chatml_semantics/chatml_semantic_snapshot.ml}
+    lib/chatml_semantics/chatml_semantics.ml %{dep:../chatml_semantics/chatml_semantics.ml}
     lib/chatml_linked_runtime/chatml_linked_runtime.ml %{dep:../chatml_linked_runtime/chatml_linked_runtime.ml}
     lib/chatml/chatml_builtin_modules.ml %{dep:../chatml/chatml_builtin_modules.ml}
     lib/chatml/chatml_type_expr.ml %{dep:../chatml/chatml_type_expr.ml}
@@ -56,6 +78,8 @@
     lib/chatml/chatml_tuple.ml %{dep:../chatml/chatml_tuple.ml}
     lib/chatml/chatml_binding_pattern.ml %{dep:../chatml/chatml_binding_pattern.ml}
     lib/chatml/chatml_binding_value.ml %{dep:../chatml/chatml_binding_value.ml}
+    lib/chatml/chatml_task_array.ml %{dep:../chatml/chatml_task_array.ml}
+    lib/chatml/chatml_task_array_mode.ml %{dep:../chatml/chatml_task_array_mode.ml}
     lib/chatml/chatml_value_codec.ml %{dep:../chatml/chatml_value_codec.ml}
     lib/chatml/chatml_compilation.ml %{dep:../chatml/chatml_compilation.ml}
     lib/chatml/chatml_execution.ml %{dep:../chatml/chatml_execution.ml}
@@ -154,6 +178,12 @@
     lib/agent_session/session_management_channel.ml %{dep:../agent_session/session_management_channel.ml}
     lib/agent_server/session_helper_policy.ml %{dep:../agent_server/session_helper_policy.ml}
     lib/shell_access/shell_access_v2.ml %{dep:../shell_access/shell_access_v2.ml}
+    lib/agent_session/prompt_source_owner.ml %{dep:../agent_session/prompt_source_owner.ml}
+    lib/agent_session/prompt_source_lease.ml %{dep:../agent_session/prompt_source_lease.ml}
+    lib/agent_session/prompt_catalog.ml %{dep:../agent_session/prompt_catalog.ml}
+    lib/agent_session/runtime_builder.ml %{dep:../agent_session/runtime_builder.ml}
+    lib/agent_store/prompt_source_receipt.ml %{dep:../agent_store/prompt_source_receipt.ml}
+    lib/agent_session/prompt_revision_builder.ml %{dep:../agent_session/prompt_revision_builder.ml}
     lib/agent_store/delegation_store.ml %{dep:../agent_store/delegation_store.ml}
     lib/chat_response/authoring_context.ml %{dep:../chat_response/authoring_context.ml}
     lib/chat_response/authoring_validation.ml %{dep:../chat_response/authoring_validation.ml}

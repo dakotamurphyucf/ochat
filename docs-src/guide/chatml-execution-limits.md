@@ -22,6 +22,14 @@ between stages and within inference traversals; cleanup is joined. Work between
 checkpoints may overrun the configured duration. This is cooperative cancellation,
 not a hard deadline or an operating-system memory sandbox.
 
+Native Prepared compilation also admits the authentic static host contract and
+checks any supplied original entry-body constraint inside that same worker
+budget. Canonical contract bytes and separately retained expected-body bytes
+count toward the source allowance. Conservative metadata conversion has a
+separate ceiling of 32 times the remaining contract-input allowance; exhausting
+it reports `chatml.metadata_allocation_limit`. This bounds the conversion's
+accounting, not the OCaml heap, and does not increase the default source limit.
+
 ## Prepared execution validates before initialization
 
 Prepared execution uses an immutable linked artifact with entrypoint descriptors
@@ -36,11 +44,16 @@ The host also validates invocation roles before initialization. Registered
 one-off/tool contracts use `main`/`run`; moderator contracts use
 `initial_state`/`on_event`. A Native host can select custom names, but task
 entrypoints require an explicit fixed-arity function returning a task. A Native
-session requires three event arguments and the same static state encoding in
+session normally requires three event arguments and the same static state encoding in
 its initial-state requirement, event state input and task result, including
 shared type-variable names. This checks the declared contract without new
 runtime inference or alias solving. Generic linked initialization can still
 select a non-task value contract without invoking it as a host task.
+
+Prepared shell hooks use an explicit two-argument native role, `hook(event,
+state)`, with the same initial/input/result state agreement. They compile and
+invoke the original source without appending an adapter. Selecting a different
+entrypoint requires preparing and compiling its actual role contract again.
 
 Installation, dependency initialization, entry invocation and value conversion
 share one execution scope. Units do not reset fuel, allocation or depth limits.

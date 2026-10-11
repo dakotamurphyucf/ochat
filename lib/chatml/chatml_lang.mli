@@ -30,19 +30,23 @@ type 'a node =
   }
 [@@deriving sexp]
 
-type pattern =
+(** Source names carry optional exact parser coordinates. Resolved patterns
+    carry strings only; their runtime comparison and matching retain no IDs. *)
+type 'name pattern_desc =
   | PUnit
   | PWildcard
-  | PVar of string
+  | PVar of 'name
   | PInt of int
   | PBool of bool
   | PFloat of float
   | PString of string
-  | PVariant of string * pattern list
-  | PRecord of (string * pattern) list * bool
-  | PTuple of pattern Chatml_tuple.t
+  | PVariant of 'name * 'name pattern_desc list
+  | PRecord of ('name * 'name pattern_desc) list * bool
+  | PTuple of 'name pattern_desc Chatml_tuple.t
 [@@deriving sexp, compare]
 
+type pattern = Chatml_syntax_name.t pattern_desc [@@deriving sexp, compare]
+type resolved_pattern = string pattern_desc [@@deriving sexp, compare]
 type type_expr = Chatml_type_expr.t [@@deriving sexp]
 
 type var_loc =
@@ -68,7 +72,7 @@ and match_case_slots =
 [@@deriving sexp]
 
 and resolved_match_case =
-  { pat : pattern
+  { pat : resolved_pattern
   ; pat_span : Source.span
   ; slots : Frame_env.packed_slot list
   ; rhs : resolved_expr node
@@ -118,16 +122,17 @@ and expr =
   | EIf of expr node * expr node * expr node
   | EWhile of expr node * expr node
   | ELetIn of Chatml_binding_pattern.t * expr node * expr node
-  | ELetRec of (string * expr node) list * expr node
+  | ELetRec of (Chatml_syntax_name.t * expr node) list * expr node
   | ELetBlock of (Chatml_binding_pattern.t * expr node) list * expr node
   | ELetBlockSlots of
       (Chatml_binding_pattern.t * expr node) list * Frame_env.packed_slot list * expr node
-  | ELetRecSlots of (string * expr node) list * Frame_env.packed_slot list * expr node
+  | ELetRecSlots of
+      (Chatml_syntax_name.t * expr node) list * Frame_env.packed_slot list * expr node
   | EMatch of expr node * match_case list
   | EMatchSlots of expr node * match_case_slots list
-  | ERecord of (string * expr node) list
-  | EFieldGet of expr node * string
-  | EVariant of string * expr node list
+  | ERecord of (Chatml_syntax_name.t * expr node) list
+  | EFieldGet of expr node * Chatml_syntax_name.t
+  | EVariant of Chatml_syntax_name.t * expr node list
   | EArray of expr node list
   | ETuple of expr node Chatml_tuple.t
   | EArrayGet of expr node * expr node
@@ -136,7 +141,7 @@ and expr =
   | ESetRef of expr node * expr node
   | ESequence of expr node * expr node
   | EDeref of expr node
-  | ERecordExtend of expr node * (string * expr node) list
+  | ERecordExtend of expr node * (Chatml_syntax_name.t * expr node) list
   | EAnnot of expr node * type_expr
 [@@deriving sexp]
 
@@ -179,14 +184,14 @@ and resolved_expr =
 
 type stmt =
   | SLet of Chatml_binding_pattern.t * expr node
-  | SLetRec of (string * expr node) list
+  | SLetRec of (Chatml_syntax_name.t * expr node) list
   | SType of Chatml_type_expr.Declaration.t
   | SModule of
-      { name : string
+      { name : Chatml_syntax_name.t
       ; signature : Chatml_module_signature.t node option
       ; body : stmt node list
       }
-  | SOpen of string
+  | SOpen of Chatml_syntax_name.t
   | SExpr of expr node
 [@@deriving sexp]
 
@@ -240,6 +245,9 @@ type execution_control =
         without consuming expression/task execution fuel. Source/site values
         never retain this callback. *)
   ; allocate : int -> unit
+  ; allocate_array : int -> unit
+    (** Reserve an array of the given element count under the current host limits.
+        This checks the array size and charges its allocation before creation. *)
   ; before_builtin : name:string -> value list -> unit
   ; check_value : value -> unit
   ; before_json_import : Jsonaf.t -> unit
@@ -278,6 +286,7 @@ and task_step =
   | TPure of value
   | TBind of task * value
   | TMap of task * value
+  | TArray of Chatml_task_array_mode.t * value array * value
   | TFail of string
   | TCatch of task * value
   | TPerform of eff
@@ -361,5 +370,10 @@ val define_var : env -> string -> value -> unit
 val update_var : env -> string -> value -> unit
 val set_var : env -> string -> value -> unit
 val equal_value : value -> value -> bool
-val match_pattern : value -> pattern -> (string * value) list option
+val match_pattern : value -> resolved_pattern -> (string * value) list option
 val collect_pattern_vars : ?checkpoint:(unit -> unit) -> pattern -> string list
+
+val collect_resolved_pattern_vars
+  :  ?checkpoint:(unit -> unit)
+  -> resolved_pattern
+  -> string list

@@ -65,7 +65,9 @@ let%test_unit "whole RHS restriction and projected schemes preserve weak/equalit
      let a = identity(7)"
   in
   Support.require recursive_rhs ~accepted:true;
-  Support.require (recursive_rhs ^ "\nlet b = identity(true)") ~accepted:false
+  (* A recursive sibling does not constrain the independent pure identity.
+     The expansive whole-RHS and shared weak-cell cases above still restrict. *)
+  Support.require (recursive_rhs ^ "\nlet b = identity(true)") ~accepted:true
 ;;
 
 let%test_unit "product aliases, annotations and signatures admit all leaf exports" =

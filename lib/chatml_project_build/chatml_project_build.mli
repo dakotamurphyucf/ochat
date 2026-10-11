@@ -261,3 +261,22 @@ val restore
   -> limits:Limits.t
   -> checkpoint:(unit -> unit)
   -> (t, Error.t) Result.t
+
+(** Recompose an admitted captured-entry library for an authentic compiler
+    contract, retaining its exact entry, sources, catalogs, scopes, environments
+    and dependency selections. Declared entry builds are rejected. Authored target
+    and compiler requirements are checked normally against the new contract.
+
+    [lock_id] must differ from the receiver's lock and every retained source ID.
+    The result owns a new canonical lock and fingerprint; the receiver remains
+    unchanged. No source acquisition, discovery, preprocessing, compiler inference,
+    initializer or tool execution occurs. All reconstruction and admission use
+    one invocation-local work/input budget. Checkpoint exceptions propagate
+    unchanged; runtime authority is still admitted by the execution host. *)
+val recompose
+  :  t
+  -> contract:Chatml.Chatml_compiler_contract.t
+  -> lock_id:Chatml_source.Id.t
+  -> limits:Limits.t
+  -> checkpoint:(unit -> unit)
+  -> (t, Error.t) Result.t

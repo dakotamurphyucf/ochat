@@ -18,6 +18,7 @@ let features =
     , "Captured imports, relative sources, namespaces and bounded expansion"
     , [ "lib/chatmd/prompt.ml"
       ; "lib/chatmd/source_loader.ml"
+      ; "lib/agent_session/prompt_revision_builder.ml"
       ; "lib/chatmd/chatmd_import_expansion.ml"
       ; "lib/chatmd/chatmd_parser_input.ml"
       ; "lib/chatmd/chatmd_owned_parser.ml"
@@ -34,6 +35,8 @@ let features =
       ; "test/chatmd_prompt_content/content_tests.ml"
       ; "test/builtin_instructions/builtin_instructions_tests.ml"
       ; "test/agent_docs/docs_child_authoring.ml"
+      ; "test/chatml_source_owner/owner_tests.ml"
+      ; "test/chatml_source_owner/project_tests.ml"
       ] )
   ; ( "generated.messages"
     , "Plain initial messages without resource loading or stored identities"
@@ -276,6 +279,8 @@ let implementation_sources =
     , "ff5449579e75dad66338700683d56b373ee9baedbb6433214e21af5a4df1ab57" )
   ; ( "lib/chatmd/chatmd_owned_parser.ml"
     , "42130395da8eb0465c96d59a5233ae24adb300e5bd6094609a5cf60d007ca573" )
+  ; ( "lib/agent_session/prompt_revision_builder.ml"
+    , "038753f931fc95214a392acf8d25261d4a28ef2279be43f0648397c915a3cfad" )
   ]
 ;;
 
@@ -291,13 +296,13 @@ let topic_contracts =
     , "4630a7cccd765e162431feb20472ec36665deae8f28a29bf213a2fab6e5a414b" )
   ; ( "tool_v1"
     , "chatmd.declarations.schemas"
-    , "532ae64b35fbc2026dcc3fd9a8f92bac3364522e59d6ba9ebac32f0ba810484d" )
+    , "78b3bb2c5fe2cc62ffe305eecfdf873eec39950493d5168dfa46eac6b77eae21" )
   ; ( "moderator_v1"
     , "chatmd.declarations.schemas"
-    , "8d327bcd1275fdba014e4464a716aa4b6d9d2014dbb74fae06e5ee5f776d9241" )
+    , "9a6905d9e72718e687a27dcbb588ceae3f83011a517f4b10f1d74a3e7ede7585" )
   ; ( "delegated_moderator_v1"
     , "chatmd.declarations.schemas"
-    , "a00242c0b64b0ad0fc4b4f0566d72e4e3c4265ea907aa2bccc0387396c22c514" )
+    , "f7b59b2b93517a9dca100c2779fca31f3619a78384858a754c402da7b772dcb9" )
   ; ( "tool_v1"
     , "chatmd.capabilities"
     , "db79d06691be96ee2b87182a1648784e929e647305496c240cb8557d033f776c" )

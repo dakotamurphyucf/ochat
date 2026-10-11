@@ -1,8 +1,20 @@
+module Syntax_name = Chatml.Chatml_syntax_name
 open Core
 open Chatml_inferred_type
 module Syntax = Chatml.Chatml_module_signature
 module Type_alias = Chatml_type_alias
 module Probe = Chatml_type_probe
+module Semantic = Chatml_semantic_recorder
+module Binding = Chatml_semantic_binding
+module Elaboration = Chatml_semantic_elaboration
+
+module Recording = struct
+  type t =
+    { frame : Semantic.Frame.t
+    ; context : Semantic.Context.t
+    ; implementation : Binding.Members.t
+    }
+end
 
 module Engine = struct
   type t =
@@ -23,11 +35,13 @@ type t =
   { values : typ Env.t
   ; types : Type_alias.t
   ; visibility : Visibility.t
+  ; members : Binding.Members.t option
   }
 
 let values t = t.values
 let types t = t.types
 let visibility t = t.visibility
+let members t = t.members
 
 exception Rejected of Error.t
 
@@ -36,8 +50,27 @@ let alias_result = function
   | Error error -> raise (Rejected error)
 ;;
 
-let check ?source ?lookup engine ~values ~types ~outer_types ~signature ~span =
+let check
+      ?recording
+      ?source
+      ?lookup
+      engine
+      ~values
+      ~types
+      ~outer_types
+      ~signature
+      ~(span : Source.span)
+  =
   let { Engine.instantiate; unify; fresh_name; checkpoint } = engine in
+  Option.iter recording ~f:(fun recording ->
+    let expected = Semantic.source (Semantic.Frame.unit recording.Recording.frame) in
+    match source with
+    | Some source
+      when Chatml_source.Id.equal (Chatml_source.id source) (Chatml_source.id expected)
+           && Chatml_source.Digest.equal
+                (Chatml_source.digest source)
+                (Chatml_source.digest expected) -> ()
+    | None | Some _ -> Semantic.take_exn (Error Semantic.Error.Foreign_unit));
   let reject span message =
     let diagnostic = Chatml_diagnostic.create ~span message in
     let diagnostic =
@@ -69,9 +102,70 @@ let check ?source ?lookup engine ~values ~types ~outer_types ~signature ~span =
     | Error message ->
       reject item_span (Printf.sprintf "Signature member '%s': %s" name message)
   in
-  let rec check_module ~implementation ~implementation_types ~outer_types signature =
+  let rec check_module
+            ?recording
+            ?(anchors = false)
+            ~implementation
+            ~implementation_types
+            ~outer_types
+            signature
+    =
     let local_types = ref (Type_alias.enter_scope outer_types) in
     let selected = ref Env.empty in
+    let specification_values = ref [] in
+    let public_values = ref [] in
+    let value_context = ref (Option.map recording ~f:(fun r -> r.Recording.context)) in
+    let context r =
+      Semantic.join_context
+        (Semantic.Frame.recorder r.Recording.frame)
+        (Semantic.Frame.unit r.frame)
+        ~values:!value_context
+        ~types:(Type_alias.semantic_context !local_types)
+        ~checkpoint
+      |> Semantic.take_exn
+    in
+    let anchor position =
+      if anchors
+      then
+        Option.iter recording ~f:(fun r ->
+          Semantic.region
+            (Semantic.Frame.recorder r.Recording.frame)
+            (Semantic.Frame.unit r.frame)
+            ~context:(context r)
+            ~span:{ Source.left = position; right = position }
+            ~checkpoint
+          |> Semantic.take_exn)
+    in
+    anchor span.left;
+    let project r name specification nested_members =
+      let recorder = Semantic.Frame.recorder r.Recording.frame in
+      let implementation =
+        Binding.Members.find r.implementation ~namespace:Value ~name ~checkpoint
+        |> Option.value_exn
+      in
+      let public =
+        Semantic.public_binding
+          recorder
+          ~implementation
+          ~specification
+          ~members:nested_members
+          ~checkpoint
+        |> Semantic.take_exn
+      in
+      specification_values := (name, specification) :: !specification_values;
+      public_values := (name, public) :: !public_values;
+      value_context
+      := Some
+           (Semantic.define_context
+              recorder
+              (Semantic.Frame.unit r.frame)
+              (context r)
+              ~namespace:Value
+              ~name
+              ~binding:specification
+              ~checkpoint
+            |> Semantic.take_exn)
+    in
     let type_names = ref [] in
     let module_names = ref [] in
     let visibility = ref [] in
@@ -86,47 +180,79 @@ let check ?source ?lookup engine ~values ~types ~outer_types ~signature ~span =
       checkpoint ();
       match item.desc with
       | Type declaration ->
+        let semantic =
+          Option.map recording ~f:(fun r ->
+            Elaboration.alias_exn
+              r.Recording.frame
+              ~context:(context r)
+              declaration
+              ~checkpoint)
+        in
         local_types
-        := Type_alias.declare ?source ?lookup !local_types declaration ~checkpoint
+        := Type_alias.declare
+             ?semantic
+             ?source
+             ?lookup
+             !local_types
+             declaration
+             ~checkpoint
            |> alias_result;
         let count = List.length declaration.parameters in
-        (match Type_alias.declared_arity implementation_types ~name:declaration.name with
+        (match
+           Type_alias.declared_arity
+             implementation_types
+             ~name:(Syntax_name.name declaration.name)
+         with
          | Some arity when arity = count -> ()
          | Some arity ->
            reject
              item.span
              (Printf.sprintf
                 "Type '%s' has %d parameter(s); signature requires %d"
-                declaration.name
+                (Syntax_name.name declaration.name)
                 arity
                 count)
          | None ->
            reject
              item.span
-             (Printf.sprintf "Module does not declare type '%s'" declaration.name));
+             (Printf.sprintf
+                "Module does not declare type '%s'"
+                (Syntax_name.name declaration.name)));
         Type_alias.check_declared_equivalent
           ?source
           implementation_types
           ~other:!local_types
-          ~name:declaration.name
+          ~name:(Syntax_name.name declaration.name)
           ~span:item.span
           ~checkpoint
         |> alias_result;
-        type_names := declaration.name :: !type_names
-      | Value { name; annotation; requirements } ->
+        type_names := Syntax_name.name declaration.name :: !type_names
+      | Value { name = authored_name; annotation; requirements } ->
+        let name = Syntax_name.name authored_name in
+        let semantic =
+          Option.map recording ~f:(fun r ->
+            Elaboration.specification_exn
+              r.Recording.frame
+              ~context:(context r)
+              authored_name
+              ~checkpoint)
+        in
         let actual = implementation_value item.span name in
         let equality_parameters =
           List.map requirements ~f:(fun (requirement : Syntax.Requirement.t) ->
             checkpoint ();
-            if not (String.equal requirement.name "equality")
+            if not (String.equal (Syntax_name.name requirement.name) "equality")
             then
               reject
                 requirement.span
-                (Printf.sprintf "Unknown signature constraint '%s'" requirement.name);
-            requirement.parameter)
+                (Printf.sprintf
+                   "Unknown signature constraint '%s'"
+                   (Syntax_name.name requirement.name));
+            Syntax_name.name requirement.parameter)
         in
         let expected =
           Type_alias.elaborate_scheme
+            ?semantic
             ?source
             ?lookup
             !local_types
@@ -137,9 +263,26 @@ let check ?source ?lookup engine ~values ~types ~outer_types ~signature ~span =
           |> alias_result
         in
         match_type item.span ~name (instantiate actual) expected;
+        (match recording, semantic with
+         | Some r, Some semantic ->
+           List.iter requirements ~f:(fun requirement ->
+             Elaboration.name_reference_exn
+               semantic
+               requirement.Syntax.Requirement.name
+               ~role:Constraint_name
+               ~target:(Semantic.Target.Language_type "equality")
+               ~checkpoint;
+             Elaboration.constraint_parameter_exn
+               semantic
+               requirement.parameter
+               ~checkpoint);
+           project r name (Elaboration.binding semantic |> Option.value_exn) None
+         | None, None -> ()
+         | Some _, None | None, Some _ -> assert false);
         selected := Map.set !selected ~key:name ~data:expected;
         visibility := Visibility.Value name :: !visibility
-      | Module { name; signature } ->
+      | Module { name = authored_name; signature } ->
+        let name = Syntax_name.name authored_name in
         let actual = implementation_value item.span name in
         let fields =
           match actual with
@@ -159,8 +302,23 @@ let check ?source ?lookup engine ~values ~types ~outer_types ~signature ~span =
               item.span
               (Printf.sprintf "Missing type namespace for module '%s'" name)
         in
-        let nested =
+        let nested_recording =
+          Option.map recording ~f:(fun r ->
+            let implementation =
+              Binding.Members.find
+                r.Recording.implementation
+                ~namespace:Value
+                ~name
+                ~checkpoint
+              |> Option.value_exn
+              |> Binding.members
+              |> Option.value_exn
+            in
+            { Recording.frame = r.frame; context = context r; implementation })
+        in
+        let nested, nested_specification =
           check_module
+            ?recording:nested_recording
             ~implementation:fields
             ~implementation_types:nested_types
             ~outer_types:!local_types
@@ -168,7 +326,43 @@ let check ?source ?lookup engine ~values ~types ~outer_types ~signature ~span =
         in
         selected
         := Map.set !selected ~key:name ~data:(Module (Row (nested.values, Empty_row)));
-        local_types := Type_alias.add_module !local_types ~name ~exports:nested.types;
+        let semantic_binding =
+          Option.map recording ~f:(fun r ->
+            let recorder = Semantic.Frame.recorder r.Recording.frame in
+            let unit = Semantic.Frame.unit r.frame in
+            let group, roots =
+              Semantic.group
+                recorder
+                [ Module (Row (nested.values, Empty_row)) ]
+                ~checkpoint
+              |> Semantic.take_exn
+            in
+            let location =
+              Semantic.named recorder unit ~role:Module_binder authored_name ~checkpoint
+              |> Semantic.take_exn
+              |> Option.value_exn
+            in
+            let specification =
+              Semantic.define
+                recorder
+                unit
+                ~name
+                ~kind:Module
+                ~definition:(Binding.Definition.Authored location)
+                ~scheme:(Some (group, List.hd_exn roots))
+                ~members:nested_specification
+                ~checkpoint
+              |> Semantic.take_exn
+            in
+            project r name specification nested.members;
+            specification)
+        in
+        local_types
+        := Type_alias.add_module
+             ?semantic_binding
+             !local_types
+             ~name
+             ~exports:nested.types;
         module_names := name :: !module_names;
         visibility := Visibility.Module (name, nested.visibility) :: !visibility);
     let types =
@@ -179,18 +373,60 @@ let check ?source ?lookup engine ~values ~types ~outer_types ~signature ~span =
         ~checkpoint
       |> located span
     in
-    { values = !selected; types; visibility = List.rev !visibility }
+    let make_members entries =
+      Option.map recording ~f:(fun r ->
+        Semantic.members
+          (Semantic.Frame.recorder r.Recording.frame)
+          ~values:(List.rev entries)
+          ~types:(Type_alias.semantic_exports types ~checkpoint)
+          ~checkpoint
+        |> Semantic.take_exn)
+    in
+    anchor span.right;
+    ( { values = !selected
+      ; types
+      ; visibility = List.rev !visibility
+      ; members = make_members !public_values
+      }
+    , make_members !specification_values )
   in
   try
-    let checked =
+    let checked, specification =
       check_module
+        ?recording
+        ~anchors:
+          (Option.value_map source ~default:false ~f:(fun source ->
+             Int.equal span.left.offset 0
+             && Int.equal span.right.offset (Chatml_source.byte_length source)))
         ~implementation:copied_values
         ~implementation_types:types
         ~outer_types
         signature
     in
-    match Probe.commit probe ~rigid_names:!rigids ~checkpoint with
-    | Ok () -> Ok checked
+    let stage =
+      Option.map recording ~f:(fun r ->
+        let recorder = Semantic.Frame.recorder r.Recording.frame in
+        let stage =
+          Semantic.stage_signature
+            recorder
+            ~implementation:r.implementation
+            ~specification:(Option.value_exn specification)
+            ~checkpoint
+          |> Semantic.take_exn
+        in
+        Semantic.validate_signature_stage recorder stage |> Semantic.take_exn;
+        recorder, stage)
+    in
+    let commit_checkpoint () =
+      checkpoint ();
+      Option.iter stage ~f:(fun (recorder, stage) ->
+        Semantic.validate_signature_stage recorder stage |> Semantic.take_exn)
+    in
+    match Probe.commit probe ~rigid_names:!rigids ~checkpoint:commit_checkpoint with
+    | Ok () ->
+      Option.iter stage ~f:(fun (recorder, stage) ->
+        Semantic.commit_signature_exn recorder stage);
+      Ok checked
     | Error (Escaping_parameter _) ->
       reject span "Signature would generalize an existing monomorphic type variable"
     | Error Original_changed ->
@@ -200,7 +436,7 @@ let check ?source ?lookup engine ~values ~types ~outer_types ~signature ~span =
   | Rejected error -> Error error
 ;;
 
-let check_captured interface ?lookup engine ~values ~types ~outer_types =
+let check_captured interface ?recording ?lookup engine ~values ~types ~outer_types =
   let source = Chatml.Chatml_parse.Interface.source interface in
   let checkpoint = engine.Engine.checkpoint in
   (* This whole-unit range is constructed before checking or committing cells. *)
@@ -214,6 +450,7 @@ let check_captured interface ?lookup engine ~values ~types ~outer_types =
     |> Chatml_source.Location.span
   in
   check
+    ?recording
     ~source
     ?lookup
     engine

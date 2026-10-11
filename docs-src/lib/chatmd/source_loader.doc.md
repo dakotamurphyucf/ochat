@@ -1,6 +1,6 @@
 # source_loader
 
-Host-controlled source loading and provenance. Daemon pinned sources use the captured artifact closure; no arbitrary external filesystem snapshot is implied.
+Host-controlled source loading and provenance. Captured loaders read only their immutable inventory. The retained loader borrows a separately admitted original directory owner; its Eio root is a diagnostic label, with no ambient filesystem fallback.
 
 See [agent-core embedding](../../agent-server/embedding.md),
 [session/history behavior](../../agent-server/sessions-and-workspaces.md),
@@ -104,4 +104,15 @@ val resolve_within_root : t -> base:source -> reference:string -> (source, strin
 (** Read at most [max_bytes] (0..8 MiB), then notify the capture observer.
     Oversized reads never publish a partial captured dependency. *)
 val read_bounded : max_bytes:int -> t -> source -> (string, string) result
+
+(** Borrowed original-root backend. Labels/context come from [root]; every read
+    uses the admitted retained [owner], descriptor-relative/no-follow. Reject
+    portable member hazards before native work. No filesystem fallback. Caller
+    checkpoints/observers propagate unchanged; expected native errors are loader
+    failures. The host keeps this owner alive until all loader operations join. *)
+val retained_filesystem
+  :  root:Eio.Fs.dir_ty Eio.Path.t
+  -> owner:Chatml_local_source.t
+  -> checkpoint:(unit -> unit)
+  -> t
 ```

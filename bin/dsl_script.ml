@@ -26,6 +26,7 @@
 open Core
 open Chatml
 open Chatml_builtin_modules
+module Parser = Chatml_parser.Make (Chatml_syntax_sites.Disabled)
 
 (** [parse src] returns the AST corresponding to the ChatML program
       contained in [src].
@@ -34,11 +35,9 @@ open Chatml_builtin_modules
 let parse (str : string) : Chatml_lang.program =
   let lexbuf = Lexing.from_string str in
   try
-    { Chatml_lang.stmts = Chatml_parser.program Chatml_lexer.token lexbuf
-    ; source_text = str
-    }
+    { Chatml_lang.stmts = Parser.program Chatml_lexer.token lexbuf; source_text = str }
   with
-  | Chatml_parser.Error -> failwith "Parse error"
+  | Parser.Error -> failwith "Parse error"
 ;;
 
 let () =

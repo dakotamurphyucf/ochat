@@ -30,6 +30,23 @@ type t
 val values : t -> typ Env.t
 val types : t -> Chatml_type_alias.t
 val visibility : t -> Visibility.t
+val members : t -> Chatml_semantic_binding.Members.t option
+
+module Recording : sig
+  (** Borrowed exact signature unit/context and already collected implementation
+      members. No resolver/machine/callback is retained in checked output. All
+      specification definitions/groups/public projections and links are admitted
+      before Probe.commit. Its actual final checkpoint revalidates the stage
+      AFTER the user callback, then activation performs no allocation/polling.
+      Public values retain implementation identity with the actual selected
+      specification scheme; transparent aliases retain the checked specification
+      declaration, with an explicit implementation/specification link. *)
+  type t =
+    { frame : Chatml_semantic_recorder.Frame.t
+    ; context : Chatml_semantic_recorder.Context.t
+    ; implementation : Chatml_semantic_binding.Members.t
+    }
+end
 
 (** Match one implementation against a signature, including nested modules.
     [values] and [types] contain explicit implementation exports; [outer_types]
@@ -43,7 +60,8 @@ val visibility : t -> Visibility.t
     Existing raw-span/string callers remain unowned compatibility adapters.
     No initializer or host capability is invoked. *)
 val check
-  :  ?source:Chatml_source.t
+  :  ?recording:Recording.t
+  -> ?source:Chatml_source.t
   -> ?lookup:Chatml_type_alias.Lookup.t
   -> Engine.t
   -> values:typ Env.t
@@ -59,6 +77,7 @@ val check
     No checkpoint or captured inventory is retained by the result. *)
 val check_captured
   :  Chatml.Chatml_parse.Interface.t
+  -> ?recording:Recording.t
   -> ?lookup:Chatml_type_alias.Lookup.t
   -> Engine.t
   -> values:typ Env.t

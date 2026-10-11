@@ -58,7 +58,24 @@ val exports
 
 (** Install a completed module's static type namespace. Like a non-recursive
     module value binding, this replaces any previous binding of the same name. *)
-val add_module : t -> name:string -> exports:t -> t
+val add_module
+  :  ?semantic_binding:Chatml_semantic_binding.t
+  -> t
+  -> name:string
+  -> exports:t
+  -> t
+
+(** Optional immutable compiler metadata. The namespace never retains a Recorder,
+    Elaboration frame, callback or inference machine. *)
+val semantic_context : t -> Chatml_semantic_recorder.Context.t option
+
+val with_semantic_context : t -> Chatml_semantic_recorder.Context.t -> t
+
+(** Exact locally declared metadata; opened/outer names are not re-exports. *)
+val semantic_exports
+  :  t
+  -> checkpoint:(unit -> unit)
+  -> (string * Chatml_semantic_binding.t) list
 
 (** Inspect declarations in this exact scope, without looking through outer or
     opened bindings. Used to check a module's explicit public type members. *)
@@ -92,7 +109,8 @@ val open_module : t -> name:string -> checkpoint:(unit -> unit) -> (t, string) r
     no mutable inference variables. Existing names and primitive names reject.
     The constructor also validates recursive binders and internal type kinds. *)
 val add_host
-  :  t
+  :  ?semantic_binding:Chatml_semantic_binding.t
+  -> t
   -> name:string
   -> body:typ
   -> checkpoint:(unit -> unit)
@@ -103,7 +121,8 @@ val add_host
     All traversals poll [checkpoint];
     its exceptions (including cancellation) propagate unchanged. *)
 val declare
-  :  ?source:Chatml_source.t
+  :  ?semantic:Chatml_semantic_elaboration.t
+  -> ?source:Chatml_source.t
   -> ?lookup:Lookup.t
   -> t
   -> Syntax.Declaration.t
@@ -112,7 +131,8 @@ val declare
 
 (** Elaborate an annotation with no implicitly quantified parameters. *)
 val elaborate
-  :  ?source:Chatml_source.t
+  :  ?semantic:Chatml_semantic_elaboration.t
+  -> ?source:Chatml_source.t
   -> ?lookup:Lookup.t
   -> t
   -> Syntax.t
@@ -136,7 +156,8 @@ val elaborate
     Ordinary annotations still use
     [elaborate], which rejects unbound parameters. *)
 val elaborate_scheme
-  :  ?source:Chatml_source.t
+  :  ?semantic:Chatml_semantic_elaboration.t
+  -> ?source:Chatml_source.t
   -> ?lookup:Lookup.t
   -> t
   -> Syntax.t

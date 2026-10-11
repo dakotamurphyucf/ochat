@@ -87,3 +87,31 @@ val reparse
   -> artifact:Agent_store.Prompt_artifact_store.Artifact.t
   -> materialized_tree:Eio.Fs.dir_ty Eio.Path.t
   -> (Prompt_revision.t, Diagnostic.t list) result
+
+(** Same bounded parser/capture walker as [capture], supplied with an actual
+    original-root loader. [env] only supplies existing shell inspection; it never
+    becomes a fallback source root. No initializer/artifact publication. *)
+val capture_with_loader
+  :  loader:Source_loader.t
+  -> entry:Source.Portable_path.t
+  -> env:Eio_unix.Stdenv.base
+  -> preprocess:(string -> string)
+  -> limits:Prompt.Chat_markdown.Limits.t
+  -> checkpoint:(unit -> unit)
+  -> Prompt_definition.t
+  -> (Capture.t, Diagnostic.t list) Result.t
+
+(** Publish actual immutable capture after source/program preparation. Receipt
+    must match original definition and root member. No original file/stat reread;
+    canonical-source metadata derives solely from admitted selection receipt.
+    Hook exceptions propagate unchanged; captured replay retains original wire. *)
+val build_captured
+  :  ?prepare_programs:
+       (Capture.t -> (Chatml_prompt_programs.t, Diagnostic.t list) Result.t)
+  -> capture:Capture.t
+  -> source_receipt:Agent_store.Prompt_source_receipt.t
+  -> artifact_store:Agent_store.Prompt_artifact_store.t
+  -> transaction_id:Agent_protocol.Id.Transaction.t
+  -> created_at:Agent_protocol.Timestamp.t
+  -> Prompt_definition.t
+  -> (Prompt_revision.t, Diagnostic.t list) Result.t

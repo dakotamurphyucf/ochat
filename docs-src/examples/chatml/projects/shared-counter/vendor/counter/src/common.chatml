@@ -1,0 +1,4 @@
+let initialized = to_string("common")
+let cell = ref(0)
+let next () = cell := !cell + 1; !cell
+let reveal () = !cell

@@ -41,6 +41,9 @@ let of_json json =
   let%bind prompt_definition_id =
     optional json "prompt_definition_id" (identifier P.Id.Prompt_definition.of_string)
   in
+  let%bind source_receipt =
+    optional json "source_receipt" Prompt_source_receipt.of_json
+  in
   let%bind canonical_source = optional json "canonical_source" F.string in
   let%bind root_relative_path = F.required json "root_relative_path" F.string in
   let%bind root_sha256 = F.required json "root_sha256" F.digest in
@@ -64,6 +67,7 @@ let of_json json =
       { version
       ; revision_id
       ; prompt_definition_id
+      ; source_receipt
       ; canonical_source
       ; root_relative_path
       ; root_sha256
@@ -104,6 +108,7 @@ let to_json (t : M.t) =
              ~f:Prompt_program_bundle.Manifest.to_json
          ; optional "prompt_definition_id" t.prompt_definition_id ~f:(fun id ->
              `String (P.Id.Prompt_definition.to_string id))
+         ; optional "source_receipt" t.source_receipt ~f:Prompt_source_receipt.to_json
          ; optional "canonical_source" t.canonical_source ~f:(fun text -> `String text)
          ; optional "shell_manifest_sha256" t.shell_manifest_sha256 ~f:(fun text ->
              `String text)
@@ -121,6 +126,7 @@ let shape =
     [ "version", D.Shape.value
     ; "revision_id", D.Shape.value
     ; "prompt_definition_id", D.Shape.value
+    ; "source_receipt", Prompt_source_receipt.shape
     ; "canonical_source", D.Shape.value
     ; "root_relative_path", D.Shape.value
     ; "root_sha256", D.Shape.value

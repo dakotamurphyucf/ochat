@@ -1,0 +1,2 @@
+let initialized = to_string("alternate")
+let next () = Common.next() + 100

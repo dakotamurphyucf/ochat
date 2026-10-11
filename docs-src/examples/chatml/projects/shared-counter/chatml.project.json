@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "namespace": "shared-counter",
+  "source_dirs": [
+    "src",
+    "branches"
+  ],
+  "exclude": [
+    "src/ignored.chatml"
+  ],
+  "modules": {
+    "Right": {
+      "implementation": "branches/right.chatml"
+    },
+    "Alternate": {
+      "implementation": "variants/right.chatml"
+    }
+  },
+  "environments": {
+    "app": {
+      "modules": {
+        "Alias": "counter_alias.Common",
+        "Left": "self.Left",
+        "Right": "self.Right"
+      }
+    },
+    "alternate": {
+      "modules": {
+        "Alias": "counter_alias.Common",
+        "Left": "self.Left",
+        "Right": "self.Alternate"
+      }
+    },
+    "branch": {
+      "modules": {
+        "Common": "counter.Common"
+      }
+    },
+    "empty": {
+      "modules": {}
+    }
+  },
+  "default_environment": "app",
+  "file_environments": {
+    "src/left.chatml": "branch",
+    "branches/right.chatml": "branch",
+    "variants/right.chatml": "branch"
+  },
+  "entries": {
+    "main": {
+      "source": "src/main.chatml",
+      "target": "one_off_v1",
+      "environment": "app"
+    }
+  },
+  "dependencies": {
+    "counter": {
+      "source": {
+        "kind": "local",
+        "path": "vendor/counter"
+      },
+      "project": "chatml.project.json"
+    },
+    "counter_alias": {
+      "source": {
+        "kind": "local",
+        "path": "vendor/counter"
+      },
+      "project": "chatml.project.json"
+    }
+  }
+}

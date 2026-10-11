@@ -5,12 +5,14 @@
   chatml_project
   chatml_project_declaration
   chatml_project_decode
+  chatml_project_namespace
   chatml_project_lock
   chatml_project_lock_receipt
   chatml_project_lock_codec)
  (private_modules
   chatml_project_declaration
   chatml_project_decode
+  chatml_project_namespace
   chatml_project_lock
   chatml_project_lock_receipt
   chatml_project_lock_codec)

@@ -140,7 +140,16 @@ let catalog_input budget ~limits ~declared_at receipt sources selected =
   }
 ;;
 
-let restore budget ~limits ~contract ~lock_source ~sources =
+module Reconstruction = struct
+  type t =
+    { receipt : Lock.t
+    ; root : Input.t
+    ; catalogs : Input.t list
+    ; entry : Model.Entry.t
+    }
+end
+
+let reconstruct budget ~limits ~lock_source ~sources =
   let checkpoint () = Budget.checkpoint budget in
   checkpoint ();
   let open Result.Let_syntax in
@@ -178,6 +187,14 @@ let restore budget ~limits ~contract ~lock_source ~sources =
       (match find_source budget sources id with
        | Some source -> Ok (Model.Entry.Captured source)
        | None -> Error (Model.Error.create ~declared_at (Missing_capture id)))
+  in
+  Ok { Reconstruction.receipt; root; catalogs; entry }
+;;
+
+let restore budget ~limits ~contract ~lock_source ~sources =
+  let open Result.Let_syntax in
+  let%bind { Reconstruction.receipt; root; catalogs; entry } =
+    reconstruct budget ~limits ~lock_source ~sources
   in
   let%bind catalogs = Closure.select budget root ~catalogs in
   Assembly.create
