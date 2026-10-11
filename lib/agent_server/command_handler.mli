@@ -36,6 +36,7 @@ val create
   -> workspace_retained:
        (Agent_session.Session_state.t -> (bool, Agent_protocol.Error.t) result)
   -> provider_operator:Provider_operator_port.t option
+  -> dependency_administration:Dependency_administration.t option
   -> prepare_administration:
        (Session_registry.entry
         -> previous:Agent_session.Session_state.t

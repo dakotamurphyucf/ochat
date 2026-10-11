@@ -15,6 +15,8 @@ type t =
   ; start_queue : Agent_session.Start_queue.t
   ; idempotency_store : Agent_store.Idempotency_store.t
   ; provider_operator : Provider_operator_port.t option
+  ; dependency_administration : Dependency_administration.t option
+  ; dependency_receipts : Dependency_update_receipt.t
   ; idempotency_mutex : Eio.Mutex.t
   ; search_cache : Search_cache.t
   ; search_cursors : Search_cursor.t
@@ -69,8 +71,20 @@ let create
       ~prepare_session_start
       ~workspace_retained
       ~provider_operator
+      ~dependency_administration
       ~prepare_administration
   =
+  let idempotency_mutex = Eio.Mutex.create () in
+  let dependency_receipts =
+    Dependency_update_receipt.create
+      ~store:idempotency_store
+      ~mutex:idempotency_mutex
+      ~now:(fun () ->
+        Eio.Time.now (Eio.Stdenv.clock env)
+        |> Time_ns.Span.of_sec
+        |> Time_ns.of_span_since_epoch
+        |> Agent_protocol.Timestamp.of_time_ns)
+  in
   { sw
   ; env
   ; registry
@@ -79,7 +93,9 @@ let create
   ; start_queue
   ; idempotency_store
   ; provider_operator
-  ; idempotency_mutex = Eio.Mutex.create ()
+  ; idempotency_mutex
+  ; dependency_administration
+  ; dependency_receipts
   ; search_cache =
       Search_cache.create ()
       |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
@@ -357,6 +373,10 @@ let idempotency = function
   | Session_configuration_update request ->
     protected (Some request.session_id) request.idempotency_key
   | Session_run_start request -> protected (Some request.session_id) request.key
+  | Prompt_dependencies_update request ->
+    protected
+      None
+      (Agent_protocol.Prompt_dependency_selection.Update_request.idempotency_key request)
   | Session_send_message request ->
     protected (Some request.session_id) request.idempotency_key
   | Session_cancel_pending_input request ->
@@ -396,7 +416,6 @@ let idempotency = function
   | Prompt_list _
   | Prompt_get _
   | Prompt_dependencies_status
-  | Prompt_dependencies_update _
   | Workspace_list _
   | Workspace_get _
   | Blob_read _
@@ -2831,7 +2850,7 @@ let dispatch_authorized
   | Prompt_list request -> handle_prompt_list t request
   | Prompt_get request -> handle_prompt_get t request
   | Prompt_dependencies_status | Prompt_dependencies_update _ ->
-    Error (error Invalid_state "dependency administration is not installed")
+    Error (error Invalid_state "dependency administration requires dedicated dispatch")
   | Workspace_list request -> handle_workspace_list t request
   | Workspace_get request -> handle_workspace_get t request
   | ( Project_create _
@@ -3209,7 +3228,8 @@ let retained_run_receipt t ~actor (request : Agent_protocol.Run_start.t) ~reques
   let current () =
     if Operator_authorization.is_current actor
     then Ok ()
-    else Error (error Permission_denied "run receipt authority expired or was revoked")
+    else
+      Error (error Permission_denied "original receipt authority expired or was revoked")
   in
   let%bind () = current () in
   let%bind state =
@@ -3257,7 +3277,8 @@ let handle_command_receipt
   in
   let%bind () =
     match command with
-    | Session_run_start _ when not (Operator_authorization.is_current actor) ->
+    | (Session_run_start _ | Prompt_dependencies_update _)
+      when not (Operator_authorization.is_current actor) ->
       Error (error Permission_denied "run receipt authority expired or was revoked")
     | _ -> Ok ()
   in
@@ -3476,8 +3497,70 @@ let handle_lifecycle t context command request =
      | Error failure -> Error (Session_lifecycle_service.Failure.error failure))
 ;;
 
+let dependency_authority actor =
+  if not (Operator_authorization.is_current actor)
+  then Error (error Permission_denied "dependency authority expired or was revoked")
+  else if
+    not
+      (Agent_protocol.Principal.has_scope
+         (Operator_authorization.principal actor)
+         Administer_configuration)
+  then
+    Error
+      (error Permission_denied "dependency administration requires configuration.admin")
+  else Ok ()
+;;
+
+let dependency_status t =
+  match t.dependency_administration with
+  | None -> Error (error Invalid_state "dependency administration is not installed")
+  | Some port ->
+    Dependency_administration.status port
+    |> Result.map ~f:(fun value ->
+      Agent_protocol.Method_result.Prompt_dependencies_status value)
+;;
+
+let dependency_update t ~actor context request =
+  let module Denial = struct
+    exception Revoked
+  end
+  in
+  let checkpoint () =
+    Eio.Fiber.check ();
+    match dependency_authority actor with
+    | Ok () -> ()
+    | Error _ -> raise Denial.Revoked
+  in
+  let execute ~checkpoint =
+    match t.dependency_administration with
+    | None ->
+      Error
+        (Dependency_administration.Failure.Rejected
+           (error Invalid_state "dependency administration is not installed"))
+    | Some port -> Dependency_administration.update port request ~checkpoint
+  in
+  try
+    Dependency_update_receipt.dispatch
+      t.dependency_receipts
+      ~principal_id:(Connection_context.principal context).id
+      ~request
+      ~authorize:(fun () -> dependency_authority actor)
+      ~checkpoint
+      ~execute
+    |> Result.map ~f:(fun value ->
+      Agent_protocol.Method_result.Prompt_dependencies_update value)
+  with
+  | Denial.Revoked ->
+    Error
+      (error
+         Interrupted
+         "dependency authority changed after receipt admission; outcome is unknown")
+;;
+
 let execute t ~actor context ~inference_budget command =
   match command with
+  | Agent_protocol.Command.Prompt_dependencies_status -> dependency_status t
+  | Prompt_dependencies_update request -> dependency_update t ~actor context request
   | Agent_protocol.Command.Command_receipt request ->
     handle_command_receipt t ~actor context request
   | Session_delete request ->
@@ -3550,6 +3633,8 @@ let handle t ?actor ~context ~inference_budget command =
       | Session_continue_history _
       | Session_cancel_pending_input _
       | Session_replace_pending_input _ -> authorize_mutation t context command
+      | Prompt_dependencies_status | Prompt_dependencies_update _ ->
+        dependency_authority actor
       | Session_run_start request ->
         if not (Operator_authorization.is_current actor)
         then Error (error Permission_denied "run authority expired or was revoked")

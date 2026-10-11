@@ -74,9 +74,11 @@
   startup_cleanup
   daemon
   provider_operator_port
+  dependency_administration
+  dependency_update_receipt
   command_handler
   dispatcher)
- (private_modules session_factory_catalogs project_source_header)
+ (private_modules session_factory_catalogs project_source_header dependency_update_receipt)
  (libraries ochat.operator_authorization
  core
   base64
