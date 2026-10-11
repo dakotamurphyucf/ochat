@@ -1217,15 +1217,16 @@ This is necessary for soundness with:
 - arrays
 - mutable aliasing
 
-### 10.4.1 Recursive types remain monomorphic
+### 10.4.1 Generalization with recursive data
 
-Bindings whose type contains an explicit recursive type are kept
-monomorphic in the current design.
+Non-expansive functions involving regular recursive types follow the same
+generalization and value restriction as other functions. A pure JSON helper's
+independent callback or result variable can be instantiated differently at
+separate calls. Captured weak variables remain shared, and expansive bindings
+such as refs and arrays are not generalized.
 
-This applies even when the binding is otherwise non-expansive.
-
-The implementation intentionally does **not** attempt polymorphic
-recursion.
+Recursive calls within a simultaneous function definition use monomorphic
+placeholders. This does not permit polymorphic recursion.
 
 ### 10.5 Records and row polymorphism
 
@@ -2296,7 +2297,7 @@ The current implementation intentionally enforces or relies on:
 - ordinary inference variables being acyclic
 - recursive types being explicit and checked
 - recursive type declarations being contractive
-- recursive types remaining monomorphic
+- regular recursive data preserving ordinary generalization and value restriction
 - recursive bindings being function-only
 - mutation interacting with polymorphism via a value restriction
 - explicit separation of integer and float operators

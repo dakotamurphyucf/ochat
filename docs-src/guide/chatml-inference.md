@@ -139,9 +139,18 @@ the declaration's parameters, in order. For example, ``type 'a tree =
 to `'a array` is not. Aliases resolve names in their declaration environment.
 Duplicate/free parameters, missing or extra arguments, and unguarded or
 nonregular recursion are rejected at a type-expression source span. There are no
-mutually recursive type declarations. A binding whose inferred type contains an
-explicit recursive type stays monomorphic, even if its expression is a lambda;
-do not infer polymorphic recursion from the usual identity-function example.
+mutually recursive type declarations. A non-expansive function involving regular
+recursive data can generalize its independent variables. For example, a pure
+function taking JSON can return different callback result types at separate
+calls. Captured weak variables and mutable storage still share their constraints.
+
+<!-- ochat-authoring-example: {"id":"types.recursive-json-callback","surface":"one_off_v1","result":true} -->
+```ocaml
+let decode value f = f(Json.tag(value))
+let number = decode(`Null, fun tag -> 7)
+let text = decode(`Null, fun tag -> "checked")
+let main input = Task.pure(`Bool(number == 7 && text == "checked"))
+```
 
 `let rec` and `and` bind functions, including annotated lambdas. They cannot
 construct cyclic refs, records or arbitrary self-referential values. Recursive

@@ -55,6 +55,7 @@ module Builtin_surface = Chatml.Chatml_builtin_surface
 module Binding_pattern = Chatml.Chatml_binding_pattern
 module Type_alias = Chatml_type_alias
 module Type_probe = Chatml_type_probe
+module Type_scheme = Chatml_type_scheme
 module Signature_check = Chatml_signature_check
 module Value_scope = Chatml_value_scope
 module Configured_lookup = Chatml_configured_lookup
@@ -324,84 +325,23 @@ let unfold_mu ?checkpoint (ty : typ) : typ =
 (** --------------------------------------------------------------------- *)
 
 let instantiate (state : infer_state) ty =
-  let table = Hashtbl.create (module String) in
-  let kinds = Hashtbl.create (module String) in
-  let rec inst_kind seen kind =
-    checkpoint state;
-    match kind with
-    | Generic { name; equality = None } ->
-      Hashtbl.find_or_add kinds name ~default:(fun () ->
-        new_var state state.shared.current_lvl)
-    | Generic { equality = Some _; _ } ->
-      raise (Type_error "A representation kind cannot carry value equality")
-    | Var ({ contents = Bound bound } as tv) ->
-      if tv_ref_mem tv seen then Var tv else inst_kind (tv :: seen) bound
-    | other -> other
-  in
-  let rec inst (seen : tv ref list) ty =
-    checkpoint state;
-    match ty with
-    | Fun (ps, r) -> Fun (List.map ps ~f:(inst seen), inst seen r)
-    | Generic { name; equality } ->
-      let variable =
-        Hashtbl.find_or_add table name ~default:(fun () ->
-          new_var state ?equality state.shared.current_lvl)
-      in
-      (match variable with
-       | Var tv -> Option.iter equality ~f:(add_free_equality tv)
-       | _ -> assert false);
-      variable
-    | Con (n, args) -> Con (n, List.map args ~f:(inst seen))
-    | Var ({ contents = Bound t } as tvref) ->
-      if tv_ref_mem tvref seen then Var tvref else inst (tvref :: seen) t
-    | Var ({ contents = Free _ } as tvref) -> Var tvref
-    | Mu (binder, body) -> Mu (binder, inst seen body)
-    | Rec_var _ as rec_var -> rec_var
-    | Ref t -> Ref (inst seen t)
-    | Record r -> Record (inst seen r)
-    | Module r -> Module (inst seen r)
-    | Field_receiver (kind, row) -> Field_receiver (inst_kind seen kind, inst seen row)
-    | Variant r -> Variant (inst seen r)
-    | Tuple ts -> Tuple (List.map ts ~f:(inst seen))
-    | Variant_payload ts -> Variant_payload (List.map ts ~f:(inst seen))
-    | Row (fields, t) -> Row (Env.map fields ~f:(inst seen), inst seen t)
-    | Array t -> Array (inst seen t)
-    | t -> t
-  in
-  inst [] ty
+  match
+    Type_scheme.instantiate
+      ty
+      ~level:state.shared.current_lvl
+      ~fresh_name:(fun () -> gensym state)
+      ~checkpoint:(fun () -> checkpoint state)
+  with
+  | Ok ty -> ty
+  | Error Representation_equality ->
+    raise (Type_error "A representation kind cannot carry value equality")
+  | Error (Conflicting_equality Value_and_row) ->
+    raise (Type_error "Type variable cannot be both a value and a record row")
 ;;
 
-(**
-  Generalisation
-  We now adopt the same strategy that the Nox checker uses: all free type variables that were
-  introduced at a deeper level than the current one are turned into
-  universally-quantified (Generic) type variables.
-*)
 let generalise (state : infer_state) ty =
-  let rec gen (seen : tv ref list) ty =
-    checkpoint state;
-    match ty with
-    | Fun (params, ret) -> Fun (List.map params ~f:(gen seen), gen seen ret)
-    | Var ({ contents = Bound t } as tvref) ->
-      if tv_ref_mem tvref seen then Var tvref else gen (tvref :: seen) t
-    | Var { contents = Free { name; level; equality } }
-      when level > state.shared.current_lvl -> Generic { name; equality }
-    | Var ({ contents = Free _ } as tvref) -> Var tvref
-    | Con (n, args) -> Con (n, List.map args ~f:(gen seen))
-    | Mu (binder, body) -> Mu (binder, gen seen body)
-    | Rec_var _ as rec_var -> rec_var
-    | Ref t -> Ref (gen seen t)
-    | Record row -> Record (gen seen row)
-    | Module row -> Module (gen seen row)
-    | Field_receiver (kind, row) -> Field_receiver (gen seen kind, gen seen row)
-    | Variant row -> Variant (gen seen row)
-    | Tuple ts -> Tuple (List.map ts ~f:(gen seen))
-    | Variant_payload ts -> Variant_payload (List.map ts ~f:(gen seen))
-    | Row (fields, tail) -> Row (Env.map fields ~f:(gen seen), gen seen tail)
-    | Array t -> Array (gen seen t)
-    | t -> t
-  in
-  gen [] ty
+  Type_scheme.generalise ty ~level:state.shared.current_lvl ~checkpoint:(fun () ->
+    checkpoint state)
 ;;
 
 let has_recursive_type = Chatml_type_validity.has_recursive_type
@@ -445,16 +385,29 @@ let merge_fields ?(checkpoint = fun () -> ()) row =
 
 let occurs ?(checkpoint = fun () -> ()) tv ty =
   let found = ref false in
-  let rec aux (seen : tv ref list) ty =
+  let seen = ref [] in
+  (* The target is fixed and Bound links do not change during this invocation.
+     Reaching a shared Bound node through another sibling adds no obligation:
+     Free lowering is the same idempotent minimum, and Mu does not substitute.
+     Retain all sibling traversal, including after finding the target. *)
+  let rec aux ty =
     checkpoint ();
     match ty with
     | Fun (ps, r) ->
-      List.iter ps ~f:(aux seen);
-      aux seen r
-    | Con (_n, args) -> List.iter args ~f:(aux seen)
+      List.iter ps ~f:aux;
+      aux r
+    | Con (_n, args) -> List.iter args ~f:aux
     | Var tv' when phys_equal tv tv' -> found := true
     | Var ({ contents = Bound ty } as tv') ->
-      if not (tv_ref_mem tv' seen) then aux (tv' :: seen) ty
+      let visited =
+        List.exists !seen ~f:(fun previous ->
+          checkpoint ();
+          phys_equal tv' previous)
+      in
+      if not visited
+      then (
+        seen := tv' :: !seen;
+        aux ty)
     | Var ({ contents = Free ({ level = lvl; _ } as info) } as tv') ->
       let new_lvl =
         match !tv with
@@ -462,19 +415,19 @@ let occurs ?(checkpoint = fun () -> ()) tv ty =
         | _ -> lvl
       in
       tv' := Free { info with level = new_lvl }
-    | Mu (_binder, body) -> aux seen body
+    | Mu (_binder, body) -> aux body
     | Rec_var _ -> ()
-    | Ref t | Record t | Module t | Variant t | Array t -> aux seen t
+    | Ref t | Record t | Module t | Variant t | Array t -> aux t
     | Field_receiver (kind, row) ->
-      aux seen kind;
-      aux seen row
-    | Tuple ts | Variant_payload ts -> List.iter ts ~f:(aux seen)
+      aux kind;
+      aux row
+    | Tuple ts | Variant_payload ts -> List.iter ts ~f:aux
     | Row (fs, rest) ->
-      Env.iter fs ~f:(fun _ t -> aux seen t);
-      aux seen rest
+      Env.iter fs ~f:(fun _ t -> aux t);
+      aux rest
     | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit | Shape_kind _ -> ()
   in
-  aux [] ty;
+  aux ty;
   !found
 ;;
 
@@ -1342,19 +1295,10 @@ let add_mono ?(checkpoint = fun () -> ()) (env : tenv) x ty : tenv =
   Value_scope.add_local env ~name:x ~scheme:ty
 ;;
 
-let should_generalize_binding ?checkpoint (ty : typ) : bool =
-  not (has_recursive_type ?checkpoint ty)
-;;
-
 let add_generalized (state : infer_state) (env : tenv) x ty : tenv =
-  (* bindings whose type contains an explicit recursive type
-     are kept monomorphic.  We therefore skip HM generalization entirely for
-     such bindings and store the checked type as-is. *)
-  if not (should_generalize_binding ~checkpoint:(fun () -> checkpoint state) ty)
-  then (
-    ensure_contractive_type ~checkpoint:(fun () -> checkpoint state) ty;
-    Value_scope.add_local env ~name:x ~scheme:ty)
-  else Value_scope.add_local env ~name:x ~scheme:(generalise state ty)
+  if has_recursive_type ~checkpoint:(fun () -> checkpoint state) ty
+  then ensure_contractive_type ~checkpoint:(fun () -> checkpoint state) ty;
+  Value_scope.add_local env ~name:x ~scheme:(generalise state ty)
 ;;
 
 let add_open_binding
@@ -1539,12 +1483,10 @@ and infer_nonrecursive_binding
   in
   let scheme =
     if is_non_expansive rhs.value
-    then
-      if should_generalize_binding ~checkpoint:(fun () -> checkpoint state) rhs_ty
-      then generalise state rhs_ty
-      else (
-        ensure_contractive_type ~checkpoint:(fun () -> checkpoint state) rhs_ty;
-        rhs_ty)
+    then (
+      if has_recursive_type ~checkpoint:(fun () -> checkpoint state) rhs_ty
+      then ensure_contractive_type ~checkpoint:(fun () -> checkpoint state) rhs_ty;
+      generalise state rhs_ty)
     else (
       restrict_free_vars_to_level
         ~checkpoint:(fun () -> checkpoint state)
