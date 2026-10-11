@@ -1,6 +1,7 @@
 name: Website
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   push:
     branches: [main]
   workflow_dispatch:
@@ -18,8 +19,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  # Always start detection and the final gate. Do not use workflow path filters.
+  # Drafts allocate no runners. Ready-for-review events run normal qualification.
+  # Keep detection and the final gate for all other events; do not use path filters.
   changes:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -305,7 +308,7 @@ jobs:
           if-no-files-found: error
           overwrite: true
   release-gate:
-    if: always()
+    if: always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     needs: [changes, semantics, framework, website, browser, website-qualification]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
