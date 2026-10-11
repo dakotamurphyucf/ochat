@@ -5059,5 +5059,77 @@
     "title": "Host-owned provider operator service",
     "reviewNote": "Contributor reference for shared runtime composition, explicit setup and protected local enrollment, owner-bound private login challenges, authorization, durable operation reconciliation and CLI recovery. Offline route tests do not claim live provider qualification.",
     "provenance": "authored"
+  },
+  {
+    "id": "development/bounded-document-conversion",
+    "source": "docs-src/development/bounded-document-conversion.md",
+    "disposition": "repository-only",
+    "title": "Bounded local document conversion",
+    "reviewNote": "Contributor contract for bounded pure document conversion, accounting units, exception ownership and qualification.",
+    "provenance": "authored"
+  },
+  {
+    "id": "development/captured-document-content",
+    "source": "docs-src/development/captured-document-content.md",
+    "disposition": "repository-only",
+    "title": "Captured document foundation",
+    "reviewNote": "Contributor contract for parser-owned document slots, immutable content inventories and bounded materialization.",
+    "provenance": "authored"
+  },
+  {
+    "id": "development/chatmd-content-custody",
+    "source": "docs-src/development/chatmd-content-custody.md",
+    "disposition": "repository-only",
+    "title": "Captured document custody",
+    "reviewNote": "Contributor contract for captured document acquisition, artifact publication, restoration and host policies.",
+    "provenance": "authored"
+  },
+  {
+    "id": "development/chatml-program-custody",
+    "source": "docs-src/development/chatml-program-custody.md",
+    "disposition": "repository-only",
+    "title": "Retaining ChatMD parser inputs and ChatML programs",
+    "reviewNote": "Contributor contract for retained parser inputs, executable program graphs, source ownership and artifact limits.",
+    "provenance": "authored"
+  },
+  {
+    "id": "development/chatml-semantic-queries",
+    "source": "docs-src/development/chatml-semantic-queries.md",
+    "disposition": "repository-only",
+    "title": "ChatML semantic query contracts",
+    "reviewNote": "Contributor contract for compiler semantic snapshots, query ownership, bounded analysis and validation.",
+    "provenance": "authored"
+  },
+  {
+    "id": "development/chatml-source-preparation",
+    "source": "docs-src/development/chatml-source-preparation.md",
+    "disposition": "repository-only",
+    "title": "Capturing project sources before session admission",
+    "reviewNote": "Contributor contract for source-only project batches, deferred live-tool admission and preparation ownership.",
+    "provenance": "authored"
+  },
+  {
+    "id": "development/project-source-host",
+    "source": "docs-src/development/project-source-host.md",
+    "disposition": "repository-only",
+    "title": "Administrative project source host",
+    "reviewNote": "Contributor reference for administrative source grants, bounded local/Git acquisition and host lifetime qualification.",
+    "provenance": "authored"
+  },
+  {
+    "id": "development/script-project-baselines",
+    "source": "docs-src/development/script-project-baselines.md",
+    "disposition": "repository-only",
+    "title": "Last successful script project selections",
+    "reviewNote": "Contributor contract for retained project selections, durable baseline publication and explicit dependency update receipts.",
+    "provenance": "authored"
+  },
+  {
+    "id": "examples/chatml/projects/shared-counter/readme",
+    "source": "docs-src/examples/chatml/projects/shared-counter/README.md",
+    "disposition": "repository-only",
+    "title": "A captured project with one shared counter",
+    "reviewNote": "Contributor execution fixture and host API walkthrough for captured module graphs, shared aliases, source removal and exact dependency locks; not a standalone downloadable agent workflow.",
+    "provenance": "authored"
   }
 ]
