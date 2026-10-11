@@ -64,6 +64,7 @@ let%expect_test "legacy manager diagnostics cannot recurse forever or invalidate
     { id = "logging"
     ; language = "chatml"
     ; kind = "moderator"
+    ; source_ref = None
     ; source =
         Inline
           "let initial_state = 0\nlet on_event ctx state event = Task.pure(state + 1)"

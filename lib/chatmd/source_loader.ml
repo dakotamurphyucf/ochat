@@ -12,6 +12,7 @@ type t =
   ; confined : bool
   ; generated : bool
   ; captured : string String.Map.t option
+  ; read_limit : (source -> int) option
   ; observer : (source -> string -> unit) option
   ; agent_observer : (source -> unit) option
   }
@@ -21,6 +22,7 @@ let filesystem ~root =
   ; confined = false
   ; generated = false
   ; captured = None
+  ; read_limit = None
   ; observer = None
   ; agent_observer = None
   }
@@ -44,9 +46,19 @@ let portable_reference reference =
           | _ -> false))
 ;;
 
+let with_read_limit t ~max_bytes =
+  let bound =
+    match t.read_limit with
+    | None -> max_bytes
+    | Some previous -> fun source -> Int.min (previous source) (max_bytes source)
+  in
+  { t with read_limit = Some bound }
+;;
+
 let with_observer t ~f = { t with observer = Some f }
 let with_agent_observer t ~f = { t with agent_observer = Some f }
 let root_dir t = t.root
+let is_captured t = Option.is_some t.captured
 
 let normalize path =
   String.substr_replace_all path ~pattern:"\\" ~with_:"/"
@@ -128,7 +140,7 @@ let resolve t ~base ~reference =
          else Eio.Path.(base.directory / reference)))
 ;;
 
-let read t source =
+let read_unbounded t source =
   try
     let contents =
       match t.captured with
@@ -151,34 +163,48 @@ let read_bounded ~max_bytes t source =
   if max_bytes < 0 || max_bytes > 8 * 1024 * 1024
   then Error "invalid source read bound"
   else (
-    try
-      let contents =
-        match t.captured with
-        | Some sources ->
-          (match Map.find sources source.relative_path with
-           | Some text when String.length text <= max_bytes -> text
-           | Some _ -> failwith "source byte limit exceeded"
-           | None -> failwith ("source is not captured: " ^ source.relative_path))
-        | None ->
-          Eio.Path.with_open_in source.path (fun flow ->
-            let buffer = Buffer.create (Int.min 4096 max_bytes) in
-            let chunk = Cstruct.create (Int.min 4096 (max_bytes + 1)) in
-            let rec loop () =
-              match Eio.Flow.single_read flow chunk with
-              | count ->
-                if Buffer.length buffer + count > max_bytes
-                then failwith "source byte limit exceeded";
-                Buffer.add_string buffer (Cstruct.to_string ~len:count chunk);
-                loop ()
-              | exception End_of_file -> Buffer.contents buffer
-            in
-            loop ())
-      in
-      Option.iter t.observer ~f:(fun observe -> observe source contents);
-      Ok contents
-    with
-    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
-    | exn -> Error (Exn.to_string exn))
+    let max_bytes =
+      match t.read_limit with
+      | None -> max_bytes
+      | Some bound -> Int.min max_bytes (bound source)
+    in
+    if max_bytes < 0
+    then Error "invalid source read bound"
+    else (
+      try
+        let contents =
+          match t.captured with
+          | Some sources ->
+            (match Map.find sources source.relative_path with
+             | Some text when String.length text <= max_bytes -> text
+             | Some _ -> failwith "source byte limit exceeded"
+             | None -> failwith ("source is not captured: " ^ source.relative_path))
+          | None ->
+            Eio.Path.with_open_in source.path (fun flow ->
+              let buffer = Buffer.create (Int.min 4096 max_bytes) in
+              let chunk = Cstruct.create (Int.min 4096 (max_bytes + 1)) in
+              let rec loop () =
+                match Eio.Flow.single_read flow chunk with
+                | count ->
+                  if Buffer.length buffer + count > max_bytes
+                  then failwith "source byte limit exceeded";
+                  Buffer.add_string buffer (Cstruct.to_string ~len:count chunk);
+                  loop ()
+                | exception End_of_file -> Buffer.contents buffer
+              in
+              loop ())
+        in
+        Option.iter t.observer ~f:(fun observe -> observe source contents);
+        Ok contents
+      with
+      | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+      | exn -> Error (Exn.to_string exn)))
+;;
+
+let read t source =
+  match t.read_limit with
+  | None -> read_unbounded t source
+  | Some _ -> read_bounded ~max_bytes:(8 * 1024 * 1024) t source
 ;;
 
 let resolve_within_root t ~base ~reference =

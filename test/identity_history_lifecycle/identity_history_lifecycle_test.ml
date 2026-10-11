@@ -218,6 +218,7 @@ let moderator_artifact ~replace_id ~delete_id =
       { id = "identity-lifecycle"
       ; language = "chatml"
       ; kind = "moderator"
+      ; source_ref = None
       ; source = Inline source
       }
   in

@@ -200,7 +200,7 @@ let implementation_sources =
   ; ( "lib/agent_session/delegation_authority.ml"
     , "1296afd747dd9317e822ef3c1efbdc795188f27a0cb6f25664b2673ecb848a74" )
   ; ( "lib/agent_session/generated_definition.ml"
-    , "49c76ab4b8409a0daaf73653cae2d548a4340e9424d652bb4101f2af5532301e" )
+    , "f2c2ead7ec5ef439115a19458eece9e7165289b2ecf6f663226011a32112b0c9" )
   ; ( "lib/agent_session/generated_session_request.ml"
     , "90af4ba27a871509ae8b0805f36c008d7167fc748104c7055b7660d960ce6a8d" )
   ; ( "lib/agent_session/generated_session_tool.ml"

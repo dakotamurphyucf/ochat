@@ -4,6 +4,13 @@
  (wrapped false)
  (modules
   chatmd_ast
+  chatmd_parser_input
+  chatmd_parser_builder
+  chatmd_located_ast
+  chatmd_owned_parser
+  chatmd_parser_engine
+  chatmd_parser_tokens
+  chatmd_tokens
   source_loader
   chatmd_source_bundle
   chatmd_lexer
@@ -21,6 +28,7 @@
  (libraries
   core
   source
+  chatml_source
   cstruct
   str
   menhirLib
@@ -33,7 +41,12 @@
   (pps ppx_jane ppx_jsonaf_conv)))
 
 (menhir
- (modules chatmd_parser)
- (flags --table))
+ (modules chatmd_parser_engine)
+ (flags --table --external-tokens Chatmd_tokens))
+
+(rule
+ (targets chatmd_parser_tokens.ml chatmd_parser_tokens.mli)
+ (action
+  (run %{bin:menhir} --only-tokens --base chatmd_parser_tokens %{dep:chatmd_parser_engine.mly})))
 
 (ocamllex chatmd_lexer)

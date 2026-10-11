@@ -185,6 +185,7 @@ module Chat_markdown : sig
     ; language : string
     ; kind : string
     ; source : script_source
+    ; source_ref : Chatmd_shell_spec.Source_ref.t option [@jsonaf.option]
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
@@ -207,6 +208,79 @@ module Chat_markdown : sig
     | Authoring_context of Chatmd_shell_spec.Extension_spec.authoring_context
     | Authoring_help of Chatmd_shell_spec.Extension_spec.authoring_help
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
+
+  module Declaration : sig
+    type t
+
+    val range : t -> Chatmd_parser_input.Range.t
+    val source_ref : t -> Chatmd_shell_spec.Source_ref.t
+    val script_id : t -> string
+
+    (** Body is the actual inline extraction / loaded external body already used
+        by the script parser; artifact custody computes/reconciles its digest. *)
+    val script_body : t -> string
+  end
+
+  module Parsed : sig
+    type t
+
+    val elements : t -> top_level_elements list
+    val root_input : t -> Chatmd_parser_input.t
+    val inputs : t -> Chatmd_parser_input.t list
+    val declarations : t -> Declaration.t list
+  end
+
+  module Limits : sig
+    type t
+
+    (** Positive explicit bounds for ONE Root preparation/replay INCLUDING its
+        imported parsing. Byte cap applies before hashing/index/lexing each input;
+        parse-call/token counters do not reset for imports. Depth bounds both
+        per-file markup and the expanded output. Capture combines at most 256
+        Root calls under the artifact's
+        separately enforced joint authored/private256-file/8MiB allowance.
+        Suggested capture values reuse established generated-admission ceilings:
+        8MiB input,1024 parse calls,100000 tokens,depth128. No default is implicit.
+        Ordinary legacy authored wrapper retains its current acceptance policy. *)
+    val create
+      :  max_input_bytes:int
+      -> max_parse_calls:int
+      -> max_tokens:int
+      -> max_depth:int
+      -> t Core.Or_error.t
+
+    val input_bytes : t -> int
+  end
+
+  (** Explicit parser-owned preparation callback. Ordinary production wrapper
+      supplies Meta_prompting.Preprocessor.preprocess. Capture tests supply a
+      deterministic transformation and count invocations. Called ONCE for this
+      Root, never for raw imports. Cancellation/callback exceptions propagate
+      unchanged. Root + each queued local-agent Root have separate calls. *)
+  val prepare_chat_inputs
+    :  source:string
+    -> source_loader:Source_loader.t
+    -> dir:Eio.Fs.dir_ty Eio.Path.t
+    -> preprocess:(string -> string)
+    -> limits:Limits.t
+    -> checkpoint:(unit -> unit)
+    -> string
+    -> Parsed.t
+
+  (** Replay an actual retained Root input through ordinary authored declaration
+      semantics with preprocessing Fn.id. This DOES NOT use generated-bundle
+      validate_inert: effective input may legitimately retain a META_REFINE marker.
+      Imports resolve/read solely through the supplied captured loader and become
+      Import inputs with exact raw=effective equality. Never consult a preprocessor,
+      provider, native source fallback or an ambient enablement flag. Missing Root
+      association is rejected by the artifact owner before this call. *)
+  val replay_chat_inputs
+    :  Chatmd_parser_input.t
+    -> source_loader:Source_loader.t
+    -> dir:Eio.Fs.dir_ty Eio.Path.t
+    -> limits:Limits.t
+    -> checkpoint:(unit -> unit)
+    -> Parsed.t
 
   (** [parse_chat_inputs ~dir raw] tokenises, parses and normalises the
       ChatMarkdown snippet contained in [raw].
@@ -259,6 +333,8 @@ module Chat_markdown : sig
   type parsed_bundle =
     { root : top_level_elements list
     ; agents : (string * top_level_elements list) list
+    ; parsed_root : Parsed.t
+    ; parsed_agents : (string * Parsed.t) list
     }
 
   (** Recheck the parsed declaration registry, including IDs, handler kinds,

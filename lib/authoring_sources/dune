@@ -103,7 +103,13 @@
     lib/chatmd/chatmd_extension_declaration.ml %{dep:../chatmd/chatmd_extension_declaration.ml}
     lib/chatmd/chatmd_import_expansion.ml %{dep:../chatmd/chatmd_import_expansion.ml}
     lib/chatmd/chatmd_lexer.mll %{dep:../chatmd/chatmd_lexer.mll}
-    lib/chatmd/chatmd_parser.mly %{dep:../chatmd/chatmd_parser.mly}
+    lib/chatmd/chatmd_parser_engine.mly %{dep:../chatmd/chatmd_parser_engine.mly}
+    lib/chatmd/chatmd_parser.ml %{dep:../chatmd/chatmd_parser.ml}
+    lib/chatmd/chatmd_parser_builder.ml %{dep:../chatmd/chatmd_parser_builder.ml}
+    lib/chatmd/chatmd_located_ast.ml %{dep:../chatmd/chatmd_located_ast.ml}
+    lib/chatmd/chatmd_tokens.ml %{dep:../chatmd/chatmd_tokens.ml}
+    lib/chatmd/chatmd_parser_input.ml %{dep:../chatmd/chatmd_parser_input.ml}
+    lib/chatmd/chatmd_owned_parser.ml %{dep:../chatmd/chatmd_owned_parser.ml}
     lib/chatmd/chatmd_script_declaration.ml %{dep:../chatmd/chatmd_script_declaration.ml}
     lib/chatmd/chatmd_source_bundle.ml %{dep:../chatmd/chatmd_source_bundle.ml}
     lib/source.ml %{dep:../source.ml}

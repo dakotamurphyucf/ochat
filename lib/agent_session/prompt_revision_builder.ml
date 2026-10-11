@@ -41,8 +41,8 @@ let source_values captures =
   |> List.sort ~compare:(fun (left, _) (right, _) -> String.compare left right)
 ;;
 
-let artifact_sources captures =
-  source_values captures
+let artifact_sources sources =
+  sources
   |> List.map ~f:(fun (relative_path, contents) ->
     Agent_store.Prompt_artifact_store.Source.create ~relative_path ~contents)
   |> Result.all
@@ -66,79 +66,55 @@ let build_manifest definition ~canonical_source ~root ~sources ~shell_manifest_s
   |> Sexp.to_string_mach
 ;;
 
-let source_capture_loader root_path root captures dependencies =
+let source_capture_loader root_path root captures dependencies ~private_bytes =
   let captured_bytes = ref (String.length root) in
   if !captured_bytes > 8 * 1024 * 1024 then failwith "prompt source byte limit exceeded";
-  Source_loader.filesystem ~root:root_path
-  |> Source_loader.with_observer ~f:(fun source contents ->
-    let path = Source_loader.relative_path source in
-    if
-      Filename.is_absolute (Source_loader.file_name source)
-      || List.mem (String.split path ~on:'/') ".." ~equal:String.equal
-    then
-      failwith
-        "captured imports and scripts must remain beneath the root prompt directory";
-    (match Hashtbl.find captures path with
-     | Some previous when not (String.equal previous contents) ->
-       failwith "prompt dependency changed during capture"
-     | None when Hashtbl.length captures >= 255 ->
-       failwith "prompt dependency file count limit exceeded"
-     | _ -> ());
-    let previous_bytes =
-      Hashtbl.find captures path |> Option.value_map ~default:0 ~f:String.length
-    in
-    captured_bytes := !captured_bytes - previous_bytes + String.length contents;
-    if !captured_bytes > 8 * 1024 * 1024 then failwith "prompt source byte limit exceeded";
-    Hashtbl.set captures ~key:path ~data:contents)
-  |> Source_loader.with_agent_observer ~f:(fun source ->
-    Queue.enqueue dependencies source)
+  let loader =
+    Source_loader.filesystem ~root:root_path
+    |> Source_loader.with_read_limit ~max_bytes:(fun source ->
+      match Hashtbl.find captures (Source_loader.relative_path source) with
+      | Some contents -> String.length contents
+      | None -> (8 * 1024 * 1024) - !captured_bytes - !private_bytes)
+    |> Source_loader.with_observer ~f:(fun source contents ->
+      let path = Source_loader.relative_path source in
+      if
+        Filename.is_absolute (Source_loader.file_name source)
+        || List.mem (String.split path ~on:'/') ".." ~equal:String.equal
+      then
+        failwith
+          "captured imports and scripts must remain beneath the root prompt directory";
+      (match Hashtbl.find captures path with
+       | Some previous when not (String.equal previous contents) ->
+         failwith "prompt dependency changed during capture"
+       | None when Hashtbl.length captures >= 255 ->
+         failwith "prompt dependency file count limit exceeded"
+       | _ -> ());
+      let previous_bytes =
+        Hashtbl.find captures path |> Option.value_map ~default:0 ~f:String.length
+      in
+      captured_bytes := !captured_bytes - previous_bytes + String.length contents;
+      if !captured_bytes > (8 * 1024 * 1024) - !private_bytes
+      then failwith "prompt source byte limit exceeded";
+      Hashtbl.set captures ~key:path ~data:contents)
+    |> Source_loader.with_agent_observer ~f:(fun source ->
+      Queue.enqueue dependencies source)
+  in
+  loader, captured_bytes
 ;;
 
-let capture_nested_sources loader root_path root_name dependencies =
-  let visited = Hash_set.create (module String) in
-  Hash_set.add visited root_name;
-  while not (Queue.is_empty dependencies) do
-    let source = Queue.dequeue_exn dependencies in
-    let path = Source_loader.relative_path source in
-    if not (Hash_set.mem visited path)
-    then (
-      if Hash_set.length visited >= 256
-      then failwith "nested prompt source limit exceeded";
-      Hash_set.add visited path;
-      let contents = Source_loader.read loader source |> Result.ok_or_failwith in
-      ignore
-        (Prompt.Chat_markdown.parse_chat_inputs
-           ~source:path
-           ~source_loader:loader
-           ~dir:root_path
-           contents
-         : Prompt.Chat_markdown.top_level_elements list))
-  done
-;;
+module Capture = struct
+  type t =
+    { root : Prompt.Chat_markdown.Parsed.t
+    ; agents : (string * Prompt.Chat_markdown.Parsed.t) list
+    ; sources : (string * string) list
+    ; shell_manifest_sha256 : string
+    }
 
-let parse_live ~env definition root =
-  let root_directory = Filename.dirname definition.Prompt_definition.root_file in
-  let root_name = Filename.basename definition.root_file in
-  let root_path = Eio.Path.(Eio.Stdenv.fs env / root_directory) in
-  let captures = Hashtbl.create (module String) in
-  let dependencies = Queue.create () in
-  let loader = source_capture_loader root_path root captures dependencies in
-  let elements =
-    Prompt.Chat_markdown.parse_chat_inputs
-      ~source:root_name
-      ~source_loader:loader
-      ~dir:root_path
-      root
-  in
-  capture_nested_sources loader root_path root_name dependencies;
-  let inspection =
-    Chat_response.Agent_runtime.inspect_shell
-      ~env
-      ~platform:(Chat_response.Agent_runtime.platform ())
-      ~prompt_elements:elements
-  in
-  Result.map inspection ~f:(fun inspection -> elements, captures, inspection)
-;;
+  let root t = t.root
+  let agents t = t.agents
+  let sources t = t.sources
+  let shell_manifest_sha256 t = t.shell_manifest_sha256
+end
 
 let inspection_diagnostics diagnostics =
   List.map diagnostics ~f:(fun value ->
@@ -146,6 +122,118 @@ let inspection_diagnostics diagnostics =
       Option.map value.Chat_response.Agent_runtime.source ~f:(fun source -> source.file)
     in
     diagnostic ?source value.code value.message)
+;;
+
+let capture ~env ~preprocess ~limits ~checkpoint (definition : Prompt_definition.t) =
+  let poll () =
+    Eio.Fiber.check ();
+    checkpoint ();
+    Eio.Fiber.check ()
+  in
+  let root_directory = Filename.dirname definition.root_file in
+  let root_name = Filename.basename definition.root_file in
+  let root_path = Eio.Path.(Eio.Stdenv.fs env / root_directory) in
+  let root_loader = Source_loader.filesystem ~root:root_path in
+  let root_source =
+    Source_loader.root root_loader ~file:root_name |> Result.ok_or_failwith
+  in
+  poll ();
+  let authored =
+    Source_loader.read_bounded
+      ~max_bytes:
+        (Int.min (Prompt.Chat_markdown.Limits.input_bytes limits) (8 * 1024 * 1024))
+      root_loader
+      root_source
+    |> Result.ok_or_failwith
+  in
+  poll ();
+  let captures = Hashtbl.create (module String) in
+  let dependencies = Queue.create () in
+  let private_bytes = ref 0 in
+  let loader, authored_bytes =
+    source_capture_loader root_path authored captures dependencies ~private_bytes
+  in
+  let private_inputs = Hashtbl.create (module String) in
+  let retain_effective parsed =
+    let input = Prompt.Chat_markdown.Parsed.root_input parsed in
+    let effective = Chatmd_parser_input.effective input in
+    if not (Chatmd_parser_input.authored_matches input effective ~checkpoint:poll)
+    then (
+      let digest = Chatmd_parser_input.effective_sha256 input in
+      match Hashtbl.find private_inputs digest with
+      | Some previous ->
+        if not (Chatmd_parser_input.effective_matches previous effective ~checkpoint:poll)
+        then failwith "effective prompt digest collision"
+      | None ->
+        let length = Chatmd_parser_input.effective_byte_length input in
+        if length > (8 * 1024 * 1024) - !authored_bytes - !private_bytes
+        then failwith "prompt source byte limit exceeded";
+        private_bytes := !private_bytes + length;
+        Hashtbl.set private_inputs ~key:digest ~data:input);
+    parsed
+  in
+  let prepare source contents =
+    Prompt.Chat_markdown.prepare_chat_inputs
+      ~source
+      ~source_loader:loader
+      ~dir:root_path
+      ~preprocess
+      ~limits
+      ~checkpoint:poll
+      contents
+    |> retain_effective
+  in
+  let root = prepare root_name authored in
+  let visited = Hash_set.create (module String) in
+  Hash_set.add visited root_name;
+  let agents = ref [] in
+  while not (Queue.is_empty dependencies) do
+    poll ();
+    let source = Queue.dequeue_exn dependencies in
+    let path = Source_loader.relative_path source in
+    if not (Hash_set.mem visited path)
+    then (
+      if Hash_set.length visited >= 256
+      then failwith "nested prompt source limit exceeded";
+      Hash_set.add visited path;
+      let contents =
+        Source_loader.read_bounded
+          ~max_bytes:
+            (Int.min (Prompt.Chat_markdown.Limits.input_bytes limits) (8 * 1024 * 1024))
+          loader
+          source
+        |> Result.ok_or_failwith
+      in
+      poll ();
+      let parsed = prepare path contents in
+      agents := (path, parsed) :: !agents)
+  done;
+  let inspection =
+    Chat_response.Agent_runtime.inspect_shell
+      ~env
+      ~platform:(Chat_response.Agent_runtime.platform ())
+      ~prompt_elements:(Prompt.Chat_markdown.Parsed.elements root)
+  in
+  poll ();
+  Result.map_error inspection ~f:inspection_diagnostics
+  |> Result.map ~f:(fun inspection ->
+    let result : Capture.t =
+      { root
+      ; agents = List.rev !agents
+      ; sources = source_values captures
+      ; shell_manifest_sha256 = shell_digest inspection
+      }
+    in
+    result)
+;;
+
+let capture_limits () =
+  Prompt.Chat_markdown.Limits.create
+    ~max_input_bytes:(8 * 1024 * 1024)
+    ~max_parse_calls:1024
+    ~max_tokens:100_000
+    ~max_depth:128
+  |> Or_error.ok_exn
 ;;
 
 let install artifact_store ~transaction_id artifact =
@@ -281,20 +369,28 @@ let build
       (definition : Prompt_definition.t)
   =
   try
-    let root = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / definition.root_file) in
-    match parse_live ~env definition root with
-    | Error diagnostics -> Error (inspection_diagnostics diagnostics)
-    | Ok (_elements, captures, inspection) ->
-      let sources = source_values captures in
+    match
+      capture
+        ~env
+        ~preprocess:Meta_prompting.Preprocessor.preprocess
+        ~limits:(capture_limits ())
+        ~checkpoint:Eio.Fiber.check
+        definition
+    with
+    | Error diagnostics -> Error diagnostics
+    | Ok captured ->
+      let root_input = Prompt.Chat_markdown.Parsed.root_input (Capture.root captured) in
+      let root = Chatmd_parser_input.authored root_input in
+      let sources = Capture.sources captured in
       let canonical_source = canonical_source ~env definition.root_file in
-      let shell_manifest_sha256 = shell_digest inspection in
+      let shell_manifest_sha256 = Capture.shell_manifest_sha256 captured in
       let manifest =
         build_manifest definition ~canonical_source ~root ~sources ~shell_manifest_sha256
       in
       let revision_id = revision_id manifest in
       let open Result.Let_syntax in
       let result =
-        let%bind sources = artifact_sources captures |> Result.map_error ~f:List.return in
+        let%bind sources = artifact_sources sources |> Result.map_error ~f:List.return in
         let%bind artifact =
           Agent_store.Prompt_artifact_store.Artifact.create
             ~revision_id
@@ -315,7 +411,29 @@ let build
       (match result with
        | Error errors -> Error (List.map errors ~f:store_error)
        | Ok artifact ->
-         let tree, elements = parse_artifact artifact_store artifact in
+         let tree =
+           Agent_store.Prompt_artifact_store.materialized_tree
+             artifact_store
+             artifact.revision_id
+         in
+         Agent_store.Prompt_artifact_store.verify_tree ~root:tree artifact
+         |> Result.map_error ~f:(fun error ->
+           Sexp.to_string_hum ([%sexp_of: Agent_store.Store_error.t] error))
+         |> Result.ok_or_failwith;
+         let loader =
+           Source_loader.captured_filesystem
+             ~root:tree
+             ~sources:((artifact.root_relative_path, artifact.root_chatmd) :: sources)
+         in
+         let parsed =
+           Prompt.Chat_markdown.replay_chat_inputs
+             root_input
+             ~source_loader:loader
+             ~dir:tree
+             ~limits:(capture_limits ())
+             ~checkpoint:Eio.Fiber.check
+         in
+         let elements = Prompt.Chat_markdown.Parsed.elements parsed in
          Ok
            (Prompt_revision.create
               ~definition

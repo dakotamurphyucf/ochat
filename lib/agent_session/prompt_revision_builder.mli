@@ -9,7 +9,44 @@ module Diagnostic : sig
   [@@deriving compare, equal, sexp]
 end
 
-(** [build] captures, inspects, persists, and reparses one prompt revision.
+module Capture : sig
+  (** Immutable first-admission parser results and authored inventory. No loader,
+      provider, filesystem capability or callback is retained. Queued Roots are
+      keyed by the existing loader-relative source identity. This is the parser
+      owner seam for durable custody; it does not itself persist associations. *)
+  type t
+
+  val root : t -> Prompt.Chat_markdown.Parsed.t
+  val agents : t -> (string * Prompt.Chat_markdown.Parsed.t) list
+
+  (** Raw dependencies, excluding the separately retained root authored input. *)
+  val sources : t -> (string * string) list
+
+  val shell_manifest_sha256 : t -> string
+end
+
+(** Read a bounded authored closure and preprocess each distinct queued Root
+    exactly once. Imports remain raw. Limits apply to each Root including imports;
+    the existing 256-file limit also applies. Jointly retained authored bytes plus
+    distinct transformed effective payloads must fit8MiB; exact-equal effective
+    and authored inputs share accounting. New file reads use remaining allowance;
+    a preparation may temporarily retain one bounded effective result before its
+    aggregate admission. These payload limits do not bound the callback's internal
+    allocations. Expected shell
+    inspection failures return diagnostics. Parser, checkpoint and preprocessing
+    exceptions propagate unchanged, including cancellation. *)
+val capture
+  :  env:Eio_unix.Stdenv.base
+  -> preprocess:(string -> string)
+  -> limits:Prompt.Chat_markdown.Limits.t
+  -> checkpoint:(unit -> unit)
+  -> Prompt_definition.t
+  -> (Capture.t, Diagnostic.t list) result
+
+(** [build] captures, inspects, persists, and replays one prompt revision.
+    Fresh replay uses the retained effective Root with no second preprocessing.
+    Durable restart association persistence is owned by the parser-input custody
+    format; legacy artifacts still use the existing restoration path.
     Capture imports, scripts, extension schemas and static relative nested-agent sources at their
     declaration directories. Deduplicate cycles; reject closures exceeding 256
     total source files (including the root) or 8 MiB of captured source bytes.

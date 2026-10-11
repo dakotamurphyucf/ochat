@@ -175,6 +175,7 @@ module Chat_content = struct
     ; language : string
     ; kind : string
     ; source : script_source
+    ; source_ref : Chatmd_shell_spec.Source_ref.t option [@jsonaf.option]
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
@@ -435,7 +436,7 @@ module Chat_markdown = struct
         if List.is_empty attrs then "" else " " ^ String.concat ~sep:" " attrs
       in
       Printf.sprintf "<config%s />" attrs_string
-    | Script { id; language; kind; source } ->
+    | Script { id; language; kind; source; source_ref = _ } ->
       let attrs =
         [ Some (Printf.sprintf "id=\"%s\"" id)
         ; Some (Printf.sprintf "language=\"%s\"" language)
@@ -556,6 +557,7 @@ module Chat_markdown = struct
     ; language = script.language
     ; kind = Script_spec.kind_to_string script.kind
     ; source
+    ; source_ref = Some script.source_ref
     }
   ;;
 
@@ -612,7 +614,8 @@ module Chat_markdown = struct
         (match sourced.node with
          | Ast.Text _ -> []
          | Ast.Element (_, _, children) ->
-           List.map children ~f:(fun node -> { sourced with node; children = None }))
+           List.map children ~f:(fun node ->
+             { sourced with node; children = None; range = None }))
     in
     let results =
       List.map children ~f:(fun child -> tree ~preserve_child_sources child ~f)
@@ -1158,6 +1161,233 @@ module Chat_markdown = struct
 
   let validate_declarations = validate_scripts
 
+  module Limits = Chatmd_owned_parser.Limits
+
+  module Declaration = struct
+    type t =
+      { range : Chatmd_parser_input.Range.t
+      ; source_ref : Chatmd_shell_spec.Source_ref.t
+      ; script_id : string
+      ; script_body : string
+      }
+
+    let range t = t.range
+    let source_ref t = t.source_ref
+    let script_id t = t.script_id
+    let script_body t = t.script_body
+
+    let of_conversion range (converted : chat_element) =
+      let source_text (source : Script_spec.source) =
+        match source with
+        | Inline text -> text
+        | Src { path = _; source_text } -> source_text
+      in
+      let script =
+        match converted with
+        | Script script ->
+          let body =
+            match script.source with
+            | Inline text -> text
+            | Src { path = _; source_text } -> source_text
+          in
+          Some (script.id, body, Option.value_exn script.source_ref)
+        | Shell_script script ->
+          Some (script.id, Script_spec.source_text script, script.source_ref)
+        | Extension_script script ->
+          Some (script.id, source_text script.source, script.source_ref)
+        | Message _
+        | Developer_msg _
+        | System_msg _
+        | User_msg _
+        | Assistant_msg _
+        | Tool_call_msg _
+        | Tool_response_msg _
+        | Config _
+        | Tool _
+        | Shell_runtime _
+        | Moderator_runtime _
+        | Authoring_context _
+        | Authoring_help _
+        | Reasoning _
+        | Summary _
+        | Text _
+        | Image _
+        | Document _
+        | Agent _ -> None
+      in
+      match range, script with
+      | Some range, Some (script_id, script_body, source_ref) ->
+        Some { range; source_ref; script_id; script_body }
+      | None, _ | Some _, None -> None
+    ;;
+  end
+
+  module Parsed = struct
+    type t =
+      { elements : top_level_elements list
+      ; root_input : Chatmd_parser_input.t
+      ; inputs : Chatmd_parser_input.t list
+      ; declarations : Declaration.t list
+      }
+
+    let elements t = t.elements
+    let root_input t = t.root_input
+    let inputs t = t.inputs
+    let declarations t = t.declarations
+  end
+
+  let parse_owned
+        ~canonical_sources
+        ~validate_input
+        ~validate_document
+        ~check_token
+        ~owner
+        ~source_file
+        ~root_input
+        ~source_loader:loader
+        ~dir
+    =
+    let checkpoint () = Chatmd_owned_parser.checkpoint owner in
+    let loader = Chatmd_owned_parser.bound_loader owner loader in
+    let root_source =
+      Source_loader.root loader ~file:source_file |> Result.ok_or_failwith
+    in
+    let imported_inputs = ref [] in
+    let parse_input input =
+      validate_input (Chatmd_parser_input.effective input);
+      let document = Chatmd_owned_parser.parse owner ~check_token input in
+      validate_document (List.map document ~f:Chatmd_located_ast.node);
+      document
+    in
+    let parse_import source contents =
+      let input =
+        Chatmd_owned_parser.input
+          owner
+          ~role:Import
+          ~path:(Source_loader.relative_path source)
+          ~authored:contents
+          ~effective:contents
+      in
+      imported_inputs := input :: !imported_inputs;
+      parse_input input
+    in
+    let document = parse_input root_input in
+    let expanded =
+      Chatmd_import_expansion.expand_located
+        ~checkpoint
+        ~check_node:(Chatmd_owned_parser.check_expansion owner)
+        ~canonical_sources
+        ~read_import:(Chatmd_owned_parser.read_import owner)
+        ~parse:parse_import
+        ~loader
+        ~root_source
+        ~dir
+        ~file:source_file
+        ~source:(Chatmd_parser_input.effective root_input)
+        document
+    in
+    let declarations = ref [] in
+    let converted =
+      List.map (chat_elements expanded) ~f:(fun sourced ->
+        checkpoint ();
+        let converted =
+          parse_chat_element
+            ~dir
+            ~loader
+            ~preserve_child_sources:canonical_sources
+            sourced
+        in
+        Option.iter
+          (Declaration.of_conversion sourced.range converted)
+          ~f:(fun declaration -> declarations := declaration :: !declarations);
+        converted)
+    in
+    let elements = of_chat_elements converted |> validate_scripts in
+    checkpoint ();
+    let result : Parsed.t =
+      { elements
+      ; root_input
+      ; inputs = root_input :: List.rev !imported_inputs
+      ; declarations = List.rev !declarations
+      }
+    in
+    result
+  ;;
+
+  let prepare_chat_inputs
+        ~source
+        ~source_loader
+        ~dir
+        ~preprocess
+        ~limits
+        ~checkpoint
+        authored
+    =
+    let owner = Chatmd_owned_parser.create limits ~checkpoint in
+    Chatmd_owned_parser.checkpoint owner;
+    if String.length authored > Limits.input_bytes limits
+    then failwith "owned ChatMD input byte limit exceeded";
+    let effective = preprocess authored in
+    Chatmd_owned_parser.checkpoint owner;
+    let root_source =
+      Source_loader.root source_loader ~file:source |> Result.ok_or_failwith
+    in
+    let root_input =
+      Chatmd_owned_parser.input
+        owner
+        ~role:Root
+        ~path:(Source_loader.relative_path root_source)
+        ~authored
+        ~effective
+    in
+    parse_owned
+      ~canonical_sources:false
+      ~validate_input:ignore
+      ~validate_document:ignore
+      ~check_token:ignore
+      ~owner
+      ~source_file:source
+      ~root_input
+      ~source_loader
+      ~dir
+  ;;
+
+  let replay_chat_inputs root_input ~source_loader ~dir ~limits ~checkpoint =
+    let owner = Chatmd_owned_parser.create limits ~checkpoint in
+    Chatmd_owned_parser.checkpoint owner;
+    if not (Chatmd_parser_input.Role.equal (Chatmd_parser_input.role root_input) Root)
+    then failwith "owned ChatMD replay requires a Root input";
+    if not (Source_loader.is_captured source_loader)
+    then failwith "owned ChatMD replay requires a captured source loader";
+    if
+      Chatmd_parser_input.authored_byte_length root_input > Limits.input_bytes limits
+      || Chatmd_parser_input.effective_byte_length root_input > Limits.input_bytes limits
+    then failwith "owned ChatMD replay input byte limit exceeded";
+    let source_file = Chatmd_parser_input.path root_input in
+    let root_source =
+      Source_loader.root source_loader ~file:source_file |> Result.ok_or_failwith
+    in
+    let authored =
+      Chatmd_owned_parser.read_import owner source_loader root_source
+      |> Result.ok_or_failwith
+    in
+    if
+      not
+        (Chatmd_parser_input.authored_matches root_input authored ~checkpoint:(fun () ->
+           Chatmd_owned_parser.checkpoint owner))
+    then failwith "owned ChatMD replay authored input differs from capture";
+    parse_owned
+      ~canonical_sources:false
+      ~validate_input:ignore
+      ~validate_document:ignore
+      ~check_token:ignore
+      ~owner
+      ~source_file
+      ~root_input
+      ~source_loader
+      ~dir
+  ;;
+
   let parse_inputs
         ~parse_document
         ~preprocess
@@ -1220,6 +1450,8 @@ module Chat_markdown = struct
   type parsed_bundle =
     { root : top_level_elements list
     ; agents : (string * top_level_elements list) list
+    ; parsed_root : Parsed.t
+    ; parsed_agents : (string * Parsed.t) list
     }
 
   let parse_source_bundle ~dir bundle =
@@ -1238,24 +1470,16 @@ module Chat_markdown = struct
       |> Source_loader.with_agent_observer ~f:(fun source ->
         Queue.enqueue queued (Source_loader.relative_path source))
     in
-    let parse_document content =
+    let validate_input content =
       if not (Stdlib.String.is_valid_utf_8 content)
       then failwith "generated ChatMD source must be valid UTF-8";
-      Meta_prompting.Preprocessor.validate_inert content |> Result.ok_or_failwith;
-      let depth = ref 0
-      and next = Chatmd_lexer.create () in
-      let token lexbuf =
-        incr tokens;
-        if !tokens > 100_000 then failwith "generated source token limit exceeded";
-        let token = next lexbuf in
-        (match token with
-         | Chatmd_parser.START _ -> incr depth
-         | END _ -> decr depth
-         | _ -> ());
-        if !depth > 128 then failwith "generated markup nesting limit exceeded";
-        token
-      in
-      let document = Chatmd_parser.document token (Lexing.from_string content) in
+      Meta_prompting.Preprocessor.validate_inert content |> Result.ok_or_failwith
+    in
+    let check_token _ =
+      incr tokens;
+      if !tokens > 100_000 then failwith "generated source token limit exceeded"
+    in
+    let validate_document document =
       let rec check = function
         | Ast.Text _ -> ()
         | Ast.Element (tag, attrs, children) ->
@@ -1266,8 +1490,15 @@ module Chat_markdown = struct
           then failwith "generated agent definitions must use bundled local sources";
           List.iter children ~f:check
       in
-      List.iter document ~f:check;
-      document
+      List.iter document ~f:check
+    in
+    let limits =
+      Limits.create
+        ~max_input_bytes:(8 * 1024 * 1024)
+        ~max_parse_calls:1024
+        ~max_tokens:100_000
+        ~max_depth:128
+      |> Or_error.ok_exn
     in
     let parse_file file =
       Hash_set.add seen file;
@@ -1279,16 +1510,27 @@ module Chat_markdown = struct
           source
         |> Result.ok_or_failwith
       in
-      parse_inputs
-        ~parse_document
-        ~preprocess:Fn.id
+      let owner = Chatmd_owned_parser.create limits ~checkpoint:Eio.Fiber.check in
+      let root_input =
+        Chatmd_owned_parser.input
+          owner
+          ~role:Root
+          ~path:(Source_loader.relative_path source)
+          ~authored:content
+          ~effective:content
+      in
+      parse_owned
         ~canonical_sources:true
-        ~source:file
+        ~validate_input
+        ~validate_document
+        ~check_token
+        ~owner
+        ~source_file:file
+        ~root_input
         ~source_loader:loader
         ~dir
-        content
     in
-    let root = parse_file (Chatmd_source_bundle.root_file bundle) in
+    let parsed_root = parse_file (Chatmd_source_bundle.root_file bundle) in
     let agents = ref [] in
     while not (Queue.is_empty queued) do
       let file = Queue.dequeue_exn queued in
@@ -1297,7 +1539,13 @@ module Chat_markdown = struct
         let elements = parse_file file in
         agents := (file, elements) :: !agents)
     done;
-    { root; agents = List.rev !agents }
+    let parsed_agents = List.rev !agents in
+    { root = Parsed.elements parsed_root
+    ; agents =
+        List.map parsed_agents ~f:(fun (path, parsed) -> path, Parsed.elements parsed)
+    ; parsed_root
+    ; parsed_agents
+    }
   ;;
 end
 

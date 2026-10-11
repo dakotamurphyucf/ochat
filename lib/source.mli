@@ -116,3 +116,21 @@ module Portable_path : sig
   val create : string -> t Core.Or_error.t
   val to_string : t -> string
 end
+
+module Position_index : sig
+  (** Immutable byte-position index affine to its supplied string. Owns that
+      string without copying, with one array slot per 4096 bytes plus the first.
+      LF and bare CR advance line; CRLF advances once. Columns are zero-based
+      bytes, preserving the captured-source coordinate convention. *)
+  type t
+
+  val create : string -> checkpoint:(unit -> unit) -> t
+
+  (** Validate [0..byte_length], then scan at most one 4096-byte block.
+      Hash/index/position checkpoint exceptions propagate unchanged. *)
+  val position
+    :  t
+    -> byte_offset:int
+    -> checkpoint:(unit -> unit)
+    -> position Core.Or_error.t
+end

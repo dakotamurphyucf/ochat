@@ -1,113 +1,35 @@
-# Chatmd_parser
+# ChatMD parser
 
-Menhir‐generated parser for the **ChatMarkdown** language.
+`Chatmd_parser.document` consumes the shared ChatMD token stream and produces
+`Chatmd_ast.document`. The lexer recognizes the closed vocabulary described in
+the [language reference](../../overview/chatmd-language.md); unknown markup
+inside recognized elements remains text. The parser checks matching tags and
+rejects non-whitespace top-level text.
 
----
+## One grammar, two builders
 
-## 1 – Purpose
+The authoritative Menhir grammar is
+[`chatmd_parser_engine.mly`](../../../lib/chatmd/chatmd_parser_engine.mly).
+Its builder parameter changes node construction, not accepted syntax.
 
-`Chatmd_parser` turns the token stream produced by
-[`Chatmd_lexer`](./chatmd_lexer.doc.md) into the lightweight DOM defined
-in [`Chatmd_ast`](../../../lib/chatmd/chatmd_ast.ml).
-
-At the moment the grammar recognises **only** the *official* set of
-ChatMarkdown tags:
-
-```
-<msg> <user> <assistant> <agent> <system> <developer>
-<doc> <img> <import> <config>
-<reasoning> <summary>
-<tool_call> <tool_response> <tool>
-```
-
-Any unknown XML/HTML that appears *inside* one of the recognised tags is
-passed through as plain text so that downstream components can decide
-how to handle it.
-
----
-
-## 2 – Public API
-
-| Value | Type | Description |
-|-------|------|-------------|
-| `Chatmd_parser.document` | `(Lexing.lexbuf -> Chatmd_parser.token) -> Lexing.lexbuf -> Chatmd_ast.document` | Parses the entire buffer. Expects a lexer function (typically `Chatmd_lexer.token`). |
-
-### 2.1 Error conditions
-
-| Scenario | Exception | Message |
-|----------|-----------|---------|
-| `<msg>` closed with `</user>` | `Failure` | `Mismatching tags: <msg> … </user>` |
-| Non-whitespace text at top level | `Failure` | *Unexpected text at top level: …* |
-
----
-
-## 3 – Behavioural details
-
-### 3.1 Whitespace handling
-
-• Pure whitespace between top-level elements is ignored.
-
-• Whitespace *inside* an element is preserved because it is delivered as
-  part of a `Text` node.
-
-### 3.2 Text collapsing
-
-Consecutive `TEXT` tokens are concatenated into one `Chatmd_ast.Text`
-node:
-
-```text
-"a < b"     => Text "a < b"
-```
-
-instead of three separate pieces (`"a "`, `"<"`, `" b"`).
-
-### 3.3 Unknown tags
-
-Balanced unknown elements are not parsed – they are already collapsed
-into a single `TEXT` token by the lexer, guaranteeing that no
-information is lost.
-
----
-
-## 4 – Example usage
+`Chatmd_parser` instantiates the ordinary semantic builder, preserving the
+existing `document` and token API. `Chatmd_located_ast.Make` instead retains each
+element's exact parser-produced start/end bytes and input owner. The lexer and
+both builders use one token representation. No second grammar, text search or
+AST-to-token matching reconstructs locations.
 
 ```ocaml
-open Core
-
-let parse_string s =
-  let lexbuf = Lexing.from_string s in
-  Chatmd_parser.document Chatmd_lexer.token lexbuf
-
-let () =
-  let ast = parse_string "<msg><user>hello</user></msg>" in
-  Sexp.pp_hum Format.std_formatter (Chatmd_ast.sexp_of_document ast)
+let parse text =
+  let next = Chatmd_lexer.create () in
+  Chatmd_parser.document next (Lexing.from_string text)
 ```
 
----
+This low-level operation does not load imports, preprocess a prompt or convert
+runtime declarations. Use [Prompt.Chat_markdown](prompt.doc.md) for those stages.
+Its owned preparation path supplies input/token/depth limits and checkpoints.
+Plain text nodes do not claim declaration ranges; recognized element ranges are
+nonempty half-open byte spans in the exact effective input.
 
-## 5 – Performance considerations
-
-Menhir is invoked with the `--table` flag.  The generated LR automaton
-is loaded lazily, keeping the initial start-up cost low.  Overall time
-complexity is `O(n)` in the size of the token stream, and the parser
-allocates only the minimal structure required to represent the AST.
-
----
-
-## 6 – Limitations & future work
-
-* The parser does not attempt to validate attribute well-formedness.
-  Malformed attributes are caught earlier by the lexer.
-* Unknown tags are silently accepted as raw text.  This is a
-  deliberate design choice to allow embedding arbitrary XML in ChatMarkdown
-documents for inclusion in the LLM prompt.
-
-### Shell scope exception
-
-Nested shell declarations are parsed by this parser, not by a second XML
-parser. `Chatmd_lexer` enables the closed `Shell_element` vocabulary only
-inside `<shell_access>` and shell-tool scope. The subsequent
-`Chatmd_shell_declaration` conversion rejects unknown attributes/children,
-duplicate singleton sections, invalid values, and mixed text. The permissive
-unknown-markup behavior above applies to model-visible content, not runtime
-configuration.
+[Builder interface](../../../lib/chatmd/chatmd_parser_builder.mli) ·
+[Located nodes](../../../lib/chatmd/chatmd_located_ast.mli) ·
+[Input ownership](../../../lib/chatmd/chatmd_parser_input.mli)

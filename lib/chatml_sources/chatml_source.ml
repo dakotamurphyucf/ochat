@@ -68,70 +68,7 @@ module Location = struct
   let span t = t.span
 end
 
-module Position_index = struct
-  (* These arrays are private and mutate only inside [create], before publication. *)
-  type t =
-    { lines : int array
-    ; columns : int array
-    }
-
-  let stride = 4096
-
-  let scan contents ~start_byte ~end_byte ~line ~column ~checkpoint ~record =
-    let length = String.length contents in
-    let rec loop offset line column =
-      if offset mod stride = 0
-      then (
-        checkpoint ();
-        match record with
-        | None -> ()
-        | Some t ->
-          let slot = offset / stride in
-          t.lines.(slot) <- line;
-          t.columns.(slot) <- column);
-      if offset = end_byte
-      then { Source.line; column; offset }
-      else (
-        match String.get contents offset with
-        | '\r' ->
-          if offset + 1 < length && Char.equal (String.get contents (offset + 1)) '\n'
-          then loop (offset + 1) line (column + 1)
-          else loop (offset + 1) (line + 1) 0
-        | '\n' -> loop (offset + 1) (line + 1) 0
-        | _ -> loop (offset + 1) line (column + 1))
-    in
-    loop start_byte line column
-  ;;
-
-  let create contents ~checkpoint =
-    let length = String.length contents in
-    let slots = (length / stride) + 1 in
-    let t = { lines = Array.create ~len:slots 1; columns = Array.create ~len:slots 0 } in
-    let (_ : Source.position) =
-      scan
-        contents
-        ~start_byte:0
-        ~end_byte:length
-        ~line:1
-        ~column:0
-        ~checkpoint
-        ~record:(Some t)
-    in
-    t
-  ;;
-
-  let position t ~contents ~byte_offset ~checkpoint =
-    let slot = byte_offset / stride in
-    scan
-      contents
-      ~start_byte:(slot * stride)
-      ~end_byte:byte_offset
-      ~line:t.lines.(slot)
-      ~column:t.columns.(slot)
-      ~checkpoint
-      ~record:None
-  ;;
-end
+module Position_index = Source.Position_index
 
 type t =
   { id : Id.t
@@ -170,11 +107,7 @@ let locate t ~start_byte ~end_byte ~checkpoint =
   then Or_error.error_string "source byte range is out of bounds"
   else (
     let position byte_offset =
-      Position_index.position
-        t.position_index
-        ~contents:t.contents
-        ~byte_offset
-        ~checkpoint
+      Position_index.position t.position_index ~byte_offset ~checkpoint |> Or_error.ok_exn
     in
     let left = position start_byte in
     let right = position end_byte in

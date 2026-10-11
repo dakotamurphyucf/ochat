@@ -6,6 +6,7 @@ type sourced_node =
   { node : Ast.node
   ; source : Source_ref.t
   ; source_node : Source_loader.source
+  ; range : Chatmd_parser_input.Range.t option
   ; children : sourced_node list option
   }
 
@@ -25,23 +26,36 @@ type context =
 
 let source_attribute = "ochat-source-context"
 
-let source_ref (context : context) =
-  match context.cached_source with
-  | Some source -> source
+let source_ref (context : context) range =
+  match range with
+  | Some range ->
+    Source_ref.
+      { file = context.file
+      ; source_dir = Eio.Path.native_exn context.dir
+      ; prompt_dir = context.prompt_dir
+      ; namespace = context.namespace
+      ; start_pos = Chatmd_parser_input.Range.start_position range
+      ; end_pos = Chatmd_parser_input.Range.end_position range
+      ; source_sha256 =
+          Chatmd_parser_input.Range.input range |> Chatmd_parser_input.effective_sha256
+      }
   | None ->
-    let position : Source_ref.position = { offset = 0; line = 1; column = 1 } in
-    let source =
-      Source_ref.create
-        ~file:context.file
-        ~source_dir:(Eio.Path.native_exn context.dir)
-        ~prompt_dir:context.prompt_dir
-        ~namespace:context.namespace
-        ~start_pos:position
-        ~end_pos:{ position with offset = String.length context.source }
-        ~source:context.source
-    in
-    context.cached_source <- Some source;
-    source
+    (match context.cached_source with
+     | Some source -> source
+     | None ->
+       let position : Source_ref.position = { offset = 0; line = 1; column = 1 } in
+       let source =
+         Source_ref.create
+           ~file:context.file
+           ~source_dir:(Eio.Path.native_exn context.dir)
+           ~prompt_dir:context.prompt_dir
+           ~namespace:context.namespace
+           ~start_pos:position
+           ~end_pos:{ position with offset = String.length context.source }
+           ~source:context.source
+       in
+       context.cached_source <- Some source;
+       source)
 ;;
 
 let can_have_imports = function
@@ -123,7 +137,7 @@ let reject_import_cycle context src =
   key
 ;;
 
-let import_context (context : context) attributes =
+let import_context ~read_import (context : context) attributes =
   validate_import_attributes attributes;
   let src =
     match import_attribute attributes "src" with
@@ -135,7 +149,7 @@ let import_context (context : context) attributes =
     Source_loader.resolve context.loader ~base:context.source_node ~reference:src
     |> Result.ok_or_failwith
   in
-  let source = Source_loader.read context.loader source_node |> Result.ok_or_failwith in
+  let source = read_import context.loader source_node |> Result.ok_or_failwith in
   let namespace = combine_namespace context.namespace (namespace_attribute attributes) in
   let dir = Source_loader.materialized_dir source_node in
   { dir
@@ -153,9 +167,10 @@ let import_context (context : context) attributes =
   }
 ;;
 
-let validate_namespace_aliases nodes =
+let validate_namespace_aliases ~node nodes =
   let aliases =
-    List.filter_map nodes ~f:(function
+    List.filter_map nodes ~f:(fun item ->
+      match node item with
       | Ast.Element (Ast.Import, attributes, _) -> namespace_attribute attributes
       | _ -> None)
   in
@@ -171,42 +186,178 @@ let rec check_generated_depth depth = function
     List.iter children ~f:(check_generated_depth (depth + 1))
 ;;
 
-let rec expand_nodes ~parse ~depth (context : context) nodes : sourced_node list =
-  validate_namespace_aliases nodes;
-  List.concat_map nodes ~f:(expand_node ~parse ~depth context)
+module Make (Node : sig
+    type t
 
-and expand_node ~parse ~depth context node =
-  if context.canonical_sources then check_generated_depth depth node;
-  match node with
-  | Ast.Element (Ast.Import, attributes, _) ->
-    let imported = import_context context attributes in
-    expand_nodes ~parse ~depth imported (parse imported.source)
-  | Ast.Element (Ast.Msg, attributes, children) as node ->
-    let role = List.Assoc.find attributes ~equal:String.equal "role" in
-    (match role with
-     | Some (Some "user") | Some (Some "system") | Some (Some "developer") ->
-       sourced_parent ~parse ~depth context Ast.Msg attributes children
-     | _ -> [ sourced context node ])
-  | Ast.Element (tag, attributes, children) when can_have_imports tag ->
-    sourced_parent ~parse ~depth context tag attributes children
-  | node -> [ sourced context node ]
+    val node : t -> Ast.node
+    val range : t -> Chatmd_parser_input.Range.t option
+    val children : t -> t list
+    val retain_children : bool
+  end) =
+struct
+  let make context node range children =
+    { node
+    ; range
+    ; source = source_ref context range
+    ; source_node = context.source_node
+    ; children
+    }
+  ;;
 
-and sourced_parent ~parse ~depth (context : context) tag attributes children =
-  let children = expand_nodes ~parse ~depth:(depth + 1) context children in
-  let parent =
-    sourced
-      context
-      (Ast.Element (tag, attributes, List.map children ~f:(fun child -> child.node)))
-  in
-  [ { parent with children = Some children } ]
+  let rec sourced ~check_node ~depth context node =
+    check_node ~depth (Node.node node);
+    let children =
+      if Node.retain_children
+      then
+        Some
+          (List.map
+             (Node.children node)
+             ~f:(sourced ~check_node ~depth:(depth + 1) context))
+      else None
+    in
+    make context (Node.node node) (Node.range node) children
+  ;;
 
-and sourced (context : context) node : sourced_node =
-  { node
-  ; source = source_ref context
-  ; source_node = context.source_node
-  ; children = None
-  }
-;;
+  let rec expand_nodes ~checkpoint ~check_node ~read_import ~parse ~depth context nodes =
+    validate_namespace_aliases ~node:Node.node nodes;
+    List.concat_map
+      nodes
+      ~f:(expand_node ~checkpoint ~check_node ~read_import ~parse ~depth context)
+
+  and expand_node ~checkpoint ~check_node ~read_import ~parse ~depth context node =
+    let semantic = Node.node node in
+    (match semantic with
+     | Ast.Element (Ast.Import, _, _) -> checkpoint ()
+     | _ -> check_node ~depth semantic);
+    if context.canonical_sources && not Node.retain_children
+    then check_generated_depth depth semantic;
+    match semantic with
+    | Ast.Element (Ast.Import, attributes, _) ->
+      let imported = import_context ~read_import context attributes in
+      expand_nodes
+        ~checkpoint
+        ~check_node
+        ~read_import
+        ~parse
+        ~depth
+        imported
+        (parse imported.source_node imported.source)
+    | Ast.Element (Ast.Msg, attributes, _) ->
+      let role = List.Assoc.find attributes ~equal:String.equal "role" in
+      (match role with
+       | Some (Some "user") | Some (Some "system") | Some (Some "developer") ->
+         sourced_parent
+           ~checkpoint
+           ~check_node
+           ~read_import
+           ~parse
+           ~depth
+           context
+           node
+           Ast.Msg
+           attributes
+       | _ -> [ sourced ~check_node ~depth context node ])
+    | Ast.Element (tag, attributes, _) when can_have_imports tag ->
+      sourced_parent
+        ~checkpoint
+        ~check_node
+        ~read_import
+        ~parse
+        ~depth
+        context
+        node
+        tag
+        attributes
+    | _ -> [ sourced ~check_node ~depth context node ]
+
+  and sourced_parent
+        ~checkpoint
+        ~check_node
+        ~read_import
+        ~parse
+        ~depth
+        context
+        node
+        tag
+        attributes
+    =
+    let children =
+      expand_nodes
+        ~checkpoint
+        ~check_node
+        ~read_import
+        ~parse
+        ~depth:(depth + 1)
+        context
+        (Node.children node)
+    in
+    [ make
+        context
+        (Ast.Element (tag, attributes, List.map children ~f:(fun child -> child.node)))
+        (Node.range node)
+        (Some children)
+    ]
+  ;;
+
+  let expand
+        ~checkpoint
+        ~check_node
+        ~canonical_sources
+        ~read_import
+        ~parse
+        ~loader
+        ~root_source
+        ~dir
+        ~file
+        ~source
+        document
+    =
+    let active_imports =
+      if String.is_prefix file ~prefix:"<"
+      then String.Set.empty
+      else String.Set.singleton (Source_loader.relative_path root_source)
+    in
+    let context =
+      { dir =
+          (if canonical_sources then Source_loader.materialized_dir root_source else dir)
+      ; loader
+      ; source_node = root_source
+      ; file
+      ; prompt_dir = Eio.Path.native_exn dir
+      ; namespace = None
+      ; source
+      ; active_imports
+      ; import_depth = 0
+      ; canonical_sources
+      ; cached_source = None
+      }
+    in
+    expand_nodes ~checkpoint ~check_node ~read_import ~parse ~depth:0 context document
+  ;;
+end
+
+module Legacy = Make (struct
+    type t = Ast.node
+
+    let node node = node
+    let range _ = None
+
+    let children = function
+      | Ast.Text _ -> []
+      | Ast.Element (_, _, children) -> children
+    ;;
+
+    let retain_children = false
+  end)
+
+module Located = Make (struct
+    type t = Chatmd_located_ast.t
+
+    let node = Chatmd_located_ast.node
+    let range = Chatmd_located_ast.range
+    let children = Chatmd_located_ast.children
+    let retain_children = true
+  end)
 
 let expand
       ?(canonical_sources = false)
@@ -218,25 +369,18 @@ let expand
       ~source
       document
   =
-  let active_imports =
-    if String.is_prefix file ~prefix:"<"
-    then String.Set.empty
-    else String.Set.singleton (Source_loader.relative_path root_source)
-  in
-  let context =
-    { dir =
-        (if canonical_sources then Source_loader.materialized_dir root_source else dir)
-    ; loader
-    ; source_node = root_source
-    ; file
-    ; prompt_dir = Eio.Path.native_exn dir
-    ; namespace = None
-    ; source
-    ; active_imports
-    ; import_depth = 0
-    ; canonical_sources
-    ; cached_source = None
-    }
-  in
-  expand_nodes ~parse ~depth:0 context document
+  Legacy.expand
+    ~checkpoint:ignore
+    ~check_node:(fun ~depth:_ _ -> ())
+    ~canonical_sources
+    ~read_import:Source_loader.read
+    ~parse:(fun _ contents -> parse contents)
+    ~loader
+    ~root_source
+    ~dir
+    ~file
+    ~source
+    document
 ;;
+
+let expand_located = Located.expand

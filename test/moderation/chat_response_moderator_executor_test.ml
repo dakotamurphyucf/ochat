@@ -196,6 +196,7 @@ let moderator_artifact () =
       { id = "main"
       ; language = "chatml"
       ; kind = "moderator"
+      ; source_ref = None
       ; source =
           Inline
             {|
@@ -269,6 +270,7 @@ let%test_unit
             { id = "active-owner"
             ; language = "chatml"
             ; kind = "moderator"
+            ; source_ref = None
             ; source =
                 Inline
                   {|

@@ -65,7 +65,13 @@ let moderator_of_source
       source
   =
   let script =
-    CM.{ id = "main"; language = "chatml"; kind = "moderator"; source = Inline source }
+    CM.
+      { id = "main"
+      ; language = "chatml"
+      ; kind = "moderator"
+      ; source_ref = None
+      ; source = Inline source
+      }
   in
   let artifact =
     ok_or_fail (Manager.Registry.compile_script ~surface Manager.Registry.empty script)

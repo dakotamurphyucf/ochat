@@ -125,6 +125,7 @@ let script =
     { id = "main"
     ; language = "chatml"
     ; kind = "moderator"
+    ; source_ref = None
     ; source = Inline script_source
     }
 ;;
@@ -302,7 +303,13 @@ let%expect_test "manager applies prepend, replace, delete, and append overlay op
     |}
   in
   let script =
-    CM.{ id = "main"; language = "chatml"; kind = "moderator"; source = Inline source }
+    CM.
+      { id = "main"
+      ; language = "chatml"
+      ; kind = "moderator"
+      ; source_ref = None
+      ; source = Inline source
+      }
   in
   let artifact =
     ok_or_fail (Manager.Registry.compile_script Manager.Registry.empty script) |> snd
@@ -369,7 +376,13 @@ let%expect_test "manager item helpers expose structured item accessors" =
     |}
   in
   let script =
-    CM.{ id = "main"; language = "chatml"; kind = "moderator"; source = Inline source }
+    CM.
+      { id = "main"
+      ; language = "chatml"
+      ; kind = "moderator"
+      ; source_ref = None
+      ; source = Inline source
+      }
   in
   let artifact =
     ok_or_fail (Manager.Registry.compile_script Manager.Registry.empty script) |> snd
@@ -422,7 +435,13 @@ let%expect_test "manager rolls back overlay and state after failed moderation ta
     |}
   in
   let script =
-    CM.{ id = "main"; language = "chatml"; kind = "moderator"; source = Inline source }
+    CM.
+      { id = "main"
+      ; language = "chatml"
+      ; kind = "moderator"
+      ; source_ref = None
+      ; source = Inline source
+      }
   in
   let artifact =
     ok_or_fail (Manager.Registry.compile_script Manager.Registry.empty script) |> snd
@@ -490,7 +509,13 @@ let%expect_test "entry moderation preserves target identity and persists provena
       target
   in
   let script =
-    CM.{ id = "main"; language = "chatml"; kind = "moderator"; source = Inline source }
+    CM.
+      { id = "main"
+      ; language = "chatml"
+      ; kind = "moderator"
+      ; source_ref = None
+      ; source = Inline source
+      }
   in
   let artifact =
     ok_or_fail (Manager.Registry.compile_script Manager.Registry.empty script) |> snd
@@ -564,7 +589,13 @@ let%expect_test "failed identity validation commits no runtime or overlay state"
       unknown
   in
   let script =
-    CM.{ id = "main"; language = "chatml"; kind = "moderator"; source = Inline source }
+    CM.
+      { id = "main"
+      ; language = "chatml"
+      ; kind = "moderator"
+      ; source_ref = None
+      ; source = Inline source
+      }
   in
   let artifact =
     ok_or_fail (Manager.Registry.compile_script Manager.Registry.empty script) |> snd
@@ -630,7 +661,13 @@ let%expect_test "failed resumed identity validation commits no suspended transac
       unknown
   in
   let script =
-    CM.{ id = "main"; language = "chatml"; kind = "moderator"; source = Inline source }
+    CM.
+      { id = "main"
+      ; language = "chatml"
+      ; kind = "moderator"
+      ; source_ref = None
+      ; source = Inline source
+      }
   in
   let artifact =
     ok_or_fail
@@ -713,7 +750,13 @@ let%expect_test "committed identity moderation emits one atomic change" =
       target
   in
   let script =
-    CM.{ id = "main"; language = "chatml"; kind = "moderator"; source = Inline source }
+    CM.
+      { id = "main"
+      ; language = "chatml"
+      ; kind = "moderator"
+      ; source_ref = None
+      ; source = Inline source
+      }
   in
   let artifact =
     ok_or_fail (Manager.Registry.compile_script Manager.Registry.empty script) |> snd
@@ -780,7 +823,13 @@ let%expect_test "failed identity transaction emits no committed change" =
       unknown
   in
   let script =
-    CM.{ id = "main"; language = "chatml"; kind = "moderator"; source = Inline source }
+    CM.
+      { id = "main"
+      ; language = "chatml"
+      ; kind = "moderator"
+      ; source_ref = None
+      ; source = Inline source
+      }
   in
   let artifact =
     ok_or_fail (Manager.Registry.compile_script Manager.Registry.empty script) |> snd
@@ -829,7 +878,13 @@ let%expect_test "approval resume emits one combined change and restore does not 
             Task.pure({ approved = true }))))|}
   in
   let script =
-    CM.{ id = "main"; language = "chatml"; kind = "moderator"; source = Inline source }
+    CM.
+      { id = "main"
+      ; language = "chatml"
+      ; kind = "moderator"
+      ; source_ref = None
+      ; source = Inline source
+      }
   in
   let artifact =
     ok_or_fail
@@ -920,7 +975,12 @@ let serialized_script =
             Task.pure({ count = st.count + 10 })|}
   in
   CM.
-    { id = "serialized"; language = "chatml"; kind = "moderator"; source = Inline source }
+    { id = "serialized"
+    ; language = "chatml"
+    ; kind = "moderator"
+    ; source_ref = None
+    ; source = Inline source
+    }
 ;;
 
 let handle_serialized_event manager event =
