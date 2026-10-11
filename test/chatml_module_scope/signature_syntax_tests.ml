@@ -1,4 +1,5 @@
 open Core
+module Name = Chatml.Chatml_syntax_name
 module Signature = Chatml.Chatml_module_signature
 module Parse = Chatml.Chatml_parse
 
@@ -28,7 +29,7 @@ let%test_unit "interface nesting preserves declaration order and exact source ra
         let rec inspect remaining signature =
           match signature with
           | [ { Signature.desc = Module item; span } ] when remaining > 0 ->
-            [%test_eq: string] item.name name;
+            [%test_eq: string] (Name.name item.name) name;
             let text = source_at source span in
             assert (String.is_prefix text ~prefix:("module " ^ name ^ " : sig "));
             assert (String.is_suffix text ~suffix:" end");
@@ -37,18 +38,18 @@ let%test_unit "interface nesting preserves declaration order and exact source ra
             ; { desc = Value { name = value_name; annotation; requirements }; span }
             ]
             when remaining = 0 ->
-            [%test_eq: string] declaration.name "t";
-            [%test_eq: string list] declaration.parameters [ "a" ];
+            [%test_eq: string] (Name.name declaration.name) "t";
+            [%test_eq: string list] (List.map declaration.parameters ~f:Name.name) [ "a" ];
             [%test_eq: string] (source_at source type_span) "type 'a t = {value:'a}";
-            [%test_eq: string] value_name "same";
+            [%test_eq: string] (Name.name value_name) "same";
             [%test_eq: string] (source_at source annotation.span) "fun('a, 'a) -> bool";
             [%test_eq: string]
               (source_at source span)
               "val same : fun('a, 'a) -> bool where equality('a)";
             (match requirements with
              | [ requirement ] ->
-               [%test_eq: string] requirement.name "equality";
-               [%test_eq: string] requirement.parameter "a";
+               [%test_eq: string] (Name.name requirement.name) "equality";
+               [%test_eq: string] (Name.name requirement.parameter) "a";
                [%test_eq: string] (source_at source requirement.span) "equality('a)"
              | _ -> failwith "constraint was lost or duplicated")
           | _ -> failwith ("incorrect interface structure:\n" ^ source)

@@ -3,6 +3,7 @@
 open Core
 open Chatml
 module L = Chatml_lang
+module Syntax_name = Chatml.Chatml_syntax_name
 module Binding_pattern = Chatml_binding_pattern
 
 type slot_info =
@@ -58,6 +59,26 @@ let choose_slot (ctx : resolve_ctx) (rhs_node : L.expr L.node) : Frame_env.packe
 
 let with_value (node : L.expr L.node) value = L.{ value; span = node.span }
 let with_stmt_value (node : L.stmt L.node) value = L.{ value; span = node.span }
+
+let rec lower_pattern ctx (pattern : L.pattern) : L.resolved_pattern =
+  ctx.checkpoint ();
+  match pattern with
+  | PUnit -> PUnit
+  | PWildcard -> PWildcard
+  | PVar name -> PVar (Syntax_name.name name)
+  | PInt value -> PInt value
+  | PBool value -> PBool value
+  | PFloat value -> PFloat value
+  | PString value -> PString value
+  | PVariant (tag, children) ->
+    PVariant (Syntax_name.name tag, List.map children ~f:(lower_pattern ctx))
+  | PRecord (fields, is_open) ->
+    PRecord
+      ( List.map fields ~f:(fun (label, child) ->
+          Syntax_name.name label, lower_pattern ctx child)
+      , is_open )
+  | PTuple children -> PTuple (Chatml_tuple.map children ~f:(lower_pattern ctx))
+;;
 
 let rec resolve_expr (ctx : resolve_ctx) (e : L.expr L.node) : L.resolved_expr =
   ctx.checkpoint ();
@@ -121,12 +142,13 @@ let rec resolve_expr (ctx : resolve_ctx) (e : L.expr L.node) : L.resolved_expr =
       List.mapi binds ~f:(fun idx (nm, rhs_expr) ->
         ctx.checkpoint ();
         let slot = choose_slot ctx rhs_expr in
-        Hashtbl.set fm ~key:nm ~data:{ index = idx; slot };
+        Hashtbl.set fm ~key:(Syntax_name.name nm) ~data:{ index = idx; slot };
         slot)
     in
     push_frame ctx.stack fm;
     let binds' =
-      List.map binds ~f:(fun (nm, rhs) -> nm, with_value rhs (resolve_expr ctx rhs))
+      List.map binds ~f:(fun (nm, rhs) ->
+        Syntax_name.name nm, with_value rhs (resolve_expr ctx rhs))
     in
     let body' = resolve_expr ctx body in
     pop_frame ctx.stack;
@@ -137,11 +159,11 @@ let rec resolve_expr (ctx : resolve_ctx) (e : L.expr L.node) : L.resolved_expr =
     let fm = Hashtbl.create (module String) in
     List.iteri binds ~f:(fun idx (nm, _rhs) ->
       let slot = List.nth_exn slots idx in
-      Hashtbl.set fm ~key:nm ~data:{ index = idx; slot });
+      Hashtbl.set fm ~key:(Syntax_name.name nm) ~data:{ index = idx; slot });
     push_frame ctx.stack fm;
     let binds' =
       List.map binds ~f:(fun (nm, rhs_node) ->
-        nm, with_value rhs_node (resolve_expr ctx rhs_node))
+        Syntax_name.name nm, with_value rhs_node (resolve_expr ctx rhs_node))
     in
     let body' = resolve_expr ctx body in
     pop_frame ctx.stack;
@@ -172,7 +194,7 @@ let rec resolve_expr (ctx : resolve_ctx) (e : L.expr L.node) : L.resolved_expr =
           | Some t -> slot_of_typ ~checkpoint:ctx.checkpoint t
           | None -> Frame_env.Slot Frame_env.SObj
         in
-        [ x, slot ]
+        [ Syntax_name.name x, slot ]
       | L.PWildcard | L.PInt _ | L.PBool _ | L.PFloat _ | L.PString _ -> []
       | L.PVariant (_tag, subpats) ->
         List.concat_map subpats ~f:(fun sp -> slots_of_pattern sp None)
@@ -191,7 +213,10 @@ let rec resolve_expr (ctx : resolve_ctx) (e : L.expr L.node) : L.resolved_expr =
       | L.PRecord (fields, _open) ->
         let field_type lbl =
           Option.bind ty_opt ~f:(fun ty ->
-            Chatml_typechecker.record_field_type ~checkpoint:ctx.checkpoint ty lbl)
+            Chatml_typechecker.record_field_type
+              ~checkpoint:ctx.checkpoint
+              ty
+              (Syntax_name.name lbl))
         in
         List.concat_map fields ~f:(fun (lbl, p) -> slots_of_pattern p (field_type lbl))
     in
@@ -207,7 +232,7 @@ let rec resolve_expr (ctx : resolve_ctx) (e : L.expr L.node) : L.resolved_expr =
         push_frame ctx.stack fm;
         let rhs' = resolve_expr ctx case.rhs in
         pop_frame ctx.stack;
-        { L.pat = case.pat
+        { L.pat = lower_pattern ctx case.pat
         ; pat_span = case.pat_span
         ; slots
         ; rhs = with_value case.rhs rhs'
@@ -226,7 +251,7 @@ let rec resolve_expr (ctx : resolve_ctx) (e : L.expr L.node) : L.resolved_expr =
         push_frame ctx.stack fm;
         let rhs' = resolve_expr ctx case.rhs in
         pop_frame ctx.stack;
-        { L.pat = case.pat
+        { L.pat = lower_pattern ctx case.pat
         ; pat_span = case.pat_span
         ; slots = case.slots
         ; rhs = with_value case.rhs rhs'
@@ -235,15 +260,16 @@ let rec resolve_expr (ctx : resolve_ctx) (e : L.expr L.node) : L.resolved_expr =
     L.REMatch (with_value scrut scrut', cases')
   | L.ERecord fields ->
     let fields' =
-      List.map fields ~f:(fun (lbl, ex) -> lbl, with_value ex (resolve_expr ctx ex))
+      List.map fields ~f:(fun (lbl, ex) ->
+        Syntax_name.name lbl, with_value ex (resolve_expr ctx ex))
     in
     L.RERecord fields'
   | L.EFieldGet (obj, lbl) ->
     let obj' = resolve_expr ctx obj in
-    L.REFieldGet (with_value obj obj', lbl)
+    L.REFieldGet (with_value obj obj', Syntax_name.name lbl)
   | L.EVariant (tag, vs) ->
     let vs' = List.map vs ~f:(fun v -> with_value v (resolve_expr ctx v)) in
-    L.REVariant (tag, vs')
+    L.REVariant (Syntax_name.name tag, vs')
   | L.EArray elts ->
     let elts' = List.map elts ~f:(fun elt -> with_value elt (resolve_expr ctx elt)) in
     L.REArray elts'
@@ -272,7 +298,8 @@ let rec resolve_expr (ctx : resolve_ctx) (e : L.expr L.node) : L.resolved_expr =
   | L.ERecordExtend (base, fields) ->
     let base' = resolve_expr ctx base in
     let fields' =
-      List.map fields ~f:(fun (lbl, ex) -> lbl, with_value ex (resolve_expr ctx ex))
+      List.map fields ~f:(fun (lbl, ex) ->
+        Syntax_name.name lbl, with_value ex (resolve_expr ctx ex))
     in
     L.RERecordExtend (with_value base base', fields')
 
@@ -353,7 +380,8 @@ let rec resolve_stmt (ctx : resolve_ctx) (snode : L.stmt L.node) : L.resolved_st
   | L.SLet (x, rhs) -> Some (L.RSLet (x, with_value rhs (resolve_expr ctx rhs)))
   | L.SLetRec binds ->
     let binds' =
-      List.map binds ~f:(fun (nm, rhs) -> nm, with_value rhs (resolve_expr ctx rhs))
+      List.map binds ~f:(fun (nm, rhs) ->
+        Syntax_name.name nm, with_value rhs (resolve_expr ctx rhs))
     in
     Some (L.RSLetRec binds')
   | L.SType _ -> None
@@ -369,12 +397,12 @@ let rec resolve_stmt (ctx : resolve_ctx) (snode : L.stmt L.node) : L.resolved_st
         | Some visibility -> visibility
         | None -> failwith "Resolver: missing checked module signature")
     in
-    Some (L.RSModule { name; visibility; body = stmts' })
+    Some (L.RSModule { name = Syntax_name.name name; visibility; body = stmts' })
   | L.SOpen nm ->
     (match ctx.lookup_configured snode.span with
      | Some (Inert_open _) -> None
      | Some (Value_read _) -> failwith "Resolver: value annotation at open"
-     | None -> Some (L.RSOpen nm))
+     | None -> Some (L.RSOpen (Syntax_name.name nm)))
 ;;
 
 let resolve_checked_program

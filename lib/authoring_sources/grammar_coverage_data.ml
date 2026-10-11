@@ -128,10 +128,10 @@ let productions =
     , "6283862d341d55e9b124be69793b4d3079499bb728503a29a6a7fd1a388a86ad"
     , "chatml.programs" )
   ; ( "expr -> TICKIDENT"
-    , "7cd3f8f4eb0e150f657499dc94bed8401d197788d1a6f10468a122e8eef905c4"
+    , "434e9670072cf399359516c22110af45d768bbc19e1a152dad9d92a843c1f5b5"
     , "chatml.programs" )
   ; ( "expr -> TICKIDENT LPAREN expr_list RPAREN"
-    , "fc9dc5e44bfed0365f06aff454b8cd8b73ed688a9b04b558f618554cfeb32a08"
+    , "55ee2e8075bc01d8db85e1dd662288565438deef7f4d794982ffdf4ff81861aa"
     , "chatml.programs" )
   ; ( "expr -> WHILE expr_sequence DO expr_sequence DONE"
     , "07d0c74909b0d15fec5e9acf71b41d404a4592e66fa86d00a6a21ebc0135843f"
@@ -143,13 +143,13 @@ let productions =
     , "6d487c40bd4445e53fb948c10bd726a30ecc748241e853efe9c390682d166334"
     , "chatml.programs" )
   ; ( "expr -> expr DOT LIDENT"
-    , "d4f906dcc12f965856df37238663196077e38f2b2f9e788098cf89a97d99dd7d"
+    , "9f7cbd3cb1b49ee31429f538a6019393a84c7196ae2cb391885aee67619e01fd"
     , "chatml.programs" )
   ; ( "expr -> expr DOT LIDENT LPAREN expr_list RPAREN"
-    , "c22d839fc46b72e5a6ef3bebfae053f1861a3a2aff2072d5f2df76173ccce61f"
+    , "60183c31d0873d88ee9b242dbab1e01cf863c81a1c4e2259fc1a10485656e8e3"
     , "chatml.programs" )
   ; ( "expr -> expr DOT UIDENT"
-    , "1419c783a39191fd063d1fc7c40736cedc434f50c27e37d99e1003aa5b773781"
+    , "f5ded0a1d3b521e1e332cda55215476723550c70feddf5c742c66c5c8db9447a"
     , "chatml.programs" )
   ; ( "expr -> expr EQEQ expr"
     , "0f0eebdcd223ab6b513eed23cf487a5689078b0f9366140248bcf940ca503883"
@@ -236,7 +236,7 @@ let productions =
     , "1018bfe6134944bef31c8b86180b0915f7f93bfbe15ea750f857fba921b461a6"
     , "chatml.programs" )
   ; ( "field_decl -> LIDENT EQ expr"
-    , "7cb7cd40f2d0778b7b611bf9cf3125753113687473f3483a9410fd328a1e89a9"
+    , "5a087bebd1d046833a8a27f7e2d5844bd24e21cafdc0c1980392ced4cdfd99c5"
     , "chatml.programs" )
   ; ( "field_decls -> field_decl"
     , "8e677e6916193aa33abf060860991b92c2783897c40c520e3ee24a45aed5ede3"
@@ -289,16 +289,16 @@ let productions =
     , "chatml.programs" )
   ; ( "module_stmt -> MODULE UIDENT COLON SIG signature_items END EQ STRUCT module_stmts \
        END"
-    , "e1c0fbc47a8ce4a16ce8fad97f332c05a1a70ab01836b5fa67e4cf65d8f2ba27"
+    , "0b0facb89369fb027dd3447e2eb7003b0b0c4abd85f069764b8df9f414a363d4"
     , "chatml.programs" )
   ; ( "module_stmt -> MODULE UIDENT EQ STRUCT module_stmts END"
-    , "c3e1cbbc9fecbfaec2b4a2b96df90d729778641e41281cac2a7e57d18c1cd3d1"
+    , "c1f6c3702e8b91b514016730ef5b0dd704f16d72220dac519d0f8edd69670e19"
     , "chatml.programs" )
   ; ( "module_stmt -> OPEN UIDENT"
-    , "1a5206247c3cedacc03fa99eed5ee192dd6d33d1a9ef9e79ab5c443919a32dc7"
+    , "79241d108e711e47e3e4148d8bb2709999cbfbb9a0f2ac7f340c0787d3402803"
     , "chatml.programs" )
   ; ( "module_stmt -> TYPE type_parameters LIDENT EQ type_expr"
-    , "0a4edbfd23a5db6f8fc42407c761a3271dcde6e346ca2f5d6094d89b6bdeb2cd"
+    , "70d7bc1d718b44df62c5b4cb5572743cd691369755de20dbab8db28a3906eaf6"
     , "chatml.programs" )
   ; ( "module_stmt -> expr"
     , "b5ad1d57b820bf02e7e1de21c4b10876178daf4e6965c34b43cbfe0399e8ad9f"
@@ -337,7 +337,7 @@ let productions =
     , "b6116a18be72d095b8019fb8621503084cdfba67e41b55d6a798bcc0496bba06"
     , "chatml.programs" )
   ; ( "pattern -> LIDENT"
-    , "025dceb86720d4f807807fa9c4eefb24d2ab80c41e2f3959320afea6f8866522"
+    , "d864640dcbf47f7d3c8e110753bf0952fc6bb55627db5180305244299d60eaf4"
     , "chatml.programs" )
   ; ( "pattern -> LPAREN RPAREN"
     , "ca35b7d52bcf68e5ecf188923d8071dd000ad990ebc2610d84561ef528fa90f4"
@@ -346,10 +346,10 @@ let productions =
     , "723773369aab9c6e4490019b57ad7ea7397bee167d106c44b1a7b6aeab31b648"
     , "chatml.programs" )
   ; ( "pattern -> TICKIDENT"
-    , "2095661aa75a4d2a291d40cb3e3816a11f96803fd857199512d7c856f8fa784e"
+    , "a3c3caadaaafb9157d44b8f58edbfdc775a5c92a4bf886aef7ddade138996dda"
     , "chatml.programs" )
   ; ( "pattern -> TICKIDENT LPAREN pattern_list RPAREN"
-    , "4b05fc11f7c88994192ff2e0ccb507dc4e6706cf479257a921d9ca65e22f6d65"
+    , "191d78aadd41cc27952b49bea5b71992250b4ede0fbfb0f6926a700fb984b7b7"
     , "chatml.programs" )
   ; ( "pattern -> UNDERSCORE"
     , "6466cddb4459b2f9e98ab3406e7407b043980972fba5cd71ca80f9dfbccc8667"
@@ -364,7 +364,7 @@ let productions =
     , "e7791b787d043fb0341ced502c4d294f90cf4b16c4a8fb016f0377298d04afc7"
     , "chatml.programs" )
   ; ( "pattern_field_decl -> LIDENT EQ pattern"
-    , "92a9b8160451558f2cf0c17222f103014a76c7fe3f87d49ac132382159b9cedd"
+    , "32f86d0c24884a3f460a5cfcb3bcff3947c5a23f09efc0c98220818666c8e7b3"
     , "chatml.programs" )
   ; ( "pattern_field_decls -> pattern_field_decl SEMI"
     , "3bb779e3cc743f5e59fe1dddf8e9a503d4df01e682597381d864a80e90c28b13"
@@ -409,16 +409,16 @@ let productions =
     , "00099d29534710d61b79af3811b0e155912026efbee51ce8da707c9829cc9b2a"
     , "chatml.programs" )
   ; ( "rec_binding -> LIDENT COLON type_expr EQ expr_sequence"
-    , "bab4a889b192b7bda1b347ab97f95f085f1b43ff090290a9253bd76ffda88982"
+    , "d1709173fbf4a116ac3ff1143bd16c7200215a21138f6705deb2489394f42258"
     , "chatml.programs" )
   ; ( "rec_binding -> LIDENT EQ expr_sequence"
-    , "fd1a915da06499fe621270497719907f5865b2cc0748a7abf5a4116ec8e54725"
+    , "6984b777001e52a4f831139a1793a6cc20a1b41ed4ce2d3191eceb314d639c86"
     , "chatml.programs" )
   ; ( "rec_binding -> LIDENT LPAREN RPAREN EQ expr_sequence"
-    , "8f109cd5878b7104e2240a3f5bfb82152a211d9e02fdf30a41c2011b5d4f7841"
+    , "8eedceee6abca93e13cbc10ab4786d87e99ea8259d417be6bad9417fa6c7b03a"
     , "chatml.programs" )
   ; ( "rec_binding -> LIDENT params EQ expr_sequence"
-    , "274b645a0aa3f4da0fa61794a862e8c4affe717242999c3d27305fb3d15c8ef6"
+    , "79a6e826d7aa8d7429f1814298b8deca01b5f11fbbb0d03e12f0d6716b6aaa6f"
     , "chatml.programs" )
   ; ( "rec_bindings -> rec_binding"
     , "eac0103500dd1fda84fcfd14de00d835efe14744313016c33c2275def4ee5528"
@@ -433,12 +433,12 @@ let productions =
        separated_nonempty_list(AND,signature_requirement)"
     , "de74c92f5a266462eae59c719beebaa97800986a3128c51d51e48c1871c58a6a"
     , "chatml.programs" )
-  ; ( "separated_nonempty_list(COMMA,TYPEVAR) -> TYPEVAR"
-    , "68a68d5cd142ef569a57641d0b7c317c55985dce6d3f2d0f48773b156114032f"
+  ; ( "separated_nonempty_list(COMMA,type_parameter_name) -> type_parameter_name"
+    , "d14d74a1654364254d5f33a9577273cc3ac0a4fca10cac394c14d506256dadbb"
     , "chatml.programs" )
-  ; ( "separated_nonempty_list(COMMA,TYPEVAR) -> TYPEVAR COMMA \
-       separated_nonempty_list(COMMA,TYPEVAR)"
-    , "f84ec8578c9ceeccaa0620271178407c3269b354b38e360fe98c9311a3a014a9"
+  ; ( "separated_nonempty_list(COMMA,type_parameter_name) -> type_parameter_name COMMA \
+       separated_nonempty_list(COMMA,type_parameter_name)"
+    , "1f4d02ccac1cb6750751eab34122a9b3252ee1c9484ffb1580b00a0f7f7ddf23"
     , "chatml.programs" )
   ; ( "separated_nonempty_list(COMMA,type_expr) -> type_expr"
     , "4f8fc775dbdabbacacefadb0146226ad7829a3da3f112a64d69fca51a5dc0de9"
@@ -448,13 +448,13 @@ let productions =
     , "e57a26f25b11a93a1272d01157808d784a90cc67fca2b9ea9986a04411c87e07"
     , "chatml.programs" )
   ; ( "signature_item -> MODULE UIDENT COLON SIG signature_items END"
-    , "98e7fc26324b1ac9fe883c50ad1a2fd90da31b7f353c5f55c1c2c16810ba8747"
+    , "e6b31a6603d1c03a322511171cd5d4b9e3011c296cec8207747119de10a001e9"
     , "chatml.programs" )
   ; ( "signature_item -> TYPE type_parameters LIDENT EQ type_expr"
-    , "610a69830ef35e5a08b49c61fd973ec0aeedd2221ef2d7be1cac3ce5743c412b"
+    , "53e0fd1dfb853f7511d7e083c3bbbe2ba3f03b5750e72793b3567c3f22ab7657"
     , "chatml.programs" )
   ; ( "signature_item -> VAL LIDENT COLON type_expr signature_requirements"
-    , "aaa84d85284aef0e4b070c0afb4e17ca0b07abf55329752a3f6e7c513380b74e"
+    , "063c89319de530cbe3842c7f4e31c9cfb25af8dd11eb269f63b94e5e571230a2"
     , "chatml.programs" )
   ; ( "signature_items -> "
     , "90e26fe4701c5fed333e1d355bcf9a8e83e7de4506f4982749fcc982eb8bbfe5"
@@ -466,7 +466,7 @@ let productions =
     , "7f1832e2918496440006d324c1b3020987aa4f285280c78fe3c833870ac0b327"
     , "chatml.programs" )
   ; ( "signature_requirement -> LIDENT LPAREN TYPEVAR RPAREN"
-    , "ebf32d629db39b27f1575fbb90c5c874706d99667dfb77e1348e7b753e27941c"
+    , "199e5ae425b8d1f63a5892f817f2c12a0035f227c6cb4f4ab0cc7229ca3fba4a"
     , "chatml.programs" )
   ; ( "signature_requirements -> "
     , "24ea778bd7bda6d25505ff8ca8273969f55aad19bb8245cdd60833f4641361f3"
@@ -500,7 +500,7 @@ let productions =
     , "e5955de0bb397d064917a987a073cdbb51712f2dcd757ea10eef1120546d3f57"
     , "chatml.programs" )
   ; ( "type_field -> LIDENT COLON type_expr"
-    , "858de38276a8fc4722acd2799009893f2d732c06560c6ffb45aa25c6d2dfe6aa"
+    , "3b27049bc28a8271af23e51738cec0bd4516cf7c3f134601f2acf150e0f76c05"
     , "chatml.programs" )
   ; ( "type_field_list -> "
     , "fb9cc4e09564679864d8dde3e29c47d099a819405adaa28fa0becf6b49844ee7"
@@ -518,25 +518,25 @@ let productions =
     , "9de604591335feee5569c44e6b3f57b4b32bb381633441a2681c49cec59af8cc"
     , "chatml.programs" )
   ; ( "type_module_path -> UIDENT"
-    , "c5f921a7e9190dd381e18d12b61ec556c3ae7bf7ea03922b049dcf2edfd47ed6"
+    , "1f16fa03301870512346bbcb272e908d6b21edf0e35212bb90d3e396c1c6002e"
     , "chatml.programs" )
   ; ( "type_module_path -> type_module_path DOT UIDENT"
-    , "5d487a3dc21c431304d0fa2d7fd4cd9718d008f2b3bde4a22d5adcc4f246c73a"
+    , "a9775758dc2862747ae79a25bb58ef257d1c6e12877e05b44e23f8411f308a4b"
     , "chatml.programs" )
   ; ( "type_name -> LIDENT"
-    , "a0b5a5d64870f3ea52f3d8a6c3c0a776911df7656d7763953296aea4d100bbf0"
+    , "62bb859df0f268866965840f393d207d315dbe954f6550bc314f7e2073e5fd48"
     , "chatml.programs" )
   ; ( "type_name -> type_module_path DOT LIDENT"
-    , "229702bf852dd16a8f34e46c04c8e6b84f047f288499af7516de8bd232938e90"
+    , "97e4532b7c8e7b1c027a1fa2cb113058c8deec9c3cdf012d6053b15983d17d2e"
     , "chatml.programs" )
   ; ( "type_parameters -> "
     , "335e1c23c586436ae0109876fcb3606fcb0cda0fb773b0a4258f8b612d82f48f"
     , "chatml.programs" )
-  ; ( "type_parameters -> LPAREN separated_nonempty_list(COMMA,TYPEVAR) RPAREN"
-    , "47da803afbbc346dbc51d311e7b99c6a8fb0d1cdd023a615081537fbcc4464ef"
+  ; ( "type_parameters -> LPAREN separated_nonempty_list(COMMA,type_parameter_name) RPAREN"
+    , "f95df831b86e13f948643b1aa7ff429714151c8df2588f1fa4b695375e9267e6"
     , "chatml.programs" )
-  ; ( "type_parameters -> TYPEVAR"
-    , "2c0573744b284fede70de21db4b1129bf50c18de4d9f7ae7a6973386380bc1d5"
+  ; ( "type_parameters -> type_parameter_name"
+    , "628364e02653183dfe3b0e5b33cf394dd4bd9ef2c2c73aafa0f94ebeac368d9e"
     , "chatml.programs" )
   ; ( "type_postfix -> LPAREN type_expr COMMA type_expr_list RPAREN type_name"
     , "d275c0aad40120a2a2c13e78342983e7bb4fb3017cd1f589947d407f580f4e3e"
@@ -563,10 +563,10 @@ let productions =
     , "95e0d6c016a26f19435ba735bbc5179210a605ac40ec22cf8e92a54fac4e6724"
     , "chatml.programs" )
   ; ( "type_variant_case -> TICKIDENT"
-    , "fa382a98c29ca76294e0df0e9e86c32eb2fcace045f1aca219364588b102d73d"
+    , "76446843c5e00b3197804f184ce25dec6cc2f7d26175a75ef83d39d42f312508"
     , "chatml.programs" )
   ; ( "type_variant_case -> TICKIDENT LPAREN type_expr_list RPAREN"
-    , "34abef5a960415a5ff16bd4832aee6889c06d7192f16cb706613faf37a083c98"
+    , "76b5e4976836fc1178a47da77e2e8bf81548eefb7480b540255e2d5bd3580521"
     , "chatml.programs" )
   ; ( "type_variant_cases -> type_variant_case"
     , "0cc70d0583838725c7d4181e20803ddd1c58949a374bf3511b08a57eaacee9bf"
@@ -579,6 +579,9 @@ let productions =
     , "chatml.programs" )
   ; ( "type_variant_cases_opt -> type_variant_cases"
     , "e79e300c05ef0ebdc0a87ee8b026ac27e137822b0a19d423c0dd8a7180256c78"
+    , "chatml.programs" )
+  ; ( "type_parameter_name -> TYPEVAR"
+    , "0ad1ee03203ca3b211f6613fc562b6e1dfb2b76faf76bed1d613bf9867a6fa06"
     , "chatml.programs" )
   ]
 ;;

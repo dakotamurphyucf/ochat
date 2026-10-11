@@ -2,10 +2,11 @@ open Core
 
 module Name : sig
   (** A source type name, optionally qualified by its lexical module path.
-      Module components and the final type name retain their source spelling. *)
+      Each component retains its source spelling and optional exact parser site;
+      qualified occurrence identity does not depend on a shared owner span. *)
   type t =
-    { modules : string list
-    ; name : string
+    { modules : Chatml_syntax_name.t list
+    ; name : Chatml_syntax_name.t
     }
   [@@deriving sexp]
 
@@ -27,14 +28,14 @@ and desc =
   | TEFunction of t list * t
   | TETuple of t Chatml_tuple.t
   | TEConstr of Name.t * t list
-  | TERecord of (string * t) list
-  | TEVariant of (string * t list) list
+  | TERecord of (Chatml_syntax_name.t * t) list
+  | TEVariant of (Chatml_syntax_name.t * t list) list
 [@@deriving sexp]
 
 module Declaration : sig
   type nonrec t =
-    { name : string
-    ; parameters : string list
+    { name : Chatml_syntax_name.t
+    ; parameters : Chatml_syntax_name.t list
     ; body : t
     }
   [@@deriving sexp]

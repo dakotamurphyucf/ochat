@@ -1,3 +1,4 @@
+module Syntax_name = Chatml.Chatml_syntax_name
 open Core
 open Chatml_inferred_type
 module Syntax = Chatml.Chatml_module_signature
@@ -90,40 +91,49 @@ let check ?source ?lookup engine ~values ~types ~outer_types ~signature ~span =
         := Type_alias.declare ?source ?lookup !local_types declaration ~checkpoint
            |> alias_result;
         let count = List.length declaration.parameters in
-        (match Type_alias.declared_arity implementation_types ~name:declaration.name with
+        (match
+           Type_alias.declared_arity
+             implementation_types
+             ~name:(Syntax_name.name declaration.name)
+         with
          | Some arity when arity = count -> ()
          | Some arity ->
            reject
              item.span
              (Printf.sprintf
                 "Type '%s' has %d parameter(s); signature requires %d"
-                declaration.name
+                (Syntax_name.name declaration.name)
                 arity
                 count)
          | None ->
            reject
              item.span
-             (Printf.sprintf "Module does not declare type '%s'" declaration.name));
+             (Printf.sprintf
+                "Module does not declare type '%s'"
+                (Syntax_name.name declaration.name)));
         Type_alias.check_declared_equivalent
           ?source
           implementation_types
           ~other:!local_types
-          ~name:declaration.name
+          ~name:(Syntax_name.name declaration.name)
           ~span:item.span
           ~checkpoint
         |> alias_result;
-        type_names := declaration.name :: !type_names
+        type_names := Syntax_name.name declaration.name :: !type_names
       | Value { name; annotation; requirements } ->
+        let name = Syntax_name.name name in
         let actual = implementation_value item.span name in
         let equality_parameters =
           List.map requirements ~f:(fun (requirement : Syntax.Requirement.t) ->
             checkpoint ();
-            if not (String.equal requirement.name "equality")
+            if not (String.equal (Syntax_name.name requirement.name) "equality")
             then
               reject
                 requirement.span
-                (Printf.sprintf "Unknown signature constraint '%s'" requirement.name);
-            requirement.parameter)
+                (Printf.sprintf
+                   "Unknown signature constraint '%s'"
+                   (Syntax_name.name requirement.name));
+            Syntax_name.name requirement.parameter)
         in
         let expected =
           Type_alias.elaborate_scheme
@@ -140,6 +150,7 @@ let check ?source ?lookup engine ~values ~types ~outer_types ~signature ~span =
         selected := Map.set !selected ~key:name ~data:expected;
         visibility := Visibility.Value name :: !visibility
       | Module { name; signature } ->
+        let name = Syntax_name.name name in
         let actual = implementation_value item.span name in
         let fields =
           match actual with

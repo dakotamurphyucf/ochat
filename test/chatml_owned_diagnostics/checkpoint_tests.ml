@@ -1,3 +1,4 @@
+module Parser = Chatml.Chatml_parser.Make (Chatml.Chatml_syntax_sites.Disabled)
 open Core
 module Helpers = Ownership_tests
 module Parse = Chatml.Chatml_parse
@@ -35,7 +36,7 @@ let%test_unit "compiler-domain exceptions from checkpoints retain their original
     |> Chatml_source.Location.span
   in
   let exceptions =
-    [ Chatml.Chatml_parser.Error
+    [ Parser.Error
     ; Checker.Type_error "checkpoint type error"
     ; Checker.Type_error_with_loc ("checkpoint located error", span)
     ; Failure "checkpoint failure"

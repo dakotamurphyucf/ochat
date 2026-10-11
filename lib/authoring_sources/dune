@@ -20,6 +20,9 @@
    (run %{exe:embed_contracts.exe}
     lib/chatml/chatml_lexer.mll %{dep:../chatml/chatml_lexer.mll}
     lib/chatml/chatml_parser.mly %{dep:../chatml/chatml_parser.mly}
+    lib/chatml/chatml_syntax_sites.ml %{dep:../chatml/chatml_syntax_sites.ml}
+    lib/chatml/chatml_syntax_name.ml %{dep:../chatml/chatml_syntax_name.ml}
+    lib/chatml/chatml_tokens.ml %{dep:../chatml/chatml_tokens.ml}
     lib/chatml/chatml_parse.ml %{dep:../chatml/chatml_parse.ml}
     lib/chatml/chatml_owned_source.ml %{dep:../chatml/chatml_owned_source.ml}
     lib/chatml/chatml_checkpoint.ml %{dep:../chatml/chatml_checkpoint.ml}

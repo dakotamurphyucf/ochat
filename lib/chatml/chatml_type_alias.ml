@@ -1,3 +1,4 @@
+module Syntax_name = Chatml.Chatml_syntax_name
 open Core
 open Chatml_inferred_type
 module Syntax = Chatml.Chatml_type_expr
@@ -153,6 +154,8 @@ let root_module t ~checkpoint name =
 ;;
 
 let find_alias t ~checkpoint ({ Syntax.Name.modules; name } : Syntax.Name.t) =
+  let modules = List.map modules ~f:Syntax_name.name in
+  let name = Syntax_name.name name in
   match modules with
   | [] -> find_local_alias t ~checkpoint name
   | first :: rest ->
@@ -392,6 +395,8 @@ let resolved_alias
       (syntax : Syntax.t)
       (qualified : Syntax.Name.t)
   =
+  let modules = List.map qualified.modules ~f:Syntax_name.name in
+  let name = Syntax_name.name qualified.name in
   let observe origin =
     match resolution, origin with
     | Some resolution, Some origin ->
@@ -400,10 +405,10 @@ let resolved_alias
        | Error diagnostic -> raise (Invalid diagnostic))
     | _ -> ()
   in
-  match qualified.modules with
+  match modules with
   | [] ->
-    let alias = find_local_alias t ~checkpoint qualified.name in
-    if Option.is_some alias then observe (alias_origin t ~checkpoint qualified.name);
+    let alias = find_local_alias t ~checkpoint name in
+    if Option.is_some alias then observe (alias_origin t ~checkpoint name);
     alias
   | root :: rest ->
     let scope, observed =
@@ -419,7 +424,7 @@ let resolved_alias
            (match
               resolution.lookup.resolve
                 ~name:root
-                ~member_path:(rest @ [ qualified.name ])
+                ~member_path:(rest @ [ name ])
                 ~span:syntax.span
             with
             | Error diagnostic -> raise (Invalid diagnostic)
@@ -432,12 +437,12 @@ let resolved_alias
       Option.bind scope ~f:(fun scope -> nested_module scope ~path:rest ~checkpoint)
     in
     Option.bind scope ~f:(fun scope ->
-      let alias = Map.find scope.aliases qualified.name in
+      let alias = Map.find scope.aliases name in
       if Option.is_some alias && not observed
       then
         observe
           (Option.map scope.origin ~f:(fun origin ->
-             Chatml_configured_lookup.Origin.member origin ~name:qualified.name));
+             Chatml_configured_lookup.Origin.member origin ~name));
       alias)
 ;;
 
@@ -488,11 +493,12 @@ let rec convert ?source ?resolution (t : t) ~parameters ~self ~checkpoint syntax
         syntax
         ~what:"type record field label"
         ~checkpoint
-        (List.map fields ~f:fst);
+        (List.map fields ~f:(fun (name, _) -> Syntax_name.name name));
       Record
         (Row
            ( String.Map.of_alist_exn
-               (List.map fields ~f:(fun (name, body) -> name, expression body))
+               (List.map fields ~f:(fun (name, body) ->
+                  Syntax_name.name name, expression body))
            , Empty_row ))
     | TEVariant cases ->
       ensure_unique
@@ -500,12 +506,12 @@ let rec convert ?source ?resolution (t : t) ~parameters ~self ~checkpoint syntax
         syntax
         ~what:"type variant constructor label"
         ~checkpoint
-        (List.map cases ~f:fst);
+        (List.map cases ~f:(fun (name, _) -> Syntax_name.name name));
       Variant
         (Row
            ( String.Map.of_alist_exn
                (List.map cases ~f:(fun (name, bodies) ->
-                  name, Variant_payload (List.map bodies ~f:expression)))
+                  Syntax_name.name name, Variant_payload (List.map bodies ~f:expression)))
            , Empty_row ))
   and constructor syntax (qualified : Syntax.Name.t) arguments =
     let name = Syntax.Name.to_string qualified in
@@ -598,6 +604,8 @@ let declare
   =
   protect (fun () ->
     checkpoint ();
+    let name = Syntax_name.name name in
+    let parameters = List.map parameters ~f:Syntax_name.name in
     (match available t name with
      | Ok () -> ()
      | Error message -> reject ?source ~checkpoint body message);
@@ -694,7 +702,8 @@ let symbolic_expansion ~fresh_binder ~checkpoint =
         ( Record
         , [ Equivalence.Row
               ( String.Map.of_alist_exn
-                  (List.map fields ~f:(fun (name, body) -> name, expression body))
+                  (List.map fields ~f:(fun (name, body) ->
+                     Syntax_name.name name, expression body))
               , Equivalence.Node (Empty_row, []) )
           ] )
     | TEVariant cases ->
@@ -703,7 +712,7 @@ let symbolic_expansion ~fresh_binder ~checkpoint =
         , [ Equivalence.Row
               ( String.Map.of_alist_exn
                   (List.map cases ~f:(fun (name, bodies) ->
-                     ( name
+                     ( Syntax_name.name name
                      , Equivalence.Node (Variant_payload, List.map bodies ~f:expression) )))
               , Equivalence.Node (Empty_row, []) )
           ] )

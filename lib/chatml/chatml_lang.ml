@@ -30,19 +30,21 @@ type 'a node =
   }
 [@@deriving sexp]
 
-type pattern =
+type 'name pattern_desc =
   | PUnit
   | PWildcard
-  | PVar of string
+  | PVar of 'name
   | PInt of int
   | PBool of bool
   | PFloat of float
   | PString of string
-  | PVariant of string * pattern list
-  | PRecord of (string * pattern) list * bool
-  | PTuple of pattern Chatml_tuple.t
+  | PVariant of 'name * 'name pattern_desc list
+  | PRecord of ('name * 'name pattern_desc) list * bool
+  | PTuple of 'name pattern_desc Chatml_tuple.t
 [@@deriving sexp, compare]
 
+type pattern = Chatml_syntax_name.t pattern_desc [@@deriving sexp, compare]
+type resolved_pattern = string pattern_desc [@@deriving sexp, compare]
 type type_expr = Chatml_type_expr.t [@@deriving sexp]
 
 type var_loc =
@@ -68,7 +70,7 @@ and match_case_slots =
 [@@deriving sexp]
 
 and resolved_match_case =
-  { pat : pattern
+  { pat : resolved_pattern
   ; pat_span : Source.span
   ; slots : Frame_env.packed_slot list
   ; rhs : resolved_expr node
@@ -118,16 +120,17 @@ and expr =
   | EIf of expr node * expr node * expr node
   | EWhile of expr node * expr node
   | ELetIn of Chatml_binding_pattern.t * expr node * expr node
-  | ELetRec of (string * expr node) list * expr node
+  | ELetRec of (Chatml_syntax_name.t * expr node) list * expr node
   | ELetBlock of (Chatml_binding_pattern.t * expr node) list * expr node
   | ELetBlockSlots of
       (Chatml_binding_pattern.t * expr node) list * Frame_env.packed_slot list * expr node
-  | ELetRecSlots of (string * expr node) list * Frame_env.packed_slot list * expr node
+  | ELetRecSlots of
+      (Chatml_syntax_name.t * expr node) list * Frame_env.packed_slot list * expr node
   | EMatch of expr node * match_case list
   | EMatchSlots of expr node * match_case_slots list
-  | ERecord of (string * expr node) list
-  | EFieldGet of expr node * string
-  | EVariant of string * expr node list
+  | ERecord of (Chatml_syntax_name.t * expr node) list
+  | EFieldGet of expr node * Chatml_syntax_name.t
+  | EVariant of Chatml_syntax_name.t * expr node list
   | EArray of expr node list
   | ETuple of expr node Chatml_tuple.t
   | EArrayGet of expr node * expr node
@@ -136,7 +139,7 @@ and expr =
   | ESetRef of expr node * expr node
   | ESequence of expr node * expr node
   | EDeref of expr node
-  | ERecordExtend of expr node * (string * expr node) list
+  | ERecordExtend of expr node * (Chatml_syntax_name.t * expr node) list
   | EAnnot of expr node * type_expr
 [@@deriving sexp]
 
@@ -179,14 +182,14 @@ and resolved_expr =
 
 type stmt =
   | SLet of Chatml_binding_pattern.t * expr node
-  | SLetRec of (string * expr node) list
+  | SLetRec of (Chatml_syntax_name.t * expr node) list
   | SType of Chatml_type_expr.Declaration.t
   | SModule of
-      { name : string
+      { name : Chatml_syntax_name.t
       ; signature : Chatml_module_signature.t node option
       ; body : stmt node list
       }
-  | SOpen of string
+  | SOpen of Chatml_syntax_name.t
   | SExpr of expr node
 [@@deriving sexp]
 
@@ -457,7 +460,7 @@ let rec equal_value (lhs : value) (rhs : value) : bool =
 (* 4) Pattern Matching                                                     *)
 (***************************************************************************)
 
-let rec match_pattern (v : value) (p : pattern) : (string * value) list option =
+let rec match_pattern (v : value) (p : resolved_pattern) : (string * value) list option =
   match p, v with
   | PUnit, VUnit -> Some []
   | PWildcard, _ -> Some []
@@ -512,16 +515,24 @@ let rec match_pattern (v : value) (p : pattern) : (string * value) list option =
   | _ -> None
 ;;
 
-let collect_pattern_vars ?(checkpoint = fun () -> ()) (pat : pattern) : string list =
+let collect_pattern_names pat ~checkpoint ~name =
   let rec aux acc p =
     checkpoint ();
     match p with
     | PUnit -> acc
-    | PVar x -> x :: acc
+    | PVar x -> name x :: acc
     | PWildcard | PInt _ | PBool _ | PFloat _ | PString _ -> acc
     | PVariant (_, ps) -> List.fold ps ~init:acc ~f:aux
     | PTuple patterns -> Chatml_tuple.fold patterns ~init:acc ~f:aux
     | PRecord (fields, _open) -> List.fold fields ~init:acc ~f:(fun ac (_, p) -> aux ac p)
   in
   List.rev (aux [] pat)
+;;
+
+let collect_pattern_vars ?(checkpoint = fun () -> ()) (pat : pattern) =
+  collect_pattern_names pat ~checkpoint ~name:Chatml_syntax_name.name
+;;
+
+let collect_resolved_pattern_vars ?(checkpoint = fun () -> ()) (pat : resolved_pattern) =
+  collect_pattern_names pat ~checkpoint ~name:Fn.id
 ;;

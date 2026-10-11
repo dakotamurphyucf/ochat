@@ -2,8 +2,8 @@ open Core
 
 module Requirement = struct
   type t =
-    { name : string
-    ; parameter : string
+    { name : Chatml_syntax_name.t
+    ; parameter : Chatml_syntax_name.t
     ; span : Source.span
     }
   [@@deriving sexp]
@@ -19,12 +19,12 @@ and item =
 and desc =
   | Type of Chatml_type_expr.Declaration.t
   | Value of
-      { name : string
+      { name : Chatml_syntax_name.t
       ; annotation : Chatml_type_expr.t
       ; requirements : Requirement.t list
       }
   | Module of
-      { name : string
+      { name : Chatml_syntax_name.t
       ; signature : t
       }
 [@@deriving sexp]

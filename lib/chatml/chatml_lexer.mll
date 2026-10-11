@@ -38,7 +38,7 @@
 
 
 {
-  open Chatml_parser
+  open Chatml_tokens
   open Lexing
 
   (** ocamllex does not allow us to peek arbitrarily far, so we implement

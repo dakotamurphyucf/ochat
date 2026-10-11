@@ -47,6 +47,7 @@
     Everything else in this file exists to implement the inference engine
     itself and is **not** part of the stable API.
 *)
+module Syntax_name = Chatml.Chatml_syntax_name
 
 open Core
 open Chatml.Chatml_lang
@@ -1563,9 +1564,10 @@ and infer_recursive_bindings
       (state : infer_state)
       (env : tenv)
       (types : type_env)
-      (bindings : (string * expr node) list)
+      (bindings : (Syntax_name.t * expr node) list)
   : tenv
   =
+  let bindings = List.map bindings ~f:(fun (name, rhs) -> Syntax_name.name name, rhs) in
   validate_unique_binders
     ~what:"recursive binding"
     (List.map bindings ~f:(fun (name, rhs) -> name, rhs.span));
@@ -1599,7 +1601,7 @@ and infer_record_extend
       (env : tenv)
       (types : type_env)
       (base_expr : expr node)
-      (fields : (string * expr node) list)
+      (fields : (Syntax_name.t * expr node) list)
   : typ
   =
   let base_ty = infer_expr state env types base_expr in
@@ -1611,7 +1613,7 @@ and infer_record_extend
   let override_fields =
     List.fold fields ~init:Env.empty ~f:(fun acc (lbl, expr) ->
       let ty = infer_expr state env types expr in
-      Env.add lbl ty acc)
+      Env.add (Syntax_name.name lbl) ty acc)
   in
   let result_fields =
     Env.fold override_fields ~init:base_fields ~f:(fun ~key ~data acc ->
@@ -1653,17 +1655,23 @@ and validate_unique_labels
 
 and validate_unique_record_fields
       (span : Source.span)
-      (fields : (string * expr node) list)
+      (fields : (Syntax_name.t * expr node) list)
   : unit
   =
-  validate_unique_labels ~what:"record field" ~span:(Some span) (List.map fields ~f:fst)
+  validate_unique_labels
+    ~what:"record field"
+    ~span:(Some span)
+    (List.map fields ~f:(fun (name, _) -> Syntax_name.name name))
 
 and validate_unique_record_update_fields
       (span : Source.span)
-      (fields : (string * expr node) list)
+      (fields : (Syntax_name.t * expr node) list)
   : unit
   =
-  validate_unique_labels ~what:"record update" ~span:(Some span) (List.map fields ~f:fst)
+  validate_unique_labels
+    ~what:"record update"
+    ~span:(Some span)
+    (List.map fields ~f:(fun (name, _) -> Syntax_name.name name))
 
 and validate_unique_record_labels_in_pattern (pat : pattern) (span : Source.span option)
   : unit
@@ -1673,7 +1681,10 @@ and validate_unique_record_labels_in_pattern (pat : pattern) (span : Source.span
     | PVariant (_tag, subpats) -> List.iter subpats ~f:loop
     | PTuple patterns -> Chatml.Chatml_tuple.iter patterns ~f:loop
     | PRecord (fields, _is_open) ->
-      validate_unique_labels ~what:"record pattern" ~span (List.map fields ~f:fst);
+      validate_unique_labels
+        ~what:"record pattern"
+        ~span
+        (List.map fields ~f:(fun (name, _) -> Syntax_name.name name));
       List.iter fields ~f:(fun (_lbl, subpat) -> loop subpat)
   in
   loop pat
@@ -1788,7 +1799,7 @@ and pattern_totally_covers_type
   | PRecord (fields, is_open) ->
     let subpatterns_cover_all =
       List.for_all fields ~f:(fun (label, subpat) ->
-        match record_field_type ~checkpoint expected_ty label with
+        match record_field_type ~checkpoint expected_ty (Syntax_name.name label) with
         | Some field_ty -> pattern_totally_covers_type ~checkpoint subpat field_ty
         | None -> false)
     in
@@ -1800,7 +1811,10 @@ and pattern_totally_covers_type
       match resolve_bound_type ~checkpoint expected_ty with
       | Record row ->
         let row_fields, _tail = merge_fields ~checkpoint row in
-        let field_names = List.map fields ~f:fst |> String.Set.of_list in
+        let field_names =
+          List.map fields ~f:(fun (name, _) -> Syntax_name.name name)
+          |> String.Set.of_list
+        in
         Set.equal
           field_names
           (Env.bindings row_fields |> List.map ~f:fst |> String.Set.of_list)
@@ -1826,7 +1840,7 @@ and pattern_fully_covers_variant_case
   =
   checkpoint ();
   match pat with
-  | PVariant (tag', subpats) when String.equal tag tag' ->
+  | PVariant (tag', subpats) when String.equal tag (Syntax_name.name tag') ->
     let payload_tys = payload_component_types ~checkpoint payload_ty in
     List.length subpats = List.length payload_tys
     && List.for_all2_exn subpats payload_tys ~f:(pattern_totally_covers_type ~checkpoint)
@@ -1841,13 +1855,13 @@ and show_pattern_brief (pat : pattern) : string =
   match pat with
   | PUnit -> "()"
   | PWildcard -> "_"
-  | PVar x -> x
+  | PVar x -> Syntax_name.name x
   | PInt i -> Int.to_string i
   | PBool b -> Bool.to_string b
   | PFloat f -> Float.to_string f
   | PString s -> Printf.sprintf "%S" s
-  | PVariant (tag, []) -> Printf.sprintf "`%s" tag
-  | PVariant (tag, _subpats) -> Printf.sprintf "`%s(...)" tag
+  | PVariant (tag, []) -> Printf.sprintf "`%s" (Syntax_name.name tag)
+  | PVariant (tag, _subpats) -> Printf.sprintf "`%s(...)" (Syntax_name.name tag)
   | PRecord _ -> "{...}"
   | PTuple _ -> "(|...|)"
 
@@ -1860,7 +1874,8 @@ and simple_pattern_key_of_pattern (pat : pattern) : (string * string) option =
     let rendered = Float.to_string f in
     Some ("float:" ^ rendered, rendered)
   | PString s -> Some ("string:" ^ s, Printf.sprintf "%S" s)
-  | PVariant (tag, []) -> Some ("variant:" ^ tag, Printf.sprintf "`%s" tag)
+  | PVariant (tag, []) ->
+    Some ("variant:" ^ Syntax_name.name tag, Printf.sprintf "`%s" (Syntax_name.name tag))
   | _ -> None
 
 and validate_match_case_shapes (cases : (pattern * Source.span) list) : unit =
@@ -1979,15 +1994,19 @@ and validate_typed_match_redundancy
        let closed_tail = is_closed_variant_tail ~checkpoint tail in
        List.iter cases ~f:(fun (pat, pat_span) ->
          (match pat with
-          | PVariant (tag, _subpats) when Hash_set.mem covered_tags tag ->
-            let covered_payload = Map.find_exn payload_by_tag tag in
+          | PVariant (tag, _subpats) when Hash_set.mem covered_tags (Syntax_name.name tag)
+            ->
+            let covered_payload = Map.find_exn payload_by_tag (Syntax_name.name tag) in
             raise
               (Type_error_with_loc
                  ( Printf.sprintf
                      "Redundant match arm '%s': previous arms already cover variant case \
                       '%s'"
                      (show_pattern_brief pat)
-                     (show_missing_variant_case ~checkpoint tag covered_payload)
+                     (show_missing_variant_case
+                        ~checkpoint
+                        (Syntax_name.name tag)
+                        covered_payload)
                  , pat_span ))
           | _ when is_catch_all_pattern pat && closed_tail && all_known_tags_covered () ->
             raise
@@ -2067,7 +2086,8 @@ and infer_pattern (state : infer_state) (env : tenv) (pat : pattern) (expected_t
     unify state expected_ty Unit;
     env
   | PWildcard -> env
-  | PVar x -> add_mono ~checkpoint:(fun () -> checkpoint state) env x expected_ty
+  | PVar x ->
+    add_mono ~checkpoint:(fun () -> checkpoint state) env (Syntax_name.name x) expected_ty
   | PInt _ ->
     unify state expected_ty TInt;
     env
@@ -2093,7 +2113,7 @@ and infer_pattern (state : infer_state) (env : tenv) (pat : pattern) (expected_t
       List.fold fields ~init:(env, []) ~f:(fun (env_acc, fields_acc) (lbl, pat) ->
         let ty = new_var state state.shared.current_lvl in
         let env_acc' = infer_pattern state env_acc pat ty in
-        env_acc', (lbl, ty) :: fields_acc)
+        env_acc', (Syntax_name.name lbl, ty) :: fields_acc)
     in
     let fields_env = Env.of_list (List.rev fields_acc) in
     let tail_row =
@@ -2112,7 +2132,9 @@ and infer_pattern (state : infer_state) (env : tenv) (pat : pattern) (expected_t
     let sub_tys = List.rev sub_tys_rev in
     let case_ty = Variant_payload sub_tys in
     let row_var = new_var state state.shared.current_lvl in
-    let variant_ty = Variant (Row (Env.singleton tag case_ty, row_var)) in
+    let variant_ty =
+      Variant (Row (Env.singleton (Syntax_name.name tag) case_ty, row_var))
+    in
     unify state expected_ty variant_ty;
     env_after
 
@@ -2308,7 +2330,7 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
         let row =
           List.fold_right fields ~init:Empty_row ~f:(fun (lbl, expr) acc ->
             let ty = infer_expr state env types expr in
-            Row (Env.singleton lbl ty, acc))
+            Row (Env.singleton (Syntax_name.name lbl) ty, acc))
         in
         Record row
       | EFieldGet (obj, lbl) ->
@@ -2320,7 +2342,7 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
           obj_ty
           (Field_receiver
              ( new_var state state.shared.current_lvl
-             , Row (Env.singleton lbl field_ty, tail_row) ));
+             , Row (Env.singleton (Syntax_name.name lbl) field_ty, tail_row) ));
         field_ty
       | EArray elts ->
         let elt_ty = new_var state state.shared.current_lvl in
@@ -2359,7 +2381,7 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
         let arg_tys = List.map exprs ~f:(fun ex -> infer_expr state env types ex) in
         let case_ty = Variant_payload arg_tys in
         let row_var = new_var state state.shared.current_lvl in
-        Variant (Row (Env.singleton tag case_ty, row_var))
+        Variant (Row (Env.singleton (Syntax_name.name tag) case_ty, row_var))
       | EAnnot (rhs, type_expr) ->
         let annotated_ty =
           typ_of_type_expr
@@ -2529,9 +2551,9 @@ let rec infer_stmt_with_exports
     let env = infer_recursive_bindings state env types bindings in
     let env =
       List.fold bindings ~init:env ~f:(fun env (name, rhs) ->
-        Value_scope.with_span env ~name ~span:rhs.span)
+        Value_scope.with_span env ~name:(Syntax_name.name name) ~span:rhs.span)
     in
-    env, types, List.map bindings ~f:fst
+    env, types, List.map bindings ~f:(fun (name, _) -> Syntax_name.name name)
   | SType declaration ->
     ( env
     , infer_type_decl
@@ -2545,6 +2567,7 @@ let rec infer_stmt_with_exports
     ignore (infer_expr state env types e);
     env, types, []
   | SModule { name = mname; signature; body = stmts } ->
+    let mname = Syntax_name.name mname in
     (* A module declaration is non-recursive: its new name enters scope only
        after its body has been checked. Functions capture the same lexical scope;
        a deferred read does not make the module's own binding available. *)
@@ -2575,8 +2598,9 @@ let rec infer_stmt_with_exports
       List.fold stmts ~init:([], []) ~f:(fun (type_names, module_names) stmt ->
         checkpoint state;
         match stmt.value with
-        | SType declaration -> declaration.name :: type_names, module_names
-        | SModule { name; _ } -> type_names, name :: module_names
+        | SType declaration ->
+          Syntax_name.name declaration.name :: type_names, module_names
+        | SModule { name; _ } -> type_names, Syntax_name.name name :: module_names
         | SLet _ | SLetRec _ | SOpen _ | SExpr _ -> type_names, module_names)
     in
     let exports =
@@ -2620,6 +2644,7 @@ let rec infer_stmt_with_exports
     in
     env, Type_alias.add_module types ~name:mname ~exports, [ mname ]
   | SOpen mname ->
+    let mname = Syntax_name.name mname in
     (* Configured dispatch borrows raw schemes without an ordinary value read.
        Existing module-kind, type/value collision and merge rules stay here. *)
     let opened =
@@ -2722,8 +2747,8 @@ let infer_configured_unit_static state surface (program : program) =
     List.fold program.stmts ~init:([], []) ~f:(fun (type_names, module_names) node ->
       checkpoint state;
       match node.value with
-      | SType declaration -> declaration.name :: type_names, module_names
-      | SModule { name; _ } -> type_names, name :: module_names
+      | SType declaration -> Syntax_name.name declaration.name :: type_names, module_names
+      | SModule { name; _ } -> type_names, Syntax_name.name name :: module_names
       | SLet _ | SLetRec _ | SOpen _ | SExpr _ -> type_names, module_names)
   in
   let types =

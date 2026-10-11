@@ -11,6 +11,8 @@
   chatml_binding_pattern
   chatml_binding_value
   chatml_type_expr
+  chatml_syntax_sites
+  chatml_syntax_name
   chatml_module_signature
   chatml_module_visibility
   chatml_shape_kind
@@ -22,6 +24,8 @@
   chatml_slot_layout
   chatml_lexer
   chatml_parser
+  chatml_parser_tokens
+  chatml_tokens
   chatml_debug_log
   frame_env
   chatml_value_codec
@@ -90,7 +94,12 @@
 
 (menhir
  (modules chatml_parser)
- (flags --table --dump --cmly))
+ (flags --table --dump --cmly --external-tokens Chatml_tokens))
+
+(rule
+ (targets chatml_parser_tokens.ml chatml_parser_tokens.mli)
+ (action
+  (run %{bin:menhir} --only-tokens --base chatml_parser_tokens %{dep:chatml_parser.mly})))
 
 (library
  (name chatml_execution)
