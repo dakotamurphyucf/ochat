@@ -28,6 +28,9 @@ val admit
   -> checkpoint:(unit -> unit)
   -> (t, Chatml_prompt_programs.Error.t) Result.t
 
+(** Fixed complete artifact-manifest policy, independent of host index limits. *)
+val manifest_limits : unit -> Document_schema.Limits.t
+
 (** Hash the complete admitted storage manifest, including unknown metadata and
     private digest/length inventory; exclude outer revision/time/self fields. *)
 val fingerprint

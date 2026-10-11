@@ -13,6 +13,10 @@
   prompt_revision
   prompt_parser_boundary
   prompt_program_custody
+  prompt_project_baseline_record
+  prompt_project_baseline_document
+  prompt_project_baseline
+  prompt_project_baseline_store
   prompt_content_custody
   prompt_revision_builder
   generated_definition
@@ -180,7 +184,8 @@
   quota_manager
   start_queue
   inference_ledger)
- (private_modules pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles)
+ (private_modules pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles
+  prompt_project_baseline_record prompt_project_baseline_document)
  (libraries ochat.inference_client ochat.inference_runtime ochat.inference ochat.history_chatmd ochat.transcript
   core
   digestif

@@ -48,17 +48,21 @@ let prepare authored ~parsed_contexts ~root ~supplied ~checkpoint =
   custody
 ;;
 
+let manifest_limits () =
+  Document_schema.Limits.create
+    ~max_bytes:262144
+    ~max_depth:128
+    ~max_fields:100_000
+    ~max_nodes:1_000_000
+  |> Result.map_error ~f:(fun _ -> "Invalid fixed artifact policy")
+  |> Result.ok_or_failwith
+;;
+
 let fingerprint t ~checkpoint =
-  let limits =
-    Document_schema.Limits.create
-      ~max_bytes:262144
-      ~max_depth:128
-      ~max_fields:100_000
-      ~max_nodes:1_000_000
-    |> Result.map_error ~f:(fun _ -> "Invalid fixed artifact policy")
-    |> Result.ok_or_failwith
-  in
-  Storage.Manifest.fingerprint (Storage.manifest (C.to_storage t)) ~limits ~checkpoint
+  Storage.Manifest.fingerprint
+    (Storage.manifest (C.to_storage t))
+    ~limits:(manifest_limits ())
+    ~checkpoint
   |> Result.map_error ~f:(fun error -> C.Error.Document error)
 ;;
 
