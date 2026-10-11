@@ -42,6 +42,7 @@ let plan
 ;;
 
 let prepare
+      ?(operation = fun _ -> Chatml_project_build.Operation.Initial_prepare)
       ?(provided = [])
       ?(checkpoint = ignore)
       ?(additional_anchors = [])
@@ -51,10 +52,17 @@ let prepare
       captured
       plans
   =
+  let root_plan, role_plans =
+    match plans with
+    | root_plan :: role_plans -> root_plan, role_plans
+    | [] -> failwith "fixture requires explicit Root plan"
+  in
   Scripts.capture
     scope
     ~capture:captured
-    ~plans
+    ~root_plan
+    ~role_plans
+    ~operation
     ~provided
     ~additional_anchors
     ~git_store:None
@@ -675,8 +683,12 @@ let on_event = fun ctx state event -> Task.pure(state)</script>
             |> Option.value_exn
           in
           assert (List.length (C.Restored.programs restored) = 3));
-        assert (
-          Result.is_error (prepare env scope captured [ root_plan; root_plan; headless ]));
+        let repeated =
+          prepare env scope captured [ root_plan; root_plan; headless; headless ] |> ok
+        in
+        assert (List.length (C.bindings repeated) = 3);
+        assert (not (C.has_active_programs repeated));
+        assert (Result.is_error (prepare env scope captured [ headless; root_plan ]));
         Ok ())
       |> ok))
 ;;
@@ -760,6 +772,139 @@ let%test_unit "source-slot matching streams qualified-import pairs beyond progra
           |> ok
         in
         assert (reused = pairs);
+        Ok ())
+      |> ok))
+;;
+
+let%test_unit "self-root requested variants retain only the actual current role active" =
+  with_workspace (fun env _ root ->
+    save
+      root
+      "root.chatmd"
+      {|<tool name="headless" agent="root.chatmd" local="true"/>
+<tool name="delegated" agent="root.chatmd" local="true" persistence="persistent"/>
+<script id="owner" language="chatml" kind="moderator" api="extensibility-v1" project="chatml.project.json">let initial_state = 0
+let on_event = fun ctx state event -> Task.pure(state)</script>|};
+    save root "chatml.project.json" {|{"schema_version":1,"namespace":"self"}|};
+    let definition = definition root in
+    Eio.Switch.run (fun sw ->
+      let owner = open_owner sw root definition in
+      Owner.with_scope owner ~f:(fun scope ->
+        let captured = capture env scope definition |> ok in
+        let value = Owner.Capture.value captured in
+        assert (List.is_empty (Builder.Capture.agents value));
+        let parsed = Builder.Capture.root value in
+        let headless =
+          plan ~moderator_surface:Chatml.Chatml_builtin_surface.moderator_surface parsed
+        in
+        let delegated = plan ~delegated_moderator:true parsed in
+        let calls = ref 0 in
+        let custody =
+          prepare
+            env
+            scope
+            captured
+            [ headless; delegated; headless; delegated ]
+            ~operation:(fun _ ->
+              incr calls;
+              Chatml_project_build.Operation.Initial_prepare)
+          |> ok
+        in
+        assert (!calls = 2);
+        assert (List.length (C.bindings custody) = 2);
+        let restored =
+          Chat_response.Restored_programs.restore
+            headless
+            ~custody
+            ~limits:(custody_limits ())
+            ~checkpoint:ignore
+          |> ok
+          |> Option.value_exn
+        in
+        let active = C.Restored.programs restored in
+        assert (List.length active = 1);
+        assert (
+          S.Digest.equal
+            (Plan.Program.compiler_contract (List.hd_exn (Plan.programs headless)))
+            (P.compiler_contract (C.Restored.Program.prepared (List.hd_exn active))));
+        assert (
+          Result.is_error
+            (Chat_response.Restored_programs.restore
+               delegated
+               ~custody
+               ~limits:(custody_limits ())
+               ~checkpoint:ignore));
+        Ok ())
+      |> ok))
+;;
+
+let%test_unit "configured operation callback is forwarded once and preserves exceptions" =
+  with_workspace (fun env _ root ->
+    populate root;
+    let definition = definition root in
+    Eio.Switch.run (fun sw ->
+      let owner = open_owner sw root definition in
+      let captured =
+        Owner.with_scope owner ~f:(fun scope -> capture env scope definition) |> ok
+      in
+      let planned = plan (Builder.Capture.root (Owner.Capture.value captured)) in
+      let previous =
+        Owner.with_scope owner ~f:(fun scope ->
+          let custody = prepare env scope captured [ planned; planned ] |> ok in
+          let _, restored = replay env captured custody in
+          let previous =
+            List.find_map (C.Restored.programs restored) ~f:(fun program ->
+              match C.Restored.Program.input program with
+              | Provided _ -> None
+              | Selected build -> Some (Chatml_project_build.lock_source build))
+            |> Option.value_exn
+          in
+          Ok previous)
+        |> ok
+      in
+      Owner.with_scope owner ~f:(fun scope ->
+        let calls = ref 0 in
+        let custody =
+          prepare env scope captured [ planned; planned ] ~operation:(fun program ->
+            incr calls;
+            assert (
+              Option.is_some
+                (CM.Declaration.project_selection (Plan.Program.declaration program)));
+            Chatml_project_build.Operation.Build { previous_lock = previous })
+          |> ok
+        in
+        assert (!calls = 1);
+        let _, restored = replay env captured custody in
+        assert (List.length (C.Restored.programs restored) = 2);
+        let exception Injected in
+        let original = Injected in
+        (match
+           prepare env scope captured [ planned ] ~operation:(fun _ -> raise original)
+         with
+         | _ -> assert false
+         | exception exn -> assert (phys_equal exn original));
+        Ok ())
+      |> ok;
+      let invalid =
+        S.create
+          (S.id previous)
+          ~contents:"{}"
+          ~expected_digest:None
+          ~max_bytes:None
+          ~checkpoint:ignore
+        |> ok
+      in
+      assert (
+        Result.is_error
+          (Owner.with_scope owner ~f:(fun scope ->
+             match
+               prepare env scope captured [ planned ] ~operation:(fun _ ->
+                 Chatml_project_build.Operation.Build { previous_lock = invalid })
+             with
+             | Ok _ -> assert false
+             | Error _ -> Ok ())));
+      Owner.with_scope owner ~f:(fun scope ->
+        ignore (prepare env scope captured [ planned ] |> ok : C.t);
         Ok ())
       |> ok))
 ;;

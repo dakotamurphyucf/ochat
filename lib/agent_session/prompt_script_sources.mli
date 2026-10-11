@@ -5,7 +5,10 @@ open Core
 val capture
   :  Prompt_source_owner.Scope.t
   -> capture:Prompt_source_owner.Capture.t
-  -> plans:Chat_response.Script_contract_plan.t list
+  -> root_plan:Chat_response.Script_contract_plan.t
+  -> role_plans:Chat_response.Script_contract_plan.t list
+  -> operation:
+       (Chat_response.Script_contract_plan.Program.t -> Chatml_project_build.Operation.t)
   -> provided:(Chatml_prompt_programs.Binding.t * Chatml_prepared_program.t) list
   -> additional_anchors:Chatml_local_roots.Anchor.t list
   -> git_store:Chatml_git_host.Store.t option
@@ -24,10 +27,16 @@ val capture
   -> checkpoint:(unit -> unit)
   -> (Chatml_prompt_programs.t, Prompt_revision_builder.Diagnostic.t list) Result.t
 
-(** All plans must belong to actual root/queued-root Parsed values in Capture,
-    exactly ONE current Root role plan. Queued Parsed contexts may have several
-    explicitly requested authentic role plans: union binding+contract variants,
+(** [root_plan] must belong to the actual original Root Parsed value in Capture.
+    [role_plans] must belong to that same Root or actual queued-root Parsed values.
+    Only [root_plan] binding+contract pairs become active. Explicitly requested
+    inactive roles may share the original Root; union binding+contract variants,
     deduplicate common roles before source preparation. No unrequested variants.
+    [operation] is invoked exactly once per unique configured program, after whole
+    helper polling and before its request is retained. Its actual returned
+    operation is forwarded to the existing project request; it is not invoked for
+    unconfigured/Provided rows. Original callback exceptions propagate unchanged.
+    The callback is borrowed only for this invocation and never retained.
     Bound pre-dedup work and preflight retained unique programs before acquisition. Supplied Provided
     graphs must match one unconfigured binding PLUS authentic contract/body;
     duplicate/surplus/selected-project substitution rejects. In a wholly

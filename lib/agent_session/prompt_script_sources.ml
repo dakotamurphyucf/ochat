@@ -60,7 +60,9 @@ let binding_equal left right ~checkpoint =
 let capture
       scope
       ~capture
-      ~plans
+      ~root_plan
+      ~role_plans
+      ~operation
       ~provided
       ~additional_anchors
       ~git_store
@@ -259,9 +261,10 @@ let capture
     if max_input_bytes <= 0 || max_path_components <= 0 || max_request_bytes <= 0
     then fail "prompt.program_source_limit" "Script source ceilings must be positive";
     let grouped = ref [] in
-    let root_plans = ref 0 in
     let program_count = ref 0 in
-    List.iter plans ~f:(fun plan ->
+    if not (phys_equal (Plan.parsed root_plan) root)
+    then fail "prompt.program_source_owner" "Current Root role plan is required";
+    let add_plan plan =
       poll ();
       let parsed = Plan.parsed plan in
       if
@@ -270,14 +273,6 @@ let capture
              poll ();
              phys_equal parsed context))
       then fail "prompt.program_source_owner" "Plan belongs to another parser capture";
-      if phys_equal parsed root
-      then (
-        incr root_plans;
-        if !root_plans > 1
-        then
-          fail
-            "prompt.program_source_duplicate"
-            "Current Root requires exactly one role plan");
       let context =
         match
           List.find !grouped ~f:(fun context ->
@@ -308,9 +303,10 @@ let capture
           if !program_count = Int.max_value
           then fail "prompt.program_source_limit" "Program count overflow";
           incr program_count;
-          context.programs <- program :: context.programs)));
-    if !root_plans <> 1
-    then fail "prompt.program_source_owner" "Current Root role plan is required";
+          context.programs <- program :: context.programs))
+    in
+    add_plan root_plan;
+    List.iter role_plans ~f:add_plan;
     let grouped = List.rev !grouped in
     ignore
       (List.fold provided ~init:0 ~f:(fun count _ ->
@@ -392,11 +388,14 @@ let capture
                               (C.Binding.start_byte (Plan.Program.binding program))
                               (S.Digest.to_hex (Plan.Program.compiler_contract program))))
                   in
+                  poll ();
+                  let operation = operation program in
+                  poll ();
                   Some
                     (admit
                        (Prepare.Request.create_with_entry
                           (Prompt_project_route.root route)
-                          ~operation:Initial_prepare
+                          ~operation
                           ~selection:
                             (Library
                                { environment = Prompt_project_route.environment route })
@@ -412,7 +411,14 @@ let capture
             ; source
             ; supplied
             ; request
-            ; active = phys_equal context.Context.parsed root
+            ; active =
+                phys_equal context.Context.parsed root
+                && List.exists (Plan.programs root_plan) ~f:(fun active ->
+                  poll ();
+                  phys_equal (Plan.Program.declaration active) declaration
+                  && S.Digest.equal
+                       (Plan.Program.compiler_contract active)
+                       (Plan.Program.compiler_contract program))
             }))
     in
     List.iter provided ~f:(fun pair ->
