@@ -46,15 +46,13 @@ end
 (** Borrow the exclusively owned actual Session_store and already opened baseline
     store for the host lifetime. A new baseline must come only from the successful
     Session_store.create branch; an existing root always uses open_existing.
-    Source anchors/Git grants are actual operator-admitted host authority. Creating
-    this coordinator neither opens sources nor admits new grants. *)
+    Creating this coordinator neither opens sources nor retains source authority. *)
 val create
   :  store:Agent_store.Session_store.t
   -> catalog:Agent_session.Prompt_catalog.t
   -> artifacts:Agent_store.Prompt_artifact_store.t
   -> baselines:Agent_session.Prompt_project_baseline_store.t
   -> policy:Policy.t
-  -> sources:Agent_session.Prompt_script_preparation.Host.t
   -> content_limits:Chatmd_prompt_content.Limits.t option
   -> t
 
@@ -80,9 +78,14 @@ end
     Expected failure/exception closes unused candidates and releases reservation;
     originals/cancellation propagate after joined cleanup. [sw] is the actual host
     lifetime, shared with the baseline/source owners: it stays alive through
-    publish/commit/retire or discard, not merely until preparation returns. *)
+    publish/commit/retire or discard, not merely until preparation returns.
+    [sources] borrows actual operator-admitted anchors/Git grants only until prepare
+    returns; its source-host borrow need not span publication. The prepared token
+    retains immutable program custody and separately owned original catalog scopes,
+    never additional source anchors, Git handles, readers or grants. *)
 val prepare
   :  t
+  -> sources:Agent_session.Prompt_script_preparation.Host.t
   -> sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
   -> mode:Mode.t

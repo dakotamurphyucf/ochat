@@ -71,7 +71,6 @@ type t =
   ; artifacts : Agent_store.Prompt_artifact_store.t
   ; baselines : Store.t
   ; policy : Policy.t
-  ; sources : Sources.Host.t
   ; content_limits : Chatmd_prompt_content.Limits.t option
   ; mutable admission : admission
   }
@@ -104,14 +103,13 @@ type certainty =
   | Uncertain
 [@@deriving equal, sexp_of]
 
-let create ~store ~catalog ~artifacts ~baselines ~policy ~sources ~content_limits =
+let create ~store ~catalog ~artifacts ~baselines ~policy ~content_limits =
   { domain_id = (Stdlib.Domain.self () :> int)
   ; store
   ; catalog
   ; artifacts
   ; baselines
   ; policy
-  ; sources
   ; content_limits
   ; admission = Available
   }
@@ -196,7 +194,7 @@ let capture_content ~checkpoint limits scope capture =
     ])
 ;;
 
-let prepare t ~sw ~env ~mode ~created_at ~checkpoint definitions =
+let prepare t ~sources ~sw ~env ~mode ~created_at ~checkpoint definitions =
   let open Result.Let_syntax in
   let%bind () = reserve t in
   let token = ref () in
@@ -265,7 +263,7 @@ let prepare t ~sw ~env ~mode ~created_at ~checkpoint definitions =
             ~baseline_limits:t.policy.baseline_limits
             ~custody_limits:t.policy.custody_limits
             ~root_role:Ui
-            ~host:t.sources
+            ~host:sources
             ~scope
             ~capture:captured
             ~provided:[]
