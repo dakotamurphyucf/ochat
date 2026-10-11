@@ -47,6 +47,15 @@ and ty =
   | TRef of ty
   | TTuple of ty list
   | TRecord of row
+  | TModule of row
+  (** A module's accessible exports. This type cannot satisfy record-only
+      annotations, patterns or copy-update operations. *)
+  | TField_receiver of string * row
+  (** A receiver admitting either a record or a module with the required fields.
+      The string names a quantified representation-kind variable, in a separate
+      namespace from value and row variables. Reusing it within a scheme requires
+      the same representation; independent instantiations may choose differently.
+      This constraint supports projection and [record_keys], not record mutation. *)
   | TVariant of variant_row
   | TFun of ty list * ty
   | TMu of string * ty
@@ -60,13 +69,13 @@ type builtin =
   ; impl : value list -> value
   }
 
-(** A builtin module installed as a record-like runtime value. *)
+(** A builtin module installed as an identity-bearing module environment. *)
 type builtin_module =
   { name : string
   ; exports : builtin list
   }
 
-(** Compute the record type corresponding to a builtin module's exports. *)
+(** Compute the distinct module type corresponding to its accessible exports. *)
 val module_scheme : builtin_module -> ty
 
 (** Render a runtime value into a stable debugging string shared by tests

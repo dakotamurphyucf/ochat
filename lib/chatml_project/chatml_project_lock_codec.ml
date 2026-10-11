@@ -107,6 +107,59 @@ module Decode = struct
       "expected a nonnegative source byte length"
   ;;
 
+  let entry reader path value =
+    let open Result.Let_syntax in
+    let%bind fields =
+      Reader.object_fields reader path ~allowed:[ "source"; "selection" ] value
+    in
+    let%bind source = Reader.required reader path fields "source" ~decode:source in
+    let selection reader path value =
+      let%bind fields =
+        Reader.object_fields reader path ~allowed:[ "kind"; "name" ] value
+      in
+      let%bind kind =
+        Reader.required reader path fields "kind" ~decode:Reader.nonempty_string
+      in
+      match kind with
+      | "declared" ->
+        let%map name =
+          Reader.required reader path fields "name" ~decode:Reader.nonempty_string
+        in
+        Receipt.Entry.Declared name
+      | "captured" ->
+        let%map _ = Reader.object_fields reader path ~allowed:[ "kind" ] value in
+        Receipt.Entry.Captured
+      | _ -> Reader.fail reader path "expected declared or captured entry selection"
+    in
+    let%bind selection =
+      Reader.required reader path fields "selection" ~decode:selection
+    in
+    primitive
+      reader
+      path
+      (Receipt.Entry.create source ~selection)
+      "invalid entry selection"
+  ;;
+
+  let dependency reader path value =
+    let open Result.Let_syntax in
+    let%bind fields =
+      Reader.object_fields reader path ~allowed:[ "name"; "declaration" ] value
+    in
+    let%bind name =
+      Reader.required reader path fields "name" ~decode:Reader.nonempty_string
+    in
+    let%bind declaration = Reader.required reader path fields "declaration" ~decode:id in
+    primitive
+      reader
+      path
+      (Receipt.Dependency_selection.create
+         ~name
+         ~declaration
+         ~checkpoint:reader.checkpoint)
+      "invalid selected dependency name"
+  ;;
+
   let module_selection reader path value =
     let open Result.Let_syntax in
     let%bind fields =
@@ -170,19 +223,46 @@ module Decode = struct
       Reader.object_fields
         reader
         path
-        ~allowed:[ "kind"; "path"; "repository"; "object_format"; "commit" ]
+        ~allowed:
+          [ "kind"; "path"; "repository"; "object_format"; "commit"; "package_root" ]
         value
     in
     let%bind kind =
       Reader.required reader path fields "kind" ~decode:Reader.nonempty_string
     in
-    if String.equal kind "root_local"
-    then (
+    match kind with
+    | "local" ->
       let%map _ = Reader.object_fields reader path ~allowed:[ "kind" ] value in
-      Receipt.Catalog.Root_local)
-    else (
-      let%map source = Chatml_project_decode.Decode.dependency_source reader path value in
-      Receipt.Catalog.Dependency source)
+      Receipt.Catalog.Local
+    | "git" ->
+      let%bind package_root =
+        let path = path @ [ "package_root" ] in
+        match Document_schema.Json.field (`Object fields) ~name:"package_root" with
+        | Absent -> Reader.fail reader path "required field is absent"
+        | Null -> Ok None
+        | Value value ->
+          let%bind value = Reader.nonempty_string reader path value in
+          primitive
+            reader
+            path
+            (Source.Portable_path.create value)
+            "invalid portable repository package root"
+          |> Result.map ~f:Option.some
+      in
+      (* Reuse the authored source-kind/pin decoder without admitting this receipt-
+         only field into user dependency syntax. *)
+      let value =
+        `Object
+          (List.filter fields ~f:(fun (name, _) -> not (String.equal name "package_root")))
+      in
+      let%bind source =
+        Chatml_project_decode.Decode.dependency_source reader path value
+      in
+      (match source with
+       | Git { repository; pin } ->
+         Ok (Receipt.Catalog.Git { repository; pin; package_root })
+       | Local _ -> Reader.fail reader path "expected a Git catalog origin")
+    | _ -> Reader.fail reader path "expected local or git catalog origin"
   ;;
 
   let catalog reader path value =
@@ -196,6 +276,7 @@ module Decode = struct
           ; "origin"
           ; "declaration"
           ; "selected_environment"
+          ; "dependencies"
           ; "sources"
           ; "modules"
           ; "scopes"
@@ -214,6 +295,14 @@ module Decode = struct
         fields
         "selected_environment"
         ~decode:Reader.nonempty_string
+    in
+    let%bind dependencies =
+      Reader.required
+        reader
+        path
+        fields
+        "dependencies"
+        ~decode:(Reader.array ~decode:dependency)
     in
     let%bind sources =
       Reader.required reader path fields "sources" ~decode:(Reader.array ~decode:source)
@@ -235,6 +324,7 @@ module Decode = struct
       ~origin
       ~declaration
       ~selected_environment
+      ~dependencies
       ~sources
       ~modules
       ~scopes
@@ -262,8 +352,14 @@ module Decode = struct
     family, target, contract
   ;;
 
-  let reject_own_source reader catalogs =
+  let reject_own_source reader entry catalogs =
     let own = Chatml_source.id (Project.Declared_at.source reader.Reader.origin) in
+    let open Result.Let_syntax in
+    let%bind () =
+      if Id.equal own (Receipt.Source_entry.id (Receipt.Entry.source entry))
+      then Reader.fail reader [ "entry" ] "lock entry includes its own source ID"
+      else Ok ()
+    in
     List.fold_result catalogs ~init:() ~f:(fun () catalog ->
       reader.checkpoint ();
       List.fold_result (Receipt.Catalog.sources catalog) ~init:() ~f:(fun () source ->
@@ -282,6 +378,7 @@ module Decode = struct
         path
         ~allowed:
           [ "schema_version"
+          ; "root"
           ; "entry"
           ; "environment"
           ; "compiler"
@@ -291,7 +388,8 @@ module Decode = struct
         value
     in
     let%bind () = Reader.required reader path fields "schema_version" ~decode:version in
-    let%bind entry = Reader.required reader path fields "entry" ~decode:id in
+    let%bind root = Reader.required reader path fields "root" ~decode:id in
+    let%bind entry = Reader.required reader path fields "entry" ~decode:entry in
     let%bind environment =
       Reader.required reader path fields "environment" ~decode:Reader.nonempty_string
     in
@@ -309,9 +407,10 @@ module Decode = struct
     let%bind catalogs =
       Reader.required reader path fields "catalogs" ~decode:(Reader.array ~decode:catalog)
     in
-    let%bind () = reject_own_source reader catalogs in
+    let%bind () = reject_own_source reader entry catalogs in
     Receipt.create
       ~declared_at:reader.origin
+      ~root
       ~entry
       ~environment
       ~compiler_family
@@ -412,6 +511,29 @@ module Encode = struct
     object_fields t [ "id", id; "sha256", sha256; "byte_length", byte_length ]
   ;;
 
+  let entry t entry =
+    let open Result.Let_syntax in
+    let%bind source = source t (Receipt.Entry.source entry) in
+    let%bind selection =
+      match Receipt.Entry.selection entry with
+      | Declared name ->
+        let%bind kind = string t "declared" in
+        let%bind name = string t name in
+        object_fields t [ "kind", kind; "name", name ]
+      | Captured ->
+        let%bind kind = string t "captured" in
+        object_fields t [ "kind", kind ]
+    in
+    object_fields t [ "source", source; "selection", selection ]
+  ;;
+
+  let dependency t dependency =
+    let open Result.Let_syntax in
+    let%bind name = string t (Receipt.Dependency_selection.name dependency) in
+    let%bind declaration = id t (Receipt.Dependency_selection.declaration dependency) in
+    object_fields t [ "name", name; "declaration", declaration ]
+  ;;
+
   let module_selection t selection =
     let open Result.Let_syntax in
     let%bind implementation = id t (Receipt.Module_selection.implementation selection) in
@@ -443,16 +565,11 @@ module Encode = struct
   ;;
 
   let origin t = function
-    | Receipt.Catalog.Root_local ->
-      let open Result.Let_syntax in
-      let%bind kind = string t "root_local" in
-      object_fields t [ "kind", kind ]
-    | Dependency (Local { directory }) ->
+    | Receipt.Catalog.Local ->
       let open Result.Let_syntax in
       let%bind kind = string t "local" in
-      let%bind path = string t directory in
-      object_fields t [ "kind", kind; "path", path ]
-    | Dependency (Git { repository; pin }) ->
+      object_fields t [ "kind", kind ]
+    | Git { repository; pin; package_root } ->
       let open Result.Let_syntax in
       let%bind kind = string t "git" in
       let%bind repository = string t repository in
@@ -464,12 +581,18 @@ module Encode = struct
            | Sha256 -> "sha256")
       in
       let%bind commit = string t (Project.Git_pin.commit pin) in
+      let%bind package_root =
+        match package_root with
+        | None -> Result.map (charge t 4) ~f:(fun () -> `Null)
+        | Some root -> string t (Source.Portable_path.to_string root)
+      in
       object_fields
         t
         [ "kind", kind
         ; "repository", repository
         ; "object_format", object_format
         ; "commit", commit
+        ; "package_root", package_root
         ]
   ;;
 
@@ -480,6 +603,9 @@ module Encode = struct
     let%bind declaration = id t (Receipt.Catalog.declaration catalog) in
     let%bind selected_environment =
       string t (Receipt.Catalog.selected_environment catalog)
+    in
+    let%bind dependencies =
+      array t (Receipt.Catalog.dependencies catalog) ~encode:dependency
     in
     let%bind sources = array t (Receipt.Catalog.sources catalog) ~encode:source in
     let%bind modules =
@@ -492,6 +618,7 @@ module Encode = struct
       ; "origin", origin
       ; "declaration", declaration
       ; "selected_environment", selected_environment
+      ; "dependencies", dependencies
       ; "sources", sources
       ; "modules", modules
       ; "scopes", scopes
@@ -501,7 +628,8 @@ module Encode = struct
   let receipt t receipt =
     let open Result.Let_syntax in
     let%bind schema_version = integer t 1 in
-    let%bind entry = id t (Receipt.entry receipt) in
+    let%bind root = id t (Receipt.root receipt) in
+    let%bind entry = entry t (Receipt.entry_selection receipt) in
     let%bind environment = string t (Receipt.environment receipt) in
     let%bind family = string t (Receipt.compiler_family receipt) in
     let%bind target = string t (Receipt.target_name receipt) in
@@ -516,6 +644,7 @@ module Encode = struct
     object_fields
       t
       [ "schema_version", schema_version
+      ; "root", root
       ; "entry", entry
       ; "environment", environment
       ; "compiler", compiler

@@ -59,6 +59,10 @@ let check_value
     | VArray values ->
       if Array.length values > max_array_items then failwith "array item limit";
       Array.iter values ~f:child
+    | VTuple values ->
+      if Chatml.Chatml_tuple.length values > max_array_items
+      then failwith "tuple item limit";
+      Chatml.Chatml_tuple.iter values ~f:child
     | VRecord fields ->
       Map.iteri fields ~f:(fun ~key ~data ->
         consume (String.length key);

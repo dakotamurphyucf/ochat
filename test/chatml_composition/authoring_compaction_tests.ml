@@ -124,11 +124,10 @@ let exercise with_session =
   and fresh_source = ref "" in
   let first_receipts = ref [] in
   let partial_pages = ref 0 in
-  let queried = ref [] in
+  let delivered_pages = ref [] in
   let query number request =
     let id = "reference-" ^ Int.to_string number in
     pending := id;
-    queried := id :: !queried;
     [ id, "ochat_authoring_context", request ]
   in
   let example =
@@ -177,6 +176,8 @@ let exercise with_session =
       | Initial_prepare | Initial_example | Refreshed_example ->
         let page = response !inputs !pending in
         assert (not (Q.has_error page));
+        let delivered = not (List.is_empty (Q.items page)) in
+        delivered_pages := (!pending, delivered) :: !delivered_pages;
         pages := !pages @ [ page ];
         (match Q.field page "next_cursor" with
          | `String cursor ->
@@ -359,8 +360,10 @@ let exercise with_session =
                 P.History.Id.equal
                   receipt.Chat_response.Authoring_presence.entry_id
                   old.entry_id))));
-       List.iter !queried ~f:(fun id ->
-         assert (Option.is_some (model_invocation state id).authoring_reference));
+       List.iter !delivered_pages ~f:(fun (id, delivered) ->
+         [%test_eq: bool]
+           delivered
+           (Option.is_some (model_invocation state id).authoring_reference));
        print_endline
          "paginated background package -> persisted compaction -> manual pointer -> \
           fresh retrieval -> moderator validation -> executed completion parser")

@@ -134,8 +134,8 @@ let make_control ~env budget =
   let until_poll = Atomic.make 0 in
   let clock = Eio.Stdenv.mono_clock env in
   let started = Eio.Time.Mono.now clock in
-  let checkpoint () =
-    consume budget remaining 1 fuel_failure;
+  let diagnostic_checkpoint () =
+    check_budget budget;
     if Atomic.fetch_and_add until_poll (-1) <= 0
     then (
       Atomic.set until_poll 64;
@@ -149,6 +149,10 @@ let make_control ~env budget =
           { code = "chatml.execution_timeout"
           ; message = "ChatML execution deadline exceeded"
           })
+  in
+  let checkpoint () =
+    consume budget remaining 1 fuel_failure;
+    diagnostic_checkpoint ()
   in
   let allocation_remaining = Atomic.make limits.allocation_bytes in
   let allocate bytes = consume budget allocation_remaining bytes allocation_failure in
@@ -178,6 +182,10 @@ let make_control ~env budget =
       | VArray values ->
         if Array.length values > limits.max_array_items then value_failure ();
         Array.iter values ~f:(visit (depth + 1))
+      | VTuple values ->
+        if Chatml.Chatml_tuple.length values > limits.max_array_items
+        then value_failure ();
+        Chatml.Chatml_tuple.iter values ~f:(visit (depth + 1))
       | VRecord fields ->
         if Map.length fields > limits.max_array_items then value_failure ();
         Map.iteri fields ~f:(fun ~key ~data ->
@@ -188,7 +196,7 @@ let make_control ~env budget =
         List.iter fields ~f:(visit (depth + 1))
       | VRef cell -> visit (depth + 1) !cell
       | VTask task when render_tasks ->
-        (match task with
+        (match task.step with
          | TPure value -> visit (depth + 1) value
          | TBind (task, fn) | TMap (task, fn) | TCatch (task, fn) ->
            visit (depth + 1) (VTask task);
@@ -300,7 +308,8 @@ let make_control ~env budget =
     checkpoint ();
     List.iter args ~f:check_value;
     match name, args with
-    | ("Array.make" | "Array.init" | "Array.literal"), VInt count :: _ -> array_size count
+    | ("Array.make" | "Array.init" | "Array.literal" | "Tuple.literal"), VInt count :: _
+      -> array_size count
     | "Array.append", [ VArray a; VArray b ] ->
       array_size (Array.length a + Array.length b)
     | ( ( "Array.copy"
@@ -413,6 +422,7 @@ let make_control ~env budget =
     | _ -> ()
   in
   { Chatml.Chatml_lang.checkpoint
+  ; diagnostic_checkpoint
   ; allocate
   ; before_builtin
   ; check_value
@@ -512,6 +522,8 @@ let with_scope
         Some
           Chatml.Chatml_lang.
             { checkpoint = (fun () -> each (fun c -> c.checkpoint ()))
+            ; diagnostic_checkpoint =
+                (fun () -> each (fun c -> c.diagnostic_checkpoint ()))
             ; allocate = (fun bytes -> each (fun c -> c.allocate bytes))
             ; check_value = (fun value -> each (fun c -> c.check_value value))
             ; before_json_import =
@@ -571,6 +583,7 @@ let create_runner ~env ~policy () =
   in
   let control : Chatml.Chatml_lang.execution_control =
     { checkpoint = (fun () -> apply (fun c -> c.checkpoint ()))
+    ; diagnostic_checkpoint = (fun () -> apply (fun c -> c.diagnostic_checkpoint ()))
     ; allocate = (fun bytes -> apply (fun c -> c.allocate bytes))
     ; check_value = (fun value -> apply (fun c -> c.check_value value))
     ; before_json_import = (fun value -> apply (fun c -> c.before_json_import value))
@@ -600,34 +613,32 @@ let with_host_budget ?context ~policy ~env f =
   with_scope ~invocation:false ?context ~policy ~env f
 ;;
 
-let run_in_scope
-      ?prepare_result
-      ~(control : Chatml.Chatml_lang.execution_control option)
-      ~config
-      ~program
-      ~entrypoint
-      ~arguments
-      ()
-  =
-  Option.iter control ~f:(fun c -> List.iter arguments ~f:c.check_value);
+let checked_run ~control ~arguments ~prepare_result ~f =
+  Option.iter control ~f:(fun c ->
+    List.iter arguments ~f:c.Chatml.Chatml_lang.check_value);
   let prepare_result =
     Option.map prepare_result ~f:(fun prepare ~value ~local_effects ->
-      Option.iter control ~f:(fun c -> c.check_value value);
+      Option.iter control ~f:(fun c -> c.Chatml.Chatml_lang.check_value value);
       prepare ~value ~local_effects)
   in
-  Chatml_host_runtime.run_entrypoint
-    ?control
-    ?prepare_result
-    config
-    program
-    ~entrypoint
-    ~arguments
-    ()
+  f prepare_result
   |> Result.map ~f:(fun value ->
     (match prepare_result with
-     | None -> Option.iter control ~f:(fun c -> c.check_value value)
+     | None -> Option.iter control ~f:(fun c -> c.Chatml.Chatml_lang.check_value value)
      | Some _ -> ());
     value)
+;;
+
+let run_in_scope ?prepare_result ~control ~config ~program ~entrypoint ~arguments () =
+  checked_run ~control ~arguments ~prepare_result ~f:(fun prepare_result ->
+    Chatml_host_runtime.run_entrypoint
+      ?control
+      ?prepare_result
+      config
+      program
+      ~entrypoint
+      ~arguments
+      ())
   |> Result.map_error ~f:(fun message ->
     { code = "chatml.execution_failed"; message = String.prefix message (16 * 1024) })
 ;;
@@ -635,5 +646,38 @@ let run_in_scope
 let run ?policy ?context ~env ~config ~program ~entrypoint ~arguments () =
   with_control ?policy ?context ~env (fun control ->
     run_in_scope ~control ~config ~program ~entrypoint ~arguments ())
+  |> Result.join
+;;
+
+let run_prepared_in_scope
+      program
+      ~control
+      ~config
+      ~entrypoint
+      ~arguments
+      ?prepare_result
+      ()
+  =
+  checked_run ~control ~arguments ~prepare_result ~f:(fun prepare_result ->
+    Chatml_host_runtime.run_prepared_entrypoint_detailed
+      config
+      program
+      ~entrypoint
+      ~arguments
+      ?control
+      ?prepare_result
+      ())
+  |> Result.map_error ~f:(fun diagnostic ->
+    let checkpoint () =
+      Option.iter control ~f:(fun c -> c.Chatml.Chatml_lang.diagnostic_checkpoint ())
+    in
+    { code = "chatml.execution_failed"
+    ; message = Chatml_diagnostic.render diagnostic ~label:"Runtime error" ~checkpoint
+    })
+;;
+
+let run_prepared program ?policy ?context ~env ~config ~entrypoint ~arguments () =
+  with_control ?policy ?context ~env (fun control ->
+    run_prepared_in_scope program ~control ~config ~entrypoint ~arguments ())
   |> Result.join
 ;;

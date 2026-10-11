@@ -54,13 +54,18 @@ end
 (** Immutable exact bytes and their independently computed digest. Strings are
     retained as immutable OCaml values; contents are not trimmed, UTF-8 repaired,
     newline-normalized, parsed or preprocessed. Code/string byte semantics remain
-    compatible with existing single-file compilation. *)
+    compatible with existing single-file compilation. A private immutable position
+    index retains two integers per 4096-byte block, plus one initial slot. This
+    derived index does not change source identity or exact byte accounting. *)
 type t
 
 (** Checks [max_bytes] before hashing; [None] omits this host-selected byte ceiling,
     while [Some n] requires positive n. Hash in bounded chunks, polling checkpoint
     between chunks. [expected_digest], when supplied by admitted host metadata,
     must equal the computed digest. It is not trusted without recomputation.
+    Only after size and digest validation, build the position index in a separate
+    bounded, checkpoint-polled pass. Index arrays mutate only during construction
+    and are never exposed or modified after successful admission.
 
     Checkpoint exceptions, including cancellation, propagate unchanged. A failure
     or cancellation returns/publishes no partially constructed source. No global
@@ -91,8 +96,9 @@ val digest : t -> Digest.t
     LF, CR and CRLF are line breaks, with CRLF counted once as in the ChatML lexer.
     Between CR and its following LF, the position remains on the preceding line;
     the break is complete after LF. Every byte offset is admitted.
-    The source index is immutable. A scan/index build polls checkpoint and is
-    invocation-local; it cannot retain an Eio control or mutable global cache. *)
+    Each endpoint starts at its immutable 4096-byte position checkpoint and scans
+    at most 4095 bytes. Lookup polls checkpoint and retains no supplied callback,
+    Eio control or mutable global cache. Checkpoint exceptions propagate unchanged. *)
 val locate
   :  t
   -> start_byte:int

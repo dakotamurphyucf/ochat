@@ -39,6 +39,47 @@ let plan project names =
   C.Plan.create discovery ~observations ~checkpoint:ignore |> ok
 ;;
 
+let%test_unit "scope lookup polls complete searches and preserves immutable selections" =
+  let p =
+    project
+      {|{"schema_version":1,"namespace":"test","source_dirs":["."],"environments":{"default":{},"isolated":{"modules":{}}},"file_environments":{"z.chatml":"isolated"}}|}
+  in
+  let first = capture "a.chatml" "let a = 1" in
+  let last = capture "z.chatml" "let z = 2" in
+  let catalog =
+    C.create
+      (plan p [ "a.chatml"; "z.chatml" ])
+      ~sources:[ P.source p; first; last ]
+      ~checkpoint:ignore
+    |> ok
+  in
+  let lookup ?checkpoint source = C.scope_for ?checkpoint catalog ~source in
+  let selected source = lookup source |> Option.value_exn |> P.Scope_spec.name in
+  [%test_eq: string] (selected (S.id first)) "default";
+  [%test_eq: string] (selected (S.id last)) "isolated";
+  let polls = ref 0 in
+  ignore (lookup ~checkpoint:(fun () -> incr polls) (S.id last) : P.Scope_spec.t option);
+  (* Namespace admission, every preceding member and the selected member must
+     be interruptible. Do not lock the assertion to one implementation count. *)
+  assert (!polls >= 4);
+  let exception Cancelled of unit ref in
+  for stop = 1 to !polls do
+    let token = ref () in
+    let observed = ref 0 in
+    let checkpoint () =
+      incr observed;
+      if !observed = stop then raise (Cancelled token)
+    in
+    (match lookup ~checkpoint (S.id last) with
+     | _ -> failwith "cancelled lookup returned a selection"
+     | exception Cancelled actual -> assert (phys_equal actual token));
+    [%test_eq: string] (selected (S.id last)) "isolated"
+  done;
+  assert (Option.is_none (lookup (S.id (P.source p))));
+  assert (Option.is_none (lookup (S.id (capture "missing.chatml" ""))));
+  assert (Option.is_none (lookup (S.id (capture ~namespace:"other" "z.chatml" ""))))
+;;
+
 let paths plan =
   List.map (C.Plan.members plan) ~f:(fun value ->
     ( Source.Portable_path.to_string (C.Plan.Member.path value)

@@ -43,7 +43,9 @@ let main input = Task.pure(`Null)
 `[1, 2]` is an array, not an OCaml list. Use `values[index]` for access and
 `values[index] <- value` for mutation. Array elements share a type. Record fields
 use semicolons; variants use a backtick and can have comma-separated payloads.
-A multi-payload constructor does not imply that arbitrary tuple expressions exist.
+Tuples use `(|a, b|)`, with at least two elements and product type `int * string`.
+A constructor `` `Pair(a, b) `` has two payloads; `` `Pair((|a, b|)) `` has one
+tuple payload. Ordinary `(a, b)` is rejected, and `()` remains unit.
 
 <!-- ochat-authoring-example: {"id":"containers.delimiters","surface":"one_off_v1","result":true} -->
 ```ocaml
@@ -55,7 +57,7 @@ let main input =
   | `Pair(name, count) -> Task.pure(`Bool(count == 3))
 ```
 
-**Rejected during parsing:** `(1, 2)` is not a general tuple expression.
+**Rejected during parsing:** `(1, 2)` does not use ChatML tuple delimiters.
 
 <!-- ochat-authoring-example: {"id":"containers.tuple-rejected","surface":"one_off_v1","stage":"parse","contains":"Syntax error","span":true} -->
 ```ocaml
@@ -63,7 +65,7 @@ let pair = (1, 2)
 let main input = Task.pure(`Null)
 ```
 
-## Records are structural, with conservative joins
+## Records are structural, with matching branch shapes
 
 You do not need an OCaml-style nominal record declaration to create or inspect a
 record. A copy update creates a new record and may change a field's type. It does
@@ -79,11 +81,13 @@ let main input =
   else Task.pure(`String("unexpected mutation"))
 ```
 
-At an `if` or `match` join, only fields guaranteed on every branch remain
-available. Do not assume a field added on one branch exists on the joined result.
-Prefer the same explicit result shape on each branch.
+At an `if` or `match` join, branch records must have the same field set and
+compatible field types. Construct matching result shapes, or use variant tags
+for intentionally different alternatives. Open record-taking helpers still
+accept additional fields; matching result types do not erase those fields.
 
-**Rejected during typechecking:** `timeout_ms` is not present on every path.
+**Rejected during typechecking:** these branches have different field sets,
+even if the caller never reads `timeout_ms`.
 
 <!-- ochat-authoring-example: {"id":"records.join-rejected","surface":"one_off_v1","stage":"typecheck","contains":"timeout_ms","span":true} -->
 ```ocaml
@@ -207,10 +211,40 @@ let main input =
 
 ## Modules export their own declarations
 
-Modules can refer to outer bindings while being defined. Those bindings are not
-implicitly exported. An `open` inside a module does not re-export the imported
-names either. Prefer qualified builtin access such as `Array.length(values)`;
-`open` rejects shadowing rather than silently replacing an existing binding.
+Modules can refer to earlier lexical bindings while being defined. They are
+non-recursive: the new module name is unavailable within its own body, even in a
+function called later. Use local names and `let rec` for recursive functions.
+Initialization installs the new module only after its body succeeds; earlier
+effects are not rolled back if it fails.
+
+An unsigned module exports its own values, transparent type aliases and nested
+modules. Outer bindings and names introduced only by `open` are not implicitly
+exported. Refer to public types with paths such as `Data.t` or `Outer.Inner.t`;
+`open` also brings public types into scope and preserves value polymorphism and
+shared mutable state. Prefer qualified builtin access such as
+`Array.length(values)`; `open` rejects collisions rather than silently replacing
+an existing binding.
+
+Inline contracts use `module M : sig ... end = struct ... end`, with transparent
+`type t = ...`, `val name : ...` and nested `module Name : sig ... end` items.
+Unlike an OCaml abstract `type t` specification, these aliases expose their
+structural definition. `val identity : fun('a) -> 'a` is an explicit universal
+claim that the implementation must satisfy. Equality-using generic specifications
+carry `where equality('a)`. The checked signature selects public runtime members;
+exported closures retain private implementation bindings. There are no module
+type declarations or functors. See the [checked inline interface](chatml-inference.md#modules-and-records-have-different-representations).
+
+Modules have a distinct kind from ordinary records. Projection and `record_keys`
+support both, while record annotations, patterns and copy-updates require records
+and `open` requires a module.
+
+Optional `;;` separates statements at the top level and inside modules. It is
+useful for a boundary such as `type t = int ;; Graph.run()`; ordinary declaration
+sequences still need no separators, and `;` continues to sequence expressions.
+The [module type and separator example](chatml-inference.md#modules-and-records-have-different-representations)
+demonstrates the distinction. Configured multi-file module loading and companion
+`.chatmli` linkage are still pending; the interface parser does not itself load
+or link another file.
 
 **Rejected during typechecking:** `M` exports `y`, not the outer `x`.
 

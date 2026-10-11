@@ -17,7 +17,12 @@ let%expect_test "compiled syntax inventory is separate from binding coverage" =
     [ "expr -> LETSTAR task_let_binder EQ expr_sequence IN expr_sequence"
     ; "expr -> LETPLUS task_let_binder EQ expr_sequence IN expr_sequence"
     ; "expr -> BANGEQ expr"
-    ; "type_arrow -> type_postfix ARROW type_arrow"
+    ; "type_arrow -> type_product ARROW type_arrow"
+    ; "expr -> TUPLE_OPEN expr_sequence COMMA expr_sequence tuple_expr_tail TUPLE_CLOSE"
+    ; "pattern -> TUPLE_OPEN pattern COMMA pattern tuple_pattern_tail TUPLE_CLOSE"
+    ; "binding_pattern -> TUPLE_OPEN binding_pattern COMMA binding_pattern \
+       binding_pattern_tail TUPLE_CLOSE"
+    ; "params -> binding_pattern params"
     ; "pattern -> LBRACE pattern_field_list RBRACE"
     ]
     ~f:(fun id -> assert (List.mem ids id ~equal:String.equal));
@@ -52,7 +57,7 @@ let%expect_test "compiled syntax inventory is separate from binding coverage" =
        coverage"];
   [%expect
     {|
-    (143
+    (190
      "compiled productions on each of four surfaces; unmapped syntax cannot pass coverage")
     |}]
 ;;

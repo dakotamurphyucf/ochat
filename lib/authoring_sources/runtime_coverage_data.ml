@@ -45,16 +45,51 @@ let shared_features =
       ; "test/chatml_composition/background_shell_tests.ml"
       ] )
   ; ( "compilation.policy"
-    , "No-effect compiler domains, explicit policy and cooperative cancellation"
+    , "No-effect compiler domains, captured revisions, explicit policy and cooperative \
+       cancellation"
     , [ "lib/chatml/chatml_compilation.ml" ]
     , "runtime.execution"
-    , [ "test/chatml_compilation_test.ml" ] )
+    , [ "test/chatml_compilation_test.ml"
+      ; "test/chatml_captured_compilation/domain_tests.ml"
+      ] )
   ; ( "execution.ancestry"
     , "Owned shared counters, nested scope lifetimes and independent session budgets"
     , [ "lib/chatml/chatml_execution.ml" ]
     , "runtime.execution"
     , [ "test/chatml_execution_budget_test.ml"; "test/chatml_projection_budget_test.ml" ]
     )
+  ; ( "execution.configured_modules"
+    , "Contract and invocation preflight before effects, canonical once-only value \
+       dependencies, execution-local state and shared controls"
+    , [ "lib/chatml_linked_runtime/chatml_linked_runtime.ml"
+      ; "lib/chatml/chatml_builtin_modules.ml"
+      ; "lib/chatml/chatml_compiler_contract.ml"
+      ; "lib/chatml/chatml_contract_encoding.ml"
+      ; "lib/chatml/chatml_eval.ml"
+      ; "lib/chatml/chatml_lang.ml"
+      ; "lib/chatml/chatml_host_runtime.ml"
+      ; "lib/chatml/chatml_execution.ml"
+      ]
+    , "runtime.execution"
+    , [ "test/chatml_linked_runtime/runtime_tests.ml"
+      ; "test/chatml_linked_runtime/control_tests.ml"
+      ; "test/chatml_linked_runtime/order_model_tests.ml"
+      ; "test/chatml_linked_runtime/invocation_tests.ml"
+      ] )
+  ; ( "diagnostics.deferred_ownership"
+    , "Deferred source sites, bounded diagnostics and unchanged task fuel/recovery \
+       boundaries"
+    , [ "lib/chatml/chatml_lang.ml"
+      ; "lib/chatml/chatml_host_runtime.ml"
+      ; "lib/chatml/chatml_execution.ml"
+      ; "lib/chatml_sources/chatml_diagnostic.ml"
+      ]
+    , "runtime.execution"
+    , [ "test/chatml_owned_diagnostics/task_tests.ml"
+      ; "test/chatml_owned_diagnostics/execution_tests.ml"
+      ; "test/chatml_owned_diagnostics/session_tests.ml"
+      ; "test/chatml_diagnostics/diagnostic_invariants.ml"
+      ] )
   ; ( "jobs.launch"
     , "Selected job starts stage intent until owner commit; reads and cancellation \
        retain live authority"
@@ -199,7 +234,17 @@ let moderator_features =
 ;;
 
 let implementation_sources =
-  [ ( "lib/agent_session/administration.ml"
+  [ ( "lib/chatml_linked_runtime/chatml_linked_runtime.ml"
+    , "6a818d806bd09eeb3970e3603f5444de154d8b39f8131dc237f21e94a4d9493f" )
+  ; ( "lib/chatml/chatml_builtin_modules.ml"
+    , "4d005f60b55cee3263e7925bae6d1c81129ca383cf6218b3cc2dc86270def236" )
+  ; ( "lib/chatml/chatml_compiler_contract.ml"
+    , "cfcfb1f24a1a3c45fb85e91fca1bf028c57df9b89a0e336b440a15c5021ec01f" )
+  ; ( "lib/chatml/chatml_contract_encoding.ml"
+    , "7f8c6c1a49818abaf5ecbfe7cc1df2f4511930939cc1c573e3d422c94548c138" )
+  ; ( "lib/chatml/chatml_eval.ml"
+    , "26e9c0d0374407252f65f8fb8f7439652ed2e181db63a4d938af8f7d74eb82d4" )
+  ; ( "lib/agent_session/administration.ml"
     , "294e4f4885be914c82f8fd9b327b9dac9a311ba6c49f3c424cdd34f7c9a9f54b" )
   ; ( "lib/agent_server/command_handler.ml"
     , "5f3054bc7a800289757ef23127c329766fb3f951ef0fa36c2db225f35e926477" )
@@ -212,11 +257,11 @@ let implementation_sources =
   ; ( "lib/agent_server/delegation_lifecycle.ml"
     , "5bfed8ecc3cd3f7976457adbab4a5e875f8b56bd08f4856d18149c694303ad49" )
   ; ( "lib/chatml/chatml_compilation.ml"
-    , "5b5f2a27e8615fc45c8050c7015fc36b33d9f4314379496ff7f1c5683d2efa3b" )
+    , "f15466510b48217410039497a1d57ed9d83030c445d5045deb1a1638ee7f23dc" )
   ; ( "lib/chatml/chatml_execution.ml"
-    , "e2272786e56f379f14bd6fba149ca2e822c74a05ef512a87185bdbb518018afe" )
+    , "f8f85d98bef83a4dd18bbb635be3059fe6c319c9658fb27133a74059c611b142" )
   ; ( "lib/chatml/chatml_value_codec.ml"
-    , "0f621d743b97b856dd40270fc8c51444ca18e6098ceb7ff2481a22cf999d85be" )
+    , "34d04d5b6b6a3e15a4cbdf75cf1a380c3eeb593045620893ba11c05b15d02eb7" )
   ; ( "lib/agent_protocol/delivery.ml"
     , "63ae0f4d478302e84a1e49c84f406abf090794db4c231aa76181ad02072581d9" )
   ; ( "lib/agent_protocol/job.ml"
@@ -270,7 +315,7 @@ let implementation_sources =
   ; ( "lib/chat_response/ingress_operations.ml"
     , "d8e2813f75f67ca4c4d3ee6fc264a9731889538987a53d1f80ff27c2c399c825" )
   ; ( "lib/chat_response/moderator_invocation.ml"
-    , "2acb0161a22fcc03eeaa7b92660266b0010b1733d7fa595d16f79dfe3fa2c52b" )
+    , "485cab4625c91fe5efe73e10be2e97b2e4b065dafebcca5c46580ce5965be9dd" )
   ; ( "lib/chat_response/moderator_manager.ml"
     , "c67622bcd7c0da613b5c8a6aca7b8841be9ada1dd9283d6e83e14c70b3d16d05" )
   ; ( "lib/chat_response/notification_operations.ml"
@@ -282,112 +327,116 @@ let implementation_sources =
   ; ( "lib/chat_response/subscription_operations.ml"
     , "88aa4ac9bd7c2100a9614f8b30639c6fd30e7ae0c11e86e423a57badd69c0603" )
   ; ( "lib/chatml/chatml_host_runtime.ml"
-    , "9bce55b94e4733d606d1196bb893382580a4d87c85b717cee96c8b3a613dbc5f" )
+    , "e8b91417a2826579b9ea24e88d13a88a330abe115efd88b2cf73c14ed6827b83" )
+  ; ( "lib/chatml/chatml_lang.ml"
+    , "cffe0b48ae424c94993392b748bbad87727a0207d372d84600e4eed2dcfbdf36" )
+  ; ( "lib/chatml_sources/chatml_diagnostic.ml"
+    , "cd4f59d52868eff58a8eaabd2cc8222d8c65f677066b3d8ab16c7b5c7a81fde5" )
   ]
 ;;
 
 let topic_contracts =
   [ ( "one_off_v1"
     , "runtime.lifecycle"
-    , "763ccb16441f43ef89b4f49e3c9a9bb7626593e9c6579151ef41d8f6ae3ed872" )
+    , "db1c69cd2b82e1dc651ebb4d6bd3f251e713e5f41d46f38e2ae2f0735226e62d" )
   ; ( "tool_v1"
     , "runtime.lifecycle"
-    , "36f78528f6fc354438170d9e9f66c677a38414d398ea9a6b8f565dfd82e8b95b" )
+    , "35bc43e1b9ea56031cfbfbc394089103f39657c990f012614dc4dd21114d3448" )
   ; ( "moderator_v1"
     , "runtime.lifecycle"
-    , "9f92ebb3d130aac68a0f7be19e7a9709fa0aaace145af49a6401a7d49c22cb4c" )
+    , "9d9927e629beb190acca81abb269b149fec62a98895a44df19c4496ba0055ead" )
   ; ( "delegated_moderator_v1"
     , "runtime.lifecycle"
-    , "294a5744de2faab1d95da0218dad26b1ab739b831d30ec610534ee64823b5212" )
+    , "e1c3aaa7ed7aedb2e13188a16276413e547488619cc322b596704abf4bd5d9b7" )
   ; ( "one_off_v1"
     , "runtime.execution"
-    , "a1829b872251aee31185ead355a9e69c50379a0f875bd4c457206aee2870c7f0" )
+    , "4c930e0431a0534667446379e4d190107d751ead66420792af8bf0aa88c7c8e1" )
   ; ( "tool_v1"
     , "runtime.execution"
-    , "4c32af2405c7865c5d419cedf923501b52e8b61d1672af1d6eeb97a0a854286e" )
+    , "50fc26b2591a71a0582e2ff267d66e6e99c221fd4cf47830fd4e4a309afc8689" )
   ; ( "moderator_v1"
     , "runtime.execution"
-    , "aa270bddc098321e84d1ac0c7f2a166a55ca9c34785c2425e31a902dc6a7e4eb" )
+    , "28416715133a81369dffe0313b19e0400d53de52b1c67b110c8a428aec101149" )
   ; ( "delegated_moderator_v1"
     , "runtime.execution"
-    , "c4b3179805c316bc181c1f7f47dc954a737789e260e5e384d59352fad2e22e70" )
+    , "966524097356cfeb00ba3c07adc2ef63b22adbb12013ab0b152fb7cce87be762" )
   ; ( "one_off_v1"
     , "runtime.jobs.owned"
-    , "61cc6553ecb8b4278b6d8aab419a43be25209835632f90051581b3d29f0274aa" )
+    , "b9ae2125f3db7caf8088dbeed3d435aa99340fc98d427f73107d278b437f98ce" )
   ; ( "one_off_v1"
     , "runtime.work-values"
-    , "14122ef8915f76e77b6172a07fff41ed399a384869197f64cade9f3429bbec8c" )
+    , "37e48b6a9659f75cfee317a7c4bb1f0ec5c141dbaca31030faa28efbc93d94bd" )
   ; ( "one_off_v1"
     , "runtime.recovery.background"
-    , "991622524c3de3e9dd41b11b44fd7670e2875318b12fb6d81a6f16df73cdbbc4" )
+    , "b057f64c26b41219e91b158f8853db7df7cd9141986a8f0566f51ed4792d4353" )
   ; ( "tool_v1"
     , "runtime.jobs.owned"
-    , "6510cab72c9e521d4f031ea1627ea7c6ee660b9a384473ad0cacd74526fb1128" )
+    , "9a17b34fc0682025ea544ec1925cfa3a71416feefc20d40241fcf23484be875c" )
   ; ( "tool_v1"
     , "runtime.work-values"
-    , "2879183f3da7e9586e6f835fc14e526be1522123cd9da755fe9f43935f9a04b7" )
+    , "d3a500c62e2ea7ea686d8d843062392834c2ac33f6270be900463476e3d9ecf6" )
   ; ( "tool_v1"
     , "runtime.recovery.background"
-    , "561d5e610ae95867a83f689048195b56e8530a8dfb98763bc8d75cea7c0aed7b" )
+    , "374ec946a35b7188a36a062a1c3ad70ef743dbf2e9a8bcad3e622b5a0e3e0fd9" )
   ; ( "moderator_v1"
     , "runtime.jobs.owned"
-    , "d9e2b0a9de443d20a9ea7757971fb171cb580a6358dbc7b6320a7d2816d1db45" )
+    , "d6ec077b9497845d2b13d13e273fdc129dc8f1abe842e6c677232fcb59c92432" )
   ; ( "moderator_v1"
     , "runtime.work-values"
-    , "71f95fab1303f5bb4c6fb5209455699087a62c2eab7484ad277aad5284a0e3ad" )
+    , "a9b7f295675109af5e8cb8c52812b4f8f325b907ea81d5d61d9230e047e38cfc" )
   ; ( "moderator_v1"
     , "runtime.recovery.background"
-    , "b1b417f643cf2af063a0ff046f900d066b5c3790ea4d3adf90d409780760a6e8" )
+    , "95df99736f75455a45279dbe8cd11a0be0bccf6fc7a79df8042ca441faeef711" )
   ; ( "moderator_v1"
     , "runtime.invocations.moderator"
-    , "3490ac1d20006770a62f5ffcb001a255e438761072b01e3a18e2d1d14d7b8322" )
+    , "b092943b64d89f61f8c63d9ecf17e6c1263746932fac188b306dacba22fb0605" )
   ; ( "moderator_v1"
     , "runtime.control"
-    , "6449bc4e139f0a07c8fa0cbbecfe32da19b9f2698e8112115e63aa5c35b2f192" )
+    , "f0255a5f97a7e3b4c2fe0a9d99218dc770b13e5b6c10a2c3cd0d395b9bc33b63" )
   ; ( "moderator_v1"
     , "runtime.jobs.acknowledgement"
-    , "36441fde8b5cd0bf7cc3130d14f1c7a74c39afc011032e5b18223a29c3143384" )
+    , "ad55ac1ce31e2b8bbb06ecc9071d8853fe23d72f5f4213ab205d7b88ce4c588d" )
   ; ( "moderator_v1"
     , "runtime.jobs.subscriptions"
-    , "d73bcfc93b161f370116191d92d0d46e7bb5b6f7e696f90f11e5641db7825183" )
+    , "4de2d5869468ba6a8458b385e138e0f93608de00ec34ebb052af5f40e9ddda52" )
   ; ( "moderator_v1"
     , "runtime.jobs.timers"
-    , "3429d29cc6694035ae131c370a7435ce246a725d3ff98d6e1cab3b3a0e87ac5d" )
+    , "bfc67b8977be05d2eb2dc6c36f8efae34b385beb6cdd402d6a1e0676d6d9b883" )
   ; ( "moderator_v1"
     , "runtime.delivery.notifications"
-    , "e8fd6f16a399063a821599cc2aace314f00866393bbdac5fe56d1718f71e7476" )
+    , "0b6f7ebd14c60d2c0d154e1e2060df410732d5213b1c4a57bcc408f8693e9a54" )
   ; ( "moderator_v1"
     , "runtime.delivery.ingress"
-    , "ebc730dd34dfd29de8cd9b6a0f4bca837b44ed75fce80479c5b33eb6a72f1f05" )
+    , "c61eb24bbd16e1ffbe2f0138575c136bc8df4c495b2a70c5dd2542d30a216aff" )
   ; ( "delegated_moderator_v1"
     , "runtime.jobs.owned"
-    , "a67520428232b7c5253c323384c7934ae9d336541a5e26ad49d46e14251c2020" )
+    , "c594002c509f614224d366577cb75a34dcacfc43fafeb496c7b8e1cff06d0267" )
   ; ( "delegated_moderator_v1"
     , "runtime.work-values"
-    , "ac7b68c8ad7a7372ba7228e0af20701d2384b4b7aaf3e4e7f6dacc6a7aeb0275" )
+    , "49e5a3dde66985c8dbae8d5bad19f6ef454ce7d0a3e918010f54d0b59c7e26a6" )
   ; ( "delegated_moderator_v1"
     , "runtime.recovery.background"
-    , "179752ab98cbce17b4fd47ee673b18aeb1facd6e26b4743fe9b3eea70770d5d2" )
+    , "87f7cbe9b2c1e14f17f1c10fb60d76a0d12854d8f6d1f09fa118db5cb4d9f3e8" )
   ; ( "delegated_moderator_v1"
     , "runtime.invocations.moderator"
-    , "c98e93260bbb581fab57d13b8b807130290a65bc99fd50df3445693de635f74d" )
+    , "3aae7d8d502126fda8c0270a53c8b2a550144666900fb08f78cc20128916afb8" )
   ; ( "delegated_moderator_v1"
     , "runtime.control"
-    , "d72e04972d0d87d19f13099bc6fdf9fbcdbc47bd6d6333d4648d9e7781a1db1f" )
+    , "d6bd94d70deeefec2e931f7bde1d4a903b48034779e36c23876b560edfeecd19" )
   ; ( "delegated_moderator_v1"
     , "runtime.jobs.acknowledgement"
-    , "4a7c91f7adef4de7f7456e33f26ff1ddf0df14147ff204e5097ac4683b8e28a6" )
+    , "380b21273ffb3593075e8f26a29c18c792801cc94ab1ae1634d1a81e464ad095" )
   ; ( "delegated_moderator_v1"
     , "runtime.jobs.subscriptions"
-    , "fa11ed1573f77ab9428932c107372e5bb9d5899739092368797d73c2d0640470" )
+    , "0d95970189ec40358e76029a0de32fa062f2e0ba9e90a2187b2a7bb3533cf747" )
   ; ( "delegated_moderator_v1"
     , "runtime.jobs.timers"
-    , "16b1181647213172b0ed5f590c154165ec91ed48dc7134341f4a9c209d05bf7b" )
+    , "592d3f51ba270dc80a4cb3688b3220afb10633ec08d741644a6d50f7490ec316" )
   ; ( "delegated_moderator_v1"
     , "runtime.delivery.notifications"
-    , "3ce94476b699d3d11a87d35f6cc1d35d6ceea851166264d83c0968809ca5d1eb" )
+    , "dcccbf5da02b04f5f78fa550eb18ce12f2755c59ce521afa7a96cde7fe4bfd44" )
   ; ( "delegated_moderator_v1"
     , "runtime.delivery.ingress"
-    , "36899670e3267a9171d32bc71833962a59ca6af5c7fdf73d05a378027dbb5d4b" )
+    , "31e69c8a360ce8b70e4890adb55305183dfd6183ee1242988cffff640a4e1de5" )
   ]
 ;;

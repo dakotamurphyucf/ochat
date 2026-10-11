@@ -74,15 +74,7 @@ module Reader = struct
   let dependency_name t path value =
     let open Result.Let_syntax in
     let%bind name = nonempty_string t path value in
-    if String.equal name "self"
-    then fail t path "self is reserved for the current catalog"
-    else if
-      (match name.[0] with
-       | 'a' .. 'z' | 'A' .. 'Z' | '_' -> true
-       | _ -> false)
-      && String.for_all name ~f:(function
-        | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' -> true
-        | _ -> false)
+    if Dependency.is_valid_name name ~checkpoint:t.checkpoint
     then Ok name
     else fail t path "expected a dependency alias identifier"
   ;;

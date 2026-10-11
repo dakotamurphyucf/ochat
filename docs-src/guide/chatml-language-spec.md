@@ -101,9 +101,9 @@ ChatML now has a deliberately small user-facing type surface:
 - binding annotations on `let`, `let rec`, and `let ... in`,
 - explicit recursive types introduced through those declarations.
 
-It still does **not** provide a full ML type language: there are no type
-parameters, no mutual recursive type declarations, and no general
-expression-level ascription syntax.
+Aliases support scoped parameters and regular contractive recursion. The type
+language remains small: there are no mutual recursive type declarations or
+general expression-level ascriptions.
 
 Function calls use explicit call syntax:
 
@@ -183,7 +183,9 @@ type resolved_program =
   }
 ```
 
-The stored `source_text` is used for diagnostic formatting.
+The stored `source_text` supports legacy single-file diagnostic formatting.
+Captured compilation additionally retains each unit's source identity and exact
+bytes so a deferred failure can select its defining source.
 
 ### 3.4 Type checking
 
@@ -358,10 +360,16 @@ Top-level statement forms:
 - `let rec f : type_expr = expr and g : type_expr = expr`
 - `let rec f x = expr and g y = expr`
 - `module M = struct ... end`
+- `module M : sig ... end = struct ... end`
 - `open M`
 - a bare expression statement
 
 Evaluation proceeds top-to-bottom in source order.
+
+Optional `;;` separates statements at the top level and inside module bodies.
+It can disambiguate a type declaration followed by a qualified call, for example
+`type t = int ;; Graph.run()`. Ordinary declaration sequences remain valid without
+separators. A single `;` retains expression-sequencing behavior.
 
 The top level is mutable in the sense that each statement extends the
 current environment, but closures capture lexical bindings stably.
@@ -415,12 +423,14 @@ Operationally:
   visible
 - placeholders are updated with the final values
 
-### 6.3 Top-level `type`
+### 6.3 Type declarations
 
 Examples:
 
 ```ocaml
 type expr = [ `Int(int) | `Add(expr, expr) ]
+type 'a tree = [ `Leaf('a) | `Branch('a tree, 'a tree) ]
+type ('a, 'e) outcome = [ `Ok('a) | `Error('e) ]
 type task = { name : string; attempts : int; status : status }
 ```
 
@@ -428,14 +438,25 @@ Properties:
 
 - type declarations are compile-time only
 - they introduce names into a separate type namespace
-- they are currently allowed only at the top level
+- they are allowed at the top level and inside module bodies
 - later statements may refer to earlier type declarations
 - module bodies may refer to earlier top-level type declarations
-- `open` does not import type names
+- local module type declarations are exported unless an inline signature hides them
+- qualified names such as `Data.t` and `Outer.Inner.t` select public type aliases
+- `open` brings public type and nested module names into the lexical type namespace
 - type declarations are alias-like, not nominal runtime entities
 
-Recursive type declarations are allowed, but only in explicit checked form.
-The typechecker validates them for **contractiveness**:
+Parameterized aliases are applied using postfix syntax: `int tree` or
+`(int, string) outcome`. The comma-separated form supplies multiple arguments to
+an alias; it is not a general tuple type. Parameter names are scoped to their
+declaration. Expansion uses the declaration's lexical type namespace, with no
+runtime type objects. Duplicate/free parameters and wrong arities are errors.
+Zero-parameter names such as `type task = ...` remain legal alongside the unary
+builtin `task` constructor; builtin constructors cannot be redefined with parameters.
+
+Recursive applications must preserve the original parameters, in order.
+Nonregular applications such as `('a array) tree` inside `'a tree` are rejected.
+The typechecker also validates **contractiveness**:
 
 - accepted:
   - `type expr = [ \`Int(int) | \`Add(expr, expr) ]`
@@ -446,8 +467,6 @@ The typechecker validates them for **contractiveness**:
 Current intentional limitations:
 
 - no `type ... and ...`
-- no type parameters
-- no module-local type declarations
 - no forward references to later type declarations
 
 ### 6.4 Modules
@@ -468,11 +487,49 @@ Properties:
 - module bodies may reference outer bindings
 - only names explicitly defined in the module body are exported
 - names imported via `open` inside a module are not re-exported
-- modules are represented as records by the typechecker and as `VModule`
-  values at runtime
+- modules have a distinct static module kind and are `VModule` values at runtime
+- module bodies may contain transparent type declarations
+- module declarations are non-recursive; the new module name is available only
+  after its body succeeds and is not in scope within that body, even in functions
 
-Type declarations are not statements inside module bodies in the current
-surface grammar.
+Optional inline signatures select a module's public interface using
+`module M : sig ... end = struct ... end`. The
+[checked module examples](chatml-inference.md#modules-and-records-have-different-representations)
+demonstrate private state, transparent types and polymorphic public members.
+
+Signature items are transparent `type` aliases, `val` specifications and nested
+`module Name : sig ... end` specifications. The implementation must satisfy each
+claim. Type parameters in a `val` specification are universally quantified;
+equality-using generic functions specify the obligation with, for example,
+`val same : fun('a, 'a) -> bool where equality('a)`. There are no abstract type
+specifications, module type declarations or functors.
+
+Universally quantified value specifications require fixed function arity after
+alias expansion. If substituting a parameter could erase a legacy arrow's unit
+argument or flatten its function-valued result, use an explicit `fun(...) -> ...`
+type. This restriction applies to the universal value claim; ordinary aliases,
+concrete applications and inferred functions retain their existing behavior.
+
+A signed module exposes only specified values, types and nested modules.
+The same checked selection limits runtime value fields; omitted implementation
+bindings remain available privately to exported closures. Type aliases remain
+transparent and have no runtime fields. Without a signature, the public interface
+is inferred from the module's local declarations.
+
+The declaration-only signature syntax also has a companion `.chatmli` parser.
+The prepared compiler checks explicitly captured implementations and optional
+companions, and lowers configured value reads to canonical module members.
+The linked runtime initializes the entry's value dependency closure once in
+dependency-first order. Type references and configured `open` alone stay inert;
+actual value uses select initialization. Aliases of one canonical module share
+its public runtime instance. Standalone runs get fresh state; a persistent
+session retains its initialized graph. See
+[evaluation order](chatml-evaluation.md#configured-module-initialization) and
+[prepared execution](chatml-execution-limits.md#prepared-execution-validates-before-initialization).
+
+The legacy text compiler does not discover companion files or configured sources.
+These explicit prepared/linked APIs do not supply filesystem discovery, bundle
+custody or automatic ChatMD host routing.
 
 ### 6.5 `open`
 
@@ -485,6 +542,8 @@ open Flow
 Semantics:
 
 - imports all exported names from the module into the current scope
+- includes public type and nested module names in the static namespace
+- preserves polymorphic value schemes and shared mutable export constraints
 - does not create a module alias
 - is shallow; there is no selective import syntax
 - now **rejects shadowing** of existing names
@@ -775,7 +834,7 @@ Properties:
 - variants are polymorphic variants
 - constructors are identified by tag name
 - constructors may carry zero, one, or multiple payload values
-- multi-value payloads are typed using internal tuple types
+- multi-value payloads retain a separate internal constructor-argument list
 
 ---
 
@@ -1030,10 +1089,34 @@ through explicit checked declarations.
 - variant types
 - tuple types
 
-Tuple types currently exist in the type system and runtime representation,
-but tuple syntax is not exposed as a general user-facing surface feature.
-They are most visible as the internal typing of multi-argument variant
-payloads.
+Tuple values and match patterns use `(|first, second, ...|)`, with at least two
+elements. Products are ordered and may be heterogeneous. Flat triples and nested
+pairs have different shapes; `()` remains unit. Product annotations use `int *
+string`; postfix constructors bind tighter than products, which bind tighter than
+arrows. `(int * string) * bool` is a nested pair, while `int * string * bool` is a
+flat triple. `f(a, b)` passes two arguments; `f((|a, b|))` passes one product.
+Variant payload argument lists remain separate: `` `Pair(a, b) `` has two payload
+arguments, while `` `Pair((|a, b|)) `` has one product payload.
+
+```ocaml
+let pair : int * string = (|7, "seven"|)
+let label pair = match pair with | (|count, name|) -> name ++ to_string(count)
+```
+
+Tuple match elements support existing literal, variant, record, wildcard, variable
+and nested tuple patterns. Coverage is conservative: a total tuple pattern or
+`_` arm is required; separate refutable product arms are not combined into a
+Cartesian completeness proof. Let and parameter binders allow names, `_`, and
+nested tuples of those binders. Literals, records and variants remain match-only
+patterns. A let RHS runs once in the previous scope; all named leaves enter
+scope together. The value restriction applies to the whole RHS before leaf
+schemes are distributed, preserving shared weak variables. One tuple parameter
+consumes one argument even when it binds several names; `_` also consumes an
+argument while binding no name. Recursive declaration heads remain names.
+For example, `let (|n, _|) = (|7, true|)` binds only `n`, and
+`let add (|a, b|) step = a + b + step` is called as `add((|2, 3|), 4)`.
+The immutable tuple container shares mutable child values;
+equality is supported only when all component types support equality.
 
 ### 10.2.1 User-facing type syntax
 
@@ -1046,7 +1129,12 @@ The current user-facing type-expression syntax supports:
   - `string`
   - `unit`
 - previously declared type names
-- function types:
+- exact nary function types:
+  - `fun() -> int` (zero arguments)
+  - `fun(unit) -> int` (one unit argument)
+  - `fun(int, bool) -> string` (two arguments)
+  - `fun(int) -> fun(int) -> int` (one argument, returning a function)
+- legacy flattened function types:
   - `expr -> int`
   - `state -> event -> state`
   - `unit -> string`
@@ -1075,16 +1163,13 @@ let step : task -> status =
 
 Current user-facing omissions are intentional:
 
-- no tuple type syntax
 - no ref type syntax
 - no open-row type syntax
-- no type parameters
 - no mutual recursive type declarations
 
-The parser accepts generic postfix lowercase unary constructors in type
-expressions, but the current typechecker recognizes only the constructors
-implemented by the host/type environment. In the built-in surface those are
-currently:
+The parser accepts postfix constructors and multi-argument alias applications.
+The checker enforces each declaration's arity. Parameters such as `'a` are only
+available within the declaration that binds them. Builtin unary constructors are:
 
 - `array`
 - `task`
@@ -1279,25 +1364,20 @@ The builtin specification language now supports:
 Notes:
 
 This builtin type language is richer than the current user-facing type language.
-Users still do not write builtin-only forms such as ref types, tuple types, open-row forms, or explicit recursive binders directly; they appear only through host-provided builtin schemes.
+Users still do not write builtin-only forms such as ref types, open-row forms, or explicit recursive binders directly; they appear only through host-provided builtin schemes.
 
 ### 10.9 Module typing
 
-Modules are typed as records of exports.
+Modules have a distinct static module kind containing their public value members,
+and are represented as `VModule` at runtime. Ordinary record annotations, record
+patterns and copy-updates do not accept module values; `open` requires a module.
+Field projection works on both kinds, and `record_keys` explicitly supports both.
 
-This is intentionally simple and matches the intended “modules are just
-structuring” design.
-
-Implementation note:
-
-- runtime modules are represented as `VModule`
-- the typechecker models them as record types of exports
-
-This is usually ergonomic, but it also means module values are not a fully
-separate static category.
-
-Type declarations are not exported as module fields, because they do not
-exist at runtime and `open` affects only value bindings.
+Module-local type aliases and nested type namespaces are static exports, not
+runtime fields. Qualified type paths and `open` use that static namespace. Inline
+signatures check transparent type/value/nested-module claims and select one public
+interface for both checking and runtime visibility. Opening that interface does
+not specialize polymorphic members or duplicate shared mutable state.
 
 ---
 
@@ -1424,17 +1504,28 @@ Modules are for:
 - grouping helper functions
 - reducing naming clutter
 - structuring scripts
+- exposing transparent local types and checked public member boundaries
 
 Modules are not for:
 
-- signatures
 - functors
+- module type declarations or abstract signature types
 - generative module behavior
 - abstraction-heavy namespace engineering
 
+Module declarations are non-recursive: a new module binding is available only
+after its body finishes. The module's own name is not introduced inside that
+body, even in a function that will be called later. Refer to earlier local
+bindings directly; recursive functions use `let rec`. Enclosing bindings retain
+their lexical meaning. A failing initializer does not install the new module;
+effects already performed are not rolled back.
+
 ### 12.2 Export behavior
 
-Only names explicitly defined in the module body are exported.
+An unsigned module exports only its locally defined values, types and nested
+modules. An inline signature selects a subset and checks its declared types;
+unselected runtime members are hidden while exported closures retain private
+bindings. Outer bindings and names introduced only by `open` are not re-exported.
 
 Example:
 
@@ -1460,7 +1551,8 @@ M.x
 ### 12.3 `open` behavior
 
 `open M` copies module exports into the current environment for subsequent
-lookup.
+value lookup and brings public type/nested-module names into the static namespace.
+It preserves the exported polymorphic schemes and mutable value identity.
 
 It does not:
 
@@ -1481,7 +1573,7 @@ hard-coded builtin universe.
 A builtin surface may contribute:
 
 - global builtin functions,
-- builtin modules installed as `VModule` values (typed as records of exports),
+- builtin modules installed as `VModule` values (with a distinct module type),
 - builtin type aliases injected into the initial type environment.
 
 The current implementation exposes two standard assembled surfaces:
@@ -1514,7 +1606,7 @@ Notes:
 - to_string returns that representation.
 - length works on arrays only.
 - array_copy is a shallow copy of the array container.
-- record_keys works on record values, and also on module values because modules are record-like at the type level.
+- record_keys explicitly supports ordinary records and module values; for a signed module it returns only public runtime member names, not type names.
 - variant_tag returns only the constructor/tag name, not the payload.
 - swap_ref r v stores v into r and returns the old contents.
 - fail raises a runtime failure and is polymorphic in its result position.
@@ -1563,7 +1655,7 @@ Additional builtin type aliases:
 - `context`
 
 Each builtin module is a `VModule` value at runtime and is typed as a
-record of its exports by the typechecker.
+module of its exports, distinct from an ordinary record, by the typechecker.
 
 #### 13.2.2.1 `ui_moderator_surface`
 
@@ -2002,9 +2094,15 @@ let f () = expr
 let rec f : type_expr = expr
 let rec f x = expr and g y = expr
 module M = struct stmts end
+module M : sig signature_items end = struct stmts end
 open M
 expr
 ```
+
+Signature items are `type t = type_expr`, `val name : type_expr` (optionally
+followed by `where equality('a)` constraints joined with `and`) and
+`module M : sig signature_items end`. Optional `;;` separates statements and
+signature items; a single `;` remains an expression separator.
 
 ### 14.2 Expressions
 
@@ -2109,24 +2207,70 @@ state task array
 
 ## 15. Diagnostics
 
-### 15.1 Type errors
+### 15.1 Structured failures and source ownership
 
-Type errors are reported with:
+Parser, typechecker and runtime failures use `Chatml_diagnostic.t`. Its validated
+constructor preserves read-only message/span projections and an optional owned
+site. A site holds the exact captured source identity, content digest and range;
+it grants no execution authority and performs no live file lookup. An existing
+site wins when a caller supplies fallback context. A legacy unowned span alone
+does not establish source ownership.
 
-- a message
-- an optional source span
+Ranges are half-open byte ranges, with 1-based lines and 0-based byte columns.
+LF, CR and CRLF are canonical line breaks; a position between CR and its
+following LF remains on the preceding line until LF is consumed. Invalid or
+stale coordinates reject instead of being clipped. Messages retain at most
+16 KiB, and diagnostics retain at most eight related sites. Complete rendering
+is also bounded to 16 KiB. Source labels and excerpts escape control bytes; caret
+markers are omitted when escaping or multiple lines would misrepresent byte
+columns. `render_legacy` uses explicitly supplied text only for unowned ranges;
+an owned failure always renders its captured bytes.
 
-When a span is available, formatting uses source-text excerpts with caret
-markers.
+Closures retain their defining source through direct calls, tail calls and
+builtin callbacks. Task values retain their construction site, and continuation
+failures preserve their defining source through persistent events and UI
+resumption. Sites retain only the needed captured source, with no complete
+inventory or control callback. Metadata introduces no semantic task step or
+fuel charge. Diagnostic polling still checks cancellation, deadlines and active
+scope lifetime. Eager and bind/map callback errors preserve their existing
+`Task.catch` boundaries; plain task/host failure strings reach recovery unchanged
+even when their diagnostic display is truncated.
 
-### 15.2 Runtime errors
+### 15.2 Captured compiler and detailed host APIs
 
-Runtime errors are also structured:
+For OCaml embedders, `Chatml_parse.parse_captured` produces a source/AST pair.
+`parse_captured_interface` pairs companion interface syntax with its exact captured
+bytes. `Chatml_signature_check.check_captured` checks that interface against supplied
+implementation exports; it does not discover or load companion files. Signature
+claims use the interface source, while an alias expansion retains its defining
+source. An alias-equivalence mismatch can include the implementation definition
+as a related site without replacing the interface claim's primary location.
 
-- message
-- optional source span
+`Chatml_typechecker.check_captured_program_with_surface` and
+`Chatml_resolver.resolve_captured_program` preserve that pairing; resolution
+rejects annotations belonging to a different source identity or revision.
+Per-unit type and module-visibility annotation tables are separate while inference
+identities and weak type cells remain deliberately shared within the compilation.
+Location-based queries require the owning source identity and content digest.
+These tables are not deeply frozen value-query snapshots. Interface checking
+validates source metadata before committing constraints to shared weak variables;
+failed or cancelled checks do not publish a partial constraint update.
 
-and are formatted in the same general style as type errors.
+`Chatml_host_runtime.compile_captured_script` compiles exact captured bytes
+without executing initializers. Its compilation diagnostic retains the stage,
+message/span projections, rendered text and shared structured diagnostic.
+`Chatml_compilation.compile_captured` and `compile_captured_with_policy` provide
+the same captured compilation through the existing joined Eio domain, source-size
+limits and cooperative cancellation/time policy. The caller supplies the chosen
+capture; these APIs perform no project or file discovery.
+The host's `instantiate_session_detailed`, `run_entrypoint_detailed`,
+`handle_event_detailed`, `handle_next_queued_event_detailed` and
+`resume_ui_request_detailed` return the shared diagnostic from the same
+interpreter used by the string APIs. Existing single-string compilation and
+string-returning host entrypoints remain rendering adapters. Compiler checkpoint
+exceptions retain their original identity and backtrace; cancellation and
+execution-control exceptions propagate after cleanup rather than becoming
+ordinary task failures.
 
 ### 15.3 Current strengths
 
@@ -2178,18 +2322,15 @@ Unification of recursive types uses an alpha-renaming strategy for Mu-vs-Mu unif
 
 ChatML currently does **not** provide:
 
-- tuple syntax as a general user-facing feature
-- type parameters
 - mutual recursive type declarations
-- module-local type declarations
 - general expression ascription syntax
-- tuple type syntax as a general user-facing feature
 - ref type syntax
 - open-row type syntax
 - full user-facing algebraic datatype declarations beyond alias-style
   structural `type` declarations
 - selective imports
-- signatures or functors
+- abstract signature types, module type declarations or functors
+- automatic filesystem discovery and ChatMD routing of configured source graphs
 - layout-sensitive syntax
 - Unicode identifiers
 - full ML-style match usefulness analysis
@@ -2203,13 +2344,15 @@ The language remains intentionally conservative and small.
 
 These are worth documenting because they shape current behavior.
 
-### 18.1 Modules are statically record-like, but runtime-distinct
+### 18.1 Module and record operations retain their kind
 
-The typechecker models modules as records of exports, while the runtime
-represents them as `VModule`.
-
-This is deliberate and ergonomic, but it means “module values” are not a
-fully separate static category.
+The typechecker distinguishes modules from ordinary records, and the runtime
+represents them as `VModule` and `VRecord` respectively. Projection and
+`record_keys` support both. Record patterns, annotations and copy-updates require
+ordinary records; `open` requires a module. Inferred aliases and higher-order
+helpers retain these constraints. Public type aliases exist only in the static
+module namespace, while signed runtime modules contain only selected value and
+nested-module members.
 
 ### 18.2 Records get stronger row ergonomics than variants
 
@@ -2234,7 +2377,8 @@ For the current language, the most ergonomic and robust style is:
 - annotate recursive helper functions against those declared types
 - write small helpers over row-polymorphic state records
 - use variants for finite event/state tags
-- use modules only for grouping
+- use modules to group helpers and transparent types; add inline signatures when
+  a public member boundary helps
 - keep arithmetic explicit by numeric kind
 - prefer `M.name` over aggressive `open` use when readability matters
 - push complex host interaction into builtins/runtime services
@@ -3072,6 +3216,15 @@ persisted moderator state.
 
 Only data-shaped ChatML values cross this boundary. The snapshot codec rejects
 closures, refs, builtins, modules, and tasks.
+
+Tuple snapshots preserve arity, order, and nesting. Session documents retain
+unknown fields on tuple containers and their children through restore and
+unrelated edits. As with arrays and variant payloads, changing tuple children
+while retaining unknown child fields can make their association ambiguous; the
+document encoder then returns `Extension_conflict` before writing. For example,
+editing a session setting preserves an unknown field on the first tuple child,
+while changing that child's known value rejects when its unknown field is still
+retained. Child edits without retained unknown child fields succeed.
 
 When a session is exported to ChatMD, canonical history stays canonical while
 overlay-derived synthetic entries are materialized explicitly in the exported

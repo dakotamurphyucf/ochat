@@ -3,8 +3,22 @@
  (public_name ochat.chatml)
  (modules
   chatml_lang
+  chatml_module_reference
+  chatml_static_surface
+  chatml_compiler_contract
+  chatml_contract_encoding
+  chatml_tuple
+  chatml_binding_pattern
+  chatml_binding_value
+  chatml_type_expr
+  chatml_module_signature
+  chatml_module_visibility
+  chatml_shape_kind
+  chatml_equality_requirement
   chatml_eval
   chatml_parse
+  chatml_checkpoint
+  chatml_owned_source
   chatml_slot_layout
   chatml_lexer
   chatml_parser
@@ -15,7 +29,8 @@
   chatml_builtin_surface
   chatml_extension_surface
   chatml_surface_inventory)
- (libraries core jsonaf menhirLib source)
+ (private_modules chatml_contract_encoding)
+ (libraries core jsonaf menhirLib source chatml_source chatml_diagnostic)
  (preprocess
   (pps ppx_jane)))
 
@@ -23,15 +38,15 @@
  (name chatml_resolver)
  (public_name ochat.chatml_resolver)
  (modules chatml_resolver)
- (libraries core chatml chatml_typechecker)
+ (libraries core chatml chatml_typechecker chatml_graph chatml_prepared_program)
  (preprocess
   (pps ppx_jane)))
 
 (library
  (name chatml_typechecker)
  (public_name ochat.chatml_typechecker)
- (modules chatml_typechecker)
- (libraries core chatml)
+ (modules chatml_typechecker chatml_inferred_type chatml_type_alias chatml_type_validity chatml_type_probe chatml_signature_check chatml_alias_equivalence chatml_value_scope chatml_configured_resolution)
+ (libraries core chatml chatml_graph)
  (preprocess
   (pps ppx_jane)))
 
@@ -52,7 +67,8 @@
   chatml
   chatml_typechecker
   chatml_resolver
-  chatml_builtin_modules)
+  chatml_builtin_modules
+  chatml_linked_runtime)
  (preprocess
   (pps ppx_jane)))
 
@@ -89,5 +105,12 @@
  (name chatml_compilation)
  (public_name ochat.chatml_compilation)
  (modules chatml_compilation)
- (libraries core eio eio.unix mtime chatml chatml_host_runtime)
+ (libraries core eio eio.unix mtime chatml chatml_source chatml_prepared_program chatml_linked_program chatml_host_runtime)
+ (preprocess (pps ppx_jane)))
+
+(library
+ (name chatml_configured_check)
+ (public_name ochat.chatml_configured_check)
+ (modules chatml_configured_check)
+ (libraries core chatml chatml_typechecker chatml_graph)
  (preprocess (pps ppx_jane)))
