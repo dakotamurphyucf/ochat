@@ -528,8 +528,11 @@ session retains its initialized graph. See
 [prepared execution](chatml-execution-limits.md#prepared-execution-validates-before-initialization).
 
 The legacy text compiler does not discover companion files or configured sources.
-These explicit prepared/linked APIs do not supply filesystem discovery, bundle
-custody or automatic ChatMD host routing.
+Explicit host project preparation captures Local directories and full-pin Git
+catalogs under admitted host authority, then supplies immutable inputs to these
+prepared/linked APIs. See the [working shared-counter project](../examples/chatml/projects/shared-counter/README.md).
+The graph compiler itself performs no discovery or native reads. Bundle custody
+and automatic ChatMD host routing have separate host owners.
 
 ### 6.5 `open`
 
@@ -2330,7 +2333,8 @@ ChatML currently does **not** provide:
   structural `type` declarations
 - selective imports
 - abstract signature types, module type declarations or functors
-- automatic filesystem discovery and ChatMD routing of configured source graphs
+- ambient project discovery for submitted source strings
+- automatic ChatMD routing of configured source graphs
 - layout-sensitive syntax
 - Unicode identifiers
 - full ML-style match usefulness analysis

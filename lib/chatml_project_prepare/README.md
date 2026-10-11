@@ -82,3 +82,19 @@ after successful publication, under its existing coordination.
 Compiler queries and captured restoration do not call this library. Running
 sessions retain immutable code. A new independent file-backed launch performs a
 new preparation unless its caller explicitly selects retained captured input.
+
+## Graph execution handoff
+
+A successful preparation feeds `Build.prepared` directly to
+`Chatml_compilation.compile_prepared_with_policy`, using the actual selected target
+and existing host policy. Compilation performs no source reads, initialization or
+tool execution. `Chatml_execution.run_prepared` then initializes the selected
+value graph and invokes the standard role under the current runtime budget and
+native admission. Persistent sessions use the existing prepared Host session API.
+
+The runnable example in `docs-src/examples/chatml/projects/shared-counter` is
+qualified by `test/chatml_project_execution`. It exercises a vendored Local
+catalog through aliases, companion visibility, direct/open diamond reads,
+independent runs, entry/catalog overlap, alternate environment selection and
+capture-only restoration after all original files disappear. Native Git,
+publication and aggregate admission remain qualified by their owning suites.

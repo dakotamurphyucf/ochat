@@ -1,0 +1,6 @@
+open Alias
+let initialized = to_string("main")
+let seed = next()
+let main input =
+  let total = Left.next() + Right.next() + next() + reveal() in
+  Task.pure(`String(to_string(total)))

@@ -1,8 +1,11 @@
-# Project declaration format v1 — interface review contract
+# Project declaration format v1
 
-This draft describes OCH-189 pure decoding and scope selection. Directory capture,
-Git acquisition, compiler compatibility and native admission belong to later host
-adapters. It does not claim project execution is implemented.
+This document describes pure declaration decoding and scope selection. Explicit
+host preparation performs directory capture, pinned Git acquisition, compiler
+compatibility and native admission before handing an immutable project to the
+existing graph compiler and runtime. See the working example in
+`docs-src/examples/chatml/projects/shared-counter`; decoding itself performs no
+acquisition or execution.
 
 Declarations are flat JSON objects with `schema_version: 1`. Duplicate object keys,
 unknown fields, invalid JSON and explicit null selectors reject. JSON integer

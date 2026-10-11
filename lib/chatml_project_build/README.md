@@ -64,6 +64,23 @@ escaping the repository rejects. Absolute Local paths still require host admissi
 These portable receipt facts do not prove native identity or authenticate Git
 objects; those checks remain acquisition responsibilities.
 
+## Captured role recomposition
+
+`recompose` takes an already admitted Build with a captured entry and root Library
+selection. It reconstructs the same exact catalogs and entry through restoration's
+shared validation, then generates a distinct lock under the supplied authentic
+contract. The caller chooses a lock ID different from the old lock and every
+retained source ID. Sources, environments, module scopes and dependency selections
+stay fixed; the original Build remains unchanged. Declared entry builds reject,
+and authored compiler/target/contract requirements still apply.
+
+For example, a retained moderator library can be recomposed for the delegated
+moderator contract before the host compiles and instantiates that actual role.
+This operation needs no original files and executes no initializers. It does not
+retarget the old lock or weaken restore. A subsequent restore verifies the new
+lock normally against the new contract. Outer artifact custody checks collisions
+against its other programs and continues to own source persistence.
+
 ## Bounds and validation
 
 Composition and restoration share an invocation-owned cooperative work budget.
