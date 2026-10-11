@@ -165,6 +165,7 @@
   operation_worker
   turn_worker
   runtime_script_preparation
+  captured_agent_runner
   runtime_builder
   runtime_activity
   queued_moderator_event
