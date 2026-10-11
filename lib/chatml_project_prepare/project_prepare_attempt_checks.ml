@@ -26,7 +26,7 @@ let%test_module "project preparation accounting" =
       |> Or_error.ok_exn
     ;;
 
-    let policy () =
+    let policy ?(local_work = 100) () =
       let document = Document_schema.Limits.default in
       Policy.create
         ~roots:
@@ -44,7 +44,7 @@ let%test_module "project preparation accounting" =
              ~max_source_bytes:1000
              ~max_total_source_bytes:1000
              ~max_path_components:16
-             ~max_work_steps:100
+             ~max_work_steps:local_work
            |> Or_error.ok_exn)
         ~git_objects:
           (Chatml_git_catalog.Limits.create
@@ -94,6 +94,134 @@ let%test_module "project preparation accounting" =
         ~clock:(Eio_mock.Clock.Mono.make ())
         ~checkpoint
         ~f
+    ;;
+
+    let with_local_owner f =
+      Eio_main.run (fun env ->
+        let random = Cstruct.create 16 in
+        Eio.Flow.read_exact (Eio.Stdenv.secure_random env) random;
+        let suffix =
+          Cstruct.to_string random
+          |> String.to_list
+          |> List.map ~f:(fun byte -> sprintf "%02x" (Char.to_int byte))
+          |> String.concat
+        in
+        let path = Eio.Path.(Eio.Stdenv.fs env / "/tmp" / ("ochat-prepare-" ^ suffix)) in
+        Eio.Path.mkdir ~perm:0o700 path;
+        Fun.protect
+          ~finally:(fun () -> Eio.Path.rmtree path)
+          (fun () ->
+             Eio.Path.with_open_dir path (fun root ->
+               Chatml_local_source.with_root
+                 root
+                 ~max_path_components:16
+                 ~checkpoint:ignore
+                 ~f:(fun owner -> Ok (f path owner))
+               |> ok)))
+    ;;
+
+    let local_attempt f =
+      Attempt.run
+        ~limits:(limits ~output:1000 ~work:1_000_000)
+        ~policy:(policy ~local_work:1_000_000 ())
+        ~clock:(Eio_mock.Clock.Mono.make ())
+        ~checkpoint:ignore
+        ~f
+    ;;
+
+    let capture_local attempt owner =
+      Project_prepare_local.capture
+        attempt
+        ~owner
+        ~project:(Source.Portable_path.create "chatml.project.json" |> Or_error.ok_exn)
+        ~namespace_override:(Some "selected")
+        ~selection:(Chatml_project.Selection.Library { environment = None })
+    ;;
+
+    let%expect_test
+        "local bootstrap retains exact authored bytes under the selected identity"
+      =
+      with_local_owner (fun path owner ->
+        let save name contents =
+          Eio.Path.save ~create:(`Or_truncate 0o600) Eio.Path.(path / name) contents
+        in
+        let declaration namespace =
+          sprintf
+            {|{"schema_version":1,"namespace":"%s","modules":{"Code":{"implementation":"code.raw"}}}|}
+            namespace
+        in
+        let old_declaration = declaration "authored" in
+        save "chatml.project.json" old_declaration;
+        save "code.raw" "first version";
+        let (old, fresh), receipt =
+          local_attempt (fun attempt ->
+            let open Result.Let_syntax in
+            let%bind old = capture_local attempt owner in
+            save "chatml.project.json" (declaration "edited");
+            save "code.raw" "second version";
+            let%map fresh = capture_local attempt owner in
+            old, fresh)
+          |> ok
+        in
+        let module Local = Chatml_local_capture in
+        let module Captured = Chatml_source in
+        let old_source = Chatml_project.source (Local.project old) in
+        [%test_eq: string] (Captured.contents old_source) old_declaration;
+        [%test_eq: string]
+          (Captured.Id.package_namespace (Captured.id old_source))
+          "selected";
+        let inventory = Local.sources old @ Local.sources fresh in
+        [%test_eq: int] (A.source_count receipt) (List.length inventory);
+        [%test_eq: int]
+          (A.source_bytes receipt)
+          (List.sum (module Int) inventory ~f:Captured.byte_length);
+        let code value =
+          Local.sources value
+          |> List.find_exn ~f:(fun source ->
+            String.equal (Captured.Id.relative_path (Captured.id source)) "code.raw")
+          |> Captured.contents
+        in
+        printf
+          "old authored namespace: %s\n"
+          (Chatml_project.namespace (Local.project old));
+        printf
+          "new authored namespace: %s\n"
+          (Chatml_project.namespace (Local.project fresh));
+        printf "retained / fresh: %s / %s\n" (code old) (code fresh);
+        printf "captured sources: %d\n" (A.source_count receipt));
+      [%expect
+        {|
+        old authored namespace: authored
+        new authored namespace: edited
+        retained / fresh: first version / second version
+        captured sources: 4
+      |}]
+    ;;
+
+    let%test_unit "caught local bootstrap and catalog failures cannot complete an attempt"
+      =
+      with_local_owner (fun path owner ->
+        List.iter
+          [ {|{"schema_version":1,"namespace":""}|}, `Bootstrap
+          ; ( {|{"schema_version":1,"namespace":"valid","modules":{"Missing":{"implementation":"missing.raw"}}}|}
+            , `Catalog )
+          ]
+          ~f:(fun (declaration, expected_phase) ->
+            Eio.Path.save
+              ~create:(`Or_truncate 0o600)
+              Eio.Path.(path / "chatml.project.json")
+              declaration;
+            let result =
+              local_attempt (fun attempt ->
+                (match capture_local attempt owner with
+                 | Error error ->
+                   (match expected_phase, Error.problem error with
+                    | `Bootstrap, Bootstrap _ | `Catalog, Local _ -> ()
+                    | _ -> assert false)
+                 | Ok _ -> assert false);
+                Ok ())
+            in
+            assert (Result.is_error result)))
     ;;
 
     let%expect_test "in-flight capacity is held until measured completion" =
@@ -237,6 +365,25 @@ let%test_module "project preparation accounting" =
             | Invalid_accounting -> ()
             | _ -> assert false)
          | Ok _ -> assert false);
+        let callback_cancellation_entered = ref false in
+        let callback_cancellation =
+          try
+            Eio.Cancel.sub (fun context ->
+              ignore
+                (run
+                   ~output:10
+                   ~checkpoint:(fun () ->
+                     Eio.Cancel.cancel context (Failure "cancel in checkpoint"))
+                   (fun _ ->
+                      callback_cancellation_entered := true;
+                      Ok ())
+                 : (unit * A.t, Error.t) Result.t));
+            false
+          with
+          | Eio.Cancel.Cancelled _ -> true
+        in
+        assert callback_cancellation;
+        assert (not !callback_cancellation_entered);
         let exception Sentinel of int ref in
         let witness = ref 0 in
         let armed = ref false in

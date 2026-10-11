@@ -61,6 +61,7 @@ let poll t =
   Option.iter t.failure ~f:t.stop;
   check_deadline t;
   poison_on_exception t t.checkpoint;
+  poison_on_exception t Eio.Fiber.check;
   (* Progress callbacks may yield or advance an injected clock. Do not admit
      the next effect using the time observed before that callback. *)
   check_deadline t

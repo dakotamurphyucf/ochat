@@ -20,6 +20,10 @@ val charge : t -> Accounting.t -> (unit, Error.t) Result.t
 
 val accounting : t -> Accounting.t
 
+(** Snapshot after used and all in-flight reservations. This is not admission:
+    reserve/charge must still succeed before starting work. *)
+val remaining : t -> Accounting.t
+
 module Reservation : sig
   (** One in-flight stage ceiling, affine to its attempt and completable once. *)
   type t
