@@ -1,0 +1,5 @@
+(library
+ (name chatml_type_snapshot_tests)
+ (libraries core expect_test_helpers_core chatml chatml_typechecker)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

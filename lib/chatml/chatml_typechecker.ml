@@ -56,6 +56,7 @@ module Binding_pattern = Chatml.Chatml_binding_pattern
 module Type_alias = Chatml_type_alias
 module Type_probe = Chatml_type_probe
 module Signature_check = Chatml_signature_check
+module Type_snapshot = Chatml_type_snapshot
 module Value_scope = Chatml_value_scope
 module Configured_lookup = Chatml_configured_lookup
 module Configured_resolution = Chatml_configured_resolution

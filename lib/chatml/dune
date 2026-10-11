@@ -45,7 +45,7 @@
 (library
  (name chatml_typechecker)
  (public_name ochat.chatml_typechecker)
- (modules chatml_typechecker chatml_inferred_type chatml_type_alias chatml_type_validity chatml_type_probe chatml_signature_check chatml_alias_equivalence chatml_value_scope chatml_configured_resolution)
+ (modules chatml_typechecker chatml_type_snapshot chatml_inferred_type chatml_type_alias chatml_type_validity chatml_type_probe chatml_signature_check chatml_alias_equivalence chatml_value_scope chatml_configured_resolution)
  (libraries core chatml chatml_graph)
  (preprocess
   (pps ppx_jane)))
