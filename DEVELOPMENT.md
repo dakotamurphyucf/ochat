@@ -1,5 +1,47 @@
 # Local OCaml documentation & search workflows
 
+## Complexity estimates and cycle tracking
+
+Cycles are analytics windows, not deadlines. They do not change milestone order, dependency gates, engineering standards, review requirements or the agreed merge/CI gates.
+
+Use Fibonacci estimates **1, 2, 3, 5, 8**. Estimate technical complexity for one cohesive, reviewable outcome: interacting contracts, breadth of semantic change, uncertainty and the validation needed to establish correctness. Points are not hours, agent count, lines changed, test count or a performance target. More parallel agents do not reduce a ticket's complexity.
+
+| Points | Working anchor |
+| --- | --- |
+| 1 | A localized, understood change or narrow investigation with a straightforward contract and validation. |
+| 2 | A bounded component change with a few interactions or edge cases and established implementation patterns. |
+| 3 | A moderate cohesive feature or substantial bounded investigation involving several invariants or callers. |
+| 5 | A substantial coherent component spanning layers or meaningful uncertainty, with a clear ownership and validation boundary. |
+| 8 | The largest sensible single ticket: multiple interacting contracts and substantial validation, but one outcome that can be implemented and reviewed coherently. |
+
+Choose the closest anchor holistically; do not add a point per file, layer or risk. Include required documentation, integration and correctness evidence. Research is estimated for its own questions and deliverables, not the implementation it may generate.
+
+## Ticket workflow
+
+1. Before starting a ticket, read its acceptance criteria and dependencies, set its estimate and record a short rationale. Preserve an existing estimate unless scope or new evidence warrants an explained revision.
+2. If the work exceeds 8, split it into independently verifiable, cohesive outcomes before further implementation. Preserve all acceptance requirements and dependencies. A research ticket can first resolve uncertainty and produce an estimated implementation breakdown.
+3. Estimate actual work once. Leave pure tracking parents unestimated; estimate their implementation children. If a parent retains real work, explicitly distinguish that work from its children.
+4. Before marking a ticket Done, ensure it has an estimate and the required review, validation and merge evidence. Tickets already In Review receive estimates before closure.
+5. Keep the original estimate and scope-change rationale in comments when changing points. Do not rewrite estimates merely to match elapsed time or make analytics look better.
+6. Retrospective estimates must be labelled as such. Keep historical delivered tickets intact; document any oversized aggregate rather than manufacturing a past breakdown.
+7. Review the anchors after a few cycles using concrete completed-ticket comparisons, surprising complexity and decomposition quality. Version substantive rubric changes. Retrospective points are an initial baseline, not evidence of forecasting accuracy.
+
+The practical size limit is a coherent outcome with bounded contracts and a reviewable validation argument, not a fixed number of features or files. Safety and correctness remain absolute; splitting work never drops acceptance requirements.
+
+## Cycle estimation calibration
+
+Review at cycle close using the completed cohort. If tickets remain unfinished, publish a provisional review and add a final review when that cohort is complete; do not delay learning or call unfinished work delivered. Record tickets added, removed, split or cancelled, and preserve their original cycle membership in the review. Completion includes required review, tests and merge evidence.
+
+1. **Preserve the baseline.** At ticket start, record the estimate, rubric version, acceptance scope, estimate date and a short rationale naming the main contracts, uncertainty and validation. Mark estimates assigned after implementation as retrospective. Keep original estimates when scope or estimates change; missing historical evidence stays unknown rather than being reconstructed as fact.
+2. **Build one evidence table.** For each ticket, include its original estimate and timing, original versus delivered scope, relevant PRs, final acceptance evidence, discovered dependencies, required validation and material review/rework findings. Record active work and waiting time separately when reliably available. Neither elapsed time, token use nor lines changed defines complexity.
+3. **Assess realized complexity independently.** Review the delivered work against the same rubric, preferably with the original score hidden during the first pass. Propose a retrospective comparison score with evidence and confidence, then reconcile reviewer disagreements. This is a judgment about complexity, not a measured quantity called actual points. Separate the difficulty of the original scope from added or removed scope.
+4. **Explain differences.** Classify each outcome as well calibrated, overestimated, underestimated, changed scope, poorly decomposed or insufficient evidence. Identify causes: unknown design constraints, missed dependencies/integration, underestimated correctness work, reusable infrastructure that simplified the work, or avoidable implementation/review churn. A long external wait is a workflow finding, not automatically an estimation miss. Record mixed causes rather than forcing one label.
+5. **Compare across tickets.** Sort by assessed complexity and compare adjacent scores and tickets with the same score. Report sample counts, prospective versus retrospective coverage, agreement and movement between Fibonacci categories. Treat points as ordered relative categories, not a ratio scale; do not report a 5-point ticket as a measured percentage more difficult than a 3-point ticket. Analyze research and implementation examples with their different deliverables in view. Exclude tracking parents from point totals and retain parent/child lineage when splits occur.
+6. **Choose concrete anchors.** Select completed, reviewed tickets that exemplify each supported score, plus boundary examples explaining why a ticket is 3 rather than 5 or 5 rather than 8. Do not invent anchors for scores without evidence. Describe interacting contracts, semantic breadth, uncertainty and the correctness argument; avoid mechanical file-count or subsystem-count formulas. Work that lacks one cohesive reviewable outcome or exceeds the 8-point anchor should be decomposed before implementation.
+7. **Publish the next rubric and test it.** Keep the cycle report, evidence table, anchor tickets, rubric changes and a small set of actionable improvements in the project. Version substantive changes as the next rubric; use them for future estimates without rewriting historical scores. Calibrate a few upcoming tickets against the new anchors and check agreement again next cycle. Do not optimize point throughput at the expense of correctness or interpret more completed points as inherently better work.
+
+The first cycle contains retrospectively estimated completed work. Use it to establish comparative anchors, but assess forecast accuracy only for tickets estimated before work began. Later-discovered defects or integration work can update the review as new evidence; retain the earlier assessment and explain the revision. A cycle report should distinguish estimation misses, scope changes and execution/process issues, with a concrete adjustment for each recurring cause.
+
 ## Current agent-server and documentation workflow
 
 Start at [the documentation index](docs-src/README.md) and
@@ -584,3 +626,24 @@ when changing `ochat.opam`/`dune-project` or source pins. The CI lock targets Li
 ordinary local setup on other platforms uses the base package definition.
 See [CI coverage and maintenance](https://github.com/dakotamurphyucf/ochat/blob/main/website/planning/ci-enforcement.md) for changed-file
 selection, periodic cold checks, cache recovery and the deployment rules.
+
+
+## Documentation during the development cycle
+
+Keep public interface contracts, essential architecture/behavior notes and affected
+`docs-src/` references and examples accurate alongside implementation changes.
+Continue required documentation and offline semantic checks. Record deferred
+editorial gaps with links to their owning feature tickets.
+
+The comprehensive public website refresh belongs to M10, after all preceding
+product milestones, including desktop and Linux delivery, are reviewed, merged
+and qualified. It covers content coverage, onboarding, tutorials, final UI captures,
+navigation/search, and publication verification. The initial audit
+[OCH-194](https://linear.app/ochat/issue/OCH-194) must create the concrete follow-up
+work; research completion alone does not finish the milestone.
+
+Technical prose remains canonical in `docs-src/`; `website/` owns publication
+metadata, navigation and rendering. Edit original sources, never generated output.
+Deferring the broad editorial pass does not defer correctness fixes or relax
+existing documentation checks. See `website/README.md` for source ownership and
+validation commands.
