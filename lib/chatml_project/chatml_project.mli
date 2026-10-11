@@ -177,6 +177,19 @@ end
 
 type t
 
+module Namespace : sig
+  (** Project only the shared schema_version/nonempty namespace rules before a
+      captured identity exists. Bounded JSON parsing is non-interruptible; poll
+      around it and while projecting fields. Other declaration semantics belong
+      to full decode. Errors are honestly unlocated; no fake source is created.
+      An effective namespace override never bypasses authored validation. *)
+  val of_contents
+    :  string
+    -> limits:Document_schema.Limits.t
+    -> checkpoint:(unit -> unit)
+    -> (string, Document_schema.Error.t) Result.t
+end
+
 (** Flat schema_version=1 JSON. Duplicate keys/unknown semantic fields/null
     selectors reject. Reuse Document_schema JSON validation and presence rules.
     Poll before/after its bounded decode stage and during domain conversion.

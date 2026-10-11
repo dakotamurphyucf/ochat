@@ -368,29 +368,6 @@ module Decode = struct
     , environment )
   ;;
 
-  let version reader path value =
-    match value with
-    | `Number number ->
-      let is_integer =
-        String.for_all number ~f:(function
-          | '-' | '0' .. '9' -> true
-          | _ -> false)
-      in
-      (match if is_integer then Int.of_string_opt number else None with
-       | Some 1 -> Ok ()
-       | Some version ->
-         Error
-           (Error.create
-              (Declared_at.source reader.Reader.origin)
-              ~details:
-                (Document_schema.Error.Unsupported_version
-                   { kind = "chatml.project"; version; target = 1 })
-              ~field_path:path)
-       | None -> Reader.fail reader path "expected an integer schema version")
-    | `Null | `True | `False | `String _ | `Array _ | `Object _ ->
-      Reader.fail reader path "expected an integer schema version"
-  ;;
-
   let validate_environment reader environments path name =
     reader.Reader.checkpoint ();
     if Map.mem environments name
@@ -577,9 +554,30 @@ module Decode = struct
           ]
         value
     in
-    let%bind () = Reader.required reader path fields "schema_version" ~decode:version in
     let%bind namespace =
-      Reader.required reader path fields "namespace" ~decode:Reader.nonempty_string
+      Result.map_error
+        (Chatml_project_namespace.of_json
+           (`Object fields)
+           ~checkpoint:reader.Reader.checkpoint)
+        ~f:(fun details ->
+          let field_path =
+            match details with
+            | Document_schema.Error.Invalid_field { path; reason = _ } -> path
+            | Unsupported_version _ -> [ "schema_version" ]
+            | Invalid_configuration _
+            | Limit_exceeded _
+            | Malformed _
+            | Duplicate_key _
+            | Unsupported_beta_format
+            | Unsupported_format _
+            | Unsupported_kind _
+            | Missing_conversion _
+            | Wrong_kind _
+            | Wrong_version _
+            | Required_semantics_unknown _
+            | Extension_conflict _ -> []
+          in
+          Error.create (Declared_at.source reader.origin) ~details ~field_path)
     in
     let%bind members = catalog_members reader fields in
     let%bind dependencies =

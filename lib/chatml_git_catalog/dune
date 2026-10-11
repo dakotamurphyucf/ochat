@@ -1,0 +1,7 @@
+(library
+ (name chatml_git_catalog)
+ (public_name ochat.chatml_git_catalog)
+ (modules chatml_git_catalog git_catalog_model git_catalog_budget git_catalog_session git_catalog_operation git_object git_tree git_commit git_reader)
+ (private_modules git_catalog_model git_catalog_budget git_catalog_session git_catalog_operation git_object git_tree git_commit git_reader)
+ (libraries core eio chatml_git_host chatml_project chatml_catalog chatml_source source document_schema digestif)
+ (preprocess (pps ppx_jane)))
