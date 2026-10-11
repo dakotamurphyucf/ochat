@@ -9,6 +9,14 @@ val resolve_checked_program
   -> program
   -> resolved_program
 
+(** Resolve an owned parser unit only with annotations from the same captured
+    source identity and digest. Different identities/revisions fail before span
+    lookup; successful resolution preserves all original byte spans. *)
+val resolve_captured_program
+  :  Chatml_typechecker.checked_program
+  -> Chatml.Chatml_parse.Unit.t
+  -> (resolved_program, Chatml_diagnostic.t) result
+
 (** Resolve a program using the default typechecker entrypoint. *)
 val resolve_program : program -> resolved_program
 

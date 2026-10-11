@@ -4,20 +4,21 @@ module Syntax = Chatml.Chatml_type_expr
 module Equivalence = Chatml_alias_equivalence
 
 module Error = struct
-  type t =
-    { message : string
-    ; span : Source.span
-    }
+  type t = Chatml_diagnostic.t
 end
 
 module Alias = struct
   type 'scope t =
-    | Closed of typ
+    | Closed of
+        { body : typ
+        ; definition_site : Chatml_diagnostic.Site.t option
+        }
     | Parameterized of
         { name : string
         ; parameters : string list
         ; body : Syntax.t
         ; environment : 'scope
+        ; source : Chatml_source.t option
         }
 
   let arity = function
@@ -185,7 +186,14 @@ let add_host t ~name ~body ~checkpoint =
   if template_is_immutable ~checkpoint body
   then (
     let%bind () = Chatml_type_validity.check_contractive ~checkpoint body in
-    Ok { t with aliases = Map.set t.aliases ~key:name ~data:(Alias.Closed body) })
+    Ok
+      { t with
+        aliases =
+          Map.set
+            t.aliases
+            ~key:name
+            ~data:(Alias.Closed { body; definition_site = None })
+      })
   else
     Error
       (Printf.sprintf
@@ -195,7 +203,16 @@ let add_host t ~name ~body ~checkpoint =
 
 exception Invalid of Error.t
 
-let reject (syntax : Syntax.t) message = raise (Invalid { message; span = syntax.span })
+let diagnostic ?source ~checkpoint span message =
+  let diagnostic = Chatml_diagnostic.create ~span message in
+  match source with
+  | None -> diagnostic
+  | Some source -> Chatml.Chatml_owned_source.attach source diagnostic ~checkpoint
+;;
+
+let reject ?source ~checkpoint (syntax : Syntax.t) message =
+  raise (Invalid (diagnostic ?source ~checkpoint syntax.span message))
+;;
 
 let protect f =
   try Ok (f ()) with
@@ -249,12 +266,12 @@ let application_binder ~checkpoint name arguments =
     choose 0)
 ;;
 
-let ensure_unique syntax ~what ~checkpoint names =
+let ensure_unique ?source syntax ~what ~checkpoint names =
   let seen = Hash_set.create (module String) in
   List.iter names ~f:(fun name ->
     checkpoint ();
     if Hash_set.mem seen name
-    then reject syntax (Printf.sprintf "Duplicate %s '%s'" what name);
+    then reject ?source ~checkpoint syntax (Printf.sprintf "Duplicate %s '%s'" what name);
     Hash_set.add seen name)
 ;;
 
@@ -269,7 +286,7 @@ end
 
 let parameter_name name = "'" ^ name
 
-let rec convert (t : t) ~parameters ~self ~checkpoint syntax =
+let rec convert ?source (t : t) ~parameters ~self ~checkpoint syntax =
   let rec expression (syntax : Syntax.t) =
     checkpoint ();
     match syntax.desc with
@@ -277,7 +294,12 @@ let rec convert (t : t) ~parameters ~self ~checkpoint syntax =
     | TEParameter name ->
       (match Map.find parameters name with
        | Some ty -> ty
-       | None -> reject syntax (Printf.sprintf "Unbound type parameter '%s" name))
+       | None ->
+         reject
+           ?source
+           ~checkpoint
+           syntax
+           (Printf.sprintf "Unbound type parameter '%s" name))
     | TEConstr (name, arguments) ->
       constructor syntax name (List.map arguments ~f:expression)
     | TEFunction (parameters, result) ->
@@ -294,6 +316,7 @@ let rec convert (t : t) ~parameters ~self ~checkpoint syntax =
        | _ -> Fun (lhs :: parameters, result))
     | TERecord fields ->
       ensure_unique
+        ?source
         syntax
         ~what:"type record field label"
         ~checkpoint
@@ -305,6 +328,7 @@ let rec convert (t : t) ~parameters ~self ~checkpoint syntax =
            , Empty_row ))
     | TEVariant cases ->
       ensure_unique
+        ?source
         syntax
         ~what:"type variant constructor label"
         ~checkpoint
@@ -322,6 +346,8 @@ let rec convert (t : t) ~parameters ~self ~checkpoint syntax =
       if actual <> expected
       then
         reject
+          ?source
+          ~checkpoint
           syntax
           (Printf.sprintf
              "Type '%s' expects %d argument(s), received %d"
@@ -350,6 +376,8 @@ let rec convert (t : t) ~parameters ~self ~checkpoint syntax =
                 | _ -> false))
       then
         reject
+          ?source
+          ~checkpoint
           syntax
           (Printf.sprintf "Recursive type '%s' must preserve its parameters" name);
       Rec_var binder
@@ -366,7 +394,8 @@ let rec convert (t : t) ~parameters ~self ~checkpoint syntax =
          Con ("task", arguments)
        | None, _, _ ->
          (match find_alias t ~checkpoint qualified with
-          | None -> reject syntax (Printf.sprintf "Unknown type '%s'" name)
+          | None ->
+            reject ?source ~checkpoint syntax (Printf.sprintf "Unknown type '%s'" name)
           | Some alias ->
             arity (Alias.arity alias);
             apply alias ~arguments ~checkpoint))
@@ -375,14 +404,15 @@ let rec convert (t : t) ~parameters ~self ~checkpoint syntax =
 
 and apply alias ~arguments ~checkpoint =
   match alias with
-  | Alias.Closed body -> body
-  | Parameterized { name; parameters; body; environment } ->
+  | Alias.Closed { body; _ } -> body
+  | Parameterized { name; parameters; body; environment; source } ->
     let binder = application_binder ~checkpoint name arguments in
     let bindings = String.Map.of_alist_exn (List.zip_exn parameters arguments) in
     (* A declaration has already passed its abstract-parameter regularity check.
        Elaborate in the captured namespace with concrete arguments: legacy arrow
        unit erasure and RHS flattening depend on those arguments. *)
     convert
+      ?source
       environment
       ~parameters:bindings
       ~self:(Some { Self.name; parameters; binder; check_regular = false })
@@ -392,6 +422,7 @@ and apply alias ~arguments ~checkpoint =
 ;;
 
 let declare
+      ?source
       t
       ({ Syntax.Declaration.name; parameters; body } : Syntax.Declaration.t)
       ~checkpoint
@@ -400,14 +431,20 @@ let declare
     checkpoint ();
     (match available t name with
      | Ok () -> ()
-     | Error message -> reject body message);
+     | Error message -> reject ?source ~checkpoint body message);
     if
       (not (List.is_empty parameters))
       && List.mem [ "array"; "task" ] name ~equal:String.equal
-    then reject body (Printf.sprintf "Cannot redefine builtin type constructor '%s'" name);
-    ensure_unique body ~what:"type parameter" ~checkpoint parameters;
+    then
+      reject
+        ?source
+        ~checkpoint
+        body
+        (Printf.sprintf "Cannot redefine builtin type constructor '%s'" name);
+    ensure_unique ?source body ~what:"type parameter" ~checkpoint parameters;
     let template =
       convert
+        ?source
         t
         ~parameters:
           (String.Map.of_alist_exn
@@ -420,34 +457,45 @@ let declare
     let template = recursive_body ~checkpoint ~binder:name template in
     (match Chatml_type_validity.check_contractive ~checkpoint template with
      | Ok () -> ()
-     | Error message -> reject body message);
+     | Error message -> reject ?source ~checkpoint body message);
     let definition =
       if List.is_empty parameters
-      then Alias.Closed template
-      else Alias.Parameterized { name; parameters; body; environment = t }
+      then (
+        let definition_site =
+          Option.bind source ~f:(fun source ->
+            Chatml.Chatml_owned_source.site source body.span ~checkpoint)
+        in
+        Alias.Closed { body = template; definition_site })
+      else Alias.Parameterized { name; parameters; body; environment = t; source }
     in
     { t with aliases = Map.set t.aliases ~key:name ~data:definition })
 ;;
 
-let elaborate t syntax ~checkpoint =
-  protect (fun () -> convert t ~parameters:String.Map.empty ~self:None ~checkpoint syntax)
+let elaborate ?source t syntax ~checkpoint =
+  protect (fun () ->
+    convert ?source t ~parameters:String.Map.empty ~self:None ~checkpoint syntax)
 ;;
 
 (* Unlike [convert], this expansion retains the conditional behavior of legacy
    arrows. Alias equality and universal specification arity checks share this
    symbolic traversal; it never produces an inference type. *)
 let symbolic_expansion ~fresh_binder ~checkpoint =
-  let rec expression environment parameters self (syntax : Syntax.t) =
+  let rec expression source environment parameters self (syntax : Syntax.t) =
     checkpoint ();
-    let expression = expression environment parameters self in
+    let expression = expression source environment parameters self in
     match syntax.desc with
-    | TEName name -> constructor environment self syntax name []
+    | TEName name -> constructor source environment self syntax name []
     | TEParameter name ->
       (match Map.find parameters name with
        | Some argument -> argument
-       | None -> reject syntax (Printf.sprintf "Unbound type parameter '%s" name))
+       | None ->
+         reject
+           ?source
+           ~checkpoint
+           syntax
+           (Printf.sprintf "Unbound type parameter '%s" name))
     | TEConstr (name, arguments) ->
-      constructor environment self syntax name (List.map arguments ~f:expression)
+      constructor source environment self syntax name (List.map arguments ~f:expression)
     | TEFunction (parameters, result) ->
       Equivalence.Function (List.map parameters ~f:expression, expression result)
     | TEArrow (left, right) ->
@@ -470,7 +518,7 @@ let symbolic_expansion ~fresh_binder ~checkpoint =
                      , Equivalence.Node (Variant_payload, List.map bodies ~f:expression) )))
               , Equivalence.Node (Empty_row, []) )
           ] )
-  and constructor environment self syntax qualified arguments =
+  and constructor source environment self syntax qualified arguments =
     let name = Syntax.Name.to_string qualified in
     let builtin_application =
       (not (List.is_empty arguments))
@@ -481,30 +529,31 @@ let symbolic_expansion ~fresh_binder ~checkpoint =
       -> Equivalence.Recursive_variable binder
     | _ ->
       (match primitive name, name, arguments with
-       | Some ty, _, _ -> closed syntax ty
+       | Some ty, _, _ -> closed source syntax ty
        | None, "array", _ :: _ -> Equivalence.Node (Array, arguments)
        | None, "task", _ :: _ -> Equivalence.Node (Con "task", arguments)
        | None, _, _ ->
          (match find_alias environment ~checkpoint qualified with
           | Some alias -> apply alias arguments
-          | None -> reject syntax (Printf.sprintf "Unknown type '%s'" name)))
-  and closed syntax ty =
+          | None ->
+            reject ?source ~checkpoint syntax (Printf.sprintf "Unknown type '%s'" name)))
+  and closed source syntax ty =
     match Equivalence.of_closed_type ty ~fresh_binder ~checkpoint with
     | Ok ty -> ty
-    | Error message -> reject syntax message
+    | Error message -> reject ?source ~checkpoint syntax message
   and apply alias arguments =
     checkpoint ();
     match alias with
-    | Alias.Closed ty ->
+    | Alias.Closed { body = ty; _ } ->
       (* Closed templates are already validated. Their source location is never
          needed for a projection failure, which is an internal invariant. *)
       (match Equivalence.of_closed_type ty ~fresh_binder ~checkpoint with
        | Ok ty -> ty
        | Error message -> failwith message)
-    | Parameterized { name; parameters; body; environment } ->
+    | Parameterized { name; parameters; body; environment; source } ->
       let binder = fresh_binder () in
       let parameters = String.Map.of_alist_exn (List.zip_exn parameters arguments) in
-      expression environment parameters (Some (name, binder)) body
+      expression source environment parameters (Some (name, binder)) body
       |> Equivalence.recursive ~binder ~checkpoint
   in
   expression, apply
@@ -515,9 +564,11 @@ let symbolic_application alias ~arguments ~fresh_binder ~checkpoint =
   apply alias arguments
 ;;
 
-let require_fixed_function_arity syntax expanded ~checkpoint =
+let require_fixed_function_arity ?source syntax expanded ~checkpoint =
   let reject_ambiguous () =
     reject
+      ?source
+      ~checkpoint
       syntax
       "Universal value specifications require fixed function arity; use explicit \
        fun(...) -> ... for parameter-dependent legacy arrows"
@@ -545,7 +596,7 @@ let require_fixed_function_arity syntax expanded ~checkpoint =
   check expanded
 ;;
 
-let elaborate_scheme t syntax ~equality_parameters ~fresh_name ~checkpoint =
+let elaborate_scheme ?source t syntax ~equality_parameters ~fresh_name ~checkpoint =
   protect (fun () ->
     let rec collect names (syntax : Syntax.t) =
       checkpoint ();
@@ -563,13 +614,22 @@ let elaborate_scheme t syntax ~equality_parameters ~fresh_name ~checkpoint =
           List.fold arguments ~init:names ~f:collect)
     in
     let names = collect String.Set.empty syntax in
-    ensure_unique syntax ~what:"equality requirement" ~checkpoint equality_parameters;
+    ensure_unique
+      ?source
+      syntax
+      ~what:"equality requirement"
+      ~checkpoint
+      equality_parameters;
     let equality_names =
       List.fold equality_parameters ~init:String.Set.empty ~f:(fun equalities name ->
         checkpoint ();
         if not (Set.mem names name)
         then
-          reject syntax (Printf.sprintf "Equality parameter '%s is not quantified" name);
+          reject
+            ?source
+            ~checkpoint
+            syntax
+            (Printf.sprintf "Equality parameter '%s is not quantified" name);
         Set.add equalities name)
     in
     let parameters =
@@ -580,7 +640,7 @@ let elaborate_scheme t syntax ~equality_parameters ~fresh_name ~checkpoint =
         in
         Map.set parameters ~key:name ~data:(Generic { name = fresh_name (); equality }))
     in
-    let declared = convert t ~parameters ~self:None ~checkpoint syntax in
+    let declared = convert ?source t ~parameters ~self:None ~checkpoint syntax in
     let symbolic_parameters =
       Set.to_list names
       |> List.mapi ~f:(fun index name -> name, Equivalence.Parameter index)
@@ -594,18 +654,40 @@ let elaborate_scheme t syntax ~equality_parameters ~fresh_name ~checkpoint =
       binder
     in
     let expression, _ = symbolic_expansion ~fresh_binder ~checkpoint in
-    let expanded = expression t symbolic_parameters None syntax in
-    require_fixed_function_arity syntax expanded ~checkpoint;
+    let expanded = expression source t symbolic_parameters None syntax in
+    require_fixed_function_arity ?source syntax expanded ~checkpoint;
     declared)
 ;;
 
-let check_declared_equivalent t ~other ~name ~checkpoint =
+let definition_site alias ~checkpoint =
+  match alias with
+  | Alias.Closed { definition_site; _ } -> definition_site
+  | Parameterized { source; body; _ } ->
+    Option.bind source ~f:(fun source ->
+      Chatml.Chatml_owned_source.site source body.span ~checkpoint)
+;;
+
+let check_declared_equivalent ?source t ~other ~name ~span ~checkpoint =
   checkpoint ();
+  let failure ?actual message =
+    let related =
+      Option.bind actual ~f:(fun alias -> definition_site alias ~checkpoint)
+      |> Option.map ~f:(fun site ->
+        Chatml_diagnostic.Related.create site ~message:"Implementation alias definition")
+      |> Option.to_list
+    in
+    let error = diagnostic ?source ~checkpoint span message in
+    Error
+      (Chatml_diagnostic.create ?span:error.span ?site:error.site ~related error.message)
+  in
   match Map.find t.aliases name, Map.find other.aliases name with
   | Some actual, Some expected ->
     let arity = Alias.arity actual in
     if arity <> Alias.arity expected
-    then Error (Printf.sprintf "Type alias '%s' has different parameter counts" name)
+    then
+      failure
+        ~actual
+        (Printf.sprintf "Type alias '%s' has different parameter counts" name)
     else (
       let next_binder = ref 0 in
       let fresh_binder () =
@@ -622,13 +704,14 @@ let check_declared_equivalent t ~other ~name ~checkpoint =
         protect (fun () ->
           Equivalence.equivalent (expand actual) (expand expected) ~checkpoint)
       with
-      | Error error -> Error error.message
+      | Error error -> Error error
       | Ok true -> Ok ()
       | Ok false ->
-        Error
+        failure
+          ~actual
           (Printf.sprintf
              "Cannot establish universal equivalence of type alias '%s': normalized \
               symbolic expansions differ"
              name))
-  | None, _ | _, None -> Error (Printf.sprintf "Module does not declare type '%s'" name)
+  | None, _ | _, None -> failure (Printf.sprintf "Module does not declare type '%s'" name)
 ;;

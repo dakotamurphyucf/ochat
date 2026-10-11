@@ -36,3 +36,15 @@ val eval_expr : env -> Frame_env.env -> resolved_expr node -> eval_result
 (** Evaluate an entire resolved program into the supplied top-level
     environment. *)
 val eval_program : env -> resolved_program -> unit
+
+(** Evaluate into a copy of the supplied bindings whose immutable source owner
+    is [source]. Export cells and captured closures retain that owner. This
+    returns the owned environment; the input environment is not relabelled.
+    Rejects different captured bytes before evaluation. Runtime failures remain
+    structured; execution-control exceptions propagate. No initializer executes
+    during compilation. *)
+val eval_captured_program
+  :  env
+  -> source:Chatml_source.t
+  -> resolved_program
+  -> (env, runtime_error) result

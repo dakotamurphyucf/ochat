@@ -16,10 +16,7 @@ end
 module Visibility = Chatml.Chatml_module_visibility
 
 module Error = struct
-  type t =
-    { message : string
-    ; span : Source.span
-    }
+  type t = Chatml_diagnostic.t
 end
 
 type t =
@@ -34,20 +31,26 @@ let visibility t = t.visibility
 
 exception Rejected of Error.t
 
-let reject span message = raise (Rejected { message; span })
-
-let located span = function
-  | Ok value -> value
-  | Error message -> reject span message
-;;
-
 let alias_result = function
   | Ok value -> value
-  | Error { Type_alias.Error.message; span } -> reject span message
+  | Error error -> raise (Rejected error)
 ;;
 
-let check engine ~values ~types ~outer_types ~signature ~span =
+let check ?source engine ~values ~types ~outer_types ~signature ~span =
   let { Engine.instantiate; unify; fresh_name; checkpoint } = engine in
+  let reject span message =
+    let diagnostic = Chatml_diagnostic.create ~span message in
+    let diagnostic =
+      match source with
+      | None -> diagnostic
+      | Some source -> Chatml.Chatml_owned_source.attach source diagnostic ~checkpoint
+    in
+    raise (Rejected diagnostic)
+  in
+  let located span = function
+    | Ok value -> value
+    | Error message -> reject span message
+  in
   let rigids = ref String.Set.empty in
   let new_rigid_name () =
     let name = fresh_name () in
@@ -84,7 +87,7 @@ let check engine ~values ~types ~outer_types ~signature ~span =
       match item.desc with
       | Type declaration ->
         local_types
-        := Type_alias.declare !local_types declaration ~checkpoint |> alias_result;
+        := Type_alias.declare ?source !local_types declaration ~checkpoint |> alias_result;
         let count = List.length declaration.parameters in
         (match Type_alias.declared_arity implementation_types ~name:declaration.name with
          | Some arity when arity = count -> ()
@@ -101,11 +104,13 @@ let check engine ~values ~types ~outer_types ~signature ~span =
              item.span
              (Printf.sprintf "Module does not declare type '%s'" declaration.name));
         Type_alias.check_declared_equivalent
+          ?source
           implementation_types
           ~other:!local_types
           ~name:declaration.name
+          ~span:item.span
           ~checkpoint
-        |> located item.span;
+        |> alias_result;
         type_names := declaration.name :: !type_names
       | Value { name; annotation; requirements } ->
         let actual = implementation_value item.span name in
@@ -121,6 +126,7 @@ let check engine ~values ~types ~outer_types ~signature ~span =
         in
         let expected =
           Type_alias.elaborate_scheme
+            ?source
             !local_types
             annotation
             ~equality_parameters
@@ -190,4 +196,27 @@ let check engine ~values ~types ~outer_types ~signature ~span =
     | Error Already_committed -> assert false
   with
   | Rejected error -> Error error
+;;
+
+let check_captured interface engine ~values ~types ~outer_types =
+  let source = Chatml.Chatml_parse.Interface.source interface in
+  let checkpoint = engine.Engine.checkpoint in
+  (* This whole-unit range is constructed before checking or committing cells. *)
+  let span =
+    Chatml_source.locate
+      source
+      ~start_byte:0
+      ~end_byte:(Chatml_source.byte_length source)
+      ~checkpoint
+    |> Or_error.ok_exn
+    |> Chatml_source.Location.span
+  in
+  check
+    ~source
+    engine
+    ~values
+    ~types
+    ~outer_types
+    ~signature:(Chatml.Chatml_parse.Interface.signature interface)
+    ~span
 ;;

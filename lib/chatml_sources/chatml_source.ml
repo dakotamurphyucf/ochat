@@ -68,10 +68,76 @@ module Location = struct
   let span t = t.span
 end
 
+module Position_index = struct
+  (* These arrays are private and mutate only inside [create], before publication. *)
+  type t =
+    { lines : int array
+    ; columns : int array
+    }
+
+  let stride = 4096
+
+  let scan contents ~start_byte ~end_byte ~line ~column ~checkpoint ~record =
+    let length = String.length contents in
+    let rec loop offset line column =
+      if offset mod stride = 0
+      then (
+        checkpoint ();
+        match record with
+        | None -> ()
+        | Some t ->
+          let slot = offset / stride in
+          t.lines.(slot) <- line;
+          t.columns.(slot) <- column);
+      if offset = end_byte
+      then { Source.line; column; offset }
+      else (
+        match String.get contents offset with
+        | '\r' ->
+          if offset + 1 < length && Char.equal (String.get contents (offset + 1)) '\n'
+          then loop (offset + 1) line (column + 1)
+          else loop (offset + 1) (line + 1) 0
+        | '\n' -> loop (offset + 1) (line + 1) 0
+        | _ -> loop (offset + 1) line (column + 1))
+    in
+    loop start_byte line column
+  ;;
+
+  let create contents ~checkpoint =
+    let length = String.length contents in
+    let slots = (length / stride) + 1 in
+    let t = { lines = Array.create ~len:slots 1; columns = Array.create ~len:slots 0 } in
+    let (_ : Source.position) =
+      scan
+        contents
+        ~start_byte:0
+        ~end_byte:length
+        ~line:1
+        ~column:0
+        ~checkpoint
+        ~record:(Some t)
+    in
+    t
+  ;;
+
+  let position t ~contents ~byte_offset ~checkpoint =
+    let slot = byte_offset / stride in
+    scan
+      contents
+      ~start_byte:(slot * stride)
+      ~end_byte:byte_offset
+      ~line:t.lines.(slot)
+      ~column:t.columns.(slot)
+      ~checkpoint
+      ~record:None
+  ;;
+end
+
 type t =
   { id : Id.t
   ; contents : string
   ; digest : Digest.t
+  ; position_index : Position_index.t
   }
 
 let id t = t.id
@@ -93,7 +159,9 @@ let create id ~contents ~expected_digest ~max_bytes ~checkpoint =
   match expected_digest with
   | Some expected when not (Digest.equal expected digest) ->
     Or_error.error_string "captured source digest mismatch"
-  | None | Some _ -> Ok { id; contents; digest }
+  | None | Some _ ->
+    let position_index = Position_index.create contents ~checkpoint in
+    Ok { id; contents; digest; position_index }
 ;;
 
 let locate t ~start_byte ~end_byte ~checkpoint =
@@ -101,39 +169,16 @@ let locate t ~start_byte ~end_byte ~checkpoint =
   if start_byte < 0 || end_byte < start_byte || end_byte > byte_length t
   then Or_error.error_string "source byte range is out of bounds"
   else (
-    (* Tail recursion keeps scanning stack-safe; record only the start endpoint. *)
-    let rec scan offset line column left =
-      if offset mod 4096 = 0 then checkpoint ();
-      let left =
-        if offset = start_byte then Some { Source.line; column; offset } else left
-      in
-      if offset = end_byte
-      then (
-        let right = { Source.line; column; offset } in
-        match left with
-        | Some left ->
-          Ok
-            { Location.source = t.id
-            ; source_digest = t.digest
-            ; span = { Source.left; right }
-            }
-        | None -> Or_error.error_string "source byte range start is missing")
-      else (
-        let char = String.get t.contents offset in
-        let line, column =
-          match char with
-          | '\r' ->
-            if
-              offset + 1 < byte_length t
-              && Char.equal (String.get t.contents (offset + 1)) '\n'
-            then line, column + 1
-            else line + 1, 0
-          | '\n' -> line + 1, 0
-          | _ -> line, column + 1
-        in
-        scan (offset + 1) line column left)
+    let position byte_offset =
+      Position_index.position
+        t.position_index
+        ~contents:t.contents
+        ~byte_offset
+        ~checkpoint
     in
-    scan 0 1 0 None)
+    let left = position start_byte in
+    let right = position end_byte in
+    Ok { Location.source = t.id; source_digest = t.digest; span = { Source.left; right } })
 ;;
 
 let same_position (a : Source.position) (b : Source.position) =

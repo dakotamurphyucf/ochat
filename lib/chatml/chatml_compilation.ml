@@ -24,21 +24,12 @@ type error =
   ; message : string
   ; diagnostic : Chatml_host_runtime.compilation_diagnostic option
   }
-[@@deriving sexp]
+[@@deriving sexp_of]
 
 let max_error_bytes = 16 * 1024
 let bounded_message message = String.prefix message max_error_bytes
 
 let error ?diagnostic code message =
-  let diagnostic =
-    Option.map
-      diagnostic
-      ~f:(fun (diagnostic : Chatml_host_runtime.compilation_diagnostic) ->
-        { diagnostic with
-          message = bounded_message diagnostic.message
-        ; formatted = bounded_message diagnostic.formatted
-        })
-  in
   Error { code; message = bounded_message message; diagnostic }
 ;;
 
@@ -82,14 +73,43 @@ let validate_limits limits =
    builtin type descriptions and the finished program cross the domain boundary.
    Checkpoints run between stages and within inference: this is cooperative cancellation,
    not a hard time or memory sandbox around arbitrary compiler code. *)
-let compile_with_policy ~policy ~env ~target ~source () =
+module Input = struct
+  type t =
+    | Text of string
+    | Captured of Chatml_source.t
+
+  let byte_length = function
+    | Text contents -> String.length contents
+    | Captured source -> Chatml_source.byte_length source
+  ;;
+
+  let compile t ~checkpoint ~surface ~required_bindings =
+    match t with
+    | Text source ->
+      Chatml_host_runtime.compile_script_detailed
+        ~checkpoint
+        ~surface
+        ~required_bindings
+        ~source
+        ()
+    | Captured source ->
+      Chatml_host_runtime.compile_captured_script
+        source
+        ~checkpoint
+        ~surface
+        ~required_bindings
+        ()
+  ;;
+end
+
+let compile_input source ~policy ~env ~target =
   let open Result.Let_syntax in
   let%bind () =
     match policy with
     | Unrestricted -> Ok ()
     | Bounded limits ->
       let%bind () = validate_limits limits in
-      if String.length source > limits.max_source_bytes
+      if Input.byte_length source > limits.max_source_bytes
       then error "chatml.source_limit" "script exceeds the compiler source limit"
       else Ok ()
   in
@@ -107,14 +127,7 @@ let compile_with_policy ~policy ~env ~target ~source () =
     in
     Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) (fun () ->
       let surface, required_bindings = surface target in
-      match
-        Chatml_host_runtime.compile_script_detailed
-          ~checkpoint
-          ~surface
-          ~required_bindings
-          ~source
-          ()
-      with
+      match Input.compile source ~checkpoint ~surface ~required_bindings with
       | Ok compiled -> Ok compiled
       | Error diagnostic ->
         error ~diagnostic "chatml.invalid_handler" diagnostic.formatted)
@@ -134,6 +147,18 @@ let compile_with_policy ~policy ~env ~target ~source () =
   | _ -> error "chatml.compiler_failed" "compiler failed unexpectedly"
 ;;
 
+let compile_with_policy ~policy ~env ~target ~source () =
+  compile_input (Input.Text source) ~policy ~env ~target
+;;
+
 let compile ?(limits = default_limits) ~env ~target ~source () =
   compile_with_policy ~policy:(Bounded limits) ~env ~target ~source ()
+;;
+
+let compile_captured_with_policy source ~policy ~env ~target () =
+  compile_input (Input.Captured source) ~policy ~env ~target
+;;
+
+let compile_captured source ?(limits = default_limits) ~env ~target () =
+  compile_captured_with_policy source ~policy:(Bounded limits) ~env ~target ()
 ;;

@@ -14,7 +14,9 @@ let task_builtin ~name ~op ~parameters ~result ~spawn : S.builtin =
         if List.length args <> List.length parameters
         then failwith (op ^ ": invalid arity");
         let task_effect : Chatml_lang.eff = { op; args } in
-        Chatml_lang.VTask (if spawn then TSpawn task_effect else TPerform task_effect))
+        Chatml_lang.VTask
+          (Chatml_lang.Task.create
+             (if spawn then TSpawn task_effect else TPerform task_effect)))
   }
 ;;
 
@@ -189,7 +191,7 @@ let project_receipt tag (builtin : S.builtin) =
                   when String.equal actual tag -> value
                 | _ -> failwith "invalid host mutation receipt")
           in
-          Chatml_lang.VTask (TMap (task, project))
+          Chatml_lang.VTask (Chatml_lang.Task.create (TMap (task, project)))
         | _ -> assert false)
   }
 ;;

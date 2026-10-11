@@ -13,7 +13,7 @@ let declare types source =
   match Chatml.Chatml_parse.parse_interface source with
   | Ok [ { Syntax.desc = Type declaration; _ } ] ->
     Alias.declare types declaration ~checkpoint:ignore
-    |> Result.map_error ~f:(fun error -> error.Alias.Error.message)
+    |> Result.map_error ~f:(fun error -> error.Chatml_diagnostic.message)
     |> Result.ok_or_failwith
   | _ -> failwith "expected one type declaration"
 ;;
@@ -103,7 +103,7 @@ let%test_unit
   let aliases = types "type 'a callback = 'a -> int type 'a producer = int -> 'a" in
   let ordinary source =
     Alias.elaborate aliases (Signature_scheme_tests.annotation source) ~checkpoint:ignore
-    |> Result.map_error ~f:(fun error -> error.Alias.Error.message)
+    |> Result.map_error ~f:(fun error -> error.Chatml_diagnostic.message)
     |> Result.ok_or_failwith
   in
   List.iter

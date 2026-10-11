@@ -183,7 +183,9 @@ type resolved_program =
   }
 ```
 
-The stored `source_text` is used for diagnostic formatting.
+The stored `source_text` supports legacy single-file diagnostic formatting.
+Captured compilation additionally retains each unit's source identity and exact
+bytes so a deferred failure can select its defining source.
 
 ### 3.4 Type checking
 
@@ -2171,24 +2173,70 @@ state task array
 
 ## 15. Diagnostics
 
-### 15.1 Type errors
+### 15.1 Structured failures and source ownership
 
-Type errors are reported with:
+Parser, typechecker and runtime failures use `Chatml_diagnostic.t`. Its validated
+constructor preserves read-only message/span projections and an optional owned
+site. A site holds the exact captured source identity, content digest and range;
+it grants no execution authority and performs no live file lookup. An existing
+site wins when a caller supplies fallback context. A legacy unowned span alone
+does not establish source ownership.
 
-- a message
-- an optional source span
+Ranges are half-open byte ranges, with 1-based lines and 0-based byte columns.
+LF, CR and CRLF are canonical line breaks; a position between CR and its
+following LF remains on the preceding line until LF is consumed. Invalid or
+stale coordinates reject instead of being clipped. Messages retain at most
+16 KiB, and diagnostics retain at most eight related sites. Complete rendering
+is also bounded to 16 KiB. Source labels and excerpts escape control bytes; caret
+markers are omitted when escaping or multiple lines would misrepresent byte
+columns. `render_legacy` uses explicitly supplied text only for unowned ranges;
+an owned failure always renders its captured bytes.
 
-When a span is available, formatting uses source-text excerpts with caret
-markers.
+Closures retain their defining source through direct calls, tail calls and
+builtin callbacks. Task values retain their construction site, and continuation
+failures preserve their defining source through persistent events and UI
+resumption. Sites retain only the needed captured source, with no complete
+inventory or control callback. Metadata introduces no semantic task step or
+fuel charge. Diagnostic polling still checks cancellation, deadlines and active
+scope lifetime. Eager and bind/map callback errors preserve their existing
+`Task.catch` boundaries; plain task/host failure strings reach recovery unchanged
+even when their diagnostic display is truncated.
 
-### 15.2 Runtime errors
+### 15.2 Captured compiler and detailed host APIs
 
-Runtime errors are also structured:
+For OCaml embedders, `Chatml_parse.parse_captured` produces a source/AST pair.
+`parse_captured_interface` pairs companion interface syntax with its exact captured
+bytes. `Chatml_signature_check.check_captured` checks that interface against supplied
+implementation exports; it does not discover or load companion files. Signature
+claims use the interface source, while an alias expansion retains its defining
+source. An alias-equivalence mismatch can include the implementation definition
+as a related site without replacing the interface claim's primary location.
 
-- message
-- optional source span
+`Chatml_typechecker.check_captured_program_with_surface` and
+`Chatml_resolver.resolve_captured_program` preserve that pairing; resolution
+rejects annotations belonging to a different source identity or revision.
+Per-unit type and module-visibility annotation tables are separate while inference
+identities and weak type cells remain deliberately shared within the compilation.
+Location-based queries require the owning source identity and content digest.
+These tables are not deeply frozen value-query snapshots. Interface checking
+validates source metadata before committing constraints to shared weak variables;
+failed or cancelled checks do not publish a partial constraint update.
 
-and are formatted in the same general style as type errors.
+`Chatml_host_runtime.compile_captured_script` compiles exact captured bytes
+without executing initializers. Its compilation diagnostic retains the stage,
+message/span projections, rendered text and shared structured diagnostic.
+`Chatml_compilation.compile_captured` and `compile_captured_with_policy` provide
+the same captured compilation through the existing joined Eio domain, source-size
+limits and cooperative cancellation/time policy. The caller supplies the chosen
+capture; these APIs perform no project or file discovery.
+The host's `instantiate_session_detailed`, `run_entrypoint_detailed`,
+`handle_event_detailed`, `handle_next_queued_event_detailed` and
+`resume_ui_request_detailed` return the shared diagnostic from the same
+interpreter used by the string APIs. Existing single-string compilation and
+string-returning host entrypoints remain rendering adapters. Compiler checkpoint
+exceptions retain their original identity and backtrace; cancellation and
+execution-control exceptions propagate after cleanup rather than becoming
+ordinary task failures.
 
 ### 15.3 Current strengths
 

@@ -7,14 +7,15 @@ module Syntax = Chatml.Chatml_type_expr
     namespace; application elaborates with actual arguments in that namespace,
     never in the caller's. This preserves legacy arrow normalization after
     substitution. Closed zero-parameter aliases reuse their compiled body.
+    Source declarations retain only their exact captured defining owner; applying
+    private lexical syntax uses that owner, while use-site argument/name/arity
+    failures use the explicitly supplied caller source. Host definitions remain
+    honestly unlocated. Errors share the canonical bounded diagnostic type.
     No initializer, tool or provider is ever executed. *)
 type t
 
 module Error : sig
-  type t =
-    { message : string
-    ; span : Source.span
-    }
+  type t = Chatml_diagnostic.t
 end
 
 val empty : t
@@ -51,11 +52,13 @@ val declared_module : t -> name:string -> t option
     explicit diagnostic; this operation never samples argument instantiations.
     Neither namespace nor any inference graph is mutated. *)
 val check_declared_equivalent
-  :  t
+  :  ?source:Chatml_source.t
+  -> t
   -> other:t
   -> name:string
+  -> span:Source.span
   -> checkpoint:(unit -> unit)
-  -> (unit, string) result
+  -> (unit, Error.t) result
 
 (** Bring a module's public type and nested-module names into scope. Existing
     visible names cannot be shadowed by [open]. A module with no static type
@@ -78,13 +81,19 @@ val add_host
     All traversals poll [checkpoint];
     its exceptions (including cancellation) propagate unchanged. *)
 val declare
-  :  t
+  :  ?source:Chatml_source.t
+  -> t
   -> Syntax.Declaration.t
   -> checkpoint:(unit -> unit)
   -> (t, Error.t) result
 
 (** Elaborate an annotation with no implicitly quantified parameters. *)
-val elaborate : t -> Syntax.t -> checkpoint:(unit -> unit) -> (typ, Error.t) result
+val elaborate
+  :  ?source:Chatml_source.t
+  -> t
+  -> Syntax.t
+  -> checkpoint:(unit -> unit)
+  -> (typ, Error.t) result
 
 (** Elaborate a universally quantified value specification. Each parameter in
     the annotation denotes one fresh, shared [Generic] node within that
@@ -103,7 +112,8 @@ val elaborate : t -> Syntax.t -> checkpoint:(unit -> unit) -> (typ, Error.t) res
     Ordinary annotations still use
     [elaborate], which rejects unbound parameters. *)
 val elaborate_scheme
-  :  t
+  :  ?source:Chatml_source.t
+  -> t
   -> Syntax.t
   -> equality_parameters:string list
   -> fresh_name:(unit -> string)

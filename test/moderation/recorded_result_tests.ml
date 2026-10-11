@@ -34,7 +34,9 @@ let config ?(rollback = fun _ -> ()) ?(reserve = fun _ -> Ok ()) issued =
   let reserve_builtin : S.builtin =
     { name = "reserve"
     ; scheme = S.TFun ([ S.TString ], S.task_ty S.TString)
-    ; impl = (fun args -> L.VTask (TPerform { op = "Reservation.reserve"; args }))
+    ; impl =
+        (fun args ->
+          L.VTask (L.Task.create (TPerform { op = "Reservation.reserve"; args })))
     }
   in
   let surface =
