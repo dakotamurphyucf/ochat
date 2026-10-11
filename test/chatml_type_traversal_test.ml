@@ -1,4 +1,5 @@
 open Core
+module Name = Chatml.Chatml_syntax_name
 module T = Chatml_typechecker
 module L = Chatml.Chatml_lang
 module B = Chatml.Chatml_builtin_spec
@@ -50,7 +51,14 @@ let%expect_test "inference-owned type inspections and row operations cooperate" 
       (T.lookup state (T.Value_scope.of_schemes (T.Env.singleton "value" ty)) "value"
        : T.typ));
   cancelled "pattern binding" (fun state _ ->
-    ignore (T.infer_pattern state T.Value_scope.empty (L.PVar "value") ty : T.tenv));
+    ignore
+      (T.infer_pattern
+         state
+         T.Value_scope.empty
+         T.Type_alias.empty
+         (L.PVar (Name.unlocated "value"))
+         ty
+       : T.tenv));
   cancelled "type declaration" (fun state _ ->
     ignore
       (T.infer_stmt
@@ -63,7 +71,7 @@ let%expect_test "inference-owned type inspections and row operations cooperate" 
                ~body:ty
                ~checkpoint:ignore))
          (L.SType
-            { name = "alias"
+            { name = Name.unlocated "alias"
             ; parameters = []
             ; body = syntax (Syntax.TEName (Syntax.Name.local "seed"))
             })
@@ -138,7 +146,8 @@ let%expect_test
     | 0 -> syntax (Syntax.TEName (Syntax.Name.local "int"))
     | _ ->
       let nested = annotation (depth - 1) in
-      syntax (Syntax.TERecord [ "left", nested; "right", nested ])
+      syntax
+        (Syntax.TERecord [ Name.unlocated "left", nested; Name.unlocated "right", nested ])
   in
   cancelled "annotation" (fun _ poll ->
     ignore

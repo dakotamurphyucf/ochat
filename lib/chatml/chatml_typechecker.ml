@@ -47,6 +47,7 @@
     Everything else in this file exists to implement the inference engine
     itself and is **not** part of the stable API.
 *)
+module Syntax_name = Chatml.Chatml_syntax_name
 
 open Core
 open Chatml.Chatml_lang
@@ -55,11 +56,17 @@ module Builtin_surface = Chatml.Chatml_builtin_surface
 module Binding_pattern = Chatml.Chatml_binding_pattern
 module Type_alias = Chatml_type_alias
 module Type_probe = Chatml_type_probe
+module Type_scheme = Chatml_type_scheme
 module Signature_check = Chatml_signature_check
 module Type_snapshot = Chatml_type_snapshot
 module Value_scope = Chatml_value_scope
 module Configured_lookup = Chatml_configured_lookup
 module Configured_resolution = Chatml_configured_resolution
+module Semantic = Chatml_semantic_recorder
+module Semantic_binding = Chatml_semantic_binding
+module Semantic_scope = Chatml_semantic_scope
+module Semantic_elaboration = Chatml_semantic_elaboration
+module Semantic_host = Chatml_semantic_host
 
 (***************************************************************************)
 (* A Hindley-Milner style type-checker for the ChatML language.            *)
@@ -105,7 +112,9 @@ type configured_annotation = Configured_resolution.Annotation.t =
   | Inert_open of Configured_lookup.Origin.t
 
 type infer_state =
-  { configured : Configured_resolution.t option
+  { semantic : Semantic.Frame.t option
+  ; semantic_members : Semantic_binding.Members.t SpanTbl.t option
+  ; configured : Configured_resolution.t option
   ; shared : inference_machine
   ; checkpoint : unit -> unit
   ; source : Chatml_source.t option
@@ -115,7 +124,9 @@ type infer_state =
   }
 
 let create_state ?(checkpoint = fun () -> ()) ?source () : infer_state =
-  { configured = None
+  { semantic = None
+  ; semantic_members = None
+  ; configured = None
   ; shared = { current_id = 0; current_lvl = 0; mu_id = 0; until_checkpoint = 0 }
   ; checkpoint
   ; source
@@ -127,7 +138,9 @@ let create_state ?(checkpoint = fun () -> ()) ?source () : infer_state =
 
 (* New unit annotations, same inference graph. No fresh gensym or type cells. *)
 let for_source state source =
-  { configured = None
+  { semantic = None
+  ; semantic_members = None
+  ; configured = None
   ; shared = state.shared
   ; checkpoint = state.checkpoint
   ; source = Some source
@@ -325,84 +338,23 @@ let unfold_mu ?checkpoint (ty : typ) : typ =
 (** --------------------------------------------------------------------- *)
 
 let instantiate (state : infer_state) ty =
-  let table = Hashtbl.create (module String) in
-  let kinds = Hashtbl.create (module String) in
-  let rec inst_kind seen kind =
-    checkpoint state;
-    match kind with
-    | Generic { name; equality = None } ->
-      Hashtbl.find_or_add kinds name ~default:(fun () ->
-        new_var state state.shared.current_lvl)
-    | Generic { equality = Some _; _ } ->
-      raise (Type_error "A representation kind cannot carry value equality")
-    | Var ({ contents = Bound bound } as tv) ->
-      if tv_ref_mem tv seen then Var tv else inst_kind (tv :: seen) bound
-    | other -> other
-  in
-  let rec inst (seen : tv ref list) ty =
-    checkpoint state;
-    match ty with
-    | Fun (ps, r) -> Fun (List.map ps ~f:(inst seen), inst seen r)
-    | Generic { name; equality } ->
-      let variable =
-        Hashtbl.find_or_add table name ~default:(fun () ->
-          new_var state ?equality state.shared.current_lvl)
-      in
-      (match variable with
-       | Var tv -> Option.iter equality ~f:(add_free_equality tv)
-       | _ -> assert false);
-      variable
-    | Con (n, args) -> Con (n, List.map args ~f:(inst seen))
-    | Var ({ contents = Bound t } as tvref) ->
-      if tv_ref_mem tvref seen then Var tvref else inst (tvref :: seen) t
-    | Var ({ contents = Free _ } as tvref) -> Var tvref
-    | Mu (binder, body) -> Mu (binder, inst seen body)
-    | Rec_var _ as rec_var -> rec_var
-    | Ref t -> Ref (inst seen t)
-    | Record r -> Record (inst seen r)
-    | Module r -> Module (inst seen r)
-    | Field_receiver (kind, row) -> Field_receiver (inst_kind seen kind, inst seen row)
-    | Variant r -> Variant (inst seen r)
-    | Tuple ts -> Tuple (List.map ts ~f:(inst seen))
-    | Variant_payload ts -> Variant_payload (List.map ts ~f:(inst seen))
-    | Row (fields, t) -> Row (Env.map fields ~f:(inst seen), inst seen t)
-    | Array t -> Array (inst seen t)
-    | t -> t
-  in
-  inst [] ty
+  match
+    Type_scheme.instantiate
+      ty
+      ~level:state.shared.current_lvl
+      ~fresh_name:(fun () -> gensym state)
+      ~checkpoint:(fun () -> checkpoint state)
+  with
+  | Ok ty -> ty
+  | Error Representation_equality ->
+    raise (Type_error "A representation kind cannot carry value equality")
+  | Error (Conflicting_equality Value_and_row) ->
+    raise (Type_error "Type variable cannot be both a value and a record row")
 ;;
 
-(**
-  Generalisation
-  We now adopt the same strategy that the Nox checker uses: all free type variables that were
-  introduced at a deeper level than the current one are turned into
-  universally-quantified (Generic) type variables.
-*)
 let generalise (state : infer_state) ty =
-  let rec gen (seen : tv ref list) ty =
-    checkpoint state;
-    match ty with
-    | Fun (params, ret) -> Fun (List.map params ~f:(gen seen), gen seen ret)
-    | Var ({ contents = Bound t } as tvref) ->
-      if tv_ref_mem tvref seen then Var tvref else gen (tvref :: seen) t
-    | Var { contents = Free { name; level; equality } }
-      when level > state.shared.current_lvl -> Generic { name; equality }
-    | Var ({ contents = Free _ } as tvref) -> Var tvref
-    | Con (n, args) -> Con (n, List.map args ~f:(gen seen))
-    | Mu (binder, body) -> Mu (binder, gen seen body)
-    | Rec_var _ as rec_var -> rec_var
-    | Ref t -> Ref (gen seen t)
-    | Record row -> Record (gen seen row)
-    | Module row -> Module (gen seen row)
-    | Field_receiver (kind, row) -> Field_receiver (gen seen kind, gen seen row)
-    | Variant row -> Variant (gen seen row)
-    | Tuple ts -> Tuple (List.map ts ~f:(gen seen))
-    | Variant_payload ts -> Variant_payload (List.map ts ~f:(gen seen))
-    | Row (fields, tail) -> Row (Env.map fields ~f:(gen seen), gen seen tail)
-    | Array t -> Array (gen seen t)
-    | t -> t
-  in
-  gen [] ty
+  Type_scheme.generalise ty ~level:state.shared.current_lvl ~checkpoint:(fun () ->
+    checkpoint state)
 ;;
 
 let has_recursive_type = Chatml_type_validity.has_recursive_type
@@ -446,16 +398,29 @@ let merge_fields ?(checkpoint = fun () -> ()) row =
 
 let occurs ?(checkpoint = fun () -> ()) tv ty =
   let found = ref false in
-  let rec aux (seen : tv ref list) ty =
+  let seen = ref [] in
+  (* The target is fixed and Bound links do not change during this invocation.
+     Reaching a shared Bound node through another sibling adds no obligation:
+     Free lowering is the same idempotent minimum, and Mu does not substitute.
+     Retain all sibling traversal, including after finding the target. *)
+  let rec aux ty =
     checkpoint ();
     match ty with
     | Fun (ps, r) ->
-      List.iter ps ~f:(aux seen);
-      aux seen r
-    | Con (_n, args) -> List.iter args ~f:(aux seen)
+      List.iter ps ~f:aux;
+      aux r
+    | Con (_n, args) -> List.iter args ~f:aux
     | Var tv' when phys_equal tv tv' -> found := true
     | Var ({ contents = Bound ty } as tv') ->
-      if not (tv_ref_mem tv' seen) then aux (tv' :: seen) ty
+      let visited =
+        List.exists !seen ~f:(fun previous ->
+          checkpoint ();
+          phys_equal tv' previous)
+      in
+      if not visited
+      then (
+        seen := tv' :: !seen;
+        aux ty)
     | Var ({ contents = Free ({ level = lvl; _ } as info) } as tv') ->
       let new_lvl =
         match !tv with
@@ -463,19 +428,19 @@ let occurs ?(checkpoint = fun () -> ()) tv ty =
         | _ -> lvl
       in
       tv' := Free { info with level = new_lvl }
-    | Mu (_binder, body) -> aux seen body
+    | Mu (_binder, body) -> aux body
     | Rec_var _ -> ()
-    | Ref t | Record t | Module t | Variant t | Array t -> aux seen t
+    | Ref t | Record t | Module t | Variant t | Array t -> aux t
     | Field_receiver (kind, row) ->
-      aux seen kind;
-      aux seen row
-    | Tuple ts | Variant_payload ts -> List.iter ts ~f:(aux seen)
+      aux kind;
+      aux row
+    | Tuple ts | Variant_payload ts -> List.iter ts ~f:aux
     | Row (fs, rest) ->
-      Env.iter fs ~f:(fun _ t -> aux seen t);
-      aux seen rest
+      Env.iter fs ~f:(fun _ t -> aux t);
+      aux rest
     | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit | Shape_kind _ -> ()
   in
-  aux [] ty;
+  aux ty;
   !found
 ;;
 
@@ -1219,12 +1184,20 @@ let alias_result = function
   | Error diagnostic -> raise (Type_diagnostic diagnostic)
 ;;
 
-let typ_of_type_expr ?source ?lookup ?(checkpoint = fun () -> ()) types expr =
-  Type_alias.elaborate ?source ?lookup types expr ~checkpoint |> alias_result
+let typ_of_type_expr ?semantic ?source ?lookup ?(checkpoint = fun () -> ()) types expr =
+  Type_alias.elaborate ?semantic ?source ?lookup types expr ~checkpoint |> alias_result
 ;;
 
-let infer_type_decl ?source ?lookup ?(checkpoint = fun () -> ()) types declaration =
-  Type_alias.declare ?source ?lookup types declaration ~checkpoint |> alias_result
+let infer_type_decl
+      ?semantic
+      ?source
+      ?lookup
+      ?(checkpoint = fun () -> ())
+      types
+      declaration
+  =
+  Type_alias.declare ?semantic ?source ?lookup types declaration ~checkpoint
+  |> alias_result
 ;;
 
 let builtin_row_var_name (name : string) = "__builtin_row_" ^ name
@@ -1280,6 +1253,7 @@ and typ_of_builtin_variant_row ?(checkpoint = fun () -> ()) row : typ =
 ;;
 
 let init_env_with_static
+      ?semantic
       ?(checkpoint = fun () -> ())
       (surface : Chatml.Chatml_static_surface.t)
   : tenv
@@ -1295,7 +1269,10 @@ let init_env_with_static
       checkpoint ();
       m.name, typ_of_builtin_ty ~checkpoint (Static.Module.scheme ~checkpoint m))
   in
-  Env.of_list (globals @ modules) |> Value_scope.of_schemes
+  let values = Env.of_list (globals @ modules) |> Value_scope.of_schemes in
+  match semantic with
+  | None -> values
+  | Some frame -> Semantic_host.values_exn frame values ~globals ~modules ~checkpoint
 ;;
 
 let init_env_with_surface ?(checkpoint = fun () -> ()) surface =
@@ -1306,14 +1283,28 @@ let init_env_with_surface ?(checkpoint = fun () -> ()) surface =
 
 let init_env () : tenv = init_env_with_surface Builtin_surface.core_surface
 
-let init_types_with_static ?(checkpoint = fun () -> ()) surface : type_env =
+let init_types_with_static ?semantic ?(checkpoint = fun () -> ()) surface : type_env =
   List.fold
     (Chatml.Chatml_static_surface.type_aliases surface)
     ~init:Type_alias.empty
     ~f:(fun env (alias : Builtin_surface.builtin_type_alias) ->
       let alias_ty = typ_of_builtin_ty ~checkpoint alias.body in
-      match Type_alias.add_host env ~name:alias.name ~body:alias_ty ~checkpoint with
-      | Ok types -> types
+      let metadata =
+        Option.map semantic ~f:(fun frame ->
+          Semantic_host.alias_exn frame env ~name:alias.name ~body:alias_ty ~checkpoint)
+      in
+      let semantic_binding = Option.map metadata ~f:fst in
+      match
+        Type_alias.add_host
+          ?semantic_binding
+          env
+          ~name:alias.name
+          ~body:alias_ty
+          ~checkpoint
+      with
+      | Ok types ->
+        Option.value_map metadata ~default:types ~f:(fun (_, context) ->
+          Type_alias.with_semantic_context types context)
       | Error message -> raise (Type_error message))
 ;;
 
@@ -1343,19 +1334,10 @@ let add_mono ?(checkpoint = fun () -> ()) (env : tenv) x ty : tenv =
   Value_scope.add_local env ~name:x ~scheme:ty
 ;;
 
-let should_generalize_binding ?checkpoint (ty : typ) : bool =
-  not (has_recursive_type ?checkpoint ty)
-;;
-
 let add_generalized (state : infer_state) (env : tenv) x ty : tenv =
-  (* bindings whose type contains an explicit recursive type
-     are kept monomorphic.  We therefore skip HM generalization entirely for
-     such bindings and store the checked type as-is. *)
-  if not (should_generalize_binding ~checkpoint:(fun () -> checkpoint state) ty)
-  then (
-    ensure_contractive_type ~checkpoint:(fun () -> checkpoint state) ty;
-    Value_scope.add_local env ~name:x ~scheme:ty)
-  else Value_scope.add_local env ~name:x ~scheme:(generalise state ty)
+  if has_recursive_type ~checkpoint:(fun () -> checkpoint state) ty
+  then ensure_contractive_type ~checkpoint:(fun () -> checkpoint state) ty;
+  Value_scope.add_local env ~name:x ~scheme:(generalise state ty)
 ;;
 
 let add_open_binding
@@ -1381,21 +1363,75 @@ let add_open_binding
        Value_scope.add_imported env ~name ~scheme:ty ~origin)
 ;;
 
-let lookup_expression state env ~span name =
-  match state.configured with
-  | None -> lookup state env name
-  | Some configured ->
-    let scheme, origin =
-      Configured_resolution.value configured ~env ~name ~span |> alias_result
-    in
-    Option.iter origin ~f:(fun origin ->
-      Hashtbl.set
-        state.configured_annotations
-        ~key:(span_to_key span)
-        ~data:(Value_read origin));
+let lookup_expression state env types ~span name =
+  let scheme, origin, members =
+    match state.configured with
+    | None ->
+      ( lookup_scheme env name
+      , None
+      , (match state.semantic with
+         | None -> None
+         | Some _ ->
+           Option.bind
+             (Option.bind (Value_scope.find env ~name) ~f:Value_scope.Binding.semantic)
+             ~f:Semantic_binding.members) )
+    | Some configured ->
+      let selected =
+        Configured_resolution.value_with_metadata configured ~env ~name ~span
+        |> alias_result
+      in
+      selected.scheme, selected.origin, selected.members
+  in
+  Option.iter origin ~f:(fun origin ->
+    Hashtbl.set
+      state.configured_annotations
+      ~key:(span_to_key span)
+      ~data:(Value_read origin));
+  let inferred =
     if contains_generic ~checkpoint:(fun () -> checkpoint state) scheme
     then instantiate state scheme
     else scheme
+  in
+  Option.iter state.semantic ~f:(fun frame ->
+    let recorder = Semantic.Frame.recorder frame in
+    let unit = Semantic.Frame.unit frame in
+    match
+      Semantic.authored
+        recorder
+        unit
+        ~role:Value_reference
+        ~span
+        ~checkpoint:state.checkpoint
+      |> Semantic.take_exn
+    with
+    | None -> ()
+    | Some location ->
+      let target =
+        match
+          Option.bind (Value_scope.find env ~name) ~f:Value_scope.Binding.semantic, origin
+        with
+        | Some binding, _ -> Semantic.Target.Binding (Semantic_binding.symbol binding)
+        | None, Some origin ->
+          Configured_module (Configured_lookup.Origin.dependency origin)
+        | None, None -> Unlocated_module_member
+      in
+      let context =
+        Semantic_scope.context_exn frame ~values:env ~types ~checkpoint:state.checkpoint
+      in
+      Semantic.reference
+        recorder
+        unit
+        ~context
+        ~location
+        ~target
+        ~inferred:(Some inferred)
+        ~checkpoint:state.checkpoint
+      |> Semantic.take_exn;
+      (match state.semantic_members, members with
+       | Some table, Some members ->
+         Hashtbl.set table ~key:(span_to_key span) ~data:members
+       | None, _ | Some _, None -> ()));
+  inferred
 ;;
 
 let type_lookup state env =
@@ -1486,6 +1522,34 @@ let restrict_free_vars_to_level ?(checkpoint = fun () -> ()) (max_level : int) (
   aux [] ty
 ;;
 
+let record_semantic_expression state env types expr inferred =
+  Option.iter state.semantic ~f:(fun frame ->
+    let context =
+      Semantic_scope.context_exn frame ~values:env ~types ~checkpoint:state.checkpoint
+    in
+    Semantic.expression
+      (Semantic.Frame.recorder frame)
+      (Semantic.Frame.unit frame)
+      ~context
+      ~span:expr.span
+      ~inferred
+      ~checkpoint:state.checkpoint
+    |> Semantic.take_exn)
+;;
+
+let record_structural_reference state env types name ~role =
+  Option.iter state.semantic ~f:(fun frame ->
+    Semantic_scope.reference_exn
+      frame
+      ~values:env
+      ~types
+      name
+      ~role
+      ~target:Semantic.Target.Structural_label
+      ~inferred:None
+      ~checkpoint:state.checkpoint)
+;;
+
 let rec check_binding_shape (state : infer_state) (pattern : Binding_pattern.t) ty =
   checkpoint state;
   record_span_type state pattern.span ty;
@@ -1517,9 +1581,23 @@ and project_binding_schemes (state : infer_state) (pattern : Binding_pattern.t) 
     List.concat_map (List.zip_exn patterns components) ~f:(fun (pattern, ty) ->
       project_binding_schemes state pattern ty)
 
-and add_parameter_bindings state env pattern ty =
-  List.fold (check_binding_shape state pattern ty) ~init:env ~f:(fun env (name, ty) ->
-    add_mono ~checkpoint:(fun () -> checkpoint state) env name ty)
+and add_parameter_bindings state env types pattern ty =
+  let projected = check_binding_shape state pattern ty in
+  let env =
+    List.fold projected ~init:env ~f:(fun env (name, ty) ->
+      add_mono ~checkpoint:(fun () -> checkpoint state) env name ty)
+  in
+  match state.semantic with
+  | None -> env
+  | Some frame ->
+    Semantic_scope.projected_exn
+      frame
+      ~values:env
+      ~types
+      ~pattern
+      ~projected
+      ~kind:Parameter
+      ~checkpoint:state.checkpoint
 
 and infer_nonrecursive_binding
       (state : infer_state)
@@ -1540,12 +1618,10 @@ and infer_nonrecursive_binding
   in
   let scheme =
     if is_non_expansive rhs.value
-    then
-      if should_generalize_binding ~checkpoint:(fun () -> checkpoint state) rhs_ty
-      then generalise state rhs_ty
-      else (
-        ensure_contractive_type ~checkpoint:(fun () -> checkpoint state) rhs_ty;
-        rhs_ty)
+    then (
+      if has_recursive_type ~checkpoint:(fun () -> checkpoint state) rhs_ty
+      then ensure_contractive_type ~checkpoint:(fun () -> checkpoint state) rhs_ty;
+      generalise state rhs_ty)
     else (
       restrict_free_vars_to_level
         ~checkpoint:(fun () -> checkpoint state)
@@ -1553,23 +1629,43 @@ and infer_nonrecursive_binding
         rhs_ty;
       rhs_ty)
   in
-  List.fold
-    (project_binding_schemes state pattern scheme)
-    ~init:env
-    ~f:(fun env (name, ty) ->
+  let projected = project_binding_schemes state pattern scheme in
+  let env =
+    List.fold projected ~init:env ~f:(fun env (name, ty) ->
       add_mono ~checkpoint:(fun () -> checkpoint state) env name ty)
+  in
+  match state.semantic with
+  | None -> env
+  | Some frame ->
+    let members =
+      match pattern.value, state.semantic_members with
+      | Binding_pattern.Name _, Some table -> Hashtbl.find table (span_to_key rhs.span)
+      | Name _, None | Wildcard, _ | Tuple _, _ -> None
+    in
+    Semantic_scope.projected_exn
+      ?members
+      frame
+      ~values:env
+      ~types
+      ~pattern
+      ~projected
+      ~kind:Value
+      ~checkpoint:state.checkpoint
 
 and infer_recursive_bindings
       (state : infer_state)
       (env : tenv)
       (types : type_env)
-      (bindings : (string * expr node) list)
+      (bindings : (Syntax_name.t * expr node) list)
   : tenv
   =
+  let bindings =
+    List.map bindings ~f:(fun (name, rhs) -> name, Syntax_name.name name, rhs)
+  in
   validate_unique_binders
     ~what:"recursive binding"
-    (List.map bindings ~f:(fun (name, rhs) -> name, rhs.span));
-  List.iter bindings ~f:(fun (nm, rhs) ->
+    (List.map bindings ~f:(fun (_, name, rhs) -> name, rhs.span));
+  List.iter bindings ~f:(fun (_, nm, rhs) ->
     if not (is_function_like_expr rhs.value)
     then
       raise
@@ -1578,28 +1674,56 @@ and infer_recursive_bindings
   let binding_types =
     with_new_level state ~f:(fun () ->
       let env_with_placeholders =
-        List.fold bindings ~init:env ~f:(fun env_acc (nm, _) ->
-          add_mono
-            ~checkpoint:(fun () -> checkpoint state)
-            env_acc
-            nm
-            (new_var state state.shared.current_lvl))
+        List.fold bindings ~init:env ~f:(fun env_acc (name, nm, _) ->
+          let scheme = new_var state state.shared.current_lvl in
+          let env_acc =
+            add_mono ~checkpoint:(fun () -> checkpoint state) env_acc nm scheme
+          in
+          match state.semantic with
+          | None -> env_acc
+          | Some frame ->
+            Semantic_scope.named_exn
+              frame
+              ~values:env_acc
+              ~types
+              ~name
+              ~kind:Value
+              ~role:Value_binder
+              ~scheme
+              ~members:None
+              ~checkpoint:state.checkpoint)
       in
-      List.iter bindings ~f:(fun (nm, rhs) ->
+      List.iter bindings ~f:(fun (_, nm, rhs) ->
         let placeholder_ty = lookup_scheme env_with_placeholders nm in
         let rhs_ty = infer_expr state env_with_placeholders types rhs in
         unify state placeholder_ty rhs_ty);
-      List.map bindings ~f:(fun (nm, _) -> nm, lookup_scheme env_with_placeholders nm))
+      List.map bindings ~f:(fun (_, nm, _) ->
+        let binding =
+          Option.bind
+            (Value_scope.find env_with_placeholders ~name:nm)
+            ~f:Value_scope.Binding.semantic
+        in
+        nm, lookup_scheme env_with_placeholders nm, binding))
   in
-  List.fold binding_types ~init:env ~f:(fun env_acc (nm, ty) ->
-    add_generalized state env_acc nm ty)
+  List.fold binding_types ~init:env ~f:(fun env_acc (nm, ty, binding) ->
+    let env_acc = add_generalized state env_acc nm ty in
+    match state.semantic, binding with
+    | Some frame, Some binding ->
+      Semantic_scope.finish_exn
+        frame
+        ~values:env_acc
+        ~types
+        ~binding
+        ~scheme:(lookup_scheme env_acc nm)
+        ~checkpoint:state.checkpoint
+    | None, _ | Some _, None -> env_acc)
 
 and infer_record_extend
       (state : infer_state)
       (env : tenv)
       (types : type_env)
       (base_expr : expr node)
-      (fields : (string * expr node) list)
+      (fields : (Syntax_name.t * expr node) list)
   : typ
   =
   let base_ty = infer_expr state env types base_expr in
@@ -1611,7 +1735,8 @@ and infer_record_extend
   let override_fields =
     List.fold fields ~init:Env.empty ~f:(fun acc (lbl, expr) ->
       let ty = infer_expr state env types expr in
-      Env.add lbl ty acc)
+      record_structural_reference state env types lbl ~role:Field_label;
+      Env.add (Syntax_name.name lbl) ty acc)
   in
   let result_fields =
     Env.fold override_fields ~init:base_fields ~f:(fun ~key ~data acc ->
@@ -1653,17 +1778,23 @@ and validate_unique_labels
 
 and validate_unique_record_fields
       (span : Source.span)
-      (fields : (string * expr node) list)
+      (fields : (Syntax_name.t * expr node) list)
   : unit
   =
-  validate_unique_labels ~what:"record field" ~span:(Some span) (List.map fields ~f:fst)
+  validate_unique_labels
+    ~what:"record field"
+    ~span:(Some span)
+    (List.map fields ~f:(fun (name, _) -> Syntax_name.name name))
 
 and validate_unique_record_update_fields
       (span : Source.span)
-      (fields : (string * expr node) list)
+      (fields : (Syntax_name.t * expr node) list)
   : unit
   =
-  validate_unique_labels ~what:"record update" ~span:(Some span) (List.map fields ~f:fst)
+  validate_unique_labels
+    ~what:"record update"
+    ~span:(Some span)
+    (List.map fields ~f:(fun (name, _) -> Syntax_name.name name))
 
 and validate_unique_record_labels_in_pattern (pat : pattern) (span : Source.span option)
   : unit
@@ -1673,7 +1804,10 @@ and validate_unique_record_labels_in_pattern (pat : pattern) (span : Source.span
     | PVariant (_tag, subpats) -> List.iter subpats ~f:loop
     | PTuple patterns -> Chatml.Chatml_tuple.iter patterns ~f:loop
     | PRecord (fields, _is_open) ->
-      validate_unique_labels ~what:"record pattern" ~span (List.map fields ~f:fst);
+      validate_unique_labels
+        ~what:"record pattern"
+        ~span
+        (List.map fields ~f:(fun (name, _) -> Syntax_name.name name));
       List.iter fields ~f:(fun (_lbl, subpat) -> loop subpat)
   in
   loop pat
@@ -1788,7 +1922,7 @@ and pattern_totally_covers_type
   | PRecord (fields, is_open) ->
     let subpatterns_cover_all =
       List.for_all fields ~f:(fun (label, subpat) ->
-        match record_field_type ~checkpoint expected_ty label with
+        match record_field_type ~checkpoint expected_ty (Syntax_name.name label) with
         | Some field_ty -> pattern_totally_covers_type ~checkpoint subpat field_ty
         | None -> false)
     in
@@ -1800,7 +1934,10 @@ and pattern_totally_covers_type
       match resolve_bound_type ~checkpoint expected_ty with
       | Record row ->
         let row_fields, _tail = merge_fields ~checkpoint row in
-        let field_names = List.map fields ~f:fst |> String.Set.of_list in
+        let field_names =
+          List.map fields ~f:(fun (name, _) -> Syntax_name.name name)
+          |> String.Set.of_list
+        in
         Set.equal
           field_names
           (Env.bindings row_fields |> List.map ~f:fst |> String.Set.of_list)
@@ -1826,7 +1963,7 @@ and pattern_fully_covers_variant_case
   =
   checkpoint ();
   match pat with
-  | PVariant (tag', subpats) when String.equal tag tag' ->
+  | PVariant (tag', subpats) when String.equal tag (Syntax_name.name tag') ->
     let payload_tys = payload_component_types ~checkpoint payload_ty in
     List.length subpats = List.length payload_tys
     && List.for_all2_exn subpats payload_tys ~f:(pattern_totally_covers_type ~checkpoint)
@@ -1841,13 +1978,13 @@ and show_pattern_brief (pat : pattern) : string =
   match pat with
   | PUnit -> "()"
   | PWildcard -> "_"
-  | PVar x -> x
+  | PVar x -> Syntax_name.name x
   | PInt i -> Int.to_string i
   | PBool b -> Bool.to_string b
   | PFloat f -> Float.to_string f
   | PString s -> Printf.sprintf "%S" s
-  | PVariant (tag, []) -> Printf.sprintf "`%s" tag
-  | PVariant (tag, _subpats) -> Printf.sprintf "`%s(...)" tag
+  | PVariant (tag, []) -> Printf.sprintf "`%s" (Syntax_name.name tag)
+  | PVariant (tag, _subpats) -> Printf.sprintf "`%s(...)" (Syntax_name.name tag)
   | PRecord _ -> "{...}"
   | PTuple _ -> "(|...|)"
 
@@ -1860,7 +1997,8 @@ and simple_pattern_key_of_pattern (pat : pattern) : (string * string) option =
     let rendered = Float.to_string f in
     Some ("float:" ^ rendered, rendered)
   | PString s -> Some ("string:" ^ s, Printf.sprintf "%S" s)
-  | PVariant (tag, []) -> Some ("variant:" ^ tag, Printf.sprintf "`%s" tag)
+  | PVariant (tag, []) ->
+    Some ("variant:" ^ Syntax_name.name tag, Printf.sprintf "`%s" (Syntax_name.name tag))
   | _ -> None
 
 and validate_match_case_shapes (cases : (pattern * Source.span) list) : unit =
@@ -1979,15 +2117,19 @@ and validate_typed_match_redundancy
        let closed_tail = is_closed_variant_tail ~checkpoint tail in
        List.iter cases ~f:(fun (pat, pat_span) ->
          (match pat with
-          | PVariant (tag, _subpats) when Hash_set.mem covered_tags tag ->
-            let covered_payload = Map.find_exn payload_by_tag tag in
+          | PVariant (tag, _subpats) when Hash_set.mem covered_tags (Syntax_name.name tag)
+            ->
+            let covered_payload = Map.find_exn payload_by_tag (Syntax_name.name tag) in
             raise
               (Type_error_with_loc
                  ( Printf.sprintf
                      "Redundant match arm '%s': previous arms already cover variant case \
                       '%s'"
                      (show_pattern_brief pat)
-                     (show_missing_variant_case ~checkpoint tag covered_payload)
+                     (show_missing_variant_case
+                        ~checkpoint
+                        (Syntax_name.name tag)
+                        covered_payload)
                  , pat_span ))
           | _ when is_catch_all_pattern pat && closed_tail && all_known_tags_covered () ->
             raise
@@ -2058,7 +2200,12 @@ and validate_match_exhaustiveness
         raise (Type_error "Non-exhaustive match on tuple: add '_' or a total tuple arm")
     | _ -> raise (Type_error "Non-exhaustive match: add '_' arm"))
 
-and infer_pattern (state : infer_state) (env : tenv) (pat : pattern) (expected_ty : typ)
+and infer_pattern
+      (state : infer_state)
+      (env : tenv)
+      (types : type_env)
+      (pat : pattern)
+      (expected_ty : typ)
   : tenv
   =
   checkpoint state;
@@ -2067,7 +2214,27 @@ and infer_pattern (state : infer_state) (env : tenv) (pat : pattern) (expected_t
     unify state expected_ty Unit;
     env
   | PWildcard -> env
-  | PVar x -> add_mono ~checkpoint:(fun () -> checkpoint state) env x expected_ty
+  | PVar x ->
+    let env =
+      add_mono
+        ~checkpoint:(fun () -> checkpoint state)
+        env
+        (Syntax_name.name x)
+        expected_ty
+    in
+    (match state.semantic with
+     | None -> env
+     | Some frame ->
+       Semantic_scope.named_exn
+         frame
+         ~values:env
+         ~types
+         ~name:x
+         ~kind:Parameter
+         ~role:Value_binder
+         ~scheme:expected_ty
+         ~members:None
+         ~checkpoint:state.checkpoint)
   | PInt _ ->
     unify state expected_ty TInt;
     env
@@ -2087,13 +2254,13 @@ and infer_pattern (state : infer_state) (env : tenv) (pat : pattern) (expected_t
     in
     unify state expected_ty (Tuple components);
     List.fold2_exn patterns components ~init:env ~f:(fun env pattern ty ->
-      infer_pattern state env pattern ty)
+      infer_pattern state env types pattern ty)
   | PRecord (fields, is_open) ->
     let env_after, fields_acc =
       List.fold fields ~init:(env, []) ~f:(fun (env_acc, fields_acc) (lbl, pat) ->
         let ty = new_var state state.shared.current_lvl in
-        let env_acc' = infer_pattern state env_acc pat ty in
-        env_acc', (lbl, ty) :: fields_acc)
+        let env_acc' = infer_pattern state env_acc types pat ty in
+        env_acc', (Syntax_name.name lbl, ty) :: fields_acc)
     in
     let fields_env = Env.of_list (List.rev fields_acc) in
     let tail_row =
@@ -2101,19 +2268,24 @@ and infer_pattern (state : infer_state) (env : tenv) (pat : pattern) (expected_t
     in
     let record_ty = Record (Row (fields_env, tail_row)) in
     unify state expected_ty record_ty;
+    List.iter fields ~f:(fun (name, _) ->
+      record_structural_reference state env types name ~role:Field_label);
     env_after
   | PVariant (tag, subpats) ->
     let env_after, sub_tys_rev =
       List.fold subpats ~init:(env, []) ~f:(fun (env_acc, tys) sp ->
         let ty = new_var state state.shared.current_lvl in
-        let env_acc' = infer_pattern state env_acc sp ty in
+        let env_acc' = infer_pattern state env_acc types sp ty in
         env_acc', ty :: tys)
     in
     let sub_tys = List.rev sub_tys_rev in
     let case_ty = Variant_payload sub_tys in
     let row_var = new_var state state.shared.current_lvl in
-    let variant_ty = Variant (Row (Env.singleton tag case_ty, row_var)) in
+    let variant_ty =
+      Variant (Row (Env.singleton (Syntax_name.name tag) case_ty, row_var))
+    in
     unify state expected_ty variant_ty;
+    record_structural_reference state env types tag ~role:Variant_tag;
     env_after
 
 (** --------------------------------------------------------------------- *)
@@ -2194,24 +2366,40 @@ and infer_expr_against_expected
   with
   | ELambda (params, body), Fun (expected_params, expected_ret)
     when List.length params = List.length expected_params ->
-    with_new_level state ~f:(fun () ->
-      let env_with_params =
-        List.fold2_exn params expected_params ~init:env ~f:(fun env_acc param param_ty ->
-          add_parameter_bindings state env_acc param param_ty)
-      in
-      let body_ty = infer_expr state env_with_params types body in
-      unify state body_ty expected_ret;
-      expected_ty)
+    let result =
+      with_new_level state ~f:(fun () ->
+        let env_with_params =
+          List.fold2_exn
+            params
+            expected_params
+            ~init:env
+            ~f:(fun env_acc param param_ty ->
+              add_parameter_bindings state env_acc types param param_ty)
+        in
+        let body_ty = infer_expr state env_with_params types body in
+        unify state body_ty expected_ret;
+        expected_ty)
+    in
+    record_semantic_expression state env types expr result;
+    result
   | ELambdaSlots (params, _slots, body), Fun (expected_params, expected_ret)
     when List.length params = List.length expected_params ->
-    with_new_level state ~f:(fun () ->
-      let env_with_params =
-        List.fold2_exn params expected_params ~init:env ~f:(fun env_acc param param_ty ->
-          add_parameter_bindings state env_acc param param_ty)
-      in
-      let body_ty = infer_expr state env_with_params types body in
-      unify state body_ty expected_ret;
-      expected_ty)
+    let result =
+      with_new_level state ~f:(fun () ->
+        let env_with_params =
+          List.fold2_exn
+            params
+            expected_params
+            ~init:env
+            ~f:(fun env_acc param param_ty ->
+              add_parameter_bindings state env_acc types param param_ty)
+        in
+        let body_ty = infer_expr state env_with_params types body in
+        unify state body_ty expected_ret;
+        expected_ty)
+    in
+    record_semantic_expression state env types expr result;
+    result
   | ( (ELambda (params, _) | ELambdaSlots (params, _, _))
     , Fun (expected_params, _expected_ret) ) ->
     raise
@@ -2239,7 +2427,7 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
       | EFloat _ -> TFloat
       | EBool _ -> Boolean
       | EString _ -> String
-      | EVar x -> lookup_expression state env ~span:expr.span x
+      | EVar x -> lookup_expression state env types ~span:expr.span x
       | EVarLoc _ -> failwith "EVarLoc should not appear before resolver"
       | EPrim1 (prim, arg) -> infer_unary_prim state env types prim arg
       | EPrim2 (prim, lhs, rhs) -> infer_binary_prim state env types prim lhs rhs
@@ -2248,7 +2436,7 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
           let env_with_params, param_tys_rev =
             List.fold params ~init:(env, []) ~f:(fun (env_acc, tys_rev) p ->
               let t = new_var state state.shared.current_lvl in
-              add_parameter_bindings state env_acc p t, t :: tys_rev)
+              add_parameter_bindings state env_acc types p t, t :: tys_rev)
           in
           let body_ty = infer_expr state env_with_params types body in
           let param_tys = List.rev param_tys_rev in
@@ -2258,7 +2446,7 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
           let env_with_params, param_tys_rev =
             List.fold params ~init:(env, []) ~f:(fun (env_acc, tys_rev) p ->
               let t = new_var state state.shared.current_lvl in
-              add_parameter_bindings state env_acc p t, t :: tys_rev)
+              add_parameter_bindings state env_acc types p t, t :: tys_rev)
           in
           let body_ty = infer_expr state env_with_params types body in
           let param_tys = List.rev param_tys_rev in
@@ -2308,7 +2496,8 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
         let row =
           List.fold_right fields ~init:Empty_row ~f:(fun (lbl, expr) acc ->
             let ty = infer_expr state env types expr in
-            Row (Env.singleton lbl ty, acc))
+            record_structural_reference state env types lbl ~role:Field_label;
+            Row (Env.singleton (Syntax_name.name lbl) ty, acc))
         in
         Record row
       | EFieldGet (obj, lbl) ->
@@ -2320,7 +2509,39 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
           obj_ty
           (Field_receiver
              ( new_var state state.shared.current_lvl
-             , Row (Env.singleton lbl field_ty, tail_row) ));
+             , Row (Env.singleton (Syntax_name.name lbl) field_ty, tail_row) ));
+        Option.iter state.semantic ~f:(fun frame ->
+          let member =
+            Option.bind state.semantic_members ~f:(fun table ->
+              Option.bind
+                (Hashtbl.find table (span_to_key obj.span))
+                ~f:(fun members ->
+                  Semantic_binding.Members.find
+                    members
+                    ~namespace:Value
+                    ~name:(Syntax_name.name lbl)
+                    ~checkpoint:state.checkpoint))
+          in
+          let target =
+            match member with
+            | Some binding -> Semantic.Target.Binding (Semantic_binding.symbol binding)
+            | None ->
+              (match resolve_bound_type ~checkpoint:state.checkpoint obj_ty with
+               | Module _ -> Semantic.Target.Unlocated_module_member
+               | _ -> Structural_label)
+          in
+          Semantic_scope.reference_exn
+            frame
+            ~values:env
+            ~types
+            lbl
+            ~role:Field_label
+            ~target
+            ~inferred:(Some field_ty)
+            ~checkpoint:state.checkpoint;
+          Option.iter (Option.bind member ~f:Semantic_binding.members) ~f:(fun members ->
+            Option.iter state.semantic_members ~f:(fun table ->
+              Hashtbl.set table ~key:(span_to_key expr.span) ~data:members)));
         field_ty
       | EArray elts ->
         let elt_ty = new_var state state.shared.current_lvl in
@@ -2359,10 +2580,26 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
         let arg_tys = List.map exprs ~f:(fun ex -> infer_expr state env types ex) in
         let case_ty = Variant_payload arg_tys in
         let row_var = new_var state state.shared.current_lvl in
-        Variant (Row (Env.singleton tag case_ty, row_var))
+        record_structural_reference state env types tag ~role:Variant_tag;
+        Variant (Row (Env.singleton (Syntax_name.name tag) case_ty, row_var))
       | EAnnot (rhs, type_expr) ->
+        let semantic =
+          Option.map state.semantic ~f:(fun frame ->
+            let context =
+              Semantic_scope.context_exn
+                frame
+                ~values:env
+                ~types
+                ~checkpoint:state.checkpoint
+            in
+            Semantic_elaboration.annotation_exn
+              frame
+              ~context
+              ~checkpoint:state.checkpoint)
+        in
         let annotated_ty =
           typ_of_type_expr
+            ?semantic
             ?source:state.source
             ?lookup:(type_lookup state env)
             ~checkpoint:(fun () -> checkpoint state)
@@ -2379,7 +2616,7 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
             try
               validate_unique_record_labels_in_pattern case.pat (Some case.pat_span);
               validate_pattern_binders case.pat;
-              let env_arm = infer_pattern state env case.pat scrut_ty in
+              let env_arm = infer_pattern state env types case.pat scrut_ty in
               let rhs_ty = infer_expr state env_arm types case.rhs in
               Some
                 (match acc with
@@ -2406,7 +2643,7 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
             try
               validate_unique_record_labels_in_pattern case.pat (Some case.pat_span);
               validate_pattern_binders case.pat;
-              let env_arm = infer_pattern state env case.pat scrut_ty in
+              let env_arm = infer_pattern state env types case.pat scrut_ty in
               let rhs_ty = infer_expr state env_arm types case.rhs in
               Some
                 (match acc with
@@ -2428,6 +2665,14 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
     | Type_error msg -> raise (Type_error_with_loc (msg, expr.span))
   in
   record_span_type state expr.span result_ty;
+  record_semantic_expression state env types expr result_ty;
+  Option.iter state.semantic ~f:(fun _ ->
+    match expr.value, state.semantic_members with
+    | EAnnot (rhs, _), Some table ->
+      Option.iter
+        (Hashtbl.find table (span_to_key rhs.span))
+        ~f:(fun members -> Hashtbl.set table ~key:(span_to_key expr.span) ~data:members)
+    | _, None | _, Some _ -> ());
   result_ty
 ;;
 
@@ -2456,7 +2701,31 @@ let signature_engine state : Signature_check.Engine.t =
   }
 ;;
 
-let check_module_signature ?lookup state ~values ~types ~outer_types ~signature ~span =
+let signature_recording state ~semantic_values ~semantic_members ~outer_types =
+  Option.map state.semantic ~f:(fun frame ->
+    let values = Option.value_exn semantic_values in
+    let implementation = Option.value_exn semantic_members in
+    let context =
+      Semantic_scope.context_exn
+        frame
+        ~values
+        ~types:outer_types
+        ~checkpoint:state.checkpoint
+    in
+    { Signature_check.Recording.frame; context; implementation })
+;;
+
+let check_module_signature
+      ?semantic_values
+      ?semantic_members
+      ?lookup
+      state
+      ~values
+      ~types
+      ~outer_types
+      ~signature
+      ~span
+  =
   Chatml.Chatml_checkpoint.protect state.checkpoint ~f:(fun checkpoint ->
     let state =
       { state with
@@ -2466,7 +2735,11 @@ let check_module_signature ?lookup state ~values ~types ~outer_types ~signature 
             Configured_resolution.with_checkpoint configured ~checkpoint)
       }
     in
+    let recording =
+      signature_recording state ~semantic_values ~semantic_members ~outer_types
+    in
     Signature_check.check
+      ?recording
       ?source:state.source
       ?lookup
       (signature_engine state)
@@ -2479,7 +2752,16 @@ let check_module_signature ?lookup state ~values ~types ~outer_types ~signature 
 
 (* An interface never contributes offset keys to the implementation unit's
    annotation tables. Both units still borrow the same inference identities. *)
-let check_captured_module_signature ?lookup state interface ~values ~types ~outer_types =
+let check_captured_module_signature
+      ?semantic_values
+      ?semantic_members
+      ?lookup
+      state
+      interface
+      ~values
+      ~types
+      ~outer_types
+  =
   Chatml.Chatml_checkpoint.protect state.checkpoint ~f:(fun checkpoint ->
     let state =
       { state with
@@ -2489,8 +2771,12 @@ let check_captured_module_signature ?lookup state interface ~values ~types ~oute
             Configured_resolution.with_checkpoint configured ~checkpoint)
       }
     in
+    let recording =
+      signature_recording state ~semantic_values ~semantic_members ~outer_types
+    in
     Signature_check.check_captured
       interface
+      ?recording
       ?lookup
       (signature_engine state)
       ~values
@@ -2511,185 +2797,326 @@ let rec infer_stmt_with_exports
           (types : type_env)
   : tenv * type_env * string list
   =
-  match stmt with
-  | SLet (pattern, e) ->
-    let env = infer_nonrecursive_binding state env types pattern e in
-    let names =
-      Binding_pattern.binders ~checkpoint:(fun () -> checkpoint state) pattern
-      |> List.map ~f:fst
-    in
-    let env =
-      List.fold
-        (Binding_pattern.binders ~checkpoint:state.checkpoint pattern)
-        ~init:env
-        ~f:(fun env (name, span) -> Value_scope.with_span env ~name ~span)
-    in
-    env, types, names
-  | SLetRec bindings ->
-    let env = infer_recursive_bindings state env types bindings in
-    let env =
-      List.fold bindings ~init:env ~f:(fun env (name, rhs) ->
-        Value_scope.with_span env ~name ~span:rhs.span)
-    in
-    env, types, List.map bindings ~f:fst
-  | SType declaration ->
-    ( env
-    , infer_type_decl
-        ?source:state.source
-        ?lookup:(type_lookup state env)
-        ~checkpoint:(fun () -> checkpoint state)
-        types
-        declaration
-    , [] )
-  | SExpr e ->
-    ignore (infer_expr state env types e);
-    env, types, []
-  | SModule { name = mname; signature; body = stmts } ->
-    (* A module declaration is non-recursive: its new name enters scope only
+  let result =
+    match stmt with
+    | SLet (pattern, e) ->
+      let env = infer_nonrecursive_binding state env types pattern e in
+      let names =
+        Binding_pattern.binders ~checkpoint:(fun () -> checkpoint state) pattern
+        |> List.map ~f:fst
+      in
+      let env =
+        List.fold
+          (Binding_pattern.binders ~checkpoint:state.checkpoint pattern)
+          ~init:env
+          ~f:(fun env (name, span) -> Value_scope.with_span env ~name ~span)
+      in
+      env, types, names
+    | SLetRec bindings ->
+      let env = infer_recursive_bindings state env types bindings in
+      let env =
+        List.fold bindings ~init:env ~f:(fun env (name, rhs) ->
+          Value_scope.with_span env ~name:(Syntax_name.name name) ~span:rhs.span)
+      in
+      env, types, List.map bindings ~f:(fun (name, _) -> Syntax_name.name name)
+    | SType declaration ->
+      let semantic =
+        Option.map state.semantic ~f:(fun frame ->
+          let context =
+            Semantic_scope.context_exn
+              frame
+              ~values:env
+              ~types
+              ~checkpoint:state.checkpoint
+          in
+          Semantic_elaboration.alias_exn
+            frame
+            ~context
+            declaration
+            ~checkpoint:state.checkpoint)
+      in
+      ( env
+      , infer_type_decl
+          ?semantic
+          ?source:state.source
+          ?lookup:(type_lookup state env)
+          ~checkpoint:(fun () -> checkpoint state)
+          types
+          declaration
+      , [] )
+    | SExpr e ->
+      ignore (infer_expr state env types e);
+      env, types, []
+    | SModule { name = authored_mname; signature; body = stmts } ->
+      let mname = Syntax_name.name authored_mname in
+      (* A module declaration is non-recursive: its new name enters scope only
        after its body has been checked. Functions capture the same lexical scope;
        a deferred read does not make the module's own binding available. *)
-    let mod_env_final, mod_types_final, exported_names_rev =
-      List.fold
-        stmts
-        ~init:(env, Type_alias.enter_scope types, [])
-        ~f:(fun (env_acc, types_acc, names_rev) stmt_node ->
-          let env_next, types_next, stmt_exports =
-            with_stmt_location stmt_node ~f:(fun stmt ->
-              infer_stmt_with_exports ~span:stmt_node.span state env_acc stmt types_acc)
-          in
-          env_next, types_next, List.rev_append stmt_exports names_rev)
-    in
-    let exported_names = List.rev exported_names_rev in
-    let seen = Hash_set.create (module String) in
-    let exports_map =
-      List.fold exported_names ~init:Env.empty ~f:(fun acc name ->
-        if Hash_set.mem seen name
-        then acc
-        else (
-          Hash_set.add seen name;
-          match Value_scope.find mod_env_final ~name with
-          | Some binding -> Env.add name (Value_scope.Binding.scheme binding) acc
-          | None -> acc))
-    in
-    let type_names, module_names =
-      List.fold stmts ~init:([], []) ~f:(fun (type_names, module_names) stmt ->
-        checkpoint state;
-        match stmt.value with
-        | SType declaration -> declaration.name :: type_names, module_names
-        | SModule { name; _ } -> type_names, name :: module_names
-        | SLet _ | SLetRec _ | SOpen _ | SExpr _ -> type_names, module_names)
-    in
-    let exports =
-      match
-        Type_alias.exports
-          mod_types_final
-          ~type_names
-          ~module_names
-          ~checkpoint:(fun () -> checkpoint state)
-      with
-      | Ok exports -> exports
-      | Error message -> raise (Type_error message)
-    in
-    let exports_map, exports =
-      match signature with
-      | None -> exports_map, exports
-      | Some signature ->
-        (match
-           check_module_signature
-             ?lookup:(type_lookup state env)
-             state
-             ~values:exports_map
-             ~types:exports
-             ~outer_types:types
-             ~signature:signature.value
-             ~span:signature.span
-         with
-         | Error diagnostic -> raise (Type_diagnostic diagnostic)
-         | Ok checked ->
-           Hashtbl.set
-             state.module_visibility
-             ~key:(span_to_key signature.span)
-             ~data:(Signature_check.visibility checked);
-           Signature_check.values checked, Signature_check.types checked)
-    in
-    let module_typ = Module (Row (exports_map, Empty_row)) in
-    let env = add_generalized state env mname module_typ in
-    let env =
-      Option.value_map span ~default:env ~f:(fun span ->
-        Value_scope.with_span env ~name:mname ~span)
-    in
-    env, Type_alias.add_module types ~name:mname ~exports, [ mname ]
-  | SOpen mname ->
-    (* Configured dispatch borrows raw schemes without an ordinary value read.
-       Existing module-kind, type/value collision and merge rules stay here. *)
-    let opened =
-      match state.configured with
-      | None -> Configured_resolution.Opened.Local (lookup_scheme env mname)
-      | Some configured ->
-        let span =
-          match span with
-          | Some span -> span
-          | None -> raise (Type_error "Configured open requires its original source span")
-        in
-        Configured_resolution.open_module configured ~env ~name:mname ~span
-        |> alias_result
-    in
-    let scheme, imported =
-      match opened with
-      | Local scheme -> scheme, None
-      | Configured { scheme; reference; _ } ->
-        let origin = Configured_lookup.Reference.origin reference in
-        let span =
-          Chatml_diagnostic.Site.location (Configured_lookup.Reference.site reference)
-          |> Chatml_source.Location.span
-        in
-        Hashtbl.set
-          state.configured_annotations
-          ~key:(span_to_key span)
-          ~data:(Inert_open origin);
-        scheme, Some origin
-    in
-    let merge_open () =
-      match scheme with
-      | Module row ->
-        let fields, _tail = merge_fields ~checkpoint:(fun () -> checkpoint state) row in
-        let types =
-          let result =
-            match opened with
-            | Local _ ->
-              Type_alias.open_module types ~name:mname ~checkpoint:state.checkpoint
-            | Configured { types = exports; reference; _ } ->
-              Type_alias.open_exports
-                types
-                ~name:mname
-                ~exports
-                ~origin:(Configured_lookup.Reference.origin reference)
-                ~checkpoint:state.checkpoint
-                ()
-          in
-          match result with
-          | Ok types -> types
-          | Error message -> raise (Type_error message)
-        in
-        ( Env.fold fields ~init:env ~f:(fun ~key ~data acc ->
-            let origin =
-              Option.map imported ~f:(fun origin ->
-                Configured_lookup.Origin.member origin ~name:key)
+      let mod_env_final, mod_types_final, exported_names_rev =
+        List.fold
+          stmts
+          ~init:(env, Type_alias.enter_scope types, [])
+          ~f:(fun (env_acc, types_acc, names_rev) stmt_node ->
+            let env_next, types_next, stmt_exports =
+              with_stmt_location stmt_node ~f:(fun stmt ->
+                infer_stmt_with_exports ~span:stmt_node.span state env_acc stmt types_acc)
             in
-            let env = add_open_binding ?origin state acc ~module_name:mname key data in
-            Option.value_map span ~default:env ~f:(fun span ->
-              Value_scope.with_span env ~name:key ~span))
-        , types
-        , [] )
-      | _ -> raise (Type_error (Printf.sprintf "Cannot open non-module '%s'" mname))
-    in
-    (try merge_open () with
-     | Type_error message as exn ->
-       (match opened with
-        | Local _ -> raise exn
-        | Configured _ ->
-          raise
-            (Type_diagnostic (Configured_resolution.Opened.diagnostic opened ~message))))
+            env_next, types_next, List.rev_append stmt_exports names_rev)
+      in
+      let exported_names = List.rev exported_names_rev in
+      let seen = Hash_set.create (module String) in
+      let exports_map =
+        List.fold exported_names ~init:Env.empty ~f:(fun acc name ->
+          if Hash_set.mem seen name
+          then acc
+          else (
+            Hash_set.add seen name;
+            match Value_scope.find mod_env_final ~name with
+            | Some binding -> Env.add name (Value_scope.Binding.scheme binding) acc
+            | None -> acc))
+      in
+      let type_names, module_names =
+        List.fold stmts ~init:([], []) ~f:(fun (type_names, module_names) stmt ->
+          checkpoint state;
+          match stmt.value with
+          | SType declaration ->
+            Syntax_name.name declaration.name :: type_names, module_names
+          | SModule { name; _ } -> type_names, Syntax_name.name name :: module_names
+          | SLet _ | SLetRec _ | SOpen _ | SExpr _ -> type_names, module_names)
+      in
+      let exports =
+        match
+          Type_alias.exports
+            mod_types_final
+            ~type_names
+            ~module_names
+            ~checkpoint:(fun () -> checkpoint state)
+        with
+        | Ok exports -> exports
+        | Error message -> raise (Type_error message)
+      in
+      let implementation_members =
+        Option.map state.semantic ~f:(fun frame ->
+          Semantic_scope.members_exn
+            frame
+            ~values:mod_env_final
+            ~types:exports
+            ~exports:exports_map
+            ~checkpoint:state.checkpoint)
+      in
+      let exports_map, exports, members =
+        match signature with
+        | None -> exports_map, exports, implementation_members
+        | Some signature ->
+          (match
+             check_module_signature
+               ~semantic_values:env
+               ?semantic_members:implementation_members
+               ?lookup:(type_lookup state env)
+               state
+               ~values:exports_map
+               ~types:exports
+               ~outer_types:types
+               ~signature:signature.value
+               ~span:signature.span
+           with
+           | Error diagnostic -> raise (Type_diagnostic diagnostic)
+           | Ok checked ->
+             Hashtbl.set
+               state.module_visibility
+               ~key:(span_to_key signature.span)
+               ~data:(Signature_check.visibility checked);
+             ( Signature_check.values checked
+             , Signature_check.types checked
+             , Signature_check.members checked ))
+      in
+      let module_typ = Module (Row (exports_map, Empty_row)) in
+      let env = add_generalized state env mname module_typ in
+      let env =
+        match state.semantic with
+        | None -> env
+        | Some frame ->
+          Semantic_scope.named_exn
+            frame
+            ~values:env
+            ~types
+            ~name:authored_mname
+            ~kind:Module
+            ~role:Module_binder
+            ~scheme:(lookup_scheme env mname)
+            ~members
+            ~checkpoint:state.checkpoint
+      in
+      let env =
+        Option.value_map span ~default:env ~f:(fun span ->
+          Value_scope.with_span env ~name:mname ~span)
+      in
+      let semantic_binding =
+        Option.bind (Value_scope.find env ~name:mname) ~f:Value_scope.Binding.semantic
+      in
+      env, Type_alias.add_module ?semantic_binding types ~name:mname ~exports, [ mname ]
+    | SOpen authored_mname ->
+      let mname = Syntax_name.name authored_mname in
+      (* Configured dispatch borrows raw schemes without an ordinary value read.
+       Existing module-kind, type/value collision and merge rules stay here. *)
+      let opened =
+        match state.configured with
+        | None -> Configured_resolution.Opened.Local (lookup_scheme env mname)
+        | Some configured ->
+          let span =
+            match span with
+            | Some span -> span
+            | None ->
+              raise (Type_error "Configured open requires its original source span")
+          in
+          Configured_resolution.open_module configured ~env ~name:mname ~span
+          |> alias_result
+      in
+      let scheme, imported =
+        match opened with
+        | Local scheme -> scheme, None
+        | Configured { scheme; reference; _ } ->
+          let origin = Configured_lookup.Reference.origin reference in
+          let span =
+            Chatml_diagnostic.Site.location (Configured_lookup.Reference.site reference)
+            |> Chatml_source.Location.span
+          in
+          Hashtbl.set
+            state.configured_annotations
+            ~key:(span_to_key span)
+            ~data:(Inert_open origin);
+          scheme, Some origin
+      in
+      let members =
+        match opened with
+        | Configured { members; _ } -> members
+        | Local _ ->
+          Option.bind
+            (Option.bind
+               (Value_scope.find env ~name:mname)
+               ~f:Value_scope.Binding.semantic)
+            ~f:Semantic_binding.members
+      in
+      Option.iter state.semantic ~f:(fun frame ->
+        let target =
+          match
+            ( Option.bind
+                (Value_scope.find env ~name:mname)
+                ~f:Value_scope.Binding.semantic
+            , imported )
+          with
+          | Some binding, _ -> Semantic.Target.Binding (Semantic_binding.symbol binding)
+          | None, Some origin ->
+            Configured_module (Configured_lookup.Origin.dependency origin)
+          | None, None -> Unlocated_module_member
+        in
+        Semantic_scope.reference_exn
+          frame
+          ~values:env
+          ~types
+          authored_mname
+          ~role:Module_reference
+          ~target
+          ~inferred:None
+          ~checkpoint:state.checkpoint);
+      let merge_open () =
+        match scheme with
+        | Module row ->
+          let fields, _tail = merge_fields ~checkpoint:(fun () -> checkpoint state) row in
+          let types =
+            let result =
+              match opened with
+              | Local _ ->
+                Type_alias.open_module types ~name:mname ~checkpoint:state.checkpoint
+              | Configured { types = exports; reference; _ } ->
+                Type_alias.open_exports
+                  types
+                  ~name:mname
+                  ~exports
+                  ~origin:(Configured_lookup.Reference.origin reference)
+                  ~checkpoint:state.checkpoint
+                  ()
+            in
+            match result with
+            | Ok types ->
+              (match state.semantic with
+               | None -> types
+               | Some frame ->
+                 let exports =
+                   match opened with
+                   | Configured { types; _ } -> Some types
+                   | Local _ ->
+                     Type_alias.visible_module
+                       types
+                       ~name:mname
+                       ~checkpoint:state.checkpoint
+                 in
+                 Option.value_map exports ~default:types ~f:(fun exports ->
+                   Semantic_scope.opened_types_exn
+                     frame
+                     types
+                     ~exports
+                     ~checkpoint:state.checkpoint))
+            | Error message -> raise (Type_error message)
+          in
+          ( Env.fold fields ~init:env ~f:(fun ~key ~data acc ->
+              let origin =
+                Option.map imported ~f:(fun origin ->
+                  Configured_lookup.Origin.member origin ~name:key)
+              in
+              let env = add_open_binding ?origin state acc ~module_name:mname key data in
+              let env =
+                match state.semantic, members with
+                | Some frame, Some members ->
+                  (match
+                     Semantic_binding.Members.find
+                       members
+                       ~namespace:Value
+                       ~name:key
+                       ~checkpoint:state.checkpoint
+                   with
+                   | None -> env
+                   | Some binding ->
+                     Semantic_scope.imported_exn
+                       frame
+                       ~values:env
+                       ~types
+                       ~binding
+                       ~checkpoint:state.checkpoint)
+                | None, _ | Some _, None -> env
+              in
+              Option.value_map span ~default:env ~f:(fun span ->
+                Value_scope.with_span env ~name:key ~span))
+          , types
+          , [] )
+        | _ -> raise (Type_error (Printf.sprintf "Cannot open non-module '%s'" mname))
+      in
+      (try merge_open () with
+       | Type_error message as exn ->
+         (match opened with
+          | Local _ -> raise exn
+          | Configured _ ->
+            raise
+              (Type_diagnostic (Configured_resolution.Opened.diagnostic opened ~message))))
+  in
+  Option.iter state.semantic ~f:(fun frame ->
+    Option.iter span ~f:(fun (span : Source.span) ->
+      let after_values, after_types, _ = result in
+      let boundary values types span =
+        let context =
+          Semantic_scope.context_exn frame ~values ~types ~checkpoint:state.checkpoint
+        in
+        Semantic.region
+          (Semantic.Frame.recorder frame)
+          (Semantic.Frame.unit frame)
+          ~context
+          ~span
+          ~checkpoint:state.checkpoint
+        |> Semantic.take_exn
+      in
+      boundary env types { span with right = span.left };
+      boundary after_values after_types { span with left = span.right }));
+  result
 ;;
 
 let infer_stmt ?span (state : infer_state) (env : tenv) (types : type_env) (stmt : stmt)
@@ -2702,8 +3129,36 @@ let infer_stmt ?span (state : infer_state) (env : tenv) (types : type_env) (stmt
 (* Compiler-only unit adapter reuses the same statement inference/export rules
    as inline modules, with authentic surface and no importer lexical bindings. *)
 let infer_configured_unit_static state surface (program : program) =
-  let env = init_env_with_static ~checkpoint:state.checkpoint surface in
-  let types = init_types_with_static ~checkpoint:state.checkpoint surface in
+  let env =
+    init_env_with_static ?semantic:state.semantic ~checkpoint:state.checkpoint surface
+  in
+  let types =
+    init_types_with_static ?semantic:state.semantic ~checkpoint:state.checkpoint surface
+  in
+  let unit_boundary env types ~byte_offset =
+    Option.iter state.semantic ~f:(fun frame ->
+      let recorder = Semantic.Frame.recorder frame in
+      let unit = Semantic.Frame.unit frame in
+      let location =
+        Chatml_source.locate
+          (Semantic.source unit)
+          ~start_byte:byte_offset
+          ~end_byte:byte_offset
+          ~checkpoint:state.checkpoint
+        |> Or_error.ok_exn
+      in
+      let context =
+        Semantic_scope.context_exn frame ~values:env ~types ~checkpoint:state.checkpoint
+      in
+      Semantic.region
+        recorder
+        unit
+        ~context
+        ~span:(Chatml_source.Location.span location)
+        ~checkpoint:state.checkpoint
+      |> Semantic.take_exn)
+  in
+  unit_boundary env types ~byte_offset:0;
   let env, types, names_rev =
     List.fold program.stmts ~init:(env, types, []) ~f:(fun (env, types, names_rev) node ->
       checkpoint state;
@@ -2713,6 +3168,12 @@ let infer_configured_unit_static state surface (program : program) =
       in
       env, types, List.rev_append names names_rev)
   in
+  Option.iter state.semantic ~f:(fun frame ->
+    unit_boundary
+      env
+      types
+      ~byte_offset:
+        (Chatml_source.byte_length (Semantic.source (Semantic.Frame.unit frame))));
   let values =
     List.fold names_rev ~init:Env.empty ~f:(fun values name ->
       checkpoint state;
@@ -2722,8 +3183,8 @@ let infer_configured_unit_static state surface (program : program) =
     List.fold program.stmts ~init:([], []) ~f:(fun (type_names, module_names) node ->
       checkpoint state;
       match node.value with
-      | SType declaration -> declaration.name :: type_names, module_names
-      | SModule { name; _ } -> type_names, name :: module_names
+      | SType declaration -> Syntax_name.name declaration.name :: type_names, module_names
+      | SModule { name; _ } -> type_names, Syntax_name.name name :: module_names
       | SLet _ | SLetRec _ | SOpen _ | SExpr _ -> type_names, module_names)
   in
   let types =
@@ -2740,7 +3201,20 @@ let infer_configured_unit_static state surface (program : program) =
     ; configured_annotations = Hashtbl.copy state.configured_annotations
     }
   in
-  annotations, Configured_resolution.Public_module.create ~values ~types, env
+  let exports = Configured_resolution.Public_module.create ~values ~types in
+  let exports =
+    Option.value_map state.semantic ~default:exports ~f:(fun frame ->
+      let members =
+        Semantic_scope.members_exn
+          frame
+          ~values:env
+          ~types
+          ~exports:values
+          ~checkpoint:state.checkpoint
+      in
+      Configured_resolution.Public_module.with_members exports members)
+  in
+  annotations, exports, env
 ;;
 
 let infer_configured_unit state surface program =
@@ -2755,6 +3229,7 @@ let infer_configured_unit state surface program =
    lookup callback determines lexical ownership, never the type algorithm. *)
 let check_required_bindings
       ?(binding_span = fun _ -> None)
+      ?semantic_scope
       state
       required_bindings
       ~lookup_binding
@@ -2762,21 +3237,78 @@ let check_required_bindings
   (match List.find_a_dup (List.map required_bindings ~f:fst) ~compare:String.compare with
    | Some name -> raise (Type_error ("Duplicate required binding '" ^ name ^ "'"))
    | None -> ());
-  let required_types =
-    Tuple
-      (List.map required_bindings ~f:(fun (_, ty) ->
-         typ_of_builtin_ty ~checkpoint:(fun () -> checkpoint state) ty))
-    |> instantiate state
+  let components =
+    List.map required_bindings ~f:(fun (_, ty) ->
+      typ_of_builtin_ty ~checkpoint:(fun () -> checkpoint state) ty)
   in
+  let required_roots =
+    match state.semantic with
+    | None -> None
+    | Some frame ->
+      let group =
+        Semantic.stage_group (Semantic.Frame.recorder frame) ~checkpoint:state.checkpoint
+        |> Semantic.take_exn
+      in
+      let roots =
+        List.map components ~f:(fun inferred ->
+          Semantic.stage_root
+            (Semantic.Frame.recorder frame)
+            group
+            inferred
+            ~checkpoint:state.checkpoint
+          |> Semantic.take_exn)
+      in
+      Semantic.commit_group
+        (Semantic.Frame.recorder frame)
+        group
+        ~checkpoint:state.checkpoint
+      |> Semantic.take_exn;
+      Some roots
+  in
+  let required_types = instantiate state (Tuple components) in
   match required_types with
   | Tuple types ->
-    List.iter2_exn required_bindings types ~f:(fun (name, _) expected ->
+    let record name root =
+      match state.semantic, semantic_scope with
+      | Some frame, Some scope ->
+        Option.iter
+          (Option.bind (Value_scope.find scope ~name) ~f:Value_scope.Binding.semantic)
+          ~f:(fun binding ->
+            Semantic.host_requirement
+              (Semantic.Frame.recorder frame)
+              (Semantic.Frame.unit frame)
+              ~contract:(Semantic.compiler_contract (Semantic.Frame.recorder frame))
+              ~name
+              ~binding
+              ~required:root
+              ~checkpoint:state.checkpoint
+            |> Semantic.take_exn)
+      | None, _ | Some _, None -> ()
+    in
+    let check name expected =
       try unify state (lookup_binding name) expected with
       | Type_error message ->
         let message = "Invalid entrypoint '" ^ name ^ "': " ^ message in
         (match binding_span name with
          | None -> raise (Type_error message)
-         | Some span -> raise (Type_error_with_loc (message, span))))
+         | Some span -> raise (Type_error_with_loc (message, span)))
+    in
+    (match required_roots with
+     | None ->
+       List.iter2_exn required_bindings types ~f:(fun (name, _) expected ->
+         check name expected)
+     | Some roots ->
+       let rec check_recorded bindings types roots =
+         match bindings, types, roots with
+         | [], [], [] -> ()
+         | (name, _) :: bindings, expected :: types, root :: roots ->
+           state.checkpoint ();
+           check name expected;
+           record name root;
+           check_recorded bindings types roots
+         | _ -> assert false
+       in
+       check_recorded required_bindings types roots)
   | _ -> assert false
 ;;
 

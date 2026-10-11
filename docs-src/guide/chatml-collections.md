@@ -1,7 +1,8 @@
 # Arrays and optional values
 
-Use `Array` to transform ordered, homogeneous data and `Option` to represent a
-missing result. These modules are available on all four extensibility surfaces.
+Use `Array` to transform ordered, homogeneous data, `Option` to represent a
+missing result, and `Outcome` for a success or typed error. These modules are
+available on all four extensibility surfaces.
 They evaluate immediately; they do not start background work or interpret tasks
 returned by callbacks. Retrieve `reference.signatures` for the selected surface's
 exact schemes, and [task composition](chatml-task-effects.md) for sequencing work.
@@ -34,6 +35,7 @@ is no automatic list conversion, array pattern matching, or resizable push/pop A
 | `Array.iteri(values, fun index value -> ())` | Iterate with index first and value second. |
 | `Array.fold(values, initial, fun accumulator value -> next)` | Fold left to right; return the final accumulator. Empty input returns `initial`. |
 | `Array.filter(values, fun value -> predicate)` | New array of elements whose boolean predicate succeeds, preserving order. |
+| `Array.filter_map(values, fun value -> optional_result)` | Call every element's callback in order; new array of the `Some` payloads, skipping `None`. |
 | `Array.exists(values, fun value -> predicate)` | Stop at the first true predicate. Empty input returns false. |
 | `Array.for_all(values, fun value -> predicate)` | Stop at the first false predicate. Empty input returns true. |
 | `Array.find(values, fun value -> predicate)` | First matching element as `Some(value)`, otherwise `None`. This returns a value, not its index. |
@@ -158,8 +160,10 @@ Options are ordinary backtick variants, `None` and `Some(value)`, without OCaml'
 nominal option type. `Option.none()` constructs `None`; `Option.some(value)`
 constructs `Some(value)`. `Option.is_none(option)` and `Option.is_some(option)`
 return booleans. `Option.get_or(option, default)` returns the payload or default.
-These five functions are the complete `Option` module; there is no implicit
-`Option.map` or exception-raising `Option.get`.
+`Option.map(option, function)` transforms a present payload. `Option.bind(option,
+function)` transforms it into another option. Both skip the callback for `None`.
+The callback is the final argument and takes one argument. A callback failure
+propagates; it does not become `None`. There is no exception-raising `Option.get`.
 
 The default argument is evaluated even when a value is present. To defer expensive
 or effectful fallback computation, explicitly match `None` and `Some(value)`.
@@ -181,6 +185,38 @@ let main input =
   Task.pure(`String(eager ++ ":" ++ to_string(!count) ++ ":" ++ lazy_value ++
     ":" ++ to_string(Option.is_some(present))))
 ```
+
+## Composing optional values and typed errors
+
+`Outcome` operates on ordinary variants `Ok(value)` and `Error(error)`. It is
+separate from the shell hook `Result` module. `Outcome.map(outcome, function)`
+transforms only `Ok`; `Outcome.bind(outcome, function)` transforms `Ok` into a new
+outcome with the same error type. `Outcome.map_error(outcome, function)` transforms
+only `Error`. The successful and error payload types may differ. Callbacks run
+once on their selected branch. These helpers do not catch exceptions, interpret
+tasks, retry work, or grant capabilities. `let*` and `let+` remain Task syntax.
+
+The following example filters optional payloads, composes another optional value,
+and transforms a typed error. The skipped callback is never run.
+
+<!-- ochat-authoring-example: {"id":"collections.typed-composition","surface":"one_off_v1","result":"30:4:bad!"} -->
+```ocaml
+let main input =
+  let values = Array.filter_map([1, 2, 3], fun n ->
+    if n > 1 then `Some(n * 10) else `None) in
+  let selected = Option.bind(Option.map(`Some(1), fun n -> n + 1),
+    fun n -> `Some(n * 2)) in
+  let failure = Outcome.map(`Error("bad"), fun ignored -> fail("not called")) in
+  let renamed = Outcome.map_error(failure, fun message -> message ++ "!") in
+  let message = match renamed with | `Ok(value) -> value | `Error(error) -> error in
+  Task.pure(`String(to_string(values[1]) ++ ":" ++
+    to_string(Option.get_or(selected, 0)) ++ ":" ++ message))
+```
+
+`Array.filter_map` returns a fresh shallow array, preserves retained order, and
+stops immediately if a callback fails. Like the other eager array traversals,
+it does not snapshot its input; avoid mutating later input elements from the
+callback when stable input is needed.
 
 ## Invalid allocation and ranges
 

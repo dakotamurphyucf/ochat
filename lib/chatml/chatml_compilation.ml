@@ -97,19 +97,34 @@ module Input = struct
   ;;
 end
 
-(* Two real callers share admission, the elapsed budget, exception mapping and
-   joined domain cleanup. Metadata preparation runs under that SAME budget before
+(* Text/captured, linked and semantic callers share admission, elapsed policy,
+   exception mapping and joined domain cleanup. Metadata preparation runs under
+   that SAME budget before
    domain creation, so static projection cannot evade bounded compilation. *)
-let run_worker ~input_bytes ~policy ~env ~prepare ~compile =
+type exception_policy =
+  | Legacy_mapping
+  | Preserve_unexpected
+
+let run_worker
+      ~input_bytes
+      ~policy
+      ~env
+      ~map_policy_error
+      ~exception_policy
+      ~prepare
+      ~compile
+  =
   let open Result.Let_syntax in
   let%bind () =
-    match policy with
-    | Unrestricted -> Ok ()
-    | Bounded limits ->
-      let%bind () = validate_limits limits in
-      if input_bytes > limits.max_source_bytes
-      then error "chatml.source_limit" "script exceeds the compiler source limit"
-      else Ok ()
+    Result.map_error
+      (match policy with
+       | Unrestricted -> Ok ()
+       | Bounded limits ->
+         let%bind () = validate_limits limits in
+         if input_bytes > limits.max_source_bytes
+         then error "chatml.source_limit" "script exceeds the compiler source limit"
+         else Ok ())
+      ~f:map_policy_error
   in
   let execute () =
     let clock = Eio.Stdenv.mono_clock env in
@@ -136,14 +151,29 @@ let run_worker ~input_bytes ~policy ~env ~prepare ~compile =
         execute
   with
   | Eio.Time.Timeout ->
-    error "chatml.compile_timeout" "compiler cooperative time budget exceeded"
-  | Eio.Cancel.Cancelled _ as exn -> raise exn
-  | Stack_overflow -> error "chatml.compiler_limit" "compiler stack limit exceeded"
-  | _ -> error "chatml.compiler_failed" "compiler failed unexpectedly"
+    Result.map_error
+      (error "chatml.compile_timeout" "compiler cooperative time budget exceeded")
+      ~f:map_policy_error
+  | Eio.Cancel.Cancelled _ as exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    Exn.raise_with_original_backtrace exn backtrace
+  | exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    (match exception_policy with
+     | Preserve_unexpected -> Exn.raise_with_original_backtrace exn backtrace
+     | Legacy_mapping ->
+       let failure =
+         match exn with
+         | Stack_overflow -> error "chatml.compiler_limit" "compiler stack limit exceeded"
+         | _ -> error "chatml.compiler_failed" "compiler failed unexpectedly"
+       in
+       Result.map_error failure ~f:map_policy_error)
 ;;
 
 let compile_input source ~policy ~env ~target =
   run_worker
+    ~map_policy_error:Fn.id
+    ~exception_policy:Legacy_mapping
     ~input_bytes:(Input.byte_length source)
     ~policy
     ~env
@@ -196,6 +226,8 @@ let compile_graph input contract ~max_dependency_depth ~checkpoint =
 
 let compile_prepared_with_policy input ~policy ~max_dependency_depth ~env ~target () =
   run_worker
+    ~map_policy_error:Fn.id
+    ~exception_policy:Legacy_mapping
     ~input_bytes:
       (Chatml_prepared_program.Accounting.input_bytes
          (Chatml_prepared_program.accounting input))
@@ -250,6 +282,8 @@ let compile_prepared_with_contract_and_policy
   let module Contract = Chatml.Chatml_compiler_contract in
   let input_bytes = Prepared.Accounting.input_bytes (Prepared.accounting input) in
   run_worker
+    ~map_policy_error:Fn.id
+    ~exception_policy:Legacy_mapping
     ~input_bytes
     ~policy
     ~env
@@ -361,5 +395,61 @@ let compile_prepared_with_contract
     ~policy:(Bounded limits)
     ~max_dependency_depth
     ~env
+    ()
+;;
+
+module Analysis_error = struct
+  type t =
+    | Policy of error
+    | Analysis of Chatml_semantics.Error.t
+end
+
+let analyze_prepared_with_policy
+      input
+      ~policy
+      ~semantic_limits
+      ~max_dependency_depth
+      ~env
+      ~target
+      ()
+  =
+  run_worker
+    ~map_policy_error:(fun error -> Analysis_error.Policy error)
+    ~exception_policy:Preserve_unexpected
+    ~input_bytes:
+      (Chatml_prepared_program.Accounting.input_bytes
+         (Chatml_prepared_program.accounting input))
+    ~policy
+    ~env
+    ~prepare:(fun ~checkpoint ->
+      Ok
+        ( input
+        , Chatml.Chatml_compiler_contract.for_target (static_target target) ~checkpoint ))
+    ~compile:(fun (input, contract) ~checkpoint ->
+      Chatml_semantics.analyze
+        input
+        ~contract
+        ~max_dependency_depth
+        ~limits:semantic_limits
+        ~checkpoint
+      |> Result.map_error ~f:(fun error -> Analysis_error.Analysis error))
+;;
+
+let analyze_prepared
+      input
+      ?(limits = default_limits)
+      ~semantic_limits
+      ~max_dependency_depth
+      ~env
+      ~target
+      ()
+  =
+  analyze_prepared_with_policy
+    input
+    ~policy:(Bounded limits)
+    ~semantic_limits
+    ~max_dependency_depth
+    ~env
+    ~target
     ()
 ;;

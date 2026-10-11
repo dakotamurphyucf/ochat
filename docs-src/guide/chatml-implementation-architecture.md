@@ -499,7 +499,7 @@ Contributors should preserve these invariants:
 - ordinary inference variables are acyclic
 - recursive types are represented explicitly via `Mu` / `Rec_var`
 - recursive type declarations are contractive
-- recursive types are not generalized
+- scheme transforms preserve recursive data while generalizing eligible variables
 - recursive bindings are function-only
 - local variable addresses are resolver-produced lexical locations
 - frame slot accesses must match stored frame layout

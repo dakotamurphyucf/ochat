@@ -1,0 +1,5 @@
+(library
+ (name chatml_semantic_facts_tests)
+ (libraries core expect_test_helpers_core chatml chatml_source chatml_prepared_program chatml_typechecker chatml_graph chatml_configured_check chatml_checked_graph chatml_linked_program)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

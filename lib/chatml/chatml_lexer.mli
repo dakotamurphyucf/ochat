@@ -5,7 +5,7 @@
     {!ocamllex} such as [comment] or [string_lit] remain
     implementation-private. *)
 
-(** [token lb] returns the next {!Chatml_parser.token} extracted from
+(** [token lb] returns the next {!Chatml_tokens.token} extracted from
     [lb].  See the implementation for the full set of recognised
     tokens.
 
@@ -17,9 +17,9 @@
          let lb = Lexing.from_string "let answer = 42" in
          let rec aux acc =
            match token lb with
-           | Chatml_parser.EOF -> List.rev acc
+           | Chatml_tokens.EOF -> List.rev acc
            | tok               -> aux (tok :: acc)
          in
          aux [] ]}
  *)
-val token : Lexing.lexbuf -> Chatml_parser.token
+val token : Lexing.lexbuf -> Chatml_tokens.token

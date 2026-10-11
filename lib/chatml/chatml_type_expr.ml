@@ -2,13 +2,16 @@ open Core
 
 module Name = struct
   type t =
-    { modules : string list
-    ; name : string
+    { modules : Chatml_syntax_name.t list
+    ; name : Chatml_syntax_name.t
     }
   [@@deriving sexp]
 
-  let local name = { modules = []; name }
-  let to_string t = String.concat ~sep:"." (t.modules @ [ t.name ])
+  let local name = { modules = []; name = Chatml_syntax_name.unlocated name }
+
+  let to_string t =
+    String.concat ~sep:"." (List.map (t.modules @ [ t.name ]) ~f:Chatml_syntax_name.name)
+  ;;
 end
 
 (** Type syntax with byte-based source spans. Parameters are lexical names,
@@ -25,14 +28,14 @@ and desc =
   | TEFunction of t list * t
   | TETuple of t Chatml_tuple.t
   | TEConstr of Name.t * t list
-  | TERecord of (string * t) list
-  | TEVariant of (string * t list) list
+  | TERecord of (Chatml_syntax_name.t * t) list
+  | TEVariant of (Chatml_syntax_name.t * t list) list
 [@@deriving sexp]
 
 module Declaration = struct
   type nonrec t =
-    { name : string
-    ; parameters : string list
+    { name : Chatml_syntax_name.t
+    ; parameters : Chatml_syntax_name.t list
     ; body : t
     }
   [@@deriving sexp]

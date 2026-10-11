@@ -551,7 +551,7 @@ and match_eval
     (match match_pattern v case.pat with
      | None -> match_eval ~tail env frames match_span v tl
      | Some binds ->
-       let vars = collect_pattern_vars case.pat in
+       let vars = collect_resolved_pattern_vars case.pat in
        if List.length vars <> List.length case.slots
        then failwith "internal: slot/var length mismatch in REMatch";
        let pat_frame = Frame_env.alloc_packed case.slots in

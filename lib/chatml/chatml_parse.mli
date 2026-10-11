@@ -6,12 +6,14 @@ open Chatml_lang
 type diagnostic = Chatml_diagnostic.t
 
 module Unit : sig
-  (** An unchanged parser AST paired with the exact immutable bytes from which
-      it was parsed. No ambient source owner or rewritten offsets. *)
+  (** Parser syntax paired with exact immutable bytes and optional identifier
+      metadata. Existing node spans are unchanged; no ambient source owner or
+      rewritten offsets. *)
   type t
 
   val source : t -> Chatml_source.t
   val program : t -> program
+  val sites : t -> Chatml_syntax_sites.t option
 end
 
 module Interface : sig
@@ -21,7 +23,29 @@ module Interface : sig
 
   val source : t -> Chatml_source.t
   val signature : t -> Chatml_module_signature.t
+  val sites : t -> Chatml_syntax_sites.t option
 end
+
+(** Metadata admission is separate from ordinary parse diagnostics. Existing
+    entrypoints below retain no site table and produce unlocated syntax names. *)
+type site_error =
+  | Syntax of diagnostic
+  | Sites of Chatml_syntax_sites.Error.t
+
+(** Parse the exact captured bytes with invocation-owned token coordinates on
+    formerly unlocated name nodes. Bounds cover metadata only. Failed parsing or
+    collection publishes no partial unit; checkpoints escape unchanged. *)
+val parse_captured_with_sites
+  :  Chatml_source.t
+  -> limits:Chatml_syntax_sites.Limits.t
+  -> checkpoint:(unit -> unit)
+  -> (Unit.t, site_error) result
+
+val parse_captured_interface_with_sites
+  :  Chatml_source.t
+  -> limits:Chatml_syntax_sites.Limits.t
+  -> checkpoint:(unit -> unit)
+  -> (Interface.t, site_error) result
 
 (** Parse a captured interface using the same checkpoint-protected token path
     as programs. Failures own interface bytes; checkpoint exceptions escape. *)

@@ -1,3 +1,4 @@
+module Parser = Chatml.Chatml_parser.Make (Chatml.Chatml_syntax_sites.Disabled)
 open Core
 module Captured = Chatml_source
 module Diagnostic = Chatml_diagnostic
@@ -107,7 +108,7 @@ let%test_unit
   ignore (Parse.parse_captured_interface source ~checkpoint:(fun () -> Int.incr count));
   assert (!count > 0);
   for stop = 1 to !count do
-    List.iter [ Failure "callback"; Chatml.Chatml_parser.Error ] ~f:(fun original ->
+    List.iter [ Failure "callback"; Parser.Error ] ~f:(fun original ->
       let visited = ref 0 in
       match
         Parse.parse_captured_interface source ~checkpoint:(fun () ->

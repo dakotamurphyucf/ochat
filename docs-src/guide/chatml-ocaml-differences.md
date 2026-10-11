@@ -177,8 +177,9 @@ support arbitrary OCaml typed parameter patterns or general `(expression : type)
 annotations. For recursive structural data, declare a contractive type: recursive
 references must occur beneath a real constructor. `type bad = bad` is not valid.
 The recursive function below has a binding annotation followed by an ordinary
-lambda. Bindings involving explicit recursive types remain monomorphic; do not
-assume polymorphic recursion.
+lambda. Regular recursive data does not prevent independent variables in a pure
+function from generalizing. Recursive calls during the definition remain
+monomorphic; do not assume polymorphic recursion.
 
 <!-- ochat-authoring-example: {"id":"types.recursive-binding","surface":"one_off_v1","result":true} -->
 ```ocaml

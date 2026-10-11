@@ -40,7 +40,8 @@
 
       {[
         let supplier = MenhirLib.LexerUtil.make_supplier Chatml_lexer.token lexbuf in
-        let checkpoint = Chatml_parser.Incremental.program lexbuf.lex_curr_p in
+        let module Parser = Chatml_parser.Make (Chatml_syntax_sites.Disabled) in
+        let checkpoint = Parser.Incremental.program lexbuf.lex_curr_p in
         MenhirLib.Engine.stream_checkpoint checkpoint supplier
       ]}
 
@@ -91,6 +92,15 @@ let position_of_lex (pos : Lexing.position) : Source.position =
 let span_of_lex (startp : Lexing.position) (endp : Lexing.position) : Source.span =
   { left = position_of_lex startp; right = position_of_lex endp }
 
+let site_name role startp endp name =
+  if Sites.enabled
+  then Chatml_syntax_name.located name (Sites.add role ~name ~span:(span_of_lex startp endp))
+  else Chatml_syntax_name.unlocated name
+
+let record_site role startp endp name =
+  if Sites.enabled
+  then ignore (Sites.add role ~name ~span:(span_of_lex startp endp))
+
 let mk_type startp endp desc =
   { desc; span = span_of_lex startp endp }
 
@@ -101,6 +111,8 @@ let mk_binding startp endp value =
   { Chatml_binding_pattern.value; span = span_of_lex startp endp }
 
 let mk_name startp endp name =
+  if Sites.enabled
+  then ignore (Sites.add Value_binder ~name ~span:(span_of_lex startp endp));
   mk_binding startp endp (Chatml_binding_pattern.Name name)
 
 let mk_node startp endp value =
@@ -138,7 +150,7 @@ let maybe_annotate_expr (expr_node : expr node) (type_opt : type_expr option) : 
     =
     let bname = binder_name_of_task_let binder in
     let task_mod = mk_exprnode startp endp (EVar "Task") in
-    let fn = mk_exprnode startp endp (EFieldGet (task_mod, method_name)) in
+    let fn = mk_exprnode startp endp (EFieldGet (task_mod, Chatml_syntax_name.unlocated method_name)) in
     let lam = mk_exprnode startp endp (ELambda ([ bname ], body)) in
     mk_exprnode startp endp (EApp (fn, [ rhs; lam ]))
 %}
@@ -146,6 +158,8 @@ let maybe_annotate_expr (expr_node : expr node) (type_opt : type_expr option) : 
 (***************************************************************************)
 (* 1) Declare tokens & semantic types                                      *)
 (***************************************************************************)
+
+%parameter <Sites : Chatml_syntax_sites.Sink>
 
 %token <int> INT
 %token <float> FLOAT
@@ -198,13 +212,13 @@ signature_items:
 signature_item:
     TYPE type_parameters LIDENT EQ type_expr
       { mk_signature_item $startpos $endpos
-          (Chatml_module_signature.Type { name = $3; parameters = $2; body = $5 }) }
+          (Chatml_module_signature.Type { name = site_name Type_binder $startpos($3) $endpos($3) $3; parameters = $2; body = $5 }) }
 | VAL LIDENT COLON type_expr signature_requirements
       { mk_signature_item $startpos $endpos
-          (Chatml_module_signature.Value { name = $2; annotation = $4; requirements = $5 }) }
+          (Chatml_module_signature.Value { name = site_name Signature_value_binder $startpos($2) $endpos($2) $2; annotation = $4; requirements = $5 }) }
 | MODULE UIDENT COLON SIG signature_items END
       { mk_signature_item $startpos $endpos
-          (Chatml_module_signature.Module { name = $2; signature = $5 }) }
+          (Chatml_module_signature.Module { name = site_name Module_binder $startpos($2) $endpos($2) $2; signature = $5 }) }
 
 signature_requirements:
     /* empty */ { [] }
@@ -212,8 +226,8 @@ signature_requirements:
 
 signature_requirement:
     LIDENT LPAREN TYPEVAR RPAREN
-      { { Chatml_module_signature.Requirement.name = $1
-        ; parameter = $3
+      { { Chatml_module_signature.Requirement.name = site_name Constraint_name $startpos($1) $endpos($1) $1
+        ; parameter = site_name Constraint_parameter_reference $startpos($3) $endpos($3) $3
         ; span = span_of_lex $startpos $endpos } }
 
 program_stmts:
@@ -231,7 +245,7 @@ program_stmt:
 
 module_stmt:
   TYPE type_parameters LIDENT EQ type_expr
-    { mk_node $startpos $endpos (SType { name = $3; parameters = $2; body = $5 }) }
+    { mk_node $startpos $endpos (SType { name = site_name Type_binder $startpos($3) $endpos($3) $3; parameters = $2; body = $5 }) }
 | LET REC rec_bindings          { mk_node $startpos $endpos (SLetRec( $3)) }
 | LET REC rec_bindings IN expr_sequence  { mk_node $startpos $endpos (SExpr( mk_exprnode $startpos $endpos (ELetRec($3, $5)) )) }
 | LET binding_pattern COLON type_expr EQ expr_sequence
@@ -240,13 +254,13 @@ module_stmt:
 | LET LIDENT LPAREN RPAREN EQ expr_sequence { mk_node $startpos $endpos (SLet(mk_name $startpos($2) $endpos($2) $2, mk_exprnode $startpos $endpos (ELambda([], ($6))))) }
 | LET binding_pattern EQ expr_sequence        { mk_node $startpos $endpos (SLet($2, $4)) }
 | MODULE UIDENT EQ STRUCT module_stmts END
-    { mk_node $startpos $endpos (SModule { name = $2; signature = None; body = $5 }) }
+    { mk_node $startpos $endpos (SModule { name = site_name Module_binder $startpos($2) $endpos($2) $2; signature = None; body = $5 }) }
 | MODULE UIDENT COLON SIG signature_items END EQ STRUCT module_stmts END
     { mk_node $startpos $endpos
-        (SModule { name = $2
+        (SModule { name = site_name Module_binder $startpos($2) $endpos($2) $2
                  ; signature = Some (mk_node $startpos($4) $endpos($6) $5)
                  ; body = $9 }) }
-| OPEN UIDENT               { mk_node $startpos $endpos (SOpen($2)) }
+| OPEN UIDENT               { mk_node $startpos $endpos (SOpen(site_name Module_reference $startpos($2) $endpos($2) $2)) }
 | expr                      { mk_node $startpos $endpos (SExpr($1)) }
 
 expr:
@@ -290,8 +304,8 @@ expr:
     | expr LPAREN expr_list RPAREN { mk_exprnode $startpos $endpos (EApp($1, List.map (fun sn -> sn) $3)) }
 
     (* Polymorphic variant: `Variant or `Variant(expr1, expr2) *)
-    | TICKIDENT               { mk_exprnode $startpos $endpos (EVariant($1, [])) }
-    | TICKIDENT LPAREN expr_list RPAREN { mk_exprnode $startpos $endpos (EVariant($1, List.map (fun sn -> sn) $3)) }
+    | TICKIDENT               { mk_exprnode $startpos $endpos (EVariant(site_name Variant_tag $startpos($1) $endpos($1) $1, [])) }
+    | TICKIDENT LPAREN expr_list RPAREN { mk_exprnode $startpos $endpos (EVariant(site_name Variant_tag $startpos($1) $endpos($1) $1, List.map (fun sn -> sn) $3)) }
 
     (* If expression *)
     | IF expr_sequence THEN expr_sequence ELSE expr_sequence  { mk_exprnode $startpos $endpos (EIf($2, $4, $6)) }
@@ -325,11 +339,11 @@ expr:
     | LBRACE field_list RBRACE      { mk_exprnode $startpos $endpos (ERecord( List.map (fun (s,sn) -> s,sn) $2)) }
 
     (* record field access, e.g. expr.field *)
-    | expr DOT LIDENT              { mk_exprnode $startpos $endpos (EFieldGet($1, $3)) }
-    | expr DOT UIDENT              { mk_exprnode $startpos $endpos (EFieldGet($1, $3)) }
+    | expr DOT LIDENT              { mk_exprnode $startpos $endpos (EFieldGet($1, site_name Field_label $startpos($3) $endpos($3) $3)) }
+    | expr DOT UIDENT              { mk_exprnode $startpos $endpos (EFieldGet($1, site_name Field_label $startpos($3) $endpos($3) $3)) }
 
     | expr DOT LIDENT LPAREN expr_list RPAREN
-		    { mk_exprnode $startpos $endpos (EApp( mk_exprnode $startpos $endpos (EFieldGet($1, $3)),  $5)) }
+		    { mk_exprnode $startpos $endpos (EApp( mk_exprnode $startpos $endpos (EFieldGet($1, site_name Field_label $startpos($3) $endpos($3) $3)),  $5)) }
 
     (* array literal *)
     | LBRACKET expr_list RBRACKET  { mk_exprnode $startpos $endpos (EArray(List.map (fun sn -> sn) $2)) }
@@ -382,10 +396,10 @@ pattern:
     | FLOAT           { PFloat $1 }
     | BOOL            { PBool $1 }
     | STRING          { PString $1 }
-    | TICKIDENT       { PVariant($1, []) }
-    | TICKIDENT LPAREN pattern_list RPAREN { PVariant($1, $3) }
+    | TICKIDENT       { PVariant(site_name Variant_tag $startpos($1) $endpos($1) $1, []) }
+    | TICKIDENT LPAREN pattern_list RPAREN { PVariant(site_name Variant_tag $startpos($1) $endpos($1) $1, $3) }
     | LBRACE pattern_field_list RBRACE { PRecord(fst $2, snd $2) }
-    | LIDENT          { PVar $1 }
+    | LIDENT          { PVar (site_name Value_binder $startpos($1) $endpos($1) $1) }
 
 tuple_pattern_tail:
 | /* empty */ { [] }
@@ -411,7 +425,7 @@ pattern_field_decls:
   | pattern_field_decl SEMI pattern_field_decls { $1 :: (fst $3), (snd $3) }
 
 pattern_field_decl:
-    LIDENT EQ pattern { ($1, $3) }
+    LIDENT EQ pattern { (site_name Field_label $startpos($1) $endpos($1) $1, $3) }
 
 expr_list:
     /* empty */ { [] }
@@ -450,21 +464,21 @@ field_decls:
 | field_decl SEMI field_decls { $1 :: $3 }
 
 field_decl:
-    LIDENT EQ expr { ($1, $3) }
+    LIDENT EQ expr { (site_name Field_label $startpos($1) $endpos($1) $1, $3) }
 
 ident:
-| LIDENT   { EVar $1 }
-| UIDENT   { EVar $1 }
+| LIDENT   { record_site Value_reference $startpos($1) $endpos($1) $1; EVar $1 }
+| UIDENT   { record_site Value_reference $startpos($1) $endpos($1) $1; EVar $1 }
 
 rec_bindings:
 | rec_binding                  { [$1] }
 | rec_binding AND rec_bindings { $1 :: $3 }
 
 rec_binding:
-| LIDENT COLON type_expr EQ expr_sequence { ($1, maybe_annotate_expr $5 (Some $3)) }
-| LIDENT EQ expr_sequence { ($1, $3) }
-| LIDENT LPAREN RPAREN EQ expr_sequence { ($1, mk_exprnode $startpos $endpos (ELambda([], $5)) ) }
-| LIDENT params EQ expr_sequence { ($1, mk_exprnode $startpos $endpos (ELambda($2, $4)) ) }
+| LIDENT COLON type_expr EQ expr_sequence { (site_name Value_binder $startpos($1) $endpos($1) $1, maybe_annotate_expr $5 (Some $3)) }
+| LIDENT EQ expr_sequence { (site_name Value_binder $startpos($1) $endpos($1) $1, $3) }
+| LIDENT LPAREN RPAREN EQ expr_sequence { (site_name Value_binder $startpos($1) $endpos($1) $1, mk_exprnode $startpos $endpos (ELambda([], $5)) ) }
+| LIDENT params EQ expr_sequence { (site_name Value_binder $startpos($1) $endpos($1) $1, mk_exprnode $startpos $endpos (ELambda($2, $4)) ) }
 
 expr_sequence:
 | expr  { $1 }
@@ -472,8 +486,11 @@ expr_sequence:
 
 type_parameters:
 | /* empty */ { [] }
-| TYPEVAR { [$1] }
-| LPAREN separated_nonempty_list(COMMA, TYPEVAR) RPAREN { $2 }
+| type_parameter_name { [$1] }
+| LPAREN separated_nonempty_list(COMMA, type_parameter_name) RPAREN { $2 }
+
+type_parameter_name:
+| TYPEVAR { site_name Type_parameter_binder $startpos($1) $endpos($1) $1 }
 
 type_expr:
 | type_arrow { $1 }
@@ -500,12 +517,12 @@ type_postfix:
     { mk_type $startpos $endpos (TEConstr ($6, $2 :: $4)) }
 
 type_name:
-| LIDENT { Name.local $1 }
-| type_module_path DOT LIDENT { { Name.modules = $1; name = $3 } }
+| LIDENT { { Name.modules = []; name = site_name Type_reference $startpos($1) $endpos($1) $1 } }
+| type_module_path DOT LIDENT { { Name.modules = $1; name = site_name Type_reference $startpos($3) $endpos($3) $3 } }
 
 type_module_path:
-| UIDENT { [$1] }
-| type_module_path DOT UIDENT { $1 @ [$3] }
+| UIDENT { [site_name Module_reference $startpos($1) $endpos($1) $1] }
+| type_module_path DOT UIDENT { $1 @ [site_name Module_reference $startpos($3) $endpos($3) $3] }
 
 type_primary:
 | type_name { mk_type $startpos $endpos (TEName $1) }
@@ -524,7 +541,7 @@ type_fields:
 | type_field SEMI type_fields { $1 :: $3 }
 
 type_field:
-| LIDENT COLON type_expr { ($1, $3) }
+| LIDENT COLON type_expr { (site_name Field_label $startpos($1) $endpos($1) $1, $3) }
 
 type_variant_cases_opt:
 | /* empty */ { [] }
@@ -535,8 +552,8 @@ type_variant_cases:
 | type_variant_case BAR type_variant_cases { $1 :: $3 }
 
 type_variant_case:
-| TICKIDENT { ($1, []) }
-| TICKIDENT LPAREN type_expr_list RPAREN { ($1, $3) }
+| TICKIDENT { (site_name Variant_tag $startpos($1) $endpos($1) $1, []) }
+| TICKIDENT LPAREN type_expr_list RPAREN { (site_name Variant_tag $startpos($1) $endpos($1) $1, $3) }
 
 type_expr_list:
 | type_expr { [$1] }

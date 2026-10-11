@@ -1,7 +1,11 @@
+module Syntax_name = Chatml.Chatml_syntax_name
 open Core
 open Chatml_inferred_type
 module Syntax = Chatml.Chatml_type_expr
 module Equivalence = Chatml_alias_equivalence
+module Semantic = Chatml_semantic_elaboration
+module Semantic_binding = Chatml_semantic_binding
+module Semantic_target = Chatml_semantic_recorder.Target
 
 module Error = struct
   type t = Chatml_diagnostic.t
@@ -12,6 +16,7 @@ module Alias = struct
     | Closed of
         { body : typ
         ; definition_site : Chatml_diagnostic.Site.t option
+        ; semantic_binding : Semantic_binding.t option
         }
     | Parameterized of
         { name : string
@@ -19,7 +24,13 @@ module Alias = struct
         ; body : Syntax.t
         ; environment : 'scope
         ; source : Chatml_source.t option
+        ; semantic_binding : Semantic_binding.t option
         }
+
+  let semantic_binding = function
+    | Closed { semantic_binding; _ } | Parameterized { semantic_binding; _ } ->
+      semantic_binding
+  ;;
 
   let arity = function
     | Closed _ -> 0
@@ -28,7 +39,9 @@ module Alias = struct
 end
 
 type t =
-  { aliases : t Alias.t String.Map.t
+  { semantic_context : Chatml_semantic_recorder.Context.t option
+  ; semantic_module : Semantic_binding.t option
+  ; aliases : t Alias.t String.Map.t
   ; modules : t String.Map.t
   ; opened_aliases : t Alias.t String.Map.t
   ; opened_modules : t String.Map.t
@@ -39,7 +52,9 @@ type t =
   }
 
 let empty =
-  { aliases = String.Map.empty
+  { semantic_context = None
+  ; semantic_module = None
+  ; aliases = String.Map.empty
   ; modules = String.Map.empty
   ; opened_aliases = String.Map.empty
   ; opened_modules = String.Map.empty
@@ -69,14 +84,29 @@ module Lookup = struct
     }
 end
 
-let enter_scope t = { empty with outer = Some t }
+let semantic_context t = t.semantic_context
+let with_semantic_context t context = { t with semantic_context = Some context }
+let enter_scope t = { empty with outer = Some t; semantic_context = t.semantic_context }
 
-let add_module t ~name ~exports =
+let add_module ?semantic_binding t ~name ~exports =
+  let exports =
+    match semantic_binding with
+    | None -> exports
+    | Some binding -> { exports with semantic_module = Some binding }
+  in
   { t with modules = Map.set t.modules ~key:name ~data:exports }
 ;;
 
 let declared_arity t ~name = Option.map (Map.find t.aliases name) ~f:Alias.arity
 let declared_module t ~name = Map.find t.modules name
+
+let semantic_exports t ~checkpoint =
+  Map.fold t.aliases ~init:[] ~f:(fun ~key ~data bindings ->
+    checkpoint ();
+    match Alias.semantic_binding data with
+    | None -> bindings
+    | Some binding -> (key, binding) :: bindings)
+;;
 
 let exports t ~type_names ~module_names ~checkpoint =
   let select bindings names =
@@ -153,6 +183,8 @@ let root_module t ~checkpoint name =
 ;;
 
 let find_alias t ~checkpoint ({ Syntax.Name.modules; name } : Syntax.Name.t) =
+  let modules = List.map modules ~f:Syntax_name.name in
+  let name = Syntax_name.name name in
   match modules with
   | [] -> find_local_alias t ~checkpoint name
   | first :: rest ->
@@ -257,7 +289,7 @@ let rec template_is_immutable ~checkpoint ty =
   | Rec_var _ | Shape_kind _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> true
 ;;
 
-let add_host t ~name ~body ~checkpoint =
+let add_host ?semantic_binding t ~name ~body ~checkpoint =
   let open Result.Let_syntax in
   let%bind () = available t name in
   if template_is_immutable ~checkpoint body
@@ -269,7 +301,7 @@ let add_host t ~name ~body ~checkpoint =
           Map.set
             t.aliases
             ~key:name
-            ~data:(Alias.Closed { body; definition_site = None })
+            ~data:(Alias.Closed { body; definition_site = None; semantic_binding })
       })
   else
     Error
@@ -386,12 +418,28 @@ let rec alias_origin t ~checkpoint name =
 ;;
 
 let resolved_alias
+      ?semantic
       t
       ~resolution
       ~checkpoint
       (syntax : Syntax.t)
       (qualified : Syntax.Name.t)
   =
+  let name = Syntax_name.name qualified.name in
+  let record ?(role = Chatml.Chatml_syntax_sites.Role.Type_reference) name target =
+    Option.iter semantic ~f:(fun semantic ->
+      Semantic.name_reference_exn semantic name ~role ~target ~checkpoint)
+  in
+  let target binding origin =
+    match binding, origin with
+    | Some binding, _ -> Semantic_target.Binding (Semantic_binding.symbol binding)
+    | None, Some origin ->
+      Configured_module (Chatml_configured_lookup.Origin.dependency origin)
+    | None, None -> Unlocated_module_member
+  in
+  let record_alias alias =
+    record qualified.name (target (Alias.semantic_binding alias) None)
+  in
   let observe origin =
     match resolution, origin with
     | Some resolution, Some origin ->
@@ -402,12 +450,15 @@ let resolved_alias
   in
   match qualified.modules with
   | [] ->
-    let alias = find_local_alias t ~checkpoint qualified.name in
-    if Option.is_some alias then observe (alias_origin t ~checkpoint qualified.name);
+    let alias = find_local_alias t ~checkpoint name in
+    Option.iter alias ~f:(fun alias ->
+      observe (alias_origin t ~checkpoint name);
+      record_alias alias);
     alias
   | root :: rest ->
+    let root_name = Syntax_name.name root in
     let scope, observed =
-      match root_module t ~checkpoint root with
+      match root_module t ~checkpoint root_name with
       | Some scope -> Some scope, false
       | None ->
         (match resolution with
@@ -418,26 +469,39 @@ let resolved_alias
               callback or a cache that suppresses later located observations. *)
            (match
               resolution.lookup.resolve
-                ~name:root
-                ~member_path:(rest @ [ qualified.name ])
+                ~name:root_name
+                ~member_path:(List.map rest ~f:Syntax_name.name @ [ name ])
                 ~span:syntax.span
             with
             | Error diagnostic -> raise (Invalid diagnostic)
             | Ok namespace ->
               resolution.namespaces
-              <- Map.set resolution.namespaces ~key:root ~data:namespace;
+              <- Map.set resolution.namespaces ~key:root_name ~data:namespace;
               Some (with_origin namespace.exports namespace.origin), true))
     in
     let scope =
-      Option.bind scope ~f:(fun scope -> nested_module scope ~path:rest ~checkpoint)
+      Option.bind scope ~f:(fun scope ->
+        record ~role:Module_reference root (target scope.semantic_module scope.origin);
+        List.fold rest ~init:(Some scope) ~f:(fun scope name ->
+          checkpoint ();
+          Option.bind scope ~f:(fun scope ->
+            Option.map
+              (descend scope (Syntax_name.name name))
+              ~f:(fun child ->
+                record
+                  ~role:Module_reference
+                  name
+                  (target child.semantic_module child.origin);
+                child))))
     in
     Option.bind scope ~f:(fun scope ->
-      let alias = Map.find scope.aliases qualified.name in
+      let alias = Map.find scope.aliases name in
       if Option.is_some alias && not observed
       then
         observe
           (Option.map scope.origin ~f:(fun origin ->
-             Chatml_configured_lookup.Origin.member origin ~name:qualified.name));
+             Chatml_configured_lookup.Origin.member origin ~name));
+      Option.iter alias ~f:record_alias;
       alias)
 ;;
 
@@ -452,14 +516,22 @@ end
 
 let parameter_name name = "'" ^ name
 
-let rec convert ?source ?resolution (t : t) ~parameters ~self ~checkpoint syntax =
+let rec convert ?semantic ?source ?resolution (t : t) ~parameters ~self ~checkpoint syntax
+  =
+  let record name target =
+    Option.iter semantic ~f:(fun semantic ->
+      Semantic.name_reference_exn semantic name ~role:Type_reference ~target ~checkpoint)
+  in
   let rec expression (syntax : Syntax.t) =
     checkpoint ();
     match syntax.desc with
     | TEName name -> constructor syntax name []
     | TEParameter name ->
       (match Map.find parameters name with
-       | Some ty -> ty
+       | Some ty ->
+         Option.iter semantic ~f:(fun semantic ->
+           Semantic.parameter_reference_exn semantic ~name ~span:syntax.span ~checkpoint);
+         ty
        | None ->
          reject
            ?source
@@ -488,11 +560,19 @@ let rec convert ?source ?resolution (t : t) ~parameters ~self ~checkpoint syntax
         syntax
         ~what:"type record field label"
         ~checkpoint
-        (List.map fields ~f:fst);
+        (List.map fields ~f:(fun (name, _) -> Syntax_name.name name));
       Record
         (Row
            ( String.Map.of_alist_exn
-               (List.map fields ~f:(fun (name, body) -> name, expression body))
+               (List.map fields ~f:(fun (name, body) ->
+                  Option.iter semantic ~f:(fun semantic ->
+                    Semantic.name_reference_exn
+                      semantic
+                      name
+                      ~role:Field_label
+                      ~target:Structural_label
+                      ~checkpoint);
+                  Syntax_name.name name, expression body))
            , Empty_row ))
     | TEVariant cases ->
       ensure_unique
@@ -500,12 +580,19 @@ let rec convert ?source ?resolution (t : t) ~parameters ~self ~checkpoint syntax
         syntax
         ~what:"type variant constructor label"
         ~checkpoint
-        (List.map cases ~f:fst);
+        (List.map cases ~f:(fun (name, _) -> Syntax_name.name name));
       Variant
         (Row
            ( String.Map.of_alist_exn
                (List.map cases ~f:(fun (name, bodies) ->
-                  name, Variant_payload (List.map bodies ~f:expression)))
+                  Option.iter semantic ~f:(fun semantic ->
+                    Semantic.name_reference_exn
+                      semantic
+                      name
+                      ~role:Variant_tag
+                      ~target:Structural_label
+                      ~checkpoint);
+                  Syntax_name.name name, Variant_payload (List.map bodies ~f:expression)))
            , Empty_row ))
   and constructor syntax (qualified : Syntax.Name.t) arguments =
     let name = Syntax.Name.to_string qualified in
@@ -534,6 +621,13 @@ let rec convert ?source ?resolution (t : t) ~parameters ~self ~checkpoint syntax
     | Some ({ Self.name = self_name; parameters; binder; check_regular } : Self.t)
       when String.equal name self_name && not is_builtin_application ->
       arity (List.length parameters);
+      Option.iter semantic ~f:(fun semantic ->
+        let target =
+          match Semantic.binding semantic with
+          | Some binding -> Semantic_target.Binding (Semantic_binding.symbol binding)
+          | None -> Unlocated_module_member
+        in
+        record qualified.name target);
       if
         check_regular
         && not
@@ -553,15 +647,18 @@ let rec convert ?source ?resolution (t : t) ~parameters ~self ~checkpoint syntax
       (match primitive name, name, arguments with
        | Some ty, _, _ ->
          arity 0;
+         record qualified.name (Language_type name);
          ty
        | None, "array", _ :: _ ->
          arity 1;
+         record qualified.name (Language_type name);
          Array (List.hd_exn arguments)
        | None, "task", _ :: _ ->
          arity 1;
+         record qualified.name (Language_type name);
          Con ("task", arguments)
        | None, _, _ ->
-         (match resolved_alias t ~resolution ~checkpoint syntax qualified with
+         (match resolved_alias ?semantic t ~resolution ~checkpoint syntax qualified with
           | None ->
             reject ?source ~checkpoint syntax (Printf.sprintf "Unknown type '%s'" name)
           | Some alias ->
@@ -573,7 +670,7 @@ let rec convert ?source ?resolution (t : t) ~parameters ~self ~checkpoint syntax
 and apply alias ~arguments ~checkpoint =
   match alias with
   | Alias.Closed { body; _ } -> body
-  | Parameterized { name; parameters; body; environment; source } ->
+  | Parameterized { name; parameters; body; environment; source; _ } ->
     let binder = application_binder ~checkpoint name arguments in
     let bindings = String.Map.of_alist_exn (List.zip_exn parameters arguments) in
     (* A declaration has already passed its abstract-parameter regularity check.
@@ -590,14 +687,18 @@ and apply alias ~arguments ~checkpoint =
 ;;
 
 let declare
+      ?semantic
       ?source
       ?lookup
       t
-      ({ Syntax.Declaration.name; parameters; body } : Syntax.Declaration.t)
+      ({ Syntax.Declaration.name; parameters = authored_parameters; body } :
+        Syntax.Declaration.t)
       ~checkpoint
   =
   protect (fun () ->
     checkpoint ();
+    let name = Syntax_name.name name in
+    let parameters = List.map authored_parameters ~f:Syntax_name.name in
     (match available t name with
      | Ok () -> ()
      | Error message -> reject ?source ~checkpoint body message);
@@ -611,16 +712,28 @@ let declare
         body
         (Printf.sprintf "Cannot redefine builtin type constructor '%s'" name);
     ensure_unique ?source body ~what:"type parameter" ~checkpoint parameters;
+    let parameter_types =
+      String.Map.of_alist_exn
+        (List.map parameters ~f:(fun parameter ->
+           parameter, Generic { name = parameter_name parameter; equality = None }))
+    in
+    Option.iter semantic ~f:(fun semantic ->
+      Semantic.parameters_exn
+        semantic
+        (List.map authored_parameters ~f:(fun name ->
+           { Semantic.Parameter.name = Syntax_name.name name
+           ; inferred = Map.find_exn parameter_types (Syntax_name.name name)
+           ; definition = Authored name
+           }))
+        ~checkpoint);
     let resolution = Option.map lookup ~f:Resolution.create in
     let template =
       convert
+        ?semantic
         ?resolution
         ?source
         t
-        ~parameters:
-          (String.Map.of_alist_exn
-             (List.map parameters ~f:(fun parameter ->
-                parameter, Generic { name = parameter_name parameter; equality = None })))
+        ~parameters:parameter_types
         ~self:(Some { Self.name; parameters; binder = name; check_regular = true })
         ~checkpoint
         body
@@ -629,6 +742,9 @@ let declare
     (match Chatml_type_validity.check_contractive ~checkpoint template with
      | Ok () -> ()
      | Error message -> reject ?source ~checkpoint body message);
+    Option.iter semantic ~f:(fun semantic ->
+      Semantic.finish_exn semantic body ~inferred:template ~checkpoint);
+    let semantic_binding = Option.bind semantic ~f:Semantic.binding in
     let definition =
       if List.is_empty parameters
       then (
@@ -636,7 +752,7 @@ let declare
           Option.bind source ~f:(fun source ->
             Chatml.Chatml_owned_source.site source body.span ~checkpoint)
         in
-        Alias.Closed { body = template; definition_site })
+        Alias.Closed { body = template; definition_site; semantic_binding })
       else
         Alias.Parameterized
           { name
@@ -644,22 +760,36 @@ let declare
           ; body
           ; environment = Resolution.freeze resolution t ~checkpoint
           ; source
+          ; semantic_binding
           }
     in
-    { t with aliases = Map.set t.aliases ~key:name ~data:definition })
+    let semantic_context =
+      match semantic with
+      | None -> t.semantic_context
+      | Some semantic -> Some (Semantic.definition_context_exn semantic ~checkpoint)
+    in
+    { t with aliases = Map.set t.aliases ~key:name ~data:definition; semantic_context })
 ;;
 
-let elaborate ?source ?lookup t syntax ~checkpoint =
+let elaborate ?semantic ?source ?lookup t syntax ~checkpoint =
   let resolution = Option.map lookup ~f:Resolution.create in
   protect (fun () ->
-    convert
-      ?source
-      ?resolution
-      t
-      ~parameters:String.Map.empty
-      ~self:None
-      ~checkpoint
-      syntax)
+    Option.iter semantic ~f:(fun semantic ->
+      Semantic.parameters_exn semantic [] ~checkpoint);
+    let inferred =
+      convert
+        ?semantic
+        ?source
+        ?resolution
+        t
+        ~parameters:String.Map.empty
+        ~self:None
+        ~checkpoint
+        syntax
+    in
+    Option.iter semantic ~f:(fun semantic ->
+      Semantic.finish_exn semantic syntax ~inferred ~checkpoint);
+    inferred)
 ;;
 
 (* Unlike [convert], this expansion retains the conditional behavior of legacy
@@ -694,7 +824,8 @@ let symbolic_expansion ~fresh_binder ~checkpoint =
         ( Record
         , [ Equivalence.Row
               ( String.Map.of_alist_exn
-                  (List.map fields ~f:(fun (name, body) -> name, expression body))
+                  (List.map fields ~f:(fun (name, body) ->
+                     Syntax_name.name name, expression body))
               , Equivalence.Node (Empty_row, []) )
           ] )
     | TEVariant cases ->
@@ -703,7 +834,7 @@ let symbolic_expansion ~fresh_binder ~checkpoint =
         , [ Equivalence.Row
               ( String.Map.of_alist_exn
                   (List.map cases ~f:(fun (name, bodies) ->
-                     ( name
+                     ( Syntax_name.name name
                      , Equivalence.Node (Variant_payload, List.map bodies ~f:expression) )))
               , Equivalence.Node (Empty_row, []) )
           ] )
@@ -739,7 +870,7 @@ let symbolic_expansion ~fresh_binder ~checkpoint =
       (match Equivalence.of_closed_type ty ~fresh_binder ~checkpoint with
        | Ok ty -> ty
        | Error message -> failwith message)
-    | Parameterized { name; parameters; body; environment; source } ->
+    | Parameterized { name; parameters; body; environment; source; _ } ->
       let binder = fresh_binder () in
       let parameters = String.Map.of_alist_exn (List.zip_exn parameters arguments) in
       expression source environment parameters (Some (name, binder)) body
@@ -785,14 +916,25 @@ let require_fixed_function_arity ?source syntax expanded ~checkpoint =
   check expanded
 ;;
 
-let elaborate_scheme ?source ?lookup t syntax ~equality_parameters ~fresh_name ~checkpoint
+let elaborate_scheme
+      ?semantic
+      ?source
+      ?lookup
+      t
+      syntax
+      ~equality_parameters
+      ~fresh_name
+      ~checkpoint
   =
   protect (fun () ->
     let rec collect names (syntax : Syntax.t) =
       checkpoint ();
       match syntax.desc with
       | TEName _ -> names
-      | TEParameter name -> Set.add names name
+      | TEParameter name ->
+        Option.iter semantic ~f:(fun semantic ->
+          Semantic.implicit_parameter_exn semantic ~name ~span:syntax.span ~checkpoint);
+        Set.add names name
       | TEArrow (left, right) -> collect (collect names left) right
       | TEFunction (parameters, result) ->
         List.fold parameters ~init:(collect names result) ~f:collect
@@ -831,9 +973,16 @@ let elaborate_scheme ?source ?lookup t syntax ~equality_parameters ~fresh_name ~
         in
         Map.set parameters ~key:name ~data:(Generic { name = fresh_name (); equality }))
     in
+    Option.iter semantic ~f:(fun semantic ->
+      Semantic.parameters_exn
+        semantic
+        (Map.to_alist parameters
+         |> List.map ~f:(fun (name, inferred) ->
+           { Semantic.Parameter.name; inferred; definition = Implicit syntax.span }))
+        ~checkpoint);
     let resolution = Option.map lookup ~f:Resolution.create in
     let declared =
-      convert ?source ?resolution t ~parameters ~self:None ~checkpoint syntax
+      convert ?semantic ?source ?resolution t ~parameters ~self:None ~checkpoint syntax
     in
     let t = Resolution.freeze resolution t ~checkpoint in
     let symbolic_parameters =
@@ -851,6 +1000,8 @@ let elaborate_scheme ?source ?lookup t syntax ~equality_parameters ~fresh_name ~
     let expression, _ = symbolic_expansion ~fresh_binder ~checkpoint in
     let expanded = expression source t symbolic_parameters None syntax in
     require_fixed_function_arity ?source syntax expanded ~checkpoint;
+    Option.iter semantic ~f:(fun semantic ->
+      Semantic.finish_exn semantic syntax ~inferred:declared ~checkpoint);
     declared)
 ;;
 
