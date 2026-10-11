@@ -1,7 +1,8 @@
 open Core
 
 type pending =
-  { completed : unit Eio.Promise.t
+  { admitted : unit Eio.Promise.t
+  ; mutable completed : unit Eio.Promise.or_exn option
   ; mutable context : Eio.Cancel.t option
   ; mutable requested : exn option
   }
@@ -25,7 +26,9 @@ let stop pending reason =
   Eio.Cancel.protect (fun () ->
     pending.requested <- Some reason;
     Option.iter pending.context ~f:(fun context -> Eio.Cancel.cancel context reason);
-    Eio.Promise.await pending.completed)
+    Eio.Promise.await pending.admitted;
+    Option.iter pending.completed ~f:(fun completed ->
+      ignore (Eio.Promise.await completed : (unit, exn) Result.t)))
 ;;
 
 let clear t pending =
@@ -40,35 +43,45 @@ let run t ~f =
   else if is_active t
   then Error Busy
   else (
-    let completed, resolve_completed = Eio.Promise.create () in
+    Eio.Switch.check t.switch;
+    let admitted, resolve_admitted = Eio.Promise.create () in
     let result, resolve_result = Eio.Promise.create () in
-    let pending = { completed; context = None; requested = None } in
+    let pending = { admitted; completed = None; context = None; requested = None } in
     t.pending <- Some pending;
-    (try
-       Eio.Fiber.fork_daemon ~sw:t.switch (fun () ->
-         let outcome =
-           try
-             Ok
-               (Fun.protect
-                  ~finally:(fun () -> pending.context <- None)
-                  (fun () ->
-                     Eio.Cancel.sub (fun context ->
-                       pending.context <- Some context;
-                       Option.iter pending.requested ~f:(Eio.Cancel.cancel context);
-                       Eio.Fiber.check ();
-                       f ())))
-           with
-           | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
-         in
-         Eio.Promise.resolve resolve_result outcome;
-         Eio.Promise.resolve resolve_completed ();
-         `Stop_daemon)
-     with
-     | exn ->
-       let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-       clear t pending;
-       Exn.raise_with_original_backtrace exn backtrace);
+    let completed =
+      try
+        let completed =
+          Eio.Fiber.fork_promise ~sw:t.switch (fun () ->
+            let outcome =
+              try
+                Ok
+                  (Fun.protect
+                     ~finally:(fun () -> pending.context <- None)
+                     (fun () ->
+                        Eio.Cancel.sub (fun context ->
+                          pending.context <- Some context;
+                          Option.iter pending.requested ~f:(Eio.Cancel.cancel context);
+                          Eio.Fiber.check ();
+                          f ())))
+              with
+              | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+            in
+            Eio.Promise.resolve resolve_result outcome)
+        in
+        pending.completed <- Some completed;
+        Eio.Promise.resolve resolve_admitted ();
+        completed
+      with
+      | exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        Eio.Promise.resolve resolve_admitted ();
+        clear t pending;
+        Exn.raise_with_original_backtrace exn backtrace
+    in
     try
+      (* The worker promise settles even when switch admission rejects before
+         entering our callback. A callback-owned completion promise does not. *)
+      Eio.Promise.await_exn completed;
       match Eio.Promise.await result with
       | Ok value ->
         clear t pending;
