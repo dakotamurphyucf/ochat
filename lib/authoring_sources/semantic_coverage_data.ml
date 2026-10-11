@@ -62,6 +62,7 @@ let features =
     , [ "lib/chatml/chatml_typechecker.ml" ]
     , "chatml.inference"
     , [ "inference.expansive-function-rejected"
+      ; "test/chatml_type_identity/type_identity_test.ml"
       ; "test/agent_docs/docs_chatml_authoring.ml"
       ] )
   ; ( "types.recursive_bindings"
@@ -196,7 +197,7 @@ let implementation_sources =
   ; ( "lib/chatml/chatml_resolver.ml"
     , "679b48fde2c4319c055bc52e67cffd29f4168163634514f14111cd4de7bb075d" )
   ; ( "lib/chatml/chatml_typechecker.ml"
-    , "1ccd34561f205c4f1dd4da5caf624fb802ec1ede748b887df070fad1cac5d51e" )
+    , "915a91234a16afd99ceb629c7a1741a2d5f3474c1fa9c7751dcdc35d3e12d4d9" )
   ; ( "lib/chatml/chatml_value_codec.ml"
     , "0f621d743b97b856dd40270fc8c51444ca18e6098ceb7ff2481a22cf999d85be" )
   ]
