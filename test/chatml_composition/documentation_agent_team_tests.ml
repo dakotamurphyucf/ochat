@@ -64,7 +64,7 @@ let answer ~id text =
 (* Exercise the exact public bundle and its read-only daemon configuration.
    Only model responses are simulated: file tools, admission, durable sessions,
    ownership and receipt/output publication all use the production paths. *)
-let with_team ?(sources = sources) ?reviewer_provider f =
+let with_team_runtime ?(sources = sources) ?reviewer_provider f =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
     let root = temporary_root env in
@@ -243,7 +243,11 @@ let with_team ?(sources = sources) ?reviewer_provider f =
                       Option.is_none current.active_operation && Option.is_some !outcome);
                     Option.value_exn !outcome
                   in
-                  f create invoke state continuations)))))
+                  f ~env ~daemon create invoke state continuations)))))
+;;
+
+let with_team ?sources ?reviewer_provider f =
+  with_team_runtime ?sources ?reviewer_provider (fun ~env:_ ~daemon:_ -> f)
 ;;
 
 let complete = function

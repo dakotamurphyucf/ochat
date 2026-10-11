@@ -101,6 +101,21 @@ val is_closing : t -> bool
     never reinstalled. *)
 val load : t -> Agent_protocol.Id.Session.t -> (entry, Agent_protocol.Error.t) result
 
+(** Retain a loaded entry for one bounded read, lazily reconstructing an indexed
+    session without loading its execution runtime. Wait cancellably for existing
+    per-ID lifecycle admission, then recheck membership and shutdown. The callback
+    runs once on successful load, outside the global mutex, under per-ID exclusion; cancellation
+    or exceptions release that exclusion. Failed cleanup remains an error.
+    Callers must establish authority before admission and revalidate it before
+    disclosure. The callback must not reserve/load/remove this same ID, shut down
+    the registry, or wait for work requiring this ID's lifecycle admission. Do not
+    retain admission across heartbeat waits or execute lifecycle mutations here. *)
+val with_loaded_read
+  :  t
+  -> Agent_protocol.Id.Session.t
+  -> (entry -> ('a, Agent_protocol.Error.t) Result.t)
+  -> ('a, Agent_protocol.Error.t) Result.t
+
 val entries : t -> entry list
 val stats : t -> stats
 val load_all : t -> (entry list, Agent_protocol.Error.t) result

@@ -336,3 +336,81 @@ let%expect_test "shutdown waits for blocked loader reservation without blocking 
       print_s [%sexp ((progress, draining, original) : bool * bool * bool)]));
   [%expect {| (true true true) |}]
 ;;
+
+let%test_unit "bounded read admission waits, cancels and rechecks shutdown" =
+  List.iter [ `Release; `Cancel; `Shutdown ] ~f:(fun scenario ->
+    Eio_main.run (fun _env ->
+      Eio.Switch.run (fun sw ->
+        let registry = Registry.create () in
+        let entry = indexed "ses_read_admission" in
+        Registry.index registry entry;
+        let loads = ref 0 in
+        Registry.install_loader registry (fun _ ->
+          Int.incr loads;
+          Error
+            (P.Error.create Invalid_state ~message:"loader reached" ~retryable:false ()));
+        let entered, entered_u = Eio.Promise.create () in
+        let release, release_u = Eio.Promise.create () in
+        let holder_done, holder_done_u = Eio.Promise.create () in
+        Eio.Fiber.fork ~sw (fun () ->
+          Registry.with_lifecycle registry entry.session.id (fun _ ->
+            Eio.Promise.resolve entered_u ();
+            Eio.Promise.await release;
+            Ok ())
+          |> protocol_ok;
+          Eio.Promise.resolve holder_done_u ());
+        Eio.Promise.await entered;
+        let started, started_u = Eio.Promise.create () in
+        let finished, finished_u = Eio.Promise.create () in
+        let cancel, cancel_u = Eio.Promise.create () in
+        Eio.Fiber.fork ~sw (fun () ->
+          let outcome =
+            try
+              Eio.Switch.run (fun read_sw ->
+                Eio.Promise.resolve cancel_u (fun () -> Eio.Switch.fail read_sw Exit);
+                Eio.Promise.resolve started_u ();
+                let result =
+                  Registry.with_loaded_read registry entry.session.id (fun _ ->
+                    failwith "rejecting loader cannot admit callback")
+                in
+                match result with
+                | Error error -> `Rejected error.P.Error.code
+                | Ok () -> failwith "unexpected read admission")
+            with
+            | Exit -> `Cancelled
+          in
+          Eio.Promise.resolve finished_u outcome);
+        Eio.Promise.await started;
+        Eio.Fiber.yield ();
+        assert (Option.is_none (Eio.Promise.peek finished));
+        [%test_eq: int] !loads 0;
+        (match Registry.load registry entry.session.id with
+         | Error { P.Error.code = Conflict; _ } -> ()
+         | Error _ | Ok _ -> failwith "ordinary admission must remain fail-fast");
+        let shutdown = ref None in
+        (match scenario with
+         | `Release -> ()
+         | `Cancel ->
+           (Eio.Promise.await cancel) ();
+           (match Eio.Promise.await finished with
+            | `Cancelled -> ()
+            | `Rejected _ -> failwith "cancellation was swallowed")
+         | `Shutdown ->
+           let done_, done_u = Eio.Promise.create () in
+           shutdown := Some done_;
+           Eio.Fiber.fork ~sw (fun () ->
+             Registry.shutdown registry;
+             Eio.Promise.resolve done_u ());
+           Eio.Fiber.yield ();
+           assert (Registry.is_closing registry));
+        Eio.Promise.resolve release_u ();
+        Eio.Promise.await holder_done;
+        (match scenario, Eio.Promise.await finished with
+         | `Release, `Rejected Invalid_state -> [%test_eq: int] !loads 1
+         | `Shutdown, `Rejected Server_shutting_down | `Cancel, `Cancelled ->
+           [%test_eq: int] !loads 0
+         | _ -> failwith "read admission violated lifecycle outcome");
+        Option.iter !shutdown ~f:Eio.Promise.await;
+        assert (not (Registry.lifecycle_reserved registry entry.session.id));
+        Registry.shutdown registry)))
+;;
