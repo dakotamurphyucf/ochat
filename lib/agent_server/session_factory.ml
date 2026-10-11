@@ -5187,7 +5187,24 @@ let finish_creation t handle _revision _profile provisional ~command_audit =
     Exn.raise_with_original_backtrace exn backtrace
 ;;
 
-let create_session
+let with_catalog_admission t ~f =
+  match
+    Catalogs.with_admission t.catalogs ~f:(fun () ->
+      match Agent_session.Prompt_catalog.publication_state t.prompts with
+      | Available -> f ()
+      | Sealed -> Error (unavailable Conflict "prompt catalog publication is pending")
+      | Uncertain ->
+        Error (unavailable Invalid_state "prompt catalog publication is uncertain"))
+  with
+  | Ok result -> result
+  | Error Busy -> Error (unavailable Conflict "factory catalog publication is pending")
+  | Error Publication_uncertain ->
+    Error (unavailable Invalid_state "factory catalog publication is uncertain")
+  | Error Foreign_domain ->
+    Error (unavailable Invalid_state "factory catalog belongs to another Eio domain")
+;;
+
+let create_session_admitted
       t
       ~command_audit
       ~principal
@@ -5276,6 +5293,11 @@ let create_session
     Exn.raise_with_original_backtrace exn backtrace
 ;;
 
+let create_session t ~command_audit ~principal request =
+  with_catalog_admission t ~f:(fun () ->
+    create_session_admitted t ~command_audit ~principal request)
+;;
+
 let validate_import_request request legacy source_path =
   let spec = request.Agent_protocol.Session.Create_request.spec in
   if not (Filename.is_absolute source_path)
@@ -5320,7 +5342,7 @@ let save_legacy_provenance t handle ~source_id ~source_path legacy =
   |> Result.map_error ~f:protocol_of_store
 ;;
 
-let import_legacy t ~principal ~source_id ~source_path ~legacy request =
+let import_legacy_admitted t ~principal ~source_id ~source_path ~legacy request =
   let open Result.Let_syntax in
   let%bind () = validate_import_request request legacy source_path in
   let%bind definition, revision = resolve_prompt t request.spec.prompt in
@@ -5379,6 +5401,11 @@ let import_legacy t ~principal ~source_id ~source_path ~legacy request =
       try Eio.Cancel.protect (fun () -> cleanup_failed_session t handle) with
       | _ -> ());
     failure
+;;
+
+let import_legacy t ~principal ~source_id ~source_path ~legacy request =
+  with_catalog_admission t ~f:(fun () ->
+    import_legacy_admitted t ~principal ~source_id ~source_path ~legacy request)
 ;;
 
 let with_uninstalled_recovery_entry

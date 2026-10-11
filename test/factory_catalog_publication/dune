@@ -2,7 +2,8 @@
 (copy_files ../../lib/agent_server/session_factory_catalogs.mli)
 (library
  (name factory_catalog_publication_tests)
- (modules operator_manifest_grant session_factory_catalogs state_tests)
- (libraries core eio_main expect_test_helpers_core ochat.agent_server ochat.agent_session)
+ (modules operator_manifest_grant session_factory_catalogs state_tests creation_tests)
+ (libraries agent_server_test_support core eio_main mirage-crypto-rng.unix
+  expect_test_helpers_core ochat.agent_server ochat.agent_session ochat.agent_store)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))

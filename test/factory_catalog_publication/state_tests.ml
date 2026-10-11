@@ -249,3 +249,130 @@ let%test_unit
     check owner a old [ old; next ];
     Owner.Seal.abort planned |> ok)
 ;;
+
+let%test_unit "overlapping admissions block both publication and direct workspace install"
+  =
+  with_owner (fun _ owner original replacement a _ old next ->
+    Eio.Switch.run (fun sw ->
+      let first_started, first_started_u = Eio.Promise.create () in
+      let first_release, first_release_u = Eio.Promise.create () in
+      let second_started, second_started_u = Eio.Promise.create () in
+      let second_release, second_release_u = Eio.Promise.create () in
+      let borrow started release =
+        Eio.Fiber.fork_promise ~sw (fun () ->
+          Owner.with_admission owner ~f:(fun () ->
+            Eio.Promise.resolve started ();
+            Eio.Promise.await release;
+            check owner a old [ old ]))
+      in
+      let first = borrow first_started_u first_release in
+      let second = borrow second_started_u second_release in
+      Eio.Promise.await first_started;
+      Eio.Promise.await second_started;
+      let blocked () =
+        let polls = ref 0 in
+        (match seal owner replacement next ~checkpoint:(fun () -> incr polls) with
+         | Error Busy -> ()
+         | _ -> assert false);
+        [%test_eq: int] !polls 0;
+        (match W.seal original ~replacement ~checkpoint:(fun () -> incr polls) with
+         | Error Busy -> ()
+         | _ -> assert false);
+        [%test_eq: int] !polls 0;
+        (match W.install original ~replacement with
+         | () -> assert false
+         | exception Invalid_argument _ -> ());
+        match
+          Owner.install
+            owner
+            ~workspaces:replacement
+            ~permission_profiles:[ next ]
+            ~manifest_grants:[]
+        with
+        | () -> assert false
+        | exception Invalid_argument _ -> ()
+      in
+      blocked ();
+      Eio.Promise.resolve first_release_u ();
+      Eio.Promise.await_exn first |> ok;
+      blocked ();
+      Eio.Promise.resolve second_release_u ();
+      Eio.Promise.await_exn second |> ok;
+      let planned = seal owner replacement next ~checkpoint:ignore |> ok in
+      let entered = ref false in
+      (match Owner.with_admission owner ~f:(fun () -> entered := true) with
+       | Error Busy -> ()
+       | _ -> assert false);
+      assert (not !entered);
+      Owner.Seal.abort planned |> ok;
+      Owner.with_admission owner ~f:(fun () ->
+        Owner.with_admission owner ~f:(fun () -> check owner a old [ old ]) |> ok)
+      |> ok))
+;;
+
+let%test_unit
+    "admission failure releases both owners and uncertainty retains pinned history"
+  =
+  with_owner (fun env owner original replacement a _ old next ->
+    let failure = Failure "original admission callback" in
+    List.iter [ `Throw; `Cancel ] ~f:(fun mode ->
+      (match
+         Eio.Cancel.sub (fun context ->
+           Owner.with_admission owner ~f:(fun () ->
+             match mode with
+             | `Throw -> raise failure
+             | `Cancel ->
+               Eio.Cancel.cancel context failure;
+               Eio.Fiber.check ()))
+       with
+       | exception exn when phys_equal exn failure -> ()
+       | exception Eio.Cancel.Cancelled reason -> assert (phys_equal reason failure)
+       | _ -> assert false);
+      let planned = seal owner replacement next ~checkpoint:ignore |> ok in
+      Owner.Seal.abort planned |> ok;
+      W.with_admission original ~f:(fun () -> check owner a old [ old ]) |> ok);
+    (match
+       Eio.Domain_manager.run env#domain_mgr (fun () ->
+         Owner.with_admission owner ~f:(fun () -> assert false))
+     with
+     | Error Foreign_domain -> ()
+     | _ -> assert false);
+    let planned = seal owner replacement next ~checkpoint:ignore |> ok in
+    Owner.Seal.mark_uncertain planned |> ok;
+    (match Owner.with_admission owner ~f:(fun () -> assert false) with
+     | Error Publication_uncertain -> ()
+     | _ -> assert false);
+    (match W.with_admission original ~f:(fun () -> assert false) with
+     | Error Publication_uncertain -> ()
+     | _ -> assert false);
+    check owner a old [ old ])
+;;
+
+let%test_unit "workspace final admission rechecks reads begun by a checkpoint" =
+  with_owner (fun _ owner original replacement a _ old _ ->
+    Eio.Switch.run (fun sw ->
+      let started, started_u = Eio.Promise.create () in
+      let release, release_u = Eio.Promise.create () in
+      let worker = ref None in
+      let polls = ref 0 in
+      (match
+         W.seal original ~replacement ~checkpoint:(fun () ->
+           incr polls;
+           if !polls = 2
+           then (
+             worker
+             := Some
+                  (Eio.Fiber.fork_promise ~sw (fun () ->
+                     Owner.with_admission owner ~f:(fun () ->
+                       Eio.Promise.resolve started_u ();
+                       Eio.Promise.await release)));
+             Eio.Promise.await started))
+       with
+       | Error Busy -> ()
+       | _ -> assert false);
+      check owner a old [ old ];
+      Eio.Promise.resolve release_u ();
+      Eio.Promise.await_exn (Option.value_exn !worker) |> ok;
+      let planned = W.seal original ~replacement ~checkpoint:ignore |> ok in
+      W.Seal.abort planned |> ok))
+;;

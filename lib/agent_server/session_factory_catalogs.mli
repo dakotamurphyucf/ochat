@@ -20,6 +20,28 @@ val find_profile : t -> string -> Agent_session.Permission_policy.t option
 val find_profile_revision : t -> string -> Agent_session.Permission_policy.t option
 val manifest_grants : t -> Operator_manifest_grant.t list
 
+module Admission : sig
+  module Error : sig
+    type t =
+      | Busy
+      | Publication_uncertain
+      | Foreign_domain
+    [@@deriving equal, sexp_of]
+  end
+end
+
+(** Borrow the current publication generation on the creating Eio domain. Pending
+    or uncertain publication rejects before [f]. Concurrent or nested admitted
+    callbacks may suspend; no mutex is held. Their entire joined preparation must
+    finish before returning. Normal return, exceptions and cancellation release
+    the borrow without yielding; original exceptions/backtraces propagate.
+
+    Any live borrow makes [seal] and [install] reject Busy before callbacks. The
+    host must reserve this SAME owner before its durable writer and all coordinated
+    prompt/config/service pointer swaps. This owner does not manage Prompt_catalog
+    or grant authority. Pinned history reads and existing runtimes remain usable. *)
+val with_admission : t -> f:(unit -> 'a) -> ('a, Admission.Error.t) Result.t
+
 module Seal : sig
   module Error : sig
     type t =
@@ -60,7 +82,9 @@ end
     Profile insertion semantics stay the existing last-definition-wins semantics;
     validated Config is still the authoritative duplicate/permission admission owner.
     Work is proportional to supplied profiles, logarithmic in retained map sizes.
-    Existing immutable workspace indexes are reused; no workspace native IO occurs. *)
+    Existing immutable workspace indexes are reused; no workspace native IO occurs.
+    Live [with_admission] callbacks reject Busy before the first checkpoint and are
+    checked again after preallocation, before the final reservation. *)
 val seal
   :  t
   -> workspaces:Agent_session.Workspace_catalog.t

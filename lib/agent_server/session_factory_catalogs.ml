@@ -33,6 +33,7 @@ type t =
   ; workspaces : Workspaces.t
   ; mutable snapshot : snapshot
   ; mutable publication : publication
+  ; mutable admissions : int
   }
 
 and publication =
@@ -103,6 +104,7 @@ let create ~workspaces ~permission_profiles ~manifest_grants =
   ; workspaces
   ; snapshot = { profiles; revisions; grants = manifest_grants }
   ; publication = Open
+  ; admissions = 0
   }
 ;;
 
@@ -124,6 +126,38 @@ let find_profile_revision t digest =
 let manifest_grants t =
   check_domain t;
   t.snapshot.grants
+;;
+
+module Admission = struct
+  module Error = struct
+    type t =
+      | Busy
+      | Publication_uncertain
+      | Foreign_domain
+    [@@deriving equal, sexp_of]
+  end
+end
+
+let with_admission t ~f =
+  if not (same_domain t)
+  then Error Admission.Error.Foreign_domain
+  else (
+    match t.publication with
+    | Sealed _ -> Error Admission.Error.Busy
+    | Indeterminate _ -> Error Admission.Error.Publication_uncertain
+    | Open ->
+      if Int.equal t.admissions Int.max_value
+      then Error Admission.Error.Busy
+      else (
+        t.admissions <- t.admissions + 1;
+        Exn.protect
+          ~finally:(fun () -> t.admissions <- t.admissions - 1)
+          ~f:(fun () ->
+            match Workspaces.with_admission t.workspaces ~f with
+            | Ok _ as result -> result
+            | Error Busy -> Error Admission.Error.Busy
+            | Error Publication_uncertain -> Error Admission.Error.Publication_uncertain
+            | Error Foreign_domain -> Error Admission.Error.Foreign_domain)))
 ;;
 
 module Seal = struct
@@ -214,52 +248,59 @@ let seal t ~workspaces ~permission_profiles ~manifest_grants ~checkpoint =
     | Sealed _ -> busy
     | Indeterminate _ -> publication_uncertain
     | Open ->
-      let previous = t.snapshot in
-      poll checkpoint;
-      (match Workspaces.seal t.workspaces ~replacement:workspaces ~checkpoint with
-       | Error error -> workspace_error error
-       | Ok workspace ->
-         let release () =
-           ignore
-             (Workspaces.Seal.abort workspace : (unit, Workspaces.Seal.Error.t) Result.t)
-         in
-         (try
-            let profiles, revisions =
-              index permission_profiles ~revisions:previous.revisions ~checkpoint
-            in
-            List.iter manifest_grants ~f:(fun _ -> poll checkpoint);
-            let replacement = { profiles; revisions; grants = manifest_grants } in
-            let rec sealed =
-              { owner = t
-              ; workspace
-              ; replacement
-              ; phase = Pending
-              ; reserved = Sealed sealed
-              ; uncertain = Indeterminate sealed
-              }
-            in
-            let result = Ok sealed in
-            poll checkpoint;
-            match t.publication with
-            | Sealed _ ->
-              release ();
-              busy
-            | Indeterminate _ ->
-              release ();
-              publication_uncertain
-            | Open ->
-              if not (phys_equal previous t.snapshot)
-              then (
-                release ();
-                stale)
-              else (
-                t.publication <- sealed.reserved;
-                result)
-          with
-          | exn ->
-            let trace = Stdlib.Printexc.get_raw_backtrace () in
-            Eio.Cancel.protect release;
-            Exn.raise_with_original_backtrace exn trace)))
+      if t.admissions > 0
+      then busy
+      else (
+        let previous = t.snapshot in
+        poll checkpoint;
+        match Workspaces.seal t.workspaces ~replacement:workspaces ~checkpoint with
+        | Error error -> workspace_error error
+        | Ok workspace ->
+          let release () =
+            ignore
+              (Workspaces.Seal.abort workspace : (unit, Workspaces.Seal.Error.t) Result.t)
+          in
+          (try
+             let profiles, revisions =
+               index permission_profiles ~revisions:previous.revisions ~checkpoint
+             in
+             List.iter manifest_grants ~f:(fun _ -> poll checkpoint);
+             let replacement = { profiles; revisions; grants = manifest_grants } in
+             let rec sealed =
+               { owner = t
+               ; workspace
+               ; replacement
+               ; phase = Pending
+               ; reserved = Sealed sealed
+               ; uncertain = Indeterminate sealed
+               }
+             in
+             let result = Ok sealed in
+             poll checkpoint;
+             match t.publication with
+             | Sealed _ ->
+               release ();
+               busy
+             | Indeterminate _ ->
+               release ();
+               publication_uncertain
+             | Open ->
+               if t.admissions > 0
+               then (
+                 release ();
+                 busy)
+               else if not (phys_equal previous t.snapshot)
+               then (
+                 release ();
+                 stale)
+               else (
+                 t.publication <- sealed.reserved;
+                 result)
+           with
+           | exn ->
+             let trace = Stdlib.Printexc.get_raw_backtrace () in
+             Eio.Cancel.protect release;
+             Exn.raise_with_original_backtrace exn trace)))
 ;;
 
 let install t ~workspaces ~permission_profiles ~manifest_grants =

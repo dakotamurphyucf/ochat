@@ -29,6 +29,7 @@ type t =
   { domain_id : int
   ; mutable snapshot : snapshot
   ; mutable publication : publication
+  ; mutable admissions : int
   }
 
 and publication =
@@ -97,6 +98,7 @@ let create definitions =
                 Map.set map ~key:definition.config_name ~data:definition)
           }
       ; publication = Open
+      ; admissions = 0
       }
 ;;
 
@@ -113,6 +115,35 @@ let find t id =
 let find_by_name t name =
   check_domain t;
   Map.find t.snapshot.by_name name
+;;
+
+module Admission = struct
+  module Error = struct
+    type t =
+      | Busy
+      | Publication_uncertain
+      | Foreign_domain
+    [@@deriving equal, sexp_of]
+  end
+end
+
+let with_admission t ~f =
+  if not (same_domain t)
+  then Error Admission.Error.Foreign_domain
+  else (
+    match t.publication with
+    | Sealed _ -> Error Admission.Error.Busy
+    | Indeterminate _ -> Error Admission.Error.Publication_uncertain
+    | Open ->
+      if Int.equal t.admissions Int.max_value
+      then Error Admission.Error.Busy
+      else (
+        t.admissions <- t.admissions + 1;
+        Exn.protect
+          ~finally:(fun () -> t.admissions <- t.admissions - 1)
+          ~f:(fun () ->
+            Eio.Fiber.check ();
+            Ok (f ()))))
 ;;
 
 module Seal = struct
@@ -187,27 +218,32 @@ let seal t ~replacement ~checkpoint =
     | Sealed _ -> busy
     | Indeterminate _ -> publication_uncertain
     | Open ->
-      let previous = t.snapshot in
-      poll checkpoint;
-      let rec sealed =
-        { owner = t
-        ; replacement = replacement.snapshot
-        ; phase = Pending
-        ; reserved = Sealed sealed
-        ; uncertain = Indeterminate sealed
-        }
-      in
-      let result = Ok sealed in
-      poll checkpoint;
-      (match t.publication with
-       | Sealed _ -> busy
-       | Indeterminate _ -> publication_uncertain
-       | Open ->
-         if not (phys_equal previous t.snapshot)
-         then stale
-         else (
-           t.publication <- sealed.reserved;
-           result)))
+      if t.admissions > 0
+      then busy
+      else (
+        let previous = t.snapshot in
+        poll checkpoint;
+        let rec sealed =
+          { owner = t
+          ; replacement = replacement.snapshot
+          ; phase = Pending
+          ; reserved = Sealed sealed
+          ; uncertain = Indeterminate sealed
+          }
+        in
+        let result = Ok sealed in
+        poll checkpoint;
+        match t.publication with
+        | Sealed _ -> busy
+        | Indeterminate _ -> publication_uncertain
+        | Open ->
+          if t.admissions > 0
+          then busy
+          else if not (phys_equal previous t.snapshot)
+          then stale
+          else (
+            t.publication <- sealed.reserved;
+            result)))
 ;;
 
 let install t ~replacement =

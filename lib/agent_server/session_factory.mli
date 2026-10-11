@@ -190,6 +190,12 @@ val install_catalogs
   -> manifest_grants:Operator_manifest_grant.t list
   -> unit
 
+(** Fresh catalog-dependent creation borrows one coordinated publication generation
+    through source/workspace/profile selection, layout and joined runtime preflight.
+    Factory or Prompt_catalog sealed/uncertain state rejects before source selection.
+    Coordinated publishers must reserve [seal_catalogs] before durable publication.
+    Existing pinned restoration and inherited child creation keep their own captured
+    admission paths; they do not select a new prompt definition here. *)
 val create_session
   :  t
   -> command_audit:Document_schema.Document.t option
@@ -212,7 +218,9 @@ val prepare_administration
 
 (** [import_legacy t ~principal ~source_id ~source_path ~legacy request]
     creates one stopped durable session from a validated legacy snapshot. It
-    records immutable source provenance and never mutates [source_path]. *)
+    records immutable source provenance and never mutates [source_path]. Uses the
+    SAME scoped publication admission as [create_session] through joined layout and
+    durable creation; pending/uncertain publication rejects before source selection. *)
 val import_legacy
   :  t
   -> principal:Agent_protocol.Principal.t
