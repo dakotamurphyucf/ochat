@@ -209,7 +209,7 @@ let%expect_test
        ~sep:", "
        (List.map (P.Scope.bindings scope) ~f:(fun binding -> binding.name)));
   [%expect
-    {| 
+    {|
     kind: chatml.provided-program
     source body present: false
     opaque namespace bytes: 8

@@ -20,13 +20,22 @@ type t =
   ; parent_artifact : Store.Artifact.t
   ; root_chatmd : string
   ; sources : Store.Source.t list
+  ; programs : Chatml_prompt_programs.t option
+  ; programs_sha256 : string option
   }
 
 let identity t = t.identity
 let declaration t = t.declaration
 
 let fingerprint t =
-  [%sexp ("ochat.authored-agent-source.v1" : string), (t.identity : Identity.t)]
+  (match t.programs_sha256 with
+   | None ->
+     [%sexp ("ochat.authored-agent-source.v1" : string), (t.identity : Identity.t)]
+   | Some programs_sha256 ->
+     [%sexp
+       ("ochat.authored-agent-source.v2" : string)
+     , (t.identity : Identity.t)
+     , (programs_sha256 : string)])
   |> Sexp.to_string_mach
   |> Chatmd_shell_spec.Source_ref.digest
 ;;
@@ -95,15 +104,169 @@ let capture ~parent ~tool_name =
     ; policy
     }
   in
+  let sources =
+    List.filter all_sources ~f:(fun source ->
+      not (String.equal source.Store.Source.relative_path selected.relative_path))
+  in
+  let%bind programs =
+    match parent_artifact.program_bundle with
+    | None -> Ok None
+    | Some storage ->
+      let%bind parent_authored =
+        Prompt_program_custody.authored
+          ~root_file:parent_artifact.root_relative_path
+          ~sources:
+            (List.map all_sources ~f:(fun s -> s.Store.Source.relative_path, s.contents))
+        |> Result.map_error ~f:(fun _ ->
+          P.Error.create
+            Prompt_unavailable
+            ~message:"Invalid retained authored inventory"
+            ~retryable:false
+            ())
+      in
+      let%bind custody =
+        Prompt_program_custody.admit
+          storage
+          ~authored:parent_authored
+          ~checkpoint:Eio.Fiber.check
+        |> Result.map_error ~f:(fun _ ->
+          P.Error.create
+            Prompt_unavailable
+            ~message:"Invalid retained program custody"
+            ~retryable:false
+            ())
+      in
+      let%bind root_input =
+        List.find (Chatml_prompt_programs.parser_inputs custody) ~f:(fun input ->
+          Chatmd_parser_input.Role.equal (Chatmd_parser_input.role input) Root
+          && String.equal (Chatmd_parser_input.path input) selected.relative_path)
+        |> Result.of_option
+             ~error:
+               (P.Error.create
+                  Prompt_unavailable
+                  ~message:"Retained child has no captured effective Root"
+                  ~retryable:false
+                  ())
+      in
+      let%bind authored =
+        Prompt_program_custody.authored
+          ~root_file:selected.relative_path
+          ~sources:
+            (List.map all_sources ~f:(fun s -> s.Store.Source.relative_path, s.contents))
+        |> Result.map_error ~f:(fun _ ->
+          P.Error.create
+            Prompt_unavailable
+            ~message:"Invalid retained child inventory"
+            ~retryable:false
+            ())
+      in
+      let%bind parsed =
+        Prompt_program_custody.replay root_input ~authored ~dir:tree
+        |> Result.map_error ~f:(fun error ->
+          P.Error.create
+            Prompt_unavailable
+            ~message:(Error.to_string_hum error)
+            ~retryable:false
+            ())
+      in
+      let%map child =
+        Chatml_prompt_programs.reroot
+          custody
+          ~authored
+          ~parsed
+          ~programs:[]
+          ~limits:(Prompt_program_custody.limits ())
+          ~checkpoint:Eio.Fiber.check
+        |> Result.map_error ~f:(fun _ ->
+          P.Error.create
+            Prompt_unavailable
+            ~message:"Invalid retained child selection"
+            ~retryable:false
+            ())
+      in
+      Some child
+  in
+  let%bind programs_sha256 =
+    match programs with
+    | None -> Ok None
+    | Some programs ->
+      Prompt_program_custody.fingerprint programs ~checkpoint:Eio.Fiber.check
+      |> Result.map ~f:Option.some
+      |> Result.map_error ~f:(fun _ ->
+        P.Error.create
+          Prompt_unavailable
+          ~message:"Complete child program manifest exceeds artifact policy"
+          ~retryable:false
+          ())
+  in
   Ok
     { identity
     ; declaration = { declaration with agent = selected.relative_path }
     ; parent_artifact
     ; root_chatmd = selected.contents
-    ; sources =
-        List.filter all_sources ~f:(fun source ->
-          not (String.equal source.relative_path selected.relative_path))
+    ; sources
+    ; programs
+    ; programs_sha256
     }
+;;
+
+let authored_sources t =
+  Prompt_program_custody.authored
+    ~root_file:t.identity.root_relative_path
+    ~sources:
+      ((t.identity.root_relative_path, t.root_chatmd)
+       :: List.map t.sources ~f:(fun s -> s.Store.Source.relative_path, s.contents))
+  |> Or_error.ok_exn
+;;
+
+let with_programs t incoming =
+  let open Result.Let_syntax in
+  let%bind previous =
+    match t.programs with
+    | Some previous -> Ok previous
+    | None -> denied "Legacy source has no retained effective child Root"
+  in
+  let expected = Chatml_prompt_programs.root_input previous
+  and actual = Chatml_prompt_programs.root_input incoming in
+  let%bind () =
+    if
+      Chatmd_parser_input.Role.equal (Chatmd_parser_input.role actual) Root
+      && String.equal (Chatmd_parser_input.path actual) t.identity.root_relative_path
+      && Chatmd_parser_input.authored_matches
+           expected
+           (Chatmd_parser_input.authored actual)
+           ~checkpoint:Eio.Fiber.check
+      && Chatmd_parser_input.effective_matches
+           expected
+           (Chatmd_parser_input.effective actual)
+           ~checkpoint:Eio.Fiber.check
+    then Ok ()
+    else denied "Incoming custody does not select this retained child's exact Root"
+  in
+  let%bind programs =
+    Chatml_prompt_programs.adopt
+      incoming
+      ~previous
+      ~authored:(authored_sources t)
+      ~limits:(Prompt_program_custody.limits ())
+      ~checkpoint:Eio.Fiber.check
+    |> Result.map_error ~f:(fun _ ->
+      P.Error.create
+        Prompt_unavailable
+        ~message:"Incoming custody changed retained source inventory or unknown ownership"
+        ~retryable:false
+        ())
+  in
+  let%map programs_sha256 =
+    Prompt_program_custody.fingerprint programs ~checkpoint:Eio.Fiber.check
+    |> Result.map_error ~f:(fun _ ->
+      P.Error.create
+        Prompt_unavailable
+        ~message:"Complete child program manifest exceeds artifact policy"
+        ~retryable:false
+        ())
+  in
+  { t with programs = Some programs; programs_sha256 = Some programs_sha256 }
 ;;
 
 let artifact t ~revision_id ~created_at =
@@ -114,6 +277,7 @@ let artifact t ~revision_id ~created_at =
     ~sources:t.sources
     ~parser_schema_version:t.parent_artifact.parser_schema_version
     ~runtime_schema_version:t.parent_artifact.runtime_schema_version
+    ?program_bundle:(Option.map t.programs ~f:Chatml_prompt_programs.to_storage)
     ~created_at
     ()
 ;;

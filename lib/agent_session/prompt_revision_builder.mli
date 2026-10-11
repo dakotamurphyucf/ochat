@@ -43,7 +43,12 @@ val capture
   -> Prompt_definition.t
   -> (Capture.t, Diagnostic.t list) result
 
-(** [build] captures, inspects, persists, and replays one prompt revision.
+(** The preparation hook receives only immutable Capture and runs once before
+    semantic revision identity/publication. Its closure may own explicit host
+    acquisition capabilities; it is never retained. Its returned custody must
+    match the original actual capture. Without a hook, parser-only custody retains
+    every effective Root and raw Import, with zero prepared programs.
+    [build] captures, inspects, persists, and replays one prompt revision.
     Fresh replay uses the retained effective Root with no second preprocessing.
     Durable restart association persistence is owned by the parser-input custody
     format; legacy artifacts still use the existing restoration path.
@@ -54,7 +59,9 @@ val capture
     Explicit absolute agent references remain external dependencies.
     It never authorizes a manifest or starts executable runtime resources. *)
 val build
-  :  env:Eio_unix.Stdenv.base
+  :  ?prepare_programs:
+       (Capture.t -> (Chatml_prompt_programs.t, Diagnostic.t list) Result.t)
+  -> env:Eio_unix.Stdenv.base
   -> artifact_store:Agent_store.Prompt_artifact_store.t
   -> transaction_id:Agent_protocol.Id.Transaction.t
   -> created_at:Agent_protocol.Timestamp.t

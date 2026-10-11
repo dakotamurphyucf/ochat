@@ -50,9 +50,16 @@ let artifact_sources sources =
 
 let shell_digest inspection = inspection.Chat_response.Agent_runtime.manifest.sha256
 
-let build_manifest definition ~canonical_source ~root ~sources ~shell_manifest_sha256 =
+let build_manifest
+      definition
+      ~canonical_source
+      ~root
+      ~sources
+      ~shell_manifest_sha256
+      ~programs_sha256
+  =
   [%sexp
-    { schema = (5 : int)
+    { schema = (6 : int)
     ; prompt_definition_id =
         (definition.Prompt_definition.id : Agent_protocol.Id.Prompt_definition.t)
     ; canonical_source : string
@@ -62,6 +69,7 @@ let build_manifest definition ~canonical_source ~root ~sources ~shell_manifest_s
            path, Chatmd_shell_spec.Source_ref.digest contents)
          : (string * string) list)
     ; shell_manifest_sha256 : string
+    ; programs_sha256 : string
     }]
   |> Sexp.to_string_mach
 ;;
@@ -321,15 +329,59 @@ let parse_tree tree artifact =
   in
   if parser_version < 5
   then validate_parser_closure ~parser_version ~dir:tree loader root_source;
-  let elements =
-    Prompt.Chat_markdown.parse_chat_inputs
-      ~source:artifact.root_relative_path
-      ~source_loader:loader
-      ~dir:tree
-      artifact.root_chatmd
+  match artifact.program_bundle with
+  | None ->
+    let elements =
+      Prompt.Chat_markdown.parse_chat_inputs
+        ~source:artifact.root_relative_path
+        ~source_loader:loader
+        ~dir:tree
+        artifact.root_chatmd
+    in
+    validate_parser_elements ~parser_version elements;
+    tree, elements, None
+  | Some storage ->
+    let authored =
+      Prompt_program_custody.authored ~root_file:artifact.root_relative_path ~sources
+      |> Or_error.ok_exn
+    in
+    let custody =
+      Prompt_program_custody.admit storage ~authored ~checkpoint:Eio.Fiber.check
+      |> Result.map_error ~f:(fun _ -> "Invalid retained parser/program custody")
+      |> Result.ok_or_failwith
+    in
+    let parsed =
+      Prompt_program_custody.replay
+        (Chatml_prompt_programs.root_input custody)
+        ~authored
+        ~dir:tree
+      |> Or_error.ok_exn
+    in
+    Chatml_prompt_programs.validate_selection
+      custody
+      ~parsed
+      ~limits:(Prompt_program_custody.limits ())
+      ~checkpoint:Eio.Fiber.check
+    |> Result.map_error ~f:(fun _ -> "Invalid retained active binding")
+    |> Result.ok_or_failwith;
+    let elements = Prompt.Chat_markdown.Parsed.elements parsed in
+    validate_parser_elements ~parser_version elements;
+    tree, elements, Some (parsed, custody)
+;;
+
+let prepared_revision ~definition ~artifact (tree, elements, custody) =
+  let revision =
+    Prompt_revision.create ~definition ~artifact ~materialized_tree:tree ~elements
   in
-  validate_parser_elements ~parser_version elements;
-  tree, elements
+  match custody with
+  | None -> revision
+  | Some (parser_context, programs) ->
+    Prompt_revision.with_custody
+      revision
+      ~parser_context
+      ~programs
+      ~checkpoint:Eio.Fiber.check
+    |> Or_error.ok_exn
 ;;
 
 let parse_artifact artifact_store artifact =
@@ -342,8 +394,7 @@ let parse_artifact artifact_store artifact =
 
 let reparse ~definition ~artifact ~materialized_tree =
   try
-    let tree, elements = parse_tree materialized_tree artifact in
-    Ok (Prompt_revision.create ~definition ~artifact ~materialized_tree:tree ~elements)
+    Ok (prepared_revision ~definition ~artifact (parse_tree materialized_tree artifact))
   with
   | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
   | exn -> Error [ exception_error ~source:definition.Prompt_definition.root_file exn ]
@@ -354,22 +405,26 @@ let restore ~artifact_store (definition : Prompt_definition.t) revision_id =
   | Error error -> Error [ store_error error ]
   | Ok artifact ->
     (try
-       let tree, elements = parse_artifact artifact_store artifact in
-       Ok (Prompt_revision.create ~definition ~artifact ~materialized_tree:tree ~elements)
+       Ok
+         (prepared_revision
+            ~definition
+            ~artifact
+            (parse_artifact artifact_store artifact))
      with
      | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
      | exn -> Error [ exception_error ~source:definition.root_file exn ])
 ;;
 
 let build
+      ?prepare_programs
       ~env
       ~artifact_store
       ~transaction_id
       ~created_at
       (definition : Prompt_definition.t)
   =
-  try
-    match
+  let captured =
+    try
       capture
         ~env
         ~preprocess:Meta_prompting.Preprocessor.preprocess
@@ -377,69 +432,84 @@ let build
         ~checkpoint:Eio.Fiber.check
         definition
     with
-    | Error diagnostics -> Error diagnostics
-    | Ok captured ->
-      let root_input = Prompt.Chat_markdown.Parsed.root_input (Capture.root captured) in
-      let root = Chatmd_parser_input.authored root_input in
-      let sources = Capture.sources captured in
-      let canonical_source = canonical_source ~env definition.root_file in
-      let shell_manifest_sha256 = Capture.shell_manifest_sha256 captured in
-      let manifest =
-        build_manifest definition ~canonical_source ~root ~sources ~shell_manifest_sha256
-      in
-      let revision_id = revision_id manifest in
-      let open Result.Let_syntax in
-      let result =
-        let%bind sources = artifact_sources sources |> Result.map_error ~f:List.return in
-        let%bind artifact =
-          Agent_store.Prompt_artifact_store.Artifact.create
-            ~revision_id
-            ~prompt_definition_id:definition.id
-            ~canonical_source
-            ~root_relative_path:(Filename.basename definition.root_file)
-            ~root_chatmd:root
-            ~sources
-            ~parser_schema_version:5
-            ~runtime_schema_version:1
-            ~shell_manifest_sha256
-            ~created_at
-            ()
-          |> Result.map_error ~f:(fun error -> [ error ])
-        in
-        install artifact_store ~transaction_id artifact |> Result.map_error ~f:List.return
-      in
-      (match result with
-       | Error errors -> Error (List.map errors ~f:store_error)
-       | Ok artifact ->
-         let tree =
-           Agent_store.Prompt_artifact_store.materialized_tree
-             artifact_store
-             artifact.revision_id
-         in
-         Agent_store.Prompt_artifact_store.verify_tree ~root:tree artifact
-         |> Result.map_error ~f:(fun error ->
-           Sexp.to_string_hum ([%sexp_of: Agent_store.Store_error.t] error))
-         |> Result.ok_or_failwith;
-         let loader =
-           Source_loader.captured_filesystem
-             ~root:tree
-             ~sources:((artifact.root_relative_path, artifact.root_chatmd) :: sources)
-         in
-         let parsed =
-           Prompt.Chat_markdown.replay_chat_inputs
-             root_input
-             ~source_loader:loader
-             ~dir:tree
-             ~limits:(capture_limits ())
-             ~checkpoint:Eio.Fiber.check
-         in
-         let elements = Prompt.Chat_markdown.Parsed.elements parsed in
-         Ok
-           (Prompt_revision.create
-              ~definition
-              ~artifact
-              ~materialized_tree:tree
-              ~elements))
+    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+    | exn -> Error [ exception_error ~source:definition.root_file exn ]
+  in
+  let open Result.Let_syntax in
+  let%bind captured = captured in
+  (* Host preparation failures/exceptions retain their original identity. Its
+     closure may own capabilities; only the immutable Capture is passed here. *)
+  let%bind supplied =
+    match prepare_programs with
+    | None -> Ok None
+    | Some prepare -> Result.map (prepare captured) ~f:Option.some
+  in
+  try
+    let root_input = Prompt.Chat_markdown.Parsed.root_input (Capture.root captured) in
+    let root = Chatmd_parser_input.authored root_input in
+    let sources = Capture.sources captured in
+    let root_relative_path = Chatmd_parser_input.path root_input in
+    let%bind authored =
+      Prompt_program_custody.authored
+        ~root_file:root_relative_path
+        ~sources:((root_relative_path, root) :: sources)
+      |> Result.map_error ~f:(fun e ->
+        [ diagnostic "prompt.custody" (Error.to_string_hum e) ])
+    in
+    let%bind programs =
+      Prompt_program_custody.prepare
+        authored
+        ~parsed_contexts:
+          (Capture.root captured :: List.map (Capture.agents captured) ~f:snd)
+        ~root:root_input
+        ~supplied
+        ~checkpoint:Eio.Fiber.check
+      |> Result.map_error ~f:(fun _ ->
+        [ diagnostic "prompt.custody" "Preparation custody does not match actual capture"
+        ])
+    in
+    let canonical_source = canonical_source ~env definition.root_file in
+    let shell_manifest_sha256 = Capture.shell_manifest_sha256 captured in
+    let%bind programs_sha256 =
+      Prompt_program_custody.fingerprint programs ~checkpoint:Eio.Fiber.check
+      |> Result.map_error ~f:(fun _ ->
+        [ diagnostic "prompt.custody" "Complete program manifest exceeds artifact policy"
+        ])
+    in
+    let manifest =
+      build_manifest
+        definition
+        ~canonical_source
+        ~root
+        ~sources
+        ~shell_manifest_sha256
+        ~programs_sha256
+    in
+    let revision_id = revision_id manifest in
+    let%bind source_values =
+      artifact_sources sources |> Result.map_error ~f:(fun error -> [ store_error error ])
+    in
+    let%bind artifact =
+      Agent_store.Prompt_artifact_store.Artifact.create
+        ~revision_id
+        ~prompt_definition_id:definition.id
+        ~canonical_source
+        ~root_relative_path
+        ~root_chatmd:root
+        ~sources:source_values
+        ~parser_schema_version:5
+        ~runtime_schema_version:1
+        ~shell_manifest_sha256
+        ~program_bundle:(Chatml_prompt_programs.to_storage programs)
+        ~created_at
+        ()
+      |> Result.map_error ~f:(fun e -> [ store_error e ])
+    in
+    let%bind artifact =
+      install artifact_store ~transaction_id artifact
+      |> Result.map_error ~f:(fun e -> [ store_error e ])
+    in
+    Ok (prepared_revision ~definition ~artifact (parse_artifact artifact_store artifact))
   with
   | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
   | exn -> Error [ exception_error ~source:definition.root_file exn ]

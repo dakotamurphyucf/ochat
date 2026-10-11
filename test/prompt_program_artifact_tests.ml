@@ -77,7 +77,7 @@ let%expect_test "program sources remain private across exact artifact reload and
     print_endline "private program payload: retained and verified";
     print_endline "copied publication: exact");
   [%expect
-    {| 
+    {|
     authored tree: root.chatmd
     private program payload: retained and verified
     copied publication: exact |}]

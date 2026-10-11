@@ -11,6 +11,7 @@
   workspace_cleanup
   prompt_definition
   prompt_revision
+  prompt_program_custody
   prompt_revision_builder
   generated_definition
   generated_session_request
@@ -168,13 +169,15 @@
   quota_manager
   start_queue
   inference_ledger)
- (private_modules pending_carrier_admission)
+ (private_modules pending_carrier_admission prompt_program_custody)
  (libraries ochat.inference_client ochat.inference_runtime ochat.inference ochat.history_chatmd ochat.transcript
   core
   digestif
   eio
   eio.unix
   ochat.document_schema
+  jsonaf
+  chatml_prompt_programs
   ochat.agent_protocol
   ochat.agent_store
   chatmd

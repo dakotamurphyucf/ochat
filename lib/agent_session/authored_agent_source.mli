@@ -92,3 +92,11 @@ val load_artifact
   :  artifact_store:Agent_store.Prompt_artifact_store.t
   -> reservation:Agent_store.Delegation_store.record
   -> (Agent_store.Prompt_artifact_store.Artifact.t, Agent_protocol.Error.t) result
+
+(** Exact retained authored closure with this child's selected root. *)
+val authored_sources : t -> Chatmd_source_bundle.t
+
+(** Adopt a complete child projection before fingerprint/reservation/publication.
+    Preserve previous program/input/source inventory and unknowns, require the
+    actual retained queued Root, and validate active bindings through replay. *)
+val with_programs : t -> Chatml_prompt_programs.t -> (t, Agent_protocol.Error.t) Result.t

@@ -17,3 +17,18 @@ val artifact : t -> Agent_store.Prompt_artifact_store.Artifact.t
 val materialized_tree : t -> Eio.Fs.dir_ty Eio.Path.t
 val elements : t -> Prompt.Chat_markdown.top_level_elements list
 val root_relative_path : t -> string
+
+(** Present only for exact parser/program custody; legacy revisions retain None. *)
+val parser_context : t -> Prompt.Chat_markdown.Parsed.t option
+
+val programs : t -> Chatml_prompt_programs.t option
+
+(** Attach the already-admitted parser/program custody after artifact replay.
+    Reject a divergent artifact bundle/current Root/raw revision/active mapping or
+    elements not owned by this actual Parsed. No compilation/execution authority. *)
+val with_custody
+  :  t
+  -> parser_context:Prompt.Chat_markdown.Parsed.t
+  -> programs:Chatml_prompt_programs.t
+  -> checkpoint:(unit -> unit)
+  -> t Or_error.t
