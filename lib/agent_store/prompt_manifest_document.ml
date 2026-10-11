@@ -55,6 +55,9 @@ let of_json json =
   let%bind parser_schema_version = F.required json "parser_schema_version" integer in
   let%bind runtime_schema_version = F.required json "runtime_schema_version" integer in
   let%bind shell_manifest_sha256 = optional json "shell_manifest_sha256" F.digest in
+  let%bind program_bundle =
+    optional json "program_bundle" Prompt_program_bundle.Manifest.of_json
+  in
   let%bind created_at = F.required json "created_at" (identifier P.Timestamp.of_string) in
   let result =
     M.
@@ -68,6 +71,7 @@ let of_json json =
       ; parser_schema_version
       ; runtime_schema_version
       ; shell_manifest_sha256
+      ; program_bundle
       ; created_at
       }
   in
@@ -94,7 +98,11 @@ let to_json (t : M.t) =
      ; "created_at", `String (P.Timestamp.to_string t.created_at)
      ]
      @ List.filter_opt
-         [ optional "prompt_definition_id" t.prompt_definition_id ~f:(fun id ->
+         [ optional
+             "program_bundle"
+             t.program_bundle
+             ~f:Prompt_program_bundle.Manifest.to_json
+         ; optional "prompt_definition_id" t.prompt_definition_id ~f:(fun id ->
              `String (P.Id.Prompt_definition.to_string id))
          ; optional "canonical_source" t.canonical_source ~f:(fun text -> `String text)
          ; optional "shell_manifest_sha256" t.shell_manifest_sha256 ~f:(fun text ->
@@ -120,9 +128,12 @@ let shape =
     ; "parser_schema_version", D.Shape.value
     ; "runtime_schema_version", D.Shape.value
     ; "shell_manifest_sha256", D.Shape.value
+    ; "program_bundle", Prompt_program_bundle.Manifest.shape
     ; "created_at", D.Shape.value
     ]
 ;;
+
+let program_semantics = "prompt.program-bundle.v1"
 
 let codec () =
   D.Domain_codec.create
@@ -130,7 +141,7 @@ let codec () =
     ~kind:"store.prompt_manifest"
     ~version:1
     ~shape
-    ~supported_semantics:[]
+    ~supported_semantics:[ program_semantics ]
     ~decode:of_json
     ~encode:(fun value ->
       let open Result.Let_syntax in
@@ -149,13 +160,43 @@ let value = D.Extension_carrier.value
 let of_document document =
   let open Result.Let_syntax in
   let%bind codec = codec () in
-  D.Domain_codec.decode codec document
+  let%bind carrier = D.Domain_codec.decode codec document in
+  if
+    Option.is_some (value carrier).program_bundle
+    && not
+         (List.mem
+            (D.Document.required_semantics document)
+            program_semantics
+            ~equal:String.equal)
+  then
+    F.invalid "required_semantics" "program bundle requires explicit execution semantics"
+  else Ok carrier
 ;;
 
 let to_document t =
   let open Result.Let_syntax in
   let%bind codec = codec () in
-  D.Domain_codec.encode codec t
+  let%bind document = D.Domain_codec.encode codec t in
+  let required = D.Document.required_semantics document in
+  if
+    Option.is_none (value t).program_bundle
+    || List.mem required program_semantics ~equal:String.equal
+  then Ok document
+  else (
+    let fields =
+      match D.Document.json document with
+      | `Object fields -> fields
+      | _ -> assert false
+    in
+    D.Document.inspect
+      ~limits
+      (`Object
+          (( "required_semantics"
+           , `Array
+               (List.map (required @ [ program_semantics ]) ~f:(fun name -> `String name))
+           )
+           :: List.filter fields ~f:(fun (name, _) ->
+             not (String.equal name "required_semantics")))))
 ;;
 
 let stored_revision_id document =
@@ -191,6 +232,29 @@ module Publication = struct
     let%map envelope = to_document document in
     let bytes = D.Document.to_string envelope in
     { document; bytes; sha256 = digest bytes }
+  ;;
+
+  let with_identity t ~revision_id ~created_at =
+    let known = value t.document in
+    if
+      P.Id.Prompt_revision.equal known.revision_id revision_id
+      && P.Timestamp.equal known.created_at created_at
+    then Ok t
+    else
+      let open Result.Let_syntax in
+      let%bind document = to_document t.document in
+      let%bind document =
+        D.Document.replace_payload_scalars
+          document
+          ~limits
+          ~updates:
+            [ [ "revision_id" ], `String (P.Id.Prompt_revision.to_string revision_id)
+            ; [ "created_at" ], `String (P.Timestamp.to_string created_at)
+            ]
+      in
+      let%map admitted = of_document document in
+      let bytes = D.Document.to_string document in
+      { document = admitted; bytes; sha256 = digest bytes }
   ;;
 
   let of_bytes bytes ~revision_id ~expected_sha256 =

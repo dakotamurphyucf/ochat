@@ -21,6 +21,7 @@ type t =
   ; parser_schema_version : int
   ; runtime_schema_version : int
   ; shell_manifest_sha256 : string option
+  ; program_bundle : Prompt_program_bundle.Manifest.t option
   ; created_at : P.Timestamp.t
   }
 [@@deriving equal, sexp_of]
@@ -64,6 +65,21 @@ let validate t =
       && Option.for_all t.canonical_source ~f:(fun path -> not (String.mem path '\000'))
     then Ok ()
     else F.invalid "manifest" "invalid manifest version, paths or schema counters"
+  in
+  let%bind () =
+    let initial =
+      1
+      + Option.value_map t.program_bundle ~default:0 ~f:(fun bundle ->
+        List.length (Prompt_program_bundle.Manifest.payloads bundle))
+    in
+    List.fold_result t.sources ~init:initial ~f:(fun count _ ->
+      if count >= Prompt_program_bundle.max_payload_count
+      then Error (Document_schema.Error.Limit_exceeded "prompt source count")
+      else Ok (count + 1))
+    |> Result.bind ~f:(fun count ->
+      if count > Prompt_program_bundle.max_payload_count
+      then Error (Document_schema.Error.Limit_exceeded "prompt source count")
+      else Ok ())
   in
   let%bind () =
     if

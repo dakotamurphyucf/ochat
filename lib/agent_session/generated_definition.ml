@@ -37,16 +37,7 @@ let protocol_result result =
 let with_identity t ~revision_id ~created_at =
   let open Result.Let_syntax in
   let%map artifact =
-    Store.Artifact.create
-      ~revision_id
-      ~root_relative_path:t.artifact.root_relative_path
-      ~root_chatmd:t.artifact.root_chatmd
-      ~sources:t.artifact.sources
-      ~parser_schema_version:t.artifact.parser_schema_version
-      ~runtime_schema_version:t.artifact.runtime_schema_version
-      ~created_at
-      ()
-    |> store_result
+    Store.Artifact.with_identity t.artifact ~revision_id ~created_at |> store_result
   in
   { t with artifact }
 ;;

@@ -28,6 +28,15 @@ module Publication : sig
     -> expected_sha256:string
     -> (t, Store_error.t) result
 
+  (** Reauthor only revision identity and creation time, retaining the complete
+      converted named document and all unknown metadata. An unchanged identity
+      and time retain the exact original publication bytes. *)
+  val with_identity
+    :  t
+    -> revision_id:Agent_protocol.Id.Prompt_revision.t
+    -> created_at:Agent_protocol.Timestamp.t
+    -> (t, Document_schema.Error.t) result
+
   val document : t -> document
   val bytes : t -> string
   val sha256 : t -> string

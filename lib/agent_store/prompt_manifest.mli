@@ -18,6 +18,7 @@ type t =
   ; parser_schema_version : int
   ; runtime_schema_version : int
   ; shell_manifest_sha256 : string option
+  ; program_bundle : Prompt_program_bundle.Manifest.t option
   ; created_at : Agent_protocol.Timestamp.t
   }
 [@@deriving equal, sexp_of]

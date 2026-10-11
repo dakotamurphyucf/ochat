@@ -58,6 +58,7 @@
   audit_event_document
   audit_evidence_document
   audit_store
+  prompt_program_bundle
   prompt_manifest
   prompt_manifest_document
   prompt_artifact_store
