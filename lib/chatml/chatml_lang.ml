@@ -211,31 +211,20 @@ type resolved_program =
 (* Runtime diagnostics                                                     *)
 (***************************************************************************)
 
-type runtime_error =
-  { message : string
-  ; span : Source.span option
-  }
+type runtime_error = Chatml_diagnostic.t
 
 exception Runtime_error of runtime_error
 
-let raise_runtime_error ?span message = raise (Runtime_error { message; span })
+let raise_runtime_error ?span ?site message =
+  raise (Runtime_error (Chatml_diagnostic.create ?span ?site message))
+;;
 
-let format_runtime_error (source_text : string) (err : runtime_error) : string =
-  match err.span with
-  | None -> Printf.sprintf "Runtime error: %s" err.message
-  | Some span ->
-    let source = Source.read (Source.make source_text) span in
-    let caret_count = Int.max 1 (span.right.column - span.left.column) in
-    Printf.sprintf
-      "line %i, characters %i-%i:\n%i|    %s%s\n      %s\n\nRuntime error: %s"
-      span.left.line
-      span.left.column
-      span.right.column
-      span.left.line
-      source
-      (String.make (span.left.column + 3) ' ')
-      (String.make caret_count '^')
-      err.message
+let format_runtime_error source_text err =
+  Chatml_diagnostic.render_legacy
+    err
+    ~source:source_text
+    ~label:"Runtime error"
+    ~checkpoint:(fun () -> ())
 ;;
 
 (***************************************************************************)
@@ -244,6 +233,7 @@ let format_runtime_error (source_text : string) (err : runtime_error) : string =
 
 type execution_control =
   { checkpoint : unit -> unit
+  ; diagnostic_checkpoint : unit -> unit
   ; allocate : int -> unit
   ; before_builtin : name:string -> value list -> unit
   ; check_value : value -> unit
@@ -274,6 +264,11 @@ and eff =
   }
 
 and task =
+  { site : Chatml_diagnostic.Site.t option
+  ; step : task_step
+  }
+
+and task_step =
   | TPure of value
   | TBind of task * value
   | TMap of task * value
@@ -295,18 +290,35 @@ and cell = value ref
 and env =
   { bindings : (string, cell) Hashtbl.t
   ; control : execution_control option
+  ; source : Chatml_source.t option
   }
 
 (***************************************************************************)
 (* 3) Environment Helpers                                                  *)
 (***************************************************************************)
 
-let create_env ?control () : env = { bindings = Hashtbl.create (module String); control }
+module Task = struct
+  type t = task
+
+  let create step = { site = None; step }
+  let site t = t.site
+  let step t = t.step
+
+  let with_fallback t site =
+    match t.site, site with
+    | Some _, _ | None, None -> t
+    | None, Some site -> { t with site = Some site }
+  ;;
+end
+
+let create_env ?control ?source () : env =
+  { bindings = Hashtbl.create (module String); control; source }
+;;
 
 let copy_env (parent : env) : env =
   Option.iter parent.control ~f:(fun control ->
     control.allocate (32 * Hashtbl.length parent.bindings));
-  { bindings = Hashtbl.copy parent.bindings; control = parent.control }
+  { parent with bindings = Hashtbl.copy parent.bindings }
 ;;
 
 let find_var_cell (e : env) (x : string) : cell option = Hashtbl.find e.bindings x
@@ -344,7 +356,9 @@ let rec equal_value (lhs : value) (rhs : value) : bool =
   | VClosure clos_x, VClosure clos_y -> phys_equal clos_x clos_y
   | VModule env_x, VModule env_y -> phys_equal env_x env_y
   | VBuiltin fn_x, VBuiltin fn_y -> phys_equal fn_x fn_y
-  | VTask t_x, VTask t_y -> phys_equal t_x t_y
+  | VTask t_x, VTask t_y ->
+    (* Metadata copies preserve the identity of the original semantic task. *)
+    phys_equal t_x.step t_y.step
   | _ -> false
 ;;
 

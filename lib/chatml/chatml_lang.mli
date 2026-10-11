@@ -1,0 +1,315 @@
+(** ChatML language core.
+
+    This module defines:
+
+    {ol
+    {- The surface AST produced by the parser and consumed by the
+       typechecker.}
+    {- The resolved AST produced by the resolver and consumed by the
+       evaluator.}
+    {- Runtime value and environment types shared by the evaluator and
+       builtin libraries.}
+    {- Small helper functions for diagnostics, environments, and
+       pattern matching.}}
+
+    Evaluation itself lives in {!module:Chatml_eval}.  Keeping the
+    evaluator out of this module makes the phase distinction explicit and
+    avoids dependency cycles between the parser, typechecker, resolver,
+    and interpreter.
+*)
+
+open Core
+
+(***************************************************************************)
+(* 1) AST Types                                                            *)
+(***************************************************************************)
+
+type 'a node =
+  { value : 'a
+  ; span : Source.span
+  }
+[@@deriving sexp]
+
+type pattern =
+  | PUnit
+  | PWildcard
+  | PVar of string
+  | PInt of int
+  | PBool of bool
+  | PFloat of float
+  | PString of string
+  | PVariant of string * pattern list
+  | PRecord of (string * pattern) list * bool
+[@@deriving sexp, compare]
+
+type type_expr =
+  | TEName of string
+  | TEArrow of type_expr * type_expr
+  | TEConstr of string * type_expr list
+  | TERecord of (string * type_expr) list
+  | TEVariant of (string * type_expr list) list
+[@@deriving sexp]
+
+type var_loc =
+  { depth : int
+  ; index : int
+  ; slot : Frame_env.packed_slot
+  }
+[@@deriving sexp]
+
+type match_case =
+  { pat : pattern
+  ; pat_span : Source.span
+  ; rhs : expr node
+  }
+[@@deriving sexp]
+
+and match_case_slots =
+  { pat : pattern
+  ; pat_span : Source.span
+  ; slots : Frame_env.packed_slot list
+  ; rhs : expr node
+  }
+[@@deriving sexp]
+
+and resolved_match_case =
+  { pat : pattern
+  ; pat_span : Source.span
+  ; slots : Frame_env.packed_slot list
+  ; rhs : resolved_expr node
+  }
+[@@deriving sexp]
+
+and unary_prim =
+  | UNegInt
+  | UNegFloat
+[@@deriving sexp]
+
+and binary_prim =
+  | BIntAdd
+  | BIntSub
+  | BIntMul
+  | BIntDiv
+  | BFloatAdd
+  | BFloatSub
+  | BFloatMul
+  | BFloatDiv
+  | BStringConcat
+  | BIntLt
+  | BIntGt
+  | BIntLe
+  | BIntGe
+  | BFloatLt
+  | BFloatGt
+  | BFloatLe
+  | BFloatGe
+  | BEq
+  | BNeq
+[@@deriving sexp]
+
+and expr =
+  | EUnit
+  | EInt of int
+  | EBool of bool
+  | EFloat of float
+  | EString of string
+  | EVar of string
+  | EVarLoc of var_loc
+  | EPrim1 of unary_prim * expr node
+  | EPrim2 of binary_prim * expr node * expr node
+  | ELambda of string list * expr node
+  | ELambdaSlots of string list * Frame_env.packed_slot list * expr node
+  | EApp of expr node * expr node list
+  | EIf of expr node * expr node * expr node
+  | EWhile of expr node * expr node
+  | ELetIn of string * expr node * expr node
+  | ELetRec of (string * expr node) list * expr node
+  | ELetBlock of (string * expr node) list * expr node
+  | ELetBlockSlots of (string * expr node) list * Frame_env.packed_slot list * expr node
+  | ELetRecSlots of (string * expr node) list * Frame_env.packed_slot list * expr node
+  | EMatch of expr node * match_case list
+  | EMatchSlots of expr node * match_case_slots list
+  | ERecord of (string * expr node) list
+  | EFieldGet of expr node * string
+  | EVariant of string * expr node list
+  | EArray of expr node list
+  | EArrayGet of expr node * expr node
+  | EArraySet of expr node * expr node * expr node
+  | ERef of expr node
+  | ESetRef of expr node * expr node
+  | ESequence of expr node * expr node
+  | EDeref of expr node
+  | ERecordExtend of expr node * (string * expr node) list
+  | EAnnot of expr node * type_expr
+[@@deriving sexp]
+
+and resolved_expr =
+  | REUnit
+  | REInt of int
+  | REBool of bool
+  | REFloat of float
+  | REString of string
+  | REVarGlobal of string
+  | REVarLoc of var_loc
+  | REPrim1 of unary_prim * resolved_expr node
+  | REPrim2 of binary_prim * resolved_expr node * resolved_expr node
+  | RELambda of string list * Frame_env.packed_slot list * resolved_expr node
+  | REApp of resolved_expr node * resolved_expr node list
+  | REIf of resolved_expr node * resolved_expr node * resolved_expr node
+  | REWhile of resolved_expr node * resolved_expr node
+  | RELetBlock of
+      (string * resolved_expr node) list * Frame_env.packed_slot list * resolved_expr node
+  | RELetRec of
+      (string * resolved_expr node) list * Frame_env.packed_slot list * resolved_expr node
+  | REMatch of resolved_expr node * resolved_match_case list
+  | RERecord of (string * resolved_expr node) list
+  | REFieldGet of resolved_expr node * string
+  | REVariant of string * resolved_expr node list
+  | REArray of resolved_expr node list
+  | REArrayGet of resolved_expr node * resolved_expr node
+  | REArraySet of resolved_expr node * resolved_expr node * resolved_expr node
+  | RERef of resolved_expr node
+  | RESetRef of resolved_expr node * resolved_expr node
+  | RESequence of resolved_expr node * resolved_expr node
+  | REDeref of resolved_expr node
+  | RERecordExtend of resolved_expr node * (string * resolved_expr node) list
+[@@deriving sexp]
+
+type stmt =
+  | SLet of string * expr node
+  | SLetRec of (string * expr node) list
+  | SType of string * type_expr
+  | SModule of string * stmt node list
+  | SOpen of string
+  | SExpr of expr node
+[@@deriving sexp]
+
+type resolved_stmt =
+  | RSLet of string * resolved_expr node
+  | RSLetRec of (string * resolved_expr node) list
+  | RSModule of string * resolved_stmt node list
+  | RSOpen of string
+  | RSExpr of resolved_expr node
+[@@deriving sexp]
+
+type stmt_node = stmt node [@@deriving sexp]
+type resolved_stmt_node = resolved_stmt node [@@deriving sexp]
+
+type program =
+  { stmts : stmt_node list
+  ; source_text : string
+  }
+[@@deriving sexp]
+
+type resolved_program =
+  { stmts : resolved_stmt_node list
+  ; source_text : string
+  }
+[@@deriving sexp]
+
+type runtime_error = Chatml_diagnostic.t
+
+exception Runtime_error of runtime_error
+
+(** Raise only an ordinary script failure. Existing execution-control and
+    cancellation exceptions are independent and must propagate unchanged. *)
+val raise_runtime_error
+  :  ?span:Source.span
+  -> ?site:Chatml_diagnostic.Site.t
+  -> string
+  -> 'a
+
+val format_runtime_error : string -> runtime_error -> string
+
+type execution_control =
+  { checkpoint : unit -> unit
+  ; diagnostic_checkpoint : unit -> unit
+    (** Poll cancellation, deadlines, budget state and active scope lifetime
+        without consuming expression/task execution fuel. Source/site values
+        never retain this callback. *)
+  ; allocate : int -> unit
+  ; before_builtin : name:string -> value list -> unit
+  ; check_value : value -> unit
+  ; before_json_import : Jsonaf.t -> unit
+  ; before_json_export : value -> unit
+  ; before_effect : name:string -> spawned:bool -> unit
+  ; after_effect : value -> unit
+  }
+
+and value =
+  | VInt of int
+  | VBool of bool
+  | VFloat of float
+  | VString of string
+  | VVariant of string * value list
+  | VRecord of value String.Map.t
+  | VArray of value array
+  | VRef of value ref
+  | VClosure of clos
+  | VModule of env
+  | VUnit
+  | VBuiltin of (value list -> value)
+  | VTask of task
+
+and eff =
+  { op : string
+  ; args : value list
+  }
+
+and task = private
+  { site : Chatml_diagnostic.Site.t option
+  ; step : task_step
+  }
+
+and task_step =
+  | TPure of value
+  | TBind of task * value
+  | TMap of task * value
+  | TFail of string
+  | TCatch of task * value
+  | TPerform of eff
+  | TSpawn of eff
+
+and clos =
+  { params : string list
+  ; body : resolved_expr node
+  ; env : env
+  ; frames : Frame_env.env
+  ; param_slots : Frame_env.packed_slot list
+  }
+
+and cell = value ref
+
+and env =
+  { bindings : (string, cell) Hashtbl.t
+  ; control : execution_control option
+  ; source : Chatml_source.t option
+  }
+
+(** Task origin is metadata outside the semantic step. Creating/attaching a
+    site adds no execution/fuel/value-depth step. Copies preserve semantic task
+    identity for [equal_value]; owned nested tasks retain their own source. *)
+module Task : sig
+  type t = task
+
+  val create : task_step -> t
+  val site : t -> Chatml_diagnostic.Site.t option
+  val step : t -> task_step
+  val with_fallback : t -> Chatml_diagnostic.Site.t option -> t
+end
+
+(** Environments own their mutable binding table and immutable optional source.
+    A copy shares binding cells/control/source while copying the table. Closure
+    bodies and module exports retain the defining unit's captured bytes only,
+    never a complete prepared inventory or mutable current-origin field. *)
+val create_env : ?control:execution_control -> ?source:Chatml_source.t -> unit -> env
+
+val copy_env : env -> env
+val find_var_cell : env -> string -> cell option
+val find_var : env -> string -> value option
+val define_var : env -> string -> value -> unit
+val update_var : env -> string -> value -> unit
+val set_var : env -> string -> value -> unit
+val equal_value : value -> value -> bool
+val match_pattern : value -> pattern -> (string * value) list option
+val collect_pattern_vars : pattern -> string list

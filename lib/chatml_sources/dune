@@ -11,3 +11,10 @@
  (modules chatml_prepared_program)
  (libraries core digestif source chatml_source)
  (preprocess (pps ppx_jane)))
+
+(library
+ (name chatml_diagnostic)
+ (public_name ochat.chatml_diagnostic)
+ (modules chatml_diagnostic)
+ (libraries core source chatml_source)
+ (preprocess (pps ppx_jane)))

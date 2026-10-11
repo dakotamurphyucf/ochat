@@ -2773,11 +2773,15 @@ let language_foundation ~sources =
       ; review =
           Audited
             { excerpt_sha256 =
-                [ "8baf6476f567e770f5c8298d433a44c9e081a930da4d849c03c6b255c0218ac7" ]
+                [ "882ebcc7de587151d7f3f5e692f9ba06cdf0acf90d2af2ebcf966fd0c354a709" ]
             ; evidence =
                 [ "lib/chatml/chatml_lexer.mll"
                 ; "lib/chatml/chatml_parser.mly"
                 ; "lib/chatml/chatml_eval.ml"
+                ; "test/chatml_diagnostics/diagnostic_invariants.ml"
+                ; "test/chatml_owned_diagnostics/ownership_tests.ml"
+                ; "test/chatml_owned_diagnostics/task_tests.ml"
+                ; "test/chatml_owned_diagnostics/session_tests.ml"
                 ; "test/agent_docs/docs_chatml_authoring.ml"
                 ]
             }

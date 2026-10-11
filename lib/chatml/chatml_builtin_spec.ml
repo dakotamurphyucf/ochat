@@ -72,14 +72,24 @@ let apply_chatml (name : string) (fn : value) (args : value list) : value =
   | Error err ->
     let message =
       match fn with
-      | VClosure _ when String.equal err.message "Function arity mismatch" ->
+      | VClosure closure when List.length closure.params <> List.length args ->
         Printf.sprintf "%s: function arity mismatch" name
       | VBuiltin _ | VClosure _ -> err.message
       | _ -> Printf.sprintf "%s: expected a function" name
     in
-    (* Re-raise as [Failure] so the outer VBuiltin call site converts it
-       into a span-attached ChatML runtime error. *)
-    failwith message
+    (* Preserve callback-owned failures. The outer builtin application adds its
+       caller site only when the failure has no source owner. *)
+    let err =
+      if String.equal message err.message
+      then err
+      else
+        Chatml_diagnostic.create
+          ?span:err.span
+          ?site:err.site
+          ~related:err.related
+          message
+    in
+    raise (Runtime_error err)
 ;;
 
 let module_scheme (m : builtin_module) : ty =
@@ -243,7 +253,7 @@ let rec value_to_string (v : value) : string =
       "{operation = " ^ eff.op ^ ", args = [" ^ String.concat ~sep:", " args ^ "]}"
     in
     let rec print_task task =
-      match task with
+      match task.step with
       | TPure v -> "pure(" ^ value_to_string v ^ ")"
       | TBind (t, v) -> "bind(" ^ print_task t ^ ", " ^ value_to_string v ^ ")"
       | TMap (t, v) -> "map(" ^ print_task t ^ ", " ^ value_to_string v ^ ")"
@@ -337,37 +347,37 @@ let render_debug ?(max_bytes = 4096) ?(max_nodes = 256) ?(max_depth = 16) render
            add "(";
            separated (fun f -> List.iter fields ~f) child;
            add ")")
-      | VTask (TPure value) ->
+      | VTask { step = TPure value; _ } ->
         add "pure(";
         child value;
         add ")"
-      | VTask (TFail text) ->
+      | VTask { step = TFail text; _ } ->
         add "fail(";
         add text;
         add ")"
-      | VTask (TBind (nested, fn)) ->
+      | VTask { step = TBind (nested, fn); _ } ->
         add "bind(";
         task nested;
         add ", ";
         child fn;
         add ")"
-      | VTask (TMap (nested, fn)) ->
+      | VTask { step = TMap (nested, fn); _ } ->
         add "map(";
         task nested;
         add ", ";
         child fn;
         add ")"
-      | VTask (TCatch (nested, fn)) ->
+      | VTask { step = TCatch (nested, fn); _ } ->
         add "catch(";
         task nested;
         add ", ";
         child fn;
         add ")"
-      | VTask (TPerform eff) ->
+      | VTask { step = TPerform eff; _ } ->
         add "perform(";
         render_eff eff;
         add ")"
-      | VTask (TSpawn eff) ->
+      | VTask { step = TSpawn eff; _ } ->
         add "spawn(";
         render_eff eff;
         add ")")
@@ -442,7 +452,7 @@ let rec value_to_pretty_string_with_depth ?(depth = 0) (v : value) : string =
       ^ indent depth
       ^ "}"
     in
-    match task with
+    match task.step with
     | TPure value ->
       "pure(\n"
       ^ indent_block (depth + 1) (compact_nested value)
@@ -598,7 +608,7 @@ let make_task_nullary_perform_builtin (name : string) (result_ty : ty) ~(op : st
   make_nullary_builtin
     name
     (TFun ([], task_ty result_ty))
-    (fun () -> VTask (TPerform { op; args = [] }))
+    (fun () -> VTask (Task.create (TPerform { op; args = [] })))
 ;;
 
 let make_task_unary_perform_builtin
@@ -611,7 +621,7 @@ let make_task_unary_perform_builtin
   make_unary_builtin
     name
     (TFun ([ arg_ty ], task_ty result_ty))
-    (fun arg -> VTask (TPerform { op; args = [ arg ] }))
+    (fun arg -> VTask (Task.create (TPerform { op; args = [ arg ] })))
 ;;
 
 let make_task_binary_perform_builtin
@@ -625,7 +635,7 @@ let make_task_binary_perform_builtin
   make_binary_builtin
     name
     (TFun ([ lhs_ty; rhs_ty ], task_ty result_ty))
-    (fun lhs rhs -> VTask (TPerform { op; args = [ lhs; rhs ] }))
+    (fun lhs rhs -> VTask (Task.create (TPerform { op; args = [ lhs; rhs ] })))
 ;;
 
 let shell_field name field scheme =
@@ -776,7 +786,7 @@ let make_task_nullary_spawn_builtin (name : string) (result_ty : ty) ~(op : stri
   make_nullary_builtin
     name
     (TFun ([], task_ty result_ty))
-    (fun () -> VTask (TSpawn { op; args = [] }))
+    (fun () -> VTask (Task.create (TSpawn { op; args = [] })))
 ;;
 
 let make_task_unary_spawn_builtin
@@ -789,7 +799,7 @@ let make_task_unary_spawn_builtin
   make_unary_builtin
     name
     (TFun ([ arg_ty ], task_ty result_ty))
-    (fun arg -> VTask (TSpawn { op; args = [ arg ] }))
+    (fun arg -> VTask (Task.create (TSpawn { op; args = [ arg ] })))
 ;;
 
 let make_task_binary_spawn_builtin
@@ -803,7 +813,7 @@ let make_task_binary_spawn_builtin
   make_binary_builtin
     name
     (TFun ([ lhs_ty; rhs_ty ], task_ty result_ty))
-    (fun lhs rhs -> VTask (TSpawn { op; args = [ lhs; rhs ] }))
+    (fun lhs rhs -> VTask (Task.create (TSpawn { op; args = [ lhs; rhs ] })))
 ;;
 
 let hash_string_md5 s =
@@ -1787,27 +1797,27 @@ let task_module : builtin_module =
       [ make_unary_builtin
           "pure"
           (TFun ([ TVar "a" ], task_ty (TVar "a")))
-          (fun v -> VTask (TPure v))
+          (fun v -> VTask (Task.create (TPure v)))
       ; make_binary_builtin
           "bind"
           (TFun
              ( [ task_ty (TVar "a"); TFun ([ TVar "a" ], task_ty (TVar "b")) ]
              , task_ty (TVar "b") ))
-          (fun t k -> VTask (TBind (expect_task "Task.bind" t, k)))
+          (fun t k -> VTask (Task.create (TBind (expect_task "Task.bind" t, k))))
       ; make_binary_builtin
           "map"
           (TFun ([ task_ty (TVar "a"); TFun ([ TVar "a" ], TVar "b") ], task_ty (TVar "b")))
-          (fun t f -> VTask (TMap (expect_task "Task.map" t, f)))
+          (fun t f -> VTask (Task.create (TMap (expect_task "Task.map" t, f))))
       ; make_unary_builtin
           "fail"
           (TFun ([ TString ], task_ty (TVar "a")))
-          (fun s -> VTask (TFail (expect_string "Task.fail" s)))
+          (fun s -> VTask (Task.create (TFail (expect_string "Task.fail" s))))
       ; make_binary_builtin
           "catch"
           (TFun
              ( [ task_ty (TVar "a"); TFun ([ TString ], task_ty (TVar "a")) ]
              , task_ty (TVar "a") ))
-          (fun t h -> VTask (TCatch (expect_task "Task.catch" t, h)))
+          (fun t h -> VTask (Task.create (TCatch (expect_task "Task.catch" t, h))))
       ]
   }
 ;;
@@ -2162,15 +2172,16 @@ let turn_module : builtin_module =
                | Some target_id -> "Turn.replace_message", [ VString target_id; item ]
                | None -> "Turn.append_message", [ item ]
              in
-             VTask (TPerform { op; args }))
+             VTask (Task.create (TPerform { op; args })))
       ; make_unary_builtin
           "append_notice"
           (TFun ([ TString ], task_ty TUnit))
           (fun text ->
              let text = expect_string "Turn.append_notice" text in
              VTask
-               (TPerform
-                  { op = "Turn.append_message"; args = [ item_notice_value ~text ] }))
+               (Task.create
+                  (TPerform
+                     { op = "Turn.append_message"; args = [ item_notice_value ~text ] })))
       ; make_task_unary_perform_builtin
           "append_message"
           item_ty
@@ -2421,8 +2432,11 @@ let model_module : builtin_module =
              let recipe = expect_string "Model.call_text" recipe in
              let text = expect_string "Model.call_text" text in
              VTask
-               (TPerform
-                  { op = "Model.call"; args = [ VString recipe; json_string_value text ] }))
+               (Task.create
+                  (TPerform
+                     { op = "Model.call"
+                     ; args = [ VString recipe; json_string_value text ]
+                     })))
       ; make_task_binary_perform_builtin
           "call_json"
           TString
@@ -2437,10 +2451,11 @@ let model_module : builtin_module =
              let recipe = expect_string "Model.spawn_text" recipe in
              let text = expect_string "Model.spawn_text" text in
              VTask
-               (TSpawn
-                  { op = "Model.spawn"
-                  ; args = [ VString recipe; json_string_value text ]
-                  }))
+               (Task.create
+                  (TSpawn
+                     { op = "Model.spawn"
+                     ; args = [ VString recipe; json_string_value text ]
+                     })))
       ]
   }
 ;;

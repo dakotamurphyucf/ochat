@@ -17,12 +17,54 @@ module Debug_log = struct
   ;;
 end
 
+module Diagnostic = Chatml_diagnostic
+module Captured = Chatml_source
+
+module Failure = struct
+  type presentation =
+    | Plain of string
+    | Runtime
+
+  type t =
+    { diagnostic : Diagnostic.t
+    ; presentation : presentation
+    }
+
+  let plain ?site message =
+    { diagnostic = Diagnostic.create ?site message; presentation = Plain message }
+  ;;
+
+  let runtime diagnostic = { diagnostic; presentation = Runtime }
+  let diagnostic t = t.diagnostic
+
+  let render t ~source_text =
+    match t.presentation with
+    | Plain _ ->
+      (match t.diagnostic.site with
+       | None -> t.diagnostic.message
+       | Some _ ->
+         Diagnostic.render t.diagnostic ~label:"Runtime error" ~checkpoint:(fun () -> ()))
+    | Runtime -> Lang.format_runtime_error source_text t.diagnostic
+  ;;
+
+  (* Catch sees the original script/host protocol payload, as before. Public
+     diagnostics and display remain bounded independently of that value. *)
+  let catch_message t ~source_text =
+    match t.presentation with
+    | Plain message -> message
+    | Runtime -> Lang.format_runtime_error source_text t.diagnostic
+  ;;
+end
+
+let host_result result = Result.map_error result ~f:Failure.plain
+
 module Value_codec = Chatml.Chatml_value_codec
 
 type compiled_script =
   { surface : Builtin_surface.surface
   ; resolved : Lang.resolved_program
   ; source_text : string
+  ; source : Captured.t option
   }
 
 type log_level =
@@ -121,10 +163,17 @@ and exec_ctx =
   }
 
 and continuation_frame =
-  | Bind_frame of Lang.value
-  | Map_frame of Lang.value
+  | Bind_frame of
+      { fn : Lang.value
+      ; site : Diagnostic.Site.t option
+      }
+  | Map_frame of
+      { fn : Lang.value
+      ; site : Diagnostic.Site.t option
+      }
   | Catch_frame of
       { handler : Lang.value
+      ; site : Diagnostic.Site.t option
       ; saved_local_effects_rev : Lang.eff list
       ; saved_emitted_rev : Lang.value list
       ; saved_end_session_requested : string option
@@ -149,10 +198,6 @@ and session =
   ; mutable ui_resume_active : bool
   ; mutable halted : bool
   }
-
-let format_runtime_error (session : session) (err : Lang.runtime_error) : string =
-  Lang.format_runtime_error session.source_text err
-;;
 
 let duplicate_names (ops : op_def list) : string list =
   let counts =
@@ -774,52 +819,78 @@ type compilation_diagnostic =
   ; message : string
   ; span : Source.span option
   ; formatted : string
+  ; diagnostic : Diagnostic.t
   }
-[@@deriving sexp]
+[@@deriving sexp_of]
 
-let compile_script_detailed
+let compile_source
       ?(checkpoint = fun () -> ())
       ?(surface = Builtin_surface.moderator_surface)
       ?(required_bindings = [])
-      ~(source : string)
-      ()
-  : (compiled_script, compilation_diagnostic) result
+      ~source_text
+      source
   =
+  let compilation_error stage diagnostic =
+    let label =
+      match stage with
+      | Parse -> "Parse error"
+      | Typecheck -> "Type error"
+    in
+    let formatted =
+      match source with
+      | Some _ -> Diagnostic.render diagnostic ~label ~checkpoint
+      | None -> Diagnostic.render_legacy diagnostic ~source:source_text ~label ~checkpoint
+    in
+    Error
+      { stage
+      ; message = diagnostic.Diagnostic.message
+      ; span = diagnostic.span
+      ; formatted
+      ; diagnostic
+      }
+  in
   checkpoint ();
-  let parsed = Parse.parse_program source in
+  let parsed =
+    match source with
+    | None -> Parse.parse_program source_text
+    | Some source ->
+      Parse.parse_captured source ~checkpoint |> Result.map ~f:Parse.Unit.program
+  in
   checkpoint ();
   let result =
     match parsed with
-    | Error diagnostic ->
-      Error
-        { stage = Parse
-        ; message = diagnostic.message
-        ; span = diagnostic.span
-        ; formatted = Parse.format_diagnostic source diagnostic
-        }
+    | Error diagnostic -> compilation_error Parse diagnostic
     | Ok program ->
       let checked =
         Typechecker.check_program_with_surface
           ~checkpoint
+          ?source
           ~required_bindings
           surface
           program
       in
       checkpoint ();
       (match checked with
-       | Error diagnostic ->
-         Error
-           { stage = Typecheck
-           ; message = diagnostic.message
-           ; span = diagnostic.span
-           ; formatted = Typechecker.format_diagnostic source diagnostic
-           }
+       | Error diagnostic -> compilation_error Typecheck diagnostic
        | Ok checked ->
          let resolved = Resolver.resolve_checked_program checked program in
-         Ok { surface; resolved; source_text = source })
+         Ok { surface; resolved; source_text; source })
   in
   checkpoint ();
   result
+;;
+
+let compile_script_detailed ?checkpoint ?surface ?required_bindings ~source () =
+  compile_source ?checkpoint ?surface ?required_bindings ~source_text:source None
+;;
+
+let compile_captured_script source ?checkpoint ?surface ?required_bindings () =
+  compile_source
+    ?checkpoint
+    ?surface
+    ?required_bindings
+    ~source_text:(Captured.contents source)
+    (Some source)
 ;;
 
 let compile_script ?checkpoint ?surface ?required_bindings ~source () =
@@ -831,42 +902,44 @@ let compiled_surface (compiled : compiled_script) : Builtin_surface.surface =
   compiled.surface
 ;;
 
-let instantiate_session
+let instantiate_session_internal
       ?control
       (config : runtime_config)
       (compiled : compiled_script)
       ~(entrypoints : compiled_entrypoints)
-  : (session, string) result
+  : (session, Failure.t) result
   =
+  let failure message = Error (Failure.plain message) in
   match
     ensure_surface_compatible
       ~compiled_surface:compiled.surface
       ~runtime_surface:config.surface
   with
-  | Error msg -> Error msg
+  | Error msg -> failure msg
   | Ok () ->
     (match operations_map config.operations with
-     | Error msg -> Error msg
+     | Error msg -> failure msg
      | Ok operations ->
        let env = Builtin_modules.create_env_with_surface ?control config.surface in
+       let env = { env with source = compiled.source } in
        (try
           Eval.eval_program env compiled.resolved;
           match Lang.find_var env entrypoints.initial_state_name with
           | None ->
-            Error
+            failure
               (Printf.sprintf
                  "Missing initial_state binding '%s'"
                  entrypoints.initial_state_name)
           | Some initial_state ->
             (match Lang.find_var env entrypoints.on_event_name with
              | None ->
-               Error
+               failure
                  (Printf.sprintf
                     "Missing on_event binding '%s'"
                     entrypoints.on_event_name)
              | Some on_event ->
                (match expect_callable entrypoints.on_event_name on_event with
-                | Error msg -> Error msg
+                | Error msg -> failure msg
                 | Ok on_event ->
                   Option.iter control ~f:(fun control ->
                     control.check_value initial_state);
@@ -891,8 +964,18 @@ let instantiate_session
                     ; halted = false
                     }))
         with
-        | Lang.Runtime_error err ->
-          Error (Lang.format_runtime_error compiled.source_text err)))
+        | Lang.Runtime_error err -> Error (Failure.runtime err)))
+;;
+
+let instantiate_session_detailed ?control config compiled ~entrypoints =
+  instantiate_session_internal ?control config compiled ~entrypoints
+  |> Result.map_error ~f:Failure.diagnostic
+;;
+
+let instantiate_session ?control config compiled ~entrypoints =
+  instantiate_session_internal ?control config compiled ~entrypoints
+  |> Result.map_error ~f:(fun failure ->
+    Failure.render failure ~source_text:compiled.source_text)
 ;;
 
 let current_state (session : session) : Lang.value = session.state
@@ -998,26 +1081,17 @@ let expect_task_value (value : Lang.value) : (Lang.task, string) result =
   | _ -> Error "Expected task result from on_event"
 ;;
 
-let continuation_task_result
-      (session : session)
-      (fn : Lang.value)
-      (args : Lang.value list)
-  : (Lang.task, string) result
-  =
+let continuation_task_result fn args ~site =
   match Eval.apply_value_result fn args with
-  | Ok value -> expect_task_value value
-  | Error err -> Error (format_runtime_error session err)
+  | Ok (Lang.VTask task) -> Ok (Lang.Task.with_fallback task site)
+  | Ok _ -> Error (Failure.plain ?site "Expected task result from on_event")
+  | Error diagnostic -> Error (Failure.runtime (Diagnostic.with_fallback diagnostic site))
 ;;
 
-let continuation_value_result
-      (session : session)
-      (fn : Lang.value)
-      (args : Lang.value list)
-  : (Lang.value, string) result
-  =
-  match Eval.apply_value_result fn args with
-  | Ok value -> Ok value
-  | Error err -> Error (format_runtime_error session err)
+let continuation_value_result fn args ~site =
+  Eval.apply_value_result fn args
+  |> Result.map_error ~f:(fun diagnostic ->
+    Failure.runtime (Diagnostic.with_fallback diagnostic site))
 ;;
 
 let find_operation (session : session) (name : string) : (op_def, string) result =
@@ -1188,36 +1262,24 @@ let perform_local_effect (session : session) (eff : Lang.eff) =
     | Effect_suspend _ -> Error "host local-effect delivery cannot suspend")
 ;;
 
-let rec continue_with_value
-          (session : session)
-          (exec : exec_ctx)
-          ~(frames : continuation_frame list)
-          (value : Lang.value)
-  : (task_result, string) result
-  =
+let rec continue_with_value session exec ~frames value =
   match frames with
   | [] -> Ok (Task_value value)
-  | Bind_frame k :: rest ->
+  | Bind_frame { fn; site } :: rest ->
     let open Result.Let_syntax in
-    let%bind next_task = continuation_task_result session k [ value ] in
+    let%bind next_task = continuation_task_result fn [ value ] ~site in
     interpret_task session exec ~frames:rest next_task
-  | Map_frame f :: rest ->
+  | Map_frame { fn; site } :: rest ->
     let open Result.Let_syntax in
-    let%bind mapped = continuation_value_result session f [ value ] in
+    let%bind mapped = continuation_value_result fn [ value ] ~site in
     continue_with_value session exec ~frames:rest mapped
   | Catch_frame _ :: rest -> continue_with_value session exec ~frames:rest value
 
-and continue_with_error
-      (session : session)
-      (exec : exec_ctx)
-      ~(frames : continuation_frame list)
-      (msg : string)
-  : (task_result, string) result
-  =
+and continue_with_error session exec ~frames diagnostic =
   match frames with
-  | [] -> Error msg
+  | [] -> Error diagnostic
   | Bind_frame _ :: rest | Map_frame _ :: rest ->
-    continue_with_error session exec ~frames:rest msg
+    continue_with_error session exec ~frames:rest diagnostic
   | Catch_frame catch_frame :: rest ->
     let discarded =
       List.take
@@ -1233,63 +1295,74 @@ and continue_with_error
       | Ok { kind = Local_transactional_with_result { rollback }; _ } -> rollback eff.args
       | _ -> ());
     let open Result.Let_syntax in
+    (* Task.catch has always received the task/operation failure message. Owned
+       diagnostic transport does not add rendering or catch callback failures. *)
     let%bind next_task =
-      continuation_task_result session catch_frame.handler [ Lang.VString msg ]
+      continuation_task_result
+        catch_frame.handler
+        [ Lang.VString (Failure.catch_message diagnostic ~source_text:session.source_text)
+        ]
+        ~site:catch_frame.site
     in
     interpret_task session exec ~frames:rest next_task
 
-and interpret_task
-      (session : session)
-      (exec : exec_ctx)
-      ~(frames : continuation_frame list)
-      (task : Lang.task)
-  : (task_result, string) result
-  =
+and interpret_task session exec ~frames (task : Lang.task) =
   Option.iter session.env.control ~f:(fun control -> control.checkpoint ());
   let open Result.Let_syntax in
+  let failure message = Failure.plain ?site:task.site message in
+  let nested task' = Lang.Task.with_fallback task' task.site in
   let%bind () =
     match exec.fuel with
-    | Some remaining when remaining <= 0 -> Error "ChatML task fuel exhausted"
+    | Some remaining when remaining <= 0 -> Error (failure "ChatML task fuel exhausted")
     | Some remaining ->
       exec.fuel <- Some (remaining - 1);
       Ok ()
     | None -> Ok ()
   in
-  match task with
+  match task.step with
   | Lang.TPure value -> continue_with_value session exec ~frames value
-  | Lang.TFail msg -> continue_with_error session exec ~frames msg
-  | Lang.TBind (next_task, k) ->
-    interpret_task session exec ~frames:(Bind_frame k :: frames) next_task
-  | Lang.TMap (next_task, f) ->
-    interpret_task session exec ~frames:(Map_frame f :: frames) next_task
+  | Lang.TFail msg -> continue_with_error session exec ~frames (failure msg)
+  | Lang.TBind (next_task, fn) ->
+    interpret_task
+      session
+      exec
+      ~frames:(Bind_frame { fn; site = task.site } :: frames)
+      (nested next_task)
+  | Lang.TMap (next_task, fn) ->
+    interpret_task
+      session
+      exec
+      ~frames:(Map_frame { fn; site = task.site } :: frames)
+      (nested next_task)
   | Lang.TCatch (next_task, handler) ->
     let catch_frame =
       Catch_frame
         { handler
+        ; site = task.site
         ; saved_local_effects_rev = exec.local_effects_rev
         ; saved_emitted_rev = exec.emitted_rev
         ; saved_end_session_requested = exec.end_session_requested
         }
     in
-    interpret_task session exec ~frames:(catch_frame :: frames) next_task
+    interpret_task session exec ~frames:(catch_frame :: frames) (nested next_task)
   | Lang.TPerform eff ->
     (match dispatch_effect session exec ~spawned:false eff with
-     | Error msg -> continue_with_error session exec ~frames msg
+     | Error msg -> continue_with_error session exec ~frames (failure msg)
      | Ok (Effect_value value) -> continue_with_value session exec ~frames value
      | Ok (Effect_suspend request) -> Ok (Task_suspend { exec; frames; request }))
   | Lang.TSpawn eff ->
     (match exec.remaining_tasks with
      | Some remaining when remaining <= 0 ->
-       continue_with_error session exec ~frames "ChatML task limit exceeded"
+       continue_with_error session exec ~frames (failure "ChatML task limit exceeded")
      | remaining ->
        exec.remaining_tasks <- Option.map remaining ~f:(fun remaining -> remaining - 1);
        (match dispatch_effect session exec ~spawned:true eff with
-        | Error msg -> continue_with_error session exec ~frames msg
+        | Error msg -> continue_with_error session exec ~frames (failure msg)
         | Ok (Effect_value value) -> continue_with_value session exec ~frames value
         | Ok (Effect_suspend _) -> assert false))
 ;;
 
-let run_entrypoint
+let run_entrypoint_internal
       ?control
       ?limits
       ?prepare_result
@@ -1299,11 +1372,13 @@ let run_entrypoint
       ~arguments
       ()
   =
+  let failure message = Error (Failure.plain message) in
   let open Result.Let_syntax in
   let%bind () =
     ensure_surface_compatible
       ~compiled_surface:compiled.surface
       ~runtime_surface:config.surface
+    |> host_result
   in
   let%bind operations =
     List.filter config.operations ~f:(fun operation ->
@@ -1312,14 +1387,16 @@ let run_entrypoint
       | Local_transactional_with_result _ -> Option.is_some prepare_result
       | Local_transactional | External_async -> false)
     |> operations_map
+    |> host_result
   in
   let env = Builtin_modules.create_env_with_surface ?control config.surface in
+  let env = { env with source = compiled.source } in
   try
     Eval.eval_program env compiled.resolved;
     let%bind fn =
       match Lang.find_var env entrypoint with
-      | None -> Error (Printf.sprintf "Missing entrypoint '%s'" entrypoint)
-      | Some value -> expect_callable entrypoint value
+      | None -> failure (Printf.sprintf "Missing entrypoint '%s'" entrypoint)
+      | Some value -> expect_callable entrypoint value |> host_result
     in
     let exec =
       { phase = "standalone"
@@ -1348,10 +1425,9 @@ let run_entrypoint
       ~finally:(fun () -> session.current_exec <- None)
       ~f:(fun () ->
         let%bind value =
-          Eval.apply_value_result fn arguments
-          |> Result.map_error ~f:(format_runtime_error session)
+          Eval.apply_value_result fn arguments |> Result.map_error ~f:Failure.runtime
         in
-        let%bind task = expect_task_value value in
+        let%bind task = expect_task_value value |> host_result in
         let%bind outcome = interpret_task session exec ~frames:[] task in
         match outcome with
         | Task_value value ->
@@ -1360,13 +1436,58 @@ let run_entrypoint
             | None -> Ok ignore
             | Some prepare ->
               prepare ~value ~local_effects:(List.rev exec.local_effects_rev)
+              |> host_result
           in
           install ();
           value
-        | Task_suspend _ -> Error "Standalone execution cannot suspend for UI input")
+        | Task_suspend _ -> failure "Standalone execution cannot suspend for UI input")
   with
-  | Lang.Runtime_error error ->
-    Error (Lang.format_runtime_error compiled.source_text error)
+  | Lang.Runtime_error error -> Error (Failure.runtime error)
+;;
+
+let run_entrypoint_detailed
+      ?control
+      ?limits
+      ?prepare_result
+      config
+      compiled
+      ~entrypoint
+      ~arguments
+      ()
+  =
+  run_entrypoint_internal
+    ?control
+    ?limits
+    ?prepare_result
+    config
+    compiled
+    ~entrypoint
+    ~arguments
+    ()
+  |> Result.map_error ~f:Failure.diagnostic
+;;
+
+let run_entrypoint
+      ?control
+      ?limits
+      ?prepare_result
+      config
+      compiled
+      ~entrypoint
+      ~arguments
+      ()
+  =
+  run_entrypoint_internal
+    ?control
+    ?limits
+    ?prepare_result
+    config
+    compiled
+    ~entrypoint
+    ~arguments
+    ()
+  |> Result.map_error ~f:(fun failure ->
+    Failure.render failure ~source_text:compiled.source_text)
 ;;
 
 let commit_exec
@@ -1451,7 +1572,25 @@ let prepare_runtime_commit
     install_transaction ()
 ;;
 
-let handle_event_impl
+let prepare_runtime_commit_detailed
+      ?consume_queued
+      prepare_commit
+      prepare_transaction
+      session
+      exec
+      ~new_state
+  =
+  prepare_runtime_commit
+    ?consume_queued
+    prepare_commit
+    prepare_transaction
+    session
+    exec
+    ~new_state
+  |> host_result
+;;
+
+let handle_event_impl_detailed
       ?(prepare_commit = fun ~local_effects:_ -> Ok ignore)
       ?prepare_transaction
       ?(validate_state = fun _ -> Ok ())
@@ -1462,17 +1601,17 @@ let handle_event_impl
       (session : session)
       ~(context : Lang.value)
       ~(event : Lang.value)
-  : (unit, string) result
+  : (unit, Failure.t) result
   =
   if session.halted
-  then Error "Session has ended"
+  then Error (Failure.plain "Session has ended")
   else if Option.is_some session.suspended_exec
-  then Error "Session is waiting for UI input."
+  then Error (Failure.plain "Session is waiting for UI input.")
   else if Option.is_some session.current_exec
-  then Error "Session is already handling an event."
+  then Error (Failure.plain "Session is already handling an event.")
   else (
     match phase_of_context context with
-    | Error msg -> Error msg
+    | Error msg -> Error (Failure.plain msg)
     | Ok phase ->
       Option.iter session.env.control ~f:(fun control ->
         control.check_value session.state);
@@ -1494,7 +1633,7 @@ let handle_event_impl
       in
       let old_state = session.state in
       let open Result.Let_syntax in
-      let%bind execution_state = copy_state old_state in
+      let%bind execution_state = copy_state old_state |> host_result in
       let committed = ref false in
       Exn.protect
         ~finally:(fun () ->
@@ -1510,10 +1649,10 @@ let handle_event_impl
                     session.on_event
                     [ context; execution_state; event ]
                 with
-                | Error err -> Error (format_runtime_error session err)
+                | Error err -> Error (Failure.runtime err)
                 | Ok value ->
                   (match expect_task_value value with
-                   | Error msg -> Error msg
+                   | Error msg -> Error (Failure.plain msg)
                    | Ok task -> interpret_task session exec ~frames:[] task))
               ~finally:(fun () -> session.current_exec <- None)
           in
@@ -1525,15 +1664,15 @@ let handle_event_impl
                 phase
                 (value_to_string old_state)
                 (value_to_string event)
-                (String.prefix msg 4096));
+                (String.prefix msg.Failure.diagnostic.message 4096));
             Error msg
           | Ok (Task_value new_state) ->
             let open Result.Let_syntax in
             Option.iter session.env.control ~f:(fun control ->
               control.check_value new_state);
-            let%bind () = validate_state new_state in
+            let%bind () = validate_state new_state |> host_result in
             let%map commit_host =
-              prepare_runtime_commit
+              prepare_runtime_commit_detailed
                 ~consume_queued
                 prepare_commit
                 prepare_transaction
@@ -1547,7 +1686,7 @@ let handle_event_impl
             log_committed_exec session exec ~old_state ~new_state
           | Ok (Task_suspend suspended_exec) ->
             let open Result.Let_syntax in
-            let%map () = validate_suspension () in
+            let%map () = validate_suspension () |> host_result in
             session.suspended_exec <- Some suspended_exec;
             Debug_log.emit (fun () ->
               Printf.sprintf
@@ -1559,9 +1698,58 @@ let handle_event_impl
                  | Ask_choice { prompt; _ } -> "ask_choice:" ^ String.prefix prompt 4096))))
 ;;
 
-let handle_event = handle_event_impl ~consume_queued:false
+let handle_event_internal = handle_event_impl_detailed ~consume_queued:false
 
-let handle_next_queued_event
+let handle_event_detailed
+      ?prepare_commit
+      ?prepare_transaction
+      ?validate_state
+      ?validate_suspension
+      ?copy_state
+      ?limits
+      session
+      ~context
+      ~event
+  =
+  handle_event_internal
+    ?prepare_commit
+    ?prepare_transaction
+    ?validate_state
+    ?validate_suspension
+    ?copy_state
+    ?limits
+    session
+    ~context
+    ~event
+  |> Result.map_error ~f:Failure.diagnostic
+;;
+
+let handle_event
+      ?prepare_commit
+      ?prepare_transaction
+      ?validate_state
+      ?validate_suspension
+      ?copy_state
+      ?limits
+      session
+      ~context
+      ~event
+  =
+  handle_event_internal
+    ?prepare_commit
+    ?prepare_transaction
+    ?validate_state
+    ?validate_suspension
+    ?copy_state
+    ?limits
+    session
+    ~context
+    ~event
+  |> Result.map_error ~f:(fun failure ->
+    Failure.render failure ~source_text:session.source_text)
+;;
+
+let handle_next_queued_event_internal
       ?prepare_commit
       ?prepare_transaction
       ?validate_state
@@ -1575,9 +1763,9 @@ let handle_next_queued_event
   match peek_queued_event session with
   | None -> Ok None
   | Some event ->
-    let%bind event = copy_event event in
+    let%bind event = copy_event event |> host_result in
     let%map () =
-      handle_event_impl
+      handle_event_impl_detailed
         ?prepare_commit
         ?prepare_transaction
         ?validate_state
@@ -1593,41 +1781,89 @@ let handle_next_queued_event
     Some ()
 ;;
 
-let resume_ui_request
+let handle_next_queued_event_detailed
+      ?prepare_commit
+      ?prepare_transaction
+      ?validate_state
+      ?copy_state
+      ?limits
+      session
+      ~context
+      ~copy_event
+  =
+  handle_next_queued_event_internal
+    ?prepare_commit
+    ?prepare_transaction
+    ?validate_state
+    ?copy_state
+    ?limits
+    session
+    ~context
+    ~copy_event
+  |> Result.map_error ~f:Failure.diagnostic
+;;
+
+let handle_next_queued_event
+      ?prepare_commit
+      ?prepare_transaction
+      ?validate_state
+      ?copy_state
+      ?limits
+      session
+      ~context
+      ~copy_event
+  =
+  handle_next_queued_event_internal
+    ?prepare_commit
+    ?prepare_transaction
+    ?validate_state
+    ?copy_state
+    ?limits
+    session
+    ~context
+    ~copy_event
+  |> Result.map_error ~f:(fun failure ->
+    Failure.render failure ~source_text:session.source_text)
+;;
+
+let resume_ui_request_internal
       ?(prepare_commit = fun ~local_effects:_ -> Ok ignore)
       ?prepare_transaction
       ?(validate_state = fun _ -> Ok ())
       ?limits:_
       (session : session)
       ~(response : string)
-  : (unit, string) result
+  : (unit, Failure.t) result
   =
   match session.suspended_exec with
-  | None -> Error "Session is not waiting for UI input."
+  | None -> Error (Failure.plain "Session is not waiting for UI input.")
   | Some suspended_exec ->
     let old_state = session.state in
     let open Result.Let_syntax in
     let%bind response_value =
-      response_value_of_request suspended_exec.request ~response
+      response_value_of_request suspended_exec.request ~response |> host_result
     in
     session.suspended_exec <- None;
     session.ui_resume_active <- true;
     session.current_exec <- Some suspended_exec.exec;
     let result =
-      continue_with_value
-        session
-        suspended_exec.exec
-        ~frames:suspended_exec.frames
-        response_value
+      Exn.protect
+        ~finally:(fun () ->
+          session.current_exec <- None;
+          session.ui_resume_active <- false)
+        ~f:(fun () ->
+          continue_with_value
+            session
+            suspended_exec.exec
+            ~frames:suspended_exec.frames
+            response_value)
     in
-    session.current_exec <- None;
-    session.ui_resume_active <- false;
     (match result with
      | Error msg -> Error msg
      | Ok (Task_value new_state) ->
-       let%bind () = validate_state new_state in
+       let%bind () = validate_state new_state |> host_result in
        let%map commit_host =
-         prepare_runtime_commit
+         prepare_runtime_commit_detailed
            prepare_commit
            prepare_transaction
            session
@@ -1640,6 +1876,43 @@ let resume_ui_request
      | Ok (Task_suspend next_suspended_exec) ->
        session.suspended_exec <- Some next_suspended_exec;
        Ok ())
+;;
+
+let resume_ui_request_detailed
+      ?prepare_commit
+      ?prepare_transaction
+      ?validate_state
+      ?limits
+      session
+      ~response
+  =
+  resume_ui_request_internal
+    ?prepare_commit
+    ?prepare_transaction
+    ?validate_state
+    ?limits
+    session
+    ~response
+  |> Result.map_error ~f:Failure.diagnostic
+;;
+
+let resume_ui_request
+      ?prepare_commit
+      ?prepare_transaction
+      ?validate_state
+      ?limits
+      session
+      ~response
+  =
+  resume_ui_request_internal
+    ?prepare_commit
+    ?prepare_transaction
+    ?validate_state
+    ?limits
+    session
+    ~response
+  |> Result.map_error ~f:(fun failure ->
+    Failure.render failure ~source_text:session.source_text)
 ;;
 
 let prepare_enqueue_internal_event (session : session) (event : Lang.value) =

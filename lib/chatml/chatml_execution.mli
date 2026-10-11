@@ -1,7 +1,9 @@
 open Core
 
 (** Host execution budget shared by initialization, pure evaluation, task
-    continuations and nested ChatML runs. Does not grant tool authority. *)
+    continuations and nested ChatML runs. Does not grant tool authority.
+    Diagnostic/site validation uses the same cancellation/deadline/lifetime
+    polling without consuming execution fuel. *)
 type limits =
   { fuel : int
   ; max_tasks : int

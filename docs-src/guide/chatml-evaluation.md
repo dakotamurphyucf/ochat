@@ -128,6 +128,25 @@ the host's task/event commit rules determine which staged effects are retained.
 An eagerly raised failure occurs before an outer task is constructed and is not
 automatically caught by `Task.catch` around a task argument.
 
+When a host compiles captured source, diagnostics retain its exact identity,
+content revision and byte range. A closure keeps the source in which it was
+defined, including tail calls and builtin callbacks. Deferred tasks keep their
+construction site; continuation failures keep their defining source through
+later events and UI resumption. Propagating an already located failure preserves
+its original site. Rendering uses captured bytes without reopening a file or
+substituting the calling program's text. An error without a provable location
+remains unlocated.
+
+Locations are half-open byte ranges, with lines starting at 1 and columns at 0.
+LF, CR and CRLF retain their canonical positions. Messages and complete rendered
+diagnostics are bounded to 16 KiB, with at most eight related sites. Escaped
+control bytes and bounded excerpts do not redefine source byte coordinates.
+Source metadata adds no task step or fuel charge; its cooperative polls still
+observe cancellation, deadlines and execution-scope lifetime. `Task.catch`
+keeps its existing recovery boundaries and receives the original plain failure
+message even when the displayed diagnostic is truncated. Cancellation and
+execution-limit failures still escape recovery.
+
 <!-- ochat-authoring-example: {"id":"evaluation.float-zero-failure","surface":"one_off_v1","runtime_error":"Division by zero"} -->
 ```ocaml
 let main input = Task.pure(`Number(1.0 /. 0.0))

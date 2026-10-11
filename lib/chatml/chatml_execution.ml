@@ -134,8 +134,8 @@ let make_control ~env budget =
   let until_poll = Atomic.make 0 in
   let clock = Eio.Stdenv.mono_clock env in
   let started = Eio.Time.Mono.now clock in
-  let checkpoint () =
-    consume budget remaining 1 fuel_failure;
+  let diagnostic_checkpoint () =
+    check_budget budget;
     if Atomic.fetch_and_add until_poll (-1) <= 0
     then (
       Atomic.set until_poll 64;
@@ -149,6 +149,10 @@ let make_control ~env budget =
           { code = "chatml.execution_timeout"
           ; message = "ChatML execution deadline exceeded"
           })
+  in
+  let checkpoint () =
+    consume budget remaining 1 fuel_failure;
+    diagnostic_checkpoint ()
   in
   let allocation_remaining = Atomic.make limits.allocation_bytes in
   let allocate bytes = consume budget allocation_remaining bytes allocation_failure in
@@ -188,7 +192,7 @@ let make_control ~env budget =
         List.iter fields ~f:(visit (depth + 1))
       | VRef cell -> visit (depth + 1) !cell
       | VTask task when render_tasks ->
-        (match task with
+        (match task.step with
          | TPure value -> visit (depth + 1) value
          | TBind (task, fn) | TMap (task, fn) | TCatch (task, fn) ->
            visit (depth + 1) (VTask task);
@@ -413,6 +417,7 @@ let make_control ~env budget =
     | _ -> ()
   in
   { Chatml.Chatml_lang.checkpoint
+  ; diagnostic_checkpoint
   ; allocate
   ; before_builtin
   ; check_value
@@ -512,6 +517,8 @@ let with_scope
         Some
           Chatml.Chatml_lang.
             { checkpoint = (fun () -> each (fun c -> c.checkpoint ()))
+            ; diagnostic_checkpoint =
+                (fun () -> each (fun c -> c.diagnostic_checkpoint ()))
             ; allocate = (fun bytes -> each (fun c -> c.allocate bytes))
             ; check_value = (fun value -> each (fun c -> c.check_value value))
             ; before_json_import =
@@ -571,6 +578,7 @@ let create_runner ~env ~policy () =
   in
   let control : Chatml.Chatml_lang.execution_control =
     { checkpoint = (fun () -> apply (fun c -> c.checkpoint ()))
+    ; diagnostic_checkpoint = (fun () -> apply (fun c -> c.diagnostic_checkpoint ()))
     ; allocate = (fun bytes -> apply (fun c -> c.allocate bytes))
     ; check_value = (fun value -> apply (fun c -> c.check_value value))
     ; before_json_import = (fun value -> apply (fun c -> c.before_json_import value))

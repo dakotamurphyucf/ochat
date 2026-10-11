@@ -62,3 +62,30 @@ val compile_with_policy
   -> source:string
   -> unit
   -> (Chatml_host_runtime.compiled_script, error) result
+
+(** Compile one already validated immutable capture through the same bounded
+    domain/policy adapter as [compile]. Check its exact byte length before
+    starting a domain; do not reopen, rewrite or rehash its contents. Successful
+    programs and parser/type failures retain its identity, revision and source.
+    No initializer executes. The capture can cross the joined domain boundary;
+    inference state, checkpoint callbacks and execution authority do not escape.
+    Resource/host failures remain unlocated, and cancellation follows [compile]. *)
+val compile_captured
+  :  Chatml_source.t
+  -> ?limits:limits
+  -> env:Eio_unix.Stdenv.base
+  -> target:target
+  -> unit
+  -> (Chatml_host_runtime.compiled_script, error) result
+
+(** Explicit policy variant of [compile_captured], using the same cooperative
+    cancellation, elapsed-time checks and joined cleanup as [compile_with_policy].
+    This API selects no project, file, bundle or runtime revision on the caller's
+    behalf; the capture owner has already chosen the exact immutable source. *)
+val compile_captured_with_policy
+  :  Chatml_source.t
+  -> policy:policy
+  -> env:Eio_unix.Stdenv.base
+  -> target:target
+  -> unit
+  -> (Chatml_host_runtime.compiled_script, error) result

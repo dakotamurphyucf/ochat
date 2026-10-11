@@ -331,6 +331,23 @@ let resolve_checked_program
   { L.stmts = stmts'; source_text = prog.source_text }
 ;;
 
+let resolve_captured_program (checked : Chatml_typechecker.checked_program) unit =
+  let source = Chatml.Chatml_parse.Unit.source unit in
+  match checked.source with
+  | Some checked_source
+    when Chatml_source.Id.equal
+           (Chatml_source.id source)
+           (Chatml_source.id checked_source)
+         && Chatml_source.Digest.equal
+              (Chatml_source.digest source)
+              (Chatml_source.digest checked_source) ->
+    Ok (resolve_checked_program checked (Chatml.Chatml_parse.Unit.program unit))
+  | Some _ | None ->
+    Error
+      (Chatml_diagnostic.create
+         "Checked annotations do not belong to this captured source revision")
+;;
+
 let resolve_program (prog : L.program) : L.resolved_program =
   match Chatml_typechecker.check_program prog with
   | Ok checked -> resolve_checked_program checked prog

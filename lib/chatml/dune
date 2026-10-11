@@ -5,6 +5,8 @@
   chatml_lang
   chatml_eval
   chatml_parse
+  chatml_checkpoint
+  chatml_owned_source
   chatml_slot_layout
   chatml_lexer
   chatml_parser
@@ -15,7 +17,7 @@
   chatml_builtin_surface
   chatml_extension_surface
   chatml_surface_inventory)
- (libraries core jsonaf menhirLib source)
+ (libraries core jsonaf menhirLib source chatml_source chatml_diagnostic)
  (preprocess
   (pps ppx_jane)))
 
@@ -89,5 +91,5 @@
  (name chatml_compilation)
  (public_name ochat.chatml_compilation)
  (modules chatml_compilation)
- (libraries core eio eio.unix mtime chatml chatml_host_runtime)
+ (libraries core eio eio.unix mtime chatml chatml_source chatml_host_runtime)
  (preprocess (pps ppx_jane)))

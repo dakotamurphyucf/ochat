@@ -45,16 +45,33 @@ let shared_features =
       ; "test/chatml_composition/background_shell_tests.ml"
       ] )
   ; ( "compilation.policy"
-    , "No-effect compiler domains, explicit policy and cooperative cancellation"
+    , "No-effect compiler domains, captured revisions, explicit policy and cooperative \
+       cancellation"
     , [ "lib/chatml/chatml_compilation.ml" ]
     , "runtime.execution"
-    , [ "test/chatml_compilation_test.ml" ] )
+    , [ "test/chatml_compilation_test.ml"
+      ; "test/chatml_captured_compilation/domain_tests.ml"
+      ] )
   ; ( "execution.ancestry"
     , "Owned shared counters, nested scope lifetimes and independent session budgets"
     , [ "lib/chatml/chatml_execution.ml" ]
     , "runtime.execution"
     , [ "test/chatml_execution_budget_test.ml"; "test/chatml_projection_budget_test.ml" ]
     )
+  ; ( "diagnostics.deferred_ownership"
+    , "Deferred source sites, bounded diagnostics and unchanged task fuel/recovery \
+       boundaries"
+    , [ "lib/chatml/chatml_lang.ml"
+      ; "lib/chatml/chatml_host_runtime.ml"
+      ; "lib/chatml/chatml_execution.ml"
+      ; "lib/chatml_sources/chatml_diagnostic.ml"
+      ]
+    , "runtime.execution"
+    , [ "test/chatml_owned_diagnostics/task_tests.ml"
+      ; "test/chatml_owned_diagnostics/execution_tests.ml"
+      ; "test/chatml_owned_diagnostics/session_tests.ml"
+      ; "test/chatml_diagnostics/diagnostic_invariants.ml"
+      ] )
   ; ( "jobs.launch"
     , "Selected job starts stage intent until owner commit; reads and cancellation \
        retain live authority"
@@ -212,9 +229,9 @@ let implementation_sources =
   ; ( "lib/agent_server/delegation_lifecycle.ml"
     , "5bfed8ecc3cd3f7976457adbab4a5e875f8b56bd08f4856d18149c694303ad49" )
   ; ( "lib/chatml/chatml_compilation.ml"
-    , "5b5f2a27e8615fc45c8050c7015fc36b33d9f4314379496ff7f1c5683d2efa3b" )
+    , "c468c9538044e219520562ffa39265cfcb61630b142522910285bc5ed395a5c0" )
   ; ( "lib/chatml/chatml_execution.ml"
-    , "e2272786e56f379f14bd6fba149ca2e822c74a05ef512a87185bdbb518018afe" )
+    , "b14119b791a92bca9b430c2c261c6debd1f8d0367a9628fe40e5eaea141c5cee" )
   ; ( "lib/chatml/chatml_value_codec.ml"
     , "0f621d743b97b856dd40270fc8c51444ca18e6098ceb7ff2481a22cf999d85be" )
   ; ( "lib/agent_protocol/delivery.ml"
@@ -282,7 +299,11 @@ let implementation_sources =
   ; ( "lib/chat_response/subscription_operations.ml"
     , "88aa4ac9bd7c2100a9614f8b30639c6fd30e7ae0c11e86e423a57badd69c0603" )
   ; ( "lib/chatml/chatml_host_runtime.ml"
-    , "9bce55b94e4733d606d1196bb893382580a4d87c85b717cee96c8b3a613dbc5f" )
+    , "be7c0621bb402557f0f8972ed5f6fd9f3bb10373f24a5b0a56f59b0fbe9439b8" )
+  ; ( "lib/chatml/chatml_lang.ml"
+    , "944594533c46d658d2a6a900fb020f47b2ec5c9859363d52bf00629a1926d47f" )
+  ; ( "lib/chatml_sources/chatml_diagnostic.ml"
+    , "cd4f59d52868eff58a8eaabd2cc8222d8c65f677066b3d8ab16c7b5c7a81fde5" )
   ]
 ;;
 
@@ -301,16 +322,16 @@ let topic_contracts =
     , "294a5744de2faab1d95da0218dad26b1ab739b831d30ec610534ee64823b5212" )
   ; ( "one_off_v1"
     , "runtime.execution"
-    , "a1829b872251aee31185ead355a9e69c50379a0f875bd4c457206aee2870c7f0" )
+    , "230a406a2b1b75f25a54be0c3e124f75878fe363900d3b556d2c0540e35f6066" )
   ; ( "tool_v1"
     , "runtime.execution"
-    , "4c32af2405c7865c5d419cedf923501b52e8b61d1672af1d6eeb97a0a854286e" )
+    , "04f76b1eacc2cd6d263f076593ed1bbe4b6bcedfdf7f2675e5ef5f4dac37fa1f" )
   ; ( "moderator_v1"
     , "runtime.execution"
-    , "aa270bddc098321e84d1ac0c7f2a166a55ca9c34785c2425e31a902dc6a7e4eb" )
+    , "a8f21e2211dd395be33c404ab8f16cefa030f7a73371d1a8d9a8c9ebc8e1f543" )
   ; ( "delegated_moderator_v1"
     , "runtime.execution"
-    , "c4b3179805c316bc181c1f7f47dc954a737789e260e5e384d59352fad2e22e70" )
+    , "c7d1b752769bfd2e1345d8476d1318164faddc2bddd941a6c9af7a3e791f40ca" )
   ; ( "one_off_v1"
     , "runtime.jobs.owned"
     , "61cc6553ecb8b4278b6d8aab419a43be25209835632f90051581b3d29f0274aa" )

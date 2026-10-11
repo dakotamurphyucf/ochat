@@ -19,7 +19,8 @@ let%expect_test
     (S.implementation_sources sources
      |> List.map ~f:(fun source -> source.S.path)
      |> List.filter ~f:(fun path ->
-       String.is_prefix path ~prefix:"lib/chatml/"
+       (String.is_prefix path ~prefix:"lib/chatml/"
+        || String.is_prefix path ~prefix:"lib/chatml_sources/")
        (* Host control belongs to the separate runtime contract inventory. *)
        && not
             (List.mem
@@ -45,6 +46,6 @@ let%expect_test
     , (List.map incomplete.missing ~f:(fun target -> target.V.id) : string list)];
   [%expect
     {|
-    (30 120 7 (one_off_v1/semantics/lex.identifiers))
+    (31 124 13 (one_off_v1/semantics/lex.identifiers))
     |}]
 ;;

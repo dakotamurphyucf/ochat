@@ -5,6 +5,25 @@ type eval_result =
   | Value of value
   | TailCall of clos * value list
 
+let diagnostic_checkpoint env () =
+  Option.iter env.control ~f:(fun control -> control.diagnostic_checkpoint ())
+;;
+
+let site env span =
+  Option.bind env.source ~f:(fun source ->
+    Chatml_owned_source.site source span ~checkpoint:(diagnostic_checkpoint env))
+;;
+
+let raise_owned_error env ?span message =
+  let site = Option.bind span ~f:(site env) in
+  let span =
+    match env.source, site with
+    | Some _, None -> None
+    | None, _ | Some _, Some _ -> span
+  in
+  raise_runtime_error ?span ?site message
+;;
+
 let slot_matches_value = Chatml_slot_layout.matches_value
 
 let allocate env bytes =
@@ -103,7 +122,7 @@ and eval_expr_tail
   | REVarGlobal x ->
     (match find_var env x with
      | Some v -> Value v
-     | None -> raise_runtime_error ~span:e.span (Printf.sprintf "Unbound variable %s" x))
+     | None -> raise_owned_error env ~span:e.span (Printf.sprintf "Unbound variable %s" x))
   | REVarLoc loc -> Value (load_from_frames frames loc)
   | REPrim1 (prim, arg_expr) ->
     let arg_val = finish_eval frames (eval_expr_tail ~tail:false env frames arg_expr) in
@@ -111,11 +130,13 @@ and eval_expr_tail
      | UNegInt, VInt n -> Value (VInt (-n))
      | UNegFloat, VFloat f -> Value (VFloat (-.f))
      | UNegInt, _ ->
-       raise_runtime_error
+       raise_owned_error
+         env
          ~span:e.span
          "Internal type error: unary int negation on non-int"
      | UNegFloat, _ ->
-       raise_runtime_error
+       raise_owned_error
+         env
          ~span:e.span
          "Internal type error: unary float negation on non-float")
   | REPrim2 (prim, lhs_expr, rhs_expr) ->
@@ -125,13 +146,13 @@ and eval_expr_tail
      | BIntAdd, VInt x, VInt y -> Value (VInt (x + y))
      | BIntSub, VInt x, VInt y -> Value (VInt (x - y))
      | BIntMul, VInt x, VInt y -> Value (VInt (x * y))
-     | BIntDiv, VInt _, VInt 0 -> raise_runtime_error ~span:e.span "Division by zero"
+     | BIntDiv, VInt _, VInt 0 -> raise_owned_error env ~span:e.span "Division by zero"
      | BIntDiv, VInt x, VInt y -> Value (VInt (x / y))
      | BFloatAdd, VFloat x, VFloat y -> Value (VFloat (x +. y))
      | BFloatSub, VFloat x, VFloat y -> Value (VFloat (x -. y))
      | BFloatMul, VFloat x, VFloat y -> Value (VFloat (x *. y))
      | BFloatDiv, VFloat _, VFloat y when Float.equal y 0.0 ->
-       raise_runtime_error ~span:e.span "Division by zero"
+       raise_owned_error env ~span:e.span "Division by zero"
      | BFloatDiv, VFloat x, VFloat y -> Value (VFloat (x /. y))
      | BStringConcat, VString x, VString y ->
        Option.iter env.control ~f:(fun control ->
@@ -157,7 +178,8 @@ and eval_expr_tail
              | _ -> not equal))
      | (BIntAdd | BIntSub | BIntMul | BIntDiv | BIntLt | BIntGt | BIntLe | BIntGe), _, _
        ->
-       raise_runtime_error
+       raise_owned_error
+         env
          ~span:e.span
          "Internal type error: int primitive on non-int operands"
      | ( ( BFloatAdd
@@ -170,11 +192,13 @@ and eval_expr_tail
          | BFloatGe )
        , _
        , _ ) ->
-       raise_runtime_error
+       raise_owned_error
+         env
          ~span:e.span
          "Internal type error: float primitive on non-float operands"
      | BStringConcat, _, _ ->
-       raise_runtime_error
+       raise_owned_error
+         env
          ~span:e.span
          "Internal type error: string concatenation on non-string operands")
   | RELambda (params, slots, body) ->
@@ -201,20 +225,41 @@ and eval_expr_tail
     (match fn_val with
      | VClosure cl ->
        if List.length cl.params <> List.length arg_vals
-       then raise_runtime_error ~span:e.span "Function arity mismatch";
+       then raise_owned_error env ~span:e.span "Function arity mismatch";
        if tail
        then TailCall (cl, arg_vals)
        else Value (finish_eval frames (TailCall (cl, arg_vals)))
      | VBuiltin bf ->
-       (try Value (bf arg_vals) with
-        | Failure msg -> raise_runtime_error ~span:e.span msg)
-     | _ -> raise_runtime_error ~span:e.span "Trying to call a non-function value")
+       let value =
+         try bf arg_vals with
+         | Runtime_error diagnostic ->
+           let fallback =
+             match diagnostic.site with
+             | Some _ -> None
+             | None -> site env e.span
+           in
+           raise (Runtime_error (Chatml_diagnostic.with_fallback diagnostic fallback))
+         | Failure msg -> raise_owned_error env ~span:e.span msg
+       in
+       let value =
+         match value with
+         | VTask task ->
+           let fallback =
+             match task.site with
+             | Some _ -> None
+             | None -> site env e.span
+           in
+           VTask (Task.with_fallback task fallback)
+         | value -> value
+       in
+       Value value
+     | _ -> raise_owned_error env ~span:e.span "Trying to call a non-function value")
   | REIf (cond_expr, then_expr, else_expr) ->
     let cond_val = finish_eval frames (eval_expr_tail ~tail:false env frames cond_expr) in
     (match cond_val with
      | VBool true -> eval_expr_tail ~tail env frames then_expr
      | VBool false -> eval_expr_tail ~tail env frames else_expr
-     | _ -> raise_runtime_error ~span:e.span "If condition must be bool")
+     | _ -> raise_owned_error env ~span:e.span "If condition must be bool")
   | REWhile (cond_expr, body_expr) ->
     let rec loop () =
       let cval = finish_eval frames (eval_expr_tail ~tail:false env frames cond_expr) in
@@ -223,7 +268,7 @@ and eval_expr_tail
         ignore (finish_eval frames (eval_expr_tail ~tail:false env frames body_expr));
         loop ()
       | VBool false -> Value VUnit
-      | _ -> raise_runtime_error ~span:e.span "While condition must be bool"
+      | _ -> raise_owned_error env ~span:e.span "While condition must be bool"
     in
     loop ()
   | RELetRec (bindings, slots, body) ->
@@ -259,17 +304,19 @@ and eval_expr_tail
        (match Map.find fields field with
         | Some v -> Value v
         | None ->
-          raise_runtime_error
+          raise_owned_error
+            env
             ~span:e.span
             (Printf.sprintf "No field '%s' in record" field))
      | VModule menv ->
        (match find_var menv field with
         | Some v -> Value v
         | None ->
-          raise_runtime_error
+          raise_owned_error
+            env
             ~span:e.span
             (Printf.sprintf "No field '%s' in module" field))
-     | _ -> raise_runtime_error ~span:e.span "Field access on non-record/non-module")
+     | _ -> raise_owned_error env ~span:e.span "Field access on non-record/non-module")
   | REVariant (tag, exprs) ->
     allocate env (16 * (List.length exprs + 1));
     let vals =
@@ -291,9 +338,9 @@ and eval_expr_tail
     (match arr_val, idx_val with
      | VArray arr, VInt i ->
        if i < 0 || i >= Array.length arr
-       then raise_runtime_error ~span:e.span "Array index out of bounds"
+       then raise_owned_error env ~span:e.span "Array index out of bounds"
        else Value arr.(i)
-     | _ -> raise_runtime_error ~span:e.span "Invalid array access")
+     | _ -> raise_owned_error env ~span:e.span "Invalid array access")
   | REArraySet (arr_expr, idx_expr, v_expr) ->
     let arr_val = finish_eval frames (eval_expr_tail ~tail:false env frames arr_expr) in
     let idx_val = finish_eval frames (eval_expr_tail ~tail:false env frames idx_expr) in
@@ -301,11 +348,11 @@ and eval_expr_tail
     (match arr_val, idx_val with
      | VArray arr, VInt i ->
        if i < 0 || i >= Array.length arr
-       then raise_runtime_error ~span:e.span "Array index out of bounds"
+       then raise_owned_error env ~span:e.span "Array index out of bounds"
        else (
          arr.(i) <- new_val;
          Value VUnit)
-     | _ -> raise_runtime_error ~span:e.span "Invalid array set")
+     | _ -> raise_owned_error env ~span:e.span "Invalid array set")
   | RERef e1 ->
     allocate env 16;
     let v1 = finish_eval frames (eval_expr_tail ~tail:false env frames e1) in
@@ -317,12 +364,12 @@ and eval_expr_tail
      | VRef cell ->
        cell := nv;
        Value VUnit
-     | _ -> raise_runtime_error ~span:e.span "Attempting to set a non-ref value")
+     | _ -> raise_owned_error env ~span:e.span "Attempting to set a non-ref value")
   | REDeref e1 ->
     let rv = finish_eval frames (eval_expr_tail ~tail:false env frames e1) in
     (match rv with
      | VRef cell -> Value !cell
-     | _ -> raise_runtime_error ~span:e.span "Deref on non-ref value")
+     | _ -> raise_owned_error env ~span:e.span "Deref on non-ref value")
   | RESequence (e1, e2) ->
     ignore (finish_eval frames (eval_expr_tail ~tail:false env frames e1));
     eval_expr_tail ~tail env frames e2
@@ -331,7 +378,7 @@ and eval_expr_tail
     let base_fields =
       match base_val with
       | VRecord fields -> fields
-      | _ -> raise_runtime_error ~span:e.span "Record extension base is not a record"
+      | _ -> raise_owned_error env ~span:e.span "Record extension base is not a record"
     in
     let new_fields =
       allocate env (64 * (Map.length base_fields + List.length fields));
@@ -351,7 +398,7 @@ and match_eval
   : eval_result
   =
   match cases with
-  | [] -> raise_runtime_error ~span:match_span "Non-exhaustive pattern match"
+  | [] -> raise_owned_error env ~span:match_span "Non-exhaustive pattern match"
   | case :: tl ->
     (match match_pattern v case.pat with
      | None -> match_eval ~tail env frames match_span v tl
@@ -382,13 +429,18 @@ and import_module_bindings ?span (target_env : env) (mname : string) : string li
        List.find imports ~f:(fun (key, _value) -> Hashtbl.mem target_env.bindings key)
      with
      | Some (key, _value) ->
-       raise_runtime_error
+       raise_owned_error
+         target_env
          ?span
          (Printf.sprintf "open %s would shadow existing binding '%s'" mname key)
      | None ->
        List.iter imports ~f:(fun (key, value) -> define_var target_env key value);
        List.map imports ~f:fst)
-  | _ -> raise_runtime_error ?span (Printf.sprintf "Cannot open non-module '%s'" mname)
+  | _ ->
+    raise_owned_error
+      target_env
+      ?span
+      (Printf.sprintf "Cannot open non-module '%s'" mname)
 
 and eval_module_value
       (outer_env : env)
@@ -398,7 +450,9 @@ and eval_module_value
   : env
   =
   let module_eval_env = copy_env outer_env in
-  let module_export_env = create_env ?control:outer_env.control () in
+  let module_export_env =
+    create_env ?control:outer_env.control ?source:outer_env.source ()
+  in
   define_var module_eval_env mname (VModule module_export_env);
   let exported_names =
     List.concat_map stmts ~f:(fun st -> eval_stmt_with_exports module_eval_env frames st)
@@ -446,16 +500,16 @@ let apply_value_result (fn : value) (args : value list) : (value, runtime_error)
   match fn with
   | VClosure cl ->
     if List.length cl.params <> List.length args
-    then Error { message = "Function arity mismatch"; span = None }
+    then Error (Chatml_diagnostic.create "Function arity mismatch")
     else (
       try Ok (finish_eval [] (TailCall (cl, args))) with
       | Runtime_error err -> Error err
-      | Failure msg -> Error { message = msg; span = None })
+      | Failure msg -> Error (Chatml_diagnostic.create msg))
   | VBuiltin bf ->
     (try Ok (bf args) with
      | Runtime_error err -> Error err
-     | Failure msg -> Error { message = msg; span = None })
-  | _ -> Error { message = "Trying to call a non-function value"; span = None }
+     | Failure msg -> Error (Chatml_diagnostic.create msg))
+  | _ -> Error (Chatml_diagnostic.create "Trying to call a non-function value")
 ;;
 
 let apply_value_exn (fn : value) (args : value list) : value =
@@ -465,6 +519,24 @@ let apply_value_exn (fn : value) (args : value list) : value =
 ;;
 
 let eval_program (env : env) (prog : resolved_program) : unit =
+  (match env.source with
+   | Some source when not (String.equal (Chatml_source.contents source) prog.source_text)
+     -> raise_runtime_error "Resolved program does not match captured source bytes"
+   | None | Some _ -> ());
   let initial_frames : Frame_env.env = [] in
   List.iter prog.stmts ~f:(fun stmt_node -> eval_stmt env initial_frames stmt_node)
+;;
+
+let eval_captured_program env ~source prog =
+  if not (String.equal (Chatml_source.contents source) prog.source_text)
+  then
+    Error
+      (Chatml_diagnostic.create "Resolved program does not match captured source bytes")
+  else (
+    let env = { (copy_env env) with source = Some source } in
+    try
+      eval_program env prog;
+      Ok env
+    with
+    | Runtime_error diagnostic -> Error diagnostic)
 ;;

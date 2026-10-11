@@ -136,54 +136,66 @@ module SpanTbl = Hashtbl.Make (struct
     type t = span_key [@@deriving compare, hash, sexp]
   end)
 
-type infer_state =
+(* Inference identities and weak cells belong to one compilation. Annotation
+   ownership belongs to one unit and never changes when another unit is checked. *)
+type inference_machine =
   { mutable current_id : int
   ; mutable current_lvl : int
-  ; mutable mu_id : int (* NEW: never reset *)
-  ; span_types : typ SpanTbl.t
+  ; mutable mu_id : int
   ; checkpoint : unit -> unit
   ; mutable until_checkpoint : int
   }
 
-let create_state ?(checkpoint = fun () -> ()) () : infer_state =
-  { current_id = 0
-  ; current_lvl = 0
-  ; mu_id = 0
+type infer_state =
+  { shared : inference_machine
+  ; source : Chatml_source.t option
+  ; span_types : typ SpanTbl.t
+  }
+
+let create_state ?(checkpoint = fun () -> ()) ?source () : infer_state =
+  { shared =
+      { current_id = 0; current_lvl = 0; mu_id = 0; checkpoint; until_checkpoint = 0 }
+  ; source
   ; span_types = SpanTbl.create ()
-  ; checkpoint
-  ; until_checkpoint = 0
   }
 ;;
 
+(* New unit annotations, same inference graph. No fresh gensym or type cells. *)
+let for_source state source =
+  { shared = state.shared; source = Some source; span_types = SpanTbl.create () }
+;;
+
 let checkpoint state =
-  state.until_checkpoint <- state.until_checkpoint - 1;
-  if state.until_checkpoint <= 0
+  state.shared.until_checkpoint <- state.shared.until_checkpoint - 1;
+  if state.shared.until_checkpoint <= 0
   then (
-    state.until_checkpoint <- 64;
-    state.checkpoint ())
+    state.shared.until_checkpoint <- 64;
+    state.shared.checkpoint ())
 ;;
 
 (* Levels govern generalization, not variable identity. An inferred variable can
    escape an inner level through an outer parameter or captured mutable value.
    Reusing its name would conflate distinct binders when schemes instantiate. *)
-let enter_level (state : infer_state) = state.current_lvl <- state.current_lvl + 1
+let enter_level (state : infer_state) =
+  state.shared.current_lvl <- state.shared.current_lvl + 1
+;;
 
 let exit_level (state : infer_state) =
-  if state.current_lvl <= 0
+  if state.shared.current_lvl <= 0
   then failwith "Typechecker level stack underflow"
-  else state.current_lvl <- state.current_lvl - 1
+  else state.shared.current_lvl <- state.shared.current_lvl - 1
 ;;
 
 let gensym (state : infer_state) : string =
-  let id = state.current_id in
-  state.current_id <- state.current_id + 1;
+  let id = state.shared.current_id in
+  state.shared.current_id <- state.shared.current_id + 1;
   let letter = Char.of_int_exn ((id mod 26) + Char.to_int 'a') |> Char.to_string in
   if id >= 26 then letter ^ Int.to_string (id / 26) else letter
 ;;
 
 let gensym_mu (state : infer_state) : string =
-  let id = state.mu_id in
-  state.mu_id <- state.mu_id + 1;
+  let id = state.shared.mu_id in
+  state.shared.mu_id <- state.shared.mu_id + 1;
   Int.to_string id
 ;;
 
@@ -191,37 +203,45 @@ let record_span_type (state : infer_state) (span : Source.span) (ty : typ) : uni
   Hashtbl.set state.span_types ~key:(span_to_key span) ~data:ty
 ;;
 
-type diagnostic =
-  { message : string
-  ; span : Source.span option
-  }
+type diagnostic = Chatml_diagnostic.t
 
 exception Type_error of string
 exception Type_error_with_loc of string * Source.span
 
-type checked_program = { span_types : typ SpanTbl.t }
+type checked_program =
+  { source : Chatml_source.t option
+  ; span_types : typ SpanTbl.t
+  }
 
+(* Raw-span lookup is a single-unit compatibility view. *)
 let checked_lookup_span_type (checked : checked_program) (span : Source.span) : typ option
   =
   Hashtbl.find checked.span_types (span_to_key span)
 ;;
 
-let format_diagnostic (source_text : string) (diagnostic : diagnostic) : string =
-  match diagnostic.span with
-  | None -> Printf.sprintf "Type error: %s" diagnostic.message
-  | Some span ->
-    let source = Source.read (Source.make source_text) span in
-    let caret_count = Int.max 1 (span.right.column - span.left.column) in
-    Printf.sprintf
-      "line %i, characters %i-%i:\n%i|    %s%s\n      %s\n\nType error: %s"
-      span.left.line
-      span.left.column
-      span.right.column
-      span.left.line
-      source
-      (String.make (span.left.column + 3) ' ')
-      (String.make caret_count '^')
-      diagnostic.message
+(* Location admission already validated coordinates; source and revision must
+   match before identical offset pairs can query this unit's table. *)
+let checked_lookup_location_type (checked : checked_program) location =
+  match checked.source with
+  | None -> None
+  | Some source ->
+    if
+      Chatml_source.Id.equal
+        (Chatml_source.id source)
+        (Chatml_source.Location.source location)
+      && Chatml_source.Digest.equal
+           (Chatml_source.digest source)
+           (Chatml_source.Location.source_digest location)
+    then checked_lookup_span_type checked (Chatml_source.Location.span location)
+    else None
+;;
+
+let format_diagnostic source_text diagnostic =
+  Chatml_diagnostic.render_legacy
+    diagnostic
+    ~source:source_text
+    ~label:"Type error"
+    ~checkpoint:(fun () -> ())
 ;;
 
 let new_var (state : infer_state) level = Var (ref (Free (gensym state, level)))
@@ -283,7 +303,7 @@ let instantiate (state : infer_state) ty =
       (match Hashtbl.find table x with
        | Some t -> t
        | None ->
-         let v = new_var state state.current_lvl in
+         let v = new_var state state.shared.current_lvl in
          Hashtbl.add_exn table ~key:x ~data:v;
          v)
     | Con (n, args) -> Con (n, List.map args ~f:(inst seen))
@@ -317,7 +337,8 @@ let generalise (state : infer_state) ty =
     | Fun (params, ret) -> Fun (List.map params ~f:(gen seen), gen seen ret)
     | Var ({ contents = Bound t } as tvref) ->
       if tv_ref_mem tvref seen then Var tvref else gen (tvref :: seen) t
-    | Var { contents = Free (name, lvl) } when lvl > state.current_lvl -> Generic name
+    | Var { contents = Free (name, lvl) } when lvl > state.shared.current_lvl ->
+      Generic name
     | Var ({ contents = Free _ } as tvref) -> Var tvref
     | Con (n, args) -> Con (n, List.map args ~f:(gen seen))
     | Mu (binder, body) -> Mu (binder, gen seen body)
@@ -758,7 +779,7 @@ let rec unify (state : infer_state) lhs rhs =
     | false, false ->
       (match tail_l with
        | Var ({ contents = Free _ } as tv) ->
-         let row_var = new_var state state.current_lvl in
+         let row_var = new_var state state.shared.current_lvl in
          go active env_r env_l tail_r (Row (missing_r, row_var));
          (match !tv with
           | Bound _ -> raise (Type_error "Recursive row types")
@@ -1514,7 +1535,7 @@ let rec infer_nonrecursive_binding
   else (
     restrict_free_vars_to_level
       ~checkpoint:(fun () -> checkpoint state)
-      state.current_lvl
+      state.shared.current_lvl
       rhs_ty;
     add_mono ~checkpoint:(fun () -> checkpoint state) env name rhs_ty)
 
@@ -1539,7 +1560,7 @@ and infer_recursive_bindings
             ~checkpoint:(fun () -> checkpoint state)
             env_acc
             nm
-            (new_var state state.current_lvl))
+            (new_var state state.shared.current_lvl))
       in
       List.iter bindings ~f:(fun (nm, rhs) ->
         let placeholder_ty = Env.find_exn env_with_placeholders nm in
@@ -1559,7 +1580,7 @@ and infer_record_extend
   : typ
   =
   let base_ty = infer_expr state env types base_expr in
-  let base_row = new_var state state.current_lvl in
+  let base_row = new_var state state.shared.current_lvl in
   unify state base_ty (Record base_row);
   let base_fields, base_tail =
     merge_fields ~checkpoint:(fun () -> checkpoint state) base_row
@@ -1988,25 +2009,27 @@ and infer_pattern (state : infer_state) (env : tenv) (pat : pattern) (expected_t
   | PRecord (fields, is_open) ->
     let env_after, fields_acc =
       List.fold fields ~init:(env, []) ~f:(fun (env_acc, fields_acc) (lbl, pat) ->
-        let ty = new_var state state.current_lvl in
+        let ty = new_var state state.shared.current_lvl in
         let env_acc' = infer_pattern state env_acc pat ty in
         env_acc', (lbl, ty) :: fields_acc)
     in
     let fields_env = Env.of_list (List.rev fields_acc) in
-    let tail_row = if is_open then new_var state state.current_lvl else Empty_row in
+    let tail_row =
+      if is_open then new_var state state.shared.current_lvl else Empty_row
+    in
     let record_ty = Record (Row (fields_env, tail_row)) in
     unify state expected_ty record_ty;
     env_after
   | PVariant (tag, subpats) ->
     let env_after, sub_tys_rev =
       List.fold subpats ~init:(env, []) ~f:(fun (env_acc, tys) sp ->
-        let ty = new_var state state.current_lvl in
+        let ty = new_var state state.shared.current_lvl in
         let env_acc' = infer_pattern state env_acc sp ty in
         env_acc', ty :: tys)
     in
     let sub_tys = List.rev sub_tys_rev in
     let case_ty = Variant_payload sub_tys in
-    let row_var = new_var state state.current_lvl in
+    let row_var = new_var state state.shared.current_lvl in
     let variant_ty = Variant (Row (Env.singleton tag case_ty, row_var)) in
     unify state expected_ty variant_ty;
     env_after
@@ -2044,7 +2067,7 @@ and reopen_lambda_row (state : infer_state) (row : typ) : typ =
        open tail after inference has discovered the required fields.  This is
        intentionally biased toward the "state-machine helper" use-case that
        ChatML scripts rely on heavily. *)
-    Row (reopened_fields, new_var state state.current_lvl)
+    Row (reopened_fields, new_var state state.shared.current_lvl)
   | other -> other
 
 (** --------------------------------------------------------------------- *)
@@ -2226,7 +2249,7 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
         with_new_level state ~f:(fun () ->
           let env_with_params, param_tys_rev =
             List.fold params ~init:(env, []) ~f:(fun (env_acc, tys_rev) p ->
-              let t = new_var state state.current_lvl in
+              let t = new_var state state.shared.current_lvl in
               add_mono ~checkpoint:(fun () -> checkpoint state) env_acc p t, t :: tys_rev)
           in
           let body_ty = infer_expr state env_with_params types body in
@@ -2239,7 +2262,7 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
         with_new_level state ~f:(fun () ->
           let env_with_params, param_tys_rev =
             List.fold params ~init:(env, []) ~f:(fun (env_acc, tys_rev) p ->
-              let t = new_var state state.current_lvl in
+              let t = new_var state state.shared.current_lvl in
               add_mono ~checkpoint:(fun () -> checkpoint state) env_acc p t, t :: tys_rev)
           in
           let body_ty = infer_expr state env_with_params types body in
@@ -2251,7 +2274,7 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
       | EApp (fn_expr, arg_exprs) ->
         let fn_ty = infer_expr state env types fn_expr in
         let arg_tys = List.map arg_exprs ~f:(fun arg -> infer_expr state env types arg) in
-        let ret_ty = new_var state state.current_lvl in
+        let ret_ty = new_var state state.shared.current_lvl in
         unify state fn_ty (Fun (arg_tys, ret_ty));
         ret_ty
       | EIf (c, t, e) ->
@@ -2298,17 +2321,17 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
         Record row
       | EFieldGet (obj, lbl) ->
         let obj_ty = infer_expr state env types obj in
-        let field_ty = new_var state state.current_lvl in
-        let tail_row = new_var state state.current_lvl in
+        let field_ty = new_var state state.shared.current_lvl in
+        let tail_row = new_var state state.shared.current_lvl in
         unify state obj_ty (Record (Row (Env.singleton lbl field_ty, tail_row)));
         field_ty
       | EArray elts ->
-        let elt_ty = new_var state state.current_lvl in
+        let elt_ty = new_var state state.shared.current_lvl in
         List.iter elts ~f:(fun e -> unify state (infer_expr state env types e) elt_ty);
         Array elt_ty
       | EArrayGet (arr, idx) ->
         unify state (infer_expr state env types idx) TInt;
-        let elt_ty = new_var state state.current_lvl in
+        let elt_ty = new_var state state.shared.current_lvl in
         unify state (infer_expr state env types arr) (Array elt_ty);
         elt_ty
       | EArraySet (arr, idx, v) ->
@@ -2321,19 +2344,19 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
         validate_unique_record_update_fields expr.span fields;
         infer_record_extend state env types base_expr fields
       | EDeref e ->
-        let ty = new_var state state.current_lvl in
+        let ty = new_var state state.shared.current_lvl in
         unify state (Ref ty) (infer_expr state env types e);
         ty
       | ESetRef (lhs, rhs) ->
         let lhs_ty = infer_expr state env types lhs in
         let rhs_ty = infer_expr state env types rhs in
-        unify state (Ref (new_var state state.current_lvl)) lhs_ty;
+        unify state (Ref (new_var state state.shared.current_lvl)) lhs_ty;
         unify state lhs_ty (Ref rhs_ty);
         Unit
       | EVariant (tag, exprs) ->
         let arg_tys = List.map exprs ~f:(fun ex -> infer_expr state env types ex) in
         let case_ty = Variant_payload arg_tys in
-        let row_var = new_var state state.current_lvl in
+        let row_var = new_var state state.shared.current_lvl in
         Variant (Row (Env.singleton tag case_ty, row_var))
       | EAnnot (rhs, type_expr) ->
         let annotated_ty =
@@ -2366,7 +2389,7 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
           case_spans;
         (match result_ty with
          | Some ty -> ty
-         | None -> new_var state state.current_lvl)
+         | None -> new_var state state.shared.current_lvl)
       | EMatchSlots (scrut, cases) ->
         let scrut_ty = infer_expr state env types scrut in
         let case_spans = List.map cases ~f:(fun case -> case.pat, case.pat_span) in
@@ -2393,7 +2416,7 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
           case_spans;
         (match result_ty with
          | Some ty -> ty
-         | None -> new_var state state.current_lvl)
+         | None -> new_var state state.shared.current_lvl)
     with
     | Type_error msg -> raise (Type_error_with_loc (msg, expr.span))
   in
@@ -2429,7 +2452,7 @@ let rec infer_stmt_with_exports
     ignore (infer_expr state env types e);
     env, types, []
   | SModule (mname, stmts) ->
-    let module_placeholder = new_var state state.current_lvl in
+    let module_placeholder = new_var state state.shared.current_lvl in
     let mod_env_start =
       add_mono ~checkpoint:(fun () -> checkpoint state) env mname module_placeholder
     in
@@ -2490,8 +2513,9 @@ let infer_stmt (state : infer_state) (env : tenv) (types : type_env) (stmt : stm
     The function allocates a fresh inference state, infers every top-level
     statement in order, and returns either:
 
-    - [Ok checked], where [checked] contains an immutable snapshot of the
-      principal types recorded for each source span; or
+    - [Ok checked], where [checked] owns a copied span table for this unit. Its
+      type values deliberately retain shared inference/weak-cell identities;
+      this is not a deeply immutable semantic snapshot (OCH-127 owns that); or
     - [Error diagnostic], where [diagnostic] identifies the first typing
       error and never permits evaluation to proceed.
 
@@ -2499,49 +2523,87 @@ let infer_stmt (state : infer_state) (env : tenv) (types : type_env) (stmt : stm
     consulted by the resolver in production. *)
 let check_program_with_surface
       ?checkpoint:compiler_checkpoint
+      ?source
       ?(required_bindings : (string * Builtin_spec.ty) list = [])
       (surface : Builtin_surface.surface)
       (prog : program)
   : (checked_program, diagnostic) result
   =
-  let state = create_state ?checkpoint:compiler_checkpoint () in
-  try
-    let env = init_env_with_surface ~checkpoint:(fun () -> checkpoint state) surface in
-    let types : type_env =
-      init_types_with_surface ~checkpoint:(fun () -> checkpoint state) surface
-    in
-    (* Each element of [prog] now carries its own source span.  The current
+  let source_matches =
+    match source with
+    | None -> true
+    | Some source -> String.equal (Chatml_source.contents source) prog.source_text
+  in
+  if not source_matches
+  then Error (Chatml_diagnostic.create "Program does not match captured source bytes")
+  else (
+    let compiler_checkpoint = Option.value compiler_checkpoint ~default:(fun () -> ()) in
+    Chatml.Chatml_checkpoint.protect compiler_checkpoint ~f:(fun compiler_checkpoint ->
+      let state = create_state ~checkpoint:compiler_checkpoint ?source () in
+      try
+        let env =
+          init_env_with_surface ~checkpoint:(fun () -> checkpoint state) surface
+        in
+        let types : type_env =
+          init_types_with_surface ~checkpoint:(fun () -> checkpoint state) surface
+        in
+        (* Each element of [prog] now carries its own source span.  The current
        type-checker, however, does not yet make use of that information.  We
        therefore simply discard the annotation for the time being. *)
-    let final_env, _final_types =
-      List.fold prog.stmts ~init:(env, types) ~f:(fun (env_acc, types_acc) stmt_node ->
-        infer_stmt state env_acc types_acc stmt_node.value)
-    in
-    (* Instantiate the entire contract together: repeated type variables relate
+        let final_env, _final_types =
+          List.fold
+            prog.stmts
+            ~init:(env, types)
+            ~f:(fun (env_acc, types_acc) stmt_node ->
+              infer_stmt state env_acc types_acc stmt_node.value)
+        in
+        (* Instantiate the entire contract together: repeated type variables relate
        bindings such as initial_state and on_event. Checking inferred bindings
        avoids evaluating initializers or introducing shadowable source wrappers. *)
-    (match
-       List.find_a_dup (List.map required_bindings ~f:fst) ~compare:String.compare
-     with
-     | Some name -> raise (Type_error ("Duplicate required binding '" ^ name ^ "'"))
-     | None -> ());
-    let required_types =
-      Tuple
-        (List.map required_bindings ~f:(fun (_, ty) ->
-           typ_of_builtin_ty ~checkpoint:(fun () -> checkpoint state) ty))
-      |> instantiate state
-    in
-    (match required_types with
-     | Tuple types ->
-       List.iter2_exn required_bindings types ~f:(fun (name, _) expected ->
-         try unify state (lookup state final_env name) expected with
-         | Type_error message ->
-           raise (Type_error ("Invalid entrypoint '" ^ name ^ "': " ^ message)))
-     | _ -> assert false);
-    Ok { span_types = Hashtbl.copy state.span_types }
-  with
-  | Type_error msg -> Error { message = msg; span = None }
-  | Type_error_with_loc (msg, span) -> Error { message = msg; span = Some span }
+        (match
+           List.find_a_dup (List.map required_bindings ~f:fst) ~compare:String.compare
+         with
+         | Some name -> raise (Type_error ("Duplicate required binding '" ^ name ^ "'"))
+         | None -> ());
+        let required_types =
+          Tuple
+            (List.map required_bindings ~f:(fun (_, ty) ->
+               typ_of_builtin_ty ~checkpoint:(fun () -> checkpoint state) ty))
+          |> instantiate state
+        in
+        (match required_types with
+         | Tuple types ->
+           List.iter2_exn required_bindings types ~f:(fun (name, _) expected ->
+             try unify state (lookup state final_env name) expected with
+             | Type_error message ->
+               raise (Type_error ("Invalid entrypoint '" ^ name ^ "': " ^ message)))
+         | _ -> assert false);
+        Ok { source = state.source; span_types = Hashtbl.copy state.span_types }
+      with
+      | Type_error msg -> Error (Chatml_diagnostic.create msg)
+      | Type_error_with_loc (msg, span) ->
+        let diagnostic = Chatml_diagnostic.create ~span msg in
+        let diagnostic =
+          match state.source with
+          | None -> diagnostic
+          | Some source ->
+            Chatml.Chatml_owned_source.attach
+              source
+              diagnostic
+              ~checkpoint:state.shared.checkpoint
+        in
+        Error diagnostic))
+;;
+
+(** Captured parser units keep source/AST pairing invariant. Compilation does
+    not evaluate initializers; failures retain their exact captured source. *)
+let check_captured_program_with_surface ?checkpoint ?required_bindings surface unit =
+  check_program_with_surface
+    ?checkpoint
+    ?required_bindings
+    ~source:(Chatml.Chatml_parse.Unit.source unit)
+    surface
+    (Chatml.Chatml_parse.Unit.program unit)
 ;;
 
 let check_program (prog : program) : (checked_program, diagnostic) result =
