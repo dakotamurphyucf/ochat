@@ -412,6 +412,7 @@ let config
         ; session_helpers = []
         ; authoring_packages = []
         ; authoring_budget = None
+    ; project_sources = None
         ; unix_socket = Filename.concat root "agent.sock"
         ; http =
             { enabled = false

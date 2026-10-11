@@ -92,6 +92,7 @@ let server_config data_root =
     ; session_helpers = []
     ; authoring_packages = []
     ; authoring_budget = None
+    ; project_sources = None
     ; unix_socket = Filename.concat data_root "agent.sock"
     ; http =
         { enabled = false
