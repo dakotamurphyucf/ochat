@@ -135,6 +135,10 @@ module Cursor = struct
 
   let owner t = t.owner
   let identity t = t.identity
+
+  (* The resolver admits exactly one cursor per normalized route in its cache.
+     Physical identity here deliberately denotes that affine route, not files. *)
+  let equal_route = phys_equal
 end
 
 module Accounting = struct

@@ -161,3 +161,70 @@ module Request : sig
     -> max_request_bytes:int
     -> t Or_error.t
 end
+
+module Error : sig
+  (** Finite domain failures retain honest optional declaration provenance, never
+      raw exceptions, credentials, process output or live capabilities. *)
+  type problem =
+    | Limit_exceeded
+    | Invalid_accounting
+    | Accounting_overflow
+    | Timed_out
+    | Authority_denied
+    | Conflicting_selection
+    | Roots of Roots.Error.t
+    | Source of Chatml_local_source.Error.t
+    | Local of Chatml_local_capture.Error.t
+    | Git_host of Git.Error.t
+    | Git_catalog of Chatml_git_catalog.Error.t
+    | Bootstrap of Document_schema.Error.t
+    | Declaration of Project.Error.t
+    | Composition of Build.Error.t
+    | Tool_admission of Chat_response.Tool_capability.error
+    | Stale_selection
+    | Publication of Agent_store.Store_error.t
+    | Publication_uncertain of Agent_store.Store_error.t
+
+  type t
+
+  val problem : t -> problem
+  val declared_at : t -> Project.Declared_at.t option
+end
+
+(** Capture the selected declaration closure through explicit host authority.
+    Exact aliases reuse captured sources; every incoming previous-lock route is
+    checked before acquisition. Authored tool names are admitted against [tools]
+    without invoking them or granting authority. No resolver, native owner,
+    checkpoint or tool implementation is retained in the immutable result.
+
+    Failure aborts the complete attempt, without hidden retries or refunds.
+    Cancellation and unexpected exceptions propagate after joined cleanup.
+    An independent file-backed launch captures current local files; an existing
+    runtime continues using its retained immutable sources. *)
+val prepare
+  :  Host.t
+  -> Request.t
+  -> tools:Chat_response.Tool_capability.t
+  -> policy:Policy.t
+  -> limits:Limits.t
+  -> clock:_ Eio.Time.Mono.t
+  -> checkpoint:(unit -> unit)
+  -> (t, Error.t) Result.t
+
+(** Prepare and select the completed lock under [publication]'s existing exclusive
+    host coordination. The one deadline starts before the first expected-lock read.
+    Tool admission, complete result allocation and the final progress/deadline
+    check precede protected atomic replacement. There is no postcommit progress
+    callback. Before writer entry, failure preserves the old lock. After entry,
+    an unconfirmed outcome leaves [Publication.Uncertain]; no rollback or old
+    selection is claimed. Expose the new queue/runtime only after success. *)
+val prepare_and_publish
+  :  Host.t
+  -> Request.t
+  -> publication:Publication.t
+  -> tools:Chat_response.Tool_capability.t
+  -> policy:Policy.t
+  -> limits:Limits.t
+  -> clock:_ Eio.Time.Mono.t
+  -> checkpoint:(unit -> unit)
+  -> (t, Error.t) Result.t
