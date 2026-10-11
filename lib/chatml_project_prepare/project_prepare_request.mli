@@ -17,14 +17,25 @@ module Root : sig
         }
 end
 
-(** Metadata admission does not validate a declaration or grant authority.
-    Captured/previous-lock bytes are immutable inputs and separately bounded by
-    composition. The authentic compiler contract is never reconstructed by name. *)
+module Entry : sig
+  type t =
+    | Declared
+    | Captured_fragment of Captured.t
+    | Captured_file of
+        { source : Captured.t
+        ; root_member : Source.Portable_path.t option
+        }
+end
+
+(** Metadata admission does not grant native authority. A file member is a
+    host-established relationship to the selected admitted root, never inferred
+    from retained artifact paths. Actual catalog identity/bytes are reconciled
+    after capture. No namespace or source override is invented. *)
 type t = private
   { root : Root.t
   ; operation : Build.Operation.t
   ; selection : Project.Selection.request
-  ; entry : Build.Entry.t
+  ; entry : Entry.t
   ; contract : Chatml.Chatml_compiler_contract.t
   ; lock_id : Captured.Id.t
   }
@@ -34,6 +45,16 @@ val create
   -> operation:Build.Operation.t
   -> selection:Project.Selection.request
   -> entry:Build.Entry.t
+  -> contract:Chatml.Chatml_compiler_contract.t
+  -> lock_id:Captured.Id.t
+  -> max_request_bytes:int
+  -> t Or_error.t
+
+val create_with_entry
+  :  Root.t
+  -> operation:Build.Operation.t
+  -> selection:Project.Selection.request
+  -> entry:Entry.t
   -> contract:Chatml.Chatml_compiler_contract.t
   -> lock_id:Captured.Id.t
   -> max_request_bytes:int

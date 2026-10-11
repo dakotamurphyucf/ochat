@@ -232,7 +232,7 @@ let acquire attempt host roots state gate root =
   run ()
 ;;
 
-let prepare attempt ~host ~(request : Request.t) ~tools =
+let prepare_source attempt ~host ~(request : Request.t) =
   let result =
     let open Result.Let_syntax in
     let%bind gate =
@@ -262,12 +262,16 @@ let prepare attempt ~host ~(request : Request.t) ~tools =
       | None -> Error (Error.create Invalid_accounting)
       | Some root ->
         let%bind root_input, catalogs = State.inputs state ~root in
+        let root_catalog = State.catalog root in
+        let%bind entry =
+          Project_prepare_entry.resolve attempt ~root:root_catalog request.entry
+        in
         let%bind build =
           Stage.pure attempt ~f:(fun ~limits ~checkpoint ->
             Build.compose
               root_input
               ~catalogs
-              ~entry:request.entry
+              ~entry
               ~selection_gate:gate
               ~contract:request.contract
               ~lock_id:request.lock_id
@@ -275,20 +279,47 @@ let prepare attempt ~host ~(request : Request.t) ~tools =
               ~checkpoint
             |> Result.map ~f:(fun build -> build, Build.accounting build))
         in
-        let names = Project.Lock.required_tools (Build.lock build) in
-        let%bind () =
-          List.fold_result names ~init:() ~f:(fun () name ->
-            charge attempt { Accounting.zero with work_steps = 1 + String.length name })
+        let%map () =
+          charge
+            attempt
+            { Accounting.zero with
+              prepared_input_bytes =
+                Chatml_prepared_program.Accounting.input_bytes
+                  (Chatml_prepared_program.accounting (Build.prepared build))
+            }
         in
-        Attempt.poll attempt;
-        let%map _ =
-          Chat_response.Tool_capability.select tools ~names
-          |> Result.map_error ~f:(fun failure ->
-            Error.create
-              ~declared_at:(Project.declared_at (Catalog.project (State.catalog root)))
-              (Tool_admission failure))
-        in
-        build)
+        Project_prepare_source_result.create
+          build
+          ~declared_at:(Project.declared_at (Catalog.project root_catalog)))
+  in
+  match result with
+  | Ok _ -> result
+  | Error error -> Attempt.reject attempt error
+;;
+
+let admit_tools attempt source ~tools =
+  let open Result.Let_syntax in
+  let names = Project_prepare_source_result.required_tools source in
+  let%bind () =
+    List.fold_result names ~init:() ~f:(fun () name ->
+      let%bind () = charge attempt { Accounting.zero with work_steps = 1 } in
+      charge attempt { Accounting.zero with work_steps = String.length name })
+  in
+  Attempt.poll attempt;
+  Chat_response.Tool_capability.select tools ~names
+  |> Result.map ~f:(fun _ -> ())
+  |> Result.map_error ~f:(fun failure ->
+    Error.create
+      ~declared_at:(Project_prepare_source_result.declared_at source)
+      (Tool_admission failure))
+;;
+
+let prepare attempt ~host ~request ~tools =
+  let result =
+    let open Result.Let_syntax in
+    let%bind source = prepare_source attempt ~host ~request in
+    let%map () = admit_tools attempt source ~tools in
+    Project_prepare_source_result.build source
   in
   match result with
   | Ok _ -> result

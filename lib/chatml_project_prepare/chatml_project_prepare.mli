@@ -74,6 +74,9 @@ module Accounting : sig
   val native_output_bytes : t -> int
   val acquisition_payload_reserved : t -> int
   val work_steps : t -> int
+
+  (** Sum of completed Prepared canonical-input bytes, not heap accounting. *)
+  val prepared_input_bytes : t -> int
 end
 
 (** Immutable completed Build and final invocation accounting. No clock, callbacks,
@@ -144,6 +147,16 @@ module Root : sig
 end
 
 module Request : sig
+  module Entry : sig
+    type t =
+      | Declared
+      | Captured_fragment of Captured.t
+      | Captured_file of
+          { source : Captured.t
+          ; root_member : Source.Portable_path.t option
+          }
+  end
+
   type t
 
   (** Exact authentic contract supplied by the existing selected target adapter.
@@ -160,6 +173,22 @@ module Request : sig
     -> lock_id:Captured.Id.t
     -> max_request_bytes:int
     -> t Or_error.t
+
+  (** A fragment remains independent. File root_member is supplied only from a
+      genuine host-admitted source/project relationship, never artifact/cwd
+      authority. Reuse an actual root catalog member only after exact bounded
+      digest/length/byte agreement. Conflict rejects; absent member preserves the
+      original host-owned source identity without rereading or inventing namespace.
+      Captured alternatives require Library selection. *)
+  val create_with_entry
+    :  Root.t
+    -> operation:Build.Operation.t
+    -> selection:Project.Selection.request
+    -> entry:Entry.t
+    -> contract:Chatml.Chatml_compiler_contract.t
+    -> lock_id:Captured.Id.t
+    -> max_request_bytes:int
+    -> t Or_error.t
 end
 
 module Error : sig
@@ -172,6 +201,7 @@ module Error : sig
     | Timed_out
     | Authority_denied
     | Conflicting_selection
+    | Entry_revision_conflict of Captured.Id.t
     | Roots of Roots.Error.t
     | Source of Chatml_local_source.Error.t
     | Local of Chatml_local_capture.Error.t
@@ -228,3 +258,41 @@ val prepare_and_publish
   -> clock:_ Eio.Time.Mono.t
   -> checkpoint:(unit -> unit)
   -> (t, Error.t) Result.t
+
+module Source_preparation : sig
+  (** Immutable source-selected graph and exact requirements. Distinct from strict
+      completed preparation: no actual tool registry was admitted, no capability
+      granted, no compilation or initializer run. No native owner is retained. *)
+  type t
+
+  val build : t -> Build.t
+
+  (** Exact selected-lock names. The session owner must admit these against its
+      actual live registry before any initializer; source custody is no grant. *)
+  val required_tools : t -> string list
+end
+
+module Source_batch : sig
+  (** Complete ordered results plus one cumulative receipt; no partial batch. *)
+  type t
+
+  val preparations : t -> Source_preparation.t list
+  val accounting : t -> Accounting.t
+end
+
+(** Acquire/compose all requests using one existing attempt, deadline and aggregate
+    native/source/work/canonical-input ledger. Request count is bounded before
+    traversal by package capacity. Each composition receives remaining canonical
+    input bytes. No per-request reset, retry/refund, backend reread, compiler or
+    publication. Empty input yields an empty batch/zero receipt. Independent graph
+    acquisitions charge separately; no global physical-file deduplication claim.
+    Original checkpoint/cancellation exceptions propagate after joined cleanup.
+    Existing strict prepare/publish still admit tools in their same attempt. *)
+val prepare_sources
+  :  Host.t
+  -> Request.t list
+  -> policy:Policy.t
+  -> limits:Limits.t
+  -> clock:_ Eio.Time.Mono.t
+  -> checkpoint:(unit -> unit)
+  -> (Source_batch.t, Error.t) Result.t

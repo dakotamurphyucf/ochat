@@ -15,6 +15,7 @@ type t =
   ; native_output_bytes : int
   ; acquisition_payload_reserved : int
   ; work_steps : int
+  ; prepared_input_bytes : int
   }
 
 let zero =
@@ -30,6 +31,7 @@ let zero =
   ; native_output_bytes = 0
   ; acquisition_payload_reserved = 0
   ; work_steps = 0
+  ; prepared_input_bytes = 0
   }
 ;;
 
@@ -45,6 +47,7 @@ let native_request_bytes t = t.native_request_bytes
 let native_output_bytes t = t.native_output_bytes
 let acquisition_payload_reserved t = t.acquisition_payload_reserved
 let work_steps t = t.work_steps
+let prepared_input_bytes t = t.prepared_input_bytes
 
 let add first second =
   if
@@ -82,6 +85,9 @@ let add first second =
     || second.acquisition_payload_reserved < 0
     || second.acquisition_payload_reserved
        > Int.max_value - first.acquisition_payload_reserved
+    || first.prepared_input_bytes < 0
+    || second.prepared_input_bytes < 0
+    || second.prepared_input_bytes > Int.max_value - first.prepared_input_bytes
     || first.work_steps < 0
     || second.work_steps < 0
     || second.work_steps > Int.max_value - first.work_steps
@@ -102,6 +108,7 @@ let add first second =
       ; acquisition_payload_reserved =
           first.acquisition_payload_reserved + second.acquisition_payload_reserved
       ; work_steps = first.work_steps + second.work_steps
+      ; prepared_input_bytes = first.prepared_input_bytes + second.prepared_input_bytes
       }
 ;;
 
@@ -118,6 +125,7 @@ let within t ~ceiling =
   && t.native_output_bytes <= ceiling.native_output_bytes
   && t.acquisition_payload_reserved <= ceiling.acquisition_payload_reserved
   && t.work_steps <= ceiling.work_steps
+  && t.prepared_input_bytes <= ceiling.prepared_input_bytes
 ;;
 
 let subtract first second =
@@ -139,5 +147,6 @@ let subtract first second =
       ; acquisition_payload_reserved =
           first.acquisition_payload_reserved - second.acquisition_payload_reserved
       ; work_steps = first.work_steps - second.work_steps
+      ; prepared_input_bytes = first.prepared_input_bytes - second.prepared_input_bytes
       }
 ;;
