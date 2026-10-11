@@ -271,6 +271,7 @@ type t =
   }
 
 let source t = t.source
+let declared_at t = t.declared_at
 let namespace t = t.namespace
 let source_dirs t = t.source_dirs
 let exclusions t = t.exclusions

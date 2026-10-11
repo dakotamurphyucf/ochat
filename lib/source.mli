@@ -115,4 +115,14 @@ module Portable_path : sig
 
   val create : string -> t Core.Or_error.t
   val to_string : t -> string
+
+  (** Pure shared inventory identity validation. Exact duplicates and ASCII-case
+      collisions are checked first in canonical path order, then proper component
+      prefix file/directory conflicts. Unicode normalization/case equivalence and
+      filesystem semantics are not inferred. Return original validated paths;
+      prefix conflicts return the parent path first. Callers deduplicate legitimate
+      repeated references and group by their own namespace before calling.
+      Path bytes are bounded by create; poll inventory, comparisons and prefixes.
+      No input mutation, retained callback or I/O. *)
+  val first_collision : t list -> checkpoint:(unit -> unit) -> (t * t) option
 end

@@ -13,6 +13,7 @@ module Selection = Chatml_project_declaration.Selection
 type t = Chatml_project_declaration.t
 
 let source = Chatml_project_declaration.source
+let declared_at = Chatml_project_declaration.declared_at
 let namespace = Chatml_project_declaration.namespace
 let source_dirs = Chatml_project_declaration.source_dirs
 let exclusions = Chatml_project_declaration.exclusions

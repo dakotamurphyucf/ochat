@@ -108,6 +108,56 @@ CAMLprim value ochat_local_source_duplicate_directory(value owner, value origina
   if (code < 0) CAMLreturn(success);
   Store_field(failure, 0, Val_int(code)); CAMLreturn(failure);
 }
+/* The output owner was preallocated before acquisition. A clone is independent
+   of the parent cursor and lifetime; the active parent operation keeps its FD live. */
+CAMLprim value ochat_local_source_clone_directory(value owner, value parent) {
+  CAMLparam2(owner, parent); CAMLlocal2(success, failure);
+  success = caml_alloc(1, 0); Store_field(success, 0, Val_unit);
+  failure = caml_alloc(1, 1); Store_field(failure, 0, Val_int(LS_UNAVAILABLE));
+  struct descriptor *payload = Descriptor(owner);
+  int parent_fd = Descriptor(parent)->fd, fd = -1, code = LS_UNAVAILABLE;
+  if (parent_fd >= 0 && payload->fd < 0) {
+    caml_enter_blocking_section();
+    fd = fcntl(parent_fd, F_DUPFD_CLOEXEC, 0);
+    code = fd < 0 ? code_of_errno(errno) : check_kind(fd, 1);
+    if (code >= 0 && fd >= 0) { close(fd); fd = -1; }
+    payload->fd = fd;
+    caml_leave_blocking_section();
+  }
+  if (code < 0) CAMLreturn(success);
+  Store_field(failure, 0, Val_int(code)); CAMLreturn(failure);
+}
+
+/* Preserve all supported dev_t/ino_t bits. No OCaml allocation/access while
+   unlocked. fstat acquires no resource, so reentry exceptions lose no handle. */
+_Static_assert(sizeof(dev_t) <= sizeof(uint64_t), "device identity exceeds 64 bits");
+_Static_assert(sizeof(ino_t) <= sizeof(uint64_t), "inode identity exceeds 64 bits");
+CAMLprim value ochat_local_source_observe_directory(value owner) {
+  CAMLparam1(owner); CAMLlocal4(result, identity, device, inode);
+  int fd = Descriptor(owner)->fd, code = LS_UNAVAILABLE;
+  struct stat metadata;
+  caml_enter_blocking_section();
+  if (fd >= 0) {
+    if (fstat(fd, &metadata)) code = code_of_errno(errno);
+    else code = S_ISDIR(metadata.st_mode) ? -1 : LS_KIND;
+  }
+  caml_leave_blocking_section();
+  if (code >= 0) {
+    result = caml_alloc(1, 1); Store_field(result, 0, Val_int(code));
+  } else {
+    uint64_t device_bits = (uint64_t)metadata.st_dev;
+    uint64_t inode_bits = (uint64_t)metadata.st_ino;
+    int64_t device_value, inode_value;
+    memcpy(&device_value, &device_bits, sizeof(device_value));
+    memcpy(&inode_value, &inode_bits, sizeof(inode_value));
+    device = caml_copy_int64(device_value); inode = caml_copy_int64(inode_value);
+    identity = caml_alloc(2, 0);
+    Store_field(identity, 0, device); Store_field(identity, 1, inode);
+    result = caml_alloc(1, 0); Store_field(result, 0, identity);
+  }
+  CAMLreturn(result);
+}
+
 static value open_component(value owner, value parent, value name, int directory) {
   CAMLparam3(owner, parent, name); CAMLlocal2(success, failure);
   success = caml_alloc(1, 0); Store_field(success, 0, Val_unit);

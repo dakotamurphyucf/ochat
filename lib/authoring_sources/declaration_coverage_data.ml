@@ -209,7 +209,7 @@ let implementation_sources =
     , "2d29ec016ea80169b4b8b4c088dd2232a11fa3184c4b8cc9acb7f1d6223c3c55" )
   ; ( "lib/chatmd/chatmd_script_declaration.ml"
     , "7a195f7836a0aa4a50ca7924a22056dabd17a5fe6bb87ad076b96a7e939dc00b" )
-  ; "lib/source.ml", "ae5b47de67bc26e22724b6b53a88369783cd8448fce1b8ea324a0114521d5817"
+  ; "lib/source.ml", "40c268102a58398f2503a9772ae3a1916bc4bf8bdf339de5a4cb5d911e39061a"
   ; ( "lib/chatmd/chatmd_source_bundle.ml"
     , "c3e0f8f89c8538ddcec98873739455a673b0e6e894282c21c96046c096bb6ae5" )
   ; ( "lib/chatmd/prompt.ml"

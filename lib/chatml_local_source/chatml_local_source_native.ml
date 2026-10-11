@@ -36,6 +36,12 @@ module Descriptor = struct
     -> (unit, Code.t) Result.t
     = "ochat_local_source_duplicate_directory"
 
+  external clone_directory
+    :  t
+    -> parent:t
+    -> (unit, Code.t) Result.t
+    = "ochat_local_source_clone_directory"
+
   external open_directory
     :  t
     -> parent:t
@@ -107,3 +113,16 @@ module Directory = struct
     else Ok (Some (Bigstring.to_string buffer ~pos:0 ~len:count))
   ;;
 end
+
+module Directory_identity = struct
+  type t =
+    { device : int64
+    ; inode : int64
+    }
+  [@@deriving equal, compare, sexp_of]
+end
+
+external observe_directory
+  :  Descriptor.t
+  -> (Directory_identity.t, Code.t) Result.t
+  = "ochat_local_source_observe_directory"

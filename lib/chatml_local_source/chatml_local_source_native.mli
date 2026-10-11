@@ -28,9 +28,10 @@ module Descriptor : sig
       owns only a new duplicate, never the caller's original descriptor. *)
   val create : unit -> t
 
+  val clone_directory : t -> parent:t -> (unit, Code.t) Result.t
   val duplicate_directory : t -> Native_unix.file_descr -> (unit, Code.t) Result.t
 
-  (** ONE validated portable component, relative to descriptor; kernel nofollow.
+  (** ONE validated native component, relative to descriptor; kernel nofollow.
       Newly acquired file must be fstat regular before success. Nonblocking flags
       avoid FIFO admission hangs. Constructors allocate owner/result BEFORE IO. *)
   val open_directory : t -> parent:t -> string -> (unit, Code.t) Result.t
@@ -74,3 +75,15 @@ module Directory : sig
       reachable for bracket cleanup, not a separate unowned native allocation. *)
   val next : t -> Bigstring.t -> (string option, Code.t) Result.t
 end
+
+module Directory_identity : sig
+  type t =
+    { device : int64
+    ; inode : int64
+    }
+  [@@deriving equal, compare, sexp_of]
+end
+
+(** fstat of a retained directory; exact device/inode bits. No new resource.
+    Result allocation only with runtime lock held, not errno conversion of OOM. *)
+val observe_directory : Descriptor.t -> (Directory_identity.t, Code.t) Result.t

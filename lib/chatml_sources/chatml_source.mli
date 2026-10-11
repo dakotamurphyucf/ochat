@@ -75,6 +75,12 @@ val create
   -> checkpoint:(unit -> unit)
   -> t Or_error.t
 
+(** Reuse exact immutable bytes/digest and any retained position index under a
+    validated new identity. No hashing, parsing, IO or provenance authentication.
+    Locations with the old differing identity do not belong to the returned source.
+    The original source remains unchanged. *)
+val reidentify : t -> id:Id.t -> t
+
 val id : t -> Id.t
 val contents : t -> string
 val byte_length : t -> int

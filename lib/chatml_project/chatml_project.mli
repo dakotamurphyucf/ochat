@@ -190,6 +190,11 @@ val decode
   -> (t, Error.t) Result.t
 
 val source : t -> Chatml_source.t
+
+(** Already validated root context of the exact decoded declaration. Reuses its
+    immutable whole-source location and empty JSON field path without rescanning. *)
+val declared_at : t -> Declared_at.t
+
 val namespace : t -> string
 val source_dirs : t -> Source_dir.t list
 val exclusions : t -> (Source.Portable_path.t * Declared_at.t) list
