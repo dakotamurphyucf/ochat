@@ -8,6 +8,7 @@ type problem =
   | Timed_out
   | Authority_denied
   | Conflicting_selection
+  | Entry_revision_conflict of Chatml_source.Id.t
   | Roots of Chatml_local_roots.Error.t
   | Source of Chatml_local_source.Error.t
   | Local of Chatml_local_capture.Error.t

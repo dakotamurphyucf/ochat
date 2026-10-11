@@ -1,5 +1,5 @@
 (library
  (name chatml_project_prepare_public_tests)
- (libraries core eio eio_main cstruct source chatml_source chatml_prepared_program document_schema chatml_project chatml_project_build chatml_project_prepare chatml_local_roots chatml_local_capture chatml_git_catalog chatml_git_host chat_response chatml expect_test_helpers_core)
+ (libraries core eio eio_main cstruct source chatml_source chatml_prepared_program document_schema chatml_project chatml_project_build chatml_project_prepare chatml_local_roots chatml_local_capture chatml_git_catalog chatml_git_host chat_response chatml chatml_compilation chatml_execution chatml_host_runtime expect_test_helpers_core)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))

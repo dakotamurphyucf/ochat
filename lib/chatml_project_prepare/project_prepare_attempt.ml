@@ -217,8 +217,8 @@ let composition_limits t =
         (Some
            (Option.value_map
               (L.max_input_bytes policy)
-              ~default:t.limits.prepared_input_bytes
-              ~f:(Int.min t.limits.prepared_input_bytes)))
+              ~default:remaining.prepared_input_bytes
+              ~f:(Int.min remaining.prepared_input_bytes)))
       ~document:(L.document policy))
 ;;
 
@@ -237,6 +237,7 @@ let run ~limits ~policy ~deadline ~clock ~checkpoint ~f =
     ; native_output_bytes = limits.Limits.native_output_bytes
     ; acquisition_payload_reserved = limits.Limits.acquisition_payload_reserved
     ; work_steps = limits.Limits.work_steps
+    ; prepared_input_bytes = limits.Limits.prepared_input_bytes
     }
   in
   let t =

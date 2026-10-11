@@ -408,6 +408,48 @@ let%test_module "project preparation accounting" =
         done)
     ;;
 
+    let%test_unit "canonical input shares the reservation ledger and remaining allowance" =
+      Eio_main.run (fun _ ->
+        let delta bytes = { A.zero with prepared_input_bytes = bytes } in
+        let schedules =
+          [ 400, 200, 500, 300; 400, 200, 500, 301; 1000, 1000, 0, 0; 1000, 999, 1, 0 ]
+        in
+        List.iter schedules ~f:(fun (reserved, observed, concurrent, later) ->
+          let result =
+            run ~output:10 (fun attempt ->
+              let open Result.Let_syntax in
+              let%bind token = Attempt.reserve attempt (delta reserved) in
+              [%test_eq: int]
+                (A.prepared_input_bytes (Attempt.remaining attempt))
+                (1000 - reserved);
+              let%bind () = Attempt.charge attempt (delta concurrent) in
+              let%bind () = Attempt.finish attempt token ~actual:(delta observed) in
+              [%test_eq: int]
+                (A.prepared_input_bytes (Attempt.remaining attempt))
+                (1000 - observed - concurrent);
+              let%bind next = Attempt.composition_limits attempt in
+              [%test_eq: int option]
+                (Chatml_project_build.Limits.max_input_bytes next)
+                (Some (1000 - observed - concurrent));
+              Attempt.charge attempt (delta later))
+          in
+          let expected =
+            reserved + concurrent <= 1000
+            && observed + concurrent + later <= 1000
+            && observed + concurrent < 1000
+          in
+          assert (Bool.equal (Result.is_ok result) expected);
+          match result with
+          | Error error ->
+            (match Error.problem error with
+             | Limit_exceeded -> ()
+             | _ -> assert false)
+          | Ok ((), receipt) ->
+            [%test_eq: int]
+              (A.prepared_input_bytes receipt)
+              (observed + concurrent + later)))
+    ;;
+
     let%test_unit "uncompleted, reused and foreign reservations cannot publish" =
       Eio_main.run (fun _ ->
         let invalid result =
