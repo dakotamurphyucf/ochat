@@ -13,30 +13,38 @@ let contract =
   Contract.for_static_surface surface ~required_bindings:[]
 ;;
 
-let root ?(declaration_path = "owner.json") origin =
+let root
+      ?(declaration_path = "owner.json")
+      ?(namespace = "owner")
+      ?(environment = "default")
+      origin
+  =
   let declaration =
     Support.capture
-      ~namespace:"owner"
+      ~namespace
       declaration_path
-      {|{"schema_version":1,"namespace":"owner","environments":{"default":{"modules":{}}}}|}
+      {|{"schema_version":1,"namespace":"owner","environments":{"default":{"modules":{}},"alternate":{"modules":{}}}}|}
   in
   let catalog =
-    Support.catalog declaration ~request:(Library { environment = None }) ~members:[]
+    Support.catalog
+      declaration
+      ~request:(Library { environment = Some environment })
+      ~members:[]
   in
   B.Catalog_input.create catalog ~origin ~acquisition_key:"root-attempt" ~dependencies:[]
 ;;
 
-let compose ?declaration_path origin operation =
+let compose ?declaration_path ?(namespace = "owner") ?environment origin operation =
   let limits = Support.limits () in
   let open Result.Let_syntax in
   let%bind gate, _ = B.Selection_gate.create operation ~limits ~checkpoint:ignore in
   B.compose
-    (root ?declaration_path origin)
+    (root ?declaration_path ~namespace ?environment origin)
     ~catalogs:[]
     ~entry:(Captured (Support.capture ~namespace:"host" "inline.chatml" "let main = 0"))
     ~selection_gate:gate
     ~contract
-    ~lock_id:(Support.id ~namespace:"owner" "selected.lock.json")
+    ~lock_id:(Support.id ~namespace "selected.lock.json")
     ~limits
     ~checkpoint:ignore
 ;;

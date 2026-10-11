@@ -152,8 +152,40 @@ let%test_unit
   let dependency = List.hd_exn (P.dependencies owner) in
   [%test_eq: string] (P.Dependency.name dependency) "leaf";
   let check gate checkpoint =
+    let previous_root, _ =
+      B.Selection_gate.check_root
+        gate
+        ~origin:Local
+        ~project:(Source.Portable_path.create "root.json" |> Or_error.ok_exn)
+        ~limits
+        ~checkpoint
+      |> Support.ok
+    in
+    let root =
+      Chatml_prepared_program.find_source
+        (B.prepared original)
+        (Support.id ~namespace:"root" "root.json")
+      |> Option.value_exn
+    in
+    let root_project =
+      match P.decode root ~limits:Document_schema.Limits.default ~checkpoint with
+      | Ok project -> project
+      | Error _ -> failwith "valid captured root rejected"
+    in
+    let previous_owner, _ =
+      B.Selection_gate.check_dependency
+        gate
+        ~previous_owner:previous_root
+        ~owner:root_project
+        ~owner_origin:Local
+        (List.hd_exn (P.dependencies root_project))
+        ~limits
+        ~checkpoint
+      |> Support.ok
+    in
     B.Selection_gate.check_dependency
       gate
+      ~previous_owner
       ~owner
       ~owner_origin:Local
       dependency
@@ -176,7 +208,8 @@ let%test_unit
     |> Support.ok
     |> fst
   in
-  ignore (check update ignore |> Support.ok : B.Accounting.t);
+  ignore
+    (check update ignore |> Support.ok : B.Selection_gate.Owner.t option * B.Accounting.t);
   Support.assert_checkpoint_identity ~f:(fun checkpoint ->
     let error = check build checkpoint |> Support.reject in
     match B.Error.problem error with
@@ -199,7 +232,7 @@ let%test_unit
   | _ -> failwith "actual captured pin mismatch admitted"
 ;;
 
-let%test_unit "Build preserves immutable Git bytes and selected optional inventory" =
+let%test_unit "Build preserves overlapping Git bytes while selected inventory may change" =
   let initial = Fixture.make () in
   let original = Fixture.compose initial Initial_prepare |> Support.ok in
   let previous_lock = B.lock_source original in
@@ -207,7 +240,7 @@ let%test_unit "Build preserves immutable Git bytes and selected optional invento
     previous_lock
     (B.lock_source (Fixture.compose initial (Build { previous_lock }) |> Support.ok));
   List.iter
-    [ Fixture.make ~code:"let value = 9" (); Fixture.make ~companion:true () ]
+    [ Fixture.make ~code:"let value = 9" () ]
     ~f:(fun changed ->
       let error = Fixture.compose changed (Build { previous_lock }) |> Support.reject in
       (match B.Error.problem error with
@@ -215,6 +248,15 @@ let%test_unit "Build preserves immutable Git bytes and selected optional invento
        | _ -> failwith "Git captured selection drift classification");
       let owner = B.Error.declared_at error |> Option.value_exn |> P.Declared_at.source in
       Support.assert_same_source changed.Fixture.leaf_declaration owner);
+  let companion =
+    Fixture.compose (Fixture.make ~companion:true ()) (Build { previous_lock })
+    |> Support.ok
+  in
+  assert (
+    Option.is_some
+      (Chatml_prepared_program.find_source
+         (B.prepared companion)
+         (Support.id ~namespace:"leaf" "util.chatmli")));
   Support.assert_same_source
     previous_lock
     (B.lock_source (Fixture.compose initial (Build { previous_lock }) |> Support.ok))

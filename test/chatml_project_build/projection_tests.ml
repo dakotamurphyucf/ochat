@@ -85,18 +85,21 @@ let%test_unit "explicit remaining allowances aggregate pure host projections" =
     ; (fun () ->
         B.Selection_gate.check_dependency
           gate
+          ~previous_owner:None
           ~owner
           ~owner_origin:Local
           dependency
           ~limits
-          ~checkpoint)
+          ~checkpoint
+        |> receipt)
     ; (fun () ->
         B.Selection_gate.check_root
           gate
           ~origin:Local
           ~project:(path "owner.json")
           ~limits
-          ~checkpoint)
+          ~checkpoint
+        |> receipt)
     ]
   in
   let observed =

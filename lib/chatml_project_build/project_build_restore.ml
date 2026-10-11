@@ -4,7 +4,6 @@ module Budget = Project_build_budget
 module Assembly = Project_build_assembly
 module Catalog_restore = Project_build_restore_catalog
 module Closure = Project_build_closure
-module Gate = Project_build_selection_gate
 module Input = Model.Catalog_input
 module Project = Chatml_project
 module Lock = Project.Lock
@@ -180,10 +179,7 @@ let restore budget ~limits ~contract ~lock_source ~sources =
        | Some source -> Ok (Model.Entry.Captured source)
        | None -> Error (Model.Error.create ~declared_at (Missing_capture id)))
   in
-  let%bind gate =
-    Gate.create Initial_prepare ~document:(Model.Limits.document limits) ~checkpoint
-  in
-  let%bind catalogs = Closure.select budget root ~catalogs ~gate in
+  let%bind catalogs = Closure.select budget root ~catalogs in
   Assembly.create
     budget
     root
