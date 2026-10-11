@@ -20,6 +20,7 @@ module Error : sig
     | Capture
     | Foreign_capture
     | Project_preparation
+    | Document_capture
   [@@deriving equal, sexp_of]
 
   type t
@@ -30,6 +31,7 @@ module Error : sig
   val foreign_receipt : unit -> t
   val capture_diagnostics : t -> Prompt_revision_builder.Diagnostic.t list option
   val project_error : t -> Chatml_project_prepare.Error.t option
+  val document_error : t -> Chatmd_content_capture.Error.t option
   val sexp_of_t : t -> Sexp.t
 end
 
@@ -136,6 +138,18 @@ module Scope : sig
     -> limits:Prompt.Chat_markdown.Limits.t
     -> checkpoint:(unit -> unit)
     -> (Capture.t, Error.t) Result.t
+
+  (** Capture rendered documents through this SAME retained Local. Reject foreign
+      capture admission/receipt before any read. Derive contexts from the actual
+      immutable Builder capture; no root/Local getter or artifact-path reopen.
+      Shared policy/cancellation checks bracket caller checkpoints and delivery.
+      Complete native/conversion/metadata receipt is immutable and charged once. *)
+  val capture_documents
+    :  t
+    -> capture:Capture.t
+    -> limits:Chatmd_prompt_content.Limits.t
+    -> checkpoint:(unit -> unit)
+    -> (Chatmd_content_capture.t, Error.t) Result.t
 
   (** SAME retained original root makes the genuine host anchor privately; no
       root/Local/Host getter. Capture must belong to this exact native admission

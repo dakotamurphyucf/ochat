@@ -49,9 +49,6 @@ let prepare authored ~parsed_contexts ~root ~supplied ~checkpoint =
 ;;
 
 let fingerprint t ~checkpoint =
-  let json = Storage.Manifest.to_json (Storage.manifest (C.to_storage t)) in
-  (* Storage admits metadata and payloads separately. Admit their complete
-     combined manifest before encoded allocation or semantic hashing. *)
   let limits =
     Document_schema.Limits.create
       ~max_bytes:262144
@@ -61,22 +58,8 @@ let fingerprint t ~checkpoint =
     |> Result.map_error ~f:(fun _ -> "Invalid fixed artifact policy")
     |> Result.ok_or_failwith
   in
-  let open Result.Let_syntax in
-  let%bind _ =
-    Document_schema.Json.validate_and_measure ~limits json
-    |> Result.map_error ~f:(fun e -> C.Error.Document e)
-  in
-  let bytes = Jsonaf.to_string json in
-  let digest = ref Digestif.SHA256.empty
-  and offset = ref 0 in
-  while !offset < String.length bytes do
-    checkpoint ();
-    let len = Int.min 4096 (String.length bytes - !offset) in
-    digest := Digestif.SHA256.feed_string !digest bytes ~off:!offset ~len;
-    offset := !offset + len
-  done;
-  checkpoint ();
-  Ok Digestif.SHA256.(get !digest |> to_hex)
+  Storage.Manifest.fingerprint (Storage.manifest (C.to_storage t)) ~limits ~checkpoint
+  |> Result.map_error ~f:(fun error -> C.Error.Document error)
 ;;
 
 let replay input ~authored ~dir =

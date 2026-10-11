@@ -12,6 +12,7 @@
   prompt_definition
   prompt_revision
   prompt_program_custody
+  prompt_content_custody
   prompt_revision_builder
   generated_definition
   generated_session_request
@@ -180,6 +181,8 @@
   ochat.document_schema
   jsonaf
   chatml_prompt_programs
+  ochat.chatmd_content_capture
+  ochat.chatmd_prompt_content
   ochat.chatml_local_source
   ochat.chatml_project_prepare
   ochat.chatml_local_roots

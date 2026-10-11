@@ -22,12 +22,17 @@ type t =
   ; sources : Store.Source.t list
   ; programs : Chatml_prompt_programs.t option
   ; programs_sha256 : string option
+  ; content : Chatmd_prompt_content.t option
+  ; content_sha256 : string option
+  ; content_limits : Chatmd_prompt_content.Limits.t option
+  ; parser_context : CM.Parsed.t option
+  ; content_projection : Prompt_content_custody.Restored.t option
   }
 
 let identity t = t.identity
 let declaration t = t.declaration
 
-let fingerprint t =
+let program_fingerprint t =
   (match t.programs_sha256 with
    | None ->
      [%sexp ("ochat.authored-agent-source.v1" : string), (t.identity : Identity.t)]
@@ -40,9 +45,21 @@ let fingerprint t =
   |> Chatmd_shell_spec.Source_ref.digest
 ;;
 
+let fingerprint t =
+  match t.content_sha256 with
+  | None -> program_fingerprint t
+  | Some content_sha256 ->
+    [%sexp
+      ("ochat.authored-agent-source.v3" : string)
+    , (program_fingerprint t : string)
+    , (content_sha256 : string)]
+    |> Sexp.to_string_mach
+    |> Chatmd_shell_spec.Source_ref.digest
+;;
+
 let denied message = Error (P.Error.create Permission_denied ~message ~retryable:false ())
 
-let capture ~parent ~tool_name =
+let capture ?content_limits ~parent ~tool_name () =
   let open Result.Let_syntax in
   let%bind declaration, policy =
     List.filter_map (Prompt_revision.elements parent) ~f:(function
@@ -108,9 +125,9 @@ let capture ~parent ~tool_name =
     List.filter all_sources ~f:(fun source ->
       not (String.equal source.Store.Source.relative_path selected.relative_path))
   in
-  let%bind programs =
+  let%bind programs, child_parsed =
     match parent_artifact.program_bundle with
-    | None -> Ok None
+    | None -> Ok (None, None)
     | Some storage ->
       let%bind parent_authored =
         Prompt_program_custody.authored
@@ -184,7 +201,7 @@ let capture ~parent ~tool_name =
             ~retryable:false
             ())
       in
-      Some child
+      Some child, Some parsed
   in
   let%bind programs_sha256 =
     match programs with
@@ -199,6 +216,57 @@ let capture ~parent ~tool_name =
           ~retryable:false
           ())
   in
+  let%bind content, content_sha256, content_limits, content_projection =
+    match parent_artifact.content_bundle, programs, child_parsed, content_limits with
+    | None, _, parsed, _ ->
+      if
+        Option.exists parsed ~f:(fun parsed ->
+          Prompt_content_custody.requires_captured_documents
+            parsed
+            ~checkpoint:Eio.Fiber.check)
+      then
+        Error
+          (P.Error.create
+             Prompt_unavailable
+             ~message:"Owned child captured documents require retained content custody"
+             ~retryable:false
+             ())
+      else Ok (None, None, None, None)
+    | Some storage, Some programs, Some parsed, Some limits ->
+      let%bind restored =
+        Prompt_content_custody.restore
+          storage
+          ~programs
+          ~parsed
+          ~limits
+          ~checkpoint:Eio.Fiber.check
+        |> Result.map_error ~f:(fun _ ->
+          P.Error.create
+            Prompt_unavailable
+            ~message:"Invalid retained child content or content allowance"
+            ~retryable:false
+            ())
+      in
+      let content = Prompt_content_custody.Restored.content restored in
+      let%map digest =
+        Prompt_content_custody.fingerprint content ~checkpoint:Eio.Fiber.check
+        |> Result.map_error ~f:(fun _ ->
+          P.Error.create
+            Prompt_unavailable
+            ~message:"Complete child content manifest exceeds artifact policy"
+            ~retryable:false
+            ())
+      in
+      Some content, Some digest, Some limits, Some restored
+    | Some _, _, _, _ ->
+      Error
+        (P.Error.create
+           Prompt_unavailable
+           ~message:
+             "Retained child content requires parser custody and explicit content limits"
+           ~retryable:false
+           ())
+  in
   Ok
     { identity
     ; declaration = { declaration with agent = selected.relative_path }
@@ -207,6 +275,11 @@ let capture ~parent ~tool_name =
     ; sources
     ; programs
     ; programs_sha256
+    ; content
+    ; content_sha256
+    ; content_limits
+    ; parser_context = child_parsed
+    ; content_projection
     }
 ;;
 
@@ -279,6 +352,7 @@ let artifact t ~revision_id ~created_at =
     ~parser_schema_version:t.parent_artifact.parser_schema_version
     ~runtime_schema_version:t.parent_artifact.runtime_schema_version
     ?program_bundle:(Option.map t.programs ~f:Chatml_prompt_programs.to_storage)
+    ?content_bundle:(Option.map t.content ~f:Chatmd_prompt_content.to_storage)
     ~created_at
     ()
 ;;
@@ -302,19 +376,60 @@ let resource_revision ~parent t =
     artifact t ~revision_id ~created_at:t.parent_artifact.created_at
     |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
   in
-  Prompt_revision_builder.reparse
-    ~definition:(Prompt_revision.definition parent)
-    ~artifact
-    ~materialized_tree:(Prompt_revision.materialized_tree parent)
-  |> Result.map_error ~f:(fun diagnostics ->
-    P.Error.create
-      Prompt_unavailable
-      ~message:
-        (List.map diagnostics ~f:(fun diagnostic ->
-           diagnostic.Prompt_revision_builder.Diagnostic.message)
-         |> String.concat ~sep:"\n")
-      ~retryable:false
-      ())
+  match t.parser_context, t.programs with
+  | Some parsed, Some programs ->
+    let tree = Prompt_revision.materialized_tree parent in
+    let%bind () =
+      Store.verify_tree ~root:tree artifact
+      |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+    in
+    let revision =
+      Prompt_revision.create
+        ~definition:(Prompt_revision.definition parent)
+        ~artifact
+        ~materialized_tree:tree
+        ~elements:(CM.Parsed.elements parsed)
+    in
+    let unavailable error =
+      P.Error.create
+        Prompt_unavailable
+        ~message:(Error.to_string_hum error)
+        ~retryable:false
+        ()
+    in
+    let%bind revision =
+      Prompt_revision.with_custody
+        revision
+        ~parser_context:parsed
+        ~programs
+        ~checkpoint:Eio.Fiber.check
+      |> Result.map_error ~f:unavailable
+    in
+    (match t.content_projection with
+     | None -> Ok revision
+     | Some restored ->
+       Prompt_revision.with_content
+         revision
+         ~content:(Prompt_content_custody.Restored.content restored)
+         ~materialized:(Prompt_content_custody.Restored.materialized restored)
+         ~checkpoint:Eio.Fiber.check
+       |> Result.map_error ~f:unavailable)
+  | None, None | Some _, None | None, Some _ ->
+    Prompt_revision_builder.reparse
+      ?content_limits:t.content_limits
+      ~definition:(Prompt_revision.definition parent)
+      ~artifact
+      ~materialized_tree:(Prompt_revision.materialized_tree parent)
+      ()
+    |> Result.map_error ~f:(fun diagnostics ->
+      P.Error.create
+        Prompt_unavailable
+        ~message:
+          (List.map diagnostics ~f:(fun diagnostic ->
+             diagnostic.Prompt_revision_builder.Diagnostic.message)
+           |> String.concat ~sep:"\n")
+        ~retryable:false
+        ())
 ;;
 
 let store_result result =

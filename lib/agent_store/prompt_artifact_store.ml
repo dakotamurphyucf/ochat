@@ -35,6 +35,7 @@ module Artifact = struct
     ; runtime_schema_version : int
     ; shell_manifest_sha256 : string option
     ; program_bundle : Program_bundle.t option
+    ; content_bundle : Program_bundle.t option
     ; manifest_sha256 : string
     ; manifest_publication : Publication.t
     ; created_at : Agent_protocol.Timestamp.t
@@ -55,11 +56,12 @@ module Artifact = struct
     ; runtime_schema_version = artifact.runtime_schema_version
     ; shell_manifest_sha256 = artifact.shell_manifest_sha256
     ; program_bundle = Option.map artifact.program_bundle ~f:Program_bundle.manifest
+    ; content_bundle = Option.map artifact.content_bundle ~f:Program_bundle.manifest
     ; created_at = artifact.created_at
     }
   ;;
 
-  let of_publication publication ~root_chatmd ~sources ~program_bundle =
+  let of_publication publication ~root_chatmd ~sources ~program_bundle ~content_bundle =
     let known = Prompt_manifest_document.value (Publication.document publication) in
     let artifact =
       { revision_id = known.revision_id
@@ -74,6 +76,7 @@ module Artifact = struct
       ; runtime_schema_version = known.runtime_schema_version
       ; shell_manifest_sha256 = known.shell_manifest_sha256
       ; program_bundle
+      ; content_bundle
       ; manifest_sha256 = Publication.sha256 publication
       ; manifest_publication = publication
       ; created_at = known.created_at
@@ -100,13 +103,14 @@ module Artifact = struct
       ~root_chatmd:t.root_chatmd
       ~sources:t.sources
       ~program_bundle:t.program_bundle
+      ~content_bundle:t.content_bundle
   ;;
 
   let same_content (a : t) (b : t) =
     Manifest.equal (manifest a) { (manifest b) with created_at = a.created_at }
   ;;
 
-  let check_payload_budget ~root_chatmd ~sources ~program_bundle =
+  let check_payload_budget ~root_chatmd ~sources ~program_bundle ~content_bundle =
     let module B = Program_bundle in
     let open Result.Let_syntax in
     let%bind () =
@@ -116,19 +120,27 @@ module Artifact = struct
           (Store_error.Document (Document_schema.Error.Limit_exceeded "root prompt bytes"))
       else Ok ()
     in
-    let initial_count, initial_bytes =
-      Option.value_map
-        program_bundle
-        ~default:(1, String.length root_chatmd)
-        ~f:(fun bundle ->
-          let manifest = B.manifest bundle in
-          ( 1 + List.length (B.Manifest.payloads manifest)
-          , String.length root_chatmd + B.Manifest.payload_bytes manifest ))
-    in
     let invalid () =
       Error
         (Store_error.Document
            (Document_schema.Error.Limit_exceeded "prompt source inventory"))
+    in
+    let%bind initial_count, initial_bytes =
+      List.fold_result
+        [ program_bundle; content_bundle ]
+        ~init:(1, String.length root_chatmd)
+        ~f:(fun (count, bytes) bundle ->
+          match bundle with
+          | None -> Ok (count, bytes)
+          | Some bundle ->
+            let manifest = B.manifest bundle in
+            let additional_count = List.length (B.Manifest.payloads manifest) in
+            let additional_bytes = B.Manifest.payload_bytes manifest in
+            if
+              additional_count > B.max_payload_count - count
+              || additional_bytes > B.max_payload_bytes - bytes
+            then invalid ()
+            else Ok (count + additional_count, bytes + additional_bytes))
     in
     if initial_count > B.max_payload_count || initial_bytes > B.max_payload_bytes
     then invalid ()
@@ -156,11 +168,14 @@ module Artifact = struct
         ~runtime_schema_version
         ?shell_manifest_sha256
         ?program_bundle
+        ?content_bundle
         ~created_at
         ()
     =
     let open Result.Let_syntax in
-    let%bind () = check_payload_budget ~root_chatmd ~sources ~program_bundle in
+    let%bind () =
+      check_payload_budget ~root_chatmd ~sources ~program_bundle ~content_bundle
+    in
     let known : Manifest.t =
       { version = 1
       ; revision_id
@@ -177,12 +192,13 @@ module Artifact = struct
       ; runtime_schema_version
       ; shell_manifest_sha256
       ; program_bundle = Option.map program_bundle ~f:Program_bundle.manifest
+      ; content_bundle = Option.map content_bundle ~f:Program_bundle.manifest
       ; created_at
       }
     in
     let open Result.Let_syntax in
     let%bind publication = Publication.create known |> Document_fields.store in
-    of_publication publication ~root_chatmd ~sources ~program_bundle
+    of_publication publication ~root_chatmd ~sources ~program_bundle ~content_bundle
   ;;
 end
 
@@ -305,15 +321,18 @@ let install_files t directory artifact =
     let tree_path = Filename.concat tree_root source.relative_path in
     ensure_parent t tree_path;
     save_file t tree_path source.contents);
-  Option.iter artifact.program_bundle ~f:(fun bundle ->
-    List.iter (Program_bundle.payloads bundle) ~f:(fun payload ->
-      let path =
-        Filename.concat
-          (Filename.concat directory "programs")
-          (Program_bundle.Payload.sha256 payload)
-      in
-      ensure_parent t path;
-      save_file t path (Program_bundle.Payload.contents payload)));
+  List.iter
+    [ "programs", artifact.program_bundle; "content", artifact.content_bundle ]
+    ~f:(fun (pool, bundle) ->
+      Option.iter bundle ~f:(fun bundle ->
+        List.iter (Program_bundle.payloads bundle) ~f:(fun payload ->
+          let path =
+            Filename.concat
+              (Filename.concat directory pool)
+              (Program_bundle.Payload.sha256 payload)
+          in
+          ensure_parent t path;
+          save_file t path (Program_bundle.Payload.contents payload))));
   let encoded_manifest = Publication.bytes artifact.Artifact.manifest_publication in
   save_file t (Filename.concat directory "manifest.sexp") encoded_manifest;
   save_file
@@ -454,15 +473,14 @@ let load_source reader source =
   else Error (Store_error.Corrupt "prompt source digest mismatch")
 ;;
 
-let load_program_bundle t directory reader manifest =
+let load_private_bundle t directory reader ~pool manifest =
   let open Result.Let_syntax in
   let expected =
     Option.value_map manifest ~default:[] ~f:Program_bundle.Manifest.payloads
   in
   let%bind () =
     match
-      ( Eio.Path.kind ~follow:false (eio_path t (Filename.concat directory "programs"))
-      , expected )
+      Eio.Path.kind ~follow:false (eio_path t (Filename.concat directory pool)), expected
     with
     | `Not_found, [] -> Ok ()
     | `Directory, _ :: _ ->
@@ -476,11 +494,11 @@ let load_program_bundle t directory reader manifest =
           ~max_entries:(1 + List.length expected)
           ~max_bytes:0
       in
-      let%bind names = Retention_reader.list names_reader ~directory:"programs" in
+      let%bind names = Retention_reader.list names_reader ~directory:pool in
       if List.equal String.equal names (List.map expected ~f:fst)
       then Ok ()
-      else Error (Store_error.Corrupt "private program payload inventory differs")
-    | _ -> Error (Store_error.Corrupt "invalid private program payload directory")
+      else Error (Store_error.Corrupt ("private " ^ pool ^ " payload inventory differs"))
+    | _ -> Error (Store_error.Corrupt ("invalid private " ^ pool ^ " payload directory"))
   in
   match manifest with
   | None -> Ok None
@@ -490,7 +508,7 @@ let load_program_bundle t directory reader manifest =
         let%bind contents =
           Retention_reader.read
             reader
-            ~path:(Filename.concat "programs" digest)
+            ~path:(Filename.concat pool digest)
             ~max_bytes:bytes
         in
         let%bind payload = Program_bundle.Payload.create contents in
@@ -498,7 +516,7 @@ let load_program_bundle t directory reader manifest =
           String.equal digest (Program_bundle.Payload.sha256 payload)
           && Int.equal bytes (Program_bundle.Payload.byte_length payload)
         then Ok (payload :: acc)
-        else Error (Store_error.Corrupt "private program payload differs"))
+        else Error (Store_error.Corrupt ("private " ^ pool ^ " payload differs")))
     in
     Result.map (Program_bundle.restore manifest (List.rev payloads)) ~f:Option.some
 ;;
@@ -576,13 +594,25 @@ let load t revision_id =
           Result.all (List.map manifest.sources ~f:(load_source reader))
         in
         let%bind program_bundle =
-          load_program_bundle t directory reader manifest.program_bundle
+          load_private_bundle t directory reader ~pool:"programs" manifest.program_bundle
+        in
+        let%bind content_bundle =
+          load_private_bundle t directory reader ~pool:"content" manifest.content_bundle
         in
         let%bind () =
-          Artifact.check_payload_budget ~root_chatmd ~sources ~program_bundle
+          Artifact.check_payload_budget
+            ~root_chatmd
+            ~sources
+            ~program_bundle
+            ~content_bundle
         in
         let%bind artifact =
-          Artifact.of_publication publication ~root_chatmd ~sources ~program_bundle
+          Artifact.of_publication
+            publication
+            ~root_chatmd
+            ~sources
+            ~program_bundle
+            ~content_bundle
         in
         let%map () = verify_materialized_tree t artifact in
         artifact)
@@ -622,6 +652,9 @@ let verify_retained t ~reader ~revision_id ~manifest_sha256 =
     @ Option.value_map manifest.program_bundle ~default:[] ~f:(fun bundle ->
       List.map (Program_bundle.Manifest.payloads bundle) ~f:(fun (digest, _) ->
         Filename.concat "programs" digest, digest))
+    @ Option.value_map manifest.content_bundle ~default:[] ~f:(fun bundle ->
+      List.map (Program_bundle.Manifest.payloads bundle) ~f:(fun (digest, _) ->
+        Filename.concat "content" digest, digest))
     @ List.concat_map manifest.sources ~f:(fun source ->
       [ Filename.concat "sources" source.Manifest.Source.relative_path, source.sha256
       ; Filename.concat "tree" source.relative_path, source.sha256

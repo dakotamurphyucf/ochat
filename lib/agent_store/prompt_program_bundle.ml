@@ -121,6 +121,25 @@ module Manifest = struct
                  ])) )
       ]
   ;;
+
+  let fingerprint t ~limits ~checkpoint =
+    let json = to_json t in
+    let open Result.Let_syntax in
+    checkpoint ();
+    let%bind _ = D.Json.validate_and_measure ~limits json in
+    checkpoint ();
+    let bytes = Jsonaf.to_string json in
+    let digest = ref Digestif.SHA256.empty in
+    let offset = ref 0 in
+    while !offset < String.length bytes do
+      checkpoint ();
+      let len = Int.min 4096 (String.length bytes - !offset) in
+      digest := Digestif.SHA256.feed_string !digest bytes ~off:!offset ~len;
+      offset := !offset + len
+    done;
+    checkpoint ();
+    Ok Digestif.SHA256.(get !digest |> to_hex)
+  ;;
 end
 
 type t =

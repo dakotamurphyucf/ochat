@@ -638,7 +638,7 @@ let%expect_test "private authored shell manifests need an exact operator grant" 
     let source_sha256, root_manifest, private_manifest =
       with_daemon env root base principal provider (fun _ daemon _ ->
         let parent = revision daemon in
-        let source = Source.capture ~parent ~tool_name:"researcher" |> protocol_ok in
+        let source = Source.capture ~parent ~tool_name:"researcher" () |> protocol_ok in
         let child = Source.resource_revision ~parent source |> protocol_ok in
         let inspection =
           Chat_response.Agent_runtime.inspect_shell

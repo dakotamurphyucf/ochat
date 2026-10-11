@@ -48,6 +48,29 @@ let of_json json =
   let%bind root_relative_path = F.required json "root_relative_path" F.string in
   let%bind root_sha256 = F.required json "root_sha256" F.digest in
   let%bind sources = F.required json "sources" F.array in
+  let%bind program_bundle =
+    optional json "program_bundle" Prompt_program_bundle.Manifest.of_json
+  in
+  let%bind content_bundle =
+    optional json "content_bundle" Prompt_program_bundle.Manifest.of_json
+  in
+  let initial =
+    1
+    + Option.value_map program_bundle ~default:0 ~f:(fun value ->
+      List.length (Prompt_program_bundle.Manifest.payloads value))
+    + Option.value_map content_bundle ~default:0 ~f:(fun value ->
+      List.length (Prompt_program_bundle.Manifest.payloads value))
+  in
+  let%bind () =
+    List.fold_result sources ~init:initial ~f:(fun count _ ->
+      if count >= Prompt_program_bundle.max_payload_count
+      then Error (D.Error.Limit_exceeded "prompt source count")
+      else Ok (count + 1))
+    |> Result.bind ~f:(fun count ->
+      if count > Prompt_program_bundle.max_payload_count
+      then Error (D.Error.Limit_exceeded "prompt source count")
+      else Ok ())
+  in
   let%bind sources =
     List.map sources ~f:(fun source ->
       let%bind relative_path = F.required source "relative_path" F.string in
@@ -58,9 +81,6 @@ let of_json json =
   let%bind parser_schema_version = F.required json "parser_schema_version" integer in
   let%bind runtime_schema_version = F.required json "runtime_schema_version" integer in
   let%bind shell_manifest_sha256 = optional json "shell_manifest_sha256" F.digest in
-  let%bind program_bundle =
-    optional json "program_bundle" Prompt_program_bundle.Manifest.of_json
-  in
   let%bind created_at = F.required json "created_at" (identifier P.Timestamp.of_string) in
   let result =
     M.
@@ -76,6 +96,7 @@ let of_json json =
       ; runtime_schema_version
       ; shell_manifest_sha256
       ; program_bundle
+      ; content_bundle
       ; created_at
       }
   in
@@ -106,6 +127,10 @@ let to_json (t : M.t) =
              "program_bundle"
              t.program_bundle
              ~f:Prompt_program_bundle.Manifest.to_json
+         ; optional
+             "content_bundle"
+             t.content_bundle
+             ~f:Prompt_program_bundle.Manifest.to_json
          ; optional "prompt_definition_id" t.prompt_definition_id ~f:(fun id ->
              `String (P.Id.Prompt_definition.to_string id))
          ; optional "source_receipt" t.source_receipt ~f:Prompt_source_receipt.to_json
@@ -135,11 +160,13 @@ let shape =
     ; "runtime_schema_version", D.Shape.value
     ; "shell_manifest_sha256", D.Shape.value
     ; "program_bundle", Prompt_program_bundle.Manifest.shape
+    ; "content_bundle", Prompt_program_bundle.Manifest.shape
     ; "created_at", D.Shape.value
     ]
 ;;
 
 let program_semantics = "prompt.program-bundle.v1"
+let content_semantics = "prompt.content-bundle.v1"
 
 let codec () =
   D.Domain_codec.create
@@ -147,7 +174,7 @@ let codec () =
     ~kind:"store.prompt_manifest"
     ~version:1
     ~shape
-    ~supported_semantics:[ program_semantics ]
+    ~supported_semantics:[ program_semantics; content_semantics ]
     ~decode:of_json
     ~encode:(fun value ->
       let open Result.Let_syntax in
@@ -167,16 +194,26 @@ let of_document document =
   let open Result.Let_syntax in
   let%bind codec = codec () in
   let%bind carrier = D.Domain_codec.decode codec document in
-  if
-    Option.is_some (value carrier).program_bundle
-    && not
-         (List.mem
-            (D.Document.required_semantics document)
-            program_semantics
-            ~equal:String.equal)
-  then
-    F.invalid "required_semantics" "program bundle requires explicit execution semantics"
-  else Ok carrier
+  List.fold_result
+    [ (value carrier).program_bundle, program_semantics
+    ; (value carrier).content_bundle, content_semantics
+    ]
+    ~init:carrier
+    ~f:(fun carrier (bundle, semantics) ->
+      if
+        Option.is_some bundle
+        && not
+             (List.mem
+                (D.Document.required_semantics document)
+                semantics
+                ~equal:String.equal)
+      then
+        F.invalid
+          "required_semantics"
+          (if String.equal semantics program_semantics
+           then "program bundle requires explicit execution semantics"
+           else "content bundle requires explicit execution semantics")
+      else Ok carrier)
 ;;
 
 let to_document t =
@@ -184,11 +221,19 @@ let to_document t =
   let%bind codec = codec () in
   let%bind document = D.Domain_codec.encode codec t in
   let required = D.Document.required_semantics document in
-  if
-    Option.is_none (value t).program_bundle
-    || List.mem required program_semantics ~equal:String.equal
-  then Ok document
-  else (
+  let additional =
+    List.filter_map
+      [ (value t).program_bundle, program_semantics
+      ; (value t).content_bundle, content_semantics
+      ]
+      ~f:(fun (bundle, semantics) ->
+        if Option.is_some bundle && not (List.mem required semantics ~equal:String.equal)
+        then Some semantics
+        else None)
+  in
+  match additional with
+  | [] -> Ok document
+  | _ :: _ ->
     let fields =
       match D.Document.json document with
       | `Object fields -> fields
@@ -198,11 +243,9 @@ let to_document t =
       ~limits
       (`Object
           (( "required_semantics"
-           , `Array
-               (List.map (required @ [ program_semantics ]) ~f:(fun name -> `String name))
-           )
+           , `Array (List.map (required @ additional) ~f:(fun name -> `String name)) )
            :: List.filter fields ~f:(fun (name, _) ->
-             not (String.equal name "required_semantics")))))
+             not (String.equal name "required_semantics"))))
 ;;
 
 let stored_revision_id document =
