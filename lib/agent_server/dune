@@ -57,6 +57,7 @@
   permission_scheduler
   schedule_scheduler
   maintenance
+  session_factory_catalogs
   session_factory
   local_storage
   local_selection
@@ -69,6 +70,7 @@
   provider_operator_port
   command_handler
   dispatcher)
+ (private_modules session_factory_catalogs)
  (libraries ochat.operator_authorization
  core
   base64

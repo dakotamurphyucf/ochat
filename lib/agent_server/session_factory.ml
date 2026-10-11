@@ -1,4 +1,5 @@
 open! Core
+module Catalogs = Session_factory_catalogs
 
 type generated_lifetime =
   | Owned
@@ -97,12 +98,7 @@ type t =
   ; idempotency_store : Agent_store.Idempotency_store.t
   ; blob_store : Agent_store.Blob_store.t
   ; prompts : Agent_session.Prompt_catalog.t
-  ; workspaces : Agent_session.Workspace_catalog.t
-  ; catalog_mutex : Eio.Mutex.t
-  ; mutable permission_profiles : (string, Agent_session.Permission_policy.t) Map.Poly.t
-  ; mutable permission_profile_revisions :
-      (string, Agent_session.Permission_policy.t) Map.Poly.t
-  ; mutable manifest_grants : Operator_manifest_grant.t list
+  ; catalogs : Catalogs.t
   ; quota_manager : Agent_session.Quota_manager.t
   ; job_capacity : Job_capacity.t
   ; tool_dir : string
@@ -145,22 +141,14 @@ type runtime_source =
       ; materialized_tree : Eio.Fs.dir_ty Eio.Path.t
       }
 
+module Catalog_seal = Catalogs.Seal
+
+let seal_catalogs t ~workspaces ~permission_profiles ~manifest_grants ~checkpoint =
+  Catalogs.seal t.catalogs ~workspaces ~permission_profiles ~manifest_grants ~checkpoint
+;;
+
 let install_catalogs t ~workspaces ~permission_profiles ~manifest_grants =
-  Agent_session.Workspace_catalog.install t.workspaces ~replacement:workspaces;
-  Eio.Mutex.use_rw ~protect:true t.catalog_mutex (fun () ->
-    t.permission_profiles
-    <- List.fold permission_profiles ~init:Map.Poly.empty ~f:(fun profiles profile ->
-         Map.set profiles ~key:profile.Agent_session.Permission_policy.id ~data:profile);
-    t.permission_profile_revisions
-    <- List.fold
-         permission_profiles
-         ~init:t.permission_profile_revisions
-         ~f:(fun profiles profile ->
-           Map.set
-             profiles
-             ~key:profile.Agent_session.Permission_policy.revision_digest
-             ~data:profile);
-    t.manifest_grants <- manifest_grants)
+  Catalogs.install t.catalogs ~workspaces ~permission_profiles ~manifest_grants
 ;;
 
 let now t =
@@ -204,7 +192,7 @@ let resolve_workspace_definition t definition = function
   | Agent_protocol.Session.Workspace_request.Configured workspace_id ->
     let open Result.Let_syntax in
     let%bind workspace =
-      Agent_session.Workspace_catalog.find t.workspaces workspace_id
+      Catalogs.find_workspace t.catalogs workspace_id
       |> Result.of_option
            ~error:(unavailable Workspace_not_found "workspace is not in the catalog")
     in
@@ -217,14 +205,13 @@ let resolve_workspace_definition t definition = function
 ;;
 
 let permission_profile t id =
-  Eio.Mutex.use_ro t.catalog_mutex (fun () -> Map.find t.permission_profiles id)
+  Catalogs.find_profile t.catalogs id
   |> Result.of_option
        ~error:(unavailable Configuration_invalid "permission profile is unavailable")
 ;;
 
 let permission_profile_revision t digest =
-  Eio.Mutex.use_ro t.catalog_mutex (fun () ->
-    Map.find t.permission_profile_revisions digest)
+  Catalogs.find_profile_revision t.catalogs digest
   |> Result.of_option
        ~error:
          (unavailable
@@ -1046,7 +1033,7 @@ let operator_manifest_authorizer t ~manifest_sha256 revision state =
       , Some principal_id
       , Some hash )
       when String.equal hash request.manifest.sha256 ->
-      let grants = Eio.Mutex.use_ro t.catalog_mutex (fun () -> t.manifest_grants) in
+      let grants = Catalogs.manifest_grants t.catalogs in
       if
         List.exists grants ~f:(fun grant ->
           Operator_manifest_grant.authorizes
@@ -3795,7 +3782,7 @@ let capacity_for_state t state =
              (unavailable Invalid_state "durable session has no workspace definition")
     in
     let%bind workspace =
-      Agent_session.Workspace_catalog.find t.workspaces definition_id
+      Catalogs.find_workspace t.catalogs definition_id
       |> Result.of_option
            ~error:(unavailable Workspace_not_found "workspace definition is unavailable")
     in
@@ -8616,17 +8603,7 @@ let create
       |> Result.ok_or_failwith
       |> Option.some
   in
-  let profiles =
-    List.fold permission_profiles ~init:Map.Poly.empty ~f:(fun profiles profile ->
-      Map.set profiles ~key:profile.Agent_session.Permission_policy.id ~data:profile)
-  in
-  let revisions =
-    List.fold permission_profiles ~init:Map.Poly.empty ~f:(fun profiles profile ->
-      Map.set
-        profiles
-        ~key:profile.Agent_session.Permission_policy.revision_digest
-        ~data:profile)
-  in
+  let catalogs = Catalogs.create ~workspaces ~permission_profiles ~manifest_grants in
   let bundle_limits =
     Option.value_map
       authoring_validation_host
@@ -8645,11 +8622,7 @@ let create
     ; idempotency_store
     ; blob_store
     ; prompts
-    ; workspaces
-    ; catalog_mutex = Eio.Mutex.create ()
-    ; permission_profiles = profiles
-    ; permission_profile_revisions = revisions
-    ; manifest_grants
+    ; catalogs
     ; quota_manager
     ; job_capacity
     ; tool_dir

@@ -134,8 +134,55 @@ val model_job_inference
   -> Agent_protocol.Job.t
   -> (model_job_inference, Agent_protocol.Error.t) Result.t
 
-(** [install_catalogs] atomically publishes catalogs used for future session
-    creation while retaining permission revisions pinned by existing sessions. *)
+module Catalog_seal : sig
+  module Error : sig
+    type t =
+      | Busy
+      | Workspaces_busy
+      | Publication_uncertain
+      | Foreign_domain
+      | Stale_preparation
+      | Aborted
+      | Committed
+    [@@deriving equal, sexp_of]
+  end
+
+  (** Creating-domain reservation for precomputed immutable catalog state. None of
+      these operations acquires locks, polls, invokes callbacks, allocates or yields.
+      This token neither acquires native source authority nor admits authorization. *)
+  type t
+
+  (** Before acknowledged durability only. Releases both reservations, preserving
+      published state; repeated abort succeeds. Committed/uncertain tokens reject. *)
+  val abort : t -> (unit, Error.t) Result.t
+
+  (** Preserves old pointers and permanently blocks replacements on this owner.
+      Repeated marking succeeds; committed/aborted tokens reject. *)
+  val mark_uncertain : t -> (unit, Error.t) Result.t
+
+  (** After acknowledged durability only. Installs precomputed pointers; repeated
+      commit succeeds without reinstalling old state. Aborted/uncertain reject. *)
+  val commit : t -> (unit, Error.t) Result.t
+end
+
+(** Preallocate and reserve the actual workspace/profile/history/grant replacement
+    before external durable publication. This token owns no Prompt_catalog or
+    baseline transaction. The host seals those separately and commits ALL pointer
+    swaps in one same-domain protected nonyielding phase only after durable success.
+    Current sessions' pinned profile revisions remain available. Original checkpoint
+    exceptions/cancellation propagate; legacy installation cannot invalidate a seal. *)
+val seal_catalogs
+  :  t
+  -> workspaces:Agent_session.Workspace_catalog.t
+  -> permission_profiles:Agent_session.Permission_policy.t list
+  -> manifest_grants:Operator_manifest_grant.t list
+  -> checkpoint:(unit -> unit)
+  -> (Catalog_seal.t, Catalog_seal.Error.t) Result.t
+
+(** Compatibility publication for future sessions, retaining pinned permission
+    revisions. Uses the same reservation as [seal_catalogs] and rejects pending,
+    uncertain or foreign-domain installation before either catalog changes.
+    Does not replace native source ownership or authorization admission. *)
 val install_catalogs
   :  t
   -> workspaces:Agent_session.Workspace_catalog.t
