@@ -11,6 +11,8 @@ module Error : sig
     | Enumerate
     | Read
     | Check_revision
+    | Open_subroot
+    | Observe_directory
   [@@deriving equal, sexp_of]
 
   type code =
@@ -35,7 +37,83 @@ module Error : sig
   val sexp_of_t : t -> Sexp.t
 end
 
+module Directory_path : sig
+  (** Bounded sequence of exact native POSIX directory components. Empty means
+      the retained directory itself. Components are nonempty, at most 1024 bytes,
+      contain neither '/' nor NUL and are never '.'/'..'. Colon, backslash and
+      other native filename bytes are not silently subjected to portable source
+      member restrictions. No Unicode normalization or link resolution. *)
+  type t
+
+  val create
+    :  string list
+    -> max_bytes:int
+    -> max_components:int
+    -> checkpoint:(unit -> unit)
+    -> t Or_error.t
+
+  val components : t -> string list
+  val component_count : t -> int
+  val byte_length : t -> int
+end
+
+module Directory_identity : sig
+  (** Exact kernel directory object identity (device/inode bits), observed from
+      its retained FD. Not a pathname, content revision, persistent identifier or
+      authority. Compare only while owners remain alive within the same host
+      attempt; inode reuse/reboot makes cross-lifetime comparisons invalid. *)
+  type t [@@deriving equal, compare, sexp_of]
+
+  (** Bounded exact device/inode bit representation for acquisition diagnostics or
+      a temporary acquisition-owned source namespace before declaration decoding.
+      Not a stable persisted source ID, lock field, portable locator or permission. *)
+  val to_string : t -> string
+end
+
 type t
+
+(** Own an independent duplicate of the native directory underlying the supplied
+    already-retained empty-path Eio root. Borrow only until joined acquisition;
+    the returned native owner does not retain the caller's Eio resource. Reject
+    nonempty paths/unsupported providers exactly as with_root. Install joined close
+    on [sw] before publication, with immediate cleanup on failed/cancelled setup.
+    [max_path_components] is explicit source-member/subroot traversal policy.
+    with_root reuses this ownership path inside its existing scoped bracket. *)
+val open_root
+  :  [ `Close | Eio.Fs.dir_ty ] Eio.Path.t
+  -> sw:Eio.Switch.t
+  -> max_path_components:int
+  -> checkpoint:(unit -> unit)
+  -> (t, Error.t) Result.t
+
+(** Construct an independent owned child directory using component-relative
+    O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC opens and fstat kind checks. Empty path clones
+    the existing directory; no native path is reopened. Input traversal must fit
+    the parent's component ceiling. Child inherits that ceiling; callers may
+    separately impose stricter source-member limits without silently changing it.
+
+    Preallocate native owners/install cleanup before acquisition. Borrow parent
+    through its active-operation gate until child acquisition is complete; no
+    gate is held during checkpoint/callback/IO. Once acquired, child has its own
+    lifecycle gate and FD and remains usable after parent bracket closes.
+    Register joined child close with supplied switch BEFORE result publication;
+    all exceptional/cancelled/failed setup closes every new resource immediately.
+    Caller keeps switch alive and joins users before closing it. Switch close
+    rejects new child operations, waits active operations, then closes exactly
+    once. No usable retained child after switch closes. No callback retained. *)
+val open_subroot
+  :  t
+  -> sw:Eio.Switch.t
+  -> directory:Directory_path.t
+  -> checkpoint:(unit -> unit)
+  -> (t, Error.t) Result.t
+
+(** Joined fstat on the exact live directory FD with directory-kind verification.
+    Finite Error.t, no raw errno/path/native exception retention. Parent/child
+    lifecycle and caller checkpoint/cancellation behavior match read/fold. *)
+val identity : t -> checkpoint:(unit -> unit) -> (Directory_identity.t, Error.t) Result.t
+
+val path_component_limit : t -> int
 
 (** Caller passes an ALREADY OPEN host-admitted closeable directory with empty
     Eio path; nonempty paths reject. Borrow its native FD by opening "." through

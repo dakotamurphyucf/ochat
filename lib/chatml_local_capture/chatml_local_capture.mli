@@ -183,3 +183,22 @@ val accounting : t -> Accounting.t
 val find_source : t -> Chatml_source.Id.t -> Chatml_source.t option
 
 val scope_for : t -> source:Chatml_source.Id.t -> Chatml_project.Scope_spec.t option
+
+(** Caller supplies a live descriptor owner already rooted at the selected package.
+    No Eio path/native filename is reconstructed or reopened. Capture limits must
+    not exceed the owner's component ceiling; incompatible policy rejects instead
+    of silently reducing the requested ceiling. Existing per-member checks may
+    impose stricter limits. Caller joins capture before closing owner/switch.
+
+    Reuse current source-owned errors, once-per-member reads, exact missing-leaf
+    optional policy, overrides/discovery, work reservations and Catalog validation.
+    Result contains no owner/identity/FD/callback. Root acquisition/retention costs
+    remain visible in the host attempt ledger; do not double-charge a new root
+    bracket that this endpoint does not create. *)
+val capture_from_owner
+  :  Chatml_project.t
+  -> owner:Chatml_local_source.t
+  -> request:Chatml_project.Selection.request
+  -> limits:Limits.t
+  -> checkpoint:(unit -> unit)
+  -> (t, Error.t) Result.t

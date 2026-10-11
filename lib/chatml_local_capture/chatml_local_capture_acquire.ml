@@ -221,9 +221,8 @@ let acquire_members project owner plan counters limits ~checkpoint =
           | Some source -> Map.set captured ~key:path ~data:source))
 ;;
 
-let capture project ~root ~request ~limits ~checkpoint =
+let prepare project ~request ~limits ~checkpoint =
   let open Result.Let_syntax in
-  let checkpoint = poll checkpoint in
   checkpoint ();
   let declaration = Project.source project in
   let counters = Budget.create limits in
@@ -242,6 +241,77 @@ let capture project ~root ~request ~limits ~checkpoint =
     Catalog.Plan.Discovery.create project ~request ~checkpoint
     |> Result.map_error ~f:catalog_error
   in
+  Ok (counters, origin, lookup_count, key_bytes, discovery)
+;;
+
+let capture_on_owner
+      project
+      owner
+      counters
+      limits
+      origin
+      discovery
+      ~lookup_count
+      ~key_bytes
+      ~checkpoint
+  =
+  let open Result.Let_syntax in
+  let declaration = Project.source project in
+  let%bind observations =
+    discover project owner discovery counters limits origin ~lookup_count ~checkpoint
+  in
+  let%bind count =
+    budget
+      origin
+      (Budget.sum
+         (List.length observations)
+         (List.length (Project.module_overrides project)))
+  in
+  let%bind count = budget origin (Budget.sum count 1) in
+  let%bind () =
+    budget origin (Budget.reserve_ordering counters ~count ~key_bytes ~passes:16)
+  in
+  let%bind plan =
+    Catalog.Plan.create discovery ~observations ~checkpoint
+    |> Result.map_error ~f:catalog_error
+  in
+  let%bind captured = acquire_members project owner plan counters limits ~checkpoint in
+  let%bind capture_count =
+    budget
+      origin
+      (Budget.sum (Map.length captured) (List.length (Catalog.Plan.members plan)))
+  in
+  let%bind capture_count = budget origin (Budget.sum capture_count count) in
+  let key_bytes =
+    Int.max
+      key_bytes
+      (String.length (Captured.Id.package_namespace (Captured.id declaration)))
+  in
+  let%bind () =
+    budget
+      origin
+      (Budget.reserve_ordering counters ~count:capture_count ~key_bytes ~passes:16)
+  in
+  let%bind () =
+    budget origin (Budget.reserve_scan counters ~bytes:(Captured.byte_length declaration))
+  in
+  let sources =
+    Map.fold captured ~init:[] ~f:(fun ~key:_ ~data sources ->
+      checkpoint ();
+      data :: sources)
+  in
+  let%map catalog =
+    Catalog.create plan ~sources ~checkpoint |> Result.map_error ~f:catalog_error
+  in
+  Chatml_local_capture_catalog.create catalog ~accounting:(Budget.snapshot counters)
+;;
+
+let capture project ~root ~request ~limits ~checkpoint =
+  let open Result.Let_syntax in
+  let checkpoint = poll checkpoint in
+  let%bind counters, origin, lookup_count, key_bytes, discovery =
+    prepare project ~request ~limits ~checkpoint
+  in
   let%bind () = budget origin (Budget.reserve counters 6) in
   match
     Native.with_root
@@ -249,67 +319,45 @@ let capture project ~root ~request ~limits ~checkpoint =
       ~max_path_components:(Budget.Limits.path_components limits)
       ~checkpoint
       ~f:(fun owner ->
-        let%bind observations =
-          discover
-            project
-            owner
-            discovery
-            counters
-            limits
-            origin
-            ~lookup_count
-            ~checkpoint
-        in
-        let%bind count =
-          budget
-            origin
-            (Budget.sum
-               (List.length observations)
-               (List.length (Project.module_overrides project)))
-        in
-        let%bind count = budget origin (Budget.sum count 1) in
-        let%bind () =
-          budget origin (Budget.reserve_ordering counters ~count ~key_bytes ~passes:16)
-        in
-        let%bind plan =
-          Catalog.Plan.create discovery ~observations ~checkpoint
-          |> Result.map_error ~f:catalog_error
-        in
-        let%bind captured =
-          acquire_members project owner plan counters limits ~checkpoint
-        in
-        let%bind capture_count =
-          budget
-            origin
-            (Budget.sum (Map.length captured) (List.length (Catalog.Plan.members plan)))
-        in
-        let%bind capture_count = budget origin (Budget.sum capture_count count) in
-        let key_bytes =
-          Int.max
-            key_bytes
-            (String.length (Captured.Id.package_namespace (Captured.id declaration)))
-        in
-        let%bind () =
-          budget
-            origin
-            (Budget.reserve_ordering counters ~count:capture_count ~key_bytes ~passes:16)
-        in
-        let%bind () =
-          budget
-            origin
-            (Budget.reserve_scan counters ~bytes:(Captured.byte_length declaration))
-        in
-        let sources =
-          Map.fold captured ~init:[] ~f:(fun ~key:_ ~data sources ->
-            checkpoint ();
-            data :: sources)
-        in
-        let%map catalog =
-          Catalog.create plan ~sources ~checkpoint |> Result.map_error ~f:catalog_error
-        in
-        Chatml_local_capture_catalog.create catalog ~accounting:(Budget.snapshot counters))
+        capture_on_owner
+          project
+          owner
+          counters
+          limits
+          origin
+          discovery
+          ~lookup_count
+          ~key_bytes
+          ~checkpoint)
   with
   | Ok result -> Ok result
   | Error (`Callback failure) -> Error failure
   | Error (`Filesystem failure) -> Error (filesystem origin failure)
+;;
+
+let capture_from_owner project ~owner ~request ~limits ~checkpoint =
+  let open Result.Let_syntax in
+  let checkpoint = poll checkpoint in
+  checkpoint ();
+  if Budget.Limits.path_components limits > Native.path_component_limit owner
+  then
+    Error
+      (Error.create
+         (Project.declared_at project)
+         (Limit_exceeded
+            { limit = Path_components; maximum = Native.path_component_limit owner }))
+  else (
+    let%bind counters, origin, lookup_count, key_bytes, discovery =
+      prepare project ~request ~limits ~checkpoint
+    in
+    capture_on_owner
+      project
+      owner
+      counters
+      limits
+      origin
+      discovery
+      ~lookup_count
+      ~key_bytes
+      ~checkpoint)
 ;;

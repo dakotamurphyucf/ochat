@@ -10,6 +10,8 @@ module Error = struct
     | Enumerate
     | Read
     | Check_revision
+    | Open_subroot
+    | Observe_directory
   [@@deriving equal, sexp_of]
 
   type code =
@@ -49,6 +51,49 @@ module Error = struct
   ;;
 end
 
+module Directory_path = struct
+  type t =
+    { components : string list
+    ; byte_length : int
+    ; component_count : int
+    }
+
+  let components t = t.components
+  let component_count t = t.component_count
+  let byte_length t = t.byte_length
+
+  let create components ~max_bytes ~max_components ~checkpoint =
+    let open Or_error.Let_syntax in
+    if max_bytes < 0 || max_components < 0
+    then Or_error.error_string "invalid directory path limit"
+    else (
+      let%map count, bytes =
+        List.fold_result components ~init:(0, 0) ~f:(fun (count, bytes) component ->
+          checkpoint ();
+          let length = String.length component in
+          if count >= max_components || length > max_bytes - bytes
+          then Or_error.error_string "directory path limit exceeded"
+          else if
+            length = 0
+            || length > 1024
+            || String.equal component "."
+            || String.equal component ".."
+          then Or_error.error_string "invalid directory component"
+          else if
+            String.exists component ~f:(fun c -> Char.equal c '/' || Char.equal c '\000')
+          then Or_error.error_string "invalid directory component"
+          else Ok (count + 1, bytes + length))
+      in
+      { components; byte_length = bytes; component_count = count })
+  ;;
+end
+
+module Directory_identity = struct
+  include Native.Directory_identity
+
+  let to_string t = sprintf "%016Lx:%016Lx" t.device t.inode
+end
+
 type t =
   { descriptor : Native.Descriptor.t
   ; max_path_components : int
@@ -57,6 +102,8 @@ type t =
   ; mutable closing : bool
   ; drained : unit Eio.Promise.t
   ; resolve_drained : unit Eio.Promise.u
+  ; closed : unit Eio.Promise.t
+  ; resolve_closed : unit Eio.Promise.u
   }
 
 let poll checkpoint =
@@ -70,11 +117,59 @@ let close_stream stream = joined (fun () -> Native.Directory.close stream)
 
 let close t =
   Eio.Cancel.protect (fun () ->
-    Eio.Mutex.use_rw ~protect:true t.gate (fun () ->
-      t.closing <- true;
-      if t.active = 0 then Eio.Promise.resolve t.resolve_drained ());
-    Eio.Promise.await t.drained;
-    close_descriptor t.descriptor)
+    let started =
+      Eio.Mutex.use_rw ~protect:true t.gate (fun () ->
+        if t.closing
+        then false
+        else (
+          t.closing <- true;
+          if t.active = 0 then Eio.Promise.resolve t.resolve_drained ();
+          true))
+    in
+    if started
+    then
+      Fun.protect
+        ~finally:(fun () -> Eio.Promise.resolve t.resolve_closed ())
+        (fun () ->
+           Eio.Promise.await t.drained;
+           close_descriptor t.descriptor)
+    else Eio.Promise.await t.closed)
+;;
+
+(* All OCaml lifecycle state exists before native acquisition. The switch hook
+   and setup bracket may both request close if a switch has already finished;
+   close is idempotent and waits for joined completion. *)
+let create_owner ~max_path_components =
+  let descriptor = Native.Descriptor.create () in
+  let drained, resolve_drained = Eio.Promise.create () in
+  let closed, resolve_closed = Eio.Promise.create () in
+  { descriptor
+  ; max_path_components
+  ; gate = Eio.Mutex.create ()
+  ; active = 0
+  ; closing = false
+  ; drained
+  ; resolve_drained
+  ; closed
+  ; resolve_closed
+  }
+;;
+
+let acquire_owner ~sw ~max_path_components ~checkpoint ~acquire =
+  let transferred = ref false in
+  let t = create_owner ~max_path_components in
+  let success = Ok t in
+  let release () = close t in
+  Fun.protect
+    ~finally:(fun () -> if not !transferred then close t)
+    (fun () ->
+       match acquire t.descriptor with
+       | Error error -> Error error
+       | Ok () ->
+         poll checkpoint;
+         Eio.Switch.on_release sw release;
+         transferred := true;
+         success)
 ;;
 
 let with_operation t operation ~f =
@@ -110,54 +205,45 @@ let borrow_error = function
   | _ -> Error.create Borrow_root Unavailable
 ;;
 
-let with_root root ~max_path_components ~checkpoint ~f =
+let open_root root ~sw ~max_path_components ~checkpoint =
   let _, path = root in
   if max_path_components <= 0
-  then Error (`Filesystem (Error.create Borrow_root Invalid_limit))
+  then Error (Error.create Borrow_root Invalid_limit)
   else if not (String.is_empty path)
-  then Error (`Filesystem (Error.create Borrow_root Not_retained_directory))
+  then Error (Error.create Borrow_root Not_retained_directory)
   else (
     poll checkpoint;
-    Eio.Switch.run (fun sw ->
-      let opened =
-        try Ok (Eio.Path.open_in ~sw Eio.Path.(root / ".")) with
-        | Eio.Io (error, _) -> Error (borrow_error error)
-      in
-      match opened with
-      | Error error -> Error (`Filesystem error)
-      | Ok resource ->
-        (match Eio_unix.Resource.fd_opt resource with
-         | None -> Error (`Filesystem (Error.create Borrow_root Unsupported_provider))
-         | Some borrowed ->
-           let owner = ref None in
-           let descriptor = Native.Descriptor.create () in
-           Fun.protect
-             ~finally:(fun () ->
-               match !owner with
-               | None -> close_descriptor descriptor
-               | Some t -> close t)
-             (fun () ->
-                let acquired =
-                  Eio_unix.Fd.use_exn "borrow local source root" borrowed (fun fd ->
-                    joined (fun () -> Native.Descriptor.duplicate_directory descriptor fd))
-                in
-                match acquired with
-                | Error error -> Error (`Filesystem (Error.native Borrow_root error))
-                | Ok () ->
-                  let drained, resolve_drained = Eio.Promise.create () in
-                  let t =
-                    { descriptor
-                    ; max_path_components
-                    ; gate = Eio.Mutex.create ()
-                    ; active = 0
-                    ; closing = false
-                    ; drained
-                    ; resolve_drained
-                    }
-                  in
-                  owner := Some t;
-                  poll checkpoint;
-                  Result.map_error (f t) ~f:(fun error -> `Callback error)))))
+    acquire_owner ~sw ~max_path_components ~checkpoint ~acquire:(fun descriptor ->
+      Eio.Switch.run (fun borrowed_sw ->
+        let opened =
+          try Ok (Eio.Path.open_in ~sw:borrowed_sw Eio.Path.(root / ".")) with
+          | Eio.Io (error, _) -> Error (borrow_error error)
+        in
+        match opened with
+        | Error error -> Error error
+        | Ok resource ->
+          (match Eio_unix.Resource.fd_opt resource with
+           | None -> Error (Error.create Borrow_root Unsupported_provider)
+           | Some borrowed ->
+             Eio_unix.Fd.use_exn "borrow local source root" borrowed (fun fd ->
+               joined (fun () -> Native.Descriptor.duplicate_directory descriptor fd))
+             |> Result.map_error ~f:(Error.native Borrow_root)))))
+;;
+
+let with_root root ~max_path_components ~checkpoint ~f =
+  Eio.Switch.run (fun sw ->
+    match open_root root ~sw ~max_path_components ~checkpoint with
+    | Error error -> Error (`Filesystem error)
+    | Ok owner -> Result.map_error (f owner) ~f:(fun error -> `Callback error))
+;;
+
+let path_component_limit t = t.max_path_components
+
+let identity t ~checkpoint =
+  with_operation t Observe_directory ~f:(fun () ->
+    poll checkpoint;
+    joined (fun () -> Native.observe_directory t.descriptor)
+    |> Result.map_error ~f:(Error.native Observe_directory))
 ;;
 
 let components t member operation =
@@ -189,6 +275,26 @@ let with_directories t parts ~checkpoint ~f =
              Ok descriptor)
        in
        f directory)
+;;
+
+let open_subroot t ~sw ~directory ~checkpoint =
+  if Directory_path.component_count directory > t.max_path_components
+  then Error (Error.create Open_subroot Too_large)
+  else
+    with_operation t Open_subroot ~f:(fun () ->
+      acquire_owner
+        ~sw
+        ~max_path_components:t.max_path_components
+        ~checkpoint
+        ~acquire:(fun descriptor ->
+          with_directories
+            t
+            (Directory_path.components directory)
+            ~checkpoint
+            ~f:(fun parent ->
+              poll checkpoint;
+              joined (fun () -> Native.Descriptor.clone_directory descriptor ~parent)
+              |> Result.map_error ~f:(Error.native Open_subroot))))
 ;;
 
 let with_file parent name ~checkpoint ~f =

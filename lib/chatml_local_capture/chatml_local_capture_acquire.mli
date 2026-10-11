@@ -10,3 +10,11 @@ val capture
   -> limits:Chatml_local_capture_budget.Limits.t
   -> checkpoint:(unit -> unit)
   -> (Chatml_local_capture_catalog.t, Chatml_local_capture_error.t) Result.t
+
+val capture_from_owner
+  :  Chatml_project.t
+  -> owner:Chatml_local_source.t
+  -> request:Chatml_project.Selection.request
+  -> limits:Chatml_local_capture_budget.Limits.t
+  -> checkpoint:(unit -> unit)
+  -> (Chatml_local_capture_catalog.t, Chatml_local_capture_error.t) Result.t

@@ -6,6 +6,7 @@ module Binding = Chatml_catalog.Binding
 type t = Chatml_local_capture_catalog.t
 
 let capture = Chatml_local_capture_acquire.capture
+let capture_from_owner = Chatml_local_capture_acquire.capture_from_owner
 let catalog = Chatml_local_capture_catalog.catalog
 let accounting = Chatml_local_capture_catalog.accounting
 let project t = Chatml_catalog.project (catalog t)
