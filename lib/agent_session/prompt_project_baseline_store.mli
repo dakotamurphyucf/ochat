@@ -63,6 +63,16 @@ val create_new
   -> (t, Error.t) Result.t
 
 module Snapshot : sig
+  module History : sig
+    (** Finite metadata only: no source authority, artifact references or raw
+        invalid-document diagnostics. *)
+    type t =
+      | Tracked of int
+      | Missing
+      | Invalid
+    [@@deriving equal, sexp_of]
+  end
+
   (** Immutable generation/owner-affine state. May be kept across preparation but
       supplies no native authority and becomes stale after another publication.
       This persisted index generation is distinct from the original Catalog
@@ -75,6 +85,7 @@ module Snapshot : sig
     | Untracked of Untracked.t
 
   val generation : t -> int option
+  val history : t -> History.t
 
   val previous
     :  t
@@ -99,6 +110,10 @@ module Candidate : sig
   (** Entire bounded merged document, final bytes, expected generation/byte
       identity and post-publication Snapshot allocated before writer entry. *)
   type t
+
+  (** Actual next index generation allocated by successful preparation, not an
+      acknowledgment of publication. Pure and safe to inspect before writing. *)
+  val generation : t -> int
 end
 
 (** Pure prepare: owner/snapshot affinity, counter overflow, capacity, successful

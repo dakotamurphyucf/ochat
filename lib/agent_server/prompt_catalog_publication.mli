@@ -5,6 +5,8 @@ open Core
     Daemon in the same final protected nonyielding phase. No second journal. *)
 type t
 
+module History = Agent_session.Prompt_project_baseline_store.Snapshot.History
+
 module Policy : sig
   type t
 
@@ -46,7 +48,8 @@ end
 (** Borrow the exclusively owned actual Session_store and already opened baseline
     store for the host lifetime. A new baseline must come only from the successful
     Session_store.create branch; an existing root always uses open_existing.
-    Creating this coordinator neither opens sources nor retains source authority. *)
+    Reads one bounded actual baseline snapshot before returning. Creating this
+    coordinator neither opens sources nor retains source authority. *)
 val create
   :  store:Agent_store.Session_store.t
   -> catalog:Agent_session.Prompt_catalog.t
@@ -54,12 +57,21 @@ val create
   -> baselines:Agent_session.Prompt_project_baseline_store.t
   -> policy:Policy.t
   -> content_limits:Chatmd_prompt_content.Limits.t option
-  -> t
+  -> checkpoint:(unit -> unit)
+  -> (t, Error.t) Result.t
+
+(** Last installed history, initialized from the admitted startup snapshot.
+    Pure, including during pending or uncertain publication; it does not claim
+    the current durable generation after an uncertain write. Foreign-domain
+    access raises Invalid_argument before reading state. *)
+val history : t -> History.t
 
 module Prepared : sig
   type t
 
   val entries : t -> Agent_session.Prompt_catalog.entry list
+  val previous_history : t -> History.t
+  val history : t -> History.t
 end
 
 (** Reserve this host's complete preparation/publication attempt. Snapshot durable

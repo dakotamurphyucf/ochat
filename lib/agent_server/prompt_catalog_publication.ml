@@ -9,6 +9,7 @@ module Revision = Agent_session.Prompt_revision
 module Builder = Agent_session.Prompt_revision_builder
 module Definition = Agent_session.Prompt_definition
 module Id = Agent_protocol.Id.Prompt_definition
+module History = Store.Snapshot.History
 
 module Policy = struct
   type t =
@@ -73,6 +74,7 @@ type t =
   ; policy : Policy.t
   ; content_limits : Chatmd_prompt_content.Limits.t option
   ; mutable admission : admission
+  ; mutable history : History.t
   }
 
 module Prepared = struct
@@ -90,12 +92,16 @@ module Prepared = struct
     ; entries : Catalog.entry list
     ; seal : Catalog.Seal.t
     ; baseline : Store.Candidate.t option
+    ; previous_history : History.t
+    ; history : History.t
     ; mutable phase : phase
     ; mutable operation_active : bool
     ; mutable retired : bool
     }
 
   let entries t = t.entries
+  let previous_history t = t.previous_history
+  let history t = t.history
 end
 
 type certainty =
@@ -103,7 +109,12 @@ type certainty =
   | Uncertain
 [@@deriving equal, sexp_of]
 
-let create ~store ~catalog ~artifacts ~baselines ~policy ~content_limits =
+let create ~store ~catalog ~artifacts ~baselines ~policy ~content_limits ~checkpoint =
+  let open Result.Let_syntax in
+  let%map snapshot =
+    Store.snapshot baselines ~checkpoint
+    |> Result.map_error ~f:(fun error -> Error.History error)
+  in
   { domain_id = (Stdlib.Domain.self () :> int)
   ; store
   ; catalog
@@ -112,6 +123,7 @@ let create ~store ~catalog ~artifacts ~baselines ~policy ~content_limits =
   ; policy
   ; content_limits
   ; admission = Available
+  ; history = Store.Snapshot.history snapshot
   }
 ;;
 
@@ -120,6 +132,12 @@ let foreign = Error Error.Foreign_domain
 let invalid = Error Error.Invalid_token
 let uncertain = Error Error.Publication_uncertain
 let domain t = Int.equal t.domain_id (Stdlib.Domain.self () :> int)
+
+let history t =
+  if not (domain t)
+  then invalid_arg "Prompt_catalog_publication.history: foreign Eio domain";
+  t.history
+;;
 
 let reserve t =
   if not (domain t)
@@ -338,6 +356,11 @@ let prepare t ~sources ~sw ~env ~mode ~created_at ~checkpoint definitions =
           ; entries
           ; seal
           ; baseline
+          ; previous_history = Store.Snapshot.history snapshot
+          ; history =
+              (match baseline with
+               | None -> Store.Snapshot.history snapshot
+               | Some candidate -> History.Tracked (Store.Candidate.generation candidate))
           ; phase = Ready
           ; operation_active = false
           ; retired = false
@@ -427,6 +450,7 @@ let commit t =
       else (
         match Catalog.Seal.commit t.seal with
         | Ok () ->
+          t.owner.history <- t.history;
           t.phase <- Installed;
           success
         | Error _ ->

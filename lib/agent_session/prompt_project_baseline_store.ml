@@ -114,6 +114,14 @@ type t =
   }
 
 module Snapshot = struct
+  module History = struct
+    type t =
+      | Tracked of int
+      | Missing
+      | Invalid
+    [@@deriving equal, sexp_of]
+  end
+
   type t =
     { owner : unit ref
     ; known : known
@@ -129,6 +137,13 @@ module Snapshot = struct
     match t.known.history with
     | Tracked document -> Some (Baseline.Document.generation document)
     | Unknown _ -> None
+  ;;
+
+  let history t =
+    match t.known.history with
+    | Tracked document -> History.Tracked (Baseline.Document.generation document)
+    | Unknown Missing_index -> History.Missing
+    | Unknown (Invalid_index _) -> History.Invalid
   ;;
 
   let previous t ~receipt ~checkpoint =
@@ -168,7 +183,10 @@ module Candidate = struct
     ; next : known
     ; snapshot : Snapshot.t
     ; bytes : string
+    ; generation : int
     }
+
+  let generation t = t.generation
 end
 
 let basename = "script-project-baselines.json"
@@ -483,6 +501,7 @@ let prepare t ~snapshot ~successes ~checkpoint =
           ; previous = pending.previous
           ; next
           ; bytes
+          ; generation = Baseline.Document.generation next_document
           ; snapshot = { Snapshot.owner = t.identity; known = next; limits = t.limits }
           }))
 ;;

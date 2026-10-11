@@ -43,10 +43,16 @@ val create
 
 val catalog : t -> Agent_session.Prompt_catalog.t
 
+(** Pure last-installed metadata, including while publication is busy/uncertain.
+    No filesystem read or source acquisition. *)
+val history : t -> Prompt_catalog_publication.History.t
+
 module Prepared : sig
   type t
 
   val entries : t -> Agent_session.Prompt_catalog.entry list
+  val previous_history : t -> Prompt_catalog_publication.History.t
+  val history : t -> Prompt_catalog_publication.History.t
 end
 
 (** One original monotonic attempt deadline spans source borrowing, all definitions

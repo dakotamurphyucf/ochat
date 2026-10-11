@@ -74,3 +74,23 @@ Operation completion uses a worker promise even when callback entry is skipped;
 startup admission also settles when the lifetime closes before daemon entry.
 Callbacks run without a held owner lock and preserve their original exception
 and backtrace. Concurrent/reentrant operations return Busy.
+
+The daemon opens this history from its actual session-store creation/open branch.
+Only successful creation of the owned data root permits a new empty index; a
+missing index in an existing root remains Untracked. Catalog preparation captures
+configured projects through the administrative source host, then seals the prompt
+and factory candidates before durable publication. Reload joins preparation,
+publication and cleanup under one owner; shutdown joins that owner before closing
+source and session-store resources. Pruning uses the same publication admission
+and retains last-successful baseline artifacts. Unknown history disables pruning.
+
+The publication owner's history observation is immutable metadata: a tracked
+generation, Missing, or Invalid. Startup obtains it from a bounded actual snapshot;
+subsequent status reads perform no filesystem or source work. A prepared candidate
+exposes its authentic previous and next history. Only final in-memory catalog
+installation updates the displayed generation. A successful disk write followed
+by interrupted installation therefore leaves the old displayed generation and
+uncertain publication; that old observation does not describe current disk bytes
+or authorize a retry. The existing publication tests check this distinction at
+the real writer boundary, and the daemon fixture verifies configured-project
+startup, restart after a local edit, and refusal to recreate a missing old index.

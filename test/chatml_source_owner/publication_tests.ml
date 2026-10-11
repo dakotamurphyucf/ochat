@@ -96,6 +96,8 @@ module Host = struct
                  ~baselines
                  ~policy:(policy ())
                  ~content_limits:None
+                 ~checkpoint:ignore
+               |> ok
              in
              f { env; sw; publication; catalog; artifacts; baselines; directory })))
   ;;
@@ -166,6 +168,12 @@ let assert_original actual expected =
   | actual -> assert (phys_equal actual expected)
 ;;
 
+let check_history actual expected =
+  if not (Publication.History.equal actual expected)
+  then
+    raise_s [%sexp { actual : Publication.History.t; expected : Publication.History.t }]
+;;
+
 let%expect_test
     "real host publication writes history before installing pointers and survives restart"
   =
@@ -175,13 +183,18 @@ let%expect_test
     let saved = ref None in
     Host.with_open env parent (fun host ->
       [%test_eq: int] 0 (Host.generation host);
+      check_history (Publication.history host.publication) (Tracked 0);
       let token = Host.prepare host [ definition ] |> ok in
+      check_history (Publication.Prepared.previous_history token) (Tracked 0);
+      check_history (Publication.Prepared.history token) (Tracked 1);
       let pending = pending_revision token in
       assert (List.is_empty (Catalog.entries host.catalog));
       Publication.publish token ~checkpoint:ignore |> ok;
       [%test_eq: int] 1 (Host.generation host);
+      check_history (Publication.history host.publication) (Tracked 0);
       assert (List.is_empty (Catalog.entries host.catalog));
       Publication.commit token |> ok;
+      check_history (Publication.history host.publication) (Tracked 1);
       assert (phys_equal pending (revision host.catalog definition));
       Publication.retire token;
       saved := Some (Revision.id pending);
@@ -284,6 +297,7 @@ let%test_unit
       (* The caller has not entered its protected final pointer phase. Discard
          cannot roll acknowledged bytes back or expose the old baseline. *)
       assert (Publication.equal_certainty (Publication.discard token) Uncertain);
+      check_history (Publication.history host.publication) (Tracked 0);
       assert (List.is_empty (Catalog.entries host.catalog));
       (match Publication.commit token with
        | Error Publication_uncertain -> ()
@@ -449,6 +463,7 @@ let%test_unit
                 (Revision.id pending)))
           else [%test_eq: string] old_bytes (Host.bytes host);
           assert (Publication.equal_certainty (Publication.discard token) Uncertain);
+          check_history (Publication.history host.publication) (Tracked 1);
           (match Host.prepare host [ definition ] with
            | Error Publication_uncertain -> ()
            | _ -> assert false);
@@ -468,7 +483,10 @@ let%expect_test "missing history in an existing root never becomes first admissi
     let index = Eio.Path.(parent / "host" / "indexes" / Baseline_tests.basename) in
     Eio.Path.unlink index;
     Host.with_open ~existing:true env parent (fun host ->
+      check_history (Publication.history host.publication) Missing;
       let token = Host.prepare host [ definition ] |> ok in
+      check_history (Publication.Prepared.previous_history token) Missing;
+      check_history (Publication.Prepared.history token) Missing;
       (match Publication.Prepared.entries token with
        | [ { Catalog.availability = Unavailable diagnostics; _ } ] ->
          assert (
@@ -480,6 +498,7 @@ let%expect_test "missing history in an existing root never becomes first admissi
       Publication.publish token ~checkpoint:ignore |> ok;
       Publication.commit token |> ok;
       Publication.retire token;
+      check_history (Publication.history host.publication) Missing;
       assert (not (Eio.Path.is_file index));
       save root "root.chatmd" "<user>implicit</user>";
       ignore (Host.install host [ definition ] : Publication.Prepared.t);

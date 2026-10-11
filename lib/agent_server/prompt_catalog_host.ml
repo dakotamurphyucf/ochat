@@ -75,6 +75,8 @@ module Prepared = struct
     }
 
   let entries t = Publication.Prepared.entries t.publication
+  let previous_history t = Publication.Prepared.previous_history t.publication
+  let history t = Publication.Prepared.history t.publication
 end
 
 let history_limits () =
@@ -145,13 +147,24 @@ let create ~sw ~env ~store ~origin ~sources ~content_limits ~checkpoint =
           ~max_roots:1024
         |> Or_error.ok_exn
       in
-      Publication.create ~store ~catalog ~artifacts ~baselines ~policy ~content_limits)
+      Publication.create
+        ~store
+        ~catalog
+        ~artifacts
+        ~baselines
+        ~policy
+        ~content_limits
+        ~checkpoint)
     |> Result.map_error ~f:(fun error -> Error.Sources error)
+  in
+  let%bind publication =
+    Result.map_error publication ~f:(fun error -> Error.Publication error)
   in
   Ok { sw; env; sources; catalog; publication }
 ;;
 
 let catalog t = t.catalog
+let history t = Publication.history t.publication
 
 exception Deadline_exceeded
 
