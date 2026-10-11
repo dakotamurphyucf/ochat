@@ -2983,7 +2983,7 @@ let runtime_foundation ~sources =
       ; review =
           Audited
             { excerpt_sha256 =
-                [ "a47f3aa148fe551488e03f30d7ab1e567e8b39ac2ae9017ddfdf16c728dfbb49" ]
+                [ "af56a6a762c4982120e6f1e7b79792c199b351830a52975466155a6ab5a75cba" ]
             ; evidence =
                 [ "test/agent_docs/docs_chatmd_authoring.ml"
                 ; "lib/chatmd/prompt.ml"
@@ -3468,7 +3468,7 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "fb5e3e32539f4ad5ba51d980899d71ff2437d382e966564712ab98781275e19a" ]
+                   [ "22c4d323f6a225a82b9fce615e99beaf38776cb9600d7b72e3e373b1b356ec92" ]
                ; evidence =
                    [ "lib/chatml/chatml_compilation.ml"
                    ; "lib/chatml/chatml_execution.ml"
@@ -3558,7 +3558,7 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "9e24239b9f0faefb1095ec4302f9847871ea9071019fc9e2a3c9ef57c14e3ce3" ]
+                   [ "9ddf89afd38fb3c5cb1f3dca47630def120c1ae982d64b240f8b0bf0579f750f" ]
                ; evidence =
                    [ "lib/chat_response/one_off_request.ml"
                    ; "lib/chat_response/authoring_validation.ml"

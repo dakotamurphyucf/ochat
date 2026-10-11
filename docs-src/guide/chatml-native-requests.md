@@ -6,6 +6,12 @@ definition before executing or creating it. Validation produces diagnostics; it
 does not run the candidate. Read `reference.tools` for the exact selected tool
 schemas and `reference.signatures` for the actual compiler surface.
 
+Captured managed tools and moderators bind their deferred invocation observers to
+the complete prepared graph revision. Changing a dependency changes that identity
+without granting new tools or file access. Their existing borrowed invocation
+scope and execution controls still apply; single-file requests retain their
+existing source identity.
+
 ## Execute one computation
 
 `run_chatml` requires `source`, `input` and `tools`. `source` is ChatML text with

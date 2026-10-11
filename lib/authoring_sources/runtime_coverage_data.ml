@@ -47,10 +47,18 @@ let shared_features =
   ; ( "compilation.policy"
     , "No-effect compiler domains, captured revisions, explicit policy and cooperative \
        cancellation"
-    , [ "lib/chatml/chatml_compilation.ml" ]
+    , [ "lib/chatml/chatml_compilation.ml"
+      ; "lib/chat_response/startup_compilation.ml"
+      ; "lib/agent_session/runtime_script_preparation.ml"
+      ; "lib/chat_response/script_contract_plan.ml"
+      ; "lib/chat_response/restored_programs.ml"
+      ]
     , "runtime.execution"
     , [ "test/chatml_compilation_test.ml"
       ; "test/chatml_captured_compilation/domain_tests.ml"
+      ; "test/chatml_script_routing/startup_budget_tests.ml"
+      ; "test/chatml_source_owner/runtime_preparation_tests.ml"
+      ; "test/chatml_source_owner/script_tests.ml"
       ] )
   ; ( "tasks.array_traversal"
     , "Sequential deferred callbacks with per-interpretation snapshots, control and \
@@ -150,6 +158,7 @@ let moderator_features =
     , "runtime.execution"
     , [ "test/moderation/moderator_execution_budget_test.ml"
       ; "test/moderation/moderator_invocation_test.ml"
+      ; "test/chatml_script_routing/routing_tests.ml"
       ] )
   ; ( "moderator.transactions"
     , "Serialized handler state, invocation resolution and local commit versus external \
@@ -162,6 +171,7 @@ let moderator_features =
     , "runtime.invocations.moderator"
     , [ "test/chatml_composition/moderator_pending_tests.ml"
       ; "test/agent_server_restart_test.ml"
+      ; "test/chatml_script_routing/routing_tests.ml"
       ] )
   ; ( "moderator.control"
     , "Model and process effects, transactional runtime requests and bounded turn \
@@ -196,6 +206,7 @@ let moderator_features =
     , "runtime.jobs.subscriptions"
     , [ "test/chatml_composition/subscription_tests.ml"
       ; "test/chatml_composition/subscription_expiry_tests.ml"
+      ; "test/chatml_script_routing/routing_tests.ml"
       ] )
   ; ( "timers.lifecycle"
     , "Source-owned one-shot timers, misfire policy and subscription dependency receipts"
@@ -274,7 +285,7 @@ let implementation_sources =
   ; ( "lib/agent_server/delegation_lifecycle.ml"
     , "5bfed8ecc3cd3f7976457adbab4a5e875f8b56bd08f4856d18149c694303ad49" )
   ; ( "lib/chatml/chatml_compilation.ml"
-    , "acc2cc876586c7d9eb304ec9880249fcbd1ff78e79bc311c1e21c85bc9f354d6" )
+    , "28b7183fd9cece84beae3a54f241291f70725dfab4a44081b7ca8163e9ccc4d0" )
   ; ( "lib/chatml/chatml_execution.ml"
     , "4a4bf26d29069eec620086008fa9883b20102ea425753489ed2f72a3abb1afdd" )
   ; ( "lib/chatml/chatml_value_codec.ml"
@@ -298,7 +309,7 @@ let implementation_sources =
   ; ( "lib/agent_session/external_ingress.ml"
     , "a86eff0d9e1389bd1b5bc5df9bd6688965b18fd49432463133e6782d3d5e8e1f" )
   ; ( "lib/agent_session/moderator_tool_dispatch.ml"
-    , "d37f70ede0b3d14d3b55e41ffd50c1dcf27e5a295d5fe207e36054c0ca75ecb9" )
+    , "0a5bcab978a0040322f288676a8e784d7c5ea95253b2dfe38ce8121abfae27f0" )
   ; ( "lib/agent_session/notification_delivery.ml"
     , "9f18c6eb7561b0afda29cd706214ddf2a376c54b9f28980ce536079ae5b7b45e" )
   ; ( "lib/agent_session/notification_history.ml"
@@ -314,7 +325,7 @@ let implementation_sources =
   ; ( "lib/agent_session/script_schedule_service.ml"
     , "9af44ed67062da4b8fa546c35d57a9aa627c24775f4d763946aed8ae84e7b58b" )
   ; ( "lib/agent_session/script_subscription_service.ml"
-    , "3c9e62b0f11666b6e5916b21c5b3ee1c8a2a3184ec9ffc4066927dee3457f44e" )
+    , "54c775836b551733687e907ff46a2a7a0cc26bd46ff915cc6fd5f0cf5116f069" )
   ; ( "lib/agent_session/session_actor.ml"
     , "31a99121c40ddf3208aa91df1a99ba79e033742d50f92d522cc1ec6b2f6a8746" )
   ; ( "lib/agent_session/staged_jobs.ml"
@@ -334,7 +345,7 @@ let implementation_sources =
   ; ( "lib/chat_response/moderator_invocation.ml"
     , "485cab4625c91fe5efe73e10be2e97b2e4b065dafebcca5c46580ce5965be9dd" )
   ; ( "lib/chat_response/moderator_manager.ml"
-    , "c67622bcd7c0da613b5c8a6aca7b8841be9ada1dd9283d6e83e14c70b3d16d05" )
+    , "871de11cfb01d4b73f24999ca459c081e629bc00dff942a0742f2100a8cd6b38" )
   ; ( "lib/chat_response/notification_operations.ml"
     , "1e67db1e69921f11f0c28798e340e7e23dc5436eb492bb79a12a0125b0f69e29" )
   ; ( "lib/chat_response/runtime_semantics.ml"
@@ -349,6 +360,14 @@ let implementation_sources =
     , "f8d63210438cadd286834a77bb62eaa371cc4f94aea08751aa84a87bc49333f0" )
   ; ( "lib/chatml_sources/chatml_diagnostic.ml"
     , "cd4f59d52868eff58a8eaabd2cc8222d8c65f677066b3d8ab16c7b5c7a81fde5" )
+  ; ( "lib/chat_response/startup_compilation.ml"
+    , "0f60a1f036408809e5618f3310fbc2213e9f7fe99788fb785951bd31c7b96bb1" )
+  ; ( "lib/agent_session/runtime_script_preparation.ml"
+    , "84113336f9cc51fca78fd37611115faf2967c38dc492f98a208e314529f0e8d8" )
+  ; ( "lib/chat_response/script_contract_plan.ml"
+    , "c72db10f7f883c17271b8171b1136a63e11b069676c6da15cd3ae93f62343a22" )
+  ; ( "lib/chat_response/restored_programs.ml"
+    , "329f2747454cc915a6ac3713fbffadc46d2d71b925167a3be68c0aefa9617fdb" )
   ]
 ;;
 
@@ -379,16 +398,16 @@ let topic_contracts =
     , "2695de70fc838d575dc80dc2519ac3e9294d5064b6b29487254dd74ab85f0441" )
   ; ( "one_off_v1"
     , "runtime.execution"
-    , "c07d50de5d8d2031960033d4e9cf131a0a4916493490f0268684b13fecc19585" )
+    , "340b985a3812eab6a5c7d4216d2938d7b64634e5daa4bad649f3393d0f425824" )
   ; ( "tool_v1"
     , "runtime.execution"
-    , "421ab4ab2f3298ee5c78854d322678fd1e8a3468ac40c3d42b5723ef1f60d15b" )
+    , "10a26428101d4b8d9fc7153ad1f4c6d71f447bb793f16eb350faac37abe3253e" )
   ; ( "moderator_v1"
     , "runtime.execution"
-    , "f163cc665c6c03938a12112e830241d40bd7d04182a243dc1c6d414111ef4658" )
+    , "c3a3be3c526186a752fba220aef782fee85e6fd5b98606ff1eaf855c37c78d6d" )
   ; ( "delegated_moderator_v1"
     , "runtime.execution"
-    , "166c27355282504b0262c91414e4e88b07165c5258670b67144ab23144e8ba2f" )
+    , "db2e344c7fdcccc4d7d2770064549e9e49f917c7e47a2d9c216956d7a058d6b7" )
   ; ( "one_off_v1"
     , "runtime.jobs.owned"
     , "3f1c4db718bfdc3e03027580f9b0a170a4f3d594d7bab931428ab007b24dc550" )

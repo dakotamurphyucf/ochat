@@ -164,6 +164,13 @@ both forms. `kind="tool"` selects the standalone tool surface and requires an
 explicit ID. Omitting the API from a moderator selects the older moderator
 contract, which is not accepted as generated lifecycle moderation.
 
+For a host-prepared configured graph, a script can record
+`project="chatml.project.json"` and an optional `environment="NAME"`.
+An environment requires a project; both values must be nonblank and contain no
+NUL. The host must supply the matching captured graph and actual role contract.
+These attributes do not grant filesystem or Git access, and a missing graph
+cannot fall back to compiling only the entry body.
+
 Extension scripts accept `wall_time`, `fuel`, `max_tasks`, `max_value`,
 `max_output`, `max_array_items` and `max_depth`. They must satisfy the versioned
 extension contract and host ceilings; these attributes do not impose a universal
@@ -251,7 +258,9 @@ The parser and pure content API retain exact declaration ownership and can repla
 captured output as literal message text; unmarked document imports remain dynamic.
 The builtin catalog currently contains only `chatml`; other names reject.
 
-These declarations do not themselves read a file, grant a tool, or install content
-in a session artifact. Host acquisition and session integration are separate work.
+These declarations do not themselves read a file or grant a tool. An explicitly
+admitted original-source scope can capture their content before artifact
+publication; captured restoration then requires the host's content policy and
+matching retained parser inputs.
 See the [content contract](../development/captured-document-content.md) for current
 API behavior and its ownership and resource limits.

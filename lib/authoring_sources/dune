@@ -189,6 +189,10 @@
     lib/chat_response/authoring_validation.ml %{dep:../chat_response/authoring_validation.ml}
     lib/chat_response/one_off_request.ml %{dep:../chat_response/one_off_request.ml}
     lib/chat_response/one_off_script.ml %{dep:../chat_response/one_off_script.ml}
+    lib/chat_response/startup_compilation.ml %{dep:../chat_response/startup_compilation.ml}
+    lib/agent_session/runtime_script_preparation.ml %{dep:../agent_session/runtime_script_preparation.ml}
+    lib/chat_response/script_contract_plan.ml %{dep:../chat_response/script_contract_plan.ml}
+    lib/chat_response/restored_programs.ml %{dep:../chat_response/restored_programs.ml}
     lib/chat_response/converter.ml %{dep:../chat_response/converter.ml}
     lib/chat_response/fetch.ml %{dep:../chat_response/fetch.ml}
     lib/chat_response/mcp_discovery_cache.ml %{dep:../chat_response/mcp_discovery_cache.ml}

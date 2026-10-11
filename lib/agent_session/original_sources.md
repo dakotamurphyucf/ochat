@@ -60,6 +60,8 @@ admits at most 1024 original roots, 512 path components and 4096 runtime leases 
 selection. Root counts and lease capacity are checked before acquisition, and
 policy checks surround yielding checkpoints and publication.
 
-This boundary supplies original-source ownership. Per-launch File selection,
-retry reservation and document-content capture are separate integrations; these
-APIs do not change existing captured execution or introduce authored selectors.
+This boundary supplies original-source ownership. Per-launch File selection and
+retry reservation are separate integrations. Scoped document capture now uses
+the same admitted capture and retained Local owner for parser-owned occurrences,
+and returns immutable content custody. It exposes no root getter or native path
+fallback. These APIs do not change captured execution or introduce authored selectors.

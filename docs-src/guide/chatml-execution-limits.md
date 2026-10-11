@@ -30,6 +30,21 @@ separate ceiling of 32 times the remaining contract-input allowance; exhausting
 it reports `chatml.metadata_allocation_limit`. This bounds the conversion's
 accounting, not the OCaml heap, and does not increase the default source limit.
 
+Session resource preparation can use one explicit host policy for the actual
+revision's script plan and retained-program restoration. Planning uses the original
+parser before authoring helpers are added; native resources consume its validated
+document projection. Owned parser custody requires that policy even without a
+configured project. Missing graph or active selection rejects rather than
+compiling only the entry body.
+
+The same startup context spans shell preparation, managed scripts and legacy
+moderator preflight. Its absolute deadline does not reset between roles. Distinct
+source/schema/help text and canonical prepared graph input have separate aggregate
+8 MiB ceilings; an exact repeated input is admitted once within its own ledger.
+Prepared fingerprints distinguish differing scopes and contracts. These budgets
+cover preparation and joined compilation, while initializer and native hook
+activation use their separate execution controls after complete preflight.
+
 ## Prepared execution validates before initialization
 
 Prepared execution uses an immutable linked artifact with entrypoint descriptors
