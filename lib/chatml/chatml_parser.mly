@@ -75,6 +75,7 @@
 %{
 
 open Chatml_lang
+open Chatml_type_expr
 open Source
 
 (* ------------------------------------------------------------------- *)
@@ -89,6 +90,18 @@ let position_of_lex (pos : Lexing.position) : Source.position =
 
 let span_of_lex (startp : Lexing.position) (endp : Lexing.position) : Source.span =
   { left = position_of_lex startp; right = position_of_lex endp }
+
+let mk_type startp endp desc =
+  { desc; span = span_of_lex startp endp }
+
+let mk_signature_item startp endp desc =
+  { Chatml_module_signature.desc; span = span_of_lex startp endp }
+
+let mk_binding startp endp value =
+  { Chatml_binding_pattern.value; span = span_of_lex startp endp }
+
+let mk_name startp endp name =
+  mk_binding startp endp (Chatml_binding_pattern.Name name)
 
 let mk_node startp endp value =
   { value; span = span_of_lex startp endp }
@@ -107,12 +120,12 @@ let maybe_annotate_expr (expr_node : expr node) (type_opt : type_expr option) : 
   (* ------------------------------------------------------------------- *)
 
   type task_let_binder =
-    | TLB_name of string
-    | TLB_unit
+    | TLB_name of Chatml_binding_pattern.t
+    | TLB_unit of Source.span
 
   let binder_name_of_task_let = function
     | TLB_name x -> x
-    | TLB_unit -> "__chatml_task_unit"
+    | TLB_unit span -> { Chatml_binding_pattern.value = Name "__chatml_task_unit"; span }
 
   let desugar_task_let
         (startp : Lexing.position)
@@ -141,17 +154,22 @@ let maybe_annotate_expr (expr_node : expr node) (type_opt : type_expr option) : 
 %token <string> LIDENT
 %token <string> UIDENT
 %token <string> TICKIDENT
+%token <string> TYPEVAR
 %token FUN IF THEN ELSE WHILE DO DONE LET IN MATCH WITH MODULE STRUCT END OPEN REF REC AND TYPE
 %token LETSTAR LETPLUS
+%token SIG VAL WHERE
 %token ARROW LEFTARROW COLON COLONEQ BANGEQ EQ EQEQ
 %token LTEQ GTEQ LT GT LTEQDOT GTEQDOT LTDOT GTDOT
 %token PLUS MINUS PLUSPLUS PLUSDOT MINUSDOT STAR SLASH STARDOT SLASHDOT
 %token LPAREN RPAREN UNDERSCORE
-%token LBRACE RBRACE LBRACKET RBRACKET SEMI COMMA DOT BAR BANG
+%token TUPLE_OPEN TUPLE_CLOSE
+%token LBRACE RBRACE LBRACKET RBRACKET SEMI SEMISEMI COMMA DOT BAR BANG
 %token EOF
 
 %start program
 %type <Chatml_lang.stmt_node list> program
+%start module_interface
+%type <Chatml_module_signature.t> module_interface
 
 %left ELSE
 %left EQ EQEQ BANGEQ LT GT LTEQ GTEQ LTDOT GTDOT LTEQDOT GTEQDOT
@@ -169,27 +187,65 @@ let maybe_annotate_expr (expr_node : expr node) (type_opt : type_expr option) : 
 program:
     program_stmts EOF  { $1 }
 
+module_interface:
+    signature_items EOF { $1 }
+
+signature_items:
+    signature_items signature_item { $1 @ [$2] }
+| signature_items SEMISEMI { $1 }
+| /* empty */ { [] }
+
+signature_item:
+    TYPE type_parameters LIDENT EQ type_expr
+      { mk_signature_item $startpos $endpos
+          (Chatml_module_signature.Type { name = $3; parameters = $2; body = $5 }) }
+| VAL LIDENT COLON type_expr signature_requirements
+      { mk_signature_item $startpos $endpos
+          (Chatml_module_signature.Value { name = $2; annotation = $4; requirements = $5 }) }
+| MODULE UIDENT COLON SIG signature_items END
+      { mk_signature_item $startpos $endpos
+          (Chatml_module_signature.Module { name = $2; signature = $5 }) }
+
+signature_requirements:
+    /* empty */ { [] }
+| WHERE separated_nonempty_list(AND, signature_requirement) { $2 }
+
+signature_requirement:
+    LIDENT LPAREN TYPEVAR RPAREN
+      { { Chatml_module_signature.Requirement.name = $1
+        ; parameter = $3
+        ; span = span_of_lex $startpos $endpos } }
+
 program_stmts:
     program_stmts program_stmt { $1 @ [$2] }
+| program_stmts SEMISEMI { $1 }
 | /* empty */ { [] }
 
 module_stmts:
     module_stmts module_stmt { $1 @ [$2] }
+| module_stmts SEMISEMI { $1 }
 | /* empty */ { [] }
 
 program_stmt:
-  TYPE LIDENT EQ type_expr     { mk_node $startpos $endpos (SType($2, $4)) }
-| module_stmt                  { $1 }
+  module_stmt                  { $1 }
 
 module_stmt:
-  LET REC rec_bindings          { mk_node $startpos $endpos (SLetRec( $3)) }
+  TYPE type_parameters LIDENT EQ type_expr
+    { mk_node $startpos $endpos (SType { name = $3; parameters = $2; body = $5 }) }
+| LET REC rec_bindings          { mk_node $startpos $endpos (SLetRec( $3)) }
 | LET REC rec_bindings IN expr_sequence  { mk_node $startpos $endpos (SExpr( mk_exprnode $startpos $endpos (ELetRec($3, $5)) )) }
-| LET LIDENT COLON type_expr EQ expr_sequence
+| LET binding_pattern COLON type_expr EQ expr_sequence
     { mk_node $startpos $endpos (SLet($2, maybe_annotate_expr $6 (Some $4))) }
-| LET LIDENT params EQ expr_sequence { mk_node $startpos $endpos (SLet($2, mk_exprnode $startpos $endpos (ELambda($3, ($5))))) }
-| LET LIDENT LPAREN RPAREN EQ expr_sequence { mk_node $startpos $endpos (SLet($2, mk_exprnode $startpos $endpos (ELambda([], ($6))))) }
-| LET LIDENT EQ expr_sequence        { mk_node $startpos $endpos (SLet($2, $4)) }
-| MODULE UIDENT EQ STRUCT module_stmts END { mk_node $startpos $endpos (SModule($2, $5)) }
+| LET LIDENT params EQ expr_sequence { mk_node $startpos $endpos (SLet(mk_name $startpos($2) $endpos($2) $2, mk_exprnode $startpos $endpos (ELambda($3, ($5))))) }
+| LET LIDENT LPAREN RPAREN EQ expr_sequence { mk_node $startpos $endpos (SLet(mk_name $startpos($2) $endpos($2) $2, mk_exprnode $startpos $endpos (ELambda([], ($6))))) }
+| LET binding_pattern EQ expr_sequence        { mk_node $startpos $endpos (SLet($2, $4)) }
+| MODULE UIDENT EQ STRUCT module_stmts END
+    { mk_node $startpos $endpos (SModule { name = $2; signature = None; body = $5 }) }
+| MODULE UIDENT COLON SIG signature_items END EQ STRUCT module_stmts END
+    { mk_node $startpos $endpos
+        (SModule { name = $2
+                 ; signature = Some (mk_node $startpos($4) $endpos($6) $5)
+                 ; body = $9 }) }
 | OPEN UIDENT               { mk_node $startpos $endpos (SOpen($2)) }
 | expr                      { mk_node $startpos $endpos (SExpr($1)) }
 
@@ -246,11 +302,11 @@ expr:
     | LET REC rec_bindings IN expr_sequence  { mk_exprnode $startpos $endpos (ELetRec($3, $5)) }
 
     (* Let-in expression *)
-    | LET LIDENT COLON type_expr EQ expr_sequence IN expr_sequence
+    | LET binding_pattern COLON type_expr EQ expr_sequence IN expr_sequence
         { mk_exprnode $startpos $endpos (ELetIn($2, maybe_annotate_expr $6 (Some $4), $8)) }
-    | LET LIDENT EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn($2, $4, $6)) }
-	  | LET LIDENT LPAREN RPAREN EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn($2, mk_exprnode $startpos $endpos (ELambda([], $6)), $8)) }
-	  | LET LIDENT params EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn($2, mk_exprnode $startpos $endpos (ELambda($3, $5)), $7)) }
+    | LET binding_pattern EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn($2, $4, $6)) }
+	  | LET LIDENT LPAREN RPAREN EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn(mk_name $startpos($2) $endpos($2) $2, mk_exprnode $startpos $endpos (ELambda([], $6)), $8)) }
+	  | LET LIDENT params EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn(mk_name $startpos($2) $endpos($2) $2, mk_exprnode $startpos $endpos (ELambda($3, $5)), $7)) }
     (* Task sugar:
        let* x = t1 in t2  ==> Task.bind(t1, fun x -> t2)
        let+ x = t1 in t2  ==> Task.map(t1,  fun x -> t2)
@@ -270,6 +326,7 @@ expr:
 
     (* record field access, e.g. expr.field *)
     | expr DOT LIDENT              { mk_exprnode $startpos $endpos (EFieldGet($1, $3)) }
+    | expr DOT UIDENT              { mk_exprnode $startpos $endpos (EFieldGet($1, $3)) }
 
     | expr DOT LIDENT LPAREN expr_list RPAREN
 		    { mk_exprnode $startpos $endpos (EApp( mk_exprnode $startpos $endpos (EFieldGet($1, $3)),  $5)) }
@@ -286,6 +343,8 @@ expr:
     (* parentheses *)
     | LPAREN RPAREN                         { mk_exprnode $startpos $endpos EUnit }
     | LPAREN expr_sequence RPAREN           { $2 }
+    | TUPLE_OPEN expr_sequence COMMA expr_sequence tuple_expr_tail TUPLE_CLOSE
+        { mk_exprnode $startpos $endpos (ETuple (Chatml_tuple.create $2 $4 ~rest:$5)) }
 
     (* references *)
     | REF expr                     { mk_exprnode $startpos $endpos (ERef($2)) }
@@ -299,6 +358,10 @@ expr:
     | DOT expr                     { failwith "Unexpected '.' expression" }
     /* fallback to handle conflicts if any. */
 
+tuple_expr_tail:
+| /* empty */ { [] }
+| COMMA expr_sequence tuple_expr_tail { $2 :: $3 }
+
 pattern_cases:
     pattern_case { [$1] }
 | pattern_case pattern_cases { $1 :: $2 }
@@ -311,6 +374,8 @@ pattern_case:
        } }
 
 pattern:
+    | TUPLE_OPEN pattern COMMA pattern tuple_pattern_tail TUPLE_CLOSE
+        { PTuple (Chatml_tuple.create $2 $4 ~rest:$5) }
     | LPAREN RPAREN    { PUnit }
     | UNDERSCORE      { PWildcard }
     | INT             { PInt $1 }
@@ -321,6 +386,10 @@ pattern:
     | TICKIDENT LPAREN pattern_list RPAREN { PVariant($1, $3) }
     | LBRACE pattern_field_list RBRACE { PRecord(fst $2, snd $2) }
     | LIDENT          { PVar $1 }
+
+tuple_pattern_tail:
+| /* empty */ { [] }
+| COMMA pattern tuple_pattern_tail { $2 :: $3 }
 
 pattern_list:
     pattern { [$1] }
@@ -352,14 +421,24 @@ expr_list_nonempty:
     expr_sequence { [$1] }
 | expr_sequence COMMA expr_list_nonempty { $1 :: $3 }
 
+binding_pattern:
+    LIDENT { mk_name $startpos $endpos $1 }
+| UNDERSCORE { mk_binding $startpos $endpos Chatml_binding_pattern.Wildcard }
+| TUPLE_OPEN binding_pattern COMMA binding_pattern binding_pattern_tail TUPLE_CLOSE
+    { mk_binding $startpos $endpos
+        (Chatml_binding_pattern.Tuple (Chatml_tuple.create $2 $4 ~rest:$5)) }
+
+binding_pattern_tail:
+    /* empty */ { [] }
+| COMMA binding_pattern binding_pattern_tail { $2 :: $3 }
+
 params:
-    /* possibly multiple variable names for e.g. fun x y ->  ... */
-    LIDENT { [$1] }
-| LIDENT params { $1 :: $2 }
+    binding_pattern { [$1] }
+| binding_pattern params { $1 :: $2 }
 
 task_let_binder:
-    LIDENT            { TLB_name $1 }
-  | LPAREN RPAREN     { TLB_unit }
+    LIDENT            { TLB_name (mk_name $startpos $endpos $1) }
+  | LPAREN RPAREN     { TLB_unit (span_of_lex $startpos $endpos) }
 
 field_list:
     /* empty */ { [] }
@@ -391,23 +470,49 @@ expr_sequence:
 | expr  { $1 }
 | expr SEMI expr_sequence { mk_exprnode $startpos $endpos (ESequence($1, $3)) }
 
+type_parameters:
+| /* empty */ { [] }
+| TYPEVAR { [$1] }
+| LPAREN separated_nonempty_list(COMMA, TYPEVAR) RPAREN { $2 }
+
 type_expr:
 | type_arrow { $1 }
 
 type_arrow:
-| type_postfix ARROW type_arrow { TEArrow($1, $3) }
+| FUN LPAREN separated_list(COMMA, type_expr) RPAREN ARROW type_arrow
+    { mk_type $startpos $endpos (TEFunction($3, $6)) }
+| type_product ARROW type_arrow { mk_type $startpos $endpos (TEArrow($1, $3)) }
+| type_product { $1 }
+
+type_product:
 | type_postfix { $1 }
+| type_postfix STAR type_postfix type_product_tail
+    { mk_type $startpos $endpos (TETuple (Chatml_tuple.create $1 $3 ~rest:$4)) }
+
+type_product_tail:
+| /* empty */ { [] }
+| STAR type_postfix type_product_tail { $2 :: $3 }
 
 type_postfix:
 | type_primary { $1 }
-| type_postfix LIDENT
-    { TEConstr ($2, [ $1 ]) }
+| type_postfix type_name { mk_type $startpos $endpos (TEConstr ($2, [ $1 ])) }
+| LPAREN type_expr COMMA type_expr_list RPAREN type_name
+    { mk_type $startpos $endpos (TEConstr ($6, $2 :: $4)) }
+
+type_name:
+| LIDENT { Name.local $1 }
+| type_module_path DOT LIDENT { { Name.modules = $1; name = $3 } }
+
+type_module_path:
+| UIDENT { [$1] }
+| type_module_path DOT UIDENT { $1 @ [$3] }
 
 type_primary:
-| LIDENT { TEName $1 }
+| type_name { mk_type $startpos $endpos (TEName $1) }
+| TYPEVAR { mk_type $startpos $endpos (TEParameter $1) }
 | LPAREN type_expr RPAREN { $2 }
-| LBRACE type_field_list RBRACE { TERecord $2 }
-| LBRACKET type_variant_cases_opt RBRACKET { TEVariant $2 }
+| LBRACE type_field_list RBRACE { mk_type $startpos $endpos (TERecord $2) }
+| LBRACKET type_variant_cases_opt RBRACKET { mk_type $startpos $endpos (TEVariant $2) }
 
 type_field_list:
 | /* empty */ { [] }

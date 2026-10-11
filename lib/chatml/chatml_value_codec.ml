@@ -128,6 +128,7 @@ module Snapshot = struct
     | Array of t list
     | Record of (string * t) list
     | Variant of string * t list
+    | Tuple of t * t * t list
   [@@deriving sexp, compare, bin_io]
 
   let field_path path field = Printf.sprintf "%s.%s" path field
@@ -145,6 +146,16 @@ module Snapshot = struct
     | VBool b -> Ok (Bool b)
     | VString s -> Ok (String s)
     | VUnit -> Ok Unit
+    | VTuple values ->
+      let open Result.Let_syntax in
+      let%bind first = of_value_at ~path:(array_path path 0) values.first in
+      let%bind second = of_value_at ~path:(array_path path 1) values.second in
+      let%map rest =
+        List.mapi values.rest ~f:(fun index value ->
+          of_value_at ~path:(array_path path (index + 2)) value)
+        |> list_map_result ~f:Fn.id
+      in
+      Tuple (first, second, rest)
     | VArray values ->
       values
       |> Array.to_list
@@ -187,6 +198,16 @@ module Snapshot = struct
     | Bool b -> Ok (VBool b)
     | String s -> Ok (VString s)
     | Unit -> Ok VUnit
+    | Tuple (first, second, rest) ->
+      let open Result.Let_syntax in
+      let%bind first = to_value_at ~path:(array_path path 0) first in
+      let%bind second = to_value_at ~path:(array_path path 1) second in
+      let%map rest =
+        List.mapi rest ~f:(fun index value ->
+          to_value_at ~path:(array_path path (index + 2)) value)
+        |> list_map_result ~f:Fn.id
+      in
+      VTuple (Chatml_tuple.create first second ~rest)
     | Array values ->
       values
       |> List.mapi ~f:(fun index element ->
@@ -229,6 +250,11 @@ module Snapshot = struct
       `Object [ "kind", `String "bool"; ("value", if value then `True else `False) ]
     | String value -> `Object [ "kind", `String "string"; "value", `String value ]
     | Unit -> `Object [ "kind", `String "unit" ]
+    | Tuple (first, second, rest) ->
+      let first = to_jsonaf first in
+      let second = to_jsonaf second in
+      let rest = List.map rest ~f:to_jsonaf in
+      `Object [ "kind", `String "tuple"; "values", `Array (first :: second :: rest) ]
     | Array values ->
       `Object [ "kind", `String "array"; "values", `Array (List.map values ~f:to_jsonaf) ]
     | Record fields ->
@@ -312,6 +338,17 @@ module Snapshot = struct
       name, value
     | _ -> Error "ChatML snapshot record field must be an object"
 
+  and decode_tuple fields =
+    let open Result.Let_syntax in
+    let%bind values = array_field fields "values" in
+    match values with
+    | [] | [ _ ] -> Error "ChatML snapshot tuple must have at least two values"
+    | first :: second :: rest ->
+      let%bind first = of_jsonaf first in
+      let%bind second = of_jsonaf second in
+      let%map rest = list_map_result rest ~f:of_jsonaf in
+      Tuple (first, second, rest)
+
   and decode_record fields =
     let open Result.Let_syntax in
     let%bind values = array_field fields "fields" in
@@ -329,6 +366,7 @@ module Snapshot = struct
     | "bool" -> Result.map (parse_bool fields) ~f:(fun value -> Bool value)
     | "string" -> Result.map (string_field fields "value") ~f:(fun value -> String value)
     | "unit" -> Ok Unit
+    | "tuple" -> decode_tuple fields
     | "array" ->
       Result.map (decode_values fields "values") ~f:(fun values -> Array values)
     | "record" -> Result.map (decode_record fields) ~f:(fun fields -> Record fields)

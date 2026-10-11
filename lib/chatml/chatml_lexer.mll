@@ -83,6 +83,9 @@ rule token = parse
 | "rec"                    { REC }
 | "and"                    { AND }
 | "type"                   { TYPE }
+| "sig"                    { SIG }
+| "val"                    { VAL }
+| "where"                  { WHERE }
 
     (* Operators / punctuation *)
 | "->"                     { ARROW }
@@ -110,11 +113,14 @@ rule token = parse
 | "/."                     { SLASHDOT }
 | "/"                      { SLASH }
 | "("                      { LPAREN }
+| "(|"                     { TUPLE_OPEN }
+| "|)"                     { TUPLE_CLOSE }
 | ")"                      { RPAREN }
 | "{"                      { LBRACE }
 | "}"                      { RBRACE }
 | "["                      { LBRACKET }
 | "]"                      { RBRACKET }
+| ";;"                     { SEMISEMI }
 | ";"                      { SEMI }
 | ","                      { COMMA }
 | "."                      { DOT }
@@ -140,6 +146,11 @@ rule token = parse
 | '`' ['A'-'Z''a'-'z''0'-'9' '_']+ as tickid {
     let name = String.sub tickid 1 (String.length tickid - 1) in
     TICKIDENT name
+    }
+
+    (* Lexically scoped alias/signature parameter, distinct from variant tags. *)
+| '\'' ['a'-'z' '_']['a'-'z''A'-'Z''0'-'9' '_']* as parameter {
+    TYPEVAR (String.sub parameter 1 (String.length parameter - 1))
     }
 
     (* Identifier: starts letter or underscore, followed by same + digits. *)

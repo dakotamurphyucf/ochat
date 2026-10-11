@@ -110,6 +110,35 @@ let%test_unit "every bounded byte range has exact source revision and coordinate
     done)
 ;;
 
+let%test_unit "indexed positions agree with the independent newline model across blocks" =
+  let boundaries = [ 4095; 4096; 4097; 8191; 8192; 8193 ] in
+  List.iter [ "\r"; "\n"; "\r\n" ] ~f:(fun newline ->
+    List.iter boundaries ~f:(fun boundary ->
+      let bytes = String.make boundary 'x' ^ newline ^ String.make 5000 'y' in
+      let source = capture bytes in
+      let offsets =
+        [ 0; boundary - 1; boundary; boundary + 1; boundary + 2; String.length bytes ]
+        @ boundaries
+        |> List.dedup_and_sort ~compare:Int.compare
+      in
+      List.iter offsets ~f:(fun left ->
+        List.iter offsets ~f:(fun right ->
+          if left <= right
+          then (
+            let location =
+              S.locate source ~start_byte:left ~end_byte:right ~checkpoint
+              |> Or_error.ok_exn
+            in
+            let span = S.Location.span location in
+            List.iter
+              [ left, span.left; right, span.right ]
+              ~f:(fun (offset, position) ->
+                [%test_eq: int * int]
+                  (position.Source.line, position.column)
+                  (reference_position bytes offset));
+            assert (Result.is_ok (S.of_span source span ~checkpoint)))))))
+;;
+
 exception Checkpoint_interrupted of int
 
 let interrupt_every_checkpoint run =

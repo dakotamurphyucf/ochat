@@ -102,7 +102,7 @@ let%expect_test "readable signatures preserve recursive JSON, call arity and row
     | _ -> ());
   [%expect
     {|
-    chatml-builtin-sexp-v2
+    chatml-builtin-sexp-v3
     inspect: ({ value: 'a; ..'fields }, () -> 'a) -> [ `Pair('a, json) | `Done | `One(unit) | ..'cases ]
     Task.bind: (task<'a>, ('a) -> task<'b>) -> task<'b>
     json: mu rec0. [ `Null | `Bool(bool) | `Number(float) | `String(string) | `Array(array<rec0>) | `Object(array<{ key: string; value: rec0 }>) ]

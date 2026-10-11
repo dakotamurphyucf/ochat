@@ -17,14 +17,19 @@ Write annotations on a binding, followed by a lambda: `let add : int -> int -> i
 = fun left right -> left + right`. Arrow chains describe the arguments of one
 call, not automatic currying. `unit -> result` describes a zero-argument function,
 called with `f()`. It does not describe a function taking a unit value as one
-argument. Function parameters themselves are ordinary names; neither annotated
-parameter patterns nor general `(expression : type)` syntax is available.
+argument. Function parameters allow names, `_`, and nested tuple binders.
+Neither annotated parameter patterns nor general `(expression : type)` syntax
+is available; annotate the whole binding to constrain its argument patterns.
 
 Right-hand arrows are flattened even inside parentheses or a named alias. Thus
 `int -> (int -> int)` still expects two parameters. Inferred functions may return
-functions, but this arrow annotation cannot express that curried result directly.
-Leave such a binding inferred or return a record containing the function. A
-function-valued argument on the left of an arrow is supported as shown below.
+functions. To annotate that result, use explicit function types:
+`fun(int) -> fun(int) -> int`. The parameter list in `fun(...)` retains its exact
+arity: `fun() -> int` takes no arguments, while `fun(unit) -> int` takes one unit
+value. Alias arguments are substituted before legacy arrow normalization:
+`type 'a callback = 'a -> int` makes `unit callback` a zero-argument function;
+use `type 'a callback = fun('a) -> int` when every application takes one argument,
+including unit. A function-valued argument on the left of a legacy arrow also works.
 
 <!-- ochat-authoring-example: {"id":"inference.explicit-arrow-arity","surface":"one_off_v1","result":13} -->
 ```ocaml
@@ -47,6 +52,20 @@ let main input = Task.pure(`Null)
 let make : int -> {apply: int -> int} =
   fun left -> {apply = fun right -> left + right}
 let main input = Task.pure(Json.parse(to_string(make(3).apply(4))))
+```
+
+<!-- ochat-authoring-example: {"id":"inference.generic-tree-and-nary-functions","surface":"one_off_v1","result":12} -->
+```ocaml
+type 'a tree = [ `Leaf('a) | `Branch('a tree, 'a tree) ]
+let rec total : fun(int tree) -> int = fun tree ->
+  match tree with
+  | `Leaf(n) -> n
+  | `Branch(left, right) -> total(left) + total(right)
+let zero : fun() -> int = fun () -> 1
+let one : fun(unit) -> int = fun ignored -> 2
+let make : fun(int) -> fun(int) -> int = fun left -> fun right -> left + right
+let main input = Task.pure(Json.parse(to_string(
+  total(`Branch(`Leaf(2), `Leaf(3))) + zero() + one(()) + make(1)(3))))
 ```
 
 ## Generalization depends on how a value is bound
@@ -82,17 +101,44 @@ let main input =
   else Task.pure(`Bool(false))
 ```
 
+## Annotating a copy helper's closed result
+
+An exact result annotation can constrain a copy helper before the input's fields
+are known. In that case, explicitly annotate the input shape when it contains a
+field that the copy overwrites. For example, an unannotated `enable r` whose body
+contains `let updated : {enabled: bool} = {r with enabled = true} in updated`
+currently infers an empty input shape: it accepts `{}`, but rejects
+`{enabled = 1}`. ChatML does not infer optional overwritten fields from that
+closed output. This conservative inference limit does not restrict ordinary
+unannotated copies, which still add fields, change field types and preserve extras.
+
+<!-- ochat-authoring-example: {"id":"inference.annotated-copy-input","surface":"one_off_v1","result":true} -->
+```ocaml
+let enable : fun({enabled: int}) -> {enabled: bool} =
+  fun original -> {original with enabled = true}
+let main input = Task.pure(`Bool(enable({enabled = 1}).enabled))
+```
+
 ## Named types are structural and recursive bindings are functions
 
 Primitive annotation names are `int`, `float`, `bool`, `string` and `unit`.
 Postfix `array` and `task` are supported. Record and variant annotations are
-closed. There are no user-written type parameters, explicit open-row annotations
-or `ref` type constructor. Named types are aliases, not nominal wrappers: two
-names with the same structural shape can describe the same value.
+closed. Named types are transparent aliases, not nominal wrappers: two names
+with the same structural shape can describe the same value. Aliases can declare
+lexically scoped parameters: `type 'a box = {value: 'a}` and
+``type ('a, 'e) outcome = [ `Ok('a) | `Error('e) ]``. Apply them as `int box` or
+`(int, string) outcome`. Parameters belong to their declaration; an annotation
+cannot introduce an unbound `'a` or claim implicit universal polymorphism.
+Explicit open-row annotations and a `ref` type constructor remain unsupported.
 
 Declarations are top-level and ordered. They may refer to earlier type names and
 their own recursive name, but cannot redefine a primitive or existing type name.
-Recursive references must be guarded by a real type constructor. There are no
+Recursive references must be guarded by a real type constructor and preserve
+the declaration's parameters, in order. For example, ``type 'a tree =
+[ `Leaf('a) | `Branch('a tree, 'a tree) ]`` is regular; recursively applying `tree`
+to `'a array` is not. Aliases resolve names in their declaration environment.
+Duplicate/free parameters, missing or extra arguments, and unguarded or
+nonregular recursion are rejected at a type-expression source span. There are no
 mutually recursive type declarations. A binding whose inferred type contains an
 explicit recursive type stays monomorphic, even if its expression is a lambda;
 do not infer polymorphic recursion from the usual identity-function example.
@@ -100,6 +146,12 @@ do not infer polymorphic recursion from the usual identity-function example.
 `let rec` and `and` bind functions, including annotated lambdas. They cannot
 construct cyclic refs, records or arbitrary self-referential values. Recursive
 calls share monomorphic placeholders while their definitions are checked.
+Parameter names within one lambda, and names within one simultaneous recursive
+group, must be distinct. Sequential bindings may still reuse a name; earlier
+closures retain their lexical bindings. Duplicate-parameter diagnostics currently
+point to the whole lambda, and duplicate recursive-name diagnostics to that
+binding's right-hand side, because the parsed AST does not retain individual
+binder-token spans.
 
 <!-- ochat-authoring-example: {"id":"inference.structural-aliases","surface":"one_off_v1","result":"ready"} -->
 ```ocaml
@@ -116,7 +168,28 @@ let rec cycle = {next = cycle}
 let main input = Task.pure(`Null)
 ```
 
-## Records retain only fields guaranteed by their type
+<!-- ochat-authoring-example: {"id":"inference.duplicate-parameter-rejected","surface":"one_off_v1","stage":"typecheck","contains":"Duplicate lambda parameter 'value'","span":true} -->
+```ocaml
+let duplicate value value = value
+let main input = Task.pure(`Null)
+```
+
+<!-- ochat-authoring-example: {"id":"inference.duplicate-recursive-name-rejected","surface":"one_off_v1","stage":"typecheck","contains":"Duplicate recursive binding 'repeat'","span":true} -->
+```ocaml
+let rec repeat value = value
+and repeat value = value
+let main input = Task.pure(`Null)
+```
+
+<!-- ochat-authoring-example: {"id":"inference.sequential-rebinding","surface":"one_off_v1","result":"first:second"} -->
+```ocaml
+let label = "first"
+let captured () = label
+let label = "second"
+let main input = Task.pure(`String(captured() ++ ":" ++ label))
+```
+
+## Records preserve their shape and inferred field requirements
 
 Field access constrains an inferred record parameter to contain that field.
 Unannotated helper parameters can remain open to additional fields. An explicit
@@ -126,11 +199,21 @@ labels and pattern binders are rejected.
 
 Copy-update produces a new record, can add a field, and can replace a field with
 a different type. Refs and arrays inside either record still share their storage.
-At an `if` or `match` result join, records keep only common fields and join those
-fields recursively. An open tail is preserved only when both sides share the
-same tail identity; merely similar-looking unknown rows do not grant fields.
-Outside record joins, branch result types must unify. Returning a variant with
-different constructors is often clearer than returning incompatible field types.
+All `if` and `match` result branches must have compatible types, including the
+same record field set. A join never hides physical fields. This also holds for
+nested records and records inside arrays, refs and function results. Use matching
+shapes or inferred variant tags when alternatives intentionally carry different
+records.
+
+When a branch returns an input record and another overrides one of its fields,
+the input must already have that field with a compatible type. Additional input
+fields are preserved. If both branches replace the field compatibly, the original
+field may be absent or have another type. Standalone updates still add fields or
+change their types. An annotation on the original constrains only the original;
+an explicit annotation on the new result must match that result's complete shape.
+
+Exact record patterns constrain helper arguments just like closed annotations.
+Use an open pattern or field projection when a helper should accept extra fields.
 
 <!-- ochat-authoring-example: {"id":"inference.closed-record-annotation-rejected","surface":"one_off_v1","stage":"typecheck","contains":"extra","span":true} -->
 ```ocaml
@@ -145,6 +228,161 @@ let finish value = {value with status = "done"}
 let main input =
   let updated = finish({name = "task"; status = 1; extra = true}) in
   Task.pure(`String(label(updated) ++ ":" ++ updated.status))
+```
+
+<!-- ochat-authoring-example: {"id":"inference.branch-shape-rejected","surface":"one_off_v1","stage":"typecheck","contains":"extra","span":true} -->
+```ocaml
+let choose flag = if flag then {x = 1} else {x = 2; extra = true}
+let main input = Task.pure(`Null)
+```
+
+<!-- ochat-authoring-example: {"id":"inference.conditional-update","surface":"one_off_v1","result":7} -->
+```ocaml
+let maybe_enable flag state = if flag then {state with enabled = true} else state
+let main input =
+  let next = maybe_enable(true, {enabled = false; count = 7; name = "kept"}) in
+  Task.pure(Json.parse(to_string(next.count)))
+```
+
+<!-- ochat-authoring-example: {"id":"inference.exact-helper-rejected","surface":"one_off_v1","stage":"typecheck","contains":"extra","span":true} -->
+```ocaml
+let exact value = match value with | {x = x} -> x
+let main input = Task.pure(Json.parse(to_string(exact({x = 1; extra = true}))))
+```
+
+## Modules and records have different representations
+
+A module is an environment of exports, not a record value. Field projection and
+`record_keys` accept either representation. A helper inferred only from those
+operations can be used independently with modules and records; an ordinary
+record argument may still have extra fields. Using a record-only operation
+constrains the helper to records: record annotations, exact or open record
+patterns, and copy-update cannot accept a module, including through an alias or
+a function parameter. `open` accepts modules only.
+
+Module declarations are non-recursive. The module being defined is not in
+scope inside its own body, including deferred function bodies. Use earlier local
+bindings directly, and `let rec` for recursive functions. The new module binding
+becomes available only after the whole body finishes. Existing enclosing bindings
+keep their normal lexical meaning; rebinding a module does not make the new
+module visible to its own initializer.
+
+Modules can declare transparent type aliases, including generic aliases. Refer
+to them as `Data.item` or `int Data.box`; nested modules keep their qualified
+paths. Each alias resolves names in its defining scope. `open Data` brings
+exported types into scope alongside values, rejecting existing-name collisions.
+Names inherited from an outer scope or introduced only by `open` are not
+automatically exported from the enclosing module.
+
+An optional `sig ... end` interface selects the public value, type and nested
+module members. Type definitions remain transparent: the implementation must
+agree with each public alias. Unlisted values are private, including at runtime
+when inspected with `record_keys`; exported closures can still use their private
+bindings. A signature does not run an initializer during checking.
+
+Generic aliases must agree for every argument type, including arguments that
+change legacy arrow normalization. For example, `'a -> int` and
+`fun('a) -> int` are not interchangeable aliases: substituting `unit` gives
+different arities. Interface checking compares normalized symbolic definitions
+with private aliases expanded and recursive binders renamed. It conservatively
+rejects definitions whose equivalence it cannot establish, including different
+unfoldings of the same recursive shape; use matching recursive definitions on
+both sides of the interface.
+
+Parameters in a `val` specification are universally quantified. For example,
+`val identity : fun('a) -> 'a` requires a function that works independently at
+each caller's type. It cannot generalize shared mutable storage. A function that
+compares its arguments must expose that requirement, for example
+`val same : fun('a, 'a) -> bool where equality('a)`. Opening the module preserves
+its member schemes and shared mutable types; it does not choose one instance of
+a polymorphic export for every subsequent use.
+
+An explicitly polymorphic value specification must also keep a fixed function
+arity for every substitution. Legacy arrows can erase a `unit` argument or
+flatten a function-valued result. Use `fun('a) -> int` instead of `'a -> int`,
+and `fun(int) -> 'a` instead of `int -> 'a`, when making these universal claims.
+This check expands aliases, so an alias cannot hide the arity change. Ordinary
+alias declarations, concrete applications and inferred functions retain their
+existing behavior; already fixed-arity legacy arrows remain valid.
+
+<!-- ochat-authoring-example: {"id":"inference.checked-module-interface","surface":"one_off_v1","result":43} -->
+```ocaml
+module Counter : sig
+  type total = int
+  val next : fun() -> total
+  val identity : fun('a) -> 'a
+end = struct
+  let count = ref(0)
+  type total = int
+  let next () = count := !count + 1; !count
+  let identity value = value
+end
+open Counter
+let main input =
+  let result = if identity(true) then identity(42) + next() else 0 in
+  Task.pure(Json.parse(to_string(result)))
+```
+
+<!-- ochat-authoring-example: {"id":"inference.universal-arity-rejected","surface":"one_off_v1","stage":"typecheck","contains":"fixed function arity","span":true} -->
+```ocaml
+type 'a callback = 'a -> int
+module Handler : sig
+  val run : 'a callback
+end = struct
+  let run ignored = 1
+end
+let main input = Task.pure(`Null)
+```
+
+Newlines do not separate statements. Use optional `;;` when a type declaration
+is followed by a bare qualified call: without the separator, the parser can
+read the module path as part of a postfix type application. Separators also
+work inside modules. A single `;` continues to sequence expressions.
+
+<!-- ochat-authoring-example: {"id":"inference.module-types-and-separators","surface":"one_off_v1","result":1} -->
+```ocaml
+let count = ref(0)
+module Counter = struct
+  type total = int
+  let tick () = count := !count + 1
+end
+type total = Counter.total ;; Counter.tick();;
+let main input =
+  let result : total = !count in
+  Task.pure(Json.parse(to_string(result)))
+```
+
+<!-- ochat-authoring-example: {"id":"inference.module-local-reference","surface":"one_off_v1","result":42} -->
+```ocaml
+module M = struct
+  let x = 42
+  let read () = x
+end
+let main input = Task.pure(Json.parse(to_string(M.read())))
+```
+
+<!-- ochat-authoring-example: {"id":"inference.module-self-reference-rejected","surface":"one_off_v1","stage":"typecheck","contains":"Unknown variable 'M'","span":true} -->
+```ocaml
+module M = struct
+  let read () = M.x
+  let x = 42
+end
+let main input = Task.pure(Json.parse(to_string(M.read())))
+```
+
+<!-- ochat-authoring-example: {"id":"inference.module-record-projection","surface":"one_off_v1","result":5} -->
+```ocaml
+let read value = value.x
+module M = struct let x = 2 end
+let main input =
+  Task.pure(Json.parse(to_string(read(M) + read({x=3; extra=true}))))
+```
+
+<!-- ochat-authoring-example: {"id":"inference.module-update-rejected","surface":"one_off_v1","stage":"typecheck","contains":"Cannot unify","span":true} -->
+```ocaml
+let update value = {value with x=3}
+module M = struct let x = 2 end
+let main input = Task.pure(Json.parse(to_string(update(M).x)))
 ```
 
 ## Matching and equality use inferred types
@@ -185,20 +423,34 @@ let main input = Task.pure(`Null)
 ```
 
 Arithmetic and ordering distinguish integers from floats and do not coerce
-between them. Equality unifies operand types. When those types are already known,
-it rejects arrays, refs, functions and tasks. A generic equality helper currently
-does not retain that restriction for later specialization: it can accept these
-values and compare them by identity at runtime. This is a compiler limitation,
-not structural array equality. Compare elements explicitly when contents matter.
+between them. Equality unifies operand types and checks every visible component.
+Arrays, refs, functions, tasks and module identities cannot be compared, directly
+or through a generic helper. Inferred equality requirements survive aliases,
+higher-order calls and module exports; open record helpers also check additional
+fields supplied by the caller. These are compiler-maintained requirements, not a
+user-defined type-class system. Diagnostics may label an inferred variable with
+`[equality]`; that label is explanatory, not annotation syntax.
 
-<!-- ochat-authoring-example: {"id":"inference.generic-equality-boundary","surface":"one_off_v1","result":true} -->
+<!-- ochat-authoring-example: {"id":"inference.generic-equality-boundary","surface":"one_off_v1","stage":"typecheck","contains":"Equality is not supported for arrays","span":true} -->
 ```ocaml
 let same left right = left == right
+let main input = Task.pure(`Bool(same([1, 2], [1, 2])))
+```
+
+Ordinary comparable values remain polymorphic. A copy-update compares the copy's
+visible fields, so replacing a function-valued field with an integer does not
+require the original function to support equality. Accessing and comparing an
+exported value is also allowed; comparing the module itself is not.
+
+<!-- ochat-authoring-example: {"id":"inference.equality-visible-fields","surface":"one_off_v1","result":true} -->
+```ocaml
+let same left right = left == right
+let compare_copy original =
+  let copy = {original with callback = 1} in same(copy, copy)
+module Settings = struct let enabled = true end
 let main input =
-  let first = [1, 2] in
-  let alias = first in
-  let copy = Array.copy(first) in
-  if same(first, alias) then Task.pure(`Bool(if same(first, copy) then false else true))
+  let original = {callback = (fun x -> x); label = "kept"} in
+  if same(Settings.enabled, true) then Task.pure(`Bool(compare_copy(original)))
   else Task.pure(`Bool(false))
 ```
 
@@ -218,3 +470,72 @@ Validation checks these static rules without executing a candidate. It does not
 prove termination, bounds safety, tool availability, schema validity or success
 of later effects. Inspect linked diagnostics, repair the submitted source, and
 validate that exact revision again before execution.
+
+## Product types and one tuple argument
+
+`int * string` describes an ordered pair. Postfix types bind tighter than `*`,
+and `*` binds tighter than arrows: `int * string -> bool` takes one pair;
+`int -> string * bool` returns a pair. Exact `fun(int, string) -> bool` takes two
+arguments. A flat triple differs from a pair containing another pair. Transparent
+aliases and signatures preserve these shapes and shared weak variables.
+
+<!-- ochat-authoring-example: {"id":"inference.tuple-products","surface":"one_off_v1","result":true} -->
+```ocaml
+type 'a labelled = 'a * string
+let choose : fun(bool labelled) -> bool = fun pair ->
+  match pair with | (|flag, name|) -> flag
+let main input = Task.pure(`Bool(choose((|true, "chosen"|))))
+```
+
+A tuple construction is nonexpansive only when every element is nonexpansive.
+Refs, arrays, functions and tasks inside a tuple remain subject to their ordinary
+equality restrictions; a tuple does not hide a forbidden comparison leaf.
+
+Destructuring applies this policy once to the whole RHS before distributing leaf
+schemes. For example, an array elsewhere in a tuple makes its identity-function
+leaf weak too. Names from the same expansive producer retain shared weak cells.
+An annotation constrains the full tuple shape, including ignored elements.
+
+<!-- ochat-authoring-example: {"id":"inference.tuple-binders","surface":"one_off_v1","result":"chosen=7"} -->
+```ocaml
+let describe : fun(int * string, bool) -> string = fun (|n, text|) flag ->
+  if flag then text ++ "=" ++ to_string(n) else "other"
+let main input = Task.pure(`String(describe((|7, "chosen"|), true)))
+```
+
+<!-- ochat-authoring-example: {"id":"inference.tuple-weak-rejected","surface":"one_off_v1","stage":"typecheck","contains":"Cannot unify","span":true} -->
+```ocaml
+let (|identity, items|) = (|fun value -> value, []|)
+let first = identity(7)
+let second = identity(true)
+let main input = Task.pure(`Null)
+```
+
+## Configured module checking
+
+The compiler also provides a configured-source checking API over an already
+captured project inventory. It resolves lexical bindings first, then the selected
+module scope for that file. Imported files use their own scopes; aliases for the
+same module share its checked exports and weak type variables. Errors retain the
+source revision and relevant configuration location.
+
+Checking dependencies and initialization dependencies are distinct. A qualified
+type or `open Catalog` alone requires checking Catalog. A value reference,
+including one inside an uncalled function, also selects Catalog for initialization.
+The runtime selection follows value references transitively from the entry;
+merely making a module available does not select it. The checking API executes
+no initializers.
+
+Configured compilation now produces an immutable linked artifact from those
+captured files. A companion `.chatmli` checks and restricts public exports using
+its own configured scope. Host entrypoints are checked against the entry file's
+final private scope, so an entry interface can hide a host handler from other
+modules without making that handler unavailable to its host.
+
+All files finish type checking before lowering. This matters when an importer's
+use specializes a dependency's shared weak type: the dependency's compiled frame
+slots must reflect that final type. The artifact retains exact source revisions,
+checked public boundaries and the entry-rooted initialization order. It contains
+no initialized modules or native tool callbacks. Execution and project loading
+remain separate host integration steps; existing single-file entrypoints do not
+acquire them from this compilation API alone.

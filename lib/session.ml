@@ -11,6 +11,11 @@ module Snapshot = struct
     | Float value when not (Float.is_finite value) ->
       Error "nonfinite ChatML snapshot float"
     | Int _ | Float _ | Bool _ | String _ | Unit -> Ok ()
+    | Tuple (first, second, rest) ->
+      let open Result.Let_syntax in
+      let%bind () = validate first in
+      let%bind () = validate second in
+      List.fold_result rest ~init:() ~f:(fun () value -> validate value)
     | Array values | Variant (_, values) ->
       List.fold_result values ~init:() ~f:(fun () value -> validate value)
     | Record fields ->
@@ -51,6 +56,7 @@ module Snapshot = struct
           let child = build (depth - 1) in
           cases
           @ [ "array", object_ [ "kind", value; "values", array child ]
+            ; "tuple", object_ [ "kind", value; "values", array child ]
             ; "record", object_ [ "kind", value; "fields", named_values_shape child ]
             ; "variant", object_ [ "kind", value; "tag", value; "payload", array child ]
             ])

@@ -139,6 +139,7 @@ let id optional = match optional with
 let ids : item array -> json = fun items ->
   `Array(Array.map(items, fun item -> `String(Item.id(item))))
 let on_event ctx state event =
+  let ctx : context = ctx in
   match event with
   | `Session_start ->
     let descriptor : tool_desc = {name = "echo"; description = "Echo input"; input_schema = Json.parse("{\"type\":\"object\"}")} in

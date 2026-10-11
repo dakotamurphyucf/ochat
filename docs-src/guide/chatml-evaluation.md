@@ -119,6 +119,29 @@ unit. A sequence discards its first value. Discarding a task does not run it.
 Callbacks in ordinary array/string operations are eager; they are not scheduled
 as independent jobs merely because their bodies construct task values.
 
+## Configured module initialization
+
+The prepared compiler and linked runtime operate on explicitly captured source;
+they do not discover or reopen files. The entry's value dependencies initialize
+once in dependency-first order, with the entry last. A configured `open` or type
+reference alone does not initialize its module. Actual value uses, including
+inside an uncalled function or a selected host binding imported through `open`,
+select dependencies. Unused catalog entries remain inert.
+
+Canonical module identity determines sharing. If two dependencies and the entry
+use different configured names for the same counter module, all three reach the
+same initialized counter. Another standalone execution gets fresh state; events
+in one persistent session retain that session's initialized state.
+
+Each unit sees its own lexical bindings, authorized builtins and completed value
+dependencies. Importer-local bindings do not enter a dependency's environment.
+Checked public visibility applies before a module is published; exported
+closures retain their private bindings. A companion limits external exports,
+while compiled local host entrypoints can use the entry's private environment.
+A failed initializer stops later units and returns no partial runtime instance;
+native effects already performed are not rolled back. Deferred failures retain
+the defining dependency's captured source.
+
 ## Failures and representation boundaries
 
 Both integer and float division reject zero divisors, including floating negative
@@ -127,6 +150,25 @@ local mutation. Language evaluation alone is not a transactional rollback system
 the host's task/event commit rules determine which staged effects are retained.
 An eagerly raised failure occurs before an outer task is constructed and is not
 automatically caught by `Task.catch` around a task argument.
+
+When a host compiles captured source, diagnostics retain its exact identity,
+content revision and byte range. A closure keeps the source in which it was
+defined, including tail calls and builtin callbacks. Deferred tasks keep their
+construction site; continuation failures keep their defining source through
+later events and UI resumption. Propagating an already located failure preserves
+its original site. Rendering uses captured bytes without reopening a file or
+substituting the calling program's text. An error without a provable location
+remains unlocated.
+
+Locations are half-open byte ranges, with lines starting at 1 and columns at 0.
+LF, CR and CRLF retain their canonical positions. Messages and complete rendered
+diagnostics are bounded to 16 KiB, with at most eight related sites. Escaped
+control bytes and bounded excerpts do not redefine source byte coordinates.
+Source metadata adds no task step or fuel charge; its cooperative polls still
+observe cancellation, deadlines and execution-scope lifetime. `Task.catch`
+keeps its existing recovery boundaries and receives the original plain failure
+message even when the displayed diagnostic is truncated. Cancellation and
+execution-limit failures still escape recovery.
 
 <!-- ochat-authoring-example: {"id":"evaluation.float-zero-failure","surface":"one_off_v1","runtime_error":"Division by zero"} -->
 ```ocaml

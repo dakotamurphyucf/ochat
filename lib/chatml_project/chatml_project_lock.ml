@@ -1,5 +1,7 @@
 module Error = Chatml_project_declaration.Error
 module Source_entry = Chatml_project_lock_receipt.Source_entry
+module Entry = Chatml_project_lock_receipt.Entry
+module Dependency_selection = Chatml_project_lock_receipt.Dependency_selection
 module Module_selection = Chatml_project_lock_receipt.Module_selection
 module File_scope = Chatml_project_lock_receipt.File_scope
 module Catalog = Chatml_project_lock_receipt.Catalog
@@ -9,6 +11,8 @@ type t = Chatml_project_lock_receipt.t
 let create = Chatml_project_lock_receipt.create
 let decode = Chatml_project_lock_codec.decode
 let to_string = Chatml_project_lock_codec.to_string
+let root = Chatml_project_lock_receipt.root
+let entry_selection = Chatml_project_lock_receipt.entry_selection
 let entry = Chatml_project_lock_receipt.entry
 let environment = Chatml_project_lock_receipt.environment
 let compiler_family = Chatml_project_lock_receipt.compiler_family

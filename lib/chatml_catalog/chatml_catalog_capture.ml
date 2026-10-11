@@ -56,14 +56,25 @@ let find_source t id =
   else None
 ;;
 
-let scope_for t ~source =
-  match find_source t source with
-  | None -> None
-  | Some _ ->
-    let path = Captured.Id.relative_path source in
+let scope_for ?(checkpoint = fun () -> ()) t ~source =
+  let path = Captured.Id.relative_path source in
+  if
+    (not
+       (Int.equal
+          (Plan.compare_string
+             (namespace t.plan)
+             (Captured.Id.package_namespace source)
+             ~checkpoint)
+          0))
+    || not (Map.mem t.by_path path)
+  then None
+  else
     List.find (Plan.members t.plan) ~f:(fun member ->
-      String.equal (Path.to_string (Plan.Member.path member)) path)
+      Int.equal
+        (Plan.compare_string (Path.to_string (Plan.Member.path member)) path ~checkpoint)
+        0)
     |> Option.map ~f:(fun member ->
+      checkpoint ();
       Project.Selection.scope_for (selection t) ~source:(Plan.Member.path member))
 ;;
 

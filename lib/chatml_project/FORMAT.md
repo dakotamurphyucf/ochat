@@ -154,7 +154,7 @@ fingerprint; composition encodes and captures it before183 admission.
 
 ## Chatml_project.Lock selected-build wire v1
 
-The lock is a flat object with required `schema_version: 1`, `entry`,
+The lock is a flat object with required `schema_version: 1`, `root`, `entry`,
 `environment`, `compiler`, `required_tools`, and `catalogs`. All collections must
 be present, including empty collections. Unknown fields, duplicate JSON keys and
 explicit null reject. Version uses an integer number lexeme, as the declaration
@@ -166,10 +166,40 @@ existing exact Source.Id constructor. The compiler is
 family/target/environment are nonempty intent names and SHA-256 is validated
 lowercase hexadecimal. `required_tools` is a unique array of nonempty exact names.
 
+`root` is the exact selected project declaration source ID. `entry` contains
+`source` (the source-entry metadata below) and `selection`. Selection is
+`{ "kind": "declared", "name": string }` for a nonempty entry name in the root
+project, or `{ "kind": "captured" }` for an explicitly supplied host source.
+A captured entry uses the selected root environment, without inventing a project
+entry, file override or containing-document position. Composition must reconcile
+these facts and every overlapping catalog source before admission.
+
 Each catalog has required `namespace`, `origin`, `declaration`,
-`selected_environment`, `sources`, `modules`, and `scopes`. Origin is
-`{ "kind": "root_local" }` or the declaration's existing exact local/Git source
-object (`kind: local` with `path`, or `kind: git` with repository/object_format/commit).
+`selected_environment`, `dependencies`, `sources`, `modules`, and `scopes`.
+Origin is `{ "kind": "local" }` or a Git object with `kind: git` and the exact
+`repository`, `object_format`, full `commit`, and required `package_root`.
+`package_root: null` means the repository root; a string is an exact validated
+portable repository directory prefix. Absence, empty strings, dot/parent paths
+and other non-string values reject. Local origins reject this field. Source IDs
+remain relative to the selected package root, so prefix plus declaration ID path
+identifies its repository member. Explicit Git dependencies select repository
+root. A Git-owned declaration's relative Local dependency resolves from that
+repository member's containing directory into the same repository/full pin;
+escaping the repository root rejects. An absolute Local dependency instead needs
+separate host Local admission. No resolution here proves native filesystem identity.
+Local locators stay in incoming
+captured dependency declarations: different relative locators can select the same
+host-admitted root, so the receipt cannot choose one arbitrary incoming path as
+canonical provenance. No native device/inode/acquisition key is serialized.
+
+Each dependency association is `{ "name": string, "declaration": source-id }`.
+The containing catalog owns the name, using the declaration's dependency alias
+syntax (`self` is reserved and rejected). Different aliases may select one declaration;
+duplicate names reject even if they select the same target. Composition checks
+each association against its exact owner's source intent, namespace/project member
+and selected environment. Capture-only reconstruction verifies these immutable
+facts; it does not re-prove native path identity or acquire authority.
+
 A source entry is `{ "id": source-id, "sha256": string, "byte_length": integer }`;
 length is nonnegative. These are EXPECTED values: no capture is verified here.
 A module selection is `{ "implementation": source-id }` with optional non-null
@@ -179,17 +209,17 @@ Module identity is the implementation ID, with no other encoded identity wrapper
 
 Catalog namespaces are unique. Declaration, source entries, module implementation
 and optional interface, and file-scope OWNER IDs must match their catalog namespace.
-Binding TARGET IDs may cross catalogs. Source/module/scope/binding keys reject
+Binding and dependency TARGET IDs may cross catalogs. Source/module/scope/binding/dependency keys reject
 exact duplicates. No source membership, portable collision, graph, capture digest
 or declared environment membership proof is inferred from this receipt.192 checks
 expected bytes/origins/own-package selections against exact captures, then183
 admits the same complete input;193 consumes/qualifies it. Entry may share a module
-implementation ID. A decoded lock cannot list its own captured ID in sources;
+implementation ID. A decoded lock cannot list its own captured ID in sources or as its entry;
 authored construction requires the host to exclude its future selected lock ID.
 
 Canonical output fixes object field order as written above, omits absent module
 interfaces, and sorts catalogs by exact namespace, source entries/scopes by typed
-Source.Id, modules by implementation Source.Id, bindings by exact name and tools
+Source.Id, modules by implementation Source.Id, bindings/dependencies by exact name and tools
 by exact name. Namespace/path remain separate strings. Encoding first bounds its
 invocation-local JSON construction, then uses existing exact
 `Document_schema.Json.validate_and_measure` before rendering compact JSON.
@@ -211,7 +241,7 @@ the exact supplied capture, including output errors after authored creation.
 
 The public lock API is nested `Chatml_project.Lock` in the SAME wrapped
 `ochat.chatml_project` library. Its explicit signature references the outer
-Error/Declared_at/Dependency contracts; private declaration, decoder, receipt,
+Error/Declared_at/Git_pin contracts; private declaration, decoder, receipt,
 codec and lock facade modules expose no paths or representations to callers.
 Both codecs share the existing invocation-local Reader directly, with ONE
 validated whole-source location per decode and pure field-path updates. No

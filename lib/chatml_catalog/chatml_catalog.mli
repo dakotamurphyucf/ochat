@@ -161,4 +161,13 @@ val definitions : t -> Chatml_prepared_program.Definition.t list
 val bindings : t -> Binding.t list
 val accounting : t -> Accounting.t
 val find_source : t -> Chatml_source.Id.t -> Chatml_source.t option
-val scope_for : t -> source:Chatml_source.Id.t -> Chatml_project.Scope_spec.t option
+
+(** Resolve a captured planned member's whole environment. Poll the member
+    search and long namespace/path comparisons when [checkpoint] is supplied;
+    callback exceptions propagate unchanged and the callback is not retained.
+    Foreign, absent or unplanned sources return [None]. *)
+val scope_for
+  :  ?checkpoint:(unit -> unit)
+  -> t
+  -> source:Chatml_source.Id.t
+  -> Chatml_project.Scope_spec.t option
