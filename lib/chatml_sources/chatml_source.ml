@@ -77,6 +77,7 @@ type t =
   ; position_index : Position_index.t
   }
 
+let reidentify t ~id = { t with id }
 let id t = t.id
 let contents t = t.contents
 let digest t = t.digest

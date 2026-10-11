@@ -433,31 +433,30 @@ let validate_portable_paths (input : Input.t) ~checkpoint =
         | rest -> List.rev group, rest
       in
       let group, rest = take [] pending in
-      let%bind paths =
-        List.fold_result group ~init:String.Map.empty ~f:(fun paths (id, path) ->
+      let paths =
+        List.map group ~f:(fun (id, _) ->
           checkpoint ();
-          match Map.find paths path with
-          | Some previous ->
-            error
-              (Portable_source_collision (previous, id))
-              "portable source paths collide"
-          | None -> Ok (Map.set paths ~key:path ~data:id))
+          Source.Portable_path.create (Captured.Id.relative_path id) |> Or_error.ok_exn)
       in
       let%bind () =
-        List.fold_result group ~init:() ~f:(fun () (id, path) ->
-          checkpoint ();
-          let rec prefixes prefix = function
-            | [] | [ _ ] -> Ok ()
-            | part :: rest ->
-              let prefix = if String.is_empty prefix then part else prefix ^ "/" ^ part in
-              (match Map.find paths prefix with
-               | Some previous ->
-                 error
-                   (Portable_source_collision (previous, id))
-                   "source path conflicts with a directory"
-               | None -> prefixes prefix rest)
+        match Source.Portable_path.first_collision paths ~checkpoint with
+        | None -> Ok ()
+        | Some (first, second) ->
+          let id path =
+            Captured.Id.create
+              ~package_namespace:namespace
+              ~relative_path:(Source.Portable_path.to_string path)
+            |> Or_error.ok_exn
           in
-          prefixes "" (String.split path ~on:'/'))
+          let message =
+            if
+              String.equal
+                (String.lowercase (Source.Portable_path.to_string first))
+                (String.lowercase (Source.Portable_path.to_string second))
+            then "portable source paths collide"
+            else "source path conflicts with a directory"
+          in
+          error (Portable_source_collision (id first, id second)) message
       in
       groups rest
   in

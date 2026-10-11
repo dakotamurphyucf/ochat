@@ -1,0 +1,8 @@
+(library
+ (name chatml_local_roots_tests)
+ (modules support root_test ownership_test)
+ (libraries core core_unix eio eio.unix eio_main source ochat.chatml_source
+  ochat.chatml_local_source ochat.chatml_local_roots ochat.chatml_local_capture
+  ochat.chatml_project document_schema)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

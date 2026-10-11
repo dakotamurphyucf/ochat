@@ -19,6 +19,47 @@ module Portable_path = struct
   ;;
 
   let to_string t = t
+
+  let first_collision paths ~checkpoint =
+    let folded =
+      List.map paths ~f:(fun path ->
+        checkpoint ();
+        path, String.lowercase path)
+      |> List.sort ~compare:(fun (left, folded_left) (right, folded_right) ->
+        checkpoint ();
+        let comparison = String.compare folded_left folded_right in
+        if comparison = 0 then compare left right else comparison)
+    in
+    let rec distinct index = function
+      | [] -> Ok index
+      | (path, folded) :: rest ->
+        checkpoint ();
+        (match Map.find index folded with
+         | Some previous -> Error (previous, path)
+         | None -> distinct (Map.set index ~key:folded ~data:path) rest)
+    in
+    match distinct String.Map.empty folded with
+    | Error pair -> Some pair
+    | Ok index ->
+      let rec inspect = function
+        | [] -> None
+        | (path, folded) :: rest ->
+          checkpoint ();
+          let rec prefixes offset =
+            if offset = String.length folded
+            then inspect rest
+            else if Char.equal folded.[offset] '/'
+            then (
+              checkpoint ();
+              match Map.find index (String.prefix folded offset) with
+              | Some parent -> Some (parent, path)
+              | None -> prefixes (offset + 1))
+            else prefixes (offset + 1)
+          in
+          prefixes 0
+      in
+      inspect folded
+  ;;
 end
 
 (* ----- Source, position and span -------------------------------------------------------------- *)

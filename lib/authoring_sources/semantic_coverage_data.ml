@@ -371,7 +371,7 @@ let implementation_sources =
   ; ( "lib/chatml/chatml_static_surface.ml"
     , "07c8f7a97e1e6da286ff4e103181ce4b22b12ebb6f370ac19918f171c0723111" )
   ; ( "lib/chatml/chatml_compiler_contract.ml"
-    , "057abd58ea8c9513c836e36dd87ad664a01bf76d0c264ccb3b61249e2a9c2763" )
+    , "cfcfb1f24a1a3c45fb85e91fca1bf028c57df9b89a0e336b440a15c5021ec01f" )
   ; ( "lib/chatml/chatml_module_reference.ml"
     , "f2e9c1ff541b67a243effe6b4f04b8c0f15763000f9cd42603d6a9a746d0a728" )
   ; ( "lib/chatml/chatml_contract_encoding.ml"
@@ -427,7 +427,7 @@ let implementation_sources =
   ; ( "lib/chatml/chatml_builtin_spec.ml"
     , "3881c43e9818b44130bbb77dbdcf46b22b5a9e01c01b708d39d1323f0e7fc612" )
   ; ( "lib/chatml_sources/chatml_source.ml"
-    , "f6df97c3dd55179f43733ec3d097dec2b92d38c0323b1496a72993682778554b" )
+    , "297cde79bf19705c922a53690aa6ed529aa65f9eb63068807853ce5b62a1e7b9" )
   ; ( "lib/chatml_sources/chatml_diagnostic.ml"
     , "cd4f59d52868eff58a8eaabd2cc8222d8c65f677066b3d8ab16c7b5c7a81fde5" )
   ]

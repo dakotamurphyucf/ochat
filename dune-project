@@ -34,6 +34,7 @@
   markup
   core
   core_unix
+  jane-street-headers
   ppx_jane
   ppxlib
   pcre
