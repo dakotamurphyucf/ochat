@@ -13,7 +13,8 @@ val contract
     compile without running any initializer. No single-file or filesystem fallback.
     Cancellation and unexpected failures propagate through the joined compiler. *)
 val compile
-  :  Chatml_prompt_programs.Restored.t
+  :  ?startup:Startup_compilation.t
+  -> Chatml_prompt_programs.Restored.t
   -> script:Prompt.Chat_markdown.script
   -> surface:Chatml.Chatml_builtin_surface.surface
   -> capabilities:Tool_capability.t

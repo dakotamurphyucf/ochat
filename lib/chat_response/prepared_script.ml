@@ -25,6 +25,7 @@ let select inventory ~script ~target ~capabilities ~checkpoint =
 
 let fingerprint t = Captured_script.fingerprint t.selected
 let input_bytes t = Captured_script.input_bytes t.selected
+let prepared t = Captured_script.prepared t.selected
 
 let compile t ~env ~limits ~max_dependency_depth =
   Chatml_compilation.compile_prepared

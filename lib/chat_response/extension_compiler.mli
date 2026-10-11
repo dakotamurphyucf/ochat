@@ -84,7 +84,8 @@ type definition
     without direct Process/Model recipes. The selected contract participates in
     definition and handler fingerprints. Standalone tool contracts are unchanged. *)
 val prepare_definition_in_domain
-  :  ?limits:Chatml_compilation.limits
+  :  ?startup:Startup_compilation.t
+  -> ?limits:Chatml_compilation.limits
   -> ?delegated_moderator:bool
   -> ?programs:Chatml_prompt_programs.Restored.t
   -> env:Eio_unix.Stdenv.base

@@ -109,7 +109,7 @@ let raw =
     Fixture.body
 ;;
 
-let with_startup env ~elements ~surface ~programs f =
+let with_host env ~elements f =
   let root = Eio.Stdenv.cwd env in
   Eio.Switch.run (fun sw ->
     let fixture =
@@ -141,7 +141,13 @@ let with_startup env ~elements ~surface ~programs f =
         ~prompt_elements:elements
       |> ok
     in
+    f ~sw ~ctx ~host)
+;;
+
+let with_startup ?compilation_limits env ~elements ~surface ~programs f =
+  with_host env ~elements (fun ~sw ~ctx ~host ->
     R.prepare_extensions
+      ?compilation_limits
       ~moderator_surface:surface
       ~programs
       ~sw

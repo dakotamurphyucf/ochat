@@ -62,11 +62,13 @@ let custom_function shell name =
   | Some specification -> shell_function shell specification
 ;;
 
-let functions_of_tool ~sw ~ctx ~host ~run_agent shell = function
+let functions_of_tool ~agent_source_runner ~sw ~ctx ~host ~run_agent shell = function
   | CM.Custom tool -> custom_function shell tool.name |> Result.map ~f:List.return
   | Shell specification -> shell_function shell specification |> Result.map ~f:List.return
   | declaration ->
-    (try Ok (Tool.of_declaration ~host ~sw ~ctx ~run_agent declaration) with
+    (try
+       Ok (Tool.of_declaration ?agent_source_runner ~host ~sw ~ctx ~run_agent declaration)
+     with
      | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
      | exn -> Error (error "agent.tool_construction_failed" (Exn.to_string exn)))
 ;;
@@ -84,7 +86,16 @@ let validate_functions functions =
     Error [ error "agent.duplicate_tool_name" ("duplicate exposed tool name: " ^ name) ]
 ;;
 
-let build_functions ~native_registrations ~sw ~ctx ~host ~run_agent shell tools =
+let build_functions
+      ~agent_source_runner
+      ~native_registrations
+      ~sw
+      ~ctx
+      ~host
+      ~run_agent
+      shell
+      tools
+  =
   (* Extension declarations are consumed by the prepared definition and owned
      dispatcher. They never receive a legacy/no-op runner. *)
   List.filter tools ~f:(function
@@ -118,12 +129,21 @@ let build_functions ~native_registrations ~sw ~ctx ~host ~run_agent shell tools 
                contract")
        | _ -> Ok [ registration ])
     | None ->
-      functions_of_tool ~sw ~ctx ~host ~run_agent shell declaration
+      functions_of_tool ~agent_source_runner ~sw ~ctx ~host ~run_agent shell declaration
       |> Result.map ~f:(fun functions ->
         let implementation_revision =
-          CM.sexp_of_tool declaration
-          |> Sexp.to_string
-          |> Chatmd_shell_spec.Source_ref.digest
+          let declared = CM.sexp_of_tool declaration in
+          let identity =
+            match declaration, agent_source_runner with
+            | CM.Agent _, Some runner ->
+              [%sexp
+                ("ochat.agent-source-runner.v1" : string)
+              , (declared : Sexp.t)
+              , (Chatml_source.Digest.to_hex runner.Tool.Agent_source_runner.revision
+                 : string)]
+            | _ -> declared
+          in
+          Sexp.to_string identity |> Chatmd_shell_spec.Source_ref.digest
         in
         List.map functions ~f:(fun implementation ->
           Registration.
@@ -153,6 +173,7 @@ let create
       ~shell
       ~admin_policy
       ?native_service_revision
+      ?agent_source_runner
       ~registrations
       ~run_agent
       prompt_elements
@@ -172,7 +193,15 @@ let create
     | Staged registry -> Some (Shell_runtime.Registry.Staged.manifest registry)
   in
   let%map functions, registrations =
-    build_functions ~native_registrations ~sw ~ctx ~host ~run_agent shell tools
+    build_functions
+      ~agent_source_runner
+      ~native_registrations
+      ~sw
+      ~ctx
+      ~host
+      ~run_agent
+      shell
+      tools
   in
   let capabilities =
     lazy

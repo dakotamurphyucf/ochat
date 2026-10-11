@@ -73,7 +73,14 @@ let%expect_test "converter rebases local nested agent prompts to their prompt di
     ((agents/child.chatmd) 0
      ((Script
        ((id main) (language chatml) (kind moderator)
-        (source (Src ((path moderator.chatml) (source_text "let x = 1\n"))))))
+        (source (Src ((path moderator.chatml) (source_text "let x = 1\n"))))
+        (source_ref
+         (((file <prompt>) (source_dir ./task10_nested_prompt_converter/agents)
+           (prompt_dir ./task10_nested_prompt_converter/agents) (namespace ())
+           (start_pos ((offset 0) (line 1) (column 1)))
+           (end_pos ((offset 91) (line 1) (column 92)))
+           (source_sha256
+            ac35d89f14d79c30347e4f615befff5e87394487a6feecae84107ccf0f07edc1))))))
       (System
        ((role system) (type_ ()) (content ((Text nested))) (name ()) (id ())
         (status ()) (phase ()) (ochat_history_id ()) (source_context (<prompt>))
@@ -110,7 +117,14 @@ let%expect_test "agent tool declarations reuse local nested prompt moderation" =
     ((agents/child.chatmd) 1
      ((Script
        ((id main) (language chatml) (kind moderator)
-        (source (Src ((path moderator.chatml) (source_text "let x = 1\n"))))))
+        (source (Src ((path moderator.chatml) (source_text "let x = 1\n"))))
+        (source_ref
+         (((file <prompt>) (source_dir ./task10_nested_prompt_tool/agents)
+           (prompt_dir ./task10_nested_prompt_tool/agents) (namespace ())
+           (start_pos ((offset 0) (line 1) (column 1)))
+           (end_pos ((offset 91) (line 1) (column 92)))
+           (source_sha256
+            ac35d89f14d79c30347e4f615befff5e87394487a6feecae84107ccf0f07edc1))))))
       (System
        ((role system) (type_ ()) (content ((Text nested))) (name ()) (id ())
         (status ()) (phase ()) (ochat_history_id ()) (source_context (<prompt>))
@@ -250,7 +264,14 @@ let%expect_test "mcp prompt agents pass prompt-relative context into run_agent" 
     ((child) 1
      ((Script
        ((id main) (language chatml) (kind moderator)
-        (source (Src ((path moderator.chatml) (source_text "let x = 1\n"))))))
+        (source (Src ((path moderator.chatml) (source_text "let x = 1\n"))))
+        (source_ref
+         (((file <prompt>) (source_dir ./task10_nested_prompt_mcp/agents)
+           (prompt_dir ./task10_nested_prompt_mcp/agents) (namespace ())
+           (start_pos ((offset 0) (line 1) (column 1)))
+           (end_pos ((offset 91) (line 1) (column 92)))
+           (source_sha256
+            ac35d89f14d79c30347e4f615befff5e87394487a6feecae84107ccf0f07edc1))))))
       (System
        ((role system) (type_ ()) (content ((Text nested))) (name ()) (id ())
         (status ()) (phase ()) (ochat_history_id ()) (source_context (<prompt>))

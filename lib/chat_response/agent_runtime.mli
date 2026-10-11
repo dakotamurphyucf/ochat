@@ -116,9 +116,14 @@ val validate_tool_paths
     manifest authorizer and return no shell registry. All resources remain
     owned by [sw]. [native_service_revision] optionally binds trusted host-service
     policy to resource/capability identity. Hosts restoring those resources must
-    supply the same policy identity; omission preserves legacy fingerprints. *)
+    supply the same policy identity; omission preserves legacy fingerprints.
+    [programs] supplies already restored captured scripts, including configured
+    legacy moderators. Preparation shares one compilation deadline and distinct
+    input allowances; executable activation runs after preparation. *)
 val create
   :  ?native_service_revision:string
+  -> ?agent_source_runner:Tool.Agent_source_runner.t
+  -> ?programs:Chatml_prompt_programs.Restored.t
   -> ?moderator_surface:Chatml.Chatml_builtin_surface.surface
   -> ?compilation_limits:Chatml_compilation.limits
   -> ?checkpoint:(unit -> unit)
@@ -205,7 +210,9 @@ type native_registration = Native_tool_pool.Registration.t =
     must enforce inherited execution authority when constructing the live runtime.
     [moderator_surface] defaults to the headless legacy surface; UI-capable hosts
     must supply their actual UI surface. [compilation_limits] and [checkpoint]
-    are caller-owned startup controls; no whole-invocation ledger is reset here.
+    govern one preparation/preflight deadline and distinct text/graph input
+    allowances across native, managed and legacy roles; activation/execution
+    retains its separate control. Original callback failures propagate.
     Legacy declarations compile in the same preflight and their selected artifact
     is retained on [native].
 
@@ -217,6 +224,7 @@ type native_registration = Native_tool_pool.Registration.t =
     This internal preparation entrypoint does not enable public feature flags. *)
 val prepare_extensions
   :  ?native_service_revision:string
+  -> ?agent_source_runner:Tool.Agent_source_runner.t
   -> ?moderator_surface:Chatml.Chatml_builtin_surface.surface
   -> ?compilation_limits:Chatml_compilation.limits
   -> ?checkpoint:(unit -> unit)

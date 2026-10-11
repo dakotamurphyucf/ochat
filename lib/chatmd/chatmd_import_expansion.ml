@@ -44,6 +44,20 @@ let source_ref (context : context) range =
      | Some source -> source
      | None ->
        let position : Source_ref.position = { offset = 0; line = 1; column = 1 } in
+       (* The legacy parser has no per-node ranges. Its whole-input provenance
+          still needs consistent byte/line/column endpoints. Reuse the shared
+          CR/LF and byte-column convention, once per cached source. *)
+       let index = Source.Position_index.create context.source ~checkpoint:ignore in
+       let last =
+         Source.Position_index.position
+           index
+           ~byte_offset:(String.length context.source)
+           ~checkpoint:ignore
+         |> Or_error.ok_exn
+       in
+       let end_pos : Source_ref.position =
+         { offset = last.offset; line = last.line; column = last.column + 1 }
+       in
        let source =
          Source_ref.create
            ~file:context.file
@@ -51,7 +65,7 @@ let source_ref (context : context) range =
            ~prompt_dir:context.prompt_dir
            ~namespace:context.namespace
            ~start_pos:position
-           ~end_pos:{ position with offset = String.length context.source }
+           ~end_pos
            ~source:context.source
        in
        context.cached_source <- Some source;

@@ -274,6 +274,7 @@ let inspect_shell ~env ~platform ~prompt_elements =
 ;;
 
 let instantiate
+      ~startup
       ~programs
       ~compilation_limits
       ~checkpoint
@@ -293,6 +294,7 @@ let instantiate
   let open Result.Let_syntax in
   let%bind prepared =
     Shell_preparation.prepare
+      ~startup
       ?programs
       ~limits:compilation_limits
       ~checkpoint
@@ -347,6 +349,7 @@ let instantiate
 ;;
 
 let shell_registry
+      ~startup
       ~programs
       ~compilation_limits
       ~checkpoint
@@ -372,25 +375,31 @@ let shell_registry
     preflight Native_tool_pool.Shell_view.Absent ~shell_preparation:None
     |> Result.map ~f:(fun admitted -> None, None, None, admitted)
   else
-    Result.bind (compile ~platform declarations) ~f:(fun (manifest, material) ->
-      instantiate
-        ~programs
-        ~compilation_limits
-        ~checkpoint
-        ~sw
-        ~host
-        ~admin_policy
-        ~manifest_authorizer
-        ~approval_provider
-        ~approval_store
-        ~model_completion
-        ~extension_snapshots
-        ~persist_extension_snapshots
-        ~preflight
-        manifest
-        material
-      |> Result.map ~f:(fun (registry, security_status, admitted) ->
-        Some registry, Some manifest, Some security_status, admitted))
+    Result.bind
+      (Startup_compilation.within
+         startup
+         ~map_error:(fun e -> [ diagnostic e.Chatml_compilation.code e.message ])
+         ~f:(fun () -> compile ~platform declarations))
+      ~f:(fun (manifest, material) ->
+        instantiate
+          ~startup
+          ~programs
+          ~compilation_limits
+          ~checkpoint
+          ~sw
+          ~host
+          ~admin_policy
+          ~manifest_authorizer
+          ~approval_provider
+          ~approval_store
+          ~model_completion
+          ~extension_snapshots
+          ~persist_extension_snapshots
+          ~preflight
+          manifest
+          material
+        |> Result.map ~f:(fun (registry, security_status, admitted) ->
+          Some registry, Some manifest, Some security_status, admitted))
 ;;
 
 let model_completion ~ctx ~agent:_ ~model =
@@ -447,6 +456,7 @@ let moderator_process_handler t =
 ;;
 
 let create_native
+      ~startup
       ~extension_resources
       ~programs
       ~compilation_limits
@@ -454,6 +464,7 @@ let create_native
       ~preflight
       ?(native_registrations = [])
       ?native_service_revision
+      ?agent_source_runner
       ~sw
       ~ctx
       ~host
@@ -468,104 +479,121 @@ let create_native
       ()
   =
   let open Result.Let_syntax in
-  let%bind _ =
-    Native_tool_pool.validate_registrations native_registrations
-    |> Result.map_error
-         ~f:
-           (List.map ~f:(fun error ->
-              diagnostic error.Native_tool_pool.Error.code error.message))
+  let%bind declarations, admin_policy =
+    Startup_compilation.within
+      startup
+      ~map_error:(fun e -> [ diagnostic e.Chatml_compilation.code e.message ])
+      ~f:(fun () ->
+        let%bind _ =
+          Native_tool_pool.validate_registrations native_registrations
+          |> Result.map_error
+               ~f:
+                 (List.map ~f:(fun error ->
+                    diagnostic error.Native_tool_pool.Error.code error.message))
+        in
+        if
+          List.exists prompt_elements ~f:(function
+            | CM.Extension_script _ | Tool (Extension _) -> not extension_resources
+            | Tool (Inherited _) -> true
+            | Authoring_context _ | Authoring_help _ -> not extension_resources
+            | _ -> false)
+        then
+          Error
+            [ diagnostic
+                "chatml.extension_unavailable"
+                "extension declarations are parsed but execution and authoring services \
+                 are not yet enabled on this host"
+            ]
+        else (
+          let declarations = declarations prompt_elements in
+          let%map admin_policy =
+            Shell_runtime.Admin_policy_loader.load_from_environment ~env:(Ctx.env ctx)
+            |> Result.map_error ~f:(fun error -> [ diagnostic error.code error.message ])
+          in
+          declarations, admin_policy))
   in
-  if
-    List.exists prompt_elements ~f:(function
-      | CM.Extension_script _ | Tool (Extension _) -> not extension_resources
-      | Tool (Inherited _) -> true
-      | Authoring_context _ | Authoring_help _ -> not extension_resources
-      | _ -> false)
-  then
-    Error
-      [ diagnostic
-          "chatml.extension_unavailable"
-          "extension declarations are parsed but execution and authoring services are \
-           not yet enabled on this host"
-      ]
-  else (
-    let declarations = declarations prompt_elements in
-    let%bind admin_policy =
-      Shell_runtime.Admin_policy_loader.load_from_environment ~env:(Ctx.env ctx)
-      |> Result.map_error ~f:(fun error -> [ diagnostic error.code error.message ])
-    in
-    let prepare_pool shell ~shell_preparation =
-      let%bind pool =
-        Native_tool_pool.create
-          ~registrations:native_registrations
-          ?native_service_revision
-          ~sw
-          ~ctx
-          ~host
-          ~run_agent
-          ~admin_policy
-          ~shell
-          prompt_elements
-        |> Result.map_error
-             ~f:
-               (List.map ~f:(fun error ->
-                  diagnostic error.Native_tool_pool.Error.code error.message))
-      in
-      checkpoint ();
-      let%map capabilities, legacy_moderator, admitted =
-        preflight pool ~shell_preparation
-      in
-      checkpoint ();
-      pool, capabilities, legacy_moderator, admitted
-    in
-    let%map
-        ( shell_registry
-        , shell_manifest
-        , shell_security_status
-        , (pool, capabilities, legacy_moderator, admitted) )
-      =
-      shell_registry
-        ~programs
-        ~compilation_limits
-        ~checkpoint
-        ~sw
-        ~host
-        ~platform
-        ~admin_policy
-        ~manifest_authorizer
-        ~approval_provider
-        ~approval_store
-        ~model_completion:(model_completion ~ctx)
-        ~extension_snapshots
-        ~persist_extension_snapshots
-        ~preflight:prepare_pool
-        declarations
-    in
-    let native =
-      { functions = Native_tool_pool.functions pool
-      ; capabilities
-      ; classifications = Native_tool_pool.classifications pool
-      ; shell_tool_names = shell_tool_names declarations
-      ; shell_registry
-      ; shell_manifest
-      ; shell_admin_policy = Option.some_if (Option.is_some shell_manifest) admin_policy
-      ; shell_security_status
-      ; moderator_shell_runtime = moderator_runtime shell_manifest
-      ; legacy_moderator
-      }
-    in
-    native, admitted)
+  let prepare_pool shell ~shell_preparation =
+    Startup_compilation.within
+      startup
+      ~map_error:(fun e -> [ diagnostic e.Chatml_compilation.code e.message ])
+      ~f:(fun () ->
+        let%bind pool =
+          Native_tool_pool.create
+            ~registrations:native_registrations
+            ?native_service_revision
+            ?agent_source_runner
+            ~sw
+            ~ctx
+            ~host
+            ~run_agent
+            ~admin_policy
+            ~shell
+            prompt_elements
+          |> Result.map_error
+               ~f:
+                 (List.map ~f:(fun error ->
+                    diagnostic error.Native_tool_pool.Error.code error.message))
+        in
+        checkpoint ();
+        let%map capabilities, legacy_moderator, admitted =
+          preflight pool ~shell_preparation
+        in
+        checkpoint ();
+        pool, capabilities, legacy_moderator, admitted)
+  in
+  let%map
+      ( shell_registry
+      , shell_manifest
+      , shell_security_status
+      , (pool, capabilities, legacy_moderator, admitted) )
+    =
+    shell_registry
+      ~startup
+      ~programs
+      ~compilation_limits
+      ~checkpoint
+      ~sw
+      ~host
+      ~platform
+      ~admin_policy
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+      ~model_completion:(model_completion ~ctx)
+      ~extension_snapshots
+      ~persist_extension_snapshots
+      ~preflight:prepare_pool
+      declarations
+  in
+  let native =
+    { functions = Native_tool_pool.functions pool
+    ; capabilities
+    ; classifications = Native_tool_pool.classifications pool
+    ; shell_tool_names = shell_tool_names declarations
+    ; shell_registry
+    ; shell_manifest
+    ; shell_admin_policy = Option.some_if (Option.is_some shell_manifest) admin_policy
+    ; shell_security_status
+    ; moderator_shell_runtime = moderator_runtime shell_manifest
+    ; legacy_moderator
+    }
+  in
+  native, admitted
 ;;
 
-let startup_checkpoint poll () =
-  Eio.Fiber.check ();
-  poll ();
-  Eio.Fiber.check ()
-;;
-
-let prepare_legacy ?programs ~surface ~env ~capabilities ~checkpoint ~limits elements =
+let prepare_legacy
+      ~startup
+      ?programs
+      ~surface
+      ~env
+      ~capabilities
+      ~checkpoint
+      ~limits
+      elements
+  =
   Moderator_manager.Registry.prepare_elements
     Moderator_manager.Registry.empty
+    ~startup
     ?programs
     ~surface
     ~capabilities
@@ -589,6 +617,8 @@ let declares_legacy elements =
 
 let create
       ?native_service_revision
+      ?agent_source_runner
+      ?programs
       ?(moderator_surface = Chatml.Chatml_builtin_surface.moderator_surface)
       ?(compilation_limits = Chatml_compilation.default_limits)
       ?(checkpoint = Eio.Fiber.check)
@@ -605,47 +635,58 @@ let create
       ~run_agent
       ()
   =
-  let checkpoint = startup_checkpoint checkpoint in
-  create_native
-    ~extension_resources:false
-    ~programs:None
-    ~compilation_limits
+  Startup_compilation.with_context
+    ~limits:compilation_limits
+    ~env:(Ctx.env ctx)
     ~checkpoint
-    ~preflight:(fun pool ~shell_preparation:_ ->
-      let capabilities = Native_tool_pool.capabilities pool in
-      let open Result.Let_syntax in
-      let%map legacy_moderator =
-        if not (declares_legacy prompt_elements)
-        then Ok None
-        else (
-          let%bind capabilities =
-            Lazy.force capabilities
-            |> Result.map_error ~f:(fun error ->
-              [ diagnostic error.Tool_capability.code error.message ])
+    ~map_error:(fun e -> [ diagnostic e.Chatml_compilation.code e.message ])
+    ~f:(fun startup ->
+      let checkpoint () = Startup_compilation.checkpoint startup in
+      create_native
+        ~startup
+        ~extension_resources:false
+        ~programs
+        ~compilation_limits
+        ~checkpoint
+        ~preflight:(fun pool ~shell_preparation:_ ->
+          let capabilities = Native_tool_pool.capabilities pool in
+          let open Result.Let_syntax in
+          let%map legacy_moderator =
+            if not (declares_legacy prompt_elements)
+            then Ok None
+            else (
+              let%bind capabilities =
+                Lazy.force capabilities
+                |> Result.map_error ~f:(fun error ->
+                  [ diagnostic error.Tool_capability.code error.message ])
+              in
+              prepare_legacy
+                ~startup
+                ?programs
+                ~surface:moderator_surface
+                ~env:(Ctx.env ctx)
+                ~capabilities
+                ~checkpoint
+                ~limits:compilation_limits
+                prompt_elements)
           in
-          prepare_legacy
-            ~surface:moderator_surface
-            ~env:(Ctx.env ctx)
-            ~capabilities
-            ~checkpoint
-            ~limits:compilation_limits
-            prompt_elements)
-      in
-      capabilities, legacy_moderator, ())
-    ?native_service_revision
-    ~sw
-    ~ctx
-    ~host
-    ~platform
-    ~prompt_elements
-    ~manifest_authorizer
-    ~approval_provider
-    ~approval_store
-    ?extension_snapshots
-    ?persist_extension_snapshots
-    ~run_agent
+          capabilities, legacy_moderator, ())
+        ?native_service_revision
+        ?agent_source_runner
+        ~sw
+        ~ctx
+        ~host
+        ~platform
+        ~prompt_elements
+        ~manifest_authorizer
+        ~approval_provider
+        ~approval_store
+        ?extension_snapshots
+        ?persist_extension_snapshots
+        ~run_agent
+        ()
+      |> Result.map ~f:fst)
     ()
-  |> Result.map ~f:fst
 ;;
 
 type extension_resources =
@@ -656,6 +697,7 @@ type extension_resources =
 
 let prepare_extensions
       ?native_service_revision
+      ?agent_source_runner
       ?(moderator_surface = Chatml.Chatml_builtin_surface.moderator_surface)
       ?(compilation_limits = Chatml_compilation.default_limits)
       ?(checkpoint = Eio.Fiber.check)
@@ -675,98 +717,115 @@ let prepare_extensions
       ~run_agent
       ()
   =
-  let checkpoint = startup_checkpoint checkpoint in
-  let open Result.Let_syntax in
-  let%bind () =
-    if List.length prompt_elements > 16_384
-    then Error [ diagnostic "chatml.definition_limit" "too many definition elements" ]
-    else (
-      try
-        ignore (CM.validate_declarations prompt_elements);
-        Ok ()
-      with
-      | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
-      | _ ->
-        Error
-          [ diagnostic
-              "chatml.invalid_definition"
-              "invalid captured extension declarations"
-          ])
-  in
-  let prepare_managed pool ~shell_preparation =
-    let%bind capabilities =
-      Lazy.force (Native_tool_pool.capabilities pool)
-      |> Result.map_error ~f:(fun error ->
-        [ diagnostic error.Tool_capability.code error.message ])
-    in
-    let%bind managed =
-      Managed_tool_registry.prepare
-        ~limits:compilation_limits
-        ~delegated_moderator
-        ?programs
-        ~env:(Ctx.env ctx)
-        ~owner:host.Shell_runtime.Host.session_id
-        ~capabilities
-        prompt_elements
-      |> Result.map_error
-           ~f:
-             (List.map ~f:(fun (error : D.t) ->
-                { code =
-                    (match error.code with
-                     | "capability.duplicate_name" -> "agent.duplicate_tool_name"
-                     | code -> code)
-                ; message = error.message
-                ; source = error.source
-                }))
-    in
-    let capabilities = Managed_tool_registry.capabilities managed in
-    checkpoint ();
-    let%bind () =
-      match shell_preparation with
-      | None -> Ok ()
-      | Some prepared ->
-        Shell_preparation.admit_tools prepared ~capabilities ~checkpoint
-        |> Result.map_error ~f:(fun error ->
-          [ diagnostic error.Chatml_compilation.code error.message ])
-    in
-    let%map legacy_moderator =
-      if not (declares_legacy prompt_elements)
-      then Ok None
-      else
-        prepare_legacy
-          ?programs
-          ~surface:moderator_surface
-          ~env:(Ctx.env ctx)
-          ~capabilities
+  Startup_compilation.with_context
+    ~limits:compilation_limits
+    ~env:(Ctx.env ctx)
+    ~checkpoint
+    ~map_error:(fun e -> [ diagnostic e.Chatml_compilation.code e.message ])
+    ~f:(fun startup ->
+      let checkpoint () = Startup_compilation.checkpoint startup in
+      let open Result.Let_syntax in
+      let%bind () =
+        Startup_compilation.within
+          startup
+          ~map_error:(fun e -> [ diagnostic e.Chatml_compilation.code e.message ])
+          ~f:(fun () ->
+            if List.length prompt_elements > 16_384
+            then
+              Error
+                [ diagnostic "chatml.definition_limit" "too many definition elements" ]
+            else (
+              try
+                ignore (CM.validate_declarations prompt_elements);
+                Ok ()
+              with
+              | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+              | _ ->
+                Error
+                  [ diagnostic
+                      "chatml.invalid_definition"
+                      "invalid captured extension declarations"
+                  ]))
+      in
+      let prepare_managed pool ~shell_preparation =
+        let%bind capabilities =
+          Lazy.force (Native_tool_pool.capabilities pool)
+          |> Result.map_error ~f:(fun error ->
+            [ diagnostic error.Tool_capability.code error.message ])
+        in
+        let%bind managed =
+          Managed_tool_registry.prepare
+            ~startup
+            ~limits:compilation_limits
+            ~delegated_moderator
+            ?programs
+            ~env:(Ctx.env ctx)
+            ~owner:host.Shell_runtime.Host.session_id
+            ~capabilities
+            prompt_elements
+          |> Result.map_error
+               ~f:
+                 (List.map ~f:(fun (error : D.t) ->
+                    { code =
+                        (match error.code with
+                         | "capability.duplicate_name" -> "agent.duplicate_tool_name"
+                         | code -> code)
+                    ; message = error.message
+                    ; source = error.source
+                    }))
+        in
+        let capabilities = Managed_tool_registry.capabilities managed in
+        checkpoint ();
+        let%bind () =
+          match shell_preparation with
+          | None -> Ok ()
+          | Some prepared ->
+            Shell_preparation.admit_tools prepared ~capabilities ~checkpoint
+            |> Result.map_error ~f:(fun error ->
+              [ diagnostic error.Chatml_compilation.code error.message ])
+        in
+        let%map legacy_moderator =
+          if not (declares_legacy prompt_elements)
+          then Ok None
+          else
+            prepare_legacy
+              ~startup
+              ?programs
+              ~surface:moderator_surface
+              ~env:(Ctx.env ctx)
+              ~capabilities
+              ~checkpoint
+              ~limits:compilation_limits
+              prompt_elements
+        in
+        lazy (Ok capabilities), legacy_moderator, managed
+      in
+      let%map native, managed =
+        create_native
+          ~startup
+          ~extension_resources:true
+          ~programs
+          ~compilation_limits
           ~checkpoint
-          ~limits:compilation_limits
-          prompt_elements
-    in
-    lazy (Ok capabilities), legacy_moderator, managed
-  in
-  let%map native, managed =
-    create_native
-      ~extension_resources:true
-      ~programs
-      ~compilation_limits
-      ~checkpoint
-      ~preflight:prepare_managed
-      ~native_registrations
-      ?native_service_revision
-      ~sw
-      ~ctx
-      ~host
-      ~platform
-      ~prompt_elements
-      ~manifest_authorizer
-      ~approval_provider
-      ~approval_store
-      ?extension_snapshots
-      ?persist_extension_snapshots
-      ~run_agent
-      ()
-  in
-  { native; definition = Managed_tool_registry.definition managed; managed }
+          ~preflight:prepare_managed
+          ~native_registrations
+          ?native_service_revision
+          ?agent_source_runner
+          ~sw
+          ~ctx
+          ~host
+          ~platform
+          ~prompt_elements
+          ~manifest_authorizer
+          ~approval_provider
+          ~approval_store
+          ?extension_snapshots
+          ?persist_extension_snapshots
+          ~run_agent
+          ()
+      in
+      { native; definition = Managed_tool_registry.definition managed; managed })
+    ()
 ;;
 
 let inherit_native ?managed ~(parent : t) ~capabilities () =

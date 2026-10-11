@@ -246,8 +246,13 @@ let%expect_test "parse_chat_inputs retains inline script and converter ignores i
   [%expect
     {|
     ((Script
-      ((id main) (language chatml) (kind moderator)
-       (source (Inline "let x = 1"))))
+      ((id main) (language chatml) (kind moderator) (source (Inline "let x = 1"))
+       (source_ref
+        (((file <prompt>) (source_dir .) (prompt_dir .) (namespace ())
+          (start_pos ((offset 0) (line 1) (column 1)))
+          (end_pos ((offset 79) (line 1) (column 80)))
+          (source_sha256
+           b2eb074d9e142dc2d5fde9f4e5dd8f126766f570658bfa7b10ac0bc04f4cc495))))))
      (User
       ((role user) (type_ ()) (content ((Text Hello))) (name ()) (id ())
        (status ()) (phase ()) (ochat_history_id ()) (source_context (<prompt>))
@@ -279,7 +284,14 @@ let%expect_test "parse_chat_inputs resolves script src relative to the prompt di
     {|
     ((Script
       ((id main) (language chatml) (kind moderator)
-       (source (Src ((path moderator.chatml) (source_text "let x = 1\n"))))))
+       (source (Src ((path moderator.chatml) (source_text "let x = 1\n"))))
+       (source_ref
+        (((file <prompt>) (source_dir ./script_prompt_dir)
+          (prompt_dir ./script_prompt_dir) (namespace ())
+          (start_pos ((offset 0) (line 1) (column 1)))
+          (end_pos ((offset 86) (line 1) (column 87)))
+          (source_sha256
+           55e1d2f55cdaa19bbf2f12422fd6a0e0f4914654fef6d74f2a2f3af9bfd88603))))))
      (User
       ((role user) (type_ ()) (content ((Text Hello))) (name ()) (id ())
        (status ()) (phase ()) (ochat_history_id ()) (source_context (<prompt>))

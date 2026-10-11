@@ -57,6 +57,19 @@ let agent_page_classification (decl : CM.tool) =
 
 module Res = Openai.Responses
 
+module Agent_source_runner = struct
+  type t =
+    { revision : Chatml_source.Digest.t
+    ; run :
+        declaration:CM.agent_tool
+        -> ctx:Eio_unix.Stdenv.base Ctx.t
+        -> source:string
+        -> observer:Agent_response_loop.observer option
+        -> CM.content_item list
+        -> string
+    }
+end
+
 let register_invalidation_listener ~sw ~cache ~client =
   Eio.Fiber.fork_daemon ~sw (fun () ->
     let rec loop () =
@@ -112,7 +125,9 @@ let convert_tools (ts : Openai.Completions.tool list) : Res.Request.Tool.t list 
 
     Typical use-case: breaking down a complex user request into
     multiple self-contained sub-tasks handled by specialised prompts. *)
-let agent_fn ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.agent_tool) : Ochat_function.t =
+let agent_fn ?agent_source_runner ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.agent_tool)
+  : Ochat_function.t
+  =
   let CM.{ name; description; agent; is_local } = agent_spec in
   (* pull components from the shared context *)
   let _net_unused = Ctx.net ctx in
@@ -161,18 +176,21 @@ let agent_fn ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.agent_tool) : Ochat_fu
       ; markdown = false
       }
     in
-    (* Fetch the agent prompt (local or remote) *)
-    let prompt_xml = Fetch.get ~ctx agent ~is_local in
-    let prompt_dir = if is_local then Fetch.resolve_local_dir ~ctx agent else None in
-    (* Delegate the heavy lifting to the provided [run_agent] callback. *)
-    run_agent
-      ?prompt_dir
-      ?session_id:(Some agent)
-      ?observer
-      ~source
-      ~ctx
-      prompt_xml
-      [ CM.Basic basic_item ]
+    let items = [ CM.Basic basic_item ] in
+    match agent_source_runner with
+    | Some runner ->
+      runner.Agent_source_runner.run ~declaration:agent_spec ~ctx ~source ~observer items
+    | None ->
+      let prompt_xml = Fetch.get ~ctx agent ~is_local in
+      let prompt_dir = if is_local then Fetch.resolve_local_dir ~ctx agent else None in
+      run_agent
+        ?prompt_dir
+        ?session_id:(Some agent)
+        ?observer
+        ~source
+        ~ctx
+        prompt_xml
+        items
   in
   Ochat_function.create_streaming_function
     (module M)
@@ -368,7 +386,14 @@ let default_read_file ctx =
     ()
 ;;
 
-let of_declaration ?shell_registry ?host ~sw ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool)
+let of_declaration
+      ?shell_registry
+      ?host
+      ?agent_source_runner
+      ~sw
+      ~(ctx : _ Ctx.t)
+      ~run_agent
+      (decl : CM.tool)
   : Ochat_function.t list
   =
   match decl with
@@ -446,6 +471,6 @@ let of_declaration ?shell_registry ?host ~sw ~(ctx : _ Ctx.t) ~run_agent (decl :
        (match Shell_tool.create registry tool with
         | Ok tool -> [ tool ]
         | Error error -> failwithf "%s: %s" error.code error.message ()))
-  | CM.Agent agent_spec -> [ agent_fn ~ctx ~run_agent agent_spec ]
+  | CM.Agent agent_spec -> [ agent_fn ?agent_source_runner ~ctx ~run_agent agent_spec ]
   | CM.Mcp mcp -> mcp_tool ~sw ~ctx mcp
 ;;

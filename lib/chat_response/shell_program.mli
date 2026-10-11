@@ -10,7 +10,8 @@ type t
     compilation do not initialize a runtime or grant any tools. Every selected
     variant must already be present in custody; no retargeting or file fallback. *)
 val compile
-  :  Chatml_prompt_programs.Restored.t
+  :  ?startup:Startup_compilation.t
+  -> Chatml_prompt_programs.Restored.t
   -> script:Chatmd_shell_spec.Chatmd_script_spec.t
   -> entrypoints:string list
   -> env:Eio_unix.Stdenv.base

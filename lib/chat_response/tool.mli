@@ -40,6 +40,26 @@ val agent_page_classification
   :  Prompt.Chat_markdown.tool
   -> (string * Tool_execution_event.agent_page_kind) option
 
+module Agent_source_runner : sig
+  (** Host-owned child source selection before any legacy Fetch operation.
+      [revision] identifies the host's source-selection implementation and policy;
+      the native tool owner includes it in the agent tool's capability identity.
+      The callback retains live authority only for the owning runtime lifetime.
+      It must use an admitted source owner, never infer grants from [ctx] paths
+      or [source], which is only invocation correlation. It owns preparation and
+      calls the existing driver with the child's own immutable inputs. *)
+  type t =
+    { revision : Chatml_source.Digest.t
+    ; run :
+        declaration:Prompt.Chat_markdown.agent_tool
+        -> ctx:Eio_unix.Stdenv.base Ctx.t
+        -> source:string
+        -> observer:Agent_response_loop.observer option
+        -> Prompt.Chat_markdown.content_item list
+        -> string
+    }
+end
+
 (** Validate configured read-file roots through the same source-relative host
     resolver used during tool construction. Performs filesystem inspection only;
     other declaration variants are not constructed, discovered or executed.
@@ -79,6 +99,7 @@ val validate_read_roots
 val of_declaration
   :  ?shell_registry:Shell_runtime.Registry.t
   -> ?host:Shell_runtime.Host.t
+  -> ?agent_source_runner:Agent_source_runner.t
   -> sw:Eio.Switch.t
   -> ctx:Eio_unix.Stdenv.base Ctx.t
   -> run_agent:

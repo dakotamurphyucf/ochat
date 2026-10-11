@@ -53,6 +53,7 @@ val create
   -> shell:Shell_view.t
   -> admin_policy:Shell_runtime.Admin_policy.t
   -> ?native_service_revision:string
+  -> ?agent_source_runner:Tool.Agent_source_runner.t
   -> registrations:Registration.t list
   -> run_agent:
        (?prompt_dir:Eio.Fs.dir_ty Eio.Path.t
