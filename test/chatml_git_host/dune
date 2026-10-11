@@ -1,0 +1,16 @@
+(copy_files ../bounded_process/test_limits_stubs.c)
+(copy_files ../responses_driver/tls_fixture.ml)
+(copy_files ../../lib/chatml_git_host/git_host_profile.ml)
+(copy_files ../../lib/chatml_git_host/git_host_profile.mli)
+(copy_files ../../lib/chatml_git_host/git_host_native.ml)
+(copy_files ../../lib/chatml_git_host/git_host_native.mli)
+(copy_files ../../lib/chatml_git_host/git_host_storage.ml)
+(copy_files ../../lib/chatml_git_host/git_host_storage.mli)
+
+(library
+ (name chatml_git_host_tests)
+ (modules support git_host_test tls_fixture https_fixture adversarial_fixture git_host_profile git_host_native git_host_storage)
+ (libraries core core_unix eio eio.unix eio.mock eio_main tls-eio x509 mirage-crypto-rng.unix digestif expect_test_helpers_core ochat.chatml_git_host ochat.chatml_project)
+ (inline_tests)
+ (foreign_stubs (language c) (names test_limits_stubs))
+ (preprocess (pps ppx_jane ppx_expect)))

@@ -1,0 +1,11 @@
+(library
+ (name chatml_git_host)
+ (public_name ochat.chatml_git_host)
+ (modules chatml_git_host git_host_native git_host_storage git_host_profile git_host_attempt git_host_store git_host_repository)
+ (private_modules git_host_native git_host_storage git_host_profile git_host_attempt git_host_store git_host_repository)
+ (foreign_stubs
+  (language c)
+  (names git_host_stubs)
+  (include_dirs ../private_storage))
+ (libraries core eio eio.unix shell_access chatml_project digestif)
+ (preprocess (pps ppx_jane)))
