@@ -32,6 +32,9 @@ module Limits : sig
     -> project_work_steps:int
     -> document:Document_schema.Limits.t
     -> t Or_error.t
+
+  (** Literal configured ceiling, not remaining/consumed accounting. *)
+  val max_programs : t -> int
 end
 
 module Binding : sig
@@ -161,6 +164,43 @@ val to_storage : t -> Storage.t
     context and supply the correct authentic contract. No source bodies or live
     native authority. *)
 val bindings : t -> (Binding.t * Captured.Digest.t) list
+
+(** Constant-time current selection presence. Inactive original inventory is not
+    executable selection; this gives no graph/compiler/native authority. *)
+val has_active_programs : t -> bool
+
+module Declaration_match : sig
+  (** Original and current authentic bindings for one exact source slot.
+      Registration root/qualified ID may differ; exact path, authored/effective
+      revisions, range and body must agree. Retain the original contract even
+      when it differs from the caller's requested role. No implicit activation. *)
+  type t
+
+  val original : t -> Binding.t
+  val current : t -> Binding.t
+  val compiler_contract : t -> Captured.Digest.t
+  val declaration : t -> Prompt.Chat_markdown.Declaration.t
+end
+
+(** Pure bounded original-inventory/current-declaration fold. Bound retained
+    original count, raw-declaration integer overflow and pair-product overflow
+    before binding projection. Raw syntax count is not the retained-program
+    ceiling; its traversal uses the caller's complete work allowance. Stream
+    transient match rows to [f]; repeated qualified imports may yield more pairs than retained
+    programs, without allocating an all-pairs list. Use authoritative declaration
+    ownership and same-source-slot comparison, never a filename-only guess.
+    Membership/hash work and every pair poll caller checkpoint, whose whole
+    operation work ceiling remains in force. This consumes none of the
+    selected-project reconstruction receipt allowance. Callback exceptions
+    propagate unchanged. Callers bound any result they retain themselves. *)
+val fold_declaration_matches
+  :  t
+  -> parsed:Prompt.Chat_markdown.Parsed.t
+  -> limits:Limits.t
+  -> checkpoint:(unit -> unit)
+  -> init:'a
+  -> f:('a -> Declaration_match.t -> 'a)
+  -> ('a, Error.t) Result.t
 
 (** Exact admitted effective parser bytes and original authored associations.
     Restart uses these inputs with Fn.id; it never repeats preprocessing/provider

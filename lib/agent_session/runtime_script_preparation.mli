@@ -1,0 +1,62 @@
+open Core
+
+(** Host policy for restoring authored scripts before native/runtime activation.
+    Contains no source authority, compiler state or live runtime resources. *)
+type t
+
+(** All component policies are already validated. Compilation limits and the
+    positive custody work ceiling are validated here. [max_custody_work_steps]
+    bounds each complete retained-custody selection or restoration operation;
+    planning and selected-project receipt reconstruction retain their own limits.
+    Restoration uses the host's semantic project allowance, never artifact-only
+    admission limits. The startup deadline spans all these preparation phases. *)
+val create
+  :  compilation:Chatml_compilation.limits
+  -> planning:Chat_response.Script_contract_plan.Limits.t
+  -> restoration:Chatml_prompt_programs.Limits.t
+  -> max_custody_work_steps:int
+  -> t Or_error.t
+
+val compilation : t -> Chatml_compilation.limits
+val restoration : t -> Chatml_prompt_programs.Limits.t
+val max_custody_work_steps : t -> int
+
+(** Plan the actual parser's scripts before authoring helpers are added. Uses the
+    existing pure shell manifest compiler and authentic UI/delegated contracts.
+    No filesystem access, native setup or initializer. The borrowed startup owner
+    covers the complete phase; original callback failures propagate unchanged. *)
+val plan
+  :  t
+  -> startup:Chat_response.Startup_compilation.t
+  -> parsed:Prompt.Chat_markdown.Parsed.t
+  -> delegated_moderator:bool
+  -> (Chat_response.Script_contract_plan.t, Agent_protocol.Error.t) Result.t
+
+(** Start or borrow the host startup owner before planning/restoration, then lend
+    restored scripts and the same original compilation limits to [f]. [f] must
+    forward [startup] into Agent_runtime; it may activate scripts after its own
+    complete preflight. Activation is not wrapped in the compilation timer.
+
+    [None] policy supports only legacy revisions without parser/program custody
+    or stored program/content bundles, using existing default compilation limits.
+    Owned revisions require explicit policy even when they contain no projects.
+    A supplied policy also governs legacy compilation when custody is absent.
+    No missing graph/selection falls back to compiling only the declaration body.
+    Source files are never reopened; the exact revision parser and stored custody
+    are used. [f] must not retain the borrowed context in resources or artifacts;
+    its original owner enforces lifetime. A newly created context rejects use after
+    this call returns. Callback failures and cancellation retain their original
+    backtraces. A borrowed context must have the same original compilation limits. *)
+val with_revision
+  :  t option
+  -> ?startup:Chat_response.Startup_compilation.t
+  -> Prompt_revision.t
+  -> env:Eio_unix.Stdenv.base
+  -> delegated_moderator:bool
+  -> checkpoint:(unit -> unit)
+  -> f:
+       (Chat_response.Startup_compilation.t
+        -> compilation_limits:Chatml_compilation.limits
+        -> programs:Chatml_prompt_programs.Restored.t option
+        -> ('a, Agent_protocol.Error.t) Result.t)
+  -> ('a, Agent_protocol.Error.t) Result.t

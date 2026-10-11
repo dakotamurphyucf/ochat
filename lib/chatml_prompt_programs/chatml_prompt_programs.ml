@@ -14,6 +14,7 @@ module Limits = Inventory.Limits
 module Input = Inventory.Input
 module Error = Inventory.Error
 module Restored = Program_restore
+module Declaration_match = Program_declaration_match
 
 type t = Program_document.t
 
@@ -26,6 +27,18 @@ let root_input t = (Program_document.inventory t).root
 let bindings t =
   List.map (Program_document.inventory t).programs ~f:(fun p ->
     p.binding, p.compiler_contract)
+;;
+
+let has_active_programs t = not (List.is_empty (Program_document.inventory t).selections)
+
+let fold_declaration_matches t ~parsed ~limits ~checkpoint ~init ~f =
+  Declaration_match.fold
+    (Program_document.inventory t)
+    ~parsed
+    ~limits
+    ~checkpoint
+    ~init
+    ~f
 ;;
 
 let restore t = Program_restore.restore (Program_document.inventory t)

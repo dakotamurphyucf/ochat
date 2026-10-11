@@ -325,6 +325,16 @@ module Scope = struct
       | None -> check t.owner)
   ;;
 
+  let capture_matches t capture =
+    phys_equal capture.Capture.affinity t.owner.capture_affinity
+    && Receipt.equal capture.receipt (receipt t.owner)
+  ;;
+
+  let check_capture t capture =
+    Result.bind (check t) ~f:(fun () ->
+      if capture_matches t capture then Ok () else Error (Error.create Foreign_capture))
+  ;;
+
   let stop_pending pending =
     pending.requested <- true;
     Option.iter pending.cancel ~f:(fun cancel ->
@@ -495,9 +505,7 @@ module Scope = struct
 
   let capture_documents t ~capture ~limits ~checkpoint =
     run t (fun () ->
-      if
-        (not (phys_equal capture.Capture.affinity t.owner.capture_affinity))
-        || not (Receipt.equal capture.receipt (receipt t.owner))
+      if not (capture_matches t capture)
       then Error (Error.create Foreign_capture)
       else
         let module Abort = struct
@@ -550,9 +558,7 @@ module Scope = struct
         ~checkpoint
     =
     run t (fun () ->
-      if
-        (not (phys_equal capture.Capture.affinity t.owner.capture_affinity))
-        || not (Receipt.equal capture.receipt (receipt t.owner))
+      if not (capture_matches t capture)
       then Error (Error.create Foreign_capture)
       else
         let module Abort = struct

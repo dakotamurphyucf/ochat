@@ -57,6 +57,8 @@
   prepared_script
   captured_script
   startup_compilation
+  script_contract_plan
+  restored_programs
   shell_program
   shell_preparation
   extension_compiler

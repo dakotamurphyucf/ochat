@@ -36,6 +36,8 @@
   session_replacement_delta
   managed_submission_tracking
   prompt_source_owner
+  prompt_project_route
+  prompt_script_sources
   prompt_catalog
   prompt_source_lease
   security_grant
@@ -158,6 +160,7 @@
   active_calls
   operation_worker
   turn_worker
+  runtime_script_preparation
   runtime_builder
   runtime_activity
   queued_moderator_event
