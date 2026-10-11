@@ -103,7 +103,7 @@ let catalog env parent =
       ~root:(Eio.Path.native_exn Eio.Path.(parent / "artifacts"))
     |> ok
   in
-  Catalog.create ~env ~artifact_store
+  Catalog.create ~env ~artifact_store ~content_limits:None
 ;;
 
 let prepare ?prepare_programs ?(checkpoint = ignore) catalog sw definitions =

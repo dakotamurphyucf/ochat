@@ -13,9 +13,15 @@ type entry =
 type prepared
 type t
 
+(** [content_limits] is the catalog's fixed host policy for stored document
+    restoration. [None] rejects content-bearing stored revisions. Cached revisions
+    already own their validated projection and are reused without another replay;
+    changing restoration policy requires a new catalog. Fresh preparation retains
+    its acquisition callback's original limits through publication. *)
 val create
   :  env:Eio_unix.Stdenv.base
   -> artifact_store:Agent_store.Prompt_artifact_store.t
+  -> content_limits:Chatmd_prompt_content.Limits.t option
   -> t
 
 (** [prepare] builds every enabled revision without changing the published
@@ -45,7 +51,8 @@ val prune_unreferenced_artifacts
   -> (int, Agent_store.Store_error.t) result
 
 (** Restores and caches an immutable revision that is no longer the current
-    catalog revision for its prompt definition. *)
+    catalog revision for its prompt definition, using the fixed host content
+    policy supplied at construction. Failed restoration is never cached. *)
 val restore_revision
   :  t
   -> definition_id:Agent_protocol.Id.Prompt_definition.t

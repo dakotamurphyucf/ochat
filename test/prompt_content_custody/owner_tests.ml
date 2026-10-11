@@ -208,7 +208,9 @@ let%test_module "actual prompt content custody owners" =
         let parent =
           Eio.Switch.run (fun sw ->
             let module Catalog = Agent_session.Prompt_catalog in
-            let catalog = Catalog.create ~env ~artifact_store:store in
+            let catalog =
+              Catalog.create ~env ~artifact_store:store ~content_limits:(Some (limits ()))
+            in
             let candidate =
               Catalog.prepare_owned
                 catalog
@@ -278,12 +280,41 @@ let%test_module "actual prompt content custody owners" =
           Result.is_error
             (Builder.restore ~artifact_store:store definition (Revision.id parent)));
         let restarted =
-          Builder.restore
-            ~content_limits:(limits ())
-            ~artifact_store:store
-            definition
-            (Revision.id parent)
-          |> built
+          let module Catalog = Agent_session.Prompt_catalog in
+          let restore content_limits =
+            let catalog = Catalog.create ~env ~artifact_store:store ~content_limits in
+            let prepared =
+              Catalog.prepare
+                catalog
+                ~transaction_id:(fun _ -> P.Id.Transaction.create ())
+                ~created_at:timestamp
+                [ definition ]
+            in
+            Catalog.install catalog prepared;
+            assert (Option.is_none (Catalog.find_revision catalog (Revision.id parent)));
+            let result =
+              Catalog.restore_revision
+                catalog
+                ~definition_id:definition.id
+                ~revision_id:(Revision.id parent)
+            in
+            (match result with
+             | Error _ ->
+               assert (Option.is_none (Catalog.find_revision catalog (Revision.id parent)))
+             | Ok revision ->
+               assert (
+                 phys_equal
+                   revision
+                   (Catalog.restore_revision
+                      catalog
+                      ~definition_id:definition.id
+                      ~revision_id:(Revision.id parent)
+                    |> built)));
+            result
+          in
+          assert (Result.is_error (restore None));
+          assert (Result.is_error (restore (Some (limits ~work:1 ()))));
+          restore (Some (limits ())) |> built
         in
         assert (List.equal String.equal (literals restarted) [ "original" ]);
         assert (Result.is_error (Authored.capture ~parent:restarted ~tool_name:"child" ()));

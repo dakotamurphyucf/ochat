@@ -54,6 +54,10 @@ type options =
         extensions enabled, None selects the installed native
         targets/catalog. An explicit host retains its target/compiler/source
         restrictions. This does not grant tool execution authority. *)
+  ; content_limits : Chatmd_prompt_content.Limits.t option
+    (** Fixed host policy for restoring captured documents in the prompt catalog.
+        None rejects content-bearing stored revisions. Source acquisition needs
+        its own preparation hook; stored metadata never selects these limits. *)
   ; provider_operator_factory : Provider_operator_port.factory option
     (** Optional host-owned provider service. Initialize once with actual server
         identity; missing service advertises no provider.operator capability.

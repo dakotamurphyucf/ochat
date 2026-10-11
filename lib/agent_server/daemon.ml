@@ -32,6 +32,7 @@ type options =
   ; independent_lifetime_policy : string option
   ; chatml_runtime_policy : Chat_response.Runtime_semantics.policy
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
+  ; content_limits : Chatmd_prompt_content.Limits.t option
   ; provider_operator_factory : Provider_operator_port.factory option
   ; oauth_resolver : (string -> Authenticator.bearer_validator option) option
   ; oauth_actor_resolver : (string -> Authenticator.actor_validator option) option
@@ -188,6 +189,7 @@ let default_options =
   ; independent_lifetime_policy = None
   ; chatml_runtime_policy = Chat_response.Runtime_semantics.default_policy
   ; authoring_validation_host = None
+  ; content_limits = None
   ; provider_operator_factory = None
   ; oauth_resolver = None
   ; oauth_actor_resolver = None
@@ -424,7 +426,15 @@ let original_source_limits () =
   |> Or_error.ok_exn
 ;;
 
-let build_catalog ~sw ~env store config reviewer_resolver policy_evaluator_resolver =
+let build_catalog
+      ~sw
+      ~env
+      ~content_limits
+      store
+      config
+      reviewer_resolver
+      policy_evaluator_resolver
+  =
   let open Result.Let_syntax in
   let%bind built =
     Catalog_builder.build ?reviewer_resolver ?policy_evaluator_resolver config
@@ -436,7 +446,9 @@ let build_catalog ~sw ~env store config reviewer_resolver policy_evaluator_resol
         (Agent_store.Session_store.data_root store
          |> Agent_store.Data_root.prompt_artifacts_path)
   in
-  let prompts = Agent_session.Prompt_catalog.create ~env ~artifact_store in
+  let prompts =
+    Agent_session.Prompt_catalog.create ~env ~artifact_store ~content_limits
+  in
   let%bind prepared =
     Agent_session.Prompt_catalog.prepare_owned
       prompts
@@ -1412,6 +1424,7 @@ let start
       build_catalog
         ~sw
         ~env
+        ~content_limits:options.content_limits
         store
         config
         options.reviewer_resolver

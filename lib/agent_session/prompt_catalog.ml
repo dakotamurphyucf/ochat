@@ -88,6 +88,7 @@ type prepared =
 type t =
   { env : Eio_unix.Stdenv.base
   ; artifact_store : Agent_store.Prompt_artifact_store.t
+  ; content_limits : Chatmd_prompt_content.Limits.t option
   ; mutex : Eio.Mutex.t
   ; identity : unit ref
   ; mutable generation : int
@@ -98,9 +99,10 @@ type t =
   ; mutable revisions : Prompt_revision.t String.Map.t
   }
 
-let create ~env ~artifact_store =
+let create ~env ~artifact_store ~content_limits =
   { env
   ; artifact_store
+  ; content_limits
   ; mutex = Eio.Mutex.create ()
   ; identity = ref ()
   ; generation = 0
@@ -467,6 +469,7 @@ let restore_revision t ~definition_id ~revision_id =
          | Some entry ->
            (match
               Prompt_revision_builder.restore
+                ?content_limits:t.content_limits
                 ~artifact_store:t.artifact_store
                 entry.definition
                 revision_id
