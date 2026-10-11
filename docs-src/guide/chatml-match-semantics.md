@@ -43,6 +43,12 @@ Record patterns are structural:
 - `{ name = n; _ }` matches any record with at least a `name` field
 
 Variant patterns match by constructor name and arity.
+The checker preserves this same distinction: `` `A `` has no payload,
+while `` `A(()) `` has one payload whose value is unit. Match the latter
+with `` `A(()) `` or `` `A(value) ``; a nullary `` `A `` pattern is a type
+error. Likewise, `` `Pair((), value) `` has two arguments. Type annotations
+retain the distinction between ``[ `A ]`` and ``[ `A(unit) ]``, including
+through aliases, builtin signatures and recursive constructors.
 
 ### Static semantics
 

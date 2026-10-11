@@ -3,8 +3,8 @@ module S = Chatml_builtin_spec
 module Surface = Chatml_builtin_surface
 
 let record fields = S.TRecord (TRow_extend (fields, TRow_empty))
-let variant cases = S.TVariant (TRow_extend (cases, TRow_empty))
-let option ty = variant [ "None", S.TUnit; "Some", ty ]
+let variant cases = S.TVariant (TVariant_row_extend (cases, TVariant_row_empty))
+let option ty = variant [ "None", []; "Some", [ ty ] ]
 
 let task_builtin ~name ~op ~parameters ~result ~spawn : S.builtin =
   { name
@@ -42,7 +42,7 @@ let job_spawn =
     ~spawn:false
 ;;
 
-let work_ref_ty = variant [ "Job", S.TString; "Subscription", S.TString ]
+let work_ref_ty = variant [ "Job", [ S.TString ]; "Subscription", [ S.TString ] ]
 
 let tool_error_ty =
   record
@@ -55,9 +55,9 @@ let tool_error_ty =
 
 let tool_outcome_ty =
   variant
-    [ "Complete", S.json_ty
-    ; "Pending", S.TTuple [ work_ref_ty; S.json_ty ]
-    ; "Fail", tool_error_ty
+    [ "Complete", [ S.json_ty ]
+    ; "Pending", [ work_ref_ty; S.json_ty ]
+    ; "Fail", [ tool_error_ty ]
     ]
 ;;
 
@@ -90,7 +90,7 @@ let origin_ty =
   variant
     (List.map
        [ "Model"; "Moderator"; "Script"; "Delegated_agent"; "External_adapter" ]
-       ~f:(fun name -> name, S.TUnit))
+       ~f:(fun name -> name, []))
 ;;
 
 let tool_context_ty =
@@ -167,16 +167,14 @@ let invocation_event_ty =
 
 let completion_ty =
   variant
-    [ "Succeeded", S.json_ty
-    ; "Failed", tool_error_ty
-    ; "Cancelled", S.TString
-    ; "Expired", S.TUnit
+    [ "Succeeded", [ S.json_ty ]
+    ; "Failed", [ tool_error_ty ]
+    ; "Cancelled", [ S.TString ]
+    ; "Expired", []
     ]
 ;;
 
-let wake_policy_ty =
-  variant [ "Request_turn", S.TUnit; "Next_turn", S.TUnit; "No_wake", S.TUnit ]
-;;
+let wake_policy_ty = variant [ "Request_turn", []; "Next_turn", []; "No_wake", [] ]
 
 let project_receipt tag (builtin : S.builtin) =
   { builtin with
@@ -240,8 +238,7 @@ let subscription_module : S.builtin_module =
 ;;
 
 let schedule_misfire_ty =
-  variant
-    [ "Deliver_once_immediately", S.TUnit; "Skip_if_expired", S.TUnit; "Fail", S.TUnit ]
+  variant [ "Deliver_once_immediately", []; "Skip_if_expired", []; "Fail", [] ]
 ;;
 
 let schedule_module : S.builtin_module =
@@ -326,27 +323,28 @@ let ingress_module : S.builtin_module =
 
 let moderator_event_ty =
   variant
-    [ "Session_start", S.TUnit
-    ; "Session_resume", S.TUnit
-    ; "Turn_start", S.TUnit
-    ; "Item_appended", S.item_ty
-    ; "Pre_tool_call", S.tool_call_ty
-    ; "Post_tool_response", S.tool_result_ty
-    ; "Turn_end", S.TUnit
-    ; "Internal_event", S.json_ty
-    ; "Tool_invoked", invocation_event_ty
+    [ "Session_start", []
+    ; "Session_resume", []
+    ; "Turn_start", []
+    ; "Item_appended", [ S.item_ty ]
+    ; "Pre_tool_call", [ S.tool_call_ty ]
+    ; "Post_tool_response", [ S.tool_result_ty ]
+    ; "Turn_end", []
+    ; "Internal_event", [ S.json_ty ]
+    ; "Tool_invoked", [ invocation_event_ty ]
     ; ( "Tool_observed"
-      , record
-          [ "version", S.TInt
-          ; "invocation_id", S.TString
-          ; "parent_invocation", option S.TString
-          ; "parent_event", option S.TString
-          ; "tool_name", S.TString
-          ; "origin", origin_ty
-          ; "outcome", S.json_ty
-          ] )
-    ; "Job_completed", work_completion_ty
-    ; "Subscription_expired", work_completion_ty
+      , [ record
+            [ "version", S.TInt
+            ; "invocation_id", S.TString
+            ; "parent_invocation", option S.TString
+            ; "parent_event", option S.TString
+            ; "tool_name", S.TString
+            ; "origin", origin_ty
+            ; "outcome", S.json_ty
+            ]
+        ] )
+    ; "Job_completed", [ work_completion_ty ]
+    ; "Subscription_expired", [ work_completion_ty ]
     ]
 ;;
 

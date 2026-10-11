@@ -110,7 +110,7 @@ let to_json t =
   `Object
     [ "version", `Number "1"
     ; "surface", `String t.surface_id
-    ; "scheme_format", `String "chatml-builtin-sexp-v1"
+    ; "scheme_format", `String "chatml-builtin-sexp-v2"
     ; "modules", `Array (List.map t.modules ~f:(fun name -> `String name))
     ; ( "items"
       , `Array
@@ -172,8 +172,8 @@ let reference_items t =
        | TRef item -> "ref<" ^ nested item ^ ">"
        | TTuple xs -> "payload(" ^ args xs ^ ")"
        | TFun (xs, result) -> "(" ^ args xs ^ ") -> " ^ nested result
-       | TRecord row -> "{ " ^ render_row ~binders ~variant:false row ^ " }"
-       | TVariant row -> "[ " ^ render_row ~binders ~variant:true row ^ " ]"
+       | TRecord row -> "{ " ^ render_row ~binders row ^ " }"
+       | TVariant row -> "[ " ^ render_variant_row ~binders row ^ " ]"
        | TMu (name, body) ->
          let display = "rec" ^ Int.to_string (List.length binders) in
          "mu "
@@ -182,7 +182,7 @@ let reference_items t =
          ^ render ~binders:((name, display) :: binders) ~expand:false body
        | TRec_var name ->
          List.Assoc.find binders name ~equal:String.equal |> Option.value ~default:name)
-  and render_row ~binders ~variant row =
+  and render_row ~binders row =
     let rec flatten fields = function
       | B.TRow_empty -> List.rev fields, None
       | TRow_var name -> List.rev fields, Some name
@@ -190,22 +190,31 @@ let reference_items t =
     in
     let fields, tail = flatten [] row in
     let nested = render ~binders ~expand:false in
+    let fields = List.map fields ~f:(fun (name, ty) -> name ^ ": " ^ nested ty) in
+    let parts = fields @ Option.to_list (Option.map tail ~f:(fun name -> "..'" ^ name)) in
+    String.concat ~sep:"; " parts
+  and render_variant_row ~binders row =
+    let rec flatten cases = function
+      | B.TVariant_row_empty -> List.rev cases, None
+      | TVariant_row_var name -> List.rev cases, Some name
+      | TVariant_row_extend (next, tail) -> flatten (List.rev_append next cases) tail
+    in
+    let cases, tail = flatten [] row in
     let fields =
-      List.map fields ~f:(fun (name, ty) ->
-        match variant, ty with
-        | false, _ -> name ^ ": " ^ nested ty
-        | true, B.TUnit -> "`" ^ name
-        | true, TTuple args ->
-          "`" ^ name ^ "(" ^ String.concat ~sep:", " (List.map args ~f:nested) ^ ")"
-        | true, _ -> "`" ^ name ^ "(" ^ nested ty ^ ")")
+      List.map cases ~f:(fun (name, arguments) ->
+        match arguments with
+        | [] -> "`" ^ name
+        | _ ->
+          "`"
+          ^ name
+          ^ "("
+          ^ String.concat
+              ~sep:", "
+              (List.map arguments ~f:(render ~binders ~expand:false))
+          ^ ")")
     in
     let parts = fields @ Option.to_list (Option.map tail ~f:(fun name -> "..'" ^ name)) in
-    String.concat
-      ~sep:
-        (match variant with
-         | true -> " | "
-         | false -> "; ")
-      parts
+    String.concat ~sep:" | " parts
   in
   List.map t.items ~f:(fun item ->
     let expand =

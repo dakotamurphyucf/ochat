@@ -11,6 +11,12 @@ type row =
   | TRow_extend of (string * ty) list * row
 [@@deriving sexp_of]
 
+and variant_row =
+  | TVariant_row_empty
+  | TVariant_row_var of string
+  | TVariant_row_extend of (string * ty list) list * variant_row
+[@@deriving sexp_of]
+
 and ty =
   | TVar of string
   | TCon of string * ty list
@@ -23,7 +29,7 @@ and ty =
   | TRef of ty
   | TTuple of ty list
   | TRecord of row
-  | TVariant of row
+  | TVariant of variant_row
   | TFun of ty list * ty
   | TMu of string * ty
   | TRec_var of string
@@ -41,10 +47,12 @@ let record_open (fields : (string * ty) list) (tail : string) : ty =
   TRecord (open_row fields tail)
 ;;
 
-let variant (cases : (string * ty) list) : ty = TVariant (closed_row cases)
+let variant (cases : (string * ty list) list) : ty =
+  TVariant (TVariant_row_extend (cases, TVariant_row_empty))
+;;
 
-let variant_open (cases : (string * ty) list) (tail : string) : ty =
-  TVariant (open_row cases tail)
+let variant_open (cases : (string * ty list) list) (tail : string) : ty =
+  TVariant (TVariant_row_extend (cases, TVariant_row_var tail))
 ;;
 
 type builtin =
@@ -78,10 +86,10 @@ let module_scheme (m : builtin_module) : ty =
   record (List.map m.exports ~f:(fun b -> b.name, b.scheme))
 ;;
 
-let option_ty (a : string) : ty = variant [ "None", TUnit; "Some", TVar a ]
+let option_ty (a : string) : ty = variant [ "None", []; "Some", [ TVar a ] ]
 let task_ty (a : ty) : ty = TCon ("task", [ a ])
 let string_array_ty : ty = TArray TString
-let option_of_ty ty = variant [ "None", TUnit; "Some", ty ]
+let option_of_ty ty = variant [ "None", []; "Some", [ ty ] ]
 let string_option_ty = option_of_ty TString
 
 let shell_executable_ty =
@@ -853,7 +861,7 @@ let builtins : builtin list =
          VArray keys)
   ; make_unary_builtin
       "variant_tag"
-      (TFun ([ TVariant (TRow_var "r") ], TString))
+      (TFun ([ TVariant (TVariant_row_var "r") ], TString))
       (fun v -> VString (expect_variant "variant_tag" v))
   ; make_binary_builtin
       "swap_ref"
@@ -880,12 +888,12 @@ let json_ty : ty =
   TMu
     ( "__builtin_json"
     , variant
-        [ "Null", TUnit
-        ; "Bool", TBool
-        ; "Number", TFloat
-        ; "String", TString
-        ; "Array", TArray (TRec_var "__builtin_json")
-        ; "Object", TArray (json_entry_ty (TRec_var "__builtin_json"))
+        [ "Null", []
+        ; "Bool", [ TBool ]
+        ; "Number", [ TFloat ]
+        ; "String", [ TString ]
+        ; "Array", [ TArray (TRec_var "__builtin_json") ]
+        ; "Object", [ TArray (json_entry_ty (TRec_var "__builtin_json")) ]
         ] )
 ;;
 
@@ -897,7 +905,7 @@ let value_to_jsonaf (name : string) (value : value) : Jsonaf.t =
   | Error msg -> failwith (Printf.sprintf "%s: %s" name msg)
 ;;
 
-let option_of (t : ty) : ty = variant [ "None", TUnit; "Some", t ]
+let option_of (t : ty) : ty = variant [ "None", []; "Some", [ t ] ]
 let json_option_ty : ty = option_of json_ty
 let item_ty : ty = record [ "id", TString; "value", json_ty ]
 
@@ -922,10 +930,10 @@ let context_ty : ty =
     ]
 ;;
 
-let tool_call_result_ty : ty = variant [ "Ok", json_ty; "Error", TString ]
+let tool_call_result_ty : ty = variant [ "Ok", [ json_ty ]; "Error", [ TString ] ]
 
 let model_call_result_ty : ty =
-  variant [ "Ok", json_ty; "Refused", TString; "Error", TString ]
+  variant [ "Ok", [ json_ty ]; "Refused", [ TString ]; "Error", [ TString ] ]
 ;;
 
 let is_json_tag (tag : string) : bool =
@@ -1409,7 +1417,7 @@ let json_module =
 
 let entry_ty a = record [ "key", TString; "value", TVar a ]
 let tbl_ty a = TRef (TArray (entry_ty a))
-let string_option_int_ty : ty = variant [ "None", TUnit; "Some", TInt ]
+let string_option_int_ty : ty = variant [ "None", []; "Some", [ TInt ] ]
 
 let string_module : builtin_module =
   { name = "String"
