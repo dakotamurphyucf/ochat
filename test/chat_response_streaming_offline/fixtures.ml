@@ -68,6 +68,7 @@ let moderator_of_source
     CM.
       { id = "main"
       ; language = "chatml"
+      ; project_selection = None
       ; kind = "moderator"
       ; source_ref = None
       ; source = Inline source

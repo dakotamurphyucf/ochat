@@ -33,7 +33,7 @@ val prepare
 val elements : t -> Prompt.Chat_markdown.top_level_elements list
 val capabilities : t -> Tool_capability.t
 val authoring : t -> Authoring_policy.t
-val moderators : t -> (Spec.script * Chatml_host_runtime.compiled_script) list
+val moderators : t -> (Spec.script * Extension_compiler.Program.t) list
 val definition : t -> Extension_compiler.definition
 val source_fingerprint : t -> string
 val fingerprint : t -> string

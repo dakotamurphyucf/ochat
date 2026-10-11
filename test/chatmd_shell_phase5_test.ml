@@ -1182,6 +1182,7 @@ let stateful_matcher_script () =
   Chatmd_shell_spec.Chatmd_script_spec.
     { id = "persisted-matcher"
     ; language = "chatml"
+    ; project_selection = None
     ; kind = Shell_matcher
     ; source = Inline stateful_matcher_source
     ; source_ref = extension_source_ref stateful_matcher_source

@@ -185,6 +185,8 @@ module Chat_markdown : sig
     ; language : string
     ; kind : string
     ; source : script_source
+    ; project_selection : Chatmd_shell_spec.Script_project.t option
+          [@jsonaf.option] [@sexp.option]
     ; source_ref : Chatmd_shell_spec.Source_ref.t option [@jsonaf.option]
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
@@ -215,6 +217,13 @@ module Chat_markdown : sig
     val range : t -> Chatmd_parser_input.Range.t
     val source_ref : t -> Chatmd_shell_spec.Source_ref.t
     val script_id : t -> string
+
+    (** Authored selection and external src spelling from this actual converted
+        declaration. Neither is a native grant or resolved filesystem path.
+        Relative paths use the owning parser input, never display provenance. *)
+    val project_selection : t -> Chatmd_shell_spec.Script_project.t option
+
+    val script_path : t -> string option
 
     (** Body is the actual inline extraction / loaded external body already used
         by the script parser; artifact custody computes/reconciles its digest. *)

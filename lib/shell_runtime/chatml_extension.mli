@@ -44,12 +44,24 @@ val compile
   -> (compiled, Chatmd_shell_spec.Diagnostic.t list) result
 
 (** Legacy [with_entrypoint] recompiles the original text with the selected ABI
-    adapter. Prepared programs return unchanged for the same entrypoint; changing
-    it rejects before initialization. Prepare a new authentic role/graph and call
-    [compile_prepared] instead; there is no text-only fallback. *)
+    adapter. Prepared programs select only an already compiled alternative from
+    [with_prepared_entrypoints], or return unchanged for the same entrypoint.
+    Missing alternatives reject before initialization; no text-only fallback. *)
 val with_entrypoint
   :  compiled
   -> string
+  -> (compiled, Chatmd_shell_spec.Diagnostic.t) result
+
+(** Attach immutable, already compiled matcher alternatives to the default
+    prepared hook. All must have the exact same original declaration, including
+    project/environment and limits. Reject legacy programs, non-matcher kinds,
+    duplicate/default entrypoints and repeated attachment. No compilation,
+    initialization or instance mutation; the selected variant retains its own
+    authentic compiler contract and full graph revision. *)
+val with_prepared_entrypoints
+  :  compiled
+  -> alternatives:compiled list
+  -> checkpoint:(unit -> unit)
   -> (compiled, Chatmd_shell_spec.Diagnostic.t) result
 
 val instantiate
@@ -67,12 +79,27 @@ val call
 
 val id : compiled -> string
 val kind : compiled -> Chatmd_shell_spec.Chatmd_script_spec.kind
+
+(** Exact original entry-body digest retained for source custody. *)
 val source_sha256 : compiled -> string
+
+(** Saved runtime-state identity. Legacy hooks retain their body digest;
+    prepared hooks use the complete immutable graph fingerprint, including
+    dependencies, scopes and the compiler contract. *)
+val source_revision : compiled -> string
+
 val entrypoint : compiled -> string
+val default_entrypoint : Chatmd_shell_spec.Chatmd_script_spec.kind -> string
 val limits : compiled -> limits
 val instance_id : instance -> string
 val instance_kind : instance -> Chatmd_shell_spec.Chatmd_script_spec.kind
 val instance_source_sha256 : instance -> string
+val instance_source_revision : instance -> string
+
+(** Check affinity to the exact immutable declaration used for compilation,
+    including its project selection and limits. The compiled entrypoint must be
+    the kind's default; changing it requires the existing runtime ABI owner. *)
+val matches_script : compiled -> Chatmd_shell_spec.Chatmd_script_spec.t -> bool
 
 (** [snapshot instance] captures durable state, queued internal events, and
     halted state. Invocation-scoped instances reject snapshots. *)

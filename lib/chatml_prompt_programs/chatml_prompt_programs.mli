@@ -256,6 +256,10 @@ module Restored : sig
 
     val binding : t -> Binding.t
 
+    (** Actual authenticated replayed declaration. Hosts compare authored selection
+        metadata against this owner, not just the entry-body digest. *)
+    val declaration : t -> Prompt.Chat_markdown.Declaration.t
+
     (** Preserve the actual admitted restoration kind. Selected returns its real
         Build value, allowing captured-only recomposition; never construct a fake
         Build from the Prepared projection. *)

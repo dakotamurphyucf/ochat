@@ -1,5 +1,6 @@
 open Core
 module Spec = Chatmd_shell_spec.Extension_spec
+module Program = Script_program
 
 (** Prepared, non-evaluated implementation with its exact live capability subset.
     This internal compiler does not run initializers or tools, load files, perform
@@ -27,11 +28,16 @@ val declaration : t -> Spec.tool
     Unlike the prepared capability fingerprint, this identity survives restart. *)
 val script : t -> Spec.script
 
+(** Exact executable source revision for snapshots and deferred observations.
+    Prepared module dependencies participate; [script.source_sha256] remains the
+    original entry-body digest for custody and source diagnostics. *)
+val source_revision : t -> string
+
 (** Validated execution limits of the captured implementing script. These limits
     are included in the prepared implementation fingerprint. *)
 val execution_limits : t -> Chatmd_shell_spec.Chatmd_script_spec.limits
 
-val program : t -> Chatml_host_runtime.compiled_script
+val program : t -> Program.t
 val capabilities : t -> Tool_capability.t
 val fingerprint : t -> string
 val input_schema : t -> Chatmd_shell_spec.Tool_schema.t
@@ -66,6 +72,13 @@ type definition
     A host must consume the prepared result before exposing extension runners;
     code editing or registry changes require fresh admission.
 
+    [programs], when supplied, is the exact restored active custody. Every script
+    must have its authentic role and source there; missing or conflicting entries
+    reject without text fallback. A configured script without custody rejects.
+    Project-required tools must belong to each handler's selected live capability
+    subset, including on cache hits. Graph identity participates in fingerprints;
+    distinct graph canonical inputs share an 8MiB definition allowance.
+
     [delegated_moderator] defaults to false. When true, all moderator scripts,
     including ghost handlers, compile against the tool-mediated delegated surface
     without direct Process/Model recipes. The selected contract participates in
@@ -73,17 +86,14 @@ type definition
 val prepare_definition_in_domain
   :  ?limits:Chatml_compilation.limits
   -> ?delegated_moderator:bool
+  -> ?programs:Chatml_prompt_programs.Restored.t
   -> env:Eio_unix.Stdenv.base
   -> capabilities:Tool_capability.t
   -> Prompt.Chat_markdown.top_level_elements list
   -> (definition, Chatmd_shell_spec.Diagnostic.t list) result
 
 val prepared_tools : definition -> t list
-
-val compiled_scripts
-  :  definition
-  -> (Spec.script * Chatml_host_runtime.compiled_script) list
-
+val compiled_scripts : definition -> (Spec.script * Program.t) list
 val definition_fingerprint : definition -> string
 
 (** Actual admitted capability registry retained for lifecycle-only moderator

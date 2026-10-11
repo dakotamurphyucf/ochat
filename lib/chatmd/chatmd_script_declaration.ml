@@ -126,6 +126,26 @@ let limits source attributes =
   }
 ;;
 
+let project_selection source attributes =
+  let project = attribute (Chatmd_attributes.optional attributes "project") in
+  let environment = attribute (Chatmd_attributes.optional attributes "environment") in
+  let reject message =
+    fail
+      (D.error
+         ~source
+         ~path:[ "script"; "project" ]
+         ~code:"chatmd.script_invalid_project"
+         message)
+  in
+  match project, environment with
+  | None, None -> None
+  | None, Some _ -> reject "script environment requires an explicit project"
+  | Some project, environment ->
+    (match Chatmd_shell_spec.Script_project.create ~project ~environment with
+     | Ok selection -> Some selection
+     | Error error -> reject (Error.to_string_hum error))
+;;
+
 let parse ~dir:_ ~loader ~source_node ~source:source_ref ~attributes ~inline_source =
   result (fun () ->
     let attributes =
@@ -137,6 +157,8 @@ let parse ~dir:_ ~loader ~source_node ~source:source_ref ~attributes ~inline_sou
           ; "language"
           ; "kind"
           ; "src"
+          ; "project"
+          ; "environment"
           ; "wall_time"
           ; "fuel"
           ; "max_tasks"
@@ -170,6 +192,7 @@ let parse ~dir:_ ~loader ~source_node ~source:source_ref ~attributes ~inline_sou
     ; language
     ; kind
     ; source
+    ; project_selection = project_selection source_ref attributes
     ; source_ref
     ; source_sha256 = Chatmd_shell_spec.Source_ref.digest source_text
     ; limits = limits source_ref attributes
@@ -236,6 +259,16 @@ let escape value =
   |> String.substr_replace_all ~pattern:">" ~with_:"&gt;"
 ;;
 
+let project_attributes selection =
+  match selection with
+  | None -> []
+  | Some (selection : Chatmd_shell_spec.Script_project.t) ->
+    [ sprintf "project=\"%s\"" (escape selection.project) ]
+    @ Option.to_list
+        (Option.map selection.environment ~f:(fun environment ->
+           sprintf "environment=\"%s\"" (escape environment)))
+;;
+
 let serialize script =
   let limits = script.S.limits in
   let attributes =
@@ -252,6 +285,9 @@ let serialize script =
       (Chatmd_shell_spec.Duration.bytes_to_string limits.max_output_bytes)
       limits.max_array_items
       limits.max_depth
+  in
+  let attributes =
+    String.concat ~sep:" " (attributes :: project_attributes script.project_selection)
   in
   match script.source with
   | S.Inline source -> sprintf "<script %s>%s</script>" attributes source

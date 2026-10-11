@@ -7,11 +7,13 @@
   tool_schema
   extension_spec
   authoring_metadata
+  script_project
   chatmd_script_spec
   feature
   path_expr
   duration
   shell_spec
+  script_reference
   builtin_profile
   shell_tool_spec
   shell_element

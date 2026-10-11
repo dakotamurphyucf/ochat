@@ -198,10 +198,19 @@ let runtime_map
       |> Result.map ~f:(fun runtimes -> runtimes, List.rev !extension_bindings))
 ;;
 
-let extension_map scripts =
+let extension_map ~compile_extension scripts =
   List.map scripts ~f:(fun script ->
-    Chatml_extension.compile ~script
-    |> Result.map ~f:(fun compiled -> Chatml_extension.id compiled, compiled))
+    compile_extension script
+    |> Result.bind ~f:(fun compiled ->
+      if Chatml_extension.matches_script compiled script
+      then Ok (Chatml_extension.id compiled, compiled)
+      else
+        Error
+          [ D.error
+              ~source:script.Chatmd_shell_spec.Chatmd_script_spec.source_ref
+              ~code:"shell.chatml_compiled_mismatch"
+              "Compiled shell hook does not match its authorized declaration"
+          ]))
   |> Result.all
   |> Result.map_error ~f:(List.map ~f:diagnostic_error)
   |> Result.map ~f:String.Map.of_alist_exn
@@ -220,7 +229,7 @@ let admin_error (violation : Admin_policy.violation) =
   }
 ;;
 
-let prepare_with_policy ~admin_policy ~manifest ~material =
+let prepare_with_compiler ~compile_extension ~admin_policy ~manifest ~material =
   match MC.effective_runtimes material ~manifest with
   | Error diagnostics -> Error (List.map diagnostics ~f:diagnostic_error)
   | Ok runtimes ->
@@ -231,8 +240,16 @@ let prepare_with_policy ~admin_policy ~manifest ~material =
         match MC.effective_scripts material ~manifest with
         | Error diagnostics -> Error (List.map diagnostics ~f:diagnostic_error)
         | Ok scripts ->
-          Result.map (extension_map scripts) ~f:(fun extensions ->
+          Result.map (extension_map ~compile_extension scripts) ~f:(fun extensions ->
             { manifest; runtimes; extensions; admin_policy }))
+;;
+
+let prepare_with_policy ~admin_policy ~manifest ~material =
+  prepare_with_compiler
+    ~compile_extension:(fun script -> Chatml_extension.compile ~script)
+    ~admin_policy
+    ~manifest
+    ~material
 ;;
 
 let prepare ~manifest ~material =
@@ -360,7 +377,7 @@ let snapshot_matches manifest binding snapshot =
   && String.equal snapshot.manifest_sha256 manifest.M.sha256
   && String.equal
        snapshot.source_sha256
-       (Chatml_extension.instance_source_sha256 instance)
+       (Chatml_extension.instance_source_revision instance)
 ;;
 
 let captured_at_ns host =
@@ -378,7 +395,7 @@ let persisted_snapshot host manifest binding state =
     ; extension_kind = extension_kind instance
     ; runtime_id = binding.runtime_id
     ; manifest_sha256 = manifest.M.sha256
-    ; source_sha256 = Chatml_extension.instance_source_sha256 instance
+    ; source_sha256 = Chatml_extension.instance_source_revision instance
     ; state
     ; captured_at_ns = captured_at_ns host
     }

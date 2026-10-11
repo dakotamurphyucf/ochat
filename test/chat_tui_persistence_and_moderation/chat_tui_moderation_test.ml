@@ -109,6 +109,7 @@ let artifact () =
     CM.
       { id = "main"
       ; language = "chatml"
+      ; project_selection = None
       ; kind = "moderator"
       ; source_ref = None
       ; source = Inline moderator_script
@@ -122,6 +123,7 @@ let ui_notify_artifact () =
     CM.
       { id = "ui-main"
       ; language = "chatml"
+      ; project_selection = None
       ; kind = "moderator"
       ; source_ref = None
       ; source =
@@ -154,6 +156,7 @@ let approval_prompt_artifact () =
     CM.
       { id = "approval-main"
       ; language = "chatml"
+      ; project_selection = None
       ; kind = "moderator"
       ; source_ref = None
       ; source =

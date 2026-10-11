@@ -42,12 +42,14 @@ type program =
   | Prepared of Chatml_linked_program.t
 
 type compiled =
-  { id : string
+  { declaration : S.t
+  ; id : string
   ; kind : S.kind
   ; source : Chatmd_shell_spec.Source_ref.t
   ; source_text : string
   ; source_sha256 : string
   ; program : program
+  ; alternatives : Chatml_linked_program.t String.Map.t
   ; surface : Surface.surface
   ; entrypoint : string
   ; limits : limits
@@ -114,6 +116,8 @@ let entrypoint = function
   | Moderator -> "on_event"
 ;;
 
+let default_entrypoint = entrypoint
+
 let wrapper entrypoint =
   sprintf
     "\n\
@@ -123,25 +127,36 @@ let wrapper entrypoint =
 ;;
 
 let compile ~script =
-  let surface = surface script.S.kind in
-  let source_text = S.source_text script in
-  let entrypoint = entrypoint script.kind in
-  let source = source_text ^ wrapper entrypoint in
-  match R.compile_script ~surface ~source () with
-  | Ok program ->
-    Ok
-      { id = script.id
-      ; kind = script.kind
-      ; source = script.source_ref
-      ; source_text
-      ; source_sha256 = script.source_sha256
-      ; program = Legacy program
-      ; surface
-      ; entrypoint
-      ; limits = limits_of_script script.limits
-      }
-  | Error message ->
-    Error [ error ~source:script.source_ref "shell.chatml_compile" message ]
+  match script.S.project_selection with
+  | Some _ ->
+    Error
+      [ error
+          ~source:script.source_ref
+          "shell.chatml_missing_program"
+          "Configured shell script requires captured project preparation"
+      ]
+  | None ->
+    let surface = surface script.S.kind in
+    let source_text = S.source_text script in
+    let entrypoint = entrypoint script.kind in
+    let source = source_text ^ wrapper entrypoint in
+    (match R.compile_script ~surface ~source () with
+     | Ok program ->
+       Ok
+         { declaration = script
+         ; id = script.id
+         ; kind = script.kind
+         ; source = script.source_ref
+         ; source_text
+         ; source_sha256 = script.source_sha256
+         ; program = Legacy program
+         ; alternatives = String.Map.empty
+         ; surface
+         ; entrypoint
+         ; limits = limits_of_script script.limits
+         }
+     | Error message ->
+       Error [ error ~source:script.source_ref "shell.chatml_compile" message ])
 ;;
 
 let with_entrypoint compiled entrypoint =
@@ -149,19 +164,55 @@ let with_entrypoint compiled entrypoint =
   | Prepared _ ->
     if String.equal compiled.entrypoint entrypoint
     then Ok compiled
-    else
-      Error
-        (error
-           ~source:compiled.source
-           "shell.chatml_prepared_entrypoint"
-           "A different Prepared entrypoint requires authentic preparation and joined \
-            compilation")
+    else (
+      match Map.find compiled.alternatives entrypoint with
+      | Some program -> Ok { compiled with program = Prepared program; entrypoint }
+      | None ->
+        Error
+          (error
+             ~source:compiled.source
+             "shell.chatml_prepared_entrypoint"
+             "The selected entrypoint requires an already compiled captured program"))
   | Legacy _ ->
     let source = compiled.source_text ^ wrapper entrypoint in
     (match R.compile_script ~surface:compiled.surface ~source () with
      | Ok program -> Ok { compiled with program = Legacy program; entrypoint }
      | Error message ->
        Error (error ~source:compiled.source "shell.chatml_compile" message))
+;;
+
+let with_prepared_entrypoints compiled ~alternatives ~checkpoint =
+  let invalid message =
+    Error (error ~source:compiled.source "shell.chatml_entrypoint_set" message)
+  in
+  checkpoint ();
+  match compiled.program, compiled.kind with
+  | Prepared program, S.Shell_matcher
+    when String.equal compiled.entrypoint (default_entrypoint compiled.kind)
+         && Map.is_empty compiled.alternatives ->
+    let open Result.Let_syntax in
+    let%map alternatives =
+      List.fold_result alternatives ~init:String.Map.empty ~f:(fun found alternative ->
+        checkpoint ();
+        if not (S.equal compiled.declaration alternative.declaration)
+        then invalid "Matcher alternative belongs to a different declaration"
+        else if
+          String.equal alternative.entrypoint compiled.entrypoint
+          || Map.mem found alternative.entrypoint
+        then invalid "Duplicate matcher entrypoint"
+        else if not (Map.is_empty alternative.alternatives)
+        then invalid "Matcher alternatives cannot contain another entrypoint set"
+        else (
+          match alternative.program with
+          | Legacy _ -> invalid "Matcher alternative must be a prepared program"
+          | Prepared program ->
+            Ok (Map.set found ~key:alternative.entrypoint ~data:program)))
+    in
+    { compiled with
+      alternatives = Map.set alternatives ~key:compiled.entrypoint ~data:program
+    }
+  | Prepared _, _ | Legacy _, _ ->
+    invalid "Entrypoint alternatives require an unattached default prepared matcher"
 ;;
 
 let compiler_contract kind ~entrypoint ~checkpoint =
@@ -232,12 +283,14 @@ let compile_prepared input ~script ~entrypoint ~limits ~max_dependency_depth ~en
     |> Result.map_error ~f:(fun failure ->
       [ error ~source:script.source_ref failure.code failure.message ])
   in
-  { id = script.id
+  { declaration = script
+  ; id = script.id
   ; kind = script.kind
   ; source = script.source_ref
   ; source_text
   ; source_sha256 = script.source_sha256
   ; program = Prepared program
+  ; alternatives = String.Map.empty
   ; surface = surface script.kind
   ; entrypoint
   ; limits = limits_of_script script.limits
@@ -639,6 +692,20 @@ let call instance ~context ~event =
   |> Result.map_error ~f:(error ~source:instance.compiled.source "shell.chatml_runtime")
 ;;
 
+let source_revision (compiled : compiled) =
+  match compiled.program with
+  | Legacy _ -> compiled.source_sha256
+  | Prepared program ->
+    Chatml_linked_program.prepared program
+    |> Chatml_prepared_program.fingerprint
+    |> Chatml_source.Digest.to_hex
+;;
+
+let matches_script compiled script =
+  S.equal compiled.declaration script
+  && String.equal compiled.entrypoint (entrypoint script.S.kind)
+;;
+
 let id compiled = compiled.id
 let kind compiled = compiled.kind
 let source_sha256 (compiled : compiled) = compiled.source_sha256
@@ -647,6 +714,7 @@ let limits (compiled : compiled) = compiled.limits
 let instance_id instance = instance.compiled.id
 let instance_kind instance = instance.compiled.kind
 let instance_source_sha256 instance = instance.compiled.source_sha256
+let instance_source_revision instance = source_revision instance.compiled
 
 let snapshot instance =
   Eio.Mutex.use_rw ~protect:true instance.mutex (fun () ->

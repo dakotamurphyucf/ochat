@@ -175,6 +175,8 @@ module Chat_content = struct
     ; language : string
     ; kind : string
     ; source : script_source
+    ; project_selection : Chatmd_shell_spec.Script_project.t option
+          [@jsonaf.option] [@sexp.option]
     ; source_ref : Chatmd_shell_spec.Source_ref.t option [@jsonaf.option]
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
@@ -436,13 +438,16 @@ module Chat_markdown = struct
         if List.is_empty attrs then "" else " " ^ String.concat ~sep:" " attrs
       in
       Printf.sprintf "<config%s />" attrs_string
-    | Script { id; language; kind; source; source_ref = _ } ->
+    | Script { id; language; kind; source; project_selection; source_ref = _ } ->
       let attrs =
         [ Some (Printf.sprintf "id=\"%s\"" id)
         ; Some (Printf.sprintf "language=\"%s\"" language)
         ; Some (Printf.sprintf "kind=\"%s\"" kind)
         ]
         |> List.filter_map ~f:Fun.id
+      in
+      let attrs =
+        attrs @ Chatmd_script_declaration.project_attributes project_selection
       in
       let attrs_string = String.concat ~sep:" " attrs in
       (match source with
@@ -557,6 +562,7 @@ module Chat_markdown = struct
     ; language = script.language
     ; kind = Script_spec.kind_to_string script.kind
     ; source
+    ; project_selection = script.project_selection
     ; source_ref = Some script.source_ref
     }
   ;;
@@ -1169,18 +1175,27 @@ module Chat_markdown = struct
       ; source_ref : Chatmd_shell_spec.Source_ref.t
       ; script_id : string
       ; script_body : string
+      ; project_selection : Chatmd_shell_spec.Script_project.t option
+      ; script_path : string option
       }
 
     let range t = t.range
     let source_ref t = t.source_ref
     let script_id t = t.script_id
     let script_body t = t.script_body
+    let project_selection t = t.project_selection
+    let script_path t = t.script_path
 
     let of_conversion range (converted : chat_element) =
       let source_text (source : Script_spec.source) =
         match source with
         | Inline text -> text
         | Src { path = _; source_text } -> source_text
+      in
+      let script_path (source : Script_spec.source) =
+        match source with
+        | Inline _ -> None
+        | Src { path; source_text = _ } -> Some path
       in
       let script =
         match converted with
@@ -1190,11 +1205,31 @@ module Chat_markdown = struct
             | Inline text -> text
             | Src { path = _; source_text } -> source_text
           in
-          Some (script.id, body, Option.value_exn script.source_ref)
+          let path =
+            match script.source with
+            | Inline _ -> None
+            | Src { path; source_text = _ } -> Some path
+          in
+          Some
+            ( script.id
+            , body
+            , Option.value_exn script.source_ref
+            , script.project_selection
+            , path )
         | Shell_script script ->
-          Some (script.id, Script_spec.source_text script, script.source_ref)
+          Some
+            ( script.id
+            , Script_spec.source_text script
+            , script.source_ref
+            , script.project_selection
+            , script_path script.source )
         | Extension_script script ->
-          Some (script.id, source_text script.source, script.source_ref)
+          Some
+            ( script.id
+            , source_text script.source
+            , script.source_ref
+            , script.project_selection
+            , script_path script.source )
         | Message _
         | Developer_msg _
         | System_msg _
@@ -1216,8 +1251,9 @@ module Chat_markdown = struct
         | Agent _ -> None
       in
       match range, script with
-      | Some range, Some (script_id, script_body, source_ref) ->
-        Some { range; source_ref; script_id; script_body }
+      | ( Some range
+        , Some (script_id, script_body, source_ref, project_selection, script_path) ) ->
+        Some { range; source_ref; script_id; script_body; project_selection; script_path }
       | None, _ | Some _, None -> None
     ;;
   end

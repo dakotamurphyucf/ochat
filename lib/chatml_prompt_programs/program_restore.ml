@@ -15,11 +15,13 @@ module Limits = Inventory.Limits
 module Program = struct
   type t =
     { binding : Binding.t
+    ; declaration : Prompt.Chat_markdown.Declaration.t
     ; input : Inventory.Input.t
     ; compiler_contract : Captured.Digest.t
     }
 
   let binding t = t.binding
+  let declaration t = t.declaration
   let input t = t.input
 
   let prepared t =
@@ -64,17 +66,19 @@ let restore inventory ~parsed ~contracts ~limits ~checkpoint =
         checkpoint ();
         if List.length acc >= Limits.max_programs limits
         then Error Error.Limit_exceeded
-        else if not (Binding.matches_parsed binding parsed ~checkpoint)
-        then
-          Error
-            (Error.Invalid_binding
-               "Contract binding is not an actual replayed declaration")
         else (
+          let%bind declaration =
+            Binding.find_declaration binding parsed ~checkpoint
+            |> Result.of_option
+                 ~error:
+                   (Error.Invalid_binding
+                      "Contract binding is not an actual replayed declaration")
+          in
           let digest = Contract.fingerprint contract ~checkpoint in
           let key = Inventory.Program.key binding digest in
-          if List.exists acc ~f:(fun (previous, _, _) -> String.equal previous key)
+          if List.exists acc ~f:(fun (previous, _, _, _) -> String.equal previous key)
           then Error (Error.Unexpected_contract binding)
-          else Ok ((key, binding, contract) :: acc)))
+          else Ok ((key, binding, contract, declaration) :: acc)))
     in
     let%bind restored, _, _, consumed =
       List.fold_result
@@ -92,11 +96,11 @@ let restore inventory ~parsed ~contracts ~limits ~checkpoint =
           | Some program ->
             let binding = selection.binding in
             let key = Inventory.Program.key binding program.compiler_contract in
-            let%bind contract =
+            let%bind contract, declaration =
               match
-                List.find contracts ~f:(fun (actual, _, _) -> String.equal actual key)
+                List.find contracts ~f:(fun (actual, _, _, _) -> String.equal actual key)
               with
-              | Some (_, _, contract) -> Ok contract
+              | Some (_, _, contract, declaration) -> Ok (contract, declaration)
               | None -> Error (Error.Missing_contract binding)
             in
             let sources =
@@ -188,14 +192,18 @@ let restore inventory ~parsed ~contracts ~limits ~checkpoint =
                 | Some _ | None -> Error (Error.Script_mismatch binding)
               in
               Ok
-                ( { Program.binding; input; compiler_contract = program.compiler_contract }
+                ( { Program.binding
+                  ; declaration
+                  ; input
+                  ; compiler_contract = program.compiler_contract
+                  }
                   :: restored
                 , bytes + input_bytes
                 , work + used_work
                 , Set.add consumed key )))
     in
     let%map () =
-      iter_result contracts ~f:(fun (key, binding, _) ->
+      iter_result contracts ~f:(fun (key, binding, _, _) ->
         if Set.mem consumed key then Ok () else Error (Error.Unexpected_contract binding))
     in
     List.rev restored)

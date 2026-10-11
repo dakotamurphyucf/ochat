@@ -902,7 +902,7 @@ let with_invocation t ~prepared ~capabilities ~(parent : I.t) f =
     ~observer:
       (Some
          { script_id = (EC.script prepared).id
-         ; source_sha256 = (EC.script prepared).source_sha256
+         ; source_sha256 = EC.source_revision prepared
          })
     ~valid_parent
     ~execute:capabilities.Operation_worker.Capabilities.with_invocation
@@ -942,7 +942,7 @@ let with_managed_invocation t ~execution ~borrowed f =
     ~observer:
       (Some
          { script_id = (EC.script prepared).id
-         ; source_sha256 = (EC.script prepared).source_sha256
+         ; source_sha256 = EC.source_revision prepared
          })
     ~valid_parent
     ~execute:(Native_tool_invocation.execute_borrowed borrowed)
@@ -1256,11 +1256,11 @@ let run_managed t service execution borrowed with_result =
                     start_effects := local_effects;
                     Ok ignore)
                 in
-                Chatml_execution.run_in_scope
+                EC.Program.run_in_scope
+                  (EC.program prepared)
                   ?prepare_result
                   ~control
                   ~config
-                  ~program:(EC.program prepared)
                   ~entrypoint
                   ~arguments:[ ABI.context scope; ABI.input scope ]
                   ())
@@ -1402,15 +1402,18 @@ let with_one_off ?observer t ~prepared ~limits ~max_nested_calls ~borrowed ~mode
 
 let with_moderator_scope t ~definition ~execute ~parent ~valid_parent f =
   match
-    List.find_map (EC.compiled_scripts definition) ~f:(fun (script, _) ->
+    List.find_map (EC.compiled_scripts definition) ~f:(fun (script, program) ->
       match script.Chatmd_shell_spec.Extension_spec.kind with
-      | Moderator_script -> Some script
+      | Moderator_script -> Some (script, program)
       | Tool_script -> None)
   with
   | None -> f (fun ~name:_ ~args:_ -> tool_error "invocation.inactive_scope")
-  | Some script ->
+  | Some (script, program) ->
     let observer : I.observer =
-      { script_id = script.id; source_sha256 = script.source_sha256 }
+      { script_id = script.id
+      ; source_sha256 =
+          EC.Program.source_revision program ~single_file_revision:script.source_sha256
+      }
     in
     let moderator_names =
       List.fold

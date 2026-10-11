@@ -336,6 +336,7 @@ let%test_unit "moderator binary metadata preserves optional source ownership" =
         Script
           { id = "main"
           ; language = "chatml"
+          ; project_selection = None
           ; kind = "moderator"
           ; source = Inline "x"
           ; source_ref
@@ -348,8 +349,14 @@ let%test_unit "moderator binary metadata preserves optional source ownership" =
       let decoded = CM.bin_read_top_level_elements encoded ~pos_ref:position in
       assert (Int.equal !position (Bigstring.length encoded));
       match decoded with
-      | CM.Script { id; language; kind; source = Inline body; source_ref = decoded_ref }
-        ->
+      | CM.Script
+          { id
+          ; language
+          ; kind
+          ; source = Inline body
+          ; project_selection = None
+          ; source_ref = decoded_ref
+          } ->
         assert (
           String.equal id "main"
           && String.equal language "chatml"

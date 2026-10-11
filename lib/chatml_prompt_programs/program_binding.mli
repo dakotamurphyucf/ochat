@@ -46,6 +46,13 @@ val matches_parsed
   -> checkpoint:(unit -> unit)
   -> bool
 
+(** Return the actual replayed declaration after the same complete binding check. *)
+val find_declaration
+  :  t
+  -> Prompt.Chat_markdown.Parsed.t
+  -> checkpoint:(unit -> unit)
+  -> Prompt.Chat_markdown.Declaration.t option
+
 val same_declaration : t -> t -> bool
 
 (** Compare an entry's exact bytes with the actual matching parser declaration. *)

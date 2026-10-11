@@ -258,6 +258,22 @@ let validate_policy runtime errors =
       rule.matcher)
 ;;
 
+let validate_interceptor_matchers runtime errors =
+  Option.value_map runtime.S.interceptors ~default:errors ~f:(fun interceptors ->
+    List.fold interceptors.values ~init:errors ~f:(fun errors (value : S.interceptor) ->
+      let path = [ "runtime"; runtime_id runtime; "interceptors"; value.id ] in
+      match value.phase, value.matcher with
+      | _, None -> errors
+      | Before, Some matcher -> validate_matcher runtime.source path errors matcher
+      | After, Some _ ->
+        D.error
+          ~source:runtime.source
+          ~path
+          ~code:"shell.after_interceptor_match"
+          "after interceptors cannot declare match in version 1"
+        :: errors))
+;;
+
 let validate_runtime_settings runtime errors =
   let capabilities = Option.value_exn runtime.S.capabilities in
   let resolver = Option.value_exn runtime.resolver in
@@ -298,7 +314,11 @@ let validate_runtime_settings runtime errors =
 let validate_external_backend runtime errors backend =
   match backend with
   | S.External { atoms; confinement; _ } ->
-    let count = List.count atoms ~f:(function S.Command_argv_atom -> true | _ -> false) in
+    let count =
+      List.count atoms ~f:(function
+        | S.Command_argv_atom -> true
+        | _ -> false)
+    in
     let errors =
       if Int.equal count 1
       then errors
@@ -332,6 +352,7 @@ let validate_runtime platform runtime =
   |> validate_runtime_settings runtime
   |> validate_capability_backends platform runtime
   |> validate_policy runtime
+  |> validate_interceptor_matchers runtime
   |> validate_external_backends runtime
 ;;
 
@@ -458,7 +479,8 @@ let has_executable_extension runtime =
     List.exists values.values ~f:(fun value -> is_executable value.S.extension))
   || Option.exists runtime.effect_analysis ~f:(fun values ->
     List.exists values.analyzers ~f:(fun value -> is_executable value.S.extension))
-  || Option.exists runtime.audit ~f:(fun value -> Option.exists value.filter ~f:is_executable)
+  || Option.exists runtime.audit ~f:(fun value ->
+    Option.exists value.filter ~f:is_executable)
 ;;
 
 let required_features platform runtimes tools scripts =
@@ -470,89 +492,13 @@ let required_features platform runtimes tools scripts =
   @ Option.to_list
       (Option.some_if (List.exists runtimes ~f:has_model_reviewer) F.model_reviewer)
   @ Option.to_list
-      (Option.some_if (List.exists runtimes ~f:has_executable_extension) F.executable_hooks)
+      (Option.some_if
+         (List.exists runtimes ~f:has_executable_extension)
+         F.executable_hooks)
   |> String.Set.of_list
 ;;
 
-let rec matcher_references path = function
-  | S.Chatml_match matcher -> [ path, matcher.script, Chatmd_script_spec.Shell_matcher ]
-  | All values | Any values -> List.concat_map values ~f:(matcher_references path)
-  | Not value -> matcher_references path value
-  | Any_command
-  | Program _
-  | Basename _
-  | Resolved_path _
-  | Trusted_executable
-  | Program_regex _
-  | Argv_prefix _
-  | Argument _
-  | Argument_contains _
-  | Effect _
-  | No_unknown_effects
-  | Raw_shell_request -> []
-;;
-
-let reviewer_references runtime = function
-  | S.Chatml_reviewer { id; script; _ } ->
-    [ ( [ "runtime"; runtime_id runtime; "reviewers"; id ]
-      , script
-      , Chatmd_script_spec.Shell_reviewer )
-    ]
-  | Ui_reviewer _ | Model_reviewer _ | Executable_reviewer _ -> []
-;;
-
-let interceptor_reference runtime (value : S.interceptor) =
-  let kind =
-    match value.phase with
-    | S.Before -> Chatmd_script_spec.Shell_before_interceptor
-    | After -> Shell_after_interceptor
-  in
-  match value.extension with
-  | S.Chatml_extension { script; _ } ->
-    [ [ "runtime"; runtime_id runtime; "interceptors"; value.id ], script, kind ]
-  | Executable_extension _ -> []
-;;
-
-let analyzer_reference runtime (value : S.effect_analyzer) =
-  match value.extension with
-  | S.Chatml_extension { script; _ } ->
-    [ ( [ "runtime"; runtime_id runtime; "effect_analysis"; value.id ]
-      , script
-      , Chatmd_script_spec.Shell_effect_analyzer )
-    ]
-  | Executable_extension _ -> []
-;;
-
-let runtime_references runtime =
-  let policy = Option.value_exn runtime.S.policy in
-  let rules =
-    List.concat_map policy.rules ~f:(fun rule ->
-      matcher_references [ "runtime"; runtime_id runtime; "policy"; rule.id ] rule.matcher)
-  in
-  let reviewers =
-    Option.value_map runtime.reviewers ~default:[] ~f:(fun value ->
-      List.concat_map value.values ~f:(reviewer_references runtime))
-  in
-  let interceptors =
-    Option.value_map runtime.interceptors ~default:[] ~f:(fun value ->
-      List.concat_map value.values ~f:(interceptor_reference runtime))
-  in
-  let analyzers =
-    Option.value_map runtime.effect_analysis ~default:[] ~f:(fun value ->
-      List.concat_map value.analyzers ~f:(analyzer_reference runtime))
-  in
-  let audit = Option.value_exn runtime.audit in
-  let filters =
-    Option.value_map audit.filter ~default:[] ~f:(function
-      | S.Chatml_extension { script; _ } ->
-        [ ( [ "runtime"; runtime_id runtime; "audit"; "filter" ]
-          , script
-          , Chatmd_script_spec.Shell_audit_filter )
-        ]
-      | Executable_extension _ -> [])
-  in
-  rules @ reviewers @ interceptors @ analyzers @ filters
-;;
+let runtime_references = Script_reference.of_runtime
 
 type worker_reference =
   { caller : string
@@ -588,16 +534,27 @@ let worker_references runtime =
   let interceptors =
     Option.value_map runtime.interceptors ~default:[] ~f:(fun values ->
       List.concat_map values.values ~f:(fun value ->
-        extension_worker runtime value.id (prefix @ [ "interceptors"; value.id ]) value.extension))
+        extension_worker
+          runtime
+          value.id
+          (prefix @ [ "interceptors"; value.id ])
+          value.extension))
   in
   let analyzers =
     Option.value_map runtime.effect_analysis ~default:[] ~f:(fun values ->
       List.concat_map values.analyzers ~f:(fun value ->
-        extension_worker runtime value.id (prefix @ [ "effect_analysis"; value.id ]) value.extension))
+        extension_worker
+          runtime
+          value.id
+          (prefix @ [ "effect_analysis"; value.id ])
+          value.extension))
   in
   let filters =
-    Option.value_map (Option.value_exn runtime.audit).filter ~default:[] ~f:(fun extension ->
-      extension_worker runtime "audit-filter" (prefix @ [ "audit"; "filter" ]) extension)
+    Option.value_map
+      (Option.value_exn runtime.audit).filter
+      ~default:[]
+      ~f:(fun extension ->
+        extension_worker runtime "audit-filter" (prefix @ [ "audit"; "filter" ]) extension)
   in
   reviewers @ interceptors @ analyzers @ filters
 ;;
@@ -645,10 +602,12 @@ let worker_cycles references =
         ~f:(visit (path @ [ node ]))
   in
   Map.keys edges
-  |> List.fold_until ~init:String.Set.empty ~f:(fun seen node ->
-    match visit [] seen node with
-    | Ok seen -> Continue seen
-    | Error cycle -> Stop [ worker_cycle_diagnostic references cycle ])
+  |> List.fold_until
+       ~init:String.Set.empty
+       ~f:(fun seen node ->
+         match visit [] seen node with
+         | Ok seen -> Continue seen
+         | Error cycle -> Stop [ worker_cycle_diagnostic references cycle ])
        ~finish:(fun _ -> [])
 ;;
 
@@ -673,8 +632,12 @@ let dependencies input runtimes tools =
   in
   let script_edges =
     List.concat_map runtimes ~f:(fun runtime ->
-      List.map (runtime_references runtime) ~f:(fun (_, script, _) ->
-        M.{ from_id = runtime_id runtime; to_id = "script:" ^ script; kind = Chatml_extension }))
+      List.map (runtime_references runtime) ~f:(fun reference ->
+        M.
+          { from_id = runtime_id runtime
+          ; to_id = "script:" ^ reference.Script_reference.script
+          ; kind = Chatml_extension
+          }))
   in
   List.dedup_and_sort
     (tool_edges @ moderator_edges @ worker_edges @ script_edges)
@@ -691,7 +654,10 @@ let index_scripts scripts =
         :: errors ))
 ;;
 
-let validate_script_reference scripts (path, id, expected) =
+let validate_script_reference scripts (reference : Script_reference.t) =
+  let { Script_reference.path; script = id; kind = expected; entrypoint = _ } =
+    reference
+  in
   match Map.find scripts id with
   | None ->
     Error (D.error ~path ~code:"shell.unknown_script" ("unknown ChatML script: " ^ id))
@@ -795,7 +761,9 @@ let manifest input runtimes tools scripts dependencies required =
 ;;
 
 let unused_script_warnings script_map scripts =
-  let used = String.Set.of_list (List.map scripts ~f:(fun script -> script.Chatmd_script_spec.id)) in
+  let used =
+    String.Set.of_list (List.map scripts ~f:(fun script -> script.Chatmd_script_spec.id))
+  in
   Map.data script_map
   |> List.filter ~f:(fun script -> not (Set.mem used script.Chatmd_script_spec.id))
   |> List.map ~f:(fun script ->
@@ -835,9 +803,10 @@ let compile_with_material input =
          List.concat_map runtimes ~f:(validate_runtime input.platform)
          @ List.concat_map tools ~f:(validate_tool runtime_map)
          @ validate_moderator runtime_map input
-         @ (let references = List.concat_map runtimes ~f:worker_references in
-            List.concat_map references ~f:(validate_worker_reference runtime_map)
-            @ worker_cycles references)
+         @
+         let references = List.concat_map runtimes ~f:worker_references in
+         List.concat_map references ~f:(validate_worker_reference runtime_map)
+         @ worker_cycles references
        in
        (match resolve_scripts runtimes script_map with
         | Error diagnostic -> Error (diagnostic_sort (diagnostic :: validation))
@@ -851,7 +820,9 @@ let compile_with_material input =
             let dependencies = dependencies input runtimes tools in
             let manifest = manifest input runtimes tools scripts dependencies required in
             let warnings = unused_script_warnings script_map scripts in
-            Ok (manifest, { manifest_sha256 = manifest.sha256; runtimes; scripts; warnings }))
+            Ok
+              ( manifest
+              , { manifest_sha256 = manifest.sha256; runtimes; scripts; warnings } ))
           else Error diagnostics))
 ;;
 

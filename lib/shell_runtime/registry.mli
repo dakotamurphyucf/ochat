@@ -50,8 +50,26 @@ val prepare_with_policy
   -> material:Chatmd_shell_spec.Manifest_compiler.material
   -> (prepared, error list) result
 
+(** [compile_extension] is invoked only for actual authorized scripts supplied
+    by the manifest compiler. Its output must match the entire declaration and
+    default entrypoint; mismatches reject before initialization. The default
+    legacy compiler used by {!prepare_with_policy} rejects project-selected
+    scripts rather than compiling their entry body alone. *)
+val prepare_with_compiler
+  :  compile_extension:
+       (Chatmd_shell_spec.Chatmd_script_spec.t
+        -> (Chatml_extension.compiled, Chatmd_shell_spec.Diagnostic.t list) Result.t)
+  -> admin_policy:Admin_policy.t
+  -> manifest:Chatmd_shell_spec.Manifest.t
+  -> material:Chatmd_shell_spec.Manifest_compiler.material
+  -> (prepared, error list) result
+
 (** [instantiate_prepared prepared] verifies [grant] and publishes runtimes
-    only after the prepared extension set is valid. *)
+    only after the prepared extension set is valid. Saved extension state matches
+    the exact manifest and executable source revision: prepared hook dependencies
+    participate, while legacy hooks retain their body digest. Nonmatching saved
+    state is ignored and the hook starts with its freshly initialized state.
+    Multiple matching snapshots for one persistent binding reject restoration. *)
 val instantiate_prepared
   :  sw:Eio.Switch.t
   -> host:Host.t

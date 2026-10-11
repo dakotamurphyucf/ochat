@@ -41,6 +41,7 @@ type script =
   ; id : string
   ; kind : script_kind
   ; source : Chatmd_script_spec.source
+  ; project_selection : Script_project.t option [@jsonaf.option] [@sexp.option]
   ; source_sha256 : string
   ; source_ref : Source_ref.t
   ; limits : Chatmd_script_spec.limits

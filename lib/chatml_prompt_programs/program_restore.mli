@@ -7,6 +7,7 @@ module Program : sig
   type t
 
   val binding : t -> Binding.t
+  val declaration : t -> Prompt.Chat_markdown.Declaration.t
   val input : t -> Inventory.Input.t
   val prepared : t -> Chatml_prepared_program.t
   val compiler_contract : t -> Chatml_source.Digest.t

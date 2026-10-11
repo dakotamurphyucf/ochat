@@ -22,6 +22,7 @@ type t
 val prepare
   :  ?limits:Chatml_compilation.limits
   -> ?delegated_moderator:bool
+  -> ?programs:Chatml_prompt_programs.Restored.t
   -> env:Eio_unix.Stdenv.base
   -> owner:string
   -> capabilities:Tool_capability.t

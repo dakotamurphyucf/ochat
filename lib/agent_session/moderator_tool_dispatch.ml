@@ -266,7 +266,7 @@ let dispatch
               ~selected:(EC.capabilities prepared)
               ~source:
                 { script_id = (EC.script prepared).id
-                ; source_sha256 = (EC.script prepared).source_sha256
+                ; source_sha256 = EC.source_revision prepared
                 }
               ~originating:(Some (Direct (prepared, dispatched)))
               ~error:Fn.id
@@ -333,7 +333,8 @@ let dispatch
         let result =
           Moderator_observation.drain
             ~capabilities
-            ~observer:{ script_id = script.id; source_sha256 = script.source_sha256 }
+            ~observer:
+              { script_id = script.id; source_sha256 = EC.source_revision prepared }
             ~manager
             ~history:(fun () -> request.history)
             ~available_tools

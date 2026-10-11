@@ -19,6 +19,7 @@ let authority_fingerprint t = t.authority_fingerprint
 let prepare
       ?(limits = Chatml_compilation.default_limits)
       ?(delegated_moderator = false)
+      ?programs
       ~env
       ~owner
       ~capabilities
@@ -193,6 +194,23 @@ let prepare
     |> Sexp.to_string
     |> Chatmd_shell_spec.Source_ref.digest
   in
+  let authority_fingerprint =
+    match programs with
+    | None -> authority_fingerprint
+    | Some inventory ->
+      let module P = Chatml_prompt_programs in
+      let graphs =
+        List.map (P.Restored.programs inventory) ~f:(fun program ->
+          Eio.Fiber.check ();
+          ( P.Binding.script_id (P.Restored.Program.binding program)
+          , Chatml_prepared_program.fingerprint (P.Restored.Program.prepared program) ))
+      in
+      [%sexp
+        (authority_fingerprint : string)
+      , (graphs : (string * Chatml_source.Digest.t) list)]
+      |> Sexp.to_string
+      |> Chatmd_shell_spec.Source_ref.digest
+  in
   let registrations =
     List.map tools ~f:(fun tool ->
       let help_metadata =
@@ -241,6 +259,7 @@ let prepare
     EC.prepare_definition_in_domain
       ~limits
       ~delegated_moderator
+      ?programs
       ~env
       ~capabilities
       elements

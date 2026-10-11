@@ -47,6 +47,160 @@ let instantiate env compiled lifecycle =
 
 let call instance = H.call instance ~context:Support.context ~event:Support.event
 
+let%test_unit "manifest matcher admission agrees with supported interceptor phases" =
+  let module Shell = Chatmd_shell_spec.Shell_spec in
+  let module Spec = Chatmd_shell_spec.Chatmd_script_spec in
+  let module MC = Chatmd_shell_spec.Manifest_compiler in
+  let matcher = Support.script "let initial_state = 0" in
+  List.iter [ Shell.Before; After ] ~f:(fun phase ->
+    let hook =
+      { matcher with
+        id = "hook"
+      ; kind =
+          (match phase with
+           | Before -> Spec.Shell_before_interceptor
+           | After -> Shell_after_interceptor)
+      }
+    in
+    let base =
+      Chatmd_shell_spec.Manifest_defaults.legacy_runtime ~source:matcher.source_ref
+    in
+    let runtime =
+      { base with
+        interceptors =
+          Some
+            { Shell.merge = Replace
+            ; values =
+                [ { Shell.id = "guarded"
+                  ; phase
+                  ; extension =
+                      Chatml_extension { script = hook.id; lifecycle = Invocation }
+                  ; matcher =
+                      Some
+                        (All
+                           [ Any_command
+                           ; Not
+                               (Any
+                                  [ Chatml_match
+                                      { script = matcher.id
+                                      ; function_ = "selective"
+                                      ; failure = No_match_failure
+                                      }
+                                  ])
+                           ])
+                  ; failure = Error_failure
+                  }
+                ]
+            }
+      }
+    in
+    let compile scripts =
+      MC.compile_with_material
+        { runtimes = [ runtime ]
+        ; tools = []
+        ; scripts
+        ; legacy_tools = []
+        ; moderator_runtime = None
+        ; platform = Macos
+        ; supported_features = Chatmd_shell_spec.Feature.phase3
+        }
+    in
+    match phase with
+    | After ->
+      (match compile [ matcher; hook ] with
+       | Error diagnostics ->
+         assert (
+           List.exists diagnostics ~f:(fun diagnostic ->
+             String.equal
+               diagnostic.Chatmd_shell_spec.Diagnostic.code
+               "shell.after_interceptor_match"))
+       | Ok _ -> failwith "unsupported after predicate bypassed manifest validation")
+    | Before ->
+      let manifest, material = compile [ matcher; hook ] |> Support.ok in
+      let active = MC.effective_scripts material ~manifest |> Support.ok in
+      [%test_eq: string list]
+        (List.map active ~f:(fun script -> script.Spec.id)
+         |> List.sort ~compare:String.compare)
+        (List.sort [ matcher.id; hook.id ] ~compare:String.compare);
+      let effective =
+        MC.effective_runtimes material ~manifest |> Support.ok |> List.hd_exn
+      in
+      let references = Chatmd_shell_spec.Script_reference.of_runtime effective in
+      assert (
+        List.exists references ~f:(fun reference ->
+          String.equal reference.script matcher.id
+          && Option.equal String.equal reference.entrypoint (Some "selective")));
+      (match compile [ hook ] with
+       | Error diagnostics ->
+         assert (
+           List.exists diagnostics ~f:(fun diagnostic ->
+             String.equal
+               diagnostic.Chatmd_shell_spec.Diagnostic.code
+               "shell.unknown_script"))
+       | Ok _ -> failwith "interceptor predicate escaped manifest script admission"))
+;;
+
+let%expect_test "prepared matcher names select independently compiled captured roles" =
+  Eio_main.run (fun env ->
+    let body =
+      {|let initial_state = Counter.seed
+let match_command ev state = Task.bind(Match.yes("default"), fun ignored -> Task.pure(state))
+let selective ev state = Task.bind(Match.no("selected"), fun ignored -> Task.pure(state))|}
+    in
+    let script = Support.script body in
+    let compile script entrypoint =
+      let contract =
+        H.compiler_contract Shell_matcher ~entrypoint ~checkpoint:Support.checkpoint
+        |> Support.ok
+      in
+      H.compile_prepared
+        (Support.input
+           contract
+           [ "entry.chatml", body, [ "Counter", "counter.chatml" ]
+           ; "counter.chatml", "let seed = 0", []
+           ])
+        ~script
+        ~entrypoint
+        ~limits:Support.compiler_limits
+        ~max_dependency_depth:16
+        ~env
+        ()
+      |> Support.ok
+    in
+    let default = compile script "match_command" in
+    let selected = compile script "selective" in
+    let attach alternatives =
+      H.with_prepared_entrypoints default ~alternatives ~checkpoint:Support.checkpoint
+    in
+    List.iter
+      [ [ default ]
+      ; [ selected; selected ]
+      ; [ compile { script with id = "foreign" } "selective" ]
+      ]
+      ~f:(fun alternatives -> assert (Result.is_error (attach alternatives)));
+    let choices = attach [ selected ] |> Support.ok in
+    assert (
+      Result.is_error
+        (H.with_prepared_entrypoints
+           choices
+           ~alternatives:[]
+           ~checkpoint:Support.checkpoint));
+    assert (Result.is_error (H.with_entrypoint choices "missing"));
+    let selected = H.with_entrypoint choices "selective" |> Support.ok in
+    let restored_default = H.with_entrypoint selected "match_command" |> Support.ok in
+    assert (String.equal (H.source_revision restored_default) (H.source_revision default));
+    assert (not (String.equal (H.source_revision selected) (H.source_revision default)));
+    List.iter [ choices; selected; restored_default ] ~f:(fun compiled ->
+      print_s
+        [%sexp (call (instantiate env compiled Invocation) |> Support.ok : H.action)]));
+  [%expect
+    {|
+    (Match true default)
+    (Match false selected)
+    (Match true default)
+  |}]
+;;
+
 let%expect_test
     "captured original hook receives event/state and commits under persistent control"
   =
@@ -325,4 +479,180 @@ let%test_unit "minimal prepared shell hook is usable under default compiler limi
            !allocated
            (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string
             |> String.concat ~sep:"; ")))
+;;
+
+let%expect_test "shell registry snapshots follow the complete prepared graph revision" =
+  Eio_main.run (fun env ->
+    let module Spec = Chatmd_shell_spec.Chatmd_script_spec in
+    let module Shell = Chatmd_shell_spec.Shell_spec in
+    let module Registry = Shell_runtime.Registry in
+    let module MC = Chatmd_shell_spec.Manifest_compiler in
+    let body =
+      {|let initial_state = Counter.seed
+let review ev state =
+  Task.bind(Review.deny(to_string(state)), fun ignored -> Task.pure(state+1))|}
+    in
+    let script =
+      { (Support.script body) with id = "reviewer"; kind = Spec.Shell_reviewer }
+    in
+    let contract =
+      H.compiler_contract
+        Shell_reviewer
+        ~entrypoint:"review"
+        ~checkpoint:Support.checkpoint
+      |> Support.ok
+    in
+    let compile seed script =
+      H.compile_prepared
+        (Support.input
+           contract
+           [ "entry.chatml", body, [ "Counter", "counter.chatml" ]
+           ; "counter.chatml", "let seed = " ^ Int.to_string seed, []
+           ])
+        ~script
+        ~entrypoint:"review"
+        ~limits:Support.compiler_limits
+        ~max_dependency_depth:16
+        ~env
+        ()
+    in
+    let first = compile 0 script |> Support.ok in
+    let changed = compile 10 script |> Support.ok in
+    [%test_eq: string] (H.source_sha256 first) (H.source_sha256 changed);
+    assert (not (String.equal (H.source_revision first) (H.source_revision changed)));
+    assert (H.matches_script first script);
+    assert (not (H.matches_script first { script with id = "other" }));
+    assert (
+      not
+        (H.matches_script
+           first
+           { script with limits = { script.limits with fuel = script.limits.fuel - 1 } }));
+    let selected =
+      { script with
+        project_selection =
+          Some
+            (Chatmd_shell_spec.Script_project.create
+               ~project:"./chatml.project.json"
+               ~environment:None
+             |> Or_error.ok_exn)
+      }
+    in
+    assert (not (H.matches_script first selected));
+    (match H.compile ~script:selected with
+     | Error [ diagnostic ] ->
+       [%test_eq: string] diagnostic.code "shell.chatml_missing_program"
+     | Ok _ | Error _ -> assert false);
+    let root = Eio.Path.(Eio.Stdenv.cwd env / "native-shell-snapshot") in
+    Eio.Path.mkdir ~perm:0o700 root;
+    Exn.protect
+      ~f:(fun () ->
+        let runtime =
+          Chatmd_shell_spec.Manifest_defaults.legacy_runtime ~source:script.source_ref
+        in
+        let runtime =
+          { runtime with
+            policy = Some { Shell.default = Set Ask; rules = []; merge = Replace }
+          ; reviewers =
+              Some
+                { Shell.values =
+                    [ Chatml_reviewer
+                        { id = "review"
+                        ; script = script.id
+                        ; lifecycle = Session
+                        ; failure = Error_failure
+                        }
+                    ]
+                ; merge = Replace
+                }
+          }
+        in
+        let manifest, material =
+          MC.compile_with_material
+            { runtimes = [ runtime ]
+            ; tools = []
+            ; scripts = [ script ]
+            ; legacy_tools = []
+            ; moderator_runtime = None
+            ; platform = Macos
+            ; supported_features = Chatmd_shell_spec.Feature.phase3
+            }
+          |> Support.ok
+        in
+        let host =
+          Shell_runtime.Host.
+            { env
+            ; workspace = root
+            ; tool_dir = root
+            ; prompt_dir = root
+            ; session_dir = root
+            ; cache_dir = root
+            ; home = root
+            ; source_dirs = String.Map.singleton script.source_ref.file root
+            ; process_environment = [| "PATH=/usr/bin:/bin" |]
+            ; session_id = "snapshot-registry"
+            }
+        in
+        let prepare compiled =
+          Registry.prepare_with_compiler
+            ~compile_extension:(fun _ -> Ok compiled)
+            ~admin_policy:Shell_runtime.Admin_policy.permissive
+            ~manifest
+            ~material
+        in
+        (match prepare (compile 0 { script with id = "different" } |> Support.ok) with
+         | Error [ error ] ->
+           [%test_eq: string] error.code "shell.chatml_compiled_mismatch"
+         | Ok _ | Error _ -> assert false);
+        let grant =
+          Shell_runtime.Manifest_authorizer.authorize
+            Shell_runtime.Manifest_authorizer.assume_authorized
+            manifest
+          |> Support.ok
+        in
+        let saved = ref [] in
+        Eio.Switch.run (fun sw ->
+          let instantiate compiled snapshots =
+            Registry.instantiate_prepared
+              ~sw
+              ~host
+              ~grant
+              ~approval_provider:Shell_runtime.Approval_broker.None_available
+              ~extension_snapshots:snapshots
+              ~persist_extension_snapshots:(fun snapshots ->
+                saved := snapshots;
+                Ok ())
+              (prepare compiled |> Support.ok)
+          in
+          let review registry =
+            let runtime = Registry.runtimes registry |> List.hd_exn in
+            match
+              Shell_access.Executor.run
+                (Shell_runtime.Runtime.executor_config runtime)
+                { request =
+                    Shell_access.Request.command
+                      (Shell_access.Command.create "/bin/echo" [])
+                ; input = Empty
+                ; rationale = None
+                ; origin = Host "snapshot-test"
+                }
+            with
+            | Error (Denied reason) -> reason
+            | Error error -> failwith (Shell_access.Executor.error_to_string error)
+            | Ok _ -> failwith "reviewer should deny before executing a process"
+          in
+          [%test_eq: string] (review (instantiate first [] |> Support.ok)) "0";
+          let snapshot = List.hd_exn !saved in
+          [%test_eq: string] snapshot.source_sha256 (H.source_revision first);
+          [%test_eq: string] (review (instantiate first [ snapshot ] |> Support.ok)) "1";
+          [%test_eq: string]
+            (review (instantiate changed [ snapshot ] |> Support.ok))
+            "10";
+          (match instantiate first [ snapshot; snapshot ] with
+           | Error [ error ] ->
+             [%test_eq: string] error.code "shell.extension_snapshot_duplicate"
+           | Ok _ | Error _ -> assert false);
+          print_endline
+            "same body; saved graph resumes at 1; changed dependency starts at 10"))
+      ~finally:(fun () -> Eio.Cancel.protect (fun () -> Eio.Path.rmtree root)));
+  [%expect {| same body; saved graph resumes at 1; changed dependency starts at 10 |}]
 ;;

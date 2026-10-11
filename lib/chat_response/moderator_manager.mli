@@ -12,11 +12,28 @@ module Registry : sig
   val artifact_count : t -> int
 
   (** [compile_script registry script] returns the cached compiled artifact for
-      [script] or compiles it once and caches the result. *)
+      [script] or compiles it once and caches the result. Configured projects
+      require [prepare_script]; they never fall back to compiling only the body. *)
   val compile_script
     :  ?surface:Chatml.Chatml_builtin_surface.surface
     -> t
     -> CM.script
+    -> (t * artifact, string) result
+
+  (** Compile exact retained program custody against this host's legacy moderator
+      surface and actual tool pool. No initializer runs. Snapshot identity covers
+      the complete module graph. Even an existing cached artifact cannot bypass
+      current declaration or tool admission. *)
+  val prepare_script
+    :  ?surface:Chatml.Chatml_builtin_surface.surface
+    -> t
+    -> CM.script
+    -> programs:Chatml_prompt_programs.Restored.t
+    -> capabilities:Tool_capability.t
+    -> env:Eio_unix.Stdenv.base
+    -> checkpoint:(unit -> unit)
+    -> limits:Chatml_compilation.limits
+    -> max_dependency_depth:int
     -> (t * artifact, string) result
 
   (** [of_elements registry elements] compiles any moderator scripts declared
@@ -82,7 +99,8 @@ val unsubscribe : subscription -> unit
 (** [overlay_revision t] returns the installed identity-overlay revision. *)
 val overlay_revision : t -> int
 
-(** Exact compiled v1 source identity for deferred invocation observations.
+(** Exact compiled v1 source revision for deferred invocation observations.
+    Linked dependencies/scopes/contracts participate, not just the entry body.
     Legacy moderators have no invocation observer. This does not enter the
     manager or read mutable script state. *)
 val invocation_observer : t -> Agent_protocol.Invocation.observer option

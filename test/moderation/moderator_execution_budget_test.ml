@@ -63,6 +63,7 @@ let%expect_test "legacy manager diagnostics cannot recurse forever or invalidate
   let script : Prompt.Chat_markdown.script =
     { id = "logging"
     ; language = "chatml"
+    ; project_selection = None
     ; kind = "moderator"
     ; source_ref = None
     ; source =

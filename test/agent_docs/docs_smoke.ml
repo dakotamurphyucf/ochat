@@ -46,6 +46,7 @@ let shell_examples env root =
       S.
         { id
         ; language = "chatml"
+        ; project_selection = None
         ; kind
         ; source = Inline source
         ; source_ref

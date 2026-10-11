@@ -81,6 +81,7 @@ let script body =
   Spec.
     { id = "matcher"
     ; language = "chatml"
+    ; project_selection = None
     ; kind = Shell_matcher
     ; source = Inline body
     ; source_ref

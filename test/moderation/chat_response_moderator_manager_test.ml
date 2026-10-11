@@ -124,6 +124,7 @@ let script =
   CM.
     { id = "main"
     ; language = "chatml"
+    ; project_selection = None
     ; kind = "moderator"
     ; source_ref = None
     ; source = Inline script_source
@@ -306,6 +307,7 @@ let%expect_test "manager applies prepend, replace, delete, and append overlay op
     CM.
       { id = "main"
       ; language = "chatml"
+      ; project_selection = None
       ; kind = "moderator"
       ; source_ref = None
       ; source = Inline source
@@ -379,6 +381,7 @@ let%expect_test "manager item helpers expose structured item accessors" =
     CM.
       { id = "main"
       ; language = "chatml"
+      ; project_selection = None
       ; kind = "moderator"
       ; source_ref = None
       ; source = Inline source
@@ -438,6 +441,7 @@ let%expect_test "manager rolls back overlay and state after failed moderation ta
     CM.
       { id = "main"
       ; language = "chatml"
+      ; project_selection = None
       ; kind = "moderator"
       ; source_ref = None
       ; source = Inline source
@@ -512,6 +516,7 @@ let%expect_test "entry moderation preserves target identity and persists provena
     CM.
       { id = "main"
       ; language = "chatml"
+      ; project_selection = None
       ; kind = "moderator"
       ; source_ref = None
       ; source = Inline source
@@ -592,6 +597,7 @@ let%expect_test "failed identity validation commits no runtime or overlay state"
     CM.
       { id = "main"
       ; language = "chatml"
+      ; project_selection = None
       ; kind = "moderator"
       ; source_ref = None
       ; source = Inline source
@@ -664,6 +670,7 @@ let%expect_test "failed resumed identity validation commits no suspended transac
     CM.
       { id = "main"
       ; language = "chatml"
+      ; project_selection = None
       ; kind = "moderator"
       ; source_ref = None
       ; source = Inline source
@@ -753,6 +760,7 @@ let%expect_test "committed identity moderation emits one atomic change" =
     CM.
       { id = "main"
       ; language = "chatml"
+      ; project_selection = None
       ; kind = "moderator"
       ; source_ref = None
       ; source = Inline source
@@ -826,6 +834,7 @@ let%expect_test "failed identity transaction emits no committed change" =
     CM.
       { id = "main"
       ; language = "chatml"
+      ; project_selection = None
       ; kind = "moderator"
       ; source_ref = None
       ; source = Inline source
@@ -881,6 +890,7 @@ let%expect_test "approval resume emits one combined change and restore does not 
     CM.
       { id = "main"
       ; language = "chatml"
+      ; project_selection = None
       ; kind = "moderator"
       ; source_ref = None
       ; source = Inline source
@@ -977,6 +987,7 @@ let serialized_script =
   CM.
     { id = "serialized"
     ; language = "chatml"
+    ; project_selection = None
     ; kind = "moderator"
     ; source_ref = None
     ; source = Inline source

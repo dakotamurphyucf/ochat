@@ -22,6 +22,7 @@ let source_ref source =
 let script ?(id = "matcher") ?(limits = S.default_limits) kind source =
   { S.id
   ; language = "chatml"
+  ; project_selection = None
   ; kind
   ; source = Inline source
   ; source_ref = source_ref source
