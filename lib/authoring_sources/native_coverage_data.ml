@@ -265,7 +265,7 @@ let implementation_sources =
   ; ( "lib/agent_session/prompt_source_lease.ml"
     , "7413c0ed3e84375cd7e95343ceb83d9485c02b4d378ff940336beb449680dbe0" )
   ; ( "lib/agent_session/prompt_catalog.ml"
-    , "c78db17c371f4eebae433c1a976aed058132f0b478638d82c100b400e4d8c662" )
+    , "cf7ca3df0d94056d5a0e2c9c737d2b24cb8d43e3159a033fc16acdaedf21a652" )
   ; ( "lib/agent_session/runtime_builder.ml"
     , "f479270d792fb2df460bf1a51ef885617386274706d90ab3e9f407b0a63b949d" )
   ; ( "lib/agent_store/prompt_source_receipt.ml"

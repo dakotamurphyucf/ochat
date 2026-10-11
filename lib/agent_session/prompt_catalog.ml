@@ -96,7 +96,8 @@ type t =
   ; mutable entries_by_id : entry String.Map.t
   ; mutable entries_by_name : entry String.Map.t
   ; mutable source_selections : Source_selection.t String.Map.t
-  ; mutable revisions : Prompt_revision.t String.Map.t
+  ; mutable installed_revisions : Prompt_revision.t String.Map.t
+  ; mutable restored_revisions : Prompt_revision.t String.Map.t
   }
 
 let create ~env ~artifact_store ~content_limits =
@@ -109,7 +110,8 @@ let create ~env ~artifact_store ~content_limits =
   ; candidate = None
   ; entries_by_id = String.Map.empty
   ; entries_by_name = String.Map.empty
-  ; revisions = String.Map.empty
+  ; installed_revisions = String.Map.empty
+  ; restored_revisions = String.Map.empty
   ; source_selections = String.Map.empty
   }
 ;;
@@ -412,13 +414,16 @@ let install_owned t prepared =
                 Map.set map ~key:entry.definition.config_name ~data:entry)
             in
             let revisions =
-              List.fold prepared.revisions ~init:t.revisions ~f:(fun map revision ->
-                Map.set
-                  map
-                  ~key:
-                    (Agent_protocol.Id.Prompt_revision.to_string
-                       (Prompt_revision.id revision))
-                  ~data:revision)
+              List.fold
+                prepared.revisions
+                ~init:t.installed_revisions
+                ~f:(fun map revision ->
+                  Map.set
+                    map
+                    ~key:
+                      (Agent_protocol.Id.Prompt_revision.to_string
+                         (Prompt_revision.id revision))
+                    ~data:revision)
             in
             let retired = Map.data t.source_selections in
             Map.iteri t.source_selections ~f:(fun ~key ~data:old ->
@@ -427,7 +432,7 @@ let install_owned t prepared =
               | None | Some _ -> Owner.Policy.revoke old.policy);
             t.entries_by_id <- entries_by_id;
             t.entries_by_name <- entries_by_name;
-            t.revisions <- revisions;
+            t.installed_revisions <- revisions;
             t.source_selections <- prepared.sources;
             t.generation <- t.generation + 1;
             t.candidate <- None;
@@ -449,52 +454,94 @@ let find_by_name t name =
   Eio.Mutex.use_ro t.mutex (fun () -> Map.find t.entries_by_name name)
 ;;
 
+let cached_revision t revision_id =
+  let key = Agent_protocol.Id.Prompt_revision.to_string revision_id in
+  match Map.find t.installed_revisions key with
+  | Some _ as revision -> revision
+  | None -> Map.find t.restored_revisions key
+;;
+
 let find_revision t revision_id =
-  Eio.Mutex.use_ro t.mutex (fun () ->
-    Map.find t.revisions (Agent_protocol.Id.Prompt_revision.to_string revision_id))
+  Eio.Mutex.use_ro t.mutex (fun () -> cached_revision t revision_id)
 ;;
 
 let prune_unreferenced_artifacts t ~additional =
   let protected =
     Eio.Mutex.use_ro t.mutex (fun () ->
-      List.map (Map.data t.revisions) ~f:Prompt_revision.id @ additional)
+      List.map (Map.data t.installed_revisions) ~f:Prompt_revision.id
+      @ List.map (Map.data t.restored_revisions) ~f:Prompt_revision.id
+      @ additional)
   in
   Agent_store.Prompt_artifact_store.prune_unreferenced t.artifact_store ~protected
 ;;
 
+let restore_error code message =
+  Error [ Prompt_revision_builder.Diagnostic.{ code; message; source = None } ]
+;;
+
+let validate_definition revision definition_id =
+  let artifact = Prompt_revision.artifact revision in
+  if
+    Id.equal (Prompt_revision.definition revision).id definition_id
+    && Option.for_all artifact.prompt_definition_id ~f:(Id.equal definition_id)
+    && Option.for_all artifact.source_receipt ~f:(fun receipt ->
+      Id.equal (Receipt.definition_id receipt) definition_id)
+  then Ok revision
+  else
+    restore_error
+      "prompt.revision_definition_mismatch"
+      "pinned prompt revision belongs to another definition"
+;;
+
+type restore_admission =
+  | Cached of Prompt_revision.t
+  | Restore of Prompt_definition.t
+
 let restore_revision t ~definition_id ~revision_id =
-  match find_revision t revision_id with
-  | Some revision -> Ok revision
-  | None ->
-    Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-      match
-        Map.find t.revisions (Agent_protocol.Id.Prompt_revision.to_string revision_id)
-      with
-      | Some revision -> Ok revision
+  let open Result.Let_syntax in
+  let%bind admitted =
+    Eio.Mutex.use_ro t.mutex (fun () ->
+      match cached_revision t revision_id with
+      | Some revision ->
+        Result.map (validate_definition revision definition_id) ~f:(fun revision ->
+          Cached revision)
       | None ->
         (match Map.find t.entries_by_id (Id.to_string definition_id) with
+         | Some entry -> Ok (Restore entry.definition)
          | None ->
-           Error
-             [ Prompt_revision_builder.Diagnostic.
-                 { code = "prompt.definition_missing"
-                 ; message = "pinned prompt definition is absent from the catalog"
-                 ; source = None
-                 }
-             ]
-         | Some entry ->
-           (match
-              Prompt_revision_builder.restore
-                ?content_limits:t.content_limits
-                ~artifact_store:t.artifact_store
-                entry.definition
-                revision_id
-            with
-            | Error _ as failure -> failure
-            | Ok revision ->
-              t.revisions
-              <- Map.set
-                   t.revisions
-                   ~key:(Agent_protocol.Id.Prompt_revision.to_string revision_id)
-                   ~data:revision;
-              Ok revision)))
+           restore_error
+             "prompt.definition_missing"
+             "pinned prompt definition is absent from the catalog"))
+  in
+  match admitted with
+  | Cached revision -> Ok revision
+  | Restore definition ->
+    let%bind revision =
+      Prompt_revision_builder.restore
+        ?content_limits:t.content_limits
+        ~artifact_store:t.artifact_store
+        definition
+        revision_id
+    in
+    let%bind revision = validate_definition revision definition_id in
+    Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+      match cached_revision t revision_id with
+      | Some cached ->
+        let%bind cached = validate_definition cached definition_id in
+        if
+          String.equal
+            (Prompt_revision.artifact cached).manifest_sha256
+            (Prompt_revision.artifact revision).manifest_sha256
+        then Ok cached
+        else
+          restore_error
+            "prompt.revision_conflict"
+            "pinned prompt revision conflicts with already retained content"
+      | None ->
+        t.restored_revisions
+        <- Map.set
+             t.restored_revisions
+             ~key:(Agent_protocol.Id.Prompt_revision.to_string revision_id)
+             ~data:revision;
+        Ok revision)
 ;;

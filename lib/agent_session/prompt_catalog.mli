@@ -52,7 +52,17 @@ val prune_unreferenced_artifacts
 
 (** Restores and caches an immutable revision that is no longer the current
     catalog revision for its prompt definition, using the fixed host content
-    policy supplied at construction. Failed restoration is never cached. *)
+    policy supplied at construction. Both cache hits and loaded artifacts must
+    belong to [definition_id]; present artifact definition/receipt metadata must
+    agree. Old artifacts without that metadata retain the explicitly selected
+    definition. Conflicting content for a cached revision ID rejects.
+
+    Admit a currently configured definition before uncached restoration, then
+    release the catalog mutex during artifact IO/replay. A reload or removal
+    after this admission does not revoke the immutable historical revision.
+    Already cached revisions remain addressable after removal. Failed restoration
+    is never cached. Restoration writes its separate cache, so catalog publication
+    cannot discard revisions concurrently restored during preparation. *)
 val restore_revision
   :  t
   -> definition_id:Agent_protocol.Id.Prompt_definition.t

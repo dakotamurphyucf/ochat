@@ -3,6 +3,67 @@ open Support
 module Loan = Agent_session.Prompt_source_lease
 module Artifact = Agent_store.Prompt_artifact_store
 
+let%expect_test "retained revisions keep their definition on cache hits and restoration" =
+  with_workspace (fun env parent root ->
+    let module Revision = Agent_session.Prompt_revision in
+    save root "root.chatmd" "<user>retained</user>";
+    let original = definition root in
+    let other =
+      Agent_session.Prompt_definition.create
+        ~id:(Agent_protocol.Id.Prompt_definition.of_string "prd_other" |> ok)
+        ~config_name:"other"
+        ~root_file:original.root_file
+        ~allowed_workspaces:[]
+        ~permission_profile:"interactive"
+        ~runtime_policy:None
+        ~enabled:false
+        ~description:None
+      |> ok
+    in
+    Eio.Switch.run (fun sw ->
+      let warm = catalog env parent in
+      Catalog.install_owned warm (prepare warm sw [ original; other ] |> ok) |> ok;
+      let retained = revision warm original in
+      let revision_id = Revision.id retained in
+      let restore catalog definition_id =
+        Catalog.restore_revision catalog ~definition_id ~revision_id
+      in
+      let rejected result =
+        match result with
+        | Ok _ -> failwith "revision was accepted under another definition"
+        | Error diagnostics ->
+          print_s
+            [%sexp
+              (List.map diagnostics ~f:(fun diagnostic ->
+                 diagnostic.Builder.Diagnostic.code)
+               : string list)]
+      in
+      rejected (restore warm other.id);
+      let cold = catalog env parent in
+      Catalog.install_owned
+        cold
+        (prepare cold sw [ definition ~enabled:false root; other ] |> ok)
+      |> ok;
+      assert (Option.is_none (Catalog.find_revision cold revision_id));
+      rejected (restore cold other.id);
+      assert (Option.is_none (Catalog.find_revision cold revision_id));
+      let restored = restore cold original.id |> ok in
+      assert (
+        String.equal
+          (Revision.artifact retained).manifest_sha256
+          (Revision.artifact restored).manifest_sha256);
+      Catalog.install_owned cold (prepare cold sw [] |> ok) |> ok;
+      assert (phys_equal restored (restore cold original.id |> ok));
+      [%test_eq: int] 0 (Catalog.prune_unreferenced_artifacts cold ~additional:[] |> ok);
+      print_endline "restored revision survives catalog removal and pruning"));
+  [%expect
+    {|
+    (prompt.revision_definition_mismatch)
+    (prompt.revision_definition_mismatch)
+    restored revision survives catalog removal and pruning
+    |}]
+;;
+
 let live loan =
   match Loan.availability loan with
   | Live -> ()
