@@ -259,30 +259,30 @@ let implementation_sources =
 let topic_contracts =
   [ ( "tool_v1"
     , "chatmd.definitions"
-    , "46792b6d7055444a90cbffeda24ce21875f4cc073ab6a3636940b51c2c891313" )
+    , "5780c40d276e427f2509e94b27ec93c17a320326fe5a5f1b57e60594f65ca77b" )
   ; ( "moderator_v1"
     , "chatmd.definitions"
-    , "8ea9c16e449072f9ce74c2a98a7596161e6f6528e15bfcb382cf17613254ffd9" )
+    , "f1735c27c45582ea5bc9a763bd2710a9cddfd1d47018d725da6247ba097e57ba" )
   ; ( "delegated_moderator_v1"
     , "chatmd.definitions"
-    , "74a5756f546e1034c5c4d32140c31b7f46cf048ab661bd94eeb5ff8fa90e379c" )
+    , "84e3cfba4bffead1d7cbe320dccd8aca1ce10b5b679f2b2ff05e865887df1e03" )
   ; ( "tool_v1"
     , "chatmd.declarations.schemas"
-    , "06ca21296e271992a9f6d2dbb72e02e85a9a178602203ae004a421c1217d1e4a" )
+    , "532ae64b35fbc2026dcc3fd9a8f92bac3364522e59d6ba9ebac32f0ba810484d" )
   ; ( "moderator_v1"
     , "chatmd.declarations.schemas"
-    , "aa2601be4b2a7b94076b5ad635d40dcd2f276f408c38f2c66c23fb41d86bde85" )
+    , "8d327bcd1275fdba014e4464a716aa4b6d9d2014dbb74fae06e5ee5f776d9241" )
   ; ( "delegated_moderator_v1"
     , "chatmd.declarations.schemas"
-    , "aaffd33cce0c93332863d0de468562b121e6548afb3cc6f21760a19596ce1405" )
+    , "a00242c0b64b0ad0fc4b4f0566d72e4e3c4265ea907aa2bccc0387396c22c514" )
   ; ( "tool_v1"
     , "chatmd.capabilities"
-    , "a1113ab27af3d36885bfa0338e3d14dc0e6b143277e43b7b4fe7451863d8a215" )
+    , "3aa990d17f17380a6b39ab17f4d3b8bfa12afca8ea05a46163da731816eccdd6" )
   ; ( "moderator_v1"
     , "chatmd.capabilities"
-    , "d1e8ec271c038c9fe19756d9c6e1cbf213686b2625f903cc02b20b3bcf750a9d" )
+    , "eae1dc4c9c5b8b90ba2d21dc31a8d0b39493cde96d3040e4662d3e2666d9ffb3" )
   ; ( "delegated_moderator_v1"
     , "chatmd.capabilities"
-    , "35ee1cf4ed0e1ffeeb87888de6f0ea2440a81254c12996a54d2c4cf39f12c075" )
+    , "686fcc236f65bdec51fb8264a621cb3d70ca896d4496d4bf28d2b6bc2f05cce1" )
   ]
 ;;

@@ -588,12 +588,13 @@ let compile_diagnostic target source (error : Compiler.error) =
         match diagnostic.stage with
         | Parse -> "chatml.parse_error", "chatml.syntax.calls"
         | Typecheck -> "chatml.type_error", "chatml.types"
+        | Link -> "chatml.link_error", "chatml.modules"
       in
       ( code
       , diagnostic.message
       , source
       , (match diagnostic.stage with
-         | Parse -> [ topic; entrypoint_topic target ]
+         | Parse | Link -> [ topic; entrypoint_topic target ]
          | Typecheck ->
            [ topic; "chatml.inference"; "chatml.syntax.calls"; entrypoint_topic target ])
       )

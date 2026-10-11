@@ -1,0 +1,5 @@
+(library
+ (name chatml_equality_tests)
+ (libraries core expect_test_helpers_core chatml chatml_typechecker chatml_resolver chatml_builtin_modules)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

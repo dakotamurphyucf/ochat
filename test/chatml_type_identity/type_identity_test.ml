@@ -39,14 +39,15 @@ let%expect_test "nested inference levels preserve distinct escaping type variabl
 let%expect_test "level exit preserves identity without leaking generalization level" =
   let state = T.create_state () in
   T.enter_level state;
-  let first = T.new_var state state.current_lvl in
+  let first = T.new_var state state.shared.current_lvl in
   T.exit_level state;
   T.enter_level state;
-  let second = T.new_var state state.current_lvl in
+  let second = T.new_var state state.shared.current_lvl in
   T.exit_level state;
-  [%test_eq: int] 0 state.current_lvl;
+  [%test_eq: int] 0 state.shared.current_lvl;
   (match first, second with
-   | T.Var { contents = Free (first, _) }, T.Var { contents = Free (second, _) } ->
+   | ( T.Var { contents = Free { name = first; _ } }
+     , T.Var { contents = Free { name = second; _ } } ) ->
      print_s [%sexp (not (String.equal first second) : bool)]
    | _ -> failwith "expected fresh unbound variables");
   [%expect {| true |}]

@@ -47,6 +47,7 @@ let compiler_diagnostic (source_ref : Source_ref.t) (error : Chatml_compilation.
         match diagnostic.stage with
         | Parse -> "chatml.parse_error"
         | Typecheck -> "chatml.type_error"
+        | Link -> "chatml.link_error"
       in
       let position (position : Source.position) : Source_ref.position =
         { offset = position.offset; line = position.line; column = position.column }

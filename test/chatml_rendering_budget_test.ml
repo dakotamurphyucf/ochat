@@ -118,7 +118,7 @@ let%expect_test "validation pays the same parser allocation budget as parsing" =
 
 let%expect_test "diagnostic previews terminate on cycles and cap aggregate output" =
   let values = [| L.VUnit |] in
-  let task = L.VTask (L.TPure (L.VArray values)) in
+  let task = L.VTask (L.Task.create (L.TPure (L.VArray values))) in
   values.(0) <- task;
   print_endline (B.value_to_debug_string ~max_depth:4 task);
   print_endline (B.value_to_debug_string ~max_nodes:4 ~max_depth:100 task);

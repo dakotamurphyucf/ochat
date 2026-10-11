@@ -1,0 +1,17 @@
+(library
+ (name och159_verification_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  chatml
+  chatml_typechecker
+  chatml_resolver
+  chatml_builtin_modules
+  chatml_compilation
+  chatml_host_runtime
+  chatml_execution
+  eio
+  eio_main)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

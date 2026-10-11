@@ -1,0 +1,13 @@
+(library
+ (name chatml_captured_compilation_tests)
+ (libraries
+  core
+  eio_main
+  source
+  ochat.chatml_source
+  ochat.chatml_diagnostic
+  ochat.chatml
+  ochat.chatml_compilation
+  ochat.chatml_host_runtime)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

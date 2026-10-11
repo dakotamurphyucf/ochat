@@ -22,6 +22,35 @@ between stages and within inference traversals; cleanup is joined. Work between
 checkpoints may overrun the configured duration. This is cooperative cancellation,
 not a hard deadline or an operating-system memory sandbox.
 
+## Prepared execution validates before initialization
+
+Prepared execution uses an immutable linked artifact with entrypoint descriptors
+selected at compilation. Only those descriptors are invocable; an unselected
+name cannot start a new dependency initialization. Before any initializer, the
+runtime compares the caller's actual builtin names, schemes, module exports and
+type aliases with the compiled static contract. Matching metadata does not prove
+that a native callback honors its scheme or grant tool authority. The caller
+supplies authorized implementations and operations separately.
+
+The host also validates invocation roles before initialization. Registered
+one-off/tool contracts use `main`/`run`; moderator contracts use
+`initial_state`/`on_event`. A Native host can select custom names, but task
+entrypoints require an explicit fixed-arity function returning a task. A Native
+session requires three event arguments and the same static state encoding in
+its initial-state requirement, event state input and task result, including
+shared type-variable names. This checks the declared contract without new
+runtime inference or alias solving. Generic linked initialization can still
+select a non-task value contract without invoking it as a host task.
+
+Installation, dependency initialization, entry invocation and value conversion
+share one execution scope. Units do not reset fuel, allocation or depth limits.
+A persistent owner initializes with its runner's control proxy and re-enters the
+runner for every event or resumed continuation. Dependency closures then consult
+the current event's scope; using them outside that scope fails. Access to mutable
+session state remains serialized. These APIs do not implement FILE discovery,
+bundle custody or automatic host/session artifact routing. Existing text and
+single-file APIs retain their original contracts.
+
 ## What an execution budget measures
 
 Initialization, pure evaluation, task continuations and controlled input/output
@@ -119,7 +148,9 @@ unbounded result histories. Failed validation keeps the previous checkpoint;
 mutable globals are outside this state rollback contract.
 
 The behavior suites cover [nested and independent budgets](../../test/chatml_execution_budget_test.ml),
-[compilation without effects](../../test/chatml_compilation_test.ml), and
+[compilation without effects](../../test/chatml_compilation_test.ml),
+[linked initialization and preflight](../../test/chatml_linked_runtime/runtime_tests.ml),
+[invocation role rejection before effects](../../test/chatml_linked_runtime/invocation_tests.ml), and
 [moderator initialization, projection, rollback and cancellation](../../test/moderation/moderator_execution_budget_test.ml).
 They exercise actual compiler/interpreter paths offline. They do not establish
 a hard process-memory boundary or exactly-once external execution.

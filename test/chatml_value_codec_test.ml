@@ -101,7 +101,7 @@ let%expect_test "snapshot codec rejects runtime-only values with descriptive err
   print_snapshot_error (dummy_closure ());
   print_snapshot_error (Lang.VModule (Lang.create_env ()));
   print_snapshot_error (Lang.VBuiltin (fun _ -> Lang.VUnit));
-  print_snapshot_error (Lang.VTask (Lang.TPure Lang.VUnit));
+  print_snapshot_error (Lang.VTask (Lang.Task.create (Lang.TPure Lang.VUnit)));
   [%expect
     {|
     root[1]: refs are not serializable in ChatML snapshots

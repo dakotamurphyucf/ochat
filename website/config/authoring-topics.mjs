@@ -7,7 +7,7 @@ const guide = (name, fragment = '') =>
 export const authoringTopicLinks = {
   'chatml.types': guide(
     'chatml-ocaml-differences',
-    'records-are-structural-with-conservative-joins',
+    'records-are-structural-with-matching-branch-shapes',
   ),
   'chatml.programs': guide('chatml-authoring-language'),
   'chatml.task-effects': guide('chatml-task-effects'),

@@ -1,0 +1,6 @@
+(library
+ (name chatml_binding_tests)
+ (libraries core chatml chatml_typechecker chatml_resolver chatml_builtin_modules
+  ochat.chatml_source ochat.chatml_host_runtime)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

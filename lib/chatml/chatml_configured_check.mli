@@ -1,0 +1,90 @@
+open Core
+module Lookup = Chatml_configured_lookup
+module Reference = Lookup.Reference
+module Parse = Chatml.Chatml_parse
+
+(** Real configured-module checker adapter, compiler-domain only. It factors existing unit
+    inference/export collection, not a second checker, scanner or host compiler.
+    Companions and selected host contracts reuse the same invocation engine. *)
+type t
+
+(** One shared inference identity/weak-cell owner for one Session invocation and authentic supplied surface.
+    Discard this engine and all its compiler-owned exports on failure/cancellation.
+    No source/inventory/current-origin globals or initializer evaluation. *)
+val create : Chatml.Chatml_builtin_surface.surface -> checkpoint:(unit -> unit) -> t
+
+module Public_module : sig
+  (** Completed compiler-owned public schemes/types. Weak cells deliberately
+      shared; not a domain-transfer value or OCH127 frozen semantics. *)
+  type t
+
+  val value_scheme : t -> Chatml_typechecker.typ
+  val types : t -> Chatml_typechecker.Type_alias.t
+end
+
+module Checked_unit : sig
+  type t
+
+  val annotations : t -> Chatml_typechecker.checked_program
+  val exports : t -> Public_module.t
+  val visibility : t -> Chatml.Chatml_module_visibility.t
+end
+
+(** Run the EXISTING infer_stmt/export paths with this source's fresh annotation
+    maps and t's shared machine. Each independent file starts at inference level0,
+    restoring the importer level on every exit; imported weak cells cannot gain
+    polymorphism through importer generalization. Value/open/qualified syntax calls [require] for genuine configured
+    fallback or an actual use of a binding previously imported by configured open. Capture immutable defining type fallbacks;
+    use ordinary raw schemes/value restriction. This compatibility helper checks
+    an implementation alone; check_node adds its companion.
+    Both source context and parser unit must have identical source ID/digest.
+    Callback exceptions escape unchanged via existing checkpoint protection.
+    Result/exports remain private to the invocation and are discarded on failure. *)
+val check_unit
+  :  t
+  -> source:Lookup.t
+  -> require:
+       (source:Lookup.t -> Reference.t -> (Public_module.t, Chatml_diagnostic.t) Result.t)
+  -> Parse.Unit.t
+  -> (Checked_unit.t, Chatml_diagnostic.t) Result.t
+
+(** Static-only engine; runtime wrapper above immediately projects. *)
+val create_static : Chatml.Chatml_static_surface.t -> checkpoint:(unit -> unit) -> t
+
+(** Validate source IDs/digests/phases for both units before inference. Each unit
+    owns its selected lookup scope, sharing identity/weak cells/root level only.
+    Companion scope starts with authentic host types plus its own declarations,
+    never implementation-private/importer types. Existing atomic signature probe
+    returns completed restricted exports/visibility; no provisional cycle schemes.
+    Checkpoint/require exceptions escape with identity/backtrace unchanged. *)
+val check_node
+  :  t
+  -> Chatml_dependency_session.Unit.t
+  -> require:
+       (source:Lookup.t -> Reference.t -> (Public_module.t, Chatml_diagnostic.t) Result.t)
+  -> implementation:Parse.Unit.t
+  -> interface:Parse.Interface.t option
+  -> (Checked_unit.t, Chatml_diagnostic.t) Result.t
+
+module Entrypoint : sig
+  type t
+
+  val name : t -> string
+  val target : t -> Chatml.Chatml_module_reference.Binding_target.t
+end
+
+(** Check grouped host contracts against the final private lexical scope, not
+    the selected public exports. Imported bindings observe Value_reference at
+    their original implementation introduction span, validated with input/source/
+    phase affinity; shadowed locals clear origin. Invoked while entry is active.
+    Checked_unit must belong to this same engine (private identity token checked
+    before borrowing its raw cells). Returned targets retain no callbacks/types.
+    Failure discards the invocation. *)
+val check_entrypoints
+  :  t
+  -> Checked_unit.t
+  -> source:Lookup.t
+  -> require:
+       (source:Lookup.t -> Reference.t -> (Public_module.t, Chatml_diagnostic.t) Result.t)
+  -> required_bindings:(string * Chatml.Chatml_builtin_spec.ty) list
+  -> (Entrypoint.t list, Chatml_diagnostic.t) Result.t
