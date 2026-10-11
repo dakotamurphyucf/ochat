@@ -36,7 +36,7 @@ let policy ?(roles = 16) ?(references = 64) ?(work = 1_000_000) () =
   |> Or_error.ok_exn
 ;;
 
-let prepare
+let prepare_planned
       ?startup
       ?(root_role = Prepare.Root_role.Ui)
       ?(checkpoint = ignore)
@@ -58,6 +58,11 @@ let prepare
     ~env
     ~checkpoint
     ()
+;;
+
+let prepare ?startup ?root_role ?checkpoint ?operation ?policy env scope captured =
+  prepare_planned ?startup ?root_role ?checkpoint ?operation ?policy env scope captured
+  |> Result.map ~f:Prepare.Prepared.programs
 ;;
 
 let runtime_plan env ~invocation parsed =
@@ -145,10 +150,25 @@ let on_event = fun event state -> Task.pure(state)</script>|}
           ~f:(fun policy ->
             assert (Result.is_error (prepare ~operation ~policy env scope captured));
             assert (!calls = 0));
-        let custody =
-          prepare ~operation ~policy:(policy ~roles:5 ~references:7 ()) env scope captured
+        let prepared =
+          prepare_planned
+            ~operation
+            ~policy:(policy ~roles:5 ~references:7 ())
+            env
+            scope
+            captured
           |> ok
         in
+        let custody = Prepare.Prepared.programs prepared in
+        let plans = Prepare.Prepared.plans prepared in
+        [%test_eq: int] 5 (List.length plans);
+        assert (phys_equal (Plan.parsed (List.hd_exn plans)) (Builder.Capture.root value));
+        List.iter plans ~f:(fun plan ->
+          assert (
+            List.exists
+              (Builder.Capture.root value
+               :: List.map (Builder.Capture.agents value) ~f:snd)
+              ~f:(phys_equal (Plan.parsed plan))));
         assert (!calls = 4);
         assert (List.length (C.bindings custody) = 4);
         let root_plan = runtime_plan env ~invocation:Ui (Builder.Capture.root value) in

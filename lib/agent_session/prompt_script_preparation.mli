@@ -65,6 +65,22 @@ module Host : sig
     }
 end
 
+(** Result of one complete source preparation. Retains the exact plans used for
+    that acquisition, including inactive queued roles, so the host can associate
+    successful program selections with their original roles without replanning.
+    Immutable parser/custody values only; no Scope, Startup, native grant or
+    callback is retained. *)
+module Prepared : sig
+  type t
+
+  val programs : t -> Chatml_prompt_programs.t
+
+  (** The first plan is the active Root; remaining plans are the authentic
+      requested roles in acquisition order. Each keeps its original Parsed
+      identity from the supplied Capture. No roles are inferred from digests. *)
+  val plans : t -> Chat_response.Script_contract_plan.t list
+end
+
 (** Suitable for Catalog.prepare_owned's existing prepare_programs callback.
     Seed the actual Capture.root with the explicitly supplied host [root_role]. Join each authentic emitted
     Parsed.Agent_reference.queued_key to the exact captured root/agents key,
@@ -87,7 +103,10 @@ end
     to the existing gate and grants no native authority. The returned custody contains immutable selected lock bytes; this helper
     never publishes a mutable source or lock outside that custody. Return source-owned diagnostics on expected failures;
     original borrowed callback/cancellation/backtrace identity propagates.
-    No callback, Scope, Startup or grants are retained in returned custody. *)
+    Project [Prepared.programs] for Catalog's program callback. Retain the same
+    result's [Prepared.plans] when establishing a successful dependency baseline;
+    do not rebuild plans against a later parser or compiler contract.
+    No callback, Scope, Startup or grants are retained in the result. *)
 val capture
   :  Policy.t
   -> ?startup:Chat_response.Startup_compilation.t
@@ -101,4 +120,4 @@ val capture
   -> env:Eio_unix.Stdenv.base
   -> checkpoint:(unit -> unit)
   -> unit
-  -> (Chatml_prompt_programs.t, Prompt_revision_builder.Diagnostic.t list) Result.t
+  -> (Prepared.t, Prompt_revision_builder.Diagnostic.t list) Result.t

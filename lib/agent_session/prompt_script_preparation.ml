@@ -110,6 +110,16 @@ module Host = struct
     }
 end
 
+module Prepared = struct
+  type t =
+    { programs : Chatml_prompt_programs.t
+    ; plans : Plan.t list
+    }
+
+  let programs t = t.programs
+  let plans t = t.plans
+end
+
 let diagnostic ?source code message = Builder.Diagnostic.{ code; message; source }
 let compilation_error (error : Compiler.error) = [ diagnostic error.code error.message ]
 
@@ -257,28 +267,31 @@ let capture
               ]
           | root_plan :: role_plans ->
             let source = policy.sources in
-            Sources.capture
-              scope
-              ~capture
-              ~root_plan
-              ~role_plans
-              ~operation
-              ~provided
-              ~additional_anchors:host.Host.additional_anchors
-              ~git_store:host.git_store
-              ~git_grants:host.git_grants
-              ~root_limits:source.root_limits
-              ~max_grants:source.max_grants
-              ~max_grant_bytes:source.max_grant_bytes
-              ~max_request_bytes:source.max_request_bytes
-              ~max_path_components:source.max_path_components
-              ~max_input_bytes:source.max_input_bytes
-              ~max_work_steps:source.max_work_steps
-              ~policy:source.policy
-              ~limits:source.limits
-              ~custody_limits:source.custody_limits
-              ~clock:(Eio.Stdenv.mono_clock env)
-              ~checkpoint:poll
+            let%map programs =
+              Sources.capture
+                scope
+                ~capture
+                ~root_plan
+                ~role_plans
+                ~operation
+                ~provided
+                ~additional_anchors:host.Host.additional_anchors
+                ~git_store:host.git_store
+                ~git_grants:host.git_grants
+                ~root_limits:source.root_limits
+                ~max_grants:source.max_grants
+                ~max_grant_bytes:source.max_grant_bytes
+                ~max_request_bytes:source.max_request_bytes
+                ~max_path_components:source.max_path_components
+                ~max_input_bytes:source.max_input_bytes
+                ~max_work_steps:source.max_work_steps
+                ~policy:source.policy
+                ~limits:source.limits
+                ~custody_limits:source.custody_limits
+                ~clock:(Eio.Stdenv.mono_clock env)
+                ~checkpoint:poll
+            in
+            { Prepared.programs; plans }
         with
         | Abort.Stop errors -> Error errors))
     ()
