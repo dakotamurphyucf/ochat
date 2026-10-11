@@ -141,6 +141,7 @@ let features =
     , [ "test/agent_docs/docs_chatmd_capabilities.ml"
       ; "test/chatmd_shell_parser_test.ml"
       ; "test/chat_response_shell_tool_test.ml"
+      ; "test/shell_activation/activation_tests.ml"
       ] )
   ; ( "tools.agent_backed"
     , "Local/remote authored agent definitions versus inherited generated children"
@@ -235,7 +236,7 @@ let implementation_sources =
   ; ( "lib/chat_response/mcp_discovery_cache.ml"
     , "b7c02f701beaaf87c1cd04bf06065cb5564f2702f923704d8e8676f13d5724fb" )
   ; ( "lib/chat_response/shell_tool.ml"
-    , "5d21f554475442cc67f0feaabaa3635f30fc5c678c926ca916eb99f804ef35ac" )
+    , "bb69d788c0223e461fd52be56a85843313e5c113b6506dae37449bf92a52e2df" )
   ; ( "lib/chat_response/tool.ml"
     , "477798dfc2e13e78dd8f481448aca3bffc00ce74d7662bf5ffc1b76d001c626d" )
   ; ( "lib/chatmd/chatmd_read_file_declaration.ml"

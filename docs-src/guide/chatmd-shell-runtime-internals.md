@@ -144,6 +144,21 @@ authorizer, and persistence callbacks.
 All referenced runtimes and extensions instantiate before the immutable map is
 published. An invocation captures one registry generation and manifest digest.
 
+Hosts that need to check other scripts before running hook initializers use
+`Registry.instantiate_prepared_after`. Its preflight callback receives the actual
+staged runtime metadata. `Shell_tool.prepare` constructs the same shell functions
+as normal startup, but invocation remains gated until all initialization and
+snapshot restoration succeeds. The gate runs before input decoding and executor
+callbacks, including analyzers. It also rejects access after preparation fails
+or the owning switch closes. This does not undo external effects from an
+initializer that completed before another initializer failed.
+
+The callback returns its prepared host data alongside the live registry only on
+success. Cancellation and unexpected exceptions keep their original propagation;
+the caller's switch still owns resource cleanup on failure. See the
+[architecture lifecycle](../lib/shell_runtime/architecture.doc.md#lifecycle) and
+[activation invariants](../../test/shell_activation/activation_tests.ml).
+
 ## Mapping to `Shell_access.Executor.config`
 
 `Shell_runtime.Lowering` converts resolved serializable fields:
