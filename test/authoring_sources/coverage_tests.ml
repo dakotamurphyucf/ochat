@@ -11,6 +11,7 @@ let%expect_test "reviewed module coverage includes every export on each exact su
     [ "Task", V.task_mappings
     ; "String", V.string_mappings
     ; "Array", V.array_mappings
+    ; "Outcome", V.outcome_mappings
     ; "Option", V.option_mappings
     ; "Json", V.json_mappings
     ; "Hashtbl", V.hashtbl_mappings
@@ -36,30 +37,34 @@ let%expect_test "reviewed module coverage includes every export on each exact su
               (name : string), (surface_id : string), (List.length coverage.mapped : int)]));
   [%expect
     {|
-    (Task one_off_v1 6)
-    (Task tool_v1 6)
-    (Task moderator_v1 6)
-    (Task delegated_moderator_v1 6)
+    (Task one_off_v1 8)
+    (Task tool_v1 8)
+    (Task moderator_v1 8)
+    (Task delegated_moderator_v1 8)
     (String one_off_v1 15)
     (String tool_v1 15)
     (String moderator_v1 15)
     (String delegated_moderator_v1 15)
-    (Array one_off_v1 23)
-    (Array tool_v1 23)
-    (Array moderator_v1 23)
-    (Array delegated_moderator_v1 23)
-    (Option one_off_v1 6)
-    (Option tool_v1 6)
-    (Option moderator_v1 6)
-    (Option delegated_moderator_v1 6)
-    (Json one_off_v1 17)
-    (Json tool_v1 17)
-    (Json moderator_v1 17)
-    (Json delegated_moderator_v1 17)
-    (Hashtbl one_off_v1 6)
-    (Hashtbl tool_v1 6)
-    (Hashtbl moderator_v1 6)
-    (Hashtbl delegated_moderator_v1 6)
+    (Array one_off_v1 24)
+    (Array tool_v1 24)
+    (Array moderator_v1 24)
+    (Array delegated_moderator_v1 24)
+    (Outcome one_off_v1 4)
+    (Outcome tool_v1 4)
+    (Outcome moderator_v1 4)
+    (Outcome delegated_moderator_v1 4)
+    (Option one_off_v1 8)
+    (Option tool_v1 8)
+    (Option moderator_v1 8)
+    (Option delegated_moderator_v1 8)
+    (Json one_off_v1 18)
+    (Json tool_v1 18)
+    (Json moderator_v1 18)
+    (Json delegated_moderator_v1 18)
+    (Hashtbl one_off_v1 7)
+    (Hashtbl tool_v1 7)
+    (Hashtbl moderator_v1 7)
+    (Hashtbl delegated_moderator_v1 7)
   |}]
 ;;
 
@@ -100,10 +105,10 @@ let%expect_test "shared core inventory is fully mapped with exact print availabi
       print_s [%sexp (surface : string), (List.length selected : int)]);
   [%expect
     {|
-    (one_off_v1 84)
-    (tool_v1 84)
-    (moderator_v1 85)
-    (delegated_moderator_v1 84)
+    (one_off_v1 95)
+    (tool_v1 95)
+    (moderator_v1 96)
+    (delegated_moderator_v1 95)
     |}]
 ;;
 

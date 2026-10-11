@@ -144,6 +144,7 @@ let%test_unit "interrupted tuple evaluation never publishes a partial product" =
       { checkpoint
       ; diagnostic_checkpoint = checkpoint
       ; allocate = (fun _ -> ())
+      ; allocate_array = (fun _ -> ())
       ; before_builtin = (fun ~name:_ _ -> ())
       ; check_value = (fun _ -> ())
       ; before_json_import = (fun _ -> ())

@@ -15,6 +15,9 @@
   chatml_syntax_name
   chatml_module_signature
   chatml_module_visibility
+  chatml_task_array_mode
+  chatml_task_array
+  chatml_table_snapshot
   chatml_shape_kind
   chatml_equality_requirement
   chatml_eval
@@ -29,6 +32,8 @@
   chatml_debug_log
   frame_env
   chatml_value_codec
+  chatml_builtin_callback
+  chatml_builtin_composition
   chatml_builtin_spec
   chatml_builtin_surface
   chatml_extension_surface
@@ -49,7 +54,7 @@
 (library
  (name chatml_typechecker)
  (public_name ochat.chatml_typechecker)
- (modules chatml_typechecker chatml_type_snapshot chatml_semantic_binding chatml_semantic_recorder chatml_semantic_elaboration chatml_semantic_scope chatml_semantic_host chatml_inferred_type chatml_type_alias chatml_type_validity chatml_type_probe chatml_signature_check chatml_alias_equivalence chatml_value_scope chatml_configured_resolution)
+ (modules chatml_typechecker chatml_type_snapshot chatml_semantic_binding chatml_semantic_recorder chatml_semantic_elaboration chatml_semantic_scope chatml_semantic_host chatml_inferred_type chatml_type_alias chatml_type_validity chatml_type_probe chatml_type_scheme chatml_signature_check chatml_alias_equivalence chatml_value_scope chatml_configured_resolution)
  (libraries core chatml chatml_graph)
  (preprocess
   (pps ppx_jane)))

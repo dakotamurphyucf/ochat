@@ -248,6 +248,7 @@ type execution_control =
   { checkpoint : unit -> unit
   ; diagnostic_checkpoint : unit -> unit
   ; allocate : int -> unit
+  ; allocate_array : int -> unit
   ; before_builtin : name:string -> value list -> unit
   ; check_value : value -> unit
   ; before_json_import : Jsonaf.t -> unit
@@ -290,6 +291,7 @@ and task_step =
   | TPure of value
   | TBind of task * value
   | TMap of task * value
+  | TArray of Chatml_task_array_mode.t * value array * value
   | TFail of string
   | TCatch of task * value
   | TPerform of eff

@@ -4,6 +4,7 @@ module Parse = Chatml.Chatml_parse
 module Typechecker = Chatml_typechecker
 module Resolver = Chatml_resolver
 module Eval = Chatml.Chatml_eval
+module Task_array = Chatml.Chatml_task_array
 module Builtin_surface = Chatml.Chatml_builtin_surface
 module Builtin_modules = Chatml_builtin_modules
 module Builtin_spec = Chatml.Chatml_builtin_spec
@@ -169,6 +170,10 @@ and continuation_frame =
       }
   | Map_frame of
       { fn : Lang.value
+      ; site : Diagnostic.Site.t option
+      }
+  | Array_frame of
+      { traversal : Task_array.t
       ; site : Diagnostic.Site.t option
       }
   | Catch_frame of
@@ -1293,12 +1298,27 @@ let rec continue_with_value session exec ~frames value =
     let open Result.Let_syntax in
     let%bind mapped = continuation_value_result fn [ value ] ~site in
     continue_with_value session exec ~frames:rest mapped
+  | Array_frame { traversal; site } :: rest ->
+    let open Result.Let_syntax in
+    let%bind step =
+      Task_array.continue_with traversal value
+      |> Result.map_error ~f:(fun message -> Failure.plain ?site message)
+    in
+    continue_array session exec ~frames:rest traversal ~site step
   | Catch_frame _ :: rest -> continue_with_value session exec ~frames:rest value
+
+and continue_array session exec ~frames traversal ~site step =
+  match (step : Task_array.Step.t) with
+  | Finished value -> continue_with_value session exec ~frames value
+  | Call { fn; argument } ->
+    let open Result.Let_syntax in
+    let%bind task = continuation_task_result fn [ argument ] ~site in
+    interpret_task session exec ~frames:(Array_frame { traversal; site } :: frames) task
 
 and continue_with_error session exec ~frames diagnostic =
   match frames with
   | [] -> Error diagnostic
-  | Bind_frame _ :: rest | Map_frame _ :: rest ->
+  | Bind_frame _ :: rest | Map_frame _ :: rest | Array_frame _ :: rest ->
     continue_with_error session exec ~frames:rest diagnostic
   | Catch_frame catch_frame :: rest ->
     let discarded =
@@ -1354,6 +1374,15 @@ and interpret_task session exec ~frames (task : Lang.task) =
       exec
       ~frames:(Map_frame { fn; site = task.site } :: frames)
       (nested next_task)
+  | Lang.TArray (mode, input, f) ->
+    let traversal = Task_array.create input ~f ~mode ~control:session.env.control in
+    continue_array
+      session
+      exec
+      ~frames
+      traversal
+      ~site:task.site
+      (Task_array.start traversal)
   | Lang.TCatch (next_task, handler) ->
     let catch_frame =
       Catch_frame
