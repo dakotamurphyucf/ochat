@@ -63,6 +63,20 @@ val compile_with_policy
   -> unit
   -> (Chatml_host_runtime.compiled_script, error) result
 
+(** Joined, non-executing compilation for an actual legacy custom host surface.
+    Uses the same source/time admission and cooperative cleanup as [compile].
+    Retains that surface in the existing legacy artifact; it is not a static
+    Linked artifact or a grant. Original unexpected exceptions/cancellation and
+    backtraces propagate, rather than being converted to compiler_failed. *)
+val compile_with_surface
+  :  ?limits:limits
+  -> env:Eio_unix.Stdenv.base
+  -> surface:Chatml.Chatml_builtin_surface.surface
+  -> required_bindings:(string * Chatml.Chatml_builtin_spec.ty) list
+  -> source:string
+  -> unit
+  -> (Chatml_host_runtime.compiled_script, error) Result.t
+
 (** Compile one already validated immutable capture through the same bounded
     domain/policy adapter as [compile]. Check its exact byte length before
     starting a domain; do not reopen, rewrite or rehash its contents. Successful

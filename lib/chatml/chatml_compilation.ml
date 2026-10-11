@@ -194,6 +194,28 @@ let compile ?(limits = default_limits) ~env ~target ~source () =
   compile_with_policy ~policy:(Bounded limits) ~env ~target ~source ()
 ;;
 
+let compile_with_surface
+      ?(limits = default_limits)
+      ~env
+      ~surface
+      ~required_bindings
+      ~source
+      ()
+  =
+  run_worker
+    ~input_bytes:(String.length source)
+    ~policy:(Bounded limits)
+    ~env
+    ~exception_policy:Preserve_unexpected
+    ~map_policy_error:Fn.id
+    ~prepare:(fun ~checkpoint:_ -> Ok source)
+    ~compile:(fun source ~checkpoint ->
+      match Input.compile (Text source) ~checkpoint ~surface ~required_bindings with
+      | Ok compiled -> Ok compiled
+      | Error diagnostic ->
+        error ~diagnostic "chatml.invalid_handler" diagnostic.formatted)
+;;
+
 let compile_captured_with_policy source ~policy ~env ~target () =
   compile_input (Input.Captured source) ~policy ~env ~target
 ;;

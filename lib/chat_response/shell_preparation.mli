@@ -6,7 +6,8 @@ open Core
 type t
 
 val prepare
-  :  ?programs:Chatml_prompt_programs.Restored.t
+  :  ?startup:Startup_compilation.t
+  -> ?programs:Chatml_prompt_programs.Restored.t
   -> env:Eio_unix.Stdenv.base
   -> limits:Chatml_compilation.limits
   -> checkpoint:(unit -> unit)

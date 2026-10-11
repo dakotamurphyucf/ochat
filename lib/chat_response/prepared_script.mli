@@ -20,6 +20,9 @@ val fingerprint : t -> Chatml_source.Digest.t
 
 val input_bytes : t -> int
 
+(** Exact admitted immutable input for shared invocation accounting. *)
+val prepared : t -> Chatml_prepared_program.t
+
 (** Use the existing standard-target joined compiler and its source/time policy.
     Does not initialize modules or grant any runtime tools. *)
 val compile

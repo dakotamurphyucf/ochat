@@ -20,7 +20,8 @@ type t
     [delegated_moderator] selects the restricted moderator compiler contract and
     includes it in the managed authority identity; defaults to false. *)
 val prepare
-  :  ?limits:Chatml_compilation.limits
+  :  ?startup:Startup_compilation.t
+  -> ?limits:Chatml_compilation.limits
   -> ?delegated_moderator:bool
   -> ?programs:Chatml_prompt_programs.Restored.t
   -> env:Eio_unix.Stdenv.base

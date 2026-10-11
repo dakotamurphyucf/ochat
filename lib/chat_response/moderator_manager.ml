@@ -51,7 +51,8 @@ module Registry = struct
       ]
   ;;
 
-  let compile_script
+  let compile_script_with
+        ~compile_script
         ?(surface = Builtin_surface.moderator_surface)
         (t : t)
         (script : CM.script)
@@ -73,7 +74,7 @@ module Registry = struct
     match Map.find t key with
     | Some artifact -> Ok (t, artifact)
     | None ->
-      Runtime.compile_script ~surface ~source:(source_text script) ()
+      compile_script ~surface ~source:(source_text script)
       |> Result.map ~f:(fun compiled ->
         let artifact =
           { script_id = script.id
@@ -84,6 +85,11 @@ module Registry = struct
           }
         in
         Map.set t ~key ~data:artifact, artifact)
+  ;;
+
+  let compile_script ?surface t script =
+    compile_script_with ?surface t script ~compile_script:(fun ~surface ~source ->
+      Runtime.compile_script ~surface ~source ())
   ;;
 
   let install_prepared t script ~surface program =
@@ -103,6 +109,7 @@ module Registry = struct
   ;;
 
   let prepare_script_detailed
+        ?startup
         t
         script
         ~surface
@@ -114,6 +121,7 @@ module Registry = struct
         ~max_dependency_depth
     =
     Moderator_program.compile
+      ?startup
       programs
       ~script
       ~surface
@@ -152,6 +160,7 @@ module Registry = struct
 
   let prepare_elements
         t
+        ?startup
         ?programs
         ~surface
         ~capabilities
@@ -161,42 +170,81 @@ module Registry = struct
         ~max_dependency_depth
         elements
     =
-    List.fold_result elements ~init:(t, None) ~f:(fun (registry, selected) element ->
-      checkpoint ();
-      match element with
-      | CM.Script script ->
-        let result =
-          match programs with
-          | None ->
-            compile_script ~surface registry script
-            |> Result.map_error ~f:(fun message ->
-              [ Chatmd_shell_spec.Diagnostic.error
-                  ?source:script.source_ref
-                  ~code:"chatml.legacy_moderator_compile"
-                  message
-              ])
-          | Some programs ->
-            prepare_script_detailed
-              registry
-              script
-              ~surface
-              ~programs
-              ~capabilities
-              ~env
-              ~checkpoint
-              ~limits
-              ~max_dependency_depth
-            |> Result.map_error ~f:(fun error ->
-              [ Chatmd_shell_spec.Diagnostic.error
-                  ?source:script.source_ref
-                  ~code:error.Chatml_compilation.code
-                  error.message
-              ])
-        in
-        Result.map result ~f:(fun (registry, artifact) ->
-          checkpoint ();
-          registry, Some artifact)
-      | _ -> Ok (registry, selected))
+    let map_error (e : Chatml_compilation.error) =
+      [ Chatmd_shell_spec.Diagnostic.error ~code:e.code e.message ]
+    in
+    Startup_compilation.with_context
+      ?startup
+      ~limits
+      ~env
+      ~checkpoint
+      ~map_error
+      ~f:(fun startup ->
+        Startup_compilation.within startup ~map_error ~f:(fun () ->
+          let checkpoint () = Startup_compilation.checkpoint startup in
+          List.fold_result
+            elements
+            ~init:(t, None)
+            ~f:(fun (registry, selected) element ->
+              checkpoint ();
+              match element with
+              | CM.Script script ->
+                let result =
+                  match programs with
+                  | None ->
+                    let open Result.Let_syntax in
+                    let%bind () =
+                      Startup_compilation.admit_text startup (source_text script)
+                      |> Result.map_error ~f:map_error
+                    in
+                    let%bind limits =
+                      Startup_compilation.remaining_limits startup
+                      |> Result.map_error ~f:map_error
+                    in
+                    compile_script_with
+                      ~surface
+                      registry
+                      script
+                      ~compile_script:(fun ~surface ~source ->
+                        Chatml_compilation.compile_with_surface
+                          ~env
+                          ~limits
+                          ~surface
+                          ~required_bindings:[]
+                          ~source
+                          ()
+                        |> Result.map_error ~f:(fun e ->
+                          e.Chatml_compilation.code ^ ": " ^ e.message))
+                    |> Result.map_error ~f:(fun message ->
+                      [ Chatmd_shell_spec.Diagnostic.error
+                          ?source:script.source_ref
+                          ~code:"chatml.legacy_moderator_compile"
+                          message
+                      ])
+                  | Some programs ->
+                    prepare_script_detailed
+                      ~startup
+                      registry
+                      script
+                      ~surface
+                      ~programs
+                      ~capabilities
+                      ~env
+                      ~checkpoint
+                      ~limits
+                      ~max_dependency_depth
+                    |> Result.map_error ~f:(fun error ->
+                      [ Chatmd_shell_spec.Diagnostic.error
+                          ?source:script.source_ref
+                          ~code:error.Chatml_compilation.code
+                          error.message
+                      ])
+                in
+                Result.map result ~f:(fun (registry, artifact) ->
+                  checkpoint ();
+                  registry, Some artifact)
+              | _ -> Ok (registry, selected))))
+      ()
   ;;
 
   let of_elements

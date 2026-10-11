@@ -41,11 +41,13 @@ module Registry : sig
       for every declaration and admits project requirements against this exact
       live tool pool. The host supplies its actual surface, remaining compiler
       limits and checkpoint; this operation does not reset an outer startup ledger.
-      Limits govern joined captured compilation; the no-custody Single legacy
-      branch preserves [compile_script]'s existing synchronous behavior.
+      Limits govern joined compilation for both captured and Single legacy branches.
+      A supplied startup context shares its deadline/input allowances; activation
+      is not part of this preparation.
       Diagnostics retain the declaring source. Callback exceptions propagate. *)
   val prepare_elements
     :  t
+    -> ?startup:Startup_compilation.t
     -> ?programs:Chatml_prompt_programs.Restored.t
     -> surface:Chatml.Chatml_builtin_surface.surface
     -> capabilities:Tool_capability.t

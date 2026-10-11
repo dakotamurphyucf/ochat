@@ -132,7 +132,7 @@ let wrapper entrypoint =
     entrypoint
 ;;
 
-let compile ~script =
+let compile_with ~compile_script ~script =
   match script.S.project_selection with
   | Some _ ->
     Error
@@ -146,7 +146,7 @@ let compile ~script =
     let source_text = S.source_text script in
     let entrypoint = entrypoint script.kind in
     let source = source_text ^ wrapper entrypoint in
-    (match R.compile_script ~surface ~source () with
+    (match compile_script ~surface ~source with
      | Ok program ->
        Ok
          { declaration = script
@@ -163,6 +163,25 @@ let compile ~script =
          }
      | Error message ->
        Error [ error ~source:script.source_ref "shell.chatml_compile" message ])
+;;
+
+let compile ~script =
+  compile_with
+    ~compile_script:(fun ~surface ~source -> R.compile_script ~surface ~source ())
+    ~script
+;;
+
+let compile_with_limits ~env ~limits ~script =
+  compile_with ~script ~compile_script:(fun ~surface ~source ->
+    Chatml_compilation.compile_with_surface
+      ~limits
+      ~env
+      ~surface
+      ~required_bindings:[]
+      ~source
+      ()
+    |> Result.map_error ~f:(fun failure ->
+      failure.Chatml_compilation.code ^ ": " ^ failure.message))
 ;;
 
 let with_entrypoint compiled entrypoint =

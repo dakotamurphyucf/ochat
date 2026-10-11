@@ -43,6 +43,15 @@ val compile
   :  script:Chatmd_shell_spec.Chatmd_script_spec.t
   -> (compiled, Chatmd_shell_spec.Diagnostic.t list) result
 
+(** Bounded startup compilation of the same original legacy wrapper and surface.
+    Uses the joined compiler; never executes an initializer or substitutes a
+    prepared graph. Existing synchronous [compile] remains compatible. *)
+val compile_with_limits
+  :  env:Eio_unix.Stdenv.base
+  -> limits:Chatml_compilation.limits
+  -> script:Chatmd_shell_spec.Chatmd_script_spec.t
+  -> (compiled, Chatmd_shell_spec.Diagnostic.t list) Result.t
+
 (** Legacy [with_entrypoint] recompiles the original text with the selected ABI
     adapter. Prepared programs select only an already compiled alternative from
     [with_prepared_entrypoints], or return unchanged for the same entrypoint.
