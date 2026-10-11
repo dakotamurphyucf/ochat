@@ -14,6 +14,21 @@ manifest and private bytes. The host must durably install the artifact before
 publishing the baseline, and include its exact revision in pruning protection.
 Finalization itself is not a durability receipt.
 
+`Prompt_project_preparation.capture` connects this history to the existing source
+batch. It uses the actual capture's original receipt, loads and reconciles the
+exact prior artifact, and selects each operation by stable slot and authentic
+invocation role. Build uses the retained lock; a known new slot or Provided input
+uses the Local-only no-prior operation. Only authoritative first admission allows
+Initial. Update is an explicit host request and does not increase source grants.
+The host still owns authorization, candidate reservation and durable publication.
+
+Source preparation retains all requested plans for execution metadata and exposes
+`captured_plans` for baseline association. Unconfigured contexts without supplied
+graphs intentionally retain no program graph; they continue through the lightweight
+implicit path. Every configured context remains in `captured_plans`, so absent
+configured custody is still an error. Unknown history rejects configured project
+requests before acquisition while allowing these ordinary implicit scripts.
+
 A stable slot contains the registration Root, declaration input role/path and
 qualified script ID. It excludes byte ranges, source revisions and compiler
 contract hashes. Roles are selected by the authentic planner: standard targets,

@@ -16,6 +16,7 @@
   prompt_project_baseline_record
   prompt_project_baseline_document
   prompt_project_baseline
+  prompt_project_preparation
   prompt_project_baseline_store
   prompt_content_custody
   prompt_revision_builder

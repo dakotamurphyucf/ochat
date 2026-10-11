@@ -36,6 +36,8 @@ end
 module Policy : sig
   type t
 
+  val compilation : t -> Chatml_compilation.limits
+
   (** One source-only callback's policy. Compilation supplies the original startup
       deadline; it does not authorize compilation or activation. Role/reference
       counts are bounded before queue/list retention. Work covers ALL role planning,
@@ -79,6 +81,13 @@ module Prepared : sig
       requested roles in acquisition order. Each keeps its original Parsed
       identity from the supplied Capture. No roles are inferred from digests. *)
   val plans : t -> Chat_response.Script_contract_plan.t list
+
+  (** Original plans for contexts whose programs were actually retained. An
+      unconfigured context with no supplied graphs keeps the lightweight implicit
+      execution path and has no captured program rows. Configured contexts always
+      remain in this subset, so missing configured custody cannot be disguised
+      as an implicit context. Use these plans for Baseline.Prepared.create. *)
+  val captured_plans : t -> Chat_response.Script_contract_plan.t list
 end
 
 (** Suitable for Catalog.prepare_owned's existing prepare_programs callback.
@@ -104,7 +113,7 @@ end
     never publishes a mutable source or lock outside that custody. Return source-owned diagnostics on expected failures;
     original borrowed callback/cancellation/backtrace identity propagates.
     Project [Prepared.programs] for Catalog's program callback. Retain the same
-    result's [Prepared.plans] when establishing a successful dependency baseline;
+    result's [Prepared.captured_plans] when establishing a successful dependency baseline;
     do not rebuild plans against a later parser or compiler contract.
     No callback, Scope, Startup or grants are retained in the result. *)
 val capture

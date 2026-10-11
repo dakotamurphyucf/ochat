@@ -75,6 +75,8 @@ module Policy = struct
     ; max_work_steps : int
     }
 
+  let compilation t = t.compilation
+
   let create
         ~compilation
         ~planning
@@ -114,10 +116,12 @@ module Prepared = struct
   type t =
     { programs : Chatml_prompt_programs.t
     ; plans : Plan.t list
+    ; captured_plans : Plan.t list
     }
 
   let programs t = t.programs
   let plans t = t.plans
+  let captured_plans t = t.captured_plans
 end
 
 let diagnostic ?source code message = Builder.Diagnostic.{ code; message; source }
@@ -291,7 +295,26 @@ let capture
                 ~clock:(Eio.Stdenv.mono_clock env)
                 ~checkpoint:poll
             in
-            { Prepared.programs; plans }
+            let captured_plans =
+              List.filter plans ~f:(fun plan ->
+                poll ();
+                Plan.has_projects plan
+                ||
+                let root = Prompt.Chat_markdown.Parsed.root_input (Plan.parsed plan) in
+                let identity =
+                  Chatmd_parser_input.identity_digest root ~checkpoint:poll
+                in
+                List.exists
+                  (Chatml_prompt_programs.bindings programs)
+                  ~f:(fun (binding, _) ->
+                    poll ();
+                    String.equal
+                      identity
+                      (Chatmd_parser_input.identity_digest
+                         (Chatml_prompt_programs.Binding.registration_input binding)
+                         ~checkpoint:poll)))
+            in
+            { Prepared.programs; plans; captured_plans }
         with
         | Abort.Stop errors -> Error errors))
     ()
