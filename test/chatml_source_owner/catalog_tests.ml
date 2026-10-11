@@ -348,5 +348,36 @@ let%test_unit "catalog program capture borrows its live scope and cleans up fail
       Catalog.install_owned catalog candidate |> ok;
       [%test_eq: string]
         (Agent_session.Prompt_revision.artifact (revision catalog definition)).root_chatmd
-        "<user>captured</user>"))
+        "<user>captured</user>";
+      (* No native document acquisition is needed for a missing dynamic import
+         or no document at all. Supplying a host hook must not introduce an empty
+         content bundle or change the already captured revision's identity. *)
+      List.iter
+        [ "<user>no documents</user>"; {|<user><doc src="missing.md" local/></user>|} ]
+        ~f:(fun contents ->
+          save root "root.chatmd" contents;
+          Catalog.install_owned catalog (prepare catalog sw [ definition ] |> ok) |> ok;
+          let baseline = revision catalog definition in
+          let candidate =
+            Catalog.prepare_owned
+              catalog
+              ~prepare_content:(fun _ _ ->
+                failwith "all-dynamic acquisition callback must not run")
+              ~sw
+              ~source_limits:(limits ())
+              ~max_roots:8
+              ~checkpoint:ignore
+              ~transaction_id:(fun _ -> Agent_protocol.Id.Transaction.create ())
+              ~created_at:(Agent_protocol.Timestamp.of_string "2026-10-11T12:00:00Z" |> ok)
+              [ definition ]
+            |> ok
+          in
+          Catalog.install_owned catalog candidate |> ok;
+          let current = revision catalog definition in
+          assert (
+            Agent_protocol.Id.Prompt_revision.equal
+              (Agent_session.Prompt_revision.id baseline)
+              (Agent_session.Prompt_revision.id current));
+          assert (
+            Option.is_none (Agent_session.Prompt_revision.artifact current).content_bundle))))
 ;;

@@ -173,6 +173,17 @@ let source_error definition error =
   , None )
 ;;
 
+let capture_needs_content captured ~checkpoint =
+  let captured = Prompt_source_owner.Capture.value captured in
+  let needs_content parsed =
+    checkpoint ();
+    Prompt_content_custody.requires_captured_documents parsed ~checkpoint
+  in
+  needs_content (Prompt_revision_builder.Capture.root captured)
+  || List.exists (Prompt_revision_builder.Capture.agents captured) ~f:(fun (_, parsed) ->
+    needs_content parsed)
+;;
+
 let prepare_owned
       t
       ?prepare_programs
@@ -318,6 +329,10 @@ let prepare_owned
                               |> Or_error.ok_exn)
                            ~checkpoint
                          |> Result.map ~f:(fun capture ->
+                           let prepare_content =
+                             Option.filter prepare_content ~f:(fun _ ->
+                               capture_needs_content capture ~checkpoint)
+                           in
                            Prompt_revision_builder.build_captured
                              ?prepare_programs:
                                (Option.map prepare_programs ~f:(fun prepare _ ->

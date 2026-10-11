@@ -105,7 +105,10 @@ val source_selection
     retained; original exceptions and cancellation propagate after candidate
     cleanup. Without [prepare_programs], the existing parser-only program custody
     path remains. Captured documents require [prepare_content];
-    its immutable result is validated by the Builder before publication. *)
+    it is invoked only when the actual root or a queued agent contains captured
+    or builtin document occurrences. All-dynamic and document-free captures omit
+    this hook and retain absent content custody. Its immutable result is validated
+    by the Builder before publication; an invoked hook's limits are not reset. *)
 val prepare_owned
   :  t
   -> ?prepare_programs:
