@@ -25,6 +25,7 @@ type committed =
   | Provider_logout of Provider_operator.Logout_result.t
   | Provider_selection of Provider_operator.Selection_result.t
   | Provider_configuration of Provider_operator.Configuration_result.t
+  | Prompt_dependencies_updated of Prompt_dependency_selection.Update_result.t
   | Created_session of Id.Session.t
   | Attached_session of Id.Session.t
   | Session_mutation of

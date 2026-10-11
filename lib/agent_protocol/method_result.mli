@@ -143,6 +143,8 @@ type t =
   | Server_health of Health.Response.t
   | Prompt_list of Prompt.t Page.t
   | Prompt_get of Prompt.t
+  | Prompt_dependencies_status of Prompt_dependency_selection.Status.t
+  | Prompt_dependencies_update of Prompt_dependency_selection.Update_result.t
   | Workspace_list of Workspace.t Page.t
   | Workspace_get of Workspace.t
   | Blob_read of Blob.Chunk.t

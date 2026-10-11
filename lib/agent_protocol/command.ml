@@ -16,6 +16,8 @@ type t =
   | Server_health of Health.Request.t
   | Prompt_list of Prompt.List_request.t
   | Prompt_get of Prompt.Get_request.t
+  | Prompt_dependencies_status
+  | Prompt_dependencies_update of Prompt_dependency_selection.Update_request.t
   | Workspace_list of Workspace.List_request.t
   | Workspace_get of Workspace.Get_request.t
   | Blob_read of Blob.Read_request.t
@@ -98,6 +100,8 @@ let method_name = function
   | Server_health _ -> "server.health"
   | Prompt_list _ -> "prompt.list"
   | Prompt_get _ -> "prompt.get"
+  | Prompt_dependencies_status -> "prompt.dependencies.status"
+  | Prompt_dependencies_update _ -> "prompt.dependencies.update"
   | Workspace_list _ -> "workspace.list"
   | Workspace_get _ -> "workspace.get"
   | Blob_read _ -> "blob.read"
@@ -182,6 +186,9 @@ let params = function
   | Server_health request -> Health.Request.to_json request
   | Prompt_list request -> Prompt.List_request.to_json request
   | Prompt_get request -> Prompt.Get_request.to_json request
+  | Prompt_dependencies_status -> Prompt_dependency_selection.Status_request.to_json ()
+  | Prompt_dependencies_update request ->
+    Prompt_dependency_selection.Update_request.to_json request
   | Workspace_list request -> Workspace.List_request.to_json request
   | Workspace_get request -> Workspace.Get_request.to_json request
   | Blob_read request -> Blob.Read_request.to_json request
@@ -293,6 +300,12 @@ let decoders =
   ; "server.health", map Health.Request.of_json (fun x -> Server_health x)
   ; "prompt.list", map Prompt.List_request.of_json (fun x -> Prompt_list x)
   ; "prompt.get", map Prompt.Get_request.of_json (fun x -> Prompt_get x)
+  ; ( "prompt.dependencies.status"
+    , map Prompt_dependency_selection.Status_request.of_json (fun () ->
+        Prompt_dependencies_status) )
+  ; ( "prompt.dependencies.update"
+    , map Prompt_dependency_selection.Update_request.of_json (fun x ->
+        Prompt_dependencies_update x) )
   ; "workspace.list", map Workspace.List_request.of_json (fun x -> Workspace_list x)
   ; "workspace.get", map Workspace.Get_request.of_json (fun x -> Workspace_get x)
   ; "blob.read", map Blob.Read_request.of_json (fun x -> Blob_read x)

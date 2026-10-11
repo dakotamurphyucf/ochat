@@ -11,6 +11,7 @@
   idempotency_key
   session_ref
   session_lifecycle
+  prompt_dependency_selection
   command_receipt
   provider_operator
   initialize

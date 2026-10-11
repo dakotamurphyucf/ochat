@@ -35,6 +35,7 @@ type committed =
   | Provider_logout of Provider_operator.Logout_result.t
   | Provider_selection of Provider_operator.Selection_result.t
   | Provider_configuration of Provider_operator.Configuration_result.t
+  | Prompt_dependencies_updated of Prompt_dependency_selection.Update_result.t
   | Created_session of Id.Session.t
   | Attached_session of Id.Session.t
   | Session_mutation of
@@ -111,6 +112,11 @@ let optional_nullable fields name decode =
 let mutation_fields mutation = [ "mutation", Mutation_result.to_json mutation ]
 
 let committed_to_json = function
+  | Prompt_dependencies_updated value ->
+    `Object
+      [ "kind", `String "prompt_dependencies_updated"
+      ; "value", Prompt_dependency_selection.Update_result.to_json value
+      ]
   | Provider_setup value ->
     `Object
       [ "kind", `String "provider_setup"
@@ -251,6 +257,12 @@ let committed_of_json json =
   let session () = Json_codec.required_as fields "session_id" Id.Session.of_json in
   let mutation () = Json_codec.required_as fields "mutation" Mutation_result.of_json in
   match kind with
+  | "prompt_dependencies_updated" ->
+    Json_codec.required_as
+      fields
+      "value"
+      Prompt_dependency_selection.Update_result.of_json
+    |> Result.map ~f:(fun value -> Prompt_dependencies_updated value)
   | "provider_setup" ->
     Json_codec.required_as fields "value" Provider_operator.Setup_result.of_json
     |> Result.map ~f:(fun value -> Provider_setup value)

@@ -28,6 +28,8 @@ module Non_history = struct
     | Server_health _
     | Prompt_list _
     | Prompt_get _
+    | Prompt_dependencies_status _
+    | Prompt_dependencies_update _
     | Workspace_list _
     | Workspace_get _
     | Blob_read _

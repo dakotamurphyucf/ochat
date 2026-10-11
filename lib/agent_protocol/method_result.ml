@@ -400,6 +400,8 @@ type t =
   | Server_health of Health.Response.t
   | Prompt_list of Prompt.t Page.t
   | Prompt_get of Prompt.t
+  | Prompt_dependencies_status of Prompt_dependency_selection.Status.t
+  | Prompt_dependencies_update of Prompt_dependency_selection.Update_result.t
   | Workspace_list of Workspace.t Page.t
   | Workspace_get of Workspace.t
   | Blob_read of Blob.Chunk.t
@@ -482,6 +484,8 @@ let method_name = function
   | Server_health _ -> "server.health"
   | Prompt_list _ -> "prompt.list"
   | Prompt_get _ -> "prompt.get"
+  | Prompt_dependencies_status _ -> "prompt.dependencies.status"
+  | Prompt_dependencies_update _ -> "prompt.dependencies.update"
   | Workspace_list _ -> "workspace.list"
   | Workspace_get _ -> "workspace.get"
   | Blob_read _ -> "blob.read"
@@ -566,6 +570,9 @@ let to_json = function
   | Server_health value -> Health.Response.to_json value
   | Prompt_list value -> Page.to_json Prompt.to_json value
   | Prompt_get value -> Prompt.to_json value
+  | Prompt_dependencies_status value -> Prompt_dependency_selection.Status.to_json value
+  | Prompt_dependencies_update value ->
+    Prompt_dependency_selection.Update_result.to_json value
   | Workspace_list value -> Page.to_json Workspace.to_json value
   | Workspace_get value -> Workspace.to_json value
   | Blob_read value -> Blob.Chunk.to_json value
@@ -675,6 +682,12 @@ let decoders =
   ; "server.health", map Health.Response.of_json (fun x -> Server_health x)
   ; "prompt.list", map (Page.of_json Prompt.of_json) (fun x -> Prompt_list x)
   ; "prompt.get", map Prompt.of_json (fun x -> Prompt_get x)
+  ; ( "prompt.dependencies.status"
+    , map Prompt_dependency_selection.Status.of_json (fun x ->
+        Prompt_dependencies_status x) )
+  ; ( "prompt.dependencies.update"
+    , map Prompt_dependency_selection.Update_result.of_json (fun x ->
+        Prompt_dependencies_update x) )
   ; "workspace.list", map (Page.of_json Workspace.of_json) (fun x -> Workspace_list x)
   ; "workspace.get", map Workspace.of_json (fun x -> Workspace_get x)
   ; "blob.read", map Blob.Chunk.of_json (fun x -> Blob_read x)
