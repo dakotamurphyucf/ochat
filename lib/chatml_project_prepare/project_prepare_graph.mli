@@ -50,3 +50,10 @@ val prepare
   -> request:Request.t
   -> tools:Chat_response.Tool_capability.t
   -> (Build.t, Error.t) Result.t
+
+(** Same source acquisition/composition, without claiming live tool admission. *)
+val prepare_source
+  :  Attempt.t
+  -> host:Host.t
+  -> request:Request.t
+  -> (Project_prepare_source_result.t, Error.t) Result.t
