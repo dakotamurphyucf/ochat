@@ -63,7 +63,7 @@ let pair = (1, 2)
 let main input = Task.pure(`Null)
 ```
 
-## Records are structural, with conservative joins
+## Records are structural, with matching branch shapes
 
 You do not need an OCaml-style nominal record declaration to create or inspect a
 record. A copy update creates a new record and may change a field's type. It does
@@ -79,11 +79,13 @@ let main input =
   else Task.pure(`String("unexpected mutation"))
 ```
 
-At an `if` or `match` join, only fields guaranteed on every branch remain
-available. Do not assume a field added on one branch exists on the joined result.
-Prefer the same explicit result shape on each branch.
+At an `if` or `match` join, branch records must have the same field set and
+compatible field types. Construct matching result shapes, or use variant tags
+for intentionally different alternatives. Open record-taking helpers still
+accept additional fields; matching result types do not erase those fields.
 
-**Rejected during typechecking:** `timeout_ms` is not present on every path.
+**Rejected during typechecking:** these branches have different field sets,
+even if the caller never reads `timeout_ms`.
 
 <!-- ochat-authoring-example: {"id":"records.join-rejected","surface":"one_off_v1","stage":"typecheck","contains":"timeout_ms","span":true} -->
 ```ocaml

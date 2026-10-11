@@ -24,10 +24,9 @@
     • monomorphic bindings are {e not} instantiated on lookup, so helper
       functions preserve sharing between a parameter's projected fields and
       the value they eventually return;
-    • lambda parameters whose type has been constrained by record field
-      accesses are reopened to an open row before generalisation, allowing
-      helpers such as state-transition functions to accept larger records
-      than the subset of fields they touch;
+    • field projection and open record patterns infer open rows directly,
+      allowing helpers to accept larger records than the fields they touch;
+      exact patterns and annotations retain their closed-row requirements;
     • record copy-update (`{ r with field = v }`) preserves the base row's
       open tail and layers updated fields in front, so helpers can both
       override existing fields and add new ones while still accepting
@@ -752,23 +751,23 @@ let rec unify (state : infer_state) lhs rhs =
           tv := Bound t (* cyclic bind; NO Rec_var/Mu synthesis *))
         else tv := Bound t
       | Ref t1, Ref t2 | Array t1, Array t2 -> go active env_l env_r t1 t2
-      | Record r1, Record r2 | Module r1, Module r2 | Variant r1, Variant r2 ->
-        go active env_l env_r r1 r2
+      | Record r1, Record r2 | Module r1, Module r2 -> go_rows active env_l env_r r1 r2
+      | Variant r1, Variant r2 -> go active env_l env_r r1 r2
       | Field_receiver (k1, r1), Field_receiver (k2, r2) ->
         go active env_l env_r k1 k2;
-        go active env_l env_r r1 r2
+        go_rows active env_l env_r r1 r2
       | Field_receiver (kind, receiver_row), Record row ->
         go active env_l env_r kind (Shape_kind Record);
-        go active env_l env_r receiver_row row
+        go_rows active env_l env_r receiver_row row
       | Record row, Field_receiver (kind, receiver_row) ->
         go active env_l env_r (Shape_kind Record) kind;
-        go active env_l env_r row receiver_row
+        go_rows active env_l env_r row receiver_row
       | Field_receiver (kind, receiver_row), Module row ->
         go active env_l env_r kind (Shape_kind Module);
-        go active env_l env_r receiver_row row
+        go_rows active env_l env_r receiver_row row
       | Module row, Field_receiver (kind, receiver_row) ->
         go active env_l env_r (Shape_kind Module) kind;
-        go active env_l env_r row receiver_row
+        go_rows active env_l env_r row receiver_row
       | Shape_kind left, Shape_kind right when Shape_kind.equal left right -> ()
       | Variant_payload ts1, Variant_payload ts2 ->
         if List.length ts1 <> List.length ts2
@@ -815,21 +814,35 @@ let rec unify (state : infer_state) lhs rhs =
     let missing_l, missing_r =
       collect (Env.bindings map_l) (Env.bindings map_r) Env.empty Env.empty
     in
-    match Env.is_empty missing_l, Env.is_empty missing_r with
-    | true, true -> go active env_l env_r tail_l tail_r
-    | true, false -> go active env_r env_l tail_r (Row (missing_r, tail_l))
-    | false, true -> go active env_l env_r tail_l (Row (missing_l, tail_r))
-    | false, false ->
-      (match tail_l with
-       | Var ({ contents = Free _ } as tv) ->
-         let row_var = new_var state state.current_lvl in
-         go active env_r env_l tail_r (Row (missing_r, row_var));
-         (match !tv with
-          | Bound _ -> raise (Type_error "Recursive row types")
-          | _ -> ());
-         tv := Bound (Row (missing_l, row_var))
-       | Empty_row -> go active env_l env_r tail_l (Row (missing_l, new_var state 0))
-       | _ -> assert false)
+    (* Copy-updates may overlay fields on the same unknown base row. Equality
+       of those rows requires the base to provide any field overridden on only
+       one side. Use a fresh remainder rather than a recursive row equation;
+       flatten again to check newly exposed field types. This is shared row
+       unification, so nested records and container/function types obey the
+       same rule as direct branch results. *)
+    match tail_l, tail_r with
+    | Var ({ contents = Free _ } as left), Var right
+      when phys_equal left right && not (Env.is_empty missing_l && Env.is_empty missing_r)
+      ->
+      let required = Env.merge missing_l missing_r in
+      go active env_l env_r tail_l (Row (required, new_var state state.current_lvl));
+      go_rows active env_l env_r lhs rhs
+    | _ ->
+      (match Env.is_empty missing_l, Env.is_empty missing_r with
+       | true, true -> go active env_l env_r tail_l tail_r
+       | true, false -> go active env_r env_l tail_r (Row (missing_r, tail_l))
+       | false, true -> go active env_l env_r tail_l (Row (missing_l, tail_r))
+       | false, false ->
+         (match tail_l with
+          | Var ({ contents = Free _ } as tv) ->
+            let row_var = new_var state state.current_lvl in
+            go active env_r env_l tail_r (Row (missing_r, row_var));
+            (match !tv with
+             | Bound _ -> raise (Type_error "Recursive row types")
+             | _ -> ());
+            tv := Bound (Row (missing_l, row_var))
+          | Empty_row -> go active env_l env_r tail_l (Row (missing_l, new_var state 0))
+          | _ -> assert false))
   in
   go [] MuEnv.empty MuEnv.empty lhs rhs
 
@@ -2127,43 +2140,6 @@ and infer_pattern (state : infer_state) (env : tenv) (pat : pattern) (expected_t
     unify state expected_ty variant_ty;
     env_after
 
-and reopen_lambda_param_type (state : infer_state) (ty : typ) : typ =
-  checkpoint state;
-  match resolve_bound_type ~checkpoint:(fun () -> checkpoint state) ty with
-  | Record row -> Record (reopen_lambda_row state row)
-  | Field_receiver (kind, row) -> Field_receiver (kind, reopen_lambda_row state row)
-  | Array elt_ty -> Array (reopen_lambda_param_type state elt_ty)
-  | Ref inner_ty -> Ref (reopen_lambda_param_type state inner_ty)
-  | Tuple tys -> Tuple (List.map tys ~f:(reopen_lambda_param_type state))
-  | Variant_payload tys ->
-    Variant_payload (List.map tys ~f:(reopen_lambda_param_type state))
-  | other -> other
-
-and reopen_lambda_param_if_closed_record (state : infer_state) (ty : typ) : typ =
-  match ty with
-  | Var ({ contents = Bound bound_ty } as tv) ->
-    let reopened = reopen_lambda_param_type state bound_ty in
-    tv := Bound reopened;
-    ty
-  | _ -> reopen_lambda_param_type state ty
-
-and reopen_lambda_row (state : infer_state) (row : typ) : typ =
-  checkpoint state;
-  match resolve_bound_type ~checkpoint:(fun () -> checkpoint state) row with
-  | Row _ as full_row ->
-    let merged_fields, _merged_tail =
-      merge_fields ~checkpoint:(fun () -> checkpoint state) full_row
-    in
-    let reopened_fields = Env.map merged_fields ~f:(reopen_lambda_param_type state) in
-    (* Lambda parameters should be row-polymorphic by default: if a helper
-       touches only a subset of record fields, callers should be able to pass
-       larger records.  We therefore rebuild the parameter row with a fresh
-       open tail after inference has discovered the required fields.  This is
-       intentionally biased toward the "state-machine helper" use-case that
-       ChatML scripts rely on heavily. *)
-    Row (reopened_fields, new_var state state.current_lvl)
-  | other -> other
-
 (** --------------------------------------------------------------------- *)
 (** 10. Inference – expressions                                            *)
 (** --------------------------------------------------------------------- *)
@@ -2222,62 +2198,11 @@ and infer_binary_prim
     ensure_equality_type ~checkpoint:(fun () -> checkpoint state) lhs_ty;
     Boolean
 
-and row_tail_equivalent ?checkpoint (lhs : typ) (rhs : typ) : bool =
-  let lhs' = resolve_bound_type ?checkpoint lhs in
-  let rhs' = resolve_bound_type ?checkpoint rhs in
-  (* Phase 6 rule: explicit recursive types stay separate from row tails.
-     Control-flow joins must not preserve a row tail merely because both
-     sides happen to mention the same recursive binder structure. *)
-  phys_equal lhs' rhs'
-  ||
-  match lhs', rhs' with
-  | Empty_row, Empty_row -> true
-  | Var tv_l, Var tv_r -> phys_equal tv_l tv_r
-  | Generic name_l, Generic name_r -> String.equal name_l name_r
-  | Mu _, _ | _, Mu _ | Rec_var _, _ | _, Rec_var _ -> false
-  | _ -> false
-
-and build_row_type (fields : typ Env.t) (tail : typ) : typ =
-  if Env.is_empty fields then tail else Row (fields, tail)
-
-and row_known_fields_subset ~(subset : typ) ~(superset : typ) : bool =
-  let subset_fields, _subset_tail = merge_fields subset in
-  let superset_fields, _superset_tail = merge_fields superset in
-  Env.fold subset_fields ~init:true ~f:(fun ~key ~data:_ acc ->
-    acc
-    &&
-    match Env.find superset_fields key with
-    | Some _ -> true
-    | None -> false)
-
-and join_record_rows (state : infer_state) (lhs : typ) (rhs : typ) : typ =
-  let poll () = checkpoint state in
-  let map_l, tail_l = merge_fields ~checkpoint:poll lhs in
-  let map_r, tail_r = merge_fields ~checkpoint:poll rhs in
-  let common_fields =
-    Env.fold map_l ~init:Env.empty ~f:(fun ~key ~data:lhs_field_ty acc ->
-      match Env.find map_r key with
-      | None -> acc
-      | Some rhs_field_ty -> Env.add key (join_type state lhs_field_ty rhs_field_ty) acc)
-  in
-  let shared_tail =
-    if row_tail_equivalent ~checkpoint:poll tail_l tail_r
-    then resolve_bound_type ~checkpoint:poll tail_l
-    else Empty_row
-  in
-  build_row_type common_fields shared_tail
-
 and join_type (state : infer_state) (lhs : typ) (rhs : typ) : typ =
-  checkpoint state;
-  match
-    ( resolve_bound_type ~checkpoint:(fun () -> checkpoint state) lhs
-    , resolve_bound_type ~checkpoint:(fun () -> checkpoint state) rhs )
-  with
-  | Record row_l, Record row_r -> Record (join_record_rows state row_l row_r)
-  | Module row_l, Module row_r -> Module (join_record_rows state row_l row_r)
-  | lhs', rhs' ->
-    unify state lhs' rhs';
-    lhs
+  (* Keep one compatible result type, including the complete physical record
+     shape. A field intersection would unsafely erase exactness constraints. *)
+  unify state lhs rhs;
+  lhs
 
 and infer_expr_against_expected
       (state : infer_state)
@@ -2350,10 +2275,7 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
               add_mono ~checkpoint:(fun () -> checkpoint state) env_acc p t, t :: tys_rev)
           in
           let body_ty = infer_expr state env_with_params types body in
-          let param_tys =
-            List.rev param_tys_rev
-            |> List.map ~f:(reopen_lambda_param_if_closed_record state)
-          in
+          let param_tys = List.rev param_tys_rev in
           Fun (param_tys, body_ty))
       | ELambdaSlots (params, _slots, body) ->
         with_new_level state ~f:(fun () ->
@@ -2363,10 +2285,7 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
               add_mono ~checkpoint:(fun () -> checkpoint state) env_acc p t, t :: tys_rev)
           in
           let body_ty = infer_expr state env_with_params types body in
-          let param_tys =
-            List.rev param_tys_rev
-            |> List.map ~f:(reopen_lambda_param_if_closed_record state)
-          in
+          let param_tys = List.rev param_tys_rev in
           Fun (param_tys, body_ty))
       | EApp (fn_expr, arg_exprs) ->
         let fn_ty = infer_expr state env types fn_expr in

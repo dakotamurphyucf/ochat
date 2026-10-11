@@ -55,8 +55,6 @@ let%expect_test "inference-owned type inspections and row operations cooperate" 
     T.validate_match_exhaustiveness state left [ L.PRecord ([], false) ]);
   cancelled "disjoint record join" (fun state _ ->
     ignore (T.join_type state left right : T.typ));
-  cancelled "lambda row reopening" (fun state _ ->
-    ignore (T.reopen_lambda_param_type state left : T.typ));
   [%expect
     {|
     lookup: cancelled
@@ -64,7 +62,6 @@ let%expect_test "inference-owned type inspections and row operations cooperate" 
     type declaration: cancelled
     record coverage: cancelled
     disjoint record join: cancelled
-    lambda row reopening: cancelled
     |}]
 ;;
 

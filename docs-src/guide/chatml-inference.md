@@ -143,7 +143,7 @@ let label = "second"
 let main input = Task.pure(`String(captured() ++ ":" ++ label))
 ```
 
-## Records retain only fields guaranteed by their type
+## Records preserve their shape and inferred field requirements
 
 Field access constrains an inferred record parameter to contain that field.
 Unannotated helper parameters can remain open to additional fields. An explicit
@@ -153,11 +153,21 @@ labels and pattern binders are rejected.
 
 Copy-update produces a new record, can add a field, and can replace a field with
 a different type. Refs and arrays inside either record still share their storage.
-At an `if` or `match` result join, records keep only common fields and join those
-fields recursively. An open tail is preserved only when both sides share the
-same tail identity; merely similar-looking unknown rows do not grant fields.
-Outside record joins, branch result types must unify. Returning a variant with
-different constructors is often clearer than returning incompatible field types.
+All `if` and `match` result branches must have compatible types, including the
+same record field set. A join never hides physical fields. This also holds for
+nested records and records inside arrays, refs and function results. Use matching
+shapes or inferred variant tags when alternatives intentionally carry different
+records.
+
+When a branch returns an input record and another overrides one of its fields,
+the input must already have that field with a compatible type. Additional input
+fields are preserved. If both branches replace the field compatibly, the original
+field may be absent or have another type. Standalone updates still add fields or
+change their types. An annotation on the original constrains only the original;
+an explicit annotation on the new result must match that result's complete shape.
+
+Exact record patterns constrain helper arguments just like closed annotations.
+Use an open pattern or field projection when a helper should accept extra fields.
 
 <!-- ochat-authoring-example: {"id":"inference.closed-record-annotation-rejected","surface":"one_off_v1","stage":"typecheck","contains":"extra","span":true} -->
 ```ocaml
@@ -172,6 +182,26 @@ let finish value = {value with status = "done"}
 let main input =
   let updated = finish({name = "task"; status = 1; extra = true}) in
   Task.pure(`String(label(updated) ++ ":" ++ updated.status))
+```
+
+<!-- ochat-authoring-example: {"id":"inference.branch-shape-rejected","surface":"one_off_v1","stage":"typecheck","contains":"extra","span":true} -->
+```ocaml
+let choose flag = if flag then {x = 1} else {x = 2; extra = true}
+let main input = Task.pure(`Null)
+```
+
+<!-- ochat-authoring-example: {"id":"inference.conditional-update","surface":"one_off_v1","result":7} -->
+```ocaml
+let maybe_enable flag state = if flag then {state with enabled = true} else state
+let main input =
+  let next = maybe_enable(true, {enabled = false; count = 7; name = "kept"}) in
+  Task.pure(Json.parse(to_string(next.count)))
+```
+
+<!-- ochat-authoring-example: {"id":"inference.exact-helper-rejected","surface":"one_off_v1","stage":"typecheck","contains":"extra","span":true} -->
+```ocaml
+let exact value = match value with | {x = x} -> x
+let main input = Task.pure(Json.parse(to_string(exact({x = 1; extra = true}))))
 ```
 
 ## Modules and records have different representations
