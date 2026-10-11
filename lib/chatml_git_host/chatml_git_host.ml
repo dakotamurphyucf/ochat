@@ -106,12 +106,14 @@ module Receipt = struct
   type t =
     { disposition : disposition
     ; payload_bytes_reserved : int
+    ; request_bytes : int
     ; output_bytes : int
     ; work_steps : int
     }
 
   let disposition t = t.disposition
   let payload_bytes_reserved t = t.payload_bytes_reserved
+  let request_bytes t = t.request_bytes
   let output_bytes t = t.output_bytes
   let work_steps t = t.work_steps
 end
@@ -178,6 +180,7 @@ let with_directory_owned result ~f =
 let receipt attempt ~disposition ~reservation =
   { Receipt.disposition
   ; payload_bytes_reserved = reservation
+  ; request_bytes = Attempt.request_bytes attempt
   ; output_bytes = Attempt.output_bytes attempt
   ; work_steps = Attempt.work_steps attempt
   }

@@ -49,6 +49,7 @@ val charge_request
   -> (unit, Error.t) Result.t
 
 val charge_output : t -> stdout:string -> stderr_bytes:int -> (unit, Error.t) Result.t
+val request_bytes : t -> int
 val output_bytes : t -> int
 val work_steps : t -> int
 

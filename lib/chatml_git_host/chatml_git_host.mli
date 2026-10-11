@@ -248,6 +248,12 @@ module Receipt : sig
 
   val disposition : t -> disposition
   val payload_bytes_reserved : t -> int
+
+  (** Cumulative bytes charged by the native request ledger, including executable,
+      arguments, explicit environment and stdin. This is the admitted request
+      size, not a network-transfer count or the configured maximum allowance. *)
+  val request_bytes : t -> int
+
   val output_bytes : t -> int
   val work_steps : t -> int
 end

@@ -89,6 +89,7 @@ let create limits ~clock =
 
 let poison t = t.poisoned <- true
 let is_poisoned t = t.poisoned
+let request_bytes t = t.requests
 let output_bytes t = t.output
 let work_steps t = t.work
 
