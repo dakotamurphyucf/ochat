@@ -219,9 +219,10 @@ let%expect_test "shell surfaces snapshot globals modules aliases and exports" =
        (parse parse_result stringify pretty parse_opt validate tag as_bool
         as_number as_string as_array as_object object_keys get_field get_path
         set_field remove_field))
-      (Task (pure bind map fail catch)) (Outcome (map bind map_error))
+      (Task (pure bind map map_array iter_array fail catch))
+      (Outcome (map bind map_error))
       (Option (none some is_none is_some map bind get_or))
-      (Hashtbl (create set get mem remove))
+      (Hashtbl (create to_array set get mem remove))
       (Shell
        (request_id runtime_id manifest_sha256 argv executable cwd origin
         request_kind stdin_kind stdin_sha256 stdin_bytes script_sha256
