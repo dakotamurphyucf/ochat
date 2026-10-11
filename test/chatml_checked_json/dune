@@ -1,0 +1,11 @@
+(copy_files ../../docs-src/examples/libraries/checked-json/src/*)
+(copy_files ../../docs-src/examples/libraries/checked-json/chatml.project.json)
+
+(library
+ (name chatml_checked_json_tests)
+ (libraries core expect_test_helpers_core eio eio_main chatml chatml_source
+  chatml_prepared_program chatml_diagnostic chatml_graph chatml_linked_program
+  chatml_execution chatml_host_runtime)
+ (inline_tests
+  (deps checked_json.chatml checked_json.chatmli chatml.project.json))
+ (preprocess (pps ppx_jane ppx_expect)))

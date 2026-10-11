@@ -1,0 +1,30 @@
+(* Transparent checked decoder interface.
+   This is authored ChatML, not a builtin or alternate module registry.
+   Error paths use outermost-first field/index segments. Lookup keeps the first
+   duplicate key. Null is distinguished from absent and wrong-shaped values. *)
+type segment = [ `Field(string) | `Index(int) ]
+type kind =
+  [ `Missing
+  | `Null
+  | `Wrong_shape({expected:string; actual:string})
+  | `Invalid_value(string)
+  | `Invalid_syntax(string)
+  ]
+type error = {path:segment array; kind:kind}
+type 'a checked = [ `Ok('a) | `Error(error) ]
+type 'a nullable = [ `None | `Some('a) ]
+
+val parse : fun(string) -> json checked
+val string : fun(json) -> string checked
+val array : fun(json, fun(json) -> 'a checked) -> ('a array) checked
+val field : fun(json, string, fun(json) -> 'a checked) -> 'a checked
+val nullable : fun(json, fun(json) -> 'a checked) -> ('a nullable) checked
+
+(* Require an object and reject unknown keys, retaining duplicate-key lookup.
+   The returned JSON is the original receiver, not a lossy rebuilt object. *)
+val object_fields : fun(json, string array) -> json checked
+
+(* Validate a decoded domain value. Existing failures remain unchanged.
+   Put this inside field/array callbacks to retain the contextual path. *)
+val validate : fun('a checked, string, fun('a) -> bool) -> 'a checked
+val describe : fun(error) -> string
