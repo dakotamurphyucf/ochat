@@ -38,6 +38,8 @@
   prompt_source_owner
   prompt_project_route
   prompt_script_sources
+  prompt_script_roles
+  prompt_script_preparation
   prompt_catalog
   prompt_source_lease
   security_grant
@@ -175,7 +177,7 @@
   quota_manager
   start_queue
   inference_ledger)
- (private_modules pending_carrier_admission prompt_program_custody)
+ (private_modules pending_carrier_admission prompt_program_custody prompt_script_roles)
  (libraries ochat.inference_client ochat.inference_runtime ochat.inference ochat.history_chatmd ochat.transcript
   core
   digestif
