@@ -29,7 +29,12 @@ val create
 
     Profile: individual source256KiB, aggregate canonical input/physical custody
     independently8MiB/256 files, manifest262144 bytes, parser inputs512,
-    context roles512/reference visits4096; Local entries4096/components64;
+    context roles512/reference visits4096; script-plan metadata 8 MiB, matching the
+    runtime preparation profile. This is canonical compiler-contract metadata,
+    separate from the 262144-byte artifact manifest. The planner also retains its
+    conservative allocation debit: the shipped versioned moderator contracts
+    require more than 8 MiB of debit despite encoding to less than 80 KiB.
+    Local entries4096/components64;
     roots33/retained128/100000 work; Git objects1024/16MiB/object1MiB/tree8192;
     native60s/CPU30s/FD128; attempt requests4MiB/output32MiB/acquisition128MiB;
     cache8 repositories/64MiB/1024 entries/100000 admission work. Document schema

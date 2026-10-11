@@ -196,7 +196,7 @@ let configure t configuration =
   let%bind planning =
     Chat_response.Script_contract_plan.Limits.create
       ~max_programs:512
-      ~max_metadata_bytes:262_144
+      ~max_metadata_bytes:(8 * mib)
       ~max_work_steps:t.max_semantic_work_steps
   in
   let%bind source_preparation =
