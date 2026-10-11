@@ -113,6 +113,8 @@ type certainty =
     uncertain durable write marks the seal/host uncertain rather than rolling back.
     Cleanup may suspend and is protected; original caller exception remains its
     caller's responsibility. All unused resources joined before releasing admission.
+    If abort cleanup raises, the token remains nonpublishable and retains admission;
+    a later discard retries only joined cleanup.
     Overlapping token operations raise Invalid_argument before mutation or cleanup. *)
 val discard : Prepared.t -> certainty
 

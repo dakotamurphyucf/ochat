@@ -81,6 +81,7 @@ module Prepared = struct
     | Ready
     | Acknowledged
     | Installed
+    | Rejecting
     | Rejected
     | Uncertain
 
@@ -374,7 +375,7 @@ let publish t ~checkpoint =
   then invalid
   else (
     match t.phase with
-    | Acknowledged | Installed | Rejected | Uncertain -> invalid
+    | Acknowledged | Installed | Rejecting | Rejected | Uncertain -> invalid
     | Ready ->
       t.operation_active <- true;
       Fun.protect
@@ -403,7 +404,7 @@ let publish t ~checkpoint =
                Prepared.(
                  match t.phase with
                  | Acknowledged | Uncertain -> true
-                 | Ready | Installed | Rejected -> store_uncertain t.owner)
+                 | Ready | Installed | Rejecting | Rejected -> store_uncertain t.owner)
              then mark_uncertain t;
              Error error
            | exception exn ->
@@ -421,7 +422,7 @@ let commit t =
     match t.phase with
     | Installed -> success
     | Uncertain -> uncertain
-    | Ready | Rejected -> invalid
+    | Ready | Rejecting | Rejected -> invalid
     | Acknowledged ->
       if not (owns t.owner t.token)
       then invalid
@@ -442,6 +443,16 @@ let with_cleanup t ~f =
   Fun.protect ~finally:(fun () -> t.operation_active <- false) f
 ;;
 
+let abort_candidate t =
+  t.Prepared.phase <- Rejecting;
+  Catalog.Seal.abort t.seal
+  |> Result.map_error ~f:(fun e -> Core.Error.create_s (Catalog.Seal.Error.sexp_of_t e))
+  |> Or_error.ok_exn;
+  t.phase <- Rejected;
+  release t.owner t.token;
+  Rejected
+;;
+
 let discard t =
   if not (domain t.Prepared.owner)
   then invalid_arg "Prompt_catalog_publication.discard: foreign domain";
@@ -457,6 +468,7 @@ let discard t =
         |> Or_error.ok_exn;
         Uncertain
       | Rejected -> Rejected
+      | Rejecting -> abort_candidate t
       | Ready ->
         if store_uncertain t.owner
         then (
@@ -466,14 +478,7 @@ let discard t =
             Core.Error.create_s (Catalog.Seal.Error.sexp_of_t e))
           |> Or_error.ok_exn;
           Uncertain)
-        else (
-          Catalog.Seal.abort t.seal
-          |> Result.map_error ~f:(fun e ->
-            Core.Error.create_s (Catalog.Seal.Error.sexp_of_t e))
-          |> Or_error.ok_exn;
-          t.phase <- Rejected;
-          release t.owner t.token;
-          Rejected)))
+        else abort_candidate t))
 ;;
 
 let retire t =
@@ -482,7 +487,7 @@ let retire t =
   if not t.retired
   then (
     match t.phase with
-    | Ready | Acknowledged | Rejected | Uncertain ->
+    | Ready | Acknowledged | Rejecting | Rejected | Uncertain ->
       invalid_arg "Prompt_catalog_publication.retire: token is not installed"
     | Installed ->
       with_cleanup t ~f:(fun () ->
