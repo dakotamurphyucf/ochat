@@ -60,3 +60,29 @@ val with_revision
         -> programs:Chatml_prompt_programs.Restored.t option
         -> ('a, Agent_protocol.Error.t) Result.t)
   -> ('a, Agent_protocol.Error.t) Result.t
+
+(** Prepare a retained authored child and select its exact delegated role before
+    its source fingerprint can enter resource admission or a durable reservation.
+    The captured inventory is preserved; ambiguous, partial or missing recorded
+    roles reject without compiling a replacement entry body. Genuine legacy
+    sources retain their existing path. Content replay uses [content_limits].
+
+    The callback borrows the same startup context that bounded child capture,
+    role planning, selection and adoption. It must forward that context into
+    resource construction and must not retain it. The callback may activate after
+    complete preflight; activation is outside the preparation timer. No native
+    source acquisition, tool initialization or artifact installation occurs before
+    the callback. Original callback exceptions and cancellation propagate. *)
+val with_authored_child
+  :  t option
+  -> parent:Prompt_revision.t
+  -> tool_name:string
+  -> content_limits:Chatmd_prompt_content.Limits.t option
+  -> env:Eio_unix.Stdenv.base
+  -> checkpoint:(unit -> unit)
+  -> f:
+       (Chat_response.Startup_compilation.t
+        -> source:Authored_agent_source.t
+        -> revision:Prompt_revision.t
+        -> ('a, Agent_protocol.Error.t) Result.t)
+  -> ('a, Agent_protocol.Error.t) Result.t

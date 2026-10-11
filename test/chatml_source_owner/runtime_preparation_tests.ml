@@ -29,6 +29,97 @@ let policy ?(max_custody_work_steps = 1_000_000) () =
   |> Or_error.ok_exn
 ;;
 
+let%expect_test "retained child roles are selected before source identity is reserved" =
+  with_workspace (fun env parent root ->
+    List.iter [ false; true ] ~f:(fun delegated ->
+      save
+        root
+        "root.chatmd"
+        {|<tool name="child" agent="child.chatmd" local persistence="persistent"/>|};
+      save
+        root
+        "child.chatmd"
+        {|<script id="owner" language="chatml" kind="moderator" api="extensibility-v1" project="chatml.project.json">let initial_state = 0
+let on_event = fun ctx state event -> Task.pure(state)</script>|};
+      save root "chatml.project.json" {|{"schema_version":1,"namespace":"child"}|};
+      Eio.Switch.run (fun sw ->
+        let module A = Agent_session.Authored_agent_source in
+        let module C = Chatml_prompt_programs in
+        let definition = definition root in
+        let catalog = catalog env parent in
+        let candidate =
+          prepare catalog sw [ definition ] ~prepare_programs:(fun scope captured ->
+            let value = Owner.Capture.value captured in
+            let child = snd (List.hd_exn (Builder.Capture.agents value)) in
+            Script_tests.prepare
+              env
+              scope
+              captured
+              [ Script_tests.plan (Builder.Capture.root value)
+              ; Script_tests.plan ~delegated_moderator:delegated child
+              ])
+          |> ok
+        in
+        Catalog.install_owned catalog candidate |> ok;
+        let parent = revision catalog definition in
+        let before = A.capture ~parent ~tool_name:"child" () |> ok in
+        List.iter [ "root.chatmd"; "child.chatmd"; "chatml.project.json" ] ~f:(fun file ->
+          Eio.Path.unlink Eio.Path.(root / file));
+        let borrowed = ref None in
+        let result =
+          Preparation.with_authored_child
+            (Some (policy ()))
+            ~parent
+            ~tool_name:"child"
+            ~content_limits:None
+            ~env
+            ~checkpoint:ignore
+            ~f:(fun startup ~source ~revision ->
+              assert delegated;
+              borrowed := Some startup;
+              assert (not (String.equal (A.fingerprint before) (A.fingerprint source)));
+              assert (
+                C.has_active_programs (Revision.programs revision |> Option.value_exn));
+              let projected = A.resource_revision ~parent source |> ok in
+              assert (
+                Agent_protocol.Id.Prompt_revision.equal
+                  (Revision.id projected)
+                  (Revision.id revision));
+              Preparation.with_revision
+                (Some (policy ()))
+                ~startup
+                revision
+                ~env
+                ~delegated_moderator:true
+                ~checkpoint:ignore
+                ~f:(fun same ~compilation_limits:_ ~programs ->
+                  assert (phys_equal same startup);
+                  assert (
+                    List.length (C.Restored.programs (Option.value_exn programs)) = 1);
+                  Ok ()))
+        in
+        match result with
+        | Error error ->
+          assert (not delegated);
+          assert (Option.is_none !borrowed);
+          assert (
+            String.is_substring error.message ~substring:"chatml.program_missing_role");
+          print_endline "wrong retained role: rejected before reservation callback"
+        | Ok () ->
+          assert delegated;
+          assert (
+            Result.is_error
+              (Chat_response.Startup_compilation.remaining_limits
+                 (Option.value_exn !borrowed)));
+          print_endline
+            "delegated role: selected identity, original startup, no source reads")));
+  [%expect
+    {|
+    wrong retained role: rejected before reservation callback
+    delegated role: selected identity, original startup, no source reads
+    |}]
+;;
+
 let%test_unit "owned revisions require explicit policy and actual parser attachments" =
   with_workspace (fun env parent root ->
     save root "root.chatmd" "<user>owned revision</user>";

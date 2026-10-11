@@ -319,6 +319,7 @@ let build_native_registrations = Extensibility_native_tools.registrations
 let declares_native = Extensibility_native_tools.declares
 
 let create_authored_resources
+      ~startup
       ~script_preparation
       ~revision
       ~additional_native_registrations
@@ -337,6 +338,7 @@ let create_authored_resources
   =
   Script_preparation.with_revision
     script_preparation
+    ?startup
     revision
     ~env
     ~delegated_moderator
@@ -459,6 +461,7 @@ let create_authored_resources
 ;;
 
 let prepare_resources_internal
+      ~startup
       ~script_preparation
       ~native_registrations
       ~delegated_moderator
@@ -503,6 +506,7 @@ let prepare_resources_internal
   in
   let%bind host = host ~env ~paths ~session_id ~elements in
   create_authored_resources
+    ~startup
     ~script_preparation
     ~revision
     ~additional_native_registrations:native_registrations
@@ -520,7 +524,9 @@ let prepare_resources_internal
     ~response_dir
 ;;
 
-let prepare_resources = prepare_resources_internal ~delegated_moderator:false
+let prepare_resources =
+  prepare_resources_internal ~startup:None ~delegated_moderator:false
+;;
 
 type authored_resources =
   { source : Authored_agent_source.t
@@ -551,45 +557,48 @@ let prepare_authored_resources
       ~approval_provider
       ~approval_store
   =
-  let open Result.Let_syntax in
-  let%bind source =
-    Authored_agent_source.capture ?content_limits ~parent:parent_revision ~tool_name ()
-  in
-  let%bind revision =
-    Authored_agent_source.resource_revision ~parent:parent_revision source
-  in
-  let paths =
-    { paths with
-      Runtime_paths.prompt_dir =
-        Eio.Path.(
-          Prompt_revision.materialized_tree revision
-          / Filename.dirname (Prompt_revision.root_relative_path revision))
-    }
-  in
-  let%map resources =
-    prepare_resources_internal
-      ~script_preparation
-      ~native_registrations
-      ~delegated_moderator:true
-      ~inference_context
-      ~inference_identity
-      ~on_inference_attempt
-      ~on_inference_completion
-      ~on_inference_observation
-      ~native_service_revision
-      ~env
-      ~sw
-      ~paths
-      ~storage_paths
-      ~revision
-      ~session_id
-      ~one_off_policy
-      ~authoring_validation_host
-      ~manifest_authorizer:(manifest_authorizer revision)
-      ~approval_provider
-      ~approval_store
-  in
-  { source; revision; resources }
+  Script_preparation.with_authored_child
+    script_preparation
+    ~parent:parent_revision
+    ~tool_name
+    ~content_limits
+    ~env
+    ~checkpoint:Eio.Fiber.check
+    ~f:(fun startup ~source ~revision ->
+      let open Result.Let_syntax in
+      let paths =
+        { paths with
+          Runtime_paths.prompt_dir =
+            Eio.Path.(
+              Prompt_revision.materialized_tree revision
+              / Filename.dirname (Prompt_revision.root_relative_path revision))
+        }
+      in
+      let%map resources =
+        prepare_resources_internal
+          ~startup:(Some startup)
+          ~script_preparation
+          ~native_registrations
+          ~delegated_moderator:true
+          ~inference_context
+          ~inference_identity
+          ~on_inference_attempt
+          ~on_inference_completion
+          ~on_inference_observation
+          ~native_service_revision
+          ~env
+          ~sw
+          ~paths
+          ~storage_paths
+          ~revision
+          ~session_id
+          ~one_off_policy
+          ~authoring_validation_host
+          ~manifest_authorizer:(manifest_authorizer revision)
+          ~approval_provider
+          ~approval_store
+      in
+      { source; revision; resources })
 ;;
 
 let inherit_prepared_resources ~parent_runtime ~inherited_managed ~definition =
@@ -1336,6 +1345,7 @@ let build_with_services
       let%bind host = host ~env ~paths ~session_id ~elements in
       let%map resources =
         create_authored_resources
+          ~startup:None
           ~script_preparation
           ~revision
           ~additional_native_registrations:native_registrations

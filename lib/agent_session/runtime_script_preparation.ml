@@ -127,3 +127,61 @@ let with_revision policy ?startup revision ~env ~delegated_moderator ~checkpoint
       f startup ~compilation_limits ~programs)
     ()
 ;;
+
+let select_child policy ~startup ~parent source =
+  let open Result.Let_syntax in
+  let%bind revision = Authored_agent_source.resource_revision ~parent source in
+  match Prompt_revision.parser_context revision, Prompt_revision.programs revision with
+  | None, None ->
+    let%map (_ : Chatml_prompt_programs.Restored.t option) =
+      restore policy ~startup ~revision ~delegated_moderator:true
+    in
+    source, revision
+  | Some parsed, Some custody ->
+    (match policy with
+     | None ->
+       Error (failure "owned child custody requires explicit host preparation policy")
+     | Some policy ->
+       let%bind plan = plan policy ~startup ~parsed ~delegated_moderator:true in
+       let%bind selected =
+         Chat_response.Retained_selection.select
+           plan
+           ~custody
+           ~authored:(Authored_agent_source.authored_sources source)
+           ~limits:policy.restoration
+           ~max_work_steps:policy.max_custody_work_steps
+           ~checkpoint:(fun () -> Startup.checkpoint startup)
+         |> map_diagnostics ~to_string:Chatmd_shell_spec.Diagnostic.to_string
+       in
+       let selected =
+         match selected with
+         | Chat_response.Retained_selection.Legacy custody | Selected custody -> custody
+       in
+       let%bind source = Authored_agent_source.with_programs source selected in
+       let%map revision = Authored_agent_source.resource_revision ~parent source in
+       source, revision)
+  | None, Some _ | Some _, None ->
+    Error (failure "child custody is missing its matching original parser or inventory")
+;;
+
+let with_authored_child policy ~parent ~tool_name ~content_limits ~env ~checkpoint ~f =
+  let compilation_limits =
+    Option.value_map policy ~default:Compiler.default_limits ~f:compilation
+  in
+  Startup.with_context
+    ~limits:compilation_limits
+    ~env
+    ~checkpoint
+    ~map_error:compilation_error
+    ~f:(fun startup ->
+      let open Result.Let_syntax in
+      let%bind source, revision =
+        Startup.within startup ~map_error:compilation_error ~f:(fun () ->
+          let%bind source =
+            Authored_agent_source.capture ?content_limits ~parent ~tool_name ()
+          in
+          select_child policy ~startup ~parent source)
+      in
+      f startup ~source ~revision)
+    ()
+;;

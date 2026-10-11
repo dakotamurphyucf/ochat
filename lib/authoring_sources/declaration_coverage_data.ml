@@ -233,9 +233,9 @@ let implementation_sources =
   ; ( "lib/chatmd/chatmd_source_bundle.ml"
     , "c3e0f8f89c8538ddcec98873739455a673b0e6e894282c21c96046c096bb6ae5" )
   ; ( "lib/chatmd/prompt.ml"
-    , "bb5a4164f4e2708bd627784f37245c7ec57e0bc5d61e4aeabb2e53efe3306bcc" )
+    , "5eeeb8393634964e08c6d6d9c6f79ab50eb4bf247e073d6855dbc5e374b675aa" )
   ; ( "lib/chatmd/source_loader.ml"
-    , "3d1e30a10bffd9a470ddb6d54feebebdb6e126f822debd04a0b0ecfd000277c1" )
+    , "202688ce4248d9042c4d865f45f5909a593506d5f1c269c5db0419d9c3d4b85e" )
   ; ( "lib/chatmd_shell_spec/authoring_metadata.ml"
     , "8fa283f545896b7efbaab8bcf17a3ab7549d61c04873403c94961fc4ca0b789d" )
   ; ( "lib/chatmd_shell_spec/duration.ml"
