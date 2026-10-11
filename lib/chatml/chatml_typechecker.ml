@@ -52,8 +52,7 @@ open Core
 open Chatml.Chatml_lang
 module Builtin_spec = Chatml.Chatml_builtin_spec
 module Builtin_surface = Chatml.Chatml_builtin_surface
-module Shape_kind = Chatml.Chatml_shape_kind
-module Equality_requirement = Chatml.Chatml_equality_requirement
+module Type_alias = Chatml_type_alias
 
 (***************************************************************************)
 (* A Hindley-Milner style type-checker for the ChatML language.            *)
@@ -65,73 +64,7 @@ module Equality_requirement = Chatml.Chatml_equality_requirement
 
 (** --------------------------------------------------------------------- *)
 
-module Env = struct
-  type 'a t = 'a String.Map.t
-
-  let empty : 'a t = String.Map.empty
-  let add k v m : 'a t = Map.set m ~key:k ~data:v
-  let find m k = Map.find m k
-  let find_exn m k = Map.find_exn m k
-  let of_list l = List.fold l ~init:empty ~f:(fun acc (k, v) -> add k v acc)
-  let merge m1 m2 = Map.merge_skewed m1 m2 ~combine:(fun ~key:_ v_left _v_right -> v_left)
-  let is_empty = Map.is_empty
-  let bindings = Map.to_alist
-  let map m ~f = Map.map m ~f
-  let iter m ~f = Map.iteri m ~f:(fun ~key ~data -> f key data)
-
-  let choose m =
-    match Map.min_elt m with
-    | None -> raise_notrace (Invalid_argument "empty map")
-    | Some (k, v) -> k, v
-  ;;
-
-  let exists m f = Map.existsi m ~f:(fun ~key ~data -> f key data)
-  let fold m ~init ~f = Map.fold m ~init ~f:(fun ~key ~data acc -> f ~key ~data acc)
-  let singleton = String.Map.singleton
-end
-
-(** --------------------------------------------------------------------- *)
-
-(** 2. Types and type variables                                            *)
-
-(** --------------------------------------------------------------------- *)
-
-type name = string
-
-type typ =
-  | Fun of typ list * typ
-  | Generic of
-      { name : name
-      ; equality : Equality_requirement.t option
-      }
-  | Var of tv ref
-  | Con of string * typ list
-  | Mu of name * typ
-  | Rec_var of name
-  | Ref of typ
-  | Record of typ (* row *)
-  | Module of typ (* exported value row *)
-  | Field_receiver of typ * typ (* representation kind, accessible row *)
-  | Shape_kind of Shape_kind.t
-  | Variant of typ (* row with Variant_payload fields *)
-  | Variant_payload of typ list (* constructor arguments, never a value type *)
-  | Tuple of typ list
-  | Array of typ
-  | TInt
-  | TFloat
-  | Boolean
-  | String
-  | Row of typ Env.t * typ (* fields * tail *)
-  | Empty_row
-  | Unit
-
-and tv =
-  | Bound of typ
-  | Free of
-      { name : name
-      ; level : int
-      ; equality : Equality_requirement.t option
-      }
+include Chatml_inferred_type
 
 (** --------------------------------------------------------------------- *)
 
@@ -385,136 +318,8 @@ let generalise (state : infer_state) ty =
   gen [] ty
 ;;
 
-let has_recursive_type ?(checkpoint = fun () -> ()) (ty : typ) : bool =
-  let rec aux (seen : tv ref list) ty =
-    checkpoint ();
-    match ty with
-    | Fun (params, ret) -> List.exists params ~f:(aux seen) || aux seen ret
-    | Var ({ contents = Bound t } as tv) ->
-      if tv_ref_mem tv seen then true else aux (tv :: seen) t
-    | Con (_n, args) -> List.exists args ~f:(aux seen)
-    | Mu (_binder, _body) -> true
-    | Rec_var _ -> true
-    | Var { contents = Free _ }
-    | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit | Shape_kind _ ->
-      false
-    | Ref t | Record t | Module t | Variant t | Array t -> aux seen t
-    | Field_receiver (kind, row) -> aux seen kind || aux seen row
-    | Tuple ts | Variant_payload ts -> List.exists ts ~f:(aux seen)
-    | Row (fields, tail) ->
-      Env.exists fields (fun _field ty' -> aux seen ty') || aux seen tail
-  in
-  aux [] ty
-;;
-
-let check_contractive ?(checkpoint = fun () -> ()) (ty : typ) : (unit, string) result =
-  let rec check_list
-            (seen : tv ref list)
-            ~(target : name option)
-            ~(guarded : bool)
-            ~(scope : name list)
-            (tys : typ list)
-    : (unit, string) result
-    =
-    match tys with
-    | [] -> Ok ()
-    | hd :: tl ->
-      (match check_ty seen ~target ~guarded ~scope hd with
-       | Ok () -> check_list seen ~target ~guarded ~scope tl
-       | Error _ as err -> err)
-  and check_fields
-        (seen : tv ref list)
-        ~(target : name option)
-        ~(guarded : bool)
-        ~(scope : name list)
-        (fields : typ Env.t)
-    : (unit, string) result
-    =
-    fields |> Env.bindings |> List.map ~f:snd |> check_list seen ~target ~guarded ~scope
-  and check_ty
-        (seen : tv ref list)
-        ~(target : name option)
-        ~(guarded : bool)
-        ~(scope : name list)
-        (ty : typ)
-    : (unit, string) result
-    =
-    checkpoint ();
-    match ty with
-    | Fun (params, ret) ->
-      (match check_list seen ~target ~guarded:true ~scope params with
-       | Ok () -> check_ty seen ~target ~guarded:true ~scope ret
-       | Error _ as err -> err)
-    | Var ({ contents = Bound bound_ty } as tv) ->
-      if tv_ref_mem tv seen
-      then Ok ()
-      else check_ty (tv :: seen) ~target ~guarded ~scope bound_ty
-    | Con (_n, args) -> check_list seen ~target ~guarded ~scope args
-    | Var { contents = Free _ }
-    | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> Ok ()
-    | Shape_kind _ -> Error "Representation kind is only valid in a field receiver"
-    | Mu (binder, body) ->
-      let scope' = binder :: scope in
-      let outer_target =
-        match target with
-        | Some target_name when String.equal target_name binder -> None
-        | _ -> target
-      in
-      (match check_ty seen ~target:(Some binder) ~guarded:false ~scope:scope' body with
-       | Error _ as err -> err
-       | Ok () -> check_ty seen ~target:outer_target ~guarded ~scope:scope' body)
-    | Rec_var binder ->
-      if not (rec_name_mem binder scope)
-      then Error (Printf.sprintf "Unbound recursive type variable '%s'" binder)
-      else (
-        match target with
-        | Some target_binder when String.equal target_binder binder && not guarded ->
-          Error (Printf.sprintf "Unguarded recursive type variable '%s'" binder)
-        | _ -> Ok ())
-    | Ref inner | Record inner | Module inner | Array inner ->
-      check_ty seen ~target ~guarded:true ~scope inner
-    | Variant row -> check_variant_row seen ~target ~guarded:true ~scope row
-    | Variant_payload _ -> Error "Variant payload is only valid in a variant row"
-    | Field_receiver (kind, row) ->
-      (match check_kind seen kind with
-       | Error _ as error -> error
-       | Ok () -> check_ty seen ~target ~guarded:true ~scope row)
-    | Tuple tys -> check_list seen ~target ~guarded:true ~scope tys
-    | Row (fields, tail) ->
-      (match check_fields seen ~target ~guarded ~scope fields with
-       | Ok () -> check_ty seen ~target ~guarded ~scope tail
-       | Error _ as err -> err)
-  and check_kind seen kind =
-    checkpoint ();
-    match kind with
-    | Shape_kind _ | Generic _ | Var { contents = Free _ } -> Ok ()
-    | Var ({ contents = Bound bound } as tv) ->
-      if tv_ref_mem tv seen
-      then Error "Cyclic field receiver representation kind"
-      else check_kind (tv :: seen) bound
-    | _ -> Error "Invalid field receiver representation kind"
-  and check_variant_row seen ~target ~guarded ~scope row =
-    checkpoint ();
-    match row with
-    | Row (cases, tail) ->
-      let rec check_cases = function
-        | [] -> check_variant_row seen ~target ~guarded ~scope tail
-        | (_, Variant_payload arguments) :: rest ->
-          (match check_list seen ~target ~guarded ~scope arguments with
-           | Ok () -> check_cases rest
-           | Error _ as error -> error)
-        | _ -> Error "Variant row fields must retain constructor payload arity"
-      in
-      check_cases (Env.bindings cases)
-    | Var ({ contents = Bound row } as tv) ->
-      if tv_ref_mem tv seen
-      then Ok ()
-      else check_variant_row (tv :: seen) ~target ~guarded ~scope row
-    | Empty_row | Generic _ | Var { contents = Free _ } -> Ok ()
-    | _ -> Error "Invalid variant row"
-  in
-  check_ty [] ~target:None ~guarded:false ~scope:[] ty
-;;
+let has_recursive_type = Chatml_type_validity.has_recursive_type
+let check_contractive = Chatml_type_validity.check_contractive
 
 (** --------------------------------------------------------------------- *)
 
@@ -1284,7 +1089,7 @@ and ensure_equality_type state ty = require_equality state Equality_requirement.
 
 type scheme = typ
 type tenv = scheme Env.t
-type type_env = typ Env.t
+type type_env = Type_alias.t
 
 (* Unlike a classical HM environment that stores only polymorphic schemes,
    ChatML's typing environment stores both:
@@ -1317,140 +1122,18 @@ let contains_generic ?(checkpoint = fun () -> ()) (ty : typ) : bool =
   aux [] ty
 ;;
 
-let primitive_type_of_name (name : string) : typ option =
-  match name with
-  | "int" -> Some TInt
-  | "float" -> Some TFloat
-  | "bool" -> Some Boolean
-  | "string" -> Some String
-  | "unit" -> Some Unit
-  | _ -> None
+let alias_result = function
+  | Ok value -> value
+  | Error { Type_alias.Error.message; span } ->
+    raise (Type_error_with_loc (message, span))
 ;;
 
-let contains_rec_var_name ?(checkpoint = fun () -> ()) (target : name) (ty : typ) : bool =
-  let rec aux (seen : tv ref list) ty =
-    checkpoint ();
-    match ty with
-    | Rec_var name when String.equal name target -> true
-    | Rec_var _ -> false
-    | Fun (params, ret) -> List.exists params ~f:(aux seen) || aux seen ret
-    | Var ({ contents = Bound t } as tv) ->
-      if tv_ref_mem tv seen then false else aux (tv :: seen) t
-    | Con (_n, args) -> List.exists args ~f:(aux seen)
-    | Var { contents = Free _ }
-    | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit | Shape_kind _ ->
-      false
-    | Mu (binder, body) -> if String.equal binder target then false else aux seen body
-    | Ref t | Record t | Module t | Variant t | Array t -> aux seen t
-    | Field_receiver (kind, row) -> aux seen kind || aux seen row
-    | Tuple ts | Variant_payload ts -> List.exists ts ~f:(aux seen)
-    | Row (fields, tail) ->
-      Env.exists fields (fun _field ty' -> aux seen ty') || aux seen tail
-  in
-  aux [] ty
+let typ_of_type_expr ?(checkpoint = fun () -> ()) types expr =
+  Type_alias.elaborate types expr ~checkpoint |> alias_result
 ;;
 
-let ensure_unique_type_labels
-      ?(checkpoint = fun () -> ())
-      ~(what : string)
-      (labels : string list)
-  : unit
-  =
-  let seen = Hash_set.create (module String) in
-  match
-    List.find labels ~f:(fun label ->
-      checkpoint ();
-      if Hash_set.mem seen label
-      then true
-      else (
-        Hash_set.add seen label;
-        false))
-  with
-  | None -> ()
-  | Some label -> raise (Type_error (Printf.sprintf "Duplicate %s label '%s'" what label))
-;;
-
-let rec typ_of_type_expr
-          ?(checkpoint = fun () -> ())
-          ?self_name
-          (types : type_env)
-          (expr : type_expr)
-  : typ
-  =
-  checkpoint ();
-  let convert = typ_of_type_expr ~checkpoint ?self_name types in
-  match expr with
-  | TEName name ->
-    (match primitive_type_of_name name with
-     | Some ty -> ty
-     | None ->
-       (match self_name with
-        | Some self when String.equal self name -> Rec_var name
-        | _ ->
-          (match Env.find types name with
-           | Some ty -> ty
-           | None -> raise (Type_error (Printf.sprintf "Unknown type '%s'" name)))))
-  | TEArrow (lhs, rhs) ->
-    let lhs_ty = convert lhs in
-    let params, ret =
-      match convert rhs with
-      | Fun (params, ret) -> params, ret
-      | rhs_ty -> [], rhs_ty
-    in
-    (match lhs_ty with
-     | Unit -> Fun (params, ret)
-     | _ -> Fun (lhs_ty :: params, ret))
-  | TEConstr (name, args) ->
-    (match name, List.map args ~f:convert with
-     | "array", [ arg_ty ] -> Array arg_ty
-     | "task", [ arg_ty ] -> Con ("task", [ arg_ty ])
-     | _, _ -> raise (Type_error (Printf.sprintf "Unknown type constructor '%s'" name)))
-  | TERecord fields ->
-    ensure_unique_type_labels
-      ~checkpoint
-      ~what:"type record field"
-      (List.map fields ~f:fst);
-    Record
-      (Row
-         ( Env.of_list
-             (List.map fields ~f:(fun (label, ty_expr) -> label, convert ty_expr))
-         , Empty_row ))
-  | TEVariant cases ->
-    ensure_unique_type_labels
-      ~checkpoint
-      ~what:"type variant constructor"
-      (List.map cases ~f:fst);
-    let payload_ty payloads = Variant_payload (List.map payloads ~f:convert) in
-    Variant
-      (Row
-         ( Env.of_list
-             (List.map cases ~f:(fun (tag, payloads) -> tag, payload_ty payloads))
-         , Empty_row ))
-;;
-
-let infer_type_decl
-      ?(checkpoint = fun () -> ())
-      (types : type_env)
-      (name : string)
-      (body : type_expr)
-  : type_env
-  =
-  checkpoint ();
-  if Option.is_some (primitive_type_of_name name)
-  then raise (Type_error (Printf.sprintf "Cannot redefine primitive type '%s'" name))
-  else (
-    match Env.find types name with
-    | Some _ -> raise (Type_error (Printf.sprintf "Duplicate type declaration '%s'" name))
-    | None ->
-      let body_ty = typ_of_type_expr ~checkpoint ~self_name:name types body in
-      let declared_ty =
-        if contains_rec_var_name ~checkpoint name body_ty
-        then Mu (name, body_ty)
-        else body_ty
-      in
-      if has_recursive_type ~checkpoint declared_ty
-      then ensure_contractive_type ~checkpoint declared_ty;
-      Env.add name declared_ty types)
+let infer_type_decl ?(checkpoint = fun () -> ()) types declaration =
+  Type_alias.declare types declaration ~checkpoint |> alias_result
 ;;
 
 let builtin_row_var_name (name : string) = "__builtin_row_" ^ name
@@ -1529,19 +1212,11 @@ let init_types_with_surface
       (surface : Builtin_surface.surface)
   : type_env
   =
-  List.fold surface.type_aliases ~init:Env.empty ~f:(fun env alias ->
-    if Option.is_some (primitive_type_of_name alias.name)
-    then
-      raise (Type_error (Printf.sprintf "Cannot redefine primitive type '%s'" alias.name))
-    else (
-      match Env.find env alias.name with
-      | Some _ ->
-        raise (Type_error (Printf.sprintf "Duplicate type declaration '%s'" alias.name))
-      | None ->
-        let alias_ty = typ_of_builtin_ty ~checkpoint alias.body in
-        if has_recursive_type ~checkpoint alias_ty
-        then ensure_contractive_type ~checkpoint alias_ty;
-        Env.add alias.name alias_ty env))
+  List.fold surface.type_aliases ~init:Type_alias.empty ~f:(fun env alias ->
+    let alias_ty = typ_of_builtin_ty ~checkpoint alias.body in
+    match Type_alias.add_host env ~name:alias.name ~body:alias_ty ~checkpoint with
+    | Ok types -> types
+    | Error message -> raise (Type_error message))
 ;;
 
 (* Instantiate only genuinely polymorphic schemes.  Monomorphic bindings are
@@ -2536,8 +2211,8 @@ let rec infer_stmt_with_exports
   | SLet (x, e) -> infer_nonrecursive_binding state env types x e, types, [ x ]
   | SLetRec bindings ->
     infer_recursive_bindings state env types bindings, types, List.map bindings ~f:fst
-  | SType (name, body) ->
-    env, infer_type_decl ~checkpoint:(fun () -> checkpoint state) types name body, []
+  | SType declaration ->
+    env, infer_type_decl ~checkpoint:(fun () -> checkpoint state) types declaration, []
   | SExpr e ->
     ignore (infer_expr state env types e);
     env, types, []

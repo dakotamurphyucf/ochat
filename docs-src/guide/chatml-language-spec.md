@@ -101,9 +101,9 @@ ChatML now has a deliberately small user-facing type surface:
 - binding annotations on `let`, `let rec`, and `let ... in`,
 - explicit recursive types introduced through those declarations.
 
-It still does **not** provide a full ML type language: there are no type
-parameters, no mutual recursive type declarations, and no general
-expression-level ascription syntax.
+Aliases support scoped parameters and regular contractive recursion. The type
+language remains small: there are no mutual recursive type declarations or
+general expression-level ascriptions.
 
 Function calls use explicit call syntax:
 
@@ -421,6 +421,8 @@ Examples:
 
 ```ocaml
 type expr = [ `Int(int) | `Add(expr, expr) ]
+type 'a tree = [ `Leaf('a) | `Branch('a tree, 'a tree) ]
+type ('a, 'e) outcome = [ `Ok('a) | `Error('e) ]
 type task = { name : string; attempts : int; status : status }
 ```
 
@@ -434,8 +436,17 @@ Properties:
 - `open` does not import type names
 - type declarations are alias-like, not nominal runtime entities
 
-Recursive type declarations are allowed, but only in explicit checked form.
-The typechecker validates them for **contractiveness**:
+Parameterized aliases are applied using postfix syntax: `int tree` or
+`(int, string) outcome`. The comma-separated form supplies multiple arguments to
+an alias; it is not a general tuple type. Parameter names are scoped to their
+declaration. Expansion uses the declaration's lexical type namespace, with no
+runtime type objects. Duplicate/free parameters and wrong arities are errors.
+Zero-parameter names such as `type task = ...` remain legal alongside the unary
+builtin `task` constructor; builtin constructors cannot be redefined with parameters.
+
+Recursive applications must preserve the original parameters, in order.
+Nonregular applications such as `('a array) tree` inside `'a tree` are rejected.
+The typechecker also validates **contractiveness**:
 
 - accepted:
   - `type expr = [ \`Int(int) | \`Add(expr, expr) ]`
@@ -446,7 +457,6 @@ The typechecker validates them for **contractiveness**:
 Current intentional limitations:
 
 - no `type ... and ...`
-- no type parameters
 - no module-local type declarations
 - no forward references to later type declarations
 
@@ -1046,7 +1056,12 @@ The current user-facing type-expression syntax supports:
   - `string`
   - `unit`
 - previously declared type names
-- function types:
+- exact nary function types:
+  - `fun() -> int` (zero arguments)
+  - `fun(unit) -> int` (one unit argument)
+  - `fun(int, bool) -> string` (two arguments)
+  - `fun(int) -> fun(int) -> int` (one argument, returning a function)
+- legacy flattened function types:
   - `expr -> int`
   - `state -> event -> state`
   - `unit -> string`
@@ -1078,13 +1093,11 @@ Current user-facing omissions are intentional:
 - no tuple type syntax
 - no ref type syntax
 - no open-row type syntax
-- no type parameters
 - no mutual recursive type declarations
 
-The parser accepts generic postfix lowercase unary constructors in type
-expressions, but the current typechecker recognizes only the constructors
-implemented by the host/type environment. In the built-in surface those are
-currently:
+The parser accepts postfix constructors and multi-argument alias applications.
+The checker enforces each declaration's arity. Parameters such as `'a` are only
+available within the declaration that binds them. Builtin unary constructors are:
 
 - `array`
 - `task`
@@ -2179,7 +2192,6 @@ Unification of recursive types uses an alpha-renaming strategy for Mu-vs-Mu unif
 ChatML currently does **not** provide:
 
 - tuple syntax as a general user-facing feature
-- type parameters
 - mutual recursive type declarations
 - module-local type declarations
 - general expression ascription syntax

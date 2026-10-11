@@ -305,7 +305,7 @@ let rec resolve_stmt (ctx : resolve_ctx) (snode : L.stmt L.node) : L.resolved_st
       List.map binds ~f:(fun (nm, rhs) -> nm, with_value rhs (resolve_expr ctx rhs))
     in
     Some (L.RSLetRec binds')
-  | L.SType (_name, _body) -> None
+  | L.SType _ -> None
   | L.SExpr e -> Some (L.RSExpr (with_value e (resolve_expr ctx e)))
   | L.SModule (mname, stmts) ->
     let stmts' =

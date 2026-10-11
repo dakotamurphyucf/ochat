@@ -138,10 +138,15 @@ Use top-level named types for intentional recursion and for stable record/varian
 contracts. Types are structural aliases, not nominal runtime wrappers. Bindings
 can have annotations; individual parameters and arbitrary expressions cannot.
 Only previously declared type names and the current recursive name are in scope.
-Recursive types must be contractive; `type bad = bad` is rejected. There are no
-type parameters or mutually recursive type declarations. `array` and `task` are
-supported postfix constructors; refs and open rows are inferred rather than
-written as explicit annotation syntax.
+Recursive types must be contractive; `type bad = bad` is rejected. Transparent
+aliases can have scoped parameters: `type 'a box = {value: 'a}`, used as `int box`,
+or ``type ('a, 'e) outcome = [ `Ok('a) | `Error('e) ]``, used as `(int, string) outcome`.
+Recursive applications must preserve those parameters; mutual type declarations
+are unsupported. `array` and `task` are supported postfix constructors; refs and
+open rows are inferred rather than written as explicit annotation syntax.
+Explicit function types retain exact arity: `fun() -> int` takes no arguments,
+`fun(unit) -> int` takes one unit value, and `fun(int) -> fun(int) -> int` returns
+a function. Legacy arrows keep their flattening and unit-erasure behavior.
 
 <!-- ochat-authoring-example: {"id":"language.recursive-data-and-record-patterns","surface":"one_off_v1","result":"total=7"} -->
 ```ocaml

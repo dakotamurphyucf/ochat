@@ -142,6 +142,11 @@ rule token = parse
     TICKIDENT name
     }
 
+    (* Lexically scoped alias/signature parameter, distinct from variant tags. *)
+| '\'' ['a'-'z' '_']['a'-'z''A'-'Z''0'-'9' '_']* as parameter {
+    TYPEVAR (String.sub parameter 1 (String.length parameter - 1))
+    }
+
     (* Identifier: starts letter or underscore, followed by same + digits. *)
 | ['a'-'z''A'-'Z' '_']['a'-'z''A'-'Z''0'-'9' '_']* as id {
     if id.[0] >= 'A' && id.[0] <= 'Z' then UIDENT id

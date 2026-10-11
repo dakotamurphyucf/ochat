@@ -42,13 +42,7 @@ type pattern =
   | PRecord of (string * pattern) list * bool
 [@@deriving sexp, compare]
 
-type type_expr =
-  | TEName of string
-  | TEArrow of type_expr * type_expr
-  | TEConstr of string * type_expr list
-  | TERecord of (string * type_expr) list
-  | TEVariant of (string * type_expr list) list
-[@@deriving sexp]
+type type_expr = Chatml_type_expr.t [@@deriving sexp]
 
 type var_loc =
   { depth : int
@@ -178,7 +172,7 @@ and resolved_expr =
 type stmt =
   | SLet of string * expr node
   | SLetRec of (string * expr node) list
-  | SType of string * type_expr
+  | SType of Chatml_type_expr.Declaration.t
   | SModule of string * stmt node list
   | SOpen of string
   | SExpr of expr node

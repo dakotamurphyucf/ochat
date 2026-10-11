@@ -3,6 +3,7 @@
  (public_name ochat.chatml)
  (modules
   chatml_lang
+  chatml_type_expr
   chatml_shape_kind
   chatml_equality_requirement
   chatml_eval
@@ -32,7 +33,7 @@
 (library
  (name chatml_typechecker)
  (public_name ochat.chatml_typechecker)
- (modules chatml_typechecker)
+ (modules chatml_typechecker chatml_inferred_type chatml_type_alias chatml_type_validity)
  (libraries core chatml)
  (preprocess
   (pps ppx_jane)))

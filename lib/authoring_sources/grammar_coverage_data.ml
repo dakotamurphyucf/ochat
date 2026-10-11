@@ -210,6 +210,13 @@ let productions =
   ; ( "ident -> UIDENT"
     , "76012b1af4c6efeca89d90e629d00afd6616078b3993593510e9afe4fc353b2f"
     , "chatml.programs" )
+  ; ( "loption(separated_nonempty_list(COMMA,type_expr)) -> "
+    , "7cfb73df4d1abed0c691870dbbec4395abdd1b3b1fa728b4f16d380fd2ba7ad8"
+    , "chatml.programs" )
+  ; ( "loption(separated_nonempty_list(COMMA,type_expr)) -> \
+       separated_nonempty_list(COMMA,type_expr)"
+    , "52464b694af641988ae7e68f5d9ce08842e1a3a034f0540ec01353d5b349034c"
+    , "chatml.programs" )
   ; ( "module_stmt -> LET LIDENT COLON type_expr EQ expr_sequence"
     , "f26bf0731db0e65a20b3a1f3332d4e3fb5176fedba82a72075519dfc2663046b"
     , "chatml.programs" )
@@ -327,8 +334,8 @@ let productions =
   ; ( "program -> program_stmts EOF"
     , "62e3ad7aea6d21100de63a1463b8fd7841343c4183185a31d2618f2b3e3ae587"
     , "chatml.programs" )
-  ; ( "program_stmt -> TYPE LIDENT EQ type_expr"
-    , "91ba8dee794454817889ff24ccd7aebf71d57c284798f5e6782308e79b30b71f"
+  ; ( "program_stmt -> TYPE type_parameters LIDENT EQ type_expr"
+    , "a5a06a9f9d3a61a10c910b021d4f55c2ee2076a5322bec5fa715a1a56b38404b"
     , "chatml.programs" )
   ; ( "program_stmt -> module_stmt"
     , "58794c5bf009a4a210f75537f5aa8ed2a686843295dc6938f3391ba010d97b4f"
@@ -357,17 +364,35 @@ let productions =
   ; ( "rec_bindings -> rec_binding AND rec_bindings"
     , "34869410922a768afe9a6fd6c9ed765e54b3827e8c83554b68731883d8aa689e"
     , "chatml.programs" )
+  ; ( "separated_nonempty_list(COMMA,TYPEVAR) -> TYPEVAR"
+    , "68a68d5cd142ef569a57641d0b7c317c55985dce6d3f2d0f48773b156114032f"
+    , "chatml.programs" )
+  ; ( "separated_nonempty_list(COMMA,TYPEVAR) -> TYPEVAR COMMA \
+       separated_nonempty_list(COMMA,TYPEVAR)"
+    , "f84ec8578c9ceeccaa0620271178407c3269b354b38e360fe98c9311a3a014a9"
+    , "chatml.programs" )
+  ; ( "separated_nonempty_list(COMMA,type_expr) -> type_expr"
+    , "4f8fc775dbdabbacacefadb0146226ad7829a3da3f112a64d69fca51a5dc0de9"
+    , "chatml.programs" )
+  ; ( "separated_nonempty_list(COMMA,type_expr) -> type_expr COMMA \
+       separated_nonempty_list(COMMA,type_expr)"
+    , "e57a26f25b11a93a1272d01157808d784a90cc67fca2b9ea9986a04411c87e07"
+    , "chatml.programs" )
   ; ( "task_let_binder -> LIDENT"
     , "049d0ff8eefe67c009ae963c418d0ca0b5a14d5cbb7e6c4ee4a17275342826b6"
     , "chatml.task-effects" )
   ; ( "task_let_binder -> LPAREN RPAREN"
     , "9ba5488a96bc63b1272a87dc8504f108c44a7fe212eade661c23454265c68492"
     , "chatml.task-effects" )
+  ; ( "type_arrow -> FUN LPAREN loption(separated_nonempty_list(COMMA,type_expr)) RPAREN \
+       ARROW type_arrow"
+    , "3e911c4653dfc44d2c3f294de9c55cef16f4c6895b3c8804a38913e65ae4e6eb"
+    , "chatml.programs" )
   ; ( "type_arrow -> type_postfix"
     , "143e041e450b12b13fafb7a172ce00a9559af222e203b5af0aae9b4b78c8f0af"
     , "chatml.programs" )
   ; ( "type_arrow -> type_postfix ARROW type_arrow"
-    , "6e67410799682b20d3b7d3f0da5b405927cc98b75dc9a700cb9805a81c4e4aec"
+    , "c9cd564e784173b1bb0a01a63d75a3694cea243b50957be65ae303383bc38363"
     , "chatml.programs" )
   ; ( "type_expr -> type_arrow"
     , "deb63956ae9e7c61bc3bdce30c864d0a70bd961324db8982e526edadd1a954d2"
@@ -396,23 +421,38 @@ let productions =
   ; ( "type_fields -> type_field SEMI type_fields"
     , "9de604591335feee5569c44e6b3f57b4b32bb381633441a2681c49cec59af8cc"
     , "chatml.programs" )
+  ; ( "type_parameters -> "
+    , "335e1c23c586436ae0109876fcb3606fcb0cda0fb773b0a4258f8b612d82f48f"
+    , "chatml.programs" )
+  ; ( "type_parameters -> LPAREN separated_nonempty_list(COMMA,TYPEVAR) RPAREN"
+    , "47da803afbbc346dbc51d311e7b99c6a8fb0d1cdd023a615081537fbcc4464ef"
+    , "chatml.programs" )
+  ; ( "type_parameters -> TYPEVAR"
+    , "2c0573744b284fede70de21db4b1129bf50c18de4d9f7ae7a6973386380bc1d5"
+    , "chatml.programs" )
+  ; ( "type_postfix -> LPAREN type_expr COMMA type_expr_list RPAREN LIDENT"
+    , "6f222ecd168b71516de4e86acbaf1c63316760c76f3947d050db5c760b2d7cf4"
+    , "chatml.programs" )
   ; ( "type_postfix -> type_postfix LIDENT"
-    , "5cab8f71b4117c756c2f30b9a308f69ed55b585c085fc7572f7f984f73a8283c"
+    , "a8b8740dd6b349e5fa645a45441b286eda6d3ba8232b88b6ca80a933023bc8a5"
     , "chatml.programs" )
   ; ( "type_postfix -> type_primary"
     , "205376817f93c40f5034bfb40c705c333d8dbaf704a83d827c551ff6a1603dbc"
     , "chatml.programs" )
   ; ( "type_primary -> LBRACE type_field_list RBRACE"
-    , "017d0b1e0e1694231287c7d83a1d0e5954c35f178bc0b1dfd387720b0757562c"
+    , "f937ff90a813e823d897ca81a08cb75defd914ac513db33b7a3eca99901af128"
     , "chatml.programs" )
   ; ( "type_primary -> LBRACKET type_variant_cases_opt RBRACKET"
-    , "123a3fa003edeef8994a0ba62f20dcdb301b8436f63e6cc531391e2dfe2e32ea"
+    , "0e2dd53119c8a313e3f73bf08da75f2d24f1dd06d47850fec056be6718eac49d"
     , "chatml.programs" )
   ; ( "type_primary -> LIDENT"
-    , "219a9355cbe0497ad343e9034e53f9dcfe0dd2a5140546a2c908268b3420071b"
+    , "20c6baf48892518c9e3d9d0666e09a6280dc5c9d625aab08de9793c0ca2c3946"
     , "chatml.programs" )
   ; ( "type_primary -> LPAREN type_expr RPAREN"
     , "60551e60d9edde1e6dabac4cee8a5a9c67a53c986c46dfd1f633d56f85f0352a"
+    , "chatml.programs" )
+  ; ( "type_primary -> TYPEVAR"
+    , "aecd8a9292cd7b84a4689f42ef84d316fcb3c7d068f4037f32ea7cc7da6c7806"
     , "chatml.programs" )
   ; ( "type_variant_case -> TICKIDENT"
     , "fa382a98c29ca76294e0df0e9e86c32eb2fcace045f1aca219364588b102d73d"
@@ -438,19 +478,19 @@ let productions =
 let topic_contracts =
   [ ( "one_off_v1"
     , "chatml.programs"
-    , "eb47a3bd2499dee045f5eb2530fbad557766d7859c025055e0f72314689e650e" )
+    , "08f5b8104dfcb6348a8b58d7f041cb010b1d8873179ed4c9778f4d6905a5189f" )
   ; ( "one_off_v1"
     , "chatml.task-effects"
     , "2f79102968c363bfaea021a29a659cd8884c0500393e902f016121e7568179d9" )
   ; ( "tool_v1"
     , "chatml.programs"
-    , "381581bff33f7d453b086c086a5ad31915685b99d1841a7a634a8957d57d1658" )
+    , "fa3069095038c5b94ef00f75be360f1ef3150dd1ecfaf8c6238aeeabb70fbe0b" )
   ; ( "moderator_v1"
     , "chatml.programs"
-    , "f5fa799844f2e6a6cdd60e41f811f8f851785423e75271746c173ae96168eb4f" )
+    , "745033a3463fd67e7b8edc347a315d04c012bea71a5a5acb452a3ba64c667c36" )
   ; ( "delegated_moderator_v1"
     , "chatml.programs"
-    , "a4cb73d5006f024644127b59912bb083e0fc0a96de0d52a12fa9ab8f5101d1cc" )
+    , "18c56e04a8fc94e4895ae7bb66bffd242c530229c0ef4d5da599ae522cc281e8" )
   ; ( "tool_v1"
     , "chatml.task-effects"
     , "18490fafcce366cf5614e94e209af5b3d87b5a8c31ba02889a43298ba93229bb" )

@@ -75,6 +75,7 @@
 %{
 
 open Chatml_lang
+open Chatml_type_expr
 open Source
 
 (* ------------------------------------------------------------------- *)
@@ -89,6 +90,9 @@ let position_of_lex (pos : Lexing.position) : Source.position =
 
 let span_of_lex (startp : Lexing.position) (endp : Lexing.position) : Source.span =
   { left = position_of_lex startp; right = position_of_lex endp }
+
+let mk_type startp endp desc =
+  { desc; span = span_of_lex startp endp }
 
 let mk_node startp endp value =
   { value; span = span_of_lex startp endp }
@@ -141,6 +145,7 @@ let maybe_annotate_expr (expr_node : expr node) (type_opt : type_expr option) : 
 %token <string> LIDENT
 %token <string> UIDENT
 %token <string> TICKIDENT
+%token <string> TYPEVAR
 %token FUN IF THEN ELSE WHILE DO DONE LET IN MATCH WITH MODULE STRUCT END OPEN REF REC AND TYPE
 %token LETSTAR LETPLUS
 %token ARROW LEFTARROW COLON COLONEQ BANGEQ EQ EQEQ
@@ -178,7 +183,8 @@ module_stmts:
 | /* empty */ { [] }
 
 program_stmt:
-  TYPE LIDENT EQ type_expr     { mk_node $startpos $endpos (SType($2, $4)) }
+  TYPE type_parameters LIDENT EQ type_expr
+    { mk_node $startpos $endpos (SType { name = $3; parameters = $2; body = $5 }) }
 | module_stmt                  { $1 }
 
 module_stmt:
@@ -391,23 +397,32 @@ expr_sequence:
 | expr  { $1 }
 | expr SEMI expr_sequence { mk_exprnode $startpos $endpos (ESequence($1, $3)) }
 
+type_parameters:
+| /* empty */ { [] }
+| TYPEVAR { [$1] }
+| LPAREN separated_nonempty_list(COMMA, TYPEVAR) RPAREN { $2 }
+
 type_expr:
 | type_arrow { $1 }
 
 type_arrow:
-| type_postfix ARROW type_arrow { TEArrow($1, $3) }
+| FUN LPAREN separated_list(COMMA, type_expr) RPAREN ARROW type_arrow
+    { mk_type $startpos $endpos (TEFunction($3, $6)) }
+| type_postfix ARROW type_arrow { mk_type $startpos $endpos (TEArrow($1, $3)) }
 | type_postfix { $1 }
 
 type_postfix:
 | type_primary { $1 }
-| type_postfix LIDENT
-    { TEConstr ($2, [ $1 ]) }
+| type_postfix LIDENT { mk_type $startpos $endpos (TEConstr ($2, [ $1 ])) }
+| LPAREN type_expr COMMA type_expr_list RPAREN LIDENT
+    { mk_type $startpos $endpos (TEConstr ($6, $2 :: $4)) }
 
 type_primary:
-| LIDENT { TEName $1 }
+| LIDENT { mk_type $startpos $endpos (TEName $1) }
+| TYPEVAR { mk_type $startpos $endpos (TEParameter $1) }
 | LPAREN type_expr RPAREN { $2 }
-| LBRACE type_field_list RBRACE { TERecord $2 }
-| LBRACKET type_variant_cases_opt RBRACKET { TEVariant $2 }
+| LBRACE type_field_list RBRACE { mk_type $startpos $endpos (TERecord $2) }
+| LBRACKET type_variant_cases_opt RBRACKET { mk_type $startpos $endpos (TEVariant $2) }
 
 type_field_list:
 | /* empty */ { [] }

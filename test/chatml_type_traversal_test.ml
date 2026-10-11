@@ -2,7 +2,13 @@ open Core
 module T = Chatml_typechecker
 module L = Chatml.Chatml_lang
 module B = Chatml.Chatml_builtin_spec
+module Syntax = Chatml.Chatml_type_expr
 module S = Chatml.Chatml_builtin_surface
+
+let syntax desc : Syntax.t =
+  let position : Source.position = { line = 1; column = 0; offset = 0 } in
+  { desc; span = { left = position; right = position } }
+;;
 
 let shared_type depth =
   let rec loop remaining ty =
@@ -48,8 +54,14 @@ let%expect_test "inference-owned type inspections and row operations cooperate" 
       (T.infer_stmt
          state
          T.Env.empty
-         (T.Env.singleton "seed" ty)
-         (L.SType ("alias", L.TEName "seed"))
+         (Result.ok_or_failwith
+            (T.Type_alias.add_host
+               T.Type_alias.empty
+               ~name:"seed"
+               ~body:ty
+               ~checkpoint:ignore))
+         (L.SType
+            { name = "alias"; parameters = []; body = syntax (Syntax.TEName "seed") })
        : T.tenv * T.type_env));
   cancelled "record coverage" (fun state _ ->
     T.validate_match_exhaustiveness state left [ L.PRecord ([], false) ]);
@@ -118,13 +130,14 @@ let%expect_test
   =
   let rec annotation depth =
     match depth with
-    | 0 -> L.TEName "int"
+    | 0 -> syntax (Syntax.TEName "int")
     | _ ->
       let nested = annotation (depth - 1) in
-      L.TERecord [ "left", nested; "right", nested ]
+      syntax (Syntax.TERecord [ "left", nested; "right", nested ])
   in
   cancelled "annotation" (fun _ poll ->
-    ignore (T.typ_of_type_expr ~checkpoint:poll T.Env.empty (annotation 14) : T.typ));
+    ignore
+      (T.typ_of_type_expr ~checkpoint:poll T.Type_alias.empty (annotation 14) : T.typ));
   List.iter
     [ "type unit_alias = unit\nlet f : unit_alias -> int = fun () -> 1"
     ; "let f : int -> unit -> int = fun x -> x"

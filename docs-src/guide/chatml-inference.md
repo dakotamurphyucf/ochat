@@ -22,9 +22,13 @@ parameter patterns nor general `(expression : type)` syntax is available.
 
 Right-hand arrows are flattened even inside parentheses or a named alias. Thus
 `int -> (int -> int)` still expects two parameters. Inferred functions may return
-functions, but this arrow annotation cannot express that curried result directly.
-Leave such a binding inferred or return a record containing the function. A
-function-valued argument on the left of an arrow is supported as shown below.
+functions. To annotate that result, use explicit function types:
+`fun(int) -> fun(int) -> int`. The parameter list in `fun(...)` retains its exact
+arity: `fun() -> int` takes no arguments, while `fun(unit) -> int` takes one unit
+value. Alias arguments are substituted before legacy arrow normalization:
+`type 'a callback = 'a -> int` makes `unit callback` a zero-argument function;
+use `type 'a callback = fun('a) -> int` when every application takes one argument,
+including unit. A function-valued argument on the left of a legacy arrow also works.
 
 <!-- ochat-authoring-example: {"id":"inference.explicit-arrow-arity","surface":"one_off_v1","result":13} -->
 ```ocaml
@@ -47,6 +51,20 @@ let main input = Task.pure(`Null)
 let make : int -> {apply: int -> int} =
   fun left -> {apply = fun right -> left + right}
 let main input = Task.pure(Json.parse(to_string(make(3).apply(4))))
+```
+
+<!-- ochat-authoring-example: {"id":"inference.generic-tree-and-nary-functions","surface":"one_off_v1","result":12} -->
+```ocaml
+type 'a tree = [ `Leaf('a) | `Branch('a tree, 'a tree) ]
+let rec total : fun(int tree) -> int = fun tree ->
+  match tree with
+  | `Leaf(n) -> n
+  | `Branch(left, right) -> total(left) + total(right)
+let zero : fun() -> int = fun () -> 1
+let one : fun(unit) -> int = fun ignored -> 2
+let make : fun(int) -> fun(int) -> int = fun left -> fun right -> left + right
+let main input = Task.pure(Json.parse(to_string(
+  total(`Branch(`Leaf(2), `Leaf(3))) + zero() + one(()) + make(1)(3))))
 ```
 
 ## Generalization depends on how a value is bound
@@ -82,17 +100,44 @@ let main input =
   else Task.pure(`Bool(false))
 ```
 
+## Annotating a copy helper's closed result
+
+An exact result annotation can constrain a copy helper before the input's fields
+are known. In that case, explicitly annotate the input shape when it contains a
+field that the copy overwrites. For example, an unannotated `enable r` whose body
+contains `let updated : {enabled: bool} = {r with enabled = true} in updated`
+currently infers an empty input shape: it accepts `{}`, but rejects
+`{enabled = 1}`. ChatML does not infer optional overwritten fields from that
+closed output. This conservative inference limit does not restrict ordinary
+unannotated copies, which still add fields, change field types and preserve extras.
+
+<!-- ochat-authoring-example: {"id":"inference.annotated-copy-input","surface":"one_off_v1","result":true} -->
+```ocaml
+let enable : fun({enabled: int}) -> {enabled: bool} =
+  fun original -> {original with enabled = true}
+let main input = Task.pure(`Bool(enable({enabled = 1}).enabled))
+```
+
 ## Named types are structural and recursive bindings are functions
 
 Primitive annotation names are `int`, `float`, `bool`, `string` and `unit`.
 Postfix `array` and `task` are supported. Record and variant annotations are
-closed. There are no user-written type parameters, explicit open-row annotations
-or `ref` type constructor. Named types are aliases, not nominal wrappers: two
-names with the same structural shape can describe the same value.
+closed. Named types are transparent aliases, not nominal wrappers: two names
+with the same structural shape can describe the same value. Aliases can declare
+lexically scoped parameters: `type 'a box = {value: 'a}` and
+``type ('a, 'e) outcome = [ `Ok('a) | `Error('e) ]``. Apply them as `int box` or
+`(int, string) outcome`. Parameters belong to their declaration; an annotation
+cannot introduce an unbound `'a` or claim implicit universal polymorphism.
+Explicit open-row annotations and a `ref` type constructor remain unsupported.
 
 Declarations are top-level and ordered. They may refer to earlier type names and
 their own recursive name, but cannot redefine a primitive or existing type name.
-Recursive references must be guarded by a real type constructor. There are no
+Recursive references must be guarded by a real type constructor and preserve
+the declaration's parameters, in order. For example, ``type 'a tree =
+[ `Leaf('a) | `Branch('a tree, 'a tree) ]`` is regular; recursively applying `tree`
+to `'a array` is not. Aliases resolve names in their declaration environment.
+Duplicate/free parameters, missing or extra arguments, and unguarded or
+nonregular recursion are rejected at a type-expression source span. There are no
 mutually recursive type declarations. A binding whose inferred type contains an
 explicit recursive type stays monomorphic, even if its expression is a lambda;
 do not infer polymorphic recursion from the usual identity-function example.
