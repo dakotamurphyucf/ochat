@@ -45,6 +45,19 @@ type shell_inspection =
   ; security_status : Shell_runtime.Manifest_security.status
   }
 
+(** Pure declaration preparation shared by source planning and runtime inspection.
+    Returns the actual manifest compiler's transient material so callers can
+    select effective scripts and invocation contracts. Does not consult host
+    policy, acquire source authority, authorize tools or run initializers.
+    Material may contain private declaration data: never persist it in program
+    custody or expose it as public authoring metadata. *)
+val prepare_shell_manifest
+  :  platform:Chatmd_shell_spec.Shell_spec.platform
+  -> prompt_elements:Prompt.Chat_markdown.top_level_elements list
+  -> ( Chatmd_shell_spec.Manifest.t * Chatmd_shell_spec.Manifest_compiler.material
+       , diagnostic list )
+       result
+
 (** [inspect_shell ~env ~platform ~prompt_elements] evaluates requested shell
     declarations against host administrative and trust policy without
     authorizing a manifest or instantiating any executable runtime. *)
