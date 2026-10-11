@@ -33,7 +33,8 @@ module Selection_gate = struct
     Budget.run limits ~checkpoint ~f:(fun budget ->
       let checkpoint () = Budget.checkpoint budget in
       (match operation with
-       | Operation.Initial_prepare | Update { previous_lock = None } -> ()
+       | Operation.Initial_prepare | Build_without_previous
+       | Update { previous_lock = None } -> ()
        | Build { previous_lock } | Update { previous_lock = Some previous_lock } ->
          Budget.charge_bytes budget (Chatml_source.byte_length previous_lock));
       Gate.create operation ~document:(Limits.document limits) ~checkpoint)

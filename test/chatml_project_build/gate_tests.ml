@@ -114,3 +114,37 @@ let%test_unit "Git root source members obey exact joined repository path bound" 
     assert (S.Id.equal id (Support.id ~namespace:"owner" declaration_path))
   | _ -> failwith "repository member bound classification"
 ;;
+
+let%test_unit "no-prior ordinary build admits Local but never Git in the selected closure"
+  =
+  let local = compose Local Build_without_previous |> Support.ok in
+  let restored =
+    B.restore
+      (B.lock_source local)
+      ~sources:(Support.without_lock local)
+      ~contract
+      ~limits:(Support.limits ())
+      ~checkpoint:ignore
+    |> Support.ok
+  in
+  Support.assert_same_source (B.lock_source local) (B.lock_source restored);
+  let gate, _ =
+    B.Selection_gate.create
+      Build_without_previous
+      ~limits:(Support.limits ())
+      ~checkpoint:ignore
+    |> Support.ok
+  in
+  assert (B.Selection_gate.preserves_git_selections gate);
+  assert (Option.is_none (B.Selection_gate.previous_lock gate));
+  let nested = Preacquisition_tests.Fixture.make () in
+  List.iter
+    [ compose (git 'a') Build_without_previous
+    ; Preacquisition_tests.Fixture.compose nested Build_without_previous
+    ]
+    ~f:(fun result ->
+      let error = result |> Support.reject in
+      match B.Error.problem error with
+      | Needs_update -> ()
+      | _ -> failwith "no-prior Git capture bypassed update policy")
+;;

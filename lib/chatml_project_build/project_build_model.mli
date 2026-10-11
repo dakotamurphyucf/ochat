@@ -83,6 +83,7 @@ end
 module Operation : sig
   type t =
     | Initial_prepare
+    | Build_without_previous
     | Build of { previous_lock : Captured.t }
     | Update of { previous_lock : Captured.t option }
 end

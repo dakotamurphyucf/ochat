@@ -18,6 +18,7 @@ let create operation ~document ~checkpoint =
   let previous, preserves_git_selections =
     match operation with
     | Model.Operation.Initial_prepare -> None, false
+    | Build_without_previous -> None, true
     | Build { previous_lock } -> Some previous_lock, true
     | Update { previous_lock } -> previous_lock, false
   in
@@ -87,7 +88,11 @@ let root_owner t ~origin ~project ~budget =
     match previous with
     | Some catalog when matches_owner catalog ~origin ~project ~budget ->
       Ok (Some { Owner.gate = t; catalog })
-    | None | Some _ -> Error (Model.Error.create Needs_update))
+    | None ->
+      (match t.previous, origin with
+       | None, Lock.Catalog.Local -> Ok None
+       | Some _, _ | None, Git _ -> Error (Model.Error.create Needs_update))
+    | Some _ -> Error (Model.Error.create Needs_update))
 ;;
 
 let check_root t ~origin ~project ~budget =

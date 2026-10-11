@@ -81,8 +81,14 @@ module Entry : sig
 end
 
 module Operation : sig
+  (** [Build_without_previous] admits only Local roots and selected Local
+      dependencies. Use it for an authoritative new script slot or a known prior
+      Provided input, never as recovery for missing/corrupt historical metadata.
+      Every Git selection requires explicit Update when no prior lock exists.
+      Source authorization remains the host's responsibility. *)
   type t =
     | Initial_prepare
+    | Build_without_previous
     | Build of { previous_lock : Chatml_source.t }
     | Update of { previous_lock : Chatml_source.t option }
 end
@@ -126,7 +132,8 @@ module Selection_gate : sig
   (** Check requested root code intent before transport. Build preserves the exact
       previous Git repository/format/full pin/package root/project member. Local
       refresh remains allowed; changing source kind requires update. No namespace
-      is invented before declaration capture. Initial/Update admit authored intent.
+      is invented before declaration capture. Build_without_previous admits only
+      Local and returns no prior owner. Initial/Update admit authored intent.
       Every call uses explicit remaining limits and returns observed work; on Error
       abort the host attempt, since no partial failure receipt/retry budget exists. *)
   val check_root

@@ -605,6 +605,62 @@ let%test_module "host graph acquisition" =
         )
     ;;
 
+    let%expect_test "new local script builds until a selected Git edge needs update" =
+      with_directory (fun env directory root ->
+        create_package
+          directory
+          "root"
+          (rich_manifest "root" "code.chatml" [ "local", local_dependency "../child" ]);
+        create_package directory "child" (rich_manifest "child" "code.chatml" []);
+        let host = host root () in
+        let local =
+          Request.Root.Local
+            { locator = "/workspace/root"; project = path "chatml.project.json" }
+        in
+        let request root = request ~operation:Build_without_previous root in
+        let build, _ = run env host (request local) |> ok in
+        [%test_eq: int] (List.length (P.Lock.catalogs (B.lock build))) 2;
+        print_endline "new local closure: built without a previous lock";
+        let repository = "https://example.invalid/must-not-fetch.git" in
+        let pin =
+          P.Git_pin.create ~object_format:Sha1 ~commit:(String.make 40 'a')
+          |> Or_error.ok_exn
+        in
+        let needs_update root =
+          match run env host (request root) with
+          | Ok _ -> failwith "new Git selection accepted without update"
+          | Error error ->
+            (match Error.problem error with
+             | Composition failure ->
+               (match B.Error.problem failure with
+                | Needs_update -> ()
+                | _ -> failwith "wrong composition failure")
+             | _ -> failwith "Git backend reached before update gate")
+        in
+        save
+          directory
+          "child/chatml.project.json"
+          (rich_manifest
+             "child"
+             "code.chatml"
+             [ "remote", git_dependency repository pin "chatml.project.json" ]);
+        needs_update local;
+        needs_update
+          (Git
+             { repository
+             ; pin
+             ; package_root = None
+             ; project = path "chatml.project.json"
+             });
+        print_endline
+          "new transitive or root Git selection: update required before backend");
+      [%expect
+        {|
+        new local closure: built without a previous lock
+        new transitive or root Git selection: update required before backend
+        |}]
+    ;;
+
     let git_repository env anchor name format packages =
       let source = Eio.Path.(anchor / name) in
       Eio.Path.mkdir ~perm:0o700 source;

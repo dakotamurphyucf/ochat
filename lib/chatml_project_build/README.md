@@ -98,6 +98,13 @@ while preserving Git repository, object format, full commit, package root and
 project member. Newly selected Git dependencies and source-kind/code changes
 require Update. Actual declarations/scopes still validate configuration; this
 permission does not grant native access or bypass compiler compatibility.
+For an authoritative new script slot or a known prior Provided input,
+`Build_without_previous` permits a new Local root and selected Local closure.
+It rejects every selected Git root/dependency before acquisition and repeats that
+check during complete composition. It is not a recovery mode for missing or
+corrupt historical metadata; the host must distinguish those states. Initial
+admission and explicit dependency updates keep their separate operations.
+
 Selected source subsets can differ at the same pin. Overlapping package-relative
 members retain their digest and byte length despite namespace changes. A prior
 omission does not prove a member was absent; authentic current Git object reads
