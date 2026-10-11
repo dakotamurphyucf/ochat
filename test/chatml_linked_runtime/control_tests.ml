@@ -9,6 +9,7 @@ let control ~checkpoint ~allocate : L.execution_control =
   { checkpoint
   ; diagnostic_checkpoint = checkpoint
   ; allocate
+  ; allocate_array = (fun count -> allocate (16 * count))
   ; before_builtin = (fun ~name:_ _ -> ())
   ; check_value = (fun _ -> ())
   ; before_json_import = (fun _ -> ())

@@ -1909,7 +1909,7 @@ let%test_unit "ordinary non-recursive bindings still generalize" =
   then failwith "expected ordinary non-recursive binding to generalize"
 ;;
 
-let%test_unit "bindings containing recursive types remain monomorphic" =
+let%test_unit "recursive arguments do not suppress independent result generalization" =
   let state = Chatml_typechecker.create_state () in
   let free =
     Chatml_typechecker.Var
@@ -1934,12 +1934,12 @@ let%test_unit "bindings containing recursive types remain monomorphic" =
   let env = Chatml_typechecker.Value_scope.empty in
   let env' = Chatml_typechecker.add_generalized state env "f" ty in
   let stored = Chatml_typechecker.lookup_scheme env' "f" in
-  if Chatml_typechecker.contains_generic stored
-  then failwith "recursive binding should have remained monomorphic";
+  if not (Chatml_typechecker.contains_generic stored)
+  then failwith "independent result variable should generalize";
   match stored with
   | Chatml_typechecker.Fun
       ( [ Chatml_typechecker.Mu _ ]
-      , Chatml_typechecker.Var { contents = Chatml_typechecker.Free _ } ) -> ()
+      , Chatml_typechecker.Generic { name = "z"; equality = None } ) -> ()
   | _ -> failwith ("unexpected stored type: " ^ Chatml_typechecker.show_type stored)
 ;;
 

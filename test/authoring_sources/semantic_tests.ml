@@ -30,6 +30,8 @@ let%expect_test
                ; "lib/chatml/chatml_compilation.ml"
                ; "lib/chatml/chatml_execution.ml"
                ; "lib/chatml/chatml_builtin_modules.ml"
+               ; "lib/chatml/chatml_task_array.ml"
+               ; "lib/chatml/chatml_task_array_mode.ml"
                ]
                path
                ~equal:String.equal)))
@@ -49,6 +51,6 @@ let%expect_test
     , (List.map incomplete.missing ~f:(fun target -> target.V.id) : string list)];
   [%expect
     {|
-    (39 156 40 (one_off_v1/semantics/lex.identifiers))
+    (40 160 44 (one_off_v1/semantics/lex.identifiers))
     |}]
 ;;

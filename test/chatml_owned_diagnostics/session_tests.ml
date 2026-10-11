@@ -94,6 +94,7 @@ let%expect_test "event and resume control exceptions propagate and release activ
       { checkpoint = (fun () -> ())
       ; diagnostic_checkpoint = (fun () -> ())
       ; allocate = (fun _ -> ())
+      ; allocate_array = (fun _ -> ())
       ; before_builtin = (fun ~name:_ _ -> ())
       ; check_value = (fun _ -> ())
       ; before_json_import = (fun _ -> ())
