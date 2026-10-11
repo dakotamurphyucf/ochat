@@ -26,10 +26,19 @@ type t
     Retains the entire captured parent source closure, preserving relative import,
     script/schema and nested-agent edges without rewriting authored declarations.
     This conservative closure also pins unused captured sources; a new parent
-    revision requires new admission even if this specialist's bytes are unchanged. *)
+    revision requires new admission even if this specialist's bytes are unchanged.
+    Content-bearing parents require explicit content limits. The complete parent
+    content inventory/unknowns is retained, while the actual child Root is replayed
+    and materialized without original document/catalog reads. The resulting actual
+    artifact-directory parser/projection is retained for [resource_revision]; that
+    transfer verifies the child's complete authored tree and does not restart the
+    content work allowance or re-materialize. Independently restored child artifacts
+    still replay against their own installed directory under explicit host policy. *)
 val capture
-  :  parent:Prompt_revision.t
+  :  ?content_limits:Chatmd_prompt_content.Limits.t
+  -> parent:Prompt_revision.t
   -> tool_name:string
+  -> unit
   -> (t, Agent_protocol.Error.t) result
 
 val identity : t -> Identity.t

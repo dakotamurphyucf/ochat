@@ -6,6 +6,8 @@ type t =
   ; materialized_tree : Eio.Fs.dir_ty Eio.Path.t
   ; parser_context : Prompt.Chat_markdown.Parsed.t option
   ; programs : Chatml_prompt_programs.t option
+  ; content : Chatmd_prompt_content.t option
+  ; document_projection : Prompt.Chat_markdown.Document_projection.t option
   ; elements : Prompt.Chat_markdown.top_level_elements list
   }
 
@@ -16,6 +18,8 @@ let create ~definition ~artifact ~materialized_tree ~elements =
   ; elements
   ; parser_context = None
   ; programs = None
+  ; content = None
+  ; document_projection = None
   }
 ;;
 
@@ -79,3 +83,56 @@ let elements t = t.elements
 let root_relative_path t = t.artifact.root_relative_path
 let parser_context t = t.parser_context
 let programs t = t.programs
+let content t = t.content
+let document_projection t = t.document_projection
+
+let with_content t ~content ~materialized ~checkpoint =
+  let module C = Chatmd_prompt_content in
+  let module Bundle = Agent_store.Prompt_program_bundle in
+  let projection = C.Materialized.projection materialized in
+  let exact_bytes left right =
+    checkpoint ();
+    if String.length left <> String.length right
+    then false
+    else (
+      let equal = ref true
+      and offset = ref 0 in
+      while !equal && !offset < String.length left do
+        if !offset mod 4096 = 0 then checkpoint ();
+        equal := Char.equal left.[!offset] right.[!offset];
+        incr offset
+      done;
+      checkpoint ();
+      !equal)
+  in
+  let matches =
+    match t.artifact.content_bundle, t.parser_context, t.programs with
+    | Some stored, Some parsed, Some _ ->
+      let supplied = C.to_storage content in
+      checkpoint ();
+      C.Materialized.belongs_to materialized ~content
+      && phys_equal parsed (Prompt.Chat_markdown.Document_projection.parsed projection)
+      (* Both manifests are admitted under the fixed262144-byte envelope and
+         bounded128 depth. Large payload comparisons poll every4096 bytes. *)
+      && Bundle.Manifest.equal (Bundle.manifest stored) (Bundle.manifest supplied)
+      && List.equal
+           (fun left right ->
+              String.equal (Bundle.Payload.sha256 left) (Bundle.Payload.sha256 right)
+              && exact_bytes
+                   (Bundle.Payload.contents left)
+                   (Bundle.Payload.contents right))
+           (Bundle.payloads stored)
+           (Bundle.payloads supplied)
+    | None, _, _ | Some _, None, _ | Some _, Some _, None -> false
+  in
+  checkpoint ();
+  if not matches
+  then Or_error.error_string "Content projection does not belong to this artifact/parser"
+  else
+    Ok
+      { t with
+        content = Some content
+      ; document_projection = Some projection
+      ; elements = Prompt.Chat_markdown.Document_projection.elements projection
+      }
+;;

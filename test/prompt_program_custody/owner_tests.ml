@@ -188,7 +188,7 @@ let%test_module "actual prompt and retained-child custody owners" =
         assert (
           String.equal (R.artifact parent).root_chatmd (R.artifact another).root_chatmd);
         assert (not (Protocol.Id.Prompt_revision.equal (R.id parent) (R.id another)));
-        let source = A.capture ~parent ~tool_name:"child" |> ok in
+        let source = A.capture ~parent ~tool_name:"child" () |> ok in
         let base = A.resource_revision ~parent source |> ok in
         let custody = R.programs base |> Option.value_exn in
         let parsed = R.parser_context base |> Option.value_exn in
@@ -345,7 +345,7 @@ let%test_module "actual prompt and retained-child custody owners" =
         [%test_eq: int]
           (List.length (C.bindings (R.programs restarted |> Option.value_exn)))
           0;
-        let source = A.capture ~parent:restarted ~tool_name:"child" |> ok in
+        let source = A.capture ~parent:restarted ~tool_name:"child" () |> ok in
         let child = A.resource_revision ~parent:restarted source |> ok in
         assert (
           String.equal

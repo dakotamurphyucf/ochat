@@ -67,7 +67,7 @@ let source ~root_path ~policy =
                , policy ))
         ]
   in
-  Source.capture ~parent:parent_revision ~tool_name:"researcher" |> protocol_ok
+  Source.capture ~parent:parent_revision ~tool_name:"researcher" () |> protocol_ok
 ;;
 
 let%expect_test "authored private tools remain scoped across mixed delegation ancestry" =

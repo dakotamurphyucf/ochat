@@ -512,7 +512,7 @@ let prepare_authored_resources
       ~approval_store
   =
   let open Result.Let_syntax in
-  let%bind source = Authored_agent_source.capture ~parent:parent_revision ~tool_name in
+  let%bind source = Authored_agent_source.capture ~parent:parent_revision ~tool_name () in
   let%bind revision =
     Authored_agent_source.resource_revision ~parent:parent_revision source
   in

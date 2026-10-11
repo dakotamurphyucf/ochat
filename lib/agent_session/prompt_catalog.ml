@@ -39,7 +39,8 @@ module Source_selection = struct
              | Filesystem
              | Capture
              | Foreign_capture
-             | Project_preparation -> Unavailable error)))
+             | Project_preparation
+             | Document_capture -> Unavailable error)))
   ;;
 
   let check_intent t expected =

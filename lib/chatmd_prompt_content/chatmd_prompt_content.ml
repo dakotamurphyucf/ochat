@@ -38,21 +38,25 @@ let of_storage storage ~inputs ~limits ~checkpoint =
   finish budget (Document.of_storage storage ~inputs ~budget)
 ;;
 
+type content = t
+
 module Materialized = struct
   type t =
     { projection : Projection.t
+    ; content : content
     ; accounting : Accounting.t
     }
 
   let projection t = t.projection
   let accounting t = t.accounting
+  let belongs_to t ~content = phys_equal t.content content
 end
 
 let materialize t ~parsed ~limits ~checkpoint =
   let budget = B.create limits ~checkpoint in
   Content_inventory.materialize (Document.inventory t.document) ~parsed ~budget
   |> Result.map ~f:(fun projection ->
-    { Materialized.projection; accounting = B.accounting budget })
+    { Materialized.projection; content = t; accounting = B.accounting budget })
 ;;
 
 let adopt t ~previous ~limits ~checkpoint =

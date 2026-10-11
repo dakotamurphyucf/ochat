@@ -32,3 +32,22 @@ val with_custody
   -> programs:Chatml_prompt_programs.t
   -> checkpoint:(unit -> unit)
   -> t Or_error.t
+
+(** Present only after exact content custody and original parser affinity have
+    been validated against this artifact. *)
+val content : t -> Chatmd_prompt_content.t option
+
+(** The exact validated projection attached by [with_content], retaining this
+    revision's original parser identity. No reparse or materialization occurs. *)
+val document_projection : t -> Prompt.Chat_markdown.Document_projection.t option
+
+(** Attach a projection created by the SAME admitted content owner and original
+    Parsed already held by this revision. Verify exact artifact metadata/private
+    payload bytes before replacing elements; parser/script ownership stays on the
+    original Parsed. Reject missing/divergent bundle and foreign projection. *)
+val with_content
+  :  t
+  -> content:Chatmd_prompt_content.t
+  -> materialized:Chatmd_prompt_content.Materialized.t
+  -> checkpoint:(unit -> unit)
+  -> t Or_error.t

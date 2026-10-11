@@ -3397,6 +3397,7 @@ let prepare_runtime_at_paths
                     (Agent_store.Prompt_artifact_store.materialized_tree
                        artifact_store
                        artifact.revision_id)
+                  ()
                 |> Result.map_error ~f:(fun errors ->
                   unavailable
                     Prompt_unavailable

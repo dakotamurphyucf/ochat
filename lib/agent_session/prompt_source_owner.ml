@@ -30,12 +30,14 @@ module Error = struct
     | Capture
     | Foreign_capture
     | Project_preparation
+    | Document_capture
   [@@deriving equal, sexp_of]
 
   type t =
     { code : code
     ; filesystem : Local.Error.t option
     ; project_error : (Prepare.Error.t option[@sexp.opaque])
+    ; document_error : (Chatmd_content_capture.Error.t option[@sexp.opaque])
     ; capture_diagnostics : Prompt_revision_builder.Diagnostic.t list option
     }
   [@@deriving sexp_of]
@@ -43,15 +45,22 @@ module Error = struct
   let code t = t.code
   let capture_diagnostics t = t.capture_diagnostics
   let project_error t = t.project_error
+  let document_error t = t.document_error
 
   let create code =
-    { code; filesystem = None; project_error = None; capture_diagnostics = None }
+    { code
+    ; filesystem = None
+    ; project_error = None
+    ; document_error = None
+    ; capture_diagnostics = None
+    }
   ;;
 
   let filesystem filesystem = { (create Filesystem) with filesystem = Some filesystem }
   let missing_live_root () = create Missing_live_root
   let foreign_receipt () = create Foreign_receipt
   let project error = { (create Project_preparation) with project_error = Some error }
+  let document error = { (create Document_capture) with document_error = Some error }
 
   let capture diagnostics =
     { (create Capture) with capture_diagnostics = Some diagnostics }
@@ -482,6 +491,47 @@ module Scope = struct
                       ; source = Some definition.root_file
                       }
                   ]))))
+  ;;
+
+  let capture_documents t ~capture ~limits ~checkpoint =
+    run t (fun () ->
+      if
+        (not (phys_equal capture.Capture.affinity t.owner.capture_affinity))
+        || not (Receipt.equal capture.receipt (receipt t.owner))
+      then Error (Error.create Foreign_capture)
+      else
+        let module Abort = struct
+          exception Stop of Error.t
+        end
+        in
+        let poll () =
+          match check t with
+          | Error error -> raise (Abort.Stop error)
+          | Ok () ->
+            checked_poll t.owner checkpoint (fun error -> raise (Abort.Stop error))
+        in
+        try
+          poll ();
+          (* Builder admits at most256 authored paths; these immutable contexts
+             have already been constructed by its actual bounded parser walker. *)
+          let value = capture.value in
+          let contexts =
+            Prompt_revision_builder.Capture.root value
+            :: List.map (Prompt_revision_builder.Capture.agents value) ~f:snd
+          in
+          match
+            Chatmd_content_capture.run
+              t.owner.local
+              ~parsed_contexts:contexts
+              ~limits
+              ~checkpoint:poll
+          with
+          | Error error -> Error (Error.document error)
+          | Ok result ->
+            poll ();
+            Ok result
+        with
+        | Abort.Stop error -> Error error)
   ;;
 
   let prepare_sources

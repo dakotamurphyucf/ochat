@@ -24,6 +24,7 @@ module Artifact : sig
     ; runtime_schema_version : int
     ; shell_manifest_sha256 : string option
     ; program_bundle : Prompt_program_bundle.t option
+    ; content_bundle : Prompt_program_bundle.t option
     ; manifest_sha256 : string
     ; manifest_publication : Prompt_manifest_document.Publication.t
     ; created_at : Agent_protocol.Timestamp.t
@@ -34,7 +35,7 @@ module Artifact : sig
   val same_content : t -> t -> bool
 
   (** Copy a revision without dropping known or unknown manifest metadata or
-      private program payloads. The original artifact remains immutable. *)
+      private program and content payloads. The original artifact remains immutable. *)
   val with_identity
     :  t
     -> revision_id:Agent_protocol.Id.Prompt_revision.t
@@ -43,7 +44,7 @@ module Artifact : sig
 
   (** Authors one exact named manifest publication. Its complete inventory is
       limited to 262144 bytes, including metadata and envelope, before IO.
-      Authored and private program payloads share the 256-file/8 MiB inventory
+      Authored and private program and content payloads share the 256-file/8 MiB inventory
       limits. Program metadata is included in the complete manifest limit. *)
   val create
     :  revision_id:Agent_protocol.Id.Prompt_revision.t
@@ -57,6 +58,7 @@ module Artifact : sig
     -> runtime_schema_version:int
     -> ?shell_manifest_sha256:string
     -> ?program_bundle:Prompt_program_bundle.t
+    -> ?content_bundle:Prompt_program_bundle.t
     -> created_at:Agent_protocol.Timestamp.t
     -> unit
     -> (t, Store_error.t) result

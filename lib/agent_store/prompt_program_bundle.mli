@@ -24,6 +24,16 @@ module Manifest : sig
   val of_json : Jsonaf.t -> (t, Document_schema.Error.t) Result.t
 
   val to_json : t -> Jsonaf.t
+
+  (** Validate the complete inventory encoding before allocation, then hash all
+      metadata including unknown fields and payload descriptors. Callback failures
+      propagate unchanged; no outer revision or timestamp participates. *)
+  val fingerprint
+    :  t
+    -> limits:Document_schema.Limits.t
+    -> checkpoint:(unit -> unit)
+    -> (string, Document_schema.Error.t) Result.t
+
   val shape : Document_schema.Shape.t
   val metadata : t -> Document_schema.Document.t
   val payloads : t -> (string * int) list

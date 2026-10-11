@@ -69,13 +69,13 @@ let%expect_test
       |> built
     in
     let parent = build () in
-    let captured = S.capture ~parent ~tool_name:"researcher" |> protocol_ok in
-    let reviewer = S.capture ~parent ~tool_name:"reviewer" |> protocol_ok in
+    let captured = S.capture ~parent ~tool_name:"researcher" () |> protocol_ok in
+    let reviewer = S.capture ~parent ~tool_name:"reviewer" () |> protocol_ok in
     assert (not (String.equal (S.fingerprint captured) (S.fingerprint reviewer)));
     [%test_eq: string] "agents/researcher.chatmd" (S.declaration captured).agent;
     assert (CM.equal_agent_persistence (S.identity captured).policy Optional);
     List.iter [ "missing"; "legacy" ] ~f:(fun tool_name ->
-      match S.capture ~parent ~tool_name with
+      match S.capture ~parent ~tool_name () with
       | Error { code = Permission_denied; _ } -> ()
       | _ -> failwith "non-persistent declaration was captured");
     (* Edits occur before creating the child artifact, not only after installing it. *)
@@ -86,7 +86,7 @@ let%expect_test
     save "shared/tools.chatmd" {|<tool name="apply_patch"/>|};
     let changed_parent = build () in
     let changed =
-      S.capture ~parent:changed_parent ~tool_name:"researcher" |> protocol_ok
+      S.capture ~parent:changed_parent ~tool_name:"researcher" () |> protocol_ok
     in
     assert (not (String.equal (S.fingerprint captured) (S.fingerprint changed)));
     let child_artifact =
@@ -147,7 +147,9 @@ let%expect_test
         | CM.Extension_script _ -> true
         | _ -> false));
     let parent_again = B.restore ~artifact_store definition (R.id parent) |> built in
-    let again = S.capture ~parent:parent_again ~tool_name:"researcher" |> protocol_ok in
+    let again =
+      S.capture ~parent:parent_again ~tool_name:"researcher" () |> protocol_ok
+    in
     assert (S.Identity.equal (S.identity captured) (S.identity again));
     [%test_eq: string] (S.fingerprint captured) (S.fingerprint again);
     (* A copied store has different materialized paths but the same source identity. *)
@@ -162,7 +164,9 @@ let%expect_test
     let relocated =
       B.restore ~artifact_store:moved_store definition (R.id parent) |> built
     in
-    let relocated = S.capture ~parent:relocated ~tool_name:"researcher" |> protocol_ok in
+    let relocated =
+      S.capture ~parent:relocated ~tool_name:"researcher" () |> protocol_ok
+    in
     [%test_eq: string] (S.fingerprint captured) (S.fingerprint relocated);
     let regenerated =
       S.artifact
@@ -231,7 +235,7 @@ let%expect_test "uncaptured external and ambiguous authored definitions cannot b
             definition
           |> built
         in
-        match S.capture ~parent ~tool_name:"researcher" with
+        match S.capture ~parent ~tool_name:"researcher" () with
         | Error { code = Permission_denied; _ } -> ()
         | _ -> failwith "unsafe source captured"));
   print_endline "absolute live source, remote source and duplicate declaration rejected";

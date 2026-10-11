@@ -247,6 +247,7 @@ let on_event ctx state event = match event with
               ~artifact
               ~materialized_tree:
                 (Artifacts.materialized_tree artifacts artifact.revision_id)
+              ()
             |> Authored_agent_source_tests.built
           in
           let authority =

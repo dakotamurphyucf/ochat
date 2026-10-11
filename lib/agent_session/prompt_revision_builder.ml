@@ -337,16 +337,27 @@ let validate_parser_closure ~parser_version ~dir loader root_source =
   done
 ;;
 
-let parse_tree tree artifact =
-  let parser_version =
-    artifact.Agent_store.Prompt_artifact_store.Artifact.parser_schema_version
+module Content_input = struct
+  type t =
+    | Stored of Chatmd_prompt_content.Limits.t option
+    | Fresh of Prompt_content_custody.Prepared.t
+end
+
+(* Pure captured replay establishes final artifact-relative source directories
+   even before installation. Public restoration verifies the tree first. *)
+let replay_custody ~content_input tree artifact =
+  let content_policy =
+    match content_input with
+    | Content_input.Stored limits -> Option.is_some limits
+    | Fresh _ -> true
   in
+  if
+    Option.is_some artifact.Agent_store.Prompt_artifact_store.Artifact.content_bundle
+    && ((not content_policy) || Option.is_none artifact.program_bundle)
+  then failwith "Content custody requires explicit policy and retained parser inputs";
+  let parser_version = artifact.parser_schema_version in
   if (parser_version < 1 || parser_version > 5) || artifact.runtime_schema_version <> 1
   then failwith "unsupported prompt parser/runtime schema version";
-  Agent_store.Prompt_artifact_store.verify_tree ~root:tree artifact
-  |> Result.map_error ~f:(fun error ->
-    Sexp.to_string_hum ([%sexp_of: Agent_store.Store_error.t] error))
-  |> Result.ok_or_failwith;
   let sources =
     (artifact.root_relative_path, artifact.root_chatmd)
     :: List.map artifact.sources ~f:(fun source -> source.relative_path, source.contents)
@@ -394,7 +405,46 @@ let parse_tree tree artifact =
     |> Result.ok_or_failwith;
     let elements = Prompt.Chat_markdown.Parsed.elements parsed in
     validate_parser_elements ~parser_version elements;
-    tree, elements, Some (parsed, custody)
+    let content =
+      match artifact.content_bundle, content_input with
+      | None, Content_input.Stored _ ->
+        if
+          Prompt_content_custody.requires_captured_documents
+            parsed
+            ~checkpoint:Eio.Fiber.check
+        then failwith "Owned captured documents require retained content custody";
+        None
+      | Some storage, Stored (Some limits) ->
+        let restored =
+          Prompt_content_custody.restore
+            storage
+            ~programs:custody
+            ~parsed
+            ~limits
+            ~checkpoint:Eio.Fiber.check
+          |> Result.map_error ~f:(fun _ -> "Invalid retained document custody")
+          |> Result.ok_or_failwith
+        in
+        Some restored
+      | Some _, Fresh prepared ->
+        let restored =
+          Prompt_content_custody.replay prepared ~parsed ~checkpoint:Eio.Fiber.check
+          |> Result.map_error ~f:(fun _ -> "Fresh document replay exceeds allowance")
+          |> Result.ok_or_failwith
+        in
+        Some restored
+      | None, Fresh _ -> failwith "Fresh content is absent from artifact"
+      | Some _, Stored None -> assert false
+    in
+    tree, elements, Some (parsed, custody, content)
+;;
+
+let parse_tree ?content_limits tree artifact =
+  Agent_store.Prompt_artifact_store.verify_tree ~root:tree artifact
+  |> Result.map_error ~f:(fun error ->
+    Sexp.to_string_hum ([%sexp_of: Agent_store.Store_error.t] error))
+  |> Result.ok_or_failwith;
+  replay_custody ~content_input:(Content_input.Stored content_limits) tree artifact
 ;;
 
 let prepared_revision ~definition ~artifact (tree, elements, custody) =
@@ -403,32 +453,49 @@ let prepared_revision ~definition ~artifact (tree, elements, custody) =
   in
   match custody with
   | None -> revision
-  | Some (parser_context, programs) ->
-    Prompt_revision.with_custody
-      revision
-      ~parser_context
-      ~programs
-      ~checkpoint:Eio.Fiber.check
-    |> Or_error.ok_exn
+  | Some (parser_context, programs, content) ->
+    let revision =
+      Prompt_revision.with_custody
+        revision
+        ~parser_context
+        ~programs
+        ~checkpoint:Eio.Fiber.check
+      |> Or_error.ok_exn
+    in
+    (match content with
+     | None -> revision
+     | Some restored ->
+       Prompt_revision.with_content
+         revision
+         ~content:(Prompt_content_custody.Restored.content restored)
+         ~materialized:(Prompt_content_custody.Restored.materialized restored)
+         ~checkpoint:Eio.Fiber.check
+       |> Or_error.ok_exn)
 ;;
 
-let parse_artifact artifact_store artifact =
+let parse_artifact ?content_limits artifact_store artifact =
   parse_tree
+    ?content_limits
     (Agent_store.Prompt_artifact_store.materialized_tree
        artifact_store
        artifact.Agent_store.Prompt_artifact_store.Artifact.revision_id)
     artifact
 ;;
 
-let reparse ~definition ~artifact ~materialized_tree =
+let reparse ?content_limits ~definition ~artifact ~materialized_tree () =
   try
-    Ok (prepared_revision ~definition ~artifact (parse_tree materialized_tree artifact))
+    Ok
+      (prepared_revision
+         ~definition
+         ~artifact
+         (parse_tree ?content_limits materialized_tree artifact))
   with
   | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
   | exn -> Error [ exception_error ~source:definition.Prompt_definition.root_file exn ]
 ;;
 
-let restore ~artifact_store (definition : Prompt_definition.t) revision_id =
+let restore ?content_limits ~artifact_store (definition : Prompt_definition.t) revision_id
+  =
   match Agent_store.Prompt_artifact_store.load artifact_store revision_id with
   | Error error -> Error [ store_error error ]
   | Ok artifact ->
@@ -437,7 +504,7 @@ let restore ~artifact_store (definition : Prompt_definition.t) revision_id =
          (prepared_revision
             ~definition
             ~artifact
-            (parse_artifact artifact_store artifact))
+            (parse_artifact ?content_limits artifact_store artifact))
      with
      | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
      | exn -> Error [ exception_error ~source:definition.root_file exn ])
@@ -445,6 +512,7 @@ let restore ~artifact_store (definition : Prompt_definition.t) revision_id =
 
 let publish_capture
       ?prepare_programs
+      ?prepare_content
       ~source_receipt
       ~canonical_source
       ~artifact_store
@@ -458,6 +526,11 @@ let publish_capture
      closure may own capabilities; only the immutable Capture is passed here. *)
   let%bind supplied =
     match prepare_programs with
+    | None -> Ok None
+    | Some prepare -> Result.map (prepare captured) ~f:Option.some
+  in
+  let%bind supplied_content =
+    match prepare_content with
     | None -> Ok None
     | Some prepare -> Result.map (prepare captured) ~f:Option.some
   in
@@ -485,6 +558,44 @@ let publish_capture
         [ diagnostic "prompt.custody" "Preparation custody does not match actual capture"
         ])
     in
+    let contexts = Capture.root captured :: List.map (Capture.agents captured) ~f:snd in
+    let%bind prepared_content =
+      match supplied_content with
+      | None ->
+        let captured_slot =
+          List.exists contexts ~f:(fun parsed ->
+            Prompt_content_custody.requires_captured_documents
+              parsed
+              ~checkpoint:Eio.Fiber.check)
+        in
+        if captured_slot
+        then
+          Error
+            [ diagnostic
+                "prompt.content"
+                "Captured documents require completed source acquisition"
+            ]
+        else Ok None
+      | Some supplied ->
+        let limits = Chatmd_content_capture.limits supplied in
+        let%map prepared =
+          Prompt_content_custody.prepare
+            ~parsed_contexts:contexts
+            ~programs
+            ~supplied:(Some supplied)
+            ~limits
+            ~checkpoint:Eio.Fiber.check
+          |> Result.map_error ~f:(fun _ ->
+            [ diagnostic
+                "prompt.content"
+                "Document custody does not match actual capture or allowance"
+            ])
+        in
+        Some prepared
+    in
+    let content =
+      Option.map prepared_content ~f:Prompt_content_custody.Prepared.content
+    in
     let canonical_source = canonical_source () in
     let shell_manifest_sha256 = Capture.shell_manifest_sha256 captured in
     let%bind programs_sha256 =
@@ -501,6 +612,20 @@ let publish_capture
         ~sources
         ~shell_manifest_sha256
         ~programs_sha256
+    in
+    let%bind manifest =
+      match content with
+      | None -> Ok manifest
+      | Some content ->
+        let%map digest =
+          Prompt_content_custody.fingerprint content ~checkpoint:Eio.Fiber.check
+          |> Result.map_error ~f:(fun _ ->
+            [ diagnostic
+                "prompt.content"
+                "Complete content manifest exceeds artifact policy"
+            ])
+        in
+        manifest ^ "#document-content.v1:" ^ digest
     in
     let manifest =
       match source_receipt with
@@ -527,15 +652,33 @@ let publish_capture
         ~runtime_schema_version:1
         ~shell_manifest_sha256
         ~program_bundle:(Chatml_prompt_programs.to_storage programs)
+        ?content_bundle:(Option.map content ~f:Chatmd_prompt_content.to_storage)
         ~created_at
         ()
       |> Result.map_error ~f:(fun e -> [ store_error e ])
+    in
+    let fresh_replay =
+      Option.map prepared_content ~f:(fun prepared ->
+        replay_custody
+          ~content_input:(Content_input.Fresh prepared)
+          (Agent_store.Prompt_artifact_store.materialized_tree artifact_store revision_id)
+          artifact)
     in
     let%bind artifact =
       install artifact_store ~transaction_id artifact
       |> Result.map_error ~f:(fun e -> [ store_error e ])
     in
-    Ok (prepared_revision ~definition ~artifact (parse_artifact artifact_store artifact))
+    let replayed =
+      match fresh_replay with
+      | None -> parse_artifact artifact_store artifact
+      | Some ((tree, _, _) as replayed) ->
+        Agent_store.Prompt_artifact_store.verify_tree ~root:tree artifact
+        |> Result.map_error ~f:(fun error ->
+          Sexp.to_string_hum ([%sexp_of: Agent_store.Store_error.t] error))
+        |> Result.ok_or_failwith;
+        replayed
+    in
+    Ok (prepared_revision ~definition ~artifact replayed)
   with
   | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
   | exn -> Error [ exception_error ~source:definition.root_file exn ]
@@ -543,6 +686,7 @@ let publish_capture
 
 let build
       ?prepare_programs
+      ?prepare_content
       ~env
       ~artifact_store
       ~transaction_id
@@ -564,6 +708,7 @@ let build
   Result.bind captured ~f:(fun captured ->
     publish_capture
       ?prepare_programs
+      ?prepare_content
       ~source_receipt:None
       ~canonical_source:(fun () -> canonical_source ~env definition.root_file)
       ~artifact_store
@@ -575,6 +720,7 @@ let build
 
 let build_captured
       ?prepare_programs
+      ?prepare_content
       ~capture
       ~source_receipt
       ~artifact_store
@@ -603,6 +749,7 @@ let build_captured
   else
     publish_capture
       ?prepare_programs
+      ?prepare_content
       ~source_receipt:(Some source_receipt)
       ~canonical_source:(fun () -> Receipt.root_file source_receipt)
       ~artifact_store

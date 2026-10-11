@@ -112,7 +112,7 @@ let prepare t ~sw ~max_depth ~revision ~build ~services =
       | Prompt.Chat_markdown.Tool (Persistent_agent (agent, _)) -> Some agent.name
       | _ -> None)
     |> List.map ~f:(fun tool_name ->
-      let%bind source = Source.capture ~parent:revision ~tool_name in
+      let%bind source = Source.capture ~parent:revision ~tool_name () in
       let path = (Source.identity source).root_relative_path in
       match
         List.length ancestors > max_depth || List.mem ancestors path ~equal:String.equal

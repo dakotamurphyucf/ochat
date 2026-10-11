@@ -90,7 +90,8 @@ let availability = function
          | Filesystem
          | Capture
          | Foreign_capture
-         | Project_preparation -> Unavailable error))
+         | Project_preparation
+         | Document_capture -> Unavailable error))
 ;;
 
 let borrow = function

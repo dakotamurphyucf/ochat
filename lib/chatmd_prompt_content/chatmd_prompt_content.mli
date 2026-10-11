@@ -125,10 +125,16 @@ val of_storage
   -> checkpoint:(unit -> unit)
   -> (t, Error.t) Result.t
 
+type content = t
+
 module Materialized : sig
   type t
 
   val projection : t -> Projection.t
+
+  (** Deliberate immutable content-owner affinity, in addition to the projection
+      retaining its original Parsed. No equality or native authority claim. *)
+  val belongs_to : t -> content:content -> bool
 
   (** Complete invocation receipt, including exact parser-input reconciliation,
       retained occurrence validation and final tree projection. Charge this once;

@@ -23,6 +23,7 @@ type t =
   ; runtime_schema_version : int
   ; shell_manifest_sha256 : string option
   ; program_bundle : Prompt_program_bundle.Manifest.t option
+  ; content_bundle : Prompt_program_bundle.Manifest.t option
   ; created_at : P.Timestamp.t
   }
 [@@deriving equal, sexp_of]
@@ -81,6 +82,8 @@ let validate t =
     let initial =
       1
       + Option.value_map t.program_bundle ~default:0 ~f:(fun bundle ->
+        List.length (Prompt_program_bundle.Manifest.payloads bundle))
+      + Option.value_map t.content_bundle ~default:0 ~f:(fun bundle ->
         List.length (Prompt_program_bundle.Manifest.payloads bundle))
     in
     List.fold_result t.sources ~init:initial ~f:(fun count _ ->
