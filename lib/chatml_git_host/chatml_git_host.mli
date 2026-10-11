@@ -85,6 +85,9 @@ module Grant : sig
   val local : repository:string -> max_input_bytes:int -> t Or_error.t
 
   val repository : t -> string
+
+  (** Validated route plus authorization byte length, without exposing credentials. *)
+  val input_bytes : t -> int
 end
 
 module Store_limits : sig

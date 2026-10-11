@@ -1,0 +1,8 @@
+(library
+ (name chatml_project_prepare)
+ (public_name ochat.chatml_project_prepare)
+ (modules chatml_project_prepare project_prepare_policy project_prepare_limits project_prepare_host project_prepare_request project_prepare_accounting project_prepare_error project_prepare_attempt project_prepare_attempt_checks)
+ (private_modules project_prepare_policy project_prepare_limits project_prepare_host project_prepare_request project_prepare_accounting project_prepare_error project_prepare_attempt project_prepare_attempt_checks)
+ (inline_tests)
+ (libraries core eio eio_main eio.mock chatml_project_build chatml_local_roots chatml_local_capture chatml_git_catalog chatml_git_host chatml_source chatml_project chatml chatml_local_source document_schema agent_store chat_response)
+ (preprocess (pps ppx_jane ppx_expect)))
