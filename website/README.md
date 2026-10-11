@@ -363,7 +363,8 @@ See [the release runbook](planning/release-runbook.md),
 
 The required `release-gate` covers selected framework normal/E2E tests,
 documentation semantics, and both website environments. Change detection and
-the final gate always run. Maintainer-documentation-only changes can skip heavy
+the final gate run for ready PRs and all non-PR events. Draft PRs skip all
+runner jobs; marking a PR ready starts qualification. Maintainer-documentation-only changes can skip heavy
 jobs and publication; unknown inputs or missing history trigger full checks.
 Unshipped website changes are included before deciding whether to publish.
 See [CI coverage, recovery and cache maintenance](planning/ci-enforcement.md).
