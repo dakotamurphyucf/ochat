@@ -21,6 +21,11 @@ module Limits = struct
   let acquisition_payload_bytes t = t.acquisition_payload_bytes
   let maximum_request_bytes t = t.maximum_request_bytes
   let wall_time t = t.wall_time
+  let maximum_output_bytes t = t.maximum_output_bytes
+  let maximum_work_steps t = t.maximum_work_steps
+  let cpu_seconds_per_process t = t.cpu_seconds_per_process
+  let memory_bytes_per_process t = t.memory_bytes_per_process
+  let open_files_per_process t = t.open_files_per_process
 
   let create
         ~metadata_file_bytes

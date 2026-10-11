@@ -22,6 +22,17 @@ module Limits : sig
     -> max_path_components:int
     -> max_work_steps:int
     -> t Or_error.t
+
+  (** Literal configured ceilings, not consumed accounting. Host composition
+      uses these to construct smaller remaining allowances without resetting
+      aggregate limits or raising any backend ceiling. *)
+  val directory_entries : t -> int
+
+  val sources : t -> int
+  val source_bytes : t -> int
+  val total_source_bytes : t -> int
+  val path_components : t -> int
+  val work_steps : t -> int
 end
 
 module Accounting : sig

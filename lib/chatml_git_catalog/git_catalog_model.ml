@@ -17,6 +17,17 @@ module Limits = struct
     ; document : Document_schema.Limits.t
     }
 
+  let max_object_bytes t = t.max_object_bytes
+  let max_total_object_bytes t = t.max_total_object_bytes
+  let max_objects t = t.max_objects
+  let max_tree_entries t = t.max_tree_entries
+  let max_sources t = t.max_sources
+  let max_source_bytes t = t.max_source_bytes
+  let max_total_source_bytes t = t.max_total_source_bytes
+  let max_path_components t = t.max_path_components
+  let max_work_steps t = t.max_work_steps
+  let document t = t.document
+
   let create
         ~max_object_bytes
         ~max_total_object_bytes

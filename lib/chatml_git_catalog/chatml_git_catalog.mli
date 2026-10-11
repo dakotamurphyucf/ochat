@@ -33,6 +33,21 @@ module Limits : sig
     -> max_work_steps:int
     -> document:Document_schema.Limits.t
     -> t Or_error.t
+
+  (** Literal configured ceilings, not consumed accounting. Host composition
+      uses these to construct smaller remaining allowances without resetting
+      aggregate limits or raising any backend ceiling. *)
+  val max_object_bytes : t -> int
+
+  val max_total_object_bytes : t -> int
+  val max_objects : t -> int
+  val max_tree_entries : t -> int
+  val max_sources : t -> int
+  val max_source_bytes : t -> int
+  val max_total_source_bytes : t -> int
+  val max_path_components : t -> int
+  val max_work_steps : t -> int
+  val document : t -> Document_schema.Limits.t
 end
 
 module Accounting : sig

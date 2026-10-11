@@ -24,6 +24,16 @@ module Limits : sig
   val acquisition_payload_bytes : t -> int
   val maximum_request_bytes : t -> int
   val wall_time : t -> Time_ns.Span.t
+
+  (** Literal configured ceilings, not consumed accounting. Host composition
+      uses these to construct smaller remaining allowances without resetting
+      aggregate limits or raising any backend ceiling. *)
+  val maximum_output_bytes : t -> int
+
+  val maximum_work_steps : t -> int
+  val cpu_seconds_per_process : t -> int
+  val memory_bytes_per_process : t -> int
+  val open_files_per_process : t -> int
 end
 
 type t
