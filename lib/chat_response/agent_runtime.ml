@@ -231,14 +231,17 @@ let compile ~platform declarations =
   |> Result.map_error ~f:(List.map ~f:diagnostic_of_manifest)
 ;;
 
+let prepare_shell_manifest ~platform ~prompt_elements =
+  compile ~platform (declarations prompt_elements)
+;;
+
 let inspect_shell ~env ~platform ~prompt_elements =
   let open Result.Let_syntax in
-  let declarations = declarations prompt_elements in
   let%bind administrative_policy =
     Shell_runtime.Admin_policy_loader.load_from_environment ~env
     |> Result.map_error ~f:(fun error -> [ diagnostic error.code error.message ])
   in
-  let%bind manifest, material = compile ~platform declarations in
+  let%bind manifest, material = prepare_shell_manifest ~platform ~prompt_elements in
   let%bind live_runtimes =
     MC.effective_runtimes material ~manifest
     |> Result.map_error ~f:(List.map ~f:diagnostic_of_manifest)
