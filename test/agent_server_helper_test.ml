@@ -1586,8 +1586,14 @@ let run env helper ~native_watch =
                 let head =
                   Option.map (List.hd snapshot.queued_internal_events) ~f:(function
                     | Session.Snapshot.Variant (tag, _) -> bounded tag
-                    | Unit | Bool _ | Int _ | Float _ | String _ | Array _ | Record _ ->
-                      "non-variant")
+                    | Unit
+                    | Bool _
+                    | Int _
+                    | Float _
+                    | String _
+                    | Array _
+                    | Record _
+                    | Tuple _ -> "non-variant")
                 in
                 [%sexp
                   (List.length snapshot.queued_internal_events : int)

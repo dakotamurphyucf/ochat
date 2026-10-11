@@ -239,6 +239,9 @@ let rec value_to_string (v : value) : string =
   | VArray arr ->
     let contents = Array.to_list arr |> List.map ~f:value_to_string in
     "[|" ^ String.concat ~sep:", " contents ^ "|]"
+  | VTuple values ->
+    let contents = Chatml_tuple.to_list values |> List.map ~f:value_to_string in
+    "(|" ^ String.concat ~sep:", " contents ^ "|)"
   | VRecord fields ->
     let rendered_fields =
       Map.to_alist fields |> List.map ~f:(fun (k, v') -> k ^ " = " ^ value_to_string v')
@@ -329,6 +332,10 @@ let render_debug ?(max_bytes = 4096) ?(max_nodes = 256) ?(max_depth = 16) render
         add "[|";
         separated (fun f -> Array.iter values ~f) child;
         add "|]"
+      | VTuple values ->
+        add "(|";
+        separated (fun f -> Chatml_tuple.iter values ~f) child;
+        add "|)"
       | VRecord fields ->
         add "{ ";
         let first = ref true in
@@ -519,6 +526,13 @@ let rec value_to_pretty_string_with_depth ?(depth = 0) (v : value) : string =
         |> String.concat ~sep:",\n"
       in
       "[|\n" ^ contents ^ "\n" ^ indent depth ^ "|]")
+  | VTuple values ->
+    let contents =
+      Chatml_tuple.to_list values
+      |> List.map ~f:(fun value -> indent_block (depth + 1) (compact_nested value))
+      |> String.concat ~sep:",\n"
+    in
+    "(|\n" ^ contents ^ "\n" ^ indent depth ^ "|)"
   | VRecord fields ->
     if Map.is_empty fields
     then "{ }"

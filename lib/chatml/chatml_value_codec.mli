@@ -35,7 +35,11 @@ module Snapshot : sig
       and queued internal events.
 
       This type intentionally excludes runtime-only values such as refs,
-      closures, modules, builtins, and tasks. *)
+      closures, modules, builtins, and tasks. The typed snapshot contains only
+      known fields. Session document ownership separately retains unknown fields,
+      including fields nested inside tuples. As with arrays and variant payloads,
+      an edit to tuple children with retained unknown child fields fails with
+      [Extension_conflict] when those fields cannot be safely reconciled. *)
   type t =
     | Int of int
     | Float of float
@@ -45,11 +49,13 @@ module Snapshot : sig
     | Array of t list
     | Record of (string * t) list
     | Variant of string * t list
+    | Tuple of t * t * t list
   [@@deriving sexp, compare, bin_io]
 
   (** [of_value value] converts [value] into a durable snapshot.
 
-      Record fields preserve sorted key order. The conversion fails with
+      Tuple containers preserve ordered arity and mutable child sharing is not
+      serialized. Record fields preserve sorted key order. The conversion fails with
       a descriptive error when [value] contains runtime-only data. *)
   val of_value : value -> (t, string) result
 
@@ -69,7 +75,9 @@ module Snapshot : sig
   val to_jsonaf : t -> Jsonaf.t
 
   (** [of_jsonaf json] decodes the stable snapshot representation produced by
-      {!to_jsonaf}. *)
+      {!to_jsonaf}. Tuple objects use [kind="tuple"] and [values] of arity at
+      least two, checked before decoding children. Generic conversion does not
+      replace caller-owned resource admission. *)
   val of_jsonaf : Jsonaf.t -> (t, string) result
 end
 

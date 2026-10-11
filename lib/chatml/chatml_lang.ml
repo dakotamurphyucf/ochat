@@ -40,6 +40,7 @@ type pattern =
   | PString of string
   | PVariant of string * pattern list
   | PRecord of (string * pattern) list * bool
+  | PTuple of pattern Chatml_tuple.t
 [@@deriving sexp, compare]
 
 type type_expr = Chatml_type_expr.t [@@deriving sexp]
@@ -127,6 +128,7 @@ and expr =
   | EFieldGet of expr node * string
   | EVariant of string * expr node list
   | EArray of expr node list
+  | ETuple of expr node Chatml_tuple.t
   | EArrayGet of expr node * expr node
   | EArraySet of expr node * expr node * expr node
   | ERef of expr node
@@ -160,6 +162,7 @@ and resolved_expr =
   | REFieldGet of resolved_expr node * string
   | REVariant of string * resolved_expr node list
   | REArray of resolved_expr node list
+  | RETuple of resolved_expr node Chatml_tuple.t
   | REArrayGet of resolved_expr node * resolved_expr node
   | REArraySet of resolved_expr node * resolved_expr node * resolved_expr node
   | RERef of resolved_expr node
@@ -253,6 +256,7 @@ and value =
   | VVariant of string * value list
   | VRecord of value String.Map.t
   | VArray of value array
+  | VTuple of value Chatml_tuple.t
   | VRef of value ref
   | VClosure of clos
   | VModule of env
@@ -353,6 +357,8 @@ let rec equal_value (lhs : value) (rhs : value) : bool =
     && List.length vals_x = List.length vals_y
     && List.for_all2_exn vals_x vals_y ~f:equal_value
   | VRecord fields_x, VRecord fields_y -> Map.equal equal_value fields_x fields_y
+  | VTuple values_x, VTuple values_y ->
+    List.equal equal_value (Chatml_tuple.to_list values_x) (Chatml_tuple.to_list values_y)
   | VArray arr_x, VArray arr_y -> phys_equal arr_x arr_y
   | VRef ref_x, VRef ref_y -> phys_equal ref_x ref_y
   | VClosure clos_x, VClosure clos_y -> phys_equal clos_x clos_y
@@ -377,6 +383,17 @@ let rec match_pattern (v : value) (p : pattern) : (string * value) list option =
   | PBool b, VBool c when Bool.equal b c -> Some []
   | PFloat f, VFloat g when Float.equal f g -> Some []
   | PString s, VString t when String.equal s t -> Some []
+  | PTuple patterns, VTuple values ->
+    let rec combine patterns values acc =
+      match patterns, values with
+      | [], [] -> Some (List.rev acc)
+      | pattern :: patterns, value :: values ->
+        (match match_pattern value pattern with
+         | None -> None
+         | Some bindings -> combine patterns values (List.rev_append bindings acc))
+      | [], _ :: _ | _ :: _, [] -> None
+    in
+    combine (Chatml_tuple.to_list patterns) (Chatml_tuple.to_list values) []
   | PVariant (tag, ps), VVariant (tagv, vs)
     when String.equal tag tagv && List.length ps = List.length vs ->
     let rec combine subpats subvals accum =
@@ -419,6 +436,7 @@ let collect_pattern_vars (pat : pattern) : string list =
     | PVar x -> x :: acc
     | PWildcard | PInt _ | PBool _ | PFloat _ | PString _ -> acc
     | PVariant (_, ps) -> List.fold ps ~init:acc ~f:aux
+    | PTuple patterns -> Chatml_tuple.fold patterns ~init:acc ~f:aux
     | PRecord (fields, _open) -> List.fold fields ~init:acc ~f:(fun ac (_, p) -> aux ac p)
   in
   List.rev (aux [] pat)

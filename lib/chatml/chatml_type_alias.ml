@@ -304,6 +304,8 @@ let rec convert ?source (t : t) ~parameters ~self ~checkpoint syntax =
       constructor syntax name (List.map arguments ~f:expression)
     | TEFunction (parameters, result) ->
       Fun (List.map parameters ~f:expression, expression result)
+    | TETuple components ->
+      Tuple (List.map (Chatml.Chatml_tuple.to_list components) ~f:expression)
     | TEArrow (lhs, rhs) ->
       let lhs = expression lhs in
       let parameters, result =
@@ -498,6 +500,9 @@ let symbolic_expansion ~fresh_binder ~checkpoint =
       constructor source environment self syntax name (List.map arguments ~f:expression)
     | TEFunction (parameters, result) ->
       Equivalence.Function (List.map parameters ~f:expression, expression result)
+    | TETuple components ->
+      Equivalence.Node
+        (Tuple, List.map (Chatml.Chatml_tuple.to_list components) ~f:expression)
     | TEArrow (left, right) ->
       Equivalence.arrow (expression left) ~result:(expression right) ~checkpoint
     | TERecord fields ->
@@ -606,6 +611,7 @@ let elaborate_scheme ?source t syntax ~equality_parameters ~fresh_name ~checkpoi
       | TEArrow (left, right) -> collect (collect names left) right
       | TEFunction (parameters, result) ->
         List.fold parameters ~init:(collect names result) ~f:collect
+      | TETuple components -> Chatml.Chatml_tuple.fold components ~init:names ~f:collect
       | TEConstr (_, arguments) -> List.fold arguments ~init:names ~f:collect
       | TERecord fields ->
         List.fold fields ~init:names ~f:(fun names (_, field) -> collect names field)

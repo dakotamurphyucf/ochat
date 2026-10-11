@@ -156,6 +156,7 @@ let maybe_annotate_expr (expr_node : expr node) (type_opt : type_expr option) : 
 %token LTEQ GTEQ LT GT LTEQDOT GTEQDOT LTDOT GTDOT
 %token PLUS MINUS PLUSPLUS PLUSDOT MINUSDOT STAR SLASH STARDOT SLASHDOT
 %token LPAREN RPAREN UNDERSCORE
+%token TUPLE_OPEN TUPLE_CLOSE
 %token LBRACE RBRACE LBRACKET RBRACKET SEMI SEMISEMI COMMA DOT BAR BANG
 %token EOF
 
@@ -336,6 +337,8 @@ expr:
     (* parentheses *)
     | LPAREN RPAREN                         { mk_exprnode $startpos $endpos EUnit }
     | LPAREN expr_sequence RPAREN           { $2 }
+    | TUPLE_OPEN expr_sequence COMMA expr_sequence tuple_expr_tail TUPLE_CLOSE
+        { mk_exprnode $startpos $endpos (ETuple (Chatml_tuple.create $2 $4 ~rest:$5)) }
 
     (* references *)
     | REF expr                     { mk_exprnode $startpos $endpos (ERef($2)) }
@@ -349,6 +352,10 @@ expr:
     | DOT expr                     { failwith "Unexpected '.' expression" }
     /* fallback to handle conflicts if any. */
 
+tuple_expr_tail:
+| /* empty */ { [] }
+| COMMA expr_sequence tuple_expr_tail { $2 :: $3 }
+
 pattern_cases:
     pattern_case { [$1] }
 | pattern_case pattern_cases { $1 :: $2 }
@@ -361,6 +368,8 @@ pattern_case:
        } }
 
 pattern:
+    | TUPLE_OPEN pattern COMMA pattern tuple_pattern_tail TUPLE_CLOSE
+        { PTuple (Chatml_tuple.create $2 $4 ~rest:$5) }
     | LPAREN RPAREN    { PUnit }
     | UNDERSCORE      { PWildcard }
     | INT             { PInt $1 }
@@ -371,6 +380,10 @@ pattern:
     | TICKIDENT LPAREN pattern_list RPAREN { PVariant($1, $3) }
     | LBRACE pattern_field_list RBRACE { PRecord(fst $2, snd $2) }
     | LIDENT          { PVar $1 }
+
+tuple_pattern_tail:
+| /* empty */ { [] }
+| COMMA pattern tuple_pattern_tail { $2 :: $3 }
 
 pattern_list:
     pattern { [$1] }
@@ -452,8 +465,17 @@ type_expr:
 type_arrow:
 | FUN LPAREN separated_list(COMMA, type_expr) RPAREN ARROW type_arrow
     { mk_type $startpos $endpos (TEFunction($3, $6)) }
-| type_postfix ARROW type_arrow { mk_type $startpos $endpos (TEArrow($1, $3)) }
+| type_product ARROW type_arrow { mk_type $startpos $endpos (TEArrow($1, $3)) }
+| type_product { $1 }
+
+type_product:
 | type_postfix { $1 }
+| type_postfix STAR type_postfix type_product_tail
+    { mk_type $startpos $endpos (TETuple (Chatml_tuple.create $1 $3 ~rest:$4)) }
+
+type_product_tail:
+| /* empty */ { [] }
+| STAR type_postfix type_product_tail { $2 :: $3 }
 
 type_postfix:
 | type_primary { $1 }

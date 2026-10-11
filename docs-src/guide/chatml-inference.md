@@ -469,3 +469,23 @@ Validation checks these static rules without executing a candidate. It does not
 prove termination, bounds safety, tool availability, schema validity or success
 of later effects. Inspect linked diagnostics, repair the submitted source, and
 validate that exact revision again before execution.
+
+## Product types and one tuple argument
+
+`int * string` describes an ordered pair. Postfix types bind tighter than `*`,
+and `*` binds tighter than arrows: `int * string -> bool` takes one pair;
+`int -> string * bool` returns a pair. Exact `fun(int, string) -> bool` takes two
+arguments. A flat triple differs from a pair containing another pair. Transparent
+aliases and signatures preserve these shapes and shared weak variables.
+
+<!-- ochat-authoring-example: {"id":"inference.tuple-products","surface":"one_off_v1","result":true} -->
+```ocaml
+type 'a labelled = 'a * string
+let choose : fun(bool labelled) -> bool = fun pair ->
+  match pair with | (|flag, name|) -> flag
+let main input = Task.pure(`Bool(choose((|true, "chosen"|))))
+```
+
+A tuple construction is nonexpansive only when every element is nonexpansive.
+Refs, arrays, functions and tasks inside a tuple remain subject to their ordinary
+equality restrictions; a tuple does not hide a forbidden comparison leaf.

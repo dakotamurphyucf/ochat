@@ -213,6 +213,17 @@ let rec resolve_expr (ctx : resolve_ctx) (e : L.expr L.node) : L.resolved_expr =
       | L.PWildcard | L.PInt _ | L.PBool _ | L.PFloat _ | L.PString _ -> []
       | L.PVariant (_tag, subpats) ->
         List.concat_map subpats ~f:(fun sp -> slots_of_pattern sp None)
+      | L.PTuple patterns ->
+        let patterns = Chatml_tuple.to_list patterns in
+        (match
+           Option.bind ty_opt ~f:(fun ty -> Chatml_typechecker.tuple_component_types ty)
+         with
+         | Some components when List.length patterns = List.length components ->
+           List.concat
+             (List.map2_exn patterns components ~f:(fun pattern ty ->
+                slots_of_pattern pattern (Some ty)))
+         | None | Some _ ->
+           List.concat_map patterns ~f:(fun pattern -> slots_of_pattern pattern None))
       | L.PRecord (fields, _open) ->
         let field_type lbl =
           Option.bind ty_opt ~f:(fun ty -> Chatml_typechecker.record_field_type ty lbl)
@@ -271,6 +282,9 @@ let rec resolve_expr (ctx : resolve_ctx) (e : L.expr L.node) : L.resolved_expr =
   | L.EArray elts ->
     let elts' = List.map elts ~f:(fun elt -> with_value elt (resolve_expr ctx elt)) in
     L.REArray elts'
+  | L.ETuple components ->
+    L.RETuple
+      (Chatml_tuple.map components ~f:(fun elt -> with_value elt (resolve_expr ctx elt)))
   | L.EArrayGet (arr, idx) ->
     let arr' = resolve_expr ctx arr in
     let idx' = resolve_expr ctx idx in

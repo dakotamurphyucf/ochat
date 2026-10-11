@@ -823,7 +823,7 @@ Properties:
 - variants are polymorphic variants
 - constructors are identified by tag name
 - constructors may carry zero, one, or multiple payload values
-- multi-value payloads are typed using internal tuple types
+- multi-value payloads retain a separate internal constructor-argument list
 
 ---
 
@@ -1078,10 +1078,26 @@ through explicit checked declarations.
 - variant types
 - tuple types
 
-Tuple types currently exist in the type system and runtime representation,
-but tuple syntax is not exposed as a general user-facing surface feature.
-They are most visible as the internal typing of multi-argument variant
-payloads.
+Tuple values and match patterns use `(|first, second, ...|)`, with at least two
+elements. Products are ordered and may be heterogeneous. Flat triples and nested
+pairs have different shapes; `()` remains unit. Product annotations use `int *
+string`; postfix constructors bind tighter than products, which bind tighter than
+arrows. `(int * string) * bool` is a nested pair, while `int * string * bool` is a
+flat triple. `f(a, b)` passes two arguments; `f((|a, b|))` passes one product.
+Variant payload argument lists remain separate: `` `Pair(a, b) `` has two payload
+arguments, while `` `Pair((|a, b|)) `` has one product payload.
+
+```ocaml
+let pair : int * string = (|7, "seven"|)
+let label pair = match pair with | (|count, name|) -> name ++ to_string(count)
+```
+
+Tuple match elements support existing literal, variant, record, wildcard, variable
+and nested tuple patterns. Coverage is conservative: a total tuple pattern or
+`_` arm is required; separate refutable product arms are not combined into a
+Cartesian completeness proof. Let and parameter declarations currently retain
+name-only binders. The immutable tuple container shares mutable child values;
+equality is supported only when all component types support equality.
 
 ### 10.2.1 User-facing type syntax
 
@@ -1128,7 +1144,6 @@ let step : task -> status =
 
 Current user-facing omissions are intentional:
 
-- no tuple type syntax
 - no ref type syntax
 - no open-row type syntax
 - no mutual recursive type declarations
@@ -1330,7 +1345,7 @@ The builtin specification language now supports:
 Notes:
 
 This builtin type language is richer than the current user-facing type language.
-Users still do not write builtin-only forms such as ref types, tuple types, open-row forms, or explicit recursive binders directly; they appear only through host-provided builtin schemes.
+Users still do not write builtin-only forms such as ref types, open-row forms, or explicit recursive binders directly; they appear only through host-provided builtin schemes.
 
 ### 10.9 Module typing
 
@@ -2288,10 +2303,8 @@ Unification of recursive types uses an alpha-renaming strategy for Mu-vs-Mu unif
 
 ChatML currently does **not** provide:
 
-- tuple syntax as a general user-facing feature
 - mutual recursive type declarations
 - general expression ascription syntax
-- tuple type syntax as a general user-facing feature
 - ref type syntax
 - open-row type syntax
 - full user-facing algebraic datatype declarations beyond alias-style
@@ -3184,6 +3197,15 @@ persisted moderator state.
 
 Only data-shaped ChatML values cross this boundary. The snapshot codec rejects
 closures, refs, builtins, modules, and tasks.
+
+Tuple snapshots preserve arity, order, and nesting. Session documents retain
+unknown fields on tuple containers and their children through restore and
+unrelated edits. As with arrays and variant payloads, changing tuple children
+while retaining unknown child fields can make their association ambiguous; the
+document encoder then returns `Extension_conflict` before writing. For example,
+editing a session setting preserves an unknown field on the first tuple child,
+while changing that child's known value rejects when its unknown field is still
+retained. Child edits without retained unknown child fields succeed.
 
 When a session is exported to ChatMD, canonical history stays canonical while
 overlay-derived synthetic entries are materialized explicitly in the exported

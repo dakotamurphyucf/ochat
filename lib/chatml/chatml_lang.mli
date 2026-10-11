@@ -40,6 +40,7 @@ type pattern =
   | PString of string
   | PVariant of string * pattern list
   | PRecord of (string * pattern) list * bool
+  | PTuple of pattern Chatml_tuple.t
 [@@deriving sexp, compare]
 
 type type_expr = Chatml_type_expr.t [@@deriving sexp]
@@ -127,6 +128,7 @@ and expr =
   | EFieldGet of expr node * string
   | EVariant of string * expr node list
   | EArray of expr node list
+  | ETuple of expr node Chatml_tuple.t
   | EArrayGet of expr node * expr node
   | EArraySet of expr node * expr node * expr node
   | ERef of expr node
@@ -160,6 +162,7 @@ and resolved_expr =
   | REFieldGet of resolved_expr node * string
   | REVariant of string * resolved_expr node list
   | REArray of resolved_expr node list
+  | RETuple of resolved_expr node Chatml_tuple.t
   | REArrayGet of resolved_expr node * resolved_expr node
   | REArraySet of resolved_expr node * resolved_expr node * resolved_expr node
   | RERef of resolved_expr node
@@ -246,6 +249,7 @@ and value =
   | VVariant of string * value list
   | VRecord of value String.Map.t
   | VArray of value array
+  | VTuple of value Chatml_tuple.t
   | VRef of value ref
   | VClosure of clos
   | VModule of env

@@ -3,7 +3,37 @@
    this file in CI. A grammar production is not a claim of executable syntax;
    structural, explicit-rejection and never-reduced branches are included. *)
 let productions =
-  [ ( "expr -> BANG expr"
+  [ ( "expr -> TUPLE_OPEN expr_sequence COMMA expr_sequence tuple_expr_tail TUPLE_CLOSE"
+    , "76e3ea1267361fffb81c8dc24b0e87a28476c6480fd6aca9ea9a7f0ce864a88e"
+    , "chatml.programs" )
+  ; ( "pattern -> TUPLE_OPEN pattern COMMA pattern tuple_pattern_tail TUPLE_CLOSE"
+    , "f57c35d14e3acbd862ca1ff0c70dbb5f6baeca377ce7a55df89d43c8e5f26396"
+    , "chatml.programs" )
+  ; ( "tuple_expr_tail -> "
+    , "d94bfd4678f4c6bb363f729193fcf4bfbe721691afb3351c04fc0a7138c99ebe"
+    , "chatml.programs" )
+  ; ( "tuple_expr_tail -> COMMA expr_sequence tuple_expr_tail"
+    , "dcc97d1d50e16822735d662eec738ec520ae96a0a187a0b96acc3ab926204df7"
+    , "chatml.programs" )
+  ; ( "tuple_pattern_tail -> "
+    , "723b55c09f1503ad43c074114a6aa1b1696f102ea72dcde7340191f8a7ff6e89"
+    , "chatml.programs" )
+  ; ( "tuple_pattern_tail -> COMMA pattern tuple_pattern_tail"
+    , "42fa5d3e12350de7cd7ddfbc7d87ab7b36686662fdae5b62abbb6610974016b1"
+    , "chatml.programs" )
+  ; ( "type_product -> type_postfix"
+    , "74998295798c3b056063670563cbbabe876e6528d343a6b6d798220b8925f68c"
+    , "chatml.programs" )
+  ; ( "type_product -> type_postfix STAR type_postfix type_product_tail"
+    , "e15bafc598f7c2925284a48f0443c824db4cb530ff2659962ffadf1cc5a90f90"
+    , "chatml.programs" )
+  ; ( "type_product_tail -> "
+    , "d607031832146a6a56ebe45b6ae22cdc1fcb873cf7a255f7fd44bcea4aa8b743"
+    , "chatml.programs" )
+  ; ( "type_product_tail -> STAR type_postfix type_product_tail"
+    , "1fdc63b020f2a75959428d3a7017cc7e7761a2bc88fb70788846a5b5cf168968"
+    , "chatml.programs" )
+  ; ( "expr -> BANG expr"
     , "057318ed316e874dd1e1be39a5677e64e1456603b687ddfbc5acc3ffd8880ae3"
     , "chatml.programs" )
   ; ( "expr -> BANGEQ expr"
@@ -438,11 +468,11 @@ let productions =
        ARROW type_arrow"
     , "3e911c4653dfc44d2c3f294de9c55cef16f4c6895b3c8804a38913e65ae4e6eb"
     , "chatml.programs" )
-  ; ( "type_arrow -> type_postfix"
-    , "143e041e450b12b13fafb7a172ce00a9559af222e203b5af0aae9b4b78c8f0af"
+  ; ( "type_arrow -> type_product"
+    , "0cab4607f82c3457032a89da5e3015fe5c3a459456cebea5313e035d21e4650f"
     , "chatml.programs" )
-  ; ( "type_arrow -> type_postfix ARROW type_arrow"
-    , "c9cd564e784173b1bb0a01a63d75a3694cea243b50957be65ae303383bc38363"
+  ; ( "type_arrow -> type_product ARROW type_arrow"
+    , "e6d1d9f394c1021d8636a21b64cb6adb697bc5e42d1deea8986e261428e8f69f"
     , "chatml.programs" )
   ; ( "type_expr -> type_arrow"
     , "deb63956ae9e7c61bc3bdce30c864d0a70bd961324db8982e526edadd1a954d2"
@@ -540,27 +570,27 @@ let productions =
 let topic_contracts =
   [ ( "one_off_v1"
     , "chatml.programs"
-    , "92dd07df010246b53b17b5e81f6d71b017ba392177be19fad812157b3cb4c5e0" )
+    , "b4feb82fa0b60f713f9f9730e16ecef0f9a3b77129ebfc3cd365a72927e89b97" )
   ; ( "one_off_v1"
     , "chatml.task-effects"
-    , "ea9d4de0641e1033cf298a5998baabda45f9dc7433157e437ec1bb0be09cfe1c" )
+    , "582c7f6b811c51b6301212a0564132fb07ea8be6d89f419c5d43c6475ec3d041" )
   ; ( "tool_v1"
     , "chatml.programs"
-    , "d8bfffc3fb9ffe458e12505e5ada8635dc051e45b6ae566f020d0950c413e027" )
+    , "56be1b3ba4029d1b0087e2e9fbafc74ada95622744037f7a4b3f6cef9c835683" )
   ; ( "moderator_v1"
     , "chatml.programs"
-    , "c1b3d1a342b0dd32b15521cfc587a134108073367b1c317cc20b4d2a386fa13b" )
+    , "4b3ef22fb1c508ef7858de033186ae23c31396f3786c1013f55cfb7ee6bfce85" )
   ; ( "delegated_moderator_v1"
     , "chatml.programs"
-    , "a58f5727ee75435af1a0099b1c12566b2781fe0bc265b7c013a1005bb0ef7159" )
+    , "84472c2b4a8edf69c49cb52ebb16634d70aaec5cd4412700e17cf8bc23d0d584" )
   ; ( "tool_v1"
     , "chatml.task-effects"
-    , "57dd3cb533962d869d748883acf2abcf7ad538e618b7bacff1fe4891edddf059" )
+    , "65ba204ea5691f2c33f1a6e9f36b871b5e3978e1c5af7bb87338cc40ff70c137" )
   ; ( "moderator_v1"
     , "chatml.task-effects"
-    , "ceaa7aa751e1a509796a715510e41a2d89d5e4e3b78d1d3793ca1233dcb41f0e" )
+    , "f26513eaa3ae368a0834ae673773c685810907aee27eed4221995bb88eea35cd" )
   ; ( "delegated_moderator_v1"
     , "chatml.task-effects"
-    , "9221c18bd6da87a3b1de83193da31fb96f311691ea8b73765c74b6b1a7caf956" )
+    , "4f7ab4f8a44fc52f22a876663a1a07d9930c809680c1a731ab02594c73ad5b8e" )
   ]
 ;;

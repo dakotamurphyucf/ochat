@@ -113,6 +113,8 @@ rule token = parse
 | "/."                     { SLASHDOT }
 | "/"                      { SLASH }
 | "("                      { LPAREN }
+| "(|"                     { TUPLE_OPEN }
+| "|)"                     { TUPLE_CLOSE }
 | ")"                      { RPAREN }
 | "{"                      { LBRACE }
 | "}"                      { RBRACE }

@@ -1341,6 +1341,9 @@ let rec is_non_expansive (expr : expr) : bool =
     List.for_all fields ~f:(fun (_lbl, expr_node) -> is_non_expansive expr_node.value)
   | EVariant (_tag, exprs) ->
     List.for_all exprs ~f:(fun expr_node -> is_non_expansive expr_node.value)
+  | ETuple components ->
+    List.for_all (Chatml.Chatml_tuple.to_list components) ~f:(fun expr_node ->
+      is_non_expansive expr_node.value)
   | EAnnot (expr_node, _) -> is_non_expansive expr_node.value
   | EPrim1 _
   | EPrim2 _
@@ -1531,6 +1534,7 @@ and validate_unique_record_labels_in_pattern (pat : pattern) (span : Source.span
   let rec loop = function
     | PUnit | PWildcard | PVar _ | PInt _ | PBool _ | PFloat _ | PString _ -> ()
     | PVariant (_tag, subpats) -> List.iter subpats ~f:loop
+    | PTuple patterns -> Chatml.Chatml_tuple.iter patterns ~f:loop
     | PRecord (fields, _is_open) ->
       validate_unique_labels ~what:"record pattern" ~span (List.map fields ~f:fst);
       List.iter fields ~f:(fun (_lbl, subpat) -> loop subpat)
@@ -1607,6 +1611,11 @@ and payload_component_types ?checkpoint (payload_ty : typ) : typ list =
   | Variant_payload ts -> ts
   | _ -> raise (Type_error "Invalid variant constructor payload type")
 
+and tuple_component_types ?checkpoint (ty : typ) : typ list option =
+  match resolve_bound_type ?checkpoint ty with
+  | Tuple components -> Some components
+  | _ -> None
+
 and show_missing_variant_case ?checkpoint (tag : string) (payload_ty : typ) : string =
   match payload_component_types ?checkpoint payload_ty with
   | [] -> Printf.sprintf "`%s" tag
@@ -1627,6 +1636,16 @@ and pattern_totally_covers_type
      | Unit -> true
      | _ -> false)
   | PWildcard | PVar _ -> true
+  | PTuple patterns ->
+    (match tuple_component_types ~checkpoint expected_ty with
+     | None -> false
+     | Some components ->
+       let patterns = Chatml.Chatml_tuple.to_list patterns in
+       List.length patterns = List.length components
+       && List.for_all2_exn
+            patterns
+            components
+            ~f:(pattern_totally_covers_type ~checkpoint))
   | PRecord (fields, is_open) ->
     let subpatterns_cover_all =
       List.for_all fields ~f:(fun (label, subpat) ->
@@ -1691,6 +1710,7 @@ and show_pattern_brief (pat : pattern) : string =
   | PVariant (tag, []) -> Printf.sprintf "`%s" tag
   | PVariant (tag, _subpats) -> Printf.sprintf "`%s(...)" tag
   | PRecord _ -> "{...}"
+  | PTuple _ -> "(|...|)"
 
 and simple_pattern_key_of_pattern (pat : pattern) : (string * string) option =
   match pat with
@@ -1890,6 +1910,13 @@ and validate_match_exhaustiveness
           pattern_totally_covers_type ~checkpoint:poll pat scrut_ty)
       then ()
       else raise (Type_error "Non-exhaustive match on record: add '_' arm")
+    | Tuple _ ->
+      if
+        List.exists patterns ~f:(fun pat ->
+          pattern_totally_covers_type ~checkpoint:poll pat scrut_ty)
+      then ()
+      else
+        raise (Type_error "Non-exhaustive match on tuple: add '_' or a total tuple arm")
     | _ -> raise (Type_error "Non-exhaustive match: add '_' arm"))
 
 and infer_pattern (state : infer_state) (env : tenv) (pat : pattern) (expected_ty : typ)
@@ -1914,6 +1941,14 @@ and infer_pattern (state : infer_state) (env : tenv) (pat : pattern) (expected_t
   | PString _ ->
     unify state expected_ty String;
     env
+  | PTuple patterns ->
+    let patterns = Chatml.Chatml_tuple.to_list patterns in
+    let components =
+      List.map patterns ~f:(fun _ -> new_var state state.shared.current_lvl)
+    in
+    unify state expected_ty (Tuple components);
+    List.fold2_exn patterns components ~init:env ~f:(fun env pattern ty ->
+      infer_pattern state env pattern ty)
   | PRecord (fields, is_open) ->
     let env_after, fields_acc =
       List.fold fields ~init:(env, []) ~f:(fun (env_acc, fields_acc) (lbl, pat) ->
@@ -2152,6 +2187,11 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
         let elt_ty = new_var state state.shared.current_lvl in
         List.iter elts ~f:(fun e -> unify state (infer_expr state env types e) elt_ty);
         Array elt_ty
+      | ETuple components ->
+        Tuple
+          (List.map
+             (Chatml.Chatml_tuple.to_list components)
+             ~f:(infer_expr state env types))
       | EArrayGet (arr, idx) ->
         unify state (infer_expr state env types idx) TInt;
         let elt_ty = new_var state state.shared.current_lvl in

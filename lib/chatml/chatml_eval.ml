@@ -332,6 +332,17 @@ and eval_expr_tail
         finish_eval frames (eval_expr_tail ~tail:false env frames ex))
     in
     Value (VArray (Array.of_list arr_vals))
+  | RETuple components ->
+    Option.iter env.control ~f:(fun control ->
+      control.before_builtin
+        ~name:"Tuple.literal"
+        [ VInt (Chatml_tuple.length components) ]);
+    allocate env 16;
+    let values =
+      Chatml_tuple.map components ~f:(fun expr ->
+        finish_eval frames (eval_expr_tail ~tail:false env frames expr))
+    in
+    Value (VTuple values)
   | REArrayGet (arr_expr, idx_expr) ->
     let arr_val = finish_eval frames (eval_expr_tail ~tail:false env frames arr_expr) in
     let idx_val = finish_eval frames (eval_expr_tail ~tail:false env frames idx_expr) in
