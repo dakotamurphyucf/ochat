@@ -13,6 +13,7 @@
   catalog_identity
   operator_manifest_grant
   catalog_builder
+  prompt_catalog_publication
   runtime_owner
   delegated_runtime
   graph_tracking
