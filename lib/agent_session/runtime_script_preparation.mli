@@ -4,6 +4,17 @@ open Core
     Contains no source authority, compiler state or live runtime resources. *)
 type t
 
+module Invocation : sig
+  (** Actual runtime role. Headless uses the ordinary headless moderator surface;
+      delegated UI uses its restricted v1 contract. No impossible combination of
+      headless surface and delegated UI is exposed. This label grants no tools. *)
+  type t =
+    | Ui
+    | Headless
+    | Delegated_ui
+  [@@deriving equal, sexp_of]
+end
+
 (** All component policies are already validated. Compilation limits and the
     positive custody work ceiling are validated here. [max_custody_work_steps]
     bounds each complete retained-custody selection or restoration operation;
@@ -22,14 +33,14 @@ val restoration : t -> Chatml_prompt_programs.Limits.t
 val max_custody_work_steps : t -> int
 
 (** Plan the actual parser's scripts before authoring helpers are added. Uses the
-    existing pure shell manifest compiler and authentic UI/delegated contracts.
+    existing pure shell manifest compiler and the explicit invocation contract.
     No filesystem access, native setup or initializer. The borrowed startup owner
     covers the complete phase; original callback failures propagate unchanged. *)
 val plan
   :  t
   -> startup:Chat_response.Startup_compilation.t
   -> parsed:Prompt.Chat_markdown.Parsed.t
-  -> delegated_moderator:bool
+  -> invocation:Invocation.t
   -> (Chat_response.Script_contract_plan.t, Agent_protocol.Error.t) Result.t
 
 (** Start or borrow the host startup owner before planning/restoration, then lend
@@ -52,7 +63,7 @@ val with_revision
   -> ?startup:Chat_response.Startup_compilation.t
   -> Prompt_revision.t
   -> env:Eio_unix.Stdenv.base
-  -> delegated_moderator:bool
+  -> invocation:Invocation.t
   -> checkpoint:(unit -> unit)
   -> f:
        (Chat_response.Startup_compilation.t

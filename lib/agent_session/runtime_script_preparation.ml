@@ -11,6 +11,14 @@ type t =
   ; max_custody_work_steps : int
   }
 
+module Invocation = struct
+  type t =
+    | Ui
+    | Headless
+    | Delegated_ui
+  [@@deriving equal, sexp_of]
+end
+
 let create ~compilation ~planning ~restoration ~max_custody_work_steps =
   let open Or_error.Let_syntax in
   let%bind () =
@@ -40,7 +48,7 @@ let map_diagnostics result ~to_string =
     List.map diagnostics ~f:to_string |> String.concat ~sep:"\n" |> failure)
 ;;
 
-let plan t ~startup ~parsed ~delegated_moderator =
+let plan t ~startup ~parsed ~invocation =
   Startup.within startup ~map_error:compilation_error ~f:(fun () ->
     let open Result.Let_syntax in
     let%bind shell =
@@ -49,10 +57,19 @@ let plan t ~startup ~parsed ~delegated_moderator =
         ~prompt_elements:(Prompt.Chat_markdown.Parsed.elements parsed)
       |> map_diagnostics ~to_string:Runtime.diagnostic_to_string
     in
+    let moderator_invocation, moderator_surface, delegated_moderator =
+      match invocation with
+      | Invocation.Ui ->
+        ( Plan.Program.Role.Moderator_invocation.Ui
+        , Chatml.Chatml_builtin_surface.ui_moderator_surface
+        , false )
+      | Headless -> Headless, Chatml.Chatml_builtin_surface.moderator_surface, false
+      | Delegated_ui -> Ui, Chatml.Chatml_builtin_surface.ui_moderator_surface, true
+    in
     Plan.create
       parsed
-      ~moderator_invocation:Ui
-      ~moderator_surface:Chatml.Chatml_builtin_surface.ui_moderator_surface
+      ~moderator_invocation
+      ~moderator_surface
       ~delegated_moderator
       ~shell:(Some shell)
       ~limits:t.planning
@@ -83,7 +100,7 @@ let restore_programs t ~startup ~plan ~custody =
     Error (failure "script custody restoration exceeds host work allowance")
 ;;
 
-let restore policy ~startup ~revision ~delegated_moderator =
+let restore policy ~startup ~revision ~invocation =
   let artifact = Prompt_revision.artifact revision in
   if
     Option.is_some artifact.content_bundle
@@ -104,7 +121,7 @@ let restore policy ~startup ~revision ~delegated_moderator =
          Error (failure "owned script custody requires explicit host preparation policy")
        | Some policy ->
          let open Result.Let_syntax in
-         let%bind plan = plan policy ~startup ~parsed ~delegated_moderator in
+         let%bind plan = plan policy ~startup ~parsed ~invocation in
          Startup.within startup ~map_error:compilation_error ~f:(fun () ->
            restore_programs policy ~startup ~plan ~custody))
     | None, Some _ | Some _, None ->
@@ -112,7 +129,7 @@ let restore policy ~startup ~revision ~delegated_moderator =
         (failure "script custody is missing its matching original parser or inventory"))
 ;;
 
-let with_revision policy ?startup revision ~env ~delegated_moderator ~checkpoint ~f =
+let with_revision policy ?startup revision ~env ~invocation ~checkpoint ~f =
   let compilation_limits =
     Option.value_map policy ~default:Compiler.default_limits ~f:compilation
   in
@@ -124,7 +141,7 @@ let with_revision policy ?startup revision ~env ~delegated_moderator ~checkpoint
     ~map_error:compilation_error
     ~f:(fun startup ->
       let open Result.Let_syntax in
-      let%bind programs = restore policy ~startup ~revision ~delegated_moderator in
+      let%bind programs = restore policy ~startup ~revision ~invocation in
       f startup ~compilation_limits ~programs)
     ()
 ;;
@@ -135,7 +152,7 @@ let select_child policy ~startup ~parent source =
   match Prompt_revision.parser_context revision, Prompt_revision.programs revision with
   | None, None ->
     let%map (_ : Chatml_prompt_programs.Restored.t option) =
-      restore policy ~startup ~revision ~delegated_moderator:true
+      restore policy ~startup ~revision ~invocation:Delegated_ui
     in
     source, revision
   | Some parsed, Some custody ->
@@ -143,7 +160,7 @@ let select_child policy ~startup ~parent source =
      | None ->
        Error (failure "owned child custody requires explicit host preparation policy")
      | Some policy ->
-       let%bind plan = plan policy ~startup ~parsed ~delegated_moderator:true in
+       let%bind plan = plan policy ~startup ~parsed ~invocation:Delegated_ui in
        let%bind selected =
          Chat_response.Retained_selection.select
            plan

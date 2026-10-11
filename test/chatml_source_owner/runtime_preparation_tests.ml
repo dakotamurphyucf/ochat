@@ -90,7 +90,7 @@ let on_event = fun ctx state event -> Task.pure(state)</script>|};
                 ~startup
                 revision
                 ~env
-                ~delegated_moderator:true
+                ~invocation:Delegated_ui
                 ~checkpoint:ignore
                 ~f:(fun same ~compilation_limits:_ ~programs ->
                   assert (phys_equal same startup);
@@ -149,7 +149,7 @@ let%test_unit "owned revisions require explicit policy and actual parser attachm
                 policy
                 revision
                 ~env
-                ~delegated_moderator:false
+                ~invocation:Ui
                 ~checkpoint:ignore
                 ~f:(fun _ ~compilation_limits:_ ~programs ->
                   assert (Option.is_none programs);
@@ -167,7 +167,7 @@ let%test_unit "owned revisions require explicit policy and actual parser attachm
                (Some generous)
                original
                ~env
-               ~delegated_moderator:false
+               ~invocation:Ui
                ~checkpoint:ignore
                ~f:(fun _ ~compilation_limits:_ ~programs:_ -> raise identity));
           failwith "callback failure disappeared"

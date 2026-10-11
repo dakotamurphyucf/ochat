@@ -341,7 +341,7 @@ let create_authored_resources
     ?startup
     revision
     ~env
-    ~delegated_moderator
+    ~invocation:(if delegated_moderator then Delegated_ui else Ui)
     ~checkpoint:Eio.Fiber.check
     ~f:(fun startup ~compilation_limits ~programs ->
       let elements = Prompt_revision.elements revision in

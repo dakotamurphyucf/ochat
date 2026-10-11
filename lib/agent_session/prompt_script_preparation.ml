@@ -223,15 +223,21 @@ let capture
               poll ();
               let parsed = Roles.parsed role in
               let%bind shell = material parsed in
-              let moderator_surface, delegated_moderator =
+              let moderator_invocation, moderator_surface, delegated_moderator =
                 match Roles.role role with
-                | Ui -> Chatml.Chatml_builtin_surface.ui_moderator_surface, false
-                | Headless -> Chatml.Chatml_builtin_surface.moderator_surface, false
-                | Delegated_ui -> Chatml.Chatml_builtin_surface.ui_moderator_surface, true
+                | Ui ->
+                  ( Plan.Program.Role.Moderator_invocation.Ui
+                  , Chatml.Chatml_builtin_surface.ui_moderator_surface
+                  , false )
+                | Headless ->
+                  Headless, Chatml.Chatml_builtin_surface.moderator_surface, false
+                | Delegated_ui ->
+                  Ui, Chatml.Chatml_builtin_surface.ui_moderator_surface, true
               in
               let%map plan =
                 Plan.create
                   parsed
+                  ~moderator_invocation
                   ~moderator_surface
                   ~delegated_moderator
                   ~shell:(Some shell)

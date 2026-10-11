@@ -60,6 +60,24 @@ let prepare
     ()
 ;;
 
+let runtime_plan env ~invocation parsed =
+  let module Runtime_preparation = Agent_session.Runtime_script_preparation in
+  let policy = Runtime_preparation_tests.policy () in
+  Startup.with_context
+    ~limits:(Runtime_preparation.compilation policy)
+    ~env
+    ~checkpoint:ignore
+    ~map_error:(fun error ->
+      Agent_protocol.Error.create
+        Invalid_state
+        ~message:error.Chatml_compilation.message
+        ~retryable:false
+        ())
+    ~f:(fun startup -> Runtime_preparation.plan policy ~startup ~parsed ~invocation)
+    ()
+  |> ok
+;;
+
 let authored captured =
   let value = Owner.Capture.value captured in
   let input = CM.Parsed.root_input (Builder.Capture.root value) in
@@ -133,7 +151,7 @@ let on_event = fun event state -> Task.pure(state)</script>|}
         in
         assert (!calls = 4);
         assert (List.length (C.bindings custody) = 4);
-        let root_plan = Script_tests.plan (Builder.Capture.root value) in
+        let root_plan = runtime_plan env ~invocation:Ui (Builder.Capture.root value) in
         let root_programs =
           Chat_response.Restored_programs.restore
             root_plan
@@ -145,9 +163,7 @@ let on_event = fun event state -> Task.pure(state)</script>|}
         in
         assert (List.length (C.Restored.programs root_programs) = 1);
         let headless_plan =
-          Script_tests.plan
-            ~moderator_surface:Chatml.Chatml_builtin_surface.moderator_surface
-            (Builder.Capture.root value)
+          runtime_plan env ~invocation:Headless (Builder.Capture.root value)
         in
         let headless_custody =
           prepare
@@ -196,10 +212,8 @@ let on_event = fun event state -> Task.pure(state)</script>|}
                ~checkpoint:ignore));
         let child = snd (List.hd_exn (Builder.Capture.agents value)) in
         List.iter
-          [ Script_tests.plan
-              ~moderator_surface:Chatml.Chatml_builtin_surface.moderator_surface
-              child
-          ; Script_tests.plan ~delegated_moderator:true child
+          [ runtime_plan env ~invocation:Headless child
+          ; runtime_plan env ~invocation:Delegated_ui child
           ]
           ~f:(fun planned ->
             let mappings =
