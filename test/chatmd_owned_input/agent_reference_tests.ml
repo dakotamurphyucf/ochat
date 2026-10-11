@@ -189,3 +189,126 @@ let%test_unit "ordinary legacy AST agrees with owned conversion without metadata
         (`Array (List.map legacy ~f:CM.jsonaf_of_top_level_elements))
         (`Array (List.map (CM.Parsed.elements owned) ~f:CM.jsonaf_of_top_level_elements))))
 ;;
+
+let%expect_test "projected nested content agents retain their exact original references" =
+  Eio_main.run (fun env ->
+    let opening = {|<agent src="../agents/child.chatmd" local>|} in
+    let nested = {|<agent src="../agents/grandchild.chatmd" local>nested</agent>|} in
+    let outer = opening ^ {|<doc src="note.txt" local capture/>|} ^ nested ^ "</agent>" in
+    let repeated = opening ^ "other</agent>" in
+    let parsed =
+      parse
+        env#cwd
+        [ "root.chatmd", {|<user><import src="parts/content.chatmd"/></user>|}
+        ; "parts/content.chatmd", outer ^ repeated
+        ]
+    in
+    let project rendered =
+      CM.materialize_documents
+        parsed
+        ~rendered
+        ~max_occurrences:1
+        ~max_output_bytes:64
+        ~max_work_steps:10000
+        ~checkpoint:ignore
+      |> Or_error.ok_exn
+    in
+    let projection =
+      project [ List.hd_exn (CM.Parsed.document_occurrences parsed), "CAPTURED" ]
+    in
+    let rec content_agents (elements : CM.content_item list) =
+      List.concat_map elements ~f:(function
+        | CM.Agent agent -> agent :: content_agents agent.items
+        | Basic _ -> [])
+    in
+    let projected =
+      match CM.Document_projection.elements projection with
+      | [ CM.User { content = Some (Items items); _ } ] -> content_agents items
+      | _ -> failwith "expected projected user content"
+    in
+    let original = CM.Parsed.agent_references parsed in
+    [%test_eq: int] (List.length projected) 3;
+    List.iter2_exn
+      projected
+      [ 0, "agents/child.chatmd"
+      ; ( String.length opening + String.length {|<doc src="note.txt" local capture/>|}
+        , "agents/grandchild.chatmd" )
+      ; String.length outer, "agents/child.chatmd"
+      ]
+      ~f:(fun descriptor (offset, target) ->
+        (* Parser metadata emission order is not projected-content traversal
+           order. The handwritten byte-piece model identifies the original tag. *)
+        let expected =
+          List.find_exn original ~f:(fun reference ->
+            Int.equal (Input.Range.start_byte (A.range reference)) offset)
+        in
+        let lookup ?(checkpoint = ignore) ?(max_work_steps = 100) () =
+          CM.content_agent_reference
+            parsed
+            ~projection
+            ~max_work_steps
+            ~checkpoint
+            descriptor
+        in
+        let actual = lookup () |> Or_error.ok_exn in
+        assert (phys_equal actual expected);
+        [%test_eq: int] (Input.Range.start_byte (A.range actual)) offset;
+        [%test_eq: string option] (A.queued_key actual) (Some target);
+        assert (
+          Result.is_error
+            (CM.content_agent_reference
+               parsed
+               ~max_work_steps:100
+               ~checkpoint:ignore
+               descriptor));
+        assert (Result.is_error (lookup ~max_work_steps:1 ()));
+        let calls = ref 0 in
+        ignore (lookup ~checkpoint:(fun () -> Int.incr calls) () |> Or_error.ok_exn : A.t);
+        assert (!calls > 0);
+        let sentinel = Failure "projected content checkpoint" in
+        List.iter
+          (List.range 1 (!calls + 1))
+          ~f:(fun interrupt ->
+            let current = ref 0 in
+            match
+              lookup
+                ~checkpoint:(fun () ->
+                  Int.incr current;
+                  if !current = interrupt then raise sentinel)
+                ()
+            with
+            | _ -> assert false
+            | exception exn -> assert (phys_equal exn sentinel));
+        assert (phys_equal (lookup () |> Or_error.ok_exn) expected);
+        print_s [%sexp (offset : int), (target : string)]);
+    let foreign = parse env#cwd [ "root.chatmd", {|<user>foreign</user>|} ] in
+    assert (
+      Result.is_error
+        (CM.content_agent_reference
+           foreign
+           ~projection
+           ~max_work_steps:100
+           ~checkpoint:ignore
+           (List.hd_exn projected)));
+    let original_reference = List.hd_exn original in
+    let original_descriptor =
+      match A.invocation original_reference with
+      | Content value -> value
+      | Tool _ | Persistent_tool _ -> assert false
+    in
+    assert (
+      phys_equal
+        (CM.content_agent_reference
+           parsed
+           ~max_work_steps:100
+           ~checkpoint:ignore
+           original_descriptor
+         |> Or_error.ok_exn)
+        original_reference));
+  [%expect
+    {|
+    (0 agents/child.chatmd)
+    (77 agents/grandchild.chatmd)
+    (146 agents/child.chatmd)
+    |}]
+;;

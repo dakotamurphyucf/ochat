@@ -35,12 +35,23 @@ val run_agent
     headless contracts before calling; normal runtime capability checks still
     precede initialization.
     A supplied literal document projection must belong to this exact [parsed].
-    Child invocations never inherit this invocation's prepared program inventory.
+    [agent_source_runner] owns the child prompt's tool/content declarations;
+    [input_agent_source_runner] owns only caller-authored invocation content items.
+    The two conversion batches remain separate. Omitted input runner preserves
+    existing dynamic-item behavior; it never inherits the child's runner.
+    [startup] borrows the host's current preparation context and requires its
+    original [compilation_limits]. Forwarded [checkpoint] failures/cancellation
+    propagate through the existing startup owner. No context is retained after
+    preparation. Child invocations never inherit this invocation's program inventory.
     [prompt_dir] is the host-selected execution directory, not source authority.
     Expected startup failures use the same exception behavior as [run_agent]. *)
 val run_prepared_agent
   :  Prompt.Chat_markdown.Parsed.t
   -> ?agent_source_runner:Tool.Agent_source_runner.t
+  -> ?input_agent_source_runner:Tool.Agent_source_runner.t
+  -> ?startup:Startup_compilation.t
+  -> ?compilation_limits:Chatml_compilation.limits
+  -> ?checkpoint:(unit -> unit)
   -> ?programs:Chatml_prompt_programs.Restored.t
   -> ?document_projection:Prompt.Chat_markdown.Document_projection.t
   -> ?history_compaction:bool

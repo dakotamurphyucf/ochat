@@ -1454,12 +1454,62 @@ module Chat_markdown = struct
       { parsed : Parsed.t
       ; elements : top_level_elements list
       ; work_steps : int
+      ; content_agents : (agent_content * agent_content) list option
       }
 
     let parsed t = t.parsed
     let elements t = t.elements
     let work_steps t = t.work_steps
   end
+
+  let content_agent_reference parsed ?projection ~max_work_steps ~checkpoint agent =
+    let module Abort = struct
+      exception Limit
+    end
+    in
+    let remaining = ref max_work_steps in
+    let poll () =
+      if !remaining <= 0 then raise Abort.Limit;
+      decr remaining;
+      checkpoint ()
+    in
+    let invalid message = Or_error.error_string message in
+    if max_work_steps <= 0
+    then invalid "content agent lookup requires positive work allowance"
+    else (
+      try
+        poll ();
+        let open Or_error.Let_syntax in
+        let%bind original =
+          match projection with
+          | None -> Ok agent
+          | Some projection ->
+            if not (phys_equal parsed projection.Document_projection.parsed)
+            then invalid "content agent projection belongs to another parser"
+            else (
+              match projection.content_agents with
+              | None -> Ok agent
+              | Some associations ->
+                List.find_map associations ~f:(fun (copy, original) ->
+                  poll ();
+                  if phys_equal copy agent then Some original else None)
+                |> Result.of_option
+                     ~error:(Error.of_string "content agent is absent from projection"))
+        in
+        let reference =
+          List.find (Parsed.agent_references parsed) ~f:(fun reference ->
+            poll ();
+            match Agent_reference.invocation reference with
+            | Content actual -> phys_equal actual original
+            | Tool _ | Persistent_tool _ -> false)
+        in
+        poll ();
+        Result.of_option
+          reference
+          ~error:(Error.of_string "content agent is absent from parser")
+      with
+      | Abort.Limit -> invalid "content agent lookup work limit")
+  ;;
 
   module Projection_work = struct
     type t =
@@ -1584,6 +1634,7 @@ module Chat_markdown = struct
       in
       List.rev reversed
     in
+    let content_agents = ref [] in
     let rec items top_level path_rev (values : content_item list) =
       map values ~f:(fun index (item : content_item) ->
         match item with
@@ -1614,8 +1665,13 @@ module Chat_markdown = struct
                  })
         | Agent agent ->
           let%bind () = charge 2 in
-          let%map items = items top_level (index :: path_rev) agent.items in
-          (Agent { agent with items } : content_item))
+          let%bind items = items top_level (index :: path_rev) agent.items in
+          (* Retain the exact original descriptor when projection creates a copy.
+             Lookup never reconstructs declaration ownership from names or paths. *)
+          let%map () = charge 2 in
+          let copy = { agent with items } in
+          content_agents := (copy, agent) :: !content_agents;
+          (Agent copy : content_item))
     in
     let message top_level value =
       match value.content with
@@ -1665,7 +1721,12 @@ module Chat_markdown = struct
     in
     let%bind () = charge 1 in
     Ok
-      ({ parsed; elements; work_steps = Projection_work.used work }
+      ({ parsed
+       ; elements
+       ; work_steps = Projection_work.used work
+       ; content_agents =
+           (if Map.is_empty replacements then None else Some !content_agents)
+       }
        : Document_projection.t)
   ;;
 

@@ -308,6 +308,22 @@ module Chat_markdown : sig
     val work_steps : t -> int
   end
 
+  (** Resolve one actual emitted content-agent descriptor to its original parser
+      reference. With [projection], require SAME Parsed and exact descriptor
+      association retained by that projection's bounded copy traversal. Without
+      projection, require original descriptor identity. No structural/path/body
+      matching or native source lookup; foreign/missing descriptors reject.
+      [max_work_steps] is a positive bound for this complete lookup, counting each
+      association/reference scan and checkpoints before work. Borrowed checkpoint
+      exceptions propagate unchanged. *)
+  val content_agent_reference
+    :  Parsed.t
+    -> ?projection:Document_projection.t
+    -> max_work_steps:int
+    -> checkpoint:(unit -> unit)
+    -> agent_content
+    -> Agent_reference.t Core.Or_error.t
+
   (** Replace exact actual Local_capture/Builtin slots with literal Basic text.
       Reject foreign, duplicate, surplus or missing occurrences before projection
       allocation. Dynamic slots remain unchanged. Preserve roles, ordering, IDs,

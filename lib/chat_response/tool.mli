@@ -47,7 +47,11 @@ module Agent_source_runner : sig
       The callback retains live authority only for the owning runtime lifetime.
       It must use an admitted source owner, never infer grants from [ctx] paths
       or [source], which is only invocation correlation. It owns preparation and
-      calls the existing driver with the child's own immutable inputs. *)
+      calls the existing driver with the child's own immutable inputs.
+      [run_content] receives the actual emitted/projected content descriptor. Its
+      host validates exact parser/projection ownership, including nested invocation
+      items. Owned content dispatch bypasses the legacy URL/items response cache;
+      callback rejection/exception never falls back to Fetch. *)
   type t =
     { revision : Chatml_source.Digest.t
     ; run :
@@ -56,6 +60,10 @@ module Agent_source_runner : sig
         -> source:string
         -> observer:Agent_response_loop.observer option
         -> Prompt.Chat_markdown.content_item list
+        -> string
+    ; run_content :
+        declaration:Prompt.Chat_markdown.agent_content
+        -> ctx:Eio_unix.Stdenv.base Ctx.t
         -> string
     }
 end

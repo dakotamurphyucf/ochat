@@ -67,6 +67,8 @@ module Agent_source_runner = struct
         -> observer:Agent_response_loop.observer option
         -> CM.content_item list
         -> string
+    ; run_content :
+        declaration:CM.agent_content -> ctx:Eio_unix.Stdenv.base Ctx.t -> string
     }
 end
 

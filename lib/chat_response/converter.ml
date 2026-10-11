@@ -53,10 +53,23 @@ let run_nested_agent ~ctx ~run_agent ~url ~is_local items =
   run_agent ?prompt_dir ?session_id:(Some url) ~ctx prompt items
 ;;
 
-let function_call_output_part_of_content_item ~ctx ~run_agent (ci : CM.content_item)
+(* A supplied owner selects and admits the actual declaration before any response
+   cache lookup. Its failure is never a request to Fetch another source. *)
+let run_content_agent ?agent_source_runner ~ctx ~run_agent (agent : CM.agent_content) =
+  match agent_source_runner with
+  | Some runner -> runner.Tool.Agent_source_runner.run_content ~declaration:agent ~ctx
+  | None ->
+    Cache.find_or_add (Ctx.cache ctx) agent ~ttl:Time_ns.Span.day ~default:(fun () ->
+      run_nested_agent ~ctx ~run_agent ~url:agent.url ~is_local:agent.is_local agent.items)
+;;
+
+let function_call_output_part_of_content_item
+      ?agent_source_runner
+      ~ctx
+      ~run_agent
+      (ci : CM.content_item)
   : Res.Tool_output.Output_part.t
   =
-  let cache = Ctx.cache ctx in
   let dir = Ctx.dir ctx in
   match ci with
   | CM.Basic b ->
@@ -82,27 +95,28 @@ let function_call_output_part_of_content_item ~ctx ~run_agent (ci : CM.content_i
        Res.Tool_output.Output_part.Input_text { text }
      | _, _ ->
        Res.Tool_output.Output_part.Input_text { text = Option.value ~default:"" b.text })
-  | CM.Agent ({ url; is_local; items } as agent) ->
-    let text =
-      Cache.find_or_add cache agent ~ttl:Time_ns.Span.day ~default:(fun () ->
-        run_nested_agent ~ctx ~run_agent ~url ~is_local items)
-    in
+  | CM.Agent agent ->
+    let text = run_content_agent ?agent_source_runner ~ctx ~run_agent agent in
     Res.Tool_output.Output_part.Input_text { text }
 ;;
 
-let function_call_output_of_items ~ctx ~run_agent (items : CM.content_item list)
+let function_call_output_of_items
+      ?agent_source_runner
+      ~ctx
+      ~run_agent
+      (items : CM.content_item list)
   : Res.Tool_output.Output.t
   =
   let parts =
     List.map items ~f:(fun ci ->
-      function_call_output_part_of_content_item ~ctx ~run_agent ci)
+      function_call_output_part_of_content_item ?agent_source_runner ~ctx ~run_agent ci)
   in
   Res.Tool_output.Output.Content parts
 ;;
 
 (* Forward declarations *)
 
-(** [string_of_items ~ctx ~run_agent items] concatenates [items] into a plain
+(** [string_of_items ?agent_source_runner ~ctx ~run_agent items] concatenates [items] into a plain
     UTF-8 string.
 
     Each element of [items] is rendered according to the following rules:
@@ -119,8 +133,13 @@ let function_call_output_of_items ~ctx ~run_agent (items : CM.content_item list)
     construction and *function-call* argument serialisation share the exact
     same rendering logic.
 *)
-let rec string_of_items ~ctx ~run_agent (items : CM.content_item list) : string =
-  let cache = Ctx.cache ctx in
+let rec string_of_items
+          ?agent_source_runner
+          ~ctx
+          ~run_agent
+          (items : CM.content_item list)
+  : string
+  =
   items
   |> List.map ~f:(function
     | CM.Basic b ->
@@ -149,9 +168,7 @@ let rec string_of_items ~ctx ~run_agent (items : CM.content_item list) : string 
             (* If the document is local and no cleanup is requested, we read it from disk. *)
             Fetch.get ~ctx doc_url ~is_local:b.is_local)
        | _, _ -> Option.value ~default:"" b.text)
-    | CM.Agent ({ url; is_local; items } as agent) ->
-      Cache.find_or_add cache agent ~ttl:Time_ns.Span.day ~default:(fun () ->
-        run_nested_agent ~ctx ~run_agent ~url ~is_local items))
+    | CM.Agent agent -> run_content_agent ?agent_source_runner ~ctx ~run_agent agent)
   |> String.concat ~sep:"\n"
 
 (** [convert_basic_item ~ctx b] converts a
@@ -197,20 +214,16 @@ and convert_basic_item ~ctx (b : CM.basic_content_item) : Res.Input_message.cont
     Text { text = txt; _type = "input_text" }
   | _ -> Text { text = Option.value ~default:"" b.text; _type = "input_text" }
 
-and convert_content_item ~ctx ~run_agent (ci : CM.content_item)
+and convert_content_item ?agent_source_runner ~ctx ~run_agent (ci : CM.content_item)
   : Res.Input_message.content_item
   =
-  let cache = Ctx.cache ctx in
   match ci with
   | CM.Basic b -> convert_basic_item ~ctx b
-  | CM.Agent ({ url; is_local; items } as agent) ->
-    let txt =
-      Cache.find_or_add cache agent ~ttl:Time_ns.Span.day ~default:(fun () ->
-        run_nested_agent ~ctx ~run_agent ~url ~is_local items)
-    in
+  | CM.Agent agent ->
+    let txt = run_content_agent ?agent_source_runner ~ctx ~run_agent agent in
     Text { text = txt; _type = "input_text" }
 
-and convert_msg ~ctx ~run_agent (m : CM.msg) : Res.Item.t =
+and convert_msg ?agent_source_runner ~ctx ~run_agent (m : CM.msg) : Res.Item.t =
   let _ = Ctx.cache ctx in
   let role =
     match String.lowercase m.role with
@@ -227,7 +240,8 @@ and convert_msg ~ctx ~run_agent (m : CM.msg) : Res.Item.t =
       match m.content with
       | None -> ""
       | Some (CM.Text t) -> t
-      | Some (CM.Items items) -> string_of_items ~ctx ~run_agent items
+      | Some (CM.Items items) ->
+        string_of_items ?agent_source_runner ~ctx ~run_agent items
     in
     Res.Item.Output_message
       { role = Assistant
@@ -247,7 +261,8 @@ and convert_msg ~ctx ~run_agent (m : CM.msg) : Res.Item.t =
       match m.content with
       | None -> Res.Tool_output.Output.Text ""
       | Some (CM.Text t) -> Res.Tool_output.Output.Text t
-      | Some (CM.Items items) -> function_call_output_of_items ~ctx ~run_agent items
+      | Some (CM.Items items) ->
+        function_call_output_of_items ?agent_source_runner ~ctx ~run_agent items
     in
     (match m.tool_call with
      | Some { id = call_id; function_ = { name; arguments = raw_args } } ->
@@ -257,7 +272,8 @@ and convert_msg ~ctx ~run_agent (m : CM.msg) : Res.Item.t =
            match m.content with
            | None -> ""
            | Some (CM.Text t) -> t
-           | Some (CM.Items items) -> string_of_items ~ctx ~run_agent items)
+           | Some (CM.Items items) ->
+             string_of_items ?agent_source_runner ~ctx ~run_agent items)
          else raw_args
        in
        if is_custom_tool_call
@@ -287,7 +303,8 @@ and convert_msg ~ctx ~run_agent (m : CM.msg) : Res.Item.t =
       match m.content with
       | None -> []
       | Some (CM.Text t) -> [ Res.Input_message.Text { text = t; _type = "input_text" } ]
-      | Some (CM.Items lst) -> List.map lst ~f:(convert_content_item ~ctx ~run_agent)
+      | Some (CM.Items lst) ->
+        List.map lst ~f:(convert_content_item ?agent_source_runner ~ctx ~run_agent)
     in
     Res.Item.Input_message { role = role_val; content = content_items; _type = "message" }
 
@@ -299,7 +316,9 @@ and convert_msg ~ctx ~run_agent (m : CM.msg) : Res.Item.t =
    diverging we only need to update the implementation here without
    touching every call-site. *)
 
-and convert_system_msg ~ctx ~run_agent (m : CM.system_msg) : Res.Item.t =
+and convert_system_msg ?agent_source_runner ~ctx ~run_agent (m : CM.system_msg)
+  : Res.Item.t
+  =
   (* [system_msg] is an alias of [msg] but we *know* its [role] is "system"
      and that it never carries tool-call metadata.  Therefore we can
      shortcut straight to an [Input_message] constructor without any
@@ -308,39 +327,47 @@ and convert_system_msg ~ctx ~run_agent (m : CM.system_msg) : Res.Item.t =
     match m.content with
     | None -> []
     | Some (CM.Text t) -> [ Res.Input_message.Text { text = t; _type = "input_text" } ]
-    | Some (CM.Items lst) -> List.map lst ~f:(convert_content_item ~ctx ~run_agent)
+    | Some (CM.Items lst) ->
+      List.map lst ~f:(convert_content_item ?agent_source_runner ~ctx ~run_agent)
   in
   Res.Item.Input_message
     { role = Res.Input_message.System; content = content_items; _type = "message" }
 
-and convert_developer_msg ~ctx ~run_agent (m : CM.developer_msg) : Res.Item.t =
+and convert_developer_msg ?agent_source_runner ~ctx ~run_agent (m : CM.developer_msg)
+  : Res.Item.t
+  =
   let content_items : Res.Input_message.content_item list =
     match m.content with
     | None -> []
     | Some (CM.Text t) -> [ Res.Input_message.Text { text = t; _type = "input_text" } ]
-    | Some (CM.Items lst) -> List.map lst ~f:(convert_content_item ~ctx ~run_agent)
+    | Some (CM.Items lst) ->
+      List.map lst ~f:(convert_content_item ?agent_source_runner ~ctx ~run_agent)
   in
   Res.Item.Input_message
     { role = Res.Input_message.Developer; content = content_items; _type = "message" }
 
-and convert_user_msg ~ctx ~run_agent (m : CM.user_msg) : Res.Item.t =
+and convert_user_msg ?agent_source_runner ~ctx ~run_agent (m : CM.user_msg) : Res.Item.t =
   let content_items : Res.Input_message.content_item list =
     match m.content with
     | None -> []
     | Some (CM.Text t) -> [ Res.Input_message.Text { text = t; _type = "input_text" } ]
-    | Some (CM.Items lst) -> List.map lst ~f:(convert_content_item ~ctx ~run_agent)
+    | Some (CM.Items lst) ->
+      List.map lst ~f:(convert_content_item ?agent_source_runner ~ctx ~run_agent)
   in
   Res.Item.Input_message
     { role = Res.Input_message.User; content = content_items; _type = "message" }
 
-and convert_assistant_msg ~ctx ~run_agent (m : CM.assistant_msg) : Res.Item.t =
+and convert_assistant_msg ?agent_source_runner ~ctx ~run_agent (m : CM.assistant_msg)
+  : Res.Item.t
+  =
   match m.id, m.status with
   | Some id, status ->
     let text =
       match m.content with
       | None -> ""
       | Some (CM.Text t) -> t
-      | Some (CM.Items items) -> string_of_items ~ctx ~run_agent items
+      | Some (CM.Items items) ->
+        string_of_items ?agent_source_runner ~ctx ~run_agent items
     in
     Res.Item.Output_message
       { role = Assistant
@@ -357,7 +384,9 @@ and convert_assistant_msg ~ctx ~run_agent (m : CM.assistant_msg) : Res.Item.t =
       | Some (CM.Text t) -> [ Res.Input_message.Text { text = t; _type = "input_text" } ]
       | Some (CM.Items items) ->
         [ Res.Input_message.Text
-            { text = string_of_items ~ctx ~run_agent items; _type = "input_text" }
+            { text = string_of_items ?agent_source_runner ~ctx ~run_agent items
+            ; _type = "input_text"
+            }
         ]
     in
     Res.Item.Input_message
@@ -368,7 +397,9 @@ and convert_assistant_msg ~ctx ~run_agent (m : CM.assistant_msg) : Res.Item.t =
          "Assistant message must have both ID and status, or neither.  Found status \
           without ID.")
 
-and convert_tool_call_msg ~ctx ~run_agent (m : CM.tool_call_msg) : Res.Item.t =
+and convert_tool_call_msg ?agent_source_runner ~ctx ~run_agent (m : CM.tool_call_msg)
+  : Res.Item.t
+  =
   (* Shorthand <tool_call/> – assistant *invoking* a tool.  The parser
      guarantees the presence of [tool_call] with [function_] details. *)
   let { CM.id = call_id; function_ = { name; arguments = raw_args } } =
@@ -381,7 +412,8 @@ and convert_tool_call_msg ~ctx ~run_agent (m : CM.tool_call_msg) : Res.Item.t =
     if String.is_empty raw_args
     then (
       match m.content with
-      | Some (CM.Items items) -> string_of_items ~ctx ~run_agent items
+      | Some (CM.Items items) ->
+        string_of_items ?agent_source_runner ~ctx ~run_agent items
       | Some (CM.Text t) -> t
       | None -> "")
     else raw_args
@@ -394,14 +426,21 @@ and convert_tool_call_msg ~ctx ~run_agent (m : CM.tool_call_msg) : Res.Item.t =
     Res.Item.Function_call
       { name; arguments; call_id; _type = "function_call"; id = m.id; status = None }
 
-and convert_tool_response_msg ~ctx ~run_agent (m : CM.tool_response_msg) : Res.Item.t =
+and convert_tool_response_msg
+      ?agent_source_runner
+      ~ctx
+      ~run_agent
+      (m : CM.tool_response_msg)
+  : Res.Item.t
+  =
   (* Shorthand <tool_response/> – the *output* of a previously invoked tool. *)
   let call_id = Option.value_exn m.tool_call_id in
   let output =
     match m.content with
     | None -> Res.Tool_output.Output.Text ""
     | Some (CM.Text t) -> Text t
-    | Some (CM.Items items) -> function_call_output_of_items ~ctx ~run_agent items
+    | Some (CM.Items items) ->
+      function_call_output_of_items ?agent_source_runner ~ctx ~run_agent items
   in
   match m.type_ with
   | Some "custom_tool_call" ->
@@ -418,7 +457,7 @@ and convert_reasoning (r : CM.reasoning) : Res.Item.t =
   Res.Item.Reasoning { id = r.id; status = r.status; _type = "reasoning"; summary = summ }
 ;;
 
-(** [to_items ~ctx ~run_agent els] walks the ChatMarkdown document and
+(** [to_items ?agent_source_runner ~ctx ~run_agent els] walks the ChatMarkdown document and
     produces the list of {!Openai.Responses.Item.t} that forms the request
     history.
 
@@ -443,20 +482,26 @@ and convert_reasoning (r : CM.reasoning) : Res.Item.t =
         ]
       in
       let ctx = Ctx.create ~env ~dir ~cache in
-      let items = Converter.to_items ~ctx ~run_agent doc in
+      let items = Converter.to_items ?agent_source_runner ~ctx ~run_agent doc in
       assert (List.length items = 2)
     ]}
 *)
-let to_items ~ctx ~run_agent (els : CM.top_level_elements list) : Res.Item.t list =
+let to_items ?agent_source_runner ~ctx ~run_agent (els : CM.top_level_elements list)
+  : Res.Item.t list
+  =
   (* implementation unchanged below *)
   List.filter_map els ~f:(function
-    | CM.Msg m -> Some (convert_msg ~ctx ~run_agent m)
-    | CM.System m -> Some (convert_system_msg ~ctx ~run_agent m)
-    | CM.Developer m -> Some (convert_developer_msg ~ctx ~run_agent m)
-    | CM.User m -> Some (convert_user_msg ~ctx ~run_agent m)
-    | CM.Assistant m -> Some (convert_assistant_msg ~ctx ~run_agent m)
-    | CM.Tool_call m -> Some (convert_tool_call_msg ~ctx ~run_agent m)
-    | CM.Tool_response m -> Some (convert_tool_response_msg ~ctx ~run_agent m)
+    | CM.Msg m -> Some (convert_msg ?agent_source_runner ~ctx ~run_agent m)
+    | CM.System m -> Some (convert_system_msg ?agent_source_runner ~ctx ~run_agent m)
+    | CM.Developer m ->
+      Some (convert_developer_msg ?agent_source_runner ~ctx ~run_agent m)
+    | CM.User m -> Some (convert_user_msg ?agent_source_runner ~ctx ~run_agent m)
+    | CM.Assistant m ->
+      Some (convert_assistant_msg ?agent_source_runner ~ctx ~run_agent m)
+    | CM.Tool_call m ->
+      Some (convert_tool_call_msg ?agent_source_runner ~ctx ~run_agent m)
+    | CM.Tool_response m ->
+      Some (convert_tool_response_msg ?agent_source_runner ~ctx ~run_agent m)
     | CM.Reasoning r -> Some (convert_reasoning r)
     | CM.Config _ -> None
     | CM.Tool _ -> None
@@ -516,9 +561,9 @@ let source_context = function
   | CM.Authoring_context _ -> None
 ;;
 
-let to_identity_bearing_items ~ctx ~run_agent elements =
+let to_identity_bearing_items ?agent_source_runner ~ctx ~run_agent elements =
   List.filter_mapi elements ~f:(fun source_index element ->
-    match to_items ~ctx ~run_agent [ element ] with
+    match to_items ?agent_source_runner ~ctx ~run_agent [ element ] with
     | [] -> None
     | [ item ] ->
       Some

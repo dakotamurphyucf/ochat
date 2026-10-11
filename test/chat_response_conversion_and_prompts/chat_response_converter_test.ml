@@ -331,3 +331,110 @@ let%expect_test "parse_chat_inputs rejects invalid script declarations" =
       \nerror[chatmd.duplicate_script] at script.main: duplicate script id: main")
     |}]
 ;;
+
+let%test_unit "owned content dispatch bypasses stale legacy cache in every output form" =
+  Eio_main.run (fun env ->
+    let cache = Chat_response.Cache.create ~max_size:5 () in
+    let ctx = fixture_ctx ~env ~dir:env#cwd ~tool_dir:env#cwd ~cache in
+    let elements =
+      CM.parse_chat_inputs
+        ~dir:env#cwd
+        {|<user><agent src="__owned_content_missing__.chatmd" local>input</agent></user>|}
+    in
+    let message, declaration =
+      match elements with
+      | [ CM.User ({ content = Some (Items [ Agent declaration ]); _ } as message) ] ->
+        message, declaration
+      | _ -> failwith "expected actual content declaration"
+    in
+    Chat_response.Cache.find_or_add
+      cache
+      declaration
+      ~ttl:Time_ns.Span.day
+      ~default:(fun () -> "STALE")
+    |> ignore;
+    let calls = ref 0 in
+    let failure = ref None in
+    let runner =
+      Chat_response.Tool.Agent_source_runner.
+        { revision = Chatml_source.Digest.of_contents "owned-content" ~checkpoint:ignore
+        ; run = (fun ~declaration:_ ~ctx:_ ~source:_ ~observer:_ _ -> assert false)
+        ; run_content =
+            (fun ~declaration:actual ~ctx:actual_ctx ->
+              assert (phys_equal actual declaration);
+              assert (phys_equal actual_ctx ctx);
+              Int.incr calls;
+              match !failure with
+              | Some exn -> raise exn
+              | None -> "OWNED")
+        }
+    in
+    let legacy ?prompt_dir:_ ?session_id:_ ~ctx:_ _ _ =
+      failwith "owned dispatch fell back"
+    in
+    let check () =
+      [%test_eq: string]
+        (Converter.string_of_items
+           ~agent_source_runner:runner
+           ~ctx
+           ~run_agent:legacy
+           [ CM.Agent declaration ])
+        "OWNED";
+      let result =
+        Converter.to_items
+          ~agent_source_runner:runner
+          ~ctx
+          ~run_agent:legacy
+          [ CM.User message
+          ; CM.Tool_response { message with role = "tool"; tool_call_id = Some "call" }
+          ]
+      in
+      match result with
+      | [ Openai.Responses.Item.Input_message
+            { content = [ Text { text = first; _ } ]; _ }
+        ; Function_call_output { output = Content [ Input_text { text = second } ]; _ }
+        ] -> [%test_eq: string * string] (first, second) ("OWNED", "OWNED")
+      | _ -> failwith "unexpected content conversion"
+    in
+    check ();
+    [%test_eq: int] !calls 3;
+    let sentinel = Failure "original content callback" in
+    failure := Some sentinel;
+    List.iter
+      [ (fun () ->
+          Converter.string_of_items
+            ~agent_source_runner:runner
+            ~ctx
+            ~run_agent:legacy
+            [ CM.Agent declaration ]
+          |> ignore)
+      ; (fun () ->
+          Converter.to_items
+            ~agent_source_runner:runner
+            ~ctx
+            ~run_agent:legacy
+            [ CM.User message ]
+          |> ignore)
+      ; (fun () ->
+          Converter.to_items
+            ~agent_source_runner:runner
+            ~ctx
+            ~run_agent:legacy
+            [ CM.Tool_response { message with role = "tool"; tool_call_id = Some "call" }
+            ]
+          |> ignore)
+      ]
+      ~f:(fun convert ->
+        match convert () with
+        | () -> assert false
+        | exception actual -> assert (phys_equal actual sentinel));
+    failure := None;
+    check ();
+    [%test_eq: string]
+      (Chat_response.Cache.find_or_add
+         cache
+         declaration
+         ~ttl:Time_ns.Span.day
+         ~default:(fun () -> assert false))
+      "STALE")
+;;

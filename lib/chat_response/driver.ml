@@ -638,6 +638,10 @@ type agent_input =
 
 let rec run_agent_input
           ?agent_source_runner
+          ?input_agent_source_runner
+          ?startup
+          ?compilation_limits
+          ?checkpoint
           ?(history_compaction = false)
           ?prompt_dir
           ?session_id
@@ -730,6 +734,9 @@ let rec run_agent_input
   let agent_runtime =
     Agent_runtime.create
       ?agent_source_runner
+      ?startup
+      ?compilation_limits
+      ?checkpoint
       ?programs
       ~moderator_surface:Chatml.Chatml_builtin_surface.moderator_surface
       ~sw
@@ -763,8 +770,9 @@ let rec run_agent_input
   let comp_tools, tool_tbl = Ochat_function.functions tools in
   let tools_req = Tool.convert_tools comp_tools in
   (* 5.  Convert XML ‑> API items and enter the execute loop to handle function calls. *)
-  let init_items =
+  let convert ?agent_source_runner elements =
     Converter.to_items
+      ?agent_source_runner
       ~ctx
       ~run_agent:(fun ?prompt_dir ?session_id ~ctx prompt items ->
         run_agent
@@ -777,8 +785,13 @@ let rec run_agent_input
           ~ctx
           prompt
           items)
-      (elements @ [ msg ])
+      elements
   in
+  (* Prompt declarations belong to this child; invocation items may belong to
+     its caller. Dynamic items never inherit either declaration inventory. *)
+  let prompt_items = convert ?agent_source_runner elements in
+  let invocation_items = convert ?agent_source_runner:input_agent_source_runner [ msg ] in
+  let init_items = prompt_items @ invocation_items in
   let all_items =
     if has_script elements
     then (
@@ -925,6 +938,10 @@ and run_agent
 let run_prepared_agent
       parsed
       ?agent_source_runner
+      ?input_agent_source_runner
+      ?startup
+      ?compilation_limits
+      ?checkpoint
       ?programs
       ?document_projection
       ?history_compaction
@@ -941,6 +958,10 @@ let run_prepared_agent
   =
   run_agent_input
     ?agent_source_runner
+    ?input_agent_source_runner
+    ?startup
+    ?compilation_limits
+    ?checkpoint
     ?history_compaction
     ?prompt_dir
     ?session_id

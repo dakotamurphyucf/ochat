@@ -34,6 +34,8 @@ let%test_unit "agent source interception precedes Fetch and preserves callback f
       let runner =
         Tool.Agent_source_runner.
           { revision = digest "owned-source-policy"
+          ; run_content =
+              (fun ~declaration:_ ~ctx:_ -> failwith "unexpected content agent")
           ; run =
               (fun ~declaration:actual ~ctx:actual_ctx ~source ~observer items ->
                 assert (phys_equal actual_ctx ctx);
@@ -99,6 +101,8 @@ let%test_unit "source policy revision changes agent permission identity only" =
         let runner =
           Tool.Agent_source_runner.
             { revision = digest revision
+            ; run_content =
+                (fun ~declaration:_ ~ctx:_ -> failwith "unexpected content agent")
             ; run =
                 (fun ~declaration:_ ~ctx:_ ~source:_ ~observer:_ _ ->
                   failwith "uninvoked source runner")
@@ -292,4 +296,169 @@ let%expect_test "prepared Driver consumes captured graph and original literal pr
        before dispatch");
   [%expect
     {| captured graph and literal content survived removal; foreign parser rejected before dispatch |}]
+;;
+
+let%expect_test
+    "prepared Driver dispatches child prompt and caller-owned nested input separately"
+  =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let prepare body =
+      CM.prepare_chat_inputs
+        ~source:"root.chatmd"
+        ~source_loader:
+          (Source_loader.captured_filesystem
+             ~root:env#cwd
+             ~sources:[ "root.chatmd", body ])
+        ~dir:env#cwd
+        ~preprocess:Fn.id
+        ~limits:
+          (CM.Limits.create
+             ~max_input_bytes:65536
+             ~max_parse_calls:16
+             ~max_tokens:10000
+             ~max_depth:32
+           |> Or_error.ok_exn)
+        ~checkpoint
+        body
+    in
+    let child = prepare {|<user><agent src="child.chatmd" local>child</agent></user>|} in
+    let caller =
+      prepare
+        {|<user><agent src="caller.chatmd" local><agent src="grandchild.chatmd" local>grandchild</agent></agent></user>|}
+    in
+    let input =
+      match CM.Parsed.elements caller with
+      | [ CM.User { content = Some (Items items); _ } ] -> items
+      | _ -> assert false
+    in
+    let calls = Queue.create () in
+    let reference parsed descriptor =
+      CM.content_agent_reference parsed ~max_work_steps:100 ~checkpoint descriptor
+      |> Or_error.ok_exn
+    in
+    let child_runner =
+      Tool.Agent_source_runner.
+        { revision = digest "child-revision"
+        ; run = (fun ~declaration:_ ~ctx:_ ~source:_ ~observer:_ _ -> assert false)
+        ; run_content =
+            (fun ~declaration ~ctx:_ ->
+              let key = CM.Agent_reference.queued_key (reference child declaration) in
+              [%test_eq: string option] key (Some "child.chatmd");
+              Queue.enqueue calls "child";
+              "CHILD")
+        }
+    in
+    let dynamic ?prompt_dir:_ ?session_id:_ ~ctx:_ _ _ =
+      failwith "owned nested input fetched dynamically"
+    in
+    let rec caller_runner : Tool.Agent_source_runner.t =
+      { revision = digest "caller-revision"
+      ; run = (fun ~declaration:_ ~ctx:_ ~source:_ ~observer:_ _ -> assert false)
+      ; run_content =
+          (fun ~declaration ~ctx ->
+            match CM.Agent_reference.queued_key (reference caller declaration) with
+            | Some "caller.chatmd" ->
+              Queue.enqueue calls "caller";
+              "CALLER("
+              ^ Chat_response.Converter.string_of_items
+                  ~agent_source_runner:caller_runner
+                  ~ctx
+                  ~run_agent:dynamic
+                  declaration.items
+              ^ ")"
+            | Some "grandchild.chatmd" ->
+              Queue.enqueue calls "grandchild";
+              "GRANDCHILD"
+            | None | Some _ -> assert false)
+      }
+    in
+    let dispatches = ref 0 in
+    let inference =
+      Inference_fixture.create
+        ~namespace:"separate-agent-inputs"
+        ~default_model:"fixture-model"
+        ~post_stream:(fun ~sw:_ ~inputs ->
+          Int.incr dispatches;
+          let texts =
+            List.concat_map inputs ~f:(function
+              | Res.Item.Input_message message ->
+                List.filter_map message.content ~f:(function
+                  | Text { text; _ } -> Some text
+                  | Image _ -> None)
+              | _ -> [])
+          in
+          [%test_eq: string list] texts [ "CHILD"; "CALLER(GRANDCHILD)" ];
+          Stdlib.List.to_seq [ final_answer ])
+    in
+    let ctx =
+      Inference_fixture.ctx
+        inference
+        ~env
+        ~dir:env#cwd
+        ~tool_dir:env#cwd
+        ~cache:(Chat_response.Cache.create ~max_size:1 ())
+        ()
+    in
+    let expired = ref None in
+    let polls = ref 0 in
+    let limits = Chatml_compilation.default_limits in
+    Chat_response.Startup_compilation.with_context
+      ~limits
+      ~env
+      ~checkpoint:(fun () -> Int.incr polls)
+      ~map_error:Fn.id
+      ~f:(fun startup ->
+        expired := Some startup;
+        let answer =
+          Driver.run_prepared_agent
+            child
+            ~agent_source_runner:child_runner
+            ~input_agent_source_runner:caller_runner
+            ~startup
+            ~compilation_limits:limits
+            ~ctx
+            input
+        in
+        [%test_eq: string] answer "ANSWER";
+        Ok ())
+      ()
+    |> ok;
+    assert (!polls > 0);
+    [%test_eq: string list] (Queue.to_list calls) [ "child"; "caller"; "grandchild" ];
+    [%test_eq: int] !dispatches 1;
+    let reject ?checkpoint ?startup () =
+      match
+        Driver.run_prepared_agent
+          child
+          ~agent_source_runner:child_runner
+          ~input_agent_source_runner:caller_runner
+          ?startup
+          ~compilation_limits:limits
+          ?checkpoint
+          ~ctx
+          input
+      with
+      | _ -> assert false
+      | exception Failure message ->
+        assert (String.is_substring message ~substring:"chatml.invalid_context")
+    in
+    reject ~startup:(Option.value_exn !expired) ();
+    [%test_eq: int] !dispatches 1;
+    let sentinel = Failure "original prepared startup checkpoint" in
+    (match
+       Driver.run_prepared_agent
+         child
+         ~agent_source_runner:child_runner
+         ~input_agent_source_runner:caller_runner
+         ~compilation_limits:limits
+         ~checkpoint:(fun () -> raise sentinel)
+         ~ctx
+         input
+     with
+     | _ -> assert false
+     | exception actual -> assert (phys_equal actual sentinel));
+    [%test_eq: int] !dispatches 1;
+    print_s [%sexp (Queue.to_list calls : string list)]);
+  [%expect {| (child caller grandchild) |}]
 ;;
