@@ -7850,7 +7850,7 @@ let reconcile_generated_creations t =
                                  installed ()))))))))
 ;;
 
-let managed_child t borrowed child_id =
+let managed_child_access t borrowed child_id =
   let module N = Agent_session.Native_tool_invocation in
   let module A = Agent_session.Session_actor in
   let module D = Agent_store.Delegation_store in
@@ -7912,35 +7912,43 @@ let managed_child t borrowed child_id =
     | false -> Error (denied ())
   in
   let%bind () = validate_parent initial_parent in
+  Ok
+    (fun (child : Session_registry.entry) ->
+      let%bind child_state = A.state child.actor in
+      let%bind () =
+        match child_state.spec.delegation with
+        | Some actual
+          when D.Reference.equal actual reference
+               && P.Id.Prompt_revision.equal
+                    child_state.spec.prompt_revision_id
+                    reference.revision_id -> Ok ()
+        | _ -> Error (denied ())
+      in
+      let%bind final_parent, final_principal = parent_state () in
+      let%bind () =
+        match P.Id.Principal.equal principal final_principal with
+        | true -> validate_parent final_parent
+        | false -> Error (denied ())
+      in
+      let%bind _ = N.borrowed_capabilities borrowed in
+      (* Native/parent checks may yield. Refresh the private child's revocation
+         after those waits, before returning even bounded metadata. *)
+      let%bind current =
+        D.resolve ledger reference |> Result.map_error ~f:protocol_of_store
+      in
+      let%map () =
+        match current.stage, current.revocation with
+        | Linked, None -> authorize_independent t current
+        | _ -> Error (denied ())
+      in
+      child, child_state)
+;;
+
+let managed_child t borrowed child_id =
+  let open Result.Let_syntax in
+  let%bind validate = managed_child_access t borrowed child_id in
   let%bind child = Session_registry.load t.registry child_id in
-  let%bind child_state = A.state child.actor in
-  let%bind () =
-    match child_state.spec.delegation with
-    | Some actual
-      when D.Reference.equal actual reference
-           && P.Id.Prompt_revision.equal
-                child_state.spec.prompt_revision_id
-                reference.revision_id -> Ok ()
-    | _ -> Error (denied ())
-  in
-  let%bind final_parent, final_principal = parent_state () in
-  let%bind () =
-    match P.Id.Principal.equal principal final_principal with
-    | true -> validate_parent final_parent
-    | false -> Error (denied ())
-  in
-  let%bind _ = N.borrowed_capabilities borrowed in
-  (* Native/parent checks may yield. Refresh the private child's revocation after
-     those waits, before returning even bounded metadata. *)
-  let%bind current =
-    D.resolve ledger reference |> Result.map_error ~f:protocol_of_store
-  in
-  let%map () =
-    match current.stage, current.revocation with
-    | Linked, None -> authorize_independent t current
-    | _ -> Error (denied ())
-  in
-  child, child_state
+  validate child
 ;;
 
 let managed_status t borrowed child_id =
@@ -8056,50 +8064,57 @@ let managed_send t borrowed child_id ~key ~message =
 let managed_read t borrowed child_id ~receipt_id ~cursor ~limit =
   let module P = Agent_protocol in
   let open Result.Let_syntax in
-  let authorize () =
-    managed_child t borrowed child_id
-    |> Result.map_error ~f:(fun _ ->
-      P.Invocation.
-        { code = "agent.management.denied"
-        ; message = "The child session is unavailable to this caller."
-        ; retryable = false
-        ; details = `Null
-        })
+  let denied _ =
+    P.Invocation.
+      { code = "agent.management.denied"
+      ; message = "The child session is unavailable to this caller."
+      ; retryable = false
+      ; details = `Null
+      }
   in
-  let%bind child, state = authorize () in
-  let result =
-    let open Result.Let_syntax in
-    let%bind history_epoch =
-      Agent_session.Durable_event_log.history_epoch
-        child.durable_events
-        ~through_sequence:state.counters.event_sequence
-    in
-    Managed_output_page.read
-      t.managed_output_cursors
-      ~state
-      ~receipt_id
-      ~cursor
-      ~history_epoch
-      ~limit
-      ~max_bytes:t.limits.managed_output_page_max_bytes
+  let%bind validate =
+    managed_child_access t borrowed child_id |> Result.map_error ~f:denied
   in
-  let%bind _, current = authorize () in
-  let result =
-    match
-      Int.equal current.identity.generation state.identity.generation
-      && Int.equal
-           current.conversation.compaction_generation
-           state.conversation.compaction_generation
-    with
-    | true -> result
-    | false ->
-      Error
-        (P.Error.create
-           Snapshot_required
-           ~message:"The session changed while reading output; request a fresh snapshot."
-           ~retryable:false
-           ~data:(`Object [ "snapshot_required", `True ])
-           ())
+  let%bind result =
+    Session_registry.with_loaded_read t.registry child_id (fun child ->
+      let%bind _, state = validate child in
+      let result =
+        let open Result.Let_syntax in
+        let%bind history_epoch =
+          Agent_session.Durable_event_log.history_epoch
+            child.durable_events
+            ~through_sequence:state.counters.event_sequence
+        in
+        Managed_output_page.read
+          t.managed_output_cursors
+          ~state
+          ~receipt_id
+          ~cursor
+          ~history_epoch
+          ~limit
+          ~max_bytes:t.limits.managed_output_page_max_bytes
+      in
+      let%bind _, current = validate child in
+      let result =
+        match
+          Int.equal current.identity.generation state.identity.generation
+          && Int.equal
+               current.conversation.compaction_generation
+               state.conversation.compaction_generation
+        with
+        | true -> result
+        | false ->
+          Error
+            (P.Error.create
+               Snapshot_required
+               ~message:
+                 "The session changed while reading output; request a fresh snapshot."
+               ~retryable:false
+               ~data:(`Object [ "snapshot_required", `True ])
+               ())
+      in
+      Ok result)
+    |> Result.map_error ~f:denied
   in
   Result.map_error result ~f:(fun error ->
     P.Invocation.

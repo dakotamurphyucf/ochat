@@ -243,29 +243,45 @@ let check_reservation t reservation =
   else Error (lifecycle_conflict "session lifecycle reservation is no longer current")
 ;;
 
-let with_lifecycle t session_id f =
+let rec reserve_lifecycle t session_id ~wait =
   let open Result.Let_syntax in
-  let%bind reservation =
+  let%bind admission =
     Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
       if Atomic.get t.closing
       then Error (shutting_down ())
-      else if Map.mem t.reservations session_id || cleanup_pending t session_id
-      then Error (lifecycle_conflict "session lifecycle is already reserved")
+      else if cleanup_pending t session_id
+      then Error (lifecycle_conflict "session cleanup is pending")
       else (
-        let target =
-          match find t session_id, Map.find t.indexed session_id with
-          | Some entry, _ -> Lifecycle_reservation.Loaded entry
-          | None, Some indexed -> Indexed indexed
-          | None, None -> Absent
-        in
-        let finished, finish = Eio.Promise.create () in
-        let reservation =
-          ({ owner = t.lifecycle_owner; session_id; target; finished; finish }
-           : Lifecycle_reservation.t)
-        in
-        t.reservations <- Map.set t.reservations ~key:session_id ~data:reservation;
-        Ok reservation))
+        match Map.find t.reservations session_id with
+        | Some current ->
+          if wait
+          then Ok (`Wait current.Lifecycle_reservation.finished)
+          else Error (lifecycle_conflict "session lifecycle is already reserved")
+        | None ->
+          let target =
+            match find t session_id, Map.find t.indexed session_id with
+            | Some entry, _ -> Lifecycle_reservation.Loaded entry
+            | None, Some indexed -> Indexed indexed
+            | None, None -> Absent
+          in
+          let finished, finish = Eio.Promise.create () in
+          let reservation =
+            ({ owner = t.lifecycle_owner; session_id; target; finished; finish }
+             : Lifecycle_reservation.t)
+          in
+          t.reservations <- Map.set t.reservations ~key:session_id ~data:reservation;
+          Ok (`Reserved reservation)))
   in
+  match admission with
+  | `Reserved reservation -> Ok reservation
+  | `Wait finished ->
+    Eio.Promise.await finished;
+    reserve_lifecycle t session_id ~wait
+;;
+
+let with_lifecycle_admission t session_id ~wait f =
+  let open Result.Let_syntax in
+  let%bind reservation = reserve_lifecycle t session_id ~wait in
   Exn.protect
     ~f:(fun () -> f reservation)
     ~finally:(fun () ->
@@ -277,6 +293,8 @@ let with_lifecycle t session_id f =
             t.reservations <- Map.remove t.reservations session_id;
             Eio.Promise.resolve reservation.finish ())))
 ;;
+
+let with_lifecycle t session_id f = with_lifecycle_admission t session_id ~wait:false f
 
 let check_retained_owner entry =
   match entry.store_handle with
@@ -440,76 +458,83 @@ let with_recovery_handle t ~store handle f =
     Exn.raise_with_original_backtrace exn backtrace
 ;;
 
-let load t session_id =
+let load_reserved t reservation =
   let open Result.Let_syntax in
-  with_lifecycle t session_id (fun reservation ->
-    match reservation.Lifecycle_reservation.target with
-    | Loaded entry ->
-      let%map () = check_retained_owner entry in
-      entry
-    | Absent ->
-      Error
-        (Agent_protocol.Error.create
-           Session_not_found
-           ~message:"session does not exist"
-           ~retryable:false
-           ())
-    | Indexed indexed ->
+  let session_id = reservation.Lifecycle_reservation.session_id in
+  match reservation.Lifecycle_reservation.target with
+  | Loaded entry ->
+    let%map () = check_retained_owner entry in
+    entry
+  | Absent ->
+    Error
+      (Agent_protocol.Error.create
+         Session_not_found
+         ~message:"session does not exist"
+         ~retryable:false
+         ())
+  | Indexed indexed ->
+    let%bind () =
+      if
+        indexed.archived
+        || not
+             (Agent_store.Session_archive_record.Admission.equal
+                indexed.admission
+                Automatic)
+      then
+        Error
+          (Agent_protocol.Error.create
+             Invalid_state
+             ~message:"session requires restoration and explicit execution admission"
+             ~retryable:false
+             ())
+      else Ok ()
+    in
+    let%bind loader =
+      Eio.Mutex.use_ro t.mutex (fun () ->
+        Result.of_option t.loader ~error:(shutting_down ()))
+    in
+    let%bind entry = loader indexed in
+    close_provisional t ~session_id entry (fun () ->
+      let%bind () = check_retained_owner entry in
+      let%bind state = Agent_session.Session_actor.state entry.actor in
+      let%bind () = check_retained_owner entry in
       let%bind () =
-        if
-          indexed.archived
-          || not
-               (Agent_store.Session_archive_record.Admission.equal
-                  indexed.admission
-                  Automatic)
-        then
+        if Agent_protocol.Id.Session.equal state.identity.session_id session_id
+        then Ok ()
+        else
           Error
             (Agent_protocol.Error.create
-               Invalid_state
-               ~message:"session requires restoration and explicit execution admission"
+               Persistence_error
+               ~message:"loaded actor identity differs from reserved session"
                ~retryable:false
                ())
-        else Ok ()
       in
-      let%bind loader =
-        Eio.Mutex.use_ro t.mutex (fun () ->
-          Result.of_option t.loader ~error:(shutting_down ()))
-      in
-      let%bind entry = loader indexed in
-      close_provisional t ~session_id entry (fun () ->
-        let%bind () = check_retained_owner entry in
-        let%bind state = Agent_session.Session_actor.state entry.actor in
-        let%bind () = check_retained_owner entry in
-        let%bind () =
-          if Agent_protocol.Id.Session.equal state.identity.session_id session_id
-          then Ok ()
-          else
-            Error
-              (Agent_protocol.Error.create
-                 Persistence_error
-                 ~message:"loaded actor identity differs from reserved session"
-                 ~retryable:false
-                 ())
-        in
-        Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-          let%bind () = check_reservation t reservation in
-          if Atomic.get t.closing
-          then Error (shutting_down ())
-          else if
-            Option.is_some (find t session_id)
-            || not
-                 (Option.equal
-                    Agent_store.Session_index.Entry.equal
-                    (Map.find t.indexed session_id)
-                    (Some indexed))
-          then Error (lifecycle_conflict "loaded session binding changed")
-          else (
-            let%bind () = check_retained_owner entry in
-            Atomic.set
-              t.sessions
-              (Map.set (Atomic.get t.sessions) ~key:session_id ~data:entry);
-            t.indexed <- Map.remove t.indexed session_id;
-            Ok entry))))
+      Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+        let%bind () = check_reservation t reservation in
+        if Atomic.get t.closing
+        then Error (shutting_down ())
+        else if
+          Option.is_some (find t session_id)
+          || not
+               (Option.equal
+                  Agent_store.Session_index.Entry.equal
+                  (Map.find t.indexed session_id)
+                  (Some indexed))
+        then Error (lifecycle_conflict "loaded session binding changed")
+        else (
+          let%bind () = check_retained_owner entry in
+          Atomic.set
+            t.sessions
+            (Map.set (Atomic.get t.sessions) ~key:session_id ~data:entry);
+          t.indexed <- Map.remove t.indexed session_id;
+          Ok entry)))
+;;
+
+let load t session_id = with_lifecycle t session_id (load_reserved t)
+
+let with_loaded_read t session_id f =
+  with_lifecycle_admission t session_id ~wait:true (fun reservation ->
+    Result.bind (load_reserved t reservation) ~f)
 ;;
 
 module Read_binding = struct
