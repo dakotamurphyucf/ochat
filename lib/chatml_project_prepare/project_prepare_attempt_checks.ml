@@ -87,11 +87,18 @@ let%test_module "project preparation accounting" =
       | Error _ -> failwith "unexpected admission failure"
     ;;
 
+    let deadline clock =
+      Project_prepare_deadline.create ~clock ~wall_time:(Time_ns.Span.of_sec 10.)
+      |> Or_error.ok_exn
+    ;;
+
     let run ?(checkpoint = fun () -> ()) ~output f =
+      let clock = Eio_mock.Clock.Mono.make () in
       Attempt.run
         ~limits:(limits ~output ~work:1000)
         ~policy:(policy ())
-        ~clock:(Eio_mock.Clock.Mono.make ())
+        ~deadline:(deadline clock)
+        ~clock
         ~checkpoint
         ~f
     ;;
@@ -121,10 +128,12 @@ let%test_module "project preparation accounting" =
     ;;
 
     let local_attempt ?(roots_work = 100) f =
+      let clock = Eio_mock.Clock.Mono.make () in
       Attempt.run
         ~limits:(limits ~output:1000 ~work:1_000_000)
         ~policy:(policy ~local_work:1_000_000 ~roots_work ())
-        ~clock:(Eio_mock.Clock.Mono.make ())
+        ~deadline:(deadline clock)
+        ~clock
         ~checkpoint:ignore
         ~f
     ;;
@@ -430,11 +439,35 @@ let%test_module "project preparation accounting" =
 
     let%test_unit "deadline and caught checkpoint failure poison the same invocation" =
       Eio_main.run (fun _ ->
+        let shared_clock = Eio_mock.Clock.Mono.make () in
+        let shared_deadline = deadline shared_clock in
+        Eio_mock.Clock.Mono.set_time shared_clock (Mtime.of_uint64_ns 9_000_000_000L);
+        let shared_expiry =
+          Attempt.run
+            ~limits:(limits ~output:10 ~work:1000)
+            ~policy:(policy ())
+            ~deadline:shared_deadline
+            ~clock:shared_clock
+            ~checkpoint:ignore
+            ~f:(fun attempt ->
+              Eio_mock.Clock.Mono.set_time
+                shared_clock
+                (Mtime.of_uint64_ns 10_000_000_000L);
+              Attempt.poll attempt;
+              Ok ())
+        in
+        (match shared_expiry with
+         | Error error ->
+           (match Error.problem error with
+            | Timed_out -> ()
+            | _ -> assert false)
+         | Ok _ -> assert false);
         let clock = Eio_mock.Clock.Mono.make () in
         let expired =
           Attempt.run
             ~limits:(limits ~output:10 ~work:1000)
             ~policy:(policy ())
+            ~deadline:(deadline clock)
             ~clock
             ~checkpoint:(fun () -> ())
             ~f:(fun attempt ->
@@ -455,6 +488,7 @@ let%test_module "project preparation accounting" =
           Attempt.run
             ~limits:(limits ~output:10 ~work:1000)
             ~policy:(policy ())
+            ~deadline:(deadline callback_clock)
             ~clock:callback_clock
             ~checkpoint:(fun () ->
               Eio_mock.Clock.Mono.set_time
@@ -557,11 +591,13 @@ let%test_module "project preparation accounting" =
             | Invalid_accounting -> ()
             | _ -> assert false)
          | Ok _ -> assert false);
+        let clock = Eio_mock.Clock.Mono.make () in
         let overflow =
           Attempt.run
             ~limits:(limits ~output:10 ~work:Int.max_value)
             ~policy:(policy ())
-            ~clock:(Eio_mock.Clock.Mono.make ())
+            ~deadline:(deadline clock)
+            ~clock
             ~checkpoint:(fun () -> ())
             ~f:(fun attempt ->
               Attempt.charge attempt { A.zero with work_steps = Int.max_value } |> ok;

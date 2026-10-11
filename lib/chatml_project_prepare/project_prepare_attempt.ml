@@ -3,6 +3,7 @@ module Accounting = Project_prepare_accounting
 module Error = Project_prepare_error
 module Limits = Project_prepare_limits
 module Policy = Project_prepare_policy
+module Deadline = Project_prepare_deadline
 
 module Reservation = struct
   type t =
@@ -18,7 +19,7 @@ type t =
   ; policy : Policy.t
   ; ceiling : Accounting.t
   ; clock : Eio.Time.Mono.ty Eio.Time.Mono.t
-  ; started : Mtime.t
+  ; deadline : Deadline.t
   ; checkpoint : unit -> unit
   ; stop : Error.t -> unit
   ; mutable failure : Error.t option
@@ -38,18 +39,14 @@ let reject t error =
 ;;
 
 let fail t problem = reject t (Error.create problem)
-
-let seconds_left t =
-  Time_ns.Span.to_sec t.limits.wall_time
-  -. (Mtime.Span.to_float_ns (Mtime.span t.started (Eio.Time.Mono.now t.clock)) /. 1e9)
-;;
+let seconds_left t = Deadline.seconds_left t.deadline ~clock:t.clock
 
 let check_deadline t =
-  if Float.(seconds_left t <= 0.)
-  then (
-    let error = Error.create Timed_out in
+  match Deadline.check t.deadline ~clock:t.clock with
+  | Ok () -> ()
+  | Error error ->
     t.failure <- Some error;
-    t.stop error)
+    t.stop error
 ;;
 
 let poison_on_exception t f =
@@ -66,6 +63,7 @@ let poll t =
   check_deadline t;
   poison_on_exception t t.checkpoint;
   poison_on_exception t Eio.Fiber.check;
+  Option.iter t.failure ~f:t.stop;
   (* Progress callbacks may yield or advance an injected clock. Do not admit
      the next effect using the time observed before that callback. *)
   check_deadline t
@@ -224,7 +222,7 @@ let composition_limits t =
       ~document:(L.document policy))
 ;;
 
-let run ~limits ~policy ~clock ~checkpoint ~f =
+let run ~limits ~policy ~deadline ~clock ~checkpoint ~f =
   let exception Stop of Error.t in
   let ceiling =
     { Accounting.packages = limits.Limits.packages
@@ -247,7 +245,7 @@ let run ~limits ~policy ~clock ~checkpoint ~f =
     ; policy
     ; ceiling
     ; clock :> Eio.Time.Mono.ty Eio.Time.Mono.t
-    ; started = Eio.Time.Mono.now clock
+    ; deadline
     ; checkpoint
     ; stop = (fun error -> raise (Stop error))
     ; failure = None

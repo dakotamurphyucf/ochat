@@ -53,11 +53,15 @@ val git_object_limits : t -> (Chatml_git_catalog.Limits.t, Error.t) Result.t
 val git_native_limits : t -> (Chatml_git_host.Limits.t, Error.t) Result.t
 val composition_limits : t -> (Chatml_project_build.Limits.t, Error.t) Result.t
 
-(** The final poll occurs before returning a candidate to a publication owner;
-    atomic publication must never be wrapped with a postcommit checkpoint. *)
+(** The supplied deadline starts before any publication expected-lock read and
+    is created with this limit's wall_time and the same monotonic clock. It is
+    shared with the publication owner, never reset at preparation entry. The final
+    poll occurs before returning a candidate to that owner; atomic publication
+    must never be wrapped with a postcommit checkpoint. *)
 val run
   :  limits:Limits.t
   -> policy:Policy.t
+  -> deadline:Project_prepare_deadline.t
   -> clock:_ Eio.Time.Mono.t
   -> checkpoint:(unit -> unit)
   -> f:(t -> ('a, Error.t) Result.t)
