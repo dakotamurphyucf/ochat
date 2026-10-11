@@ -20,6 +20,11 @@ val charge : t -> Accounting.t -> (unit, Error.t) Result.t
 
 val accounting : t -> Accounting.t
 
+(** Preserve the first expected stage failure and revoke subsequent admission,
+    including failures before any reservation/effect. Catching the returned Error
+    cannot make this invocation eligible to complete or retry another stage. *)
+val reject : t -> Error.t -> ('a, Error.t) Result.t
+
 (** Snapshot after used and all in-flight reservations. This is not admission:
     reserve/charge must still succeed before starting work. *)
 val remaining : t -> Accounting.t

@@ -79,61 +79,66 @@ let with_work_allowance limits ~work_steps =
 ;;
 
 let capture attempt ~owner ~project ~namespace_override ~selection =
-  let open Result.Let_syntax in
-  let%bind limits = Attempt.local_limits attempt in
-  let%bind composition = Attempt.composition_limits attempt in
-  let%bind inventory =
-    Attempt.reserve
-      attempt
-      { Accounting.zero with
-        source_count = Local.Limits.sources limits
-      ; source_bytes = Local.Limits.total_source_bytes limits
-      ; local_directory_entries = Local.Limits.directory_entries limits
-      }
-  in
-  let%bind project =
-    bootstrap
-      attempt
-      owner
-      project
-      namespace_override
-      limits
-      (Chatml_project_build.Limits.document composition)
-  in
-  let work_steps =
-    Int.min
-      (Local.Limits.work_steps limits)
-      (Accounting.work_steps (Attempt.remaining attempt))
-  in
-  let%bind limits = with_work_allowance limits ~work_steps in
-  let%bind work = Attempt.reserve attempt { Accounting.zero with work_steps } in
-  let%bind result =
-    Local.capture_from_owner
-      project
-      ~owner
-      ~request:selection
-      ~limits
-      ~checkpoint:(fun () -> Attempt.poll attempt)
-    |> Result.map_error ~f:(fun failure ->
-      Error.create ~declared_at:(Local.Error.declared_at failure) (Local failure))
-  in
-  let receipt = Local.accounting result in
-  let%bind () =
-    Attempt.finish
-      attempt
-      work
-      ~actual:{ Accounting.zero with work_steps = Local.Accounting.work_steps receipt }
-  in
-  let%map () =
-    Attempt.finish
-      attempt
-      inventory
-      ~actual:
+  let result =
+    let open Result.Let_syntax in
+    let%bind limits = Attempt.local_limits attempt in
+    let%bind composition = Attempt.composition_limits attempt in
+    let%bind inventory =
+      Attempt.reserve
+        attempt
         { Accounting.zero with
-          source_count = Local.Accounting.source_count receipt
-        ; source_bytes = Local.Accounting.source_bytes receipt
-        ; local_directory_entries = Local.Accounting.directory_entries receipt
+          source_count = Local.Limits.sources limits
+        ; source_bytes = Local.Limits.total_source_bytes limits
+        ; local_directory_entries = Local.Limits.directory_entries limits
         }
+    in
+    let%bind project =
+      bootstrap
+        attempt
+        owner
+        project
+        namespace_override
+        limits
+        (Chatml_project_build.Limits.document composition)
+    in
+    let work_steps =
+      Int.min
+        (Local.Limits.work_steps limits)
+        (Accounting.work_steps (Attempt.remaining attempt))
+    in
+    let%bind limits = with_work_allowance limits ~work_steps in
+    let%bind work = Attempt.reserve attempt { Accounting.zero with work_steps } in
+    let%bind result =
+      Local.capture_from_owner
+        project
+        ~owner
+        ~request:selection
+        ~limits
+        ~checkpoint:(fun () -> Attempt.poll attempt)
+      |> Result.map_error ~f:(fun failure ->
+        Error.create ~declared_at:(Local.Error.declared_at failure) (Local failure))
+    in
+    let receipt = Local.accounting result in
+    let%bind () =
+      Attempt.finish
+        attempt
+        work
+        ~actual:{ Accounting.zero with work_steps = Local.Accounting.work_steps receipt }
+    in
+    let%map () =
+      Attempt.finish
+        attempt
+        inventory
+        ~actual:
+          { Accounting.zero with
+            source_count = Local.Accounting.source_count receipt
+          ; source_bytes = Local.Accounting.source_bytes receipt
+          ; local_directory_entries = Local.Accounting.directory_entries receipt
+          }
+    in
+    result
   in
-  result
+  match result with
+  | Ok _ -> result
+  | Error error -> Attempt.reject attempt error
 ;;

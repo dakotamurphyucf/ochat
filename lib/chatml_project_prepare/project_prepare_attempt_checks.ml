@@ -26,7 +26,7 @@ let%test_module "project preparation accounting" =
       |> Or_error.ok_exn
     ;;
 
-    let policy ?(local_work = 100) () =
+    let policy ?(local_work = 100) ?(roots_work = 100) () =
       let document = Document_schema.Limits.default in
       Policy.create
         ~roots:
@@ -35,7 +35,7 @@ let%test_module "project preparation accounting" =
              ~max_locator_components:16
              ~max_anchors:16
              ~max_retained_roots:32
-             ~max_work_steps:100
+             ~max_work_steps:roots_work
            |> Or_error.ok_exn)
         ~local:
           (Chatml_local_capture.Limits.create
@@ -120,10 +120,10 @@ let%test_module "project preparation accounting" =
                |> ok)))
     ;;
 
-    let local_attempt f =
+    let local_attempt ?(roots_work = 100) f =
       Attempt.run
         ~limits:(limits ~output:1000 ~work:1_000_000)
-        ~policy:(policy ~local_work:1_000_000 ())
+        ~policy:(policy ~local_work:1_000_000 ~roots_work ())
         ~clock:(Eio_mock.Clock.Mono.make ())
         ~checkpoint:ignore
         ~f
@@ -222,6 +222,128 @@ let%test_module "project preparation accounting" =
                 Ok ())
             in
             assert (Result.is_error result)))
+    ;;
+
+    let%test_unit "real root and pure stages reconcile their final receipts" =
+      with_local_owner (fun path _ ->
+        let declaration = {|{"schema_version":1,"namespace":"authored"}|} in
+        Eio.Path.save
+          ~create:(`Or_truncate 0o600)
+          Eio.Path.(path / "chatml.project.json")
+          declaration;
+        Eio.Path.with_open_dir path (fun directory ->
+          let module Roots = Chatml_local_roots in
+          let module Stage = Project_prepare_stage in
+          let policy = policy ~local_work:1_000_000 ~roots_work:1000 () in
+          let anchor =
+            Roots.Anchor.create
+              directory
+              ~host_prefix:"/workspace"
+              ~max_path_components:16
+              ~limits:policy.roots
+              ~checkpoint:ignore
+            |> ok
+          in
+          let (catalog, root_work, inner_work), receipt =
+            local_attempt ~roots_work:1000 (fun attempt ->
+              Stage.with_roots attempt ~anchors:[ anchor ] ~f:(fun roots ->
+                let open Result.Let_syntax in
+                let before = A.work_steps (Attempt.remaining attempt) in
+                let native =
+                  Roots.resolve roots ~base:None ~locator:"/workspace" ~checkpoint:ignore
+                  |> ok
+                  |> Roots.Cursor.owner
+                in
+                let%bind catalog = capture_local attempt native in
+                let after_capture = A.work_steps (Attempt.accounting attempt) in
+                let%map pure_work =
+                  Stage.pure attempt ~f:(fun ~limits ~checkpoint ->
+                    assert (A.work_steps (Attempt.remaining attempt) < before);
+                    Chatml_project_build.Selection_gate.create
+                      Initial_prepare
+                      ~limits
+                      ~checkpoint
+                    |> Result.map ~f:(fun (_, receipt) ->
+                      Chatml_project_build.Accounting.work_steps receipt, receipt))
+                in
+                [%test_eq: int]
+                  (A.work_steps (Attempt.accounting attempt))
+                  (after_capture + pure_work);
+                let root_work = Roots.Accounting.work_steps (Roots.accounting roots) in
+                catalog, root_work, A.work_steps (Attempt.accounting attempt)))
+            |> Result.map_error ~f:(fun error ->
+              match Error.problem error with
+              | Roots failure ->
+                raise_s [%sexp (Roots.Error.code failure : Roots.Error.code)]
+              | Local failure ->
+                raise_s
+                  [%sexp
+                    (Chatml_local_capture.Error.problem failure
+                     : Chatml_local_capture.Error.problem)]
+              | Composition _ -> failwith "pure stage failed"
+              | Limit_exceeded -> failwith "aggregate stage allowance failed"
+              | _ -> failwith "unexpected stage failure")
+            |> ok
+          in
+          assert (root_work > 0);
+          [%test_eq: int] (A.work_steps receipt) (root_work + inner_work);
+          [%test_eq: int] (A.source_count receipt) 1;
+          [%test_eq: int] (A.source_bytes receipt) (String.length declaration);
+          [%test_eq: string]
+            (Chatml_source.contents
+               (Chatml_project.source (Chatml_local_capture.project catalog)))
+            declaration))
+    ;;
+
+    let%test_unit "caught authority rejection prevents a subsequent stage from entering" =
+      Eio_main.run (fun _ ->
+        let host =
+          Project_prepare_host.create
+            []
+            ~git_store:None
+            ~git_grants:[]
+            ~max_grants:0
+            ~max_grant_bytes:0
+          |> Or_error.ok_exn
+        in
+        let pin =
+          Chatml_project.Git_pin.create ~object_format:Sha1 ~commit:(String.make 40 'a')
+          |> Or_error.ok_exn
+        in
+        let rejected = ref None in
+        let entered = ref false in
+        let result =
+          run ~output:10 (fun attempt ->
+            (match
+               Project_prepare_stage.with_git
+                 attempt
+                 ~host
+                 ~repository:"https://example.invalid/repo"
+                 ~pin
+                 ~f:(fun _ ->
+                   entered := true;
+                   Ok ())
+             with
+             | Error error -> rejected := Some error
+             | Ok _ -> assert false);
+            ignore
+              (Project_prepare_stage.pure attempt ~f:(fun ~limits ~checkpoint ->
+                 entered := true;
+                 Chatml_project_build.Selection_gate.create
+                   Initial_prepare
+                   ~limits
+                   ~checkpoint)
+               : (_, Error.t) Result.t);
+            Ok ())
+        in
+        assert (not !entered);
+        match result with
+        | Error error ->
+          assert (phys_equal error (Option.value_exn !rejected));
+          (match Error.problem error with
+           | Authority_denied -> ()
+           | _ -> assert false)
+        | Ok _ -> assert false)
     ;;
 
     let%expect_test "in-flight capacity is held until measured completion" =

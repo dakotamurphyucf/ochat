@@ -29,11 +29,15 @@ type t =
 
 let accounting t = t.used
 
-let fail t problem =
-  let error = Error.create problem in
-  if Option.is_none t.failure then t.failure <- Some error;
-  Error error
+let reject t error =
+  match t.failure with
+  | Some previous -> Error previous
+  | None ->
+    t.failure <- Some error;
+    Error error
 ;;
+
+let fail t problem = reject t (Error.create problem)
 
 let seconds_left t =
   Time_ns.Span.to_sec t.limits.wall_time
