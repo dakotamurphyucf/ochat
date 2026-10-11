@@ -5,6 +5,7 @@ module Converter = Chat_response.Converter
 module Manager = Chat_response.Moderator_manager
 module Moderation = Chat_response.Moderation
 module Request = Openai.Responses.Request
+module Script_preparation = Runtime_script_preparation
 
 type moderator_drain =
   { moderator_snapshot : Jsonaf.t option
@@ -254,6 +255,9 @@ let run_agent
 ;;
 
 let create_agent_runtime
+      ~startup
+      ~compilation_limits
+      ~programs
       ~extensions
       ~delegated_moderator
       ~native_registrations
@@ -270,6 +274,9 @@ let create_agent_runtime
   match extensions with
   | false ->
     Agent_runtime.create
+      ~startup
+      ~compilation_limits
+      ?programs
       ~moderator_surface:Chatml.Chatml_builtin_surface.ui_moderator_surface
       ?native_service_revision
       ~sw
@@ -286,6 +293,9 @@ let create_agent_runtime
     |> Result.map ~f:(fun native -> native, None, None)
   | true ->
     Agent_runtime.prepare_extensions
+      ~startup
+      ~compilation_limits
+      ?programs
       ~moderator_surface:Chatml.Chatml_builtin_surface.ui_moderator_surface
       ~delegated_moderator
       ?native_service_revision
@@ -309,6 +319,8 @@ let build_native_registrations = Extensibility_native_tools.registrations
 let declares_native = Extensibility_native_tools.declares
 
 let create_authored_resources
+      ~script_preparation
+      ~revision
       ~additional_native_registrations
       ~native_service_revision
       ~delegated_moderator
@@ -316,7 +328,6 @@ let create_authored_resources
       ~sw
       ~ctx
       ~host
-      ~elements
       ~one_off_policy
       ~authoring_validation_host
       ~manifest_authorizer
@@ -324,107 +335,131 @@ let create_authored_resources
       ~approval_store
       ~response_dir
   =
-  let open Result.Let_syntax in
-  let%bind () =
-    match
-      delegated_moderator
-      && List.exists elements ~f:(function
-        | Prompt.Chat_markdown.Script _ -> true
-        | _ -> false)
-    with
-    | false -> Ok ()
-    | true -> Error (failure "authored delegation requires an extensibility-v1 moderator")
-  in
-  let%bind authoring_validation_host =
-    match one_off_policy with
-    | None -> Ok authoring_validation_host
-    | Some policy ->
-      Authoring_runtime.configure_host ?host:authoring_validation_host ~policy ()
-      |> Result.map ~f:(fun host ->
-        Some
-          (if delegated_moderator
-           then Chat_response.Authoring_validation.for_delegated host
-           else host))
-      |> Result.map_error ~f:failure
-  in
-  let%bind native_registrations =
-    build_native_registrations ~env ~elements ~one_off_policy ~authoring_validation_host
-  in
-  let native_registrations = native_registrations @ additional_native_registrations in
-  let source_elements = elements in
-  let%bind elements =
-    match authoring_validation_host with
-    | None -> Ok elements
-    | Some _ ->
-      Authoring_runtime.augment ~registrations:native_registrations elements
-      |> Result.map_error ~f:failure
-  in
-  let%bind helpers =
-    let elements =
-      List.filter elements ~f:(function
-        | Prompt.Chat_markdown.Tool (Builtin name) ->
+  Script_preparation.with_revision
+    script_preparation
+    revision
+    ~env
+    ~delegated_moderator
+    ~checkpoint:Eio.Fiber.check
+    ~f:(fun startup ~compilation_limits ~programs ->
+      let elements = Prompt_revision.elements revision in
+      let open Result.Let_syntax in
+      let%bind () =
+        match
+          delegated_moderator
+          && List.exists elements ~f:(function
+            | Prompt.Chat_markdown.Script _ -> true
+            | _ -> false)
+        with
+        | false -> Ok ()
+        | true ->
+          Error (failure "authored delegation requires an extensibility-v1 moderator")
+      in
+      let%bind authoring_validation_host =
+        match one_off_policy with
+        | None -> Ok authoring_validation_host
+        | Some policy ->
+          Authoring_runtime.configure_host ?host:authoring_validation_host ~policy ()
+          |> Result.map ~f:(fun host ->
+            Some
+              (if delegated_moderator
+               then Chat_response.Authoring_validation.for_delegated host
+               else host))
+          |> Result.map_error ~f:failure
+      in
+      let%bind native_registrations =
+        build_native_registrations
+          ~env
+          ~elements
+          ~one_off_policy
+          ~authoring_validation_host
+      in
+      let native_registrations = native_registrations @ additional_native_registrations in
+      let source_elements = elements in
+      let%bind elements =
+        match authoring_validation_host with
+        | None -> Ok elements
+        | Some _ ->
+          Authoring_runtime.augment ~registrations:native_registrations elements
+          |> Result.map_error ~f:failure
+      in
+      let%bind helpers =
+        let elements =
+          List.filter elements ~f:(function
+            | Prompt.Chat_markdown.Tool (Builtin name) ->
+              not
+                (List.exists native_registrations ~f:(fun current ->
+                   String.equal
+                     current.Agent_runtime.implementation.info.function_.name
+                     name))
+            | _ -> false)
+        in
+        build_native_registrations
+          ~env
+          ~elements
+          ~one_off_policy:None
+          ~authoring_validation_host
+      in
+      let native_registrations =
+        native_registrations
+        @ List.filter helpers ~f:(fun helper ->
           not
             (List.exists native_registrations ~f:(fun current ->
-               String.equal current.Agent_runtime.implementation.info.function_.name name))
-        | _ -> false)
-    in
-    build_native_registrations
-      ~env
-      ~elements
-      ~one_off_policy:None
-      ~authoring_validation_host
-  in
-  let native_registrations =
-    native_registrations
-    @ List.filter helpers ~f:(fun helper ->
-      not
-        (List.exists native_registrations ~f:(fun current ->
-           String.equal
-             current.Agent_runtime.implementation.info.function_.name
-             helper.implementation.info.function_.name)))
-  in
-  let extensions =
-    delegated_moderator
-    || (not (List.is_empty additional_native_registrations))
-    || (Option.is_some one_off_policy
-        && (Extensibility_native_tools.declares_any elements
-            || List.exists elements ~f:(function
-              | Prompt.Chat_markdown.Extension_script _
-              | Tool (Extension _)
-              | Authoring_context _ | Authoring_help _ -> true
-              | _ -> false)))
-  in
-  let%bind native, definition, managed =
-    create_agent_runtime
-      ~extensions
-      ~delegated_moderator
-      ~native_registrations
-      ~native_service_revision
-      ~sw
-      ~ctx
-      ~host
-      ~elements
-      ~manifest_authorizer
-      ~approval_provider
-      ~approval_store
-      ~response_dir
-  in
-  let%map authoring =
-    match authoring_validation_host with
-    | None -> Ok None
-    | Some host ->
-      let%bind capabilities =
-        Lazy.force native.capabilities
-        |> Result.map_error ~f:(fun error ->
-          failure error.Chat_response.Tool_capability.message)
+               String.equal
+                 current.Agent_runtime.implementation.info.function_.name
+                 helper.implementation.info.function_.name)))
       in
-      Authoring_runtime.prepare ~host ~elements:source_elements ~capabilities ()
-      |> Result.map_error ~f:failure
-  in
-  { source_lease = Prompt_source_lease.legacy; native; definition; managed; authoring }
+      let extensions =
+        delegated_moderator
+        || (not (List.is_empty additional_native_registrations))
+        || (Option.is_some one_off_policy
+            && (Extensibility_native_tools.declares_any elements
+                || List.exists elements ~f:(function
+                  | Prompt.Chat_markdown.Extension_script _
+                  | Tool (Extension _)
+                  | Authoring_context _ | Authoring_help _ -> true
+                  | _ -> false)))
+      in
+      let%bind native, definition, managed =
+        create_agent_runtime
+          ~startup
+          ~compilation_limits
+          ~programs
+          ~extensions
+          ~delegated_moderator
+          ~native_registrations
+          ~native_service_revision
+          ~sw
+          ~ctx
+          ~host
+          ~elements
+          ~manifest_authorizer
+          ~approval_provider
+          ~approval_store
+          ~response_dir
+      in
+      let%map authoring =
+        match authoring_validation_host with
+        | None -> Ok None
+        | Some host ->
+          let%bind capabilities =
+            Lazy.force native.capabilities
+            |> Result.map_error ~f:(fun error ->
+              failure error.Chat_response.Tool_capability.message)
+          in
+          Authoring_runtime.prepare ~host ~elements:source_elements ~capabilities ()
+          |> Result.map_error ~f:failure
+      in
+      { source_lease = Prompt_source_lease.legacy
+      ; native
+      ; definition
+      ; managed
+      ; authoring
+      })
 ;;
 
 let prepare_resources_internal
+      ~script_preparation
       ~native_registrations
       ~delegated_moderator
       ~native_service_revision
@@ -468,6 +503,8 @@ let prepare_resources_internal
   in
   let%bind host = host ~env ~paths ~session_id ~elements in
   create_authored_resources
+    ~script_preparation
+    ~revision
     ~additional_native_registrations:native_registrations
     ~native_service_revision
     ~delegated_moderator
@@ -475,7 +512,6 @@ let prepare_resources_internal
     ~sw
     ~ctx
     ~host
-    ~elements
     ~one_off_policy:(Some one_off_policy)
     ~authoring_validation_host
     ~manifest_authorizer
@@ -493,6 +529,8 @@ type authored_resources =
   }
 
 let prepare_authored_resources
+      ~script_preparation
+      ~content_limits
       ~native_registrations
       ~parent_revision
       ~tool_name
@@ -514,7 +552,9 @@ let prepare_authored_resources
       ~approval_store
   =
   let open Result.Let_syntax in
-  let%bind source = Authored_agent_source.capture ~parent:parent_revision ~tool_name () in
+  let%bind source =
+    Authored_agent_source.capture ?content_limits ~parent:parent_revision ~tool_name ()
+  in
   let%bind revision =
     Authored_agent_source.resource_revision ~parent:parent_revision source
   in
@@ -528,6 +568,7 @@ let prepare_authored_resources
   in
   let%map resources =
     prepare_resources_internal
+      ~script_preparation
       ~native_registrations
       ~delegated_moderator:true
       ~inference_context
@@ -1065,7 +1106,10 @@ type inherited_managed =
   }
 
 type source =
-  | Authored of Prompt_revision.t
+  | Authored of
+      { revision : Prompt_revision.t
+      ; script_preparation : Script_preparation.t option
+      }
   | Authored_child of
       { revision : Prompt_revision.t
       ; prepared : authored_resources
@@ -1235,7 +1279,7 @@ let build_with_services
   in
   let elements, artifact, materialized_tree, delegated =
     match source with
-    | Authored revision ->
+    | Authored { revision; script_preparation = _ } ->
       ( Prompt_revision.elements revision
       , Prompt_revision.artifact revision
       , Prompt_revision.materialized_tree revision
@@ -1288,10 +1332,12 @@ let build_with_services
           ~definition
       in
       resources.native, resources.definition, resources.managed, resources.authoring
-    | Authored _ ->
+    | Authored { revision; script_preparation } ->
       let%bind host = host ~env ~paths ~session_id ~elements in
       let%map resources =
         create_authored_resources
+          ~script_preparation
+          ~revision
           ~additional_native_registrations:native_registrations
           ~delegated_moderator:false
           ~native_service_revision:
@@ -1306,7 +1352,6 @@ let build_with_services
           ~sw
           ~ctx
           ~host
-          ~elements
           ~manifest_authorizer
           ~approval_provider
           ~approval_store
@@ -1982,6 +2027,7 @@ let build_with_services
 ;;
 
 let build
+      ~script_preparation
       ~sw
       ~env
       ~inference_context
@@ -2004,11 +2050,12 @@ let build
     ~on_inference_observation
     ~paths
     ~storage_paths
-    ~source:(Authored revision)
+    ~source:(Authored { revision; script_preparation })
     ~extension_services:None
 ;;
 
 let build_with_extensions
+      ~script_preparation
       ~native_registrations
       ~services
       ~sw
@@ -2033,7 +2080,7 @@ let build_with_extensions
     ~on_inference_observation
     ~paths
     ~storage_paths
-    ~source:(Authored revision)
+    ~source:(Authored { revision; script_preparation })
     ~extension_services:(Some services)
 ;;
 

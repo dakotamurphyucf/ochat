@@ -7,6 +7,28 @@ module C = Chat_response.Tool_capability
 module M = Chat_response.Managed_tool_registry
 module E = Chat_response.Extension_compiler
 
+let script_preparation () =
+  B.Script_preparation.create
+    ~compilation:Chatml_compilation.default_limits
+    ~planning:
+      (Chat_response.Script_contract_plan.Limits.create
+         ~max_programs:128
+         ~max_metadata_bytes:(8 * 1024 * 1024)
+         ~max_work_steps:1_000_000
+       |> Or_error.ok_exn)
+    ~restoration:
+      (Chatml_prompt_programs.Limits.create
+         ~max_programs:128
+         ~max_parser_inputs:1024
+         ~max_logical_sources:4096
+         ~max_total_input_bytes:(8 * 1024 * 1024)
+         ~project_work_steps:1_000_000
+         ~document:Document_schema.Limits.default
+       |> Or_error.ok_exn)
+    ~max_custody_work_steps:1_000_000
+  |> Or_error.ok_exn
+;;
+
 let capability_ok result =
   Result.map_error result ~f:(fun error -> error.C.message) |> Result.ok_or_failwith
 ;;
@@ -97,6 +119,7 @@ let run ctx input =
             ()
         in
         B.prepare_resources
+          ~script_preparation:(Some (script_preparation ()))
           ~inference_context:inference.context
           ~inference_identity:inference.identity
           ~on_inference_attempt:ignore

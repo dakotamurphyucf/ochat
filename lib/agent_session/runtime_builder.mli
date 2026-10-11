@@ -24,12 +24,21 @@ type resources = private
   ; authoring : Authoring_runtime.t option
   }
 
+(** Explicit host compilation/planning/restoration policy, shared by resource
+    preparation and full runtime construction. *)
+module Script_preparation = Runtime_script_preparation
+
 (** Reconstruct an authored revision's resources using the same native/extension
     registration path as normal runtime construction, including contextual one-off
     and validation helpers. Verify the stored source tree first. Does not convert
-    prompt messages, reserve history, evaluate ChatML initializers or invoke a
-    moderator/model. Authorized native setup (including shell policy checks and
-    MCP connections) can perform IO; this is not the no-effect authoring validator.
+    prompt messages, reserve history or invoke a moderator/model. Owned parser/
+    program custody requires [Some script_preparation], including parser-only
+    revisions. Planning uses the original parser before helper augmentation;
+    native resources consume its admitted document projection. Compilation and
+    restoration share one startup deadline. After complete preflight, native shell
+    hooks may activate under their separate execution controls. Authorized native
+    setup (including shell policy checks and MCP connections) can perform IO;
+    this is not the no-effect authoring validator.
 
     Resources belong to [sw]. The host must retain it through every borrower and
     release it after failed preparation. This does not authorize delegation:
@@ -41,7 +50,8 @@ type resources = private
     standard helpers. Explicit declarations select them; duplicate/mismatched
     registrations reject. An empty list supplies no additional implementations. *)
 val prepare_resources
-  :  native_registrations:Chat_response.Agent_runtime.native_registration list
+  :  script_preparation:Script_preparation.t option
+  -> native_registrations:Chat_response.Agent_runtime.native_registration list
   -> native_service_revision:string option
   -> env:Eio_unix.Stdenv.base
   -> inference_context:Inference_runtime.Context.t
@@ -71,7 +81,9 @@ type authored_resources = private
     captured source tree. Retains the authored parser, source-relative paths and
     host-supplied workspace/tool/storage capabilities. Only [prompt_dir] is re-rooted
     to the specialist's captured source directory. Does not prepare/expose the
-    parent's public tools, install an artifact/session or initialize scripts.
+    parent's public tools or install an artifact/session. Script preparation and
+    native hook activation follow [prepare_resources]. [content_limits] explicitly
+    bounds retained document restoration; no implicit content policy is selected.
 
     Native setup follows [prepare_resources], including explicit shell admission
     and MCP connection effects. The host must authorize this private closure and
@@ -87,7 +99,9 @@ type authored_resources = private
     root's operator/workspace/principal authority. It must not grant execution
     approvals or derive authority from model-supplied arguments. *)
 val prepare_authored_resources
-  :  native_registrations:Chat_response.Agent_runtime.native_registration list
+  :  script_preparation:Script_preparation.t option
+  -> content_limits:Chatmd_prompt_content.Limits.t option
+  -> native_registrations:Chat_response.Agent_runtime.native_registration list
   -> parent_revision:Prompt_revision.t
   -> tool_name:string
   -> native_service_revision:string option
@@ -334,7 +348,8 @@ val moderator_snapshot_observer
     Supply the same paths outside detached administrative preparation. Initializer
     effects on external tools/files are not rolled back by session transactions. *)
 val build
-  :  sw:Eio.Switch.t
+  :  script_preparation:Script_preparation.t option
+  -> sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
   -> inference_context:Inference_runtime.Context.t
   -> inference_identity:Chat_response.Neutral_turn.Identity.t
@@ -373,7 +388,8 @@ val build
     delivery remain under implementation. Public feature negotiation is unchanged;
     ordinary hosts continue using [build]. *)
 val build_with_extensions
-  :  native_registrations:Chat_response.Agent_runtime.native_registration list
+  :  script_preparation:Script_preparation.t option
+  -> native_registrations:Chat_response.Agent_runtime.native_registration list
   -> services:extension_services
   -> sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
