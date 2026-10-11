@@ -4,6 +4,10 @@
  (modules
   config
   config_parser
+  project_source_configuration
+  project_source_policy
+  project_source_header
+  project_source_host
   authoring_options
   session_helper_policy
   authenticator
@@ -71,13 +75,18 @@
   provider_operator_port
   command_handler
   dispatcher)
- (private_modules session_factory_catalogs)
+ (private_modules session_factory_catalogs project_source_header)
  (libraries ochat.operator_authorization
  core
   base64
   cstruct
   digestif
   ochat.document_schema
+  ochat.chatml_git_host
+  ochat.chatml_local_roots
+  ochat.chatml_project_prepare
+  ochat.chatml_local_capture
+  ochat.chatml_git_catalog
   eio
   eio.unix
   mirage-crypto-rng.unix

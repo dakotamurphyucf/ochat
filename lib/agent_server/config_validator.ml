@@ -705,12 +705,247 @@ let parse_session_helper context path sexp =
     }
 ;;
 
+let project_source_error context path =
+  fail
+    context
+    ~code:"config.project_sources"
+    ~path
+    ~message:"Invalid or excessive administrative project source declaration"
+    ~remediation:"Use bounded explicit source roots and exact qualified Git grants."
+;;
+
+let bounded_project_values context path sexp ~maximum =
+  let open Result.Let_syntax in
+  let%bind values = list context path sexp in
+  let rec check remaining = function
+    | [] -> Ok values
+    | _ :: rest ->
+      if remaining = 0
+      then project_source_error context path
+      else check (remaining - 1) rest
+  in
+  check maximum values
+;;
+
+let project_source_record context path sexp ~maximum =
+  let open Result.Let_syntax in
+  let%bind values = bounded_project_values context path sexp ~maximum in
+  let%bind () =
+    List.fold_result values ~init:() ~f:(fun () -> function
+      | Sexp.List [ Sexp.Atom name; _ ] when String.length name <= 64 -> Ok ()
+      | _ -> project_source_error context path)
+  in
+  record context path sexp
+;;
+
+let project_source_atom context path sexp =
+  let open Result.Let_syntax in
+  let%bind value = atom context path sexp in
+  if String.length value > Project_source_configuration.maximum_path_bytes
+  then project_source_error context path
+  else Ok value
+;;
+
+let parse_project_repository context path = function
+  | Sexp.List [ Sexp.Atom "local"; value ] ->
+    project_source_atom context path value
+    |> Result.map ~f:(fun path -> Project_source_configuration.Repository.Local path)
+  | Sexp.List [ Sexp.Atom "https"; sexp ] ->
+    let open Result.Let_syntax in
+    let%bind fields = project_source_record context path sexp ~maximum:2 in
+    let%bind () =
+      ensure_allowed context path fields [ "repository"; "authorization_header_file" ]
+    in
+    let%bind repository =
+      required context path fields "repository"
+      >>= project_source_atom context (path ^ ".repository")
+    in
+    let%map authorization_header_file =
+      match field fields "authorization_header_file" with
+      | None | Some (Sexp.List []) -> Ok None
+      | Some value ->
+        project_source_atom context (path ^ ".authorization_header_file") value
+        |> Result.map ~f:Option.some
+    in
+    Project_source_configuration.Repository.Https
+      { repository; authorization_header_file }
+  | _ -> shape_error context path "(local path) or (https ((repository url) ...))"
+;;
+
+let parse_project_git context path sexp =
+  let open Result.Let_syntax in
+  let%bind fields = project_source_record context path sexp ~maximum:4 in
+  let%bind () =
+    ensure_allowed
+      context
+      path
+      fields
+      [ "helper_directory"; "ca_bundle"; "memory_bytes_per_process"; "repositories" ]
+  in
+  let%bind helper_directory =
+    required context path fields "helper_directory"
+    >>= project_source_atom context (path ^ ".helper_directory")
+  in
+  let%bind ca_bundle =
+    match field fields "ca_bundle" with
+    | None | Some (Sexp.List []) -> Ok None
+    | Some value ->
+      project_source_atom context (path ^ ".ca_bundle") value |> Result.map ~f:Option.some
+  in
+  let%bind memory_sexp = required context path fields "memory_bytes_per_process" in
+  let%bind memory_text = atom context (path ^ ".memory_bytes_per_process") memory_sexp in
+  let%bind memory_bytes_per_process =
+    if String.length memory_text > 32
+    then project_source_error context path
+    else parse_int context (path ^ ".memory_bytes_per_process") memory_sexp
+  in
+  let%map repositories =
+    match field fields "repositories" with
+    | None -> Ok []
+    | Some values ->
+      let%bind values =
+        bounded_project_values
+          context
+          (path ^ ".repositories")
+          values
+          ~maximum:Project_source_configuration.maximum_git_grants
+      in
+      List.map values ~f:(parse_project_repository context (path ^ ".repositories[]"))
+      |> Result.all
+  in
+  Project_source_configuration.Git_deployment.
+    { helper_directory; ca_bundle; memory_bytes_per_process; repositories }
+;;
+
+let resolve_project_path context path value =
+  let bound = Project_source_configuration.maximum_path_bytes in
+  let selected_home =
+    if String.equal value "~" || String.is_prefix value ~prefix:"~/"
+    then Sys.getenv "HOME"
+    else None
+  in
+  let home_bytes = Option.value_map selected_home ~default:0 ~f:String.length in
+  if home_bytes > bound
+  then project_source_error context path
+  else (
+    let expanded =
+      match selected_home with
+      | None -> String.length value
+      | Some _ when String.equal value "~" -> home_bytes
+      | Some _ -> home_bytes + 1 + String.length value
+    in
+    let absolute =
+      match selected_home with
+      | Some home -> Filename.is_absolute home
+      | None -> Filename.is_absolute value
+    in
+    let base = if absolute then 0 else String.length context.source_directory in
+    if
+      expanded > bound
+      || base > bound - expanded
+      || ((not absolute) && base = bound - expanded)
+    then project_source_error context path
+    else resolve_path context path (Sexp.Atom value))
+;;
+
+let parse_project_sources context path sexp =
+  match sexp with
+  | Sexp.List [] -> Ok None
+  | _ ->
+    let module C = Project_source_configuration in
+    let open Result.Let_syntax in
+    let%bind fields = project_source_record context path sexp ~maximum:2 in
+    let%bind () = ensure_allowed context path fields [ "external_roots"; "git" ] in
+    let%bind external_roots =
+      match field fields "external_roots" with
+      | None -> Ok []
+      | Some values ->
+        let%bind values =
+          bounded_project_values
+            context
+            (path ^ ".external_roots")
+            values
+            ~maximum:C.maximum_external_roots
+        in
+        List.map values ~f:(project_source_atom context (path ^ ".external_roots[]"))
+        |> Result.all
+    in
+    let%bind git =
+      match field fields "git" with
+      | None | Some (Sexp.List []) -> Ok None
+      | Some value ->
+        parse_project_git context (path ^ ".git") value |> Result.map ~f:Option.some
+    in
+    let raw = C.{ external_roots; git } in
+    let%bind () =
+      C.validate_raw raw
+      |> Result.map_error ~f:(fun _ ->
+        [ diagnostic
+            context
+            ~code:"config.project_sources"
+            ~path
+            ~message:"Project source bounds are invalid"
+            ~remediation:"Use bounded positive settings and exact administrative paths."
+        ])
+    in
+    let resolve label value = resolve_project_path context (path ^ label) value in
+    let%bind external_roots =
+      List.map external_roots ~f:(resolve ".external_roots[]") |> Result.all
+    in
+    let%bind git =
+      match git with
+      | None -> Ok None
+      | Some git ->
+        let%bind helper_directory =
+          resolve ".git.helper_directory" git.helper_directory
+        in
+        let%bind ca_bundle =
+          match git.ca_bundle with
+          | None -> Ok None
+          | Some path -> resolve ".git.ca_bundle" path |> Result.map ~f:Option.some
+        in
+        let%map repositories =
+          List.fold_result git.repositories ~init:[] ~f:(fun acc -> function
+            | C.Repository.Local value ->
+              let%map value = resolve ".git.repositories.local" value in
+              C.Repository.Local value :: acc
+            | Https { repository; authorization_header_file } ->
+              let%map authorization_header_file =
+                match authorization_header_file with
+                | None -> Ok None
+                | Some value ->
+                  resolve ".git.repositories.authorization_header_file" value
+                  |> Result.map ~f:Option.some
+              in
+              C.Repository.Https { repository; authorization_header_file } :: acc)
+        in
+        Some
+          C.Git_deployment.
+            { git with helper_directory; ca_bundle; repositories = List.rev repositories }
+    in
+    let configuration = C.{ external_roots; git } in
+    let%map () =
+      C.validate configuration
+      |> Result.map_error ~f:(fun _ ->
+        [ diagnostic
+            context
+            ~code:"config.project_sources"
+            ~path
+            ~message:"Project source grants are invalid"
+            ~remediation:
+              "Use distinct exact grants and a positive configured Git memory cap."
+        ])
+    in
+    Some configuration
+;;
+
 let parse_server context sexp =
   let path = "server" in
   let open Result.Let_syntax in
   let%bind fields = record context path sexp in
   let allowed =
     [ "data_dir"
+    ; "project_sources"
     ; "session_helpers"
     ; "authoring_packages"
     ; "authoring_budget"
@@ -728,6 +963,15 @@ let parse_server context sexp =
   let%bind () = ensure_allowed context path fields allowed in
   let%bind data_dir =
     required context path fields "data_dir" >>= resolve_path context "server.data_dir"
+  in
+  let%bind project_sources =
+    optional_value
+      context
+      path
+      fields
+      "project_sources"
+      parse_project_sources
+      ~default:None
   in
   let%bind session_helpers =
     optional_value
@@ -875,6 +1119,7 @@ let parse_server context sexp =
   in
   Config.Server.
     { data_dir
+    ; project_sources
     ; session_helpers
     ; authoring_packages
     ; authoring_budget

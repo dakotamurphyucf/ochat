@@ -66,6 +66,7 @@ module Server : sig
 
   type t =
     { data_dir : string
+    ; project_sources : Project_source_configuration.t option [@sexp.option]
     ; session_helpers : Session_helper_policy.t list [@sexp.list]
       (** Explicit operator grants for optional external helpers. Changes require
           restart. The helpers still require declared shell tools and normal
