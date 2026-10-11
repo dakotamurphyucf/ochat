@@ -504,12 +504,12 @@ let%expect_test "module does not implicitly export outer bindings" =
   [%expect {| type error |}]
 ;;
 
-let%expect_test "module self-reference resolves through explicit exports only" =
+let%expect_test "module functions refer to earlier local bindings directly" =
   let code =
     {|
       module M = struct
         let id x = x
-        let call n = M.id(n)
+        let call n = id(n)
       end
       print(M.call(7))
     |}

@@ -393,16 +393,14 @@ and import_module_bindings ?span (target_env : env) (mname : string) : string li
 and eval_module_value
       (outer_env : env)
       (frames : Frame_env.env)
-      (mname : string)
       (stmts : resolved_stmt node list)
   : env
   =
   let module_eval_env = copy_env outer_env in
-  let module_export_env = create_env ?control:outer_env.control () in
-  define_var module_eval_env mname (VModule module_export_env);
   let exported_names =
     List.concat_map stmts ~f:(fun st -> eval_stmt_with_exports module_eval_env frames st)
   in
+  let module_export_env = create_env ?control:outer_env.control () in
   let seen = Hash_set.create (module String) in
   List.iter exported_names ~f:(fun name ->
     if not (Hash_set.mem seen name)
@@ -428,7 +426,7 @@ and eval_stmt_with_exports (env : env) (frames : Frame_env.env) (s : resolved_st
       update_var env nm v);
     List.map bindings ~f:fst
   | RSModule (mname, stmts) ->
-    let menv = eval_module_value env frames mname stmts in
+    let menv = eval_module_value env frames stmts in
     define_var env mname (VModule menv);
     [ mname ]
   | RSOpen mname ->

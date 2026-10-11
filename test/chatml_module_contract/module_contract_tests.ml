@@ -43,8 +43,8 @@ let%expect_test "modules retain their kind through record consumers" =
     {|
     module field: int 1
     module update: type-error Cannot unify module{x: int} with {...}
-    module exact pattern: type-error Cannot unify module{x: int} with {x: 'b}
-    module open pattern: type-error Cannot unify module{x: int} with {x: 'b; ...}
+    module exact pattern: type-error Cannot unify module{x: int} with {x: 'a}
+    module open pattern: type-error Cannot unify module{x: int} with {x: 'a; ...}
     record annotation: type-error Cannot unify module{x: int} with {x: int}
     aliased update: type-error Cannot unify module{x: int} with {...}
     higher order update: type-error Cannot unify {...} with module{x: int}

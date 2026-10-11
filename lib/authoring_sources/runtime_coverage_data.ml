@@ -301,16 +301,16 @@ let topic_contracts =
     , "c9f77ff92432829ec4048ccbacd2c6a420404ce6a5c96bd4a7ec9db23856b11a" )
   ; ( "one_off_v1"
     , "runtime.execution"
-    , "c1a7eac30543a8b187864eebb02ec9bc8e3f4f9c34c079b3e2557be989ad0abf" )
+    , "b1021c09f10b36db6a9c6481e33a8bc79f7059023a88089010d145e8e01c1da7" )
   ; ( "tool_v1"
     , "runtime.execution"
-    , "ac4e1e026b473988cc42f50273daa85feead6d727f3cf826de65c7a13e038acc" )
+    , "44d7dd48addc67cb918294fd3e16f92b1405e83d61e78350418138dd6cc327e5" )
   ; ( "moderator_v1"
     , "runtime.execution"
-    , "b4bb61e70ab3a7138596a745f0e1951f972043a53a80ed2247bc7f64bc2d2bc1" )
+    , "b17693767d96094e4fa776d595c810e174505dcaa7ccb1e42ccdb2cbc3f15ee0" )
   ; ( "delegated_moderator_v1"
     , "runtime.execution"
-    , "24a7ccfcbb17d7552df9e20f632be03756fe36b26a03bed0ee9ceb8ca6ef63d9" )
+    , "f817b1ce1948e6ab3bc0eed668ef1a5b9c281e537ac66dc915d282bf3827a29f" )
   ; ( "one_off_v1"
     , "runtime.jobs.owned"
     , "d6feb31943b7192430adcaa4e424814779c03853de173375be89eeb8c00dae8f" )
