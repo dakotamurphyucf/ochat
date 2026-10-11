@@ -24,6 +24,65 @@ module Policy : sig
     -> t
 end
 
+module Publication : sig
+  module Expected : sig
+    type t =
+      | Absent
+      | Exact of Captured.t
+  end
+
+  type state =
+    | Available
+    | Busy
+    | Uncertain
+    | Closed
+  [@@deriving equal, sexp_of]
+
+  (** Borrowed opened directory and exclusive caller coordination. The caller
+      retains both until switch cleanup has revoked admission, cancelled and
+      joined active work. Admission bounds the basename and expected bytes before
+      retaining them; actual expected reads happen in preparation under its shared
+      deadline. No manual close, automatic reconciliation or arbitrary writer API.
+      Use the owner's switch domain; concurrent/reentrant fibers share its state.
+      Writer failure or an undelivered entered write leaves Uncertain, even when
+      replacement succeeded. Switch cleanup leaves Closed before resource release. *)
+  type t
+
+  val open_owned
+    :  [ `Close | Eio.Fs.dir_ty ] Eio.Path.t
+    -> sw:Eio.Switch.t
+    -> basename:string
+    -> expected:Expected.t
+    -> max_lock_bytes:int
+    -> (t, Agent_store.Store_error.t) Result.t
+
+  val state : t -> state
+end
+
+module Accounting : sig
+  type t
+
+  val packages : t -> int
+  val dependency_visits : t -> int
+  val source_count : t -> int
+  val source_bytes : t -> int
+  val local_directory_entries : t -> int
+  val git_objects : t -> int
+  val git_object_bytes : t -> int
+  val git_tree_entries : t -> int
+  val native_request_bytes : t -> int
+  val native_output_bytes : t -> int
+  val acquisition_payload_reserved : t -> int
+  val work_steps : t -> int
+end
+
+(** Immutable completed Build and final invocation accounting. No clock, callbacks,
+    native owners or mutable ledgers are retained. *)
+type t
+
+val build : t -> Build.t
+val accounting : t -> Accounting.t
+
 module Limits : sig
   (** One attempt's maxima. Work is the sum of documented backend/pure adapter
       units, not CPU/syscall proof. Git request bytes count the actual native

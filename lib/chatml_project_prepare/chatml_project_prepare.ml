@@ -8,3 +8,10 @@ module Limits = Project_prepare_limits
 module Host = Project_prepare_host
 module Root = Project_prepare_request.Root
 module Request = Project_prepare_request
+module Publication = Project_prepare_publication
+module Accounting = Project_prepare_accounting
+
+type t = Project_prepare_result.t
+
+let build = Project_prepare_result.build
+let accounting = Project_prepare_result.accounting
