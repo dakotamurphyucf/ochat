@@ -1,0 +1,8 @@
+(copy_files ../webpage_markdown_test.ml)
+
+(library
+ (name bounded_document_conversion_tests)
+ (libraries core expect_test_helpers_core ochat.webpage_markdown)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
