@@ -1,5 +1,6 @@
 open Core
 open Chatml_lang
+module Binding_pattern = Chatml_binding_pattern
 
 type eval_result =
   | Value of value
@@ -85,19 +86,113 @@ let load_from_frames (frames : Frame_env.env) (loc : var_loc) : value =
        Obj.obj obj)
 ;;
 
+let binding_checkpoint env () =
+  Option.iter env.control ~f:(fun control -> control.checkpoint ())
+;;
+
+let extract_binding env (pattern : Binding_pattern.t) value =
+  match pattern.value with
+  | Name name -> [ name, value ]
+  | Wildcard -> []
+  | Tuple _ ->
+    let count = Binding_pattern.count ~checkpoint:(binding_checkpoint env) pattern in
+    allocate env (32 * count);
+    (match
+       Chatml_binding_value.extract ~checkpoint:(binding_checkpoint env) pattern value
+     with
+     | Ok bindings -> bindings
+     | Error mismatch -> raise_owned_error env ~span:mismatch.span mismatch.message)
+;;
+
+let staged_slot_bindings env (pattern : Binding_pattern.t) value =
+  match pattern.value with
+  | Name _ -> [ pattern.span, value ]
+  | Wildcard -> []
+  | Tuple _ ->
+    let values = extract_binding env pattern value in
+    let names = Binding_pattern.binders ~checkpoint:(binding_checkpoint env) pattern in
+    List.map2_exn names values ~f:(fun (_, span) (_, value) -> span, value)
+;;
+
+let rec validate_staged_slots env slots bindings =
+  match bindings, slots with
+  | [], _ -> slots
+  | (span, value) :: bindings, slot :: slots ->
+    if not (slot_matches_value slot value)
+    then raise_owned_error env ~span "Binding value does not match checked slot type";
+    validate_staged_slots env slots bindings
+  | _ :: _, [] -> failwith "internal: insufficient slots for named binding leaves"
+;;
+
+let rec store_staged_slots frame index slots bindings =
+  match bindings, slots with
+  | [], _ -> index
+  | (_, value) :: bindings, slot :: slots ->
+    store_with_slot frame index slot value;
+    store_staged_slots frame (index + 1) slots bindings
+  | _ :: _, [] -> failwith "internal: insufficient validated binding slots"
+;;
+
+let rec validate_named_parameters env params slots values =
+  match params, slots, values with
+  | [], [], [] -> ()
+  | pattern :: params, slot :: slots, value :: values ->
+    if not (slot_matches_value slot value)
+    then
+      raise_owned_error
+        env
+        ~span:pattern.Binding_pattern.span
+        "Binding value does not match checked slot type";
+    validate_named_parameters env params slots values
+  | _ -> failwith "internal: closure parameters, slots and arguments disagree"
+;;
+
+let rec store_named_parameters frame index slots values =
+  match slots, values with
+  | [], [] -> ()
+  | slot :: slots, value :: values ->
+    store_with_slot frame index slot value;
+    store_named_parameters frame (index + 1) slots values
+  | _ -> failwith "internal: validated closure slots and arguments disagree"
+;;
+
+let stage_parameters env params values =
+  List.fold2_exn params values ~init:[] ~f:(fun result pattern value ->
+    let bindings = staged_slot_bindings env pattern value in
+    List.rev_append bindings result)
+  |> List.rev
+;;
+
 let rec finish_eval (initial_frames : Frame_env.env) (initial_res : eval_result) : value =
   let rec loop (_frames : Frame_env.env) (res : eval_result) : value =
     match res with
     | Value v -> v
     | TailCall (cl, args) ->
-      if List.length cl.param_slots <> List.length args
-      then failwith "internal: closure param_slots length mismatch with call-site";
+      if List.length cl.params <> List.length args
+      then raise_owned_error cl.env ~span:cl.body.span "Function arity mismatch";
       let slots = cl.param_slots in
       allocate cl.env (16 * List.length slots);
-      let param_frame = Frame_env.alloc_packed slots in
-      List.iteri args ~f:(fun idx v ->
-        let slot = List.nth_exn slots idx in
-        store_with_slot param_frame idx slot v);
+      let named =
+        List.for_all cl.params ~f:(fun pattern ->
+          match pattern.Binding_pattern.value with
+          | Name _ -> true
+          | Wildcard | Tuple _ -> false)
+      in
+      let param_frame =
+        if named
+        then (
+          validate_named_parameters cl.env cl.params slots args;
+          let frame = Frame_env.alloc_packed slots in
+          store_named_parameters frame 0 slots args;
+          frame)
+        else (
+          let bindings = stage_parameters cl.env cl.params args in
+          if not (List.is_empty (validate_staged_slots cl.env slots bindings))
+          then failwith "internal: excess closure slots after parameter staging";
+          let frame = Frame_env.alloc_packed slots in
+          ignore (store_staged_slots frame 0 slots bindings : int);
+          frame)
+      in
       let child_env = cl.env in
       let child_frames = param_frame :: cl.frames in
       let next_res = eval_expr_tail ~tail:true child_env child_frames cl.body in
@@ -204,17 +299,46 @@ and eval_expr_tail
   | RELambda (params, slots, body) ->
     Value (VClosure { params; body; env = copy_env env; frames; param_slots = slots })
   | RELetBlock (bindings, slots, body) ->
-    allocate env (16 * List.length slots);
-    if List.length bindings <> List.length slots
+    let leaves =
+      List.sum
+        (module Int)
+        bindings
+        ~f:(fun (pattern, _) ->
+          match pattern.Binding_pattern.value with
+          | Name _ -> 1
+          | Wildcard -> 0
+          | Tuple _ -> Binding_pattern.count ~checkpoint:(binding_checkpoint env) pattern)
+    in
+    if leaves <> List.length slots
     then failwith "internal: slot list length mismatch in RELetBlock";
+    allocate env (16 * leaves);
     let block_frame = Frame_env.alloc_packed slots in
     let child_frames = block_frame :: frames in
-    List.iteri bindings ~f:(fun idx (_nm, rhs_expr) ->
-      let v =
-        finish_eval child_frames (eval_expr_tail ~tail:false env child_frames rhs_expr)
-      in
-      let slot = List.nth_exn slots idx in
-      store_with_slot block_frame idx slot v);
+    let rec install offset slots = function
+      | [] -> ()
+      | (pattern, rhs) :: rest ->
+        let value =
+          finish_eval child_frames (eval_expr_tail ~tail:false env child_frames rhs)
+        in
+        (match pattern.Binding_pattern.value, slots with
+         | Name _, slot :: tail ->
+           if not (slot_matches_value slot value)
+           then
+             raise_owned_error
+               env
+               ~span:pattern.span
+               "Binding value does not match checked slot type";
+           store_with_slot block_frame offset slot value;
+           install (offset + 1) tail rest
+         | Name _, [] -> failwith "internal: missing named let slot"
+         | Wildcard, _ -> install offset slots rest
+         | Tuple _, _ ->
+           let staged = staged_slot_bindings env pattern value in
+           let remaining = validate_staged_slots env slots staged in
+           let next = store_staged_slots block_frame offset slots staged in
+           install next remaining rest)
+    in
+    install 0 slots bindings;
     eval_expr_tail ~tail env child_frames body
   | REApp (fn_expr, arg_exprs) ->
     let fn_val = finish_eval frames (eval_expr_tail ~tail:false env frames fn_expr) in
@@ -332,6 +456,17 @@ and eval_expr_tail
         finish_eval frames (eval_expr_tail ~tail:false env frames ex))
     in
     Value (VArray (Array.of_list arr_vals))
+  | RETuple components ->
+    Option.iter env.control ~f:(fun control ->
+      control.before_builtin
+        ~name:"Tuple.literal"
+        [ VInt (Chatml_tuple.length components) ]);
+    allocate env 16;
+    let values =
+      Chatml_tuple.map components ~f:(fun expr ->
+        finish_eval frames (eval_expr_tail ~tail:false env frames expr))
+    in
+    Value (VTuple values)
   | REArrayGet (arr_expr, idx_expr) ->
     let arr_val = finish_eval frames (eval_expr_tail ~tail:false env frames arr_expr) in
     let idx_val = finish_eval frames (eval_expr_tail ~tail:false env frames idx_expr) in
@@ -497,10 +632,21 @@ and eval_stmt_with_exports (env : env) (frames : Frame_env.env) (s : resolved_st
   : string list
   =
   match s.value with
-  | RSLet (x, e1) ->
-    let v1 = finish_eval frames (eval_expr env frames e1) in
-    define_var env x v1;
-    [ x ]
+  | RSLet (pattern, e1) ->
+    let value = finish_eval frames (eval_expr env frames e1) in
+    (match pattern.value with
+     | Binding_pattern.Name name ->
+       define_var env name value;
+       [ name ]
+     | Wildcard -> []
+     | Tuple _ ->
+       let bindings = extract_binding env pattern value in
+       (* All shape/resource/cancellation checks precede cell publication. No
+          callback can observe a proper subset of these new bindings. *)
+       let cells = List.map bindings ~f:(fun (name, value) -> name, ref value) in
+       List.iter cells ~f:(fun (name, cell) ->
+         Hashtbl.set env.bindings ~key:name ~data:cell);
+       List.map bindings ~f:fst)
   | RSLetRec bindings ->
     List.iter bindings ~f:(fun (nm, _) -> define_var env nm VUnit);
     List.iter bindings ~f:(fun (nm, rhs_expr) ->

@@ -244,6 +244,7 @@ let%test_unit
     [ "open Catalog", "cells"
     ; "let saved = Catalog", "saved.cells"
     ; "let get () = Catalog.cells", "get()"
+    ; "let (|cells, _|) = (|Catalog.cells, ()|)", "cells"
     ; "", "Catalog.cells"
     ]
     ~f:(fun (prefix, cell) ->

@@ -198,6 +198,33 @@ let main input =
   ))
 ```
 
+Tuples preserve heterogeneous elements and nested shape. Use `(|a, b|)` for a
+value and `int * string` for its product type; a tuple is one function argument.
+Match patterns can inspect existing records/variants inside tuple elements.
+A total tuple pattern or default arm establishes coverage. Immutable tuple
+containers share mutable children and follow the ordinary value restriction.
+
+<!-- ochat-authoring-example: {"id":"language.tuple-values-and-match","surface":"one_off_v1","result":"sample=7"} -->
+```ocaml
+type labelled = int * string
+let label : fun(labelled) -> string = fun value ->
+  match value with | (|count, name|) -> name ++ "=" ++ to_string(count)
+let main input = Task.pure(`String(label((|7, "sample"|))))
+```
+
+Let and function parameter binders can use names, `_`, and nested tuples.
+Other patterns belong in `match`. A destructuring RHS runs once before its new
+names enter scope. The value restriction applies to that whole RHS, and mutable
+children remain shared. A tuple parameter consumes one argument regardless of
+its number of names; a wildcard parameter also consumes an argument.
+
+<!-- ochat-authoring-example: {"id":"language.tuple-binders","surface":"one_off_v1","result":"seven=8"} -->
+```ocaml
+let (|count, (|_, label|)|) = (|7, (|true, "seven"|)|)
+let describe (|n, text|) step = text ++ "=" ++ to_string(n + step)
+let main input = Task.pure(`String(describe((|count, label|), 1)))
+```
+
 Do not treat successful inference as validation of a tool's JSON arguments or
 results. Those cross a dynamic boundary and need the tool's actual schema.
 The [differences guide](chatml-ocaml-differences.md) also covers record joins,

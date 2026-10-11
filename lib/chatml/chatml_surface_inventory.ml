@@ -128,8 +128,9 @@ let reference_notation =
    two-argument function called f(x, y); () -> c is a zero-argument function. 'a is a \
    shared type variable within a signature; ..'r is an open row tail. array<t>, ref<t> \
    and name<t> describe type constructors. mu r. body binds a recursive type; r refers \
-   to that binder. A variant `Tag(a, b) has two payload arguments; payload(a, b) \
-   elsewhere describes internal payload structure, not arbitrary tuple expressions. \
+   to that binder. A variant `Tag(a, b) has two payload arguments; (a * b) is one \
+   product value, written (|x, y|) in expressions and patterns. Let/parameter binders \
+   allow names, underscores and nested tuples; a tuple parameter consumes one argument. \
    Named aliases are defined in type_alias entries. Entrypoints are definitions your \
    script supplies. Builtin signatures describe compiler support, not permission to \
    execute effects."
@@ -170,7 +171,7 @@ let reference_items t =
        | TUnit -> "unit"
        | TArray item -> "array<" ^ nested item ^ ">"
        | TRef item -> "ref<" ^ nested item ^ ">"
-       | TTuple xs -> "payload(" ^ args xs ^ ")"
+       | TTuple xs -> "(" ^ String.concat ~sep:" * " (List.map xs ~f:nested) ^ ")"
        | TFun (xs, result) -> "(" ^ args xs ^ ") -> " ^ nested result
        | TRecord row -> "{ " ^ render_row ~binders row ^ " }"
        | TVariant row -> "[ " ^ render_variant_row ~binders row ^ " ]"

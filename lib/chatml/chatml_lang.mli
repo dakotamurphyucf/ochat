@@ -40,6 +40,7 @@ type pattern =
   | PString of string
   | PVariant of string * pattern list
   | PRecord of (string * pattern) list * bool
+  | PTuple of pattern Chatml_tuple.t
 [@@deriving sexp, compare]
 
 type type_expr = Chatml_type_expr.t [@@deriving sexp]
@@ -111,15 +112,16 @@ and expr =
   | EVarLoc of var_loc
   | EPrim1 of unary_prim * expr node
   | EPrim2 of binary_prim * expr node * expr node
-  | ELambda of string list * expr node
-  | ELambdaSlots of string list * Frame_env.packed_slot list * expr node
+  | ELambda of Chatml_binding_pattern.t list * expr node
+  | ELambdaSlots of Chatml_binding_pattern.t list * Frame_env.packed_slot list * expr node
   | EApp of expr node * expr node list
   | EIf of expr node * expr node * expr node
   | EWhile of expr node * expr node
-  | ELetIn of string * expr node * expr node
+  | ELetIn of Chatml_binding_pattern.t * expr node * expr node
   | ELetRec of (string * expr node) list * expr node
-  | ELetBlock of (string * expr node) list * expr node
-  | ELetBlockSlots of (string * expr node) list * Frame_env.packed_slot list * expr node
+  | ELetBlock of (Chatml_binding_pattern.t * expr node) list * expr node
+  | ELetBlockSlots of
+      (Chatml_binding_pattern.t * expr node) list * Frame_env.packed_slot list * expr node
   | ELetRecSlots of (string * expr node) list * Frame_env.packed_slot list * expr node
   | EMatch of expr node * match_case list
   | EMatchSlots of expr node * match_case_slots list
@@ -127,6 +129,7 @@ and expr =
   | EFieldGet of expr node * string
   | EVariant of string * expr node list
   | EArray of expr node list
+  | ETuple of expr node Chatml_tuple.t
   | EArrayGet of expr node * expr node
   | EArraySet of expr node * expr node * expr node
   | ERef of expr node
@@ -147,12 +150,15 @@ and resolved_expr =
   | REVarLoc of var_loc
   | REPrim1 of unary_prim * resolved_expr node
   | REPrim2 of binary_prim * resolved_expr node * resolved_expr node
-  | RELambda of string list * Frame_env.packed_slot list * resolved_expr node
+  | RELambda of
+      Chatml_binding_pattern.t list * Frame_env.packed_slot list * resolved_expr node
   | REApp of resolved_expr node * resolved_expr node list
   | REIf of resolved_expr node * resolved_expr node * resolved_expr node
   | REWhile of resolved_expr node * resolved_expr node
   | RELetBlock of
-      (string * resolved_expr node) list * Frame_env.packed_slot list * resolved_expr node
+      (Chatml_binding_pattern.t * resolved_expr node) list
+      * Frame_env.packed_slot list
+      * resolved_expr node
   | RELetRec of
       (string * resolved_expr node) list * Frame_env.packed_slot list * resolved_expr node
   | REMatch of resolved_expr node * resolved_match_case list
@@ -160,6 +166,7 @@ and resolved_expr =
   | REFieldGet of resolved_expr node * string
   | REVariant of string * resolved_expr node list
   | REArray of resolved_expr node list
+  | RETuple of resolved_expr node Chatml_tuple.t
   | REArrayGet of resolved_expr node * resolved_expr node
   | REArraySet of resolved_expr node * resolved_expr node * resolved_expr node
   | RERef of resolved_expr node
@@ -170,7 +177,7 @@ and resolved_expr =
 [@@deriving sexp]
 
 type stmt =
-  | SLet of string * expr node
+  | SLet of Chatml_binding_pattern.t * expr node
   | SLetRec of (string * expr node) list
   | SType of Chatml_type_expr.Declaration.t
   | SModule of
@@ -183,7 +190,7 @@ type stmt =
 [@@deriving sexp]
 
 type resolved_stmt =
-  | RSLet of string * resolved_expr node
+  | RSLet of Chatml_binding_pattern.t * resolved_expr node
   | RSLetRec of (string * resolved_expr node) list
   | RSModule of
       { name : string
@@ -246,6 +253,7 @@ and value =
   | VVariant of string * value list
   | VRecord of value String.Map.t
   | VArray of value array
+  | VTuple of value Chatml_tuple.t
   | VRef of value ref
   | VClosure of clos
   | VModule of env
@@ -272,8 +280,10 @@ and task_step =
   | TPerform of eff
   | TSpawn of eff
 
+(** [params] determines call arity. [param_slots] has one slot per named leaf,
+    in parameter and depth-first binder order; wildcards consume no slots. *)
 and clos =
-  { params : string list
+  { params : Chatml_binding_pattern.t list
   ; body : resolved_expr node
   ; env : env
   ; frames : Frame_env.env

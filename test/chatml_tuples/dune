@@ -1,0 +1,7 @@
+(library
+ (name chatml_tuple_tests)
+ (libraries core jsonaf eio_main chatml chatml_typechecker chatml_resolver chatml_builtin_modules
+  ochat.chatml_source ochat.chatml_host_runtime ochat.chatml_execution ochat.session
+  ochat.document_schema ochat.shell_runtime ochat.chat_response ochat.chatmd_shell_spec)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

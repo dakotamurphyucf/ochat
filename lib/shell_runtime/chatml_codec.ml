@@ -16,7 +16,8 @@ let int_of_bytes bytes =
 ;;
 
 let of_script_limits limits =
-  { max_value_bytes = int_of_bytes limits.Chatmd_shell_spec.Chatmd_script_spec.max_value_bytes
+  { max_value_bytes =
+      int_of_bytes limits.Chatmd_shell_spec.Chatmd_script_spec.max_value_bytes
   ; max_string_bytes = int_of_bytes limits.max_output_bytes
   ; max_array_items = limits.max_array_items
   ; max_depth = limits.max_depth
@@ -43,6 +44,10 @@ and measured_shape limits path depth = function
     then Error (error path "string exceeds the configured byte limit")
     else Ok (String.length value)
   | VArray values -> measured_array limits path depth values
+  | VTuple values ->
+    if Chatml.Chatml_tuple.length values > limits.max_array_items
+    then Error (error path "tuple exceeds the configured item limit")
+    else measured_list limits path depth (Chatml.Chatml_tuple.to_list values)
   | VRecord fields -> measured_record limits path depth fields
   | VVariant (tag, values) ->
     measured_list limits (path @ [ tag ]) depth values
@@ -128,7 +133,10 @@ let option ~path decode = function
 ;;
 
 let encode_record fields = L.VRecord (String.Map.of_alist_exn fields)
-let encode_strings values = L.VArray (Array.of_list_map values ~f:(fun value -> L.VString value))
+
+let encode_strings values =
+  L.VArray (Array.of_list_map values ~f:(fun value -> L.VString value))
+;;
 
 let encode_option encode = function
   | None -> L.VVariant ("None", [])

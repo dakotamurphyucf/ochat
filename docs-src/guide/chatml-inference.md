@@ -17,8 +17,9 @@ Write annotations on a binding, followed by a lambda: `let add : int -> int -> i
 = fun left right -> left + right`. Arrow chains describe the arguments of one
 call, not automatic currying. `unit -> result` describes a zero-argument function,
 called with `f()`. It does not describe a function taking a unit value as one
-argument. Function parameters themselves are ordinary names; neither annotated
-parameter patterns nor general `(expression : type)` syntax is available.
+argument. Function parameters allow names, `_`, and nested tuple binders.
+Neither annotated parameter patterns nor general `(expression : type)` syntax
+is available; annotate the whole binding to constrain its argument patterns.
 
 Right-hand arrows are flattened even inside parentheses or a named alias. Thus
 `int -> (int -> int)` still expects two parameters. Inferred functions may return
@@ -469,6 +470,46 @@ Validation checks these static rules without executing a candidate. It does not
 prove termination, bounds safety, tool availability, schema validity or success
 of later effects. Inspect linked diagnostics, repair the submitted source, and
 validate that exact revision again before execution.
+
+## Product types and one tuple argument
+
+`int * string` describes an ordered pair. Postfix types bind tighter than `*`,
+and `*` binds tighter than arrows: `int * string -> bool` takes one pair;
+`int -> string * bool` returns a pair. Exact `fun(int, string) -> bool` takes two
+arguments. A flat triple differs from a pair containing another pair. Transparent
+aliases and signatures preserve these shapes and shared weak variables.
+
+<!-- ochat-authoring-example: {"id":"inference.tuple-products","surface":"one_off_v1","result":true} -->
+```ocaml
+type 'a labelled = 'a * string
+let choose : fun(bool labelled) -> bool = fun pair ->
+  match pair with | (|flag, name|) -> flag
+let main input = Task.pure(`Bool(choose((|true, "chosen"|))))
+```
+
+A tuple construction is nonexpansive only when every element is nonexpansive.
+Refs, arrays, functions and tasks inside a tuple remain subject to their ordinary
+equality restrictions; a tuple does not hide a forbidden comparison leaf.
+
+Destructuring applies this policy once to the whole RHS before distributing leaf
+schemes. For example, an array elsewhere in a tuple makes its identity-function
+leaf weak too. Names from the same expansive producer retain shared weak cells.
+An annotation constrains the full tuple shape, including ignored elements.
+
+<!-- ochat-authoring-example: {"id":"inference.tuple-binders","surface":"one_off_v1","result":"chosen=7"} -->
+```ocaml
+let describe : fun(int * string, bool) -> string = fun (|n, text|) flag ->
+  if flag then text ++ "=" ++ to_string(n) else "other"
+let main input = Task.pure(`String(describe((|7, "chosen"|), true)))
+```
+
+<!-- ochat-authoring-example: {"id":"inference.tuple-weak-rejected","surface":"one_off_v1","stage":"typecheck","contains":"Cannot unify","span":true} -->
+```ocaml
+let (|identity, items|) = (|fun value -> value, []|)
+let first = identity(7)
+let second = identity(true)
+let main input = Task.pure(`Null)
+```
 
 ## Configured module checking
 

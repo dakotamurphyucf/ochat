@@ -43,7 +43,9 @@ let main input = Task.pure(`Null)
 `[1, 2]` is an array, not an OCaml list. Use `values[index]` for access and
 `values[index] <- value` for mutation. Array elements share a type. Record fields
 use semicolons; variants use a backtick and can have comma-separated payloads.
-A multi-payload constructor does not imply that arbitrary tuple expressions exist.
+Tuples use `(|a, b|)`, with at least two elements and product type `int * string`.
+A constructor `` `Pair(a, b) `` has two payloads; `` `Pair((|a, b|)) `` has one
+tuple payload. Ordinary `(a, b)` is rejected, and `()` remains unit.
 
 <!-- ochat-authoring-example: {"id":"containers.delimiters","surface":"one_off_v1","result":true} -->
 ```ocaml
@@ -55,7 +57,7 @@ let main input =
   | `Pair(name, count) -> Task.pure(`Bool(count == 3))
 ```
 
-**Rejected during parsing:** `(1, 2)` is not a general tuple expression.
+**Rejected during parsing:** `(1, 2)` does not use ChatML tuple delimiters.
 
 <!-- ochat-authoring-example: {"id":"containers.tuple-rejected","surface":"one_off_v1","stage":"parse","contains":"Syntax error","span":true} -->
 ```ocaml

@@ -182,6 +182,10 @@ let make_control ~env budget =
       | VArray values ->
         if Array.length values > limits.max_array_items then value_failure ();
         Array.iter values ~f:(visit (depth + 1))
+      | VTuple values ->
+        if Chatml.Chatml_tuple.length values > limits.max_array_items
+        then value_failure ();
+        Chatml.Chatml_tuple.iter values ~f:(visit (depth + 1))
       | VRecord fields ->
         if Map.length fields > limits.max_array_items then value_failure ();
         Map.iteri fields ~f:(fun ~key ~data ->
@@ -304,7 +308,8 @@ let make_control ~env budget =
     checkpoint ();
     List.iter args ~f:check_value;
     match name, args with
-    | ("Array.make" | "Array.init" | "Array.literal"), VInt count :: _ -> array_size count
+    | ("Array.make" | "Array.init" | "Array.literal" | "Tuple.literal"), VInt count :: _
+      -> array_size count
     | "Array.append", [ VArray a; VArray b ] ->
       array_size (Array.length a + Array.length b)
     | ( ( "Array.copy"

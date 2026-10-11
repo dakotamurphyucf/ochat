@@ -52,7 +52,8 @@ type typ =
   | Shape_kind of Shape_kind.t
   | Variant of typ (* row with Variant_payload fields *)
   | Variant_payload of typ list (* constructor arguments, never a value type *)
-  | Tuple of typ list
+  | Tuple of
+      typ list (* User products have >=2; internal multi-root bundles may have 0/1. *)
   | Array of typ
   | TInt
   | TFloat

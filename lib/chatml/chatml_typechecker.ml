@@ -52,6 +52,7 @@ open Core
 open Chatml.Chatml_lang
 module Builtin_spec = Chatml.Chatml_builtin_spec
 module Builtin_surface = Chatml.Chatml_builtin_surface
+module Binding_pattern = Chatml.Chatml_binding_pattern
 module Type_alias = Chatml_type_alias
 module Type_probe = Chatml_type_probe
 module Signature_check = Chatml_signature_check
@@ -1408,6 +1409,9 @@ let rec is_non_expansive (expr : expr) : bool =
     List.for_all fields ~f:(fun (_lbl, expr_node) -> is_non_expansive expr_node.value)
   | EVariant (_tag, exprs) ->
     List.for_all exprs ~f:(fun expr_node -> is_non_expansive expr_node.value)
+  | ETuple components ->
+    List.for_all (Chatml.Chatml_tuple.to_list components) ~f:(fun expr_node ->
+      is_non_expansive expr_node.value)
   | EAnnot (expr_node, _) -> is_non_expansive expr_node.value
   | EPrim1 _
   | EPrim2 _
@@ -1468,23 +1472,78 @@ let restrict_free_vars_to_level ?(checkpoint = fun () -> ()) (max_level : int) (
   aux [] ty
 ;;
 
-let rec infer_nonrecursive_binding
-          (state : infer_state)
-          (env : tenv)
-          (types : type_env)
-          (name : string)
-          (rhs : expr node)
+let rec check_binding_shape (state : infer_state) (pattern : Binding_pattern.t) ty =
+  checkpoint state;
+  record_span_type state pattern.span ty;
+  match pattern.value with
+  | Name name -> [ name, ty ]
+  | Wildcard -> []
+  | Tuple children ->
+    let patterns = Chatml.Chatml_tuple.to_list children in
+    let components =
+      List.map patterns ~f:(fun _ -> new_var state state.shared.current_lvl)
+    in
+    (try unify state ty (Tuple components) with
+     | Type_error message -> raise (Type_error_with_loc (message, pattern.span)));
+    List.concat_map (List.zip_exn patterns components) ~f:(fun (pattern, ty) ->
+      check_binding_shape state pattern ty)
+
+and project_binding_schemes (state : infer_state) (pattern : Binding_pattern.t) ty =
+  checkpoint state;
+  match pattern.value with
+  | Name name -> [ name, ty ]
+  | Wildcard -> []
+  | Tuple children ->
+    let patterns = Chatml.Chatml_tuple.to_list children in
+    let components =
+      match resolve_bound_type ~checkpoint:(fun () -> checkpoint state) ty with
+      | Tuple components when List.length components = List.length patterns -> components
+      | _ -> failwith "internal: checked tuple binding lost its product shape"
+    in
+    List.concat_map (List.zip_exn patterns components) ~f:(fun (pattern, ty) ->
+      project_binding_schemes state pattern ty)
+
+and add_parameter_bindings state env pattern ty =
+  List.fold (check_binding_shape state pattern ty) ~init:env ~f:(fun env (name, ty) ->
+    add_mono ~checkpoint:(fun () -> checkpoint state) env name ty)
+
+and infer_nonrecursive_binding
+      (state : infer_state)
+      (env : tenv)
+      (types : type_env)
+      (pattern : Binding_pattern.t)
+      (rhs : expr node)
   : tenv
   =
-  let rhs_ty = with_new_level state ~f:(fun () -> infer_expr state env types rhs) in
-  if is_non_expansive rhs.value
-  then add_generalized state env name rhs_ty
-  else (
-    restrict_free_vars_to_level
-      ~checkpoint:(fun () -> checkpoint state)
-      state.shared.current_lvl
-      rhs_ty;
-    add_mono ~checkpoint:(fun () -> checkpoint state) env name rhs_ty)
+  validate_unique_binders
+    ~what:"binding"
+    (Binding_pattern.binders ~checkpoint:(fun () -> checkpoint state) pattern);
+  let rhs_ty =
+    with_new_level state ~f:(fun () ->
+      let ty = infer_expr state env types rhs in
+      ignore (check_binding_shape state pattern ty : (string * typ) list);
+      ty)
+  in
+  let scheme =
+    if is_non_expansive rhs.value
+    then
+      if should_generalize_binding ~checkpoint:(fun () -> checkpoint state) rhs_ty
+      then generalise state rhs_ty
+      else (
+        ensure_contractive_type ~checkpoint:(fun () -> checkpoint state) rhs_ty;
+        rhs_ty)
+    else (
+      restrict_free_vars_to_level
+        ~checkpoint:(fun () -> checkpoint state)
+        state.shared.current_lvl
+        rhs_ty;
+      rhs_ty)
+  in
+  List.fold
+    (project_binding_schemes state pattern scheme)
+    ~init:env
+    ~f:(fun env (name, ty) ->
+      add_mono ~checkpoint:(fun () -> checkpoint state) env name ty)
 
 and infer_recursive_bindings
       (state : infer_state)
@@ -1598,14 +1657,15 @@ and validate_unique_record_labels_in_pattern (pat : pattern) (span : Source.span
   let rec loop = function
     | PUnit | PWildcard | PVar _ | PInt _ | PBool _ | PFloat _ | PString _ -> ()
     | PVariant (_tag, subpats) -> List.iter subpats ~f:loop
+    | PTuple patterns -> Chatml.Chatml_tuple.iter patterns ~f:loop
     | PRecord (fields, _is_open) ->
       validate_unique_labels ~what:"record pattern" ~span (List.map fields ~f:fst);
       List.iter fields ~f:(fun (_lbl, subpat) -> loop subpat)
   in
   loop pat
 
-(* Binder names have no individual source spans in the AST. Anchor duplicate
-   parameters at their lambda, and recursive names at the duplicate RHS. *)
+(* Located nonrecursive/parameter leaves identify the duplicate itself.
+   Recursive declaration names retain their existing RHS location. *)
 and validate_unique_binders ~what binders =
   let seen = Hash_set.create (module String) in
   match
@@ -1620,12 +1680,14 @@ and validate_unique_binders ~what binders =
   | Some (name, span) ->
     raise (Type_error_with_loc (Printf.sprintf "Duplicate %s '%s'" what name, span))
 
-and validate_lambda_binders (expr : expr node) =
+and validate_lambda_binders state (expr : expr node) =
   match expr.value with
   | ELambda (params, _) | ELambdaSlots (params, _, _) ->
     validate_unique_binders
       ~what:"lambda parameter"
-      (List.map params ~f:(fun name -> name, expr.span))
+      (List.concat_map
+         params
+         ~f:(Binding_pattern.binders ~checkpoint:(fun () -> checkpoint state)))
   | _ -> ()
 
 and validate_pattern_binders (pat : pattern) : unit =
@@ -1674,6 +1736,11 @@ and payload_component_types ?checkpoint (payload_ty : typ) : typ list =
   | Variant_payload ts -> ts
   | _ -> raise (Type_error "Invalid variant constructor payload type")
 
+and tuple_component_types ?checkpoint (ty : typ) : typ list option =
+  match resolve_bound_type ?checkpoint ty with
+  | Tuple components -> Some components
+  | _ -> None
+
 and show_missing_variant_case ?checkpoint (tag : string) (payload_ty : typ) : string =
   match payload_component_types ?checkpoint payload_ty with
   | [] -> Printf.sprintf "`%s" tag
@@ -1694,6 +1761,16 @@ and pattern_totally_covers_type
      | Unit -> true
      | _ -> false)
   | PWildcard | PVar _ -> true
+  | PTuple patterns ->
+    (match tuple_component_types ~checkpoint expected_ty with
+     | None -> false
+     | Some components ->
+       let patterns = Chatml.Chatml_tuple.to_list patterns in
+       List.length patterns = List.length components
+       && List.for_all2_exn
+            patterns
+            components
+            ~f:(pattern_totally_covers_type ~checkpoint))
   | PRecord (fields, is_open) ->
     let subpatterns_cover_all =
       List.for_all fields ~f:(fun (label, subpat) ->
@@ -1758,6 +1835,7 @@ and show_pattern_brief (pat : pattern) : string =
   | PVariant (tag, []) -> Printf.sprintf "`%s" tag
   | PVariant (tag, _subpats) -> Printf.sprintf "`%s(...)" tag
   | PRecord _ -> "{...}"
+  | PTuple _ -> "(|...|)"
 
 and simple_pattern_key_of_pattern (pat : pattern) : (string * string) option =
   match pat with
@@ -1957,6 +2035,13 @@ and validate_match_exhaustiveness
           pattern_totally_covers_type ~checkpoint:poll pat scrut_ty)
       then ()
       else raise (Type_error "Non-exhaustive match on record: add '_' arm")
+    | Tuple _ ->
+      if
+        List.exists patterns ~f:(fun pat ->
+          pattern_totally_covers_type ~checkpoint:poll pat scrut_ty)
+      then ()
+      else
+        raise (Type_error "Non-exhaustive match on tuple: add '_' or a total tuple arm")
     | _ -> raise (Type_error "Non-exhaustive match: add '_' arm"))
 
 and infer_pattern (state : infer_state) (env : tenv) (pat : pattern) (expected_ty : typ)
@@ -1981,6 +2066,14 @@ and infer_pattern (state : infer_state) (env : tenv) (pat : pattern) (expected_t
   | PString _ ->
     unify state expected_ty String;
     env
+  | PTuple patterns ->
+    let patterns = Chatml.Chatml_tuple.to_list patterns in
+    let components =
+      List.map patterns ~f:(fun _ -> new_var state state.shared.current_lvl)
+    in
+    unify state expected_ty (Tuple components);
+    List.fold2_exn patterns components ~init:env ~f:(fun env pattern ty ->
+      infer_pattern state env pattern ty)
   | PRecord (fields, is_open) ->
     let env_after, fields_acc =
       List.fold fields ~init:(env, []) ~f:(fun (env_acc, fields_acc) (lbl, pat) ->
@@ -2081,7 +2174,7 @@ and infer_expr_against_expected
       (expected_ty : typ)
   : typ
   =
-  validate_lambda_binders expr;
+  validate_lambda_binders state expr;
   match
     expr.value, resolve_bound_type ~checkpoint:(fun () -> checkpoint state) expected_ty
   with
@@ -2090,7 +2183,7 @@ and infer_expr_against_expected
     with_new_level state ~f:(fun () ->
       let env_with_params =
         List.fold2_exn params expected_params ~init:env ~f:(fun env_acc param param_ty ->
-          add_mono ~checkpoint:(fun () -> checkpoint state) env_acc param param_ty)
+          add_parameter_bindings state env_acc param param_ty)
       in
       let body_ty = infer_expr state env_with_params types body in
       unify state body_ty expected_ret;
@@ -2100,7 +2193,7 @@ and infer_expr_against_expected
     with_new_level state ~f:(fun () ->
       let env_with_params =
         List.fold2_exn params expected_params ~init:env ~f:(fun env_acc param param_ty ->
-          add_mono ~checkpoint:(fun () -> checkpoint state) env_acc param param_ty)
+          add_parameter_bindings state env_acc param param_ty)
       in
       let body_ty = infer_expr state env_with_params types body in
       unify state body_ty expected_ret;
@@ -2120,7 +2213,7 @@ and infer_expr_against_expected
 
 and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
   checkpoint state;
-  validate_lambda_binders expr;
+  validate_lambda_binders state expr;
   (* We first perform the usual inference work, then — if it succeeds — we
      record the resulting type in [state.span_types].  The resolver consults this
      table to choose an appropriate slot descriptor. *)
@@ -2141,7 +2234,7 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
           let env_with_params, param_tys_rev =
             List.fold params ~init:(env, []) ~f:(fun (env_acc, tys_rev) p ->
               let t = new_var state state.shared.current_lvl in
-              add_mono ~checkpoint:(fun () -> checkpoint state) env_acc p t, t :: tys_rev)
+              add_parameter_bindings state env_acc p t, t :: tys_rev)
           in
           let body_ty = infer_expr state env_with_params types body in
           let param_tys = List.rev param_tys_rev in
@@ -2151,7 +2244,7 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
           let env_with_params, param_tys_rev =
             List.fold params ~init:(env, []) ~f:(fun (env_acc, tys_rev) p ->
               let t = new_var state state.shared.current_lvl in
-              add_mono ~checkpoint:(fun () -> checkpoint state) env_acc p t, t :: tys_rev)
+              add_parameter_bindings state env_acc p t, t :: tys_rev)
           in
           let body_ty = infer_expr state env_with_params types body in
           let param_tys = List.rev param_tys_rev in
@@ -2219,6 +2312,11 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
         let elt_ty = new_var state state.shared.current_lvl in
         List.iter elts ~f:(fun e -> unify state (infer_expr state env types e) elt_ty);
         Array elt_ty
+      | ETuple components ->
+        Tuple
+          (List.map
+             (Chatml.Chatml_tuple.to_list components)
+             ~f:(infer_expr state env types))
       | EArrayGet (arr, idx) ->
         unify state (infer_expr state env types idx) TInt;
         let elt_ty = new_var state state.shared.current_lvl in
@@ -2400,7 +2498,13 @@ let rec infer_stmt_with_exports
   : tenv * type_env * string list
   =
   match stmt with
-  | SLet (x, e) -> infer_nonrecursive_binding state env types x e, types, [ x ]
+  | SLet (pattern, e) ->
+    let env = infer_nonrecursive_binding state env types pattern e in
+    let names =
+      Binding_pattern.binders ~checkpoint:(fun () -> checkpoint state) pattern
+      |> List.map ~f:fst
+    in
+    env, types, names
   | SLetRec bindings ->
     infer_recursive_bindings state env types bindings, types, List.map bindings ~f:fst
   | SType declaration ->

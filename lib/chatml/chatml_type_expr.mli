@@ -25,6 +25,7 @@ and desc =
   | TEParameter of string
   | TEArrow of t * t
   | TEFunction of t list * t
+  | TETuple of t Chatml_tuple.t
   | TEConstr of Name.t * t list
   | TERecord of (string * t) list
   | TEVariant of (string * t list) list
