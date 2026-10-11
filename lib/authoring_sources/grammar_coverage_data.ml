@@ -254,10 +254,10 @@ let productions =
     , "6f21e4827dfd8f2430997a1b0a1f1f34bdd2436de6115cf6903422ec41906e5a"
     , "chatml.programs" )
   ; ( "ident -> LIDENT"
-    , "5e28dc1163b08e6632c15ab31d4b6f2bea91f1944b0b98946ab57005cd9afe13"
+    , "b87e7f7068e405c22dc447b4b0cfc30f4c19748aba7b7f3fe50ac58ac253a1bd"
     , "chatml.programs" )
   ; ( "ident -> UIDENT"
-    , "76012b1af4c6efeca89d90e629d00afd6616078b3993593510e9afe4fc353b2f"
+    , "48bf68021e17d574ffab71c94a8008466353d84b94ae50e282f8fb3bcecce402"
     , "chatml.programs" )
   ; ( "loption(separated_nonempty_list(COMMA,type_expr)) -> "
     , "7cfb73df4d1abed0c691870dbbec4395abdd1b3b1fa728b4f16d380fd2ba7ad8"

@@ -52,7 +52,12 @@ let%expect_test "inference-owned type inspections and row operations cooperate" 
        : T.typ));
   cancelled "pattern binding" (fun state _ ->
     ignore
-      (T.infer_pattern state T.Value_scope.empty (L.PVar (Name.unlocated "value")) ty
+      (T.infer_pattern
+         state
+         T.Value_scope.empty
+         T.Type_alias.empty
+         (L.PVar (Name.unlocated "value"))
+         ty
        : T.tenv));
   cancelled "type declaration" (fun state _ ->
     ignore

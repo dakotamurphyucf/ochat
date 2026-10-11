@@ -45,6 +45,12 @@
     lib/chatml/chatml_module_reference.ml %{dep:../chatml/chatml_module_reference.ml}
     lib/chatml/chatml_contract_encoding.ml %{dep:../chatml/chatml_contract_encoding.ml}
     lib/chatml_linked/chatml_linked_program.ml %{dep:../chatml_linked/chatml_linked_program.ml}
+    lib/chatml/chatml_semantic_binding.ml %{dep:../chatml/chatml_semantic_binding.ml}
+    lib/chatml/chatml_semantic_recorder.ml %{dep:../chatml/chatml_semantic_recorder.ml}
+    lib/chatml/chatml_semantic_elaboration.ml %{dep:../chatml/chatml_semantic_elaboration.ml}
+    lib/chatml/chatml_semantic_scope.ml %{dep:../chatml/chatml_semantic_scope.ml}
+    lib/chatml/chatml_semantic_host.ml %{dep:../chatml/chatml_semantic_host.ml}
+    lib/chatml_linked/chatml_checked_graph.ml %{dep:../chatml_linked/chatml_checked_graph.ml}
     lib/chatml_linked_runtime/chatml_linked_runtime.ml %{dep:../chatml_linked_runtime/chatml_linked_runtime.ml}
     lib/chatml/chatml_builtin_modules.ml %{dep:../chatml/chatml_builtin_modules.ml}
     lib/chatml/chatml_type_expr.ml %{dep:../chatml/chatml_type_expr.ml}
