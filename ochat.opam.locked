@@ -188,7 +188,7 @@ depends: [
   "ocplib-endian" {= "1.2"}
   "ohex" {= "0.2.0"}
   "omd" {= "2.0.0~alpha4"}
-  "oniguruma" {= "0.1.2"}
+  "oniguruma" {= "0.2.0"}
   "optint" {= "0.3.0"}
   "owl" {= "1.2"}
   "owl-base" {= "1.2"}
@@ -305,7 +305,7 @@ pin-depends: [
   ]
   [
     "textmate-language.0.4.0"
-    "git+https://github.com/dakotamurphyucf/ocaml-textmate-language.git#e9d1ea854b0734db5e616cacb2ce7e2e5fd744bf"
+    "git+https://github.com/dakotamurphyucf/ocaml-textmate-language.git#964d53b7e404c329852d02a31d066b0807991c83"
   ]
 ]
 x-maintenance-intent: ["(latest)"]

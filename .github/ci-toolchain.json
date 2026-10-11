@@ -5,7 +5,7 @@
   "opamFileSha256": "0c1e1a25e87892e7800e0d301ffdbd575de9b319b0076b880a5c40dbf99cd291",
   "sourcePins": {
     "piaf": "git+https://github.com/anmonteiro/piaf.git#c7428ec14dc681e0ef13375cdf657b2727143678",
-    "textmate-language": "git+https://github.com/dakotamurphyucf/ocaml-textmate-language.git#e9d1ea854b0734db5e616cacb2ce7e2e5fd744bf"
+    "textmate-language": "git+https://github.com/dakotamurphyucf/ocaml-textmate-language.git#964d53b7e404c329852d02a31d066b0807991c83"
   },
   "packages": {
     "angstrom": "0.16.1",
@@ -191,7 +191,7 @@
     "ocplib-endian": "1.2",
     "ohex": "0.2.0",
     "omd": "2.0.0~alpha4",
-    "oniguruma": "0.1.2",
+    "oniguruma": "0.2.0",
     "optint": "0.3.0",
     "owl": "1.2",
     "owl-base": "1.2",
