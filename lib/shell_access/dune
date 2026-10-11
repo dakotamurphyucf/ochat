@@ -1,12 +1,12 @@
 (library
  (name shell_access)
  (public_name ochat.shell_access)
- (modules shell_access shell_access_v2 request_channel process_spawn)
- (libraries core core_unix digestif eio eio.unix jsonaf optint re)
+ (modules shell_access shell_access_v2 request_channel process_spawn process_control bounded_process)
+ (libraries core core_unix cstruct digestif eio eio.unix jane-street-headers jsonaf optint re)
  (foreign_stubs
   (language c)
-  (names process_spawn_stubs)
-  (include_dirs (lib eio.unix)))
+  (names process_spawn_stubs process_anchor)
+  (include_dirs (lib eio.unix) (lib jane-street-headers)))
  (preprocess
   (per_module
-   ((pps ppx_jane) request_channel))))
+   ((pps ppx_jane) request_channel process_spawn process_control bounded_process))))
