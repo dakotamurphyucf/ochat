@@ -171,8 +171,11 @@ type native_registration = Native_tool_pool.Registration.t =
 (** Prepare a definition for an extensibility-aware host. Validates the captured
     declarations, constructs native resources through the same shell authorization
     and resource bindings as [create], then compiles all versioned scripts in an
-    Eio domain against those exact live capabilities. No script initializer or
-    handler runs here. Cross-kind collisions include dynamically expanded native
+    Eio domain against those exact staged native capabilities. Only successful
+    preparation permits native shell-hook initialization and snapshot restore.
+    Versioned script initializers and handlers remain unevaluated; the session
+    owner installs their execution services later. Failed script preparation
+    preserves source diagnostics and leaves staged shell execution revoked. Cross-kind collisions include dynamically expanded native
     tool names. Inherited/generated and authoring declarations still require their
     respective host services and are rejected. Resources remain owned by [sw];
     the caller must release that scope after failed preparation or runtime teardown.

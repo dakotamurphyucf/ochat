@@ -279,39 +279,55 @@ let instantiate
       ~model_completion
       ~extension_snapshots
       ~persist_extension_snapshots
+      ~preflight
       manifest
       material
   =
-  Result.bind
-    (Shell_runtime.Registry.prepare_with_policy ~manifest ~material ~admin_policy
-     |> Result.map_error ~f:(List.map ~f:diagnostic_of_registry))
-    ~f:(fun prepared ->
-      Result.bind
-        (Shell_runtime.Manifest_security.verify
-           ~env:host.Shell_runtime.Host.env
-           ~admin_policy
-           ~manifest
-         |> Result.map_error
-              ~f:
-                (List.map ~f:(fun (error : Shell_runtime.Manifest_security.error) ->
-                   diagnostic error.code error.message)))
-        ~f:(fun security_status ->
-          Result.bind
-            (Shell_runtime.Manifest_authorizer.authorize manifest_authorizer manifest
-             |> Result.map_error ~f:(fun error -> [ diagnostic_of_authorizer error ]))
-            ~f:(fun grant ->
-              Shell_runtime.Registry.instantiate_prepared
-                ~sw
-                ~host
-                ~grant
-                ~approval_provider
-                ~approval_store
-                ~model_completion
-                ~extension_snapshots
-                ?persist_extension_snapshots
-                prepared
-              |> Result.map_error ~f:(List.map ~f:diagnostic_of_registry)
-              |> Result.map ~f:(fun registry -> registry, security_status))))
+  let open Result.Let_syntax in
+  let%bind prepared =
+    Shell_runtime.Registry.prepare_with_policy ~manifest ~material ~admin_policy
+    |> Result.map_error ~f:(List.map ~f:diagnostic_of_registry)
+  in
+  let%bind security_status =
+    Shell_runtime.Manifest_security.verify
+      ~env:host.Shell_runtime.Host.env
+      ~admin_policy
+      ~manifest
+    |> Result.map_error
+         ~f:
+           (List.map ~f:(fun (error : Shell_runtime.Manifest_security.error) ->
+              diagnostic error.code error.message))
+  in
+  let%bind grant =
+    Shell_runtime.Manifest_authorizer.authorize manifest_authorizer manifest
+    |> Result.map_error ~f:(fun error -> [ diagnostic_of_authorizer error ])
+  in
+  (* The registry owns activation and calls preflight once. Retain its caller's
+     source-bearing diagnostics without widening the native registry error type.
+     Exceptions bypass this expected-error transport and propagate unchanged. *)
+  let preflight_diagnostics = ref None in
+  Shell_runtime.Registry.instantiate_prepared_after
+    ~sw
+    ~host
+    ~grant
+    ~approval_provider
+    ~approval_store
+    ~model_completion
+    ~extension_snapshots
+    ?persist_extension_snapshots
+    ~preflight:(fun staged ->
+      preflight (Native_tool_pool.Shell_view.Staged staged)
+      |> Result.map_error ~f:(fun diagnostics ->
+        preflight_diagnostics := Some diagnostics;
+        List.map diagnostics ~f:(fun (diagnostic : diagnostic) ->
+          Shell_runtime.Registry.
+            { code = diagnostic.code; message = diagnostic.message; runtime_id = None })))
+    prepared
+  |> Result.map_error ~f:(fun errors ->
+    match !preflight_diagnostics with
+    | Some diagnostics -> diagnostics
+    | None -> List.map errors ~f:diagnostic_of_registry)
+  |> Result.map ~f:(fun (registry, admitted) -> registry, security_status, admitted)
 ;;
 
 let shell_registry
@@ -325,6 +341,7 @@ let shell_registry
       ~model_completion
       ~extension_snapshots
       ~persist_extension_snapshots
+      ~preflight
       declarations
   =
   if
@@ -332,7 +349,9 @@ let shell_registry
     && List.is_empty declarations.shell_tools
     && List.is_empty declarations.legacy_tools
     && Option.is_none declarations.moderator_runtime
-  then Ok (None, None, None)
+  then
+    preflight Native_tool_pool.Shell_view.Absent
+    |> Result.map ~f:(fun admitted -> None, None, None, admitted)
   else
     Result.bind (compile ~platform declarations) ~f:(fun (manifest, material) ->
       instantiate
@@ -345,10 +364,11 @@ let shell_registry
         ~model_completion
         ~extension_snapshots
         ~persist_extension_snapshots
+        ~preflight
         manifest
         material
-      |> Result.map ~f:(fun (registry, security_status) ->
-        Some registry, Some manifest, Some security_status))
+      |> Result.map ~f:(fun (registry, security_status, admitted) ->
+        Some registry, Some manifest, Some security_status, admitted))
 ;;
 
 let model_completion ~ctx ~agent:_ ~model =
@@ -406,6 +426,7 @@ let moderator_process_handler t =
 
 let create_native
       ~extension_resources
+      ~preflight
       ?(native_registrations = [])
       ?native_service_revision
       ~sw
@@ -444,57 +465,98 @@ let create_native
       ]
   else (
     let declarations = declarations prompt_elements in
-    let model_completion = model_completion ~ctx in
-    Result.bind
-      (Shell_runtime.Admin_policy_loader.load_from_environment ~env:(Ctx.env ctx)
-       |> Result.map_error ~f:(fun error -> [ diagnostic error.code error.message ]))
-      ~f:(fun admin_policy ->
-        Result.bind
-          (shell_registry
-             ~sw
-             ~host
-             ~platform
-             ~admin_policy
-             ~manifest_authorizer
-             ~approval_provider
-             ~approval_store
-             ~model_completion
-             ~extension_snapshots
-             ~persist_extension_snapshots
-             declarations)
-          ~f:(fun (shell_registry, shell_manifest, shell_security_status) ->
-            Native_tool_pool.create
-              ~registrations:native_registrations
-              ?native_service_revision
-              ~sw
-              ~ctx
-              ~host
-              ~run_agent
-              ~admin_policy
-              ~shell:
-                (match shell_registry with
-                 | None -> Absent
-                 | Some registry -> Live registry)
-              prompt_elements
-            |> Result.map_error
-                 ~f:
-                   (List.map ~f:(fun error ->
-                      diagnostic error.Native_tool_pool.Error.code error.message))
-            |> Result.map ~f:(fun pool ->
-              { functions = Native_tool_pool.functions pool
-              ; capabilities = Native_tool_pool.capabilities pool
-              ; classifications = Native_tool_pool.classifications pool
-              ; shell_tool_names = shell_tool_names declarations
-              ; shell_registry
-              ; shell_manifest
-              ; shell_admin_policy =
-                  Option.some_if (Option.is_some shell_manifest) admin_policy
-              ; shell_security_status
-              ; moderator_shell_runtime = moderator_runtime shell_manifest
-              }))))
+    let%bind admin_policy =
+      Shell_runtime.Admin_policy_loader.load_from_environment ~env:(Ctx.env ctx)
+      |> Result.map_error ~f:(fun error -> [ diagnostic error.code error.message ])
+    in
+    let prepare_pool shell =
+      let%bind pool =
+        Native_tool_pool.create
+          ~registrations:native_registrations
+          ?native_service_revision
+          ~sw
+          ~ctx
+          ~host
+          ~run_agent
+          ~admin_policy
+          ~shell
+          prompt_elements
+        |> Result.map_error
+             ~f:
+               (List.map ~f:(fun error ->
+                  diagnostic error.Native_tool_pool.Error.code error.message))
+      in
+      let%map capabilities, admitted = preflight pool in
+      pool, capabilities, admitted
+    in
+    let%map
+        ( shell_registry
+        , shell_manifest
+        , shell_security_status
+        , (pool, capabilities, admitted) )
+      =
+      shell_registry
+        ~sw
+        ~host
+        ~platform
+        ~admin_policy
+        ~manifest_authorizer
+        ~approval_provider
+        ~approval_store
+        ~model_completion:(model_completion ~ctx)
+        ~extension_snapshots
+        ~persist_extension_snapshots
+        ~preflight:prepare_pool
+        declarations
+    in
+    let native =
+      { functions = Native_tool_pool.functions pool
+      ; capabilities
+      ; classifications = Native_tool_pool.classifications pool
+      ; shell_tool_names = shell_tool_names declarations
+      ; shell_registry
+      ; shell_manifest
+      ; shell_admin_policy = Option.some_if (Option.is_some shell_manifest) admin_policy
+      ; shell_security_status
+      ; moderator_shell_runtime = moderator_runtime shell_manifest
+      }
+    in
+    native, admitted)
 ;;
 
-let create = create_native ~extension_resources:false ~native_registrations:[]
+let create
+      ?native_service_revision
+      ~sw
+      ~ctx
+      ~host
+      ~platform
+      ~prompt_elements
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+      ?extension_snapshots
+      ?persist_extension_snapshots
+      ~run_agent
+      ()
+  =
+  create_native
+    ~extension_resources:false
+    ~preflight:(fun pool -> Ok (Native_tool_pool.capabilities pool, ()))
+    ?native_service_revision
+    ~sw
+    ~ctx
+    ~host
+    ~platform
+    ~prompt_elements
+    ~manifest_authorizer
+    ~approval_provider
+    ~approval_store
+    ?extension_snapshots
+    ?persist_extension_snapshots
+    ~run_agent
+    ()
+  |> Result.map ~f:fst
+;;
 
 type extension_resources =
   { native : t
@@ -536,9 +598,36 @@ let prepare_extensions
               "invalid captured extension declarations"
           ])
   in
-  let%bind native =
+  let prepare_managed pool =
+    let%bind capabilities =
+      Lazy.force (Native_tool_pool.capabilities pool)
+      |> Result.map_error ~f:(fun error ->
+        [ diagnostic error.Tool_capability.code error.message ])
+    in
+    let%map managed =
+      Managed_tool_registry.prepare
+        ~delegated_moderator
+        ~env:(Ctx.env ctx)
+        ~owner:host.Shell_runtime.Host.session_id
+        ~capabilities
+        prompt_elements
+      |> Result.map_error
+           ~f:
+             (List.map ~f:(fun (error : D.t) ->
+                { code =
+                    (match error.code with
+                     | "capability.duplicate_name" -> "agent.duplicate_tool_name"
+                     | code -> code)
+                ; message = error.message
+                ; source = error.source
+                }))
+    in
+    lazy (Ok (Managed_tool_registry.capabilities managed)), managed
+  in
+  let%map native, managed =
     create_native
       ~extension_resources:true
+      ~preflight:prepare_managed
       ~native_registrations
       ?native_service_revision
       ~sw
@@ -553,32 +642,6 @@ let prepare_extensions
       ?persist_extension_snapshots
       ~run_agent
       ()
-  in
-  let%bind capabilities =
-    Lazy.force native.capabilities
-    |> Result.map_error ~f:(fun error ->
-      [ diagnostic error.Tool_capability.code error.message ])
-  in
-  let%map managed =
-    Managed_tool_registry.prepare
-      ~delegated_moderator
-      ~env:(Ctx.env ctx)
-      ~owner:host.session_id
-      ~capabilities
-      prompt_elements
-    |> Result.map_error
-         ~f:
-           (List.map ~f:(fun (error : D.t) ->
-              { code =
-                  (match error.code with
-                   | "capability.duplicate_name" -> "agent.duplicate_tool_name"
-                   | code -> code)
-              ; message = error.message
-              ; source = error.source
-              }))
-  in
-  let native =
-    { native with capabilities = lazy (Ok (Managed_tool_registry.capabilities managed)) }
   in
   { native; definition = Managed_tool_registry.definition managed; managed }
 ;;
