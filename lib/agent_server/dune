@@ -19,6 +19,7 @@
   catalog_builder
   prompt_catalog_publication
   prompt_catalog_host
+  prompt_dependency_projection
   runtime_owner
   delegated_runtime
   graph_tracking

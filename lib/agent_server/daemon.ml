@@ -865,7 +865,7 @@ let config_watcher
   let failure candidate error =
     Config_watcher.Failure.Rejected [ config_build_diagnostic candidate error ]
   in
-  let prepare diff candidate =
+  let prepare operation diff candidate ~checkpoint =
     if diff.Config_diff.server_changed
     then
       Error
@@ -883,36 +883,61 @@ let config_watcher
         Catalog_builder.build ?reviewer_resolver ?policy_evaluator_resolver candidate
         |> Result.map_error ~f:(failure candidate)
       in
+      let mode =
+        match operation with
+        | Config_watcher.Operation.Reload -> Prompt_catalog_publication.Mode.Build
+        | Update request ->
+          let module Request = Agent_protocol.Prompt_dependency_selection.Update_request
+          in
+          Update
+            { definitions = Request.definitions request
+            ; expected_generation =
+                Agent_protocol.Prompt_dependency_selection.Generation.to_int
+                  (Request.expected_generation request)
+            }
+      in
       let%bind revisions =
         Prompt_catalog_host.prepare
           project_catalog
-          ~mode:Build
+          ~mode
           ~created_at:(timestamp env)
-          ~checkpoint:Eio.Fiber.check
+          ~checkpoint
           built.prompts
         |> Result.map_error ~f:(fun error -> failure candidate (project_error error))
       in
       prompt_candidate := Some revisions;
+      let%bind result =
+        match operation with
+        | Config_watcher.Operation.Reload ->
+          Ok (Config_watcher.Prepared_result.Reloaded diff)
+        | Update request ->
+          Prompt_dependency_projection.prepared_update revisions ~request ~checkpoint
+          |> Result.map ~f:(fun result ->
+            Config_watcher.Prepared_result.Dependencies_updated result)
+          |> Result.map_error ~f:(fun error ->
+            failure candidate (Agent_store.Store_error.Corrupt error.message))
+      in
       let%map catalogs =
         Session_factory.seal_catalogs
           factory
           ~workspaces:built.workspaces
           ~permission_profiles:built.permission_profiles
           ~manifest_grants:built.manifest_grants
-          ~checkpoint:Eio.Fiber.check
+          ~checkpoint
         |> Result.map_error ~f:(fun error ->
           failure
             candidate
             (Agent_store.Store_error.Corrupt
                (Sexp.to_string_hum (Session_factory.Catalog_seal.Error.sexp_of_t error))))
       in
-      factory_candidate := Some catalogs
+      factory_candidate := Some catalogs;
+      result
   in
-  let publish _ candidate =
+  let publish _ _ candidate =
     Prompt_catalog_host.publish (Option.value_exn !prompt_candidate)
     |> Result.map_error ~f:(fun error -> failure candidate (project_error error))
   in
-  let commit _ _ =
+  let commit _ _ _ =
     (* All objects and result carriers already exist. Watcher protects this entire
        phase and swaps Config immediately after both same-domain pointer commits. *)
     (match Session_factory.Catalog_seal.commit (Option.value_exn !factory_candidate) with
@@ -948,13 +973,18 @@ let config_watcher
     prompt_candidate := None;
     factory_candidate := None
   in
-  let audit diff =
+  let audit operation diff =
+    let name =
+      match operation with
+      | Config_watcher.Operation.Reload -> "server.configuration.reloaded"
+      | Update _ -> "prompt.dependencies.updated"
+    in
     ignore
       (Agent_store.Audit_store.append
          audit_store
          ~timestamp:(timestamp env)
          ~level:Agent_protocol.Audit.Info
-         ~name:"server.configuration.reloaded"
+         ~name
          ~session_id:None
          ~principal_id:None
          ~payload:
@@ -972,7 +1002,6 @@ let config_watcher
       ~hooks:{ prepare; publish; commit; discard_prepared; audit; retire }
   in
   if enabled then Config_watcher.run ~sw ~clock:(Eio.Stdenv.clock env) ~every:1. watcher;
-  if not enabled then Config_watcher.close watcher;
   watcher
 ;;
 

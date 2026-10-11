@@ -1679,9 +1679,11 @@ let%test_module "fallible configuration publication" =
         print_s [%sexp (List.rev !operation_names : string list)];
         W.close_and_wait watcher);
       [%expect
-        {| ("Coding agent")
+        {|
+        ("Coding agent")
         ("Next configuration")
-        (update reload) |}]
+        (update reload)
+        |}]
     ;;
 
     let%test_unit "operation response affinity is checked before any writer" =
