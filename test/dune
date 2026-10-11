@@ -1326,3 +1326,10 @@
   ochat.agent_server)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name chatml_variant_arity_test)
+ (modules chatml_variant_arity_test)
+ (libraries core chatml chatml_typechecker chatml_resolver chatml_builtin_modules chatml_host_runtime)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

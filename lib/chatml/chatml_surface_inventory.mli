@@ -41,8 +41,10 @@ val standard : unit -> (t list, string) result
 
 (** Versioned structural data for generators/corpus identities. [scheme] uses
     the builtin type algebra's canonical S-expression encoding, not executable
-    ChatML type syntax. In particular TTuple describes internal payload structure
-    and is not a claim that arbitrary tuple expressions are supported. *)
+    ChatML type syntax. Variant rows retain explicit constructor argument lists,
+    distinguishing a nullary constructor from a unary unit payload. [scheme_format] is
+    [chatml-builtin-sexp-v2]; consumers must select that format explicitly.
+    TTuple is an internal aggregate, not arbitrary source tuple syntax. *)
 val to_json : t -> Jsonaf.t
 
 (** Human-readable notation generated from the same schemes. Preserves explicit

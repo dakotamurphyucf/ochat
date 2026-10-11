@@ -17,11 +17,21 @@
 open Core
 open Chatml_lang
 
-(** Row descriptions used by builtin record and variant types. *)
+(** Record rows contain value types; variant rows contain explicit argument lists.
+    An empty argument list is nullary, [TUnit] is unary unit, and longer lists
+    retain constructor arity. This compiler metadata is not a persisted value
+    format. *)
 type row =
   | TRow_empty
   | TRow_var of string
   | TRow_extend of (string * ty) list * row
+[@@deriving sexp_of]
+
+(** A constructor's payload list is distinct from the record field type. *)
+and variant_row =
+  | TVariant_row_empty
+  | TVariant_row_var of string
+  | TVariant_row_extend of (string * ty list) list * variant_row
 [@@deriving sexp_of]
 
 (** The builtin type language mirrored by {!Chatml_typechecker}. *)
@@ -37,7 +47,7 @@ and ty =
   | TRef of ty
   | TTuple of ty list
   | TRecord of row
-  | TVariant of row
+  | TVariant of variant_row
   | TFun of ty list * ty
   | TMu of string * ty
   | TRec_var of string

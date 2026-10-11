@@ -106,7 +106,8 @@ type typ =
   | Rec_var of name
   | Ref of typ
   | Record of typ (* row *)
-  | Variant of typ (* not implemented – kept for parity *)
+  | Variant of typ (* row with Variant_payload fields *)
+  | Variant_payload of typ list (* constructor arguments, never a value type *)
   | Tuple of typ list
   | Array of typ
   | TInt
@@ -254,6 +255,7 @@ let rec substitute_rec_var
   | Record row -> Record (substitute row)
   | Variant row -> Variant (substitute row)
   | Tuple ts -> Tuple (List.map ts ~f:substitute)
+  | Variant_payload ts -> Variant_payload (List.map ts ~f:substitute)
   | Array t -> Array (substitute t)
   | Row (fields, tail) -> Row (Env.map fields ~f:substitute, substitute tail)
 ;;
@@ -294,6 +296,7 @@ let instantiate (state : infer_state) ty =
     | Record r -> Record (inst seen r)
     | Variant r -> Variant (inst seen r)
     | Tuple ts -> Tuple (List.map ts ~f:(inst seen))
+    | Variant_payload ts -> Variant_payload (List.map ts ~f:(inst seen))
     | Row (fields, t) -> Row (Env.map fields ~f:(inst seen), inst seen t)
     | Array t -> Array (inst seen t)
     | t -> t
@@ -323,6 +326,7 @@ let generalise (state : infer_state) ty =
     | Record row -> Record (gen seen row)
     | Variant row -> Variant (gen seen row)
     | Tuple ts -> Tuple (List.map ts ~f:(gen seen))
+    | Variant_payload ts -> Variant_payload (List.map ts ~f:(gen seen))
     | Row (fields, tail) -> Row (Env.map fields ~f:(gen seen), gen seen tail)
     | Array t -> Array (gen seen t)
     | t -> t
@@ -343,7 +347,7 @@ let has_recursive_type ?(checkpoint = fun () -> ()) (ty : typ) : bool =
     | Var { contents = Free _ }
     | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> false
     | Ref t | Record t | Variant t | Array t -> aux seen t
-    | Tuple ts -> List.exists ts ~f:(aux seen)
+    | Tuple ts | Variant_payload ts -> List.exists ts ~f:(aux seen)
     | Row (fields, tail) ->
       Env.exists fields (fun _field ty' -> aux seen ty') || aux seen tail
   in
@@ -413,13 +417,34 @@ let check_contractive ?(checkpoint = fun () -> ()) (ty : typ) : (unit, string) r
         | Some target_binder when String.equal target_binder binder && not guarded ->
           Error (Printf.sprintf "Unguarded recursive type variable '%s'" binder)
         | _ -> Ok ())
-    | Ref inner | Record inner | Variant inner | Array inner ->
+    | Ref inner | Record inner | Array inner ->
       check_ty seen ~target ~guarded:true ~scope inner
+    | Variant row -> check_variant_row seen ~target ~guarded:true ~scope row
+    | Variant_payload _ -> Error "Variant payload is only valid in a variant row"
     | Tuple tys -> check_list seen ~target ~guarded:true ~scope tys
     | Row (fields, tail) ->
       (match check_fields seen ~target ~guarded ~scope fields with
        | Ok () -> check_ty seen ~target ~guarded ~scope tail
        | Error _ as err -> err)
+  and check_variant_row seen ~target ~guarded ~scope row =
+    checkpoint ();
+    match row with
+    | Row (cases, tail) ->
+      let rec check_cases = function
+        | [] -> check_variant_row seen ~target ~guarded ~scope tail
+        | (_, Variant_payload arguments) :: rest ->
+          (match check_list seen ~target ~guarded ~scope arguments with
+           | Ok () -> check_cases rest
+           | Error _ as error -> error)
+        | _ -> Error "Variant row fields must retain constructor payload arity"
+      in
+      check_cases (Env.bindings cases)
+    | Var ({ contents = Bound row } as tv) ->
+      if tv_ref_mem tv seen
+      then Ok ()
+      else check_variant_row (tv :: seen) ~target ~guarded ~scope row
+    | Empty_row | Generic _ | Var { contents = Free _ } -> Ok ()
+    | _ -> Error "Invalid variant row"
   in
   check_ty [] ~target:None ~guarded:false ~scope:[] ty
 ;;
@@ -482,7 +507,7 @@ let occurs ?(checkpoint = fun () -> ()) tv ty =
     | Mu (_binder, body) -> aux seen body
     | Rec_var _ -> ()
     | Ref t | Record t | Variant t | Array t -> aux seen t
-    | Tuple ts -> List.iter ts ~f:(aux seen)
+    | Tuple ts | Variant_payload ts -> List.iter ts ~f:(aux seen)
     | Row (fs, rest) ->
       Env.iter fs ~f:(fun _ t -> aux seen t);
       aux seen rest
@@ -523,7 +548,7 @@ let rec can_infer_mu_through ?(checkpoint = fun () -> ()) (ty : typ) : bool =
   checkpoint ();
   match resolve_bound_type ~checkpoint ty with
   (* allow recursive *data* types *)
-  | Variant _ | Record _ | Row _ | Tuple _ | Con _ -> true
+  | Variant _ | Record _ | Row _ | Tuple _ | Variant_payload _ | Con _ -> true
   (* optionally allow recursion through rows wrapped in Record/Variant already covered *)
   (* | Empty_row -> true  (* not needed *) *)
 
@@ -580,7 +605,8 @@ let ensure_guarded_cycle ?(checkpoint = fun () -> ()) (target : tv ref) (ty : ty
     (* “Data guards” *)
     | Variant row -> bad seen_tv seen_mu ~guarded:true row
     | Record row -> bad seen_tv seen_mu ~guarded:true row
-    | Tuple ts -> List.exists ts ~f:(bad seen_tv seen_mu ~guarded:true)
+    | Tuple ts | Variant_payload ts ->
+      List.exists ts ~f:(bad seen_tv seen_mu ~guarded:true)
     | Con (_n, args) -> List.exists args ~f:(bad seen_tv seen_mu ~guarded:true)
     | Row (fields, tail) ->
       (* Row is only a *real* guard for its tail if it adds at least one label. *)
@@ -680,6 +706,10 @@ let rec unify (state : infer_state) lhs rhs =
         else tv := Bound t
       | Ref t1, Ref t2 | Array t1, Array t2 -> go active env_l env_r t1 t2
       | Record r1, Record r2 | Variant r1, Variant r2 -> go active env_l env_r r1 r2
+      | Variant_payload ts1, Variant_payload ts2 ->
+        if List.length ts1 <> List.length ts2
+        then raise (Type_error "Variant constructor arity mismatch");
+        List.iter2_exn ts1 ts2 ~f:(go active env_l env_r)
       | Tuple ts1, Tuple ts2 ->
         if List.length ts1 <> List.length ts2
         then raise (Type_error "Tuple arity mismatch");
@@ -807,7 +837,7 @@ and render_type ?(poll = fun () -> ()) ?bounds ty =
       add "{";
       show_row_fields depth seen seen_rec false row;
       add "}"
-    | Tuple ts ->
+    | Tuple ts | Variant_payload ts ->
       add "(";
       separated " * " ts child;
       add ")"
@@ -894,9 +924,8 @@ and render_type ?(poll = fun () -> ()) ?bounds ty =
         add key;
         let payload =
           match resolve (depth + 1) seen value with
-          | Unit -> []
-          | Tuple ts -> ts
-          | ty -> [ ty ]
+          | Variant_payload ts -> ts
+          | _ -> raise (Type_error "Invalid variant constructor payload type")
         in
         (match payload with
          | [] -> ()
@@ -971,9 +1000,8 @@ and resolve_bound_type_for_display ty =
 
 and variant_payload_components payload_ty =
   match resolve_bound_type_for_display payload_ty with
-  | Unit -> []
-  | Tuple ts -> ts
-  | ty -> [ ty ]
+  | Variant_payload ts -> ts
+  | _ -> raise (Type_error "Invalid variant constructor payload type")
 
 and show_variant_payload ty =
   match variant_payload_components ty with
@@ -1021,7 +1049,8 @@ and ensure_equality_type ?(checkpoint = fun () -> ()) ty =
       else ensure_equality_type_with_seen seen (binder :: seen_rec) body
     | Rec_var binder when rec_name_mem binder seen_rec -> ()
     | Rec_var _ -> ()
-    | Tuple ts -> List.iter ts ~f:(ensure_equality_type_with_seen seen seen_rec)
+    | Tuple ts | Variant_payload ts ->
+      List.iter ts ~f:(ensure_equality_type_with_seen seen seen_rec)
     | Record row | Variant row -> ensure_equality_row_with_seen seen seen_rec row
     | Array _ -> raise (Type_error "Equality is not supported for arrays")
     | Ref _ -> raise (Type_error "Equality is not supported for refs")
@@ -1120,7 +1149,7 @@ let contains_generic ?(checkpoint = fun () -> ()) (ty : typ) : bool =
     | Rec_var _ -> false
     | Var { contents = Free _ } -> false
     | Ref t | Record t | Variant t | Array t -> aux seen t
-    | Tuple ts -> List.exists ts ~f:(aux seen)
+    | Tuple ts | Variant_payload ts -> List.exists ts ~f:(aux seen)
     | Row (fields, tail) ->
       Env.exists fields (fun _field ty' -> aux seen ty') || aux seen tail
     | TInt | TFloat | Boolean | String | Empty_row | Unit -> false
@@ -1152,7 +1181,7 @@ let contains_rec_var_name ?(checkpoint = fun () -> ()) (target : name) (ty : typ
     | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> false
     | Mu (binder, body) -> if String.equal binder target then false else aux seen body
     | Ref t | Record t | Variant t | Array t -> aux seen t
-    | Tuple ts -> List.exists ts ~f:(aux seen)
+    | Tuple ts | Variant_payload ts -> List.exists ts ~f:(aux seen)
     | Row (fields, tail) ->
       Env.exists fields (fun _field ty' -> aux seen ty') || aux seen tail
   in
@@ -1229,12 +1258,7 @@ let rec typ_of_type_expr
       ~checkpoint
       ~what:"type variant constructor"
       (List.map cases ~f:fst);
-    let payload_ty payloads =
-      match List.map payloads ~f:convert with
-      | [] -> Unit
-      | [ ty ] -> ty
-      | tys -> Tuple tys
-    in
+    let payload_ty payloads = Variant_payload (List.map payloads ~f:convert) in
     Variant
       (Row
          ( Env.of_list
@@ -1284,7 +1308,7 @@ let rec typ_of_builtin_ty ?(checkpoint = fun () -> ()) (ty : Builtin_spec.ty) : 
   | Builtin_spec.TRef inner -> Ref (convert inner)
   | Builtin_spec.TTuple tys -> Tuple (List.map tys ~f:convert)
   | Builtin_spec.TRecord row -> Record (typ_of_builtin_row ~checkpoint row)
-  | Builtin_spec.TVariant row -> Variant (typ_of_builtin_row ~checkpoint row)
+  | Builtin_spec.TVariant row -> Variant (typ_of_builtin_variant_row ~checkpoint row)
   | Builtin_spec.TFun (params, ret) -> Fun (List.map params ~f:convert, convert ret)
   | Builtin_spec.TMu (binder, body) -> Mu (binder, convert body)
   | Builtin_spec.TRec_var name -> Rec_var name
@@ -1299,6 +1323,18 @@ and typ_of_builtin_row ?(checkpoint = fun () -> ()) (row : Builtin_spec.row) : t
       ( Env.of_list
           (List.map fields ~f:(fun (label, ty) -> label, typ_of_builtin_ty ~checkpoint ty))
       , typ_of_builtin_row ~checkpoint tail )
+
+and typ_of_builtin_variant_row ?(checkpoint = fun () -> ()) row : typ =
+  checkpoint ();
+  match row with
+  | Builtin_spec.TVariant_row_empty -> Empty_row
+  | Builtin_spec.TVariant_row_var name -> Generic (builtin_row_var_name name)
+  | Builtin_spec.TVariant_row_extend (cases, tail) ->
+    Row
+      ( Env.of_list
+          (List.map cases ~f:(fun (tag, arguments) ->
+             tag, Variant_payload (List.map arguments ~f:(typ_of_builtin_ty ~checkpoint))))
+      , typ_of_builtin_variant_row ~checkpoint tail )
 ;;
 
 let init_env_with_surface ?(checkpoint = fun () -> ()) (surface : Builtin_surface.surface)
@@ -1456,7 +1492,7 @@ let restrict_free_vars_to_level ?(checkpoint = fun () -> ()) (max_level : int) (
     | Mu (_binder, body) -> aux seen body
     | Rec_var _ -> ()
     | Ref t | Record t | Variant t | Array t -> aux seen t
-    | Tuple ts -> List.iter ts ~f:(aux seen)
+    | Tuple ts | Variant_payload ts -> List.iter ts ~f:(aux seen)
     | Row (fields, tail) ->
       Env.iter fields ~f:(fun _field ty' -> aux seen ty');
       aux seen tail
@@ -1639,9 +1675,8 @@ and is_closed_record_row ?(checkpoint = fun () -> ()) (row_ty : typ) : bool =
 
 and payload_component_types ?checkpoint (payload_ty : typ) : typ list =
   match resolve_bound_type ?checkpoint payload_ty with
-  | Unit -> []
-  | Tuple ts -> ts
-  | ty -> [ ty ]
+  | Variant_payload ts -> ts
+  | _ -> raise (Type_error "Invalid variant constructor payload type")
 
 and show_missing_variant_case ?checkpoint (tag : string) (payload_ty : typ) : string =
   match payload_component_types ?checkpoint payload_ty with
@@ -1970,12 +2005,7 @@ and infer_pattern (state : infer_state) (env : tenv) (pat : pattern) (expected_t
         env_acc', ty :: tys)
     in
     let sub_tys = List.rev sub_tys_rev in
-    let case_ty =
-      match sub_tys with
-      | [] -> Unit
-      | [ t ] -> t
-      | ts -> Tuple ts
-    in
+    let case_ty = Variant_payload sub_tys in
     let row_var = new_var state state.current_lvl in
     let variant_ty = Variant (Row (Env.singleton tag case_ty, row_var)) in
     unify state expected_ty variant_ty;
@@ -1988,6 +2018,8 @@ and reopen_lambda_param_type (state : infer_state) (ty : typ) : typ =
   | Array elt_ty -> Array (reopen_lambda_param_type state elt_ty)
   | Ref inner_ty -> Ref (reopen_lambda_param_type state inner_ty)
   | Tuple tys -> Tuple (List.map tys ~f:(reopen_lambda_param_type state))
+  | Variant_payload tys ->
+    Variant_payload (List.map tys ~f:(reopen_lambda_param_type state))
   | other -> other
 
 and reopen_lambda_param_if_closed_record (state : infer_state) (ty : typ) : typ =
@@ -2300,12 +2332,7 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
         Unit
       | EVariant (tag, exprs) ->
         let arg_tys = List.map exprs ~f:(fun ex -> infer_expr state env types ex) in
-        let case_ty =
-          match arg_tys with
-          | [] -> Unit
-          | [ t ] -> t
-          | ts -> Tuple ts
-        in
+        let case_ty = Variant_payload arg_tys in
         let row_var = new_var state state.current_lvl in
         Variant (Row (Env.singleton tag case_ty, row_var))
       | EAnnot (rhs, type_expr) ->

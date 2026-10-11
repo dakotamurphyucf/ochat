@@ -863,12 +863,12 @@ module Coverage = struct
     in
     [ make
         "one_off_v1/entrypoint/main"
-        "23c3696f85a3a6c1e947b8e65c12066294eb57f9b7ea5668b23fcd6fe5d46273"
+        "64c4f50a9a1a6fac1ecc64fa075a61d56f9d884fe03e8d6d981094d9794ccc62"
         "runtime.invocations.one-off"
         "eea330b5bdfa66a12fb5ea56fd0fd9e3d819640d7f0e624cd6d755b02c4db11e"
     ; make
         "tool_v1/entrypoint/run"
-        "776c8a90b01720d82560e9ad51ff7d507d904cc82ddae1f46b9f9388658e6a9f"
+        "1edc5c34b159cedda05075fd0fa5abeb2ef464a37e93a57c36e5d11bdc6e4db3"
         "runtime.invocations.standalone"
         "926259b19ca6823e3c988f41e48ed73263f77a2a8a0d68a971153a35e205f78f"
     ; make
@@ -878,7 +878,7 @@ module Coverage = struct
         "3490ac1d20006770a62f5ffcb001a255e438761072b01e3a18e2d1d14d7b8322"
     ; make
         "moderator_v1/entrypoint/on_event"
-        "dae4c9cf7e731d167b4088108fa0dded53478857a436e69163fe4c8215ba5775"
+        "57b6930208431728953597683fbb37e3cbcbfa49ee6e11ab88cabc03f135905e"
         "runtime.invocations.moderator"
         "3490ac1d20006770a62f5ffcb001a255e438761072b01e3a18e2d1d14d7b8322"
     ; make
@@ -888,7 +888,7 @@ module Coverage = struct
         "c98e93260bbb581fab57d13b8b807130290a65bc99fd50df3445693de635f74d"
     ; make
         "delegated_moderator_v1/entrypoint/on_event"
-        "5d25a5033754052c6e715e2dffa44385a922c922c41639eb52c1e9baf235c93e"
+        "144a8646a312ca395b58114a6eb11f3c13a167f5f373db3a78222816e6acbbfd"
         "runtime.invocations.moderator"
         "c98e93260bbb581fab57d13b8b807130290a65bc99fd50df3445693de635f74d"
     ]
@@ -985,7 +985,7 @@ module Coverage = struct
           ; ( "module_export/String.equal"
             , "49277dc0e0bac283fc5a6b6a55103bcd343c49cedc547f74fbdae9ebd473c79a" )
           ; ( "module_export/String.find"
-            , "18b4c30dba9b41bfb7dfbd190e7c42610f588c1f716553515ba7729354f00e85" )
+            , "c76fbe4a457a2ac35d0ffd4c24c1d0ec6a6a79a2d43e17dbe18679f1237b415d" )
           ; ( "module_export/String.is_empty"
             , "ac6ccfc3b741e5138e1914cbd0ad80da21714df80d139cadaa060d98dee459df" )
           ; ( "module_export/String.length"
@@ -1018,7 +1018,7 @@ module Coverage = struct
           ; ( "module_export/String.equal"
             , "44ee63c4d91bdf88341384d9ae7a9bc140c62f29a5cce6a7075a91810bfde6f5" )
           ; ( "module_export/String.find"
-            , "43ce98e62bd5765390a55f412e0ed19a331e66459033c249ae9b524e8146d59f" )
+            , "552cee68d321512e4f7ead0ac5765517367a4670537b91bb30b11a303385640d" )
           ; ( "module_export/String.is_empty"
             , "ab4213fda11ac67241b53039c4b4dea80f84b8c4769376d37c2e3c597337b363" )
           ; ( "module_export/String.length"
@@ -1051,7 +1051,7 @@ module Coverage = struct
           ; ( "module_export/String.equal"
             , "196616f9bcf3cb1831fc7c71db80440b97b26a15127a1ba71a1de6712b8077b8" )
           ; ( "module_export/String.find"
-            , "db04d0437065161403ab0e7cff4b75d5b9060e585ebb32e2bb5456005e4e5a24" )
+            , "d2324b938cd039574fd70a8726e0e9480795129c0e653d9e763e9979cd0522e2" )
           ; ( "module_export/String.is_empty"
             , "191e44b9deb73f79c09eb423d5b2999b0871b8ba9b66604ad0fb5103305d7d27" )
           ; ( "module_export/String.length"
@@ -1084,7 +1084,7 @@ module Coverage = struct
           ; ( "module_export/String.equal"
             , "c5559b9d2acde927bf359894c23bcb0d7d054f5598d248c8611155116668c022" )
           ; ( "module_export/String.find"
-            , "b924f1227208975805401d72a457e554222ecb6d3c63f83ea0ffe7a4ea192d85" )
+            , "6846cfa2e29fc9dade2200c0bd711cedab57f3e1adcf531c6e2a4adf18c3c81c" )
           ; ( "module_export/String.is_empty"
             , "f71a0522a5623c607b3c04eaff069f72bb633b1c61eb4ecabb057730af422cdf" )
           ; ( "module_export/String.length"
@@ -1135,9 +1135,9 @@ module Coverage = struct
           ; ( "module_export/Array.filter"
             , "c7b347e0ec2e10921af69b567f160c7b95644efd28dee1f352327603cf6e3647" )
           ; ( "module_export/Array.find"
-            , "4ba8cc93160f643c6aa4a3d197adb00b821d886871fdb4c9dc6077907e7fee5e" )
+            , "9693422e0175af4b721460e50464f203f75400196af95215ae7fef1872dae8ff" )
           ; ( "module_export/Array.find_map"
-            , "cc9708690b2d190552316b57b6915335832191fb58a2558d47d4215ca30c9f0a" )
+            , "8d193a5ea06babd414309818fba9b0d28b00adb17a7974b3c379706de231ca23" )
           ; ( "module_export/Array.fold"
             , "58bd9ac6be6d4c70f865771adac3a4ef071dae0b23c6a5668f9e838f48d6d981" )
           ; ( "module_export/Array.for_all"
@@ -1184,9 +1184,9 @@ module Coverage = struct
           ; ( "module_export/Array.filter"
             , "6a6fed4d1ec5c63dddfcc82af4d959c0ce30a676bf023d447efa0a3c46836d8f" )
           ; ( "module_export/Array.find"
-            , "5be83cacfa738ac8ab412471243f862be25b65e22eeaa047708ae1c1b16896f6" )
+            , "b534f391fab3e10d497680f2ade281e8f355011c3bee149b862eb0bf6cac273f" )
           ; ( "module_export/Array.find_map"
-            , "70df0066e4ddce1d2339fcbdd601f1e286b5672900032fcf1779dca3737c0ea9" )
+            , "111c88ff469effb8c37779d34bfca5b7d18945c06c424ee56afc9dc10c14ab54" )
           ; ( "module_export/Array.fold"
             , "5cfe8ad969e475b3c2ccfaba712651d4f2904fdb70990e204bb2058a07316605" )
           ; ( "module_export/Array.for_all"
@@ -1233,9 +1233,9 @@ module Coverage = struct
           ; ( "module_export/Array.filter"
             , "4cc3317a7ef26f3b9809129356074e21354fbf4f57548c3f6b02128fb75505ae" )
           ; ( "module_export/Array.find"
-            , "ccd09f629de239eb748d5881cf7aabb17a5d9676d7554e6efca835f42774709d" )
+            , "712c108fe07142efc01235fe3c191be8b0c54530d3196d40f0e3a066a8cc8f0a" )
           ; ( "module_export/Array.find_map"
-            , "31756a051cdb48dc45706665f59d24a2297f7f81003162952b1217bcab1280b9" )
+            , "6193b607583f1e8ad842be9f4a8027add334aad8581ca467eb1ce69c64d1aa20" )
           ; ( "module_export/Array.fold"
             , "e91e6f6ee1a707c30fe4075e04f504ed3222ab07f04b421a6e704d6082ff2aed" )
           ; ( "module_export/Array.for_all"
@@ -1282,9 +1282,9 @@ module Coverage = struct
           ; ( "module_export/Array.filter"
             , "a66e13f2d212434c6ee2e6c0f97b18e1505edf8b508e19762dfe5d680182ed4a" )
           ; ( "module_export/Array.find"
-            , "3ac6675f0a342b1899bf6898811262055cc76f2030731d02d0708c4a57ec30d2" )
+            , "a78ee183453454c4d002955b52bd33b4cf177835638b096fec5cf10e57ba1c44" )
           ; ( "module_export/Array.find_map"
-            , "98b89596322203d3149f3f2308f01009e29b5cad110841fdbd35dd7ca40c7dce" )
+            , "7ae022e5692f64f62777b2e33e313c270f1614934cf285192dd4e9e2121282a5" )
           ; ( "module_export/Array.fold"
             , "2c191ec8e80fb1f88ac8fa59560c59082a206ca748b66f596de9c7e9e27562ee" )
           ; ( "module_export/Array.for_all"
@@ -1337,60 +1337,60 @@ module Coverage = struct
         , [ ( "module/Option"
             , "35625c7916a5431fdcef89a05a6f24dfe4154b12e3076e6a38db17e8dc484b96" )
           ; ( "module_export/Option.get_or"
-            , "0abc06c13404ebd2ddbf702b5232c0db81dd6b2cf70b071a8c52716d2872acae" )
+            , "c250f563b7a2f9bc12e0cf82ca57b1cc77fa0dfa41111f474650b5f8b82414ac" )
           ; ( "module_export/Option.is_none"
-            , "6c6964a6eac1916c7f5d9e6bf94b8477296a9a2f4fcd4891739b13e7f76b9234" )
+            , "6b04fc380bf31bf54108b5f5ac5b2b143cc79a472794d1c6a3b44c82d0a07869" )
           ; ( "module_export/Option.is_some"
-            , "c54300490f4d5e6fd98aefce8d782e37c4ac0d98927dc7b75be5316ebbeab4c7" )
+            , "caa9d8ffa1aa1a119203078ca97b4fcb5bf804e2bf4b2d80125ec3345a3d5665" )
           ; ( "module_export/Option.none"
-            , "d66487403fa7b0c00358e9f6a907cd16c5bbea4dd6c20a78b0a18a399ab2e574" )
+            , "51b2b211332bacda225ab3746395a5a095f4b3b46be5acae3b528e70ce4b8aec" )
           ; ( "module_export/Option.some"
-            , "af6d3e053171d385c9315f96394ad854b84e2d6d5a7c8af8090dcb9a4b2bacfb" )
+            , "2d06dcb286e0900c6c401a1607f94389f2c162ed5295284d6783a92c1ab496b1" )
           ] )
       ; ( "tool_v1"
         , "9163fe3a9d746dc338f1ec9c7e3da25ad49d17158f99d59ec98f16ebfcd90882"
         , [ ( "module/Option"
             , "8139706127f4fb46b6b7d2c8f8951efe78e58e59452de6cf2c5a78e552a489f8" )
           ; ( "module_export/Option.get_or"
-            , "8e11881fb0df7f31a7090fdf89f4bb2eabac437f627695803dadeaebdfb1f257" )
+            , "9c20bee21649c4a569d2d86599d18cf2165b742ea5e8ff5c7bf0c160f1ed2607" )
           ; ( "module_export/Option.is_none"
-            , "208dc46fc81ffe56960800c5973603d8f2273261cd8652974913a3f607753a51" )
+            , "f672252d23f7ef0ace900f2980dcd00379eda6996fb46e1928622b1e9d4c106e" )
           ; ( "module_export/Option.is_some"
-            , "78f0688ad13fc626f451beb98655507315ee224684a4ef3875ef9f8bf3600993" )
+            , "d8fa9d851e3bdb7ca6fced5b8dd2a8075dffa2552cc52d2558a82e3a43566e1a" )
           ; ( "module_export/Option.none"
-            , "e3177d43a8525e9361f64fa810c60a964b56994c15487774686a95e17aa263d7" )
+            , "8ca69d39a0ed409a3a612f4a05f2d14d3aeb5604d391e43af446df1f5b9d4710" )
           ; ( "module_export/Option.some"
-            , "9800ca939bd5dd2a790a94f29faca30ca578942749ce4aebccb8dd671b3a9f28" )
+            , "fdc12fc1fa7767081c1c2eced825aa42f25905ff9415fd9f1183ffa713659fe4" )
           ] )
       ; ( "moderator_v1"
         , "5fbddd445fa773166d9620135c9fb7fcf6ac6bbdcff143411831cce6f8f55b84"
         , [ ( "module/Option"
             , "eed8a04643315785f17a45f6ff41a87b0936217c1205317613c9aefbd8375690" )
           ; ( "module_export/Option.get_or"
-            , "6e0a346b981d05e61420c1d7eb7ebda14f88351ae748408062544d9f59b25146" )
+            , "ae60c603c28bf1760498ea80263f0d7aa32ccedf77d990fc31e5f7a35d9fe757" )
           ; ( "module_export/Option.is_none"
-            , "acb5174812a5e45076da81f79d77c0c0daab34b68f878876db7818e061bb2a2f" )
+            , "3065f59760816b941033459b39c66ea7a21fe6ab23510462fd1ddabc30bbc3ae" )
           ; ( "module_export/Option.is_some"
-            , "aa242496799284da2832b2c29fcc888432c46c60a751ce5810073e5fbc7b256e" )
+            , "f40bd0b7ed039a9bef03cb171230b897a65222895d8aad0d70d910b5d5e79d72" )
           ; ( "module_export/Option.none"
-            , "41281aeee1ac78155785e553c3db78a35ff757cae49c6bbbe36a82745bd3693e" )
+            , "561cddbcb13b387a1b43803f89fab7583f3feb15e7c0dbdea7da0d7df6718097" )
           ; ( "module_export/Option.some"
-            , "38d8c3c4754e9da41c9d4fcecb4deaceedcda41aaa5200d8bcc037cfea004d92" )
+            , "4a95c14987aa4682bb0ac2db2ebe0d80e2264f6091c8de55396d71c9ec750d17" )
           ] )
       ; ( "delegated_moderator_v1"
         , "c60ff99fb45d0ba26ab8854567fb21b271fd4334accb33d1dd1c69cc7bf9379c"
         , [ ( "module/Option"
             , "eb0a6714a9d24b6c7e72a1c0e54a424080e40e700fd464aaa8e8bd672fab7d53" )
           ; ( "module_export/Option.get_or"
-            , "70e7edb127ddeec0c3794f0af81a7e9cb245a33480aacd5033a428723f481301" )
+            , "b31ef258cdd8bc2f320a54cd48f264842a4a7dbbd202d7d30a4fbe44f0109bb2" )
           ; ( "module_export/Option.is_none"
-            , "8941d3d78e609baee63d6c5cd4ae70c7fc1d71c4913d645fe2291f51cdf91258" )
+            , "ec3e9752098d1b7977de8352f37b6fffd78f0f4f3d96933c17ec8aace7232a20" )
           ; ( "module_export/Option.is_some"
-            , "5a01f4d4d605dcad2f0a50e052258e2460230be0b93111cf498f7059f5d88640" )
+            , "49c1691b5027232893bc96f84380c00baa44a5372efae6d41167a0ed944d2d06" )
           ; ( "module_export/Option.none"
-            , "f0ad57be8cc8a8ababddab73cb6dd318661df8f75085dab0df554153d05a90f7" )
+            , "8f2156ab892384645ab21e76db703b9655e45f158fb127858876c3b7809a9aff" )
           ; ( "module_export/Option.some"
-            , "f8d8f7d47d3f0b9abd83683752d373b0ca7bb5388c7bb83dd0235cf1b2523e06" )
+            , "07f7717f967646210831799b73c15b32dc1752cbcadd46200a68390729e065ae" )
           ] )
       ]
       ~f:(fun (surface_id, topic_closure_sha256, contracts) ->
@@ -1413,35 +1413,35 @@ module Coverage = struct
         , [ ( "module/Json"
             , "8276161ec095028a7648fb61044eca879e3255f69d1280b8ad20b13c350235c1" )
           ; ( "module_export/Json.as_array"
-            , "acb9138f4f2dc5fc8c5dd3c00cdddd4d904a36ec35dfa381db73354707983015" )
+            , "bbdb7996f5aed56db44bb15bff469821bb99ce5972a3764c8f42a18b853868ae" )
           ; ( "module_export/Json.as_bool"
-            , "3208189b3d4bff9f57a7a1f3e7074d696c22c482ea5d3aa46b5199bd5709c2f6" )
+            , "e3d64b57755cdb4714f4eebe82766d8ffb0200050857f7dc0bff10cf433e875a" )
           ; ( "module_export/Json.as_number"
-            , "1381277412a3982e3efe0ea48a33dd18af6cd22e81fdcf865fc9fffba51f20e3" )
+            , "d5427796dfabdf0c97682226c6e76ceb0ab51629368a5695f1cbe1c4027b29fc" )
           ; ( "module_export/Json.as_object"
-            , "c9d8866bf84395ffe566cf32835808400d0b428d07dc6a2ceadcd814dc7430e2" )
+            , "5247189707ad12473ac02dbf47085ab475d091c423c4f9a78047e017079297cf" )
           ; ( "module_export/Json.as_string"
-            , "5c011d6c14a946301316cde608eb9bab337973e054eb2073320da5d45e7755cc" )
+            , "d64119406c25277e258baa568a43c7edadc8b679d438c56330f2df8965312058" )
           ; ( "module_export/Json.get_field"
-            , "e9b748cb126e65ed07ad6a12b78f09c5ea1c2d14d28ccbe888cb10a355538b54" )
+            , "8dd2a18718c8ae22254e131ca5a709480e7eec00d4440a1f0f845354c15b9f73" )
           ; ( "module_export/Json.get_path"
-            , "8809f1b560a810f2640c6d6a46f21777514499754bedb50fedc09d7e78ff35c0" )
+            , "af6e7d8c42e5633b3e0e8d82e278bb0378ecad5d1be5ecd1c65e443d2a57ff5c" )
           ; ( "module_export/Json.object_keys"
-            , "641eb85495b4bd5c0822528732873edc8fbf282fb0d7e54e16f24cb1343b2e9a" )
+            , "b59f939da470d0d3c5e8a3c597485a92943cd5b661359ec392f5496681957d50" )
           ; ( "module_export/Json.parse"
-            , "898d914d7003ada6aa1a598ce9d1ef88fd6d078d26dbc9ed52d99b3081e9e0d2" )
+            , "8f836cd53e5d62617c3b09491bead196d9a68572e09924d04eb9b6cf60772a3b" )
           ; ( "module_export/Json.parse_opt"
-            , "db919ef6abcdb7a1a8b020477dafc7ec164911080b41dffd883e25f096bdfaa1" )
+            , "66e5331a69948fb1e8514f9f717ffe79fe0279d2e8287e40ec7782ee30429541" )
           ; ( "module_export/Json.pretty"
-            , "fec1ce2eda4b84f520fd5c57819128aa9ccf1e2fe1b0655e30bf5ea0e9c7b50f" )
+            , "8e4554faabaf2f366e1673267f2543d87724d4f873e7a8793ddca4088459bdda" )
           ; ( "module_export/Json.remove_field"
-            , "fc66ef9a047a92c9d94425cce2a76a4e93e5ef0db9307e2588fea0c96d109756" )
+            , "a55c2b6a8f4035396665ac167199ba5388c50dab727e3f3987512f52416acb76" )
           ; ( "module_export/Json.set_field"
-            , "9a41b05c4f1e6f1b76479adb4e8cfbe7f0dbd611f9e201dbcd85e42146070f56" )
+            , "0be68e86dfb83917a8bee22f217dbdf13d7a124f47bd777c7621fc4ec6023236" )
           ; ( "module_export/Json.stringify"
-            , "df1e0c7734299ebee37ebf1e0f0a23302c1aed33684c1777eb2d15f7fd395bf9" )
+            , "2de22a1a614f08f6248fd5943ff41a8ecb129f3302b9272533b74b9edd1b5e99" )
           ; ( "module_export/Json.tag"
-            , "da5713de082beb3f4e662ddab1978aeebdfb32828c7e050c05ff7192d3f81064" )
+            , "5048e3b84cc7c85ec099deb3663d16b77d827a1aa9e853035c7b87e0eeda66eb" )
           ; ( "module_export/Json.validate"
             , "775f180b4c48e9955bb980993420ca28ba4a832139e5905eb31edb35b940369b" )
           ] )
@@ -1450,35 +1450,35 @@ module Coverage = struct
         , [ ( "module/Json"
             , "f594a3d6bedb39aa513044c62ffa6eccab150fdc787b030a370c47b61b9038d0" )
           ; ( "module_export/Json.as_array"
-            , "830c7e8ebafd97b25569d1f141574b2eead88a05ee66a93b3db4996859920242" )
+            , "297c045f0281978de474232b69bf7465db7c792318944cb932d39632e4968998" )
           ; ( "module_export/Json.as_bool"
-            , "3b49f28d7d9c3bcd733dfdc055484905e9caca96d63e8f382eb2cef967f630ef" )
+            , "0322593f8aa1d13b9818072f4707882da0b5c477b3bd0d6dde7f2da125a75233" )
           ; ( "module_export/Json.as_number"
-            , "a814ede555a4997f60a026ce5596195343e26cca881f943806eb4b00322a6d21" )
+            , "d6caf59af33c1ab9b2b364929f32acfbda5a07252d25fec697206cf2950ed64d" )
           ; ( "module_export/Json.as_object"
-            , "7adc77634396be5e26b235891bdf2c01b5bacf3970092bb45522972260276daa" )
+            , "67e29e5dd5938aa365008d88825d1add1897ea0dc3fb2d855239d0beadb3d506" )
           ; ( "module_export/Json.as_string"
-            , "737615f66ab5debaaca79eadd065882a689cdbcfafa92755c94990d9cb2a478d" )
+            , "ad301b73001564b9fbd16c92e6dedd164ab2986104e89ecf75851de36fcf1f0d" )
           ; ( "module_export/Json.get_field"
-            , "db8c8826c1f21fee9289d6379ac0c0adc2ee6de10d74e53f882e63ecd8944903" )
+            , "8a0f10388e5e1cfc91210117fe95f3926d04bc2cc7abdd7cdeebe38ee155fb70" )
           ; ( "module_export/Json.get_path"
-            , "7a602e410751fec4d10b27bf4d0a66ef31ccca1d3a23bc57e1ad038a0122c9ee" )
+            , "8c19da2d8d9b6df93169809b27ac29aaed6a0c064b93c216c4515231cdb281a5" )
           ; ( "module_export/Json.object_keys"
-            , "ae36feba847f9845d7bc62fa439655799e0434484b3ac6df9ec518bf0aef5f16" )
+            , "00325c0381606fccef9235a80fdbd433135b00b447ae509c1cdf4bafe085317e" )
           ; ( "module_export/Json.parse"
-            , "57dfd9bfcfca70689c47c0b40f6c00b86e5ec8188ab0bea5d4398a2b313182b5" )
+            , "fb2412b4113f5fccd41b213adeea235c36614ffc968ab9883dade033809e168a" )
           ; ( "module_export/Json.parse_opt"
-            , "cb910f7cba2f2c63f6642a3d67d04a99c186073d95db9f2ed543e79b22d2e418" )
+            , "24ee488c8de7f1ccfc7e11476ed0de8a297642393286c900a0a29e5b3223c036" )
           ; ( "module_export/Json.pretty"
-            , "76de2cf6b7b3fe7339f73d38a9503abf240d023cdcc07b588d228ddff281b10b" )
+            , "3a8489bd8d3238b28eb32f506e3c0a63911688b2783a52da96fbafd1e7fee588" )
           ; ( "module_export/Json.remove_field"
-            , "85ddff4f6bfc4ecf10aff9566f0043be81643bea45107974db24a53718da772b" )
+            , "4e9ca8153aaca94722ec4143b1e3b9ee7163b56bea289846f5ec68d066a91b7d" )
           ; ( "module_export/Json.set_field"
-            , "c88620a3e775c91577133be0a1048c84f15aac477c40f591963b22e512566a59" )
+            , "f64878aee175873af14020e5e412876dfdf191373f82504a23b2d1f9ee6dabe5" )
           ; ( "module_export/Json.stringify"
-            , "0921a4e77f524bc421206f66c0e7693a3d3b71972a6b80a1bf1530bbe8ba7a46" )
+            , "352ed21c255e1e5942e435f56e4bc861600392295eef1ac6b13a123855b036d0" )
           ; ( "module_export/Json.tag"
-            , "768c6d0bacbfee179befcc8f01cb2d15e5c0c74b8f370416a988d11745d4e77d" )
+            , "32f3eda894a10e4ad5cbd7c30dccfa0cb60c971a3235a6e497cbf53463b7d7fa" )
           ; ( "module_export/Json.validate"
             , "91a455c705c41b4b046e84ad03f0125533c4872d94745e1f0a67c9e334eeaf3d" )
           ] )
@@ -1487,35 +1487,35 @@ module Coverage = struct
         , [ ( "module/Json"
             , "5693ccaf8653d32a31d1f478d215fbb447bac00435cfc10c3df8caee1ad85670" )
           ; ( "module_export/Json.as_array"
-            , "7d54f626a3438ca3c1a1ed4591337a4f1d63cb73b5c64aaa1850af9d5ccbc4be" )
+            , "5340743c970edc2f7e218817fa0e55f454a8546f90de8461383ae507a678a7e6" )
           ; ( "module_export/Json.as_bool"
-            , "00f8f1f23c8257eb3818363e963c23aa8cf3c95addcb1c4fbc3072c100f0fb95" )
+            , "106d6ef531886dd487c4364a81c16824292abd38b93a37362e7be3cb7d9ad818" )
           ; ( "module_export/Json.as_number"
-            , "1fb240ff3ab1f7f1d2fddd09df5db3e5c3356c4f086e072c3e646774ea70baca" )
+            , "56a4814f47e6030be7283bdbe0a3fd5c324b78c89905bde88a9898284c9939b5" )
           ; ( "module_export/Json.as_object"
-            , "b729e45268bed9e64755ba351d4d5e5ed0f4a62a4fdd161925564325ce169297" )
+            , "25d5a0681db995e3a99fe354df2f4ca0d9c60c41948b0caddeb3fe7ae97ce21c" )
           ; ( "module_export/Json.as_string"
-            , "3dca1502dc3c13f11d72a1000480e8ea384033bce523d8454fd0cd1ed8d5a5d1" )
+            , "2525f1f00da31e4452cbc588095d3e755d35a64e676e38cbcb7085bfb393c1b1" )
           ; ( "module_export/Json.get_field"
-            , "a2f3801a42a6b3f0216bf62ef2b5d39e29e62550adb2d4c8c57fe852f2bceb03" )
+            , "e2333be53f02a57b0bc5990b6108d56b8b9ed01a251b0be8ae34e7acdbdd233f" )
           ; ( "module_export/Json.get_path"
-            , "d0007da2ca77a56c3e8eb8055b8b05348595c59649d0993e0293285a47dd9e58" )
+            , "66214780233dbd617a50eb45ceaba74cd641f55ae6e66155b183e1add73c53c9" )
           ; ( "module_export/Json.object_keys"
-            , "887eb0c300397770278e55ca49f5d63acbbbabb5fca0a23a364e438a54a5aa9b" )
+            , "89792a481321c86522a2db0211dc4b2a05f54f75dc10389f883e71314583ca84" )
           ; ( "module_export/Json.parse"
-            , "7ee8770e07837980813c83d1b773ff71b1ec75da3b7b2389f1b6558a2c54473e" )
+            , "26f918a33e82e7c4e0d90547e68e7cfdf2c4221f5c08d90f0e9aaf02325e5195" )
           ; ( "module_export/Json.parse_opt"
-            , "10bfa1639e0dcaff9044e687c3eb90dbf8a096e449a80fc61bb8d1d41acf5d5e" )
+            , "134a47c74ab0f4e0697477eee39c01afdd985ce4e9158a016f84c4aa1356f788" )
           ; ( "module_export/Json.pretty"
-            , "9632e92997d6d4aee55fe3672142f0dd9d02e4b946a095aa59f1b6e22c962ee2" )
+            , "36f442baf3fe981e57b88b62f262d3ce863750c86d88d291432af9b691fac27c" )
           ; ( "module_export/Json.remove_field"
-            , "f6f1daf56b819ece76d7d33bf0200ca16d7c148bb874e577700056d8c34bb550" )
+            , "bc77a1a835c95b8d4fca410cf1912d32b67242e27da21fb4c068104a0ffca37b" )
           ; ( "module_export/Json.set_field"
-            , "3c81042fb9219af0e0c81753a826af0604410f4b22a5ce3e2b933a9b1695b29b" )
+            , "cb482fd45f051fc1c8503a7e62ff10e4a03f70c0dcd47418404196542091ce1d" )
           ; ( "module_export/Json.stringify"
-            , "9057f43bc5984c237b2433e09c1d93f5fb3e194dd9ddc87225a67a91e95780a5" )
+            , "e1f74c16ff77bd7588d35ee464ad88bec35cfee29d62d041f227324910828ea4" )
           ; ( "module_export/Json.tag"
-            , "83724c4fc80b6d37e34840e955b2e38d366b7ec518168f264a99815705b3de79" )
+            , "5db006b6182b67a574ab065f3fb1361fd1be762361852c202bbcb064f7289f30" )
           ; ( "module_export/Json.validate"
             , "fd94d4e57a65a4381f7c6c87a98cc99f5b1c080b4eea5f9a6f20da11bd20b988" )
           ] )
@@ -1524,35 +1524,35 @@ module Coverage = struct
         , [ ( "module/Json"
             , "dd36cafbd30b3b4396d4d7b02394ed09a988f3d818cf4626c2fe7da26cefc457" )
           ; ( "module_export/Json.as_array"
-            , "9ed75c04bf045f0b7035bfe3217d111e4f40c5ce5b93ee6b5b603b51577fa715" )
+            , "93dd88523493b7eb9f075a194c003d241f971b429b27a7617a0d6f62eec26d34" )
           ; ( "module_export/Json.as_bool"
-            , "721442474c0056df4e531b19bcbe328199510bf28d238cf35e9f9c63b607c3d4" )
+            , "039954974748ba8bc987b0e1cf07319445b58d966f75fd081e36687e477d3ef8" )
           ; ( "module_export/Json.as_number"
-            , "215760d1a53014b0fdb630f7b5032ed6b5b87354c3da0bc038c07d427a4c151b" )
+            , "169c4a446d6081401c10c904db2b83044401e42f819c284ab697e0e8e7add168" )
           ; ( "module_export/Json.as_object"
-            , "bb28b2c70ef3b93c59375e83bc7736564d8c7a8802b94d64a79c158c0c131fa0" )
+            , "b57cc88d9db0c37eff3a65e016cc24225bb0e5836159b82c14805a9ba7d71217" )
           ; ( "module_export/Json.as_string"
-            , "f65d73eb603fe23c074b8631df302e9b811e7f87ad2a9444a0e707c7dd1e0729" )
+            , "6a621caf154c8ea6babf2df96b198b22af428c933de8600abd061e656f63b91e" )
           ; ( "module_export/Json.get_field"
-            , "d88f230597506ceebf2feb35052d46e0804dcce4fa86f7c471ccd4c5590171ad" )
+            , "7a7b2d2efb8d3bf221c976e7016c205a4878e9bcdf447a349e39d2e969f64c4b" )
           ; ( "module_export/Json.get_path"
-            , "9e6f69a7597e5576f814f1d36c730cd0ab16d0d584547c2fe29d8a95eff9a4a7" )
+            , "eabd489d4e7145726b62b4707d1f7fff5078a66a33b98b9917846993af572663" )
           ; ( "module_export/Json.object_keys"
-            , "768abce10c876981ade1c5048eec781e077b494e3afd6d0d2c0bea465bafac65" )
+            , "64bdeeb3aee4a87176d1bec55b33d032ad6a3c6cacc687d233c7687453b9bb8c" )
           ; ( "module_export/Json.parse"
-            , "2473b066ffce99284e2e2093a1a136eb3e21033ae747b6a0e1bd0e894d46d0a8" )
+            , "9413edab5575b80f0021b9937708ce3739fe7646a921008b122960a60ce6633d" )
           ; ( "module_export/Json.parse_opt"
-            , "a720b67a46adfacb2c0cdd5f5fa9a1a138068817edc429275c69937464bcbc43" )
+            , "84188ca33edee557fd8f1c9190f93ca587c90a34877e64550155a8948f5ca08d" )
           ; ( "module_export/Json.pretty"
-            , "f9809da3480ca335a7f538380b96490eeb52f8b2c88d4dbd534a040a0381cc10" )
+            , "af50d68b217c0f2feec6eb014c2952568d8f6c6692c5a36957ccabfaf66275b3" )
           ; ( "module_export/Json.remove_field"
-            , "c1afdc54a714014c005c208cd5d069ae6e2d9d56acfb912d75ed2ba3f9ea1cb1" )
+            , "e40fa6d13f1adfdf229da5b8b981f5cb3ea207469cb05f957b6d655ba8f001bd" )
           ; ( "module_export/Json.set_field"
-            , "b2d59b8987a476a5b496d9f9e7dfed9c70bfd0134f2113ea7f5ab241e787bd82" )
+            , "8dedbdd5eb34731489c35f52934b9f21199b8b432b4eecef0eb6afd5bb7dd56a" )
           ; ( "module_export/Json.stringify"
-            , "f9d390aeffd1c5b15ee318a642abd5cca184da0cb616a575d2e6739852e48e4d" )
+            , "4e4904f65104484986b808d3c6b3814b9be156438b827944fac9ddaadaa14c66" )
           ; ( "module_export/Json.tag"
-            , "085c7596379a6ad0087d35dac11a3ef1831ebfbd2eb3c2cdfc4a70e466a39bf0" )
+            , "62d8321fc6756d8ba1c0edd69e2f348fe96c04469093d9e6e3114bfa62f6213c" )
           ; ( "module_export/Json.validate"
             , "ceda17f4f76502ab6e64c33d8b307fae18a055da08ed5d3287c4d0e750ea8f11" )
           ] )
@@ -1580,7 +1580,7 @@ module Coverage = struct
           ; ( "module_export/Hashtbl.create"
             , "1213527868f4fe7ebdda853ed034372dd4179fd3e2036ffeafe34145d0af4152" )
           ; ( "module_export/Hashtbl.get"
-            , "820c0a1f61afe2d5558912cd693817af4eac2956f491f3fd557107d1855eff70" )
+            , "57d751e2d23d73f24373a98bc846932cdbb343e1c5d7f685d6365f8410c7dcce" )
           ; ( "module_export/Hashtbl.mem"
             , "776c3ae80fddf50e10db2835e2b8ee84a1b5e8869f0d061b1e3a1e72fdfa5917" )
           ; ( "module_export/Hashtbl.remove"
@@ -1595,7 +1595,7 @@ module Coverage = struct
           ; ( "module_export/Hashtbl.create"
             , "a4d73c58e8d5fbb11a8d152fd6ced4a181342cbeec5977f4e4e8338431660fa8" )
           ; ( "module_export/Hashtbl.get"
-            , "7bfa8adb4df12a16710b29dd6e433ea03cbc3ce3a002c70e598d635192c9c6dc" )
+            , "3bb74810bda0ad1ef03e4ac7d8571d34e16b56b57ee71d5507e666babb12b1f5" )
           ; ( "module_export/Hashtbl.mem"
             , "287de86a7494590e25cb3d3ea473fc0012fa6996518b6cd074324970f7f1fc10" )
           ; ( "module_export/Hashtbl.remove"
@@ -1610,7 +1610,7 @@ module Coverage = struct
           ; ( "module_export/Hashtbl.create"
             , "4918800b94fe6812967df0847b9efe2ba2bb69c94f4a056e9fb5094da3f8ac07" )
           ; ( "module_export/Hashtbl.get"
-            , "5a833eb3c9fc49af48d9ddd801ed6cd1f1c78aab993f4541734e50c942312349" )
+            , "443ea43fff13312dfffd9a176cc3f3b43c663ea6aa1927b0028ab90af5e2bb13" )
           ; ( "module_export/Hashtbl.mem"
             , "2783288d3fa1e31f7a884deefadd4559ab223e6edd1fb087a08d7150fc674f0f" )
           ; ( "module_export/Hashtbl.remove"
@@ -1625,7 +1625,7 @@ module Coverage = struct
           ; ( "module_export/Hashtbl.create"
             , "b8ccd94c7f31132b76d8aad33fadf709b3214bf7eeb5b83285d3c96fa56f0259" )
           ; ( "module_export/Hashtbl.get"
-            , "112dbe3d725b1b8c525bf7d2f9457e7c73ff6fa83d0afde70b6972eed68ce2ee" )
+            , "aec1d32e69c3b119aef5d44d7e03beb84cbf10fde367e0d0964c73e487f9201e" )
           ; ( "module_export/Hashtbl.mem"
             , "0334be1e766167ca50ac23386019a7199d4104b920eee4a2b3fb709d8e38a177" )
           ; ( "module_export/Hashtbl.remove"
@@ -1670,7 +1670,7 @@ module Coverage = struct
           ; ( "global/to_string"
             , "4edf84ecbeeb1233ed58c0c79bc6456e841d5a060fa8b56880b47de2f177909c" )
           ; ( "global/variant_tag"
-            , "8531aaf9c5bb13b869bf64a5a6e1e6fc765ce939f286963144ff94bdc2017858" )
+            , "8bb9905e0682879b2c43d2493d37acf23bcbb47fedbf23fdbac2e398d17fa5c1" )
           ] )
       ; ( "tool_v1"
         , "4cca3adbafd0b2345a4c87fa44fa58da2fda6fabb28a3223f0a0016181d8bf84"
@@ -1693,7 +1693,7 @@ module Coverage = struct
           ; ( "global/to_string"
             , "d168492b867408fd316135febc077c75d6a27322f051eab516a85cf60919ab33" )
           ; ( "global/variant_tag"
-            , "97c0ae9a490897032699bc49604a53667792ab832e52fa28595fbd62b865515f" )
+            , "33d50d056896bd02e4ef0957ee23b80d555e9ad8a211743e228b322236995205" )
           ] )
       ; ( "moderator_v1"
         , "127121e4099cbdc390f1758f98875414c62c46839319720ea239833d44146168"
@@ -1718,7 +1718,7 @@ module Coverage = struct
           ; ( "global/to_string"
             , "f8c225211e90e3e883f1741f4734930ae23fc096c8ef823c4cce086d9d5392bc" )
           ; ( "global/variant_tag"
-            , "56997194476c168676fbe8bf5a1a471f170beb71dfb13583aa64191f86d4056f" )
+            , "205ff716c378f45f26e61da51d375cf6a42e283fd6d257e8955ffbb887b4de2c" )
           ] )
       ; ( "delegated_moderator_v1"
         , "731c7ed94765e6ec530eff320d95d4d490fd88d5ffad976a75bd54301afde16b"
@@ -1741,7 +1741,7 @@ module Coverage = struct
           ; ( "global/to_string"
             , "20d56853e18b107288211b460fa40f234924a9045a27d49abafe27f563860247" )
           ; ( "global/variant_tag"
-            , "2b376c415c701069e6333dee9de5de2f93f141fef408f6b8f9d2ea32866aafd5" )
+            , "5659d2a7b042a359404c0c61f5f5dda2bb58bf9a86f7f53f842f21dd263e5535" )
           ] )
       ]
       ~f:(fun (surface_id, topic_closure_sha256, contracts) ->
@@ -1764,22 +1764,22 @@ module Coverage = struct
       [ ( "one_off_v1"
         , "4a976060eb6ae6a23fba932336c0dd428e807e8b15515111831e4fd938f06ead"
         , [ ( "type_alias/json"
-            , "de373e490c4ffee533ebbe5ca820e68a85731092a8fbf19a7205108d6ab26a0e" )
+            , "fbc8c5ee393ba0b6d964f6bb75511c62695879973a5d79d05b827a287ac68ae1" )
           ] )
       ; ( "tool_v1"
         , "956722cbdf85e6e4cb18963d1781341afb2a381cf5b96ebf366db0f8d5755ad7"
         , [ ( "type_alias/json"
-            , "fc0bb666163b3ce1934c8ac08c558fb9eaa90c41f08407271b55b76b7c8c226f" )
+            , "8d3754a6b4fc2796d8af78faca9d3b61cd4fadf5b8a35b04dca4cdeb3ab8831f" )
           ] )
       ; ( "moderator_v1"
         , "22e825b5f5c99e7cdeb7843ce3717979b98c55ad6239278d608deff4047ec6d3"
         , [ ( "type_alias/json"
-            , "5b5af3a1b53bbccfdfc3ffc34996a6c0e061f45809b1689b0a29fc24a138755a" )
+            , "dd4fec9f78fc2918d9bda1eb49d75eeba661fde32476899e80fc25fcc1307a48" )
           ] )
       ; ( "delegated_moderator_v1"
         , "dd02b454b31316ded12a324c4ac8fdd6f19fc929eafcd2e26fb8ee047b8dd439"
         , [ ( "type_alias/json"
-            , "701bb077522f52d7894c6560b985a967f478a0f343e55f704186a1f32224295f" )
+            , "0f369802e412e80f3683ec684b0d9d5f891b735b17c1ca6b0a9dec6cf5dea435" )
           ] )
       ]
       ~f:(fun (surface_id, topic_closure_sha256, contracts) ->
@@ -1803,182 +1803,182 @@ module Coverage = struct
         , [ ( "module/Item"
             , "30a1aec7224048beb927ac1cff733daaaebb03fc4144e90f3ec7319bb0694158" )
           ; ( "module_export/Item.assistant_text"
-            , "cf578bc994928f4348b8e067b2461572d66e1604ff461e6e37182c5a58244d94" )
+            , "606d8abe1340a93749bb1bb99838a68926efb3531783e86665f80d983e51d987" )
           ; ( "module_export/Item.create"
-            , "704fda1c71dcb740a91d2fd943aa750353bad90d9c194bacc0726d1778253e15" )
+            , "a3b0da852487f8382776590c3251b5d374aa044a4892971ac0e20f6eab7d629c" )
           ; ( "module_export/Item.id"
-            , "532ddc88cfd83472978223b9ade524e79f44fbd2249260d69b2d8ac993fafea4" )
+            , "f85eda0b8ee5a3409b74469558ce30ec03e2898d0515a7b9d6280e6ad587b718" )
           ; ( "module_export/Item.input_text_message"
-            , "a4bdfb3ddaf6407d4be3e41b07abe5058bc61da6ed66865294634573d52fcafe" )
+            , "8bed7b21b5fd2bc728bd0cf7106c54abeeef5000f2900d6843445a69bd96f4d1" )
           ; ( "module_export/Item.is_assistant"
-            , "4e346c0d7de146e1ba9027acc449fedd19f7a4188e87c5df476de4a9afceb52c" )
+            , "2246c8ca733b0647d0ed66279e91ac12643a6ed885517529c006af5573db9646" )
           ; ( "module_export/Item.is_system"
-            , "9e103c00e4484437419546317daf16d06201c9a86fd13175c1677bf17fafa09c" )
+            , "60fba7eefec4bae1d219f9bd7559ba2a1763d4f48f8d483f1fada3feb77ebbd0" )
           ; ( "module_export/Item.is_tool_call"
-            , "15aa85c8320799fc6c30852b5c56d382d02e4dd790eff040f53f27400133d0e1" )
+            , "4538ef56c1a8ca487e60b527ea5a20e26108e4710b1d603939a547b51dd146ba" )
           ; ( "module_export/Item.is_tool_result"
-            , "1bcad8669f63f03eb08873a94c1f33a698d8efa692496d36044bcdec9627749c" )
+            , "d2c67cb0e41fd88e7b7fad186cb84723ac9c40f9fbc8f2c887579cd7e770cf40" )
           ; ( "module_export/Item.is_user"
-            , "5b5e494465dbcad2a191cd62f796161ae47fe6fa2cefd9d93a71d99352956da6" )
+            , "ad513f35957ddb16ef9e20dfe01125ff14a213a5a8e355f3461afcf7d130b9db" )
           ; ( "module_export/Item.kind"
-            , "767450723e3f4a1268f02be829af3cd499189702e31f516c829a36b4e297fd02" )
+            , "a1955812d65fb8002bda7e71a960e5bd22dc44ba43ec1dc77e9efb0dfe7a4315" )
           ; ( "module_export/Item.notice"
-            , "bb0ad752aeef9745666d7b664c6dd8cfcc161af3f90f266b3c5614e22ce1a694" )
+            , "5a79f951d6ec7fd7bb733a2d731b7ef4bb1f99978178245590d1e10c4d0721d4" )
           ; ( "module_export/Item.output_text_message"
-            , "10d40acab895a4e2070bf59a793d5c03a54391f48de1cb79e0e19c6d45167dd5" )
+            , "52875b810391538f3704a00f1c581442acff53316f2b379d4ce65b2e7c9a6ab4" )
           ; ( "module_export/Item.role"
-            , "4a2fe4c1f6a687303dc9ccfc96685e33901eae729651b9c225238db52d6c65e8" )
+            , "f9a2ad0071f300e24d8242e3987b8489b13245a7682a45a4972df1a34d179f46" )
           ; ( "module_export/Item.system_text"
-            , "cf8f7f4c56dfb94c0c5349a378b03068076acadbdf70ee15e0d6e98a3c80c6a9" )
+            , "e3ecb26f34a7edff9e95466abc57041b859051aab8c1ca4f72f1987c7d6e6f36" )
           ; ( "module_export/Item.text"
-            , "e4253815a8748b57f8a188950d988c76bf4ffdd584e77e88772b0ff4a605aba2" )
+            , "86f85d116ee95c633718401715a12b56125237fc1b1c4a706ddd88e82ca2b181" )
           ; ( "module_export/Item.text_parts"
-            , "b878659118156cdb333bbf655ae91f5d08cca8016b6bfa593fcdc1dd83705ee6" )
+            , "b006cc48ef484b0d22903c150eb67d0828a29c028010b3525b6814792bb59afb" )
           ; ( "module_export/Item.user_text"
-            , "45e6ceae4da7869937c2243b7ee26ad8629f35f1cb4b0d7289294fadf5a1af7b" )
+            , "cebec29ebf110fe3c993bc1a26a8f53463e6ced14f20125c34bff53127584a56" )
           ; ( "module_export/Item.value"
-            , "9cabc262c61b9ba48e9bd55ace070fd562726681337d0bd825eb18cc716e299f" )
+            , "f902426fc28dfcde7ef7e850494242a00a2b5f71a1562d94633ed2ef519c9631" )
           ; ( "module/Context"
             , "043cc243406f1aa4741526787e90f317d226bd14b92760e36ef8a9ba3eef2744" )
           ; ( "module_export/Context.find_item"
-            , "a8d0272c2226938cc40ae557c20aadd116b9666b66e553ceca85ae17d64871f3" )
+            , "5bc39261b85eb319a7e1750a59f6c044307144764df6c216c72f5baa64f5494c" )
           ; ( "module_export/Context.find_tool"
-            , "d7ffe66f65805602fa631ac544bd36f9b26aded3eeb01f7afe207edbeaaab2b2" )
+            , "a18488bf686c664376d72dade6f14eaea69bfc74aea78183ffbac2c4937b9c7a" )
           ; ( "module_export/Context.has_tool"
-            , "02ae43507446afe8943d42b9d802cac242b47dd7a917dcb9f968a1a7ae0df3cb" )
+            , "9f851e5aa974a481a4623e32b41a81b2c8d4683b409cc8227448d3e6aa560730" )
           ; ( "module_export/Context.items_by_role"
-            , "198343498107c7fa8437f13f274843de60f4f59bed49105bcc37007fa807e6f8" )
+            , "328e511650f8080cb05ad922e3547e101c2f72715507e86009778964a5f214c1" )
           ; ( "module_export/Context.items_since_last_assistant_turn"
-            , "58c9a361b0a161c425889c729cd8259b5183ba1950ae146c4ceae8a3c46a3e28" )
+            , "1c5a577ea86a2ab25edf747e36a0feccb549d4085614181f7f74154aece655ec" )
           ; ( "module_export/Context.items_since_last_user_turn"
-            , "d7b087b72cfd1824dfc8c86e0a9f118e42458ddc9f2d5de408acb7ba0c9ece18" )
+            , "a69f978e88514bee87e51338f1cd72ce82fc6f1a6d34fed2ea5eac1a3cbd1541" )
           ; ( "module_export/Context.last_assistant_item"
-            , "7e56934cf1ce82cda82ee1af9b4981d910338cb8547067bb658d3765500c08ad" )
+            , "9effe34ce9e301b1197d880f4749d95c593f0f4a9527a6c95ba461a8d0abe580" )
           ; ( "module_export/Context.last_item"
-            , "6e04c6d34aa9ffe8a2d47f9ef45ac86d80d803cdf990e433c625cfc0700facf2" )
+            , "6b940803c645d1038577ef468e47f7d89ec3d6a449a633e51ea7c37b74dc8ab8" )
           ; ( "module_export/Context.last_system_item"
-            , "7e60d76843cc05b63ca6ca2ac8b2d520ee7da5b68e0275093305869bdc5987e4" )
+            , "180fea4cb024fa7e6e9601767159d9a793c4d2a8c433457c76c3671d97ffd27f" )
           ; ( "module_export/Context.last_tool_call"
-            , "dcefc73376380fbb4202917913a8d7cff86d1f298b78175c0547f562fb82751f" )
+            , "6fabb5fdc99fb9dcebdf194253096ec52daf5c7e55f00fc757c4838615765e61" )
           ; ( "module_export/Context.last_tool_result"
-            , "efe92cf875383db48ade2f6ab8b41f825a29695ab36d52e32834add52ddca11f" )
+            , "53754a3622ee8cb4ef50c612051358bf1769aacef5bd5eb720797acd01583e3f" )
           ; ( "module_export/Context.last_user_item"
-            , "505edd3235a262b04e00cc926747b1579f117dcdc39fa5c2541506f21f74c7f7" )
+            , "8a9c0c8f674e9ba1428effb8678dc7811fd1659a08884c0c3f0985a0c2ea9c44" )
           ; ( "module/Tool_call"
             , "111edba6b295387104b0daccf838d3bc4a1bc1d28a33ed408f9e3602bb848389" )
           ; ( "module_export/Tool_call.arg"
-            , "ff23aaf75ece3686c3f4c561eb14044cc3b6ef59c380ded64866d5027d0f86c5" )
+            , "55edc67651c4aabb3c08b288deb96b9331157b5f4ed95f95271e10f276627d8d" )
           ; ( "module_export/Tool_call.arg_array"
-            , "1137b0615c993dfe16891439d506ccc5196b8ce288905d1162548a648acb4bc7" )
+            , "ca866932216d38b027e5eeb97a5e4c10da20f81509cfaaf154d40e51edb25638" )
           ; ( "module_export/Tool_call.arg_bool"
-            , "93a8a9a3d182c14d76e892c747abb903e486cf3a74331b298288032b54dced08" )
+            , "309cffbadf52a7aec710e60a7fbf2737808b22e2cf75278d7b37dc81c5c0d8ae" )
           ; ( "module_export/Tool_call.arg_string"
-            , "cebfd4d7276c5193e6fcdaadc2eb483875eeedfb6caf370fd92c2ac2a7ff4b96" )
+            , "c6efdde9a6f7dc9494ca0a3bd66702990220c1389566ba12ae1fe236a6ac820f" )
           ; ( "module_export/Tool_call.is_named"
-            , "4616ee49bf74e25bbbc5c5659d966ba87ddca0ada28e7d7cce71a5762dbd6872" )
+            , "d9e83d3884dffac6fa679e811affc81a186052424f1b0a9246a71d516dd7edec" )
           ; ( "module_export/Tool_call.is_one_of"
-            , "9a9959bf2f20bb67ce8601f8d6e7093bdb8b1caccf7075984bac6698b68ddcc7" )
+            , "807112ecbfb365162ce8529bb73f55ddc52f0c1b593aa57a8aabd55a5299cf59" )
           ; ( "type_alias/item"
-            , "beef73d64b592da99811f34b299e75303d8c12e97cfb40431abde2b0f9a33c03" )
+            , "779c45cff30af282cadf210f3cb5ca22dd3d74746790166b2126aa3e8867f987" )
           ; ( "type_alias/tool_desc"
-            , "cd826999c2542ae21c78dcb2940d332aed76840cc9a5f0c65a38b7c5852bb022" )
+            , "20d180b4abfc6867ecd98501438c37a319d759080fce6ddd8c8c2c72678a2b22" )
           ; ( "type_alias/tool_call"
-            , "09a1aa6f00a9112f05fb6464a6afd6a61a40044997e6a2250273d03e7acbdb66" )
+            , "1884b099cde804fb7506d277b48e327fa6f0ae4c35cb7850697cee91f7b719ca" )
           ; ( "type_alias/tool_result"
-            , "734a1df5a6e56c584f3f4daba9ffbdf3411e38a5d2ec196745a423968e585bad" )
+            , "2411fbab2de06d52f0feebf84fce8da9acdc81ff5453514f5819d38e64cbac1d" )
           ; ( "type_alias/context"
-            , "a7b9f78044d68da69b89b360bcf237eda4850f54c188c113720e779b1fbfa678" )
+            , "ae2e3abe05eb8ef3dc578d255620b17b914e44e8dfcd2da6227e453b870e41a3" )
           ] )
       ; ( "delegated_moderator_v1"
         , "06d731a8c04e445dac16e6dd1b0dcadbd4cc41771b7fda27aa1cad8f3e786d5a"
         , [ ( "module/Item"
             , "0d8a88fe4ea744ffef1c1e2c8ae566e17f6f27503da74c9ca8072fbb85f1b612" )
           ; ( "module_export/Item.assistant_text"
-            , "3adfc202ac93250c4e07746f32d92c0f2250bb0e09e0d503d1405a5220b27970" )
+            , "be12a4d9e334644ef22b3dd34236f6261a93fc8d923208f408e0133d5752817b" )
           ; ( "module_export/Item.create"
-            , "c8ba4855c84164e00b135cab440fbd80f9c6f86d84997ca4a2656762bc33f64d" )
+            , "736b45c85aeb4fee02f5d588dbeb6c38f1ede0b55b87bec6be7bd17a4e2a9876" )
           ; ( "module_export/Item.id"
-            , "42a186df0cb6277bf66c16281908ff7677035f3eefd636af09a44ba931d26992" )
+            , "951bf73c02f1375addc38664afd64d9df6dc3e85a19bca820d604a0383ad5b54" )
           ; ( "module_export/Item.input_text_message"
-            , "85b0a03f74d1bd46bfea84005c73f2d64747a5753ce50488c18166adbc41ebae" )
+            , "72497f3505c95f1b172564bbbd7032ddb0e6c56184658f382347d73c7beb29b9" )
           ; ( "module_export/Item.is_assistant"
-            , "c2d3d90d5a8853ddb80d3a814b836b1142f2c15b429e3a63cee5119321d03a4c" )
+            , "57e7be76d1550eb45703617dc470e21e108acd42611a47d7d4a63b089e8dec0c" )
           ; ( "module_export/Item.is_system"
-            , "7292d21e3e3ee9d95cbc1388fa588655275dd7a1ba6d2664e49c9ca588d32ff2" )
+            , "77d635951c317897dc75784e0fdbb9f614a7d9e3586152003d9dd5d10fad38f9" )
           ; ( "module_export/Item.is_tool_call"
-            , "8900de12fef3a2a92d2682d0d71282985a62c509479bdefa5241eb0ef27eab79" )
+            , "53d43b4b6b810ec1f589246f949f1f6fba87ab9617c8b2734ea3f50943cdaf6a" )
           ; ( "module_export/Item.is_tool_result"
-            , "8c67babd17c68b9df53e221801471c94e16a7cfbb44688cf914bc764adbe2609" )
+            , "f80bc783425547f87d6505f0095ee55f6fb0d763ea8e8fe30a97acc36abc0feb" )
           ; ( "module_export/Item.is_user"
-            , "a89a1a3c1c013247f66674f8a4785842e457671cf7409fe2f2a1edfedebf1847" )
+            , "6ea949e2400b8177c257fe28680d0bf8e2664389cec5ae237f70d394b57135a8" )
           ; ( "module_export/Item.kind"
-            , "dfd0d585688145e2754307371cfff203ee8615a35a70f83b57877a72e751a7aa" )
+            , "dbf37c7fee15b869898cb68921ef1d0fcee63ad57140521075c1bb1cd95047f2" )
           ; ( "module_export/Item.notice"
-            , "45029382b3634b9a4549673a0810a80244fe3e327a8e609466b483d2d48e0036" )
+            , "f4c035dd0ef300995fade2e36c779d248750223d18ed31884e0222fdbcd2934f" )
           ; ( "module_export/Item.output_text_message"
-            , "f3c566ed335cbc5ac0b1c762bc7e98723ab4503681f16a11c462c7bd671fc3a5" )
+            , "a2fbcbf9335b91f92e584b3f51ecda34dcfa68a0fc6b8fe7aac9da85fc6bc6b5" )
           ; ( "module_export/Item.role"
-            , "841f5b281d54fa62153ad8b1ddd4067d6944d11247a46cd1ea76f2c865d8dafb" )
+            , "52e5235e6b21a6cd294d6a830e2484b8a28d78b356debcc9c03f91643281723d" )
           ; ( "module_export/Item.system_text"
-            , "f0a794bb32a97371b3e07c998accc6dffdd2b80d8555acad35d3acfc75835871" )
+            , "f9011ddd32c28d59f405035dc3b051bbbeb200bb0870c504fd09122951dc10b3" )
           ; ( "module_export/Item.text"
-            , "1eec79aa6b59e0c49053f23d53b75d411f47359e542c1bcbe8d266bb31319ef7" )
+            , "e280939ac455acd202aabbe95852584bb25725f11c31ed3b03a3352b5837f48e" )
           ; ( "module_export/Item.text_parts"
-            , "f9dc702b51db124dd34fe36dc27b40e630670572d64c46578b4f0b5741f2f282" )
+            , "fbc15ed7f31e521a241a2bf0002e5205488430a359023c454b93ab76301f1e3d" )
           ; ( "module_export/Item.user_text"
-            , "3d22c6642c585b36a0005916d68512637a5740f5a4bb53ccc32e29365e25cb96" )
+            , "3be8b8c09aea101cccd12f7e4c3c478ae056ece307517a0a333a78c26c3fbdce" )
           ; ( "module_export/Item.value"
-            , "e98f64390a63417572f4fb00a3251e7ef272b93b226c8bd8511ab90893a92ce1" )
+            , "e93d1bc81641d43c747a1fe55102d748043c0b7afdc59723764b74beb70d58ec" )
           ; ( "module/Context"
             , "f504951196837027022c550e85b3f7955f6776d45fe26eb1798afee2014f8ad4" )
           ; ( "module_export/Context.find_item"
-            , "f8116d44d87140c57816551319164101fa19a3c0b1a78e0c4cf8fa5b3e421940" )
+            , "daa34a75324370fb1d8ed6120d50f3582b8973ff321918e6d1b9aadc511adea0" )
           ; ( "module_export/Context.find_tool"
-            , "f5ab3a9f626b554a8f86ec1e7c2db741bc671c483e9c4ea8d440a4e4308f76d3" )
+            , "a295f68e762ba26082b9205e1e30758b78130054510641aacedc37331f43e2fe" )
           ; ( "module_export/Context.has_tool"
-            , "09f7ea897c0ba9c71d018f1a1b3859e77e07f7dbb1f49a092c2410f109c7aaf6" )
+            , "a547b19ea7b91a7271cd379293a4a1512be64b9ba66f7c2e176e75ea5bd88b4e" )
           ; ( "module_export/Context.items_by_role"
-            , "557819a6dd9a90f6b30dc4f16393d89a7717b041cf6d71f70fb737db69febf83" )
+            , "2824bde31280c20d3cb1fffc08580e78bd5a0072f71ad36ab3a1849ee3764649" )
           ; ( "module_export/Context.items_since_last_assistant_turn"
-            , "05bb2547ea71936f43f55a780cfdc518e0a8bbd8df324cae843e1a6846458231" )
+            , "1ec4b37086808f831dcb0a9ff4d1fab66f9adc8c1f4afbb59782b85f4ea5d221" )
           ; ( "module_export/Context.items_since_last_user_turn"
-            , "a43bb672ac3f778455f93616ce562c88229e727521f7e897831a4d8cb5dedf2c" )
+            , "90ae76cebd01d1d70fb6b914b1f7e596248220cb5c86f0d45f84c019ae22c23d" )
           ; ( "module_export/Context.last_assistant_item"
-            , "c04fdd7c7c8c584bbd182083e465615ec5faeb46e7cb9a00ae7faa63c71ef1f9" )
+            , "e7a49857d5cea8c59c93669e61d9b797cfb4a92f9df3f39e60063ab3a315adbf" )
           ; ( "module_export/Context.last_item"
-            , "bfdb43de466793fd74614563a25440977fab92f6f7bb1e77712ec22458015043" )
+            , "9e982456517755b03e8092ad1dda642ce229aa6703a9b560ed986d2a0a644f6f" )
           ; ( "module_export/Context.last_system_item"
-            , "d078a6428444090b671728ebefda3e2ff792b437a58de7ba5baeaf3c94a4d714" )
+            , "7037ccdbe6e384cdfb5ac1476450088380c8b111595fc0e478f1613fd4979f14" )
           ; ( "module_export/Context.last_tool_call"
-            , "e315beee6f8bb3bee7c740b26c18b989b318a273c826752b55c7d7d4df5479d4" )
+            , "0f5942209547da6684c58cd2bed9fe93d34530e413f061834bb9884db8863d5c" )
           ; ( "module_export/Context.last_tool_result"
-            , "f0ec9f7c7b8dd0cacba71f60bde816331c6c4e413dd09fc04387b1bbb3acae5f" )
+            , "dac85e6d60a845b616cb7f6aee2da97ffe73e137b70e79f25ba0ae448e48b6a7" )
           ; ( "module_export/Context.last_user_item"
-            , "6275e676a682560182f1422c153263ae25430fc115a47cdb9898e1c1276bb241" )
+            , "fcadba7c80d98c3a2b0395a17788c25857266a0a5b6ac171314000d10ec3707e" )
           ; ( "module/Tool_call"
             , "b499b0cb8501b221b1099eeac7c45a8a07f475ae341c7ceee839d74e574ce6a3" )
           ; ( "module_export/Tool_call.arg"
-            , "bbe41b104a4ccfd15bdb2ade37884353286b168b3b125ab2b6e57c45725e5584" )
+            , "134a4ce2771dbf90cc76dbea526861198b23824fc2015650865947a24b664776" )
           ; ( "module_export/Tool_call.arg_array"
-            , "ba41adb1a59a64c021838b87ac4ff19f62b3562eda465772b4e1ac0bea52f1e3" )
+            , "a6b351f74f98cd930accdbe5aa00b2cb3841d09030b5a7fc698432ae73a7dcb6" )
           ; ( "module_export/Tool_call.arg_bool"
-            , "d48e0b051210a1d6c1c9c49797c1a9de92dd4a13c57c6e69f889e5e1c47f3a6f" )
+            , "d5dc3fa5ec35e55e7fea671cd89d89896a2e3630fd99041f08d554ff26289379" )
           ; ( "module_export/Tool_call.arg_string"
-            , "34cccc4e251168b7aa03fd465bd7187b6668a829262c87468d0a601ae8f612ff" )
+            , "70baccc3bdd4217a25d7652ad70e358737eacabbf18ba1440636cdd92ca37b2c" )
           ; ( "module_export/Tool_call.is_named"
-            , "4112e3c9d65d86b7d344bdd921b40c84a2ee498cd40754eff7d17e8ed54275ab" )
+            , "d9cc8147300ed80c0b6c2dceb0c07ae33830528c681165702857e22f5467100e" )
           ; ( "module_export/Tool_call.is_one_of"
-            , "7fd2a29ce7d0113d2fc3ef2e28b19860b7d62c2eb57bdc612ef8e8806e8a58b7" )
+            , "082b5dc528c7933d11cec23a74875432f969b7287461a65319cbc8377c831cf9" )
           ; ( "type_alias/item"
-            , "628df52e13e1d7e441045a492cf29eb5b4c1dbe73737267d69cd32c06d3e0f61" )
+            , "02f0f8fcba7f09b35a5392ed12eb97643be4244a318f2d89ce8cdb604f7d169a" )
           ; ( "type_alias/tool_desc"
-            , "cdb74ea1a94bc0ec5d130f01d7ab658a62ce64a9c8fef489535e876659769af8" )
+            , "eb36eaaca293768035f3e0ca834a7507481b56913a6780584df0d607e0bc2a9b" )
           ; ( "type_alias/tool_call"
-            , "30fd3f543f345e877ba33d259e73f1c9dbe3bf35baf625370ea406a9ad07cbd0" )
+            , "7360df4a73d2bb80c73379f2cc15d7742aa1fbf07be324f6098d9ab55e31ed5f" )
           ; ( "type_alias/tool_result"
-            , "de8443bb4f09b27bfc6695008ed0cfbd6ee20d3a07f9b78a755eb91ff62015c1" )
+            , "4a68c6d881988160e45a0758cd38e07b7fa8702377b4239342f07e1496df80c5" )
           ; ( "type_alias/context"
-            , "31a2f45106393766153ef623ff3c658b50c7cbe14d8fb6bcbac1e31fb1da3cf8" )
+            , "b122063df0521b2469989feb4a480a70b34bc137e63a0216652023598134cd19" )
           ] )
       ]
       ~f:(fun (surface_id, topic_closure_sha256, contracts) ->
@@ -2012,9 +2012,9 @@ module Coverage = struct
           ; ( "module/Tool"
             , "6817970dd16c418885b75e649ad6d7df8cf71f073c4ff1fd677eabce77864fa0" )
           ; ( "module_export/Tool.call"
-            , "41a0b2a8fb0ba5500b2ca8c569740450f53f9a5f22b69f5ce2fcd912650f3a54" )
+            , "303dfd9663b39058fd11d8e9e9da43c8f0fd3eb6f6e86ea4336c9213bcee6292" )
           ; ( "module_export/Tool.spawn"
-            , "028ac3d67d7024a24bc0a593c101802600a2c3f3e59751c6da738f0ec64c59fe" )
+            , "f3eefc265f65cba0bb6e2a2c2724170d4ad30a3e2c2a8c52b334bacade6c8b34" )
           ] )
       ; ( "tool_v1"
         , "ddbaecc2d648dcd8a6e4ac8cd69daec4ce4ea323b4f17a06f5c116cdb4d57e3f"
@@ -2031,9 +2031,9 @@ module Coverage = struct
           ; ( "module/Tool"
             , "42b49f23f03690fbc49b42e32d6f1d586be4039833ec48292088294f85d064a7" )
           ; ( "module_export/Tool.call"
-            , "bb611c148b20cc79a98f50f5ab0281eebadb596f6fda6a6754e1a288717beec9" )
+            , "2a753fd9dd38e3dfb3f17c5203a73e19c76a3a90927cfd8845010b852e373f0f" )
           ; ( "module_export/Tool.spawn"
-            , "6651cd9b8567afaf2ecee63645f00d82dc79c60e596ad044497f561cef67de82" )
+            , "eb4541da89ff68813bd6bb1057871ed5b9f7e243863d82adc1bd0963aca93b45" )
           ] )
       ; ( "moderator_v1"
         , "39c89d96148fd4eb562437a7e5bd137ecfca75889da0b3258422be0247141267"
@@ -2052,21 +2052,21 @@ module Coverage = struct
           ; ( "module_export/Tool.approve"
             , "25a858e9067c7bbdeac5faf9e1cbb07923d85d385ade44a8c3a121e06d316594" )
           ; ( "module_export/Tool.call"
-            , "8923978bf683b1c9d0e0a2161a7a44d152395aa424386fa539699261f714f44f" )
+            , "86043d9871a1e13a84bdf2b4ad87052ef6cfb4aa53803cc5364cc9b47ebefce0" )
           ; ( "module_export/Tool.redirect"
-            , "1e7e84a8cfeb56b97b6989eafb673b37f05c07adec9b02003d132a6cc097d2b9" )
+            , "d20322e3983c7d9643563611fc0eefac4f943bace011a268ac1ce89481450dcf" )
           ; ( "module_export/Tool.reject"
             , "0ca7d1cf1b0bef06206b900f5162bdf6d85396fdcff95558ce8b9ac931583405" )
           ; ( "module_export/Tool.rewrite_args"
-            , "dde819fe1642cfa51d883461ab45785da9b54aee41fa4ea616f7ef421fa3f685" )
+            , "40e65cc8110f12c10e9c349f87d2b69679b50ea778030b0b7016a500d1679204" )
           ; ( "module_export/Tool.spawn"
-            , "cba9420e9726709ff64b5c8f317f7981e9d713ce7a9b8668de79727f14cd88c4" )
+            , "9bb72207e2d1a326e47052ac52272bcf2e5727cdf5345d708d3a19aae66247d9" )
           ; ( "module/Turn"
             , "1e28ee53d9b5bda92bb82bfd26e3dc56a67c111903f83c794f5c7339273a93e2" )
           ; ( "module_export/Turn.append_item"
-            , "9d69d90e9542c89e441b0727385b98c0dedc4e0643b3e7d5891d1d5e786fa271" )
+            , "adc1baea0b4c9b7a0d860505ffc6c2e8ad7605342484eda2d2982dcd404e951b" )
           ; ( "module_export/Turn.append_message"
-            , "7ee8aadbc7899f4cc96035b6c0a18bd59f30479b1b139f62b2ee5c7c49fb7723" )
+            , "651eb6ffbceb10cab16e39bf6a5f62f982db6b0758e54e8d38e835515cf0df91" )
           ; ( "module_export/Turn.append_notice"
             , "10174b9d538c71819dd0dc2c369d83575a62bd052b6385f583c9dc4049a97e91" )
           ; ( "module_export/Turn.delete_item"
@@ -2078,11 +2078,11 @@ module Coverage = struct
           ; ( "module_export/Turn.prepend_system"
             , "023c26e1e66e0d14f762a10d0d14bcb2d13a7fb5a45c2e1fb39a0e8d20b675ec" )
           ; ( "module_export/Turn.replace_item"
-            , "77ce43494aebf37706d4b95b6bf8c19ec614e4dbc40abb25cdb9b03d78825f20" )
+            , "ad71e6cbe5f0e0087e8506110d1b2949c7389e54823bc9afe2d27a51d525041a" )
           ; ( "module_export/Turn.replace_message"
-            , "f1eac988c6e2cc8f6a1803934e4460d9e352efe554f63934eebde9b43f4411a9" )
+            , "5633886156490bf2730b683c0d1b84caf9b042eb2328f9951a7e28a161503c95" )
           ; ( "module_export/Turn.replace_or_append"
-            , "fcae7de888d753e97b1b01203e8f0917fc035971bb5c3bf72755f732399bc89b" )
+            , "651a79c090b634f976acac8c3254a1a2646e8232bb87cd2bbd57f774ff36f31d" )
           ] )
       ; ( "delegated_moderator_v1"
         , "2ee065aa76e2a8a7dacb773f6fcc525c44d7c33d473cec02b69dcb3925ba1f18"
@@ -2101,21 +2101,21 @@ module Coverage = struct
           ; ( "module_export/Tool.approve"
             , "3b167c46c3c5c2e29dd5ff4560c8772bfe39dfa8c104f305757fbf1a47bd81ec" )
           ; ( "module_export/Tool.call"
-            , "7169f22230525f7f19abf17c754acdc3943adfe2b5726c3f9dc86bf777582351" )
+            , "c347e870e6d35855b3e42ae3b16ec66591f36d34429242685205c8aba4e104b1" )
           ; ( "module_export/Tool.redirect"
-            , "0adcd86df6f82772c6df514c462bf1ef80a393342e421fa31cfa59b2af618af4" )
+            , "6cc1741d5d023c8a30a1b0a3969636bedcf68f3856e89e69841bb9ef0758a132" )
           ; ( "module_export/Tool.reject"
             , "750429786a525fa4af39e96dfc60cd329fba459a051d92a306676ed72abee88d" )
           ; ( "module_export/Tool.rewrite_args"
-            , "48de739642f0b3766d6cc1e394b823dbda77ccbb09ceb8418a80db053cf61c60" )
+            , "68dfa500efdcf1cb6472744135131dd2c1fbb52c799ff47cafc295d0b917e76e" )
           ; ( "module_export/Tool.spawn"
-            , "d53ad5b4b7915ae0d6dd6761531ed7d2305de3a126667cafe392a3a3c9e2eaf9" )
+            , "621ed2316b5b0de8784c77df4b41e28fd2f965e57d06686b4eba2a91c31cb6fd" )
           ; ( "module/Turn"
             , "e0a0406931a6c5156b39ca4e43ab61584afc884027deec39c42002c3345b8d92" )
           ; ( "module_export/Turn.append_item"
-            , "411ab5f40b3343b1ab55b0ca8e7ecdc0fdb4f1ffb7e6a701ec27ea8446b963b8" )
+            , "18d4572aab87f9e0feba71838765a23c5431bf458fb30079fc79c41fd9d69338" )
           ; ( "module_export/Turn.append_message"
-            , "ac59a05c1a1cc55aa536bd8c0be8d8a75f9c28ad6e1464e1f17bf066b2a2f6f5" )
+            , "3cc870b69e2354930f1405b31c962906ee28c992a124e4169d63456231f0db4f" )
           ; ( "module_export/Turn.append_notice"
             , "cc60b629572b98834e1840b0b0c1ff804d6a5c369bb894cf37b8e4f508f3e521" )
           ; ( "module_export/Turn.delete_item"
@@ -2127,11 +2127,11 @@ module Coverage = struct
           ; ( "module_export/Turn.prepend_system"
             , "ec1f368da810fec03b8472c9f2072378693be1b8a14c4183b6e68395e12988a2" )
           ; ( "module_export/Turn.replace_item"
-            , "7725ec529310ecf86d92248b72fe9044b3f61f9dea46b05602d70e920990568c" )
+            , "312bb13705e54826e92893c00e4e0657e47f13cb42bcbdc4d4093b15022c0591" )
           ; ( "module_export/Turn.replace_message"
-            , "c3f79c8ebdaede49de7298809037c69b6a0905d4ef6d016264f4e95fda09f2c9" )
+            , "85c8b59da80adad4afdea4342e9a2bd7522dc066f908160c09601fe540045501" )
           ; ( "module_export/Turn.replace_or_append"
-            , "fb7e721dff88bae60309e2f17de79c3a85b7bd5812d9a6d50e4f465d4a7057c0" )
+            , "fb1571be72deaa741c6067efa802818da46fb907a685ddd55f4a9ed3ea1916b5" )
           ] )
       ]
       ~f:(fun (surface_id, topic_closure_sha256, contracts) ->
@@ -2157,7 +2157,7 @@ module Coverage = struct
         , [ ( "module/Runtime"
             , "6a03d3ede904c05bd4e6e423ca255efaff8116367688886a061f782e020c3ef2" )
           ; ( "module_export/Runtime.emit"
-            , "3f7f3e2773c0d06607a68dbe08161ecfb4647c8616f411597ba89371a27c84a3" )
+            , "daa2033d20e7d0534cf8d2b7d8b4dd10d0daa2e2adc7734e034d191b96aa9723" )
           ; ( "module_export/Runtime.end_session"
             , "694178f8d868f0ceb3737e6a096d1674cba3ada6cf75a906ec4a815e1876bc0d" )
           ; ( "module_export/Runtime.request_compaction"
@@ -2167,13 +2167,13 @@ module Coverage = struct
           ; ( "module/Model"
             , "0f098eb624aee2eedf45c042ce387b1bd713878a2927601d3790cca80e47a5af" )
           ; ( "module_export/Model.call"
-            , "3d60ab4c46ebffe4088804336cec8343594ebbfb36631f5dba25a2cc9f7671f3" )
+            , "5ed1650ec28411890a3f6bf50e98a6a256eb3113975bf13e46e125c72ab429ca" )
           ; ( "module_export/Model.call_json"
-            , "ed36144b68a320358c5d85b598f9226af61c48b272202e494053203b49e15844" )
+            , "9b995c20470a5044c324fc21eaa2ddb9d01312b7c9b14e315bba56116cac1ceb" )
           ; ( "module_export/Model.call_text"
-            , "7f0f27d7a8cf10c5ef0ed087e79693e3ce5bb9884200c95e90125845c84a14c7" )
+            , "90f1bb3f301520961d4dbc49a68bbde2e78645d7c75090d9757a38606276fe59" )
           ; ( "module_export/Model.spawn"
-            , "9347ab40f37ae4be888f79f95d7cfee595b6f96841291ac5419266216e68d7cb" )
+            , "766ca8c7eb642bbfbd70d7ca91bccce6ed7d754634b067a9d1e8b9ef1e64e83a" )
           ; ( "module_export/Model.spawn_text"
             , "24c8d7a071c73bedee083896630ae2f66133b11038f4b51edcbbc2bd0475022b" )
           ; ( "module/Process"
@@ -2186,7 +2186,7 @@ module Coverage = struct
         , [ ( "module/Runtime"
             , "a7f003fdab4a960c0fe55073944b63aebe21775ba44e9be5fdf0412d3833715e" )
           ; ( "module_export/Runtime.emit"
-            , "80a5c7351e54de8e1339d93ea29b962010e1f1432e5c07e6c304d6ab8ecb83e4" )
+            , "205cb7e9d897b93cdc31323f649dbec18379e51fc7f7f0b7bf40552b2c568b5c" )
           ; ( "module_export/Runtime.end_session"
             , "ceb2dc7028797b8085b304b2ae973b7a289cc1f4136d77cf46bdd6324c8293e3" )
           ; ( "module_export/Runtime.request_compaction"
@@ -2221,9 +2221,9 @@ module Coverage = struct
           ; ( "module_export/Run.continue"
             , "6070b540e55194d30941ee63b640d5d4e97d7d2a5a4cd0b906bbb4549059d174" )
           ; ( "module_export/Run.finish"
-            , "17dfe270cdfce84d41a7e1c8b9d4b2be31d15de651062c850c2ca141706419ed" )
+            , "690ac081a282adc4864fae6f8dc255eee65c15403fe9921aba0868b7509a984e" )
           ; ( "module_export/Run.wait"
-            , "f75c21ede127c48029a18caa970cf8b6307bd281297b5f281af6a758816b2635" )
+            , "79322e34f129f854d870a6f52dd729f64afabd8255eb83e9642ccd2ee8b1dc23" )
           ] )
       ; ( "delegated_moderator_v1"
         , "c442cbe30513372fff67ae9feac7bc9ed153407353c193bebbafcc0d6257c267"
@@ -2232,9 +2232,9 @@ module Coverage = struct
           ; ( "module_export/Run.continue"
             , "9f4043518eb71e5e299067468acc5f7b65d1e71420ee47af0f275804058d5b56" )
           ; ( "module_export/Run.finish"
-            , "95f02046556522bf3d53c4e4a032df646bea063996878ffda2fa5ae95f4f192e" )
+            , "75be2d80ecfb25babf6b35a41490f0c1c5d0ceb704441893081a23c1cfd7994e" )
           ; ( "module_export/Run.wait"
-            , "1fab809cc6490d8b61de46f47db005da1e8d9e584013f6b877d117133b610ebd" )
+            , "6640a2cf1e6e5c5391523b16d693ae7e4be7bfd3e36f32fd89291475b39b8690" )
           ] )
       ]
       ~f:(fun (surface_id, topic_closure_sha256, contracts) ->
@@ -2268,13 +2268,13 @@ module Coverage = struct
           ; ( "module_export/Job.cancel"
             , "9f8be3ad789fea8ec33c1d8ea41c2e8322c4fdfef5d7110360020712c9cda402" )
           ; ( "module_export/Job.get"
-            , "baea9e18db9b8da3de5b2fbcd06baf14ead637cba87d736a0b3e030f8f603fb1" )
+            , "9108f1e26c12ad792614d4f740a91fbc4142fac71f18eefd367375a86e2c81e4" )
           ; ( "module_export/Job.read_result"
-            , "132b4984970f3a6ad47c52b69cb8f0b8b2186a88030e178da2015cda4d5ae736" )
+            , "c999ef32a4b192e98545693df59c6fa48c25833bb095dc2956db378b9fbb8b39" )
           ; ( "module_export/Job.start_script"
-            , "e984a235ba6c079dfa8ccf66b92dc10e3a623cdf926a26b487aa9eb1d82804e0" )
+            , "cf9106a40b074c61667ff26a864c8e4133b8391bbd043aab50212a3e43860252" )
           ; ( "module_export/Job.start_tool"
-            , "17445677c0fa3210c57756f489e95f645d77a25cda95584250534b6a195f84e3" )
+            , "4d70acf85b7b6fae8ce3593698ef326e276de65e5f43124dcc39488a35b7ef79" )
           ] )
       ; ( "tool_v1"
         , "runtime.jobs.owned"
@@ -2290,13 +2290,13 @@ module Coverage = struct
           ; ( "module_export/Job.cancel"
             , "882a3ca8d82cd0506fe3839d6e4234837da73cea1543ed21598570497d10a299" )
           ; ( "module_export/Job.get"
-            , "b50303b005655a57969f803e67e1d4e0445d7a2f27e9d46e9da03cdf4f4a195c" )
+            , "cb582c7df655a266a0b5c9f3e1b7d7eedb27bf0d76cc0267bcc9558e8d699b27" )
           ; ( "module_export/Job.read_result"
-            , "115edbca0f44022eb00622446584e2f9dbe6f297e0748de4191a91e4abab38b2" )
+            , "25fa68abbd9cc4ffcef2fc1fc2f6b8727d7e7267c3895d37d52e058f69b6fe87" )
           ; ( "module_export/Job.start_script"
-            , "34e3f3b04883aa73851efcd1da7e339608f74d939e515b6c2a11d6182626eb88" )
+            , "88dd6f2bc9fb2e18318d25316ccdea91c73885ddfd146eca04e870554132f229" )
           ; ( "module_export/Job.start_tool"
-            , "759aebe6c9a8a20f7904998274488ac4f8a11dc7d6da49c1c685d0f016e38023" )
+            , "e2065743ebf221494181a3767f19dd7f5da83c46a926ef2f6ed66feddb3cca4b" )
           ] )
       ; ( "moderator_v1"
         , "runtime.jobs.owned"
@@ -2312,13 +2312,13 @@ module Coverage = struct
           ; ( "module_export/Job.cancel"
             , "12d176b2d5579055b15370555061bff6a6b8c6c7a8f62f903139d9c7d2548349" )
           ; ( "module_export/Job.get"
-            , "7e0c0d449ca7305d436bdc33ea8f17383f23ef22cdd26756c2a453419d0c2a30" )
+            , "bc33db6adb893700cd45fca0c4d7246fb59d2fdbfeef6b85659095fe051134f0" )
           ; ( "module_export/Job.read_result"
-            , "08428bad2bd375f25fb5c4ca4af8ed1be77f1d9a0be609bcc3b3b4f288d7e981" )
+            , "37f2d7854e029a5a2d9a619e8931337b5661442c249c982e2122180ea9edc4cd" )
           ; ( "module_export/Job.start_script"
-            , "578fded4981e6630f6036815fee2a3afa3243cbbeab5ecd72efdc2bc85a89e4d" )
+            , "3379d9ec6f41d83323b5ee9dadbc8daf4f47aa84a74aad59868c9548deac135f" )
           ; ( "module_export/Job.start_tool"
-            , "28e8aa29a002ece9b74fe404a850bb6ad78761e6178b2e295564be0f06a14612" )
+            , "0f7a6668a8807ed6524df525a9215ab58c2b3f323bdba5f59f6dac08beb908b2" )
           ] )
       ; ( "delegated_moderator_v1"
         , "runtime.jobs.owned"
@@ -2334,13 +2334,13 @@ module Coverage = struct
           ; ( "module_export/Job.cancel"
             , "98a6f5b4a549cb0393952d26cb52c5669105a88bc6791e89042f22994a94a3d3" )
           ; ( "module_export/Job.get"
-            , "8b0d071e500383c36bb33e9a9507dcc7814f1cb2122d24a2c60e5aa3a2916ff9" )
+            , "41ed0ee3d6b4c05eb1ea93c579aee8866a0f51117791aa86d6989ba358c1c336" )
           ; ( "module_export/Job.read_result"
-            , "17a81655039f54c1d5f47c59242db4ec71461242001296f21f126e2d437e482e" )
+            , "77d880fe092e31f9ed64da1317f1f9593a264836b1fa9c0936f6b08d3a766dc7" )
           ; ( "module_export/Job.start_script"
-            , "2a58b08a35562e6bbdef2993802db698b166d0d3938a2c1fb742f839ba0d8cd9" )
+            , "2c8fbcbefe62ab8311e43bf22554b4daa2067081945c77599961daa8a625bc07" )
           ; ( "module_export/Job.start_tool"
-            , "774f9ba12c2ac21ac35fd6115b24cbb546564d2cb78bd9e1f16d6746381cf6a6" )
+            , "0de57f29a7e05d218d2ca16906f6032887af243e58ffaea4c6cf81486faf86cb" )
           ] )
       ; ( "moderator_v1"
         , "runtime.jobs.subscriptions"
@@ -2353,17 +2353,17 @@ module Coverage = struct
         , [ ( "module/Subscription"
             , "52316cd512ca3c9743d6a83013e7e26832c1e0e03825d4959db1160d84203db1" )
           ; ( "module_export/Subscription.arm"
-            , "60c64f5d1b3c159ea227bfe75e772de86da041c8686d4a48c90cec4c58beb239" )
+            , "26fdc314a780f512c8309cc5e4156b380f8a89c00a318967e006919c339fd05d" )
           ; ( "module_export/Subscription.cancel"
-            , "e18b7746322ff35d736a815313a743cc63ae77f34ab8917cf951f34ed0ced216" )
+            , "6bbf3cb608978def2b3da1ab1e92dd630c638e923da20108ed66618133d28711" )
           ; ( "module_export/Subscription.complete"
-            , "25fd2109d2c2560c154cdb3e43c4f2227538c64f2d00986825f4695e15ecef78" )
+            , "e081db89d96d4defd330cbc59a748f60d6c7798132ebc7b3552a8a0f48868352" )
           ; ( "module_export/Subscription.create"
-            , "0619453484928f73f09220dd8e53b4ca369bd64629c8d0c1b318dbba8219e470" )
+            , "b70822a0e8a079005b887ba6d22478740156e9b770471fd20f96e120173b42f5" )
           ; ( "module_export/Subscription.fail"
-            , "51a1125d3febe9494dd0649d2e0f94ce844428b35217ea6968f536d8c1022e69" )
+            , "b0eaeec54b68deee3339c2295c80c0389766d2985f1efaabb031679b487acd27" )
           ; ( "module_export/Subscription.get"
-            , "f74bff0eb164a7d9a07eda3f78a86704ac213182cb50d0289fbd023e1cdc767c" )
+            , "75d766ce25282d36f8c414ac6c34252d06694518f3e099df86c3905bd486ef6b" )
           ] )
       ; ( "delegated_moderator_v1"
         , "runtime.jobs.subscriptions"
@@ -2376,17 +2376,17 @@ module Coverage = struct
         , [ ( "module/Subscription"
             , "6a9a5b13b50b1e046f2a112657fae92568ea320808b4f93a706a1c9e743fdd32" )
           ; ( "module_export/Subscription.arm"
-            , "8d0a8de59d416625442ee253b75eab41501668f8abbedc602726629f4c1fd8a5" )
+            , "e56d0769e36b0522e8d6f48b1f39e16a9981691b5e105c700afee26488d59aaa" )
           ; ( "module_export/Subscription.cancel"
-            , "3740018fe623437aca12ba3b0cd38a1a1f064f41faf7277f00b7fe19e02bad7b" )
+            , "3fe4f883492def1be2e156a55ce573c198b0a57b0d56a79a9b63a923a2410d44" )
           ; ( "module_export/Subscription.complete"
-            , "a68c3c5cb4ade8addd834c3e046e93bab29225e4cebf129a10600bf9a525c018" )
+            , "f97a211295dbc777f8690f0623bb46db6cb1d44c6d3c3671ab51d15b909d41ee" )
           ; ( "module_export/Subscription.create"
-            , "0c3e3b4273e4e47bea9503c058d641c69bb203919127082a632744389488ab65" )
+            , "fe88cdbbd369dd31aa13d4378a6a6ceceffcdfe5a960fecc68903ea8a80088b3" )
           ; ( "module_export/Subscription.fail"
-            , "31987e4c1e19a7cbd5a26079ca4e68400c74537363c6ab8a506c97bc4ecf72b1" )
+            , "5a995ab2f1f57df67f14031493ad3b7f171dcf95fba7fe4740f001ecc8c84139" )
           ; ( "module_export/Subscription.get"
-            , "de619a3b13aec2da69728db762790e9285c903a1b35a9bf73a8fcc64d1e973e8" )
+            , "b60d55664bbd83ce14a3e1480d0e8e33343df55bed2df01c9f80c097dc0d0f28" )
           ] )
       ; ( "moderator_v1"
         , "runtime.jobs.timers"
@@ -2398,13 +2398,13 @@ module Coverage = struct
         , [ ( "module/Schedule"
             , "80f3738fc56c9c565a090f9a923b7bd327a56ca40b2f6d96ff6dfaeb4e0e74ab" )
           ; ( "module_export/Schedule.after_ms"
-            , "97e076bef5545a4820cdf54d43ed16ecdbce22fb9f06eaa80d4739265ad86351" )
+            , "ac204e39264cd9e750afe6acbb1ac69c469cbaf665e3406b6158e4fcca3cd3a0" )
           ; ( "module_export/Schedule.after_ms_with_policy"
-            , "ad0b11f17ade899ca440752d52bffac6574eac44828e9c240215f754f75035bb" )
+            , "d0e7d7146b9f3c2db5b857062e3ff3971545da767cd9076c5a90a61c58658ba4" )
           ; ( "module_export/Schedule.cancel"
             , "24885cdfb870bbe2d2b6434d5a9dff673beb1168e1f1ab3347c61245770acb26" )
           ; ( "module_export/Schedule.get"
-            , "738af71846c1fed3b0c84504a225f1cf4ba4f6d3a6d1ff959b6ce45c22b6ce68" )
+            , "f70c8e74b3c7921786d80b1eac721896667c4b7df6552e84153cf99a4febf31d" )
           ] )
       ; ( "delegated_moderator_v1"
         , "runtime.jobs.timers"
@@ -2416,13 +2416,13 @@ module Coverage = struct
         , [ ( "module/Schedule"
             , "4840e3965fbd2a5f1ed97b91822fdff20e7ebc840326177e4349d44b6a706f4c" )
           ; ( "module_export/Schedule.after_ms"
-            , "944dd9898967d46c87ddacf692d897629c5f8190986870886274aa213831c86c" )
+            , "59feff961ac734b6147c9fb4b4274f937c68485cab66cdc78cffc1b8e7f2cf75" )
           ; ( "module_export/Schedule.after_ms_with_policy"
-            , "61e6c613b4984bc5184d726580d5905743562f810a018cc41b2b86fb42f38499" )
+            , "0b5383fe04cc0e1a02119985bef96e6716db174f268581cd635bc6986aabb9b7" )
           ; ( "module_export/Schedule.cancel"
             , "aeb8f1d2083955b082943b5bb0ebde5780d368a13bf43c63cf53bd86d2a6b5f1" )
           ; ( "module_export/Schedule.get"
-            , "16f490e94ede06345712d1d041047f70b919fe5bbc87a63351e06a6b807507d0" )
+            , "01162e5dcdbf664a21d99278656d3db2690504ea7ea37f9bd5677680033e5f25" )
           ] )
       ; ( "moderator_v1"
         , "runtime.delivery.notifications"
@@ -2435,9 +2435,9 @@ module Coverage = struct
         , [ ( "module/Notification"
             , "60777c4d4ba53251cbd7a70e4acad833945646e2df8fecd1e3a9496adb998a2a" )
           ; ( "module_export/Notification.get"
-            , "a20b78f8405e774c15f41cf0e5383e9275fe2406644275754837cee3681c1811" )
+            , "4e255705325eb8d3bd337ed4655b215c29732b0f6353a6fc6520d3dff186fa43" )
           ; ( "module_export/Notification.publish"
-            , "eab33aea6fb790ceaec176e2a016936d551e3a048af2c452f9d80af457383413" )
+            , "75816d11e03dc61780f663f75f3103c2cbc82bc3448a012a66d5a07666bbd001" )
           ] )
       ; ( "delegated_moderator_v1"
         , "runtime.delivery.notifications"
@@ -2450,9 +2450,9 @@ module Coverage = struct
         , [ ( "module/Notification"
             , "78ac3dc103b756aff41f21bcf62aacc067fa4d7f87bbb0569d72e28b3eb294a4" )
           ; ( "module_export/Notification.get"
-            , "9e8ce741701379fb1d07155fc8d2a97955b38605861b1af7eebf1426cf70bcc1" )
+            , "61898fffb86f244c0823ab959224a27ef62374f5a684fc98fcff249ecee22cd5" )
           ; ( "module_export/Notification.publish"
-            , "375a8d3cdbd337c4aa630cefe85725256dc88e2c31bf2acbff9d2e6a742b4770" )
+            , "cbaa39e372093f7dda18bdd638dd1e346a9207a8487a4422f21880222937f207" )
           ] )
       ; ( "moderator_v1"
         , "runtime.delivery.ingress"
@@ -2465,11 +2465,11 @@ module Coverage = struct
         , [ ( "module/Ingress"
             , "1435e0e85966a47f7b8723f72a68dec378154ef1c9321b165ce79de5ab7447d2" )
           ; ( "module_export/Ingress.get"
-            , "6043aa63593fd8bac86a53ed3e0faefa7f20b8f82be1c246f709234aa536f10b" )
+            , "b3f59b1347da17e2e1963626375cef3bcf9abdde7f16d13e854ab7a243c3d0b6" )
           ; ( "module_export/Ingress.register"
-            , "4221b1fcbc1cf23d5ff517cc8cddd974ca98473b42b30e2b147502f6db9986be" )
+            , "1e9f6523f5499be49ff6f3d9d5e5b0ab118b43e037cf2c9b828a3a5743345491" )
           ; ( "module_export/Ingress.revoke"
-            , "545f210a584d09b042c2001edaec103533eec6479915bc76246c2323811dd2db" )
+            , "df9988cdd69e804585bc5b213308fd6e394ef9881db6712c077950a15c21ac53" )
           ] )
       ; ( "delegated_moderator_v1"
         , "runtime.delivery.ingress"
@@ -2482,11 +2482,11 @@ module Coverage = struct
         , [ ( "module/Ingress"
             , "d2923f8b23db1aff9a7f9db802fb88da9628d6059e4d958c65af159c82bd4abd" )
           ; ( "module_export/Ingress.get"
-            , "9312e369c60c37eb72c39c237139fc1723a9ce38e60b48452bd189809ee8d8d1" )
+            , "01af797d4adff493b49dd3df175f2aac531be225aeb45bc711f1fa11977fb860" )
           ; ( "module_export/Ingress.register"
-            , "2fb6f3820c1df76e2edd92459bc13b429e74885af5115b6a65ea487c25eee2b8" )
+            , "ef76fa3a3efa22e8b77a1b78aa35909739a51bcf1fc6dacb81fc750ad71c2d32" )
           ; ( "module_export/Ingress.revoke"
-            , "b44a0682014e5015e799f21f2c37b06ab83ddf6af579237a2a25e935232bf35f" )
+            , "6dd4f33a930d8705786a63235040520382cba5c4cc8277bdfa9f8443916beb37" )
           ] )
       ; ( "tool_v1"
         , "runtime.work-values"
@@ -2496,7 +2496,7 @@ module Coverage = struct
           ; "lib/chatml/chatml_extension_surface.ml"
           ]
         , [ ( "type_alias/work_ref"
-            , "c42359d394acf8cd14a52da11eab32599e1e5dc8eb6e07f95dcf9028b12c7ff0" )
+            , "f63a75db469864cc86c2bd6959c8926e3422f7ecdd243bda7b5972203e4777bf" )
           ] )
       ; ( "moderator_v1"
         , "runtime.work-values"
@@ -2506,17 +2506,17 @@ module Coverage = struct
           ; "lib/chatml/chatml_extension_surface.ml"
           ]
         , [ ( "type_alias/work_ref"
-            , "e54c58dc3e155e176ec315f45dca4ed39682cbeab6d855b189798eecb10d511d" )
+            , "4edc1aad1ed5984ccbfe3a72a859f362c2ad26d147947e16caaeb41291326495" )
           ; ( "type_alias/completion"
-            , "5b296fd113e9152cbc5ba94e7db7bb7af1317c0d7ec8599a623c83f36a0f067a" )
+            , "25ceb0c00efe4af3f14c6a579ee7babe56009078724b4b14bec24f2e8a9cd3d3" )
           ; ( "type_alias/wake_policy"
-            , "ecb931bb228b56543421e1d37cf5075e324906e1ec0a66f99d842c19c35e4ab4" )
+            , "1078708e3baf49ac8de2361e82aed8e658f9c2b5f8a15637e13330b915c8ce88" )
           ; ( "type_alias/schedule_misfire"
-            , "290efd1d1bfc5644f60597bb12171e3e18b2323b817c804d0a80dea0efead4b6" )
+            , "4aa25f3d514cf3e70d1de93e6687a12c51b4b9b0e7ca18beb463e1cb11a564d6" )
           ; ( "type_alias/notification_correlation"
-            , "20a76026e17ebb69761661af6c6db3af40a9c98aca74ba468c81cc9885564005" )
+            , "d4ecac5742f3659a5bd50bfd7f734dd298b57088bba81ad1b6eb3e6aec886f9f" )
           ; ( "type_alias/work_completion"
-            , "e8ba57d4d79196a7ed37b41420e602bdecae478b95d6d5052ff25657b67d067e" )
+            , "174d445457b64033dd079c197ef50eb2acfa69eb93f27a17c4c438472722bba1" )
           ] )
       ; ( "delegated_moderator_v1"
         , "runtime.work-values"
@@ -2526,17 +2526,17 @@ module Coverage = struct
           ; "lib/chatml/chatml_extension_surface.ml"
           ]
         , [ ( "type_alias/work_ref"
-            , "47ee4d59822a16fa377eefd53fdef6d54c9508fe79b8713a33e55183eeee062f" )
+            , "b3a055128a835cf98a1b42148754b48d3e241eae6d1ff11294bc27a74e40a59b" )
           ; ( "type_alias/completion"
-            , "5a1556210ef5f40d3e570a3c3e5daf85b77abc127aaa2edb521aaab93533774e" )
+            , "9bdacde70dbc4145323166b927a62d40b3a5c380660d311a4d8ea312e50c37f6" )
           ; ( "type_alias/wake_policy"
-            , "1a41bd74fdb959b99aebee43128afba3f35c96412fa2566a31ff437bdcef635f" )
+            , "15efd28568eb0c0956e9454f8a6202fbba728b619f519d1358ad1e9bb528027f" )
           ; ( "type_alias/schedule_misfire"
-            , "b6a8a0317d4d7b63dcd83a783502a43ade5724a79ac632b7de68fab0e1a3f898" )
+            , "ce422a4a58d0af48f9b9c1fffdef0ff86e2d1e821839eeeb7edb92b38884672c" )
           ; ( "type_alias/notification_correlation"
-            , "34dd4f58bc1cc2dd0af8363ebfab48315f7fa6cdfc4b3557c8cde1130dd3ed42" )
+            , "e39db05f9f9e194715b00c951c71eb2729db2932bc1fdaa3d905599a3df2416e" )
           ; ( "type_alias/work_completion"
-            , "4c174d896f0ae10b860cd6627a5a6ba465a1d3b9c38c74aae3d751191dfd11a3" )
+            , "bb3b7e4bf29a417e257f9498373bd5fad7a9d930fef7207f5ce2851ede34fa10" )
           ] )
       ]
       ~f:(fun (surface_id, topic_id, topic_closure_sha256, evidence, contracts) ->
@@ -2556,55 +2556,55 @@ module Coverage = struct
         , [ ( "module/Invocation"
             , "534a62f3a88e211fb3c1ace77f59a5f33ea3634dfc9be30fcee7f7b636b1114c" )
           ; ( "module_export/Invocation.resolve"
-            , "98f78b8e93b2b1eb70ab9860d85fc57c1f8f4ceafd0173b2f39d0e24d25e0d79" )
+            , "703ac84ccfb5341b0985c02d779f9fabee3960ebfba7c52735741b2b8c331625" )
           ; ( "type_alias/tool_context"
-            , "07eca40f56130f6ab7319b17575b99d6640e4caa69a1dd4dcd7a4c300792f09c" )
+            , "817f31ad844b776eee76ecf23c3a38cf18e6b201acf058b75a18d4b2061590d8" )
           ; ( "type_alias/tool_capability"
-            , "eb9cac45cba0bd76b1aa3698504b16c261eb1b59617147beb52740eeb602f0dc" )
+            , "83e52c8c67bf334a11341fb019b435ae14ce33e16e4a0c45c4e89f39d0dc4457" )
           ; ( "type_alias/tool_limits"
             , "8c79cbc7bb5df7b12772f8ee38c2265f48ba79746a5f347a77e28f55219dd058" )
           ; ( "type_alias/tool_error"
-            , "f63875c543b7ebdf83b8d24d3f309de954586cbf20b270067f6f655a6c4d1cf6" )
+            , "36a67257d779a5a74200cbf65d9c5294f88615a0d891bcdd1b4b911416c90083" )
           ; ( "type_alias/tool_outcome"
-            , "d55ee94b666ae45ba66b095038264235abb58025ee2697bef048eb8381bf28a9" )
+            , "99899d0f269ae7346e73011ad99a93aae1877d061f4afd572b75cb1fbac1e1d2" )
           ; ( "type_alias/tool_invocation"
-            , "25500957a94f53549544734fa46af5f8c0c685456b6b45375541f2be359c023c" )
+            , "4a66e84669a4db1293f265318afcc7166fc56f83aef2ea969e10371f1b1ec0e2" )
           ; ( "type_alias/moderator_event"
-            , "95863a0b7fb7f97d93b244e89ce415a7137defe91f197fd4c0460113c797aed0" )
+            , "7702861302d82a452c7515297728f81f20ce2ac6a62a1d2e5062f05bc1f94c64" )
           ] )
       ; ( "delegated_moderator_v1"
         , "f322466aafa2921893ce3f62c3c74d6f9dfe8c6148cd823553ca6aa66c5aa680"
         , [ ( "module/Invocation"
             , "6ffc1b9ef3a698ebfcccfa15fc29eb607d7dc42f4df3ad2897be1668b6e306fe" )
           ; ( "module_export/Invocation.resolve"
-            , "d3a6e39817d71c49e9edd1418244d490fe5f079623511b55ad00c2ff2772ec2a" )
+            , "862de3e2961180623847cc272f59d0f292c6463bac11f97a96eab96258c365d3" )
           ; ( "type_alias/tool_context"
-            , "afd8934b30b74f81e910fe3fe266a11dcd33e2a7059a355282c35d90e8bb8a6e" )
+            , "d43d9c009ae1e8314bcd5a49ed4e7781cdc0d97a3c2f0c813924791367eb4438" )
           ; ( "type_alias/tool_capability"
-            , "ba95552564cb8b837ac81812c7a0c4d7b49a9be7a50984dfa80eff2508b83a53" )
+            , "d67cc7b192ecebfdacbc30704f702515195313396f762a57f628b0aa83ffa460" )
           ; ( "type_alias/tool_limits"
             , "f87e2c8a5f21375c0c065784b55702b61ce40048f2b9788f9c98f43f199a9f3e" )
           ; ( "type_alias/tool_error"
-            , "2555ffdf965adf3eb015488bafc91d3edb26ab560f7cb298d1fad8363d816be2" )
+            , "990077f9a806818485eaa1b47aeeb33c2c6f3e17fc80535428a0cfd48e2b12dd" )
           ; ( "type_alias/tool_outcome"
-            , "f9f2f12c3084066a4b5ccca95466e5a959a63d0e19f5e2d466ccde439b41be71" )
+            , "2c112aa0e5acb882da3ee04bfa230b73a21b7d80b7ccd2c82f656e79713c4af4" )
           ; ( "type_alias/tool_invocation"
-            , "bb697da64001e3f3bf1ef55d58e7adffa049121a258ced838d1f3ba284937f21" )
+            , "54d89d184e764a0d952e1a2c4ef9d847b9edb55e2c64d723f93871b59db04e24" )
           ; ( "type_alias/moderator_event"
-            , "83d2a40e08bbd0ea31de2557b7b31b10d4f02e109c901b5ccacc17fd660810e9" )
+            , "8ebdf669114ca7f326ff28b7147fd61dcbee49a8e28d33900df326fc66a05291" )
           ] )
       ; ( "tool_v1"
         , "fd9fb60fc2ccb07870f1607b839956114d63dbd4c4e79ae62cc05a62c73e0ed3"
         , [ ( "type_alias/tool_context"
-            , "d421f79be4f1dfcc48061eefacc070de904df8979685fbd237bb9a682577d05a" )
+            , "e39d59aecc0de098fe9396e57ce61ea41c8ab2056e4f78cadf1945428d09eb8b" )
           ; ( "type_alias/tool_capability"
-            , "cad05b263c95d117cbc9ccc31c24d6c1f7c60d402fec8dccce30a588d4d90985" )
+            , "c01e327df808b40080c2b3982f7114f7b9b6a242774f1903e0f015169f884044" )
           ; ( "type_alias/tool_limits"
             , "6c95c31f06f4f47b7a1bc30bc0ea38642e42a5b6f0c9a30e3926e7aa6a8c845c" )
           ; ( "type_alias/tool_error"
-            , "8aab5eb5097af24bb4d16769c3c6cda0a19694452a44dcc7d7c5895cc2fe035f" )
+            , "7833727f6bf5233f1e884c047c02173710f5ad20746cff57ed46df8d8c2320df" )
           ; ( "type_alias/tool_outcome"
-            , "737ea16bb2d1cc5536a2acf0b2002acd46769de9f27414e9dc4971a52993c003" )
+            , "bcf8eb5d5098b9d8738a746272d6c7c1b0770932e8330750b042591a3fe9a8e8" )
           ] )
       ]
       ~f:(fun (surface_id, topic_closure_sha256, contracts) ->
@@ -2752,7 +2752,7 @@ let language_foundation ~sources =
       ; review =
           Audited
             { excerpt_sha256 =
-                [ "3462268bdb7b0b4f80c1778bf084c27c06966afb3131ad6246fa3387090384cb" ]
+                [ "98d4193f9202d0f86a5a71fd732c724b104a6a93a5bf49b33114ff197506cf42" ]
             ; evidence =
                 [ "lib/chatml/chatml_typechecker.ml"
                 ; "test/chatml_typechecker_test.ml"
