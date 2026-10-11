@@ -67,6 +67,9 @@ module Limits = struct
   ;;
 
   let max_bytes t = t.max_bytes
+  let max_depth t = t.max_depth
+  let max_fields t = t.max_fields
+  let max_nodes t = t.max_nodes
 end
 
 module Json = struct

@@ -51,6 +51,9 @@ module Limits : sig
 
   val default : t
   val max_bytes : t -> int
+  val max_depth : t -> int
+  val max_fields : t -> int
+  val max_nodes : t -> int
 end
 
 module Json : sig
