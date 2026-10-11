@@ -97,6 +97,12 @@ let mk_type startp endp desc =
 let mk_signature_item startp endp desc =
   { Chatml_module_signature.desc; span = span_of_lex startp endp }
 
+let mk_binding startp endp value =
+  { Chatml_binding_pattern.value; span = span_of_lex startp endp }
+
+let mk_name startp endp name =
+  mk_binding startp endp (Chatml_binding_pattern.Name name)
+
 let mk_node startp endp value =
   { value; span = span_of_lex startp endp }
 
@@ -114,12 +120,12 @@ let maybe_annotate_expr (expr_node : expr node) (type_opt : type_expr option) : 
   (* ------------------------------------------------------------------- *)
 
   type task_let_binder =
-    | TLB_name of string
-    | TLB_unit
+    | TLB_name of Chatml_binding_pattern.t
+    | TLB_unit of Source.span
 
   let binder_name_of_task_let = function
     | TLB_name x -> x
-    | TLB_unit -> "__chatml_task_unit"
+    | TLB_unit span -> { Chatml_binding_pattern.value = Name "__chatml_task_unit"; span }
 
   let desugar_task_let
         (startp : Lexing.position)
@@ -228,11 +234,11 @@ module_stmt:
     { mk_node $startpos $endpos (SType { name = $3; parameters = $2; body = $5 }) }
 | LET REC rec_bindings          { mk_node $startpos $endpos (SLetRec( $3)) }
 | LET REC rec_bindings IN expr_sequence  { mk_node $startpos $endpos (SExpr( mk_exprnode $startpos $endpos (ELetRec($3, $5)) )) }
-| LET LIDENT COLON type_expr EQ expr_sequence
+| LET binding_pattern COLON type_expr EQ expr_sequence
     { mk_node $startpos $endpos (SLet($2, maybe_annotate_expr $6 (Some $4))) }
-| LET LIDENT params EQ expr_sequence { mk_node $startpos $endpos (SLet($2, mk_exprnode $startpos $endpos (ELambda($3, ($5))))) }
-| LET LIDENT LPAREN RPAREN EQ expr_sequence { mk_node $startpos $endpos (SLet($2, mk_exprnode $startpos $endpos (ELambda([], ($6))))) }
-| LET LIDENT EQ expr_sequence        { mk_node $startpos $endpos (SLet($2, $4)) }
+| LET LIDENT params EQ expr_sequence { mk_node $startpos $endpos (SLet(mk_name $startpos($2) $endpos($2) $2, mk_exprnode $startpos $endpos (ELambda($3, ($5))))) }
+| LET LIDENT LPAREN RPAREN EQ expr_sequence { mk_node $startpos $endpos (SLet(mk_name $startpos($2) $endpos($2) $2, mk_exprnode $startpos $endpos (ELambda([], ($6))))) }
+| LET binding_pattern EQ expr_sequence        { mk_node $startpos $endpos (SLet($2, $4)) }
 | MODULE UIDENT EQ STRUCT module_stmts END
     { mk_node $startpos $endpos (SModule { name = $2; signature = None; body = $5 }) }
 | MODULE UIDENT COLON SIG signature_items END EQ STRUCT module_stmts END
@@ -296,11 +302,11 @@ expr:
     | LET REC rec_bindings IN expr_sequence  { mk_exprnode $startpos $endpos (ELetRec($3, $5)) }
 
     (* Let-in expression *)
-    | LET LIDENT COLON type_expr EQ expr_sequence IN expr_sequence
+    | LET binding_pattern COLON type_expr EQ expr_sequence IN expr_sequence
         { mk_exprnode $startpos $endpos (ELetIn($2, maybe_annotate_expr $6 (Some $4), $8)) }
-    | LET LIDENT EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn($2, $4, $6)) }
-	  | LET LIDENT LPAREN RPAREN EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn($2, mk_exprnode $startpos $endpos (ELambda([], $6)), $8)) }
-	  | LET LIDENT params EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn($2, mk_exprnode $startpos $endpos (ELambda($3, $5)), $7)) }
+    | LET binding_pattern EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn($2, $4, $6)) }
+	  | LET LIDENT LPAREN RPAREN EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn(mk_name $startpos($2) $endpos($2) $2, mk_exprnode $startpos $endpos (ELambda([], $6)), $8)) }
+	  | LET LIDENT params EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn(mk_name $startpos($2) $endpos($2) $2, mk_exprnode $startpos $endpos (ELambda($3, $5)), $7)) }
     (* Task sugar:
        let* x = t1 in t2  ==> Task.bind(t1, fun x -> t2)
        let+ x = t1 in t2  ==> Task.map(t1,  fun x -> t2)
@@ -415,14 +421,24 @@ expr_list_nonempty:
     expr_sequence { [$1] }
 | expr_sequence COMMA expr_list_nonempty { $1 :: $3 }
 
+binding_pattern:
+    LIDENT { mk_name $startpos $endpos $1 }
+| UNDERSCORE { mk_binding $startpos $endpos Chatml_binding_pattern.Wildcard }
+| TUPLE_OPEN binding_pattern COMMA binding_pattern binding_pattern_tail TUPLE_CLOSE
+    { mk_binding $startpos $endpos
+        (Chatml_binding_pattern.Tuple (Chatml_tuple.create $2 $4 ~rest:$5)) }
+
+binding_pattern_tail:
+    /* empty */ { [] }
+| COMMA binding_pattern binding_pattern_tail { $2 :: $3 }
+
 params:
-    /* possibly multiple variable names for e.g. fun x y ->  ... */
-    LIDENT { [$1] }
-| LIDENT params { $1 :: $2 }
+    binding_pattern { [$1] }
+| binding_pattern params { $1 :: $2 }
 
 task_let_binder:
-    LIDENT            { TLB_name $1 }
-  | LPAREN RPAREN     { TLB_unit }
+    LIDENT            { TLB_name (mk_name $startpos $endpos $1) }
+  | LPAREN RPAREN     { TLB_unit (span_of_lex $startpos $endpos) }
 
 field_list:
     /* empty */ { [] }

@@ -1095,8 +1095,16 @@ let label pair = match pair with | (|count, name|) -> name ++ to_string(count)
 Tuple match elements support existing literal, variant, record, wildcard, variable
 and nested tuple patterns. Coverage is conservative: a total tuple pattern or
 `_` arm is required; separate refutable product arms are not combined into a
-Cartesian completeness proof. Let and parameter declarations currently retain
-name-only binders. The immutable tuple container shares mutable child values;
+Cartesian completeness proof. Let and parameter binders allow names, `_`, and
+nested tuples of those binders. Literals, records and variants remain match-only
+patterns. A let RHS runs once in the previous scope; all named leaves enter
+scope together. The value restriction applies to the whole RHS before leaf
+schemes are distributed, preserving shared weak variables. One tuple parameter
+consumes one argument even when it binds several names; `_` also consumes an
+argument while binding no name. Recursive declaration heads remain names.
+For example, `let (|n, _|) = (|7, true|)` binds only `n`, and
+`let add (|a, b|) step = a + b + step` is called as `add((|2, 3|), 4)`.
+The immutable tuple container shares mutable child values;
 equality is supported only when all component types support equality.
 
 ### 10.2.1 User-facing type syntax

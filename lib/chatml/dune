@@ -4,6 +4,8 @@
  (modules
   chatml_lang
   chatml_tuple
+  chatml_binding_pattern
+  chatml_binding_value
   chatml_type_expr
   chatml_module_signature
   chatml_module_visibility

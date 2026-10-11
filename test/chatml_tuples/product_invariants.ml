@@ -37,7 +37,11 @@ let%test_unit "bounded product basis preserves source/type/ordered runtime shape
     in
     let rhs =
       match program.stmts with
-      | [ { value = L.SLet ("result", rhs); _ } ] -> rhs
+      | [ { value =
+              L.SLet ({ value = Chatml.Chatml_binding_pattern.Name "result"; _ }, rhs)
+          ; _
+          }
+        ] -> rhs
       | _ -> failwith "Expected model's sole annotated result"
     in
     assert_type expected (T.checked_lookup_span_type checked rhs.span |> Option.value_exn);

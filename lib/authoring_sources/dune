@@ -41,6 +41,8 @@
     lib/chatml/chatml_eval.ml %{dep:../chatml/chatml_eval.ml}
     lib/chatml/chatml_lang.ml %{dep:../chatml/chatml_lang.ml}
     lib/chatml/chatml_tuple.ml %{dep:../chatml/chatml_tuple.ml}
+    lib/chatml/chatml_binding_pattern.ml %{dep:../chatml/chatml_binding_pattern.ml}
+    lib/chatml/chatml_binding_value.ml %{dep:../chatml/chatml_binding_value.ml}
     lib/chatml/chatml_value_codec.ml %{dep:../chatml/chatml_value_codec.ml}
     lib/chatml/chatml_compilation.ml %{dep:../chatml/chatml_compilation.ml}
     lib/chatml/chatml_execution.ml %{dep:../chatml/chatml_execution.ml}

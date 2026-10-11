@@ -46,6 +46,6 @@ let%expect_test
     , (List.map incomplete.missing ~f:(fun target -> target.V.id) : string list)];
   [%expect
     {|
-    (37 148 24 (one_off_v1/semantics/lex.identifiers))
+    (38 152 26 (one_off_v1/semantics/lex.identifiers))
     |}]
 ;;

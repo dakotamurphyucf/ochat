@@ -271,6 +271,10 @@ let%test_unit "signature callback exceptions preserve identity and shared weak e
           "let storage = [] let first = storage module Nested = struct let second = \
            storage end"
       in
+      (* Sweep this phase independently of preceding inference's residual
+         64-step checkpoint budget, while retaining the same weak type graph. *)
+      let _, state, _, _ = actual in
+      state.shared.until_checkpoint <- 0;
       enabled := true;
       actual, calls, enabled, stop
     in

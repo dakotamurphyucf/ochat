@@ -435,7 +435,13 @@ let%expect_test "runtime closure arity mismatch is reported clearly" =
   let env = L.create_env () in
   let slot = Frame_env.Slot Frame_env.SInt in
   let body = node (L.REVarLoc { depth = 0; index = 0; slot }) in
-  let lam = node (L.RELambda ([ "x" ], [ slot ], body)) in
+  let lam =
+    node
+      (L.RELambda
+         ( [ { Chatml.Chatml_binding_pattern.value = Name "x"; span = body.span } ]
+         , [ slot ]
+         , body ))
+  in
   let bad_call = node (L.REApp (lam, [ node (L.REInt 1); node (L.REInt 2) ])) in
   (try
      ignore (E.finish_eval [] (E.eval_expr env [] bad_call));
