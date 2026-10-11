@@ -102,7 +102,7 @@ let%expect_test "field receivers generalize kinds without losing shared constrai
     independent keys calls: int 3
     returned receiver retains module kind: type-error Cannot unify module with record
     returned receiver accepts records: int 2
-    monomorphic receiver kind: type-error Cannot unify {x: 'k; ...} with module{x: int}
+    monomorphic receiver kind: type-error Cannot unify record with module
     module exported accessor: int 5
     nested module: int 4
     module join: int 4
