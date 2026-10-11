@@ -20,6 +20,7 @@
   prompt)
  (libraries
   core
+  source
   cstruct
   str
   menhirLib

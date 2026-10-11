@@ -1,4 +1,26 @@
 open Core
+
+module Portable_path = struct
+  type t = string [@@deriving compare, equal, sexp_of]
+
+  let create path =
+    if
+      (not (String.is_empty path))
+      && String.length path <= 1024
+      && Stdlib.String.is_valid_utf_8 path
+      && (not
+            (String.exists path ~f:(function
+               | '\\' | ':' | '\000' | '\r' | '\n' -> true
+               | _ -> false)))
+      && List.for_all (String.split path ~on:'/') ~f:(fun part ->
+        not (String.is_empty part || String.equal part "." || String.equal part ".."))
+    then Ok path
+    else Or_error.error_string "invalid portable relative source path"
+  ;;
+
+  let to_string t = t
+end
+
 (* ----- Source, position and span -------------------------------------------------------------- *)
 
 type t =
