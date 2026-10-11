@@ -78,6 +78,8 @@ let instantiate_runtime
       ~register_extension_instance
       ~worker_runtimes
       ~model_completion
+      ~prepare_extension
+      ~check_execution
       runtime
   =
   Runtime.create
@@ -94,6 +96,8 @@ let instantiate_runtime
     ~register_extension_instance
     ~worker_runtimes
     ?model_completion
+    ~prepare_extension
+    ~check_execution
     runtime
 ;;
 
@@ -151,6 +155,8 @@ let runtime_map
       ~approval_store
       ~extensions
       ~model_completion
+      ~prepare_extension
+      ~check_execution
       runtimes
   =
   Result.bind
@@ -191,6 +197,8 @@ let runtime_map
           ~register_extension_instance
           ~worker_runtimes
           ~model_completion
+          ~prepare_extension
+          ~check_execution
           specification
         |> Result.map_error ~f:(List.map ~f:runtime_error)
         |> Result.map ~f:(fun runtime ->
@@ -443,7 +451,22 @@ let configure_extension_snapshots host manifest extension_bindings initial persi
       Ok ())
 ;;
 
-let instantiate_prepared
+module Staged = struct
+  type registry = t
+
+  type t =
+    { registry : registry
+    ; gate : Activation_gate.t
+    }
+
+  let manifest t = t.registry.manifest
+  let runtime t id = Map.find t.registry.runtimes id
+  let script t name = Map.find t.registry.scripts name
+  let tools t = Map.data t.registry.tools
+  let check t = Activation_gate.check t.gate
+end
+
+let instantiate_prepared_after
       ~sw
       ~host
       ~grant
@@ -452,35 +475,107 @@ let instantiate_prepared
       ?model_completion
       ?(extension_snapshots = [])
       ?persist_extension_snapshots
+      ~preflight
       prepared
   =
   let manifest = prepared.manifest in
-  match Manifest_authorizer.verify grant manifest with
-  | Error error -> Error [ authorizer_error error ]
-  | Ok () ->
-    Result.bind
-      (runtime_map
-         ~sw
-         ~host
-         ~manifest
-         ~approval_provider
-         ~admin_policy:prepared.admin_policy
-         ~approval_store
-         ~extensions:prepared.extensions
-         ~model_completion
-         prepared.runtimes)
-      ~f:(fun (runtimes, extension_bindings) ->
-        Result.bind
-          (configure_extension_snapshots
-             host
-             manifest
-             extension_bindings
-             extension_snapshots
-             persist_extension_snapshots
-           |> Result.map_error ~f:List.return)
-          ~f:(fun () ->
-            Result.map (script_map runtimes manifest.payload.tools) ~f:(fun scripts ->
-              create manifest runtimes scripts extension_bindings)))
+  let gate = Activation_gate.create () in
+  let instances = ref [] in
+  let close () =
+    Activation_gate.close gate;
+    List.iter !instances ~f:Chatml_extension.close
+  in
+  Eio.Switch.on_release sw close;
+  let prepare_extension ~lifecycle compiled =
+    Chatml_extension.prepare_instance ~env:host.Host.env ~lifecycle compiled
+    |> Result.map ~f:(fun instance ->
+      instances := instance :: !instances;
+      instance)
+  in
+  let result =
+    Exn.protect
+      ~f:(fun () ->
+        let open Result.Let_syntax in
+        let%bind () =
+          Manifest_authorizer.verify grant manifest
+          |> Result.map_error ~f:(fun error -> [ authorizer_error error ])
+        in
+        let%bind runtimes, extension_bindings =
+          runtime_map
+            ~sw
+            ~host
+            ~manifest
+            ~approval_provider
+            ~admin_policy:prepared.admin_policy
+            ~approval_store
+            ~extensions:prepared.extensions
+            ~model_completion
+            ~prepare_extension
+            ~check_execution:(fun () -> Activation_gate.check gate)
+            prepared.runtimes
+        in
+        Eio.Fiber.check ();
+        let%bind scripts = script_map runtimes manifest.payload.tools in
+        let registry = create manifest runtimes scripts extension_bindings in
+        let staged = Staged.{ registry; gate } in
+        let%bind admitted = preflight staged in
+        Eio.Fiber.check ();
+        let%bind () =
+          List.fold_result (List.rev !instances) ~init:() ~f:(fun () instance ->
+            Eio.Fiber.check ();
+            Chatml_extension.activate instance
+            |> Result.map_error ~f:(fun diagnostic -> [ diagnostic_error diagnostic ]))
+        in
+        let%bind () =
+          configure_extension_snapshots
+            host
+            manifest
+            extension_bindings
+            extension_snapshots
+            persist_extension_snapshots
+          |> Result.map_error ~f:List.return
+        in
+        Eio.Fiber.check ();
+        (* Install last so ready access is revoked before native release hooks. *)
+        Eio.Switch.on_release sw close;
+        let%map () =
+          Activation_gate.ready gate
+          |> Result.map_error ~f:(fun message ->
+            [ { code = "shell.registry_closed"; message; runtime_id = None } ])
+        in
+        registry, admitted)
+      ~finally:(fun () ->
+        Activation_gate.fail gate;
+        match Activation_gate.check gate with
+        | Ok () -> ()
+        | Error _ -> List.iter !instances ~f:Chatml_extension.close)
+  in
+  result
+;;
+
+let instantiate_prepared
+      ~sw
+      ~host
+      ~grant
+      ~approval_provider
+      ?approval_store
+      ?model_completion
+      ?extension_snapshots
+      ?persist_extension_snapshots
+      prepared
+  =
+  instantiate_prepared_after
+    ~sw
+    ~host
+    ~grant
+    ~approval_provider
+    ?approval_store
+    ?model_completion
+    ?extension_snapshots
+    ?persist_extension_snapshots
+    ~preflight:(fun _ -> Ok ())
+    prepared
+  |> Result.map ~f:fst
 ;;
 
 let instantiate_internal

@@ -2,6 +2,7 @@
  (name shell_runtime)
  (public_name ochat.shell_runtime)
  (modules
+  activation_gate
   host
   manifest_authorizer
   manifest_grant_store
@@ -40,6 +41,7 @@
   result
   moderator_process_adapter
   registry)
+ (private_modules activation_gate)
  (libraries
   core
   eio

@@ -64,6 +64,25 @@ val with_prepared_entrypoints
   -> checkpoint:(unit -> unit)
   -> (compiled, Chatmd_shell_spec.Diagnostic.t) result
 
+(** Construct the real config and runner without evaluating initializers. A
+    pending instance rejects call, snapshot and restore until activated. *)
+val prepare_instance
+  :  env:Eio_unix.Stdenv.base
+  -> ?limits:limits
+  -> lifecycle:Chatmd_shell_spec.Shell_spec.lifecycle
+  -> compiled
+  -> (instance, Chatmd_shell_spec.Diagnostic.t) result
+
+(** Activate once under the owned runner. Persistent instances initialize;
+    Invocation remains lazy per call. Ready activation is idempotent. A failed
+    activation is terminal; original exceptions propagate after releasing the
+    serialization lock. *)
+val activate : instance -> (unit, Chatmd_shell_spec.Diagnostic.t) result
+
+(** Revoke an instance when its actual owner closes. Idempotent and nonyielding;
+    closed instances reject activation and all execution/state operations. *)
+val close : instance -> unit
+
 val instantiate
   :  env:Eio_unix.Stdenv.base
   -> ?limits:limits

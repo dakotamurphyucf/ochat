@@ -1,0 +1,5 @@
+(library
+ (name shell_activation_tests)
+ (libraries core eio eio_main expect_test_helpers_core chatml chat_response ochat.ochat_function ochat.shell_runtime ochat.chatmd_shell_spec ochat.shell_access ochat.session)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

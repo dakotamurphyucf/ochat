@@ -656,3 +656,19 @@ let review ev state =
       ~finally:(fun () -> Eio.Cancel.protect (fun () -> Eio.Path.rmtree root)));
   [%expect {| same body; saved graph resumes at 1; changed dependency starts at 10 |}]
 ;;
+
+let%test_unit "prepared native activation is one-shot and direct access is revocable" =
+  Eio_main.run (fun env ->
+    let compiled = compiled env in
+    let pending = H.prepare_instance ~env ~lifecycle:Session compiled |> Support.ok in
+    assert (Result.is_error (call pending));
+    assert (Result.is_error (H.snapshot pending));
+    H.activate pending |> Support.ok;
+    H.activate pending |> Support.ok;
+    [%test_eq: H.action] (call pending |> Support.ok) (H.Match (true, "actual-event:0"));
+    H.close pending;
+    H.close pending;
+    assert (Result.is_error (H.activate pending));
+    assert (Result.is_error (call pending));
+    assert (Result.is_error (H.snapshot pending)))
+;;
