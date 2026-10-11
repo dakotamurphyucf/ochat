@@ -6,11 +6,6 @@ supplies the root selection, admitted directory anchors and exact Git grants, th
 actual compiler contract, and the already admitted tool registry. Authored project
 configuration requests dependencies and tool names; it cannot create authority.
 
-The public preparation entry points are being integrated with the selected-closure
-traversal. The accounting, Local capture, backend brackets and selected-lock
-publication components have focused local qualification. Complete graph and
-public-entry-point qualification remains required before this library is ready.
-
 ## Capture and selection
 
 `prepare` produces one immutable `Chatml_project_build` and its final accounting.

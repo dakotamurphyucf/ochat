@@ -23,8 +23,8 @@ module Location : sig
   val project : t -> Path.t
 end
 
-(** Invocation-owned iterative queue and capture identity table. All methods
-    charge admission before allocation, bounded comparisons and queue visits.
+(** Invocation-owned iterative queue and capture identity table. Queue insertion,
+    retained input-sized facts, comparisons and queue visits charge before work.
     Local cursors are borrowed only while their Roots owner remains alive. *)
 type t
 

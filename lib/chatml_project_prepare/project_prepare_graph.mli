@@ -20,8 +20,8 @@ module Error = Project_prepare_error
     Absolute Local requires an explicit native host anchor.
 
     Iterative work queues charge unique packages, every incoming dependency visit,
-    pair traversal and long identity comparisons before work. Declaration cycles
-    terminate through package/prior-owner pairs; executable cycle checks remain
+    route/prior-owner traversal and long identity comparisons before work. Declaration cycles
+    terminate through package/lexical-route/prior-owner triples; executable cycle checks remain
     compiler-owned. Dependencies are selected by the actual captured catalog's
     scopes, never all declarations or a root/importer environment.
 
