@@ -221,12 +221,16 @@ and eval_expr_tail
   | REConfigured_read reference ->
     (match Configured_modules.read env.configured_modules reference with
      | Ok value -> Value value
-     | Error
-         ( Registry_unavailable
-         | Module_unavailable _
-         | Member_unavailable _
-         | Invalid_public_module ) ->
-       raise_owned_error env ~span:e.span "Configured module registry is unavailable")
+     | Error error ->
+       let message =
+         match error with
+         | Registry_unavailable -> "Configured module registry is unavailable"
+         | Module_unavailable _ -> "Configured module has not completed initialization"
+         | Member_unavailable _ -> "Configured public member is unavailable"
+         | Invalid_public_module -> "Configured public export is not a module"
+         | Duplicate_module _ -> "Configured module was already initialized"
+       in
+       raise_owned_error env ~span:e.span message)
   | REVarLoc loc -> Value (load_from_frames frames loc)
   | REPrim1 (prim, arg_expr) ->
     let arg_val = finish_eval frames (eval_expr_tail ~tail:false env frames arg_expr) in
@@ -735,4 +739,9 @@ let eval_captured_program env ~source prog =
       Ok env
     with
     | Runtime_error diagnostic -> Error diagnostic)
+;;
+
+let select_exports env ~visibility ~span =
+  try Ok (select_module_exports ~span ~origin:env env visibility) with
+  | Runtime_error diagnostic -> Error diagnostic
 ;;

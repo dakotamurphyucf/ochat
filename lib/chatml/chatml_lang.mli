@@ -302,8 +302,9 @@ and env =
   ; configured_modules : configured_modules
   }
 
-(** Explicit canonical access;186 is unavailable until187 installs completed modules.
-    No lazy initialization, configured-name/global fallback or callback authority. *)
+(** Execution-owned persistent maps of completed public modules. Map structure is
+    immutable; values/cells belong to one execution/session. No lazy initializer,
+    inventory, configured-name fallback or callback authority. *)
 module Configured_modules : sig
   type t = configured_modules
 
@@ -313,9 +314,20 @@ module Configured_modules : sig
       | Module_unavailable of Chatml_source.Id.t
       | Member_unavailable of string
       | Invalid_public_module
+      | Duplicate_module of Chatml_source.Id.t
   end
 
   val unavailable : t
+  val empty : t
+
+  (** Reject duplicate identity and non-module values; share the module object.
+      This shape check does not attest checked visibility or grant authority. *)
+  val add
+    :  t
+    -> implementation:Chatml_source.Id.t
+    -> public_module:value
+    -> (t, Error.t) Result.t
+
   val read : t -> Chatml_module_reference.t -> (value, Error.t) Result.t
 end
 

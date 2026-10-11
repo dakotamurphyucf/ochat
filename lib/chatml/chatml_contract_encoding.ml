@@ -66,7 +66,8 @@ let type_scheme root ~checkpoint =
 (* Sexplib0 0.17 machine syntax: spaces separate only adjacent unquoted atoms.
    Explicit pending events make list emission stack safe. Byte work polls in
    4096-byte chunks, including long native names and escaped binary atoms. *)
-let to_string root ~checkpoint =
+let to_string ?(allocate = fun _ -> ()) root ~checkpoint =
+  allocate 1024;
   let buffer = Buffer.create 256 in
   let poll index = if index mod 4096 = 0 then checkpoint () in
   let quoted text =
@@ -90,6 +91,7 @@ let to_string root ~checkpoint =
       then (
         checkpoint ();
         let len = Int.min 4096 (String.length text - offset) in
+        allocate (16 * len);
         Buffer.add_substring buffer text ~pos:offset ~len;
         chunks (offset + len))
     in
@@ -99,6 +101,7 @@ let to_string root ~checkpoint =
     Buffer.add_char buffer '"';
     String.iteri text ~f:(fun index c ->
       poll index;
+      if index mod 4096 = 0 then allocate (16 * Int.min 4096 (String.length text - index));
       match c with
       | '"' -> Buffer.add_string buffer "\\\""
       | '\\' -> Buffer.add_string buffer "\\\\"
@@ -115,7 +118,9 @@ let to_string root ~checkpoint =
         Buffer.add_char buffer (Char.of_int_exn (48 + (code mod 10))));
     Buffer.add_char buffer '"'
   in
-  let rec emit need_space = function
+  let rec emit need_space events =
+    allocate 128;
+    match events with
     | [] ->
       checkpoint ();
       Buffer.contents buffer

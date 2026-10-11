@@ -64,7 +64,14 @@ module Builtin_surface = Chatml.Chatml_builtin_surface
 let value_to_string = Builtin_spec.value_to_string
 
 module BuiltinModules = struct
-  let add_surface (env : env) (surface : Builtin_surface.surface) =
+  let install_surface ~controlled (env : env) (surface : Builtin_surface.surface) =
+    let step bytes =
+      if controlled
+      then
+        Option.iter env.control ~f:(fun control ->
+          control.diagnostic_checkpoint ();
+          control.allocate bytes)
+    in
     let implementation name (builtin : Builtin_spec.builtin) =
       match env.control with
       | None -> VBuiltin builtin.impl
@@ -79,15 +86,30 @@ module BuiltinModules = struct
             result)
     in
     List.iter surface.globals ~f:(fun builtin ->
+      step 96;
       set_var env builtin.name (implementation builtin.name builtin));
     List.iter surface.modules ~f:(fun builtin_module ->
+      step 128;
       let menv = create_env ?control:env.control () in
       List.iter builtin_module.exports ~f:(fun builtin ->
+        step 96;
         set_var
           menv
           builtin.name
           (implementation (builtin_module.name ^ "." ^ builtin.name) builtin));
       set_var env builtin_module.name (VModule menv))
+  ;;
+
+  let add_surface env surface = install_surface ~controlled:false env surface
+
+  let create_controlled_env_with_surface ?control surface =
+    Option.iter control ~f:(fun control ->
+      control.diagnostic_checkpoint ();
+      control.allocate 128);
+    let env = create_env ?control () in
+    install_surface ~controlled:true env surface;
+    Option.iter control ~f:(fun control -> control.diagnostic_checkpoint ());
+    env
   ;;
 
   let create_env_with_surface ?control (surface : Builtin_surface.surface) : env =
@@ -123,5 +145,6 @@ end
 
 let add_surface = BuiltinModules.add_surface
 let create_env_with_surface = BuiltinModules.create_env_with_surface
+let create_controlled_env_with_surface = BuiltinModules.create_controlled_env_with_surface
 let add_global_builtins = BuiltinModules.add_global_builtins
 let create_default_env = BuiltinModules.create_default_env

@@ -58,6 +58,24 @@ let shared_features =
     , "runtime.execution"
     , [ "test/chatml_execution_budget_test.ml"; "test/chatml_projection_budget_test.ml" ]
     )
+  ; ( "execution.configured_modules"
+    , "Contract and invocation preflight before effects, canonical once-only value \
+       dependencies, execution-local state and shared controls"
+    , [ "lib/chatml_linked_runtime/chatml_linked_runtime.ml"
+      ; "lib/chatml/chatml_builtin_modules.ml"
+      ; "lib/chatml/chatml_compiler_contract.ml"
+      ; "lib/chatml/chatml_contract_encoding.ml"
+      ; "lib/chatml/chatml_eval.ml"
+      ; "lib/chatml/chatml_lang.ml"
+      ; "lib/chatml/chatml_host_runtime.ml"
+      ; "lib/chatml/chatml_execution.ml"
+      ]
+    , "runtime.execution"
+    , [ "test/chatml_linked_runtime/runtime_tests.ml"
+      ; "test/chatml_linked_runtime/control_tests.ml"
+      ; "test/chatml_linked_runtime/order_model_tests.ml"
+      ; "test/chatml_linked_runtime/invocation_tests.ml"
+      ] )
   ; ( "diagnostics.deferred_ownership"
     , "Deferred source sites, bounded diagnostics and unchanged task fuel/recovery \
        boundaries"
@@ -216,7 +234,17 @@ let moderator_features =
 ;;
 
 let implementation_sources =
-  [ ( "lib/agent_session/administration.ml"
+  [ ( "lib/chatml_linked_runtime/chatml_linked_runtime.ml"
+    , "6a818d806bd09eeb3970e3603f5444de154d8b39f8131dc237f21e94a4d9493f" )
+  ; ( "lib/chatml/chatml_builtin_modules.ml"
+    , "4d005f60b55cee3263e7925bae6d1c81129ca383cf6218b3cc2dc86270def236" )
+  ; ( "lib/chatml/chatml_compiler_contract.ml"
+    , "057abd58ea8c9513c836e36dd87ad664a01bf76d0c264ccb3b61249e2a9c2763" )
+  ; ( "lib/chatml/chatml_contract_encoding.ml"
+    , "7f8c6c1a49818abaf5ecbfe7cc1df2f4511930939cc1c573e3d422c94548c138" )
+  ; ( "lib/chatml/chatml_eval.ml"
+    , "26e9c0d0374407252f65f8fb8f7439652ed2e181db63a4d938af8f7d74eb82d4" )
+  ; ( "lib/agent_session/administration.ml"
     , "294e4f4885be914c82f8fd9b327b9dac9a311ba6c49f3c424cdd34f7c9a9f54b" )
   ; ( "lib/agent_server/command_handler.ml"
     , "5f3054bc7a800289757ef23127c329766fb3f951ef0fa36c2db225f35e926477" )
@@ -231,7 +259,7 @@ let implementation_sources =
   ; ( "lib/chatml/chatml_compilation.ml"
     , "f15466510b48217410039497a1d57ed9d83030c445d5045deb1a1638ee7f23dc" )
   ; ( "lib/chatml/chatml_execution.ml"
-    , "3a67924cbea7d014cc7c26932d7b9ec613ea4e49b3dfcd775fe53c4616006fdf" )
+    , "f8f85d98bef83a4dd18bbb635be3059fe6c319c9658fb27133a74059c611b142" )
   ; ( "lib/chatml/chatml_value_codec.ml"
     , "34d04d5b6b6a3e15a4cbdf75cf1a380c3eeb593045620893ba11c05b15d02eb7" )
   ; ( "lib/agent_protocol/delivery.ml"
@@ -299,9 +327,9 @@ let implementation_sources =
   ; ( "lib/chat_response/subscription_operations.ml"
     , "88aa4ac9bd7c2100a9614f8b30639c6fd30e7ae0c11e86e423a57badd69c0603" )
   ; ( "lib/chatml/chatml_host_runtime.ml"
-    , "5449ea3ba6c1961622d4c5931d241cf1a1b72871b8dbc9fcf3f5da77e99df2eb" )
+    , "e8b91417a2826579b9ea24e88d13a88a330abe115efd88b2cf73c14ed6827b83" )
   ; ( "lib/chatml/chatml_lang.ml"
-    , "3a18d0df40384082a64e98aa8b47d1baba5b7cf835372f96ce658f18b7a1759a" )
+    , "cffe0b48ae424c94993392b748bbad87727a0207d372d84600e4eed2dcfbdf36" )
   ; ( "lib/chatml_sources/chatml_diagnostic.ml"
     , "cd4f59d52868eff58a8eaabd2cc8222d8c65f677066b3d8ab16c7b5c7a81fde5" )
   ]
@@ -322,16 +350,16 @@ let topic_contracts =
     , "e1c3aaa7ed7aedb2e13188a16276413e547488619cc322b596704abf4bd5d9b7" )
   ; ( "one_off_v1"
     , "runtime.execution"
-    , "8788ff22ae69075a297847aa5d4c0029c40c516b00bfac7d34b1b28ead20c17d" )
+    , "4c930e0431a0534667446379e4d190107d751ead66420792af8bf0aa88c7c8e1" )
   ; ( "tool_v1"
     , "runtime.execution"
-    , "7ac18942e16614edba17cbf136913d4f6329cdb194a7a0c7584c57e41353db5b" )
+    , "50fc26b2591a71a0582e2ff267d66e6e99c221fd4cf47830fd4e4a309afc8689" )
   ; ( "moderator_v1"
     , "runtime.execution"
-    , "5071945cfa936b0860c560e284459edf4b212a108398306c662ab729f207f646" )
+    , "28416715133a81369dffe0313b19e0400d53de52b1c67b110c8a428aec101149" )
   ; ( "delegated_moderator_v1"
     , "runtime.execution"
-    , "00e3b4d5c68dcd4083c4fbea6cfedd1534837d15bee1ff93ce6ef4542a9c96d2" )
+    , "966524097356cfeb00ba3c07adc2ef63b22adbb12013ab0b152fb7cce87be762" )
   ; ( "one_off_v1"
     , "runtime.jobs.owned"
     , "b9ae2125f3db7caf8088dbeed3d435aa99340fc98d427f73107d278b437f98ce" )

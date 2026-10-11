@@ -517,8 +517,19 @@ transparent and have no runtime fields. Without a signature, the public interfac
 is inferred from the module's local declarations.
 
 The declaration-only signature syntax also has a companion `.chatmli` parser.
-The current script compiler does not load companion files or configured modules
-from other source files; multi-file graph linkage remains separate pending work.
+The prepared compiler checks explicitly captured implementations and optional
+companions, and lowers configured value reads to canonical module members.
+The linked runtime initializes the entry's value dependency closure once in
+dependency-first order. Type references and configured `open` alone stay inert;
+actual value uses select initialization. Aliases of one canonical module share
+its public runtime instance. Standalone runs get fresh state; a persistent
+session retains its initialized graph. See
+[evaluation order](chatml-evaluation.md#configured-module-initialization) and
+[prepared execution](chatml-execution-limits.md#prepared-execution-validates-before-initialization).
+
+The legacy text compiler does not discover companion files or configured sources.
+These explicit prepared/linked APIs do not supply filesystem discovery, bundle
+custody or automatic ChatMD host routing.
 
 ### 6.5 `open`
 
@@ -2319,7 +2330,7 @@ ChatML currently does **not** provide:
   structural `type` declarations
 - selective imports
 - abstract signature types, module type declarations or functors
-- configured multi-file module loading and companion interface linkage
+- automatic filesystem discovery and ChatMD routing of configured source graphs
 - layout-sensitive syntax
 - Unicode identifiers
 - full ML-style match usefulness analysis

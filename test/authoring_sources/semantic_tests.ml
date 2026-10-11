@@ -29,6 +29,7 @@ let%expect_test
                [ "lib/chatml/chatml_host_runtime.ml"
                ; "lib/chatml/chatml_compilation.ml"
                ; "lib/chatml/chatml_execution.ml"
+               ; "lib/chatml/chatml_builtin_modules.ml"
                ]
                path
                ~equal:String.equal)))

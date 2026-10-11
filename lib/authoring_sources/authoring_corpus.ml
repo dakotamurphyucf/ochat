@@ -2773,7 +2773,7 @@ let language_foundation ~sources =
       ; review =
           Audited
             { excerpt_sha256 =
-                [ "882ebcc7de587151d7f3f5e692f9ba06cdf0acf90d2af2ebcf966fd0c354a709" ]
+                [ "ba2f407ab376c109d77391e135cce1e1752979c3a73c42750df8d8067ace09f2" ]
             ; evidence =
                 [ "lib/chatml/chatml_lexer.mll"
                 ; "lib/chatml/chatml_parser.mly"
@@ -2782,6 +2782,8 @@ let language_foundation ~sources =
                 ; "test/chatml_owned_diagnostics/ownership_tests.ml"
                 ; "test/chatml_owned_diagnostics/task_tests.ml"
                 ; "test/chatml_owned_diagnostics/session_tests.ml"
+                ; "test/chatml_linked_runtime/runtime_tests.ml"
+                ; "test/chatml_linked_runtime/order_model_tests.ml"
                 ; "test/agent_docs/docs_chatml_authoring.ml"
                 ]
             }
@@ -3343,7 +3345,7 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "9689f7153cb5bd7301fe9a84b4193b4d3423438a03ea9923168aa1dd59cc96b4" ]
+                   [ "c3363bbc5a826d476c2938832dc97081aa7901b3ebb82b52b379da6063bd6f3b" ]
                ; evidence =
                    [ "lib/chatml/chatml_compilation.ml"
                    ; "lib/chatml/chatml_execution.ml"
@@ -3352,6 +3354,8 @@ let runtime_foundation ~sources =
                    ; "lib/chat_response/moderator_manager.ml"
                    ; "test/chatml_compilation_test.ml"
                    ; "test/chatml_execution_budget_test.ml"
+                   ; "test/chatml_linked_runtime/control_tests.ml"
+                   ; "test/chatml_linked_runtime/invocation_tests.ml"
                    ; "test/moderation/moderator_execution_budget_test.ml"
                    ]
                }

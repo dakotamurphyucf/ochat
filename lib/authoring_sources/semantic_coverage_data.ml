@@ -371,11 +371,11 @@ let implementation_sources =
   ; ( "lib/chatml/chatml_static_surface.ml"
     , "07c8f7a97e1e6da286ff4e103181ce4b22b12ebb6f370ac19918f171c0723111" )
   ; ( "lib/chatml/chatml_compiler_contract.ml"
-    , "4b17a43d4a99a74aefe092eb88fac79239aa93a0b7f691ceaecd4ca11fa13259" )
+    , "057abd58ea8c9513c836e36dd87ad664a01bf76d0c264ccb3b61249e2a9c2763" )
   ; ( "lib/chatml/chatml_module_reference.ml"
     , "f2e9c1ff541b67a243effe6b4f04b8c0f15763000f9cd42603d6a9a746d0a728" )
   ; ( "lib/chatml/chatml_contract_encoding.ml"
-    , "2961bf9176c246b023060193e16e863d1985dacda03388f8c16c60154b3ca285" )
+    , "7f8c6c1a49818abaf5ecbfe7cc1df2f4511930939cc1c573e3d422c94548c138" )
   ; ( "lib/chatml_linked/chatml_linked_program.ml"
     , "a344c9d811ed02ff820abffb442a297d72dfeb699f47f546e221698d7e6750a8" )
   ; ( "lib/chatml/chatml_binding_pattern.ml"
@@ -405,9 +405,9 @@ let implementation_sources =
   ; ( "lib/chatml/chatml_equality_requirement.ml"
     , "d5eac886d08cdc3e3619b7d1f1ccab0e391ad282e08bc2e9835bc84acc519b48" )
   ; ( "lib/chatml/chatml_eval.ml"
-    , "89fc361dae79ea61b4027a78f4cabe5764bc355f55506addfbca836e7fbd7fc5" )
+    , "26e9c0d0374407252f65f8fb8f7439652ed2e181db63a4d938af8f7d74eb82d4" )
   ; ( "lib/chatml/chatml_lang.ml"
-    , "3a18d0df40384082a64e98aa8b47d1baba5b7cf835372f96ce658f18b7a1759a" )
+    , "cffe0b48ae424c94993392b748bbad87727a0207d372d84600e4eed2dcfbdf36" )
   ; ( "lib/chatml/chatml_lexer.mll"
     , "7e1ad82856e9e6e1a1a26f6202e535a0f55dd4671c5083429d205abb448e7c5e" )
   ; ( "lib/chatml/chatml_parser.mly"
@@ -436,16 +436,16 @@ let implementation_sources =
 let topic_contracts =
   [ ( "one_off_v1"
     , "chatml.evaluation"
-    , "400882cc9a60a6eecc26ab67169bc53a0029a65f0e9c265f4858fdfc1b259dcb" )
+    , "849a77ddcb5dd53942889309c538b159daf31789a1910dd1d06f5305c0890dfc" )
   ; ( "tool_v1"
     , "chatml.evaluation"
-    , "1bb8bc70331971515931345d68a07b026b3daf3cf7ba30e76d6f35a87a47334a" )
+    , "ff1ae585f1d36fb56b9b3f7255807a8f9f9aef9841ca38cc8fdf01f618b72af7" )
   ; ( "moderator_v1"
     , "chatml.evaluation"
-    , "ddc297c852a9d4a5074b57ab6be0889168f7fa5d10912d9cab5259191c5586a9" )
+    , "caf75d2117a1c0089ef0dab18ace4ec95247abe4c053e1c48a6d26cc3a187c5c" )
   ; ( "delegated_moderator_v1"
     , "chatml.evaluation"
-    , "9c6595c1d0623d721b3ed16cb9a20780506fa3e3bd153485894cda987e2d78d0" )
+    , "c485f1e9e589332ea48ae92867926f26c94cf20cf47d6675afa714678c9de7fd" )
   ; ( "one_off_v1"
     , "chatml.inference"
     , "82958b0c05087b9ddf655c3de92f4b80c924f51ec5a3a682e81aff7d76d02eeb" )

@@ -67,7 +67,8 @@
   chatml
   chatml_typechecker
   chatml_resolver
-  chatml_builtin_modules)
+  chatml_builtin_modules
+  chatml_linked_runtime)
  (preprocess
   (pps ppx_jane)))
 

@@ -912,6 +912,21 @@ let compiled_surface (compiled : compiled_script) : Builtin_surface.surface =
   compiled.surface
 ;;
 
+let create_session env ~state ~on_event ~operations ~source_text ~current_exec =
+  { env
+  ; state
+  ; on_event
+  ; queue = Queue.create ()
+  ; operations
+  ; source_text
+  ; current_exec
+  ; suspended_exec = None
+  ; committed_local_effects_rev = []
+  ; ui_resume_active = false
+  ; halted = false
+  }
+;;
+
 let instantiate_session_internal
       ?control
       (config : runtime_config)
@@ -961,18 +976,13 @@ let instantiate_session_internal
                       entrypoints.initial_state_name
                       entrypoints.on_event_name);
                   Ok
-                    { env
-                    ; state = initial_state
-                    ; on_event
-                    ; queue = Queue.create ()
-                    ; operations
-                    ; source_text = compiled.source_text
-                    ; current_exec = None
-                    ; suspended_exec = None
-                    ; committed_local_effects_rev = []
-                    ; ui_resume_active = false
-                    ; halted = false
-                    }))
+                    (create_session
+                       env
+                       ~state:initial_state
+                       ~on_event
+                       ~operations
+                       ~source_text:compiled.source_text
+                       ~current_exec:None)))
         with
         | Lang.Runtime_error err -> Error (Failure.runtime err)))
 ;;
@@ -1372,6 +1382,65 @@ and interpret_task session exec ~frames (task : Lang.task) =
         | Ok (Effect_suspend _) -> assert false))
 ;;
 
+let standalone_operations (config : runtime_config) ~prepare_result =
+  List.filter config.operations ~f:(fun operation ->
+    match operation.kind with
+    | Diagnostic | External_sync -> true
+    | Local_transactional_with_result _ -> Option.is_some prepare_result
+    | Local_transactional | External_async -> false)
+  |> operations_map
+;;
+
+let run_initialized_entrypoint
+      ?limits
+      ?prepare_result
+      env
+      ~source_text
+      ~operations
+      fn
+      ~arguments
+  =
+  let failure message = Error (Failure.plain message) in
+  let open Result.Let_syntax in
+  let exec =
+    { phase = "standalone"
+    ; local_effects_rev = []
+    ; emitted_rev = []
+    ; end_session_requested = None
+    ; fuel = Option.map limits ~f:(fun (limits : execution_limits) -> limits.fuel)
+    ; remaining_tasks = Option.map limits ~f:(fun limits -> limits.max_tasks)
+    }
+  in
+  let session =
+    create_session
+      env
+      ~state:Lang.VUnit
+      ~on_event:fn
+      ~operations
+      ~source_text
+      ~current_exec:(Some exec)
+  in
+  Exn.protect
+    ~finally:(fun () -> session.current_exec <- None)
+    ~f:(fun () ->
+      let%bind value =
+        Eval.apply_value_result fn arguments |> Result.map_error ~f:Failure.runtime
+      in
+      let%bind task = expect_task_value value |> host_result in
+      let%bind outcome = interpret_task session exec ~frames:[] task in
+      match outcome with
+      | Task_value value ->
+        let%map install =
+          match prepare_result with
+          | None -> Ok ignore
+          | Some prepare ->
+            prepare ~value ~local_effects:(List.rev exec.local_effects_rev) |> host_result
+        in
+        install ();
+        value
+      | Task_suspend _ -> failure "Standalone execution cannot suspend for UI input")
+;;
+
 let run_entrypoint_internal
       ?control
       ?limits
@@ -1390,15 +1459,7 @@ let run_entrypoint_internal
       ~runtime_surface:config.surface
     |> host_result
   in
-  let%bind operations =
-    List.filter config.operations ~f:(fun operation ->
-      match operation.kind with
-      | Diagnostic | External_sync -> true
-      | Local_transactional_with_result _ -> Option.is_some prepare_result
-      | Local_transactional | External_async -> false)
-    |> operations_map
-    |> host_result
-  in
+  let%bind operations = standalone_operations config ~prepare_result |> host_result in
   let env = Builtin_modules.create_env_with_surface ?control config.surface in
   let env = { env with source = compiled.source } in
   try
@@ -1408,49 +1469,14 @@ let run_entrypoint_internal
       | None -> failure (Printf.sprintf "Missing entrypoint '%s'" entrypoint)
       | Some value -> expect_callable entrypoint value |> host_result
     in
-    let exec =
-      { phase = "standalone"
-      ; local_effects_rev = []
-      ; emitted_rev = []
-      ; end_session_requested = None
-      ; fuel = Option.map limits ~f:(fun (limits : execution_limits) -> limits.fuel)
-      ; remaining_tasks = Option.map limits ~f:(fun limits -> limits.max_tasks)
-      }
-    in
-    let session =
-      { env
-      ; state = Lang.VUnit
-      ; on_event = fn
-      ; queue = Queue.create ()
-      ; operations
-      ; source_text = compiled.source_text
-      ; current_exec = Some exec
-      ; suspended_exec = None
-      ; committed_local_effects_rev = []
-      ; ui_resume_active = false
-      ; halted = false
-      }
-    in
-    Exn.protect
-      ~finally:(fun () -> session.current_exec <- None)
-      ~f:(fun () ->
-        let%bind value =
-          Eval.apply_value_result fn arguments |> Result.map_error ~f:Failure.runtime
-        in
-        let%bind task = expect_task_value value |> host_result in
-        let%bind outcome = interpret_task session exec ~frames:[] task in
-        match outcome with
-        | Task_value value ->
-          let%map install =
-            match prepare_result with
-            | None -> Ok ignore
-            | Some prepare ->
-              prepare ~value ~local_effects:(List.rev exec.local_effects_rev)
-              |> host_result
-          in
-          install ();
-          value
-        | Task_suspend _ -> failure "Standalone execution cannot suspend for UI input")
+    run_initialized_entrypoint
+      ?limits
+      ?prepare_result
+      env
+      ~source_text:compiled.source_text
+      ~operations
+      fn
+      ~arguments
   with
   | Lang.Runtime_error error -> Error (Failure.runtime error)
 ;;
@@ -1941,4 +1967,105 @@ let enqueue_internal_event (session : session) (event : Lang.value)
       "[chatml-runtime] enqueue_internal_event event=%s"
       (value_to_string event));
   install ()
+;;
+
+let instantiate_prepared_session_detailed config program ~entrypoints ?control () =
+  let open Result.Let_syntax in
+  let checkpoint () = Option.iter control ~f:(fun c -> c.Lang.diagnostic_checkpoint ()) in
+  let allocate bytes = Option.iter control ~f:(fun c -> c.Lang.allocate bytes) in
+  let%bind invocation =
+    Chatml.Chatml_compiler_contract.Invocation.session
+      (Chatml_linked_program.static_contract program)
+      ~initial_state:entrypoints.initial_state_name
+      ~on_event:entrypoints.on_event_name
+      ~checkpoint
+      ~allocate
+      ()
+  in
+  let plain message = Diagnostic.create message in
+  let%bind operations = operations_map config.operations |> Result.map_error ~f:plain in
+  let%bind instance =
+    Chatml_linked_runtime.instantiate
+      program
+      ~surface:config.surface
+      ~entrypoints:(Chatml.Chatml_compiler_contract.Invocation.entrypoints invocation)
+      ?control
+      ()
+    |> Result.map_error ~f:Chatml_linked_runtime.Error.diagnostic
+  in
+  let binding name =
+    match Chatml_linked_runtime.binding instance ~name with
+    | Some value -> Ok value
+    | None -> Error (plain "Compiled session binding is unavailable")
+  in
+  let%bind initial_state = binding entrypoints.initial_state_name in
+  let%bind on_event = binding entrypoints.on_event_name in
+  let%bind on_event =
+    expect_callable entrypoints.on_event_name on_event |> Result.map_error ~f:plain
+  in
+  Option.iter control ~f:(fun control -> control.check_value initial_state);
+  Ok
+    (create_session
+       (Chatml_linked_runtime.entry_env instance)
+       ~state:initial_state
+       ~on_event
+       ~operations
+       ~source_text:(Captured.contents (Chatml_linked_runtime.entry_source instance))
+       ~current_exec:None)
+;;
+
+let run_prepared_entrypoint_detailed
+      config
+      program
+      ~entrypoint
+      ~arguments
+      ?control
+      ?limits
+      ?prepare_result
+      ()
+  =
+  let open Result.Let_syntax in
+  let checkpoint () = Option.iter control ~f:(fun c -> c.Lang.diagnostic_checkpoint ()) in
+  let argument_count =
+    List.fold arguments ~init:0 ~f:(fun count _ ->
+      checkpoint ();
+      count + 1)
+  in
+  let%bind invocation =
+    Chatml.Chatml_compiler_contract.Invocation.standalone
+      (Chatml_linked_program.static_contract program)
+      ~entrypoint
+      ~argument_count
+      ~checkpoint
+  in
+  let%bind operations =
+    standalone_operations config ~prepare_result |> Result.map_error ~f:Diagnostic.create
+  in
+  let%bind instance =
+    Chatml_linked_runtime.instantiate
+      program
+      ~surface:config.surface
+      ~entrypoints:(Chatml.Chatml_compiler_contract.Invocation.entrypoints invocation)
+      ?control
+      ()
+    |> Result.map_error ~f:Chatml_linked_runtime.Error.diagnostic
+  in
+  let%bind fn =
+    match Chatml_linked_runtime.binding instance ~name:entrypoint with
+    | None -> Error (Diagnostic.create "Compiled entrypoint is unavailable")
+    | Some value ->
+      expect_callable entrypoint value |> Result.map_error ~f:Diagnostic.create
+  in
+  try
+    run_initialized_entrypoint
+      ?limits
+      ?prepare_result
+      (Chatml_linked_runtime.entry_env instance)
+      ~source_text:(Captured.contents (Chatml_linked_runtime.entry_source instance))
+      ~operations
+      fn
+      ~arguments
+    |> Result.map_error ~f:Failure.diagnostic
+  with
+  | Lang.Runtime_error diagnostic -> Error diagnostic
 ;;

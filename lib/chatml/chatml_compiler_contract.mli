@@ -50,3 +50,57 @@ val identity : t -> checkpoint:(unit -> unit) -> Sexp.t
     checks it against Prepared.compiler_contract before parsing. No independent
     digest claim is trusted. Compilation.target/contract remain adapters here. *)
 val fingerprint : t -> checkpoint:(unit -> unit) -> Chatml_source.Digest.t
+
+(** Project actual installer metadata and compare its computed canonical SHA256
+    identity using this authentic contract's existing kind/requirements as the
+    comparison context. Includes every global/export scheme and alias body.
+    Retains no installer; no caller digest claim or native implementation equality.
+    Poll projection/encoding/hash; charge identity containers/bytes to [allocate]
+    when supplied by a host execution scope. Metadata equality does not grant
+    authority or prove native implementations honor their declared schemes. *)
+val matches_runtime_surface
+  :  t
+  -> Chatml_builtin_surface.surface
+  -> checkpoint:(unit -> unit)
+  -> ?allocate:(int -> unit)
+  -> unit
+  -> bool
+
+module Invocation : sig
+  type contract = t
+
+  (** Validated host invocation roles against authentic selected metadata, not
+      runtime types. No inference cells, callback, installer or captured inventory. *)
+  type t
+
+  val entrypoints : t -> string list
+
+  (** Standard one-off/tool targets allow their fixed main/run names; moderator
+      targets require session invocation. Native requires an explicit outer TFun
+      with a task result and exactly [argument_count] parameters. Generic selected
+      value contracts remain usable by the non-invoking Runtime.instantiate API.
+      Wrong kind/name/declared shape rejects before initialization. *)
+  val standalone
+    :  contract
+    -> entrypoint:string
+    -> argument_count:int
+    -> checkpoint:(unit -> unit)
+    -> (t, Chatml_diagnostic.t) Result.t
+
+  (** Standard moderator/delegated targets require canonical initial_state and
+      on_event roles. Native allows custom names, requiring explicit outer
+      TFun([ctx;state;event], TCon("task",[state])) for on_event. Its state input
+      and result must have the same canonical static type encoding as the selected
+      initial_state requirement, including shared variable names. No runtime
+      inference, alias solving or claim about native implementation correctness.
+      Poll actual conversion/encoding/hash and charge allocations when supplied.
+      Legacy caller-selected session APIs keep their existing behavior. *)
+  val session
+    :  contract
+    -> initial_state:string
+    -> on_event:string
+    -> checkpoint:(unit -> unit)
+    -> ?allocate:(int -> unit)
+    -> unit
+    -> (t, Chatml_diagnostic.t) Result.t
+end

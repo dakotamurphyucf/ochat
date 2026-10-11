@@ -333,6 +333,43 @@ val run_entrypoint_detailed
   -> unit
   -> (value, Chatml_diagnostic.t) result
 
+(** Initialize the linked value dependency closure once for a persistent session.
+    Validate exact static installer metadata and compiled selected names before
+    effects. Reuse the existing session/interpreter/events; companions restrict
+    external exports, while selected local host bindings use private entry scope.
+    Every unit captures [control]; persistent owners supply runner_control inside
+    run_scoped and serialize subsequent events. No partial session on failure.
+    Owned runtime diagnostics and cancellation contracts match detailed legacy
+    APIs. Standard moderator targets use canonical roles; Native custom labels
+    require an explicit three-argument task function and matching grouped state
+    metadata (Contract.Invocation). No runtime inference/alias solving. No
+    filesystem/custody routing or initialization during compilation. *)
+val instantiate_prepared_session_detailed
+  :  runtime_config
+  -> Chatml_linked_program.t
+  -> entrypoints:compiled_entrypoints
+  -> ?control:execution_control
+  -> unit
+  -> (session, Chatml_diagnostic.t) result
+
+(** Fresh linked instance and compiled selected task entrypoint. Shared operation
+    filtering, task/catch semantics, reservation cleanup and result installation
+    are identical to run_entrypoint_detailed. All initializer work inherits the
+    same control; selected names cannot expand the compiled dependency closure.
+    Contract.Invocation checks declared task-function shape, argument count and
+    registered target kind/role before initializer effects. *)
+val run_prepared_entrypoint_detailed
+  :  runtime_config
+  -> Chatml_linked_program.t
+  -> entrypoint:string
+  -> arguments:value list
+  -> ?control:execution_control
+  -> ?limits:execution_limits
+  -> ?prepare_result:
+       (value:value -> local_effects:eff list -> (unit -> unit, string) result)
+  -> unit
+  -> (value, Chatml_diagnostic.t) result
+
 (** Current durable script state for the session. *)
 val current_state : session -> value
 

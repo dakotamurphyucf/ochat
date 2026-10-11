@@ -241,8 +241,6 @@ let format_runtime_error source_text err =
 (* 2) Runtime Value Types                                                  *)
 (***************************************************************************)
 
-type configured_modules = Unavailable
-
 type execution_control =
   { checkpoint : unit -> unit
   ; diagnostic_checkpoint : unit -> unit
@@ -254,6 +252,10 @@ type execution_control =
   ; before_effect : name:string -> spawned:bool -> unit
   ; after_effect : value -> unit
   }
+
+and configured_modules =
+  | Unavailable
+  | Completed of (Chatml_source.Id.t, value, Chatml_source.Id.comparator_witness) Map.t
 
 and value =
   | VInt of int
@@ -334,10 +336,66 @@ module Configured_modules = struct
       | Module_unavailable of Chatml_source.Id.t
       | Member_unavailable of string
       | Invalid_public_module
+      | Duplicate_module of Chatml_source.Id.t
   end
 
   let unavailable = Unavailable
-  let read Unavailable _reference = Error Error.Registry_unavailable
+  let empty = Completed (Map.empty (module Chatml_source.Id))
+
+  let add t ~implementation ~public_module =
+    match t, public_module with
+    | Unavailable, _ -> Error Error.Registry_unavailable
+    | Completed modules, VModule _ ->
+      if Map.mem modules implementation
+      then Error (Error.Duplicate_module implementation)
+      else Ok (Completed (Map.set modules ~key:implementation ~data:public_module))
+    | ( Completed _
+      , ( VInt _
+        | VBool _
+        | VFloat _
+        | VString _
+        | VVariant _
+        | VRecord _
+        | VArray _
+        | VTuple _
+        | VRef _
+        | VClosure _
+        | VUnit
+        | VBuiltin _
+        | VTask _ ) ) -> Error Error.Invalid_public_module
+  ;;
+
+  let read t reference =
+    let rec member value = function
+      | [] -> Ok value
+      | name :: rest ->
+        (match value with
+         | VModule env ->
+           (match Hashtbl.find env.bindings name with
+            | None -> Error (Error.Member_unavailable name)
+            | Some cell -> member !cell rest)
+         | VInt _
+         | VBool _
+         | VFloat _
+         | VString _
+         | VVariant _
+         | VRecord _
+         | VArray _
+         | VTuple _
+         | VRef _
+         | VClosure _
+         | VUnit
+         | VBuiltin _
+         | VTask _ -> Error Error.Invalid_public_module)
+    in
+    match t with
+    | Unavailable -> Error Error.Registry_unavailable
+    | Completed modules ->
+      let implementation = Chatml_module_reference.implementation reference in
+      (match Map.find modules implementation with
+       | None -> Error (Error.Module_unavailable implementation)
+       | Some value -> member value (Chatml_module_reference.member_path reference))
+  ;;
 end
 
 let create_env ?control ?source ?(configured_modules = Configured_modules.unavailable) ()

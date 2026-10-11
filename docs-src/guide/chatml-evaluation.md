@@ -119,6 +119,29 @@ unit. A sequence discards its first value. Discarding a task does not run it.
 Callbacks in ordinary array/string operations are eager; they are not scheduled
 as independent jobs merely because their bodies construct task values.
 
+## Configured module initialization
+
+The prepared compiler and linked runtime operate on explicitly captured source;
+they do not discover or reopen files. The entry's value dependencies initialize
+once in dependency-first order, with the entry last. A configured `open` or type
+reference alone does not initialize its module. Actual value uses, including
+inside an uncalled function or a selected host binding imported through `open`,
+select dependencies. Unused catalog entries remain inert.
+
+Canonical module identity determines sharing. If two dependencies and the entry
+use different configured names for the same counter module, all three reach the
+same initialized counter. Another standalone execution gets fresh state; events
+in one persistent session retain that session's initialized state.
+
+Each unit sees its own lexical bindings, authorized builtins and completed value
+dependencies. Importer-local bindings do not enter a dependency's environment.
+Checked public visibility applies before a module is published; exported
+closures retain their private bindings. A companion limits external exports,
+while compiled local host entrypoints can use the entry's private environment.
+A failed initializer stops later units and returns no partial runtime instance;
+native effects already performed are not rolled back. Deferred failures retain
+the defining dependency's captured source.
+
 ## Failures and representation boundaries
 
 Both integer and float division reject zero divisors, including floating negative

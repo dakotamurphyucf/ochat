@@ -48,3 +48,14 @@ val eval_captured_program
   -> source:Chatml_source.t
   -> resolved_program
   -> (env, runtime_error) result
+
+(** Select checked public exports into a fresh table while sharing values and
+    private closure environments. Reuses inline signature selection, preserving
+    source/control/dependencies and polling the current control. Does not execute
+    a body or add a synthetic expression/fuel step. [span] belongs to this unit.
+    Runtime failures remain structured; cancellation/control propagate. *)
+val select_exports
+  :  env
+  -> visibility:Chatml_module_visibility.t
+  -> span:Source.span
+  -> (env, runtime_error) result
