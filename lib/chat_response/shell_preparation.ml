@@ -10,7 +10,7 @@ type t =
 
 let registry t = t.registry
 
-let prepare ?programs ~env ~admin_policy ~manifest material =
+let prepare ?programs ~env ~limits ~checkpoint ~admin_policy ~manifest material =
   let open Result.Let_syntax in
   match programs with
   | None ->
@@ -39,8 +39,8 @@ let prepare ?programs ~env ~admin_policy ~manifest material =
         ~entrypoints:
           (Map.find_multi entrypoints script.Chatmd_shell_spec.Chatmd_script_spec.id)
         ~env
-        ~checkpoint:Eio.Fiber.check
-        ~limits:Chatml_compilation.default_limits
+        ~checkpoint
+        ~limits
         ~max_dependency_depth:128
       |> Result.map ~f:(fun program ->
         selected := program :: !selected;

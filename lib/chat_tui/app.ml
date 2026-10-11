@@ -255,6 +255,7 @@ module Setup = struct
     =
     let host = agent_runtime_host ~ctx ~response_dir ~session_id ~prompt_elements in
     Agent_runtime.create
+      ~moderator_surface:Chatml_builtin_surface.ui_moderator_surface
       ~sw
       ~ctx
       ~host
@@ -324,18 +325,12 @@ module Setup = struct
         ~prompt_file
         ~session
         ~allocator
-        ~prompt_elements
+        ~artifact
         ~history_entries
         ~tools
         ()
     =
     let open Result.Let_syntax in
-    let%bind _, artifact =
-      Moderator_manager.Registry.of_elements
-        ~surface:Chatml_builtin_surface.ui_moderator_surface
-        Moderator_manager.Registry.empty
-        prompt_elements
-    in
     match artifact with
     | None -> Ok (None, None)
     | Some artifact ->
@@ -363,6 +358,7 @@ module Setup = struct
       in
       let%bind manager =
         Moderator_manager.create_entries
+          ~env
           ~artifact
           ~capabilities
           ~allocator
@@ -1689,7 +1685,7 @@ let run_chat
       ~prompt_file
       ~session
       ~allocator:history_allocator
-      ~prompt_elements
+      ~artifact:agent_runtime.legacy_moderator
       ~history_entries:history_items
       ~tools
       ~on_wakeup:on_moderator_wakeup

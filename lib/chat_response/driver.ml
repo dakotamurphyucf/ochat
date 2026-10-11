@@ -70,7 +70,7 @@ let capabilities_with_model_executor
 let create_moderator
       ~env
       ~session_id
-      ~elements
+      ~artifact
       ~history
       ~available_tools
       ?(capabilities = Moderation.Capabilities.default)
@@ -80,14 +80,11 @@ let create_moderator
   : (Stream_moderator.moderator option, string) result
   =
   let open Result.Let_syntax in
-  let%bind _, artifact =
-    Moderator_manager.Registry.of_elements Moderator_manager.Registry.empty elements
-  in
   match artifact with
   | None -> Ok None
   | Some artifact ->
     let%bind manager =
-      Moderator_manager.create ~artifact ~capabilities ?on_process_run ()
+      Moderator_manager.create ~env ~artifact ~capabilities ?on_process_run ()
     in
     let moderator =
       Stream_moderator.
@@ -136,7 +133,7 @@ let create_moderator
 let create_moderator_entries
       ~env
       ~session_id
-      ~elements
+      ~artifact
       ~allocator
       ~history
       ~available_tools
@@ -146,14 +143,12 @@ let create_moderator_entries
       ()
   =
   let open Result.Let_syntax in
-  let%bind _, artifact =
-    Moderator_manager.Registry.of_elements Moderator_manager.Registry.empty elements
-  in
   match artifact with
   | None -> Ok None
   | Some artifact ->
     let%bind manager =
       Moderator_manager.create_entries
+        ~env
         ~artifact
         ~capabilities
         ~allocator
@@ -712,6 +707,7 @@ let rec run_agent
   in
   let agent_runtime =
     Agent_runtime.create
+      ~moderator_surface:Chatml.Chatml_builtin_surface.moderator_surface
       ~sw
       ~ctx
       ~host
@@ -804,7 +800,7 @@ let rec run_agent
         create_moderator_entries
           ~env:(Ctx.env ctx)
           ~session_id
-          ~elements
+          ~artifact:agent_runtime.legacy_moderator
           ~allocator
           ~history:init_entries
           ~available_tools:tools_req
@@ -1033,6 +1029,7 @@ and run_completion_stream
   in
   let agent_runtime =
     Agent_runtime.create
+      ~moderator_surface:Chatml.Chatml_builtin_surface.moderator_surface
       ~sw
       ~ctx
       ~host
@@ -1115,7 +1112,7 @@ and run_completion_stream
       create_moderator_entries
         ~env
         ~session_id
-        ~elements
+        ~artifact:agent_runtime.legacy_moderator
         ~allocator
         ~history:input_entries
         ~available_tools:tools

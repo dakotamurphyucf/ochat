@@ -86,31 +86,7 @@ module Registry = struct
         Map.set t ~key ~data:artifact, artifact)
   ;;
 
-  let prepare_script
-        ?(surface = Builtin_surface.moderator_surface)
-        t
-        script
-        ~programs
-        ~capabilities
-        ~env
-        ~checkpoint
-        ~limits
-        ~max_dependency_depth
-    =
-    let open Result.Let_syntax in
-    let%map program =
-      Moderator_program.compile
-        programs
-        ~script
-        ~surface
-        ~capabilities
-        ~env
-        ~checkpoint
-        ~limits
-        ~max_dependency_depth
-      |> Result.map_error ~f:(fun error ->
-        error.Chatml_compilation.code ^ ": " ^ error.message)
-    in
+  let install_prepared t script ~surface program =
     let compiled = Extension_compiler.Program.Prepared program in
     let source_hash =
       Extension_compiler.Program.source_revision
@@ -124,6 +100,103 @@ module Registry = struct
       "prepared:" ^ Sexp.to_string [%sexp ((script.id, source_hash) : string * string)]
     in
     Map.set t ~key ~data:artifact, artifact
+  ;;
+
+  let prepare_script_detailed
+        t
+        script
+        ~surface
+        ~programs
+        ~capabilities
+        ~env
+        ~checkpoint
+        ~limits
+        ~max_dependency_depth
+    =
+    Moderator_program.compile
+      programs
+      ~script
+      ~surface
+      ~capabilities
+      ~env
+      ~checkpoint
+      ~limits
+      ~max_dependency_depth
+    |> Result.map ~f:(install_prepared t script ~surface)
+  ;;
+
+  let prepare_script
+        ?(surface = Builtin_surface.moderator_surface)
+        t
+        script
+        ~programs
+        ~capabilities
+        ~env
+        ~checkpoint
+        ~limits
+        ~max_dependency_depth
+    =
+    prepare_script_detailed
+      t
+      script
+      ~surface
+      ~programs
+      ~capabilities
+      ~env
+      ~checkpoint
+      ~limits
+      ~max_dependency_depth
+    |> Result.map_error ~f:(fun error ->
+      error.Chatml_compilation.code ^ ": " ^ error.message)
+  ;;
+
+  let prepare_elements
+        t
+        ?programs
+        ~surface
+        ~capabilities
+        ~env
+        ~checkpoint
+        ~limits
+        ~max_dependency_depth
+        elements
+    =
+    List.fold_result elements ~init:(t, None) ~f:(fun (registry, selected) element ->
+      checkpoint ();
+      match element with
+      | CM.Script script ->
+        let result =
+          match programs with
+          | None ->
+            compile_script ~surface registry script
+            |> Result.map_error ~f:(fun message ->
+              [ Chatmd_shell_spec.Diagnostic.error
+                  ?source:script.source_ref
+                  ~code:"chatml.legacy_moderator_compile"
+                  message
+              ])
+          | Some programs ->
+            prepare_script_detailed
+              registry
+              script
+              ~surface
+              ~programs
+              ~capabilities
+              ~env
+              ~checkpoint
+              ~limits
+              ~max_dependency_depth
+            |> Result.map_error ~f:(fun error ->
+              [ Chatmd_shell_spec.Diagnostic.error
+                  ?source:script.source_ref
+                  ~code:error.Chatml_compilation.code
+                  error.message
+              ])
+        in
+        Result.map result ~f:(fun (registry, artifact) ->
+          checkpoint ();
+          registry, Some artifact)
+      | _ -> Ok (registry, selected))
   ;;
 
   let of_elements
@@ -269,11 +342,22 @@ let run_controlled ?context execution f =
 ;;
 
 let execution_runner ?env ?policy (artifact : Registry.artifact) =
-  match artifact.extension, env with
-  | None, _ -> Ok None
-  | Some _, None ->
+  match artifact.extension, artifact.compiled, env with
+  | None, Single _, _ -> Ok None
+  | None, Prepared _, None ->
+    Error
+      "chatml.execution_host_required: prepared legacy moderator requires an Eio \
+       environment"
+  | Some _, _, None ->
     Error "chatml.execution_host_required: extensibility-v1 requires an Eio environment"
-  | Some (script, _), Some env ->
+  | None, Prepared _, Some env ->
+    let policy =
+      Option.value
+        policy
+        ~default:(Chatml_execution.Bounded Chatml_execution.default_limits)
+    in
+    Ok (Some (Chatml_execution.create_runner ~env ~policy ()))
+  | Some (script, _), _, Some env ->
     let module D = Chatmd_shell_spec.Duration in
     let policy =
       Option.value_or_thunk policy ~default:(fun () ->

@@ -36,6 +36,26 @@ module Registry : sig
     -> max_dependency_depth:int
     -> (t * artifact, string) result
 
+  (** Prepare all actual legacy declarations without initialization, retaining the
+      final selected artifact as [of_elements] does. Supplied custody is mandatory
+      for every declaration and admits project requirements against this exact
+      live tool pool. The host supplies its actual surface, remaining compiler
+      limits and checkpoint; this operation does not reset an outer startup ledger.
+      Limits govern joined captured compilation; the no-custody Single legacy
+      branch preserves [compile_script]'s existing synchronous behavior.
+      Diagnostics retain the declaring source. Callback exceptions propagate. *)
+  val prepare_elements
+    :  t
+    -> ?programs:Chatml_prompt_programs.Restored.t
+    -> surface:Chatml.Chatml_builtin_surface.surface
+    -> capabilities:Tool_capability.t
+    -> env:Eio_unix.Stdenv.base
+    -> checkpoint:(unit -> unit)
+    -> limits:Chatml_compilation.limits
+    -> max_dependency_depth:int
+    -> CM.top_level_elements list
+    -> (t * artifact option, Chatmd_shell_spec.Diagnostic.t list) Result.t
+
   (** [of_elements registry elements] compiles any moderator scripts declared
       by [elements]. *)
   val of_elements
@@ -112,10 +132,12 @@ val extension_definition : t -> Extension_compiler.definition option
 
 (** [create ~artifact ~capabilities ?snapshot ()] instantiates a fresh runtime
     session for [artifact], optionally restoring persisted durable state.
-    Extensibility-v1 requires [env]. Initialization and each event receive fresh
-    lexical controls under declared limits, with inherited parent budgets.
-    [execution_policy] is a trusted host override; submitted code cannot set it.
-    Legacy artifacts retain their existing execution behavior. *)
+    Prepared graphs and extensibility-v1 require [env]; their initialization and
+    events receive fresh lexical controls with inherited parent budgets.
+    Prepared legacy graphs use the supplied [execution_policy] or the default
+    bounded runner. [execution_policy] is a trusted host override; submitted code
+    cannot set it. Single legacy artifacts retain their existing uncontrolled
+    execution behavior. *)
 val create
   :  artifact:Registry.artifact
   -> capabilities:Moderation.Capabilities.t

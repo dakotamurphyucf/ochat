@@ -8,6 +8,8 @@ type t
 val prepare
   :  ?programs:Chatml_prompt_programs.Restored.t
   -> env:Eio_unix.Stdenv.base
+  -> limits:Chatml_compilation.limits
+  -> checkpoint:(unit -> unit)
   -> admin_policy:Shell_runtime.Admin_policy.t
   -> manifest:Chatmd_shell_spec.Manifest.t
   -> Chatmd_shell_spec.Manifest_compiler.material

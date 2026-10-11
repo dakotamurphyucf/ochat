@@ -32,6 +32,10 @@ type t =
   ; shell_admin_policy : Shell_runtime.Admin_policy.t option
   ; shell_security_status : Shell_runtime.Manifest_security.status option
   ; moderator_shell_runtime : string option
+  ; legacy_moderator : Moderator_manager.Registry.artifact option
+    (** Compiled before native activation against this host's actual surface and
+        complete tool pool. Later manager construction consumes this artifact
+        without recompiling or initializing here. Native inheritance clears it. *)
   }
 
 type shell_inspection =
@@ -102,6 +106,9 @@ val validate_tool_paths
     supply the same policy identity; omission preserves legacy fingerprints. *)
 val create
   :  ?native_service_revision:string
+  -> ?moderator_surface:Chatml.Chatml_builtin_surface.surface
+  -> ?compilation_limits:Chatml_compilation.limits
+  -> ?checkpoint:(unit -> unit)
   -> sw:Eio.Switch.t
   -> ctx:Eio_unix.Stdenv.base Ctx.t
   -> host:Shell_runtime.Host.t
@@ -183,6 +190,12 @@ type native_registration = Native_tool_pool.Registration.t =
     [delegated_moderator] defaults to false; true compiles moderators and their
     managed handlers against the tool-mediated delegated contract. The host still
     must enforce inherited execution authority when constructing the live runtime.
+    [moderator_surface] defaults to the headless legacy surface; UI-capable hosts
+    must supply their actual UI surface. [compilation_limits] and [checkpoint]
+    are caller-owned startup controls; no whole-invocation ledger is reset here.
+    Legacy declarations compile in the same preflight and their selected artifact
+    is retained on [native].
+
     When [programs] is supplied, native hooks and versioned scripts compile from
     that exact restored custody. Selected matcher entrypoints retain their own
     contracts, and all native hook project requirements are admitted against the
@@ -191,6 +204,9 @@ type native_registration = Native_tool_pool.Registration.t =
     This internal preparation entrypoint does not enable public feature flags. *)
 val prepare_extensions
   :  ?native_service_revision:string
+  -> ?moderator_surface:Chatml.Chatml_builtin_surface.surface
+  -> ?compilation_limits:Chatml_compilation.limits
+  -> ?checkpoint:(unit -> unit)
   -> ?native_registrations:native_registration list
   -> ?delegated_moderator:bool
   -> ?programs:Chatml_prompt_programs.Restored.t

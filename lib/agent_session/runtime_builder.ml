@@ -268,6 +268,7 @@ let create_agent_runtime
   match extensions with
   | false ->
     Agent_runtime.create
+      ~moderator_surface:Chatml.Chatml_builtin_surface.ui_moderator_surface
       ?native_service_revision
       ~sw
       ~ctx
@@ -283,6 +284,7 @@ let create_agent_runtime
     |> Result.map ~f:(fun native -> native, None, None)
   | true ->
     Agent_runtime.prepare_extensions
+      ~moderator_surface:Chatml.Chatml_builtin_surface.ui_moderator_surface
       ~delegated_moderator
       ?native_service_revision
       ~native_registrations
@@ -650,7 +652,6 @@ let create_moderator
       ~env
       ~ctx
       ~session_id
-      ~elements
       ~history
       ~tools
       ~allocator
@@ -664,10 +665,7 @@ let create_moderator
   =
   let open Result.Let_syntax in
   let legacy_artifact () =
-    Manager.Registry.of_elements
-      ~surface:Chatml.Chatml_builtin_surface.ui_moderator_surface
-      Manager.Registry.empty
-      elements
+    Ok (Manager.Registry.empty, agent_runtime.Agent_runtime.legacy_moderator)
   in
   let%bind _, artifact =
     (match definition with
@@ -1452,7 +1450,6 @@ let build_with_services
       ~env
       ~ctx
       ~session_id
-      ~elements
       ~history:initial_history
       ~tools
       ~allocator:moderator_allocator

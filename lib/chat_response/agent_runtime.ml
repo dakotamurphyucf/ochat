@@ -28,6 +28,7 @@ type t =
   ; shell_admin_policy : Shell_runtime.Admin_policy.t option
   ; shell_security_status : Shell_runtime.Manifest_security.status option
   ; moderator_shell_runtime : string option
+  ; legacy_moderator : Moderator_manager.Registry.artifact option
   }
 
 type shell_inspection =
@@ -271,6 +272,8 @@ let inspect_shell ~env ~platform ~prompt_elements =
 
 let instantiate
       ~programs
+      ~compilation_limits
+      ~checkpoint
       ~sw
       ~host
       ~admin_policy
@@ -288,6 +291,8 @@ let instantiate
   let%bind prepared =
     Shell_preparation.prepare
       ?programs
+      ~limits:compilation_limits
+      ~checkpoint
       ~env:host.Shell_runtime.Host.env
       ~manifest
       ~admin_policy
@@ -340,6 +345,8 @@ let instantiate
 
 let shell_registry
       ~programs
+      ~compilation_limits
+      ~checkpoint
       ~sw
       ~host
       ~platform
@@ -365,6 +372,8 @@ let shell_registry
     Result.bind (compile ~platform declarations) ~f:(fun (manifest, material) ->
       instantiate
         ~programs
+        ~compilation_limits
+        ~checkpoint
         ~sw
         ~host
         ~admin_policy
@@ -437,6 +446,8 @@ let moderator_process_handler t =
 let create_native
       ~extension_resources
       ~programs
+      ~compilation_limits
+      ~checkpoint
       ~preflight
       ?(native_registrations = [])
       ?native_service_revision
@@ -497,17 +508,23 @@ let create_native
                (List.map ~f:(fun error ->
                   diagnostic error.Native_tool_pool.Error.code error.message))
       in
-      let%map capabilities, admitted = preflight pool ~shell_preparation in
-      pool, capabilities, admitted
+      checkpoint ();
+      let%map capabilities, legacy_moderator, admitted =
+        preflight pool ~shell_preparation
+      in
+      checkpoint ();
+      pool, capabilities, legacy_moderator, admitted
     in
     let%map
         ( shell_registry
         , shell_manifest
         , shell_security_status
-        , (pool, capabilities, admitted) )
+        , (pool, capabilities, legacy_moderator, admitted) )
       =
       shell_registry
         ~programs
+        ~compilation_limits
+        ~checkpoint
         ~sw
         ~host
         ~platform
@@ -531,13 +548,47 @@ let create_native
       ; shell_admin_policy = Option.some_if (Option.is_some shell_manifest) admin_policy
       ; shell_security_status
       ; moderator_shell_runtime = moderator_runtime shell_manifest
+      ; legacy_moderator
       }
     in
     native, admitted)
 ;;
 
+let startup_checkpoint poll () =
+  Eio.Fiber.check ();
+  poll ();
+  Eio.Fiber.check ()
+;;
+
+let prepare_legacy ?programs ~surface ~env ~capabilities ~checkpoint ~limits elements =
+  Moderator_manager.Registry.prepare_elements
+    Moderator_manager.Registry.empty
+    ?programs
+    ~surface
+    ~capabilities
+    ~env
+    ~checkpoint
+    ~limits
+    ~max_dependency_depth:128
+    elements
+  |> Result.map ~f:snd
+  |> Result.map_error
+       ~f:
+         (List.map ~f:(fun (error : D.t) ->
+            { code = error.code; message = error.message; source = error.source }))
+;;
+
+let declares_legacy elements =
+  List.exists elements ~f:(function
+    | CM.Script _ -> true
+    | _ -> false)
+;;
+
 let create
       ?native_service_revision
+      ?(moderator_surface = Chatml.Chatml_builtin_surface.moderator_surface)
+      ?(compilation_limits = Chatml_compilation.default_limits)
+      ?(checkpoint = Eio.Fiber.check)
       ~sw
       ~ctx
       ~host
@@ -551,11 +602,33 @@ let create
       ~run_agent
       ()
   =
+  let checkpoint = startup_checkpoint checkpoint in
   create_native
     ~extension_resources:false
     ~programs:None
+    ~compilation_limits
+    ~checkpoint
     ~preflight:(fun pool ~shell_preparation:_ ->
-      Ok (Native_tool_pool.capabilities pool, ()))
+      let capabilities = Native_tool_pool.capabilities pool in
+      let open Result.Let_syntax in
+      let%map legacy_moderator =
+        if not (declares_legacy prompt_elements)
+        then Ok None
+        else (
+          let%bind capabilities =
+            Lazy.force capabilities
+            |> Result.map_error ~f:(fun error ->
+              [ diagnostic error.Tool_capability.code error.message ])
+          in
+          prepare_legacy
+            ~surface:moderator_surface
+            ~env:(Ctx.env ctx)
+            ~capabilities
+            ~checkpoint
+            ~limits:compilation_limits
+            prompt_elements)
+      in
+      capabilities, legacy_moderator, ())
     ?native_service_revision
     ~sw
     ~ctx
@@ -580,6 +653,9 @@ type extension_resources =
 
 let prepare_extensions
       ?native_service_revision
+      ?(moderator_surface = Chatml.Chatml_builtin_surface.moderator_surface)
+      ?(compilation_limits = Chatml_compilation.default_limits)
+      ?(checkpoint = Eio.Fiber.check)
       ?(native_registrations = [])
       ?(delegated_moderator = false)
       ?programs
@@ -596,6 +672,7 @@ let prepare_extensions
       ~run_agent
       ()
   =
+  let checkpoint = startup_checkpoint checkpoint in
   let open Result.Let_syntax in
   let%bind () =
     if List.length prompt_elements > 16_384
@@ -621,6 +698,7 @@ let prepare_extensions
     in
     let%bind managed =
       Managed_tool_registry.prepare
+        ~limits:compilation_limits
         ~delegated_moderator
         ?programs
         ~env:(Ctx.env ctx)
@@ -639,20 +717,36 @@ let prepare_extensions
                 }))
     in
     let capabilities = Managed_tool_registry.capabilities managed in
-    let%map () =
+    checkpoint ();
+    let%bind () =
       match shell_preparation with
       | None -> Ok ()
       | Some prepared ->
-        Shell_preparation.admit_tools prepared ~capabilities ~checkpoint:Eio.Fiber.check
+        Shell_preparation.admit_tools prepared ~capabilities ~checkpoint
         |> Result.map_error ~f:(fun error ->
           [ diagnostic error.Chatml_compilation.code error.message ])
     in
-    lazy (Ok capabilities), managed
+    let%map legacy_moderator =
+      if not (declares_legacy prompt_elements)
+      then Ok None
+      else
+        prepare_legacy
+          ?programs
+          ~surface:moderator_surface
+          ~env:(Ctx.env ctx)
+          ~capabilities
+          ~checkpoint
+          ~limits:compilation_limits
+          prompt_elements
+    in
+    lazy (Ok capabilities), legacy_moderator, managed
   in
   let%map native, managed =
     create_native
       ~extension_resources:true
       ~programs
+      ~compilation_limits
+      ~checkpoint
       ~preflight:prepare_managed
       ~native_registrations
       ?native_service_revision
@@ -742,5 +836,6 @@ let inherit_native ?managed ~(parent : t) ~capabilities () =
         List.filter parent.classifications ~f:(fun (name, _) -> Set.mem names name)
     ; shell_tool_names = Set.inter parent.shell_tool_names execution_names
     ; moderator_shell_runtime = None
+    ; legacy_moderator = None
     }
 ;;
