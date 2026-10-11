@@ -1520,6 +1520,54 @@ let%test_module "fallible configuration publication" =
           W.close_and_wait watcher))
     ;;
 
+    let%test_unit "cancellation after worker resolution preserves installed state" =
+      with_file (fun env sw path initial ->
+        let caller = ref None in
+        let sentinel = Failure "cancel resolved reload delivery" in
+        let commits = ref 0 in
+        let retirements = ref 0 in
+        let discards = ref 0 in
+        let watcher =
+          W.create
+            ~sw
+            ~env
+            ~path
+            ~initial
+            ~hooks:
+              { hooks with
+                commit = (fun _ _ -> incr commits)
+              ; retire =
+                  (fun () ->
+                    incr retirements;
+                    Eio.Fiber.fork ~sw (fun () ->
+                      (* The fork runs this child first. Yield lets the worker
+                         return and resolve its promise before cancellation;
+                         this child then precedes the resumed caller. *)
+                      Eio.Fiber.yield ();
+                      Eio.Cancel.cancel (Option.value_exn !caller) sentinel))
+              ; discard_prepared =
+                  (fun () ->
+                    incr discards;
+                    Rejected)
+              }
+        in
+        (match
+           Eio.Cancel.sub (fun context ->
+             caller := Some context;
+             W.reload watcher)
+         with
+         | _ -> assert false
+         | exception Eio.Cancel.Cancelled reason -> assert (phys_equal reason sentinel));
+        [%test_eq: int] 1 !commits;
+        [%test_eq: int] 1 !retirements;
+        [%test_eq: int] 0 !discards;
+        assert_description watcher "Next configuration";
+        assert_state Available (fst (W.status watcher));
+        let _, diagnostic = W.status watcher in
+        assert (Option.is_some diagnostic);
+        W.close_and_wait watcher)
+    ;;
+
     let%test_unit "foreign domains cannot enter hooks or mutate watcher state" =
       with_file (fun env sw path initial ->
         let watcher = W.create ~sw ~env ~path ~initial ~hooks in

@@ -89,6 +89,8 @@ val check_admission : t -> (unit, Failure.t) Result.t
     Caller cancellation and hook exceptions retain their identity/backtrace.
     Cancellation after durable acknowledgment but before protected installation
     is uncertain; once installed, audit/retirement failure does not roll back.
+    A final caller cancellation check precedes result delivery, including when
+    the worker already completed; this does not repeat cleanup or installation.
     There is no caller checkpoint or IO between protected commit and pointer swap.
     [close] revokes admission and cancels active work; [close_and_wait] joins
     it before borrowed hook resources can be released. Hooks must not call

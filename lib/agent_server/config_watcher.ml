@@ -336,8 +336,14 @@ let reload t =
       ~finally:(fun () -> finish t pending)
       (fun () ->
          match
-           Agent_session.Runtime_activity.run t.activity (fun () ->
-             run_worker t pending previous)
+           let result =
+             Agent_session.Runtime_activity.run t.activity (fun () ->
+               run_worker t pending previous)
+           in
+           (* A resolved promise can deliver after cancellation without checking
+              its caller. The worker has already joined all hook cleanup. *)
+           Eio.Fiber.check ();
+           result
          with
          | result -> result
          | exception exn ->
