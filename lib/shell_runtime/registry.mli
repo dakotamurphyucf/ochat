@@ -50,6 +50,42 @@ val prepare_with_policy
   -> material:Chatmd_shell_spec.Manifest_compiler.material
   -> (prepared, error list) result
 
+module Staged : sig
+  type t
+
+  (** Genuine admitted metadata and configurations. Execution is gated until
+      complete activation; retained values reject after failure or owner closure.
+      This view is not a live [Registry.t]. *)
+  val manifest : t -> Chatmd_shell_spec.Manifest.t
+
+  val runtime : t -> string -> Runtime.t option
+  val script : t -> string -> script option
+  val tools : t -> Chatmd_shell_spec.Shell_tool_spec.t list
+  val check : t -> (unit, string) Result.t
+end
+
+(** Build the real native resources and invoke [preflight] exactly once before
+    any hook initializer. Success permits activation, existing snapshot restore
+    and publication; failure/cancellation/exception terminally revokes escaped
+    staged functions/configurations. Original exceptions/backtraces propagate.
+    The caller's switch owns native handles and revokes even ready access when
+    closed. No unrelated switch is closed and completed initializer external
+    effects are not rolled back. Existing [instantiate_prepared] delegates with
+    an empty preflight, preserving its immediate behavior. *)
+val instantiate_prepared_after
+  :  sw:Eio.Switch.t
+  -> host:Host.t
+  -> grant:Manifest_authorizer.grant
+  -> approval_provider:Approval_broker.provider
+  -> ?approval_store:Shell_access.Approval.store
+  -> ?model_completion:Runtime.model_completion
+  -> ?extension_snapshots:Session.Shell_state.Extension_snapshot.t list
+  -> ?persist_extension_snapshots:
+       (Session.Shell_state.Extension_snapshot.t list -> (unit, string) result)
+  -> preflight:(Staged.t -> ('a, error list) Result.t)
+  -> prepared
+  -> (t * 'a, error list) Result.t
+
 (** [instantiate_prepared prepared] verifies [grant] and publishes runtimes
     only after the prepared extension set is valid. *)
 val instantiate_prepared

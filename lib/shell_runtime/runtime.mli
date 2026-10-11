@@ -30,7 +30,11 @@ type error =
 [@@deriving sexp, compare, equal]
 
 (** [create] resolves and validates one effective runtime using only [host]
-    capabilities, then constructs its [Shell_access.Executor.config]. *)
+    capabilities, then constructs its [Shell_access.Executor.config]. Trusted
+    registry staging may supply a pending-instance factory and an execution
+    check. The check composes into the executor's early scope guard, before
+    analyzers or other callbacks, including borrowed configurations. Omitting
+    these arguments preserves immediate instance initialization/execution. *)
 val create
   :  sw:Eio.Switch.t
   -> host:Host.t
@@ -47,6 +51,11 @@ val create
         -> lifecycle:Chatmd_shell_spec.Shell_spec.lifecycle
         -> Chatml_extension.instance
         -> unit)
+  -> ?prepare_extension:
+       (lifecycle:Chatmd_shell_spec.Shell_spec.lifecycle
+        -> Chatml_extension.compiled
+        -> (Chatml_extension.instance, Chatmd_shell_spec.Diagnostic.t) result)
+  -> ?check_execution:(unit -> (unit, string) result)
   -> ?worker_runtimes:t String.Map.t
   -> ?model_completion:model_completion
   -> Chatmd_shell_spec.Shell_spec.t

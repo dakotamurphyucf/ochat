@@ -53,12 +53,18 @@ type compiled =
   ; limits : limits
   }
 
+type instance_state =
+  | Pending
+  | Ready of R.session option
+  | Failed
+  | Closed
+
 type instance =
   { compiled : compiled
   ; lifecycle : Chatmd_shell_spec.Shell_spec.lifecycle
   ; config : R.runtime_config
   ; execution : Chatml_execution.runner option
-  ; mutable session : R.session option
+  ; mutable state : instance_state
   ; mutable snapshot_handler : (Session.Snapshot.t -> (unit, string) result) option
   ; mutex : Eio.Mutex.t
   ; env : Eio_unix.Stdenv.base
@@ -393,7 +399,7 @@ let instantiate_session (compiled : compiled) (config : R.runtime_config) execut
         ~checkpoint:Eio.Fiber.yield)
 ;;
 
-let instantiate ~env ?limits ~lifecycle (compiled : compiled) =
+let prepare_instance ~env ?limits ~lifecycle (compiled : compiled) =
   let limits = Option.value limits ~default:compiled.limits in
   let config =
     R.{ surface = compiled.surface; operations = List.map operation_names ~f:operation }
@@ -417,33 +423,83 @@ let instantiate ~env ?limits ~lifecycle (compiled : compiled) =
                 })
            ())
   in
-  let session =
-    match lifecycle with
-    | Chatmd_shell_spec.Shell_spec.Invocation -> Ok None
-    | Session | Runtime ->
-      run_controlled execution (fun () -> instantiate_session compiled config execution)
-      |> Result.map ~f:Option.some
-  in
-  Result.map_error session ~f:(error ~source:compiled.source "shell.chatml_instantiate")
-  |> Result.map ~f:(fun session ->
+  Ok
     { compiled
     ; lifecycle
     ; config
     ; execution
-    ; session
+    ; state = Pending
     ; snapshot_handler = None
     ; mutex = Eio.Mutex.create ()
     ; env
     ; limits
-    })
+    }
+;;
+
+let unavailable = function
+  | Pending -> "shell ChatML activation is pending"
+  | Failed -> "shell ChatML activation failed"
+  | Closed -> "shell ChatML owner has closed"
+  | Ready _ -> "shell ChatML instance is ready"
+;;
+
+let close instance = instance.state <- Closed
+
+let activate instance =
+  let outcome =
+    Eio.Mutex.use_rw ~protect:false instance.mutex (fun () ->
+      match instance.state with
+      | Ready _ -> Ok (Ok ())
+      | (Failed | Closed) as state -> Ok (Error (unavailable state))
+      | Pending ->
+        (try
+           Eio.Fiber.check ();
+           let session =
+             match instance.lifecycle with
+             | Chatmd_shell_spec.Shell_spec.Invocation -> Ok None
+             | Session | Runtime ->
+               run_controlled instance.execution (fun () ->
+                 instantiate_session instance.compiled instance.config instance.execution)
+               |> Result.map ~f:Option.some
+           in
+           Eio.Fiber.check ();
+           match instance.state, session with
+           | Closed, _ -> Ok (Error (unavailable Closed))
+           | (Pending | Ready _ | Failed), Ok session ->
+             instance.state <- Ready session;
+             Ok (Ok ())
+           | (Pending | Ready _ | Failed), Error message ->
+             instance.state <- Failed;
+             Ok (Error message)
+         with
+         | exn ->
+           let backtrace = Backtrace.Exn.most_recent () in
+           (match instance.state with
+            | Closed -> ()
+            | Pending | Ready _ | Failed -> instance.state <- Failed);
+           Error (exn, backtrace)))
+  in
+  (match outcome with
+   | Ok result -> result
+   | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace)
+  |> Result.map_error ~f:(error ~source:instance.compiled.source "shell.chatml_activate")
+;;
+
+let instantiate ~env ?limits ~lifecycle compiled =
+  Result.bind (prepare_instance ~env ?limits ~lifecycle compiled) ~f:(fun instance ->
+    activate instance
+    |> Result.map ~f:(fun () -> instance)
+    |> Result.map_error ~f:(fun diagnostic ->
+      { diagnostic with D.code = "shell.chatml_instantiate" }))
 ;;
 
 let session instance =
-  match instance.lifecycle, instance.session with
-  | Chatmd_shell_spec.Shell_spec.Invocation, _ ->
+  match instance.state, instance.lifecycle with
+  | ((Pending | Failed | Closed) as state), _ -> Error (unavailable state)
+  | Ready _, Chatmd_shell_spec.Shell_spec.Invocation ->
     instantiate_session instance.compiled instance.config instance.execution
-  | (Session | Runtime), Some session -> Ok session
-  | (Session | Runtime), None -> Error "stateful ChatML extension has no session"
+  | Ready (Some session), (Session | Runtime) -> Ok session
+  | Ready None, (Session | Runtime) -> Error "stateful ChatML extension has no session"
 ;;
 
 let snapshot_values ~state ~queued_events ~halted =
@@ -567,13 +623,14 @@ let snapshot_session ?control session =
 ;;
 
 let snapshot_unlocked instance =
-  match instance.lifecycle, instance.session with
-  | Chatmd_shell_spec.Shell_spec.Invocation, _ ->
+  match instance.state, instance.lifecycle with
+  | ((Pending | Failed | Closed) as state), _ -> Error (unavailable state)
+  | Ready _, Chatmd_shell_spec.Shell_spec.Invocation ->
     Error "invocation-scoped ChatML extensions are not persistent"
-  | (Session | Runtime), Some session ->
+  | Ready (Some session), (Session | Runtime) ->
     let control = Option.map instance.execution ~f:Chatml_execution.runner_control in
     snapshot_session ?control session
-  | (Session | Runtime), None -> Error "stateful ChatML extension has no session"
+  | Ready None, (Session | Runtime) -> Error "stateful ChatML extension has no session"
 ;;
 
 let snapshot_fields = function
@@ -600,13 +657,14 @@ let decode_snapshot snapshot =
 ;;
 
 let restore_unlocked instance snapshot =
-  match instance.lifecycle, instance.session with
-  | Chatmd_shell_spec.Shell_spec.Invocation, _ ->
+  match instance.state, instance.lifecycle with
+  | ((Pending | Failed | Closed) as state), _ -> Error (unavailable state)
+  | Ready _, Chatmd_shell_spec.Shell_spec.Invocation ->
     Error "invocation-scoped ChatML extensions cannot be restored"
-  | (Session | Runtime), Some session ->
+  | Ready (Some session), (Session | Runtime) ->
     Result.bind (decode_snapshot snapshot) ~f:(fun (state, queued_events, halted) ->
       R.restore session ~state ~queued_events ~halted)
-  | (Session | Runtime), None -> Error "stateful ChatML extension has no session"
+  | Ready None, (Session | Runtime) -> Error "stateful ChatML extension has no session"
 ;;
 
 let call instance ~context ~event =

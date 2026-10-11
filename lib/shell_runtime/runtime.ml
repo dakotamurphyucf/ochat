@@ -91,9 +91,20 @@ let extension_instance_key specification id = function
   | Session -> Some ("session\000" ^ runtime_id specification ^ "\000" ^ id)
 ;;
 
+module Extension_owner = struct
+  type t =
+    { prepare :
+        lifecycle:S.lifecycle
+        -> Chatml_extension.compiled
+        -> (Chatml_extension.instance, Chatmd_shell_spec.Diagnostic.t) result
+    ; register :
+        runtime_id:string -> lifecycle:S.lifecycle -> Chatml_extension.instance -> unit
+    }
+end
+
 let extension_instance
       specification
-      host
+      _host
       extensions
       runtime_instances
       register_extension_instance
@@ -104,10 +115,13 @@ let extension_instance
   let create () =
     let instance =
       find_extension specification extensions id kind
-      |> Chatml_extension.instantiate ~env:host.Host.env ~lifecycle
+      |> register_extension_instance.Extension_owner.prepare ~lifecycle
       |> extension_result specification
     in
-    register_extension_instance ~runtime_id:(runtime_id specification) ~lifecycle instance;
+    register_extension_instance.Extension_owner.register
+      ~runtime_id:(runtime_id specification)
+      ~lifecycle
+      instance;
     instance
   in
   match extension_instance_key specification id lifecycle with
@@ -131,7 +145,14 @@ let matcher_failure action failure =
   | Deny_failure | Error_failure -> S.equal_policy_action action S.Deny
 ;;
 
-let chatml_matcher specification host extensions ~action (matcher : S.chatml_matcher) =
+let chatml_matcher
+      specification
+      _host
+      extensions
+      owner
+      ~action
+      (matcher : S.chatml_matcher)
+  =
   let instance =
     let compiled =
       find_extension
@@ -147,8 +168,12 @@ let chatml_matcher specification host extensions ~action (matcher : S.chatml_mat
         Chatml_extension.with_entrypoint compiled matcher.function_
         |> extension_result specification
     in
-    Chatml_extension.instantiate ~env:host.Host.env ~lifecycle:Invocation compiled
-    |> extension_result specification
+    let instance =
+      owner.Extension_owner.prepare ~lifecycle:Invocation compiled
+      |> extension_result specification
+    in
+    owner.register ~runtime_id:(runtime_id specification) ~lifecycle:Invocation instance;
+    instance
   in
   Shell_access.Matcher.custom (fun context ->
     match extension_call instance ~phase:"shell_matcher" context with
@@ -615,7 +640,7 @@ let chatml_before_interceptor
       Lowering.matcher
         host
         specification.source
-        ~chatml_matcher:(chatml_matcher specification host extensions)
+        ~chatml_matcher:(chatml_matcher specification host extensions register)
         ~action:S.Deny
         matcher)
   in
@@ -648,6 +673,7 @@ let executable_before_interceptor
       specification
       host
       extensions
+      register
       worker_runtimes
       secret_filter
       (value : S.interceptor)
@@ -668,7 +694,7 @@ let executable_before_interceptor
       Lowering.matcher
         host
         specification.source
-        ~chatml_matcher:(chatml_matcher specification host extensions)
+        ~chatml_matcher:(chatml_matcher specification host extensions register)
         ~action:S.Deny
         matcher)
   in
@@ -793,6 +819,7 @@ let interceptors
           specification
           host
           extensions
+          register
           worker_runtimes
           secret_filter
           value
@@ -1084,6 +1111,7 @@ let config
       ~register_extension_instance
       ~worker_runtimes
       ~model_completion
+      ~check_execution
   =
   let source = specification.S.source in
   let environment =
@@ -1126,7 +1154,8 @@ let config
       (Lowering.policy
          host
          ~source
-         ~chatml_matcher:(chatml_matcher specification host extensions)
+         ~chatml_matcher:
+           (chatml_matcher specification host extensions register_extension_instance)
          (Option.value_exn specification.policy))
   in
   let backends =
@@ -1225,6 +1254,16 @@ let config
       ~pipefail:(value specification "pipefail" specification.pipefail)
       ()
   in
+  let executor_config =
+    match check_execution with
+    | None -> executor_config
+    | Some check ->
+      Shell_access.Executor.with_execution_scope
+        executor_config
+        ~session_id:host.session_id
+        ~approval_store
+        ~check
+  in
   ( executor_config
   , secret_filter
   , max_stdin_bytes
@@ -1247,6 +1286,7 @@ let create_exn
       ~register_extension_instance
       ~worker_runtimes
       ~model_completion
+      ~check_execution
       specification
   =
   let executor_config, secret_filter, max_stdin_bytes, environment, resolver, cwd =
@@ -1265,6 +1305,7 @@ let create_exn
       ~register_extension_instance
       ~worker_runtimes
       ~model_completion
+      ~check_execution
   in
   { spec = specification
   ; executor_config
@@ -1290,10 +1331,20 @@ let create
       ?(extensions = String.Map.empty)
       ?(runtime_instances = String.Table.create ())
       ?(register_extension_instance = fun ~runtime_id:_ ~lifecycle:_ _ -> ())
+      ?prepare_extension
+      ?check_execution
       ?(worker_runtimes = String.Map.empty)
       ?model_completion
       specification
   =
+  let register_extension_instance =
+    Extension_owner.
+      { prepare =
+          Option.value prepare_extension ~default:(fun ~lifecycle compiled ->
+            Chatml_extension.instantiate ~env:host.Host.env ~lifecycle compiled)
+      ; register = register_extension_instance
+      }
+  in
   try
     Ok
       (create_exn
@@ -1310,6 +1361,7 @@ let create
          ~register_extension_instance
          ~worker_runtimes
          ~model_completion
+         ~check_execution
          specification)
   with
   | Runtime_error error -> Error [ error ]

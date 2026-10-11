@@ -29,10 +29,29 @@ audit, moderator processes, and management surfaces.
 
 Preparation applies administrative policy to the canonical requested
 manifest. Security verification checks trusted source/signature requirements.
-Authorization grants the exact digest. Instantiation uses Eio to resolve paths,
-load secrets, open stores/audit, compile extensions, fingerprint helpers, and
-select backends. One immutable registry generation is then shared by tool and
-moderator calls.
+Authorization grants the exact digest. Preparation compiles authorized extensions
+without initializing them. Instantiation uses Eio to resolve paths, load secrets,
+open stores/audit, fingerprint helpers, and select backends. One immutable
+registry generation is then shared by tool and moderator calls.
+
+Hosts that must admit additional script contracts before any native hook
+initializer use `Registry.instantiate_prepared_after`. Its callback receives an
+abstract `Registry.Staged.t` containing the actual runtime and tool identities.
+`Chat_response.Shell_tool.prepare` constructs the real functions against that
+view. Those functions, and borrowed executor configurations, reject execution
+until the callback succeeds, every hook activates, and snapshot restore finishes.
+For example, a host can retain a prepared shell function while validating another
+tool; if that tool rejects, invoking the retained function returns
+`shell.tool_inactive` before decoding its input or performing native effects.
+
+Each native hook instance moves from pending to ready once. Activation failure
+is terminal; closing the borrowed switch revokes even previously ready access.
+Callback exceptions and cancellation propagate with their original backtraces.
+The host's switch owns the native handles throughout, including unsuccessful
+preparation: rejection does not close an unrelated caller switch. Initializers
+that completed before a later failure may have external effects; this boundary
+does not roll those effects back. The ordinary registry and standalone runtime
+constructors retain their immediate behavior.
 
 See [the contributor runtime guide](../../guide/chatmd-shell-runtime-internals.md).
 
