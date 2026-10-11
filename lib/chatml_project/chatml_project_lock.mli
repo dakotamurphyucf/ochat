@@ -1,0 +1,177 @@
+open Core
+
+(** Pure selected-build receipt of expected catalog/config/source/interface/scopes
+    and compiler compatibility, never proof of captured bytes, an installer,
+    credential or executable grant. OCH192 reconciles expected digest/byte length,
+    origin and selected environments against actual captured declarations before
+    complete183 admission;193 consumes and qualifies that result.
+
+    The serialized inventory excludes the selected lock's OWN ID/bytes/digest and
+    final Prepared fingerprint. Host composition encodes the receipt first, captures
+    it, then admits the complete183 input. Error ownership retained by this codec is
+    separate from the serialized expected source inventory. *)
+
+module Error = Chatml_project_declaration.Error
+
+module Source_entry : sig
+  type t
+
+  (** Nonnegative EXPECTED byte length and validated identity/digest syntax. This
+      metadata does not verify any captured source. No bytes or live-file lookup
+      are retained;192 must compare it against actual immutable captures. *)
+  val create
+    :  Chatml_source.Id.t
+    -> digest:Chatml_source.Digest.t
+    -> byte_length:int
+    -> t Or_error.t
+
+  val id : t -> Chatml_source.Id.t
+  val digest : t -> Chatml_source.Digest.t
+  val byte_length : t -> int
+end
+
+module Module_selection : sig
+  type t
+
+  (** Exact association, not companion discovery. Distinct implementation/interface
+      IDs required; module identity derives from implementation as in183. *)
+  val create
+    :  implementation:Chatml_source.Id.t
+    -> interface:Chatml_source.Id.t option
+    -> t Or_error.t
+
+  val implementation : t -> Chatml_source.Id.t
+  val interface : t -> Chatml_source.Id.t option
+end
+
+module File_scope : sig
+  type binding =
+    { name : string
+    ; module_id : Chatml_prepared_program.Module_id.t
+    }
+
+  type t
+
+  (** Configured UIDENT names, duplicate names rejected; aliases to one module
+      identity permitted. Environment is the selected own-package NAME intent;192 verifies membership
+      in the actual captured declaration.
+      No raw Source.span deserialization is promoted to a validated location. *)
+  val create
+    :  Chatml_source.Id.t
+    -> environment:string
+    -> bindings:binding list
+    -> checkpoint:(unit -> unit)
+    -> t Or_error.t
+
+  val source : t -> Chatml_source.Id.t
+  val environment : t -> string
+  val bindings : t -> binding list
+end
+
+module Catalog : sig
+  type origin =
+    | Root_local
+    | Dependency of Chatml_project_declaration.Dependency.source
+
+  type t
+
+  (** Validated wire/domain metadata, not a second Prepared_program admission.
+      Nonempty namespace/selected-environment names and exact record-key duplicates
+      are checked. Declaration, source entries, implementation/interface IDs and
+      file-scope OWNER IDs must have this catalog's namespace. Scope binding TARGET
+      Module_ids may cross catalog namespaces. These checks do not establish source
+      membership or that an environment exists in a captured declaration.
+
+      Complete portable-collision/inventory/association validation remains with183
+      after192 reconciles the receipt against actual captured bytes and selections.
+      Aliases live in scopes, not duplicated inventory entries. Local/Git locators
+      are validated untrusted intent, never a granted root/capability or ephemeral
+      native registration ID. No second graph validator or placeholder captures. *)
+  val create
+    :  declared_at:Chatml_project_declaration.Declared_at.t
+    -> namespace:string
+    -> origin:origin
+    -> declaration:Chatml_source.Id.t
+    -> selected_environment:string
+    -> sources:Source_entry.t list
+    -> modules:Module_selection.t list
+    -> scopes:File_scope.t list
+    -> checkpoint:(unit -> unit)
+    -> (t, Error.t) Result.t
+
+  val namespace : t -> string
+  val origin : t -> origin
+  val declaration : t -> Chatml_source.Id.t
+  val selected_environment : t -> string
+  val sources : t -> Source_entry.t list
+  val modules : t -> Module_selection.t list
+  val scopes : t -> File_scope.t list
+end
+
+(** Immutable receipt plus ONE encoding-error ownership context: create retains
+    the supplied declared_at; decode retains the exact decoded lock source and its
+    whole-declaration origin. This context is excluded from serialized receipt
+    identity. No parsed JSON tree, callback or capability is retained. *)
+type t
+
+(** Validate primitive fields/duplicate keys and canonicalize typed metadata.
+    Catalog namespaces must be unique. Complete source/scopes/binding association
+    and portable-collision validation is183's responsibility after192 reconciles
+    expected bytes/origins/own-package environment selections against captures.
+    Host composition deduplicates genuinely equal aliases before construction and
+    MUST exclude the future selected lock ID from the serialized source inventory;
+    this constructor receives no selected lock ID and cannot prove that exclusion.
+    Entry may also be a module implementation with the SAME Source.Id; no silent
+    role exclusion or initialization here.
+
+    Target/family names and required_tools are intent/compatibility metadata only.
+    Actual compiler target/contract and live tool admission must still be checked
+    by the host adapter. Tool names never restore a saved live reference/grant.
+    All input traversal polls checkpoint, checks overflow and validates its domain.
+    No actual source-cycle analysis, compiler invocation or publication. *)
+val create
+  :  declared_at:Chatml_project_declaration.Declared_at.t
+  -> entry:Chatml_source.Id.t
+  -> environment:string
+  -> compiler_family:string
+  -> target_name:string
+  -> compiler_contract:Chatml_source.Digest.t
+  -> required_tools:string list
+  -> catalogs:Catalog.t list
+  -> checkpoint:(unit -> unit)
+  -> unit
+  -> (t, Error.t) Result.t
+
+(** Flat schema_version=1 JSON with existing limits/presence validation. Duplicate
+    keys, unknown semantic fields and null required/optional selectors reject.
+    Reject the decoded lock's own source ID in its serialized source inventory.
+    Retain the exact lock source as the ONE context for honest decode/encoding
+    errors; successful metadata remains expected, not verified against live files.
+    Poll around bounded non-interruptible JSON parsing and during conversion. *)
+val decode
+  :  Chatml_source.t
+  -> limits:Document_schema.Limits.t
+  -> checkpoint:(unit -> unit)
+  -> (t, Error.t) Result.t
+
+(** Bounded canonical output: fixed compact object fields; catalogs by namespace,
+    sources/scopes by typed Source.Id, module selections by implementation Source.Id,
+    bindings by exact name and required_tools as an exact sorted set. Preserve
+    namespace/path as separate fields and distinct aliases sharing one Module_id.
+    Validate duplicate keys before sorting and measure escaped JSON size before
+    rendering. Overflow/output-limit errors use t's retained ownership context;
+    checkpoint exceptions escape unchanged. No own lock digest/final Prepared
+    fingerprint or encoding-error context is embedded in this output. *)
+val to_string
+  :  t
+  -> limits:Document_schema.Limits.t
+  -> checkpoint:(unit -> unit)
+  -> (string, Error.t) Result.t
+
+val entry : t -> Chatml_source.Id.t
+val environment : t -> string
+val compiler_family : t -> string
+val target_name : t -> string
+val compiler_contract : t -> Chatml_source.Digest.t
+val required_tools : t -> string list
+val catalogs : t -> Catalog.t list
