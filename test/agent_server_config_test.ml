@@ -845,6 +845,7 @@ let%test_unit "configuration polling publishes edits without an explicit reload"
           ~hooks:
             { prepare = (fun _ _ -> Ok ())
             ; commit = (fun _ _ -> incr commits)
+            ; discard_prepared = (fun () -> ())
             ; audit = (fun _ -> ())
             }
       in

@@ -17,7 +17,8 @@ type model_job_outcome =
 (** Native resources and compiled, non-evaluated extension definitions. No
     operation worker, moderator manager, history or actor service is installed. *)
 type resources = private
-  { native : Chat_response.Agent_runtime.t
+  { source_lease : Prompt_source_lease.t
+  ; native : Chat_response.Agent_runtime.t
   ; definition : Chat_response.Extension_compiler.definition option
   ; managed : Chat_response.Managed_tool_registry.t option
   ; authoring : Authoring_runtime.t option
@@ -209,7 +210,8 @@ type background_executor =
   }
 
 type t =
-  { worker : Operation_worker.t
+  { source_lease : Prompt_source_lease.t
+  ; worker : Operation_worker.t
   ; inference_execution : Inference_client.Execution.t
   ; now : unit -> Agent_protocol.Timestamp.t
     (** Host wall clock shared by foreground, idle and delegated moderation and
@@ -502,3 +504,20 @@ val build_authored_child
 (** Borrowed selected inference execution. Its host tracking ports and lifetime
     belong to this runtime; install and retire it with the foreground worker. *)
 val inference_execution : t -> Inference_client.Execution.t
+
+(** Host-only attachment of actual admitted original-source loan. Factory validates
+    receipt/current catalog before native setup; runtime/private resources share
+    one root loan under actual ancestor lifetime. No tool/native grant is created.
+    Live runtime close first joins its existing borrowers, then releases only an
+    owned loan. Existing constructors default to legacy/no source authority. *)
+val with_source_lease : t -> source_lease:Prompt_source_lease.t -> t Or_error.t
+
+val with_resource_source_lease
+  :  resources
+  -> source_lease:Prompt_source_lease.t
+  -> resources Or_error.t
+
+val with_authored_source_lease
+  :  authored_resources
+  -> source_lease:Prompt_source_lease.t
+  -> authored_resources Or_error.t

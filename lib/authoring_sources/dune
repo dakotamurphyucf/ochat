@@ -178,6 +178,12 @@
     lib/agent_session/session_management_channel.ml %{dep:../agent_session/session_management_channel.ml}
     lib/agent_server/session_helper_policy.ml %{dep:../agent_server/session_helper_policy.ml}
     lib/shell_access/shell_access_v2.ml %{dep:../shell_access/shell_access_v2.ml}
+    lib/agent_session/prompt_source_owner.ml %{dep:../agent_session/prompt_source_owner.ml}
+    lib/agent_session/prompt_source_lease.ml %{dep:../agent_session/prompt_source_lease.ml}
+    lib/agent_session/prompt_catalog.ml %{dep:../agent_session/prompt_catalog.ml}
+    lib/agent_session/runtime_builder.ml %{dep:../agent_session/runtime_builder.ml}
+    lib/agent_store/prompt_source_receipt.ml %{dep:../agent_store/prompt_source_receipt.ml}
+    lib/agent_session/prompt_revision_builder.ml %{dep:../agent_session/prompt_revision_builder.ml}
     lib/agent_store/delegation_store.ml %{dep:../agent_store/delegation_store.ml}
     lib/chat_response/authoring_context.ml %{dep:../chat_response/authoring_context.ml}
     lib/chat_response/authoring_validation.ml %{dep:../chat_response/authoring_validation.ml}

@@ -149,7 +149,8 @@ calls. Captured weak variables and mutable storage still share their constraints
 let decode value f = f(Json.tag(value))
 let number = decode(`Null, fun tag -> 7)
 let text = decode(`Null, fun tag -> "checked")
-let main input = Task.pure(`Bool(number == 7 && text == "checked"))
+let main input =
+  Task.pure(`Bool(if number == 7 then text == "checked" else false))
 ```
 
 `let rec` and `and` bind functions, including annotated lambdas. They cannot

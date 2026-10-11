@@ -8,6 +8,11 @@ authority/revision/lifecycle and retains the previous state before replacement.
 See [archive storage](compaction_archive.doc.md) and
 [operator initializer restrictions](../../agent-server/operations.md#reset-rebuild-and-upgrade-initializers).
 
+Original source access has its own retained directory owner, shared revocable
+catalog policy and runtime loan. Captured prompt revisions remain immutable when
+that access is unavailable or revoked. See [original source ownership](../../../lib/agent_session/original_sources.md)
+for admission, reload and borrower lifetimes.
+
 See [embedding](../../agent-server/embedding.md), [protocol](../../agent-server/protocol.md)
 and the [implementation specification](../../design/ochat-agent-server-implementation-spec.md).
 Public interfaces are the exact callable API; the table below is the complete
@@ -33,6 +38,8 @@ resource ownership, return types and cancellation/error behavior.
 | `prompt_definition` | [contract](../../../lib/agent_session/prompt_definition.mli) | [source](../../../lib/agent_session/prompt_definition.ml) |
 | `prompt_revision` | [contract](../../../lib/agent_session/prompt_revision.mli) | [source](../../../lib/agent_session/prompt_revision.ml) |
 | `prompt_revision_builder` | [contract](../../../lib/agent_session/prompt_revision_builder.mli) | [source](../../../lib/agent_session/prompt_revision_builder.ml) |
+| `prompt_source_lease` | [contract](../../../lib/agent_session/prompt_source_lease.mli) | [source](../../../lib/agent_session/prompt_source_lease.ml) |
+| `prompt_source_owner` | [contract](../../../lib/agent_session/prompt_source_owner.mli) | [source](../../../lib/agent_session/prompt_source_owner.ml) |
 | `quota_key` | [contract](../../../lib/agent_session/quota_key.mli) | [source](../../../lib/agent_session/quota_key.ml) |
 | `quota_manager` | [contract](../../../lib/agent_session/quota_manager.mli) | [source](../../../lib/agent_session/quota_manager.ml) |
 | `runtime_builder` | [contract](../../../lib/agent_session/runtime_builder.mli) | [source](../../../lib/agent_session/runtime_builder.ml) |

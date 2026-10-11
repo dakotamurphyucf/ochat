@@ -34,7 +34,9 @@
   pending_carrier_admission
   session_replacement_delta
   managed_submission_tracking
+  prompt_source_owner
   prompt_catalog
+  prompt_source_lease
   security_grant
   session_record_shapes
   persistence_codec
@@ -178,6 +180,10 @@
   ochat.document_schema
   jsonaf
   chatml_prompt_programs
+  ochat.chatml_local_source
+  ochat.chatml_project_prepare
+  ochat.chatml_local_roots
+  ochat.chatml_git_host
   ochat.agent_protocol
   ochat.agent_store
   chatmd

@@ -14,6 +14,7 @@ module Artifact : sig
   type t = private
     { revision_id : Agent_protocol.Id.Prompt_revision.t
     ; prompt_definition_id : Agent_protocol.Id.Prompt_definition.t option
+    ; source_receipt : Prompt_source_receipt.t option
     ; canonical_source : string option
     ; root_relative_path : string
     ; root_chatmd : string
@@ -47,6 +48,7 @@ module Artifact : sig
   val create
     :  revision_id:Agent_protocol.Id.Prompt_revision.t
     -> ?prompt_definition_id:Agent_protocol.Id.Prompt_definition.t
+    -> ?source_receipt:Prompt_source_receipt.t
     -> ?canonical_source:string
     -> ?root_relative_path:string
     -> root_chatmd:string

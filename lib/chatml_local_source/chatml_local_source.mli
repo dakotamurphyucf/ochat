@@ -113,6 +113,13 @@ val open_subroot
     lifecycle and caller checkpoint/cancellation behavior match read/fold. *)
 val identity : t -> checkpoint:(unit -> unit) -> (Directory_identity.t, Error.t) Result.t
 
+(** Explicit idempotent joined release. First rejects new operations, joins
+    active native operations and closes the retained descriptor. The switch's
+    finalizer may safely repeat this call. Explicit close unregisters its release
+    hook so a long-lived switch does not retain closed owners. Never revokes
+    another independent owner. *)
+val close : t -> unit
+
 val path_component_limit : t -> int
 
 (** Caller passes an ALREADY OPEN host-admitted closeable directory with empty

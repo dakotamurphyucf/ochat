@@ -18,6 +18,7 @@ let features =
     , "Captured imports, relative sources, namespaces and bounded expansion"
     , [ "lib/chatmd/prompt.ml"
       ; "lib/chatmd/source_loader.ml"
+      ; "lib/agent_session/prompt_revision_builder.ml"
       ; "lib/chatmd/chatmd_import_expansion.ml"
       ; "lib/chatmd/chatmd_parser_input.ml"
       ; "lib/chatmd/chatmd_owned_parser.ml"
@@ -31,6 +32,8 @@ let features =
       ; "test/chatmd_owned_input/input_tests.ml"
       ; "test/chatmd_owned_input/capture_tests.ml"
       ; "test/agent_docs/docs_child_authoring.ml"
+      ; "test/chatml_source_owner/owner_tests.ml"
+      ; "test/chatml_source_owner/project_tests.ml"
       ] )
   ; ( "generated.messages"
     , "Plain initial messages without resource loading or stored identities"
@@ -224,7 +227,7 @@ let implementation_sources =
   ; ( "lib/chatmd/prompt.ml"
     , "e34f84c4c8a58d4aec2ac18688954f664a49bf95650ce8161245bd41bf8af807" )
   ; ( "lib/chatmd/source_loader.ml"
-    , "11c3cb384664c37d243ca6e80a54d9599e3adad1c4bd1f94baa5390014c732c4" )
+    , "f505418ca38265841dc2a761717861150810395fd66d69071d645b00112419ff" )
   ; ( "lib/chatmd_shell_spec/authoring_metadata.ml"
     , "8fa283f545896b7efbaab8bcf17a3ab7549d61c04873403c94961fc4ca0b789d" )
   ; ( "lib/chatmd_shell_spec/duration.ml"
@@ -274,6 +277,8 @@ let implementation_sources =
     , "05b5658144dda7c829a10713b4799d4e38558c8366d1ea6f0c1cd8d968a9ac37" )
   ; ( "lib/chatmd/chatmd_owned_parser.ml"
     , "42130395da8eb0465c96d59a5233ae24adb300e5bd6094609a5cf60d007ca573" )
+  ; ( "lib/agent_session/prompt_revision_builder.ml"
+    , "038753f931fc95214a392acf8d25261d4a28ef2279be43f0648397c915a3cfad" )
   ]
 ;;
 

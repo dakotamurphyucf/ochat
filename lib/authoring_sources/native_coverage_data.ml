@@ -92,10 +92,19 @@ let features =
       ; "lib/agent_server/delegation_lifecycle.ml"
       ; "lib/agent_server/delegated_runtime.ml"
       ; "lib/agent_session/delegation_authority.ml"
+      ; "lib/agent_session/prompt_source_owner.ml"
+      ; "lib/agent_session/prompt_source_lease.ml"
+      ; "lib/agent_session/prompt_catalog.ml"
+      ; "lib/agent_session/runtime_builder.ml"
+      ; "lib/agent_store/prompt_source_receipt.ml"
       ]
     , "runtime.delegation.creation"
     , [ "test/agent_server_generated_shell_test.ml"
       ; "test/agent_server_generated_test.ml"
+      ; "test/chatml_source_owner/owner_tests.ml"
+      ; "test/chatml_source_owner/catalog_tests.ml"
+      ; "test/chatml_source_owner/lifecycle_tests.ml"
+      ; "test/chatml_source_owner/receipt_tests.ml"
       ] )
   ; ( "management.relationship"
     , "Current direct management relationship and generation, rechecked across waits"
@@ -188,7 +197,7 @@ let implementation_sources =
   ; ( "lib/agent_server/managed_output_page.ml"
     , "a14130666a4495de0c35df1c01974922da31daed064f1f7622a9b686b9c38ba5" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "b8dd64575ccc5457d54e75337e88fe3c7d2e48216908725e069f1084b4241dce" )
+    , "853288e33ea236daa68249f336d4e78f2163611da15c6b26922a1601103a6a5e" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "46e1d8969a881efd0a3600ac521dc3d810acef6648410d01b8591c8be084f4bd" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"
@@ -247,6 +256,16 @@ let implementation_sources =
     , "7427759464798805cd25c014bf8e1bd903066fea5c3678d806e3c64ec3ee14a3" )
   ; ( "lib/chat_response/one_off_script.ml"
     , "cffac7c805a03e71b84b168d7686b0bac019db7c4d431210d4560331a8f43986" )
+  ; ( "lib/agent_session/prompt_source_owner.ml"
+    , "88d5ea0f9cb37759181b3de8b908143989f607abbed09afbf79ca226248f0e29" )
+  ; ( "lib/agent_session/prompt_source_lease.ml"
+    , "22e2cb161139adff927ecda4b3e8a31d181ffa8d9dd193707929a3d3adaed744" )
+  ; ( "lib/agent_session/prompt_catalog.ml"
+    , "f8aba98abcadeaf44ef61e261fa0b579f88d1fcc44242d0aa5a25abe2ca9f2a8" )
+  ; ( "lib/agent_session/runtime_builder.ml"
+    , "3050c2602d6d961fc01f1518383a382c336f145409aec18d1d860a3ee46398b7" )
+  ; ( "lib/agent_store/prompt_source_receipt.ml"
+    , "d1089027dc9f0e69fb6db67815b2de78086d88a29334ac7c12ec6aa9f9b8258e" )
   ]
 ;;
 
@@ -259,19 +278,19 @@ let topic_contracts =
     , "551884bf0e3eec7b15c19abef77502c75744211a8a51494ca79cf603e9c56e97" )
   ; ( "one_off_v1"
     , "runtime.delegation.generated"
-    , "41591590b65f9a2b6c4e0612c1fedef4daba2c7bdcfb97817a400ccd30b2e82d" )
+    , "0cdfdeedc220d149cee7ba02246e7c5fb388264cf135dfdf1501ffc376781030" )
   ; ( "one_off_v1"
     , "runtime.delegation.creation"
-    , "dcab43bf7e59d5ea013a3f1971c393a2e7db20fe04c41d5d3aaebdd16dcecbf3" )
+    , "6c1a68d59a4c2933fc6aaa0afc5df7da18c1ad47a4384b59d22b6809b2a9bcd7" )
   ; ( "one_off_v1"
     , "runtime.delegation.submissions"
-    , "a31d9c1fb6cf0d509a1e806ab52d9b656b1ef9d6ff6640a93b79cc786b77484a" )
+    , "4b556471c6543ddfae926a1b69d512160e35ec23e4460b7c74bb719a0be11336" )
   ; ( "one_off_v1"
     , "runtime.delegation.output"
-    , "23f4b0c75fa3b1c59cf29baeee4ed298122921b1fad706274db658b57c10a1ed" )
+    , "a07e016fb496c3e31c929f3d54db1f1e7f9349df5488488a28db97fdada7b31f" )
   ; ( "one_off_v1"
     , "runtime.delegation.stop-helper"
-    , "b92deea1305b1c758585d78fa132d7529d35a005f1513d9847b1007df4c67a9a" )
+    , "397e4424ad1d1bdfabd6258c1c21081cd32b8adeab7a7f637c86bbf4deee46c9" )
   ; ( "tool_v1"
     , "runtime.native.requests"
     , "32f0e7669440255557f6b59e829c3d7c34f13e54fe38108d9d32cee86db14b1d" )
@@ -280,19 +299,19 @@ let topic_contracts =
     , "dd874d6d66ab4fd587ad87e581c41eb6600770a503fd9194ced62ae506e0f4ca" )
   ; ( "tool_v1"
     , "runtime.delegation.generated"
-    , "4027a2541890a2bae2da4536117336adf6f156f0511a1728565f7207c92b8c00" )
+    , "84a7d46a8a9c74d87a70aa981f7b8ed0f9a0fa298cac4858012f7a6a6f72eabd" )
   ; ( "tool_v1"
     , "runtime.delegation.creation"
-    , "dc28eea8514e6495581763c120bc12f9b469b5231c1be03b1533bacaf3a407f3" )
+    , "9af53241e05360c3117cd3ceb9999fc8868e2a753b46ab681136d2fd4f3f85b5" )
   ; ( "tool_v1"
     , "runtime.delegation.submissions"
-    , "8b2b95b6f3dba9109951d3e323980fd9669c542ef3f0109af5fcd79702bf8242" )
+    , "3cbc58417f4cd9c017304d4b912cf32e029ca9e4244e3c476a3bdcbf3027f582" )
   ; ( "tool_v1"
     , "runtime.delegation.output"
-    , "a6b712cd46759b8288aa6c2e98a4a83ce648d9b98f920c2dde460a1b486c7ec8" )
+    , "b9c516844a1353f3e159dcee295f2671d8fa2d1bcbcc9c1c3d67174a49b655b5" )
   ; ( "tool_v1"
     , "runtime.delegation.stop-helper"
-    , "7767ae08bf66f70eea07b84a1dd4532c43f4439b055b9ed79c878f7a7b21a131" )
+    , "e9667080be9c8ef2a7907c75244d35051a6084f2961bdf268eb1a3520fd10873" )
   ; ( "moderator_v1"
     , "runtime.native.requests"
     , "8569e95d1b54572ff8b169850665483250f1b07ffbba1928ae4c834ee04faeca" )
@@ -301,19 +320,19 @@ let topic_contracts =
     , "ad8e067d874c286eb4b067084b9558113617985ba0a190284290c15c583c3294" )
   ; ( "moderator_v1"
     , "runtime.delegation.generated"
-    , "ac335669a637ff419dfd42b4533e603ea2a2150efcb46887898f26dffdd0f2bf" )
+    , "291f73d56a563fc0fc36a6219be5bee0a5aac7c78a139599e38328801209fca3" )
   ; ( "moderator_v1"
     , "runtime.delegation.creation"
-    , "0aafef9a073240b5e80b50f41c00aaa8894a92e914cb7e4986847fbf1d8d2684" )
+    , "5c97c7a3c3931dfd06c674e3cfe7a85d04af41690b92f78ff9f1ed0112804175" )
   ; ( "moderator_v1"
     , "runtime.delegation.submissions"
-    , "fb4445f17f9f276102f22e25271c191a4b36fc52b4e4deda86d758a499e72c71" )
+    , "90e176e59c0748e76fa807857980d78b39ae4e9f162da7384e0535337455df41" )
   ; ( "moderator_v1"
     , "runtime.delegation.output"
-    , "d4ff91a98f8f2e4f7e08617d1be430fba1ae30f806fff5bb35aabd700838c968" )
+    , "0299bb275624401d3e232e4814772d7ebdd2638fef377a68ac63b1dd106354b8" )
   ; ( "moderator_v1"
     , "runtime.delegation.stop-helper"
-    , "86f0f7e678002b325ff26fbb1da657f9ee31e4231ae978a8c77904cd8e69100d" )
+    , "141b60ce65e5119e6c7b92859828b0e43e1f6c242325cf7b59c020e3361481af" )
   ; ( "delegated_moderator_v1"
     , "runtime.native.requests"
     , "92424def68b5e82d70d9342959545b9e08bbbd3098f198a4086af88bb8d44e79" )
@@ -322,18 +341,18 @@ let topic_contracts =
     , "4abe98ad1b9f860a28a97775f1c35c2e232f41f4c8c93e6e3c7ceb78ba38bd40" )
   ; ( "delegated_moderator_v1"
     , "runtime.delegation.generated"
-    , "c87d62d66c29eb1410ab093002201551481254be4b430274043edc9cfa39c7ca" )
+    , "729e8c4d8b577e86d0825bb0188467675460b23bc88353b632c773ba10733478" )
   ; ( "delegated_moderator_v1"
     , "runtime.delegation.creation"
-    , "fb1bfcb1fe14b670ab4b8fb31d85fa9035c65e47ceb1c449bfcf400edb9ffefb" )
+    , "b41be74c8bfd0f0d9c4b12cb59600bd2e5d9dc4fa5bbe460de4fded703917693" )
   ; ( "delegated_moderator_v1"
     , "runtime.delegation.submissions"
-    , "ee72c93a95a856d1fc2a19fd4d7dfeb8ed8c7238b599195492158d342d622123" )
+    , "832cb9d7b8d97c7ba8c8bbd9c895a266ec24d4bb87d5c022eacf2241db28312f" )
   ; ( "delegated_moderator_v1"
     , "runtime.delegation.output"
-    , "ab75d99b78d3f9a44869058ed44e28cee11bf593f263826635fc4d2ddbfe2951" )
+    , "80640567bdc99b6978a72dd952ed9201653d4e7c0b4284a9f820aef787bac38b" )
   ; ( "delegated_moderator_v1"
     , "runtime.delegation.stop-helper"
-    , "2affa3cf9434462aab97201bbd7aa495f207a3d783d751aa1a3f2a464549e485" )
+    , "aa1f967a6c9ac11716916d8d02a346cb550c36e183e9a7f5f4d49f2c10ca0b62" )
   ]
 ;;

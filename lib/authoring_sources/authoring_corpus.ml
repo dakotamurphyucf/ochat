@@ -2875,7 +2875,7 @@ let language_foundation ~sources =
       ; review =
           Audited
             { excerpt_sha256 =
-                [ "404bd7a71d1c348bd2afc19504c7838f06a26127b18e4150ec068ac8b0aca9ad" ]
+                [ "5b412c4b944aad1dc7e1eb8a71aadfab20f5bc59dcbbe01f254085b51ee31103" ]
             ; evidence =
                 [ "lib/chatml/chatml_typechecker.ml"
                 ; "test/chatml_typechecker_test.ml"
@@ -3112,7 +3112,7 @@ let runtime_foundation ~sources =
         "Creation retries, lifetimes and inherited authority"
         [ "runtime.delegation.generated" ]
         [ ( "## Create, retry and retain authority"
-          , "dc6b4d3d15cc186f4459c2a0b07462afa8bd6d4221d75c9b2f2cab3e2f591610" )
+          , "5dfd52233e75cf9adb876f47917c5c663d40770e3796287ee261cdd41774698c" )
         ]
     ; make_child
         "runtime.delegation.submissions"

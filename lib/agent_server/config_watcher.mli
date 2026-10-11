@@ -5,6 +5,7 @@ type t
 type hooks =
   { prepare : Config_diff.t -> Config.t -> (unit, Config.Diagnostic.t list) result
   ; commit : Config_diff.t -> Config.t -> unit
+  ; discard_prepared : unit -> unit
   ; audit : Config_diff.t -> unit
   }
 

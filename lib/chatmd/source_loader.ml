@@ -11,6 +11,7 @@ type t =
   { root : Eio.Fs.dir_ty Eio.Path.t
   ; confined : bool
   ; generated : bool
+  ; retained : (Chatml_local_source.t * (unit -> unit)) option
   ; captured : string String.Map.t option
   ; read_limit : (source -> int) option
   ; observer : (source -> string -> unit) option
@@ -21,6 +22,7 @@ let filesystem ~root =
   { root
   ; confined = false
   ; generated = false
+  ; retained = None
   ; captured = None
   ; read_limit = None
   ; observer = None
@@ -29,6 +31,10 @@ let filesystem ~root =
 ;;
 
 let confined_filesystem ~root = { (filesystem ~root) with confined = true }
+
+let retained_filesystem ~root ~owner ~checkpoint =
+  { (confined_filesystem ~root) with retained = Some (owner, checkpoint) }
+;;
 
 let captured_filesystem ~root ~sources =
   { (confined_filesystem ~root) with captured = Some (String.Map.of_alist_exn sources) }
@@ -140,7 +146,7 @@ let resolve t ~base ~reference =
          else Eio.Path.(base.directory / reference)))
 ;;
 
-let read_unbounded t source =
+let read_legacy_unbounded t source =
   try
     let contents =
       match t.captured with
@@ -159,7 +165,7 @@ let read_unbounded t source =
 
 (* New extension dependencies use a hard read ceiling before allocation and
    notify capture observers only after a complete successful bounded read. *)
-let read_bounded ~max_bytes t source =
+let read_legacy_bounded ~max_bytes t source =
   if max_bytes < 0 || max_bytes > 8 * 1024 * 1024
   then Error "invalid source read bound"
   else (
@@ -201,9 +207,36 @@ let read_bounded ~max_bytes t source =
       | exn -> Error (Exn.to_string exn)))
 ;;
 
+let read_bounded ~max_bytes t source =
+  match t.retained with
+  | None -> read_legacy_bounded ~max_bytes t source
+  | Some (owner, checkpoint) ->
+    let max_bytes =
+      Option.value_map t.read_limit ~default:max_bytes ~f:(fun bound ->
+        Int.min max_bytes (bound source))
+    in
+    if max_bytes < 0 || max_bytes > 8 * 1024 * 1024
+    then Error "invalid source read bound"
+    else (
+      checkpoint ();
+      match Source.Portable_path.create source.relative_path with
+      | Error _ -> Error "source member is not a portable relative path"
+      | Ok member ->
+        (match Chatml_local_source.read owner ~member ~max_bytes ~checkpoint with
+         | Error error ->
+           Error (Sexp.to_string_hum (Chatml_local_source.Error.sexp_of_t error))
+         | Ok contents ->
+           checkpoint ();
+           Option.iter t.observer ~f:(fun observe -> observe source contents);
+           Ok contents))
+;;
+
 let read t source =
   match t.read_limit with
-  | None -> read_unbounded t source
+  | None ->
+    (match t.retained with
+     | None -> read_legacy_unbounded t source
+     | Some _ -> read_bounded ~max_bytes:(8 * 1024 * 1024) t source)
   | Some _ -> read_bounded ~max_bytes:(8 * 1024 * 1024) t source
 ;;
 
