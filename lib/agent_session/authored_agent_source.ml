@@ -17,23 +17,14 @@ end
 type t =
   { identity : Identity.t
   ; declaration : CM.agent_tool
-  ; parent_artifact : Store.Artifact.t
-  ; root_chatmd : string
-  ; sources : Store.Source.t list
-  ; programs : Chatml_prompt_programs.t option
-  ; programs_sha256 : string option
-  ; content : Chatmd_prompt_content.t option
-  ; content_sha256 : string option
-  ; content_limits : Chatmd_prompt_content.Limits.t option
-  ; parser_context : CM.Parsed.t option
-  ; content_projection : Prompt_content_custody.Restored.t option
+  ; source : Captured_child_source.t
   }
 
 let identity t = t.identity
 let declaration t = t.declaration
 
 let program_fingerprint t =
-  (match t.programs_sha256 with
+  (match Captured_child_source.programs_sha256 t.source with
    | None ->
      [%sexp ("ochat.authored-agent-source.v1" : string), (t.identity : Identity.t)]
    | Some programs_sha256 ->
@@ -46,7 +37,7 @@ let program_fingerprint t =
 ;;
 
 let fingerprint t =
-  match t.content_sha256 with
+  match Captured_child_source.content_sha256 t.source with
   | None -> program_fingerprint t
   | Some content_sha256 ->
     [%sexp
@@ -59,61 +50,7 @@ let fingerprint t =
 
 let denied message = Error (P.Error.create Permission_denied ~message ~retryable:false ())
 
-let owned_agent_member parsed ~root_source ~declaration ~policy =
-  let input = CM.Parsed.root_input parsed in
-  Eio.Fiber.check ();
-  if
-    (not (Chatmd_parser_input.Role.equal (Chatmd_parser_input.role input) Root))
-    || (not
-          (String.equal
-             (Chatmd_parser_input.path input)
-             root_source.Store.Source.relative_path))
-    || not
-         (Chatmd_parser_input.authored_matches
-            input
-            root_source.contents
-            ~checkpoint:Eio.Fiber.check)
-  then denied "authored agent parser does not belong to the captured parent Root"
-  else (
-    let matches =
-      List.filter_map (CM.Parsed.agent_references parsed) ~f:(fun reference ->
-        Eio.Fiber.check ();
-        match CM.Agent_reference.invocation reference with
-        | Persistent_tool (candidate, candidate_policy) ->
-          (* Parser custody owns these exact emitted descriptors. Content
-             projection retains Tool elements, so semantic name/path equality
-             alone must never substitute another declaration's queued member. *)
-          if
-            phys_equal candidate declaration
-            && String.equal candidate.name declaration.name
-            && CM.equal_agent_persistence candidate_policy policy
-          then Some reference
-          else None
-        | Tool _ | Content _ -> None)
-    in
-    match matches with
-    | [ reference ] ->
-      (match CM.Agent_reference.queued_key reference with
-       | Some key -> Ok key
-       | None -> denied "persistent authored declaration has no captured queued member")
-    | [] | _ :: _ ->
-      denied "persistent authored declaration lacks one exact owned parser reference")
-;;
-
-let legacy_agent_member tree ~declaration =
-  let open Option.Let_syntax in
-  let%bind root = Eio.Path.native tree in
-  let%bind reference = String.chop_prefix declaration.CM.agent ~prefix:(root ^ "/") in
-  (* Authored imports preserve paths such as definitions/../agents/child.chatmd.
-     Normalize only the portion beneath the verified artifact tree; never consult
-     realpath or follow an external live-file alias to decide source identity. *)
-  let loader = Source_loader.confined_filesystem ~root:tree in
-  Source_loader.root loader ~file:reference
-  |> Result.ok
-  |> Option.map ~f:Source_loader.relative_path
-;;
-
-let capture ?content_limits ~parent ~tool_name () =
+let capture ?(checkpoint = Eio.Fiber.check) ?content_limits ~parent ~tool_name () =
   let open Result.Let_syntax in
   let%bind declaration, policy =
     List.filter_map (Prompt_revision.elements parent) ~f:(function
@@ -131,355 +68,61 @@ let capture ?content_limits ~parent ~tool_name () =
     | true -> Ok ()
     | false -> denied "persistent authored agent source must be captured locally"
   in
-  let parent_artifact = Prompt_revision.artifact parent in
-  let%bind root_source =
-    Store.Source.create
-      ~relative_path:parent_artifact.root_relative_path
-      ~contents:parent_artifact.root_chatmd
-    |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
-  in
-  let all_sources = root_source :: parent_artifact.sources in
-  let tree = Prompt_revision.materialized_tree parent in
-  let%bind relative_path =
+  let%map source =
     match Prompt_revision.parser_context parent with
+    | None ->
+      Captured_child_source.capture_legacy_tool
+        ~parent
+        ~declaration
+        ~content_limits
+        ~checkpoint
     | Some parsed ->
-      owned_agent_member parsed ~root_source ~declaration ~policy
-      |> Result.map ~f:Option.some
-    | None -> Ok (legacy_agent_member tree ~declaration)
+      let references =
+        List.filter (CM.Parsed.agent_references parsed) ~f:(fun reference ->
+          checkpoint ();
+          match CM.Agent_reference.invocation reference with
+          | Persistent_tool (candidate, candidate_policy) ->
+            phys_equal candidate declaration
+            && CM.equal_agent_persistence candidate_policy policy
+          | Tool _ | Content _ -> false)
+      in
+      (match references with
+       | [ reference ] ->
+         Captured_child_source.capture ~parent ~reference ~content_limits ~checkpoint
+       | [] | _ :: _ ->
+         denied "persistent authored declaration lacks one exact owned parser reference")
   in
-  let%bind selected =
-    List.find all_sources ~f:(fun source ->
-      Eio.Fiber.check ();
-      Option.value_map
-        relative_path
-        ~default:false
-        ~f:(String.equal source.Store.Source.relative_path))
-    |> Result.of_option
-         ~error:
-           (P.Error.create
-              Permission_denied
-              ~message:
-                "persistent authored agent is not in the parent's captured source closure"
-              ~retryable:false
-              ())
-  in
+  let parent_artifact = Prompt_revision.artifact parent in
+  let root_relative_path = Captured_child_source.root_relative_path source in
   let identity : Identity.t =
     { parent_revision_id = parent_artifact.revision_id
     ; parent_manifest_sha256 = parent_artifact.manifest_sha256
     ; tool_name
-    ; root_relative_path = selected.relative_path
+    ; root_relative_path
     ; policy
     }
   in
-  let sources =
-    List.filter all_sources ~f:(fun source ->
-      not (String.equal source.Store.Source.relative_path selected.relative_path))
-  in
-  let%bind programs, child_parsed =
-    match parent_artifact.program_bundle with
-    | None -> Ok (None, None)
-    | Some storage ->
-      let%bind parent_authored =
-        Prompt_program_custody.authored
-          ~root_file:parent_artifact.root_relative_path
-          ~sources:
-            (List.map all_sources ~f:(fun s -> s.Store.Source.relative_path, s.contents))
-        |> Result.map_error ~f:(fun _ ->
-          P.Error.create
-            Prompt_unavailable
-            ~message:"Invalid retained authored inventory"
-            ~retryable:false
-            ())
-      in
-      let%bind custody =
-        Prompt_program_custody.admit
-          storage
-          ~authored:parent_authored
-          ~checkpoint:Eio.Fiber.check
-        |> Result.map_error ~f:(fun _ ->
-          P.Error.create
-            Prompt_unavailable
-            ~message:"Invalid retained program custody"
-            ~retryable:false
-            ())
-      in
-      let%bind root_input =
-        List.find (Chatml_prompt_programs.parser_inputs custody) ~f:(fun input ->
-          Chatmd_parser_input.Role.equal (Chatmd_parser_input.role input) Root
-          && String.equal (Chatmd_parser_input.path input) selected.relative_path)
-        |> Result.of_option
-             ~error:
-               (P.Error.create
-                  Prompt_unavailable
-                  ~message:"Retained child has no captured effective Root"
-                  ~retryable:false
-                  ())
-      in
-      let%bind authored =
-        Prompt_program_custody.authored
-          ~root_file:selected.relative_path
-          ~sources:
-            (List.map all_sources ~f:(fun s -> s.Store.Source.relative_path, s.contents))
-        |> Result.map_error ~f:(fun _ ->
-          P.Error.create
-            Prompt_unavailable
-            ~message:"Invalid retained child inventory"
-            ~retryable:false
-            ())
-      in
-      let%bind parsed =
-        Prompt_program_custody.replay root_input ~authored ~dir:tree
-        |> Result.map_error ~f:(fun error ->
-          P.Error.create
-            Prompt_unavailable
-            ~message:(Error.to_string_hum error)
-            ~retryable:false
-            ())
-      in
-      let%map child =
-        Chatml_prompt_programs.reroot
-          custody
-          ~authored
-          ~parsed
-          ~programs:[]
-          ~limits:(Prompt_program_custody.limits ())
-          ~checkpoint:Eio.Fiber.check
-        |> Result.map_error ~f:(fun _ ->
-          P.Error.create
-            Prompt_unavailable
-            ~message:"Invalid retained child selection"
-            ~retryable:false
-            ())
-      in
-      Some child, Some parsed
-  in
-  let%bind programs_sha256 =
-    match programs with
-    | None -> Ok None
-    | Some programs ->
-      Prompt_program_custody.fingerprint programs ~checkpoint:Eio.Fiber.check
-      |> Result.map ~f:Option.some
-      |> Result.map_error ~f:(fun _ ->
-        P.Error.create
-          Prompt_unavailable
-          ~message:"Complete child program manifest exceeds artifact policy"
-          ~retryable:false
-          ())
-  in
-  let%bind content, content_sha256, content_limits, content_projection =
-    match parent_artifact.content_bundle, programs, child_parsed, content_limits with
-    | None, _, parsed, _ ->
-      if
-        Option.exists parsed ~f:(fun parsed ->
-          Prompt_content_custody.requires_captured_documents
-            parsed
-            ~checkpoint:Eio.Fiber.check)
-      then
-        Error
-          (P.Error.create
-             Prompt_unavailable
-             ~message:"Owned child captured documents require retained content custody"
-             ~retryable:false
-             ())
-      else Ok (None, None, None, None)
-    | Some storage, Some programs, Some parsed, Some limits ->
-      let%bind restored =
-        Prompt_content_custody.restore
-          storage
-          ~programs
-          ~parsed
-          ~limits
-          ~checkpoint:Eio.Fiber.check
-        |> Result.map_error ~f:(fun _ ->
-          P.Error.create
-            Prompt_unavailable
-            ~message:"Invalid retained child content or content allowance"
-            ~retryable:false
-            ())
-      in
-      let content = Prompt_content_custody.Restored.content restored in
-      let%map digest =
-        Prompt_content_custody.fingerprint content ~checkpoint:Eio.Fiber.check
-        |> Result.map_error ~f:(fun _ ->
-          P.Error.create
-            Prompt_unavailable
-            ~message:"Complete child content manifest exceeds artifact policy"
-            ~retryable:false
-            ())
-      in
-      Some content, Some digest, Some limits, Some restored
-    | Some _, _, _, _ ->
-      Error
-        (P.Error.create
-           Prompt_unavailable
-           ~message:
-             "Retained child content requires parser custody and explicit content limits"
-           ~retryable:false
-           ())
-  in
-  Ok
-    { identity
-    ; declaration = { declaration with agent = selected.relative_path }
-    ; parent_artifact
-    ; root_chatmd = selected.contents
-    ; sources
-    ; programs
-    ; programs_sha256
-    ; content
-    ; content_sha256
-    ; content_limits
-    ; parser_context = child_parsed
-    ; content_projection
-    }
+  { identity; declaration = { declaration with agent = root_relative_path }; source }
 ;;
 
-let authored_sources t =
-  Prompt_program_custody.authored
-    ~root_file:t.identity.root_relative_path
-    ~sources:
-      ((t.identity.root_relative_path, t.root_chatmd)
-       :: List.map t.sources ~f:(fun s -> s.Store.Source.relative_path, s.contents))
-  |> Or_error.ok_exn
-;;
+let authored_sources t = Captured_child_source.authored_sources t.source
 
-let with_programs t incoming =
-  let open Result.Let_syntax in
-  let%bind previous =
-    match t.programs with
-    | Some previous -> Ok previous
-    | None -> denied "Legacy source has no retained effective child Root"
-  in
-  let expected = Chatml_prompt_programs.root_input previous
-  and actual = Chatml_prompt_programs.root_input incoming in
-  let%bind () =
-    if
-      Chatmd_parser_input.Role.equal (Chatmd_parser_input.role actual) Root
-      && String.equal (Chatmd_parser_input.path actual) t.identity.root_relative_path
-      && Chatmd_parser_input.authored_matches
-           expected
-           (Chatmd_parser_input.authored actual)
-           ~checkpoint:Eio.Fiber.check
-      && Chatmd_parser_input.effective_matches
-           expected
-           (Chatmd_parser_input.effective actual)
-           ~checkpoint:Eio.Fiber.check
-    then Ok ()
-    else denied "Incoming custody does not select this retained child's exact Root"
-  in
-  let%bind programs =
-    Chatml_prompt_programs.adopt
-      incoming
-      ~previous
-      ~authored:(authored_sources t)
-      ~limits:(Prompt_program_custody.limits ())
-      ~checkpoint:Eio.Fiber.check
-    |> Result.map_error ~f:(fun _ ->
-      P.Error.create
-        Prompt_unavailable
-        ~message:"Incoming custody changed retained source inventory or unknown ownership"
-        ~retryable:false
-        ())
-  in
-  let%map programs_sha256 =
-    Prompt_program_custody.fingerprint programs ~checkpoint:Eio.Fiber.check
-    |> Result.map_error ~f:(fun _ ->
-      P.Error.create
-        Prompt_unavailable
-        ~message:"Complete child program manifest exceeds artifact policy"
-        ~retryable:false
-        ())
-  in
-  { t with programs = Some programs; programs_sha256 = Some programs_sha256 }
+let with_programs ?(checkpoint = Eio.Fiber.check) t programs =
+  Result.map
+    (Captured_child_source.with_programs t.source programs ~checkpoint)
+    ~f:(fun source -> { t with source })
 ;;
 
 let artifact t ~revision_id ~created_at =
-  Store.Artifact.create
-    ~revision_id
-    ?source_receipt:t.parent_artifact.source_receipt
-    ~root_relative_path:t.identity.root_relative_path
-    ~root_chatmd:t.root_chatmd
-    ~sources:t.sources
-    ~parser_schema_version:t.parent_artifact.parser_schema_version
-    ~runtime_schema_version:t.parent_artifact.runtime_schema_version
-    ?program_bundle:(Option.map t.programs ~f:Chatml_prompt_programs.to_storage)
-    ?content_bundle:(Option.map t.content ~f:Chatmd_prompt_content.to_storage)
-    ~created_at
-    ()
+  Captured_child_source.artifact t.source ~revision_id ~created_at
 ;;
 
-let resource_revision ~parent t =
+let resource_revision ?(checkpoint = Eio.Fiber.check) ~parent t =
   let open Result.Let_syntax in
-  let%bind () =
-    match
-      P.Id.Prompt_revision.equal (Prompt_revision.id parent) t.identity.parent_revision_id
-      && String.equal
-           (Prompt_revision.artifact parent).manifest_sha256
-           t.identity.parent_manifest_sha256
-    with
-    | true -> Ok ()
-    | false -> denied "authored resource preparation requires its original source owner"
-  in
   let%bind revision_id =
     P.Id.Prompt_revision.of_string ("prv_authored_" ^ fingerprint t)
   in
-  let%bind artifact =
-    artifact t ~revision_id ~created_at:t.parent_artifact.created_at
-    |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
-  in
-  match t.parser_context, t.programs with
-  | Some parsed, Some programs ->
-    let tree = Prompt_revision.materialized_tree parent in
-    let%bind () =
-      Store.verify_tree ~root:tree artifact
-      |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
-    in
-    let revision =
-      Prompt_revision.create
-        ~definition:(Prompt_revision.definition parent)
-        ~artifact
-        ~materialized_tree:tree
-        ~elements:(CM.Parsed.elements parsed)
-    in
-    let unavailable error =
-      P.Error.create
-        Prompt_unavailable
-        ~message:(Error.to_string_hum error)
-        ~retryable:false
-        ()
-    in
-    let%bind revision =
-      Prompt_revision.with_custody
-        revision
-        ~parser_context:parsed
-        ~programs
-        ~checkpoint:Eio.Fiber.check
-      |> Result.map_error ~f:unavailable
-    in
-    (match t.content_projection with
-     | None -> Ok revision
-     | Some restored ->
-       Prompt_revision.with_content
-         revision
-         ~content:(Prompt_content_custody.Restored.content restored)
-         ~materialized:(Prompt_content_custody.Restored.materialized restored)
-         ~checkpoint:Eio.Fiber.check
-       |> Result.map_error ~f:unavailable)
-  | None, None | Some _, None | None, Some _ ->
-    Prompt_revision_builder.reparse
-      ?content_limits:t.content_limits
-      ~definition:(Prompt_revision.definition parent)
-      ~artifact
-      ~materialized_tree:(Prompt_revision.materialized_tree parent)
-      ()
-    |> Result.map_error ~f:(fun diagnostics ->
-      P.Error.create
-        Prompt_unavailable
-        ~message:
-          (List.map diagnostics ~f:(fun diagnostic ->
-             diagnostic.Prompt_revision_builder.Diagnostic.message)
-           |> String.concat ~sep:"\n")
-        ~retryable:false
-        ())
+  Captured_child_source.resource_revision t.source ~parent ~revision_id ~checkpoint
 ;;
 
 let store_result result =

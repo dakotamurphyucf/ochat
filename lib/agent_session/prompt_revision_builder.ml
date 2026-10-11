@@ -345,7 +345,8 @@ end
 
 (* Pure captured replay establishes final artifact-relative source directories
    even before installation. Public restoration verifies the tree first. *)
-let replay_custody ~content_input tree artifact =
+let replay_custody ?(checkpoint = Eio.Fiber.check) ~content_input tree artifact =
+  checkpoint ();
   let content_policy =
     match content_input with
     | Content_input.Stored limits -> Option.is_some limits
@@ -385,12 +386,13 @@ let replay_custody ~content_input tree artifact =
       |> Or_error.ok_exn
     in
     let custody =
-      Prompt_program_custody.admit storage ~authored ~checkpoint:Eio.Fiber.check
+      Prompt_program_custody.admit storage ~authored ~checkpoint
       |> Result.map_error ~f:(fun _ -> "Invalid retained parser/program custody")
       |> Result.ok_or_failwith
     in
     let parsed =
       Prompt_program_custody.replay
+        ~checkpoint
         (Chatml_prompt_programs.root_input custody)
         ~authored
         ~dir:tree
@@ -400,7 +402,7 @@ let replay_custody ~content_input tree artifact =
       custody
       ~parsed
       ~limits:(Prompt_program_custody.limits ())
-      ~checkpoint:Eio.Fiber.check
+      ~checkpoint
     |> Result.map_error ~f:(fun _ -> "Invalid retained active binding")
     |> Result.ok_or_failwith;
     let elements = Prompt.Chat_markdown.Parsed.elements parsed in
@@ -408,10 +410,7 @@ let replay_custody ~content_input tree artifact =
     let content =
       match artifact.content_bundle, content_input with
       | None, Content_input.Stored _ ->
-        if
-          Prompt_content_custody.requires_captured_documents
-            parsed
-            ~checkpoint:Eio.Fiber.check
+        if Prompt_content_custody.requires_captured_documents parsed ~checkpoint
         then failwith "Owned captured documents require retained content custody";
         None
       | Some storage, Stored (Some limits) ->
@@ -421,14 +420,14 @@ let replay_custody ~content_input tree artifact =
             ~programs:custody
             ~parsed
             ~limits
-            ~checkpoint:Eio.Fiber.check
+            ~checkpoint
           |> Result.map_error ~f:(fun _ -> "Invalid retained document custody")
           |> Result.ok_or_failwith
         in
         Some restored
       | Some _, Fresh prepared ->
         let restored =
-          Prompt_content_custody.replay prepared ~parsed ~checkpoint:Eio.Fiber.check
+          Prompt_content_custody.replay prepared ~parsed ~checkpoint
           |> Result.map_error ~f:(fun _ -> "Fresh document replay exceeds allowance")
           |> Result.ok_or_failwith
         in
@@ -439,15 +438,26 @@ let replay_custody ~content_input tree artifact =
     tree, elements, Some (parsed, custody, content)
 ;;
 
-let parse_tree ?content_limits tree artifact =
+let parse_tree ?(checkpoint = Eio.Fiber.check) ?content_limits tree artifact =
+  checkpoint ();
   Agent_store.Prompt_artifact_store.verify_tree ~root:tree artifact
   |> Result.map_error ~f:(fun error ->
     Sexp.to_string_hum ([%sexp_of: Agent_store.Store_error.t] error))
   |> Result.ok_or_failwith;
-  replay_custody ~content_input:(Content_input.Stored content_limits) tree artifact
+  replay_custody
+    ~checkpoint
+    ~content_input:(Content_input.Stored content_limits)
+    tree
+    artifact
 ;;
 
-let prepared_revision ~definition ~artifact (tree, elements, custody) =
+let prepared_revision
+      ?(checkpoint = Eio.Fiber.check)
+      ~definition
+      ~artifact
+      (tree, elements, custody)
+  =
+  checkpoint ();
   let revision =
     Prompt_revision.create ~definition ~artifact ~materialized_tree:tree ~elements
   in
@@ -455,11 +465,7 @@ let prepared_revision ~definition ~artifact (tree, elements, custody) =
   | None -> revision
   | Some (parser_context, programs, content) ->
     let revision =
-      Prompt_revision.with_custody
-        revision
-        ~parser_context
-        ~programs
-        ~checkpoint:Eio.Fiber.check
+      Prompt_revision.with_custody revision ~parser_context ~programs ~checkpoint
       |> Or_error.ok_exn
     in
     (match content with
@@ -469,7 +475,7 @@ let prepared_revision ~definition ~artifact (tree, elements, custody) =
          revision
          ~content:(Prompt_content_custody.Restored.content restored)
          ~materialized:(Prompt_content_custody.Restored.materialized restored)
-         ~checkpoint:Eio.Fiber.check
+         ~checkpoint
        |> Or_error.ok_exn)
 ;;
 
@@ -482,16 +488,25 @@ let parse_artifact ?content_limits artifact_store artifact =
     artifact
 ;;
 
-let reparse ?content_limits ~definition ~artifact ~materialized_tree () =
-  try
-    Ok
-      (prepared_revision
-         ~definition
-         ~artifact
-         (parse_tree ?content_limits materialized_tree artifact))
-  with
-  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
-  | exn -> Error [ exception_error ~source:definition.Prompt_definition.root_file exn ]
+let reparse
+      ?(checkpoint = Eio.Fiber.check)
+      ?content_limits
+      ~definition
+      ~artifact
+      ~materialized_tree
+      ()
+  =
+  Prompt_parser_boundary.run
+    ~checkpoint
+    ~on_parser_error:(fun exn ->
+      Error [ exception_error ~source:definition.Prompt_definition.root_file exn ])
+    ~f:(fun checkpoint ->
+      Ok
+        (prepared_revision
+           ~checkpoint
+           ~definition
+           ~artifact
+           (parse_tree ~checkpoint ?content_limits materialized_tree artifact)))
 ;;
 
 let restore ?content_limits ~artifact_store (definition : Prompt_definition.t) revision_id

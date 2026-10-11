@@ -97,3 +97,32 @@ val with_authored_child
         -> revision:Prompt_revision.t
         -> ('a, Agent_protocol.Error.t) Result.t)
   -> ('a, Agent_protocol.Error.t) Result.t
+
+(** Prepare an ordinary child from one genuine reference in the defining parent's
+    owned Parsed. Capture, select/adopt its explicit invocation role, and restore
+    CHILD programs under the same borrowed startup owner. An explicit validated
+    policy is mandatory; no legacy absence, missing-role, or parent-inventory
+    fallback is possible. Captured source policy is fixed: no original read,
+    source-mode default, tool grant, initializer or installation here.
+
+    [f] receives the child's own revision/Parsed/projection and its authentic
+    restored programs. Bind child dispatch to that revision, while caller-owned
+    invocation content retains the caller's separate dispatcher. Forward startup
+    and original limits through lower preflight; activation remains outside the
+    preparation timer. Original callbacks/cancellation/backtraces propagate. *)
+val with_captured_child
+  :  t
+  -> ?startup:Chat_response.Startup_compilation.t
+  -> Prompt_revision.t
+  -> reference:Prompt.Chat_markdown.Agent_reference.t
+  -> invocation:Invocation.t
+  -> content_limits:Chatmd_prompt_content.Limits.t option
+  -> env:Eio_unix.Stdenv.base
+  -> checkpoint:(unit -> unit)
+  -> f:
+       (Chat_response.Startup_compilation.t
+        -> revision:Prompt_revision.t
+        -> compilation_limits:Chatml_compilation.limits
+        -> programs:Chatml_prompt_programs.Restored.t option
+        -> ('a, Agent_protocol.Error.t) Result.t)
+  -> ('a, Agent_protocol.Error.t) Result.t

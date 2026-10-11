@@ -36,14 +36,17 @@ val fingerprint
   -> (string, Chatml_prompt_programs.Error.t) Result.t
 
 (** Replay one retained Root with a privately constructed captured-only loader,
-    fixed owned limits and Eio cancellation checkpoint. Explicit external agent
+    fixed owned limits and an optional borrowed checkpoint (Eio cancellation by
+    default). Original checkpoint exceptions/backtraces remain outside parser
+    diagnostic conversion. Explicit external agent
     declarations retain the registered-prompt policy; imports and script reads
     remain captured-only. Pinning a child is a separate authority check.
     This reuses the established
     prompt-owner diagnostic policy: parser exceptions become Error, cancellation
     and timeout propagate unchanged. No arbitrary caller callback is interpreted. *)
 val replay
-  :  Chatmd_parser_input.t
+  :  ?checkpoint:(unit -> unit)
+  -> Chatmd_parser_input.t
   -> authored:Chatmd_source_bundle.t
   -> dir:Eio.Fs.dir_ty Eio.Path.t
   -> Prompt.Chat_markdown.Parsed.t Or_error.t

@@ -42,7 +42,8 @@ type t
     content work allowance or re-materialize. Independently restored child artifacts
     still replay against their own installed directory under explicit host policy. *)
 val capture
-  :  ?content_limits:Chatmd_prompt_content.Limits.t
+  :  ?checkpoint:(unit -> unit)
+  -> ?content_limits:Chatmd_prompt_content.Limits.t
   -> parent:Prompt_revision.t
   -> tool_name:string
   -> unit
@@ -76,7 +77,8 @@ val artifact
     another caller later inherits the wrapper. Retains the original catalog policy
     and directory relationships for host-authorized private resource preparation. *)
 val resource_revision
-  :  parent:Prompt_revision.t
+  :  ?checkpoint:(unit -> unit)
+  -> parent:Prompt_revision.t
   -> t
   -> (Prompt_revision.t, Agent_protocol.Error.t) result
 
@@ -115,4 +117,8 @@ val authored_sources : t -> Chatmd_source_bundle.t
 (** Adopt a complete child projection before fingerprint/reservation/publication.
     Preserve previous program/input/source inventory and unknowns, require the
     actual retained queued Root, and validate active bindings through replay. *)
-val with_programs : t -> Chatml_prompt_programs.t -> (t, Agent_protocol.Error.t) Result.t
+val with_programs
+  :  ?checkpoint:(unit -> unit)
+  -> t
+  -> Chatml_prompt_programs.t
+  -> (t, Agent_protocol.Error.t) Result.t

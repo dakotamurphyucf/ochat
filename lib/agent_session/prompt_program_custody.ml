@@ -62,29 +62,30 @@ let fingerprint t ~checkpoint =
   |> Result.map_error ~f:(fun error -> C.Error.Document error)
 ;;
 
-let replay input ~authored ~dir =
-  try
-    let source_loader =
-      Source_loader.captured_filesystem
-        ~root:dir
-        ~sources:(Chatmd_source_bundle.sources authored)
-    in
-    let limits =
-      Prompt.Chat_markdown.Limits.create
-        ~max_input_bytes:(8 * 1024 * 1024)
-        ~max_parse_calls:1024
-        ~max_tokens:100_000
-        ~max_depth:128
-      |> Or_error.ok_exn
-    in
-    Ok
-      (Prompt.Chat_markdown.replay_chat_inputs
-         input
-         ~source_loader
-         ~dir
-         ~limits
-         ~checkpoint:Eio.Fiber.check)
-  with
-  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
-  | exn -> Or_error.of_exn exn
+let replay ?(checkpoint = Eio.Fiber.check) input ~authored ~dir =
+  Prompt_parser_boundary.run
+    ~checkpoint
+    ~on_parser_error:Or_error.of_exn
+    ~f:(fun checkpoint ->
+      checkpoint ();
+      let source_loader =
+        Source_loader.captured_filesystem
+          ~root:dir
+          ~sources:(Chatmd_source_bundle.sources authored)
+      in
+      let limits =
+        Prompt.Chat_markdown.Limits.create
+          ~max_input_bytes:(8 * 1024 * 1024)
+          ~max_parse_calls:1024
+          ~max_tokens:100_000
+          ~max_depth:128
+        |> Or_error.ok_exn
+      in
+      Ok
+        (Prompt.Chat_markdown.replay_chat_inputs
+           input
+           ~source_loader
+           ~dir
+           ~limits
+           ~checkpoint))
 ;;

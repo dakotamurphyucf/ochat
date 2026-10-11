@@ -11,6 +11,7 @@
   workspace_cleanup
   prompt_definition
   prompt_revision
+  prompt_parser_boundary
   prompt_program_custody
   prompt_content_custody
   prompt_revision_builder
@@ -20,6 +21,7 @@
   extensibility_native_tools
   managed_session_service
   authored_agent_call
+  captured_child_source
   authored_agent_source
   authored_agent_binding
   session_management
@@ -177,7 +179,7 @@
   quota_manager
   start_queue
   inference_ledger)
- (private_modules pending_carrier_admission prompt_program_custody prompt_script_roles)
+ (private_modules pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles)
  (libraries ochat.inference_client ochat.inference_runtime ochat.inference ochat.history_chatmd ochat.transcript
   core
   digestif

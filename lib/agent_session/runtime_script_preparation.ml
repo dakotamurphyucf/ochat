@@ -146,40 +146,63 @@ let with_revision policy ?startup revision ~env ~invocation ~checkpoint ~f =
     ()
 ;;
 
-let select_child policy ~startup ~parent source =
+let select_child_role policy ~startup ~invocation ~revision ~authored =
   let open Result.Let_syntax in
-  let%bind revision = Authored_agent_source.resource_revision ~parent source in
   match Prompt_revision.parser_context revision, Prompt_revision.programs revision with
   | None, None ->
     let%map (_ : Chatml_prompt_programs.Restored.t option) =
-      restore policy ~startup ~revision ~invocation:Delegated_ui
+      restore policy ~startup ~revision ~invocation
     in
-    source, revision
+    None
   | Some parsed, Some custody ->
     (match policy with
      | None ->
        Error (failure "owned child custody requires explicit host preparation policy")
      | Some policy ->
-       let%bind plan = plan policy ~startup ~parsed ~invocation:Delegated_ui in
-       let%bind selected =
+       let%bind plan = plan policy ~startup ~parsed ~invocation in
+       let%map selected =
          Chat_response.Retained_selection.select
            plan
            ~custody
-           ~authored:(Authored_agent_source.authored_sources source)
+           ~authored
            ~limits:policy.restoration
            ~max_work_steps:policy.max_custody_work_steps
            ~checkpoint:(fun () -> Startup.checkpoint startup)
          |> map_diagnostics ~to_string:Chatmd_shell_spec.Diagnostic.to_string
        in
-       let selected =
-         match selected with
-         | Chat_response.Retained_selection.Legacy custody | Selected custody -> custody
-       in
-       let%bind source = Authored_agent_source.with_programs source selected in
-       let%map revision = Authored_agent_source.resource_revision ~parent source in
-       source, revision)
+       Some (plan, selected))
   | None, Some _ | Some _, None ->
     Error (failure "child custody is missing its matching original parser or inventory")
+;;
+
+let selected_custody = function
+  | Chat_response.Retained_selection.Legacy custody | Selected custody -> custody
+;;
+
+let select_child policy ~startup ~parent source =
+  let open Result.Let_syntax in
+  let checkpoint () = Startup.checkpoint startup in
+  let%bind revision =
+    Authored_agent_source.resource_revision ~checkpoint ~parent source
+  in
+  let%bind selected =
+    select_child_role
+      policy
+      ~startup
+      ~invocation:Delegated_ui
+      ~revision
+      ~authored:(Authored_agent_source.authored_sources source)
+  in
+  match selected with
+  | None -> Ok (source, revision)
+  | Some (_, selected) ->
+    let%bind source =
+      Authored_agent_source.with_programs ~checkpoint source (selected_custody selected)
+    in
+    let%map revision =
+      Authored_agent_source.resource_revision ~checkpoint ~parent source
+    in
+    source, revision
 ;;
 
 let with_authored_child policy ~parent ~tool_name ~content_limits ~env ~checkpoint ~f =
@@ -196,10 +219,108 @@ let with_authored_child policy ~parent ~tool_name ~content_limits ~env ~checkpoi
       let%bind source, revision =
         Startup.within startup ~map_error:compilation_error ~f:(fun () ->
           let%bind source =
-            Authored_agent_source.capture ?content_limits ~parent ~tool_name ()
+            Authored_agent_source.capture
+              ~checkpoint:(fun () -> Startup.checkpoint startup)
+              ?content_limits
+              ~parent
+              ~tool_name
+              ()
           in
           select_child policy ~startup ~parent source)
       in
       f startup ~source ~revision)
+    ()
+;;
+
+(* Preparation IDs are ephemeral: custody remains the source identity and no ID
+   chosen here is installed, reserved or used to infer native authority. *)
+let child_preparation_id parent source =
+  let artifact = Prompt_revision.artifact parent in
+  let digest =
+    [%sexp
+      ("ochat.captured-child-preparation.v1" : string)
+    , (Agent_protocol.Id.Prompt_revision.to_string artifact.revision_id : string)
+    , (artifact.manifest_sha256 : string)
+    , (Captured_child_source.root_relative_path source : string)
+    , (Captured_child_source.programs_sha256 source : string option)
+    , (Captured_child_source.content_sha256 source : string option)]
+    |> Sexp.to_string_mach
+    |> Chatmd_shell_spec.Source_ref.digest
+  in
+  Agent_protocol.Id.Prompt_revision.of_string ("prv_captured_" ^ digest)
+;;
+
+let with_captured_child
+      policy
+      ?startup
+      parent
+      ~reference
+      ~invocation
+      ~content_limits
+      ~env
+      ~checkpoint
+      ~f
+  =
+  let compilation_limits = compilation policy in
+  Startup.with_context
+    ?startup
+    ~limits:compilation_limits
+    ~env
+    ~checkpoint
+    ~map_error:compilation_error
+    ~f:(fun startup ->
+      let checkpoint () = Startup.checkpoint startup in
+      let open Result.Let_syntax in
+      let%bind revision, programs =
+        Startup.within startup ~map_error:compilation_error ~f:(fun () ->
+          let%bind source =
+            Captured_child_source.capture ~parent ~reference ~content_limits ~checkpoint
+          in
+          let%bind revision_id = child_preparation_id parent source in
+          let%bind revision =
+            Captured_child_source.resource_revision
+              source
+              ~parent
+              ~revision_id
+              ~checkpoint
+          in
+          let%bind selected =
+            select_child_role
+              (Some policy)
+              ~startup
+              ~invocation
+              ~revision
+              ~authored:(Captured_child_source.authored_sources source)
+          in
+          match selected with
+          | None ->
+            Error (failure "owned captured child has no retained parser/program custody")
+          | Some (plan, selected) ->
+            let%bind source =
+              Captured_child_source.with_programs
+                source
+                (selected_custody selected)
+                ~checkpoint
+            in
+            let%bind revision_id = child_preparation_id parent source in
+            let%bind revision =
+              Captured_child_source.resource_revision
+                source
+                ~parent
+                ~revision_id
+                ~checkpoint
+            in
+            let%bind programs =
+              restore_programs policy ~startup ~plan ~custody:(selected_custody selected)
+            in
+            (match selected, programs with
+             | Chat_response.Retained_selection.Legacy _, None | Selected _, Some _ ->
+               Ok (revision, programs)
+             | Legacy _, Some _ | Selected _, None ->
+               Error
+                 (failure
+                    "captured child role restoration changed its admitted selection")))
+      in
+      f startup ~revision ~compilation_limits ~programs)
     ()
 ;;

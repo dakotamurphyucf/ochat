@@ -100,9 +100,12 @@ val restore
     Content-bearing artifacts require explicit [content_limits], with no original
     file/catalog fallback or policy inferred from stored metadata.
     The host must supply the admitted source and original definition policy; this
-    is source preparation, not an execution or catalog authorization. *)
+    is source preparation, not an execution or catalog authorization. The optional
+    borrowed checkpoint defaults to Eio cancellation; its original exception and
+    backtrace are never converted into parser diagnostics. *)
 val reparse
-  :  ?content_limits:Chatmd_prompt_content.Limits.t
+  :  ?checkpoint:(unit -> unit)
+  -> ?content_limits:Chatmd_prompt_content.Limits.t
   -> definition:Prompt_definition.t
   -> artifact:Agent_store.Prompt_artifact_store.Artifact.t
   -> materialized_tree:Eio.Fs.dir_ty Eio.Path.t

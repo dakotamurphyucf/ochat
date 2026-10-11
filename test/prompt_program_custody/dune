@@ -1,5 +1,7 @@
 (copy_files ../../lib/agent_session/prompt_program_custody.ml)
 (copy_files ../../lib/agent_session/prompt_program_custody.mli)
+(copy_files ../../lib/agent_session/prompt_parser_boundary.ml)
+(copy_files ../../lib/agent_session/prompt_parser_boundary.mli)
 (library
  (name prompt_program_custody_tests)
  (libraries core cstruct jsonaf digestif eio eio.unix eio_main agent_protocol agent_store agent_session chatmd chatml chatml_source chatml_prepared_program chatml_prompt_programs expect_test_helpers_core)
