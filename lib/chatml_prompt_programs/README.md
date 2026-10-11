@@ -71,3 +71,25 @@ boundary and preserve exception identity.
 Execution and per-declaration project/environment selection belong to the host
 runtime owner. `restore` supplies immutable active programs, not execution
 permission, live tools or a module instance.
+
+## Refresh associations
+
+`Binding.Slot` identifies an actual logical registration Root, declaration Input
+role/path and parser-qualified script ID. It omits revisions, body hashes and byte
+ranges, so editing or moving a declaration within its input preserves the slot.
+Exact `Binding` replay identity remains unchanged. Distinct import aliases and
+registration Roots remain distinct; these labels never confer source authority.
+
+`retained` projects all admitted program records, including inactive variants.
+Its bounded exact-key lookup returns the original Selected lock capture, preserving
+accepted noncanonical bytes. It rejects malformed, missing and Provided-only keys
+and never restores an old graph against a new compiler contract. Projection and
+lookup each have an explicit whole-call cooperative-work limit and preserve
+original checkpoint/cancellation exceptions. No callback survives in the output.
+
+The authoritative `Script_contract_plan` records actual Standard targets, explicit
+legacy Ui/Headless invocation roles, and native hook kind/selected entrypoint.
+These role labels remain distinct even when contract fingerprints coincide; the
+actual supplied surface still determines compilation metadata. This pure boundary
+supplies facts for a durable host association. It does not choose Initial/Build/Update,
+persist a Catalog baseline or authorize dependency updates.

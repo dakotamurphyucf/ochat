@@ -22,12 +22,14 @@ let custody_limits ?(programs = 16) () =
 let plan
       ?(checkpoint = ignore)
       ?(shell = None)
+      ?(moderator_invocation = Plan.Program.Role.Moderator_invocation.Ui)
       ?(moderator_surface = Chatml.Chatml_builtin_surface.ui_moderator_surface)
       ?(delegated_moderator = false)
       parsed
   =
   Plan.create
     parsed
+    ~moderator_invocation
     ~moderator_surface
     ~delegated_moderator
     ~shell
@@ -603,6 +605,7 @@ let on_event = fun ctx state event -> Task.pure(state)</script>
         let headless =
           plan
             ~shell:(Some shell)
+            ~moderator_invocation:Headless
             ~moderator_surface:Chatml.Chatml_builtin_surface.moderator_surface
             child
         in
@@ -795,7 +798,10 @@ let on_event = fun ctx state event -> Task.pure(state)</script>|};
         assert (List.is_empty (Builder.Capture.agents value));
         let parsed = Builder.Capture.root value in
         let headless =
-          plan ~moderator_surface:Chatml.Chatml_builtin_surface.moderator_surface parsed
+          plan
+            ~moderator_invocation:Headless
+            ~moderator_surface:Chatml.Chatml_builtin_surface.moderator_surface
+            parsed
         in
         let delegated = plan ~delegated_moderator:true parsed in
         let calls = ref 0 in

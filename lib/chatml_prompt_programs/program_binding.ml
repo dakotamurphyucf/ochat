@@ -44,6 +44,65 @@ let script_id t = t.identity.script_id
 let script_digest t = t.body_digest
 let key t = t.key
 
+module Slot = struct
+  type t =
+    { registration_path : Source.Portable_path.t
+    ; declaration_role : Input.Role.t
+    ; declaration_path : Source.Portable_path.t
+    ; script_id : string
+    }
+  [@@deriving equal, sexp_of]
+
+  let registration_path t = t.registration_path
+  let declaration_role t = t.declaration_role
+  let declaration_path t = t.declaration_path
+  let script_id t = t.script_id
+
+  let string_matches left right ~checkpoint =
+    checkpoint ();
+    if String.length left <> String.length right
+    then false
+    else (
+      let offset = ref 0 in
+      let same = ref true in
+      while !same && !offset < String.length left do
+        checkpoint ();
+        let stop = !offset + Int.min 4096 (String.length left - !offset) in
+        while !same && !offset < stop do
+          same := Char.equal left.[!offset] right.[!offset];
+          incr offset
+        done
+      done;
+      !same)
+  ;;
+
+  let matches left right ~checkpoint =
+    checkpoint ();
+    Input.Role.equal left.declaration_role right.declaration_role
+    && string_matches
+         (Source.Portable_path.to_string left.registration_path)
+         (Source.Portable_path.to_string right.registration_path)
+         ~checkpoint
+    && string_matches
+         (Source.Portable_path.to_string left.declaration_path)
+         (Source.Portable_path.to_string right.declaration_path)
+         ~checkpoint
+    && string_matches left.script_id right.script_id ~checkpoint
+  ;;
+end
+
+let slot t =
+  (* Both portable paths were validated in of_metadata. Retain only these labels,
+     never the binding's captured parser input or revision identities. *)
+  Slot.
+    { registration_path =
+        Source.Portable_path.create t.identity.root_path |> Or_error.ok_exn
+    ; declaration_role = t.identity.role
+    ; declaration_path = t.path
+    ; script_id = t.identity.script_id
+    }
+;;
+
 let same_input left right =
   String.length (Input.path left) <= 1024
   && String.length (Input.path right) <= 1024

@@ -59,6 +59,23 @@ module Binding : sig
     -> checkpoint:(unit -> unit)
     -> t Or_error.t
 
+  module Slot : sig
+    (** Stable declaration association, not exact replay identity or authority.
+        Retains only logical registration Root path, declaration Input role/path
+        and parser-qualified script ID. No source bytes/revisions/range/body hash
+        or compiler contract are retained. Construct only through [slot]. *)
+    type t [@@deriving equal, sexp_of]
+
+    val registration_path : t -> Source.Portable_path.t
+    val declaration_role : t -> Parser_input.Role.t
+    val declaration_path : t -> Source.Portable_path.t
+    val script_id : t -> string
+
+    (** Exact byte comparison polling long names in4096-byte chunks. *)
+    val matches : t -> t -> checkpoint:(unit -> unit) -> bool
+  end
+
+  val slot : t -> Slot.t
   val declaration_path : t -> Source.Portable_path.t
   val registration_input : t -> Parser_input.t
   val declaration_digest : t -> Captured.Digest.t
@@ -289,6 +306,66 @@ val of_storage
   -> limits:Limits.t
   -> checkpoint:(unit -> unit)
   -> (t, Error.t) Result.t
+
+module Retained : sig
+  module Program : sig
+    (** One exact admitted inventory record, including inactive queued roles.
+        Source locks are projected without graph restoration or compilation. *)
+    type t
+
+    type input =
+      | Provided
+      | Selected of Captured.t
+
+    val key : t -> string
+    val binding : t -> Binding.t
+    val compiler_contract : t -> Captured.Digest.t
+    val input : t -> input
+  end
+
+  (** Immutable projection preserving semantic custody provenance (not physical
+      instance identity). No native
+      authority, graph/inference cells or callback is retained. *)
+  type t
+
+  module Error : sig
+    type t =
+      | Invalid_key
+      | Invalid_work_limit
+      | Work_limit_exceeded
+      | Missing_key of string
+      | Ambiguous_key of string
+      | Provided_key of string
+      | Invalid_inventory of string
+  end
+
+  val programs : t -> Program.t list
+
+  (** Resolve the exact stored program key (two64-byte lowercase SHA256 atoms
+      joined by a colon). Malformed keys reject before retention. Missing/duplicate/Provided records
+      reject; a foreign key is a miss. This never tries a sibling role, current
+      compiler contract, implicit Initial or a reconstructed lock. The lookup
+      has one explicit cooperative-work ceiling; string walks poll in chunks.
+      Checkpoint exceptions/backtraces propagate unchanged. *)
+  val selected_lock
+    :  t
+    -> key:string
+    -> max_work_steps:int
+    -> checkpoint:(unit -> unit)
+    -> (Captured.t, Error.t) Result.t
+end
+
+(** One bounded projection of every admitted record and its exact Selected lock.
+    Source reference membership is checked against the same custody inventory;
+    no old graph is restored or checked against a new host contract. Work counts
+    each metadata/source visit and bounded string-comparison chunk; count/bytes
+    remain bounded by original custody admission. No partial projection escapes
+    a failure/callback interruption; callbacks propagate unchanged. *)
+val retained
+  :  t
+  -> max_work_steps:int
+  -> checkpoint:(unit -> unit)
+  -> (Retained.t, Retained.Error.t) Result.t
 
 module Restored : sig
   module Program : sig

@@ -16,8 +16,34 @@ module Limits : sig
 end
 
 module Program : sig
+  module Role : sig
+    module Moderator_invocation : sig
+      (** Actual host invocation family, selected explicitly by the planning
+          caller. Custom surfaces do not choose it and fingerprints cannot stand
+          in for it. Ui and Headless may coexist for the SAME script slot. *)
+      type t =
+        | Ui
+        | Headless
+      [@@deriving equal, sexp_of]
+    end
+
+    (** The actual host role selected in the authoritative planner branches.
+        Stable across source/contract revisions; names grant no authority.
+        Native hook roles include actual kind and selected entrypoint, not merely
+        the generic native compiler target. No blanket/invented variants. *)
+    type t =
+      | Standard of Chatml.Chatml_compiler_contract.Target.t
+      | Legacy_moderator of Moderator_invocation.t
+      | Native_hook of
+          { kind : Chatmd_shell_spec.Chatmd_script_spec.kind
+          ; entrypoint : string
+          }
+    [@@deriving equal, sexp_of]
+  end
+
   type t
 
+  val role : t -> Role.t
   val declaration : t -> Prompt.Chat_markdown.Declaration.t
   val binding : t -> Chatml_prompt_programs.Binding.t
   val contract : t -> Chatml.Chatml_compiler_contract.t
@@ -36,6 +62,7 @@ type t
     exceptions propagate without conversion. No blanket role variants. *)
 val create
   :  Prompt.Chat_markdown.Parsed.t
+  -> moderator_invocation:Program.Role.Moderator_invocation.t
   -> moderator_surface:Chatml.Chatml_builtin_surface.surface
   -> delegated_moderator:bool
   -> shell:

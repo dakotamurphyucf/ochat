@@ -51,6 +51,7 @@ let plan t ~startup ~parsed ~delegated_moderator =
     in
     Plan.create
       parsed
+      ~moderator_invocation:Ui
       ~moderator_surface:Chatml.Chatml_builtin_surface.ui_moderator_surface
       ~delegated_moderator
       ~shell:(Some shell)

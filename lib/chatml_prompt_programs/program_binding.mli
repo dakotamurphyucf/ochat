@@ -24,6 +24,17 @@ val of_metadata
   -> checkpoint:(unit -> unit)
   -> t Or_error.t
 
+module Slot : sig
+  type t [@@deriving equal, sexp_of]
+
+  val registration_path : t -> Source.Portable_path.t
+  val declaration_role : t -> Input.Role.t
+  val declaration_path : t -> Source.Portable_path.t
+  val script_id : t -> string
+  val matches : t -> t -> checkpoint:(unit -> unit) -> bool
+end
+
+val slot : t -> Slot.t
 val declaration_path : t -> Source.Portable_path.t
 val registration_input : t -> Input.t
 val declaration_digest : t -> Chatml_source.Digest.t

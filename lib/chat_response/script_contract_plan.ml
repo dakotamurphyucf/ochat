@@ -25,13 +25,33 @@ module Limits = struct
 end
 
 module Program = struct
+  module Role = struct
+    module Moderator_invocation = struct
+      type t =
+        | Ui
+        | Headless
+      [@@deriving equal, sexp_of]
+    end
+
+    type t =
+      | Standard of Contract.Target.t
+      | Legacy_moderator of Moderator_invocation.t
+      | Native_hook of
+          { kind : Chatmd_shell_spec.Chatmd_script_spec.kind
+          ; entrypoint : string
+          }
+    [@@deriving equal, sexp_of]
+  end
+
   type t =
-    { declaration : CM.Declaration.t
+    { role : Role.t
+    ; declaration : CM.Declaration.t
     ; binding : C.Binding.t
     ; contract : Contract.t
     ; compiler_contract : Chatml_source.Digest.t
     }
 
+  let role t = t.role
   let declaration t = t.declaration
   let binding t = t.binding
   let contract t = t.contract
@@ -71,7 +91,15 @@ let bytes_equal left right ~checkpoint =
   !equal
 ;;
 
-let create parsed ~moderator_surface ~delegated_moderator ~shell ~limits ~checkpoint =
+let create
+      parsed
+      ~moderator_invocation
+      ~moderator_surface
+      ~delegated_moderator
+      ~shell
+      ~limits
+      ~checkpoint
+  =
   let module Abort = struct
     exception Stop of D.t list
   end
@@ -110,7 +138,7 @@ let create parsed ~moderator_surface ~delegated_moderator ~shell ~limits ~checkp
     | [] | _ :: _ :: _ ->
       fail ~source "chatml.program_plan_owner" "Script has no unique parser declaration"
   in
-  let add declaration make_contract =
+  let add declaration role make_contract =
     poll ();
     if !count >= limits.programs
     then fail "chatml.program_plan_limit" "Script contract planning program limit";
@@ -149,7 +177,8 @@ let create parsed ~moderator_surface ~delegated_moderator ~shell ~limits ~checkp
         phys_equal previous.Program.declaration declaration
         && Chatml_source.Digest.equal previous.compiler_contract compiler_contract
       then fail "chatml.program_plan_duplicate" "Duplicate script binding and contract");
-    rows := ({ declaration; binding; contract; compiler_contract } : Program.t) :: !rows
+    rows
+    := ({ role; declaration; binding; contract; compiler_contract } : Program.t) :: !rows
   in
   try
     poll ();
@@ -163,7 +192,7 @@ let create parsed ~moderator_surface ~delegated_moderator ~shell ~limits ~checkp
             fail "chatml.program_plan_owner" "Legacy script lacks parser ownership"
         in
         let declaration = descriptor_owner script.id source in
-        add declaration (fun () ->
+        add declaration (Legacy_moderator moderator_invocation) (fun () ->
           Moderator_program.contract moderator_surface ~checkpoint:poll)
       | Extension_script script ->
         poll ();
@@ -174,7 +203,8 @@ let create parsed ~moderator_surface ~delegated_moderator ~shell ~limits ~checkp
           | Moderator_script ->
             if delegated_moderator then Delegated_moderator_v1 else Moderator_v1
         in
-        add declaration (fun () -> Contract.for_target target ~checkpoint:poll)
+        add declaration (Standard target) (fun () ->
+          Contract.for_target target ~checkpoint:poll)
       | Shell_script _
       | Msg _
       | Developer _
@@ -234,15 +264,18 @@ let create parsed ~moderator_surface ~delegated_moderator ~shell ~limits ~checkp
              else names)
          in
          List.iter (List.rev names) ~f:(fun entrypoint ->
-           add declaration (fun () ->
-             match
-               Shell_runtime.Chatml_extension.compiler_contract
-                 script.kind
-                 ~entrypoint
-                 ~checkpoint:poll
-             with
-             | Ok contract -> contract
-             | Error error -> raise (Abort.Stop [ error ])))));
+           add
+             declaration
+             (Native_hook { kind = script.kind; entrypoint })
+             (fun () ->
+                match
+                  Shell_runtime.Chatml_extension.compiler_contract
+                    script.kind
+                    ~entrypoint
+                    ~checkpoint:poll
+                with
+                | Ok contract -> contract
+                | Error error -> raise (Abort.Stop [ error ])))));
     poll ();
     Ok { parsed; programs = List.rev !rows }
   with

@@ -13,11 +13,13 @@ module Inventory = Program_inventory
 module Limits = Inventory.Limits
 module Input = Inventory.Input
 module Error = Inventory.Error
+module Retained = Program_retained
 module Restored = Program_restore
 module Declaration_match = Program_declaration_match
 
 type t = Program_document.t
 
+let retained t = Program_retained.create (Program_document.inventory t)
 let to_storage = Program_document.to_storage
 let of_storage = Program_document.of_storage
 let adopt = Program_document.adopt
