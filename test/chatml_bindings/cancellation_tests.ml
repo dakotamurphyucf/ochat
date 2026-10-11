@@ -21,6 +21,7 @@ let control checkpoint : L.execution_control =
   { checkpoint
   ; diagnostic_checkpoint = checkpoint
   ; allocate = (fun _ -> checkpoint ())
+  ; allocate_array = (fun _ -> checkpoint ())
   ; before_builtin = (fun ~name:_ _ -> checkpoint ())
   ; check_value = (fun _ -> checkpoint ())
   ; before_json_import = (fun _ -> checkpoint ())

@@ -13,6 +13,9 @@
   chatml_type_expr
   chatml_module_signature
   chatml_module_visibility
+  chatml_task_array_mode
+  chatml_task_array
+  chatml_table_snapshot
   chatml_shape_kind
   chatml_equality_requirement
   chatml_eval
@@ -25,6 +28,8 @@
   chatml_debug_log
   frame_env
   chatml_value_codec
+  chatml_builtin_callback
+  chatml_builtin_composition
   chatml_builtin_spec
   chatml_builtin_surface
   chatml_extension_surface

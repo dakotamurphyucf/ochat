@@ -1,6 +1,6 @@
 # String-keyed mutable tables
 
-Use `Hashtbl` for small maps, grouping, counters or local lookup state. Its five
+Use `Hashtbl` for small maps, grouping, counters or local lookup state. Its
 exports are available on all four extensibility surfaces and execute immediately.
 Keys are case-sensitive strings and values share one inferred type. The examples
 are complete one-off programs checked without tools or provider calls.
@@ -11,6 +11,7 @@ are complete one-off programs checked without tools or provider calls.
 | `Hashtbl.set(table, key, value)` | Replace the value at an existing key, or insert a missing key; returns unit. |
 | `Hashtbl.get(table, key)` | `Some(value)` for a present key, otherwise `None`. |
 | `Hashtbl.mem(table, key)` | Whether that exact string key is present. |
+| `Hashtbl.to_array(table)` | Fresh shallow array of `{key; value}` entries in insertion order. |
 | `Hashtbl.remove(table, key)` | Remove the key; a missing key is a no-op. Returns unit. |
 
 This is not OCaml's general hash-table API: there are no custom hash functions,
@@ -18,7 +19,7 @@ polymorphic keys, `add` with multiple bindings, iterators or table-copy exports.
 The current implementation stores an array of entries behind a ref and performs
 linear scans; do not assume constant-time lookups or use it as an unbounded
 database. Treat that storage as an implementation detail and access tables through
-the module. Keep a separate array of keys if the workflow needs enumeration.
+the module. Use `to_array` when a workflow needs enumeration.
 
 Binding a table to another name shares the same table. Replacing or removing a
 binding affects both names. A retrieved mutable value is also shared; `get` does
@@ -79,4 +80,30 @@ let main input =
      Task.fail("recover")),
     fun message -> Task.pure(`String(!cell ++ ":" ++
       to_string(Option.is_none(Hashtbl.get(table, "work"))))))
+```
+
+
+## Enumerating a stable snapshot
+
+`Hashtbl.to_array` preserves insertion order. Replacing a value retains its key's
+position; removing and reinserting that key appends it. The returned outer array
+and entry records are fresh. Replacing a snapshot entry cannot change table
+membership, but nested mutable payloads remain shared. Snapshot construction is
+expected linear time and uses linear extra storage. It validates the structural
+table representation and rejects malformed entries or duplicate keys rather
+than silently skipping them.
+
+<!-- ochat-authoring-example: {"id":"tables.ordered-snapshot","surface":"one_off_v1","result":"b:3:a:4"} -->
+```ocaml
+let main input =
+  let table = Hashtbl.create() in
+  Hashtbl.set(table, "b", 1);
+  Hashtbl.set(table, "a", 2);
+  Hashtbl.set(table, "b", 3);
+  let first = Hashtbl.to_array(table) in
+  Hashtbl.remove(table, "b");
+  Hashtbl.set(table, "b", 4);
+  let second = Hashtbl.to_array(table) in
+  Task.pure(`String(first[0].key ++ ":" ++ to_string(first[0].value) ++ ":" ++
+    second[0].key ++ ":" ++ to_string(second[1].value)))
 ```

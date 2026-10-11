@@ -589,7 +589,7 @@ let topic_contracts =
     , "6d128ce587a03361bad5f79b70f92ef7454f460a570dae9a3cc291cb7769d6fd" )
   ; ( "one_off_v1"
     , "chatml.task-effects"
-    , "582c7f6b811c51b6301212a0564132fb07ea8be6d89f419c5d43c6475ec3d041" )
+    , "873b9f154db650e5f77d473666fcb7da18a81da176549fd52eb2cde3a44d31f1" )
   ; ( "tool_v1"
     , "chatml.programs"
     , "5ad7ade1f7da62e2c8dd79fdf91e62b1a1fdf93004b55ba09d6bdc170ef2003e" )
@@ -601,12 +601,12 @@ let topic_contracts =
     , "48c1d726386d41a531166eeecc176b4f464cee10645c924950ab6cc9cca77c63" )
   ; ( "tool_v1"
     , "chatml.task-effects"
-    , "65ba204ea5691f2c33f1a6e9f36b871b5e3978e1c5af7bb87338cc40ff70c137" )
+    , "b631c5850592a190e151230ca8d5f66ca9b3ba26e03133b773d76460e9460922" )
   ; ( "moderator_v1"
     , "chatml.task-effects"
-    , "f26513eaa3ae368a0834ae673773c685810907aee27eed4221995bb88eea35cd" )
+    , "bac7beee30b97ac2ad6f3e370019b195355525483055bdb17641ea5cda46886a" )
   ; ( "delegated_moderator_v1"
     , "chatml.task-effects"
-    , "4f7ab4f8a44fc52f22a876663a1a07d9930c809680c1a731ab02594c73ad5b8e" )
+    , "3e31eeb00d477c0334d066301d9f028f48f27158629d0e6ddb3e563da9cc13cd" )
   ]
 ;;

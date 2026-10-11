@@ -52,6 +52,19 @@ let shared_features =
     , [ "test/chatml_compilation_test.ml"
       ; "test/chatml_captured_compilation/domain_tests.ml"
       ] )
+  ; ( "tasks.array_traversal"
+    , "Sequential deferred callbacks with per-interpretation snapshots, control and \
+       resumable state"
+    , [ "lib/chatml/chatml_host_runtime.ml"
+      ; "lib/chatml/chatml_task_array.ml"
+      ; "lib/chatml/chatml_task_array_mode.ml"
+      ]
+    , "chatml.task-effects"
+    , [ "test/chatml_stdlib_traversal/traversal_tests.ml"
+      ; "test/chatml_stdlib_traversal/limits_tests.ml"
+      ; "test/chatml_stdlib_traversal/lifecycle_tests.ml"
+      ; "task-effects.array-traversal"
+      ] )
   ; ( "execution.ancestry"
     , "Owned shared counters, nested scope lifetimes and independent session budgets"
     , [ "lib/chatml/chatml_execution.ml" ]
@@ -234,7 +247,11 @@ let moderator_features =
 ;;
 
 let implementation_sources =
-  [ ( "lib/chatml_linked_runtime/chatml_linked_runtime.ml"
+  [ ( "lib/chatml/chatml_task_array.ml"
+    , "b5f9b9636fbcdc894d1c60de57da053abb2c3dfe1994989433dcc3ccd31c4523" )
+  ; ( "lib/chatml/chatml_task_array_mode.ml"
+    , "8b580d138d8664634a4cfee9b106bef686317ddccc6fa4a5df8dfbd265f4e3cf" )
+  ; ( "lib/chatml_linked_runtime/chatml_linked_runtime.ml"
     , "6a818d806bd09eeb3970e3603f5444de154d8b39f8131dc237f21e94a4d9493f" )
   ; ( "lib/chatml/chatml_builtin_modules.ml"
     , "4d005f60b55cee3263e7925bae6d1c81129ca383cf6218b3cc2dc86270def236" )
@@ -259,7 +276,7 @@ let implementation_sources =
   ; ( "lib/chatml/chatml_compilation.ml"
     , "f15466510b48217410039497a1d57ed9d83030c445d5045deb1a1638ee7f23dc" )
   ; ( "lib/chatml/chatml_execution.ml"
-    , "f8f85d98bef83a4dd18bbb635be3059fe6c319c9658fb27133a74059c611b142" )
+    , "4a4bf26d29069eec620086008fa9883b20102ea425753489ed2f72a3abb1afdd" )
   ; ( "lib/chatml/chatml_value_codec.ml"
     , "34d04d5b6b6a3e15a4cbdf75cf1a380c3eeb593045620893ba11c05b15d02eb7" )
   ; ( "lib/agent_protocol/delivery.ml"
@@ -327,9 +344,9 @@ let implementation_sources =
   ; ( "lib/chat_response/subscription_operations.ml"
     , "88aa4ac9bd7c2100a9614f8b30639c6fd30e7ae0c11e86e423a57badd69c0603" )
   ; ( "lib/chatml/chatml_host_runtime.ml"
-    , "e8b91417a2826579b9ea24e88d13a88a330abe115efd88b2cf73c14ed6827b83" )
+    , "81dbf7214fbe3019736f5d2befa068416665ecf53a08258135672b7aec2d67d2" )
   ; ( "lib/chatml/chatml_lang.ml"
-    , "cffe0b48ae424c94993392b748bbad87727a0207d372d84600e4eed2dcfbdf36" )
+    , "bfe0c6b1ae8712e412bd761057b536aba3c6d954226fc39a709cc9c4e715d9e4" )
   ; ( "lib/chatml_sources/chatml_diagnostic.ml"
     , "cd4f59d52868eff58a8eaabd2cc8222d8c65f677066b3d8ab16c7b5c7a81fde5" )
   ]
@@ -337,106 +354,118 @@ let implementation_sources =
 
 let topic_contracts =
   [ ( "one_off_v1"
+    , "chatml.task-effects"
+    , "873b9f154db650e5f77d473666fcb7da18a81da176549fd52eb2cde3a44d31f1" )
+  ; ( "tool_v1"
+    , "chatml.task-effects"
+    , "b631c5850592a190e151230ca8d5f66ca9b3ba26e03133b773d76460e9460922" )
+  ; ( "moderator_v1"
+    , "chatml.task-effects"
+    , "bac7beee30b97ac2ad6f3e370019b195355525483055bdb17641ea5cda46886a" )
+  ; ( "delegated_moderator_v1"
+    , "chatml.task-effects"
+    , "3e31eeb00d477c0334d066301d9f028f48f27158629d0e6ddb3e563da9cc13cd" )
+  ; ( "one_off_v1"
     , "runtime.lifecycle"
-    , "db1c69cd2b82e1dc651ebb4d6bd3f251e713e5f41d46f38e2ae2f0735226e62d" )
+    , "1b66af82a7d01ef4151095336a69f64006f91a258e8faea37d3bb06744e9ae4d" )
   ; ( "tool_v1"
     , "runtime.lifecycle"
-    , "35bc43e1b9ea56031cfbfbc394089103f39657c990f012614dc4dd21114d3448" )
+    , "503b540ba086ec81acaceedc7ef3039450128b7d499b5c71fd3e369b96c7e86d" )
   ; ( "moderator_v1"
     , "runtime.lifecycle"
-    , "9d9927e629beb190acca81abb269b149fec62a98895a44df19c4496ba0055ead" )
+    , "2d42a71494d85c61b720d5b6906768502b26b7c3fd6fde56fabf5b0d055674aa" )
   ; ( "delegated_moderator_v1"
     , "runtime.lifecycle"
-    , "e1c3aaa7ed7aedb2e13188a16276413e547488619cc322b596704abf4bd5d9b7" )
+    , "0b82cad371c32cbb496293d6959a73dc274783bbb3a07b447826b53dc9a75f7f" )
   ; ( "one_off_v1"
     , "runtime.execution"
-    , "4c930e0431a0534667446379e4d190107d751ead66420792af8bf0aa88c7c8e1" )
+    , "af733859961c7c7ed26917bd07ddf75718931a68c7a95f3a0b01198685ad0c1e" )
   ; ( "tool_v1"
     , "runtime.execution"
-    , "50fc26b2591a71a0582e2ff267d66e6e99c221fd4cf47830fd4e4a309afc8689" )
+    , "3bede757fde116dcafa7a5553cc719f58594f9875540c4befa7a4a399563f538" )
   ; ( "moderator_v1"
     , "runtime.execution"
-    , "28416715133a81369dffe0313b19e0400d53de52b1c67b110c8a428aec101149" )
+    , "4f6248ef309d76e43b1852f3a22bd4e41291e1ceb1ac3486b34e268db1bbe899" )
   ; ( "delegated_moderator_v1"
     , "runtime.execution"
-    , "966524097356cfeb00ba3c07adc2ef63b22adbb12013ab0b152fb7cce87be762" )
+    , "77db0dccacab07a6ef766625b325a00a9a3669d684af7d6ef4445033ea14f5d1" )
   ; ( "one_off_v1"
     , "runtime.jobs.owned"
-    , "b9ae2125f3db7caf8088dbeed3d435aa99340fc98d427f73107d278b437f98ce" )
+    , "6a63223ee7ca630bb446d2bfbb8d546ee6e3cc7129b0ad45ae8c652a136312c9" )
   ; ( "one_off_v1"
     , "runtime.work-values"
-    , "37e48b6a9659f75cfee317a7c4bb1f0ec5c141dbaca31030faa28efbc93d94bd" )
+    , "b3b290903287bcb8744dbf884851148efbacac31194c6e884ebb42d9e3d875e0" )
   ; ( "one_off_v1"
     , "runtime.recovery.background"
-    , "b057f64c26b41219e91b158f8853db7df7cd9141986a8f0566f51ed4792d4353" )
+    , "7efdf848ebff5d1ec1e60082e711bb7753e831cdcb841839b2da2e856074f146" )
   ; ( "tool_v1"
     , "runtime.jobs.owned"
-    , "9a17b34fc0682025ea544ec1925cfa3a71416feefc20d40241fcf23484be875c" )
+    , "18d5a331f97cb694a68817d7ab1f7e8abafeadcf12125fe3980fb0dbfdfc721c" )
   ; ( "tool_v1"
     , "runtime.work-values"
-    , "d3a500c62e2ea7ea686d8d843062392834c2ac33f6270be900463476e3d9ecf6" )
+    , "e487025eacee4350bd5950edb733cc5d66f48578fb418380a98ba339e5433ade" )
   ; ( "tool_v1"
     , "runtime.recovery.background"
-    , "374ec946a35b7188a36a062a1c3ad70ef743dbf2e9a8bcad3e622b5a0e3e0fd9" )
+    , "c3863153425462788cb45ad7e91a5714d13faade7654d273baced41f632b2186" )
   ; ( "moderator_v1"
     , "runtime.jobs.owned"
-    , "d6ec077b9497845d2b13d13e273fdc129dc8f1abe842e6c677232fcb59c92432" )
+    , "8e881cf173793f560f97242317d8dd71013b4e36b005c7a165315eebdfa68a09" )
   ; ( "moderator_v1"
     , "runtime.work-values"
-    , "a9b7f295675109af5e8cb8c52812b4f8f325b907ea81d5d61d9230e047e38cfc" )
+    , "3d8e23c8979e76406882f01e5a6962ab547af2d565725652c3ce86e1abca30d2" )
   ; ( "moderator_v1"
     , "runtime.recovery.background"
-    , "95df99736f75455a45279dbe8cd11a0be0bccf6fc7a79df8042ca441faeef711" )
+    , "48d639f9278365da6cd6247d4ffbb54a3c073ac2750fe93cb799e3f433a87aae" )
   ; ( "moderator_v1"
     , "runtime.invocations.moderator"
     , "b092943b64d89f61f8c63d9ecf17e6c1263746932fac188b306dacba22fb0605" )
   ; ( "moderator_v1"
     , "runtime.control"
-    , "f0255a5f97a7e3b4c2fe0a9d99218dc770b13e5b6c10a2c3cd0d395b9bc33b63" )
+    , "7d4949c806d2d70eb45864625b67a1fd2b7415ae79101ee8aaeaa4a6aa2822ae" )
   ; ( "moderator_v1"
     , "runtime.jobs.acknowledgement"
-    , "ad55ac1ce31e2b8bbb06ecc9071d8853fe23d72f5f4213ab205d7b88ce4c588d" )
+    , "b6dc301edac745333d9d6a74220b6f1ac705f7841b713583df41c9bdf188dc39" )
   ; ( "moderator_v1"
     , "runtime.jobs.subscriptions"
-    , "4de2d5869468ba6a8458b385e138e0f93608de00ec34ebb052af5f40e9ddda52" )
+    , "e148a7b0663855c25344a50f272c572fb0bc92281332e25d6e11fc9374e06ff3" )
   ; ( "moderator_v1"
     , "runtime.jobs.timers"
-    , "bfc67b8977be05d2eb2dc6c36f8efae34b385beb6cdd402d6a1e0676d6d9b883" )
+    , "358ca8e869d14d96f7781486c087ec6a0a7642018698cfda1a2749e668699fef" )
   ; ( "moderator_v1"
     , "runtime.delivery.notifications"
-    , "0b6f7ebd14c60d2c0d154e1e2060df410732d5213b1c4a57bcc408f8693e9a54" )
+    , "563221957cf4435a3e2ec32a969ab6b335767d89d10411eacbe7a6f3e9b829bc" )
   ; ( "moderator_v1"
     , "runtime.delivery.ingress"
-    , "c61eb24bbd16e1ffbe2f0138575c136bc8df4c495b2a70c5dd2542d30a216aff" )
+    , "1d7dac24b1f14b518d3fdbb559830c0bb6ca5b1213adde2bd3e64fcfb6cc4c2a" )
   ; ( "delegated_moderator_v1"
     , "runtime.jobs.owned"
-    , "c594002c509f614224d366577cb75a34dcacfc43fafeb496c7b8e1cff06d0267" )
+    , "9808375f654f660d542bcf30bea4a774a6a059fdccc048ca16368bf651ed205d" )
   ; ( "delegated_moderator_v1"
     , "runtime.work-values"
-    , "49e5a3dde66985c8dbae8d5bad19f6ef454ce7d0a3e918010f54d0b59c7e26a6" )
+    , "7841e8fe97c81820f9d7da8b3f58c51c3b46065fe1bf90c06a603610a71a3db7" )
   ; ( "delegated_moderator_v1"
     , "runtime.recovery.background"
-    , "87f7cbe9b2c1e14f17f1c10fb60d76a0d12854d8f6d1f09fa118db5cb4d9f3e8" )
+    , "a1979493b8d961590bbe92633d5389f35fa8059fbc97963b9a4ee0e378447d33" )
   ; ( "delegated_moderator_v1"
     , "runtime.invocations.moderator"
     , "3aae7d8d502126fda8c0270a53c8b2a550144666900fb08f78cc20128916afb8" )
   ; ( "delegated_moderator_v1"
     , "runtime.control"
-    , "d6bd94d70deeefec2e931f7bde1d4a903b48034779e36c23876b560edfeecd19" )
+    , "728d9784d6bb4ac1eaf1dfba8cb92e72d9ecb1ece3d8a5236ea7341ad6c802d7" )
   ; ( "delegated_moderator_v1"
     , "runtime.jobs.acknowledgement"
-    , "380b21273ffb3593075e8f26a29c18c792801cc94ab1ae1634d1a81e464ad095" )
+    , "44f44dfdf8ac00e5c635e3330df8edc58ee9a47e8a0fab098ea9beabee38adc8" )
   ; ( "delegated_moderator_v1"
     , "runtime.jobs.subscriptions"
-    , "0d95970189ec40358e76029a0de32fa062f2e0ba9e90a2187b2a7bb3533cf747" )
+    , "72f36b078824174c7e1d26fbcc2fff7161a03760465f29745ee7245286746543" )
   ; ( "delegated_moderator_v1"
     , "runtime.jobs.timers"
-    , "592d3f51ba270dc80a4cb3688b3220afb10633ec08d741644a6d50f7490ec316" )
+    , "2d295c1416a8e300b697f3c475f74861572b481367c6fffb933e112682e6a11d" )
   ; ( "delegated_moderator_v1"
     , "runtime.delivery.notifications"
-    , "dcccbf5da02b04f5f78fa550eb18ce12f2755c59ce521afa7a96cde7fe4bfd44" )
+    , "9b13892a4dad1b69bbcebacbae85eb40ed439270ff34c00844f204da888f201b" )
   ; ( "delegated_moderator_v1"
     , "runtime.delivery.ingress"
-    , "31e69c8a360ce8b70e4890adb55305183dfd6183ee1242988cffff640a4e1de5" )
+    , "58eefe48d7131f17be5fb7fb5de68ae233c712d8c9bb7366f221f752151bc0d1" )
   ]
 ;;

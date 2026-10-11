@@ -1,0 +1,5 @@
+(library
+ (name chatml_stdlib_traversal_tests)
+ (libraries core eio_main chatml chatml_host_runtime chatml_execution)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

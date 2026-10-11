@@ -358,3 +358,39 @@ let%test_unit "deferred dependency tasks keep defining source and legacy catch s
   | Ok _ -> assert false
   | Error diagnostic -> [%test_eq: string] (Support.owner diagnostic) "dependency.chatml"
 ;;
+
+let%test_unit "array task callbacks retain configured dependency source owners" =
+  List.iter
+    [ "map_array", B.TArray B.TInt; "iter_array", B.TUnit ]
+    ~f:(fun (operation, result) ->
+      let surface = Surface.core_surface in
+      let contract =
+        Support.native_contract ~requirements:[ "main", B.TFun ([], B.task_ty result) ] ()
+      in
+      let callback =
+        if String.equal operation "map_array"
+        then "let step n = Task.map(Task.pure(n), fun x -> 1 / x)"
+        else "let step n = Task.map(Task.pure(n), fun x -> let ignored = 1 / x in ())"
+      in
+      let program =
+        Support.input
+          contract
+          [ ( "entry.chatml"
+            , "let main () = Task." ^ operation ^ "([1, 0, 3], Dependency.step)"
+            , [ "Dependency", "dependency.chatml" ] )
+          ; "dependency.chatml", callback, []
+          ]
+        |> Support.compiled contract
+      in
+      match
+        Host.run_prepared_entrypoint_detailed
+          (Host.default_runtime_config ~surface ())
+          program
+          ~entrypoint:"main"
+          ~arguments:[]
+          ()
+      with
+      | Ok _ -> assert false
+      | Error diagnostic ->
+        [%test_eq: string] (Support.owner diagnostic) "dependency.chatml")
+;;

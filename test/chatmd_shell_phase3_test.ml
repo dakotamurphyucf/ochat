@@ -178,12 +178,12 @@ let%expect_test "shell surfaces expose no ambient process or UI capabilities" =
     ~f:(fun surface -> print_s [%sexp (module_names surface : string list)]);
   [%expect
     {|
-    (String Array Json Task Option Hashtbl Shell Match)
-    (String Array Json Task Option Hashtbl Shell Review)
-    (String Array Json Task Option Hashtbl Shell Intercept)
-    (String Array Json Task Option Hashtbl Result)
-    (String Array Json Task Option Hashtbl Shell Effect)
-    (String Array Json Task Option Hashtbl Audit)
+    (String Array Json Task Outcome Option Hashtbl Shell Match)
+    (String Array Json Task Outcome Option Hashtbl Shell Review)
+    (String Array Json Task Outcome Option Hashtbl Shell Intercept)
+    (String Array Json Task Outcome Option Hashtbl Result)
+    (String Array Json Task Outcome Option Hashtbl Shell Effect)
+    (String Array Json Task Outcome Option Hashtbl Audit)
     |}]
 ;;
 
@@ -213,13 +213,16 @@ let%expect_test "shell surfaces snapshot globals modules aliases and exports" =
         find split to_upper to_lower replace_all))
       (Array
        (length copy get set make append sub reverse reverse_in_place swap fill
-        init map mapi iter iteri fold filter exists for_all find find_map))
+        init map mapi iter iteri fold filter filter_map exists for_all find
+        find_map))
       (Json
-       (parse stringify pretty parse_opt validate tag as_bool as_number as_string
-        as_array as_object object_keys get_field get_path set_field remove_field))
-      (Task (pure bind map fail catch))
-      (Option (none some is_none is_some get_or))
-      (Hashtbl (create set get mem remove))
+       (parse parse_result stringify pretty parse_opt validate tag as_bool
+        as_number as_string as_array as_object object_keys get_field get_path
+        set_field remove_field))
+      (Task (pure bind map map_array iter_array fail catch))
+      (Outcome (map bind map_error))
+      (Option (none some is_none is_some map bind get_or))
+      (Hashtbl (create to_array set get mem remove))
       (Shell
        (request_id runtime_id manifest_sha256 argv executable cwd origin
         request_kind stdin_kind stdin_sha256 stdin_bytes script_sha256
