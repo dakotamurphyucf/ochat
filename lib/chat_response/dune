@@ -59,6 +59,7 @@
   startup_compilation
   script_contract_plan
   restored_programs
+  retained_selection
   shell_program
   shell_preparation
   extension_compiler
