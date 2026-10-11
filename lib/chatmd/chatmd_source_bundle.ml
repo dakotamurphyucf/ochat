@@ -22,18 +22,7 @@ let sources t = t.sources
 let limits t = t.limits
 let fingerprint t = t.fingerprint
 let loader t ~root = Source_loader.generated_filesystem ~root ~sources:t.sources
-
-let valid_path path =
-  (not (String.is_empty path))
-  && String.length path <= 1024
-  && Stdlib.String.is_valid_utf_8 path
-  && (not
-        (String.exists path ~f:(function
-           | '\\' | ':' | '\000' | '\r' | '\n' -> true
-           | _ -> false)))
-  && List.for_all (String.split path ~on:'/') ~f:(fun part ->
-    not (String.is_empty part || String.equal part "." || String.equal part ".."))
-;;
+let valid_path path = Result.is_ok (Source.Portable_path.create path)
 
 let create ?(limits = default_limits) ~root_file ~sources () =
   let open Result.Let_syntax in

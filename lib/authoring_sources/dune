@@ -74,6 +74,7 @@
     lib/chatmd/chatmd_parser.mly %{dep:../chatmd/chatmd_parser.mly}
     lib/chatmd/chatmd_script_declaration.ml %{dep:../chatmd/chatmd_script_declaration.ml}
     lib/chatmd/chatmd_source_bundle.ml %{dep:../chatmd/chatmd_source_bundle.ml}
+    lib/source.ml %{dep:../source.ml}
     lib/chatmd/prompt.ml %{dep:../chatmd/prompt.ml}
     lib/chatmd/source_loader.ml %{dep:../chatmd/source_loader.ml}
     lib/chatmd_shell_spec/authoring_metadata.ml %{dep:../chatmd_shell_spec/authoring_metadata.ml}

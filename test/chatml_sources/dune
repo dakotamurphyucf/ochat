@@ -1,0 +1,5 @@
+(library
+ (name chatml_source_input_tests)
+ (libraries core source ochat.chatml_source ochat.chatml_prepared_program)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

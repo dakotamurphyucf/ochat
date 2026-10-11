@@ -106,3 +106,13 @@ val read : t -> span -> string
     are supported. Ties retain [sp1]'s endpoint metadata. Both spans must
     describe the same document; line/column metadata is not recomputed. *)
 val merge : span -> span -> span
+
+module Portable_path : sig
+  (** Exact portable relative path: nonempty valid UTF-8, at most 1024 bytes,
+      no empty/dot/parent components or backslash, colon, NUL, CR or LF.
+      Does not rewrite, case-fold, open or normalize the supplied bytes. *)
+  type t [@@deriving compare, equal, sexp_of]
+
+  val create : string -> t Core.Or_error.t
+  val to_string : t -> string
+end

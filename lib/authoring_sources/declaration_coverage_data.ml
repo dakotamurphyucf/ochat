@@ -16,6 +16,7 @@ let features =
       ; "lib/chatmd/source_loader.ml"
       ; "lib/chatmd/chatmd_import_expansion.ml"
       ; "lib/chatmd/chatmd_source_bundle.ml"
+      ; "lib/source.ml"
       ; "lib/chatmd_shell_spec/source_ref.ml"
       ]
     , "chatmd.definitions"
@@ -208,8 +209,9 @@ let implementation_sources =
     , "2d29ec016ea80169b4b8b4c088dd2232a11fa3184c4b8cc9acb7f1d6223c3c55" )
   ; ( "lib/chatmd/chatmd_script_declaration.ml"
     , "7a195f7836a0aa4a50ca7924a22056dabd17a5fe6bb87ad076b96a7e939dc00b" )
+  ; "lib/source.ml", "ae5b47de67bc26e22724b6b53a88369783cd8448fce1b8ea324a0114521d5817"
   ; ( "lib/chatmd/chatmd_source_bundle.ml"
-    , "65269d209dfa68e9a4e93abf63893558a9b2eedd61c18ff6e505ea03c21387ee" )
+    , "c3e0f8f89c8538ddcec98873739455a673b0e6e894282c21c96046c096bb6ae5" )
   ; ( "lib/chatmd/prompt.ml"
     , "188a52b9b69246f526132332ce6198651ec8f4ddd5646ab65971cc825ce3b749" )
   ; ( "lib/chatmd/source_loader.ml"
