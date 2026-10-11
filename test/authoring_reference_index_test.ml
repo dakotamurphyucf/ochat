@@ -44,6 +44,42 @@ let topics index =
     List.map receipt.Presence.guidance.topics ~f:(fun topic -> topic.G.id))
 ;;
 
+let%test_unit "directly constructed index JSON is bounded before recursive decoding" =
+  let valid = R.empty ~scope () |> ok |> R.to_json in
+  let extra value =
+    match valid with
+    | `Object fields -> `Object (("extra", value) :: fields)
+    | _ -> assert false
+  in
+  let rejected ?(limits = R.default_limits) json category =
+    match R.of_json ~limits ~scope json with
+    | Ok _ -> assert false
+    | Error error ->
+      assert (Agent_protocol.Error.equal_code error.code Invalid_request);
+      assert (String.is_substring error.message ~substring:category)
+  in
+  let deep =
+    List.fold (List.init 10000 ~f:Fn.id) ~init:`Null ~f:(fun json _ -> `Array [ json ])
+  in
+  rejected (extra deep) "depth";
+  List.iter [ "NaN"; "Infinity"; "1e9999" ] ~f:(fun number ->
+    rejected (extra (`Number number)) "finite");
+  rejected (extra (`Number "0x1p0")) "number";
+  rejected (extra (`Object [ "nested", `Null; "nested", `True ])) "duplicate";
+  rejected
+    ~limits:{ R.default_limits with max_bytes = 256 }
+    (extra (`String (String.make 300 'x')))
+    "byte";
+  (* Escaping exceeds the encoded bound even though the traversal debit fits. *)
+  rejected
+    ~limits:{ R.default_limits with max_bytes = 256 }
+    (extra (`String (String.make 100 '\n')))
+    "size";
+  assert (Result.is_error (R.empty ~scope:"" ()));
+  assert (Result.is_error (R.empty ~scope:(String.make 1025 's') ()));
+  ignore (R.of_json ~scope valid |> ok : R.t)
+;;
+
 let%expect_test "bounded chronological receipts survive restore without retaining prose" =
   let limits = R.{ max_receipts = 3; max_bytes = 65536 } in
   let initial = R.empty ~limits ~scope () |> ok in

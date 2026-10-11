@@ -4,7 +4,6 @@ module H = P.History
 module G = P.Authoring_guidance
 module Presence = Authoring_presence
 module J = P.Json_codec
-module X = P.Extension_codec
 
 type limits =
   { max_receipts : int
@@ -39,10 +38,68 @@ let to_json t =
 
 let encoded_bytes t = String.length (Jsonaf.to_string (to_json t))
 
+(* Validate bounded traversal and directly constructed JSON before recursive
+   public codecs or serialization. Encoded-size validation remains with J. *)
+let validate_json limits json =
+  let open Result.Let_syntax in
+  let remaining = ref limits.max_bytes in
+  let charge bytes =
+    if bytes > !remaining
+    then invalid "extension JSON exceeds byte limit"
+    else (
+      remaining := !remaining - bytes;
+      Ok ())
+  in
+  let rec visit depth json =
+    if depth > 16
+    then invalid "extension JSON exceeds depth limit"
+    else (
+      let%bind () = charge 1 in
+      match json with
+      | `String value ->
+        let%bind () = charge (String.length value) in
+        charge 2
+      | `Number value ->
+        let%bind () = charge (String.length value) in
+        (match Float.of_string_opt value with
+         | Some number when Float.is_finite number ->
+           (match Jsonaf.parse value with
+            | Ok (`Number _) -> Ok ()
+            | Ok _ | Error _ -> invalid "invalid JSON number")
+         | _ -> invalid "extension JSON requires finite numbers")
+      | `Array values ->
+        List.fold_result values ~init:() ~f:(fun () value -> visit (depth + 1) value)
+      | `Object values ->
+        let%bind () =
+          List.fold_result values ~init:() ~f:(fun () (name, value) ->
+            let%bind () = charge (String.length name) in
+            let%bind () = charge 3 in
+            visit (depth + 1) value)
+        in
+        let%map _ = J.fields json in
+        ()
+      | `Null | `True | `False -> Ok ())
+  in
+  let%bind () = visit 1 json in
+  J.validate_limits ~max_bytes:limits.max_bytes ~max_depth:16 json
+;;
+
+let closed fields allowed =
+  match
+    List.find (J.to_alist fields) ~f:(fun (key, _) ->
+      not (List.mem allowed key ~equal:String.equal))
+  with
+  | None -> Ok ()
+  | Some (key, _) -> invalid ("unknown extension field: " ^ key)
+;;
+
 let validate_limits limits scope =
   match limits.max_receipts >= 0 && limits.max_bytes > 0 with
   | false -> invalid "invalid authoring reference index limits"
-  | true -> X.text ~name:"authoring reference scope" ~max:1024 scope
+  | true ->
+    if String.is_empty scope || String.length scope > 1024
+    then invalid "authoring reference scope must be nonempty and within its byte limit"
+    else Ok ()
 ;;
 
 let empty ?(limits = default_limits) ~scope () =
@@ -117,9 +174,9 @@ let forget t ids =
 let of_json ?(limits = default_limits) ~scope json =
   let open Result.Let_syntax in
   let%bind _ = empty ~limits ~scope () in
-  let%bind () = X.validate_json ~max_bytes:limits.max_bytes ~max_depth:16 json in
+  let%bind () = validate_json limits json in
   let%bind fields = J.fields json in
-  let%bind () = X.closed fields [ "version"; "scope"; "truncated"; "receipts" ] in
+  let%bind () = closed fields [ "version"; "scope"; "truncated"; "receipts" ] in
   let%bind _ = J.required_as fields "version" (J.bounded_int ~min:1 ~max:1) in
   let%bind restored_scope = J.required_as fields "scope" J.string in
   let%bind () =
@@ -136,7 +193,7 @@ let of_json ?(limits = default_limits) ~scope json =
   let%bind receipts =
     List.map values ~f:(fun json ->
       let%bind fields = J.fields json in
-      let%bind () = X.closed fields [ "entry_id"; "guidance" ] in
+      let%bind () = closed fields [ "entry_id"; "guidance" ] in
       let%bind entry_id = J.required_as fields "entry_id" H.Id.of_json in
       let%map guidance = J.required_as fields "guidance" G.of_json in
       Presence.{ entry_id; guidance })
