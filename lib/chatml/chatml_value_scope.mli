@@ -9,6 +9,9 @@ module Binding : sig
 
   val scheme : t -> Chatml_inferred_type.typ
   val origin : t -> Origin.t option
+
+  (** Original implementation introduction range; validated on diagnostic/host use. *)
+  val span : t -> Source.span option
 end
 
 type t
@@ -33,3 +36,6 @@ val add_imported
   -> scheme:Chatml_inferred_type.typ
   -> origin:Origin.t
   -> t
+
+(** Functional update for already inserted bindings, preserving raw schemes/origin. *)
+val with_span : t -> name:string -> span:Source.span -> t

@@ -147,6 +147,7 @@ and resolved_expr =
   | REFloat of float
   | REString of string
   | REVarGlobal of string
+  | REConfigured_read of Chatml_module_reference.t
   | REVarLoc of var_loc
   | REPrim1 of unary_prim * resolved_expr node
   | REPrim2 of binary_prim * resolved_expr node * resolved_expr node
@@ -230,6 +231,8 @@ val raise_runtime_error
 
 val format_runtime_error : string -> runtime_error -> string
 
+type configured_modules
+
 type execution_control =
   { checkpoint : unit -> unit
   ; diagnostic_checkpoint : unit -> unit
@@ -296,7 +299,25 @@ and env =
   { bindings : (string, cell) Hashtbl.t
   ; control : execution_control option
   ; source : Chatml_source.t option
+  ; configured_modules : configured_modules
   }
+
+(** Explicit canonical access;186 is unavailable until187 installs completed modules.
+    No lazy initialization, configured-name/global fallback or callback authority. *)
+module Configured_modules : sig
+  type t = configured_modules
+
+  module Error : sig
+    type t =
+      | Registry_unavailable
+      | Module_unavailable of Chatml_source.Id.t
+      | Member_unavailable of string
+      | Invalid_public_module
+  end
+
+  val unavailable : t
+  val read : t -> Chatml_module_reference.t -> (value, Error.t) Result.t
+end
 
 (** Task origin is metadata outside the semantic step. Creating/attaching a
     site adds no execution/fuel/value-depth step. Copies preserve semantic task
@@ -314,7 +335,12 @@ end
     A copy shares binding cells/control/source while copying the table. Closure
     bodies and module exports retain the defining unit's captured bytes only,
     never a complete prepared inventory or mutable current-origin field. *)
-val create_env : ?control:execution_control -> ?source:Chatml_source.t -> unit -> env
+val create_env
+  :  ?control:execution_control
+  -> ?source:Chatml_source.t
+  -> ?configured_modules:Configured_modules.t
+  -> unit
+  -> env
 
 val copy_env : env -> env
 val find_var_cell : env -> string -> cell option
@@ -324,4 +350,4 @@ val update_var : env -> string -> value -> unit
 val set_var : env -> string -> value -> unit
 val equal_value : value -> value -> bool
 val match_pattern : value -> pattern -> (string * value) list option
-val collect_pattern_vars : pattern -> string list
+val collect_pattern_vars : ?checkpoint:(unit -> unit) -> pattern -> string list

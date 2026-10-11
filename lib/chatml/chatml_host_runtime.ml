@@ -812,6 +812,7 @@ let expect_callable (name : string) (value : Lang.value) : (Lang.value, string) 
 type compilation_stage =
   | Parse
   | Typecheck
+  | Link
 [@@deriving sexp, equal]
 
 type compilation_diagnostic =
@@ -823,6 +824,26 @@ type compilation_diagnostic =
   }
 [@@deriving sexp_of]
 
+let compilation_diagnostic diagnostic ~stage ~source_text ~checkpoint =
+  let label =
+    match stage with
+    | Parse -> "Parse error"
+    | Typecheck -> "Type error"
+    | Link -> "Link error"
+  in
+  let formatted =
+    match source_text with
+    | None -> Diagnostic.render diagnostic ~label ~checkpoint
+    | Some source -> Diagnostic.render_legacy diagnostic ~source ~label ~checkpoint
+  in
+  { stage
+  ; message = diagnostic.Diagnostic.message
+  ; span = diagnostic.span
+  ; formatted
+  ; diagnostic
+  }
+;;
+
 let compile_source
       ?(checkpoint = fun () -> ())
       ?(surface = Builtin_surface.moderator_surface)
@@ -831,23 +852,12 @@ let compile_source
       source
   =
   let compilation_error stage diagnostic =
-    let label =
-      match stage with
-      | Parse -> "Parse error"
-      | Typecheck -> "Type error"
-    in
-    let formatted =
+    let source_text =
       match source with
-      | Some _ -> Diagnostic.render diagnostic ~label ~checkpoint
-      | None -> Diagnostic.render_legacy diagnostic ~source:source_text ~label ~checkpoint
+      | None -> Some source_text
+      | Some _ -> None
     in
-    Error
-      { stage
-      ; message = diagnostic.Diagnostic.message
-      ; span = diagnostic.span
-      ; formatted
-      ; diagnostic
-      }
+    Error (compilation_diagnostic diagnostic ~stage ~source_text ~checkpoint)
   in
   checkpoint ();
   let parsed =

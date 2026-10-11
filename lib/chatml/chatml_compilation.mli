@@ -89,3 +89,29 @@ val compile_captured_with_policy
   -> target:target
   -> unit
   -> (Chatml_host_runtime.compiled_script, error) result
+
+(** Compile an admitted immutable graph into a separate static-only artifact.
+    Admit total source+metadata bytes before projection/domain creation. Actual
+    selected contract is computed/verified; one budget covers static projection,
+    hashing, all parse/check/companion/entry contract/link stages and diagnostics.
+    No initializer executes, no native builtin implementations cross this graph
+    compiler domain, and no mutable inference data escapes. Depth is explicit
+    positive host policy. Only selected host descriptors are prepared for187;
+    existing text/captured APIs and runtime surface getter remain unchanged. *)
+val compile_prepared
+  :  Chatml_prepared_program.t
+  -> ?limits:limits
+  -> max_dependency_depth:int
+  -> env:Eio_unix.Stdenv.base
+  -> target:target
+  -> unit
+  -> (Chatml_linked_program.t, error) Result.t
+
+val compile_prepared_with_policy
+  :  Chatml_prepared_program.t
+  -> policy:policy
+  -> max_dependency_depth:int
+  -> env:Eio_unix.Stdenv.base
+  -> target:target
+  -> unit
+  -> (Chatml_linked_program.t, error) Result.t

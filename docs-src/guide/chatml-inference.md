@@ -524,6 +524,18 @@ type or `open Catalog` alone requires checking Catalog. A value reference,
 including one inside an uncalled function, also selects Catalog for initialization.
 The runtime selection follows value references transitively from the entry;
 merely making a module available does not select it. The checking API executes
-no initializers. Configured project linking and execution are separate integration
-steps; existing single-file host entrypoints do not acquire project loading from
-this API alone.
+no initializers.
+
+Configured compilation now produces an immutable linked artifact from those
+captured files. A companion `.chatmli` checks and restricts public exports using
+its own configured scope. Host entrypoints are checked against the entry file's
+final private scope, so an entry interface can hide a host handler from other
+modules without making that handler unavailable to its host.
+
+All files finish type checking before lowering. This matters when an importer's
+use specializes a dependency's shared weak type: the dependency's compiled frame
+slots must reflect that final type. The artifact retains exact source revisions,
+checked public boundaries and the entry-rooted initialization order. It contains
+no initialized modules or native tool callbacks. Execution and project loading
+remain separate host integration steps; existing single-file entrypoints do not
+acquire them from this compilation API alone.

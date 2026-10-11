@@ -147,6 +147,7 @@ and resolved_expr =
   | REFloat of float
   | REString of string
   | REVarGlobal of string
+  | REConfigured_read of Chatml_module_reference.t
   | REVarLoc of var_loc
   | REPrim1 of unary_prim * resolved_expr node
   | REPrim2 of binary_prim * resolved_expr node * resolved_expr node
@@ -240,6 +241,8 @@ let format_runtime_error source_text err =
 (* 2) Runtime Value Types                                                  *)
 (***************************************************************************)
 
+type configured_modules = Unavailable
+
 type execution_control =
   { checkpoint : unit -> unit
   ; diagnostic_checkpoint : unit -> unit
@@ -301,6 +304,7 @@ and env =
   { bindings : (string, cell) Hashtbl.t
   ; control : execution_control option
   ; source : Chatml_source.t option
+  ; configured_modules : configured_modules
   }
 
 (***************************************************************************)
@@ -321,8 +325,25 @@ module Task = struct
   ;;
 end
 
-let create_env ?control ?source () : env =
-  { bindings = Hashtbl.create (module String); control; source }
+module Configured_modules = struct
+  type t = configured_modules
+
+  module Error = struct
+    type t =
+      | Registry_unavailable
+      | Module_unavailable of Chatml_source.Id.t
+      | Member_unavailable of string
+      | Invalid_public_module
+  end
+
+  let unavailable = Unavailable
+  let read Unavailable _reference = Error Error.Registry_unavailable
+end
+
+let create_env ?control ?source ?(configured_modules = Configured_modules.unavailable) ()
+  : env
+  =
+  { bindings = Hashtbl.create (module String); control; source; configured_modules }
 ;;
 
 let copy_env (parent : env) : env =
@@ -433,8 +454,9 @@ let rec match_pattern (v : value) (p : pattern) : (string * value) list option =
   | _ -> None
 ;;
 
-let collect_pattern_vars (pat : pattern) : string list =
+let collect_pattern_vars ?(checkpoint = fun () -> ()) (pat : pattern) : string list =
   let rec aux acc p =
+    checkpoint ();
     match p with
     | PUnit -> acc
     | PVar x -> x :: acc

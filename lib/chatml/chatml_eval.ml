@@ -218,6 +218,15 @@ and eval_expr_tail
     (match find_var env x with
      | Some v -> Value v
      | None -> raise_owned_error env ~span:e.span (Printf.sprintf "Unbound variable %s" x))
+  | REConfigured_read reference ->
+    (match Configured_modules.read env.configured_modules reference with
+     | Ok value -> Value value
+     | Error
+         ( Registry_unavailable
+         | Module_unavailable _
+         | Member_unavailable _
+         | Invalid_public_module ) ->
+       raise_owned_error env ~span:e.span "Configured module registry is unavailable")
   | REVarLoc loc -> Value (load_from_frames frames loc)
   | REPrim1 (prim, arg_expr) ->
     let arg_val = finish_eval frames (eval_expr_tail ~tail:false env frames arg_expr) in
@@ -588,7 +597,11 @@ and eval_module_value
     List.concat_map stmts ~f:(fun st -> eval_stmt_with_exports module_eval_env frames st)
   in
   let module_export_env =
-    create_env ?control:outer_env.control ?source:outer_env.source ()
+    create_env
+      ?control:outer_env.control
+      ?source:outer_env.source
+      ~configured_modules:outer_env.configured_modules
+      ()
   in
   let seen = Hash_set.create (module String) in
   List.iter exported_names ~f:(fun name ->
@@ -602,7 +615,13 @@ and eval_module_value
 
 and select_module_exports ~span ~(origin : env) (env : env) visibility =
   allocate env (32 * List.length visibility);
-  let selected = create_env ?control:env.control ?source:env.source () in
+  let selected =
+    create_env
+      ?control:env.control
+      ?source:env.source
+      ~configured_modules:env.configured_modules
+      ()
+  in
   List.iter visibility ~f:(fun member ->
     Option.iter env.control ~f:(fun control -> control.checkpoint ());
     let name =

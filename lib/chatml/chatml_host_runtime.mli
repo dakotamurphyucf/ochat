@@ -220,6 +220,7 @@ val compile_script
 type compilation_stage =
   | Parse
   | Typecheck
+  | Link
 [@@deriving sexp, equal]
 
 (** Original parser/typechecker location and message, plus the legacy rendered
@@ -232,6 +233,16 @@ type compilation_diagnostic = private
   ; diagnostic : Chatml_diagnostic.t
   }
 [@@deriving sexp_of]
+
+(** Derive all projections from the canonical failure and render at most16KiB.
+    Captured sites retain their own bytes; optional text is only a legacy unowned
+    adapter. Checkpoints/cancellation propagate; no inventory/control retained. *)
+val compilation_diagnostic
+  :  Chatml_diagnostic.t
+  -> stage:compilation_stage
+  -> source_text:string option
+  -> checkpoint:(unit -> unit)
+  -> compilation_diagnostic
 
 (** Same non-executing compilation as [compile_script], retaining structured
     diagnostic data for validation/authoring consumers. *)

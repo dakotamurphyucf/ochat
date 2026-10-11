@@ -40,24 +40,19 @@ let surface = function
   | Delegated_moderator_v1 -> X.delegated_moderator_v1, X.moderator_entrypoints
 ;;
 
-(* Cache identity includes the exact host type surface and entrypoint contracts. *)
+let static_target = function
+  | One_off_v1 -> Chatml.Chatml_compiler_contract.Target.One_off_v1
+  | Tool_v1 -> Tool_v1
+  | Moderator_v1 -> Moderator_v1
+  | Delegated_moderator_v1 -> Delegated_moderator_v1
+;;
+
+(* Keep the existing standard compiler.v1 identity; the owner computes it from
+   actual callback-free metadata rather than accepting a caller's second claim. *)
 let contract target =
-  let module B = Chatml.Chatml_builtin_spec in
-  let module S = Chatml.Chatml_builtin_surface in
-  let surface, entrypoints = surface target in
-  let bindings entries =
-    List.map entries ~f:(fun (entry : B.builtin) -> entry.name, entry.scheme)
-  in
-  [%sexp
-    ("ochat.chatml.compiler.v1" : string)
-  , (target : target)
-  , (bindings surface.globals : (string * B.ty) list)
-  , (List.map surface.modules ~f:(fun (m : B.builtin_module) ->
-       m.name, bindings m.exports)
-     : (string * (string * B.ty) list) list)
-  , (List.map surface.type_aliases ~f:(fun (a : S.builtin_type_alias) -> a.name, a.body)
-     : (string * B.ty) list)
-  , (entrypoints : (string * B.ty) list)]
+  let checkpoint () = () in
+  Chatml.Chatml_compiler_contract.for_target (static_target target) ~checkpoint
+  |> fun contract -> Chatml.Chatml_compiler_contract.identity contract ~checkpoint
 ;;
 
 let validate_limits limits =
@@ -102,14 +97,17 @@ module Input = struct
   ;;
 end
 
-let compile_input source ~policy ~env ~target =
+(* Two real callers share admission, the elapsed budget, exception mapping and
+   joined domain cleanup. Metadata preparation runs under that SAME budget before
+   domain creation, so static projection cannot evade bounded compilation. *)
+let run_worker ~input_bytes ~policy ~env ~prepare ~compile =
   let open Result.Let_syntax in
   let%bind () =
     match policy with
     | Unrestricted -> Ok ()
     | Bounded limits ->
       let%bind () = validate_limits limits in
-      if Input.byte_length source > limits.max_source_bytes
+      if input_bytes > limits.max_source_bytes
       then error "chatml.source_limit" "script exceeds the compiler source limit"
       else Ok ()
   in
@@ -125,12 +123,9 @@ let compile_input source ~policy ~env ~target =
         if Float.(Mtime.Span.to_float_ns elapsed >= limits.wall_seconds *. 1e9)
         then raise Eio.Time.Timeout
     in
+    let%bind input = prepare ~checkpoint in
     Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) (fun () ->
-      let surface, required_bindings = surface target in
-      match Input.compile source ~checkpoint ~surface ~required_bindings with
-      | Ok compiled -> Ok compiled
-      | Error diagnostic ->
-        error ~diagnostic "chatml.invalid_handler" diagnostic.formatted)
+      compile input ~checkpoint)
   in
   try
     match policy with
@@ -147,6 +142,20 @@ let compile_input source ~policy ~env ~target =
   | _ -> error "chatml.compiler_failed" "compiler failed unexpectedly"
 ;;
 
+let compile_input source ~policy ~env ~target =
+  run_worker
+    ~input_bytes:(Input.byte_length source)
+    ~policy
+    ~env
+    ~prepare:(fun ~checkpoint:_ -> Ok (source, target))
+    ~compile:(fun (source, target) ~checkpoint ->
+      let surface, required_bindings = surface target in
+      match Input.compile source ~checkpoint ~surface ~required_bindings with
+      | Ok compiled -> Ok compiled
+      | Error diagnostic ->
+        error ~diagnostic "chatml.invalid_handler" diagnostic.formatted)
+;;
+
 let compile_with_policy ~policy ~env ~target ~source () =
   compile_input (Input.Text source) ~policy ~env ~target
 ;;
@@ -161,4 +170,54 @@ let compile_captured_with_policy source ~policy ~env ~target () =
 
 let compile_captured source ?(limits = default_limits) ~env ~target () =
   compile_captured_with_policy source ~policy:(Bounded limits) ~env ~target ()
+;;
+
+let compile_prepared_with_policy input ~policy ~max_dependency_depth ~env ~target () =
+  run_worker
+    ~input_bytes:
+      (Chatml_prepared_program.Accounting.input_bytes
+         (Chatml_prepared_program.accounting input))
+    ~policy
+    ~env
+    ~prepare:(fun ~checkpoint ->
+      Ok
+        ( input
+        , Chatml.Chatml_compiler_contract.for_target (static_target target) ~checkpoint ))
+    ~compile:(fun (input, contract) ~checkpoint ->
+      match
+        Chatml_linked_program.compile input ~contract ~max_dependency_depth ~checkpoint
+      with
+      | Ok compiled -> Ok compiled
+      | Error failure ->
+        let stage =
+          match Chatml_linked_program.Failure.stage failure with
+          | Parse -> Chatml_host_runtime.Parse
+          | Typecheck -> Typecheck
+          | Link -> Link
+        in
+        let diagnostic =
+          Chatml_host_runtime.compilation_diagnostic
+            (Chatml_linked_program.Failure.diagnostic failure)
+            ~stage
+            ~source_text:None
+            ~checkpoint
+        in
+        error ~diagnostic "chatml.invalid_handler" diagnostic.formatted)
+;;
+
+let compile_prepared
+      input
+      ?(limits = default_limits)
+      ~max_dependency_depth
+      ~env
+      ~target
+      ()
+  =
+  compile_prepared_with_policy
+    input
+    ~policy:(Bounded limits)
+    ~max_dependency_depth
+    ~env
+    ~target
+    ()
 ;;
