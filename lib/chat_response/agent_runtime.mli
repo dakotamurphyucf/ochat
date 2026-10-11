@@ -158,7 +158,7 @@ val inherit_native
     Unselected registrations are never exposed. Revision and
     result contract participate in capability identity; duplicate supplied names
     are rejected. This does not grant invocation or authoring authority. *)
-type native_registration =
+type native_registration = Native_tool_pool.Registration.t =
   { implementation : Ochat_function.t
   ; implementation_revision : string
   ; result_contract : Tool_capability.result_contract

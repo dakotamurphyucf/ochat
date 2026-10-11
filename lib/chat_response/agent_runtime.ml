@@ -11,7 +11,7 @@ type diagnostic =
   }
 [@@deriving sexp, compare, equal]
 
-type native_registration =
+type native_registration = Native_tool_pool.Registration.t =
   { implementation : Ochat_function.t
   ; implementation_revision : string
   ; result_contract : Tool_capability.result_contract
@@ -385,98 +385,6 @@ let model_completion ~ctx ~agent:_ ~model =
   Some complete
 ;;
 
-let create_shell_function registry name =
-  match Shell_runtime.Registry.tool registry name with
-  | None ->
-    Error (diagnostic "shell.tool_missing" ("compiled shell tool is missing: " ^ name))
-  | Some specification ->
-    Shell_tool.create registry specification
-    |> Result.map_error ~f:(fun error -> diagnostic error.code error.message)
-;;
-
-let functions_of_tool ~sw ~ctx ~host ~run_agent shell_registry = function
-  | CM.Custom tool ->
-    Option.value_exn shell_registry
-    |> fun registry ->
-    create_shell_function registry tool.name |> Result.map ~f:List.return
-  | declaration ->
-    (try
-       Ok (Tool.of_declaration ?shell_registry ~host ~sw ~ctx ~run_agent declaration)
-     with
-     | exn -> Error (diagnostic "agent.tool_construction_failed" (Exn.to_string exn)))
-;;
-
-let function_name function_ = function_.Ochat_function.info.function_.name
-
-let duplicate_function functions =
-  List.map functions ~f:function_name |> List.find_a_dup ~compare:String.compare
-;;
-
-let validate_functions functions =
-  match duplicate_function functions with
-  | None -> Ok functions
-  | Some name ->
-    Error
-      [ diagnostic "agent.duplicate_tool_name" ("duplicate exposed tool name: " ^ name) ]
-;;
-
-let build_functions ~native_registrations ~sw ~ctx ~host ~run_agent shell_registry tools =
-  (* Extension declarations are consumed by the prepared definition and owned
-     dispatcher. They never receive a legacy/no-op runner. *)
-  List.filter tools ~f:(function
-    | CM.Extension _ -> false
-    | _ -> true)
-  |> List.map ~f:(fun declaration ->
-    let supplied =
-      match declaration with
-      | CM.Builtin name | Persistent_agent ({ name; _ }, _) ->
-        List.find native_registrations ~f:(fun registration ->
-          String.equal name (function_name registration.implementation))
-      | _ -> None
-    in
-    match supplied with
-    | Some registration ->
-      (match declaration with
-       | Persistent_agent (_, policy)
-         when not
-                (String.equal registration.implementation.info.type_ "function"
-                 && (not registration.implementation.info.function_.strict)
-                 && Jsonaf.exactly_equal
-                      registration.implementation.info.function_.parameters
-                      (Agent_tool_contract.parameters policy)
-                 && Tool_capability.equal_result_contract
-                      registration.result_contract
-                      Invocation_v1) ->
-         Error
-           (diagnostic
-              "agent.persistence_contract"
-              "authored registration does not match its declaration's persistence \
-               contract")
-       | _ -> Ok [ registration ])
-    | None ->
-      functions_of_tool ~sw ~ctx ~host ~run_agent shell_registry declaration
-      |> Result.map ~f:(fun functions ->
-        let implementation_revision =
-          CM.sexp_of_tool declaration
-          |> Sexp.to_string
-          |> Chatmd_shell_spec.Source_ref.digest
-        in
-        List.map functions ~f:(fun implementation ->
-          { implementation
-          ; implementation_revision
-          ; result_contract = Native_output
-          ; authoring_metadata = None
-          })))
-  |> Result.all
-  |> Result.map ~f:List.concat
-  |> Result.map_error ~f:List.return
-  |> Result.bind ~f:(fun registrations ->
-    validate_functions (List.map registrations ~f:(fun value -> value.implementation))
-    |> Result.map ~f:(fun functions -> functions, registrations))
-;;
-
-let classifications tools = List.filter_map tools ~f:Tool.agent_page_classification
-
 let shell_tool_names declarations =
   List.map declarations.shell_tools ~f:(fun tool ->
     tool.Chatmd_shell_spec.Shell_tool_spec.name)
@@ -515,8 +423,11 @@ let create_native
   =
   let open Result.Let_syntax in
   let%bind _ =
-    validate_functions
-      (List.map native_registrations ~f:(fun value -> value.implementation))
+    Native_tool_pool.validate_registrations native_registrations
+    |> Result.map_error
+         ~f:
+           (List.map ~f:(fun error ->
+              diagnostic error.Native_tool_pool.Error.code error.message))
   in
   if
     List.exists prompt_elements ~f:(function
@@ -552,108 +463,27 @@ let create_native
              ~persist_extension_snapshots
              declarations)
           ~f:(fun (shell_registry, shell_manifest, shell_security_status) ->
-            build_functions
-              ~native_registrations
+            Native_tool_pool.create
+              ~registrations:native_registrations
+              ?native_service_revision
               ~sw
               ~ctx
               ~host
               ~run_agent
-              shell_registry
-              declarations.tools
-            |> Result.map ~f:(fun (functions, registrations) ->
-              let capabilities =
-                lazy
-                  (try
-                     let resource_fingerprint =
-                       let path value = Eio.Path.native_exn value in
-                       [%sexp
-                         ("ochat.tool-resources.v2" : string)
-                       , ([ path (Ctx.dir ctx)
-                          ; path (Ctx.tool_dir ctx)
-                          ; path host.workspace
-                          ; path host.tool_dir
-                          ; path host.prompt_dir
-                          ; path host.session_dir
-                          ; path host.cache_dir
-                          ; path host.home
-                          ]
-                          : string list)
-                       , (Map.to_alist host.source_dirs
-                          |> List.map ~f:(fun (name, value) -> name, path value)
-                          : (string * string) list)
-                       , (host.process_environment : string array)
-                       , (Option.map shell_manifest ~f:(fun manifest ->
-                            manifest.Chatmd_shell_spec.Manifest.sha256)
-                          : string option)
-                       , (admin_policy : Shell_runtime.Admin_policy.t)]
-                       |> Sexp.to_string
-                       |> Chatmd_shell_spec.Source_ref.digest
-                     in
-                     let resource_fingerprint =
-                       match native_service_revision with
-                       | None -> resource_fingerprint
-                       | Some revision ->
-                         [%sexp
-                           ("ochat.tool-service-policy.v1" : string)
-                         , (resource_fingerprint : string)
-                         , (revision : string)]
-                         |> Sexp.to_string_mach
-                         |> Chatmd_shell_spec.Source_ref.digest
-                     in
-                     Authoring_registration.create
-                       ~delegation_restrictions:
-                         (List.filter_map declarations.tools ~f:(function
-                            | CM.Agent { name; _ } ->
-                              Some
-                                ( name
-                                , "legacy agent tools lack delegated actor policy and \
-                                   approval services" )
-                            | CM.Builtin "fork"
-                              when not
-                                     (List.exists
-                                        native_registrations
-                                        ~f:(fun registration ->
-                                          String.equal
-                                            (function_name registration.implementation)
-                                            "fork")) ->
-                              Some
-                                ( "fork"
-                                , "legacy fork requires its owning driver; use a \
-                                   delegated session service" )
-                            | _ -> None))
-                       ~host_metadata:
-                         (List.filter_map registrations ~f:(fun value ->
-                            Option.map value.authoring_metadata ~f:(fun metadata ->
-                              function_name value.implementation, metadata)))
-                       ~result_contracts:
-                         (List.map registrations ~f:(fun value ->
-                            function_name value.implementation, value.result_contract))
-                       ~declarations:
-                         (List.filter_map prompt_elements ~f:(function
-                            | CM.Authoring_help help
-                              when not
-                                     (List.exists declarations.tools ~f:(function
-                                        | CM.Extension tool ->
-                                          String.equal tool.name help.tool
-                                        | _ -> false)) -> Some help
-                            | _ -> None))
-                       ~owner:host.session_id
-                       ~resource_fingerprint
-                       (List.map registrations ~f:(fun value ->
-                          value.implementation_revision, value.implementation))
-                     |> Result.map ~f:Authoring_registration.capabilities
-                   with
-                   | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
-                   | _ ->
-                     Error
-                       Tool_capability.
-                         { code = "capability.unavailable"
-                         ; message = "host cannot construct capability identities"
-                         })
-              in
-              { functions
-              ; capabilities
-              ; classifications = classifications declarations.tools
+              ~admin_policy
+              ~shell:
+                (match shell_registry with
+                 | None -> Absent
+                 | Some registry -> Live registry)
+              prompt_elements
+            |> Result.map_error
+                 ~f:
+                   (List.map ~f:(fun error ->
+                      diagnostic error.Native_tool_pool.Error.code error.message))
+            |> Result.map ~f:(fun pool ->
+              { functions = Native_tool_pool.functions pool
+              ; capabilities = Native_tool_pool.capabilities pool
+              ; classifications = Native_tool_pool.classifications pool
               ; shell_tool_names = shell_tool_names declarations
               ; shell_registry
               ; shell_manifest

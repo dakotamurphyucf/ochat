@@ -34,6 +34,7 @@
   tool_call
   response_loop
   shell_tool
+  native_tool_pool
   agent_runtime
   tool
   agent_tool_contract

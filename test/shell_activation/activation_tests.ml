@@ -48,6 +48,7 @@ let review ev state = Task.bind(if state == 0 then Review.defer() else Review.de
       ; source_ref = source
       ; source_sha256 = Chatmd_shell_spec.Source_ref.digest body
       ; limits = default_limits
+      ; project_selection = None
       }
   in
   let base = Chatmd_shell_spec.Manifest_defaults.legacy_runtime ~source in
