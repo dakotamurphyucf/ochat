@@ -50,6 +50,7 @@ type t =
   ; store : Agent_store.Session_store.t
   ; blob_store : Agent_store.Blob_store.t
   ; prompts : Agent_session.Prompt_catalog.t
+  ; project_sources : Project_source_host.t
   ; workspaces : Agent_session.Workspace_catalog.t
   ; registry : Session_registry.t
   ; handler : Command_handler.t
@@ -426,6 +427,7 @@ let open_store ~sw ~env config ~process_start_identity =
       ~root
       ~process_start_identity
       ~lock_nonce
+    |> Result.map ~f:(fun store -> store, Prompt_catalog_host.Store_origin.Existing)
   | `Not_found ->
     let root_path = Eio.Path.(Eio.Stdenv.fs env / root) in
     let admissible =
@@ -448,39 +450,52 @@ let open_store ~sw ~env config ~process_start_identity =
         ~server_id:(Agent_protocol.Id.Server.create ())
         ~process_start_identity
         ~lock_nonce
+      |> Result.map ~f:(fun store -> store, Prompt_catalog_host.Store_origin.Created)
   | _ -> Error (Agent_store.Store_error.Corrupt "host root schema is not a regular file")
 ;;
 
-(* Explicit daemon host ceilings. Portable source members are at most1024
-   bytes, hence at most512 nonempty slash-separated components. Runtime loans
-   share policy counts; independent library hosts supply their own ceilings. *)
-let original_source_limits () =
-  Agent_session.Prompt_source_owner.Limits.create
-    ~max_path_components:512
-    ~max_runtime_leases:4096
-  |> Or_error.ok_exn
+let project_error error =
+  Agent_store.Store_error.Corrupt (Prompt_catalog_host.Error.message error)
 ;;
 
-let capture_documents limits scope capture =
-  Agent_session.Prompt_source_owner.Scope.capture_documents
-    scope
-    ~capture
-    ~limits
-    ~checkpoint:Eio.Fiber.check
-  |> Result.map_error ~f:(fun error ->
-    [ Agent_session.Prompt_revision_builder.Diagnostic.
-        { code = "prompt.document_capture"
-        ; message =
-            Sexp.to_string_hum (Agent_session.Prompt_source_owner.Error.sexp_of_t error)
-        ; source = None
-        }
-    ])
+let install_initial_catalog host prepared =
+  let installed = ref false in
+  let cleanup () =
+    Eio.Cancel.protect (fun () ->
+      if !installed
+      then Prompt_catalog_host.retire prepared
+      else
+        ignore
+          (Prompt_catalog_host.discard prepared : Prompt_catalog_publication.certainty))
+  in
+  match
+    let open Result.Let_syntax in
+    let%bind () = Prompt_catalog_host.publish prepared in
+    let%bind () =
+      Eio.Cancel.protect (fun () ->
+        match Prompt_catalog_host.commit prepared with
+        | Ok () ->
+          installed := true;
+          Ok ()
+        | Error error -> Error (Prompt_catalog_host.Error.Publication error))
+    in
+    Ok host
+  with
+  | result ->
+    cleanup ();
+    result
+  | exception exn ->
+    let trace = Stdlib.Printexc.get_raw_backtrace () in
+    (try cleanup () with
+     | _ -> ());
+    Exn.raise_with_original_backtrace exn trace
 ;;
 
 let build_catalog
       ~sw
       ~env
       ~content_limits
+      ~origin
       store
       config
       reviewer_resolver
@@ -490,38 +505,44 @@ let build_catalog
   let%bind built =
     Catalog_builder.build ?reviewer_resolver ?policy_evaluator_resolver config
   in
-  let%bind artifact_store =
-    Agent_store.Prompt_artifact_store.create
-      ~env
-      ~root:
-        (Agent_store.Session_store.data_root store
-         |> Agent_store.Data_root.prompt_artifacts_path)
+  let%bind sources =
+    Project_source_host.open_owned
+      (Option.value
+         config.Config.server.project_sources
+         ~default:Project_source_configuration.local_only)
+      ~sw
+      ~fs:(Eio.Stdenv.fs env)
+      ~data_root:(Agent_store.Session_store.data_root store)
+      ~clock:(Eio.Stdenv.mono_clock env)
+      ~checkpoint:Eio.Fiber.check
+      ()
+    |> Result.map_error ~f:(fun error ->
+      project_error (Prompt_catalog_host.Error.Sources error))
   in
-  let prompts =
-    Agent_session.Prompt_catalog.create ~env ~artifact_store ~content_limits
+  let%bind host =
+    Prompt_catalog_host.create
+      ~sw
+      ~env
+      ~store
+      ~origin
+      ~sources
+      ~content_limits
+      ~checkpoint:Eio.Fiber.check
+    |> Result.map_error ~f:project_error
   in
   let%bind prepared =
-    Agent_session.Prompt_catalog.prepare_owned
-      prompts
-      ?prepare_content:(Option.map content_limits ~f:capture_documents)
-      ~sw
-      ~source_limits:(original_source_limits ())
-      ~max_roots:1024
-      ~checkpoint:Eio.Fiber.check
-      ~transaction_id:(fun _ -> Agent_protocol.Id.Transaction.create ())
+    Prompt_catalog_host.prepare
+      host
+      ~mode:Build
       ~created_at:(timestamp env)
+      ~checkpoint:Eio.Fiber.check
       built.prompts
-    |> Result.map_error ~f:(fun error ->
-      Agent_store.Store_error.Corrupt (Core.Error.to_string_hum error))
+    |> Result.map_error ~f:project_error
   in
-  let%bind () =
-    Fun.protect
-      ~finally:(fun () -> Agent_session.Prompt_catalog.discard_prepared prepared)
-      (fun () -> Agent_session.Prompt_catalog.install_owned prompts prepared)
-    |> Result.map_error ~f:(fun error ->
-      Agent_store.Store_error.Corrupt (Core.Error.to_string_hum error))
+  let%map host =
+    install_initial_catalog host prepared |> Result.map_error ~f:project_error
   in
-  Ok (built, prompts)
+  built, host, sources
 ;;
 
 let implementation options =
@@ -723,15 +744,18 @@ let maintenance_component maintenance =
 
 let config_component config_watcher =
   match Config_watcher.status config_watcher with
-  | false, _ ->
-    component ~message:"configuration watcher is stopped" "configuration" Unhealthy
-  | true, Some diagnostics ->
+  | (Closed | Uncertain), _ ->
+    component
+      ~message:"configuration watcher is closed or publication is uncertain"
+      "configuration"
+      Unhealthy
+  | (Available | Busy), Some diagnostics ->
     component
       ~message:
         (sprintf "last reload failed with %d diagnostics" (List.length diagnostics))
       "configuration"
       Degraded
-  | true, None ->
+  | (Available | Busy), None ->
     component ~message:"configuration watcher is running" "configuration" Healthy
 ;;
 
@@ -827,74 +851,102 @@ let config_build_diagnostic config error =
 
 let config_watcher
       ~enabled
-      ~content_limits
       ~sw
       ~env
       ~config
-      ~prompts
+      ~project_catalog
       ~factory
       ~audit_store
       ~reviewer_resolver
       ~policy_evaluator_resolver
   =
-  let prepared = ref None in
+  let prompt_candidate = ref None in
+  let factory_candidate = ref None in
+  let failure candidate error =
+    Config_watcher.Failure.Rejected [ config_build_diagnostic candidate error ]
+  in
   let prepare diff candidate =
     if diff.Config_diff.server_changed
     then
       Error
-        [ reload_diagnostic
-            candidate
-            "config.restart_required"
-            "server listener, storage, durability, retention, or authoring package \
-             changes require restart"
-            "Restart the daemon with the new server configuration."
-        ]
-    else (
-      match
+        (Config_watcher.Failure.Rejected
+           [ reload_diagnostic
+               candidate
+               "config.restart_required"
+               "server listener, storage, durability, retention, or source configuration \
+                changes require restart"
+               "Restart the daemon with the new server configuration."
+           ])
+    else
+      let open Result.Let_syntax in
+      let%bind built =
         Catalog_builder.build ?reviewer_resolver ?policy_evaluator_resolver candidate
-      with
-      | Error error -> Error [ config_build_diagnostic candidate error ]
-      | Ok built ->
-        let prompt_revisions =
-          Agent_session.Prompt_catalog.prepare_owned
-            prompts
-            ?prepare_content:(Option.map content_limits ~f:capture_documents)
-            ~sw
-            ~source_limits:(original_source_limits ())
-            ~max_roots:1024
-            ~checkpoint:Eio.Fiber.check
-            ~transaction_id:(fun _ -> Agent_protocol.Id.Transaction.create ())
-            ~created_at:(timestamp env)
-            built.prompts
-        in
-        (match prompt_revisions with
-         | Error error ->
-           Error
-             [ config_build_diagnostic
-                 candidate
-                 (Agent_store.Store_error.Corrupt (Core.Error.to_string_hum error))
-             ]
-         | Ok prompt_revisions ->
-           prepared := Some (built, prompt_revisions);
-           Ok ()))
+        |> Result.map_error ~f:(failure candidate)
+      in
+      let%bind revisions =
+        Prompt_catalog_host.prepare
+          project_catalog
+          ~mode:Build
+          ~created_at:(timestamp env)
+          ~checkpoint:Eio.Fiber.check
+          built.prompts
+        |> Result.map_error ~f:(fun error -> failure candidate (project_error error))
+      in
+      prompt_candidate := Some revisions;
+      let%map catalogs =
+        Session_factory.seal_catalogs
+          factory
+          ~workspaces:built.workspaces
+          ~permission_profiles:built.permission_profiles
+          ~manifest_grants:built.manifest_grants
+          ~checkpoint:Eio.Fiber.check
+        |> Result.map_error ~f:(fun error ->
+          failure
+            candidate
+            (Agent_store.Store_error.Corrupt
+               (Sexp.to_string_hum (Session_factory.Catalog_seal.Error.sexp_of_t error))))
+      in
+      factory_candidate := Some catalogs
   in
-  let commit _ candidate =
-    let built, prompt_revisions = Option.value_exn !prepared in
-    Session_factory.install_catalogs
-      factory
-      ~workspaces:built.Catalog_builder.workspaces
-      ~permission_profiles:built.permission_profiles
-      ~manifest_grants:built.manifest_grants;
-    Agent_session.Prompt_catalog.install_owned prompts prompt_revisions |> Or_error.ok_exn;
-    prepared := None;
-    ignore candidate
+  let publish _ candidate =
+    Prompt_catalog_host.publish (Option.value_exn !prompt_candidate)
+    |> Result.map_error ~f:(fun error -> failure candidate (project_error error))
+  in
+  let commit _ _ =
+    (* All objects and result carriers already exist. Watcher protects this entire
+       phase and swaps Config immediately after both same-domain pointer commits. *)
+    (match Session_factory.Catalog_seal.commit (Option.value_exn !factory_candidate) with
+     | Ok () -> ()
+     | Error _ -> failwith "reserved factory publication invariant failed");
+    match Prompt_catalog_host.commit (Option.value_exn !prompt_candidate) with
+    | Ok () -> ()
+    | Error _ -> failwith "acknowledged prompt publication invariant failed"
   in
   let discard_prepared () =
-    match !prepared with
-    | None -> ()
-    | Some (_, revisions) ->
-      prepared := None;
-      Agent_session.Prompt_catalog.discard_prepared revisions
+    let certainty =
+      match !prompt_candidate with
+      | None -> Prompt_catalog_publication.Rejected
+      | Some candidate -> Prompt_catalog_host.discard candidate
+    in
+    Option.iter !factory_candidate ~f:(fun candidate ->
+      let result =
+        match certainty with
+        | Rejected -> Session_factory.Catalog_seal.abort candidate
+        | Uncertain -> Session_factory.Catalog_seal.mark_uncertain candidate
+      in
+      match result with
+      | Ok () -> ()
+      | Error _ -> failwith "factory discard invariant failed");
+    prompt_candidate := None;
+    factory_candidate := None;
+    match certainty with
+    | Rejected -> Config_watcher.Certainty.Rejected
+    | Uncertain -> Uncertain
+  in
+  let retire () =
+    Option.iter !prompt_candidate ~f:Prompt_catalog_host.retire;
+    prompt_candidate := None;
+    factory_candidate := None
   in
   let audit diff =
     ignore
@@ -913,10 +965,11 @@ let config_watcher
   in
   let watcher =
     Config_watcher.create
+      ~sw
       ~env
       ~path:config.Config.source_file
       ~initial:config
-      ~hooks:{ prepare; commit; discard_prepared; audit }
+      ~hooks:{ prepare; publish; commit; discard_prepared; audit; retire }
   in
   if enabled then Config_watcher.run ~sw ~clock:(Eio.Stdenv.clock env) ~every:1. watcher;
   if not enabled then Config_watcher.close watcher;
@@ -932,6 +985,8 @@ let compose
       ~home
       ~options
       ~provider_operator
+      ~project_catalog
+      ~project_sources
       store
       built
       prompts
@@ -1157,9 +1212,11 @@ let compose
            ~max_artifact_entries:factory_limits.delegation_artifact_max_entries
            ~max_artifact_bytes:factory_limits.delegation_artifact_max_bytes
            ~f:(fun generated_revisions ->
-             Agent_session.Prompt_catalog.prune_unreferenced_artifacts
-               prompts
-               ~additional:(generated_revisions @ pinned_revisions))
+             Prompt_catalog_host.prune
+               project_catalog
+               ~additional:(generated_revisions @ pinned_revisions)
+               ~checkpoint:Eio.Fiber.check
+             |> Result.map_error ~f:project_error)
          : (int, Agent_store.Store_error.t) result);
       let%bind () = Start_scheduler.seed_recovered ~registry ~queue:start_queue in
       let startup_time = timestamp env in
@@ -1228,11 +1285,10 @@ let compose
   let config_watcher =
     config_watcher
       ~enabled:execute
-      ~content_limits:options.content_limits
       ~sw
       ~env
       ~config
-      ~prompts
+      ~project_catalog
       ~factory
       ~audit_store
       ~reviewer_resolver:options.reviewer_resolver
@@ -1399,6 +1455,7 @@ let compose
     ; schedule_scheduler
     ; maintenance
     ; config_watcher
+    ; project_sources
     ; factory
     ; selection
     ; start_queue
@@ -1448,7 +1505,7 @@ let start
       Agent_session.Automatic_turn_budget.create options.chatml_runtime_policy
       |> Agent_session.Automatic_turn_budget.validate
   in
-  let%bind store =
+  let%bind store, origin =
     open_store ~sw ~env config.server ~process_start_identity
     |> Result.map_error ~f:protocol_of_store
   in
@@ -1477,8 +1534,9 @@ let start
            | Some _ -> features @ [ "provider.operator" ])
       }
     in
-    let%bind built, prompts =
+    let%bind built, project_catalog, project_sources =
       build_catalog
+        ~origin
         ~sw
         ~env
         ~content_limits:options.content_limits
@@ -1497,13 +1555,19 @@ let start
       ~home
       ~options
       ~provider_operator
+      ~project_catalog
+      ~project_sources
       store
       built
-      prompts)
+      (Prompt_catalog_host.catalog project_catalog))
 ;;
 
 let close_connection t context = Command_handler.close_connection t.handler context
-let reload_config t = Config_watcher.reload t.config_watcher
+
+let reload_config t =
+  Config_watcher.reload t.config_watcher
+  |> Result.map_error ~f:Config_watcher.Failure.diagnostics
+;;
 
 let import_legacy t ~principal ~source_id ~source_path ~legacy request =
   let open Result.Let_syntax in
@@ -1551,10 +1615,11 @@ let shutdown t =
     Permission_scheduler.close t.permission_scheduler;
     Schedule_scheduler.close t.schedule_scheduler;
     Maintenance.close t.maintenance;
-    Config_watcher.close t.config_watcher;
+    Config_watcher.close_and_wait t.config_watcher;
     Start_scheduler.close_and_wait t.start_scheduler;
     shutdown_sessions t;
     Option.iter t.provider_operator ~f:Provider_operator_port.close;
+    Project_source_host.close_and_wait t.project_sources;
     Agent_store.Session_store.close t.store
     |> Result.map_error ~f:protocol_of_store
     |> Result.map ~f:(fun () -> t.status_ref := Stopped)
