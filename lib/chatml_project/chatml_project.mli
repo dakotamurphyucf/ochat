@@ -248,6 +248,21 @@ module Lock : sig
     val byte_length : t -> int
   end
 
+  module Entry : sig
+    type selection =
+      | Declared of string
+      | Captured
+
+    (** Exact entry facts, never a live source lookup. Declared names are reconciled
+        against the root declaration; Captured uses the root selected environment
+        without inventing a file override or containing-document source location. *)
+    type t
+
+    val create : Source_entry.t -> selection:selection -> t Or_error.t
+    val source : t -> Source_entry.t
+    val selection : t -> selection
+  end
+
   module Module_selection : sig
     type t
 
@@ -286,10 +301,29 @@ module Lock : sig
     val bindings : t -> binding list
   end
 
+  module Dependency_selection : sig
+    (** The containing catalog owns this named dependency association. Locator,
+        project member, namespace and environment intent remain in its exact
+        captured declaration. Distinct names may select one declaration. *)
+    type t
+
+    val create
+      :  name:string
+      -> declaration:Chatml_source.Id.t
+      -> checkpoint:(unit -> unit)
+      -> t Or_error.t
+
+    val name : t -> string
+    val declaration : t -> Chatml_source.Id.t
+  end
+
   module Catalog : sig
     type origin =
-      | Root_local
-      | Dependency of Dependency.source
+      | Local
+      | Git of
+          { repository : string
+          ; pin : Git_pin.t
+          }
 
     type t
 
@@ -303,14 +337,17 @@ module Lock : sig
         Complete portable-collision/inventory/association validation remains with183
         after192 reconciles the receipt against actual captured bytes and selections.
         Aliases live in scopes, not duplicated inventory entries. Local/Git locators
-        are validated untrusted intent, never a granted root/capability or ephemeral
-        native registration ID. No second graph validator or placeholder captures. *)
+        remain in incoming captured declarations; Git repository/pin is validated
+        provenance intent, never a granted capability or ephemeral native identity.
+      Dependency names are canonical owner-local keys; their targets may cross
+      namespaces. No second graph validator or placeholder captures. *)
     val create
       :  declared_at:Declared_at.t
       -> namespace:string
       -> origin:origin
       -> declaration:Chatml_source.Id.t
       -> selected_environment:string
+      -> dependencies:Dependency_selection.t list
       -> sources:Source_entry.t list
       -> modules:Module_selection.t list
       -> scopes:File_scope.t list
@@ -321,6 +358,7 @@ module Lock : sig
     val origin : t -> origin
     val declaration : t -> Chatml_source.Id.t
     val selected_environment : t -> string
+    val dependencies : t -> Dependency_selection.t list
     val sources : t -> Source_entry.t list
     val modules : t -> Module_selection.t list
     val scopes : t -> File_scope.t list
@@ -339,7 +377,9 @@ module Lock : sig
       Host composition deduplicates genuinely equal aliases before construction and
       MUST exclude the future selected lock ID from the serialized source inventory;
       this constructor receives no selected lock ID and cannot prove that exclusion.
-      Entry may also be a module implementation with the SAME Source.Id; no silent
+      Root identifies the selected project declaration; Entry records both exact
+    source metadata and declared-name versus explicitly captured-host selection.
+    Entry may also be a module implementation with the SAME Source.Id; no silent
       role exclusion or initialization here.
 
       Target/family names and required_tools are intent/compatibility metadata only.
@@ -349,7 +389,8 @@ module Lock : sig
       No actual source-cycle analysis, compiler invocation or publication. *)
   val create
     :  declared_at:Declared_at.t
-    -> entry:Chatml_source.Id.t
+    -> root:Chatml_source.Id.t
+    -> entry:Entry.t
     -> environment:string
     -> compiler_family:string
     -> target_name:string
@@ -376,7 +417,7 @@ module Lock : sig
       sources/scopes by typed Source.Id, module selections by implementation Source.Id,
       bindings by exact name and required_tools as an exact sorted set. Preserve
       namespace/path as separate fields and distinct aliases sharing one Module_id.
-      Reject duplicate keys rather than deduplicating them, and measure escaped JSON size before
+      Reject duplicate keys during canonical sorting and measure escaped JSON size before
       rendering. Overflow/output-limit errors use t's retained ownership context;
       checkpoint exceptions escape unchanged. No own lock digest/final Prepared
       fingerprint or encoding-error context is embedded in this output. *)
@@ -386,7 +427,9 @@ module Lock : sig
     -> checkpoint:(unit -> unit)
     -> (string, Error.t) Result.t
 
+  val root : t -> Chatml_source.Id.t
   val entry : t -> Chatml_source.Id.t
+  val entry_selection : t -> Entry.t
   val environment : t -> string
   val compiler_family : t -> string
   val target_name : t -> string

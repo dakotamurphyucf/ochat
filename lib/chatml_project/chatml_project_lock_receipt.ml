@@ -50,6 +50,27 @@ module Source_entry = struct
   let byte_length t = t.byte_length
 end
 
+module Entry = struct
+  type selection =
+    | Declared of string
+    | Captured
+
+  type t =
+    { source : Source_entry.t
+    ; selection : selection
+    }
+
+  let create source ~selection =
+    match selection with
+    | Declared name when String.is_empty name ->
+      Or_error.error_string "expected a nonempty declared entry name"
+    | Declared _ | Captured -> Ok { source; selection }
+  ;;
+
+  let source t = t.source
+  let selection t = t.selection
+end
+
 module Module_selection = struct
   type t =
     { implementation : Id.t
@@ -106,16 +127,36 @@ module File_scope = struct
   let bindings t = t.bindings
 end
 
+module Dependency_selection = struct
+  type t =
+    { name : string
+    ; declaration : Id.t
+    }
+
+  let create ~name ~declaration ~checkpoint =
+    if Chatml_project_declaration.Dependency.is_valid_name name ~checkpoint
+    then Ok { name; declaration }
+    else Or_error.error_string "expected a dependency alias identifier other than self"
+  ;;
+
+  let name t = t.name
+  let declaration t = t.declaration
+end
+
 module Catalog = struct
   type origin =
-    | Root_local
-    | Dependency of Chatml_project_declaration.Dependency.source
+    | Local
+    | Git of
+        { repository : string
+        ; pin : Chatml_project_declaration.Git_pin.t
+        }
 
   type t =
     { namespace : string
     ; origin : origin
     ; declaration : Id.t
     ; selected_environment : string
+    ; dependencies : Dependency_selection.t list
     ; sources : Source_entry.t list
     ; modules : Module_selection.t list
     ; scopes : File_scope.t list
@@ -123,12 +164,10 @@ module Catalog = struct
 
   let validate_origin origin ~checkpoint =
     match origin with
-    | Root_local ->
+    | Local ->
       checkpoint ();
       true
-    | Dependency (Local { directory }) ->
-      Chatml_project_declaration.Dependency.is_valid_locator directory ~checkpoint
-    | Dependency (Git { repository; pin = _ }) ->
+    | Git { repository; pin = _ } ->
       Chatml_project_declaration.Dependency.is_valid_locator repository ~checkpoint
   ;;
 
@@ -138,6 +177,7 @@ module Catalog = struct
         ~origin
         ~declaration
         ~selected_environment
+        ~dependencies
         ~sources
         ~modules
         ~scopes
@@ -195,6 +235,10 @@ module Catalog = struct
       | Ok values -> Ok values
       | Error _ -> fail [ field ] "duplicate receipt record key"
     in
+    let%bind dependencies =
+      canonical dependencies "dependencies" (fun a b ->
+        String.compare (Dependency_selection.name a) (Dependency_selection.name b))
+    in
     let%bind sources =
       canonical sources "sources" (fun a b ->
         Id.compare (Source_entry.id a) (Source_entry.id b))
@@ -207,12 +251,21 @@ module Catalog = struct
       canonical scopes "scopes" (fun a b ->
         Id.compare (File_scope.source a) (File_scope.source b))
     in
-    { namespace; origin; declaration; selected_environment; sources; modules; scopes }
+    { namespace
+    ; origin
+    ; declaration
+    ; selected_environment
+    ; dependencies
+    ; sources
+    ; modules
+    ; scopes
+    }
   ;;
 
   let namespace t = t.namespace
   let origin t = t.origin
   let declaration t = t.declaration
+  let dependencies t = t.dependencies
   let selected_environment t = t.selected_environment
   let sources t = t.sources
   let modules t = t.modules
@@ -221,7 +274,8 @@ end
 
 type t =
   { declared_at : Chatml_project_declaration.Declared_at.t
-  ; entry : Id.t
+  ; root : Id.t
+  ; entry : Entry.t
   ; environment : string
   ; compiler_family : string
   ; target_name : string
@@ -232,6 +286,7 @@ type t =
 
 let create
       ~declared_at
+      ~root
       ~entry
       ~environment
       ~compiler_family
@@ -274,6 +329,7 @@ let create
     | Error _ -> fail [ "catalogs" ] "duplicate catalog namespace"
   in
   { declared_at
+  ; root
   ; entry
   ; environment
   ; compiler_family
@@ -285,7 +341,9 @@ let create
 ;;
 
 let declared_at t = t.declared_at
-let entry t = t.entry
+let root t = t.root
+let entry t = Source_entry.id (Entry.source t.entry)
+let entry_selection t = t.entry
 let environment t = t.environment
 let compiler_family t = t.compiler_family
 let target_name t = t.target_name

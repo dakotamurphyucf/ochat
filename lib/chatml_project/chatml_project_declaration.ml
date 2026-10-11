@@ -88,6 +88,20 @@ module Dependency = struct
     ; declared_at : Declared_at.t
     }
 
+  let is_valid_name name ~checkpoint =
+    checkpoint ();
+    (not (String.is_empty name))
+    && (not (String.equal name "self"))
+    && (match name.[0] with
+        | 'a' .. 'z' | 'A' .. 'Z' | '_' -> true
+        | _ -> false)
+    && String.for_alli name ~f:(fun index char ->
+      if index mod 4096 = 0 then checkpoint ();
+      match char with
+      | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' -> true
+      | _ -> false)
+  ;;
+
   let is_valid_locator string ~checkpoint =
     checkpoint ();
     (not (String.is_empty string))

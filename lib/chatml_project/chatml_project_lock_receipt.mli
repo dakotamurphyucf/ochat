@@ -30,6 +30,21 @@ module Source_entry : sig
   val byte_length : t -> int
 end
 
+module Entry : sig
+  type selection =
+    | Declared of string
+    | Captured
+
+  (** Exact entry facts, never a live source lookup. Declared names are reconciled
+      against the root declaration; Captured uses the root selected environment
+      without inventing a file override or containing-document source location. *)
+  type t
+
+  val create : Source_entry.t -> selection:selection -> t Or_error.t
+  val source : t -> Source_entry.t
+  val selection : t -> selection
+end
+
 module Module_selection : sig
   type t
 
@@ -68,10 +83,29 @@ module File_scope : sig
   val bindings : t -> binding list
 end
 
+module Dependency_selection : sig
+  (** The containing catalog owns this named dependency association. Locator,
+      project member, namespace and environment intent remain in its exact
+      captured declaration. Distinct names may select one declaration. *)
+  type t
+
+  val create
+    :  name:string
+    -> declaration:Chatml_source.Id.t
+    -> checkpoint:(unit -> unit)
+    -> t Or_error.t
+
+  val name : t -> string
+  val declaration : t -> Chatml_source.Id.t
+end
+
 module Catalog : sig
   type origin =
-    | Root_local
-    | Dependency of Chatml_project_declaration.Dependency.source
+    | Local
+    | Git of
+        { repository : string
+        ; pin : Chatml_project_declaration.Git_pin.t
+        }
 
   type t
 
@@ -85,14 +119,17 @@ module Catalog : sig
       Complete portable-collision/inventory/association validation remains with183
       after192 reconciles the receipt against actual captured bytes and selections.
       Aliases live in scopes, not duplicated inventory entries. Local/Git locators
-      are validated untrusted intent, never a granted root/capability or ephemeral
-      native registration ID. No second graph validator or placeholder captures. *)
+      remain in incoming captured declarations; Git repository/pin is validated
+      provenance intent, never a granted capability or ephemeral native identity.
+      Dependency names are canonical owner-local keys; their targets may cross
+      namespaces. No second graph validator or placeholder captures. *)
   val create
     :  declared_at:Chatml_project_declaration.Declared_at.t
     -> namespace:string
     -> origin:origin
     -> declaration:Chatml_source.Id.t
     -> selected_environment:string
+    -> dependencies:Dependency_selection.t list
     -> sources:Source_entry.t list
     -> modules:Module_selection.t list
     -> scopes:File_scope.t list
@@ -103,6 +140,7 @@ module Catalog : sig
   val origin : t -> origin
   val declaration : t -> Chatml_source.Id.t
   val selected_environment : t -> string
+  val dependencies : t -> Dependency_selection.t list
   val sources : t -> Source_entry.t list
   val modules : t -> Module_selection.t list
   val scopes : t -> File_scope.t list
@@ -123,6 +161,8 @@ val declared_at : t -> Chatml_project_declaration.Declared_at.t
     Host composition deduplicates genuinely equal aliases before construction and
     MUST exclude the future selected lock ID from the serialized source inventory;
     this constructor receives no selected lock ID and cannot prove that exclusion.
+    Root identifies the selected project declaration; Entry records both exact
+    source metadata and declared-name versus explicitly captured-host selection.
     Entry may also be a module implementation with the SAME Source.Id; no silent
     role exclusion or initialization here.
 
@@ -133,7 +173,8 @@ val declared_at : t -> Chatml_project_declaration.Declared_at.t
     No actual source-cycle analysis, compiler invocation or publication. *)
 val create
   :  declared_at:Chatml_project_declaration.Declared_at.t
-  -> entry:Chatml_source.Id.t
+  -> root:Chatml_source.Id.t
+  -> entry:Entry.t
   -> environment:string
   -> compiler_family:string
   -> target_name:string
@@ -144,7 +185,9 @@ val create
   -> unit
   -> (t, Error.t) Result.t
 
+val root : t -> Chatml_source.Id.t
 val entry : t -> Chatml_source.Id.t
+val entry_selection : t -> Entry.t
 val environment : t -> string
 val compiler_family : t -> string
 val target_name : t -> string

@@ -73,12 +73,20 @@ end
 let root_sources = Wire.[ Field "catalogs"; Index 0; Field "sources" ]
 let root_modules = Wire.[ Field "catalogs"; Index 0; Field "modules" ]
 let root_scopes = Wire.[ Field "catalogs"; Index 0; Field "scopes" ]
+let root_dependencies = Wire.[ Field "catalogs"; Index 0; Field "dependencies" ]
 let root_bindings = root_scopes @ Wire.[ Index 0; Field "bindings" ]
 
 let%test_unit "finite collection reorderings agree with independent canonical wire" =
   let tree = Jsonaf.of_string Lock_fixtures.canonical in
   let kinds =
-    [ "catalogs"; "sources"; "modules"; "scopes"; "bindings"; "required_tools" ]
+    [ "catalogs"
+    ; "sources"
+    ; "modules"
+    ; "scopes"
+    ; "bindings"
+    ; "dependencies"
+    ; "required_tools"
+    ]
   in
   List.iter
     ([] :: kinds :: List.map kinds ~f:(fun kind -> [ kind ]))
@@ -117,6 +125,7 @@ let%test_unit "canonicalization rejects duplicate domain keys instead of droppin
     ; root_modules
     ; root_scopes
     ; root_bindings
+    ; root_dependencies
     ; Wire.[ Field "required_tools" ]
     ]
     ~f:(fun path ->
@@ -145,6 +154,8 @@ let%test_unit
     L.decode source ~limits:D.Limits.default ~checkpoint |> assert_field_rejected source);
   let source = S.capture ~namespace:"app" ~path:"a.chatml" Lock_fixtures.canonical in
   L.decode source ~limits:D.Limits.default ~checkpoint |> assert_field_rejected source;
+  let source = S.capture ~namespace:"app" ~path:"a.chatml" Lock_fixtures.minimal in
+  L.decode source ~limits:D.Limits.default ~checkpoint |> assert_field_rejected source;
   let wire =
     Wire.change
       tree
@@ -164,7 +175,14 @@ let%test_unit "required absence/null, optional interface null and primitive erro
   [%test_eq: string] (encode empty) Lock_fixtures.minimal;
   let tree = Jsonaf.of_string Lock_fixtures.canonical in
   List.iter
-    [ "schema_version"; "entry"; "environment"; "compiler"; "required_tools"; "catalogs" ]
+    [ "schema_version"
+    ; "root"
+    ; "entry"
+    ; "environment"
+    ; "compiler"
+    ; "required_tools"
+    ; "catalogs"
+    ]
     ~f:(fun name ->
       List.iter
         [ Wire.without_field name tree
@@ -179,7 +197,17 @@ let%test_unit "required absence/null, optional interface null and primitive erro
     ; (root_sources @ Wire.[ Index 0; Field "byte_length" ]), `Number "-1"
     ; (root_sources @ Wire.[ Index 0; Field "byte_length" ]), `Number "1.0"
     ; (root_sources @ Wire.[ Index 0; Field "sha256" ]), `String (String.make 64 'A')
-    ; Wire.[ Field "entry"; Field "path" ], `String "../a.chatml"
+    ; ( Wire.[ Field "entry"; Field "source"; Field "id"; Field "path" ]
+      , `String "../a.chatml" )
+    ; (root_dependencies @ Wire.[ Index 0; Field "name" ]), `String "self"
+    ; (root_dependencies @ Wire.[ Index 0; Field "name" ]), `String "bad-name"
+    ; (root_dependencies @ Wire.[ Index 0; Field "declaration" ]), `Null
+    ; Wire.[ Field "entry"; Field "selection"; Field "name" ], `String ""
+    ; Wire.[ Field "entry"; Field "selection"; Field "kind" ], `String "unknown"
+    ; Wire.[ Field "entry"; Field "source" ], `Null
+    ; ( Wire.[ Field "entry"; Field "selection" ]
+      , `Object [ "kind", `String "captured"; "name", `String "main" ] )
+    ; root_dependencies, `Null
     ; Wire.[ Field "schema_version" ], `Number "1e0"
     ; (root_bindings @ Wire.[ Index 0; Field "name" ]), `String "lowercase"
     ; ( Wire.[ Field "catalogs"; Index 1; Field "origin" ]
@@ -269,7 +297,8 @@ let authored receipt source ~environment ~checkpoint =
   in
   L.create
     ~declared_at
-    ~entry:(L.entry receipt)
+    ~root:(L.root receipt)
+    ~entry:(L.entry_selection receipt)
     ~environment
     ~compiler_family:(L.compiler_family receipt)
     ~target_name:(L.target_name receipt)
@@ -362,6 +391,7 @@ let%test_unit "lock callbacks propagate at every observed poll and inputs remain
         ~origin:(L.Catalog.origin app)
         ~declaration:(L.Catalog.declaration app)
         ~selected_environment:(L.Catalog.selected_environment app)
+        ~dependencies:(L.Catalog.dependencies app)
         ~sources:(L.Catalog.sources app)
         ~modules:(L.Catalog.modules app)
         ~scopes:(L.Catalog.scopes app)
@@ -377,4 +407,41 @@ let%test_unit "lock callbacks propagate at every observed poll and inputs remain
   in
   finished := true;
   [%test_eq: string] (encode actual) Lock_fixtures.canonical
+;;
+
+let%expect_test
+    "declared and captured entry selection retain explicit dependency associations"
+  =
+  let tree = Jsonaf.of_string Lock_fixtures.canonical in
+  List.iter
+    [ `Object [ "kind", `String "declared"; "name", `String "main" ]
+    ; `Object [ "kind", `String "captured" ]
+    ]
+    ~f:(fun selection ->
+      let receipt =
+        Wire.change tree Wire.[ Field "entry"; Field "selection" ] ~f:(fun _ -> selection)
+        |> Jsonaf.to_string
+        |> S.capture
+        |> decode
+      in
+      let roundtrip = encode receipt |> S.capture |> decode in
+      let selected = L.entry_selection roundtrip in
+      let label =
+        match L.Entry.selection selected with
+        | Declared name -> "declared:" ^ name
+        | Captured -> "captured"
+      in
+      let dependencies =
+        List.hd_exn (L.catalogs roundtrip)
+        |> L.Catalog.dependencies
+        |> List.map ~f:(fun d ->
+          ( L.Dependency_selection.name d
+          , C.Id.package_namespace (L.Dependency_selection.declaration d) ))
+      in
+      print_s [%sexp (label : string), (dependencies : (string * string) list)]);
+  [%expect
+    {|
+    (declared:main ((shared shared) (shared_alias shared)))
+    (captured ((shared shared) (shared_alias shared)))
+  |}]
 ;;

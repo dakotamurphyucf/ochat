@@ -79,6 +79,7 @@ module Dependency : sig
     ; declared_at : Declared_at.t
     }
 
+  val is_valid_name : string -> checkpoint:(unit -> unit) -> bool
   val is_valid_locator : string -> checkpoint:(unit -> unit) -> bool
   val name : t -> string
   val source : t -> source
