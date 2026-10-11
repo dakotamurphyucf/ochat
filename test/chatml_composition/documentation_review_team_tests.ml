@@ -45,7 +45,134 @@ let sources =
   ; "sample-project/docs/reference.md", Documentation_shell_tests.reference
   ; "sample-project/scripts/check-docs.sh", Documentation_shell_tests.checker
   ; "sample-project/expected-report.json", Documentation_shell_tests.expected_report
+  ; ( "chatml.project.json"
+    , [%blob
+        "../../docs-src/examples/applications/persistent-review-team/chatml.project.json"]
+    )
   ]
+  @ Documentation_program_tests.decoder_sources
+;;
+
+let collector_sources =
+  [ ( "agent.chatmd"
+    , {|<developer>Observe only fully decoded caller queries.</developer>
+<tool name="agent_status"/><tool name="agent_wait"/><tool name="agent_read"/>
+<script id="review_collector" language="chatml" kind="tool" src="scripts/coordinator.chatml" project="chatml.project.json"/>
+<tool name="collect_reviews" type="chatml" script="review_collector" entrypoint="run"
+ input_schema="any.json" output_schema="any.json">
+ <uses tool="agent_status"/><uses tool="agent_wait"/><uses tool="agent_read"/>
+</tool>|}
+    )
+  ; "any.json", "{}"
+  ]
+  @ List.filter sources ~f:(fun (name, _) ->
+    String.equal name "scripts/coordinator.chatml"
+    || String.equal name "chatml.project.json"
+    || String.is_prefix name ~prefix:"libraries/")
+;;
+
+let reviewer role session receipt cursor =
+  `Object
+    [ "role", `String role
+    ; "session_id", `String session
+    ; "receipt_id", `String receipt
+    ; "cursor", cursor
+    ]
+;;
+
+let%test_unit "a missing cursor at any reviewer position admits no lifecycle query" =
+  (* Test input is deliberately schema-permissive, so the shipped source decoder
+     rather than the public review-request schema owns this rejection. *)
+  let calls =
+    List.init 3 ~f:(fun missing_index ->
+      let reviewers =
+        List.init 3 ~f:(fun index ->
+          let row = reviewer "correctness" "opaque session" "opaque receipt" `Null in
+          if Int.equal missing_index index
+          then (
+            match row with
+            | `Object fields ->
+              `Object (List.Assoc.remove fields ~equal:String.equal "cursor")
+            | _ -> assert false)
+          else row)
+      in
+      ( Int.to_string missing_index
+      , "collect_reviews"
+      , `Object [ "reviewers", `Array reviewers ] ))
+  in
+  Fixtures.with_daemon ~sources:collector_sources ~calls (fun state ->
+    List.iter calls ~f:(fun (id, _, _) ->
+      [%test_eq: int]
+        0
+        (List.length (Fixtures.children state (Fixtures.model_invocation state id)));
+      match Fixtures.result state id with
+      | Fail error ->
+        assert (String.is_substring error.message ~substring:"Missing value.")
+      | other -> raise_s [%sexp (other : P.Invocation.outcome)]))
+;;
+
+let%expect_test "collector forwards opaque queries in reviewer and lifecycle order" =
+  let rows =
+    [ "correctness", "session first", "receipt/first", `Null
+    ; "documentation", "session second", "receipt:second", `String "cursor opaque"
+    ; "integration", "session third", "receipt third", `Null
+    ]
+  in
+  let reviewers =
+    List.map rows ~f:(fun (role, session, receipt, cursor) ->
+      reviewer role session receipt cursor)
+  in
+  Fixtures.with_daemon
+    ~sources:collector_sources
+    ~calls:[ "collect", "collect_reviews", `Object [ "reviewers", `Array reviewers ] ]
+    (fun state ->
+       let expected =
+         List.concat_map rows ~f:(fun (_, session, receipt, cursor) ->
+           let query = [ "session_id", `String session; "receipt_id", `String receipt ] in
+           [ "agent_status", `Object [ "session_id", `String session ]
+           ; "agent_wait", `Object (query @ [ "timeout_ms", `Number "0" ])
+           ; ( "agent_read"
+             , `Object
+                 (query
+                  @ [ "limit", `Number "16" ]
+                  @
+                  match cursor with
+                  | `Null -> []
+                  | value -> [ "cursor", value ]) )
+           ])
+       in
+       let actual =
+         (* Session deltas put the most recently updated invocation first.
+            These calls finish sequentially, so reverse their terminal records. *)
+         Fixtures.children state (Fixtures.model_invocation state "collect")
+         |> List.rev
+         |> List.map ~f:(fun invocation ->
+           invocation.P.Invocation.context.tool_name, invocation.context.input)
+       in
+       [%test_eq: int] 9 (List.length actual);
+       List.iter2_exn
+         actual
+         expected
+         ~f:(fun (name, input) (expected_name, expected_input) ->
+           [%test_eq: string] expected_name name;
+           assert (Jsonaf.exactly_equal input expected_input));
+       (match Fixtures.result state "collect" with
+        | Complete (`Object [ ("reviews", `Array reviews) ]) ->
+          [%test_eq: int] 3 (List.length reviews);
+          List.iter2_exn reviews rows ~f:(fun review (role, session, receipt, _) ->
+            [%test_eq: string] role (Jsonaf.member_exn "role" review |> Jsonaf.string_exn);
+            [%test_eq: string]
+              session
+              (Jsonaf.member_exn "session_id" review |> Jsonaf.string_exn);
+            [%test_eq: string]
+              receipt
+              (Jsonaf.member_exn "receipt_id" review |> Jsonaf.string_exn))
+        | other -> raise_s [%sexp (other : P.Invocation.outcome)]);
+       print_endline
+         "three exact caller queries; status, wait, read per reviewer; no local ID \
+          parsing");
+  [%expect
+    {| three exact caller queries; status, wait, read per reviewer; no local ID parsing |}]
 ;;
 
 let%expect_test

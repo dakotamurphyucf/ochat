@@ -883,7 +883,7 @@
   {
     "id": "chatml-program",
     "title": "ChatML report program",
-    "summary": "Count repeated failures across project reports using a one-off program and admitted file tools.",
+    "summary": "Count repeated failures through a self-contained one-off program and admitted file tools.",
     "tutorial": "tutorials/chatml-program",
     "host": "Native local TUI",
     "capabilities": [
@@ -903,8 +903,8 @@
         "role": "entry"
       },
       {
-        "source": "docs-src/examples/learning/check-reports/scripts/aggregate.chatml",
-        "path": "scripts/aggregate.chatml",
+        "source": "docs-src/examples/learning/check-reports/scripts/aggregate-one-off.chatml",
+        "path": "scripts/aggregate-one-off.chatml",
         "role": "data"
       },
       {
@@ -957,7 +957,7 @@
   {
     "id": "chatml-tool",
     "title": "Reusable check-summary tool",
-    "summary": "Expose the same report calculation as a named tool with schemas and selected dependencies.",
+    "summary": "Expose checked report calculation through a configured source module, public decoder interface and selected file binding.",
     "tutorial": "tutorials/chatml-tool",
     "host": "Native local TUI",
     "capabilities": [
@@ -966,7 +966,8 @@
       "Standalone script tools"
     ],
     "required": [
-      "Installed Ochat and provider access to gpt-6-astra. Run from the extracted bundle; the supplied reports are input data, not executed checks."
+      "Installed Ochat and provider access to gpt-6-astra. Run from the extracted bundle; the supplied reports are input data, not executed checks.",
+      "Use the assembled complete bundle: its configured decoder project is included below this same source root, without external source grants."
     ],
     "kind": "complete",
     "entry": "agent.chatmd",
@@ -1005,6 +1006,26 @@
         "source": "LICENSE.txt",
         "path": "LICENSE.txt",
         "role": "notice"
+      },
+      {
+        "source": "docs-src/examples/learning/check-reports/chatml.project.json",
+        "path": "chatml.project.json",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/libraries/checked-json/chatml.project.json",
+        "path": "libraries/checked-json/chatml.project.json",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/libraries/checked-json/src/checked_json.chatml",
+        "path": "libraries/checked-json/src/checked_json.chatml",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/libraries/checked-json/src/checked_json.chatmli",
+        "path": "libraries/checked-json/src/checked_json.chatmli",
+        "role": "companion"
       }
     ],
     "edges": [
@@ -1025,6 +1046,30 @@
         "toPath": "schemas/output.json",
         "reference": "schemas/output.json",
         "kind": "import"
+      },
+      {
+        "fromPath": "agent.chatmd",
+        "toPath": "chatml.project.json",
+        "reference": "chatml.project.json",
+        "kind": "project"
+      },
+      {
+        "fromPath": "chatml.project.json",
+        "toPath": "libraries/checked-json/chatml.project.json",
+        "reference": "libraries/checked-json/chatml.project.json",
+        "kind": "project"
+      },
+      {
+        "fromPath": "libraries/checked-json/chatml.project.json",
+        "toPath": "libraries/checked-json/src/checked_json.chatml",
+        "reference": "src/checked_json.chatml",
+        "kind": "project"
+      },
+      {
+        "fromPath": "libraries/checked-json/chatml.project.json",
+        "toPath": "libraries/checked-json/src/checked_json.chatmli",
+        "reference": "src/checked_json.chatmli",
+        "kind": "project"
       }
     ],
     "verification": {
@@ -1901,7 +1946,8 @@
     "required": [
       "Installed Ochat, configured gpt-6-astra provider, and a supported required confinement backend.",
       "/bin/sh, /bin/cat, /usr/bin/grep and awk; create the reports directory before launch.",
-      "Inspect the complete bundle and use --local --authorize-shell-manifest."
+      "Inspect the complete bundle and use --local --authorize-shell-manifest.",
+      "Use the assembled complete bundle: its configured decoder project is included below this same source root, without external source grants."
     ],
     "kind": "complete",
     "entry": "engineer.chatmd",
@@ -2000,6 +2046,26 @@
         "source": "LICENSE.txt",
         "path": "LICENSE.txt",
         "role": "notice"
+      },
+      {
+        "source": "docs-src/examples/applications/guarded-engineering/chatml.project.json",
+        "path": "chatml.project.json",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/libraries/checked-json/chatml.project.json",
+        "path": "libraries/checked-json/chatml.project.json",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/libraries/checked-json/src/checked_json.chatml",
+        "path": "libraries/checked-json/src/checked_json.chatml",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/libraries/checked-json/src/checked_json.chatmli",
+        "path": "libraries/checked-json/src/checked_json.chatmli",
+        "role": "companion"
       }
     ],
     "edges": [
@@ -2086,6 +2152,30 @@
         "toPath": "agents/reviewer.chatmd",
         "reference": "agents/reviewer.chatmd",
         "kind": "agent"
+      },
+      {
+        "fromPath": "capabilities.chatmd",
+        "toPath": "chatml.project.json",
+        "reference": "chatml.project.json",
+        "kind": "project"
+      },
+      {
+        "fromPath": "chatml.project.json",
+        "toPath": "libraries/checked-json/chatml.project.json",
+        "reference": "libraries/checked-json/chatml.project.json",
+        "kind": "project"
+      },
+      {
+        "fromPath": "libraries/checked-json/chatml.project.json",
+        "toPath": "libraries/checked-json/src/checked_json.chatml",
+        "reference": "src/checked_json.chatml",
+        "kind": "project"
+      },
+      {
+        "fromPath": "libraries/checked-json/chatml.project.json",
+        "toPath": "libraries/checked-json/src/checked_json.chatmli",
+        "reference": "src/checked_json.chatmli",
+        "kind": "project"
       }
     ],
     "verification": {
@@ -2155,7 +2245,8 @@
     "required": [
       "Installed Ochat and configured gpt-6-astra provider; specialists request high reasoning.",
       "Run the bundled private daemon from its extracted directory; transient local hosting is not sufficient.",
-      "Read-only sample workspace; recorded report evidence, no shell or editing tools."
+      "Read-only sample workspace; recorded report evidence, no shell or editing tools.",
+      "Use the assembled complete bundle: its configured decoder project is included below this same source root, without external source grants."
     ],
     "kind": "complete",
     "entry": "team.chatmd",
@@ -2239,6 +2330,26 @@
         "source": "LICENSE.txt",
         "path": "LICENSE.txt",
         "role": "notice"
+      },
+      {
+        "source": "docs-src/examples/applications/persistent-review-team/chatml.project.json",
+        "path": "chatml.project.json",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/libraries/checked-json/chatml.project.json",
+        "path": "libraries/checked-json/chatml.project.json",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/libraries/checked-json/src/checked_json.chatml",
+        "path": "libraries/checked-json/src/checked_json.chatml",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/libraries/checked-json/src/checked_json.chatmli",
+        "path": "libraries/checked-json/src/checked_json.chatmli",
+        "role": "companion"
       }
     ],
     "edges": [
@@ -2277,6 +2388,30 @@
         "toPath": "schemas/review-findings.json",
         "reference": "schemas/review-findings.json",
         "kind": "import"
+      },
+      {
+        "fromPath": "team.chatmd",
+        "toPath": "chatml.project.json",
+        "reference": "chatml.project.json",
+        "kind": "project"
+      },
+      {
+        "fromPath": "chatml.project.json",
+        "toPath": "libraries/checked-json/chatml.project.json",
+        "reference": "libraries/checked-json/chatml.project.json",
+        "kind": "project"
+      },
+      {
+        "fromPath": "libraries/checked-json/chatml.project.json",
+        "toPath": "libraries/checked-json/src/checked_json.chatml",
+        "reference": "src/checked_json.chatml",
+        "kind": "project"
+      },
+      {
+        "fromPath": "libraries/checked-json/chatml.project.json",
+        "toPath": "libraries/checked-json/src/checked_json.chatmli",
+        "reference": "src/checked_json.chatmli",
+        "kind": "project"
       }
     ],
     "verification": {

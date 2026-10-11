@@ -52,7 +52,7 @@ retained output remain possible subject to current authority and retention.
 <tool name="agent_read"/>
 <tool name="agent_stop"/>
 
-<script id="review_collector" language="chatml" kind="tool" src="scripts/coordinator.chatml"/>
+<script id="review_collector" language="chatml" kind="tool" project="chatml.project.json" src="scripts/coordinator.chatml"/>
 <tool name="collect_reviews" type="chatml" script="review_collector" entrypoint="run"
       input_schema="schemas/review-request.json" output_schema="schemas/review-findings.json"
       description="Collect one bounded status, receipt-completion observation and output page for each retained reviewer. Preserve returned cursors and errors; this does not wait for everyone, create sessions, stop work or summarize agreement.">

@@ -23,7 +23,7 @@ the **ChatML report program** bundle when you are ready to run it:
 ```text
 chatml-program/
   agent.chatmd
-  scripts/aggregate.chatml
+  scripts/aggregate-one-off.chatml
   reports/report-a.json
   reports/report-b.json
   LICENSE.txt
@@ -43,7 +43,7 @@ binding retains both roots; selecting a tool does not reconfigure its authority.
 
 Send this request:
 
-> Read aggregate.chatml through the programs root. Run that exact program
+> Read aggregate-one-off.chatml through the programs root. Run that exact program
 > with input ["report-a.json", "report-b.json"] and tools ["read_file"]. Tell me
 > which checks failed and how often. Do not run the checks themselves.
 
@@ -64,21 +64,28 @@ the program ran; a model-written answer with the same numbers is not evidence.
 
 ## Follow the program
 
-The complete [aggregate script](../examples/learning/check-reports/scripts/aggregate.chatml)
+The complete [aggregate script](../examples/learning/check-reports/scripts/aggregate-one-off.chatml)
 separates three kinds of work:
 
-1. `read_report` calls the admitted file reader. It checks the tool result and
-   removes the file reader's two metadata lines before parsing the JSON body.
-2. `add_report` validates each reported status and accumulates failed checks.
-   A successful check contributes no failure. Unexpected data fails visibly.
-3. `main(input)` sequences the reads with `let*` and returns a JSON summary.
+1. `main(input)` checks the entire filename array before constructing any file
+   tasks. An invalid later element therefore causes no reads.
+2. `read_report` calls the admitted reader, removes its two metadata lines, and
+   uses `Json.parse_result` to decode complete report text. Missing protocol lines,
+   invalid JSON, wrong shapes and unsupported statuses fail visibly.
+3. `Task.iter_array` sequences the reads. A local table counts failed checks;
+   `Hashtbl.to_array` snapshots the result in first-failure order. Passed checks
+   contribute no failure.
 
 The task returned by `Tool.call` describes work for the runtime. `let*` waits for
 that task's result before decoding it and reading the next file. Script execution
 itself does not require another model conversation, a moderator, or a child agent.
 
-The shared source also exports `run(ctx, input)`. That small wrapper is for the
-[next lesson's reusable tool](chatml-tool.md); `run_chatml` uses `main(input)`.
+This is deliberately a small self-contained program: `run_chatml` compiles only
+its submitted bytes and does not load a project. The
+[next lesson's configured tool](chatml-tool.md) performs the same calculation
+through a reusable `Checked_json` source module and its public interface. Its
+multi-file `aggregate.chatml` is a different entry contract; submitting that file
+alone to `run_chatml` would omit its module dependency.
 
 ## Check the result and the boundary
 
@@ -107,5 +114,5 @@ Quit the TUI with Esc, then `:q` and Enter when the request is finished. No
 background work was started by this program. Preserve the source files if you
 want to reuse it; invocation globals do not provide persistent workflow memory.
 
-Next, [package the same program as a named tool](chatml-tool.md). The agent will
+Next, [expose the calculation through a configured named tool](chatml-tool.md). The agent will
 then supply report filenames without reading and submitting source on every call.

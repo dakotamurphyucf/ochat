@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "namespace": "ochat.examples.guarded-engineering",
+  "dependencies": {
+    "Decoder": {
+      "source": {
+        "kind": "local",
+        "path": "libraries/checked-json"
+      },
+      "project": "chatml.project.json"
+    }
+  },
+  "environments": {
+    "default": {
+      "modules": {
+        "Checked_json": "Decoder.Checked_json"
+      }
+    }
+  }
+}

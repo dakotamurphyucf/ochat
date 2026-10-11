@@ -133,9 +133,13 @@ that this session ran a checker.
 
 Call `summarize_checks` with `{"files":["latest.json"]}`. The
 [report script](../examples/learning/check-reports/scripts/aggregate.chatml)
-uses `let*` to read each selected report through its declared file dependency,
-decodes the check results, and aggregates failures. Input and output schemas
-live beside it in the bundle. Expected output after the initial full check is:
+uses its [explicit project](../examples/applications/guarded-engineering/chatml.project.json)
+to select the same public `Checked_json` decoder package included inside this
+bundle. It validates all filenames before constructing sequential file tasks,
+decodes check results explicitly, and exports ordered counts from a local table
+snapshot. The project/module selection adds no file or shell permission: only
+its declared `read_file` binding performs reads. The input/output schemas, project
+and decoder companions live beside it in the complete archive. Expected output after the initial full check is:
 
 ```json
 [{"check":"verification steps","failures":1}]
