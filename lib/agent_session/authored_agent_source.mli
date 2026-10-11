@@ -23,6 +23,13 @@ type t
     one-off and uncaptured external declarations reject before artifact creation.
     The supplied revision must come from the host's verified artifact admission.
 
+    Owned parser revisions require the exact emitted persistence-enabled tool's
+    parser-owned queued key and an existing captured member. The association is
+    to that actual declaration and persistence policy, independently of its
+    materialized runtime path. Missing, external or divergent owned metadata
+    rejects without native path guessing. Revisions without parser custody keep
+    the legacy confined materialized-path compatibility behavior.
+
     Retains the entire captured parent source closure, preserving relative import,
     script/schema and nested-agent edges without rewriting authored declarations.
     This conservative closure also pins unused captured sources; a new parent

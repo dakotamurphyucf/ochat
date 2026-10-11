@@ -59,6 +59,60 @@ let fingerprint t =
 
 let denied message = Error (P.Error.create Permission_denied ~message ~retryable:false ())
 
+let owned_agent_member parsed ~root_source ~declaration ~policy =
+  let input = CM.Parsed.root_input parsed in
+  Eio.Fiber.check ();
+  if
+    (not (Chatmd_parser_input.Role.equal (Chatmd_parser_input.role input) Root))
+    || (not
+          (String.equal
+             (Chatmd_parser_input.path input)
+             root_source.Store.Source.relative_path))
+    || not
+         (Chatmd_parser_input.authored_matches
+            input
+            root_source.contents
+            ~checkpoint:Eio.Fiber.check)
+  then denied "authored agent parser does not belong to the captured parent Root"
+  else (
+    let matches =
+      List.filter_map (CM.Parsed.agent_references parsed) ~f:(fun reference ->
+        Eio.Fiber.check ();
+        match CM.Agent_reference.invocation reference with
+        | Persistent_tool (candidate, candidate_policy) ->
+          (* Parser custody owns these exact emitted descriptors. Content
+             projection retains Tool elements, so semantic name/path equality
+             alone must never substitute another declaration's queued member. *)
+          if
+            phys_equal candidate declaration
+            && String.equal candidate.name declaration.name
+            && CM.equal_agent_persistence candidate_policy policy
+          then Some reference
+          else None
+        | Tool _ | Content _ -> None)
+    in
+    match matches with
+    | [ reference ] ->
+      (match CM.Agent_reference.queued_key reference with
+       | Some key -> Ok key
+       | None -> denied "persistent authored declaration has no captured queued member")
+    | [] | _ :: _ ->
+      denied "persistent authored declaration lacks one exact owned parser reference")
+;;
+
+let legacy_agent_member tree ~declaration =
+  let open Option.Let_syntax in
+  let%bind root = Eio.Path.native tree in
+  let%bind reference = String.chop_prefix declaration.CM.agent ~prefix:(root ^ "/") in
+  (* Authored imports preserve paths such as definitions/../agents/child.chatmd.
+     Normalize only the portion beneath the verified artifact tree; never consult
+     realpath or follow an external live-file alias to decide source identity. *)
+  let loader = Source_loader.confined_filesystem ~root:tree in
+  Source_loader.root loader ~file:reference
+  |> Result.ok
+  |> Option.map ~f:Source_loader.relative_path
+;;
+
 let capture ?content_limits ~parent ~tool_name () =
   let open Result.Let_syntax in
   let%bind declaration, policy =
@@ -86,20 +140,16 @@ let capture ?content_limits ~parent ~tool_name () =
   in
   let all_sources = root_source :: parent_artifact.sources in
   let tree = Prompt_revision.materialized_tree parent in
-  let relative_path =
-    let open Option.Let_syntax in
-    let%bind root = Eio.Path.native tree in
-    let%bind reference = String.chop_prefix declaration.agent ~prefix:(root ^ "/") in
-    (* Authored imports preserve paths such as definitions/../agents/child.chatmd.
-       Normalize only the portion beneath the verified artifact tree; never consult
-       realpath or follow an external live-file alias to decide source identity. *)
-    let loader = Source_loader.confined_filesystem ~root:tree in
-    Source_loader.root loader ~file:reference
-    |> Result.ok
-    |> Option.map ~f:Source_loader.relative_path
+  let%bind relative_path =
+    match Prompt_revision.parser_context parent with
+    | Some parsed ->
+      owned_agent_member parsed ~root_source ~declaration ~policy
+      |> Result.map ~f:Option.some
+    | None -> Ok (legacy_agent_member tree ~declaration)
   in
   let%bind selected =
     List.find all_sources ~f:(fun source ->
+      Eio.Fiber.check ();
       Option.value_map
         relative_path
         ~default:false

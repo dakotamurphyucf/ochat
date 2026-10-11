@@ -205,6 +205,15 @@ let%test_module "actual prompt content custody owners" =
         "captured literal identity and retained child replay survive source removal"
       =
       with_fixture (fun env root save definition receipt store owner ->
+        List.iter [ "definitions"; "decoys" ] ~f:(fun name ->
+          Eio.Path.mkdir ~perm:0o700 Eio.Path.(root / name));
+        save
+          "root.chatmd"
+          {|<developer><doc src="guide.md" local capture/><tool name="child" agent="decoys/child.chatmd" local persistence="optional"/></developer><import src="definitions/tools.chatmd"/>|};
+        save
+          "definitions/tools.chatmd"
+          {|<tool name="child" agent="../child.chatmd" local persistence="optional"/>|};
+        save "decoys/child.chatmd" {|<developer>Unused same-name child</developer>|};
         let parent =
           Eio.Switch.run (fun sw ->
             let module Catalog = Agent_session.Prompt_catalog in
@@ -274,8 +283,14 @@ let%test_module "actual prompt content custody owners" =
         assert (List.equal String.equal (literals parent) [ "original" ]);
         assert (List.equal String.equal (literals newer) [ "edited" ]);
         Owner.close owner;
-        List.iter [ "root.chatmd"; "child.chatmd"; "guide.md" ] ~f:(fun name ->
-          Eio.Path.unlink Eio.Path.(root / name));
+        List.iter
+          [ "root.chatmd"
+          ; "child.chatmd"
+          ; "guide.md"
+          ; "definitions/tools.chatmd"
+          ; "decoys/child.chatmd"
+          ]
+          ~f:(fun name -> Eio.Path.unlink Eio.Path.(root / name));
         assert (
           Result.is_error
             (Builder.restore ~artifact_store:store definition (Revision.id parent)));
@@ -326,6 +341,42 @@ let%test_module "actual prompt content custody owners" =
             ()
           |> ok
         in
+        assert (
+          String.equal (Authored.identity child_source).root_relative_path "child.chatmd");
+        (* Imported declaration metadata follows the installed parser owner;
+           neither a relocated native prefix nor the ignored same-name tool is
+           a captured source key. The originals have already been removed. *)
+        let moved_store =
+          Store.create
+            ~env
+            ~root:(Eio.Path.native_exn Eio.Path.(root / "moved-artifacts"))
+          |> ok
+        in
+        Store.install
+          moved_store
+          ~transaction_id:(P.Id.Transaction.create ())
+          (Revision.artifact restarted)
+        |> ok;
+        let moved =
+          Builder.restore
+            ~content_limits:(limits ())
+            ~artifact_store:moved_store
+            definition
+            (Revision.id restarted)
+          |> built
+        in
+        let moved_source =
+          Authored.capture ~content_limits:(limits ()) ~parent:moved ~tool_name:"child" ()
+          |> ok
+        in
+        assert (
+          Authored.Identity.equal
+            (Authored.identity child_source)
+            (Authored.identity moved_source));
+        assert (
+          String.equal
+            (Authored.fingerprint child_source)
+            (Authored.fingerprint moved_source));
         let child = Authored.resource_revision ~parent:restarted child_source |> ok in
         assert (List.equal String.equal (literals child) [ "original" ]);
         let child_again =
