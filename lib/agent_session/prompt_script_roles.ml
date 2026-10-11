@@ -5,7 +5,7 @@ module Input = Chatmd_parser_input
 
 module Role = struct
   type t =
-    | Root_ui
+    | Ui
     | Headless
     | Delegated_ui
   [@@deriving equal]
@@ -44,7 +44,7 @@ let bytes_equal left right ~checkpoint =
   !equal
 ;;
 
-let collect captured ~max_context_roles ~max_reference_visits ~checkpoint =
+let collect captured ~root_role ~max_context_roles ~max_reference_visits ~checkpoint =
   let module Abort = struct
     exception Stop of Builder.Diagnostic.t list
   end
@@ -94,7 +94,7 @@ let collect captured ~max_context_roles ~max_reference_visits ~checkpoint =
         rows := { parsed = context.parsed; role } :: !rows;
         Queue.enqueue queue context)
     in
-    request root Root_ui;
+    request root root_role;
     while not (Queue.is_empty queue) do
       checkpoint ();
       let context = Queue.dequeue_exn queue in

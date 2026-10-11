@@ -8,6 +8,13 @@ module Builder = Prompt_revision_builder
 module Owner = Prompt_source_owner
 module Roles = Prompt_script_roles
 
+module Root_role = struct
+  type t =
+    | Ui
+    | Headless
+  [@@deriving equal]
+end
+
 module Source_policy = struct
   type t =
     { root_limits : Chatml_local_roots.Limits.t
@@ -133,7 +140,18 @@ let runtime_errors diagnostics =
       error.message)
 ;;
 
-let capture policy ?startup ~host ~scope ~capture ~operation ~provided ~env ~checkpoint ()
+let capture
+      policy
+      ?startup
+      ~root_role
+      ~host
+      ~scope
+      ~capture
+      ~operation
+      ~provided
+      ~env
+      ~checkpoint
+      ()
   =
   let module Abort = struct
     exception Stop of Builder.Diagnostic.t list
@@ -172,6 +190,10 @@ let capture policy ?startup ~host ~scope ~capture ~operation ~provided ~env ~che
           let%bind roles =
             Roles.collect
               (Owner.Capture.value capture)
+              ~root_role:
+                (match root_role with
+                 | Root_role.Ui -> Roles.Role.Ui
+                 | Headless -> Roles.Role.Headless)
               ~max_context_roles:policy.max_context_roles
               ~max_reference_visits:policy.max_reference_visits
               ~checkpoint:poll
@@ -203,7 +225,7 @@ let capture policy ?startup ~host ~scope ~capture ~operation ~provided ~env ~che
               let%bind shell = material parsed in
               let moderator_surface, delegated_moderator =
                 match Roles.role role with
-                | Root_ui -> Chatml.Chatml_builtin_surface.ui_moderator_surface, false
+                | Ui -> Chatml.Chatml_builtin_surface.ui_moderator_surface, false
                 | Headless -> Chatml.Chatml_builtin_surface.moderator_surface, false
                 | Delegated_ui -> Chatml.Chatml_builtin_surface.ui_moderator_surface, true
               in

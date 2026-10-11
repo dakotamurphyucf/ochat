@@ -1,8 +1,17 @@
 open Core
 
-(** Source-capture policy is
-    distinct from runtime restoration policy; there is no tool registry, inference
-    worker, semantic restoration policy or initialized runtime in this owner. *)
+module Root_role : sig
+  (** Host invocation role, independent of authored source selection. Persistent
+      child references still request the existing delegated UI role. *)
+  type t =
+    | Ui
+    | Headless
+  [@@deriving equal]
+end
+
+(** Source-capture policy is distinct from runtime restoration policy; there is no
+    tool registry, inference worker, semantic restoration policy or initialized
+    runtime in this owner. *)
 module Source_policy : sig
   type t
 
@@ -57,7 +66,7 @@ module Host : sig
 end
 
 (** Suitable for Catalog.prepare_owned's existing prepare_programs callback.
-    Seed only the actual Capture.root UI role. Join each authentic emitted
+    Seed the actual Capture.root with the explicitly supplied host [root_role]. Join each authentic emitted
     Parsed.Agent_reference.queued_key to the exact captured root/agents key,
     rejecting missing/duplicate queued keys before native preparation. Tool and
     Content request headless; Persistent_tool requests delegated UI. Walk only
@@ -68,7 +77,7 @@ end
     A None queued_key is genuinely external/nonlocal and supplies no retained
     preparation role; this API neither reopens it nor decides future source mode.
     Plan each role using authentic existing surface/target and pure shell material
-    under SAME startup. Only root UI Plan is active; all and only emitted requested
+    under SAME startup. Only the selected root-role Plan is active; all and only emitted requested
     roles become role_plans. One Prompt_script_sources.capture performs the complete
     unique program acquisition batch, with supplied explicit host operations.
 
@@ -82,6 +91,7 @@ end
 val capture
   :  Policy.t
   -> ?startup:Chat_response.Startup_compilation.t
+  -> root_role:Root_role.t
   -> host:Host.t
   -> scope:Prompt_source_owner.Scope.t
   -> capture:Prompt_source_owner.Capture.t

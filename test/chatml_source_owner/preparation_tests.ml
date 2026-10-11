@@ -38,6 +38,7 @@ let policy ?(roles = 16) ?(references = 64) ?(work = 1_000_000) () =
 
 let prepare
       ?startup
+      ?(root_role = Prepare.Root_role.Ui)
       ?(checkpoint = ignore)
       ?(operation = fun _ -> Chatml_project_build.Operation.Initial_prepare)
       ?(policy = policy ())
@@ -48,6 +49,7 @@ let prepare
   Prepare.capture
     policy
     ?startup
+    ~root_role
     ~host:{ additional_anchors = []; git_store = None; git_grants = [] }
     ~scope
     ~capture:captured
@@ -84,6 +86,8 @@ let on_event = fun ctx state event -> Task.pure(state)</script>|}
       root
       "root.chatmd"
       (moderator "root.project.json"
+       ^ {|<script id="legacy" language="chatml" kind="moderator" project="root.project.json">let initial_state = 0
+let on_event = fun event state -> Task.pure(state)</script>|}
        ^ {|<import src="parts/references.chatmd"/>
 <tool name="remote" agent="https://example.invalid/agent"/>
 <tool name="external" agent="/host/external.chatmd" local/>|}
@@ -124,8 +128,8 @@ let on_event = fun ctx state event -> Task.pure(state)</script>|}
           prepare ~operation ~policy:(policy ~roles:5 ~references:7 ()) env scope captured
           |> ok
         in
-        assert (!calls = 4);
-        assert (List.length (C.bindings custody) = 4);
+        assert (!calls = 6);
+        assert (List.length (C.bindings custody) = 6);
         let root_plan = Script_tests.plan (Builder.Capture.root value) in
         let root_programs =
           Chat_response.Restored_programs.restore
@@ -136,7 +140,57 @@ let on_event = fun ctx state event -> Task.pure(state)</script>|}
           |> ok
           |> Option.value_exn
         in
-        assert (List.length (C.Restored.programs root_programs) = 1);
+        assert (List.length (C.Restored.programs root_programs) = 2);
+        let headless_plan =
+          Script_tests.plan
+            ~moderator_surface:Chatml.Chatml_builtin_surface.moderator_surface
+            (Builder.Capture.root value)
+        in
+        let headless_custody =
+          prepare
+            ~root_role:Prepare.Root_role.Headless
+            ~policy:(policy ~roles:4 ~references:7 ())
+            env
+            scope
+            captured
+          |> ok
+        in
+        let headless_programs =
+          Chat_response.Restored_programs.restore
+            headless_plan
+            ~custody:headless_custody
+            ~limits:(Script_tests.custody_limits ())
+            ~checkpoint:ignore
+          |> ok
+          |> Option.value_exn
+        in
+        assert (List.length (C.Restored.programs headless_programs) = 2);
+        assert (List.length (C.bindings headless_custody) = 6);
+        let legacy_contract programs =
+          List.find_map (C.Restored.programs programs) ~f:(fun program ->
+            if
+              String.equal
+                (C.Binding.script_id (C.Restored.Program.binding program))
+                "legacy"
+            then
+              Some
+                (Chatml_prepared_program.compiler_contract
+                   (C.Restored.Program.prepared program))
+            else None)
+          |> Option.value_exn
+        in
+        assert (
+          not
+            (Chatml_source.Digest.equal
+               (legacy_contract headless_programs)
+               (legacy_contract root_programs)));
+        assert (
+          Result.is_error
+            (Chat_response.Restored_programs.restore
+               root_plan
+               ~custody:headless_custody
+               ~limits:(Script_tests.custody_limits ())
+               ~checkpoint:ignore));
         let child = snd (List.hd_exn (Builder.Capture.agents value)) in
         List.iter
           [ Script_tests.plan
@@ -185,7 +239,7 @@ let on_event = fun ctx state event -> Task.pure(state)</script>|}
             }];
         Ok ())
       |> ok));
-  [%expect {| ((retained_variants 4) (configured_requests 4) (active_root 1)) |}]
+  [%expect {| ((retained_variants 6) (configured_requests 6) (active_root 2)) |}]
 ;;
 
 let%test_unit "unused markup stays unreachable and whole helper work is not reset" =
