@@ -1,0 +1,10 @@
+(library
+ (name chatml_local_source)
+ (public_name ochat.chatml_local_source)
+ (modules chatml_local_source chatml_local_source_native)
+ (private_modules chatml_local_source_native)
+ (foreign_stubs
+  (language c)
+  (names chatml_local_source_stubs))
+ (libraries core eio eio.unix source)
+ (preprocess (pps ppx_jane)))
