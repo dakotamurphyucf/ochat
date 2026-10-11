@@ -1012,6 +1012,37 @@ let%expect_test "daemon maintenance prunes expired idempotency and temporary blo
 let%expect_test "daemon reload atomically replaces catalogs" =
   with_fixture (fun env temporary workspace prompt _token_file ->
     Eio.Switch.run (fun sw ->
+      let module Revision = Agent_session.Prompt_revision in
+      let module Catalog = Agent_session.Prompt_catalog in
+      let document = Eio.Path.(Eio.Stdenv.fs env / temporary / "guide.md") in
+      Eio.Path.save ~create:(`Exclusive 0o600) document "first captured guide";
+      Eio.Path.save
+        ~create:(`Or_truncate 0o600)
+        Eio.Path.(Eio.Stdenv.fs env / prompt)
+        {|<developer><doc src="guide.md" local capture /></developer>|};
+      let revision daemon =
+        let entry =
+          Catalog.find_by_name (Agent_server.Daemon.prompts daemon) "coding-agent"
+          |> Option.value_exn
+        in
+        match entry.availability with
+        | Ready revision -> revision
+        | Unavailable diagnostics ->
+          raise_s
+            [%sexp
+              (diagnostics : Agent_session.Prompt_revision_builder.Diagnostic.t list)]
+        | Disabled -> failwith "unexpected disabled fixture"
+      in
+      let guide revision =
+        match Revision.elements revision with
+        | [ Prompt.Chat_markdown.Developer
+              { content =
+                  Some (Items [ Basic { text = Some text; document_url = None; _ } ])
+              ; _
+              }
+          ] -> text
+        | _ -> failwith "expected captured literal document"
+      in
       let source_file = Filename.concat temporary "reload-server.sexp" in
       let http =
         "((enabled false) (address \"127.0.0.1\") (port 8787) (require_auth true))"
@@ -1035,6 +1066,9 @@ let%expect_test "daemon reload atomically replaces catalogs" =
         | Ok value -> value
         | Error error -> raise_s [%sexp (error : Agent_protocol.Error.t)]
       in
+      let initial_revision = revision daemon in
+      [%test_eq: string] "first captured guide" (guide initial_revision);
+      Eio.Path.save ~create:(`Or_truncate 0o600) document "updated captured guide";
       let updated_text =
         initial_text
         |> String.substr_replace_all
@@ -1058,6 +1092,17 @@ let%expect_test "daemon reload atomically replaces catalogs" =
         | Error diagnostics ->
           raise_s [%sexp (diagnostics : Agent_server.Config.Diagnostic.t list)]
       in
+      let updated_revision = revision daemon in
+      Eio.Path.unlink document;
+      [%test_eq: string] "first captured guide" (guide initial_revision);
+      [%test_eq: string] "updated captured guide" (guide updated_revision);
+      assert (
+        not
+          (Agent_protocol.Id.Prompt_revision.equal
+             (Revision.id initial_revision)
+             (Revision.id updated_revision)));
+      print_endline
+        "startup and reload capture independently; retained revisions survive deletion";
       let workspace =
         Agent_session.Workspace_catalog.find_by_name
           (Agent_server.Daemon.workspaces daemon)
@@ -1084,6 +1129,7 @@ let%expect_test "daemon reload atomically replaces catalogs" =
       | Error error -> raise_s [%sexp (error : Agent_protocol.Error.t)]));
   [%expect
     {|
+    startup and reload capture independently; retained revisions survive deletion
     ((workspace_changed (project)) (prompt_changed (coding-agent))
      (profile_changed (interactive)) (access Read_only)
      (description ("Reloaded agent"))) |}]

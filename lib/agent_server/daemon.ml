@@ -461,6 +461,22 @@ let original_source_limits () =
   |> Or_error.ok_exn
 ;;
 
+let capture_documents limits scope capture =
+  Agent_session.Prompt_source_owner.Scope.capture_documents
+    scope
+    ~capture
+    ~limits
+    ~checkpoint:Eio.Fiber.check
+  |> Result.map_error ~f:(fun error ->
+    [ Agent_session.Prompt_revision_builder.Diagnostic.
+        { code = "prompt.document_capture"
+        ; message =
+            Sexp.to_string_hum (Agent_session.Prompt_source_owner.Error.sexp_of_t error)
+        ; source = None
+        }
+    ])
+;;
+
 let build_catalog
       ~sw
       ~env
@@ -487,6 +503,7 @@ let build_catalog
   let%bind prepared =
     Agent_session.Prompt_catalog.prepare_owned
       prompts
+      ?prepare_content:(Option.map content_limits ~f:capture_documents)
       ~sw
       ~source_limits:(original_source_limits ())
       ~max_roots:1024
@@ -810,6 +827,7 @@ let config_build_diagnostic config error =
 
 let config_watcher
       ~enabled
+      ~content_limits
       ~sw
       ~env
       ~config
@@ -840,6 +858,7 @@ let config_watcher
         let prompt_revisions =
           Agent_session.Prompt_catalog.prepare_owned
             prompts
+            ?prepare_content:(Option.map content_limits ~f:capture_documents)
             ~sw
             ~source_limits:(original_source_limits ())
             ~max_roots:1024
@@ -1209,6 +1228,7 @@ let compose
   let config_watcher =
     config_watcher
       ~enabled:execute
+      ~content_limits:options.content_limits
       ~sw
       ~env
       ~config

@@ -55,9 +55,11 @@ type options =
         targets/catalog. An explicit host retains its target/compiler/source
         restrictions. This does not grant tool execution authority. *)
   ; content_limits : Chatmd_prompt_content.Limits.t option
-    (** Fixed host policy for restoring captured documents in the prompt catalog.
-        None rejects content-bearing stored revisions. Source acquisition needs
-        its own preparation hook; stored metadata never selects these limits. *)
+    (** Fixed host policy for capturing documents during catalog startup/reload
+        and restoring them from session artifacts. Capture borrows the catalog's
+        original source scope; stored metadata never acquires source authority or
+        selects these limits. None rejects captured imports and content-bearing
+        stored revisions, while ordinary dynamic imports retain their behavior. *)
   ; script_preparation : Agent_session.Runtime_script_preparation.t option
     (** Host compilation, role planning and semantic graph restoration ceilings.
         Required for owned prompt revisions, including parser-only custody.

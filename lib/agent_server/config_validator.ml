@@ -1422,13 +1422,39 @@ let validate_prompt_file context prompt =
       ~remediation:"Create the prompt file or correct its path."
   else (
     try
-      let contents = Eio.Path.load file in
       let directory = Eio.Path.(Eio.Stdenv.fs context.env / Filename.dirname path) in
+      let max_input_bytes = 8 * 1024 * 1024 in
+      let loader =
+        Source_loader.confined_filesystem ~root:directory
+        |> Source_loader.with_read_limit ~max_bytes:(fun _ -> max_input_bytes)
+      in
+      let source = Filename.basename path in
+      let contents =
+        Source_loader.root loader ~file:source
+        |> Result.bind ~f:(Source_loader.read loader)
+        |> Result.ok_or_failwith
+      in
+      let limits =
+        Prompt.Chat_markdown.Limits.create
+          ~max_input_bytes
+          ~max_parse_calls:1024
+          ~max_tokens:100_000
+          ~max_depth:128
+        |> Or_error.ok_exn
+      in
       ignore
-        (Prompt.Chat_markdown.parse_chat_inputs ~source:path ~dir:directory contents
-         : Prompt.Chat_markdown.top_level_elements list);
+        (Prompt.Chat_markdown.prepare_chat_inputs
+           ~source
+           ~source_loader:loader
+           ~dir:directory
+           ~preprocess:Meta_prompting.Preprocessor.preprocess
+           ~limits
+           ~checkpoint:Eio.Fiber.check
+           contents
+         : Prompt.Chat_markdown.Parsed.t);
       Ok ()
     with
+    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
     | exn ->
       fail
         context
