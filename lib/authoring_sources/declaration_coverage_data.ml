@@ -286,7 +286,7 @@ let implementation_sources =
   ; ( "lib/chatmd/chatmd_owned_parser.ml"
     , "42130395da8eb0465c96d59a5233ae24adb300e5bd6094609a5cf60d007ca573" )
   ; ( "lib/agent_session/prompt_revision_builder.ml"
-    , "2a11d216f2668af389a37c34304ba0cb63402a6a2408659717f2550a105c8d32" )
+    , "df88d829f677ca09f080480bc34fd9aca88792fa7af424766f1c36a9b055cb5a" )
   ]
 ;;
 
