@@ -839,14 +839,17 @@ let%test_unit "configuration polling publishes edits without an explicit reload"
       let commits = ref 0 in
       let watcher =
         Agent_server.Config_watcher.create
+          ~sw
           ~env
           ~path
           ~initial
           ~hooks:
             { prepare = (fun _ _ -> Ok ())
+            ; publish = (fun _ _ -> Ok ())
             ; commit = (fun _ _ -> incr commits)
-            ; discard_prepared = (fun () -> ())
+            ; discard_prepared = (fun () -> Rejected)
             ; audit = (fun _ -> ())
+            ; retire = (fun () -> ())
             }
       in
       Fun.protect
@@ -1212,4 +1215,329 @@ let%expect_test "proxy actor policy cannot replace authenticated authority" =
              refused; policy exception preserved")));
   [%expect
     {| exact authority accepted; identity/kind/scopes/attributes replacements refused; policy exception preserved |}]
+;;
+
+let%test_module "fallible configuration publication" =
+  (module struct
+    module W = Agent_server.Config_watcher
+
+    let hooks : W.hooks =
+      { prepare = (fun _ _ -> Ok ())
+      ; publish = (fun _ _ -> Ok ())
+      ; commit = (fun _ _ -> ())
+      ; discard_prepared = (fun () -> Rejected)
+      ; audit = (fun _ -> ())
+      ; retire = (fun () -> ())
+      }
+    ;;
+
+    let with_file f =
+      with_fixture (fun env temporary workspace prompt _ ->
+        Eio.Switch.run (fun sw ->
+          let path = Filename.concat temporary "fallible.sexp" in
+          let contents = config_text ~workspace ~prompt ~http:"((enabled false))" in
+          let initial = validated_exn env path contents in
+          Eio.Path.save
+            ~create:(`Exclusive 0o600)
+            Eio.Path.(Eio.Stdenv.fs env / path)
+            (String.substr_replace_all
+               contents
+               ~pattern:"Coding agent"
+               ~with_:"Next configuration");
+          f env sw path initial))
+    ;;
+
+    let description watcher =
+      (W.current watcher).prompts
+      |> List.hd_exn
+      |> fun (prompt : Agent_server.Config.Prompt.t) -> prompt.description
+    ;;
+
+    let assert_description watcher text =
+      [%test_eq: string option] (Some text) (description watcher)
+    ;;
+
+    let assert_state expected actual =
+      if not (W.State.equal expected actual)
+      then raise_s [%sexp (expected : W.State.t), (actual : W.State.t)]
+    ;;
+
+    let%expect_test "publication acknowledgment precedes pointer installation" =
+      with_file (fun env sw path initial ->
+        let watcher = ref None in
+        let current () = Option.value_exn !watcher in
+        let record phase =
+          let watcher = current () in
+          let state, _ = W.status watcher in
+          print_s
+            [%sexp
+              (phase : string), (state : W.State.t), (description watcher : string option)]
+        in
+        let watcher_value =
+          W.create
+            ~sw
+            ~env
+            ~path
+            ~initial
+            ~hooks:
+              { hooks with
+                prepare =
+                  (fun _ _ ->
+                    record "prepare";
+                    Ok ())
+              ; publish =
+                  (fun _ _ ->
+                    record "durable acknowledgment";
+                    Ok ())
+              ; commit = (fun _ _ -> record "synchronous commit")
+              ; audit = (fun _ -> record "audit")
+              ; retire = (fun () -> record "retire")
+              }
+        in
+        watcher := Some watcher_value;
+        assert (Result.is_ok (W.reload watcher_value));
+        record "installed";
+        W.close_and_wait watcher_value);
+      [%expect
+        {|
+        (prepare Busy ("Coding agent"))
+        ("durable acknowledgment" Busy ("Coding agent"))
+        ("synchronous commit" Busy ("Coding agent"))
+        (audit Busy ("Next configuration"))
+        (retire Busy ("Next configuration"))
+        (installed Available ("Next configuration"))
+        |}]
+    ;;
+
+    let%test_unit "typed rejection and uncertainty retain old pointers and govern retry" =
+      List.iter [ W.Certainty.Rejected; Uncertain ] ~f:(fun certainty ->
+        with_file (fun env sw path initial ->
+          let publications = ref 0 in
+          let diagnostic =
+            Agent_server.Config.Diagnostic.
+              { code = "test.publish"
+              ; config_path = "$"
+              ; source_file = path
+              ; message = "publication denied"
+              ; remediation = "inspect publication"
+              }
+          in
+          let watcher =
+            W.create
+              ~sw
+              ~env
+              ~path
+              ~initial
+              ~hooks:
+                { hooks with
+                  publish =
+                    (fun _ _ ->
+                      incr publications;
+                      Error
+                        (match certainty with
+                         | Rejected -> W.Failure.Rejected [ diagnostic ]
+                         | Uncertain -> Uncertain [ diagnostic ]))
+                }
+          in
+          assert (Result.is_error (W.reload watcher));
+          assert_description watcher "Coding agent";
+          let state, _ = W.status watcher in
+          assert_state
+            (match certainty with
+             | Rejected -> Available
+             | Uncertain -> Uncertain)
+            state;
+          assert (Result.is_error (W.reload watcher));
+          [%test_eq: int]
+            (match certainty with
+             | Rejected -> 2
+             | Uncertain -> 1)
+            !publications;
+          W.close_and_wait watcher))
+    ;;
+
+    type phase =
+      | Prepare
+      | Publish
+      | Commit
+      | Audit
+      | Retire
+
+    let%test_unit "hook exceptions preserve identity and distinguish postcommit failure" =
+      List.iter [ Prepare; Publish; Commit; Audit; Retire ] ~f:(fun phase ->
+        with_file (fun env sw path initial ->
+          let sentinel = Failure "original reload callback" in
+          let discards = ref 0 in
+          let retired = ref 0 in
+          let fail () = raise sentinel in
+          let watcher =
+            W.create
+              ~sw
+              ~env
+              ~path
+              ~initial
+              ~hooks:
+                { prepare =
+                    (fun _ _ ->
+                      match phase with
+                      | Prepare -> fail ()
+                      | _ -> Ok ())
+                ; publish =
+                    (fun _ _ ->
+                      match phase with
+                      | Publish -> fail ()
+                      | _ -> Ok ())
+                ; commit =
+                    (fun _ _ ->
+                      match phase with
+                      | Commit -> fail ()
+                      | _ -> ())
+                ; audit =
+                    (fun _ ->
+                      match phase with
+                      | Audit -> fail ()
+                      | _ -> ())
+                ; retire =
+                    (fun () ->
+                      incr retired;
+                      match phase with
+                      | Retire -> fail ()
+                      | _ -> ())
+                ; discard_prepared =
+                    (fun () ->
+                      incr discards;
+                      match phase with
+                      | Publish -> Uncertain
+                      | _ -> Rejected)
+                }
+          in
+          (match W.reload watcher with
+           | _ -> assert false
+           | exception exn -> assert (phys_equal exn sentinel));
+          let committed =
+            match phase with
+            | Audit | Retire -> true
+            | Prepare | Publish | Commit -> false
+          in
+          assert_description
+            watcher
+            (if committed then "Next configuration" else "Coding agent");
+          [%test_eq: int] (if committed then 1 else 0) !retired;
+          [%test_eq: int] (if committed then 0 else 1) !discards;
+          let state, _ = W.status watcher in
+          assert_state
+            (match phase with
+             | Prepare | Audit | Retire -> Available
+             | Publish | Commit -> Uncertain)
+            state;
+          W.close_and_wait watcher))
+    ;;
+
+    let%test_unit "Busy and close join borrowed reload without mutex-held hooks" =
+      with_file (fun env sw path initial ->
+        let entered, enter = Eio.Promise.create () in
+        let leave, _ = Eio.Promise.create () in
+        let cleaned = ref false in
+        let calls = ref 0 in
+        let watcher =
+          W.create
+            ~sw
+            ~env
+            ~path
+            ~initial
+            ~hooks:
+              { hooks with
+                prepare =
+                  (fun _ _ ->
+                    incr calls;
+                    Eio.Promise.resolve enter ();
+                    Fun.protect
+                      ~finally:(fun () -> cleaned := true)
+                      (fun () ->
+                         Eio.Promise.await leave;
+                         Ok ()))
+              }
+        in
+        let reload = Eio.Fiber.fork_promise ~sw (fun () -> W.reload watcher) in
+        Eio.Promise.await entered;
+        assert_state Busy (fst (W.status watcher));
+        assert (Result.is_error (W.reload watcher));
+        assert (Result.is_error (W.check_admission watcher));
+        assert_description watcher "Coding agent";
+        [%test_eq: int] 1 !calls;
+        W.close_and_wait watcher;
+        assert !cleaned;
+        (match Eio.Promise.await reload with
+         | Error (Eio.Cancel.Cancelled _) -> ()
+         | Error exn -> raise exn
+         | Ok _ -> assert false);
+        assert_state Closed (fst (W.status watcher));
+        assert (Result.is_error (W.reload watcher)))
+    ;;
+
+    let%test_unit
+        "cancel before publish rejects; cancel after acknowledgment is uncertain"
+      =
+      List.iter [ false; true ] ~f:(fun cancel_after_ack ->
+        with_file (fun env sw path initial ->
+          let context = ref None in
+          let cancel () = Eio.Cancel.cancel (Option.value_exn !context) Exit in
+          let publications = ref 0 in
+          let commits = ref 0 in
+          let watcher =
+            W.create
+              ~sw
+              ~env
+              ~path
+              ~initial
+              ~hooks:
+                { hooks with
+                  prepare =
+                    (fun _ _ ->
+                      if not cancel_after_ack then cancel ();
+                      Ok ())
+                ; publish =
+                    (fun _ _ ->
+                      incr publications;
+                      cancel ();
+                      Ok ())
+                ; commit = (fun _ _ -> incr commits)
+                }
+          in
+          (match
+             Eio.Cancel.sub (fun current ->
+               context := Some current;
+               W.reload watcher)
+           with
+           | _ -> assert false
+           | exception Eio.Cancel.Cancelled _ -> ());
+          [%test_eq: int] (if cancel_after_ack then 1 else 0) !publications;
+          [%test_eq: int] 0 !commits;
+          assert_description watcher "Coding agent";
+          assert_state
+            (if cancel_after_ack then Uncertain else Available)
+            (fst (W.status watcher));
+          W.close_and_wait watcher))
+    ;;
+
+    let%test_unit "foreign domains cannot enter hooks or mutate watcher state" =
+      with_file (fun env sw path initial ->
+        let watcher = W.create ~sw ~env ~path ~initial ~hooks in
+        Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) (fun () ->
+          List.iter
+            [ (fun () -> ignore (W.reload watcher))
+            ; (fun () -> W.close watcher)
+            ; (fun () -> W.close_and_wait watcher)
+            ; (fun () -> ignore (W.current watcher))
+            ; (fun () -> ignore (W.status watcher))
+            ; (fun () -> ignore (W.check_admission watcher))
+            ]
+            ~f:(fun operation ->
+              match operation () with
+              | () -> assert false
+              | exception Invalid_argument _ -> ()));
+        assert_state Available (fst (W.status watcher));
+        W.close_and_wait watcher)
+    ;;
+  end)
 ;;
