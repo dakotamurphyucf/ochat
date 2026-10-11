@@ -8,6 +8,27 @@ let string value key = get value key |> Jsonaf.string_exn
 let list value key = get value key |> Jsonaf.list_exn
 let require condition message = if not condition then failwith message
 
+(* Declared edges select omission candidates; the actual production resolver
+   subsequently proves their necessity. No project document is interpreted here. *)
+let project_targets edges reads =
+  let reached = Hash_set.of_list (module String) reads in
+  let pending = Queue.of_list reads in
+  let targets = Hash_set.create (module String) in
+  while not (Queue.is_empty pending) do
+    let owner = Queue.dequeue_exn pending in
+    List.iter edges ~f:(fun edge ->
+      let target = string edge "toPath" in
+      if String.equal (string edge "fromPath") owner
+      then (
+        Hash_set.add targets target;
+        if not (Hash_set.mem reached target)
+        then (
+          Hash_set.add reached target;
+          Queue.enqueue pending target)))
+  done;
+  Hash_set.to_list targets |> List.sort ~compare:String.compare
+;;
+
 (* Replay only the bytes declared by the downloadable bundle, using the same
    source resolver and nested-agent traversal as prompt artifact capture. *)
 let parse_bundle env scratch sources entry =
@@ -128,20 +149,11 @@ let run env root scratch =
       in
       let directory = Eio.Path.(Eio.Stdenv.fs env / scratch / string example "id") in
       Eio.Path.mkdir ~perm:0o700 directory;
-      List.iter sources ~f:(fun (name, contents) ->
-        require
-          ((not (Filename.is_absolute name))
-           && not (List.mem (String.split name ~on:'/') ".." ~equal:String.equal))
-          "unsafe example path";
-        let parents = Filename.dirname name |> String.split ~on:'/' in
-        let _parent =
-          List.fold parents ~init:directory ~f:(fun parent part ->
-            let child = Eio.Path.(parent / part) in
-            if Poly.equal (Eio.Path.kind ~follow:false child) `Not_found
-            then Eio.Path.mkdir ~perm:0o700 child;
-            child)
-        in
-        Eio.Path.save ~create:(`Exclusive 0o600) Eio.Path.(directory / name) contents);
+      Docs_project_bundle.stage
+        directory
+        ~sources:
+          (List.map sources ~f:(fun (name, contents) ->
+             Source.Portable_path.create name |> Or_error.ok_exn, contents));
       let entries =
         entry
         :: List.filter_map files ~f:(fun file ->
@@ -157,14 +169,18 @@ let run env root scratch =
         List.concat_map parsed ~f:(fun (_, (_, _, reads)) -> reads)
         |> List.dedup_and_sort ~compare:String.compare
       in
+      let project_edges, parser_edges =
+        List.partition_tf (list example "edges") ~f:(fun edge ->
+          String.equal (string edge "kind") "project")
+      in
       let expected =
-        entries @ List.map (list example "edges") ~f:(fun e -> string e "toPath")
+        entries @ List.map parser_edges ~f:(fun e -> string e "toPath")
         |> List.dedup_and_sort ~compare:String.compare
       in
       require
         (List.equal String.equal reads expected)
         ("bundle source closure mismatch: " ^ string example "id");
-      List.iter (list example "edges") ~f:(fun edge ->
+      List.iter parser_edges ~f:(fun edge ->
         let missing = string edge "toPath" in
         let reduced =
           List.filter sources ~f:(fun (name, _) -> not (String.equal name missing))
@@ -179,6 +195,28 @@ let run env root scratch =
              Result.is_error
                (Result.try_with (fun () -> parse_bundle env scratch reduced entry))))
           ("missing companion unexpectedly resolved: " ^ missing));
+      let project_readers =
+        List.filter_map parsed ~f:(fun (entry, (_, _, reads)) ->
+          let required = project_targets project_edges reads in
+          Option.some_if (not (List.is_empty required)) (entry, required))
+      in
+      require
+        (List.equal
+           String.equal
+           (List.map project_edges ~f:(fun edge -> string edge "toPath")
+            |> List.dedup_and_sort ~compare:String.compare)
+           (List.concat_map project_readers ~f:snd
+            |> List.dedup_and_sort ~compare:String.compare))
+        ("unreachable project companion: " ^ string example "id");
+      List.iter project_readers ~f:(fun (entry, required) ->
+        Docs_project_bundle.check
+          ~env
+          ~home_parent:Eio.Path.(Eio.Stdenv.fs env / scratch)
+          ~bundle:directory
+          ~entry:(Source.Portable_path.create entry |> Or_error.ok_exn)
+          ~required:
+            (List.map required ~f:(fun path ->
+               Source.Portable_path.create path |> Or_error.ok_exn)));
       (match string example "id" with
        | "file-reader" -> file_read env scratch example nodes
        | "specialist" ->
@@ -197,7 +235,7 @@ let run env root scratch =
        | _ -> ())
     | _ -> ());
   Eio.Flow.copy_string
-    "Tutorial bundles: captured dependency closures, missing companions, scoped file \
-     reads, specialist isolation, and three-turn ChatML PASS (offline)\n"
+    "Tutorial bundles: parser/project dependency admission, missing companions, scoped \
+     file reads, specialist isolation, and three-turn ChatML PASS (offline)\n"
     (Eio.Stdenv.stdout env)
 ;;

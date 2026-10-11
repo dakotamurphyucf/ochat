@@ -72,7 +72,7 @@ export const exampleSchema = z.array(
             fromPath: relative,
             toPath: relative,
             reference: relative,
-            kind: z.enum(['agent', 'script', 'import']),
+            kind: z.enum(['agent', 'script', 'import', 'project']),
           })
           .strict(),
       ),

@@ -615,6 +615,41 @@
       "source": "docs-src/examples/applications/documentation-lab/server.sexp",
       "disposition": "example-download",
       "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/guarded-engineering/chatml.project.json",
+      "disposition": "example-download",
+      "reason": "Reviewed checked-JSON example companion; only the exact destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
+    },
+    {
+      "source": "docs-src/examples/applications/persistent-review-team/chatml.project.json",
+      "disposition": "example-download",
+      "reason": "Reviewed checked-JSON example companion; only the exact destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
+    },
+    {
+      "source": "docs-src/examples/learning/check-reports/chatml.project.json",
+      "disposition": "example-download",
+      "reason": "Reviewed checked-JSON example companion; only the exact destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
+    },
+    {
+      "source": "docs-src/examples/learning/check-reports/scripts/aggregate-one-off.chatml",
+      "disposition": "example-download",
+      "reason": "Reviewed checked-JSON example companion; only the exact destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
+    },
+    {
+      "source": "docs-src/examples/libraries/checked-json/chatml.project.json",
+      "disposition": "example-download",
+      "reason": "Reviewed checked-JSON example companion; only the exact destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
+    },
+    {
+      "source": "docs-src/examples/libraries/checked-json/src/checked_json.chatml",
+      "disposition": "example-download",
+      "reason": "Reviewed checked-JSON example companion; only the exact destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
+    },
+    {
+      "source": "docs-src/examples/libraries/checked-json/src/checked_json.chatmli",
+      "disposition": "example-download",
+      "reason": "Reviewed checked-JSON example companion; only the exact destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
     }
   ],
   "directories": [
