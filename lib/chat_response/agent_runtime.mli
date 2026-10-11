@@ -119,9 +119,13 @@ val validate_tool_paths
     supply the same policy identity; omission preserves legacy fingerprints.
     [programs] supplies already restored captured scripts, including configured
     legacy moderators. Preparation shares one compilation deadline and distinct
-    input allowances; executable activation runs after preparation. *)
+    input allowances; executable activation runs after preparation. [startup]
+    borrows the host's existing preparation context, including time already spent
+    planning/restoring scripts. It requires the same original [compilation_limits]
+    and remains owned by the enclosing [Startup_compilation.with_context]. *)
 val create
   :  ?native_service_revision:string
+  -> ?startup:Startup_compilation.t
   -> ?agent_source_runner:Tool.Agent_source_runner.t
   -> ?programs:Chatml_prompt_programs.Restored.t
   -> ?moderator_surface:Chatml.Chatml_builtin_surface.surface
@@ -212,7 +216,9 @@ type native_registration = Native_tool_pool.Registration.t =
     must supply their actual UI surface. [compilation_limits] and [checkpoint]
     govern one preparation/preflight deadline and distinct text/graph input
     allowances across native, managed and legacy roles; activation/execution
-    retains its separate control. Original callback failures propagate.
+    retains its separate control. [startup] borrows the existing host preparation
+    context with the same original limits, as in [create], without resetting its
+    deadline or input accounting. Original callback failures propagate.
     Legacy declarations compile in the same preflight and their selected artifact
     is retained on [native].
 
@@ -224,6 +230,7 @@ type native_registration = Native_tool_pool.Registration.t =
     This internal preparation entrypoint does not enable public feature flags. *)
 val prepare_extensions
   :  ?native_service_revision:string
+  -> ?startup:Startup_compilation.t
   -> ?agent_source_runner:Tool.Agent_source_runner.t
   -> ?moderator_surface:Chatml.Chatml_builtin_surface.surface
   -> ?compilation_limits:Chatml_compilation.limits

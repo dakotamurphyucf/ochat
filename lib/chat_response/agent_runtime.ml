@@ -617,6 +617,7 @@ let declares_legacy elements =
 
 let create
       ?native_service_revision
+      ?startup
       ?agent_source_runner
       ?programs
       ?(moderator_surface = Chatml.Chatml_builtin_surface.moderator_surface)
@@ -636,6 +637,7 @@ let create
       ()
   =
   Startup_compilation.with_context
+    ?startup
     ~limits:compilation_limits
     ~env:(Ctx.env ctx)
     ~checkpoint
@@ -697,6 +699,7 @@ type extension_resources =
 
 let prepare_extensions
       ?native_service_revision
+      ?startup
       ?agent_source_runner
       ?(moderator_surface = Chatml.Chatml_builtin_surface.moderator_surface)
       ?(compilation_limits = Chatml_compilation.default_limits)
@@ -718,6 +721,7 @@ let prepare_extensions
       ()
   =
   Startup_compilation.with_context
+    ?startup
     ~limits:compilation_limits
     ~env:(Ctx.env ctx)
     ~checkpoint

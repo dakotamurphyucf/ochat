@@ -174,6 +174,7 @@ let source_error definition error =
 let prepare_owned
       t
       ?prepare_programs
+      ?prepare_content
       ~sw
       ~source_limits
       ~max_roots
@@ -318,6 +319,9 @@ let prepare_owned
                            Prompt_revision_builder.build_captured
                              ?prepare_programs:
                                (Option.map prepare_programs ~f:(fun prepare _ ->
+                                  prepare scope capture))
+                             ?prepare_content:
+                               (Option.map prepare_content ~f:(fun prepare _ ->
                                   prepare scope capture))
                              ~capture:(Owner.Capture.value capture)
                              ~source_receipt:receipt

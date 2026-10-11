@@ -277,3 +277,69 @@ let%test_unit "non-extension captured legacy startup joins before caller cancell
         assert (phys_equal actual identity);
         [%test_eq: int] (Atomic.get completed) 2))
 ;;
+
+let%test_unit "runtime preparation retains time spent in the host's borrowed context" =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    List.iter [ false; true ] ~f:(fun extensions ->
+      let clock = Clock.create () in
+      let completed = Atomic.make 0 in
+      let env =
+        Startup_budget_support.environment
+          clock
+          env
+          ~completed
+          ~on_domain_start:(fun () -> failwith "expired host started compiler")
+      in
+      let elements = [] in
+      Startup_tests.with_host env ~elements (fun ~sw ~ctx ~host ->
+        context env ~checkpoint:ignore (fun startup ->
+          Clock.advance clock ~seconds:3.;
+          let run_agent ?prompt_dir:_ ?session_id:_ ?observer:_ ~source:_ ~ctx:_ _ _ =
+            failwith "startup invoked child"
+          in
+          let result =
+            if extensions
+            then
+              Chat_response.Agent_runtime.prepare_extensions
+                ~startup
+                ~compilation_limits:limits
+                ~sw
+                ~ctx
+                ~host
+                ~platform:Macos
+                ~prompt_elements:elements
+                ~manifest_authorizer:Shell_runtime.Manifest_authorizer.deny
+                ~approval_provider:Shell_runtime.Approval_broker.None_available
+                ~approval_store:(Shell_access.Approval.create_store ())
+                ~run_agent
+                ()
+              |> Result.map ~f:ignore
+            else
+              Chat_response.Agent_runtime.create
+                ~startup
+                ~compilation_limits:limits
+                ~sw
+                ~ctx
+                ~host
+                ~platform:Macos
+                ~prompt_elements:elements
+                ~manifest_authorizer:Shell_runtime.Manifest_authorizer.deny
+                ~approval_provider:Shell_runtime.Approval_broker.None_available
+                ~approval_store:(Shell_access.Approval.create_store ())
+                ~run_agent
+                ()
+              |> Result.map ~f:ignore
+          in
+          (match result with
+           | Ok () -> failwith "runtime reset expired host deadline"
+           | Error diagnostics ->
+             assert (
+               List.exists diagnostics ~f:(fun diagnostic ->
+                 String.equal
+                   diagnostic.Chat_response.Agent_runtime.code
+                   "chatml.compile_timeout")));
+          [%test_eq: int] (Atomic.get completed) 0;
+          Ok ())
+        |> ok)))
+;;

@@ -205,10 +205,36 @@ let%test_module "actual prompt content custody owners" =
         "captured literal identity and retained child replay survive source removal"
       =
       with_fixture (fun env root save definition receipt store owner ->
-        let captured, content = acquire env owner definition in
         let parent =
-          publish captured definition receipt store ~prepare_content:(fun _ -> Ok content)
-          |> built
+          Eio.Switch.run (fun sw ->
+            let module Catalog = Agent_session.Prompt_catalog in
+            let catalog = Catalog.create ~env ~artifact_store:store in
+            let candidate =
+              Catalog.prepare_owned
+                catalog
+                ~prepare_content:(fun scope capture ->
+                  Ok
+                    (Owner.Scope.capture_documents
+                       scope
+                       ~capture
+                       ~limits:(limits ())
+                       ~checkpoint:ignore
+                     |> ok))
+                ~sw
+                ~source_limits:
+                  (Owner.Limits.create ~max_path_components:64 ~max_runtime_leases:8
+                   |> Or_error.ok_exn)
+                ~max_roots:1
+                ~checkpoint:ignore
+                ~transaction_id:(fun _ -> P.Id.Transaction.create ())
+                ~created_at:timestamp
+                [ definition ]
+              |> ok
+            in
+            Catalog.install_owned catalog candidate |> ok;
+            match Catalog.find catalog definition.id with
+            | Some { availability = Ready revision; _ } -> revision
+            | _ -> failwith "captured document catalog entry unavailable")
         in
         assert (List.equal String.equal (literals parent) [ "original" ]);
         reject_missing_content env root definition parent;
