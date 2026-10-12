@@ -2166,14 +2166,37 @@ end
 module Embedded_interactive = struct
   let protocol_error error = Error.create_s [%sexp (error : Agent_protocol.Error.t)]
 
-  let select_session host id =
+  let select_session host id ~require_stopped =
     let open Result.Let_syntax in
     let%bind snapshot =
       Agent_client.Admin.get_session (Agent_server.Embedded.host_connection host) id
     in
+    let fields = Agent_protocol.Public.Snapshot.fields snapshot in
+    let%bind () =
+      match fields.session.observed_state with
+      | Stopped -> Ok ()
+      | Queued_for_slot
+      | Starting
+      | Recovering
+      | Idle
+      | Running_turn _
+      | Compacting _
+      | Waiting_for_permission _
+      | Stopping
+      | Failed _ ->
+        if require_stopped
+        then
+          Error
+            (Agent_protocol.Error.create
+               Invalid_state
+               ~message:"native reset requires a stopped session"
+               ~retryable:false
+               ())
+        else Ok ()
+    in
     let%bind observation =
       Result.of_option
-        (Agent_protocol.Public.Snapshot.fields snapshot).lifecycle
+        fields.lifecycle
         ~error:(Agent_protocol.Error.invalid_request "session lacks lifecycle authority")
     in
     Agent_server.Embedded.select_session
@@ -2285,7 +2308,7 @@ module Embedded_interactive = struct
                   ()
               | Some id ->
                 let%bind id = Agent_protocol.Id.Session.of_string id in
-                let%bind () = select_session host id in
+                let%bind () = select_session host id ~require_stopped:false in
                 Chat_tui.Agent_session_client.attach
                   ~sw:client_sw
                   ~clock:(Eio.Stdenv.clock env)
@@ -2395,7 +2418,9 @@ module Embedded_admin = struct
         | Export { id; out_file } -> export ~env connection id ~out_file
         | Reset { id; keep_history } ->
           let%bind session_id = Agent_protocol.Id.Session.of_string id in
-          let%bind () = Embedded_interactive.select_session host session_id in
+          let%bind () =
+            Embedded_interactive.select_session host session_id ~require_stopped:true
+          in
           Daemon_admin.reset ~env ~sw ~connection id ~keep_history
           |> Result.map_error ~f:(fun error ->
             Agent_protocol.Error.create
