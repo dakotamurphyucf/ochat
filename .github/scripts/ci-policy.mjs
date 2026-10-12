@@ -1,5 +1,16 @@
 // Conservative dependency policy. Unknown inputs always request full validation.
-export function classifyPaths(paths) {
+// These exact CI control-plane files are tested by the mandatory detection job.
+// Workflow, setup, toolchain and framework-runner changes still require all jobs.
+const selectionPolicyFiles = new Set([
+  ".github/scripts/ci-policy.mjs",
+  ".github/scripts/select-checks.mjs",
+  ".github/scripts/docs-diff.mjs",
+  ".github/tests/ci-policy.test.mjs",
+  ".github/tests/docs-diff.test.mjs",
+]);
+
+export function classifyPaths(paths, documentationPaths = []) {
+  const provenDocumentation = new Set(documentationPaths);
   const result = {
     framework: false,
     semantics: false,
@@ -25,6 +36,14 @@ export function classifyPaths(paths) {
       ["website/README.md", "website/CONTRIBUTING.md"].includes(path)
     ) {
       result.reasons.push(`${path}: maintainer documentation only`);
+    } else if (
+      provenDocumentation.has(path) ||
+      selectionPolicyFiles.has(path)
+    ) {
+      result.website = result.semantics = true;
+      result.reasons.push(
+        `${path}: ${provenDocumentation.has(path) ? "verified documentation-only diff" : "CI selection policy; mandatory policy tests"}; website and semantic qualification`,
+      );
     } else if (path.startsWith("website/")) {
       // Production artifacts require same-revision semantic evidence, even for UI-only changes.
       result.website = result.semantics = true;
@@ -46,13 +65,15 @@ export function chooseChecks({
   ref,
   paths = [],
   pendingPaths = [],
+  documentationPaths = [],
+  pendingDocumentationPaths = [],
   fallback,
   mode = "validate",
 }) {
   if (!["validate", "redeploy", "cold"].includes(mode))
     throw new Error("Unknown dispatch mode");
-  const current = classifyPaths(paths);
-  const pending = classifyPaths(pendingPaths);
+  const current = classifyPaths(paths, documentationPaths);
+  const pending = classifyPaths(pendingPaths, pendingDocumentationPaths);
   const full =
     Boolean(fallback) || ["workflow_dispatch", "schedule"].includes(event);
   const selection = {
