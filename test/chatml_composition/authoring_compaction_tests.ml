@@ -124,6 +124,7 @@ let exercise with_session =
   and fresh_source = ref "" in
   let first_receipts = ref [] in
   let partial_pages = ref 0 in
+  let prepare_continuations = ref 0 in
   let delivered_pages = ref [] in
   let query number request =
     let id = "reference-" ^ Int.to_string number in
@@ -184,10 +185,24 @@ let exercise with_session =
            incr partial_pages;
            assert (not (Jsonaf.bool_exn (Q.field page "complete")));
            let minimum = Q.field (Q.field page "budget") "minimum_next_tokens" in
+           let continuation_floor =
+             match !stage with
+             | Initial_prepare ->
+               incr prepare_continuations;
+               (* Exercise small authenticated continuations before retrieving the
+                  remaining installed corpus at the admitted host ceiling. Each
+                  page is a durable foreground exchange; corpus growth need not
+                  multiply those exchanges after pagination is already proved. *)
+               if !prepare_continuations <= 2
+               then 6000
+               else Chat_response.Authoring_validation.default_context_budget.max_tokens
+             | Initial_example | Refreshed_example -> 6000
+             | Await_compaction | Validate | Execute | Finished -> assert false
+           in
            let budget =
              match minimum with
-             | `Number n -> Int.max 6000 (Int.of_string n)
-             | `Null -> 6000
+             | `Number n -> Int.max continuation_floor (Int.of_string n)
+             | `Null -> continuation_floor
              | _ -> assert false
            in
            query number (Q.request ~cursor ~max_tokens:budget "continue")
