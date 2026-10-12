@@ -2,9 +2,19 @@
     bearer capabilities: callers must authenticate the parent and recheck current
     policy, generations and revocation before every effect or disclosure.
 
-    Reserve before installing an artifact or child. A retry with the same scoped
-    key and request digest returns the original identities. Records have no TTL
-    and are not pruned by ordinary command-receipt retention. *)
+    Reserve before installing a child or an artifact that has not already been
+    admitted. A retry with the same scoped key and request digest returns the
+    original identities. Records have no TTL and are not pruned by ordinary
+    command-receipt retention.
+
+    Child and transaction identities remain unique across all records. Different
+    records may share an artifact revision only when every record still owning
+    it agrees on the exact manifest digest. Sharing bytes grants no authority.
+    A permanently revoked record with [artifact_collection = Some Prepared] has
+    irrevocably released artifact ownership; its immutable historical digest
+    does not constrain a later recapture after collection. Revoked records without
+    that marker still own their artifacts. Every durable scan validates these
+    invariants before delivering records to a callback. *)
 
 module Key = Delegation_record.Key
 module Admission = Delegation_record.Admission
@@ -81,7 +91,11 @@ val resolve : t -> Reference.t -> (record, Store_error.t) result
     conflicts even if the request digest is unchanged; a generated reservation
     cannot be relabeled as authored. Replay reestablishes durability
     after a potentially ambiguous prior write acknowledgement.
-    Scan budgets include every existing intent and atomic temporary entry. *)
+    A new key can share an admitted revision under the ownership/digest invariant
+    above; child and transaction IDs remain fresh. This does not load or authorize
+    the artifact. A revoked replay remains revoked and cannot authorize a new
+    side effect. Scan budgets include every existing intent and atomic temporary
+    entry, including released historical records. *)
 val reserve
   :  t
   -> key:Key.t
@@ -133,7 +147,10 @@ val with_records
     partially deleted artifacts under that same irrevocable intent. This preserves
     the current named v6 carrier and original admission reference hash.
     Installed/linked children, unrevoked attempts and every parent revision remain
-    protected. The immutable retry record is never removed or unrevoked.
+    protected. Protection is the union across all records: releasing one record
+    never permits deletion of an artifact retained by another record. The
+    immutable retry record is never removed or unrevoked; its release marker
+    never permits advancement or revival of the old admission.
     [f] receives protected revisions and must add all catalog/session references,
     including archives. Invalid ledger/destinations, failed verification and
     exhausted budgets prevent [f]. Marked partial deletions are resumable. *)

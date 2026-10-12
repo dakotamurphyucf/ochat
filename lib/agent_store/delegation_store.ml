@@ -215,6 +215,42 @@ let resolve t expected =
     | None -> Error (Store_error.Missing "delegated session creation record"))
 ;;
 
+let validate_record_identities records =
+  let unique projection compare =
+    List.map records ~f:projection
+    |> List.sort ~compare
+    |> List.is_sorted_strictly ~compare
+  in
+  if
+    not
+      (unique (fun r -> r.admission.child_session_id) P.Id.Session.compare
+       && unique (fun r -> r.admission.transaction_id) P.Id.Transaction.compare)
+  then corrupt "delegation ledger reuses a child or transaction identity"
+  else (
+    (* Prepared is an irrevocable release, not an artifact ownership claim. Its
+       historical digest can differ after the same content is recaptured. *)
+    let owning =
+      List.filter records ~f:(fun record -> Option.is_none record.artifact_collection)
+      |> List.sort ~compare:(fun left right ->
+        P.Id.Prompt_revision.compare
+          left.admission.revision_id
+          right.admission.revision_id)
+    in
+    List.fold_result owning ~init:None ~f:(fun previous record ->
+      match previous with
+      | Some prior
+        when P.Id.Prompt_revision.equal
+               prior.admission.revision_id
+               record.admission.revision_id
+             && not
+                  (String.equal
+                     prior.admission.manifest_sha256
+                     record.admission.manifest_sha256) ->
+        corrupt "delegation artifact owners disagree on the manifest digest"
+      | None | Some _ -> Ok (Some record))
+    |> Result.map ~f:ignore)
+;;
+
 let records_locked t ~max_records ~max_bytes =
   let open Result.Let_syntax in
   let%bind () =
@@ -250,19 +286,8 @@ let records_locked t ~max_records ~max_bytes =
       | false -> corrupt "delegation scan exceeds its record budget"
     in
     let%bind records = List.map names ~f:(read reader) |> Result.all in
-    let unique projection compare =
-      List.map records ~f:projection
-      |> List.sort ~compare
-      |> List.is_sorted_strictly ~compare
-    in
-    (match
-       unique (fun r -> r.admission.child_session_id) P.Id.Session.compare
-       && unique (fun r -> r.admission.revision_id) P.Id.Prompt_revision.compare
-       && unique (fun r -> r.admission.transaction_id) P.Id.Transaction.compare
-     with
-     | true -> Ok records
-     | false ->
-       corrupt "delegation ledger reuses a child, artifact or transaction identity")
+    let%map () = validate_record_identities records in
+    records
 ;;
 
 let with_records t ~max_records ~max_bytes ~f =
@@ -412,23 +437,11 @@ let reserve t ~key ~request_sha256 ~admission ~max_records ~max_bytes =
     | Some record -> Ok (Conflict record)
     | None ->
       let%bind () =
-        match
-          List.length records < max_records
-          && not
-               (List.exists records ~f:(fun r ->
-                  P.Id.Session.equal
-                    admission.child_session_id
-                    r.admission.child_session_id
-                  || P.Id.Prompt_revision.equal
-                       admission.revision_id
-                       r.admission.revision_id
-                  || P.Id.Transaction.equal
-                       admission.transaction_id
-                       r.admission.transaction_id))
-        with
+        match List.length records < max_records with
         | true -> Ok ()
-        | false -> corrupt "delegation reservation exceeds capacity or reuses an identity"
+        | false -> corrupt "delegation reservation exceeds capacity"
       in
+      let%bind () = validate_record_identities (candidate :: records) in
       let%map () = save t candidate in
       New candidate)
 ;;
