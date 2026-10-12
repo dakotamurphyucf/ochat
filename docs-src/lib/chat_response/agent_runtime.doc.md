@@ -49,6 +49,10 @@ type t =
   ; shell_admin_policy : Shell_runtime.Admin_policy.t option
   ; shell_security_status : Shell_runtime.Manifest_security.status option
   ; moderator_shell_runtime : string option
+  ; legacy_moderator : Moderator_manager.Registry.artifact option
+    (** Compiled before native activation against this host's actual surface and
+        complete tool pool. Later manager construction consumes this artifact
+        without recompiling or initializing here. Native inheritance clears it. *)
   }
 
 type shell_inspection =
@@ -57,6 +61,19 @@ type shell_inspection =
   ; administrative_policy : Shell_runtime.Admin_policy.t
   ; security_status : Shell_runtime.Manifest_security.status
   }
+
+(** Pure declaration preparation shared by source planning and runtime inspection.
+    Returns the actual manifest compiler's transient material so callers can
+    select effective scripts and invocation contracts. Does not consult host
+    policy, acquire source authority, authorize tools or run initializers.
+    Material may contain private declaration data: never persist it in program
+    custody or expose it as public authoring metadata. *)
+val prepare_shell_manifest
+  :  platform:Chatmd_shell_spec.Shell_spec.platform
+  -> prompt_elements:Prompt.Chat_markdown.top_level_elements list
+  -> ( Chatmd_shell_spec.Manifest.t * Chatmd_shell_spec.Manifest_compiler.material
+       , diagnostic list )
+       result
 
 (** [inspect_shell ~env ~platform ~prompt_elements] evaluates requested shell
     declarations against host administrative and trust policy without
@@ -116,9 +133,21 @@ val validate_tool_paths
     manifest authorizer and return no shell registry. All resources remain
     owned by [sw]. [native_service_revision] optionally binds trusted host-service
     policy to resource/capability identity. Hosts restoring those resources must
-    supply the same policy identity; omission preserves legacy fingerprints. *)
+    supply the same policy identity; omission preserves legacy fingerprints.
+    [programs] supplies already restored captured scripts, including configured
+    legacy moderators. Preparation shares one compilation deadline and distinct
+    input allowances; executable activation runs after preparation. [startup]
+    borrows the host's existing preparation context, including time already spent
+    planning/restoring scripts. It requires the same original [compilation_limits]
+    and remains owned by the enclosing [Startup_compilation.with_context]. *)
 val create
   :  ?native_service_revision:string
+  -> ?startup:Startup_compilation.t
+  -> ?agent_source_runner:Tool.Agent_source_runner.t
+  -> ?programs:Chatml_prompt_programs.Restored.t
+  -> ?moderator_surface:Chatml.Chatml_builtin_surface.surface
+  -> ?compilation_limits:Chatml_compilation.limits
+  -> ?checkpoint:(unit -> unit)
   -> sw:Eio.Switch.t
   -> ctx:Eio_unix.Stdenv.base Ctx.t
   -> host:Shell_runtime.Host.t
@@ -175,7 +204,7 @@ val inherit_native
     Unselected registrations are never exposed. Revision and
     result contract participate in capability identity; duplicate supplied names
     are rejected. This does not grant invocation or authoring authority. *)
-type native_registration =
+type native_registration = Native_tool_pool.Registration.t =
   { implementation : Ochat_function.t
   ; implementation_revision : string
   ; result_contract : Tool_capability.result_contract
@@ -188,8 +217,11 @@ type native_registration =
 (** Prepare a definition for an extensibility-aware host. Validates the captured
     declarations, constructs native resources through the same shell authorization
     and resource bindings as [create], then compiles all versioned scripts in an
-    Eio domain against those exact live capabilities. No script initializer or
-    handler runs here. Cross-kind collisions include dynamically expanded native
+    Eio domain against those exact staged native capabilities. Only successful
+    preparation permits native shell-hook initialization and snapshot restore.
+    Versioned script initializers and handlers remain unevaluated; the session
+    owner installs their execution services later. Failed script preparation
+    preserves source diagnostics and leaves staged shell execution revoked. Cross-kind collisions include dynamically expanded native
     tool names. Inherited/generated and authoring declarations still require their
     respective host services and are rejected. Resources remain owned by [sw];
     the caller must release that scope after failed preparation or runtime teardown.
@@ -197,11 +229,32 @@ type native_registration =
     [delegated_moderator] defaults to false; true compiles moderators and their
     managed handlers against the tool-mediated delegated contract. The host still
     must enforce inherited execution authority when constructing the live runtime.
+    [moderator_surface] defaults to the headless legacy surface; UI-capable hosts
+    must supply their actual UI surface. [compilation_limits] and [checkpoint]
+    govern one preparation/preflight deadline and distinct text/graph input
+    allowances across native, managed and legacy roles; activation/execution
+    retains its separate control. [startup] borrows the existing host preparation
+    context with the same original limits, as in [create], without resetting its
+    deadline or input accounting. Original callback failures propagate.
+    Legacy declarations compile in the same preflight and their selected artifact
+    is retained on [native].
+
+    When [programs] is supplied, native hooks and versioned scripts compile from
+    that exact restored custody. Selected matcher entrypoints retain their own
+    contracts, and all native hook project requirements are admitted against the
+    complete staged pool before any hook initializer. Missing graphs reject
+    without falling back to script bodies or current files.
     This internal preparation entrypoint does not enable public feature flags. *)
 val prepare_extensions
   :  ?native_service_revision:string
+  -> ?startup:Startup_compilation.t
+  -> ?agent_source_runner:Tool.Agent_source_runner.t
+  -> ?moderator_surface:Chatml.Chatml_builtin_surface.surface
+  -> ?compilation_limits:Chatml_compilation.limits
+  -> ?checkpoint:(unit -> unit)
   -> ?native_registrations:native_registration list
   -> ?delegated_moderator:bool
+  -> ?programs:Chatml_prompt_programs.Restored.t
   -> sw:Eio.Switch.t
   -> ctx:Eio_unix.Stdenv.base Ctx.t
   -> host:Shell_runtime.Host.t

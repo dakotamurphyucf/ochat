@@ -263,6 +263,8 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_server/daemon.mli` | [contract](../../lib/agent_server/daemon.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/agent_server/delegated_runtime.mli` | [contract](../../lib/agent_server/delegated_runtime.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_server/delegation_lifecycle.mli` | [contract](../../lib/agent_server/delegation_lifecycle.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
+| `lib/agent_server/dependency_administration.mli` | [contract](../../lib/agent_server/dependency_administration.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/agent_server/dependency_update_receipt.mli` | [contract](../../lib/agent_server/dependency_update_receipt.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/agent_server/dispatcher.mli` | [contract](../../lib/agent_server/dispatcher.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/agent_server/embedded.mli` | [contract](../../lib/agent_server/embedded.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/agent_server/embedded_host_cleanup.mli` | [contract](../../lib/agent_server/embedded_host_cleanup.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
@@ -285,6 +287,13 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_server/permission_review_service.mli` | [contract](../../lib/agent_server/permission_review_service.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
 | `lib/agent_server/permission_scheduler.mli` | [contract](../../lib/agent_server/permission_scheduler.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
 | `lib/agent_server/principal_projection.mli` | [contract](../../lib/agent_server/principal_projection.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/agent_server/project_source_configuration.mli` | [contract](../../lib/agent_server/project_source_configuration.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/agent_server/project_source_header.mli` | [contract](../../lib/agent_server/project_source_header.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/agent_server/project_source_host.mli` | [contract](../../lib/agent_server/project_source_host.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/agent_server/project_source_policy.mli` | [contract](../../lib/agent_server/project_source_policy.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/agent_server/prompt_catalog_host.mli` | [contract](../../lib/agent_server/prompt_catalog_host.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_server/prompt_catalog_publication.mli` | [contract](../../lib/agent_server/prompt_catalog_publication.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_server/prompt_dependency_projection.mli` | [contract](../../lib/agent_server/prompt_dependency_projection.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_server/provider_operator_port.mli` | [contract](../../lib/agent_server/provider_operator_port.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/agent_server/recovery_parent.mli` | [contract](../../lib/agent_server/recovery_parent.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_server/result_retention.mli` | [contract](../../lib/agent_server/result_retention.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
@@ -302,6 +311,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_server/session_capacity.mli` | [contract](../../lib/agent_server/session_capacity.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_server/session_catalog_policy.mli` | [contract](../../lib/agent_server/session_catalog_policy.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_server/session_factory.mli` | [contract](../../lib/agent_server/session_factory.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_server/session_factory_catalogs.mli` | [contract](../../lib/agent_server/session_factory_catalogs.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_server/session_helper_policy.mli` | [contract](../../lib/agent_server/session_helper_policy.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_server/session_lifecycle_receipts.mli` | [contract](../../lib/agent_server/session_lifecycle_receipts.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_server/session_lifecycle_service.mli` | [contract](../../lib/agent_server/session_lifecycle_service.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
@@ -323,6 +333,8 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/automatic_turn_budget.mli` | [contract](../../lib/agent_session/automatic_turn_budget.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/background_execution.mli` | [contract](../../lib/agent_session/background_execution.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/background_job_event.mli` | [contract](../../lib/agent_session/background_job_event.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
+| `lib/agent_session/captured_agent_runner.mli` | [contract](../../lib/agent_session/captured_agent_runner.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/captured_child_source.mli` | [contract](../../lib/agent_session/captured_child_source.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/chatmd_export.mli` | [contract](../../lib/agent_session/chatmd_export.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/compaction_archive.mli` | [contract](../../lib/agent_session/compaction_archive.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/configuration_capture.mli` | [contract](../../lib/agent_session/configuration_capture.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
@@ -399,10 +411,21 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/permission_reviewer.mli` | [contract](../../lib/agent_session/permission_reviewer.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
 | `lib/agent_session/persistence_codec.mli` | [contract](../../lib/agent_session/persistence_codec.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_session/prompt_catalog.mli` | [contract](../../lib/agent_session/prompt_catalog.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/prompt_content_custody.mli` | [contract](../../lib/agent_session/prompt_content_custody.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/prompt_definition.mli` | [contract](../../lib/agent_session/prompt_definition.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/prompt_parser_boundary.mli` | [contract](../../lib/agent_session/prompt_parser_boundary.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/prompt_program_custody.mli` | [contract](../../lib/agent_session/prompt_program_custody.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/prompt_project_baseline.mli` | [contract](../../lib/agent_session/prompt_project_baseline.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/prompt_project_baseline_document.mli` | [contract](../../lib/agent_session/prompt_project_baseline_document.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/prompt_project_baseline_record.mli` | [contract](../../lib/agent_session/prompt_project_baseline_record.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/prompt_project_baseline_store.mli` | [contract](../../lib/agent_session/prompt_project_baseline_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/agent_session/prompt_project_preparation.mli` | [contract](../../lib/agent_session/prompt_project_preparation.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/prompt_project_route.mli` | [contract](../../lib/agent_session/prompt_project_route.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/prompt_revision.mli` | [contract](../../lib/agent_session/prompt_revision.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/prompt_revision_builder.mli` | [contract](../../lib/agent_session/prompt_revision_builder.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/prompt_script_preparation.mli` | [contract](../../lib/agent_session/prompt_script_preparation.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/prompt_script_roles.mli` | [contract](../../lib/agent_session/prompt_script_roles.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/prompt_script_sources.mli` | [contract](../../lib/agent_session/prompt_script_sources.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/prompt_source_lease.mli` | [contract](../../lib/agent_session/prompt_source_lease.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/prompt_source_owner.mli` | [contract](../../lib/agent_session/prompt_source_owner.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/queued_moderator_event.mli` | [contract](../../lib/agent_session/queued_moderator_event.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
@@ -433,6 +456,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/runtime_activity.mli` | [contract](../../lib/agent_session/runtime_activity.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/runtime_builder.mli` | [contract](../../lib/agent_session/runtime_builder.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/runtime_paths.mli` | [contract](../../lib/agent_session/runtime_paths.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/runtime_script_preparation.mli` | [contract](../../lib/agent_session/runtime_script_preparation.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/schedule_ownership.mli` | [contract](../../lib/agent_session/schedule_ownership.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_session/script_ingress_service.mli` | [contract](../../lib/agent_session/script_ingress_service.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/script_job_service.mli` | [contract](../../lib/agent_session/script_job_service.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
@@ -574,6 +598,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_response/background_delivery.mli` | [contract](../../lib/chat_response/background_delivery.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/chat_response/background_job_operations.mli` | [contract](../../lib/chat_response/background_job_operations.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chat_response/background_request.mli` | [contract](../../lib/chat_response/background_request.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
+| `lib/chat_response/captured_script.mli` | [contract](../../lib/chat_response/captured_script.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/chatml_moderation.mli` | [contract](../../lib/chat_response/chatml_moderation.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chat_response/chatml_moderator.mli` | [contract](../../lib/chat_response/chatml_moderator.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chat_response/chatml_turn_driver.mli` | [contract](../../lib/chat_response/chatml_turn_driver.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
@@ -598,11 +623,16 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_response/moderation.mli` | [contract](../../lib/chat_response/moderation.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/moderator_invocation.mli` | [contract](../../lib/chat_response/moderator_invocation.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chat_response/moderator_manager.mli` | [contract](../../lib/chat_response/moderator_manager.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chat_response/moderator_program.mli` | [contract](../../lib/chat_response/moderator_program.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chat_response/native_tool_pool.mli` | [contract](../../lib/chat_response/native_tool_pool.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/neutral_turn.mli` | [contract](../../lib/chat_response/neutral_turn.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
 | `lib/chat_response/notification_operations.mli` | [contract](../../lib/chat_response/notification_operations.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/one_off_request.mli` | [contract](../../lib/chat_response/one_off_request.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/one_off_script.mli` | [contract](../../lib/chat_response/one_off_script.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chat_response/prepared_script.mli` | [contract](../../lib/chat_response/prepared_script.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/response_loop.mli` | [contract](../../lib/chat_response/response_loop.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chat_response/restored_programs.mli` | [contract](../../lib/chat_response/restored_programs.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/chat_response/retained_selection.mli` | [contract](../../lib/chat_response/retained_selection.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/root_binding.mli` | [contract](../../lib/chat_response/root_binding.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/root_context.mli` | [contract](../../lib/chat_response/root_context.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/run_operations.mli` | [contract](../../lib/chat_response/run_operations.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
@@ -610,8 +640,13 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_response/runtime_semantics.mli` | [contract](../../lib/chat_response/runtime_semantics.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/schedule_delivery.mli` | [contract](../../lib/chat_response/schedule_delivery.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chat_response/schedule_operations.mli` | [contract](../../lib/chat_response/schedule_operations.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chat_response/script_contract_plan.mli` | [contract](../../lib/chat_response/script_contract_plan.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chat_response/script_program.mli` | [contract](../../lib/chat_response/script_program.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chat_response/shell_preparation.mli` | [contract](../../lib/chat_response/shell_preparation.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
+| `lib/chat_response/shell_program.mli` | [contract](../../lib/chat_response/shell_program.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chat_response/shell_tool.mli` | [contract](../../lib/chat_response/shell_tool.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chat_response/sourced_response_event.mli` | [contract](../../lib/chat_response/sourced_response_event.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chat_response/startup_compilation.mli` | [contract](../../lib/chat_response/startup_compilation.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/subscription_operations.mli` | [contract](../../lib/chat_response/subscription_operations.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/tool.mli` | [contract](../../lib/chat_response/tool.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/tool_call.mli` | [contract](../../lib/chat_response/tool_call.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
@@ -730,6 +765,8 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chatmd_shell_spec/manifest_defaults.mli` | [contract](../../lib/chatmd_shell_spec/manifest_defaults.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chatmd_shell_spec/manifest_merge.mli` | [contract](../../lib/chatmd_shell_spec/manifest_merge.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chatmd_shell_spec/path_expr.mli` | [contract](../../lib/chatmd_shell_spec/path_expr.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
+| `lib/chatmd_shell_spec/script_project.mli` | [contract](../../lib/chatmd_shell_spec/script_project.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
+| `lib/chatmd_shell_spec/script_reference.mli` | [contract](../../lib/chatmd_shell_spec/script_reference.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chatmd_shell_spec/shell_element.mli` | [contract](../../lib/chatmd_shell_spec/shell_element.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chatmd_shell_spec/shell_spec.mli` | [contract](../../lib/chatmd_shell_spec/shell_spec.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chatmd_shell_spec/shell_tool_spec.mli` | [contract](../../lib/chatmd_shell_spec/shell_tool_spec.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
@@ -974,6 +1011,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../development/admin-remediation-notes.md) | `docs-src/development/admin-remediation-notes.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/bounded-document-conversion.md) | `docs-src/development/bounded-document-conversion.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/captured-document-content.md) | `docs-src/development/captured-document-content.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../development/chatmd-content-custody.md) | `docs-src/development/chatmd-content-custody.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/chatml-extensibility-handoff.md) | `docs-src/development/chatml-extensibility-handoff.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/chatml-program-custody.md) | `docs-src/development/chatml-program-custody.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/chatml-semantic-queries.md) | `docs-src/development/chatml-semantic-queries.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
@@ -983,7 +1021,9 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../development/documentation-worklog.md) | `docs-src/development/documentation-worklog.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/final-audit-remediation.md) | `docs-src/development/final-audit-remediation.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/library-reference-remediation.md) | `docs-src/development/library-reference-remediation.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../development/project-source-host.md) | `docs-src/development/project-source-host.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/readme-content-audit.md) | `docs-src/development/readme-content-audit.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../development/script-project-baselines.md) | `docs-src/development/script-project-baselines.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/typeahead-verification.md) | `docs-src/development/typeahead-verification.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../examples/README.md) | `docs-src/examples/README.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../examples/agent-server/README.md) | `docs-src/examples/agent-server/README.md` | Current reference/tutorial; offline checker applies. |
