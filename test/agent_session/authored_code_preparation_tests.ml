@@ -157,7 +157,12 @@ let before event state = Task.bind(Intercept.respond("%s:" ++ to_string(state), 
                |> Authored_agent_source_tests.built))
         |> protocol_ok
       in
-      let prepare ?(checkpoint = Eio.Fiber.check) selected =
+      let prepare
+            ?(checkpoint = Eio.Fiber.check)
+            ?(check_authority = Eio.Fiber.check)
+            ?(manifest_authorizer = Shell_runtime.Manifest_authorizer.assume_authorized)
+            selected
+        =
         Startup.with_context
           ~limits:(Agent_session.Runtime_script_preparation.compilation policy)
           ~env
@@ -172,11 +177,12 @@ let before event state = Task.bind(Intercept.respond("%s:" ++ to_string(state), 
               ~startup
               ~env
               ~sw
-              ~manifest_authorizer:Shell_runtime.Manifest_authorizer.assume_authorized
+              ~manifest_authorizer
               ~approval_provider:Shell_runtime.Approval_broker.None_available
               ~response_dir:root
               ~extension_snapshots:[]
               ~persist_extension_snapshots:(fun _ -> Ok ())
+              ~check_authority
               ~checkpoint)
           ()
       in
@@ -196,6 +202,179 @@ let before event state = Task.bind(Intercept.respond("%s:" ++ to_string(state), 
       (match prepare ~checkpoint:(fun () -> raise marker) chosen with
        | exception exn -> assert (phys_equal exn marker)
        | Ok _ | Error _ -> failwith "original checkpoint swallowed");
+      (* Revoke the genuine ledger admission after compiled manifest authorization,
+         before activation. This exercises the authority/helper boundary used by
+         Factory; it does not add an injectable Factory testing hook. *)
+      let admission_attempt ~revoke label =
+        let module P = Agent_protocol in
+        let module D = Agent_store.Delegation_store in
+        let module Session_store = Agent_store.Session_store in
+        let module Authority = Agent_session.Delegation_authority in
+        let selected =
+          selected (authored ~hook_state:{|fail("selected initializer reached")|} label)
+        in
+        let artifact = R.artifact selected in
+        let capabilities = Runtime_resource_tests.capabilities original.resources in
+        let registration =
+          Agent_session.Authored_agent_call.registration
+            ~source:original.source
+            ~capabilities
+            ~services:(fun _ -> failwith "activation probe dispatched an agent")
+            ()
+          |> protocol_ok
+        in
+        let public =
+          C.create
+            ~result_contracts:[ "specialist", registration.result_contract ]
+            ~owner:"activation-parent"
+            ~resource_fingerprint:
+              (Chatmd_shell_spec.Source_ref.digest "activation-parent")
+            [ registration.implementation_revision, registration.implementation ]
+          |> Background_execution_tests.cap
+        in
+        let owned = Agent_server.Authored_resources.create () in
+        Agent_server.Authored_resources.install owned ~sw ~public [ original ]
+        |> protocol_ok;
+        let profile =
+          permission_policy
+            ~tool_default:Allow
+            ~fallback:Fallback_deny
+            ~evaluator:None
+            ~reviewer:None
+        in
+        let parent =
+          actor_state
+            ~workspace_instance:workspace
+            ~liveness:Detached
+            ~start_immediately:false
+        in
+        let parent =
+          { parent with
+            spec =
+              { parent.spec with
+                prompt_revision_id = (Source.identity original.source).parent_revision_id
+              ; permission_profile = profile.id
+              ; permission_profile_digest = profile.revision_digest
+              }
+          ; lifecycle = { desired = Running; observed = Idle }
+          }
+        in
+        let session_store =
+          Session_store.create
+            ~env
+            ~sw
+            ~root:(Eio.Path.native_exn Eio.Path.(root / ("activation-" ^ label)))
+            ~server_id:(P.Id.Server.create ())
+            ~process_start_identity:None
+            ~lock_nonce:label
+          |> store_ok
+        in
+        Exn.protect
+          ~finally:(fun () -> Session_store.close session_store |> store_ok)
+          ~f:(fun () ->
+            let ledger = Session_store.delegations session_store in
+            let origin : D.Admission.authored_tool =
+              { name = "specialist"; source_sha256 = Source.fingerprint original.source }
+            in
+            let admission : D.Admission.t =
+              { child_session_id = second_session_id
+              ; revision_id = artifact.revision_id
+              ; transaction_id = P.Id.Transaction.create ()
+              ; manifest_sha256 = artifact.manifest_sha256
+              ; parent_revision_id = parent.spec.prompt_revision_id
+              ; parent_stop_epoch = Some parent.stop_epoch
+              ; authority_sha256 = Authority.fingerprint parent |> protocol_ok
+              ; authored_tool = Some origin
+              ; capability_pins =
+                  Chat_response.Background_request.capability_pins capabilities
+                  |> protocol_ok
+              ; lifetime = Owned
+              ; created_at = timestamp
+              ; inference_target = Some (delegation_inference_target ())
+              }
+            in
+            let record =
+              D.reserve
+                ledger
+                ~key:
+                  { parent_session_id = parent.identity.session_id
+                  ; parent_generation = parent.identity.generation
+                  ; principal_id
+                  ; idempotency_key = P.Idempotency_key.of_string label |> protocol_ok
+                  }
+                ~request_sha256:(Chatmd_shell_spec.Source_ref.digest label)
+                ~admission
+                ~max_records:4
+                ~max_bytes:1_000_000
+              |> store_ok
+              |> function
+              | D.New record -> record
+              | D.Replay _ | Conflict _ -> failwith "activation probe reservation reused"
+            in
+            D.advance ledger record Artifact_installed |> store_ok |> ignore;
+            let authority =
+              Authority.create
+                ~host:
+                  { state =
+                      (fun id ->
+                        assert (P.Id.Session.equal id parent.identity.session_id);
+                        Ok parent)
+                  ; capabilities =
+                      (fun id ->
+                        assert (P.Id.Session.equal id parent.identity.session_id);
+                        Ok public)
+                  ; resolve =
+                      (fun reference ->
+                        D.resolve ledger reference
+                        |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error)
+                  }
+                ~authored_capabilities:(Agent_server.Authored_resources.resolve owned)
+                ~reference:(D.reference record)
+                ~capabilities
+                ()
+            in
+            let authorize () =
+              Authority.check_authored_preparation
+                authority
+                ~origin
+                ~capabilities
+                ~session_id:second_session_id
+                ~revision_id:artifact.revision_id
+                ~manifest_sha256:artifact.manifest_sha256
+                ~permission_profile:profile
+            in
+            authorize () |> protocol_ok;
+            let exception Admission_rejected of P.Error.t in
+            let check_authority () =
+              Eio.Fiber.check ();
+              match authorize () with
+              | Ok () -> Eio.Fiber.check ()
+              | Error error -> raise (Admission_rejected error)
+            in
+            let authorizations = ref 0 in
+            let manifest_authorizer request =
+              incr authorizations;
+              if revoke
+              then D.revoke ledger record Authority_changed |> store_ok |> ignore;
+              Eio.Fiber.yield ();
+              Shell_runtime.Manifest_authorizer.assume_authorized request
+            in
+            (match prepare ~check_authority ~manifest_authorizer selected with
+             | Error error when not revoke ->
+               assert (P.Error.equal_code error.code Invalid_request);
+               assert (
+                 String.is_substring
+                   error.message
+                   ~substring:"selected initializer reached")
+             | exception Admission_rejected error when revoke ->
+               assert (P.Error.equal_code error.code Permission_denied);
+               assert (String.is_substring error.message ~substring:"delegation.revoked")
+             | Ok _ | Error _ ->
+               failwith "activation probe crossed its authority boundary");
+            [%test_eq: int] 1 !authorizations)
+      in
+      admission_attempt ~revoke:true "revoked";
+      admission_attempt ~revoke:false "admitted";
       let fresh = prepare chosen |> protocol_ok in
       Code.check fresh ~original:borrowed ~selected:chosen |> protocol_ok;
       assert (phys_equal borrowed.native.functions (Code.native fresh).functions);

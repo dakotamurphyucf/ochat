@@ -258,6 +258,11 @@ end
     initializer effects are not rolled back. [max_work_steps] is the remaining
     logical comparison/construction allowance, checked before work/retention.
     Errors abort the whole attempt, with no implicit retry or allowance reset.
+    [before_activation], when supplied by the actual admission owner, runs
+    immediately before EACH Chatml_extension.activate, after all construction and
+    any prior initializer effects/yields. Original resource liveness is rechecked
+    after this potentially yielding callback and before the effect; immutable
+    grant/gate checks remain mandatory. Neither callback escapes this call.
     Borrowed callback/cancellation exceptions preserve identity and raw trace. *)
 val rebind_code
   :  t
@@ -269,5 +274,6 @@ val rebind_code
        (Session.Shell_state.Extension_snapshot.t list -> (unit, string) Result.t)
   -> max_work_steps:int
   -> checkpoint:(unit -> unit)
+  -> ?before_activation:(unit -> unit)
   -> unit
   -> (Code_view.t, error list) Result.t

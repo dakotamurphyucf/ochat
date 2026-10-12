@@ -2769,7 +2769,7 @@ let prepare_authored_code
     in
     let%bind () = authorize () in
     let exception Admission_rejected of Agent_protocol.Error.t in
-    let checkpoint () =
+    let check_authority () =
       Eio.Fiber.check ();
       match authorize () with
       | Ok () -> Eio.Fiber.check ()
@@ -2874,7 +2874,8 @@ let prepare_authored_code
                   storage_paths.Agent_session.Runtime_paths.session_dir / "responses")
               ~extension_snapshots:!shell_state.Session.Shell_state.extension_snapshots
               ~persist_extension_snapshots
-              ~checkpoint
+              ~check_authority
+              ~checkpoint:Eio.Fiber.check
           with
           | Admission_rejected error -> Error error
         in

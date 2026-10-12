@@ -842,6 +842,7 @@ let rebind_code
       ?persist_extension_snapshots
       ~max_work_steps
       ~checkpoint
+      ?before_activation
       ()
   =
   let module B = Registry_code_budget in
@@ -1016,6 +1017,12 @@ let rebind_code
           let%bind () =
             List.fold_result ordered_instances ~init:() ~f:(fun () instance ->
               poll ();
+              Option.iter before_activation ~f:(fun check -> check ());
+              Eio.Fiber.check ();
+              let%bind () =
+                original.resource_check ()
+                |> Result.map_error ~f:(error "shell.registry_closed")
+              in
               Chatml_extension.activate instance
               |> Result.map_error ~f:(fun diagnostic -> [ diagnostic_error diagnostic ]))
           in

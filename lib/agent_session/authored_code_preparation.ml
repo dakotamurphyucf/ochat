@@ -363,6 +363,7 @@ let prepare
       ~response_dir
       ~extension_snapshots
       ~persist_extension_snapshots
+      ~check_authority
       ~checkpoint
   =
   let exception Work_limit in
@@ -379,8 +380,14 @@ let prepare
     poll ();
     Startup.checkpoint startup
   in
+  let admit () =
+    poll ();
+    check_authority ();
+    Eio.Fiber.check ()
+  in
   let open Result.Let_syntax in
   try
+    admit ();
     let%bind managed, definition, shell, view, runner, native =
       Startup.within startup ~map_error:compilation_error ~f:(fun () ->
         preflight ();
@@ -469,6 +476,7 @@ let prepare
             , runner
             , { original.native with native_registrations } )))
     in
+    admit ();
     let%bind shell_code_view =
       match shell, original.native.shell_registry with
       | None, _ -> Ok None
@@ -482,11 +490,13 @@ let prepare
           ~persist_extension_snapshots
           ~max_work_steps:(maximum - !work)
           ~checkpoint:poll
+          ~before_activation:admit
           ()
         |> Result.map_error ~f:registry_errors
         |> Result.map ~f:Option.some
       | Some _, None -> invalid "selected shell lost its original resource owner"
     in
+    admit ();
     Ok
       { original_native = original.native
       ; selected

@@ -165,6 +165,55 @@ let rebind sw registry (prepared, grant, _, _) =
   R.rebind_code registry ~prepared ~grant ~sw ~max_work_steps:100_000 ~checkpoint ()
 ;;
 
+let%test_unit
+    "activation rechecks original resources after the borrowed authority callback"
+  =
+  Eio_main.run (fun env ->
+    with_root env (fun root ->
+      let original = fixture env root "original" () in
+      let selected =
+        fixture env root "selected" ~initial_state:{|fail("initializer reached")|} ()
+      in
+      Eio.Switch.run (fun sw ->
+        let ready, deliver = Eio.Promise.create () in
+        let close, request_close = Eio.Promise.create () in
+        let closed, acknowledge_close = Eio.Promise.create () in
+        let worker =
+          Eio.Fiber.fork_promise ~sw (fun () ->
+            Eio.Switch.run (fun resource_sw ->
+              Eio.Promise.resolve deliver (instantiate resource_sw original);
+              Eio.Promise.await close);
+            (* Normal resource release and all native cleanup have completed. *)
+            Eio.Promise.resolve acknowledge_close ())
+        in
+        let registry = Eio.Promise.await ready in
+        (let prepared, grant, _, _ = selected in
+         let run before_activation =
+           R.rebind_code
+             registry
+             ~prepared
+             ~grant
+             ~sw
+             ~max_work_steps:100_000
+             ~checkpoint
+             ~before_activation
+             ()
+         in
+         let sentinel = Failure "borrowed authority callback" in
+         (match run (fun () -> raise sentinel) with
+          | exception exn -> assert (phys_equal exn sentinel)
+          | Ok _ | Error _ -> failwith "authority exception was swallowed");
+         (match
+            run (fun () ->
+              Eio.Promise.resolve request_close ();
+              Eio.Promise.await closed)
+          with
+          | Error [ error ] -> [%test_eq: string] error.code "shell.registry_closed"
+          | Error _ | Ok _ -> failwith "closed resources admitted a fresh initializer");
+         ());
+        Eio.Promise.await worker |> ok)))
+;;
+
 let config registry =
   R.runtimes registry |> List.hd_exn |> Shell_runtime.Runtime.executor_config
 ;;

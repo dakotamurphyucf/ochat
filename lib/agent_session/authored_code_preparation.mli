@@ -57,8 +57,18 @@ type t
     that complete preflight outside the compiler timer, under the existing hook
     execution limits/cancellation scope. The complete helper also shares one
     finite custody-work allowance, including activation's owner construction.
-    Neither startup nor checkpoint escapes. The switch owns fresh hook instances. The
-    caller joins all fresh execution before releasing the original resource loan.
+    [checkpoint] polls cancellation and bounded work. [check_authority] is the
+    borrowed original host's current wrapper/private grant, parent and exact
+    selected record/artifact validation. It runs before preflight, after all
+    yielding preflight even without shell code, before EACH fresh hook initializer
+    and after activation before delivering the immutable result. It is repeated
+    after prior initializer effects/yields. Denial raises the caller's original
+    exception. This separates byte/compiler polling from complete durable ancestry
+    reads; source acquisition and per-dispatch authority checks remain mandatory.
+
+    Neither startup nor either callback escapes. The switch owns fresh hook
+    instances. The caller joins all fresh execution before releasing the original
+    resource loan.
     Expected preparation failures return diagnostics; original callback exceptions
     and cancellation retain their identity/backtrace. No source read, artifact
     install, Delegation reservation or capability minting occurs here. *)
@@ -75,6 +85,7 @@ val prepare
   -> extension_snapshots:Session.Shell_state.Extension_snapshot.t list
   -> persist_extension_snapshots:
        (Session.Shell_state.Extension_snapshot.t list -> (unit, string) Result.t)
+  -> check_authority:(unit -> unit)
   -> checkpoint:(unit -> unit)
   -> (t, Agent_protocol.Error.t) Result.t
 
