@@ -362,10 +362,14 @@ See [the release runbook](planning/release-runbook.md),
 
 ## Required CI and selective publication
 
-The required `release-gate` covers selected framework normal/E2E tests,
-documentation semantics, and both website environments. Change detection and
+The required `release-gate` covers selected framework normal/E2E/native ARM64 Git
+tests, documentation semantics, bundled authoring-source tests, and both website
+environments. Change detection and
 the final gate run for ready PRs and all non-PR events. Draft PRs skip all
 runner jobs; marking a PR ready starts qualification. Maintainer-documentation-only changes can skip heavy
-jobs and publication; unknown inputs or missing history trigger full checks.
-Unshipped website changes are included before deciding whether to publish.
+jobs and publication. Verified prose-only and documentation-fingerprint changes
+skip the framework matrix while retaining semantic, authoring, website and browser
+qualification. Code, executable examples, compiler fingerprints, unknown inputs
+or missing history retain full checks. Unshipped changes are checked independently
+against the last successful deployment before deciding what to validate and publish.
 See [CI coverage, recovery and cache maintenance](planning/ci-enforcement.md).
