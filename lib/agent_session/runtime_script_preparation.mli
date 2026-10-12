@@ -137,3 +137,22 @@ val with_captured_child
         -> programs:Chatml_prompt_programs.Restored.t option
         -> ('a, Agent_protocol.Error.t) Result.t)
   -> ('a, Agent_protocol.Error.t) Result.t
+
+(** Compile the exact retained revision through [with_revision] and the same shell
+    preparation used at activation, without tools/native setup or initialization.
+    Original Parsed owns declarations; its retained graph supplies dependencies.
+    [invocation] is selected by the actual host/retained role, never inferred from
+    a digest or filename. No source acquisition or old-graph recompilation from
+    authoring paths. Complete requested canonical identity survives signature
+    rejection. Borrowed startup/checkpoint lifetime and original failures match
+    [with_revision]. *)
+val inspect_shell
+  :  t
+  -> ?startup:Chat_response.Startup_compilation.t
+  -> Prompt_revision.t
+  -> env:Eio_unix.Stdenv.base
+  -> invocation:Invocation.t
+  -> checkpoint:(unit -> unit)
+  -> ( Chat_response.Agent_runtime.prepared_shell_inspection
+       , Agent_protocol.Error.t )
+       Result.t

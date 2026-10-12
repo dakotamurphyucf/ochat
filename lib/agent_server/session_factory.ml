@@ -1033,7 +1033,8 @@ let operator_manifest_authorizer t ~manifest_sha256 revision state =
       , Some workspace_definition_id
       , Some principal_id
       , Some hash )
-      when String.equal hash request.manifest.sha256 ->
+      when String.equal hash (Chatmd_shell_spec.Manifest.resource_sha256 request.manifest)
+      ->
       let grants = Catalogs.manifest_grants t.catalogs in
       if
         List.exists grants ~f:(fun grant ->
@@ -2563,7 +2564,7 @@ let prepare_authored_graph
         ~authoring_validation_host
         ~manifest_authorizer:(fun specialist ->
           match
-            Chat_response.Agent_runtime.inspect_shell
+            Chat_response.Agent_runtime.inspect_resources
               ~env:t.env
               ~platform:(Chat_response.Agent_runtime.platform ())
               ~prompt_elements:(Agent_session.Prompt_revision.elements specialist)

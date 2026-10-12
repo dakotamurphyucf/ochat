@@ -342,3 +342,29 @@ let with_captured_child
       f startup ~revision ~compilation_limits ~programs)
     ()
 ;;
+
+let inspect_shell t ?startup revision ~env ~invocation ~checkpoint =
+  with_revision
+    (Some t)
+    ?startup
+    revision
+    ~env
+    ~invocation
+    ~checkpoint
+    ~f:(fun startup ~compilation_limits ~programs ->
+      let prompt_elements =
+        match Prompt_revision.parser_context revision with
+        | Some parsed -> Prompt.Chat_markdown.Parsed.elements parsed
+        | None -> Prompt_revision.elements revision
+      in
+      Runtime.inspect_prepared_shell
+        ~startup
+        ?programs
+        ~env
+        ~limits:compilation_limits
+        ~checkpoint
+        ~platform:(Runtime.platform ())
+        ~prompt_elements
+        ()
+      |> map_diagnostics ~to_string:Runtime.diagnostic_to_string)
+;;

@@ -48,7 +48,9 @@ let artifact_sources sources =
   |> Result.all
 ;;
 
-let shell_digest inspection = inspection.Chat_response.Agent_runtime.manifest.sha256
+let shell_digest (inspection : Chat_response.Agent_runtime.resource_inspection) =
+  inspection.manifest.sha256
+;;
 
 let build_manifest
       definition
@@ -214,7 +216,7 @@ let capture_loader ~loader:root_loader ~root_name ~env ~preprocess ~limits ~chec
       agents := (path, parsed) :: !agents)
   done;
   let inspection =
-    Chat_response.Agent_runtime.inspect_shell
+    Chat_response.Agent_runtime.inspect_resources
       ~env
       ~platform:(Chat_response.Agent_runtime.platform ())
       ~prompt_elements:(Prompt.Chat_markdown.Parsed.elements root)

@@ -116,6 +116,16 @@ val source_sha256 : compiled -> string
     dependencies, scopes and the compiler contract. *)
 val source_revision : compiled -> string
 
+(** Actual immutable prepared execution facts for default and every compiled
+    matcher alternative. Legacy text hooks return []. No initialization or
+    source recapture; each alternative keeps its own complete graph fingerprint.
+    Walks and admission comparisons poll the borrowed checkpoint, whose original
+    exceptions propagate. *)
+val prepared_hooks
+  :  compiled
+  -> checkpoint:(unit -> unit)
+  -> Chatmd_shell_spec.Manifest.Prepared_hook.t list
+
 val entrypoint : compiled -> string
 val default_entrypoint : Chatmd_shell_spec.Chatmd_script_spec.kind -> string
 val limits : compiled -> limits

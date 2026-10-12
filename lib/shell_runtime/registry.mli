@@ -64,6 +64,27 @@ val prepare_with_compiler
   -> material:Chatmd_shell_spec.Manifest_compiler.material
   -> (prepared, error list) result
 
+(** Bounded compiler variant used by the shared startup owner. Original material
+    pairing and administrative admission precede compilation. Build complete
+    execution identity from the actual compiled set before returning; no runtime
+    or native resource is initialized. Output canonical metadata is bounded by
+    [max_manifest_bytes], and every projection/encoding/hash walk uses [checkpoint].
+    Existing legacy wrappers preserve empty-projection v1 canonical bytes. *)
+val prepare_with_compiler_bounded
+  :  Chatmd_shell_spec.Manifest_compiler.material
+  -> compile_extension:
+       (Chatmd_shell_spec.Chatmd_script_spec.t
+        -> (Chatml_extension.compiled, Chatmd_shell_spec.Diagnostic.t list) Result.t)
+  -> admin_policy:Admin_policy.t
+  -> manifest:Chatmd_shell_spec.Manifest.t
+  -> max_manifest_bytes:int
+  -> checkpoint:(unit -> unit)
+  -> (prepared, error list) Result.t
+
+(** Complete immutable executable authorization identity. Security verification,
+    grants, registry publication and audit bind this same value. *)
+val prepared_manifest : prepared -> Chatmd_shell_spec.Manifest.t
+
 module Staged : sig
   type t
 

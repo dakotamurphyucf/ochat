@@ -51,7 +51,9 @@ val verify_manifest
   -> (evidence list, error list) result
 
 (** Loads a JSON trust policy using Eio. *)
-val load
-  :  fs:Eio.Fs.dir_ty Eio.Path.t
-  -> path:string
-  -> (policy, error list) result
+val load : fs:Eio.Fs.dir_ty Eio.Path.t -> path:string -> (policy, error list) result
+
+(* File loading maps expected Eio filesystem errors, JSON syntax and generated
+    JSON conversion failures only. Cancellation, Timeout and unexpected failures
+    propagate with their original exception/backtrace. Host policy files are
+    operator-selected; this API does not impose a new file-size/depth policy. *)

@@ -599,19 +599,64 @@ let review ev state =
             ~manifest
             ~material
         in
+        let compile_calls = ref 0 in
+        let mismatched = { manifest with sha256 = String.make 64 '0' } in
+        assert (
+          Result.is_error
+            (Registry.prepare_with_compiler_bounded
+               material
+               ~compile_extension:(fun _ ->
+                 incr compile_calls;
+                 Ok first)
+               ~admin_policy:Shell_runtime.Admin_policy.permissive
+               ~manifest:mismatched
+               ~max_manifest_bytes:100000
+               ~checkpoint:Support.checkpoint));
+        assert (!compile_calls = 0);
         (match prepare (compile 0 { script with id = "different" } |> Support.ok) with
          | Error [ error ] ->
            [%test_eq: string] error.code "shell.chatml_compiled_mismatch"
          | Ok _ | Error _ -> assert false);
-        let grant =
-          Shell_runtime.Manifest_authorizer.authorize
-            Shell_runtime.Manifest_authorizer.assume_authorized
-            manifest
-          |> Support.ok
-        in
         let saved = ref [] in
         Eio.Switch.run (fun sw ->
+          let prepared = prepare first |> Support.ok in
+          let complete = Registry.prepared_manifest prepared in
+          let oldgrant =
+            Shell_runtime.Manifest_authorizer.authorize
+              Shell_runtime.Manifest_authorizer.assume_authorized
+              manifest
+            |> Support.ok
+          in
+          assert (
+            Result.is_error
+              (Shell_runtime.Manifest_authorizer.authorize
+                 Shell_runtime.Manifest_authorizer.deny
+                 complete));
+          let preflight_calls = ref 0 in
+          (match
+             Registry.instantiate_prepared_after
+               ~sw
+               ~host
+               ~grant:oldgrant
+               ~approval_provider:Shell_runtime.Approval_broker.None_available
+               ~preflight:(fun _ ->
+                 incr preflight_calls;
+                 Ok ())
+               prepared
+           with
+           | Error [ error ] ->
+             [%test_eq: string] "shell.manifest_grant_mismatch" error.code
+           | Error _ | Ok _ -> failwith "raw grant authorized a prepared graph");
+          assert (!preflight_calls = 0);
+          assert (List.is_empty !saved);
           let instantiate compiled snapshots =
+            let prepared = prepare compiled |> Support.ok in
+            let grant =
+              Shell_runtime.Manifest_authorizer.authorize
+                Shell_runtime.Manifest_authorizer.assume_authorized
+                (Registry.prepared_manifest prepared)
+              |> Support.ok
+            in
             Registry.instantiate_prepared
               ~sw
               ~host
@@ -621,7 +666,7 @@ let review ev state =
               ~persist_extension_snapshots:(fun snapshots ->
                 saved := snapshots;
                 Ok ())
-              (prepare compiled |> Support.ok)
+              prepared
           in
           let review registry =
             let runtime = Registry.runtimes registry |> List.hd_exn in

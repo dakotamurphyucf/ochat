@@ -806,3 +806,28 @@ let restore instance snapshot =
 ;;
 
 let set_snapshot_handler instance handler = instance.snapshot_handler <- Some handler
+
+let prepared_hooks (compiled : compiled) ~checkpoint =
+  let fact entrypoint program =
+    checkpoint ();
+    Chatmd_shell_spec.Manifest.Prepared_hook.create
+      ~id:compiled.id
+      ~kind:compiled.kind
+      ~entrypoint
+      ~program_fingerprint:
+        (Chatml_linked_program.prepared program
+         |> Chatml_prepared_program.fingerprint
+         |> Chatml_source.Digest.to_hex)
+      ~checkpoint
+    |> Or_error.ok_exn
+  in
+  match compiled.program with
+  | Legacy _ -> []
+  | Prepared program ->
+    if Map.is_empty compiled.alternatives
+    then [ fact compiled.entrypoint program ]
+    else
+      Map.fold compiled.alternatives ~init:[] ~f:(fun ~key ~data facts ->
+        fact key data :: facts)
+      |> List.rev
+;;

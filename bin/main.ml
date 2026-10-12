@@ -339,64 +339,6 @@ let load_audit env path =
   Shell_runtime.Audit_replay.load_rotated ~fs:(Eio.Stdenv.fs env) ~path
 ;;
 
-let print_shell_diagnostics diagnostics =
-  List.iter diagnostics ~f:(fun diagnostic ->
-    eprintf "%s\n" (Chat_response.Agent_runtime.diagnostic_to_string diagnostic))
-;;
-
-let signature_summary status =
-  match status.Shell_runtime.Manifest_security.signature_key_id with
-  | None -> "unsigned; accepted by administrative policy"
-  | Some key_id ->
-    sprintf
-      "verified; key=%s%s"
-      key_id
-      (Option.value_map status.signature_issuer ~default:"" ~f:(fun issuer ->
-         "; issuer=" ^ issuer))
-;;
-
-let shell_inspect_command =
-  Command.basic
-    ~summary:"Inspect requested/live shell authority without authorizing or executing it."
-    (let%map_open path = anon ("CHATMD" %: string)
-     and canonical =
-       flag "-canonical" no_arg ~doc:" Print the canonical requested manifest JSON"
-     in
-     fun () ->
-       run_main (fun env ->
-         let fs = Eio.Stdenv.fs env in
-         let prompt = Eio.Path.(fs / path) |> Eio.Path.load in
-         let dir = Eio.Path.(fs / Filename.dirname path) in
-         let elements = Prompt.Chat_markdown.parse_chat_inputs ~source:path ~dir prompt in
-         match
-           Chat_response.Agent_runtime.inspect_shell
-             ~env
-             ~platform:(Chat_response.Agent_runtime.platform ())
-             ~prompt_elements:elements
-         with
-         | Error diagnostics ->
-           print_shell_diagnostics diagnostics;
-           Core.exit 1
-         | Ok inspection ->
-           let manifest = inspection.manifest in
-           printf "requested manifest: %s\n" manifest.sha256;
-           printf "live manifest:      %s\n" manifest.sha256;
-           printf "administrative:     %s\n" inspection.administrative_policy.source;
-           printf
-             "signature:          %s\n"
-             (signature_summary inspection.security_status);
-           printf
-             "trusted sources:    %d\n"
-             (List.length inspection.security_status.trusted_sources);
-           printf "live runtimes:      %d\n" (List.length inspection.live_runtimes);
-           List.iter inspection.live_runtimes ~f:(fun runtime ->
-             printf
-               "  %s  profile=%s\n"
-               (Chatmd_shell_spec.Shell_spec.Runtime_id.to_string runtime.id)
-               (Option.value runtime.resolved_profile ~default:"custom"));
-           if canonical then printf "\n%s\n" manifest.canonical_json))
-;;
-
 let shell_audit_validate_command =
   Command.basic
     ~summary:"Validate a shell audit JSONL file and its integrity chain."
@@ -842,7 +784,7 @@ let shell_command =
     ~summary:"Inspect and manage ChatMD shell runtimes."
     [ "audit", shell_audit_command
     ; "grants", shell_grants_command
-    ; "inspect", shell_inspect_command
+    ; "inspect", Shell_inspection_cli.command
     ; "manifest-grants", shell_manifest_grants_command
     ; "interrupted", shell_interrupted_command
     ]

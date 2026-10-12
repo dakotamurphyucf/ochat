@@ -5,12 +5,21 @@
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))
 
+(library
+ (name shell_inspection_cli)
+ (modules shell_inspection_cli)
+ (libraries core eio eio_main io ochat.chat_response ochat.shell_runtime
+  ochat.chatmd_shell_spec ochat.agent_server ochat.agent_session
+  ochat.agent_protocol mirage-crypto-rng.unix)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
 (executable
  (package ochat)
  (public_name ochat)
  (name main)
  (modules main)
- (libraries inference_composition ochat.provider_runtime_host
+ (libraries inference_composition shell_inspection_cli ochat.provider_runtime_host
   lwt_eio
   io
   dune_describe

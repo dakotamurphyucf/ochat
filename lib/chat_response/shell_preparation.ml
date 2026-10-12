@@ -30,6 +30,42 @@ let prepare ?startup ?programs ~env ~limits ~checkpoint ~admin_policy ~manifest 
         ~f:(fun () ->
           let checkpoint () = Startup_compilation.checkpoint startup in
           let open Result.Let_syntax in
+          let prepare_registry ~compile_extension =
+            let%bind remaining =
+              Startup_compilation.remaining_limits startup
+              |> Result.map_error ~f:(fun e ->
+                [ Registry.
+                    { code = e.Chatml_compilation.code
+                    ; message = e.message
+                    ; runtime_id = None
+                    }
+                ])
+            in
+            let%bind registry =
+              Registry.prepare_with_compiler_bounded
+                material
+                ~compile_extension
+                ~admin_policy
+                ~manifest
+                ~max_manifest_bytes:remaining.max_source_bytes
+                ~checkpoint
+            in
+            let complete = Registry.prepared_manifest registry in
+            match complete.authorization with
+            | None -> Ok registry
+            | Some _ ->
+              let%map () =
+                Startup_compilation.admit_text startup complete.canonical_json
+                |> Result.map_error ~f:(fun e ->
+                  [ Registry.
+                      { code = e.Chatml_compilation.code
+                      ; message = e.message
+                      ; runtime_id = None
+                      }
+                  ])
+              in
+              registry
+          in
           match programs with
           | None ->
             let compile_extension script =
@@ -55,13 +91,7 @@ let prepare ?startup ?programs ~env ~limits ~checkpoint ~admin_policy ~manifest 
               in
               Shell_runtime.Chatml_extension.compile_with_limits ~env ~limits ~script
             in
-            let%map registry =
-              Registry.prepare_with_compiler
-                ~compile_extension
-                ~admin_policy
-                ~manifest
-                ~material
-            in
+            let%map registry = prepare_registry ~compile_extension in
             { registry; programs = [] }
           | Some programs ->
             let%bind runtimes =
@@ -101,13 +131,7 @@ let prepare ?startup ?programs ~env ~limits ~checkpoint ~admin_policy ~manifest 
                 selected := program :: !selected;
                 Shell_program.compiled program)
             in
-            let%map registry =
-              Registry.prepare_with_compiler
-                ~compile_extension
-                ~admin_policy
-                ~manifest
-                ~material
-            in
+            let%map registry = prepare_registry ~compile_extension in
             { registry; programs = List.rev !selected }))
     ()
 ;;

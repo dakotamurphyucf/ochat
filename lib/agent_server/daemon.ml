@@ -53,6 +53,7 @@ type t =
   ; blob_store : Agent_store.Blob_store.t
   ; prompts : Agent_session.Prompt_catalog.t
   ; project_sources : Project_source_host.t
+  ; script_preparation : Agent_session.Runtime_script_preparation.t option
   ; workspaces : Agent_session.Workspace_catalog.t
   ; registry : Session_registry.t
   ; handler : Command_handler.t
@@ -1525,6 +1526,7 @@ let compose
     ; maintenance
     ; config_watcher
     ; project_sources
+    ; script_preparation = options.script_preparation
     ; factory
     ; selection
     ; start_queue
@@ -1711,4 +1713,55 @@ let select_session t ~principal ~expected =
       Start_scheduler.seed_recovered ~registry:t.registry ~queue:t.start_queue
     in
     entry
+;;
+
+module Shell_inspection_selection = struct
+  type t =
+    | Current
+    | Retained of
+        { revision_id : Agent_protocol.Id.Prompt_revision.t
+        ; invocation : Agent_session.Runtime_script_preparation.Invocation.t
+        }
+end
+
+let inspect_prompt_shell t ~definition_id ~selection ~checkpoint =
+  let module Catalog = Agent_session.Prompt_catalog in
+  let module Preparation = Agent_session.Runtime_script_preparation in
+  let failure message =
+    Error (Agent_protocol.Error.create Invalid_state ~message ~retryable:false ())
+  in
+  checkpoint ();
+  match t.script_preparation, Catalog.find t.prompts definition_id with
+  | None, _ ->
+    failure "complete shell inspection requires the host script preparation policy"
+  | Some _, None -> failure "shell inspection prompt definition is not admitted"
+  | Some policy, Some entry ->
+    let revision =
+      match selection with
+      | Shell_inspection_selection.Current ->
+        (match entry.availability with
+         | Ready revision ->
+           Ok
+             ( revision
+             , Preparation.Invocation.of_root
+                 (Agent_session.Prompt_definition.root_invocation entry.definition) )
+         | Disabled -> failure "shell inspection prompt is disabled"
+         | Unavailable _ ->
+           failure "shell inspection current captured revision is unavailable")
+      | Retained { revision_id; invocation } ->
+        Catalog.restore_revision t.prompts ~definition_id ~revision_id
+        |> Result.map ~f:(fun revision -> revision, invocation)
+        |> Result.map_error ~f:(fun diagnostics ->
+          Agent_protocol.Error.create
+            Invalid_state
+            ~message:
+              (List.map diagnostics ~f:(fun diagnostic ->
+                 diagnostic.Agent_session.Prompt_revision_builder.Diagnostic.message)
+               |> String.concat ~sep:"\n")
+            ~retryable:false
+            ())
+    in
+    Result.bind revision ~f:(fun (revision, invocation) ->
+      checkpoint ();
+      Preparation.inspect_shell policy revision ~env:t.env ~invocation ~checkpoint)
 ;;

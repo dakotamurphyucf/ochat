@@ -49,6 +49,22 @@ type declarations =
 
 let diagnostic code message = { code; message; source = None }
 
+type resource_inspection =
+  { manifest : Chatmd_shell_spec.Manifest.t
+  ; live_runtimes : Chatmd_shell_spec.Shell_spec.t list
+  ; administrative_policy : Shell_runtime.Admin_policy.t
+  }
+
+type prepared_shell_inspection =
+  { manifest : Chatmd_shell_spec.Manifest.t
+  ; live_runtimes : Chatmd_shell_spec.Shell_spec.t list
+  ; administrative_policy : Shell_runtime.Admin_policy.t
+  ; security_check :
+      ( Shell_runtime.Manifest_security.status
+        , Shell_runtime.Manifest_security.error list )
+        Result.t
+  }
+
 let diagnostic_to_string diagnostic =
   let prefix =
     Option.value_map diagnostic.source ~default:"" ~f:(fun source -> source.file ^ ": ")
@@ -235,7 +251,7 @@ let prepare_shell_manifest ~platform ~prompt_elements =
   compile ~platform (declarations prompt_elements)
 ;;
 
-let inspect_shell ~env ~platform ~prompt_elements =
+let inspect_material ~env ~platform ~prompt_elements =
   let open Result.Let_syntax in
   let%bind administrative_policy =
     Shell_runtime.Admin_policy_loader.load_from_environment ~env
@@ -262,15 +278,102 @@ let inspect_shell ~env ~platform ~prompt_elements =
              violation.policy_source
              violation.remediation)))
   in
-  let%map security_status =
-    Shell_runtime.Manifest_security.verify
-      ~env
-      ~admin_policy:administrative_policy
-      ~manifest
-    |> Result.map_error ~f:(fun errors ->
-      List.map errors ~f:(fun error -> diagnostic error.code error.message))
+  Ok (({ manifest; live_runtimes; administrative_policy } : resource_inspection), material)
+;;
+
+let inspect_resources ~env ~platform ~prompt_elements =
+  inspect_material ~env ~platform ~prompt_elements |> Result.map ~f:fst
+;;
+
+let inspect_shell ~env ~platform ~prompt_elements =
+  let open Result.Let_syntax in
+  let%bind (inspection : resource_inspection) =
+    inspect_resources ~env ~platform ~prompt_elements
   in
-  { manifest; live_runtimes; administrative_policy; security_status }
+  if
+    List.exists (declarations prompt_elements).scripts ~f:(fun script ->
+      Option.is_some script.Chatmd_shell_spec.Chatmd_script_spec.project_selection)
+  then
+    Error
+      [ diagnostic
+          "shell.prepared_inspection_required"
+          "Configured hooks require captured program inspection for executable \
+           authorization"
+      ]
+  else (
+    let%map security_status =
+      Shell_runtime.Manifest_security.verify
+        ~env
+        ~admin_policy:inspection.administrative_policy
+        ~manifest:inspection.manifest
+      |> Result.map_error
+           ~f:
+             (List.map ~f:(fun (error : Shell_runtime.Manifest_security.error) ->
+                diagnostic error.code error.message))
+    in
+    ({ manifest = inspection.manifest
+     ; live_runtimes = inspection.live_runtimes
+     ; administrative_policy = inspection.administrative_policy
+     ; security_status
+     }
+     : shell_inspection))
+;;
+
+let inspect_prepared_shell
+      ?startup
+      ?programs
+      ~env
+      ~limits
+      ~checkpoint
+      ~platform
+      ~prompt_elements
+      ()
+  =
+  Startup_compilation.with_context
+    ?startup
+    ~limits
+    ~env
+    ~checkpoint
+    ~map_error:(fun error -> [ diagnostic error.Chatml_compilation.code error.message ])
+    ~f:(fun startup ->
+      Startup_compilation.within
+        startup
+        ~map_error:(fun error ->
+          [ diagnostic error.Chatml_compilation.code error.message ])
+        ~f:(fun () ->
+          let open Result.Let_syntax in
+          let%bind (inspection : resource_inspection), material =
+            inspect_material ~env ~platform ~prompt_elements
+          in
+          let manifest = inspection.manifest in
+          let%map prepared =
+            Shell_preparation.prepare
+              ~startup
+              ?programs
+              ~env
+              ~limits
+              ~checkpoint
+              ~admin_policy:inspection.administrative_policy
+              ~manifest
+              material
+            |> Result.map_error ~f:(List.map ~f:diagnostic_of_registry)
+          in
+          let manifest =
+            Shell_runtime.Registry.prepared_manifest (Shell_preparation.registry prepared)
+          in
+          let security_check =
+            Shell_runtime.Manifest_security.verify
+              ~env
+              ~admin_policy:inspection.administrative_policy
+              ~manifest
+          in
+          ({ manifest
+           ; live_runtimes = inspection.live_runtimes
+           ; administrative_policy = inspection.administrative_policy
+           ; security_check
+           }
+           : prepared_shell_inspection)))
+    ()
 ;;
 
 let instantiate
@@ -303,6 +406,9 @@ let instantiate
       ~admin_policy
       material
     |> Result.map_error ~f:(List.map ~f:diagnostic_of_registry)
+  in
+  let manifest =
+    Shell_runtime.Registry.prepared_manifest (Shell_preparation.registry prepared)
   in
   let%bind security_status =
     Shell_runtime.Manifest_security.verify
@@ -399,7 +505,10 @@ let shell_registry
           manifest
           material
         |> Result.map ~f:(fun (registry, security_status, admitted) ->
-          Some registry, Some manifest, Some security_status, admitted))
+          ( Some registry
+          , Some (Shell_runtime.Registry.manifest registry)
+          , Some security_status
+          , admitted )))
 ;;
 
 let model_completion ~ctx ~agent:_ ~model =

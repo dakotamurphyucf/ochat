@@ -53,12 +53,14 @@ val verify
   -> t
   -> (unit, error) result
 
-val load_signature
-  :  fs:Eio.Fs.dir_ty Eio.Path.t
-  -> path:string
-  -> (t, error) result
+val load_signature : fs:Eio.Fs.dir_ty Eio.Path.t -> path:string -> (t, error) result
 
 val load_public_keys
   :  fs:Eio.Fs.dir_ty Eio.Path.t
   -> path:string
   -> (public_key list, error) result
+
+(* File loading maps expected Eio filesystem errors, JSON syntax and generated
+    JSON conversion failures only. Cancellation, Timeout and unexpected failures
+    propagate with their original exception/backtrace. Host policy files are
+    operator-selected; this API does not impose a new file-size/depth policy. *)

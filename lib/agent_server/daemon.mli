@@ -115,6 +115,35 @@ val factory : t -> Session_factory.t
 
 val blob_store : t -> Agent_store.Blob_store.t
 val prompts : t -> Agent_session.Prompt_catalog.t
+
+module Shell_inspection_selection : sig
+  type t =
+    | Current
+    | Retained of
+        { revision_id : Agent_protocol.Id.Prompt_revision.t
+        ; invocation : Agent_session.Runtime_script_preparation.Invocation.t
+        }
+end
+
+(** Trusted host inspection of one actual catalog-owned captured revision.
+    Current selects that definition's actual captured Ready role. Retained uses
+    existing definition-affine restoration and a trusted explicit invocation;
+    authentic stored binding/contract selection must agree or inspection rejects.
+    No current-host role inference or recapture fallback for historical code.
+    Host script/content policies remain fixed; filenames/digests never select roles.
+    No session, actor, initializer, native tool setup, provider or new source
+    acquisition. This query does not grant execution and is not an unauthenticated
+    transport RPC. The explicit Operator_only CLI owner can print/sign complete
+    requested identity even when its security check rejects. *)
+val inspect_prompt_shell
+  :  t
+  -> definition_id:Agent_protocol.Id.Prompt_definition.t
+  -> selection:Shell_inspection_selection.t
+  -> checkpoint:(unit -> unit)
+  -> ( Chat_response.Agent_runtime.prepared_shell_inspection
+       , Agent_protocol.Error.t )
+       Result.t
+
 val workspaces : t -> Agent_session.Workspace_catalog.t
 val close_connection : t -> Connection_context.t -> unit
 

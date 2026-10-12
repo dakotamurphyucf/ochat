@@ -237,20 +237,57 @@ let admin_error (violation : Admin_policy.violation) =
   }
 ;;
 
-let prepare_with_compiler ~compile_extension ~admin_policy ~manifest ~material =
-  match MC.effective_runtimes material ~manifest with
-  | Error diagnostics -> Error (List.map diagnostics ~f:diagnostic_error)
-  | Ok runtimes ->
-    Result.bind
-      (Admin_policy.evaluate admin_policy ~manifest ~runtimes
-       |> Result.map_error ~f:(List.map ~f:admin_error))
-      ~f:(fun () ->
-        match MC.effective_scripts material ~manifest with
-        | Error diagnostics -> Error (List.map diagnostics ~f:diagnostic_error)
-        | Ok scripts ->
-          Result.map (extension_map ~compile_extension scripts) ~f:(fun extensions ->
-            { manifest; runtimes; extensions; admin_policy }))
+let prepare_with_compiler_bounded
+      material
+      ~compile_extension
+      ~admin_policy
+      ~manifest
+      ~max_manifest_bytes
+      ~checkpoint
+  =
+  let open Result.Let_syntax in
+  checkpoint ();
+  let%bind runtimes =
+    MC.effective_runtimes material ~manifest
+    |> Result.map_error ~f:(List.map ~f:diagnostic_error)
+  in
+  let%bind () =
+    Admin_policy.evaluate admin_policy ~manifest ~runtimes
+    |> Result.map_error ~f:(List.map ~f:admin_error)
+  in
+  let%bind scripts =
+    MC.effective_scripts material ~manifest
+    |> Result.map_error ~f:(List.map ~f:diagnostic_error)
+  in
+  let%bind extensions = extension_map ~compile_extension scripts in
+  let hooks =
+    Map.fold extensions ~init:[] ~f:(fun ~key:_ ~data hooks ->
+      checkpoint ();
+      List.rev_append (Chatml_extension.prepared_hooks data ~checkpoint) hooks)
+  in
+  let%map manifest =
+    M.with_prepared_hooks manifest hooks ~max_bytes:max_manifest_bytes ~checkpoint
+    |> Result.map_error ~f:(fun error ->
+      [ { code = "shell.execution_manifest_invalid"
+        ; message = Error.to_string_hum error
+        ; runtime_id = None
+        }
+      ])
+  in
+  { manifest; runtimes; extensions; admin_policy }
 ;;
+
+let prepare_with_compiler ~compile_extension ~admin_policy ~manifest ~material =
+  prepare_with_compiler_bounded
+    material
+    ~compile_extension
+    ~admin_policy
+    ~manifest
+    ~max_manifest_bytes:(8 * 1024 * 1024)
+    ~checkpoint:(fun () -> ())
+;;
+
+let prepared_manifest (prepared : prepared) = prepared.manifest
 
 let prepare_with_policy ~admin_policy ~manifest ~material =
   prepare_with_compiler
