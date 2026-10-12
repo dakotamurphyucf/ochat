@@ -706,6 +706,131 @@ let%test_unit
           [%test_eq: int] !calls 0))))
 ;;
 
+exception Dispatch_cancelled of int ref
+
+let%test_unit "blocked fresh native dispatch joins before either owner releases" =
+  Eio_main.run (fun env ->
+    with_root env (fun root ->
+      let entered, enter = Eio.Promise.create () in
+      let finished = Atomic.make false in
+      let (Eio.Resource.T (data, ops)) = Eio.Stdenv.process_mgr env in
+      let module Native = (val Eio.Resource.get ops Eio.Process.Pi.Mgr) in
+      let module Observed = struct
+        type t = Native.t
+        type tag = Native.tag
+
+        let pipe = Native.pipe
+
+        let spawn data ~sw ?cwd ?stdin ?stdout ?stderr ?env:process_env ?executable args =
+          let actual = ref None in
+          (* Register BEFORE the real provider's spawn. Its later child cleanup
+             runs first at switch release; this observer must then see reaped work
+             before the enclosing code/native owner can release. It never signals
+             or kills the child itself. A missing provider join cannot pass. *)
+          Eio.Switch.on_release sw (fun () ->
+            Option.iter !actual ~f:(fun process ->
+              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+                ignore (Eio.Process.await process);
+                Atomic.set finished true)));
+          let process =
+            Native.spawn
+              data
+              ~sw
+              ?cwd
+              ?stdin
+              ?stdout
+              ?stderr
+              ?env:process_env
+              ?executable
+              args
+          in
+          actual := Some process;
+          Eio.Promise.resolve enter ();
+          process
+        ;;
+      end
+      in
+      let manager = Eio.Resource.T (data, Eio.Process.Pi.mgr (module Observed)) in
+      let wrapped : Eio_unix.Stdenv.base =
+        object
+          method domain_mgr = env#domain_mgr
+          method stdin = env#stdin
+          method stdout = env#stdout
+          method stderr = env#stderr
+          method net = env#net
+          method process_mgr = manager
+          method clock = env#clock
+          method mono_clock = env#mono_clock
+          method fs = env#fs
+          method cwd = env#cwd
+          method secure_random = env#secure_random
+          method debug = env#debug
+          method backend_id = env#backend_id
+        end
+      in
+      let executable = Eio.Path.(root / "blocked-native") in
+      let path =
+        Eio.Path.native_exn Eio.Path.(Eio.Stdenv.cwd env / "reviewer_fixture.exe")
+      in
+      Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / path)
+      |> Eio.Path.save ~create:(`Or_truncate 0o700) executable;
+      let original = fixture wrapped root "old" ~respond:false () in
+      let fresh = fixture wrapped root "fresh" ~respond:false () in
+      let _, _, _, tool = original in
+      let retained_view = ref None in
+      Eio.Switch.run (fun owner ->
+        let registry = instantiate owner original in
+        let session = moderator_session () in
+        Eio.Switch.on_release owner (fun () -> assert (Atomic.get finished));
+        let identity = ref 29 in
+        (match
+           Eio.Cancel.sub (fun cancel ->
+             Eio.Switch.run (fun code_owner ->
+               let view = rebind code_owner registry fresh |> ok in
+               retained_view := Some view;
+               Eio.Switch.on_release code_owner (fun () -> assert (Atomic.get finished));
+               Eio.Fiber.both
+                 (fun () ->
+                    Eio.Promise.await entered;
+                    Eio.Cancel.cancel cancel (Dispatch_cancelled identity))
+                 (fun () ->
+                    View.with_execution view ~checkpoint (fun execution ->
+                      let selected = Execution.registry execution |> ok in
+                      Shell_runtime.Call_context.with_services
+                        ~prepare_executor:(Execution.prepare_executor execution)
+                        (fun () ->
+                           Ok
+                             Shell_runtime.Call_context.
+                               { session_id = "blocked-child"
+                               ; approval_store = SA.Approval.create_store ()
+                               ; approval_provider = Auto_deny
+                               ; check = (fun () -> Ok ())
+                               })
+                        (fun () ->
+                           Shell_runtime.Moderator_process_adapter.handler
+                             ~registry:selected
+                             ~runtime_id:tool.runtime
+                             session
+                             ~command:(Eio.Path.native_exn executable)
+                             ~args:
+                               (Chatml.Chatml_lang.VArray
+                                  [| Chatml.Chatml_lang.VString "--block" |])
+                           |> ok))
+                    |> ok
+                    |> ignore)))
+         with
+         | _ -> failwith "blocked native process did not report owner cancellation"
+         | exception Eio.Cancel.Cancelled (Dispatch_cancelled actual) ->
+           assert (phys_equal identity actual));
+        assert (Atomic.get finished);
+        let callbacks = ref 0 in
+        assert (
+          Result.is_error
+            (View.with_execution (Option.value_exn !retained_view) ~checkpoint (fun _ ->
+               Int.incr callbacks)));
+        [%test_eq: int] !callbacks 0)))
+;;
+
 let%test_unit
     "native worker occurrences, model selector absence and raw sink are retained without \
      rereads"

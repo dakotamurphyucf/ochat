@@ -15,4 +15,11 @@ let run env =
   Eio.Flow.copy_string (Jsonaf.to_string response) (Eio.Stdenv.stdout env)
 ;;
 
-let () = Eio_main.run run
+let () =
+  Eio_main.run (fun env ->
+    if Array.exists (Sys.get_argv ()) ~f:(String.equal "--block")
+    then (
+      let pending, _ = Eio.Promise.create () in
+      Eio.Promise.await pending)
+    else run env)
+;;
