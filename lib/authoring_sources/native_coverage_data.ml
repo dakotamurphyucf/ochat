@@ -237,13 +237,13 @@ let implementation_sources =
   ; ( "lib/agent_session/managed_wait_tool.ml"
     , "2482da27415b0f542bbf5e2fa61bf97de70fb047790cb6ee5100ced465b43708" )
   ; ( "lib/agent_session/native_tool_invocation.ml"
-    , "e53c89afa87268c4db847583e4e77f285535abc4a827e04398b1edd25cdd6a90" )
+    , "79634c7f76ca3892143a858431cd7e43969e697b4e318277553c93604d3d8e7b" )
   ; ( "lib/agent_session/one_off_execution.ml"
     , "946bf1eb9dc6c2da12f46d94f973a9ec7a4c11873b6ffab1424dedaeed8c6e7a" )
   ; ( "lib/agent_session/run_chatml_tool.ml"
     , "eadb7cf2ac6622e977db08798fbfce7661062c47883cdf4f28700f1c85249b75" )
   ; ( "lib/agent_session/script_tool_calls.ml"
-    , "56f74a1353f35582d2d2ae85d8350d0bb6bb08e226e7c18e0a27b3a348a0bfac" )
+    , "ec2078fcdac31b0b61c3c42b0808a2df22a932e0a5c33c0cb31e5c07b711aa1f" )
   ; ( "lib/agent_session/session_management.ml"
     , "18431c4fd97a2d24a72b927fe8f0d20b8aea561f1f119d8f122d943f2a137f86" )
   ; ( "lib/agent_session/session_management_native.ml"
