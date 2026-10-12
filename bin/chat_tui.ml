@@ -1461,6 +1461,22 @@ module Cli = struct
       Agent_server.Local_storage.Durable root
   ;;
 
+  let interactive_storage t =
+    if t.no_persist && Option.is_some t.local_data_root
+    then Or_error.error_string "Error: --no-persist cannot use a durable --data-root."
+    else if t.no_persist && Option.is_some t.session_id
+    then
+      Or_error.error_string
+        "Error: --no-persist creates a new transient conversation; it cannot resume \
+         --session."
+    else if t.auto_persist && t.local_transient
+    then
+      Or_error.error_string "Error: --auto-persist cannot be combined with --transient."
+    else if t.no_persist
+    then Ok Agent_server.Local_storage.Transient
+    else local_storage t
+  ;;
+
   let validate_global t =
     if (t.local_transient || Option.is_some t.local_data_root) && not t.local
     then Or_error.error_string "Error: --transient and --data-root require --local."
@@ -1533,9 +1549,6 @@ module Cli = struct
     else (
       let legacy_only_requested =
         (Option.is_some t.session_id && not t.local)
-        || t.new_session
-        || t.no_persist
-        || t.auto_persist
         || t.parallel_tool_calls
         || t.no_parallel_tool_calls
       in
@@ -1546,7 +1559,7 @@ module Cli = struct
            --local."
       else if t.local || not (legacy_only_requested || t.authorize_shell_manifest)
       then (
-        let%bind storage = local_storage t in
+        let%bind storage = interactive_storage t in
         let%map authoring_budget =
           Agent_server.Authoring_options.resolve t.authoring_options
         in
@@ -2727,14 +2740,16 @@ let raw_flags_param =
       flag
         "--no-persist"
         no_arg
-        ~doc:"In interactive mode: never persist the session snapshot on exit (no save)."
+        ~doc:
+          "For a new local conversation, use temporary storage removed on exit. Legacy \
+           sessions retain their existing no-save behavior."
     and auto_persist =
       flag
         "--auto-persist"
         no_arg
         ~doc:
-          "In interactive mode: always persist the session snapshot on exit without \
-           prompting."
+          "Use durable storage for a new local conversation (the native default). Legacy \
+           sessions save on exit without prompting."
     and rebuild_session_id =
       flag
         "--rebuild-from-prompt"

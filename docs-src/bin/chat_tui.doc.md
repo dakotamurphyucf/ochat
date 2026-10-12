@@ -33,15 +33,19 @@ raw protocol clients must discover catalog IDs.
 | `--read-only` | Observe an existing session without write authority. Credential read scopes still apply. |
 | `--bearer-token-file FILE` | Connected HTTP token loaded privately with Eio; rejected for Unix endpoints. |
 | `--session ID` | Connected: daemon ID. Implicit local: legacy store ID and mode. |
-| `--new-session` | Legacy local UUID session; not daemon creation. |
+| `--new-session` | Create a new local conversation; compatible with native `--local`. Not daemon creation. |
 | `--export-file FILE` | Explicit transcript export after interactive exit, including native `--local`. Native export keeps the authored definition separate and rejects it as the destination. |
-| `--auto-persist`, `--no-persist` | Legacy interactive snapshot persistence controls. |
+| `--auto-persist`, `--no-persist` | New native conversations: durable storage (the default), or temporary storage removed on exit. No-persist cannot resume a native session or use `--data-root`; auto-persist conflicts with `--transient`. Legacy sessions retain their snapshot persistence controls. |
 | `--parallel-tool-calls`, `--no-parallel-tool-calls` | Legacy interactive execution controls, not native/connected runtime overrides. |
 | `--authorize-shell-manifest` | Authorize the prompt's compiled shell manifest for this interactive process. Supported with native `--local`; without `--local`, preserves the legacy path. Command approvals and confinement remain enforced. |
 | `--textmate-grammar FILE` | Repeatable additional grammar files for interactive rendering. |
 
-The legacy-only flags select the implicit legacy path if `--local` is absent.
+The legacy-only selection/execution flags select the implicit legacy path if `--local` is absent.
 Explicit `--local` rejects them. Do not silently combine mode examples.
+
+`--new-session --no-persist -file agent.chatmd` uses the native host and captured
+project execution. Saving its transcript requires an explicit `--export-file`;
+temporary session storage is removed after the client and host finish.
 
 Shell-manifest authorization is supported by both interactive local modes; it is
 not one of the legacy-only persistence/execution controls.

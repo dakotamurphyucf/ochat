@@ -127,7 +127,10 @@ let local env temporary ~columns ~rows ~message ?(export = false) ?(project = fa
         fixture
         ~columns
         ~rows
-        ([ "--local"; "--transient"; "-file"; Config.prompt_path fixture ]
+        ((if project
+          then [ "--new-session"; "--no-persist" ]
+          else [ "--local"; "--transient" ])
+         @ [ "-file"; Config.prompt_path fixture ]
          @ if export then [ "--export-file"; output_file ] else [])
     in
     ready env child;
