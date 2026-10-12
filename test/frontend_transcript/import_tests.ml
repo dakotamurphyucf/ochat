@@ -37,7 +37,7 @@ let with_input f =
           Eio.Path.save ~create:(`Or_truncate 0o600) file source;
           Frontend_transcript.load ctx ~file:(Eio.Path.native_exn file) ~checkpoint
         in
-        f load;
+        f ~env ~root load;
         assert (Int.equal !attempts 0)))
 ;;
 
@@ -48,7 +48,7 @@ let ok result =
 ;;
 
 let%test_unit "literal edited roles and opaque call pairing receive fresh history IDs" =
-  with_input (fun load ->
+  with_input (fun ~env:_ ~root:_ load ->
     let source =
       {|<system>system</system><developer>developer</developer>
 <user ochat-history-id="3:old:7">edited</user>
@@ -102,7 +102,7 @@ let%test_unit "literal edited roles and opaque call pairing receive fresh histor
 ;;
 
 let%test_unit "resource execution, declaration loss and malformed syntax fail closed" =
-  with_input (fun load ->
+  with_input (fun ~env:_ ~root:_ load ->
     List.iter
       [ {|<user><doc src="missing"/></user>|}
       ; {|<user><img src="missing" local/></user>|}
@@ -122,7 +122,7 @@ unterminated|}
 ;;
 
 let%test_unit "callback Failure keeps original identity and throwing backtrace" =
-  with_input (fun load ->
+  with_input (fun ~env:_ ~root:_ load ->
     let original = Failure "transcript-checkpoint-origin" in
     let trace = ref "" in
     let callback () =
@@ -143,4 +143,29 @@ let%test_unit "callback Failure keeps original identity and throwing backtrace" 
         String.is_substring
           (Stdlib.Printexc.raw_backtrace_to_string raw)
           ~substring:!trace))
+;;
+
+let%test_unit "export source coordinates remain protected after source removal" =
+  with_input (fun ~env ~root _load ->
+    let directory = Eio.Path.native_exn root in
+    let definition = Eio.Path.(root / "definition.chatmd") in
+    let source_file = Eio.Path.native_exn definition in
+    Eio.Path.mkdir ~perm:0o700 Eio.Path.(root / "sub");
+    Eio.Path.symlink ~link_to:directory Eio.Path.(root / "alias");
+    Eio.Path.save ~create:(`Exclusive 0o600) definition "definition";
+    Eio.Path.symlink ~link_to:source_file Eio.Path.(root / "file-alias");
+    let conflict output_file =
+      Frontend_transcript.Destination.conflicts_with ~env ~source_file ~output_file
+    in
+    assert (conflict (Filename.concat directory "file-alias"));
+    List.iter [ true; false ] ~f:(fun exists ->
+      if not exists then Eio.Path.unlink definition;
+      List.iter
+        [ "definition.chatmd"
+        ; "./definition.chatmd"
+        ; "sub/../definition.chatmd"
+        ; "alias/definition.chatmd"
+        ]
+        ~f:(fun relative -> assert (conflict (Filename.concat directory relative)));
+      assert (not (conflict (Filename.concat directory "transcript.chatmd")))))
 ;;

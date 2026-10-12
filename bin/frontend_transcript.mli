@@ -1,5 +1,18 @@
 open! Core
 
+module Destination : sig
+  (** Reject the same source coordinate even when its file has been removed.
+      Resolve existing parents and existing file aliases; a missing parent uses
+      an absolute lexical coordinate. This is a read-only frontend guard, not a
+      filesystem reservation. Atomic output installation remains the caller's
+      responsibility. Filesystem failures and cancellation propagate. *)
+  val conflicts_with
+    :  env:Eio_unix.Stdenv.base
+    -> source_file:string
+    -> output_file:string
+    -> bool
+end
+
 (** Explicit edited-ChatMD adoption into a fresh neutral transcript. Authored
     conversion, not restoration of captured provider payloads or promotion of
     rendered/public history. The executable definition remains separate. *)

@@ -111,7 +111,7 @@
 (library
  (name frontend_transcript)
  (modules frontend_transcript)
- (libraries core eio eio.unix ochat.chat_response ochat.agent_protocol
+ (libraries core eio eio.unix eio_posix ochat.chat_response ochat.agent_protocol
   ochat.agent_session ochat.document_schema ochat.history_entry ochat.openai)
  (preprocess (pps ppx_jane)))
 

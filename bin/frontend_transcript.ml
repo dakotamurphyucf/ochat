@@ -2,6 +2,45 @@ open! Core
 module CM = Prompt.Chat_markdown
 module P = Agent_protocol
 
+module Destination = struct
+  let absolute env name =
+    if Filename.is_absolute name
+    then name
+    else
+      Filename.concat
+        (Eio_posix.Low_level.realpath (Eio.Path.native_exn (Eio.Stdenv.cwd env)))
+        name
+  ;;
+
+  let coordinate env name =
+    let parent = Filename.dirname name in
+    if Eio.Path.is_directory Eio.Path.(Eio.Stdenv.fs env / parent)
+    then Filename.concat (Eio_posix.Low_level.realpath parent) (Filename.basename name)
+    else (
+      let components =
+        List.fold (String.split name ~on:'/') ~init:[] ~f:(fun reversed -> function
+          | "" | "." -> reversed
+          | ".." ->
+            (match reversed with
+             | [] -> []
+             | _ :: rest -> rest)
+          | component -> component :: reversed)
+      in
+      "/" ^ String.concat ~sep:"/" (List.rev components))
+  ;;
+
+  let conflicts_with ~env ~source_file ~output_file =
+    let source = absolute env source_file in
+    let output = absolute env output_file in
+    String.equal (coordinate env source) (coordinate env output)
+    || (Eio.Path.is_file Eio.Path.(Eio.Stdenv.fs env / source)
+        && Eio.Path.is_file Eio.Path.(Eio.Stdenv.fs env / output)
+        && String.equal
+             (Eio_posix.Low_level.realpath source)
+             (Eio_posix.Low_level.realpath output))
+  ;;
+end
+
 let invalid message = Error (P.Error.invalid_request message)
 let max_source_bytes = 8 * 1024 * 1024
 let max_entries = 100_000
