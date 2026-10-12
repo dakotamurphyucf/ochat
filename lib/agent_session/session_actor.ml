@@ -4183,6 +4183,7 @@ let commit_queued_event t borrow snapshot requests decision notifications =
 let finish_queued_event t borrow interrupted =
   let open Result.Let_syntax in
   let%bind () = validate_queued_event_borrow t borrow in
+  let run_scope = Option.map borrow.run_actions ~f:Run_action_service.scope in
   Option.iter borrow.run_actions ~f:Run_action_service.close;
   borrow.run_actions <- None;
   borrow.callback_active <- false;
@@ -4226,13 +4227,25 @@ let finish_queued_event t borrow interrupted =
             ; details = `Null
             }
       in
+      let%bind run_deltas =
+        match run_scope with
+        | None -> Ok []
+        | Some scope ->
+          Run_transition.fail_callback
+            t.state
+            ~scope
+            ~executing:borrow.receipt
+            ~completed:terminal
+            ~now:(t.services.now ())
+      in
       transition
         t
         ~delta:
           (Session_delta.Batch
              (children_deltas
               @ permission_deltas
-              @ [ Moderator_execution_changed terminal ]))
+              @ [ Session_delta.Moderator_execution_changed terminal ]
+              @ run_deltas))
         ~payloads:permission_payloads
       |> Result.map ~f:ignore
   in
@@ -7443,6 +7456,18 @@ let run_queued_event_borrow t borrow f =
   let finish interrupted =
     Eio.Cancel.protect (fun () -> call t (Finish_queued_event (borrow, interrupted)))
   in
+  let finish_after_failure interrupted =
+    let report message =
+      (* The primary callback failure remains the caller's exception/result.
+         Cleanup failure is secondary evidence, never a replacement outcome. *)
+      try Eio.traceln "queued moderator cleanup failed: %s" message with
+      | _ -> ()
+    in
+    match finish interrupted with
+    | Ok () -> ()
+    | Error failure -> report failure.message
+    | exception cleanup -> report (Exn.to_string cleanup)
+  in
   let execute () =
     Eio.Cancel.sub (fun context ->
       let active = ref true in
@@ -7470,9 +7495,11 @@ let run_queued_event_borrow t borrow f =
                      (borrow, snapshot, requests, decision, notifications))))))
   in
   match execute () with
-  | result ->
+  | Error failure ->
+    finish_after_failure false;
+    Error failure
+  | Ok () ->
     let%bind () = finish false in
-    let%bind () = result in
     (match borrow.committed with
      | true -> Ok true
      | false ->
@@ -7484,7 +7511,7 @@ let run_queued_event_borrow t borrow f =
       | Eio.Cancel.Cancelled _ -> true
       | _ -> false
     in
-    ignore (finish interrupted : (unit, Agent_protocol.Error.t) result);
+    finish_after_failure interrupted;
     Stdlib.Printexc.raise_with_backtrace exn backtrace
 ;;
 

@@ -640,6 +640,7 @@ let%expect_test "queued events retain actor ownership through checkpoint install
     (Concurrent 1 1 (completed) 1)
     (Claim_rejected 0 0 () 0)
     (Commit_rejected 0 1 (failed) 0)
+    +queued moderator cleanup failed: injected invocation save failure
     (Terminal_rejected 0 1 (running) 0)
     (Stop_cancel 0 1 (interrupted) 0)
     (Bad_tail 0 1 (failed) 0)

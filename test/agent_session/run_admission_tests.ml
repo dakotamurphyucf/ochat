@@ -1970,6 +1970,205 @@ let%expect_test "actual retry retains failed attempt and wakes its callback once
     |}]
 ;;
 
+let%test_unit
+    "failed actual callback preserves affinity, advanced custody and terminal winner"
+  =
+  with_startup_actor (fun actor _ _ request start manager _ _ _ ->
+    ignore (start (request "callback-failure") |> protocol_ok : P.Run_receipt.t);
+    let before =
+      Chat_response.Moderator_manager.identity_snapshot manager |> Result.ok_or_failwith
+    in
+    let sentinel = Failure "actual borrowed callback failure" in
+    let retained_scope = ref None in
+    let retained_execution = ref None in
+    (try
+       A.Session_actor.with_current_moderator_event
+         actor
+         ~operation_id:None
+         ~event:Session_start
+         ~snapshot:(fun () -> Ok before)
+         (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit:_ ->
+            let service =
+              A.Session_actor.run_actions actor executing
+              |> protocol_ok
+              |> Option.value_exn
+            in
+            let scope = A.Run_action_service.scope service in
+            retained_scope := Some scope;
+            retained_execution := Some executing;
+            let state = A.Session_actor.state actor |> protocol_ok in
+            let index = Option.value_exn state.run_state in
+            let run =
+              A.Run_state.find index (A.Run_scope.run_id scope) |> Option.value_exn
+            in
+            (* Independent finite custody oracle: these pure domain occurrences
+               exercise full capacity, not live operation admission. The callback
+               scope itself comes from the real actor and confers no new action
+               authority on this prospective owner state. *)
+            let owned_work =
+              List.init P.Run_limits.max_occurrences ~f:(fun index ->
+                let operation =
+                  P.Id.Operation.of_string (sprintf "op_oracle_%d" index) |> protocol_ok
+                in
+                P.Run_work.create
+                  ~key:(Operation operation)
+                  ~generation:run.source.generation
+                |> protocol_ok)
+            in
+            let work = List.hd_exn owned_work in
+            let advanced =
+              P.Run.create
+                ~id:run.id
+                ~session:run.session
+                ~principal_id:run.principal_id
+                ~source:run.source
+                ~mode:run.mode
+                ~lifecycle:Active
+                ~revision:(Int64.succ run.revision)
+                ~owned_work
+                ~relinquished_work:[]
+                ~terminal_work:[]
+                ~created_at:run.created_at
+                ~updated_at:run.updated_at
+              |> protocol_ok
+            in
+            let advanced_index =
+              A.Run_state.advance index ~run:advanced ~intents:[] |> protocol_ok
+            in
+            let advanced_state = { state with run_state = Some advanced_index } in
+            let completed =
+              P.Moderator_execution.fail
+                executing
+                { code = "test.failed"
+                ; message = "actual callback"
+                ; retryable = false
+                ; details = `Null
+                }
+              |> protocol_ok
+            in
+            let delta =
+              A.Run_transition.fail_callback
+                advanced_state
+                ~scope
+                ~executing
+                ~completed
+                ~now:timestamp
+              |> protocol_ok
+            in
+            let retired_index =
+              match delta with
+              | [ A.Session_delta.Run_state_changed index ] -> index
+              | _ -> failwith "failure did not issue exactly one run transition"
+            in
+            let retired = A.Run_state.find retired_index run.id |> Option.value_exn in
+            [%test_eq: int] (List.length retired.owned_work) P.Run_limits.max_occurrences;
+            [%test_eq: int]
+              (List.length retired.terminal_work)
+              P.Run_limits.max_occurrences;
+            assert (
+              List.exists retired.terminal_work ~f:(fun proof ->
+                P.Run_work.equal proof.work work
+                && P.Run_work.Terminal.equal_outcome proof.outcome Unconfirmed));
+            let interrupted =
+              P.Moderator_execution.interrupt executing ~reason:"later cleanup"
+              |> protocol_ok
+            in
+            [%test_eq: int]
+              (List.length
+                 (A.Run_transition.fail_callback
+                    { state with run_state = Some retired_index }
+                    ~scope
+                    ~executing
+                    ~completed:interrupted
+                    ~now:timestamp
+                  |> protocol_ok))
+              0;
+            let foreign_context =
+              { executing.context with
+                id =
+                  P.Id.Moderator_execution.of_string "mex_foreign_callback" |> protocol_ok
+              }
+            in
+            let foreign = P.Moderator_execution.create foreign_context |> protocol_ok in
+            let foreign_completed =
+              P.Moderator_execution.interrupt foreign ~reason:"foreign" |> protocol_ok
+            in
+            assert (
+              Result.is_error
+                (A.Run_transition.fail_callback
+                   advanced_state
+                   ~scope
+                   ~executing:foreign
+                   ~completed:foreign_completed
+                   ~now:timestamp));
+            raise sentinel)
+       |> ignore;
+       failwith "callback failure disappeared"
+     with
+     | exn when phys_equal exn sentinel -> ());
+    assert (not (A.Run_scope.is_open (Option.value_exn !retained_scope)));
+    let state = A.Session_actor.state actor |> protocol_ok in
+    let index = Option.value_exn state.run_state in
+    let run = A.Run_state.runs index |> List.hd_exn in
+    (match run.lifecycle with
+     | Terminal (Failed None) -> ()
+     | _ -> failwith "actor stranded failed callback run");
+    let executing = Option.value_exn !retained_execution in
+    assert (
+      List.exists state.moderator_executions ~f:(fun receipt ->
+        P.Id.Moderator_execution.equal receipt.context.id executing.context.id
+        &&
+        match receipt.status with
+        | Failed _ -> true
+        | _ -> false));
+    assert (
+      List.exists (A.Run_state.receipts index) ~f:(fun receipt ->
+        P.Run_receipt.Kind.equal receipt.kind Terminal)))
+;;
+
+let%test_unit "actual callback cancellation retires run with original reason" =
+  with_startup_actor (fun actor _ _ request start manager _ _ _ ->
+    ignore (start (request "callback-cancel") |> protocol_ok : P.Run_receipt.t);
+    let before =
+      Chat_response.Moderator_manager.identity_snapshot manager |> Result.ok_or_failwith
+    in
+    let reason = Failure "actual callback cancellation" in
+    (try
+       A.Session_actor.with_current_moderator_event
+         actor
+         ~operation_id:None
+         ~event:Session_start
+         ~snapshot:(fun () -> Ok before)
+         (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit:_ ->
+            A.Session_actor.run_actions actor executing
+            |> protocol_ok
+            |> Option.value_exn
+            |> ignore;
+            Eio.Cancel.sub (fun cancel ->
+              Eio.Cancel.cancel cancel reason;
+              Eio.Fiber.check ();
+              failwith "cancelled callback delivered"))
+       |> ignore;
+       failwith "callback cancellation disappeared"
+     with
+     | Eio.Cancel.Cancelled actual when phys_equal actual reason -> ());
+    let state = A.Session_actor.state actor |> protocol_ok in
+    let index = Option.value_exn state.run_state in
+    let run = A.Run_state.runs index |> List.hd_exn in
+    (match run.lifecycle with
+     | Terminal Interrupted -> ()
+     | _ -> failwith "callback interruption stranded run");
+    assert (
+      List.exists state.moderator_executions ~f:(fun receipt ->
+        match receipt.status with
+        | Interrupted _ -> true
+        | _ -> false));
+    assert (
+      List.exists (A.Run_state.receipts index) ~f:(fun receipt ->
+        P.Id.Run.equal receipt.run_id run.id
+        && P.Run_receipt.Kind.equal receipt.kind Terminal)))
+;;
+
 let stage_bounded_owned_wait actor manager =
   let before =
     Chat_response.Moderator_manager.identity_snapshot manager |> Result.ok_or_failwith

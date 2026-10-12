@@ -51,6 +51,13 @@ not stop the session or terminate unrelated jobs. Existing explicit session end
 requests retain their session semantics; incompatible continuation and finish
 requests must be resolved at the owning checkpoint boundary.
 
+An actual orchestration callback failure settles its managed run with a durable
+failure receipt in the same transaction as the failed moderator execution.
+Cancellation preserves its original reason and records interruption. An existing
+terminal winner remains unchanged. Unfinished owned work retains honest
+unconfirmed custody; retirement does not claim that work completed or cancel
+unrelated workers.
+
 Native staging and rollback invariants are exercised by
 `test/agent_session/run_action_scope_tests.ml`; the bounded domains and immutable
 outcome evidence are exercised by `test/run_lifecycle_protocol_test.ml`. The native

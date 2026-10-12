@@ -29,6 +29,21 @@ val settle_operation
   -> now:Agent_protocol.Timestamp.t
   -> (Session_delta.t list, Agent_protocol.Error.t) result
 
+(** Retire a failed/interrupted actual callback in its enclosing actor transaction.
+    The immutable scope must identify this execution and the current run source,
+    principal and generation. A closed scope is accepted only for retirement;
+    this operation grants no callback authority. Later revisions caused by owned
+    work are preserved, and an already terminal winner remains unchanged. Other
+    unresolved custody receives honest Unconfirmed evidence; no work is cancelled.
+    Persist these deltas with [completed] in the same session transaction. *)
+val fail_callback
+  :  Session_state.t
+  -> scope:Run_scope.t
+  -> executing:Agent_protocol.Moderator_execution.t
+  -> completed:Agent_protocol.Moderator_execution.t
+  -> now:Agent_protocol.Timestamp.t
+  -> (Session_delta.t list, Agent_protocol.Error.t) result
+
 (** Pair existing turn admission with only its exact applied handler request or
     bound subscription-delivery wake. Consumes the retained action once and binds
     the actual operation; unrelated input never resumes a waiting run. *)
