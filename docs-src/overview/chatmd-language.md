@@ -8,12 +8,14 @@ context. Instruction helper compatibility names emit developer-role messages.
 
 ChatMarkdown (ChatMD) is a **small, closed XML vocabulary embedded in Markdown** for authoring LLM conversations as plain files.
 
-The core idea is simple: a ChatMD file is both:
+ChatMD describes runnable agent definitions and readable conversation transcripts.
+In a managed session, the authored definition stays separate from the stored
+conversation. Export a transcript explicitly when you want a readable file of
+tool calls, tool results and replies; importing an edited transcript starts a new
+conversation. Resuming an existing conversation uses its captured code. An explicit
+rebuild while the session is stopped adopts edits to the definition and scripts.
 
-- a **prompt** (model config, tool permissions, instructions, context), and
-- an **auditable transcript** (tool calls + tool outputs + assistant replies).
-
-This makes workflows **reproducible**, **diffable**, and easy to review.
+These files make agent definitions and exported conversations easy to review.
 
 ## “What the model sees” (and the explicit exceptions)
 
@@ -584,8 +586,17 @@ A queued child keeps the installed revision selected at admission. Editing the
 files afterward does not change that queued or running child's code, including
 when its recorded work is retried or recovered. Source selection does not grant
 additional tools or access to files outside the host's admitted source roots.
-The ordinary agent-tool path implements these rules; persistent specialist
-refresh uses a separate authorization and resource-binding path.
+Persistent specialists use the same selection rules for new sessions. Resuming
+a specialist by its session ID uses that session's retained revision, even if the
+original files changed or were removed. Retrying the same creation request also
+retains its recorded revision.
+
+Refreshing a specialist's code keeps its originally admitted tools and native
+resources. Updated moderator scripts, managed tools and shell hooks must pass
+validation against those bindings, and changed shell code needs authorization for
+its new execution manifest. Source edits cannot silently add tools or widen
+permissions; changes to those declarations require a new defining session or an
+explicit rebuild.
 
 ### 5.5 MCP-backed tools (import tools from an MCP server)
 
