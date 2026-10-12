@@ -55,7 +55,13 @@ val validate_registrations : Registration.t list -> (unit, Error.t list) Result.
     Capability metadata and secure identities remain lazy, including resource
     fingerprinting and supplied-service policy. Forcing does not reconstruct
     functions, reconnect MCP clients or invoke tools. The owner must admit the
-    resulting pool and install its managed dispatch before exposing it. *)
+    resulting pool and install its managed dispatch before exposing it.
+
+    Ordinary agent tools are delegable only when their exact constructed native
+    implementation has an installed-artifact source registration. A retained
+    runner without a preparer and the legacy runner keep their delegation denial.
+    This classification grants no permissions: inherited capability, actor and
+    runtime authorization checks remain mandatory at actual dispatch. *)
 val create
   :  sw:Eio.Switch.t
   -> ctx:Eio_unix.Stdenv.base Ctx.t

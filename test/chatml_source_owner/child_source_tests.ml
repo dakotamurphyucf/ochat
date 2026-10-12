@@ -332,6 +332,53 @@ let%expect_test
         Queue.enqueue observed (Captured_runner_tests.texts inputs);
         Stdlib.List.to_seq [ Captured_runner_tests.answer "selected child" ])
     in
+    let module Native = Chat_response.Native_tool_pool in
+    let module Capabilities = Chat_response.Tool_capability in
+    let elements = Revision.elements parent in
+    let workspace = (root :> Eio.Fs.dir_ty Eio.Path.t) in
+    let host =
+      Chat_response.Agent_runtime.host
+        ~env
+        ~workspace
+        ~tool_dir:workspace
+        ~prompt_dir:(Revision.materialized_tree parent)
+        ~session_dir:responses
+        ~cache_dir:responses
+        ~home:workspace
+        ~session_id:"installed-source-delegation"
+        ~prompt_elements:elements
+      |> ok
+    in
+    let check_delegation agent_source_runner ~admitted =
+      let pool =
+        Native.create
+          ~sw
+          ~ctx
+          ~host
+          ~shell:Absent
+          ~admin_policy:Shell_runtime.Admin_policy.permissive
+          ?agent_source_runner
+          ~registrations:[]
+          ~run_agent:(fun ?prompt_dir:_ ?session_id:_ ?observer:_ ~source:_ ~ctx:_ _ _ ->
+            failwith "delegation classification invoked legacy source")
+          elements
+        |> ok
+      in
+      let binding =
+        Lazy.force (Native.capabilities pool)
+        |> ok
+        |> fun capabilities -> Capabilities.find capabilities ~name:declaration.name |> ok
+      in
+      assert (
+        phys_equal
+          (Capabilities.native_implementation binding |> Option.value_exn)
+          (List.hd_exn (Native.functions pool)));
+      assert (Bool.equal admitted (Result.is_ok (Capabilities.check_delegation binding)))
+    in
+    check_delegation (Some installed) ~admitted:true;
+    check_delegation (Some captured) ~admitted:false;
+    check_delegation None ~admitted:false;
+    assert (Queue.is_empty observed);
     let items =
       [ CM.Basic
           { type_ = "text"

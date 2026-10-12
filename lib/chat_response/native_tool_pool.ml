@@ -83,6 +83,21 @@ let functions_of_tool ~agent_source_runner ~sw ~ctx ~host ~run_agent shell = fun
 
 let function_name function_ = function_.Ochat_function.info.function_.name
 
+let has_installed_source ~functions ~registrations name =
+  match
+    List.find functions ~f:(fun implementation ->
+      String.equal (function_name implementation) name)
+  with
+  | None -> false
+  | Some implementation ->
+    List.exists registrations ~f:(fun (registration : Registration.t) ->
+      phys_equal implementation registration.implementation
+      &&
+      match registration.source_requirement with
+      | Source (Some _) -> true
+      | Source None | Ordinary -> false)
+;;
+
 let duplicate_function functions =
   List.map functions ~f:function_name |> List.find_a_dup ~compare:String.compare
 ;;
@@ -277,7 +292,8 @@ let create
          Authoring_registration.create
            ~delegation_restrictions:
              (List.filter_map tools ~f:(function
-                | CM.Agent { name; _ } ->
+                | CM.Agent { name; _ }
+                  when not (has_installed_source ~functions ~registrations name) ->
                   Some
                     ( name
                     , "legacy agent tools lack delegated actor policy and approval \
