@@ -74,7 +74,9 @@ val with_agent_source_code_view : t -> Agent_source_code_view.t -> t
 
 (** Authenticate any saved target first, then check the actual current native
     service, invocation ceiling/binding and actor authorization before projecting
-    an exact function's selected defining context. An authenticated saved target
+    the invoking function's selected defining context. A different actual native
+    function returns None after scope validation, never another selected row
+    under this invocation's authorization. An authenticated saved target
     wins and returns None here. Expired/foreign scope never becomes absence;
     original authorization failures and cancellation propagate. *)
 val agent_source_context

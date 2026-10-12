@@ -324,20 +324,26 @@ let agent_source_context t ~defining_revision ~implementation =
           else (
             match C.native_implementation binding, C.native_implementation current with
             | Some original, Some current when phys_equal original current ->
-              Ok (invocation, binding)
+              Ok (invocation, binding, phys_equal original implementation)
             | Some _, Some _ | Some _, None | None, Some _ | None, None ->
               denied "selected source code is not the admitted native implementation"))
     in
-    let%bind invocation, binding = validate () in
-    let%bind () = t.authorize invocation binding in
-    Eio.Fiber.check ();
-    let%bind current, _ = validate () in
-    if not (Agent_protocol.Id.Invocation.equal invocation.context.id current.context.id)
-    then denied "selected source code invocation changed during authorization"
+    let%bind invocation, binding, matches_implementation = validate () in
+    if not matches_implementation
+    then Ok None
     else (
-      match t.agent_source_code_view with
-      | None -> Ok None
-      | Some view -> Agent_source_code_view.find view ~defining_revision ~implementation)
+      let%bind () = t.authorize invocation binding in
+      Eio.Fiber.check ();
+      let%bind current, _, matches_implementation = validate () in
+      if
+        (not
+           (Agent_protocol.Id.Invocation.equal invocation.context.id current.context.id))
+        || not matches_implementation
+      then denied "selected source code invocation changed during authorization"
+      else (
+        match t.agent_source_code_view with
+        | None -> Ok None
+        | Some view -> Agent_source_code_view.find view ~defining_revision ~implementation))
 ;;
 
 let create
