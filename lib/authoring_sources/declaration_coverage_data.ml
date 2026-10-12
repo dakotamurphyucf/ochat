@@ -255,7 +255,7 @@ let implementation_sources =
   ; ( "lib/chat_response/mcp_discovery_cache.ml"
     , "b7c02f701beaaf87c1cd04bf06065cb5564f2702f923704d8e8676f13d5724fb" )
   ; ( "lib/chat_response/shell_tool.ml"
-    , "bb69d788c0223e461fd52be56a85843313e5c113b6506dae37449bf92a52e2df" )
+    , "2450c632c18067d0c984087461b9085f24314dd79a026a42a4f35b1014816f92" )
   ; ( "lib/chat_response/tool.ml"
     , "b6b01a30a41a4f3c01648448368f24e6ae0962ca079b84f1ebaf837679d462d8" )
   ; ( "lib/chatmd/chatmd_read_file_declaration.ml"
