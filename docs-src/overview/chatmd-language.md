@@ -571,6 +571,22 @@ The runtime is compiled and authorized before the tool is exposed. See the
 <tool name="triage" agent="prompts/triage.chatmd" local description="Triage a bug report"/>
 ```
 
+For local agent tools in a managed host, `source_mode="file"` is the default:
+each new child captures the current source files before it starts. Use
+`source_mode="captured"` to select the child code retained with the defining
+conversation instead:
+
+```xml
+<tool name="triage" agent="prompts/triage.chatmd" local source_mode="captured"/>
+```
+
+A queued child keeps the installed revision selected at admission. Editing the
+files afterward does not change that queued or running child's code, including
+when its recorded work is retried or recovered. Source selection does not grant
+additional tools or access to files outside the host's admitted source roots.
+The ordinary agent-tool path implements these rules; persistent specialist
+refresh uses a separate authorization and resource-binding path.
+
 ### 5.5 MCP-backed tools (import tools from an MCP server)
 
 ```xml
@@ -738,7 +754,15 @@ Here’s a summary produced by my sub-agent:
 Notes:
 
 - Any children of `<agent>` become the sub-agent’s runtime input.
-- Results are cached (so repeated identical agent calls can be cheap).
+- The legacy unowned content path may cache repeated agent results. Owned managed
+  child dispatch executes each selected invocation; source capture does not cache
+  its answer.
+
+Owned local content agents accept the same `source_mode="file"|"captured"`
+selection. For example, `<agent src="prompts/summarise.chatmd" local
+source_mode="captured">...</agent>` uses the retained child code. The default
+is `file`; nested agent calls select their own declared child rather than reuse
+an enclosing queued tool's selected revision.
 
 ---
 
