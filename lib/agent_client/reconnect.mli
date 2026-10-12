@@ -108,6 +108,17 @@ val read_audit
   -> limit:int
   -> (Agent_protocol.Audit.t Agent_protocol.Page.t, Agent_protocol.Error.t) result
 
+(** Read complete canonical history through the currently attached handle. The
+    complete export/download uses that one handle even if reconnection occurs;
+    transport loss is returned without retrying against another revision. No
+    attachment, reader, or connection is created. See [Canonical_export.read]. *)
+val read_canonical
+  :  t
+  -> revision:int64
+  -> limits:Document_schema.Limits.t
+  -> checkpoint:(unit -> unit)
+  -> (Canonical_export.t, Agent_protocol.Error.t) Result.t
+
 val detach : t -> (unit, Agent_protocol.Error.t) result
 val close : t -> unit
 val pending_commands : t -> Connection.pending_command list

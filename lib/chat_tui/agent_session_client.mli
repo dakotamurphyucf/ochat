@@ -99,5 +99,15 @@ val read_audit
 val detach : t -> (unit, Agent_protocol.Error.t) result
 val close : t -> unit
 
+(** Complete authorized canonical history at the exact requested revision,
+    using the current reconnect owner's attachment. Does not render the UI's
+    possibly incomplete or transformed projection, or retry after a conflict. *)
+val read_canonical
+  :  t
+  -> revision:int64
+  -> limits:Document_schema.Limits.t
+  -> checkpoint:(unit -> unit)
+  -> (Agent_client.Canonical_export.t, Agent_protocol.Error.t) Result.t
+
 (** [attachment t] exposes current attachment identity/mode, not credentials. *)
 val attachment : t -> Agent_protocol.Session.Attachment.t option

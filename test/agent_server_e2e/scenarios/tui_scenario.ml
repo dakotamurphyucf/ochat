@@ -74,9 +74,14 @@ let local_message env temporary child =
   Pty.await_text child ~clock:(Eio.Stdenv.clock env) text
 ;;
 
-let local env temporary ~columns ~rows ~message =
+let local env temporary ~columns ~rows ~message ?(export = false) () =
   let fixture = F.create env temporary "tui-local" in
   Support.Provider_fixture.provision ~env fixture;
+  let definition = Temp.path temporary (Config.prompt_path fixture) in
+  let original_definition = Eio.Path.load definition in
+  let output_file =
+    Filename.concat (Config.physical_workspace fixture) "conversation.chatmd"
+  in
   Eio.Switch.run (fun sw ->
     let child =
       spawn
@@ -85,12 +90,28 @@ let local env temporary ~columns ~rows ~message =
         fixture
         ~columns
         ~rows
-        [ "--local"; "--transient"; "-file"; Config.prompt_path fixture ]
+        ([ "--local"; "--transient"; "-file"; Config.prompt_path fixture ]
+         @ if export then [ "--export-file"; output_file ] else [])
     in
     ready env child;
     inspect_work env child;
     if message then local_message env temporary child;
     quit env child);
+  F.require
+    (String.equal (Eio.Path.load definition) original_definition)
+    "TUI exit overwrote the authored definition";
+  if export
+  then (
+    let transcript = Eio.Path.load (Temp.path temporary output_file) in
+    F.require
+      (String.is_substring transcript ~substring:"TUI-fixture-ready")
+      "export omitted canonical starting history";
+    F.require
+      (String.is_substring transcript ~substring:"pty-local-user-message")
+      "export omitted canonical submitted history";
+    F.require
+      (not (String.is_substring transcript ~substring:"<script"))
+      "transcript export copied executable definition declarations");
   let remaining =
     Eio.Path.read_dir (Temp.path temporary (Temp.roots temporary).temporary)
   in
@@ -118,6 +139,42 @@ let connected_arguments fixture http =
     ; "physical"
     ; "--detached"
     ]
+;;
+
+let reject_definition_export env temporary =
+  let fixture = F.create env temporary "tui-export-definition" in
+  Support.Provider_fixture.provision ~env fixture;
+  let definition_file = Config.prompt_path fixture in
+  let definition = Temp.path temporary definition_file in
+  let original = Eio.Path.load definition in
+  let alias =
+    Filename.concat
+      (Filename.dirname definition_file)
+      ("./" ^ Filename.basename definition_file)
+  in
+  Eio.Switch.run (fun sw ->
+    let child =
+      spawn
+        ~sw
+        env
+        fixture
+        ~columns:100
+        ~rows:30
+        [ "--local"; "--transient"; "-file"; definition_file; "--export-file"; alias ]
+    in
+    ready env child;
+    escape_to_normal env child;
+    Pty.send child ":q\r";
+    (match Pty.await_exit child ~clock:(Eio.Stdenv.clock env) with
+     | `Exited code -> F.require (code <> 0) "definition export unexpectedly succeeded"
+     | `Signaled _ -> failwith "definition export rejection killed the TUI");
+    F.require
+      (String.is_substring (Pty.output child) ~substring:"Export destination must differ")
+      "definition export failed for an unrelated reason";
+    Pty.assert_restored child ~clock:(Eio.Stdenv.clock env));
+  F.require
+    (String.equal original (Eio.Path.load definition))
+    "definition alias export changed authored source"
 ;;
 
 let only_session env connection =
@@ -178,11 +235,15 @@ let cases =
   ; "trace.reconnect-draft-preservation", Tui_stream_scenario.reconnect
   ; "trace.presentation-state-client-local", Tui_trace_scenario.presentation
   ; ( "pty.local-start-message-quit"
-    , fun env temporary -> local env temporary ~columns:100 ~rows:30 ~message:true )
+    , fun env temporary -> local env temporary ~columns:100 ~rows:30 ~message:true () )
+  ; ( "pty.local-explicit-transcript-export"
+    , fun env temporary ->
+        local env temporary ~columns:100 ~rows:30 ~message:true ~export:true () )
   ; "pty.unix-connected-start-quit", connected false
+  ; "pty.local-definition-export-rejected", reject_definition_export
   ; "pty.http-connected-start-quit", connected true
   ; ( "pty.terminal-restoration"
-    , fun env temporary -> local env temporary ~columns:72 ~rows:20 ~message:false )
+    , fun env temporary -> local env temporary ~columns:72 ~rows:20 ~message:false () )
   ]
 ;;
 

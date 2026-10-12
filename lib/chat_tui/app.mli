@@ -144,12 +144,20 @@ val run_chat
 (** [run_agent_session ~env ~client ()] runs the terminal as a projection of
     an already attached agent-server session. The server remains authoritative
     for history, execution, permissions, compaction, and persistence; editor
-    and viewport state remain local to this process. *)
+    and viewport state remain local to this process.
+
+    [on_exit] runs only after normal UI exit, after terminal restoration and UI
+    worker shutdown, while the existing client remains attached. It may perform
+    an explicit export through that client; it must not escape client resources.
+    The client is detached after the callback, including on callback failure or
+    cancellation. No callback runs if UI initialization/execution fails. The
+    default performs no export. The outer owner still releases the host. *)
 val run_agent_session
   :  ?typeahead_inference:Inference_client.Execution.t
   -> env:Eio_unix.Stdenv.base
   -> client:Agent_session_client.t
   -> ?textmate_grammar_files:string list
   -> ?typeahead_config:Type_ahead_config.t
+  -> ?on_exit:(Agent_session_client.t -> unit)
   -> unit
   -> unit

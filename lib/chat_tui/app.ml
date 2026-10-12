@@ -1133,9 +1133,7 @@ module Agent_mode = struct
       ~finally:(fun () ->
         Agent_history_layout.close history_layout;
         Type_ahead_ui.close typeahead;
-        Notty_eio.Term.release term;
-        ignore
-          (Agent_session_client.detach client : (unit, Agent_protocol.Error.t) result))
+        Notty_eio.Term.release term)
       (fun () -> loop state input_stream resize_stream redraw_stream)
   ;;
 
@@ -1174,14 +1172,21 @@ let run_agent_session
       ~client
       ?(textmate_grammar_files = [])
       ?(typeahead_config = Type_ahead_config.default)
+      ?(on_exit = fun _ -> ())
       ()
   =
-  Agent_mode.run
-    ~typeahead_inference
-    ~env
-    ~client
-    ~textmate_grammar_files
-    ~typeahead_config
+  Switch.run (fun sw ->
+    Switch.on_release sw (fun () ->
+      ignore (Agent_session_client.detach client : (unit, Agent_protocol.Error.t) result));
+    Agent_mode.run
+      ~typeahead_inference
+      ~env
+      ~client
+      ~textmate_grammar_files
+      ~typeahead_config;
+    Fiber.check ();
+    on_exit client;
+    Fiber.check ())
 ;;
 
 (* ────────────────────────────────────────────────────────────────────────── *)

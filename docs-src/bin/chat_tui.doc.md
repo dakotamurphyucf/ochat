@@ -34,7 +34,7 @@ raw protocol clients must discover catalog IDs.
 | `--bearer-token-file FILE` | Connected HTTP token loaded privately with Eio; rejected for Unix endpoints. |
 | `--session ID` | Connected: daemon ID. Implicit local: legacy store ID and mode. |
 | `--new-session` | Legacy local UUID session; not daemon creation. |
-| `--export-file FILE` | Legacy interactive transcript export. |
+| `--export-file FILE` | Explicit transcript export after interactive exit, including native `--local`. Native export keeps the authored definition separate and rejects it as the destination. |
 | `--auto-persist`, `--no-persist` | Legacy interactive snapshot persistence controls. |
 | `--parallel-tool-calls`, `--no-parallel-tool-calls` | Legacy interactive execution controls, not native/connected runtime overrides. |
 | `--authorize-shell-manifest` | Authorize the prompt's compiled shell manifest for this interactive process. Supported with native `--local`; without `--local`, preserves the legacy path. Command approvals and confinement remain enforced. |

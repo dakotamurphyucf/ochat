@@ -252,6 +252,23 @@ publishing an incomplete document. See the
 [rendering contract](../../lib/history_chatmd/history_chatmd.mli) and
 [exact-byte examples](../../test/chatmd_bounded_rendering/rendering_tests.ml).
 
+## Explicit native TUI transcript export
+
+`chat-tui --no-config --local -file agent.chatmd --export-file conversation.chatmd`
+exports after normal terminal exit, while the original attached client can still
+read the session. The authored definition stays separate: an output path resolving
+to that definition is rejected. Other existing destinations require confirmation.
+Without `--export-file`, native mode does not overwrite the definition on exit.
+
+Export reads complete, fully disclosed canonical history at one exact revision,
+including the initial conversation and later rewrites. It does not serialize the
+TUI display or copy script declarations into a purported executable definition.
+Revision conflicts, disclosure gaps and interrupted reads fail without replacing
+the destination. Admission permits a 16 MiB JSON document, 64 MiB rendered ChatMD,
+and 268,435,456 rendering work units. The existing atomic export writer publishes
+only complete rendered bytes. Terminal restoration and UI worker shutdown precede
+export; attachment cleanup and host shutdown follow it even if export fails.
+
 ## Restart and recovery
 
 Durable records survive daemon restart. Session actors recover from validated

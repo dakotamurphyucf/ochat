@@ -108,11 +108,18 @@
  (modules key_dump)
  (libraries core eio_main ochat.notty_eio))
 
+(library
+ (name tui_transcript_export)
+ (modules tui_transcript_export)
+ (libraries core eio eio.unix eio_posix ochat.chat_tui ochat.agent_client
+  ochat.agent_protocol ochat.agent_session ochat.document_schema ochat.history_chatmd)
+ (preprocess (pps ppx_jane)))
+
 (executable
  (public_name chat-tui)
  (name chat_tui)
  (modules chat_tui)
- (libraries inference_composition ochat.provider_runtime_host
+ (libraries inference_composition tui_transcript_export ochat.provider_runtime_host
   core
   eio_main
   jsonaf

@@ -1346,6 +1346,7 @@ module Cli = struct
         }
     | Embedded_interactive of
         { prompt_file : string
+        ; export_file : string option
         ; storage : Agent_server.Local_storage.t
         ; session_id : string option
         ; authoring_package_files : string list
@@ -1533,7 +1534,6 @@ module Cli = struct
       let legacy_only_requested =
         (Option.is_some t.session_id && not t.local)
         || t.new_session
-        || Option.is_some t.export_file
         || t.no_persist
         || t.auto_persist
         || t.parallel_tool_calls
@@ -1552,6 +1552,7 @@ module Cli = struct
         in
         Embedded_interactive
           { prompt_file = t.conversation_file
+          ; export_file = t.export_file
           ; storage
           ; session_id = t.session_id
           ; authoring_package_files = t.authoring_package_files
@@ -2161,6 +2162,7 @@ module Embedded_interactive = struct
         ~typeahead_config
         ~env
         ~prompt_file
+        ~export_file
         ~storage
         ~session_id
         ~textmate_grammar_files
@@ -2198,7 +2200,7 @@ module Embedded_interactive = struct
     let run_attached embedded =
       let open Result.Let_syntax in
       let%bind connection = Agent_server.Embedded.connect_owned embedded in
-      let%map client =
+      let%bind client =
         Chat_tui.Agent_session_client.attach
           ~sw
           ~clock:(Eio.Stdenv.clock env)
@@ -2210,13 +2212,28 @@ module Embedded_interactive = struct
       let typeahead_inference =
         private_typeahead_execution typeahead_config ~sw ~env ~host:(Some inference_host)
       in
+      let export_result = ref (Ok ()) in
       Chat_tui.App.run_agent_session
         ?typeahead_inference
         ~typeahead_config
         ~env
         ~client
         ~textmate_grammar_files
-        ()
+        ~on_exit:(fun client ->
+          Option.iter export_file ~f:(fun output_file ->
+            export_result
+            := Tui_transcript_export.write
+                 client
+                 ~env
+                 ~definition_file:prompt_file
+                 ~output_file))
+        ();
+      Result.map_error !export_result ~f:(fun error ->
+        Agent_protocol.Error.create
+          Internal_error
+          ~message:(Error.to_string_hum error)
+          ~retryable:false
+          ())
     in
     let daemon_options = Inference_composition.daemon_options inference_host in
     let result =
@@ -2433,6 +2450,7 @@ let run_action ~transport_policy ~typeahead_config (action : Cli.action) =
     Env.with_env (fun env -> Embedded_admin.run ~env ~prompt_file ~storage ~command)
   | Embedded_interactive
       { prompt_file
+      ; export_file
       ; storage
       ; session_id
       ; textmate_grammar_files
@@ -2446,6 +2464,7 @@ let run_action ~transport_policy ~typeahead_config (action : Cli.action) =
         ~typeahead_config
         ~env
         ~prompt_file
+        ~export_file
         ~storage
         ~session_id
         ~textmate_grammar_files

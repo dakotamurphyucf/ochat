@@ -191,6 +191,7 @@ let stop t ~mode = Agent_client.Reconnect.stop t.handle ~mode
 let respond_permission t = Agent_client.Reconnect.respond_permission t.handle
 let revoke_grant t = Agent_client.Reconnect.revoke_grant t.handle
 let read_audit t = Agent_client.Reconnect.read_audit t.handle
+let read_canonical t = Agent_client.Reconnect.read_canonical t.handle
 let detach t = Agent_client.Reconnect.detach t.handle
 let close t = Agent_client.Reconnect.close t.handle
 let attachment t = Agent_client.Reconnect.attachment t.handle
