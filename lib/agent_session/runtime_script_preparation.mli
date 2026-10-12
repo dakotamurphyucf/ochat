@@ -84,6 +84,26 @@ val with_revision
         -> ('a, Agent_protocol.Error.t) Result.t)
   -> ('a, Agent_protocol.Error.t) Result.t
 
+(** Same admitted preparation as [with_revision], additionally lending the exact
+    immutable plan used to authenticate the restored programs. No second parser
+    or planning traversal. [None] plan means genuine legacy custody absence, not
+    evidence that the captured revision contains no moderator. Borrowed startup,
+    callback and original exception rules are identical to [with_revision]. *)
+val with_revision_plan
+  :  t option
+  -> ?startup:Chat_response.Startup_compilation.t
+  -> Prompt_revision.t
+  -> env:Eio_unix.Stdenv.base
+  -> invocation:Invocation.t
+  -> checkpoint:(unit -> unit)
+  -> f:
+       (Chat_response.Startup_compilation.t
+        -> compilation_limits:Chatml_compilation.limits
+        -> plan:Chat_response.Script_contract_plan.t option
+        -> programs:Chatml_prompt_programs.Restored.t option
+        -> ('a, Agent_protocol.Error.t) Result.t)
+  -> ('a, Agent_protocol.Error.t) Result.t
+
 (** Prepare a retained authored child and select its exact delegated role before
     its source fingerprint can enter resource admission or a durable reservation.
     The captured inventory is preserved; ambiguous, partial or missing recorded

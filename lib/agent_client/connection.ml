@@ -1,10 +1,33 @@
 open! Core
 module P = Agent_protocol
 
+module Pending_identity = struct
+  type t =
+    { method_name : string
+    ; idempotency_key : P.Idempotency_key.t option
+    }
+
+  let of_original command params =
+    let idempotency_key =
+      match command with
+      | P.Command.Session_run_start request -> Some request.key
+      | _ ->
+        (match params with
+         | `Object fields ->
+           (match List.Assoc.find fields "idempotency_key" ~equal:String.equal with
+            | Some (`String key) -> P.Idempotency_key.of_string key |> Result.ok
+            | Some _ | None -> None)
+         | _ -> None)
+    in
+    { method_name = P.Command.method_name command; idempotency_key }
+  ;;
+end
+
 type pending_command =
   { command : P.Command.t
   ; byte_count : int
   ; identity : P.Initialize.Response.t option
+  ; recovery_identity : Pending_identity.t
   }
 
 let has_command_receipt = function
@@ -257,7 +280,14 @@ let request t command =
                     submitting"
                  ~retryable:false
                  ())
-          else Ok (Some { command; byte_count; identity = t.initialization }))
+          else
+            Ok
+              (Some
+                 { command
+                 ; byte_count
+                 ; identity = t.initialization
+                 ; recovery_identity = Pending_identity.of_original command params
+                 }))
       in
       Option.iter intent ~f:(fun item -> t.pending <- item :: t.pending);
       let retire () =
@@ -465,6 +495,7 @@ let request_without_history t command =
   | Error _ as failure -> failure
 ;;
 
+let pending_identity pending = pending.recovery_identity
 let pending_commands t = Eio.Mutex.use_ro t.mutex (fun () -> t.pending)
 
 let adopt_pending t pending =

@@ -14,12 +14,31 @@
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))
 
+(library
+ (name managed_completion_cli)
+ (modules managed_completion_cli managed_run_waiter)
+ (private_modules managed_run_waiter)
+ (libraries core eio ochat.agent_protocol ochat.agent_client ochat.agent_session
+  ochat.history_chatmd ochat.document_schema)
+ (preprocess (pps ppx_jane)))
+
+(library
+ (name managed_completion_command)
+ (modules managed_completion_command managed_completion_presentation)
+ (private_modules managed_completion_presentation)
+ (libraries inference_composition frontend_transcript managed_completion_cli core
+  core_unix.command_unix eio eio.unix eio_posix io ochat.agent_protocol
+  ochat.agent_client ochat.agent_server ochat.chat_response ochat.history_chatmd
+  ochat.document_schema ochat.inference_host ochat.provider_runtime_host
+  ochat.history_entry ochat.transcript)
+ (preprocess (pps ppx_jane)))
+
 (executable
  (package ochat)
  (public_name ochat)
  (name main)
  (modules main)
- (libraries inference_composition shell_inspection_cli ochat.provider_runtime_host
+ (libraries inference_composition shell_inspection_cli managed_completion_command ochat.provider_runtime_host
   lwt_eio
   io
   dune_describe

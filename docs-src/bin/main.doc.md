@@ -1,10 +1,10 @@
 # `bin/main.ml` – OCaml source behind the `ochat` executable
 
-Host scope: this CLI exposes provider administration and file-backed completion/utilities.
+Host scope: this CLI exposes provider administration, managed headless completion and utilities.
 The [provider command group](../lib/provider_operator.doc.md) operates locally or
-through a named, host-pinned daemon connection. New durable
-agent sessions use [ochat-agent-server](../agent-server/README.md), while daemon-free
-native TUI uses [the local guide](../agent-server/tutorials/local-tui.md).
+through a named, host-pinned daemon connection. Completion creates durable local
+managed sessions; shared hosting uses [ochat-agent-server](../agent-server/README.md).
+Daemon-free native TUI uses [the local guide](../agent-server/tutorials/local-tui.md).
 `ochat shell` store administration targets legacy sessions, not daemon IDs.
 
 This document describes the **implementation module** of the
@@ -83,16 +83,38 @@ $ ochat query -vector-db-folder ./vector \
 val chat_completion_command : Core.Command.t
 ```
 
-Streams an assistant reply from the OpenAI *Responses* endpoint
-based on a *chatmd* conversation.  The implementation is a one-liner
-around `Chat_response.Driver.run_completion_stream`.
+Delegates to the small `Managed_completion_command` composition. It captures a
+separate authored definition through the existing embedded host, selects an
+actual retained session or admits a fresh stopped conversation, then uses one
+subscribed `Session_handle` for execution and presentation. Ordinary prompts use
+the existing foreground operation; versioned moderators use actual managed run
+receipts in explicit Single_turn or Workflow mode.
+
+`Managed_completion_cli` watches the original operation/run terminal and exports
+the complete authorized canonical history. Live draft/tool observations and
+actual session/run IDs go to stderr; stdout or the selected file receives only
+the final ChatMD transcript. A failed terminal retains its transcript and causes
+a nonzero exit. Reader/handle cleanup precedes host/provider release.
 
 Flags of interest:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `-prompt-file`  | *(none)* | Template appended before execution on every invocation supplying it; omit when continuing existing history |
-| `-output-file`  | `./prompts/default.md` | Running conversation log |
+| `-prompt-file` | required | Separate definition; retained resume keeps captured code |
+| `-output-file` | `/dev/stdout` | Complete transcript export, replacing a distinct file atomically |
+| `-run-mode` | `single-turn` | Explicit `single-turn` or `workflow`; ordinary prompts reject Workflow |
+| `-session-id` | none | Retained managed conversation in the selected local store |
+| `-run-id` | none | Observe the original managed run with its matching mode |
+| `-message` | none | Genuine new input to a retained versioned moderator |
+| `-rebuild` | false | Adopt current catalog code in an already stopped retained session |
+| `-import-transcript` | none | Admit edited ChatMD messages as a new conversation |
+| `-storage-root` | `HOME/.ochat/agent-store` | Explicit durable native store |
+| `-project-root` | none | Repeatable administrative external project-source root grant |
+
+Definition, import and export coordinates must be distinct, including removed-file
+and symlink aliases. Source/provider configuration remains owned by the selected
+captured revision. See the [completion guide](../cli/chat-completion.md) for
+resume, activation, import and output semantics.
 
 ### 2.4  `tokenize_command`
 
@@ -149,8 +171,9 @@ separately in [`Io`](../lib/Io.doc.md).
 * **Provider configuration** – completion uses the prompt configuration;
   retrieval uses its separate embedding settings. See the
   [provider environment guide](../agent-server/environment.md).
-* **Exit codes** – unhandled OCaml exceptions propagate to the top and
-  result in a non-zero exit status without structured error handling.
+* **Exit codes** – completion reports actual failed, cancelled, limited or
+  interrupted terminal evidence after preserving the final transcript. Original
+  cancellation and unexpected exceptions also propagate with a nonzero exit.
 
 ---
 

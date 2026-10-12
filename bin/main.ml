@@ -12,8 +12,7 @@
       previously created corpus using {!module:Vector_db.query_hybrid}.
 
     • {{!val:chat_completion_command} chat-completion} – convenience wrapper
-      around {!Chat_response.Driver.run_completion_stream} for chatmd prompt
-      files.
+      using the actual managed session/run owner and canonical ChatMD export.
 
     • {{!val:tokenize_command} tokenize} – count {e Tikitoken} tokens of an
       arbitrary file; useful for prompt budgeting.
@@ -173,80 +172,9 @@ let query_command =
          docs)
 ;;
 
-(** [chat_completion_command] feeds a *chatmd* conversation to the OpenAI
-    Chat Completion endpoint and streams the assistant’s reply to a Markdown
-    file.
-
-    Flags:
-    • [-prompt-file] – optional template prepended exactly once at the start of
-      the output file.  If omitted the conversation continues from the
-      existing [output-file] only.
-
-    • [-output-file] – path where the running transcript is stored (default:
-      {b ./prompts/default.md}).  The file is created on first run so you can
-      resume later.
-
-    Implementation note: the heavy lifting is done by
-    {!Chat_response.Driver.run_completion_stream} which handles tool calling
-    and incremental rendering.
-*)
-let chat_completion_command =
-  Command.basic
-    ~summary:
-      "Call OpenAI API to provide chat completion based on the content of a chatmd \
-       prompt file ."
-    (let%map_open prompt_file =
-       flag
-         "-prompt-file"
-         (optional string)
-         ~doc:
-           "FILE Path to the file containing inital prompt (optional). Think of this as \
-            a  prompt template, and output-file as a conversation instance using the \
-            prompt-template. If you are trying to continue a previous conversation do \
-            not include this flag and only provide the output file"
-     and output_file =
-       flag
-         "-output-file"
-         (optional_with_default "./prompts/default.md" string)
-         ~doc:
-           "FILE Path to the file to save the chat completion output (default: \
-            /prompts/default.md). If prompt-file is provided contents of prompt file \
-            will be appended to the output file. "
-     and inference_transport =
-       flag
-         "inference-transport"
-         (optional_with_default "sse" string)
-         ~doc:"POLICY sse, prefer-websocket or require-websocket for this host"
-     in
-     fun () ->
-       let transport_policy =
-         Provider_runtime_host.Profile_policy.Transport_policy.of_string
-           inference_transport
-         |> Or_error.ok_exn
-       in
-       run_main
-       @@ fun env ->
-       Eio.Switch.run (fun sw ->
-         let host =
-           Inference_composition.create_with_policy
-             ~transport_policy
-             ~sw
-             ~env
-             ~default_model:"gpt-4.5-preview"
-         in
-         let inference_context =
-           Inference_composition.context host Chat_response.Config.default
-         in
-         Chat_response.Driver.run_completion_stream
-           ~env
-           ~inference_context
-           ~inference_identity:(Inference_host.identity host)
-           ~on_inference_attempt:(fun _ -> ())
-           ~on_inference_completion:(fun _ -> ())
-           ?prompt_file
-           ~output_file
-           ()))
-;;
+(** Managed headless completion uses a separate authored definition and native
+    conversation owner, explicit run mode, and complete canonical export. *)
+let chat_completion_command = Managed_completion_command.command
 
 (** [tokenize_command] prints the number of {e Tikitoken} tokens in a file.
 

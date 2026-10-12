@@ -42,6 +42,19 @@ val close : t -> unit
     contain private attachment data and is never a serializable public profile. *)
 type pending_command
 
+module Pending_identity : sig
+  (** Non-authority recovery coordinates from the retained original request.
+      No params, attachment credentials or submitted content are exposed. *)
+  type t =
+    { method_name : string
+    ; idempotency_key : Agent_protocol.Idempotency_key.t option
+    }
+end
+
+(** Constant-time immutable projection, captured during the original bounded
+    parameter admission; does not rebuild or serialize private request data. *)
+val pending_identity : pending_command -> Pending_identity.t
+
 val pending_commands : t -> pending_command list
 
 (** Transfer in-memory unresolved intents only after confirming the same host and

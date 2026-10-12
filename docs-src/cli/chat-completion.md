@@ -1,201 +1,162 @@
-# ochat chat-completion – script-friendly cousin of chat_tui
+# ochat chat-completion — managed headless execution
 
-Host scope: this is the existing file-backed completion/utility CLI. New durable
-agent sessions use [ochat-agent-server](../agent-server/README.md), while daemon-free
-native TUI uses [the local guide](../agent-server/tutorials/local-tui.md).
-`ochat shell` store administration targets legacy sessions, not daemon IDs.
+`ochat chat-completion` runs an ordinary conversation or a versioned ChatML
+moderator through the native embedded host. The authored ChatMD definition and
+managed conversation are separate. Execution keeps its captured code and provider
+selection; an explicit transcript export contains the complete authorized
+conversation history, rather than another executable definition.
 
-`ochat chat-completion` runs a ChatMD conversation non-interactively and appends
-its response to a transcript file. Use it for a scheduled report or a single
-request from an existing script. This is an optional operating path: you do not
-need it before learning [ChatML workflows](../chatml/README.md) or
-[persistent specialists](../tutorials/persistent-specialist.md).
-
-Complete [installation and provider setup](../agent-server/quickstart.md)
-first. The commands below assume the repository root and the active opam switch.
-The model request requires credentials and incurs provider charges; preparation
-alone is offline. Response timing and wording vary. Review the current
-[provider transport boundary](../agent-server/permissions-and-security.md).
+Complete [installation and provider setup](../agent-server/quickstart.md) first.
+Model requests require credentials and incur provider charges. The examples below
+assume the repository root and the selected opam switch. This CLI owns its local
+host; it does not attach to a remote daemon or use the legacy `ochat shell` store.
 
 <a id="130-second-smoke-test"></a>
 
-## 1 Run a batch request
+## Run an ordinary request
 
-Create a private directory for this example. Copy the tracked, tool-free
-[hello prompt](../examples/agent-server/prompts/hello.chatmd) and append a request:
+Copy the tracked, tool-free [hello prompt](../examples/agent-server/prompts/hello.chatmd)
+and add the initial request to that separate definition:
 
 ```sh
 OCHAT_BATCH=$(mktemp -d /tmp/ochat-batch.XXXXXX)
-cp docs-src/examples/agent-server/prompts/hello.chatmd "$OCHAT_BATCH/prompt.chatmd"
-printf '%s\n' '<user>Greet a new Ochat user in one sentence.</user>' >> "$OCHAT_BATCH/prompt.chatmd"
-```
-
-Keep `OCHAT_BATCH` in this shell. The copied prompt selects its model and declares
-no tools, imports, scripts, or other file dependencies. Adjust the model in your
-private copy if your configured provider requires it. Then make one request:
-
-```sh
+cp docs-src/examples/agent-server/prompts/hello.chatmd "$OCHAT_BATCH/definition.chatmd"
+printf '%s\n' '<user>Greet a new Ochat user in one sentence.</user>' >> "$OCHAT_BATCH/definition.chatmd"
 dune exec bin/main.exe -- chat-completion \
-  -prompt-file "$OCHAT_BATCH/prompt.chatmd" \
-  -output-file "$OCHAT_BATCH/session.chatmd"
+  -prompt-file "$OCHAT_BATCH/definition.chatmd" \
+  -storage-root "$OCHAT_BATCH/store" \
+  -output-file "$OCHAT_BATCH/transcript.chatmd"
 ```
 
-After a successful run, inspect the transcript:
+Adjust the model in the private definition if your provider requires it. A
+successful ordinary run exports the initial messages and the completed response.
+Response wording and provider IDs vary. The definition remains unchanged.
 
-```sh
-cat "$OCHAT_BATCH/session.chatmd"
-```
+Actual session IDs, managed run IDs when applicable, and bounded live draft/tool
+observations are printed on stderr. Observations can be partial, replaced or
+contain gaps; they are not the final transcript. Stdout is reserved for the
+complete canonical export when `-output-file` is omitted or `/dev/stdout`.
 
-It should contain the prompt, your user message, and an assistant greeting.
-No `echo` tool call is expected: this example has no tools. Exact response text,
-provider IDs, and optional reasoning output are not fixed test expectations.
-If the command fails, read its diagnostics and check the host's provider settings;
-do not assume a partially written file means the request completed.
+## Select execution mode
 
-## 2 Basic usage
+`-run-mode single-turn` is the default. Ordinary and legacy prompts use their
+actual foreground operation in this mode. `-run-mode workflow` requires a real
+versioned moderator and waits for its managed run terminal, rather than ending
+at the first completed model operation. It never silently becomes Single_turn. This rejection precedes run admission
+and provider work; independently admitted session creation can already initialize
+its configured hooks.
 
-Once installed, the same executable is named `ochat`:
+For a versioned moderator, a fresh conversation admits its genuine authored
+startup in the selected mode. Single_turn can complete a successful inert startup
+without inventing a user message; Workflow remains governed by the moderator's
+actual continuation and finish decisions. Failed callbacks settle the actual run
+with durable failure evidence. See [managed runs](../guide/chatml-authoring-runs.md).
 
-```sh
-ochat chat-completion -prompt-file "$OCHAT_BATCH/prompt.chatmd" \
-  -output-file "$OCHAT_BATCH/another-session.chatmd"
-```
+## Resume captured execution
 
-The driver creates its launch-directory `.chatmd` cache directory. It does not
-create arbitrary output parent directories. The private directory above already
-exists; create the parent first when choosing another output path. Conversation
-text is appended incrementally; tool payloads and provider logs can be stored
-separately. A transcript is not a backup of all runtime artifacts.
-
-## 3 Frequently-used flags
-
-| Flag | Purpose | Default |
-|------|---------|---------|
-| `-prompt-file` | Append the template before this run. Supply it only to initialize a transcript; every invocation with this flag appends it again. | *(none)* |
-| `-output-file` | Transcript path, created if absent and appended otherwise. Its parent must exist. | `./prompts/default.md` |
-
-Use a fresh output path for an independent conversation. Use the same output
-path and omit `-prompt-file` when continuing one. Running the initial command
-twice does not reset the transcript or deduplicate its instructions.
-
-## 4 Conversation state lives in a file
-
-Append another user message and continue the existing example:
-
-```sh
-printf '%s\n' '<user>Now describe ChatMD in one sentence.</user>' >> "$OCHAT_BATCH/session.chatmd"
-dune exec bin/main.exe -- chat-completion -output-file "$OCHAT_BATCH/session.chatmd"
-```
-
-This is another billable request. The previous transcript becomes input;
-the template is not appended again. Keep one writer per transcript and wait for
-completion before editing it or starting another run.
-
-To open its conversation in the native TUI:
-
-```sh
-dune exec bin/chat_tui.exe -- --no-config --local -file "$OCHAT_BATCH/session.chatmd"
-```
-
-The TUI starts a separate native host initialized from that file. It does not
-attach to the finished batch process, and it does not turn batch storage into a
-durable daemon session. See [native TUI persistence](../agent-server/tutorials/local-tui.md).
-
-## 5 Ephemeral runs
-
-The private-directory example keeps its transcript until you deliberately remove
-or archive it. For output on stdout, the driver also supports this special path:
-
-```sh
-dune exec bin/main.exe -- chat-completion \
-  -prompt-file "$OCHAT_BATCH/prompt.chatmd" -output-file /dev/stdout
-```
-
-This writes ChatMD incrementally, including the template, and still requires
-`-prompt-file` as input. `/dev/stdout` is a Unix device path, not a portable
-Windows filename. Relative dependencies use the output source context; use the
-tool-free example here rather than a prompt pack with relative imports.
-
-Both file and stdout runs can leave launch-directory `.chatmd` caches/tool
-payloads and provider response logs. They are not zero-artifact modes. See
-[provider logging](../lib/openai/responses.doc.md). When finished with the private
-example, first stop all processes using it, then archive it or remove only the
-recorded `OCHAT_BATCH` directory. Inspect other runtime artifacts separately.
-
-## 6 Root-scoped file reads
-
-The batch runner sets `${workspace}` and `${tool_dir}` to its process launch
-directory. This file-backed runner first copies `-prompt-file` into the output
-transcript, then parses that transcript. `${prompt_dir}`, root source context,
-relative imports and document references therefore use the **output transcript's
-directory**, not the original template's directory. Imported files retain their
-own source context. A template stored elsewhere does not change the workspace.
-Launch the command from the project the agent should read:
+Reuse the reported session ID with the same storage root. A retained versioned
+moderator accepts explicit new input:
 
 ```console
-$ cd /work/project
-$ mkdir -p .chatmd
-$ ochat chat-completion \
-    -prompt-file /work/prompts/reviewer.chatmd \
-    -output-file .chatmd/review.chatmd
+$ ochat chat-completion -prompt-file /work/prompts/definition.chatmd \
+    -storage-root /work/private/agent-store -session-id SESSION_ID \
+    -message 'Review the next change.' -run-mode single-turn \
+    -output-file /work/private/next-transcript.chatmd
 ```
 
-In this example `${prompt_dir}` is `/work/project/.chatmd`, not `/work/prompts`.
-Arrange relative dependencies beside the transcript, use suitable absolute
-references, or use an agent host when root-prompt source identity must be retained.
+`-prompt-file` remains a required selector coordinate. Retained execution uses its
+stored definition, invocation role and provider target even if the original file
+has disappeared. It does not adopt edits from the current file. A consumed
+versioned startup is never replayed just because `-session-id` was supplied: use
+`-message` for genuine new input or `-run-id` for the original run's evidence.
+Ordinary/legacy explicit `-message` is rejected; their initial input comes from
+the authored definition or an explicitly imported transcript.
 
-The prompt may expose one or more roots:
+If a retained versioned session is stopped, explicit input first activates it
+against the selected position, joins that retained runtime's actual resume
+callback, then selects a new admission anchor for the appended message. The
+current configuration at entry to that second phase is retained across the join;
+source, generation, attachment or configuration changes during it conflict.
+History changes committed by the authorized resume callback are expected.
+There is no failed-command retry with a newer position.
 
-```xml
-<tool name="read_file">
-  <read id="project" path="${workspace}" description="Repository under review"/>
-  <read id="docs" path="${source_dir}/reference" description="Prompt-pack reference files"/>
-</tool>
-```
+To inspect an original managed run, pass both `-session-id` and its reported
+`-run-id`, with the same `-run-mode` that admitted it. This observes the authorized
+original receipt and terminal without starting another run or reloading source.
+Unavailable evidence does not authorize rerunning it.
 
-Configured roots are validated before the first model request. The generated
-tool metadata tells the model each root's resolved absolute path and accepts
-`file`, optional `root`, optional `offset`, and optional `line_count`.
-Requests remain canonically confined to a declared root. See
-[configuring `read_file` roots](../overview/tools.md#configuring-read_file-roots).
+## Rebuild or import deliberately
 
-## 7 Shell-enabled batch runs
+`-rebuild -session-id SESSION_ID` adopts the current catalog definition into an
+**already stopped** retained conversation. The command does not silently stop an
+active session. A missing grant or invalid configured graph rejects before
+initialization. Rebuilding is distinct from ordinary captured resume.
 
-If a prompt declares `<shell_access>`, ochat compiles the canonical manifest,
-applies administrative/trust/signature policy, authorizes its exact digest,
-and instantiates every referenced runtime before publishing tools or sending
-the first model request. Missing authorization fails closed; batch execution
-never silently switches to direct spawn.
+`-import-transcript FILE` creates a new managed conversation from an edited
+ChatMD transcript and the separately selected definition. It cannot be combined
+with `-session-id`. Import uses the existing bounded ChatMD conversion once;
+executable declarations, imports, document directives, embedded agents and local
+image reads are rejected. This is authored message interpretation, not exact
+replay of opaque tool metadata, private runtime state or prior command receipts.
+See [native transcript import](../agent-server/tutorials/local-tui.md).
 
-Preflight without executing commands:
+A lost create/seed reply is reconciled using its original command key. Failed or
+cancelled execution also reads newly retained original command receipts once before
+closing the host. It reports their method/key, session and storage coordinates;
+an authentic accepted-run receipt reports the original Run ID. Unknown outcomes
+remain explicit. Do not repeat admission with a new key.
+
+<a id="6-root-scoped-file-reads"></a>
+
+## Source and project ownership
+
+The launch directory is the workspace/tool directory. Definition-relative
+imports, script `src`, documents and configured project declarations retain their
+actual original parser/source context. Choosing a transcript output elsewhere
+never rebases executable dependencies to that output directory.
+
+Workspace-local project selection uses the existing local policy. External
+project source access requires an explicit administrative grant:
 
 ```console
-$ ochat shell inspect prompts/ci-agent.chatmd -canonical
+$ ochat chat-completion -prompt-file /work/prompts/definition.chatmd \
+    -project-root /work/shared-project \
+    -output-file /work/private/transcript.chatmd
 ```
 
-CI prompts should use pinned noninteractive runtimes with a complete allowlist
-and no UI reviewer. A request reaching `ask` without an available reviewer is
-denied or returned as a configured error.
+`-project-root` is repeatable; relative values use the actual launch directory.
+Omitting it grants no external project roots. This flag does not grant Git
+transport, native tools or arbitrary escaped script reads. Each script's actual
+project, own module scope, environment and companion signature are prepared
+through the existing source/project owners. Source configuration selects the
+provider profile before initializers; retained sessions preserve that target.
 
-Finalized shell output passes through byte bounds, terminal filtering, literal
-secret replacement, and output interceptors. Byte-truncated finalized output is
-not guaranteed to end on a UTF-8 boundary. Optional sanitized live progress has
-a separate incremental UTF-8 and disclosure contract; it does not replace the
-finalized transcript result. See
-[`ochat shell` runtime management](shell-runtime-management.md) and the
-[shell security guide](../guide/chatmd-shell-security.md).
+Shell-enabled prompts retain their administrative/trust/signature and exact
+complete-manifest authorization checks. The CLI never falls back to direct spawn
+when a grant is missing. Use [shell inspection](shell-runtime-management.md) and
+[the shell security guide](../guide/chatmd-shell-security.md); inspection's resource
+hash and complete prepared execution hash have different roles.
 
-## Checkpoint and next step
+## Export, failure and cleanup
 
-You prepared a complete input, chose a fresh output path, inspected the resulting
-conversation, and learned how to append a follow-up without repeating the template.
-A successful transcript includes your message and an assistant response; a partial
-file or a provider error is not success. Check installation/model access first for
-request failures and create the output parent before retrying a missing-path error.
-Keep one writer per transcript. Follow the cleanup guidance in section 5 after all
-processes exit; caches and provider logs can live outside the transcript directory.
+The final transcript is rendered from a complete authorized canonical export.
+It is bounded to 64 MiB of ChatMD and 256 MiB of renderer work under the existing
+document limits. Live observations have separate bounded presentation and do not
+replace canonical history. The export can reflect legitimate managed compaction
+or history rewriting; it is not reconstructed by appending to an old file.
 
-For work that should outlive its terminal client, continue with
-[private daemon hosting](../agent-server/tutorials/unix-daemon.md). To program
-the work itself, choose a [ChatML execution form](../chatml/README.md).
-Return to [the learning paths](../tutorials/README.md) to choose another capability.
+A file export replaces a distinct destination atomically. Its parent must already
+exist. The destination cannot alias the definition or imported transcript, even
+through symlinks or a removed source coordinate. A failed, cancelled, limited or
+interrupted run preserves its available terminal transcript and returns a nonzero
+exit; a written file alone is not evidence of success.
+
+One subscribed handle owns notification reduction, run/operation presentation
+and lease renewal. The command closes and joins it before releasing the borrowed
+connection, local host and provider owners. Durable native storage defaults to
+`HOME/.ochat/agent-store`, or the explicit `-storage-root`. An exported transcript
+is not a backup of captured code, private checkpoints or the command ledger.
+Archive or remove a private store only after all owners using it have stopped.
+
+For interactive operation, use [the native TUI](../agent-server/tutorials/local-tui.md).
+For a long-lived shared service, use [private daemon hosting](../agent-server/tutorials/unix-daemon.md).

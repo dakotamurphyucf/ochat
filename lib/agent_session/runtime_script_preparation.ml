@@ -117,7 +117,7 @@ let restore_programs t ~startup ~plan ~custody =
     Error (failure "script custody restoration exceeds host work allowance")
 ;;
 
-let restore policy ~startup ~revision ~invocation =
+let restore_with_plan policy ~startup ~revision ~invocation =
   let artifact = Prompt_revision.artifact revision in
   if
     Option.is_some artifact.content_bundle
@@ -131,7 +131,7 @@ let restore policy ~startup ~revision ~invocation =
       then
         Error
           (failure "stored script or document custody is missing its parser attachment")
-      else Ok None
+      else Ok (None, None)
     | Some parsed, Some custody ->
       (match policy with
        | None ->
@@ -139,14 +139,21 @@ let restore policy ~startup ~revision ~invocation =
        | Some policy ->
          let open Result.Let_syntax in
          let%bind plan = plan policy ~startup ~parsed ~invocation in
-         Startup.within startup ~map_error:compilation_error ~f:(fun () ->
-           restore_programs policy ~startup ~plan ~custody))
+         let%map programs =
+           Startup.within startup ~map_error:compilation_error ~f:(fun () ->
+             restore_programs policy ~startup ~plan ~custody)
+         in
+         Some plan, programs)
     | None, Some _ | Some _, None ->
       Error
         (failure "script custody is missing its matching original parser or inventory"))
 ;;
 
-let with_revision policy ?startup revision ~env ~invocation ~checkpoint ~f =
+let restore policy ~startup ~revision ~invocation =
+  restore_with_plan policy ~startup ~revision ~invocation |> Result.map ~f:snd
+;;
+
+let with_revision_plan policy ?startup revision ~env ~invocation ~checkpoint ~f =
   let compilation_limits =
     Option.value_map policy ~default:Compiler.default_limits ~f:compilation
   in
@@ -158,9 +165,21 @@ let with_revision policy ?startup revision ~env ~invocation ~checkpoint ~f =
     ~map_error:compilation_error
     ~f:(fun startup ->
       let open Result.Let_syntax in
-      let%bind programs = restore policy ~startup ~revision ~invocation in
-      f startup ~compilation_limits ~programs)
+      let%bind plan, programs = restore_with_plan policy ~startup ~revision ~invocation in
+      f startup ~compilation_limits ~plan ~programs)
     ()
+;;
+
+let with_revision policy ?startup revision ~env ~invocation ~checkpoint ~f =
+  with_revision_plan
+    policy
+    ?startup
+    revision
+    ~env
+    ~invocation
+    ~checkpoint
+    ~f:(fun startup ~compilation_limits ~plan:_ ~programs ->
+      f startup ~compilation_limits ~programs)
 ;;
 
 let select_child_role policy ~startup ~invocation ~revision ~authored =
