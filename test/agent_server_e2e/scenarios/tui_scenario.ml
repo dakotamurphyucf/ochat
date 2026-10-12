@@ -74,8 +74,45 @@ let local_message env temporary child =
   Pty.await_text child ~clock:(Eio.Stdenv.clock env) text
 ;;
 
-let local env temporary ~columns ~rows ~message ?(export = false) () =
+let configure_project temporary fixture =
+  let root = Filename.dirname (Config.prompt_path fixture) in
+  let save relative contents =
+    Eio.Path.save
+      ~create:(`Or_truncate 0o600)
+      (Temp.path temporary (Filename.concat root relative))
+      contents
+  in
+  Eio.Path.mkdir ~perm:0o700 (Temp.path temporary (Filename.concat root "modules"));
+  save
+    "chatml.project.json"
+    {|{"schema_version":1,"namespace":"tui.project","source_dirs":["modules"],"environments":{"empty":{"modules":{}},"selected":{"modules":{"Banner":"self.Messages"}}},"default_environment":"empty"}|};
+  save "modules/messages.chatml" {|let text = "TUI-project-captured"|};
+  save "modules/messages.chatmli" "val text : string";
+  save
+    (Filename.basename (Config.prompt_path fixture))
+    {|<developer>TUI-fixture-ready</developer>
+<script language="chatml" kind="moderator" project="./chatml.project.json" environment="selected">
+type state = int
+type event = [ `Session_start | `Session_resume | `Item_appended(item) | `Turn_start | `Turn_end ]
+let initial_state = 0
+let on_event : context -> state -> event -> state task =
+  fun ctx state event ->
+    match event with
+    | `Session_start ->
+      Task.bind(Turn.prepend_system(Banner.text), fun ignored -> Task.pure(state))
+    | `Item_appended(_) ->
+      Task.bind(Turn.prepend_system(Banner.text ++ ":submitted"), fun ignored ->
+        Task.bind(Runtime.end_session("tui-input-accepted"), fun ignored -> Task.pure(state + 1)))
+    | _ -> Task.pure(state)
+</script>|};
+  fun () -> save "modules/messages.chatml" {|let text = "TUI-project-edited"|}
+;;
+
+let local env temporary ~columns ~rows ~message ?(export = false) ?(project = false) () =
   let fixture = F.create env temporary "tui-local" in
+  let edit_project =
+    if project then Some (configure_project temporary fixture) else None
+  in
   Support.Provider_fixture.provision ~env fixture;
   let definition = Temp.path temporary (Config.prompt_path fixture) in
   let original_definition = Eio.Path.load definition in
@@ -94,8 +131,14 @@ let local env temporary ~columns ~rows ~message ?(export = false) () =
          @ if export then [ "--export-file"; output_file ] else [])
     in
     ready env child;
+    Option.iter edit_project ~f:(fun edit ->
+      Pty.await_text child ~clock:(Eio.Stdenv.clock env) "TUI-project-captured";
+      edit ());
     inspect_work env child;
     if message then local_message env temporary child;
+    if project
+    then
+      Pty.await_text child ~clock:(Eio.Stdenv.clock env) "TUI-project-captured:submitted";
     quit env child);
   F.require
     (String.equal (Eio.Path.load definition) original_definition)
@@ -111,7 +154,14 @@ let local env temporary ~columns ~rows ~message ?(export = false) () =
       "export omitted canonical submitted history";
     F.require
       (not (String.is_substring transcript ~substring:"<script"))
-      "transcript export copied executable definition declarations");
+      "transcript export copied executable definition declarations";
+    if project
+    then
+      (* The PTY above observes the captured module's effective overlay. The
+         exported canonical transcript must not promote that overlay to history. *)
+      F.require
+        (not (String.is_substring transcript ~substring:"TUI-project-"))
+        "transcript export promoted an effective overlay to canonical history");
   let remaining =
     Eio.Path.read_dir (Temp.path temporary (Temp.roots temporary).temporary)
   in
@@ -239,6 +289,17 @@ let cases =
   ; ( "pty.local-explicit-transcript-export"
     , fun env temporary ->
         local env temporary ~columns:100 ~rows:30 ~message:true ~export:true () )
+  ; ( "pty.local-configured-project-capture"
+    , fun env temporary ->
+        local
+          env
+          temporary
+          ~columns:100
+          ~rows:30
+          ~message:true
+          ~export:true
+          ~project:true
+          () )
   ; "pty.unix-connected-start-quit", connected false
   ; "pty.local-definition-export-rejected", reject_definition_export
   ; "pty.http-connected-start-quit", connected true
