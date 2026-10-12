@@ -53,6 +53,14 @@ type managed_dispatch =
 
 let scope_key = Eio.Fiber.create_key ()
 
+type native_admission =
+  { invocation_context : I.context
+  ; admitted_binding : C.binding
+  ; admission_active : bool Atomic.t
+  }
+
+let native_admission_key = Eio.Fiber.create_key ()
+
 let current_scope () =
   match Eio.Fiber.get scope_key with
   | None -> Unbound
@@ -79,6 +87,50 @@ let borrowed_capabilities scope =
     Error
       (Agent_protocol.Error.invalid_request
          "borrowed scope has no active verified tool capabilities")
+;;
+
+let require_native_admission scope ~binding =
+  let open Result.Let_syntax in
+  let denied () =
+    Error (Agent_protocol.Error.invalid_request "native handler admission is unavailable")
+  in
+  let%bind ceiling = borrowed_capabilities scope in
+  match Eio.Fiber.get native_admission_key, current_scope () with
+  | Some admission, Active current
+    when Atomic.get admission.admission_active
+         && I.equal_context admission.invocation_context current.context
+         && I.equal_context scope.invocation.context current.context ->
+    let reference = C.reference binding in
+    let admitted = C.reference admission.admitted_binding in
+    let%bind selected =
+      C.resolve ceiling ~id:reference.id ~fingerprint:reference.fingerprint
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.invalid_request error.C.message)
+    in
+    (match
+       ( C.native_implementation binding
+       , C.native_implementation admission.admitted_binding
+       , C.native_implementation selected )
+     with
+     | Some implementation, Some admitted_implementation, Some selected_implementation
+       when Agent_protocol.Id.Capability.equal reference.id admitted.id
+            && String.equal reference.fingerprint admitted.fingerprint
+            && phys_equal implementation admitted_implementation
+            && phys_equal implementation selected_implementation -> Ok ()
+     | Some _, _, _ | None, _, _ -> denied ())
+  | Some _, _ | None, _ -> denied ()
+;;
+
+let with_native_admission invocation binding f =
+  let admission =
+    { invocation_context = invocation.I.context
+    ; admitted_binding = binding
+    ; admission_active = Atomic.make true
+    }
+  in
+  Exn.protect
+    ~finally:(fun () -> Atomic.set admission.admission_active false)
+    ~f:(fun () -> Eio.Fiber.with_binding native_admission_key admission f)
 ;;
 
 let select_tools scope ~names =
@@ -529,23 +581,27 @@ let run_with_native
                    "The registered tool kind is unsupported.")
           in
           let%bind output =
-            checked (fail "invocation.handler_failed" "Tool execution failed.") (fun () ->
-              match run_native with
-              | Some run_native -> Ok (run_native implementation ~payload)
-              | None ->
-                let active = Atomic.make true in
-                let invocation =
-                  match on_progress with
-                  | None -> Ochat_function.Invocation.silent
-                  | Some emit ->
-                    Ochat_function.Invocation.create (fun update ->
-                      match Atomic.get active with
-                      | true -> emit dispatched update
-                      | false -> ())
-                in
-                Exn.protect
-                  ~finally:(fun () -> Atomic.set active false)
-                  ~f:(fun () -> Ok (implementation.run_with_progress ~invocation payload)))
+            with_native_admission dispatched binding (fun () ->
+              checked
+                (fail "invocation.handler_failed" "Tool execution failed.")
+                (fun () ->
+                   match run_native with
+                   | Some run_native -> Ok (run_native implementation ~payload)
+                   | None ->
+                     let active = Atomic.make true in
+                     let invocation =
+                       match on_progress with
+                       | None -> Ochat_function.Invocation.silent
+                       | Some emit ->
+                         Ochat_function.Invocation.create (fun update ->
+                           match Atomic.get active with
+                           | true -> emit dispatched update
+                           | false -> ())
+                     in
+                     Exn.protect
+                       ~finally:(fun () -> Atomic.set active false)
+                       ~f:(fun () ->
+                         Ok (implementation.run_with_progress ~invocation payload))))
           in
           validate_output
             ~validate_work:(fun _ ->

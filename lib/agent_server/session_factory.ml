@@ -1311,14 +1311,14 @@ let extension_actor actor_ref =
     ~error:(unavailable Invalid_state "extension runtime is not installed in a session")
 ;;
 
-let authorize_extension_native t actor_ref profile native invocation binding =
+let check_extension_native actor_ref profile invocation =
   let module A = Agent_session.Session_actor in
   let module I = Agent_protocol.Invocation in
   let module Policy = Agent_session.Permission_policy in
   let open Result.Let_syntax in
   let%bind actor = extension_actor actor_ref in
   let%bind state = A.state actor in
-  let%bind () =
+  let%map () =
     match Agent_session.Native_tool_invocation.current_scope () with
     | Active current
       when I.equal_context current.context invocation.I.context
@@ -1335,6 +1335,14 @@ let authorize_extension_native t actor_ref profile native invocation binding =
            Permission_denied
            "native invocation has no current scoped authority")
   in
+  actor, state
+;;
+
+let authorize_extension_native t actor_ref profile native invocation binding =
+  let module A = Agent_session.Session_actor in
+  let module Policy = Agent_session.Permission_policy in
+  let open Result.Let_syntax in
+  let%bind actor, state = check_extension_native actor_ref profile invocation in
   if
     Set.mem
       native.Chat_response.Agent_runtime.shell_tool_names
@@ -1781,6 +1789,11 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
               | Openai.Responses.Tool_output.Output.Text text -> Ok (`String text)
               | output -> Ok (Openai.Responses.Tool_output.Output.jsonaf_of_t output))
             ~defer_observation:(fun _ -> Ok ())
+          |> fun tools ->
+          Agent_session.Script_tool_calls.with_admission_check
+            tools
+            ~check:(fun invocation _binding ->
+              check_extension_native actor_ref profile invocation |> Result.map ~f:ignore)
           |> fun tools ->
           Agent_session.Script_tool_calls.with_generated_creation_service
             tools

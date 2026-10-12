@@ -134,6 +134,16 @@ let%expect_test
     let current_registry = ref None in
     let substitute_registry = ref None in
     let escaped = ref None in
+    let admission_borrow = ref None in
+    let authorizations = ref 0 in
+    let before_admission_rejected = ref false in
+    let current_authority = ref true in
+    let current_rejected = ref false in
+    let delayed_reader = Eio.Fiber.create_key () in
+    let delayed_checks = ref 0 in
+    let delayed_waiting, delayed_waiting_u = Eio.Promise.create () in
+    let delayed_release, delayed_release_u = Eio.Promise.create () in
+    let delayed_result, delayed_result_u = Eio.Promise.create () in
     let module Definition = struct
       type input = string
 
@@ -157,6 +167,7 @@ let%expect_test
              (P.Id.Prompt_revision.to_string (B.Agent_artifact.revision_id admitted))
              (P.Id.Prompt_revision.to_string (B.Agent_artifact.revision_id selected));
            let borrowed = N.borrow () |> protocol_ok in
+           admission_borrow := Some borrowed;
            let parent = N.borrowed_invocation borrowed in
            let ceiling = N.borrowed_capabilities borrowed |> protocol_ok in
            let child =
@@ -178,6 +189,12 @@ let%expect_test
                ~selected:ceiling
                ~invocation:dispatched
                (fun () ->
+                  let child_borrow = N.borrow () |> protocol_ok in
+                  let binding =
+                    C.find ceiling ~name:Definition.name |> Background_execution_tests.cap
+                  in
+                  assert (
+                    Result.is_error (N.require_native_admission child_borrow ~binding));
                   descendant_rejected := Result.is_error (Calls.agent_artifact services);
                   Ok (I.Complete `Null)))
            |> protocol_ok
@@ -198,9 +215,15 @@ let%expect_test
                (phys_equal
                   (C.native_implementation original_binding |> Option.value_exn)
                   (C.native_implementation replacement_binding |> Option.value_exn)));
+           assert (
+             Result.is_error
+               (N.require_native_admission borrowed ~binding:replacement_binding));
            current_registry := Some replacement;
            replacement_rejected := Result.is_error (Calls.agent_artifact services);
            current_registry := Some original;
+           current_authority := false;
+           current_rejected := Result.is_error (Calls.agent_artifact services);
+           current_authority := true;
            (try
               Eio.Cancel.sub (fun context ->
                 reauthorization_cancel := Some context;
@@ -210,6 +233,11 @@ let%expect_test
             | Eio.Cancel.Cancelled actual when phys_equal actual reason ->
               delivery_cancelled := true);
            reauthorization_cancel := None;
+           Eio.Fiber.fork ~sw (fun () ->
+             Eio.Fiber.with_binding delayed_reader true (fun () ->
+               let result = Calls.agent_artifact services in
+               Eio.Promise.resolve delayed_result_u (Result.is_error result)));
+           Eio.Promise.await delayed_waiting;
            Int.incr executions;
            Openai.Responses.Tool_output.Output.Text "selected child")
     in
@@ -294,18 +322,63 @@ let%expect_test
       |> protocol_ok
     in
     let tools =
-      Background_execution_tests.tools
-        (fun () -> Option.value_exn !current_registry)
-        ~authorize:(fun _ _ ->
-          Option.iter !reauthorization_cancel ~f:(fun context ->
-            Eio.Fiber.yield ();
-            Eio.Cancel.cancel context reason);
+      Calls.create
+        ~registry:(fun () -> Option.value_exn !current_registry)
+        ~moderator_names:String.Set.empty
+        ~now:(fun () -> timestamp)
+        ~is_halted:(fun () -> false)
+        ~requires_active_moderator:(fun _ -> false)
+        ~authorize:(fun _ binding ->
+          Int.incr authorizations;
+          let borrowed = N.borrow () |> protocol_ok in
+          before_admission_rejected
+          := Result.is_error (N.require_native_admission borrowed ~binding);
           Ok ())
+        ~prepare_output:(function
+          | Openai.Responses.Tool_output.Output.Text text ->
+            (* The native handler has returned; dispatcher scope/services are
+               deliberately still live while output disclosure is held. *)
+            Eio.Promise.resolve delayed_release_u ();
+            assert (Eio.Promise.await delayed_result);
+            Ok (`String text)
+          | Content _ -> failwith "unexpected selected child output")
+        ~defer_observation:(fun _ -> Ok ())
+      |> fun tools ->
+      Calls.with_admission_check tools ~check:(fun _ _ ->
+        if Option.value (Eio.Fiber.get delayed_reader) ~default:false
+        then (
+          Int.incr delayed_checks;
+          if Int.equal !delayed_checks 2
+          then (
+            Eio.Promise.resolve delayed_waiting_u ();
+            Eio.Promise.await delayed_release));
+        Option.iter !reauthorization_cancel ~f:(fun context ->
+          Eio.Fiber.yield ();
+          Eio.Cancel.cancel context reason);
+        if !current_authority
+        then Ok ()
+        else
+          Error
+            (P.Error.create
+               Permission_denied
+               ~message:"current owner revoked"
+               ~retryable:false
+               ()))
     in
     (match dispatch env sw actor backend persisted request tools with
      | Succeeded (`String "selected child") -> ()
      | _ -> failwith "selected target dispatch failed");
     assert (Result.is_error (Calls.agent_artifact (Option.value_exn !escaped)));
+    [%test_eq: int] 1 !authorizations;
+    assert !before_admission_rejected;
+    assert !current_rejected;
+    let binding =
+      C.find (Option.value_exn !current_registry) ~name:Definition.name
+      |> Background_execution_tests.cap
+    in
+    assert (
+      Result.is_error
+        (N.require_native_admission (Option.value_exn !admission_borrow) ~binding));
     print_s
       [%sexp
         { preparations = (!preparations : int)

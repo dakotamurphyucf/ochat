@@ -61,6 +61,19 @@ val borrowed_capabilities
   :  borrowed
   -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result
 
+(** Require the exact currently executing native handler's completed admission.
+    Ordinary dispatched scopes and capability borrows are not permission proofs.
+    Only the native execution dispatcher creates this evidence after authorization and post-wait
+    binding resolution. Checks the current invocation, capability identity and
+    physical native implementation. Nested invocations cannot reuse a parent's
+    admission; inherited callbacks reject after the handler returns. This query
+    issues no approval or new execution authority. Current host policy/resource
+    checks still belong to the metadata owner. *)
+val require_native_admission
+  :  borrowed
+  -> binding:Chat_response.Tool_capability.binding
+  -> (unit, Agent_protocol.Error.t) result
+
 (** Record only the actual readonly query service's private response. This checks
     the live borrow and scope/selection; final output matching and atomic outcome
     persistence belong to the actor. Recording alone creates no model history. *)

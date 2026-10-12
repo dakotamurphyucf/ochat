@@ -55,8 +55,15 @@ let%test_unit "selected source cannot borrow a different native invocation" =
       |> Authored_agent_source_tests.built
     in
     let other = ref None
+    and self = ref None
     and tested = ref false
     and authorizations = ref 0 in
+    let delayed_reader = Eio.Fiber.create_key () in
+    let completed_checks = ref 0 in
+    let halted_after_checks = ref 0 in
+    let delayed_waiting, delayed_waiting_u = Eio.Promise.create () in
+    let delayed_release, delayed_release_u = Eio.Promise.create () in
+    let delayed_result, delayed_result_u = Eio.Promise.create () in
     let module Probe = struct
       type input = string
 
@@ -82,9 +89,29 @@ let%test_unit "selected source cannot borrow a different native invocation" =
            in
            assert (Option.is_none context);
            [%test_eq: int] before !authorizations;
+           let absent_context =
+             Calls.agent_source_context
+               services
+               ~defining_revision:original
+               ~implementation:(Option.value_exn !self)
+             |> protocol_ok
+           in
+           assert (Option.is_none absent_context);
+           [%test_eq: int] before !authorizations;
+           Eio.Fiber.fork ~sw (fun () ->
+             Eio.Fiber.with_binding delayed_reader true (fun () ->
+               let result =
+                 Calls.agent_source_context
+                   services
+                   ~defining_revision:original
+                   ~implementation:(Option.value_exn !self)
+               in
+               Eio.Promise.resolve delayed_result_u (Result.is_error result)));
+           Eio.Promise.await delayed_waiting;
            tested := true;
            Openai.Responses.Tool_output.Output.Text "checked")
     in
+    self := Some implementation;
     let registration : Runtime.native_registration =
       { implementation
       ; implementation_revision = Chatmd_shell_spec.Source_ref.digest "probe-v1"
@@ -166,11 +193,39 @@ let%test_unit "selected source cannot borrow a different native invocation" =
         (View.find view ~defining_revision:original ~implementation:selected_function
          |> protocol_ok));
     let tools =
-      Background_execution_tests.tools
+      Calls.create
+        ~registry:(fun () -> capabilities)
+        ~moderator_names:String.Set.empty
+        ~now:(fun () -> timestamp)
+        ~is_halted:(fun () ->
+          if
+            Option.value (Eio.Fiber.get delayed_reader) ~default:false
+            && Int.equal !completed_checks 2
+          then (
+            Int.incr halted_after_checks;
+            (* The helper's final halted check has completed. Hold the getter's
+               subsequent affinity validation, which also reads actor liveness. *)
+            if Int.equal !halted_after_checks 2
+            then (
+              Eio.Promise.resolve delayed_waiting_u ();
+              Eio.Promise.await delayed_release));
+          false)
+        ~requires_active_moderator:(fun _ -> false)
         ~authorize:(fun _ _ ->
-          incr authorizations;
+          Int.incr authorizations;
           Ok ())
-        (fun () -> capabilities)
+        ~prepare_output:(function
+          | Openai.Responses.Tool_output.Output.Text text ->
+            Eio.Promise.resolve delayed_release_u ();
+            assert (Eio.Promise.await delayed_result);
+            Ok (`String text)
+          | Content _ -> failwith "unexpected source-view probe output")
+        ~defer_observation:(fun _ -> Ok ())
+      |> fun tools ->
+      Calls.with_admission_check tools ~check:(fun _ _ ->
+        if Option.value (Eio.Fiber.get delayed_reader) ~default:false
+        then Int.incr completed_checks;
+        Ok ())
       |> fun tools -> Calls.with_agent_source_code_view tools view
     in
     let reference =
@@ -187,6 +242,12 @@ let%test_unit "selected source cannot borrow a different native invocation" =
     let job =
       add_claimed_job ~payload:(Chat_response.Background_request.to_json request) actor
     in
-    Background_execution_tests.run env actor job request tools |> protocol_ok |> ignore;
-    assert !tested)
+    let result =
+      Background_execution_tests.run env actor job request tools |> protocol_ok
+    in
+    (match result.resolved.status with
+     | Resolved (Complete (`String "checked")) -> ()
+     | _ -> failwith "source-view probe did not complete successfully");
+    assert !tested;
+    [%test_eq: int] 1 !authorizations)
 ;;

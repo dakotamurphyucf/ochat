@@ -48,8 +48,9 @@ val with_agent_artifact
     original binding reference/implementation resolved inside that same ceiling,
     and the exact supplied genuine background root as its direct parent. Even a
     same-binding recursive descendant cannot borrow another call's selection.
-    Invoke existing current
-    authorization, then recheck cancellation and identity after any yielding wait.
+    Require the exact executing native handler's completed admission and current
+    host authority, then recheck lifetime and identity after all yielding callbacks.
+    Metadata never issues another permission request.
     Expired/unbound/foreign rejects; None is ordinary unselected dispatch only. *)
 val agent_artifact
   :  t
@@ -57,7 +58,7 @@ val agent_artifact
        , Agent_protocol.Error.t )
        Result.t
 
-(** Same saved-service/ceiling/parent/reauthorization admission as agent_artifact,
+(** Same saved-service/ceiling/parent/current admission as agent_artifact,
     then require this exact actual native function to consume the selection.
     Distinct nested functions and direct None return no selection after admission;
     expired/foreign scope still rejects. No names or reconstructed descriptors. *)
@@ -83,12 +84,13 @@ val with_agent_source_code_view : t -> Agent_source_code_view.t -> t
 val with_shell_code_view : t -> Shell_runtime.Registry.Code_view.t -> t
 
 (** Authenticate any saved target first, then check the actual current native
-    service, invocation ceiling/binding and actor authorization before projecting
+    service, invocation ceiling/binding, completed native admission and current actor
+    authority before projecting
     the invoking function's selected defining context. A different actual native
     function returns None after scope validation, never another selected row
     under this invocation's authorization. An authenticated saved target
     wins and returns None here. Expired/foreign scope never becomes absence;
-    original authorization failures and cancellation propagate. *)
+    original current-authority failures and cancellation propagate. *)
 val agent_source_context
   :  t
   -> defining_revision:Prompt_revision.t
@@ -204,8 +206,22 @@ val authorize
   -> Chat_response.Tool_capability.binding
   -> (unit, Agent_protocol.Error.t) result
 
+(** Trusted host's current actor/profile/resource check, separate from the
+    permission action in [authorize]. Source/artifact metadata requires the exact
+    currently admitted native handler, existing service/ceiling checks and this
+    check before and after yielding. Install before [with_authorization_guard] so
+    inherited authority is composed. Missing check rejects; metadata never calls
+    the permission action again. Callback failures and cancellation propagate. *)
+val with_admission_check
+  :  t
+  -> check:
+       (Agent_protocol.Invocation.t
+        -> Chat_response.Tool_capability.binding
+        -> (unit, Agent_protocol.Error.t) result)
+  -> t
+
 (** Additional host authority gate, before and after the existing authorization
-    (including permission waits) and output preparation. Preserves
+    (including permission waits), metadata admission checks and output preparation. Preserves
     the original invocation/approval service, selected tools and owned work. *)
 val with_authorization_guard
   :  t

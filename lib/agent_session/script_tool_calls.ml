@@ -49,6 +49,7 @@ type t =
   ; durable_requests : bool
   ; requires_active_moderator : C.reference -> bool
   ; authorize : I.t -> C.binding -> (unit, Agent_protocol.Error.t) result
+  ; admission_check : (I.t -> C.binding -> (unit, Agent_protocol.Error.t) result) option
   ; preparation : preparation_policy option
   ; prepare_output :
       Openai.Responses.Tool_output.Output.t -> (Jsonaf.t, Agent_protocol.Error.t) result
@@ -222,6 +223,52 @@ let with_agent_artifact t ~binding ~parent_invocation artifact =
   { t with agent_artifact = Some (binding, parent_invocation, artifact) }
 ;;
 
+let check_metadata_admission t invocation binding =
+  let open Result.Let_syntax in
+  let%bind borrowed = Native_tool_invocation.borrow () in
+  let%bind () = Native_tool_invocation.require_native_admission borrowed ~binding in
+  let%bind check =
+    Result.of_option
+      t.admission_check
+      ~error:
+        (Agent_protocol.Error.invalid_request
+           "current native authority check unavailable")
+  in
+  let%bind () =
+    if t.is_halted ()
+    then Error (Agent_protocol.Error.invalid_request "native metadata owner has stopped")
+    else Ok ()
+  in
+  let%bind () = check invocation binding in
+  Eio.Fiber.check ();
+  let%bind () = Native_tool_invocation.require_native_admission borrowed ~binding in
+  if t.is_halted ()
+  then Error (Agent_protocol.Error.invalid_request "native metadata owner has stopped")
+  else (
+    let%bind () = check invocation binding in
+    let%bind () =
+      if t.is_halted ()
+      then
+        Error (Agent_protocol.Error.invalid_request "native metadata owner has stopped")
+      else Ok ()
+    in
+    Eio.Fiber.check ();
+    Native_tool_invocation.require_native_admission borrowed ~binding)
+;;
+
+let require_final_metadata_admission t binding =
+  let open Result.Let_syntax in
+  Eio.Fiber.check ();
+  let%bind current =
+    current_native_services () |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+  in
+  if not (phys_equal current t)
+  then Error (Agent_protocol.Error.invalid_request "native metadata service changed")
+  else (
+    let%bind borrowed = Native_tool_invocation.borrow () in
+    Native_tool_invocation.require_native_admission borrowed ~binding)
+;;
+
 let agent_artifact t =
   let open Result.Let_syntax in
   let denied message = Error (Agent_protocol.Error.invalid_request message) in
@@ -282,13 +329,14 @@ let agent_artifact t =
   match selected with
   | None -> Ok None
   | Some (binding, _, invocation) ->
-    let%bind () = t.authorize invocation binding in
+    let%bind () = check_metadata_admission t invocation binding in
     Eio.Fiber.check ();
     let%bind selected = validate () in
     (match selected with
-     | Some (_, artifact, current)
+     | Some (binding, artifact, current)
        when Agent_protocol.Id.Invocation.equal invocation.context.id current.context.id ->
-       Ok (Some artifact)
+       let%map () = require_final_metadata_admission t binding in
+       Some artifact
      | None | Some _ ->
        denied "selected agent code invocation changed during authorization")
 ;;
@@ -355,9 +403,11 @@ let agent_source_context t ~defining_revision ~implementation =
     in
     let%bind invocation, binding, matches_implementation = validate () in
     if not matches_implementation
-    then Ok None
+    then (
+      let%map () = require_final_metadata_admission t binding in
+      None)
     else (
-      let%bind () = t.authorize invocation binding in
+      let%bind () = check_metadata_admission t invocation binding in
       Eio.Fiber.check ();
       let%bind current, _, matches_implementation = validate () in
       if
@@ -366,9 +416,14 @@ let agent_source_context t ~defining_revision ~implementation =
         || not matches_implementation
       then denied "selected source code invocation changed during authorization"
       else (
-        match t.agent_source_code_view with
-        | None -> Ok None
-        | Some view -> Agent_source_code_view.find view ~defining_revision ~implementation))
+        let%bind context =
+          match t.agent_source_code_view with
+          | None -> Ok None
+          | Some view ->
+            Agent_source_code_view.find view ~defining_revision ~implementation
+        in
+        let%map () = require_final_metadata_admission t binding in
+        context))
 ;;
 
 let create
@@ -388,6 +443,7 @@ let create
   ; durable_requests = false
   ; requires_active_moderator
   ; authorize
+  ; admission_check = None
   ; preparation = None
   ; prepare_output
   ; defer_observation
@@ -477,6 +533,7 @@ let native_dispatch_base t ~declared ~input ~capabilities =
 let is_halted t = t.is_halted ()
 let current_capabilities t = t.registry ()
 let authorize t = t.authorize
+let with_admission_check t ~check = { t with admission_check = Some check }
 
 let with_authorization_guard t ~check =
   let authorize invocation binding =
@@ -485,6 +542,13 @@ let with_authorization_guard t ~check =
     let%bind () = t.authorize invocation binding in
     check ()
   in
+  let admission_check =
+    Option.map t.admission_check ~f:(fun admission_check invocation binding ->
+      let open Result.Let_syntax in
+      let%bind () = check () in
+      let%bind () = admission_check invocation binding in
+      check ())
+  in
   let prepare_output output =
     let open Result.Let_syntax in
     let%bind () = check () in
@@ -492,7 +556,7 @@ let with_authorization_guard t ~check =
     let%map () = check () in
     output
   in
-  { t with authorize; prepare_output }
+  { t with authorize; admission_check; prepare_output }
 ;;
 
 let with_lifecycle t ~is_halted = { t with is_halted }

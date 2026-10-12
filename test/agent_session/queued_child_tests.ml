@@ -411,7 +411,12 @@ let%expect_test
          List.iter (Eio.Path.read_dir root) ~f:(fun name ->
            Eio.Path.rmtree Eio.Path.(root / name));
          Agent_session.Prompt_source_lease.close lease;
-         let tools = Background_execution_tests.tools (fun () -> registry) in
+         let tools =
+           Background_execution_tests.tools (fun () -> registry)
+           |> fun tools ->
+           Agent_session.Script_tool_calls.with_admission_check tools ~check:(fun _ _ ->
+             Ok ())
+         in
          (match
             Queued_source_tests.dispatch env sw actor backend staged request tools
           with
