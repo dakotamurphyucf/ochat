@@ -1760,10 +1760,15 @@ module Cli = struct
         (match t.export_out_file with
          | Some out_file -> Ok (Export { id; out_file })
          | None -> Or_error.error_string "Error: --export-session requires --out.")
+      | Sel_reset_session id ->
+        if t.dry_run || Option.is_some t.reset_prompt_file
+        then
+          Or_error.error_string
+            "Error: native local reset does not support --dry-run or --prompt-file."
+        else Ok (Reset { id; keep_history = t.reset_keep_history })
       | Sel_start_session _
       | Sel_stop_session _
       | Sel_delete_session _
-      | Sel_reset_session _
       | Sel_rebuild_from_prompt _ ->
         Or_error.error_string "Error: this mutation requires --connect."
     in
@@ -2161,6 +2166,21 @@ end
 module Embedded_interactive = struct
   let protocol_error error = Error.create_s [%sexp (error : Agent_protocol.Error.t)]
 
+  let select_session host id =
+    let open Result.Let_syntax in
+    let%bind snapshot =
+      Agent_client.Admin.get_session (Agent_server.Embedded.host_connection host) id
+    in
+    let%bind observation =
+      Result.of_option
+        (Agent_protocol.Public.Snapshot.fields snapshot).lifecycle
+        ~error:(Agent_protocol.Error.invalid_request "session lacks lifecycle authority")
+    in
+    Agent_server.Embedded.select_session
+      host
+      (Agent_protocol.Session_lifecycle.Observation.expected observation)
+  ;;
+
   let working_directory env =
     let native = Eio.Path.native_exn (Eio.Stdenv.cwd env) in
     if Filename.is_absolute native then native else Eio_posix.Low_level.realpath native
@@ -2265,23 +2285,7 @@ module Embedded_interactive = struct
                   ()
               | Some id ->
                 let%bind id = Agent_protocol.Id.Session.of_string id in
-                let%bind snapshot =
-                  Agent_client.Admin.get_session
-                    (Agent_server.Embedded.host_connection host)
-                    id
-                in
-                let%bind observation =
-                  Result.of_option
-                    (Agent_protocol.Public.Snapshot.fields snapshot).lifecycle
-                    ~error:
-                      (Agent_protocol.Error.invalid_request
-                         "session lacks lifecycle authority")
-                in
-                let%bind () =
-                  Agent_server.Embedded.select_session
-                    host
-                    (Agent_protocol.Session_lifecycle.Observation.expected observation)
-                in
+                let%bind () = select_session host id in
                 Chat_tui.Agent_session_client.attach
                   ~sw:client_sw
                   ~clock:(Eio.Stdenv.clock env)
@@ -2389,7 +2393,17 @@ module Embedded_admin = struct
           let%map snapshot = Agent_client.Admin.get_session connection id in
           Daemon_admin.write_info env format snapshot
         | Export { id; out_file } -> export ~env connection id ~out_file
-        | Reset _ | Rebuild _ | Start _ | Stop _ | Delete _ ->
+        | Reset { id; keep_history } ->
+          let%bind session_id = Agent_protocol.Id.Session.of_string id in
+          let%bind () = Embedded_interactive.select_session host session_id in
+          Daemon_admin.reset ~env ~sw ~connection id ~keep_history
+          |> Result.map_error ~f:(fun error ->
+            Agent_protocol.Error.create
+              Internal_error
+              ~message:(Error.to_string_hum error)
+              ~retryable:false
+              ())
+        | Rebuild _ | Start _ | Stop _ | Delete _ ->
           Error
             (Agent_protocol.Error.invalid_request
                "local read command cannot mutate a session"))

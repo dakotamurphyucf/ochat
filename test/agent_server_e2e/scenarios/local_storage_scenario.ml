@@ -167,6 +167,18 @@ let run env temporary =
      | `Exited 0 -> ()
      | `Exited _ | `Signaled _ -> failwith "selected local TUI failed");
     Pty.assert_restored child ~clock:(Eio.Stdenv.clock env));
+  Eio.Path.rename (Temp.path temporary prompt) (Temp.path temporary saved_prompt);
+  Eio.Switch.run (fun sw ->
+    let reset =
+      command
+        ~sw
+        env
+        temporary
+        ~prompt
+        ~root
+        [ "--reset-session"; id_text; "--keep-history" ]
+    in
+    require_success reset);
   Eio.Switch.run (fun sw ->
     Embedded.with_local_host ~sw ~env ~daemon_options options ~f:(fun host ->
       let open Result.Let_syntax in
@@ -177,6 +189,15 @@ let run env temporary =
       F.require
         (stopped (P.Public.Snapshot.fields snapshot).session.observed_state)
         "selection implicitly started stopped session";
+      let fields = P.Public.Snapshot.fields snapshot in
+      F.require (fields.session.generation = 1) "native reset did not advance generation";
+      F.require
+        (List.exists fields.canonical_history.entries ~f:(fun entry ->
+           List.mem
+             (Support.Public_view.history_text entry)
+             "LOCAL-CLI-READY"
+             ~equal:String.equal))
+        "native reset lost retained history after source removal";
       F.require (!calls = 0) "local catalog/selection requested provider")
     |> F.ok)
 ;;

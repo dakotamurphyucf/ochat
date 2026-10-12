@@ -56,6 +56,10 @@ Use one selector per command. Without `--connect` or `--local`, session listing/
 reset/rebuild operate on the legacy store. Explicit `--local --session ID`
 selects retained native sessions under the same root without implicitly starting
 a stopped session. Local list, inspect and export do not create or activate one.
+Explicit `--local --reset-session ID --keep-history` resets the selected stopped
+native session through its revision-checked owner. It retains the identity and
+captured code even if the authored file has been removed; its workspace must
+still be available. Omit `--keep-history` to clear conversation history.
 
 | Selector | Relevant flags and behavior |
 |---|---|
@@ -64,7 +68,7 @@ a stopped session. Local list, inspect and export do not create or activate one.
 | `--start-session ID` | Connected only; start stopped session. |
 | `--stop-session ID` | Connected only; graceful by default, `--cancel` cancels active work. |
 | `--delete-session ID` | Connected stopped session; removes by default. Use `--archive` for archive policy. Treat removal as destructive. |
-| `--reset-session ID` | `--keep-history`; legacy can also replace `--prompt-file FILE`. Connected reset cannot replace prompt. |
+| `--reset-session ID` | `--keep-history`; supports explicit native `--local`. Only legacy reset supports `--prompt-file FILE` and `--dry-run`. |
 | `--rebuild-from-prompt ID` | Rebuild selected session; not ordinary start. |
 | `--export-session ID --out FILE` | Export selected session; remote downloads verify blob length/digest before installation. |
 | `--dry-run` | Legacy reset/rebuild only; not daemon administration. |
