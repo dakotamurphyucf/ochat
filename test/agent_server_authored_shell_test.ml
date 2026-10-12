@@ -312,7 +312,11 @@ let qualify_authored_shell ~snapshot_replacement =
           | _ -> failwith "expected one new authored child"
         in
         let entry =
-          R.load (D.registry daemon) record.admission.child_session_id |> protocol_ok
+          R.with_loaded_read
+            (D.registry daemon)
+            record.admission.child_session_id
+            (fun entry -> Ok entry)
+          |> protocol_ok
         in
         entry, fun () -> Eio.Promise.resolve ready_u ()
       in
