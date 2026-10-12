@@ -47,7 +47,9 @@ val resolve
 
 (** Prepare captured nested declarations from leaves to root. Validate all source
     edges, cycles and [max_depth] before calling [build], which may perform native
-    setup effects. Siblings retain separate private bindings even when they name
+    setup effects. [capture] selects each final source/revision once; recursive
+    planning and [build] use that exact owner. Both callbacks must borrow the
+    caller's same startup context across the entire graph. Siblings retain separate private bindings even when they name
     the same file. Each child's wrappers are installed against its exact private
     capability registry in [sw]. No session or moderator is started.
 
@@ -59,9 +61,12 @@ val prepare
   -> sw:Eio.Switch.t
   -> max_depth:int
   -> revision:Agent_session.Prompt_revision.t
-  -> build:
+  -> capture:
        (parent_revision:Agent_session.Prompt_revision.t
         -> tool_name:string
+        -> (Agent_session.Authored_source_preparation.t, Agent_protocol.Error.t) result)
+  -> build:
+       (source:Agent_session.Authored_source_preparation.t
         -> native_registrations:Chat_response.Agent_runtime.native_registration list
         -> ( Agent_session.Runtime_builder.authored_resources
              , Agent_protocol.Error.t )

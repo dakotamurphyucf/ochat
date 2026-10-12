@@ -2910,15 +2910,22 @@ let prepare_authored_graph
     ~revision
     ~services:t.authored_services
     ~prepare_source:(prepare_authored_job_source t ?selected_context:None ~actor_ref)
-    ~build:(fun ~parent_revision ~tool_name ~native_registrations ->
-      Agent_session.Runtime_builder.prepare_authored_resources
-        ~agent_source
-        ~startup
+    ~capture:(fun ~parent_revision ~tool_name ->
+      Agent_session.Authored_source_preparation.with_prepared
+        ~startup:(Some startup)
         ~script_preparation:t.script_preparation
         ~content_limits:t.content_limits
-        ~native_registrations
-        ~parent_revision
+        ~parent:parent_revision
         ~tool_name
+        ~env:t.env
+        ~checkpoint:Eio.Fiber.check
+        ~f:(fun _ source -> Ok source))
+    ~build:(fun ~source ~native_registrations ->
+      Agent_session.Runtime_builder.prepare_authored_resources_from_source
+        source
+        ~agent_source
+        ~startup
+        ~native_registrations
         ~native_service_revision
         ~inference_context
         ~inference_identity:(Graph_tracking.identity tracking)
@@ -3041,7 +3048,7 @@ let independent_resource_host t =
               let%bind prepared, native_registrations =
                 prepare_authored_graph
                   t
-                  ~startup:(Some startup)
+                  ~startup
                   ~sw
                   ~revision
                   ~source_lease
@@ -3657,7 +3664,7 @@ let prepare_runtime_at_paths
                   let%bind prepared, native_registrations =
                     prepare_authored_graph
                       t
-                      ~startup:(Some startup)
+                      ~startup
                       ~sw
                       ~revision
                       ~source_lease

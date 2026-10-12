@@ -182,6 +182,7 @@
     lib/agent_session/prompt_source_lease.ml %{dep:../agent_session/prompt_source_lease.ml}
     lib/agent_session/prompt_catalog.ml %{dep:../agent_session/prompt_catalog.ml}
     lib/agent_session/runtime_builder.ml %{dep:../agent_session/runtime_builder.ml}
+    lib/agent_session/authored_source_preparation.ml %{dep:../agent_session/authored_source_preparation.ml}
     lib/agent_store/prompt_source_receipt.ml %{dep:../agent_store/prompt_source_receipt.ml}
     lib/agent_session/prompt_revision_builder.ml %{dep:../agent_session/prompt_revision_builder.ml}
     lib/agent_store/delegation_store.ml %{dep:../agent_store/delegation_store.ml}

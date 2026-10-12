@@ -2,6 +2,7 @@ open Core
 module P = Agent_protocol
 module B = Agent_session.Runtime_builder
 module Source = Agent_session.Authored_agent_source
+module Prepared_source = Agent_session.Authored_source_preparation
 module Binding = Agent_session.Authored_agent_binding
 module C = Chat_response.Tool_capability
 
@@ -95,12 +96,11 @@ let resolve t (record : Agent_store.Delegation_store.record) ~public =
 ;;
 
 type plan =
-  { parent_revision : Agent_session.Prompt_revision.t
-  ; tool_name : string
+  { source : Prepared_source.t
   ; children : plan list
   }
 
-let prepare t ~sw ~max_depth ~revision ~build ~services ~prepare_source =
+let prepare t ~sw ~max_depth ~revision ~capture ~build ~services ~prepare_source =
   let module Revision = Agent_session.Prompt_revision in
   let open Result.Let_syntax in
   (* Validate the entire captured graph before native preparation can connect an
@@ -112,16 +112,15 @@ let prepare t ~sw ~max_depth ~revision ~build ~services ~prepare_source =
       | Prompt.Chat_markdown.Tool (Persistent_agent (agent, _)) -> Some agent.name
       | _ -> None)
     |> List.map ~f:(fun tool_name ->
-      let%bind source = Source.capture ~parent:revision ~tool_name () in
-      let path = (Source.identity source).root_relative_path in
+      let%bind source = capture ~parent_revision:revision ~tool_name in
+      let path = (Source.identity (Prepared_source.source source)).root_relative_path in
       match
         List.length ancestors > max_depth || List.mem ancestors path ~equal:String.equal
       with
       | true -> denied "delegation.authored_graph: cyclic or excessive private ancestry"
       | false ->
-        let%bind child_revision = Source.resource_revision ~parent:revision source in
-        let%map children = plan (path :: ancestors) child_revision in
-        { parent_revision = revision; tool_name; children })
+        let%map children = plan (path :: ancestors) (Prepared_source.revision source) in
+        { source; children })
     |> Result.all
   in
   let%bind plans = plan [ Revision.root_relative_path revision ] revision in
@@ -129,12 +128,7 @@ let prepare t ~sw ~max_depth ~revision ~build ~services ~prepare_source =
     let%bind prepared =
       List.map plans ~f:(fun plan ->
         let%bind children, native_registrations = prepare plan.children in
-        let%bind prepared =
-          build
-            ~parent_revision:plan.parent_revision
-            ~tool_name:plan.tool_name
-            ~native_registrations
-        in
+        let%bind prepared = build ~source:plan.source ~native_registrations in
         let%bind public = capabilities prepared in
         let%map () = install t ~sw ~public children in
         prepared)

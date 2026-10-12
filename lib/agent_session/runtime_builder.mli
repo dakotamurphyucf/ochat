@@ -154,6 +154,36 @@ val prepare_authored_resources
   -> approval_store:Shell_access.Approval.store
   -> (authored_resources, Agent_protocol.Error.t) result
 
+(** Build the exact role-selected source previously admitted by
+    [Authored_source_preparation.with_prepared], without recapture or role
+    selection. Nested wrappers must have been planned against that same revision
+    owner. [startup] borrows the original invocation across capture and all native
+    compilation; incompatible original policy limits reject before resource
+    effects. It never escapes. Native setup, approval and lifetime rules are those
+    of [prepare_authored_resources]. *)
+val prepare_authored_resources_from_source
+  :  Authored_source_preparation.t
+  -> startup:Chat_response.Startup_compilation.t
+  -> agent_source:Captured_agent_runner.Source_binding.t option
+  -> native_registrations:Chat_response.Agent_runtime.native_registration list
+  -> native_service_revision:string option
+  -> env:Eio_unix.Stdenv.base
+  -> inference_context:Inference_runtime.Context.t
+  -> inference_identity:Chat_response.Neutral_turn.Identity.t
+  -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
+  -> on_inference_completion:(Inference_client.Completion.t -> unit)
+  -> on_inference_observation:(Inference.Observation.t -> unit)
+  -> sw:Eio.Switch.t
+  -> paths:Runtime_paths.t
+  -> storage_paths:Runtime_paths.t
+  -> session_id:Agent_protocol.Id.Session.t
+  -> one_off_policy:Chat_response.One_off_request.policy
+  -> authoring_validation_host:Chat_response.Authoring_validation.host option
+  -> manifest_authorizer:(Prompt_revision.t -> Shell_runtime.Manifest_authorizer.t)
+  -> approval_provider:Shell_runtime.Approval_broker.provider
+  -> approval_store:Shell_access.Approval.store
+  -> (authored_resources, Agent_protocol.Error.t) result
+
 (** Narrow an already prepared ancestor's exact resources using an admitted
     generated definition. Shares native implementations and captures standalone
     private dependency closures without initializing any ancestor/child scripts.

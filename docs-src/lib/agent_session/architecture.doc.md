@@ -13,6 +13,12 @@ catalog policy and runtime loan. Captured prompt revisions remain immutable when
 that access is unavailable or revoked. See [original source ownership](../../../lib/agent_session/original_sources.md)
 for admission, reload and borrower lifetimes.
 
+Nested authored resources capture and select each child's delegated revision once
+before native setup. `Authored_source_preparation` retains that immutable pair;
+recursive planning and resource construction use the same parser/revision owner.
+The caller lends one startup deadline and text/graph allowance across the whole
+graph. The prepared source retains no startup context or live native authority.
+
 See [embedding](../../agent-server/embedding.md), [protocol](../../agent-server/protocol.md)
 and the [implementation specification](../../design/ochat-agent-server-implementation-spec.md).
 Public interfaces are the exact callable API; the table below is the complete
@@ -23,6 +29,7 @@ resource ownership, return types and cancellation/error behavior.
 |---|---|---|
 | `active_calls` | [contract](../../../lib/agent_session/active_calls.mli) | [source](../../../lib/agent_session/active_calls.ml) |
 | `administration` | [contract](../../../lib/agent_session/administration.mli) | [source](../../../lib/agent_session/administration.ml) |
+| `authored_source_preparation` | [contract](../../../lib/agent_session/authored_source_preparation.mli) | [source](../../../lib/agent_session/authored_source_preparation.ml) |
 | `chatmd_export` | [contract](../../../lib/agent_session/chatmd_export.mli) | [source](../../../lib/agent_session/chatmd_export.ml) |
 | `compaction_archive` | [contract](../../../lib/agent_session/compaction_archive.mli) | [source](../../../lib/agent_session/compaction_archive.ml) |
 | `durable_event_log` | [contract](../../../lib/agent_session/durable_event_log.mli) | [source](../../../lib/agent_session/durable_event_log.ml) |

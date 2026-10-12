@@ -569,14 +569,11 @@ type authored_resources =
 let authored_source_binding t = t.agent_source
 let authored_code_authorizer t = t.code_authorizer
 
-let prepare_authored_resources
+let prepare_authored_resources_from_source
+      prepared_source
       ~startup
       ~agent_source
-      ~script_preparation
-      ~content_limits
       ~native_registrations
-      ~parent_revision
-      ~tool_name
       ~native_service_revision
       ~env
       ~inference_context
@@ -594,15 +591,29 @@ let prepare_authored_resources
       ~approval_provider
       ~approval_store
   =
-  Script_preparation.with_authored_child
-    ?startup
-    script_preparation
-    ~parent:parent_revision
-    ~tool_name
-    ~content_limits
+  let script_preparation =
+    Authored_source_preparation.script_preparation prepared_source
+  in
+  let source = Authored_source_preparation.source prepared_source in
+  let revision = Authored_source_preparation.revision prepared_source in
+  let limits =
+    Option.value_map
+      script_preparation
+      ~default:Chatml_compilation.default_limits
+      ~f:Script_preparation.compilation
+  in
+  Chat_response.Startup_compilation.with_context
+    ~startup
+    ~limits
     ~env
     ~checkpoint:Eio.Fiber.check
-    ~f:(fun startup ~source ~revision ->
+    ~map_error:(fun error ->
+      Agent_protocol.Error.create
+        Invalid_state
+        ~message:(error.Chatml_compilation.code ^ ": " ^ error.message)
+        ~retryable:false
+        ())
+    ~f:(fun startup ->
       let open Result.Let_syntax in
       let paths =
         { paths with
@@ -638,6 +649,64 @@ let prepare_authored_resources
           ~approval_store
       in
       { source; revision; resources; agent_source; code_authorizer = manifest_authorizer })
+    ()
+;;
+
+let prepare_authored_resources
+      ~startup
+      ~agent_source
+      ~script_preparation
+      ~content_limits
+      ~native_registrations
+      ~parent_revision
+      ~tool_name
+      ~native_service_revision
+      ~env
+      ~inference_context
+      ~inference_identity
+      ~on_inference_attempt
+      ~on_inference_completion
+      ~on_inference_observation
+      ~sw
+      ~paths
+      ~storage_paths
+      ~session_id
+      ~one_off_policy
+      ~authoring_validation_host
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+  =
+  Authored_source_preparation.with_prepared
+    ~startup
+    ~script_preparation
+    ~content_limits
+    ~parent:parent_revision
+    ~tool_name
+    ~env
+    ~checkpoint:Eio.Fiber.check
+    ~f:(fun startup prepared_source ->
+      prepare_authored_resources_from_source
+        prepared_source
+        ~startup
+        ~agent_source
+        ~native_registrations
+        ~native_service_revision
+        ~env
+        ~inference_context
+        ~inference_identity
+        ~on_inference_attempt
+        ~on_inference_completion
+        ~on_inference_observation
+        ~sw
+        ~paths
+        ~storage_paths
+        ~session_id
+        ~one_off_policy
+        ~authoring_validation_host
+        ~manifest_authorizer
+        ~approval_provider
+        ~approval_store)
 ;;
 
 let inherit_prepared_resources ~parent_runtime ~inherited_managed ~definition =

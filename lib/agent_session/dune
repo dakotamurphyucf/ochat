@@ -31,6 +31,7 @@
   authored_agent_call
   captured_child_source
   authored_agent_source
+  authored_source_preparation
   authored_native_contract
   authored_code_preparation
   agent_source_code_view

@@ -51,17 +51,38 @@ let%expect_test
             definition
           |> Authored_agent_source_tests.built
         in
+        let policy = Fixtures.script_preparation () in
         let result =
-          Owned.prepare
-            (Owned.create ())
-            ~sw
-            ~max_depth
-            ~revision
-            ~build:(fun ~parent_revision:_ ~tool_name:_ ~native_registrations:_ ->
-              failwith "native setup ran before full graph validation")
-            ~services:(fun _ _ -> failwith "graph preflight invoked an agent")
-            ~prepare_source:(fun _ ~implementation:_ ~owner:_ ~request:_ ~checkpoint:_ ->
-              failwith "graph preflight prepared source")
+          Chat_response.Startup_compilation.with_context
+            ~limits:(Agent_session.Runtime_script_preparation.compilation policy)
+            ~env
+            ~checkpoint:Eio.Fiber.check
+            ~map_error:(fun error ->
+              P.Error.invalid_request error.Chatml_compilation.message)
+            ~f:(fun startup ->
+              Owned.prepare
+                (Owned.create ())
+                ~sw
+                ~max_depth
+                ~revision
+                ~capture:(fun ~parent_revision ~tool_name ->
+                  Agent_session.Authored_source_preparation.with_prepared
+                    ~startup:(Some startup)
+                    ~script_preparation:(Some policy)
+                    ~content_limits:None
+                    ~parent:parent_revision
+                    ~tool_name
+                    ~env
+                    ~checkpoint:Eio.Fiber.check
+                    ~f:(fun _ source -> Ok source))
+                ~build:(fun ~source:_ ~native_registrations:_ ->
+                  failwith "native setup ran before full graph validation")
+                ~services:(fun _ _ -> failwith "graph preflight invoked an agent")
+                ~prepare_source:
+                  (fun
+                    _ ~implementation:_ ~owner:_ ~request:_ ~checkpoint:_ ->
+                  failwith "graph preflight prepared source"))
+            ()
         in
         match result with
         | Error { code = Permission_denied; message; _ } -> print_endline message

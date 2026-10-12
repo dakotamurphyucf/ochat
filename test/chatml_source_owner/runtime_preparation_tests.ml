@@ -2,6 +2,9 @@ open Core
 open Support
 module Preparation = Agent_session.Runtime_script_preparation
 module Revision = Agent_session.Prompt_revision
+module Prepared_source = Agent_session.Authored_source_preparation
+module Startup = Chat_response.Startup_compilation
+module P = Agent_protocol
 
 let policy ?(max_custody_work_steps = 1_000_000) () =
   let planning =
@@ -67,14 +70,18 @@ let on_event = fun ctx state event -> Task.pure(state)</script>|};
           Eio.Path.unlink Eio.Path.(root / file));
         let borrowed = ref None in
         let result =
-          Preparation.with_authored_child
-            (Some (policy ()))
+          Prepared_source.with_prepared
+            ~startup:None
+            ~script_preparation:(Some (policy ()))
             ~parent
             ~tool_name:"child"
             ~content_limits:None
             ~env
             ~checkpoint:ignore
-            ~f:(fun startup ~source ~revision ->
+            ~f:(fun startup prepared ->
+              let source = Prepared_source.source prepared in
+              let revision = Prepared_source.revision prepared in
+              assert (phys_equal (A.defining_revision source) parent);
               assert delegated;
               borrowed := Some startup;
               assert (not (String.equal (A.fingerprint before) (A.fingerprint source)));
@@ -111,6 +118,51 @@ let on_event = fun ctx state event -> Task.pure(state)</script>|};
             Result.is_error
               (Chat_response.Startup_compilation.remaining_limits
                  (Option.value_exn !borrowed)));
+          let with_prepared ?startup f =
+            Prepared_source.with_prepared
+              ~startup
+              ~script_preparation:(Some (policy ()))
+              ~parent
+              ~tool_name:"child"
+              ~content_limits:None
+              ~env
+              ~checkpoint:ignore
+              ~f
+          in
+          let callbacks = ref 0 in
+          let first_admitted = ref false in
+          let distinct_text =
+            Startup.with_context
+              ~max_distinct_text_bytes:1
+              ~limits:(Preparation.compilation (policy ()))
+              ~env
+              ~checkpoint:ignore
+              ~map_error:(fun error -> error.Chatml_compilation.code)
+              ~f:(fun startup ->
+                let admit text =
+                  with_prepared ~startup (fun same _ ->
+                    assert (phys_equal same startup);
+                    incr callbacks;
+                    Startup.admit_text same text
+                    |> Result.map_error ~f:(fun error ->
+                      P.Error.invalid_request error.Chatml_compilation.code))
+                  |> Result.map_error ~f:(fun error -> error.P.Error.message)
+                in
+                let open Result.Let_syntax in
+                let%bind () = admit "a" in
+                first_admitted := true;
+                admit "b")
+              ()
+          in
+          assert !first_admitted;
+          [%test_eq: int] 2 !callbacks;
+          (match distinct_text with
+           | Error code -> [%test_eq: string] "chatml.definition_limit" code
+           | Ok () -> failwith "child preparation reset the shared text allowance");
+          let sentinel = Failure "prepared callback sentinel" in
+          (match with_prepared (fun _ _ -> raise sentinel) with
+           | _ -> failwith "prepared source swallowed callback failure"
+           | exception exn -> assert (phys_equal exn sentinel));
           print_endline
             "delegated role: selected identity, original startup, no source reads")));
   [%expect
