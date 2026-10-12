@@ -589,27 +589,27 @@ let productions =
 let topic_contracts =
   [ ( "one_off_v1"
     , "chatml.programs"
-    , "fa9ed788618df8303d62e055086789da06c05210c0ed3d0eab3eadb356ed0c15" )
+    , "e42f62e62669484346bc191239440a0a5af6f1283d8dcb2152159bc4bbe0f7ae" )
   ; ( "one_off_v1"
     , "chatml.task-effects"
-    , "c1cf4990803e28d10498ed66666235a14bbea0004d2a18f5db4e0f26d05b05b5" )
+    , "4a4f9617b016c491dfd397876bbb32d01e95f727064471e2a4432dca0478a17e" )
   ; ( "tool_v1"
     , "chatml.programs"
-    , "dc7a08232afd6231ff17dfdbef5303438f1768ca0585dd30b5e93f5a3647d03a" )
+    , "6108cb9f14a766d9b672586412a68103fbd1e67f7c59a36973f25c39ca534dc2" )
   ; ( "moderator_v1"
     , "chatml.programs"
-    , "d06b8f5ecc989952728591f74a68b3452339de07a2b407e5cfe5df96ec5ef8f4" )
+    , "4cc897db6cd131324a2c7c708fbbd5bd80c07b2b7266138b3c2e9d21327137ca" )
   ; ( "delegated_moderator_v1"
     , "chatml.programs"
-    , "e6b7eece7738a4dd894580823848de64aa41d68cd5b02f19cd80642987ad7a65" )
+    , "815167ced652829517e79a19e67fcbbba6cb83d2845fc3652d0fc8a541868e7f" )
   ; ( "tool_v1"
     , "chatml.task-effects"
-    , "88f2928bb7f73a55208abca6c16ac9f79a3a0dcbedbff5f4f71f35e202b4baab" )
+    , "26ab23b3bcf104bdd0c5e34e6123c552f4bc1adf38a16bfca7cf9696c5077d02" )
   ; ( "moderator_v1"
     , "chatml.task-effects"
-    , "daf3a2479e16d3753c0ed15f7fd3a412a4d899a796f5e3ba703878a722ae5517" )
+    , "b7f328cc4186ccde448fc23cc6158c198e81fd55cf493efa8c812889a51ee0c3" )
   ; ( "delegated_moderator_v1"
     , "chatml.task-effects"
-    , "a5855463fc7c1128ab285f7ecdca5f7e42881aee4999f520ff5c46f90ed0d5ea" )
+    , "d12925247f47d7caef5cf2abe69229efe2625413de4beb44e2f20783a17c890a" )
   ]
 ;;
