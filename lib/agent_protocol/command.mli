@@ -22,6 +22,7 @@ type t =
   | Workspace_get of Workspace.Get_request.t
   | Blob_read of Blob.Read_request.t
   | Session_create of Session.Create_request.t
+  | Session_seed of Session_seed.Request.t
   | Session_list of Session.List_request.t
   | Session_search of Search_query.t
   | Session_search_navigate of Search_navigation.Request.t

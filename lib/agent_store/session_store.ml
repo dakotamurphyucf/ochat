@@ -5,13 +5,48 @@ module Metadata = Session_metadata
 module Lifecycle_documents = Session_lifecycle_documents
 
 module Initial_projection = struct
+  type publication =
+    | Available
+    | Claimed
+    | Installed
+
+  let current_domain () = (Stdlib.Domain.self () :> int)
+
   type t =
     { metadata : Metadata.t
     ; entry : Session_index.Entry.t
+    ; domain : int
+    ; mutable publication : publication
     }
 
   let metadata t = t.metadata
   let entry t = t.entry
+
+  let check_domain_exn t =
+    if not (Int.equal t.domain (current_domain ()))
+    then invalid_arg "creation projection belongs to another Eio domain"
+  ;;
+
+  let installed t =
+    check_domain_exn t;
+    match t.publication with
+    | Installed -> true
+    | Available | Claimed -> false
+  ;;
+
+  let claim t =
+    if not (Int.equal t.domain (current_domain ()))
+    then Error (Store_error.Corrupt "creation projection belongs to another Eio domain")
+    else (
+      match t.publication with
+      | Available ->
+        t.publication <- Claimed;
+        Ok ()
+      | Claimed | Installed ->
+        Error (Store_error.Corrupt "creation projection was already claimed"))
+  ;;
+
+  let publish t = t.publication <- Installed
 
   let create ~metadata ~entry =
     let open Result.Let_syntax in
@@ -34,7 +69,7 @@ module Initial_projection = struct
       |> F.store
     in
     let%map _ = Session_index_document.of_document document |> F.store in
-    { metadata; entry }
+    { metadata; entry; domain = current_domain (); publication = Available }
   ;;
 end
 
@@ -734,67 +769,62 @@ let create_session_initialized t ~sw ~transaction_id ~actor_lock_nonce ~initiali
       (".creating-" ^ Agent_protocol.Id.Transaction.to_string transaction_id)
   in
   let temporary = eio_path t temporary_directory in
-  let layout_result =
-    try
-      Eio.Path.mkdir ~perm:0o700 temporary;
-      List.iter (session_directories temporary_directory) ~f:(fun path ->
-        Eio.Path.mkdir ~perm:0o700 (eio_path t path));
-      Ok ()
-    with
-    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
-    | exn ->
-      Error
-        (Store_error.of_exn
-           ~operation:"create session layout"
-           ~path:temporary_directory
-           exn)
+  let owns_staging = ref false in
+  let cleanup () =
+    if !owns_staging
+    then
+      Eio.Cancel.protect (fun () ->
+        try Eio.Path.rmtree ~missing_ok:true temporary with
+        | _ -> ())
   in
-  let%bind () =
-    match layout_result with
-    | Ok () -> Ok ()
-    | Error _ as error ->
-      (try Eio.Path.rmtree ~missing_ok:true temporary with
-       | _ -> ());
-      error
-  in
-  let%bind initial =
-    match initialize ~staging_directory:temporary_directory with
-    | Ok metadata -> Ok metadata
-    | Error _ as error ->
-      (try Eio.Path.rmtree ~missing_ok:true temporary with
-       | _ -> ());
-      error
-  in
-  let metadata = Initial_projection.metadata initial in
-  let entry = Initial_projection.entry initial in
-  let session_id = metadata.Metadata.session.id in
-  let final_directory = Data_root.session_path t.root session_id in
-  let destination = eio_path t final_directory in
-  let%bind () =
-    match save_metadata ~env:t.env (metadata_path temporary_directory) metadata with
-    | Ok () -> Ok ()
-    | Error _ as error ->
-      (try Eio.Path.rmtree ~missing_ok:true temporary with
-       | _ -> ());
-      error
-  in
-  Session_projection_update.publish t.projection_updates ~f:(fun ~require_intent ->
-    Session_index.with_prepared_upsert t.index entry ~publish_authority:(fun () ->
-      let%bind () = require_intent () in
-      let%bind () =
-        try
-          Eio.Path.rename temporary destination;
-          Durable_file.sync_directory ~env:t.env ~path:(Data_root.sessions_path t.root)
-        with
-        | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
-        | exn ->
-          Error
-            (Store_error.of_exn
-               ~operation:"install session layout"
-               ~path:final_directory
-               exn)
-      in
-      acquire_handle t ~sw ~directory:final_directory ~actor_lock_nonce metadata))
+  Exn.protect ~finally:cleanup ~f:(fun () ->
+    let%bind () =
+      try
+        (* Adopt only our successful exclusive creation. A pending cancellation
+           cannot escape between acquisition and this ownership assignment. *)
+        Eio.Cancel.protect (fun () ->
+          Eio.Path.mkdir ~perm:0o700 temporary;
+          owns_staging := true);
+        List.iter (session_directories temporary_directory) ~f:(fun path ->
+          Eio.Path.mkdir ~perm:0o700 (eio_path t path));
+        Ok ()
+      with
+      | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+        Error
+          (Store_error.of_exn
+             ~operation:"create session layout"
+             ~path:temporary_directory
+             exn)
+    in
+    let%bind initial = initialize ~staging_directory:temporary_directory in
+    let%bind () = Initial_projection.claim initial in
+    let metadata = Initial_projection.metadata initial in
+    let entry = Initial_projection.entry initial in
+    let session_id = metadata.Metadata.session.id in
+    let final_directory = Data_root.session_path t.root session_id in
+    let destination = eio_path t final_directory in
+    let%bind () = save_metadata ~env:t.env (metadata_path temporary_directory) metadata in
+    Session_projection_update.publish t.projection_updates ~f:(fun ~require_intent ->
+      Session_index.with_prepared_upsert t.index entry ~publish_authority:(fun () ->
+        let%bind () = require_intent () in
+        let%bind () =
+          try
+            (* Final evidence survives every later failure. Protect only transfer
+               of the staging ownership, not directory sync or handle acquisition. *)
+            Eio.Cancel.protect (fun () ->
+              Eio.Path.rename temporary destination;
+              owns_staging := false;
+              Initial_projection.publish initial);
+            Durable_file.sync_directory ~env:t.env ~path:(Data_root.sessions_path t.root)
+          with
+          | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+            Error
+              (Store_error.of_exn
+                 ~operation:"install session layout"
+                 ~path:final_directory
+                 exn)
+        in
+        acquire_handle t ~sw ~directory:final_directory ~actor_lock_nonce metadata)))
 ;;
 
 let create_session t ~sw ~transaction_id ~actor_lock_nonce metadata =

@@ -1,0 +1,5 @@
+(library
+ (name session_seed_host_tests)
+ (libraries agent_server_test_support core expect_test_helpers_core eio eio_main mirage-crypto-rng.unix ochat.agent_protocol ochat.agent_client ochat.agent_server ochat.agent_session ochat.agent_store)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

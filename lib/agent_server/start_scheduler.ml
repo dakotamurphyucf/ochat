@@ -12,7 +12,7 @@ type t =
   ; finished : unit Eio.Promise.t
   }
 
-let ticket_of_state state =
+let ticket_of_state (state : Agent_session.Session_state.t) =
   Option.map state.Agent_session.Session_state.spec.quota_key ~f:(fun quota_key ->
     Agent_session.Start_queue.
       { session_id = state.identity.session_id

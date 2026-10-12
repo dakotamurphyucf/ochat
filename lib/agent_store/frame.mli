@@ -19,6 +19,18 @@ type error =
 [@@deriving sexp]
 
 val current_version : int
+val header_length : int
+val checksum_length : int
+
+(** Length of the complete first frame from its fixed header, using the same
+    magic/version/length validation as [decode]. A short header returns [None].
+    Reject framed-length integer overflow before a reader allocates payload
+    storage. This does not verify a payload or checksum; [decode] remains required. *)
+val encoded_length_of_header
+  :  max_payload_length:int
+  -> string
+  -> (int option, error) result
+
 val flags : t -> int
 val payload : t -> string
 val checksum_raw : t -> string

@@ -84,6 +84,21 @@ type kind =
   | Other
 [@@deriving compare, equal, sexp]
 
+let classification semantic : role * kind =
+  match History_entry.Payload.Semantic.view semantic with
+  | Message { role; _ } ->
+    ( (match role with
+       | History_entry.Payload.Role.System | Developer -> System
+       | User -> User
+       | Assistant -> Assistant
+       | Tool -> Tool)
+    , Message )
+  | Call _ -> Assistant, Tool_call
+  | Result _ -> Tool, Tool_output
+  | Reasoning _ -> Assistant, Reasoning
+  | Unknown _ -> Assistant, Other
+;;
+
 type provenance =
   | Canonical
   | Moderator_inserted

@@ -157,20 +157,87 @@ let completion_shape =
     [ "completed_at", Document_schema.Shape.value; "reason", Document_schema.Shape.value ]
 ;;
 
-let storage_to_jsonaf (t : t) =
+let storage_fields
+      ~id
+      ~definition_id
+      ~source_kind
+      ~configured_root
+      ~canonical_root
+      ~conflict_domain
+      ~access
+      ~cleanup
+      ~server_created
+      ~created_at
+      ~cleanup_completion
+  =
   `Object
-    [ "id", P.Id.Workspace_instance.to_json t.id
-    ; "definition_id", (X.option_json P.Id.Workspace_definition.to_json) t.definition_id
-    ; "source_kind", source_to_jsonaf t.source_kind
-    ; "configured_root", (X.option_json X.text_json) t.configured_root
-    ; "canonical_root", canonical_to_jsonaf t.canonical_root
-    ; "conflict_domain", X.text_json t.conflict_domain
-    ; "access", access_to_jsonaf t.access
-    ; "cleanup", (X.option_json cleanup_to_jsonaf) t.cleanup
-    ; "server_created", X.bool_json t.server_created
-    ; "created_at", P.Timestamp.to_json t.created_at
-    ; "cleanup_completion", (X.option_json completion_to_jsonaf) t.cleanup_completion
+    [ "id", P.Id.Workspace_instance.to_json id
+    ; "definition_id", (X.option_json P.Id.Workspace_definition.to_json) definition_id
+    ; "source_kind", source_to_jsonaf source_kind
+    ; "configured_root", (X.option_json X.text_json) configured_root
+    ; "canonical_root", canonical_root
+    ; "conflict_domain", X.text_json conflict_domain
+    ; "access", access_to_jsonaf access
+    ; "cleanup", (X.option_json cleanup_to_jsonaf) cleanup
+    ; "server_created", X.bool_json server_created
+    ; "created_at", P.Timestamp.to_json created_at
+    ; "cleanup_completion", (X.option_json completion_to_jsonaf) cleanup_completion
     ]
+;;
+
+let storage_to_jsonaf (t : t) =
+  storage_fields
+    ~id:t.id
+    ~definition_id:t.definition_id
+    ~source_kind:t.source_kind
+    ~configured_root:t.configured_root
+    ~canonical_root:(canonical_to_jsonaf t.canonical_root)
+    ~conflict_domain:t.conflict_domain
+    ~access:t.access
+    ~cleanup:t.cleanup
+    ~server_created:t.server_created
+    ~created_at:t.created_at
+    ~cleanup_completion:t.cleanup_completion
+;;
+
+let creation_projection
+      definition
+      ~instance_id
+      ~configured_root
+      ~canonical_root
+      ~created_at
+  =
+  let source_kind, cleanup, server_created =
+    match definition.W.source with
+    | Physical _ -> Physical, None, false
+    | Temporary { location; cleanup; _ } -> Temporary location, Some cleanup, true
+  in
+  (* These scalar extrema are sizing values only. No native identity value is
+     constructed. The actual root/identity must be resolved by the workspace owner. *)
+  let conflict_domain =
+    Option.value
+      definition.conflict_domain
+      ~default:(sprintf "fs:%Ld:%Ld" Int64.max_value Int64.max_value)
+  in
+  let canonical_root =
+    `Object
+      [ "native_path", `String canonical_root
+      ; "device", X.int64_json Int64.max_value
+      ; "inode", X.int64_json Int64.max_value
+      ]
+  in
+  storage_fields
+    ~id:instance_id
+    ~definition_id:(Some definition.id)
+    ~source_kind
+    ~configured_root:(Some configured_root)
+    ~canonical_root
+    ~conflict_domain
+    ~access:definition.access
+    ~cleanup
+    ~server_created
+    ~created_at
+    ~cleanup_completion:None
 ;;
 
 let storage_of_jsonaf json =

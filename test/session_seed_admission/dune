@@ -1,0 +1,9 @@
+(copy_files ../../lib/agent_server/session_seed_admission.{ml,mli})
+(copy_files ../../lib/agent_server/session_seed_receipt.{ml,mli})
+
+(library
+ (name session_seed_admission_tests)
+ (libraries core agent_protocol agent_session agent_store chat_response inference
+  document_schema expect_test_helpers_core eio_main mirage-crypto-rng.unix)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

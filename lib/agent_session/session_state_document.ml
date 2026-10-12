@@ -1,4 +1,7 @@
 open! Core
+
+let current_version = 10
+
 module P = Agent_protocol
 module X = Persistence_codec
 module J = P.Json_codec
@@ -200,7 +203,7 @@ let root_invocation_of_jsonaf =
     ]
 ;;
 
-let spec_to_jsonaf (t : S.Spec.t) =
+let project_spec (t : 'workspace S.Spec.fields) ~workspace =
   `Object
     [ "protocol", P.Session.Spec.to_json t.protocol
     ; ( "prompt_definition_id"
@@ -211,13 +214,15 @@ let spec_to_jsonaf (t : S.Spec.t) =
     ; "inference_target", Inference.Selection.to_json t.inference_target
     ; ( "delegation"
       , (X.option_json Agent_store.Delegation_store.reference_to_jsonaf) t.delegation )
-    ; "workspace_instance", Workspace_instance.to_jsonaf t.workspace_instance
+    ; "workspace_instance", workspace t.workspace_instance
     ; "permission_profile", X.text_json t.permission_profile
     ; "permission_profile_digest", X.text_json t.permission_profile_digest
     ; "runtime_policy", (X.option_json X.text_json) t.runtime_policy
     ; "quota_key", (X.option_json Quota_key.to_jsonaf) t.quota_key
     ]
 ;;
+
+let spec_to_jsonaf t = project_spec t ~workspace:Workspace_instance.to_jsonaf
 
 let spec_of_jsonaf ~limits json =
   let open Result.Let_syntax in
@@ -628,7 +633,13 @@ let run_state_fields field value =
   | Nullable, None -> [ "run_state", `Null ]
 ;;
 
-let state_to_jsonaf ?(raw_pending = false) (t : S.t) ~limits ~presence =
+let project_fields_with_presence
+      ?(raw_pending = false)
+      (t : 'spec S.fields)
+      ~spec
+      ~limits
+      ~presence
+  =
   let run_state_field =
     if Session_state_presence.run_state_is_absent presence then Missing else Nullable
   in
@@ -639,7 +650,7 @@ let state_to_jsonaf ?(raw_pending = false) (t : S.t) ~limits ~presence =
   in
   `Object
     ([ "identity", identity_to_jsonaf t.identity
-     ; "spec", spec_to_jsonaf t.spec
+     ; "spec", spec t.spec
      ; "lifecycle", lifecycle_to_jsonaf t.lifecycle
      ; "runtime_initialization", initialization_to_jsonaf t.runtime_initialization
      ; "pending_initial_start", X.bool_json t.pending_initial_start
@@ -687,6 +698,19 @@ let state_to_jsonaf ?(raw_pending = false) (t : S.t) ~limits ~presence =
        ; "failure", (X.option_json P.Error.to_json) t.failure
        ; "counters", counters_to_jsonaf t.counters
        ])
+;;
+
+let state_to_jsonaf ?raw_pending t ~limits ~presence =
+  project_fields_with_presence ?raw_pending t ~spec:spec_to_jsonaf ~limits ~presence
+;;
+
+let project_fields t ~spec ~limits =
+  project_fields_with_presence
+    ~raw_pending:true
+    t
+    ~spec
+    ~limits
+    ~presence:Session_state_presence.authored
 ;;
 
 let equal_values previous ~limits next =
@@ -1311,7 +1335,7 @@ let codec ~limits ~presence =
     D.Domain_codec.create_validated
       ~limits
       ~kind:"session.state"
-      ~version:10
+      ~version:current_version
       ~shape
       ~supported_semantics:[]
       ~validate:(fun state -> X.document_result (S.validate state))
@@ -1377,7 +1401,7 @@ let encode t ~limits =
         |> X.document_result
       in
       let%bind.Result document =
-        D.Document.create ~limits ~kind:"session.state" ~version:10 ~payload
+        D.Document.create ~limits ~kind:"session.state" ~version:current_version ~payload
       in
       let%bind.Result admitted = decode ~limits document in
       D.Domain_codec.encode (codec_for admitted ~limits) admitted.carrier
@@ -1708,7 +1732,7 @@ module Transaction = struct
       D.Domain_codec.create
         ~limits
         ~kind:"session.state"
-        ~version:10
+        ~version:current_version
         ~shape
         ~supported_semantics:[]
         ~decode:(fun json -> state_fields_of_jsonaf ~limits json |> X.document_result)
@@ -1743,7 +1767,11 @@ module Transaction = struct
           |> X.document_result
         in
         let%bind document =
-          D.Document.create ~limits ~kind:"session.state" ~version:10 ~payload
+          D.Document.create
+            ~limits
+            ~kind:"session.state"
+            ~version:current_version
+            ~payload
         in
         let%bind carrier =
           D.Domain_codec.decode

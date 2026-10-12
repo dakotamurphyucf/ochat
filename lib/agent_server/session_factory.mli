@@ -371,3 +371,70 @@ val rebuild_index_projections : t -> (unit, Agent_protocol.Error.t) Result.t
 (** Retry durable initial-start intents only on actual loaded selected owners;
     never discover/load indexed sessions. Current linkage still governs each start. *)
 val resume_selected_initial_starts : t -> unit
+
+module Seed_recovery_limits : sig
+  (** One complete seed reconciliation invocation. Session rows/first complete
+      transactions are counted before retention; bytes conservatively cover all
+      charged frames/read buffers, including rechecks. Work counts each borrowed
+      checkpoint through enumeration, decoding, comparisons and repair; bounded
+      admitted codec/comparator stages may be nonpreemptible between polls.
+      These are independent positive bounds, not a heap sandbox or transport
+      allowance. A byte-admitted document may still exceed the work bound. *)
+  type t
+
+  val create
+    :  max_sessions:int
+    -> max_transactions:int
+    -> max_input_bytes:int
+    -> max_work_steps:int
+    -> (t, Agent_protocol.Error.t) Result.t
+
+  (** Configurable host default: 4096 rows/first transactions, 256 MiB conservative
+      aggregate, 2M cooperative steps. Startup and receipt service borrow the same
+      configured profile; each reconciliation is one fresh invocation. *)
+  val default : t
+
+  val max_sessions : t -> int
+  val max_transactions : t -> int
+  val max_input_bytes : t -> int
+  val max_work_steps : t -> int
+end
+
+module Seed_outcome : sig
+  type t =
+    | Created of Session_registry.entry
+    | Rejected of Agent_protocol.Error.t
+    | Uncertain of Agent_protocol.Error.t
+
+  (** Rejected proves no layout attempt occurred. Uncertain must retain the
+      original protected Pending and must not execute creation again. Created
+      owns an unloaded stopped entry after journal/snapshot/index admission.
+      Exceptions retain their identity/backtrace after joined cleanup. *)
+end
+
+(** Admit a new stopped identity under actual current catalog/workspace/profile
+    policy. Retained selection borrows the exact authorized lifecycle owner and
+    accepts authored roots only; current profile digest/runtime policy must still
+    authorize its pinned policy. Prelayout complete Created bounds precede Store
+    allocation. No Converter, initializer, provider request, attachment or runtime
+    load occurs. Caller holds the real original protected command reservation. *)
+val seed_session
+  :  t
+  -> principal:Agent_protocol.Principal.t
+  -> request:Agent_protocol.Session_seed.Request.t
+  -> command_audit:Document_schema.Document.t
+  -> checkpoint:(unit -> unit)
+  -> Seed_outcome.t
+
+(** Before request service in Execute and On_demand modes, scan the actual owned
+    store under finite positive aggregate limits, validating real Created audit
+    evidence. Recover the original identity/result into existing protected
+    receipts and repair incomplete initial snapshot/index through existing
+    storage owners. No actor/runtime/provider/source reconstruction occurs.
+    Absent/ambiguous outcomes remain Pending; conflicting identities fail closed.
+    General snapshot-less replay and legacy import rules remain unchanged. *)
+val reconcile_seed_creations
+  :  t
+  -> limits:Seed_recovery_limits.t
+  -> checkpoint:(unit -> unit)
+  -> (unit, Agent_protocol.Error.t) Result.t

@@ -77,6 +77,7 @@ actor state and authorization, not merely passing JSON validation.
 | `collection.delete` | `Organization_request.Collection.Delete` | `organization.manage` plus owner/admin visibility | Host-qualified logical collection delete. |
 | `blob.read` | `Blob.Read_request` | `session.transcript.read` plus blob ownership | Bounded chunk with cursor and metadata. |
 | `session.create` | `Session.Create_request` | `session.create` plus requested attachment scopes | Session, mutation acknowledgement and optional attachment/replay. |
+| `session.seed` | `Session_seed.Request` | `session.create`; Retained also requires `session.transcript.read` and source visibility | New stopped identity with validated neutral history and exact Catalog/Retained code; no attachment or initializer. |
 | `session.list` | `Session.List_request` | `session.transcript.read` | Paged visible sessions with filters. |
 | `activity.list` | `Activity_query` | `session.transcript.read` and `security.read` plus current session visibility | Bounded immutable activity/attention summaries, selected catalog order. |
 | `session.work` | `Session_work.Query` | `session.transcript.read` and `security.read` plus current session visibility | Bounded payload-free retained work with typed occurrence witnesses. |
@@ -883,3 +884,52 @@ from cancellation. Durable baseline publication and terminal receipt completion
 are separate writes; a lost receipt acknowledgment can follow a committed
 catalog. See [operations](operations.md#explicit-dependency-selection) for operator
 reconciliation.
+
+## Seed a stopped conversation
+
+`session.seed` accepts a complete validated `Session_seed.Request`: `spec`,
+`code`, `transcript` and the original `idempotency_key`. The Spec names an authored
+catalog definition and a currently permitted configured workspace, with
+`start_immediately=false`. Catalog code selection names that same definition and
+its exact expected prompt revision. Retained selection supplies the original
+host/session/generation/canonical/lifecycle `Expected` anchor. A different key
+creates a different conversation.
+
+The transcript is already-converted neutral history, not ChatMD source. Its
+canonical entries retain their supplied IDs, developer/user/assistant/tool roles,
+ordered call relations, opaque provider fields, numeric spellings and high-water
+mark. Redacted, malformed or nonzero-content-revision entries reject: retained
+in-place edit metadata is not a fresh seed. A frontend may convert a user-edited
+transcript into fresh neutral entries for this new conversation. Admission does
+not execute transcript markup, reconstruct old tool receipts, rerun conversion or copy old
+shell/moderator state. The existing 16 MiB encoded request ceiling remains; the
+complete escaped first Created transaction must also fit the host's finite
+journal profile before any layout allocation. Smaller structural/work limits
+can reject a byte-valid request. There is no hidden upload or truncated-history
+fallback. The reusable client entrypoint is `Agent_client.Session_handle.seed`.
+
+A successful result is exactly `session_id`; the new session is stopped and
+uninitialized. Attachment, explicit activation and authored/user run admission
+remain separate authorized commands. Retained code may be used when current
+source is unavailable, but its current definition metadata must exist and be
+enabled. Its pinned profile digest and runtime policy must still match current
+policy; drift rejects rather than retaining revoked privileges. Generated and
+delegated Specs cannot become independent authored roots through this command.
+The newly requested workspace is admitted under current policy; an old temporary
+instance is never cloned by labels. Same-session resume remains a different
+operation.
+
+Hosts advertise `sessions.seed` only when their actual seed Factory is present.
+An unsupported custom host omits it from initialize and server discovery and
+returns `method_not_found`. Current original operator authorization governs
+admission, replay and receipt reads, including retained-source visibility.
+
+On interruption, preserve the complete original request and key. The existing
+`command.receipt` returns `committed` with a `created_session` summary when the
+exact durable Success is known. Pending, missing or unavailable receipts are not
+permission to issue a new key or retry creation. A real audited first Created
+can precede terminal receipt acknowledgment; bounded startup/receipt recovery
+repairs only that exact initial creation and completes its original identity.
+It does not activate a runtime. Unknown or conflicting evidence stays failed
+closed. Original cancellation may follow publication and does not prove that
+creation rolled back. See [operations](operations.md#stopped-transcript-admission).

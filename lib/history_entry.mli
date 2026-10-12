@@ -267,7 +267,7 @@ val validate : allocator:Allocator.t -> t list -> (unit, string) result
 
 (** Checks explicit retained host bindings for order, call family and shared
     provider metadata. Unresolved outputs and archived/missing calls stay legal. *)
-val validate_relations : t list -> (unit, string) result
+val validate_relations : ?checkpoint:(unit -> unit) -> t list -> (unit, string) result
 
 (** Removes a bound host pair, or the nearest matching provider metadata pair
     for explicitly unresolved existing standalone results. *)

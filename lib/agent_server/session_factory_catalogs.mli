@@ -11,6 +11,10 @@ val create
   -> manifest_grants:Operator_manifest_grant.t list
   -> t
 
+(** Readonly actual configured inventory; borrow under [with_admission] when
+    deriving a native creation/cleanup route. No authorization is conveyed. *)
+val workspace_definitions : t -> Agent_session.Workspace_definition.t list
+
 val find_workspace
   :  t
   -> Agent_protocol.Id.Workspace_definition.t

@@ -40,5 +40,18 @@ val with_cleanup_completion : t -> cleanup_completion -> t
     projections remain separate. *)
 val to_jsonaf : t -> Jsonaf.t
 
+(** Size-only creation projection through the SAME field encoder. The supplied
+    planned roots are coordinates, not native identity. Device/inode/default
+    conflict metadata use their largest encoded permitted scalar values.
+    The result is never a [t] or ownership witness. The actual workspace and
+    full creation must pass normal admission after resolution. *)
+val creation_projection
+  :  Workspace_definition.t
+  -> instance_id:Agent_protocol.Id.Workspace_instance.t
+  -> configured_root:string
+  -> canonical_root:string
+  -> created_at:Agent_protocol.Timestamp.t
+  -> Jsonaf.t
+
 val of_jsonaf : Jsonaf.t -> (t, Agent_protocol.Error.t) result
 val shape : Document_schema.Shape.t

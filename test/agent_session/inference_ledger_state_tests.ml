@@ -79,7 +79,7 @@ let raw_state before ~version ~payload =
   |> document_ok
 ;;
 
-let admit state ledger =
+let admit (state : A.Session_state.t) ledger =
   let target =
     match Inference.Selection.view state.A.Session_state.spec.inference_target with
     | Captured target -> target

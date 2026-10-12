@@ -25,6 +25,7 @@ type options =
   ; protocol_limits : Agent_protocol.Initialize.Limits.t
   ; timing : Agent_protocol.Initialize.Timing.t
   ; factory_limits : Session_factory.limits
+  ; seed_recovery_limits : Session_factory.Seed_recovery_limits.t
   ; quota_limits : Agent_session.Quota_manager.limits
   ; reviewer_resolver : Catalog_builder.reviewer_resolver option
   ; policy_evaluator_resolver : Catalog_builder.policy_evaluator_resolver option
@@ -103,7 +104,8 @@ let default_options =
   ; implementation_version = "dev"
   ; extension_host = Daemon
   ; features =
-      [ "attachments.multi_client"
+      [ "sessions.seed"
+      ; "attachments.multi_client"
       ; "events.durable"
       ; "events.recoverable"
       ; "permissions.configurable"
@@ -163,6 +165,7 @@ let default_options =
           ; max_file_bytes = 64 * 1024 * 1024
           }
       }
+  ; seed_recovery_limits = Session_factory.Seed_recovery_limits.default
   ; quota_limits =
       { global_running_sessions = 256
       ; per_principal_running_sessions = 64
@@ -1205,6 +1208,15 @@ let compose
     else Ok ()
   in
   let%bind () =
+    if equal_startup_mode options.startup_mode Operator_only
+    then Ok ()
+    else
+      Session_factory.reconcile_seed_creations
+        factory
+        ~limits:options.seed_recovery_limits
+        ~checkpoint:Eio.Fiber.check
+  in
+  let%bind () =
     if equal_startup_mode options.startup_mode On_demand
     then Session_factory.rebuild_index_projections factory
     else Ok ()
@@ -1407,6 +1419,8 @@ let compose
       ~server_health:(server_health health_services)
       ~cancel_job:(Job_scheduler.cancel job_scheduler)
       ~create_session:(Session_factory.create_session factory)
+      ~seed_factory:(Some factory)
+      ~seed_recovery_limits:options.seed_recovery_limits
       ~prepare_session_start:(Session_factory.prepare_session_start factory)
       ~workspace_retained:(Session_factory.workspace_retained factory)
       ~prepare_administration:(Session_factory.prepare_administration factory)
@@ -1459,6 +1473,7 @@ let compose
       | Provider_select _
       | Provider_configure_environment _ -> Ok ()
       | Session_create _
+      | Session_seed _
       | Session_get _
       | Session_configuration_get _
       | Session_configuration_update _

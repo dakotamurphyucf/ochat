@@ -23,7 +23,7 @@ let conversation state options =
   }
 ;;
 
-let spec state options =
+let spec (state : Session_state.t) options =
   Option.value_map
     options.workspace_instance
     ~default:state.Session_state.spec
@@ -254,7 +254,7 @@ let archive ~archive_reference ~previous (candidate : Session_state.t) kind =
     }
 ;;
 
-let upgrade_payload previous state =
+let upgrade_payload (previous : Session_state.t) (state : Session_state.t) =
   if
     Agent_protocol.Id.Prompt_revision.compare
       previous.Session_state.spec.prompt_revision_id

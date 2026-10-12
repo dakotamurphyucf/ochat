@@ -98,7 +98,7 @@ let retained_state env root definition revision target role =
     ~initial_history:[]
 ;;
 
-let build env sw root fixture target state revision ~startup ~snapshot =
+let build env sw root fixture target (state : State.t) revision ~startup ~snapshot =
   let policy =
     Agent_session.Permission_policy.create
       ~id:"root-invocation"

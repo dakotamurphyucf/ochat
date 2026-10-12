@@ -12,6 +12,14 @@ module Initial_projection : sig
     -> entry:Session_index.Entry.t
     -> (t, Store_error.t) result
 
+  (** Mutable creation evidence is confined to its creating Eio domain. This
+      exact projection can be claimed by one creation attempt only; repeated
+      claims reject before metadata/index publication. [installed] becomes true
+      only at the store-owned protected successful layout rename and remains
+      true after later sync/Handle failure. No callback or directory-existence
+      inference supplies publication evidence. False grants no cleanup authority. *)
+  val installed : t -> bool
+
   val metadata : t -> Metadata.t
   val entry : t -> Session_index.Entry.t
 end
@@ -115,7 +123,11 @@ val create_session
     lets [initialize] derive metadata from paths inside that layout before the
     directory is atomically installed. Its full validated scheduling projection
     is published in that same recoverable bracket after sessions-parent sync.
-    Private staged journals remain unreachable until this installation. *)
+    Private staged journals remain unreachable until this installation. Failed
+    acquisition never removes a pre-existing staging directory. Returned errors,
+    cancellation and exceptions clean only this call's acquired staging; after
+    rename, final evidence survives later failures. Original exceptions propagate
+    after protected best-effort cleanup. *)
 val create_session_initialized
   :  t
   -> sw:Eio.Switch.t

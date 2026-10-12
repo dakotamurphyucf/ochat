@@ -27,6 +27,7 @@ let create ~env ~root ~max_entries ~max_bytes =
 ;;
 
 let root t = t.root
+let remaining_bytes t = t.budget.remaining_bytes
 
 let charge_bytes t bytes =
   match bytes >= 0 && bytes <= t.budget.remaining_bytes with

@@ -32,6 +32,10 @@ type options =
   ; protocol_limits : Agent_protocol.Initialize.Limits.t
   ; timing : Agent_protocol.Initialize.Timing.t
   ; factory_limits : Session_factory.limits
+  ; seed_recovery_limits : Session_factory.Seed_recovery_limits.t
+    (** Positive complete-invocation first-Created/receipt recovery profile shared
+        by Execute/On_demand startup and Pending original command reconciliation.
+        No runtime/source recapture occurs; limits do not enlarge transport bytes. *)
   ; quota_limits : Agent_session.Quota_manager.limits
   ; reviewer_resolver : Catalog_builder.reviewer_resolver option
   ; policy_evaluator_resolver : Catalog_builder.policy_evaluator_resolver option

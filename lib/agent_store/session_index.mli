@@ -59,6 +59,19 @@ val availability : t -> (unit, Store_error.t) result
 
 val list_checked : t -> (Entry.t list, Store_error.t) result
 
+(** Admit map cardinality before allocating a copied projection. Traverse the
+    immutable observed map with checkpoints outside the index mutex, then return
+    the same creation-time ordering as [list_checked]. The caller owns startup
+    or per-session lifecycle exclusion; this observation is not a mutation CAS.
+    Positive [max_entries] bounds retained rows; enumeration, reversal and each
+    fixed-size timestamp sort comparison borrow the same checkpoint.
+    Original callback exceptions propagate without poisoning the owner mutex. *)
+val list_checked_bounded
+  :  t
+  -> max_entries:int
+  -> checkpoint:(unit -> unit)
+  -> (Entry.t list, Store_error.t) result
+
 val find_checked
   :  t
   -> Agent_protocol.Id.Session.t

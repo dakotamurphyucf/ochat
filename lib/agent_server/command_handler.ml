@@ -17,6 +17,9 @@ type t =
   ; provider_operator : Provider_operator_port.t option
   ; dependency_administration : Dependency_administration.t option
   ; dependency_receipts : Dependency_update_receipt.t
+  ; seed_factory : Session_factory.t option
+  ; seed_receipts : Session_seed_command.t option
+  ; seed_recovery_limits : Session_factory.Seed_recovery_limits.t
   ; idempotency_mutex : Eio.Mutex.t
   ; search_cache : Search_cache.t
   ; search_cursors : Search_cursor.t
@@ -68,6 +71,8 @@ let create
       ~server_health
       ~cancel_job
       ~create_session
+      ~seed_factory
+      ~seed_recovery_limits
       ~prepare_session_start
       ~workspace_retained
       ~provider_operator
@@ -85,6 +90,39 @@ let create
         |> Time_ns.of_span_since_epoch
         |> Agent_protocol.Timestamp.of_time_ns)
   in
+  let seed_receipts =
+    Option.map seed_factory ~f:(fun factory ->
+      Session_seed_command.create
+        ~factory
+        ~registry
+        ~store:idempotency_store
+        ~mutex:idempotency_mutex
+        ~now:(fun () ->
+          Eio.Time.now (Eio.Stdenv.clock env)
+          |> Time_ns.Span.of_sec
+          |> Time_ns.of_span_since_epoch
+          |> Agent_protocol.Timestamp.of_time_ns))
+  in
+  let supported_features features =
+    match seed_factory with
+    | Some _ -> features
+    | None ->
+      List.filter features ~f:(fun feature -> not (String.equal feature "sessions.seed"))
+  in
+  let initialize ~principal request =
+    initialize ~principal request
+    |> Result.map ~f:(fun (response : Agent_protocol.Initialize.Response.t) ->
+      { response with
+        Agent_protocol.Initialize.Response.enabled_features =
+          supported_features response.enabled_features
+      })
+  in
+  let server_info () =
+    let (info : Agent_protocol.Method_result.Server_info.t) = server_info () in
+    { info with
+      Agent_protocol.Method_result.Server_info.features = supported_features info.features
+    }
+  in
   { sw
   ; env
   ; registry
@@ -96,6 +134,9 @@ let create
   ; idempotency_mutex
   ; dependency_administration
   ; dependency_receipts
+  ; seed_factory
+  ; seed_receipts
+  ; seed_recovery_limits
   ; search_cache =
       Search_cache.create ()
       |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
@@ -217,7 +258,7 @@ let has_active_workspace_lease entry ~conflict_domain:_ =
     ~f:Session_capacity.is_acquired
 ;;
 
-let cleanup_temporary t entry state ~event =
+let cleanup_temporary t entry (state : Agent_session.Session_state.t) ~event =
   let instance = state.Agent_session.Session_state.spec.workspace_instance in
   match state.spec.delegation, instance.source_kind with
   | Some _, _ | None, (Physical | Current) -> Ok instance
@@ -235,7 +276,7 @@ let cleanup_temporary t entry state ~event =
     |> Result.map_error ~f:persistence_error
 ;;
 
-let remove_temporary t entry state =
+let remove_temporary t entry (state : Agent_session.Session_state.t) =
   let instance = state.Agent_session.Session_state.spec.workspace_instance in
   let open Result.Let_syntax in
   let%bind _handle, protected_roots, expected_path = cleanup_context t entry instance in
@@ -356,6 +397,8 @@ let idempotency = function
   | Provider_select _
   | Provider_configure_environment _ -> None
   | Agent_protocol.Command.Ingress_submit _ -> None
+  | Agent_protocol.Command.Session_seed request ->
+    protected None (Agent_protocol.Session_seed.Request.idempotency_key request)
   | Agent_protocol.Command.Session_create request ->
     standard None request.Agent_protocol.Session.Create_request.idempotency_key
   | Session_attach request -> standard (Some request.session_id) request.idempotency_key
@@ -1475,7 +1518,7 @@ let rec handle_session_start t ?prepared_writer context command_audit request =
            Agent_protocol.Method_result.Session_start (session_mutation session))
        | _, Some capacity -> handle_capacity_start t entry capacity command_audit request)
 
-and enqueue_start t state =
+and enqueue_start t (state : Agent_session.Session_state.t) =
   let open Result.Let_syntax in
   let%bind quota_key =
     state.Agent_session.Session_state.spec.quota_key
@@ -2078,7 +2121,7 @@ let reset_cache t entry =
        |> Result.fail)
 ;;
 
-let replacement_workspace t entry state keep_workspace =
+let replacement_workspace t entry (state : Agent_session.Session_state.t) keep_workspace =
   if keep_workspace
   then Ok None
   else (
@@ -2161,7 +2204,7 @@ let handle_session_reset t ?prepared_writer context command_audit request =
                (session_mutation (Agent_session.Session_state.summary state)))))
 ;;
 
-let current_prompt_revision t state =
+let current_prompt_revision t (state : Agent_session.Session_state.t) =
   let open Result.Let_syntax in
   let%bind definition_id =
     state.Agent_session.Session_state.spec.prompt_definition_id
@@ -2177,7 +2220,7 @@ let current_prompt_revision t state =
   | Disabled | Unavailable _ -> Error (error Prompt_unavailable "prompt is unavailable")
 ;;
 
-let restore_target_revision t state target_revision =
+let restore_target_revision t (state : Agent_session.Session_state.t) target_revision =
   let open Result.Let_syntax in
   let%bind definition_id =
     state.Agent_session.Session_state.spec.prompt_definition_id
@@ -2724,6 +2767,7 @@ let prepared_writer_attachment command =
   | Workspace_get _
   | Blob_read _
   | Session_create _
+  | Session_seed _
   | Session_list _
   | Session_search _
   | Session_search_navigate _
@@ -2945,6 +2989,8 @@ let dispatch_authorized
     handle_schedule_create t ?prepared_writer context command_audit request
   | Schedule_cancel request ->
     handle_schedule_cancel t ?prepared_writer context command_audit request
+  | Session_seed _ ->
+    Error (error Invalid_state "seed requires original receipt dispatch")
   | Command_receipt _ -> Error (error Invalid_state "receipt requires read-only dispatch")
   | Ingress_submit request -> handle_ingress_submit t context request
 ;;
@@ -2983,6 +3029,7 @@ let command_session_id = function
   | Provider_select _
   | Provider_configure_environment _
   | Session_create _
+  | Session_seed _
   | Protocol_initialize _
   | Command_receipt _
   | Protocol_ping _
@@ -3105,6 +3152,8 @@ let receipt_summary ~session_id result =
   | Provider_configure_environment value -> Ok (R.Provider_configuration value)
   | Provider_status _ | Provider_login_challenge _ ->
     Error (error Invalid_request "method has no generic command receipt")
+  | Agent_protocol.Method_result.Session_seed value ->
+    Ok (R.Created_session value.session_id)
   | Agent_protocol.Method_result.Session_create value ->
     Ok (R.Created_session value.session.id)
   | Session_attach value -> Ok (R.Attached_session value.attachment.session_id)
@@ -3258,6 +3307,53 @@ let retained_run_receipt t ~actor (request : Agent_protocol.Run_start.t) ~reques
     Error (error Conflict "run request key identifies a non-admission receipt")
 ;;
 
+let seed_operator_authority ~actor request =
+  if not (Operator_authorization.is_current actor)
+  then Error (error Permission_denied "seed authority expired or was revoked")
+  else
+    Authorization.authorize
+      (Operator_authorization.principal actor)
+      (Agent_protocol.Command.Session_seed request)
+;;
+
+let seed_authority t ~actor context request =
+  let open Result.Let_syntax in
+  let%bind () = seed_operator_authority ~actor request in
+  match Agent_protocol.Session_seed.Request.code request with
+  | Catalog _ -> Ok ()
+  | Retained expected ->
+    let session_id =
+      Agent_protocol.Session_ref.session_id
+        (Agent_protocol.Session_lifecycle.Expected.reference expected)
+    in
+    read_visible_state t context session_id |> Result.map ~f:ignore
+;;
+
+let reconcile_pending_seed t context command =
+  let open Result.Let_syntax in
+  let%bind identity =
+    Result.of_option
+      (idempotency command)
+      ~error:(error Invalid_request "seed receipt identity is absent")
+  in
+  let%bind digest = request_digest command in
+  let key = idempotency_key (Connection_context.principal context) command identity in
+  match
+    Agent_store.Idempotency_store.lookup t.idempotency_store ~key ~request_digest:digest
+  with
+  | Replay { outcome = Pending; _ } ->
+    (match t.seed_factory with
+     | None -> Error (error Method_not_found "session.seed is not supported by this host")
+     | Some factory ->
+       Session_factory.reconcile_seed_creations
+         factory
+         ~limits:t.seed_recovery_limits
+         ~checkpoint:Eio.Fiber.check
+       |> Result.map_error ~f:(fun _ ->
+         error Interrupted "seed acknowledgment is incomplete; creation is not retried"))
+  | Missing | Conflict _ | Replay { outcome = Failure _ | Success _; _ } -> Ok ()
+;;
+
 let handle_command_receipt
       t
       ~actor
@@ -3284,6 +3380,14 @@ let handle_command_receipt
   in
   let%bind () = Authorization.authorize principal command in
   let%bind () = authorize_organization_mutation t principal command in
+  let%bind () =
+    match command with
+    | Session_seed original ->
+      let%bind () = seed_authority t ~actor context original in
+      let%bind () = reconcile_pending_seed t context command in
+      seed_authority t ~actor context original
+    | _ -> Ok ()
+  in
   if Organization_service.handles command
   then
     Organization_service.receipt
@@ -3557,8 +3661,46 @@ let dependency_update t ~actor context request =
          "dependency authority changed after receipt admission; outcome is unknown")
 ;;
 
+let handle_seed t ~actor context request =
+  let module Denial = struct
+    exception Revoked
+  end
+  in
+  let checkpoint () =
+    Eio.Fiber.check ();
+    (* Do not reenter the retained source reservation from a Factory checkpoint. *)
+    match seed_operator_authority ~actor request with
+    | Ok () -> ()
+    | Error _ -> raise Denial.Revoked
+  in
+  let run () =
+    let open Result.Let_syntax in
+    match t.seed_receipts with
+    | None -> Error (error Method_not_found "session.seed is not supported by this host")
+    | Some receipts ->
+      let%bind () = seed_authority t ~actor context request in
+      let%bind () =
+        reconcile_pending_seed t context (Agent_protocol.Command.Session_seed request)
+      in
+      Session_seed_command.dispatch
+        receipts
+        ~principal:(Connection_context.principal context)
+        ~request
+        ~authorize:(fun () -> seed_authority t ~actor context request)
+        ~checkpoint
+      |> Result.map ~f:(fun result -> Agent_protocol.Method_result.Session_seed result)
+  in
+  try run () with
+  | Denial.Revoked ->
+    Error
+      (error
+         Interrupted
+         "seed authority changed after receipt admission; outcome is unknown")
+;;
+
 let execute t ~actor context ~inference_budget command =
   match command with
+  | Agent_protocol.Command.Session_seed request -> handle_seed t ~actor context request
   | Agent_protocol.Command.Prompt_dependencies_status -> dependency_status t
   | Prompt_dependencies_update request -> dependency_update t ~actor context request
   | Agent_protocol.Command.Command_receipt request ->

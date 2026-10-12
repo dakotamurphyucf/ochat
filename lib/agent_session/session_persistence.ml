@@ -13,6 +13,7 @@ module Restored = struct
     { state_document = Session_state_document.authored state; snapshot = None }
   ;;
 
+  let of_state_document state_document = { state_document; snapshot = None }
   let state t = Session_state_document.value t.state_document
   let state_document t = t.state_document
 
@@ -246,13 +247,13 @@ let take_replay_documents t =
   documents
 ;;
 
-let install_snapshot_at t ~env ~directory ~max_payload_length ~transaction_hash state =
+let prepare_restored_snapshot restored ~max_payload_length ~transaction_hash state =
   let open Result.Let_syntax in
   let%bind limits =
     Persistence_codec.limits ~max_bytes:max_payload_length
     |> Result.map_error ~f:document_error
   in
-  let restored = Restored.with_state t.restored state in
+  let restored = Restored.with_state restored state in
   let%bind payload, state_document =
     admit_state_document restored.state_document ~limits
     |> Result.map_error ~f:document_error
@@ -274,10 +275,64 @@ let install_snapshot_at t ~env ~directory ~max_payload_length ~transaction_hash 
     | None -> args (Store.Snapshot.create ~session_id:state.identity.session_id)
     | Some snapshot -> args (Store.Snapshot.update snapshot)
   in
+  Ok (restored, snapshot)
+;;
+
+let install_restored_snapshot_at
+      restored
+      ~env
+      ~directory
+      ~max_payload_length
+      ~transaction_hash
+      state
+  =
+  let open Result.Let_syntax in
+  let%bind restored, snapshot =
+    prepare_restored_snapshot restored ~max_payload_length ~transaction_hash state
+  in
   let%map installed =
     Store.Snapshot.install ~env ~directory ~max_payload_length snapshot
   in
-  t.restored <- { restored with snapshot = Some snapshot };
+  { restored with snapshot = Some installed.snapshot }, installed
+;;
+
+let install_first_restored_snapshot_at
+      restored
+      ~env
+      ~reader
+      ~max_payload_length
+      ~transaction_hash
+      ~checkpoint
+      state
+  =
+  let open Result.Let_syntax in
+  checkpoint ();
+  let%bind restored, snapshot =
+    prepare_restored_snapshot restored ~max_payload_length ~transaction_hash state
+  in
+  let%map installed =
+    Store.Snapshot.install_first_checkpoint
+      snapshot
+      ~env
+      ~reader
+      ~max_payload_length
+      ~checkpoint
+  in
+  { restored with snapshot = Some installed.snapshot }, installed
+;;
+
+let install_snapshot_at t ~env ~directory ~max_payload_length ~transaction_hash state =
+  let open Result.Let_syntax in
+  let%map restored, installed =
+    install_restored_snapshot_at
+      t.restored
+      ~env
+      ~directory
+      ~max_payload_length
+      ~transaction_hash
+      state
+  in
+  t.restored <- restored;
   installed
 ;;
 

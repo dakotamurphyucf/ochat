@@ -30,6 +30,26 @@ let flatten delta =
   loop [] [ delta ]
 ;;
 
+let created_atom state = `Object [ "kind", `String "created"; "state", state ]
+
+let changes_document changes ~limits =
+  D.Document.create
+    ~limits
+    ~kind:"session.delta"
+    ~version:6
+    ~payload:(`Object [ "changes", `Array changes ])
+;;
+
+let project_created state ~limits =
+  let open Result.Let_syntax in
+  let%bind () = D.Document.validate state ~limits in
+  if not (String.equal (D.Document.kind state) "session.state")
+  then
+    Error
+      (D.Error.Wrong_kind { expected = "session.state"; actual = D.Document.kind state })
+  else changes_document [ created_atom (D.Document.json state) ] ~limits
+;;
+
 let atom_to_jsonaf ~limits ~state_document delta =
   let open Result.Let_syntax in
   let created_to_jsonaf state =
@@ -42,7 +62,7 @@ let atom_to_jsonaf ~limits ~state_document delta =
   | Delta.Batch _ -> assert false
   | Created value ->
     let%map json = created_to_jsonaf value in
-    `Object [ "kind", `String "created"; "state", json ]
+    created_atom json
   | Lifecycle_changed value ->
     Ok
       (`Object
@@ -1028,13 +1048,7 @@ let create value ~limits ~state_document =
     |> Result.all
     |> X.document_result
   in
-  let%bind document =
-    D.Document.create
-      ~limits
-      ~kind:"session.delta"
-      ~version:6
-      ~payload:(`Object [ "changes", `Array changes ])
-  in
+  let%bind document = changes_document changes ~limits in
   (* Decode authored output too: one set of validators governs both paths. *)
   decode ~limits document
 ;;

@@ -109,6 +109,44 @@ val install
   -> t
   -> (installed, Store_error.t) Result.t
 
+(** Recover only an authenticated first checkpoint (transaction/event sequence
+    one) while the caller retains the same journal/lifecycle/Handle exclusion.
+    This supplies no authority to bootstrap state: the caller has already
+    validated its genuine first Created transaction and original receipt.
+
+    [reader] is rooted at that actual snapshot directory and borrows the caller's
+    complete finite entry/byte allowance. Inventory, contents and comparisons
+    consume that allowance/checkpoint before mutation. Byte debits conservatively
+    cover both retained encoded frames, observed bytes, any prefix recheck and
+    the ordinary install owner's one (missing target) or two (existing target)
+    full read buffers. Exact compact frame measurement precedes frame allocation;
+    all remaining buffer admission precedes mutation. This is a bounded buffer
+    allowance, not exact heap or cumulative IO accounting. Only the first checkpoint
+    file and optional matching CURRENT are accepted, along with abandoned
+    CURRENT temporary names recognized by [Durable_file.temporary_target]. Those
+    names consume the entry allowance and supply no checkpoint authority; this
+    operation neither reads nor deletes their contents. An absent file or a shorter
+    exact prefix of the requested encoded frame (including empty) can be completed;
+    mismatching/extra/unsupported complete data remains untouched. Complete
+    existing checkpoints must agree on the entire known value and retain their
+    original outer unknown-field carrier. Both known JSON values are admitted
+    with cooperative traversal before existing [Document_schema.Json.equal];
+    that comparison is a bounded nonpreemptible stage bracketed by checkpoints.
+    Ordinary [install] is unchanged.
+
+    Recheck the observed exact prefix on the retained descriptor before extending,
+    sync the file/directory, then use the same reread/CURRENT publication owner as
+    [install]. Cancellation or uncertain writes may leave a later valid phase;
+    retry re-admits actual evidence instead of creating another identity. Original
+    checkpoint/unexpected exceptions propagate; no pruning or metadata writes. *)
+val install_first_checkpoint
+  :  t
+  -> env:Eio_unix.Stdenv.base
+  -> reader:Retention_reader.t
+  -> max_payload_length:int
+  -> checkpoint:(unit -> unit)
+  -> (installed, Store_error.t) Result.t
+
 val restore : Stored.t -> limits:Document_schema.Limits.t -> (t, Store_error.t) Result.t
 
 val decode_stored_file

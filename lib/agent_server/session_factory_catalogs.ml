@@ -108,6 +108,11 @@ let create ~workspaces ~permission_profiles ~manifest_grants =
   }
 ;;
 
+let workspace_definitions t =
+  check_domain t;
+  Workspaces.definitions t.workspaces
+;;
+
 let find_workspace t id =
   check_domain t;
   Workspaces.find t.workspaces id

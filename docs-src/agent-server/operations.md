@@ -242,3 +242,35 @@ Publication success can include Unavailable target outcomes. Inspect those
 outcomes and the existing prompt summary before assuming a new source was
 adopted. Refresh/rebuild future sessions deliberately; an update does not rewrite
 running or retained sessions.
+
+## Stopped transcript admission
+
+Use `session.seed` when edited or imported neutral history belongs in a new
+conversation. Reuse the existing session identity for ordinary resume. Choose an
+exact available Catalog revision or an authorized Retained authored root and
+a currently permitted configured workspace. Retained code/role/target remains
+immutable, but admission of a new identity still requires current enabled
+definition metadata and matching pinned profile/runtime policy. It grants no
+new source access, and does not copy a former temporary workspace.
+
+Keep the original complete request/key until its outcome is known. The shared
+client retains interrupted seed intents for `Connection.reconcile`; a committed
+receipt returns the original session ID. Do not regenerate a key after a lost
+reply. Protected Pending prevents creation from running again, including across
+restart. The host preserves the actual audited first Created until exact Success,
+then permits ordinary activation and retention. Initial recovery admits only
+verified seed evidence, not arbitrary later transactions or legacy imports.
+
+Seed reconciliation uses one configurable finite profile at startup and receipt
+reads. The default covers 4096 indexed rows/first transactions, 256 MiB of
+conservative frame/read-buffer accounting and 2 million cooperative steps.
+Execute and On-demand hosts reconcile before request service; Operator-only
+still denies new execution. Bound failures or contradictory evidence remain
+unavailable/Pending. These limits are separate from transport/journal ceilings
+and do not describe exact heap use. A large byte-valid seed can still exceed a
+structural or work bound. Inspect the original receipt and host diagnostic rather
+than deleting evidence or treating a pending creation as safely absent.
+
+The successful stopped ID can then be attached and explicitly run. Seeding alone
+performs no provider request, ChatML initializer or transcript conversion.
+See the [complete request contract](protocol.md#seed-a-stopped-conversation).

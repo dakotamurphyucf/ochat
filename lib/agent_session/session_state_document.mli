@@ -12,6 +12,25 @@ open! Core
     supplies authority. *)
 type t
 
+(** Version of newly authored complete session.state documents. *)
+val current_version : int
+
+(** Raw field projections shared by ordinary storage encoding and prelayout
+    sizing. Trusted component encoders must describe the actual supplied fields.
+    These return only JSON; no generic spec/ workspace becomes an admitted native
+    state, document, lifecycle witness or execution authority. Ordinary [encode]
+    still validates the complete monomorphic native state and final document. *)
+val project_spec
+  :  'workspace Session_state.Spec.fields
+  -> workspace:('workspace -> Jsonaf.t)
+  -> Jsonaf.t
+
+val project_fields
+  :  'spec Session_state.fields
+  -> spec:('spec -> Jsonaf.t)
+  -> limits:Document_schema.Limits.t
+  -> (Jsonaf.t, Agent_protocol.Error.t) Result.t
+
 val authored : Session_state.t -> t
 val value : t -> Session_state.t
 val with_value : t -> Session_state.t -> t

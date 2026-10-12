@@ -10,6 +10,7 @@
   document_fields
   lock
   journal_segment
+  journal_initial_creation
   journal
   snapshot
   session_record_document
@@ -64,6 +65,7 @@
   prompt_manifest_document
   prompt_artifact_store
   migration)
+ (private_modules journal_initial_creation)
  (libraries ochat.inference
   core
   core_unix

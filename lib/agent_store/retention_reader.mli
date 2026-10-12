@@ -15,6 +15,11 @@ val create
 
 val root : t -> string
 
+(** Remaining bytes in this reader's existing shared invocation allowance.
+    Serialized owner operations may admit a fixed header's declared remainder
+    before allocating it, then charge each actual chunk through [charge_bytes]. *)
+val remaining_bytes : t -> int
+
 (** Charge serialized in-memory roots against the same aggregate byte allowance
     as filesystem reads. Negative sizes and exhausted budgets fail the attempt. *)
 val charge_bytes : t -> int -> (unit, Store_error.t) result

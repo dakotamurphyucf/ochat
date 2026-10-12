@@ -445,6 +445,14 @@ let create ~sw ~clock ~connection ~spec ~mode ?(subscribe = true) ?on_update ?on
   else create None
 ;;
 
+let seed connection request =
+  match Connection.request_without_history connection (Session_seed request) with
+  | Error failure -> Error failure
+  | Ok (Session_seed result) -> Ok result
+  | Ok _ ->
+    Error (Agent_protocol.Error.invalid_request "unexpected session.seed response")
+;;
+
 let session_id t = t.session_id
 let attachment t = Eio.Mutex.use_ro t.mutex (fun () -> t.attachment)
 let reclaim_token t = t.reclaim_token

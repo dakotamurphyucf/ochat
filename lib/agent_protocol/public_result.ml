@@ -37,6 +37,7 @@ module Non_history = struct
     | Session_work _
     | Session_search _
     | Session_search_navigate _
+    | Session_seed _
     | Session_list _
     | Session_configuration_get _
     | Session_configuration_update _

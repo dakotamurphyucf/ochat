@@ -17,7 +17,7 @@ module Identity = struct
 end
 
 module Spec = struct
-  type t =
+  type 'workspace fields =
     { protocol : Agent_protocol.Session.Spec.t
     ; prompt_definition_id : Agent_protocol.Id.Prompt_definition.t option
     ; root_invocation :
@@ -28,13 +28,15 @@ module Spec = struct
     ; configuration_revision : int64 [@sexp.default 0L]
     ; inference_target : (Inference.Selection.t[@sexp.opaque])
     ; delegation : Agent_store.Delegation_store.Reference.t option [@sexp.option]
-    ; workspace_instance : Workspace_instance.t
+    ; workspace_instance : 'workspace
     ; permission_profile : string
     ; permission_profile_digest : string
     ; runtime_policy : string option
     ; quota_key : Quota_key.t option
     }
   [@@deriving sexp]
+
+  type t = Workspace_instance.t fields [@@deriving sexp]
 end
 
 module Compaction_archive = struct
@@ -111,10 +113,10 @@ module Counters = struct
   [@@deriving sexp]
 end
 
-type t =
+type 'spec fields =
   { schema_version : int
   ; identity : Identity.t
-  ; spec : Spec.t
+  ; spec : 'spec
   ; lifecycle : Lifecycle.t
   ; runtime_initialization : Runtime_initialization.t
   ; pending_initial_start : bool [@sexp.default false]
@@ -147,9 +149,11 @@ type t =
   }
 [@@deriving sexp]
 
+type t = Spec.t fields [@@deriving sexp]
+
 let current_schema_version = 25
 
-let upgrade_schema t =
+let upgrade_schema (t : t) =
   if t.schema_version = current_schema_version
   then Ok t
   else if
@@ -389,22 +393,8 @@ let fresh_inference_ledger_exn (identity : Identity.t) =
   |> Result.ok_or_failwith
 ;;
 
-let create ~(identity : Identity.t) ~(spec : Spec.t) ~initial_history =
-  let spec =
-    { spec with
-      Spec.protocol =
-        { spec.protocol with
-          display_name = identity.Identity.display_name
-        ; labels = identity.labels
-        }
-    }
-  in
+let create_fields ~(identity : Identity.t) ~spec ~desired ~initial_history =
   let inference_ledger = fresh_inference_ledger_exn identity in
-  let desired =
-    if spec.Spec.protocol.start_immediately
-    then Agent_protocol.Session.Running
-    else Stopped
-  in
   { schema_version = current_schema_version
   ; identity
   ; spec
@@ -459,6 +449,24 @@ let create ~(identity : Identity.t) ~(spec : Spec.t) ~initial_history =
   }
 ;;
 
+let create ~(identity : Identity.t) ~(spec : Spec.t) ~initial_history =
+  let spec =
+    { spec with
+      Spec.protocol =
+        { spec.protocol with
+          display_name = identity.Identity.display_name
+        ; labels = identity.labels
+        }
+    }
+  in
+  let desired =
+    if spec.Spec.protocol.start_immediately
+    then Agent_protocol.Session.Running
+    else Stopped
+  in
+  create_fields ~identity ~spec ~desired ~initial_history
+;;
+
 let authoring_references t =
   let module R = Chat_response.Authoring_reference_index in
   let scope =
@@ -483,7 +491,7 @@ let nonnegative name value =
          ())
 ;;
 
-let validate_delegation t =
+let validate_delegation (t : t) =
   let module D = Agent_store.Delegation_store in
   let invalid () =
     Error
@@ -513,7 +521,7 @@ let validate_delegation t =
   | _ -> invalid ()
 ;;
 
-let validate_model_job_targets t =
+let validate_model_job_targets (t : t) =
   let open Result.Let_syntax in
   let seen = Hash_set.create (module Agent_protocol.Id.Job) in
   let%bind () =
@@ -557,7 +565,7 @@ let validate_model_job_targets t =
     | Compaction -> Ok ())
 ;;
 
-let validate_domain t =
+let validate_domain (t : t) =
   let open Result.Let_syntax in
   let%bind () =
     if Int64.(t.spec.configuration_revision < 0L)
@@ -1031,7 +1039,7 @@ let validate_domain t =
   else Ok ()
 ;;
 
-let validate t =
+let validate (t : t) =
   let open Result.Let_syntax in
   let%bind () =
     match t.run_state with
@@ -1095,7 +1103,7 @@ let validate_administration_candidate t ~previous =
          "administration must retain the original inference ledger")
 ;;
 
-let summary t =
+let summary_fields (t : 'workspace Spec.fields fields) ~workspace =
   Agent_protocol.Session.
     { id = t.identity.session_id
     ; creator = t.identity.creating_principal
@@ -1106,7 +1114,7 @@ let summary t =
     ; desired_state = t.lifecycle.desired
     ; observed_state = t.lifecycle.observed
     ; prompt_revision = Some t.spec.prompt_revision_id
-    ; workspace_instance = Some t.spec.workspace_instance.id
+    ; workspace_instance = Some (workspace t.spec.workspace_instance)
     ; active_operation = t.active_operation
     ; revision = t.counters.revision
     ; metadata_revision = t.identity.metadata_revision
@@ -1114,6 +1122,10 @@ let summary t =
     ; inference_summary = Value (Inference_ledger.summary t.inference_ledger)
     ; latest_event_sequence = t.counters.event_sequence
     }
+;;
+
+let summary t =
+  summary_fields t ~workspace:(fun workspace -> workspace.Workspace_instance.id)
 ;;
 
 let history_window entries =

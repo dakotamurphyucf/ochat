@@ -853,13 +853,15 @@ let id t = t.id
 let payload t = t.payload
 let with_payload t payload = { t with payload }
 
-let validate_relations entries =
+let validate_relations ?(checkpoint = Fn.ignore) entries =
   let indexed = Hashtbl.create (module Id) in
   List.iteri entries ~f:(fun index entry ->
+    checkpoint ();
     Hashtbl.set indexed ~key:entry.id ~data:(index, entry));
   List.foldi entries ~init:(Ok ()) ~f:(fun index previous entry ->
     let open Result.Let_syntax in
     let%bind () = previous in
+    checkpoint ();
     let semantic = Payload.semantic entry.payload in
     match Payload.Semantic.view semantic with
     | Result { relation = Bound call_id; kind; _ } ->

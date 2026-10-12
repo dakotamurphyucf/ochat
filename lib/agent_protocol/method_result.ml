@@ -406,6 +406,7 @@ type t =
   | Workspace_get of Workspace.t
   | Blob_read of Blob.Chunk.t
   | Session_create of Create.t
+  | Session_seed of Session_seed.Result.t
   | Session_list of Session_catalog.t Page.t
   | Session_search of Search_page.t
   | Session_search_navigate of Search_navigation.Response.t
@@ -490,6 +491,7 @@ let method_name = function
   | Workspace_get _ -> "workspace.get"
   | Blob_read _ -> "blob.read"
   | Session_create _ -> "session.create"
+  | Session_seed _ -> "session.seed"
   | Session_list _ -> "session.list"
   | Session_search _ -> "session.search"
   | Session_search_navigate _ -> "session.search.navigate"
@@ -577,6 +579,7 @@ let to_json = function
   | Workspace_get value -> Workspace.to_json value
   | Blob_read value -> Blob.Chunk.to_json value
   | Session_create value -> Create.to_json value
+  | Session_seed value -> Session_seed.Result.to_json value
   | Session_list value -> Page.to_json Session_catalog.to_json value
   | Session_search value -> Search_page.to_json value
   | Session_search_navigate value -> Search_navigation.Response.to_json value
@@ -692,6 +695,7 @@ let decoders =
   ; "workspace.get", map Workspace.of_json (fun x -> Workspace_get x)
   ; "blob.read", map Blob.Chunk.of_json (fun x -> Blob_read x)
   ; "session.create", map Create.of_json (fun x -> Session_create x)
+  ; "session.seed", map Session_seed.Result.of_json (fun x -> Session_seed x)
   ; "session.list", map (Page.of_json Session_catalog.of_json) (fun x -> Session_list x)
   ; "session.search", map Search_page.of_json (fun x -> Session_search x)
   ; ( "session.search.navigate"

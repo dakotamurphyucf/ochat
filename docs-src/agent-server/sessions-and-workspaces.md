@@ -39,6 +39,7 @@ valid actor-owned writable attachment before preparing mutations.
 | Operation | Meaning |
 |---|---|
 | Create | Pin prompt/workspace/profile; choose liveness/persistence; optionally start and attach. |
+| Seed | Admit already-converted neutral history into a new stopped identity using exact Catalog or authorized Retained code; attach/start separately. |
 | Start | Set running intent and acquire workspace/quota capacity; may queue. |
 | Attach | Obtain a client view and optional subscription; does not restart a stopped session. |
 | Detach | Remove this attachment; detached session execution continues. |

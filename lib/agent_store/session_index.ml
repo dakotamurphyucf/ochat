@@ -204,6 +204,40 @@ let list_checked t =
     | Some error -> Error error)
 ;;
 
+let list_checked_bounded t ~max_entries ~checkpoint =
+  let open Result.Let_syntax in
+  let%bind entries =
+    Eio.Mutex.use_ro t.mutex (fun () ->
+      match t.unavailable with
+      | Some error -> Error error
+      | None ->
+        if max_entries <= 0 || Map.length t.entries > max_entries
+        then Error (Store_error.Corrupt "session index exceeds its entry budget")
+        else Ok t.entries)
+  in
+  checkpoint ();
+  let entries =
+    Map.fold entries ~init:[] ~f:(fun ~key:_ ~data entries ->
+      checkpoint ();
+      data :: entries)
+  in
+  let entries =
+    List.fold entries ~init:[] ~f:(fun entries entry ->
+      checkpoint ();
+      entry :: entries)
+  in
+  checkpoint ();
+  let entries =
+    List.sort entries ~compare:(fun left right ->
+      checkpoint ();
+      Agent_protocol.Timestamp.compare
+        left.Entry.session.created_at
+        right.Entry.session.created_at)
+  in
+  checkpoint ();
+  Ok entries
+;;
+
 let find_checked t id =
   Eio.Mutex.use_ro t.mutex (fun () ->
     match t.unavailable with

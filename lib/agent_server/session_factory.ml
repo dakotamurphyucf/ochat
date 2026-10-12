@@ -220,16 +220,7 @@ let permission_profile_revision t digest =
 ;;
 
 let rewrite_session_workspace_path ~final_directory instance =
-  match instance.Agent_session.Workspace_instance.source_kind with
-  | Temporary Session_dir ->
-    let parent = Eio_posix.Low_level.realpath (Filename.dirname final_directory) in
-    let final_directory = Filename.concat parent (Filename.basename final_directory) in
-    let native_path = Filename.concat final_directory "workspace" in
-    { instance with
-      canonical_root = { instance.canonical_root with native_path }
-    ; configured_root = Some native_path
-    }
-  | Physical | Current | Temporary System_tmp -> instance
+  Agent_session.Workspace_resolver.published_instance instance ~final_directory
 ;;
 
 let session_identity principal request session_id now =
@@ -340,67 +331,8 @@ let imported_state provisional legacy =
   state
 ;;
 
-let metadata state =
-  Agent_store.Session_store.Metadata.
-    { schema_version = Agent_store.Session_store.current_metadata_schema_version
-    ; session = Agent_session.Session_state.summary state
-    ; prompt_artifact =
-        Agent_protocol.Id.Prompt_revision.to_string state.spec.prompt_revision_id
-    ; workspace_identity = state.spec.workspace_instance.conflict_domain
-    ; data_schema_version = Agent_session.Session_state.current_schema_version
-    }
-;;
-
-let runnable_job job =
-  match job.Agent_protocol.Job.status with
-  | Queued -> true
-  | Running
-  | Waiting_permission _
-  | Waiting_completion _
-  | Succeeded
-  | Failed _
-  | Cancelled
-  | Interrupted _ -> false
-;;
-
-let deliverable_job job =
-  match job.Agent_protocol.Job.delivery with
-  | Pending -> true
-  | Not_required | Delivered _ | Discarded _ -> false
-;;
-
-let active_schedule schedule =
-  match schedule.Agent_protocol.Schedule.status with
-  | Scheduled | Delivering -> true
-  | Delivered | Cancelled | Failed _ -> false
-;;
-
-let owner_grace_deadline state =
-  List.find_map state.Agent_session.Session_state.attachments ~f:(fun attachment ->
-    match attachment.Agent_protocol.Session.Attachment.mode, attachment.owner_lease with
-    | Owner_read_write, Some lease -> lease.disconnect_grace_until
-    | (Owner_read_write | Read_write | Read_only), _ -> None)
-;;
-
-let index_entry state =
-  let earliest_schedule_due =
-    state.Agent_session.Session_state.schedules
-    |> List.filter ~f:active_schedule
-    |> List.map ~f:(fun schedule -> schedule.Agent_protocol.Schedule.next_due_at)
-    |> List.min_elt ~compare:Agent_protocol.Timestamp.compare
-  in
-  Agent_store.Session_index.Entry.
-    { session = Agent_session.Session_state.summary state
-    ; runnable_job_count = List.count state.jobs ~f:runnable_job
-    ; deliverable_job_count = List.count state.jobs ~f:deliverable_job
-    ; earliest_schedule_due
-    ; owner_grace_deadline = owner_grace_deadline state
-    ; pending_initial_start = state.pending_initial_start
-    ; archived = false
-    ; lifecycle_revision = Agent_store.Session_archive_record.Revision.zero
-    ; admission = Automatic
-    }
-;;
+let metadata = Session_projection.metadata
+let index_entry = Session_projection.index_entry
 
 let initialize_layout
       t
@@ -755,7 +687,7 @@ let parent_stop_recovery t ~policy (state : Agent_session.Session_state.t) =
        Ok (Some { reference; epoch; stop }))
 ;;
 
-let runtime_paths t handle source state =
+let runtime_paths t handle source (state : Agent_session.Session_state.t) =
   match t.home with
   | None ->
     Error
@@ -1019,7 +951,12 @@ let manifest_now_ns t () =
   |> Int63.to_int64
 ;;
 
-let operator_manifest_authorizer t ~manifest_sha256 revision state =
+let operator_manifest_authorizer
+      t
+      ~manifest_sha256
+      revision
+      (state : Agent_session.Session_state.t)
+  =
   let artifact = Agent_session.Prompt_revision.artifact revision in
   fun request ->
     let open Shell_runtime.Manifest_authorizer in
@@ -2152,7 +2089,7 @@ let model_job_inference t entry job =
 
 let job_services
       t
-      state
+      (state : Agent_session.Session_state.t)
       actor_ref
       pending
       ~initialization_scope
@@ -3799,7 +3736,7 @@ let quota_overflow = function
   | Queue -> Queue
 ;;
 
-let capacity_for_state t state =
+let capacity_for_state t (state : Agent_session.Session_state.t) =
   let open Result.Let_syntax in
   match state.Agent_session.Session_state.spec.quota_key with
   | None -> Ok None
@@ -3991,8 +3928,37 @@ let create_retention_preflight t handle journal =
     ~validate:(validate_recovery_document t handle)
 ;;
 
+let seed_recovery t =
+  Session_seed_recovery.create
+    ~env:t.env
+    ~store:t.store
+    ~registry:t.registry
+    ~idempotency_store:t.idempotency_store
+    ~journal_document_limits:t.journal_document_limits
+    ~storage_limits:
+      { max_journal_payload = t.limits.max_journal_payload
+      ; max_segment_bytes = t.limits.max_segment_bytes
+      ; max_segment_frames = t.limits.max_segment_frames
+      ; snapshot_payload_limit = t.limits.snapshot_payload_limit
+      }
+    ~max_work_steps:(Document_schema.Limits.max_nodes t.document_limits)
+;;
+
+let with_seed_work = Session_seed_recovery.with_work
+
+let require_seed_success t handle =
+  Session_seed_recovery.require_success (seed_recovery t) handle
+;;
+
 let prune_snapshot t handle journal persistence _installed =
   let open Result.Let_syntax in
+  (* The first audited Created is the Pending seed's recovery authority. Neither
+     cache maintenance nor closure may seal it away before durable Success. *)
+  let%bind () =
+    require_seed_success t handle
+    |> Result.map_error ~f:(fun failure ->
+      Agent_store.Store_error.Corrupt failure.message)
+  in
   let directory = Agent_store.Session_store.Handle.snapshot_directory handle in
   let%bind () =
     match Agent_session.Session_persistence.retention_preflight persistence with
@@ -4873,31 +4839,47 @@ let create_loaded_entry
 
 let close_recovered_entry t owner handle journal persistence actor =
   Session_recovery_owner.with_entry_close owner (fun () ->
-    let first_close = not (Session_recovery_owner.is_closing owner) in
-    Session_recovery_owner.prepare_close owner;
-    let checkpoint_failure =
+    let maintain_checkpoint () =
+      let first_close = not (Session_recovery_owner.is_closing owner) in
+      Session_recovery_owner.prepare_close owner;
       if first_close
       then (
         match Agent_store.Session_store.Handle.metadata_checked handle with
         | Error _ -> None (* Unavailable projection cannot admit cache maintenance. *)
         | Ok _ ->
-          (match checkpoint_entry t handle journal persistence actor with
-           | Ok () -> None
-           | Error failure ->
-             Session_recovery_owner.record_checkpoint_failure owner failure;
-             Some failure))
+          (match require_seed_success t handle with
+           | Error _ ->
+             None (* Retain genuine Pending proof; still close all resources. *)
+           | Ok () ->
+             (match checkpoint_entry t handle journal persistence actor with
+              | Ok () -> None
+              | Error failure ->
+                Session_recovery_owner.record_checkpoint_failure owner failure;
+                Some failure)))
       else None
     in
-    match Session_recovery_owner.close owner with
-    | Error failure ->
-      raise
-        (Session_registry.Cleanup_failed
-           (Session_registry.Cleanup_failure.rejected failure))
-    | Ok () ->
-      Option.iter checkpoint_failure ~f:(fun failure ->
-        raise
-          (Session_registry.Cleanup_failed
-             (Session_registry.Cleanup_failure.rejected failure))))
+    match maintain_checkpoint () with
+    | checkpoint_failure ->
+      (match Session_recovery_owner.close owner with
+       | Error failure ->
+         raise
+           (Session_registry.Cleanup_failed
+              (Session_registry.Cleanup_failure.rejected failure))
+       | Ok () ->
+         Option.iter checkpoint_failure ~f:(fun failure ->
+           raise
+             (Session_registry.Cleanup_failed
+                (Session_registry.Cleanup_failure.rejected failure))))
+    | exception exn ->
+      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      (* The actual owner bracket joins/releases resources even when the gate or
+         checkpoint throws, retaining secondary cleanup diagnostics alongside the
+         original exception and backtrace. It never recursively closes the entry. *)
+      let (_ : (Session_registry.entry, Agent_protocol.Error.t) Result.t) =
+        Session_registry.with_recovery_owner t.registry owner (fun () ->
+          Exn.raise_with_original_backtrace exn backtrace)
+      in
+      assert false)
 ;;
 
 let create_unloaded_entry
@@ -5081,7 +5063,14 @@ let commit_creation t persistence state ~command_audit =
   transition
 ;;
 
-let persist_initial_snapshot t handle journal persistence state =
+let persist_initial_snapshot
+      ?(retain_initial_proof = false)
+      t
+      handle
+      journal
+      persistence
+      state
+  =
   let open Result.Let_syntax in
   let%bind installed =
     Agent_session.Session_persistence.install_snapshot
@@ -5093,13 +5082,16 @@ let persist_initial_snapshot t handle journal persistence state =
       state
     |> Result.map_error ~f:protocol_of_store
   in
-  ignore
-    (prune_snapshot t handle journal persistence installed
-     : (unit, Agent_store.Store_error.t) result);
+  if not retain_initial_proof
+  then
+    ignore
+      (prune_snapshot t handle journal persistence installed
+       : (unit, Agent_store.Store_error.t) result);
   persist_metadata t handle state |> Result.map_error ~f:protocol_of_store
 ;;
 
-let finish_unloaded_creation t handle state ~command_audit =
+let finish_unloaded_creation ?(retain_initial_proof = false) t handle state ~command_audit
+  =
   let open Result.Let_syntax in
   let%bind state, capacity = prepare_initial_capacity t state in
   let cleanup = ref (fun () -> Option.iter capacity ~f:Session_capacity.release) in
@@ -5150,7 +5142,9 @@ let finish_unloaded_creation t handle state ~command_audit =
     | Error _ as failure -> failure
     | Ok creation ->
       let state = creation.Agent_session.Session_transition.state in
-      (match persist_initial_snapshot t handle journal persistence state with
+      (match
+         persist_initial_snapshot ~retain_initial_proof t handle journal persistence state
+       with
        | Error _ as failure -> failure
        | Ok () ->
          (* [create_unloaded_entry] takes ownership on entry, including failures. *)
@@ -5479,7 +5473,7 @@ let close_recovery_handle t handle =
 
 let corrupt message = protocol_of_store (Agent_store.Store_error.Corrupt message)
 
-let validate_snapshot handle installed state =
+let validate_snapshot handle installed (state : Agent_session.Session_state.t) =
   let snapshot = installed.Agent_store.Snapshot.snapshot in
   let session_id = Agent_store.Session_store.Handle.session_id handle in
   let prompt_revision =
@@ -5565,7 +5559,7 @@ let open_recovery t handle =
 let recovered_revision = restore_state_source
 let recovered_profile = restore_state_profile
 
-let verify_recovered_workspace t state =
+let verify_recovered_workspace t (state : Agent_session.Session_state.t) =
   Agent_session.Workspace_resolver.verify_available
     ~env:t.env
     state.Agent_session.Session_state.spec.workspace_instance
@@ -5647,7 +5641,7 @@ let interrupted_reviewer_jobs state now =
   List.filter_map state.Agent_session.Session_state.jobs ~f:(interrupted_reviewer_job now)
 ;;
 
-let recovery_attachment_deltas state ~now =
+let recovery_attachment_deltas (state : Agent_session.Session_state.t) ~now =
   let disconnect_owner attachment lease disconnect_grace_ms =
     let grace =
       now
@@ -5940,6 +5934,7 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
       ~capacity:None
   in
   Session_registry.with_recovery_owner t.registry owner (fun () ->
+    let%bind () = require_seed_success t handle in
     let%bind parent_policy = prepare_parent_policy () in
     let%bind lifecycle =
       Agent_store.Session_store.read_lifecycle t.store handle
@@ -7169,7 +7164,7 @@ let create_delegated_session
         let%bind record = source.install ~artifacts ~record in
         let reference = D.reference record in
         let child_id = record.admission.child_session_id in
-        let verify state =
+        let verify (state : State.t) =
           match state.State.spec.delegation with
           | Some actual when D.Reference.equal reference actual ->
             validate_delegated_target state record
@@ -8806,4 +8801,287 @@ let validate_session_removal t (state : Agent_session.Session_state.t) =
     if live
     then Error (unavailable Conflict "session has a live durable delegation obligation")
     else Ok ())
+;;
+
+module Seed_recovery_limits = Session_seed_recovery.Limits
+
+module Seed_outcome = struct
+  type t =
+    | Created of Session_registry.entry
+    | Rejected of Agent_protocol.Error.t
+    | Uncertain of Agent_protocol.Error.t
+end
+
+let seed_definition t id =
+  match Agent_session.Prompt_catalog.find t.prompts id with
+  | None -> Error (unavailable Prompt_not_found "seed definition is absent")
+  | Some entry -> Ok entry.definition
+;;
+
+let seed_from_recipe
+      t
+      recipe
+      ~principal
+      ~request
+      ~command_audit
+      ~attempted
+      ~retained_source
+      ~checkpoint
+  =
+  let open Result.Let_syntax in
+  let%bind candidate =
+    Session_seed_layout.prepare
+      recipe
+      ~env:t.env
+      ~store:t.store
+      ~principal
+      ~request
+      ~command_audit
+      ~timestamp:(now t)
+      ~limits:t.journal_document_limits
+      ~max_work_steps:(Document_schema.Limits.max_nodes t.document_limits)
+      ~checkpoint
+  in
+  checkpoint ();
+  let%bind () =
+    match retained_source with
+    | None -> Ok ()
+    | Some (handle, current) ->
+      if Agent_store.Session_store.Lifecycle.Current.is_current current handle
+      then Ok ()
+      else Error (unavailable Conflict "seed retained source changed during admission")
+  in
+  let physical_roots =
+    Catalogs.workspace_definitions t.catalogs
+    |> List.filter_map ~f:(fun definition ->
+      checkpoint ();
+      match definition.Agent_session.Workspace_definition.source with
+      | Physical { configured_root } -> Some configured_root
+      | Temporary _ -> None)
+  in
+  attempted := true;
+  let%bind handle, state =
+    Session_seed_layout.install candidate ~sw:t.sw ~physical_roots ~checkpoint
+    |> Result.map_error ~f:protocol_of_store
+  in
+  match
+    finish_unloaded_creation
+      ~retain_initial_proof:true
+      t
+      handle
+      state
+      ~command_audit:(Some command_audit)
+  with
+  | Ok _ as success -> success
+  | Error _ as failure ->
+    close_actor_lock_after_failure t handle;
+    failure
+  | exception exn ->
+    let backtrace = Backtrace.Exn.most_recent () in
+    close_actor_lock_after_failure t handle;
+    Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let seed_session t ~principal ~request ~command_audit ~checkpoint =
+  let module P = Agent_protocol in
+  let module S = Agent_session in
+  let module R = P.Session_seed.Request in
+  let attempted = ref false in
+  let admit () =
+    let open Result.Let_syntax in
+    if not (P.Principal.has_scope principal Create_sessions)
+    then Error (unavailable Permission_denied "seed creation scope is required")
+    else
+      with_seed_work
+        ~max_work_steps:(Document_schema.Limits.max_nodes t.document_limits)
+        ~checkpoint
+        (fun checkpoint ->
+           let%bind audit =
+             Agent_store.Idempotency_store.Command_audit.decode command_audit
+             |> Result.map_error ~f:protocol_of_store
+           in
+           let%bind digest =
+             P.Json_codec.canonical_string (R.to_json request)
+             |> Result.map ~f:(fun encoded ->
+               Digestif.SHA256.(digest_string encoded |> to_hex))
+           in
+           let%bind () =
+             if
+               audit.protected_record
+               && Option.is_none audit.key.session_id
+               && String.equal audit.key.method_name "session.seed"
+               && P.Id.Principal.equal audit.key.principal_id principal.id
+               && P.Idempotency_key.equal
+                    audit.key.idempotency_key
+                    (R.idempotency_key request)
+               && String.equal audit.request_digest digest
+             then Ok ()
+             else Error (unavailable Invalid_request "seed original audit differs")
+           in
+           let%bind () =
+             match
+               Agent_store.Idempotency_store.lookup
+                 t.idempotency_store
+                 ~key:audit.key
+                 ~request_digest:audit.request_digest
+             with
+             | Replay
+                 { retention = Protected
+                 ; outcome = Pending
+                 ; accepted_transaction_sequence = None
+                 ; _
+                 } -> Ok ()
+             | Missing | Conflict _ | Replay _ ->
+               Error
+                 (unavailable
+                    Invalid_state
+                    "seed creation requires its actual original protected Pending receipt")
+           in
+           checkpoint ();
+           with_catalog_admission t ~f:(fun () ->
+             let create ?(retained_source = None) recipe =
+               seed_from_recipe
+                 t
+                 recipe
+                 ~principal
+                 ~request
+                 ~command_audit
+                 ~attempted
+                 ~retained_source
+                 ~checkpoint
+             in
+             let select definition =
+               let%bind workspace =
+                 resolve_workspace_definition t definition (R.spec request).workspace
+               in
+               let%map profile =
+                 permission_profile t definition.S.Prompt_definition.permission_profile
+               in
+               workspace, profile
+             in
+             match R.code request with
+             | Catalog { definition_id; expected_revision } ->
+               let%bind definition, revision = resolve_prompt t (Catalog definition_id) in
+               let%bind () =
+                 if
+                   P.Id.Prompt_revision.equal
+                     expected_revision
+                     (S.Prompt_revision.id revision)
+                 then Ok ()
+                 else Error (unavailable Conflict "seed catalog revision changed")
+               in
+               let%bind workspace, profile = select definition in
+               let%bind target =
+                 t.inference_policy.capture_inference_target
+                   ~prompt_revision_id:(S.Prompt_revision.id revision)
+                   ~config:
+                     (Chat_response.Config.of_elements
+                        (S.Prompt_revision.elements revision))
+                 |> Result.map_error ~f:(fun error ->
+                   unavailable
+                     Invalid_state
+                     (Sexp.to_string_hum
+                        (Inference_runtime.Preparation_error.sexp_of_t error)))
+               in
+               let%bind inference_target =
+                 Inference.Selection.captured target ~limits:t.document_limits
+                 |> Result.map_error ~f:(fun error ->
+                   unavailable
+                     Invalid_request
+                     (Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error)))
+               in
+               let%bind recipe =
+                 Session_seed_admission.catalog
+                   request
+                   ~definition
+                   ~revision
+                   ~workspace
+                   ~profile
+                   ~inference_target
+                   ~checkpoint
+               in
+               create recipe
+             | Retained expected ->
+               let reference = P.Session_lifecycle.Expected.reference expected in
+               let%bind () =
+                 if
+                   P.Id.Server.equal
+                     (P.Session_ref.server_id reference)
+                     (Agent_store.Session_store.server_id t.store)
+                 then Ok ()
+                 else
+                   Error
+                     (unavailable Invalid_request "seed source belongs to another host")
+               in
+               let retained =
+                 Retained_session.create
+                   ~store:t.store
+                   ~registry:t.registry
+                   ~read_owned:(read_owned_session t)
+               in
+               Retained_session.with_state
+                 retained
+                 ~session_id:(P.Session_ref.session_id reference)
+                 ~authorize:(fun summary ->
+                   if
+                     P.Principal.has_scope principal View_session_transcript
+                     && Authorization.session_visible_to principal summary
+                   then Ok ()
+                   else Error (unavailable Permission_denied "seed source is not visible"))
+                 ~f:(fun handle state ->
+                   let%bind lifecycle =
+                     Agent_store.Session_store.read_lifecycle t.store handle
+                     |> Result.map_error ~f:protocol_of_store
+                   in
+                   let%bind () =
+                     if
+                       state.identity.generation
+                       = P.Session_lifecycle.Expected.generation expected
+                       && Int64.equal
+                            state.counters.revision
+                            (P.Session_lifecycle.Expected.session_revision expected)
+                       && P.Session_lifecycle.Revision.equal
+                            (Agent_store.Session_archive_record.revision
+                               (Agent_store.Session_store.Lifecycle.Observation.value
+                                  lifecycle))
+                            (P.Session_lifecycle.Expected.lifecycle_revision expected)
+                     then Ok ()
+                     else Error (unavailable Conflict "seed retained anchor changed")
+                   in
+                   let%bind definition_id =
+                     Result.of_option
+                       state.spec.prompt_definition_id
+                       ~error:
+                         (unavailable
+                            Invalid_request
+                            "retained seed has no catalog definition")
+                   in
+                   let%bind definition = seed_definition t definition_id in
+                   let%bind workspace, current_profile = select definition in
+                   let%bind current =
+                     Agent_store.Session_store.current_lifecycle
+                       t.store
+                       handle
+                       ~current_entry:(index_entry state)
+                     |> Result.map_error ~f:protocol_of_store
+                   in
+                   let%bind recipe =
+                     Session_seed_admission.retained
+                       request
+                       ~state
+                       ~definition
+                       ~workspace
+                       ~current_profile
+                       ~checkpoint
+                   in
+                   create ~retained_source:(Some (handle, current)) recipe)))
+  in
+  match admit () with
+  | Ok entry -> Seed_outcome.Created entry
+  | Error error ->
+    if !attempted then Seed_outcome.Uncertain error else Seed_outcome.Rejected error
+;;
+
+let reconcile_seed_creations t ~limits ~checkpoint =
+  Session_seed_recovery.reconcile (seed_recovery t) ~limits ~checkpoint
 ;;

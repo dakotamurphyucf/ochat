@@ -68,6 +68,12 @@ let validate_payload_length ~max_payload_length length =
   else Ok ()
 ;;
 
+let framed_length payload_length =
+  if payload_length > Int.max_value - header_length - checksum_length
+  then Error (Payload_too_large (Int64.of_int payload_length))
+  else Ok (header_length + payload_length + checksum_length)
+;;
+
 module Encoded = struct
   type t =
     { bytes : string
@@ -81,8 +87,8 @@ module Encoded = struct
     let open Result.Let_syntax in
     let%bind () = validate_flags flags in
     let payload_length = String.length payload in
-    let%map () = validate_payload_length ~max_payload_length payload_length in
-    let framed_length = header_length + payload_length + checksum_length in
+    let%bind () = validate_payload_length ~max_payload_length payload_length in
+    let%map framed_length = framed_length payload_length in
     let bytes = Bytes.create framed_length in
     Stdlib.Bytes.blit_string magic 0 bytes 0 (String.length magic);
     set_uint16_be bytes 8 current_version;
@@ -121,6 +127,22 @@ let validate_header contents offset =
     if version <> current_version then Error (Unsupported_version version) else Ok ())
 ;;
 
+let decode_header ~max_payload_length contents offset =
+  let open Result.Let_syntax in
+  let%bind () = validate_header contents offset in
+  let%bind payload_length = decode_length ~max_payload_length contents offset in
+  let%map frame_length = framed_length payload_length in
+  payload_length, frame_length
+;;
+
+let encoded_length_of_header ~max_payload_length contents =
+  if String.length contents < header_length
+  then Ok None
+  else
+    decode_header ~max_payload_length contents 0
+    |> Result.map ~f:(fun (_, frame_length) -> Some frame_length)
+;;
+
 let decode_complete ~contents ~offset ~payload_length =
   let payload_offset = offset + header_length in
   let checksum_offset = payload_offset + payload_length in
@@ -149,9 +171,9 @@ let decode ~max_payload_length ~contents ~offset =
   then Ok (Incomplete_tail { offset })
   else
     let open Result.Let_syntax in
-    let%bind () = validate_header contents offset in
-    let%bind payload_length = decode_length ~max_payload_length contents offset in
-    let frame_length = header_length + payload_length + checksum_length in
+    let%bind payload_length, frame_length =
+      decode_header ~max_payload_length contents offset
+    in
     if contents_length - offset < frame_length
     then Ok (Incomplete_tail { offset })
     else decode_complete ~contents ~offset ~payload_length

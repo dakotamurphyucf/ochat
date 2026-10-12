@@ -64,6 +64,12 @@
   schedule_scheduler
   maintenance
   session_factory_catalogs
+  session_projection
+  session_seed_layout
+  session_seed_recovery
+  session_seed_admission
+  session_seed_receipt
+  session_seed_command
   session_factory
   local_storage
   local_selection
@@ -78,7 +84,8 @@
   dependency_update_receipt
   command_handler
   dispatcher)
- (private_modules session_factory_catalogs project_source_header dependency_update_receipt)
+ (private_modules session_projection session_seed_layout session_seed_recovery session_factory_catalogs session_seed_admission session_seed_receipt session_seed_command
+  project_source_header dependency_update_receipt)
  (libraries ochat.operator_authorization
  core
   base64

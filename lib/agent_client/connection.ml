@@ -9,7 +9,8 @@ type pending_command =
 
 let has_command_receipt = function
   | P.Command.Prompt_dependencies_update _ -> true
-  | P.Command.Session_create _
+  | P.Command.Session_seed _
+  | Session_create _
   | Session_attach _
   | Session_detach _
   | Session_renew_owner _

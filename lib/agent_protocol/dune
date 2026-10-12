@@ -68,6 +68,7 @@
 
   session_configuration
   session
+  session_seed
   session_catalog
   session_work
   run_limits
