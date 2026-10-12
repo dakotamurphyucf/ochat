@@ -212,8 +212,9 @@ from Pagefind; example descriptions and host/capability metadata remain searchab
 
 ## Search maintenance
 
-Homepage and documentation share one accessible search dialog. Search runs against
-114 approved pages: 110 published pages and four labeled compatibility pages.
+Homepage and documentation share one accessible search dialog. Search covers
+approved published pages and labeled compatibility pages. The current build's
+`.generated/search-index-report.json` records the exact indexed inventory.
 Bridges, unpublished content, repeated navigation, source-reader bodies, and
 verification controls are excluded. Compatibility APIs remain discoverable for
 explicit queries such as `Prompt_session`; current entry points receive priority.

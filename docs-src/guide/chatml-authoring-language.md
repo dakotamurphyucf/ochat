@@ -111,9 +111,13 @@ in checking and at runtime, while public closures retain private implementation
 bindings. See the [checked module examples](chatml-inference.md#modules-and-records-have-different-representations).
 
 There are no functors, module type declarations or abstract signature types.
-Inline modules work within the submitted program. Configured multi-file module
-loading and companion `.chatmli` linkage are not yet implemented; interface syntax
-parsing alone does not load or link a file.
+Configured multi-file modules and optional `.chatmli` companions are supported
+through explicit host project preparation. A script's `project` and optional
+`environment` select its captured module graph; companion interfaces check and
+restrict public exports before initialization. The single-file text compiler
+does not discover other files. See the
+[configured tool tutorial](../tutorials/chatml-tool.md) and
+[configured module initialization](chatml-evaluation.md#configured-module-initialization).
 
 <!-- ochat-authoring-example: {"id":"language.closures-loops-recursion","surface":"one_off_v1","result":"6:10:true"} -->
 ```ocaml

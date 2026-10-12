@@ -243,9 +243,12 @@ Optional `;;` separates statements at the top level and inside modules. It is
 useful for a boundary such as `type t = int ;; Graph.run()`; ordinary declaration
 sequences still need no separators, and `;` continues to sequence expressions.
 The [module type and separator example](chatml-inference.md#modules-and-records-have-different-representations)
-demonstrates the distinction. Configured multi-file module loading and companion
-`.chatmli` linkage are still pending; the interface parser does not itself load
-or link another file.
+demonstrates the distinction. For multi-file programs, the host prepares the
+declared project and selected environment, captures its module sources and checks
+optional `.chatmli` companions. The compiler receives that immutable graph;
+parsing an interface or submitting a single-file string does not discover or
+load other files. See the [configured tool tutorial](../tutorials/chatml-tool.md)
+and [configured module initialization](chatml-evaluation.md#configured-module-initialization).
 
 **Rejected during typechecking:** `M` exports `y`, not the outer `x`.
 
