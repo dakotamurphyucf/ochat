@@ -2128,7 +2128,15 @@ let set_runtime_worker t worker inference =
 let change_moderator t moderator =
   if moderator_is_borrowed t
   then Error (error Conflict "moderator invocation owns the moderator checkpoint")
-  else transition t ~delta:(Session_delta.Moderator_changed moderator) ~payloads:[]
+  else (
+    let state = { t.state with moderator } in
+    transition
+      t
+      ~delta:(Session_delta.Moderator_changed moderator)
+      ~payloads:
+        [ Agent_protocol.Event.Durable.Payload.Session_updated
+            (Session_state.summary state)
+        ])
 ;;
 
 let change_workspace t workspace =

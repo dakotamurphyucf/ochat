@@ -723,6 +723,9 @@ val set_runtime_worker
   -> inference:Inference_client.Execution.t option
   -> (unit, Agent_protocol.Error.t) result
 
+(** Durably installs the supplied checkpoint, including an unchanged value.
+    Publishes a public Session_updated position after commit so subscribers can
+    reach the returned revision. Private moderator state is not disclosed. *)
 val change_moderator
   :  t
   -> Jsonaf.t option
