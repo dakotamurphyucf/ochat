@@ -56,6 +56,22 @@ val create
   -> create_options
   -> (t, Agent_protocol.Error.t) result
 
+(** Create and attach through the existing reconnect owner using an explicit
+    validated specification. Unlike the named daemon convenience [create], this
+    preserves the caller's execution host, persistence and start intent. Exactly
+    one subscribed handle owns notifications; failed/uncertain admission is not
+    retried with a new command identity. The caller owns the enclosing switch. *)
+val create_with_spec
+  :  sw:Eio.Switch.t
+  -> clock:_ Eio.Time.clock
+  -> connection:Agent_client.Connection.t
+  -> ?reconnect:
+       (unit -> (Agent_client.Connection.t, Agent_protocol.Error.t) result) option
+  -> spec:Agent_protocol.Session.Spec.t
+  -> mode:Agent_protocol.Session.attachment_mode
+  -> unit
+  -> (t, Agent_protocol.Error.t) result
+
 val projection : t -> Agent_projection.t
 val status : t -> Connection_status.t
 val next_update : t -> update

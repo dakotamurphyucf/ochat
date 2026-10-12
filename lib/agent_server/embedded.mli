@@ -19,6 +19,15 @@ type t
 
 val default_permission_profile : Config.Permission_profile.t
 
+(** Pure specification for a new session in the catalog installed by
+    [open_local_host] with these options. Uses the existing embedded prompt and
+    workspace identities, process-bound liveness, selected persistence and
+    start intent. This constructs no host, session, attachment or authority;
+    normal protocol admission still validates it against the actual host. *)
+val session_spec
+  :  options
+  -> (Agent_protocol.Session.Spec.t, Agent_protocol.Error.t) Result.t
+
 (** Explicit process-local authorization permits the compiled shell manifests to
     load. Ordinary tool approval, shell command policy, capability checks and
     sandbox enforcement remain unchanged. With [false], startup requires a grant.

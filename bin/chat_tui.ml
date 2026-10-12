@@ -2197,18 +2197,7 @@ module Embedded_interactive = struct
         ~env
         ~default_model:"gpt-4.5-preview"
     in
-    let run_attached embedded =
-      let open Result.Let_syntax in
-      let%bind connection = Agent_server.Embedded.connect_owned embedded in
-      let%bind client =
-        Chat_tui.Agent_session_client.attach
-          ~sw
-          ~clock:(Eio.Stdenv.clock env)
-          ~connection
-          ~session_id:(Agent_server.Embedded.session_id embedded)
-          ~mode:Agent_protocol.Session.Read_write
-          ()
-      in
+    let run_attached client =
       let typeahead_inference =
         private_typeahead_execution typeahead_config ~sw ~env ~host:(Some inference_host)
       in
@@ -2237,49 +2226,58 @@ module Embedded_interactive = struct
     in
     let daemon_options = Inference_composition.daemon_options inference_host in
     let result =
-      let open Result.Let_syntax in
-      match session_id with
-      | None ->
-        let%bind embedded =
-          Agent_server.Embedded.start
-            ~daemon_options
-            ~sw
-            ~env
-            ~authoring_package_files
-            ?authoring_budget
-            options
-        in
-        Agent_server.Embedded.with_session embedded ~f:run_attached
-      | Some id ->
-        let%bind id = Agent_protocol.Id.Session.of_string id in
-        Agent_server.Embedded.with_local_host
-          ~daemon_options
-          ~sw
-          ~env
-          ~authoring_package_files
-          ?authoring_budget
-          options
-          ~f:(fun host ->
-            let%bind snapshot =
-              Agent_client.Admin.get_session
-                (Agent_server.Embedded.host_connection host)
-                id
+      Agent_server.Embedded.with_local_host
+        ~daemon_options
+        ~sw
+        ~env
+        ~authoring_package_files
+        ?authoring_budget
+        options
+        ~f:(fun host ->
+          Eio.Switch.run (fun client_sw ->
+            let open Result.Let_syntax in
+            let%bind connection = Agent_server.Embedded.connect_host host in
+            Eio.Switch.on_release client_sw (fun () ->
+              Agent_client.Connection.close connection);
+            let%bind client =
+              match session_id with
+              | None ->
+                let%bind spec = Agent_server.Embedded.session_spec options in
+                Chat_tui.Agent_session_client.create_with_spec
+                  ~sw:client_sw
+                  ~clock:(Eio.Stdenv.clock env)
+                  ~connection
+                  ~spec
+                  ~mode:options.attachment_mode
+                  ()
+              | Some id ->
+                let%bind id = Agent_protocol.Id.Session.of_string id in
+                let%bind snapshot =
+                  Agent_client.Admin.get_session
+                    (Agent_server.Embedded.host_connection host)
+                    id
+                in
+                let%bind observation =
+                  Result.of_option
+                    (Agent_protocol.Public.Snapshot.fields snapshot).lifecycle
+                    ~error:
+                      (Agent_protocol.Error.invalid_request
+                         "session lacks lifecycle authority")
+                in
+                let%bind () =
+                  Agent_server.Embedded.select_session
+                    host
+                    (Agent_protocol.Session_lifecycle.Observation.expected observation)
+                in
+                Chat_tui.Agent_session_client.attach
+                  ~sw:client_sw
+                  ~clock:(Eio.Stdenv.clock env)
+                  ~connection
+                  ~session_id:id
+                  ~mode:options.attachment_mode
+                  ()
             in
-            let%bind observation =
-              Result.of_option
-                (Agent_protocol.Public.Snapshot.fields snapshot).lifecycle
-                ~error:
-                  (Agent_protocol.Error.invalid_request
-                     "session lacks lifecycle authority")
-            in
-            let%bind embedded =
-              Agent_server.Embedded.attach_retained
-                host
-                ~mode:options.attachment_mode
-                ~expected:
-                  (Agent_protocol.Session_lifecycle.Observation.expected observation)
-            in
-            run_attached embedded)
+            run_attached client))
     in
     Result.map_error result ~f:protocol_error
   ;;

@@ -275,7 +275,7 @@ let initialize connection =
   | Error _ as failure -> failure
 ;;
 
-let create_spec options =
+let session_spec options =
   Agent_protocol.Session.Spec.create
     ~execution_host:Embedded
     ~prompt:(Catalog (Catalog_identity.prompt_definition "embedded.prompt"))
@@ -293,7 +293,7 @@ let create_spec options =
 
 let create_session connection options =
   let open Result.Let_syntax in
-  let%bind spec = create_spec options in
+  let%bind spec = session_spec options in
   let%bind idempotency_key =
     Agent_protocol.Idempotency_key.of_string
       (Agent_protocol.Id.Transaction.create () |> Agent_protocol.Id.Transaction.to_string)
