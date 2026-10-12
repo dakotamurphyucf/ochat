@@ -1,0 +1,8 @@
+(copy_files ../chatml_source_owner/support.ml)
+
+(library
+ (name child_source_cancellation_tests)
+ (modules support cancellation_source_tests)
+ (libraries builtin_instructions core eio eio.unix eio_main mirage-crypto-rng.unix inference_fixture agent_server_test_support ochat.agent_session ochat.agent_server ochat.agent_store)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
