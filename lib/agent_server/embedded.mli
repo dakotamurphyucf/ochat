@@ -38,6 +38,9 @@ val start
   :  sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
   -> ?daemon_options:Daemon.options
+  -> ?root_invocation:
+       Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+  -> ?project_sources:Project_source_configuration.t
   -> ?authoring_package_files:string list
        (** Absolute paths captured through the shared bounded loader before store
          creation. Packages configure the same host as daemon configuration;
@@ -65,12 +68,23 @@ val open_host
   -> unit
   -> (host, Agent_protocol.Error.t) result
 
-(** Additions to Embedded: reuse the exact local composition and actual host
-    cleanup owner without creating a replacement session. *)
+(** Reuse the exact local composition and actual host cleanup owner without
+    creating a replacement session. [root_invocation] overrides the trusted daemon
+    option for new captures only; omission preserves that option (Ui by default).
+    [project_sources] supplies existing operator-selected source declarations to
+    normal native admission. Omission keeps local-only authority. Absolute roots
+    and Git grants are validated by the existing source host; labels, artifacts
+    and the current directory supply no authority. Retained Spec/code/target win
+    on attachment regardless of the current host selection.
+
+    [start] and [with_local_host] forward these same choices. *)
 val open_local_host
   :  sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
   -> ?daemon_options:Daemon.options
+  -> ?root_invocation:
+       Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+  -> ?project_sources:Project_source_configuration.t
   -> ?authoring_package_files:string list
   -> ?authoring_budget:Chat_response.Authoring_validation.context_budget
   -> options
@@ -95,6 +109,9 @@ val with_local_host
   :  sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
   -> ?daemon_options:Daemon.options
+  -> ?root_invocation:
+       Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+  -> ?project_sources:Project_source_configuration.t
   -> ?authoring_package_files:string list
   -> ?authoring_budget:Chat_response.Authoring_validation.context_budget
   -> options

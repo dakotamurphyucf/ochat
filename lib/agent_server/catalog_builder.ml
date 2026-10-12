@@ -66,9 +66,9 @@ let workspace (value : Config.Workspace.t) =
     ~prompt_limits:(List.map value.prompt_limits ~f:prompt_limit)
 ;;
 
-let prompt (value : Config.Prompt.t) =
+let prompt ~root_invocation (value : Config.Prompt.t) =
   Agent_session.Prompt_definition.create
-    ~root_invocation:Ui
+    ~root_invocation
     ~id:(prompt_id value.id)
     ~config_name:value.id
     ~root_file:value.path
@@ -155,13 +155,18 @@ let permission_profile
     ~reviewer
 ;;
 
-let build ?reviewer_resolver ?policy_evaluator_resolver config =
+let build
+      ?(root_invocation = Agent_session.Prompt_script_preparation.Root_role.Ui)
+      ?reviewer_resolver
+      ?policy_evaluator_resolver
+      config
+  =
   let open Result.Let_syntax in
   let%bind workspace_definitions =
     Result.all (List.map config.Config.workspaces ~f:workspace)
   in
   let%bind workspaces = Agent_session.Workspace_catalog.create workspace_definitions in
-  let%bind prompts = Result.all (List.map config.prompts ~f:prompt) in
+  let%bind prompts = Result.all (List.map config.prompts ~f:(prompt ~root_invocation)) in
   let%bind permission_profiles =
     Result.all
       (List.map config.permission_profiles ~f:(fun profile ->

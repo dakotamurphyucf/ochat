@@ -19,10 +19,14 @@ type policy_evaluator_resolver =
   string -> (string * Agent_session.Permission_policy.evaluator) option
 
 (** [build ?reviewer_resolver ?policy_evaluator_resolver config] compiles
-    validated configuration into runtime catalogs. Missing named reviewers and
-    policy evaluators compile to unavailable fail-closed implementations. *)
+    validated configuration into runtime catalogs. The explicit trusted root
+    invocation defaults to Ui; no authored configuration syntax selects it.
+    Missing named reviewers and policy evaluators compile to unavailable
+    fail-closed implementations. *)
 val build
-  :  ?reviewer_resolver:reviewer_resolver
+  :  ?root_invocation:
+       Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+  -> ?reviewer_resolver:reviewer_resolver
   -> ?policy_evaluator_resolver:policy_evaluator_resolver
   -> Config.t
   -> (t, Agent_store.Store_error.t) result

@@ -86,13 +86,13 @@ let data_root env options =
   | None -> Result.map (create_temporary_root env) ~f:(fun path -> path, Some path)
 ;;
 
-let server_config data_root =
+let server_config ~project_sources data_root =
   Config.Server.
     { data_dir = data_root
     ; session_helpers = []
     ; authoring_packages = []
     ; authoring_budget = None
-    ; project_sources = None
+    ; project_sources
     ; unix_socket = Filename.concat data_root "agent.sock"
     ; http =
         { enabled = false
@@ -155,11 +155,11 @@ let prompt_config options =
     }
 ;;
 
-let config options data_root =
+let config ~project_sources options data_root =
   Config.
     { version = current_version
     ; source_file = Filename.concat data_root "embedded-server.sexp"
-    ; server = server_config data_root
+    ; server = server_config ~project_sources data_root
     ; workspaces = [ workspace_config options ]
     ; prompts = [ prompt_config options ]
     ; permission_profiles = [ options.permission_profile ]
@@ -466,6 +466,8 @@ let open_local_host
       ~sw
       ~env
       ?(daemon_options = Daemon.default_options)
+      ?root_invocation
+      ?project_sources
       ?(authoring_package_files = [])
       ?authoring_budget
       options
@@ -477,7 +479,7 @@ let open_local_host
     |> Result.map_error ~f:Agent_protocol.Error.invalid_request
   in
   let%bind data_root, temporary_root = data_root env options in
-  let config = config options data_root in
+  let config = config ~project_sources options data_root in
   let config =
     { config with server = { config.server with authoring_packages; authoring_budget } }
   in
@@ -487,6 +489,8 @@ let open_local_host
     ~daemon_options:
       { daemon_options with
         startup_mode = On_demand
+      ; root_invocation =
+          Option.value root_invocation ~default:daemon_options.root_invocation
       ; extension_host =
           (match options.storage with
            | Transient -> Embedded_transient
@@ -503,6 +507,8 @@ let with_local_host
       ~sw
       ~env
       ?daemon_options
+      ?root_invocation
+      ?project_sources
       ?authoring_package_files
       ?authoring_budget
       options
@@ -514,6 +520,8 @@ let with_local_host
       ~sw
       ~env
       ?daemon_options
+      ?root_invocation
+      ?project_sources
       ?authoring_package_files
       ?authoring_budget
       options
@@ -523,13 +531,24 @@ let with_local_host
   Ok result
 ;;
 
-let start ~sw ~env ?daemon_options ?authoring_package_files ?authoring_budget options =
+let start
+      ~sw
+      ~env
+      ?daemon_options
+      ?root_invocation
+      ?project_sources
+      ?authoring_package_files
+      ?authoring_budget
+      options
+  =
   let open Result.Let_syntax in
   let%bind host =
     open_local_host
       ~sw
       ~env
       ?daemon_options
+      ?root_invocation
+      ?project_sources
       ?authoring_package_files
       ?authoring_budget
       options

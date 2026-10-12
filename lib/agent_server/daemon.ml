@@ -16,6 +16,8 @@ type startup_mode =
 
 type options =
   { startup_mode : startup_mode
+  ; root_invocation :
+      Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
   ; implementation_name : string
   ; implementation_version : string
   ; features : string list
@@ -95,6 +97,7 @@ type health_services =
 
 let default_options =
   { startup_mode = Execute
+  ; root_invocation = Ui
   ; implementation_name = "ochat-agent-server"
   ; implementation_version = "dev"
   ; extension_host = Daemon
@@ -495,6 +498,7 @@ let build_catalog
       ~sw
       ~env
       ~content_limits
+      ~root_invocation
       ~origin
       store
       config
@@ -503,7 +507,11 @@ let build_catalog
   =
   let open Result.Let_syntax in
   let%bind built =
-    Catalog_builder.build ?reviewer_resolver ?policy_evaluator_resolver config
+    Catalog_builder.build
+      ~root_invocation
+      ?reviewer_resolver
+      ?policy_evaluator_resolver
+      config
   in
   let%bind sources =
     Project_source_host.open_owned
@@ -859,6 +867,7 @@ let config_watcher
       ~audit_store
       ~reviewer_resolver
       ~policy_evaluator_resolver
+      ~root_invocation
   =
   let prompt_candidate = ref None in
   let factory_candidate = ref None in
@@ -880,7 +889,11 @@ let config_watcher
     else
       let open Result.Let_syntax in
       let%bind built =
-        Catalog_builder.build ?reviewer_resolver ?policy_evaluator_resolver candidate
+        Catalog_builder.build
+          ~root_invocation
+          ?reviewer_resolver
+          ?policy_evaluator_resolver
+          candidate
         |> Result.map_error ~f:(failure candidate)
       in
       let mode =
@@ -1322,6 +1335,7 @@ let compose
       ~audit_store
       ~reviewer_resolver:options.reviewer_resolver
       ~policy_evaluator_resolver:options.policy_evaluator_resolver
+      ~root_invocation:options.root_invocation
   in
   let health_services =
     { health_env = env
@@ -1595,6 +1609,7 @@ let start
         ~sw
         ~env
         ~content_limits:options.content_limits
+        ~root_invocation:options.root_invocation
         store
         config
         options.reviewer_resolver

@@ -20,6 +20,11 @@ type startup_mode =
 
 type options =
   { startup_mode : startup_mode
+  ; root_invocation :
+      Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+    (** Trusted root invocation for newly captured catalog definitions, including
+        reload. Defaults to Ui. Retained session Spec remains authoritative; this
+        does not reinterpret an existing revision or select a role by digest. *)
   ; implementation_name : string
   ; implementation_version : string
   ; features : string list
