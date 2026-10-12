@@ -16,7 +16,7 @@ let parent_source =
 <script id="watch" language="chatml" kind="tool">
 let run ctx input =
   let* job = Job.start_tool("reviewer", `Object([
-    { key = "input"; value = `String("Run the retained nested tool.") };
+    { key = "input"; value = `String("Run the retained nested tool.") },
     { key = "mode"; value = `String("persistent") }
   ])) in
   Task.pure(`Pending(`Job(job), `String("accepted")))
@@ -97,9 +97,18 @@ let require_source inputs selected original =
     "child execution used original captured A"
 ;;
 
+let completed_text text =
+  match Jsonaf.parse text with
+  | Error _ -> None
+  | Ok json ->
+    (match P.Invocation.outcome_of_json json with
+     | Ok (Complete (`String text)) -> Some text
+     | Ok (Complete _ | Pending _ | Fail _ | Cancelled _) | Error _ -> None)
+;;
+
 let tool_output_text = function
-  | Openai.Responses.Tool_output.Output.Text text -> Some text
-  | Content [ Input_text { text } ] -> Some text
+  | Openai.Responses.Tool_output.Output.Text text | Content [ Input_text { text } ] ->
+    completed_text text
   | Content _ -> None
 ;;
 
@@ -273,7 +282,8 @@ let require_child_history entries =
        | Result { output; _ } ->
          (match output with
           | Text text | Content [ Text { text; _ } ] ->
-            String.equal text "nested B result"
+            Option.exists (completed_text text) ~f:(fun text ->
+              String.equal text "nested B result")
           | Content _ -> false)
        | Message _ | Call _ | Reasoning _ | Unknown _ -> false))
     "persistent child lost the actual selected nested output"
@@ -352,7 +362,12 @@ let test env environment =
         | [ { result = Some result; _ } ] -> result
         | _ -> F.fail "expected one completed persistent child job"
       in
-      let child_id, receipt_id = result completed_result in
+      let child_id, receipt_id =
+        match P.Stored_completion.of_json completed_result |> F.protocol_ok with
+        | Inline (Succeeded value) -> result value
+        | Inline (Failed _ | Cancelled _ | Expired) | Artifact _ ->
+          F.fail "persistent child job did not retain its inline success"
+      in
       let child_summary = (F.get client child_id).session in
       let child_session, _ =
         B.attach client child_summary (sprintf "child:attach:%d" reopen)
