@@ -8,15 +8,10 @@ let path env name =
 ;;
 
 let same_definition ~env ~definition_file ~output_file =
-  String.equal definition_file output_file
-  ||
-  let definition = path env definition_file in
-  let output = path env output_file in
-  Eio.Path.is_file definition
-  && Eio.Path.is_file output
-  && String.equal
-       (Eio_posix.Low_level.realpath (Eio.Path.native_exn definition))
-       (Eio_posix.Low_level.realpath (Eio.Path.native_exn output))
+  Frontend_transcript.Destination.conflicts_with
+    ~env
+    ~source_file:definition_file
+    ~output_file
 ;;
 
 let confirm_overwrite ~env output_file =

@@ -118,7 +118,7 @@
 (library
  (name tui_transcript_export)
  (modules tui_transcript_export)
- (libraries core eio eio.unix eio_posix ochat.chat_tui ochat.agent_client
+ (libraries core eio eio.unix eio_posix frontend_transcript ochat.chat_tui ochat.agent_client
   ochat.agent_protocol ochat.agent_session ochat.document_schema ochat.history_chatmd)
  (preprocess (pps ppx_jane)))
 
