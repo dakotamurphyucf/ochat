@@ -597,6 +597,52 @@ end
 module Executor : sig
   type config
 
+  (** Exact opaque resource ownership, preserved by functional caller/code
+      overlays. Equal runtime names, paths or manifest digests do not establish
+      this identity. *)
+  val same_resource_owner : config -> config -> bool
+
+  module Code : sig
+    (** Trusted host code projection. Contains no native resource replacement;
+        this value itself neither verifies a grant nor confers authority. *)
+    type t
+
+    val create
+      :  manifest_sha256:string
+      -> policy:Policy.t
+      -> reviewer:Approval.reviewer option
+      -> reviewer_with_metadata:Approval.reviewer_with_metadata option
+      -> analyzers:Analyzer.t list
+      -> interceptors:Interceptor.t list
+      -> audit:Audit.t
+      -> check:(unit -> (unit, string) Result.t)
+      -> t
+
+    (** Add a borrowed admission check; existing code-owner checks remain. *)
+    val with_check : t -> check:(unit -> (unit, string) Result.t) -> t
+  end
+
+  (** Immutable current code projection; excludes caller/resource checks and
+      contains no native material. *)
+  val code : config -> Code.t
+
+  (** Exact manifest of the config selected for actual execution. *)
+  val manifest_sha256 : config -> string
+
+  (** Add a borrowed execution-admission check without changing native material.
+      This check remains attached to this config through later code replacement;
+      replacing [Code] cannot revive an expired invocation. Fresh executions
+      derive from the original owner template rather than escaped scoped configs. *)
+  val with_execution_check : config -> check:(unit -> (unit, string) Result.t) -> config
+
+  (** Replace only admitted specialist code/manifest, composing its liveness
+      check with the actual supplied config's check. Preserve environment/cwd,
+      native resolver/capabilities/backends/limits, administrative restrictions,
+      caller approval identity/store, request channel, secret controls and audit
+      sequence. [Code.audit] must wrap the actual retained raw sink; verified
+      registry assembly owns that invariant. *)
+  val with_code : config -> Code.t -> config
+
   type progress =
     { channel : [ `Stdout | `Stderr ]
     ; text : string

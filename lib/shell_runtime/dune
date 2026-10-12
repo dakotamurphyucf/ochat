@@ -3,6 +3,11 @@
  (public_name ochat.shell_runtime)
  (modules
   activation_gate
+  registry_code_budget
+  registry_footprint_comparison
+  registry_runtime_footprint
+  registry_resource_footprint
+  registry_code_validation
   host
   manifest_authorizer
   manifest_grant_store
@@ -41,7 +46,7 @@
   result
   moderator_process_adapter
   registry)
- (private_modules activation_gate)
+ (private_modules activation_gate registry_code_budget registry_footprint_comparison registry_runtime_footprint registry_resource_footprint registry_code_validation)
  (libraries
   core
   eio

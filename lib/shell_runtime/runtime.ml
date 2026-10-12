@@ -9,6 +9,28 @@ type executable =
   }
 [@@deriving sexp, compare, equal]
 
+type model_completion =
+  agent:string -> model:string option -> Model_reviewer.complete option
+
+type native_worker =
+  { id : string
+  ; kind : Hook_protocol.kind
+  ; worker : Hook_worker.t
+  }
+
+type model_service =
+  { agent : string
+  ; model : string option
+  ; complete : Model_reviewer.complete option
+  }
+
+type resources =
+  { audit_sink : Shell_access.Audit.t
+  ; approval_provider : Approval_broker.provider
+  ; native_workers : native_worker list
+  ; model_services : model_service list option
+  }
+
 type t =
   { spec : S.t
   ; executor_config : Shell_access.Executor.config
@@ -19,10 +41,8 @@ type t =
   ; cwd : string
   ; environment : string array
   ; host : Host.t
+  ; resources : resources
   }
-
-type model_completion =
-  agent:string -> model:string option -> Model_reviewer.complete option
 
 type file_identity =
   { path : string
@@ -74,8 +94,41 @@ let extension_result specification = function
     fail specification diagnostic.Chatmd_shell_spec.Diagnostic.code diagnostic.message
 ;;
 
-let find_extension specification extensions id expected =
-  match Map.find extensions id with
+let extension_instance_key specification id = function
+  | S.Invocation -> None
+  | Runtime -> Some ("runtime\000" ^ id)
+  | Session -> Some ("session\000" ^ runtime_id specification ^ "\000" ^ id)
+;;
+
+module Extension_owner = struct
+  type runtime = t
+
+  type t =
+    { prepare :
+        lifecycle:S.lifecycle
+        -> Chatml_extension.compiled
+        -> (Chatml_extension.instance, Chatmd_shell_spec.Diagnostic.t) result
+    ; register :
+        runtime_id:string -> lifecycle:S.lifecycle -> Chatml_extension.instance -> unit
+    ; worker :
+        S.t
+        -> Host.t
+        -> runtime String.Map.t
+        -> Shell_access.Secret_filter.t
+        -> string
+        -> Hook_protocol.kind
+        -> S.executable_hook
+        -> Hook_worker.t
+    ; poll : unit -> unit
+    ; lookup :
+        Chatml_extension.compiled String.Map.t
+        -> string
+        -> Chatml_extension.compiled option
+    }
+end
+
+let find_extension specification owner extensions id expected =
+  match owner.Extension_owner.lookup extensions id with
   | None -> fail specification "shell.unknown_script" ("unknown ChatML script: " ^ id)
   | Some compiled
     when Chatmd_shell_spec.Chatmd_script_spec.equal_kind
@@ -84,23 +137,6 @@ let find_extension specification extensions id expected =
   | Some _ ->
     fail specification "shell.script_kind_mismatch" ("wrong ChatML script kind: " ^ id)
 ;;
-
-let extension_instance_key specification id = function
-  | S.Invocation -> None
-  | Runtime -> Some ("runtime\000" ^ id)
-  | Session -> Some ("session\000" ^ runtime_id specification ^ "\000" ^ id)
-;;
-
-module Extension_owner = struct
-  type t =
-    { prepare :
-        lifecycle:S.lifecycle
-        -> Chatml_extension.compiled
-        -> (Chatml_extension.instance, Chatmd_shell_spec.Diagnostic.t) result
-    ; register :
-        runtime_id:string -> lifecycle:S.lifecycle -> Chatml_extension.instance -> unit
-    }
-end
 
 let extension_instance
       specification
@@ -112,9 +148,10 @@ let extension_instance
       kind
       lifecycle
   =
+  register_extension_instance.Extension_owner.poll ();
   let create () =
     let instance =
-      find_extension specification extensions id kind
+      find_extension specification register_extension_instance extensions id kind
       |> register_extension_instance.Extension_owner.prepare ~lifecycle
       |> extension_result specification
     in
@@ -124,6 +161,20 @@ let extension_instance
       instance;
     instance
   in
+  (* Admit the bounded library copying/hashing passes before constructing and
+     looking up this cache key. The enclosing construction ledger owns [poll]. *)
+  let admit value =
+    ignore
+      (Registry_code_budget.equal_string_with_checkpoint
+         ~checkpoint:register_extension_instance.Extension_owner.poll
+         value
+         value
+       : bool)
+  in
+  admit id;
+  admit (runtime_id specification);
+  admit id;
+  admit (runtime_id specification);
   match extension_instance_key specification id lifecycle with
   | None -> create ()
   | Some key -> Hashtbl.find_or_add runtime_instances key ~default:create
@@ -153,10 +204,12 @@ let chatml_matcher
       ~action
       (matcher : S.chatml_matcher)
   =
+  owner.Extension_owner.poll ();
   let instance =
     let compiled =
       find_extension
         specification
+        owner
         extensions
         matcher.S.script
         Chatmd_shell_spec.Chatmd_script_spec.Shell_matcher
@@ -238,7 +291,7 @@ let resolve_hook_executable specification host worker hook =
      | Some _ | None -> executable)
 ;;
 
-let hook_worker specification host worker_runtimes secret_filter id kind hook =
+let create_hook_worker specification host worker_runtimes secret_filter id kind hook =
   let worker = worker_runtime specification worker_runtimes hook.S.runtime in
   let executable = resolve_hook_executable specification host worker hook in
   Hook_worker.create
@@ -252,6 +305,11 @@ let hook_worker specification host worker_runtimes secret_filter id kind hook =
     ~max_output_bytes:(hook_limit 262_144 hook.max_output)
     ~redact:(Shell_access.Secret_filter.redact secret_filter)
     ()
+;;
+
+let hook_worker specification host worker_runtimes secret_filter owner id kind hook =
+  owner.Extension_owner.poll ();
+  owner.worker specification host worker_runtimes secret_filter id kind hook
 ;;
 
 let chatml_analyzer
@@ -299,6 +357,7 @@ let executable_analyzer
       host
       worker_runtimes
       secret_filter
+      register
       (value : S.effect_analyzer)
       hook
   =
@@ -308,6 +367,7 @@ let executable_analyzer
       host
       worker_runtimes
       secret_filter
+      register
       value.S.id
       Hook_protocol.Effect_analyzer
       hook
@@ -330,6 +390,7 @@ let analyzer
       secret_filter
       (value : S.effect_analyzer)
   =
+  register.Extension_owner.poll ();
   match value.S.extension with
   | Chatml_extension { script; lifecycle } ->
     chatml_analyzer
@@ -342,7 +403,14 @@ let analyzer
       script
       lifecycle
   | Executable_extension hook ->
-    executable_analyzer specification host worker_runtimes secret_filter value hook
+    executable_analyzer
+      specification
+      host
+      worker_runtimes
+      secret_filter
+      register
+      value
+      hook
 ;;
 
 let analyzers
@@ -542,6 +610,7 @@ let reviewer_entry
         host
         worker_runtimes
         secret_filter
+        register
         id
         Hook_protocol.Reviewer
         hook
@@ -572,20 +641,20 @@ let reviewer
     |> Option.map ~f:(fun reviewer request -> review (reviewer request))
   | Some reviewers ->
     let entries =
-      List.map
-        reviewers.values
-        ~f:
-          (reviewer_entry
-             specification
-             host
-             extensions
-             runtime_instances
-             register
-             worker_runtimes
-             secret_filter
-             configured
-             manifest
-             model_completion)
+      List.map reviewers.values ~f:(fun entry ->
+        register.Extension_owner.poll ();
+        reviewer_entry
+          specification
+          host
+          extensions
+          runtime_instances
+          register
+          worker_runtimes
+          secret_filter
+          configured
+          manifest
+          model_completion
+          entry)
     in
     Some
       (fun request ->
@@ -638,6 +707,7 @@ let chatml_before_interceptor
   let matcher =
     Option.map value.matcher ~f:(fun matcher ->
       Lowering.matcher
+        ~checkpoint:register.Extension_owner.poll
         host
         specification.source
         ~chatml_matcher:(chatml_matcher specification host extensions register)
@@ -685,6 +755,7 @@ let executable_before_interceptor
       host
       worker_runtimes
       secret_filter
+      register
       value.S.id
       Hook_protocol.Before_interceptor
       hook
@@ -692,6 +763,7 @@ let executable_before_interceptor
   let matcher =
     Option.map value.matcher ~f:(fun matcher ->
       Lowering.matcher
+        ~checkpoint:register.Extension_owner.poll
         host
         specification.source
         ~chatml_matcher:(chatml_matcher specification host extensions register)
@@ -759,6 +831,7 @@ let executable_after_interceptor
       host
       worker_runtimes
       secret_filter
+      register
       (value : S.interceptor)
       hook
   =
@@ -768,6 +841,7 @@ let executable_after_interceptor
       host
       worker_runtimes
       secret_filter
+      register
       value.S.id
       Hook_protocol.After_interceptor
       hook
@@ -791,8 +865,10 @@ let interceptors
       worker_runtimes
       secret_filter
   =
+  register.Extension_owner.poll ();
   Option.value_map specification.S.interceptors ~default:[] ~f:(fun interceptors ->
     List.map interceptors.values ~f:(fun value ->
+      register.Extension_owner.poll ();
       match value.S.phase, value.extension with
       | Before, Chatml_extension { script; lifecycle } ->
         chatml_before_interceptor
@@ -830,6 +906,7 @@ let interceptors
           host
           worker_runtimes
           secret_filter
+          register
           value
           hook))
 ;;
@@ -919,13 +996,15 @@ let chatml_audit_filter
       | Error diagnostic -> Error diagnostic.message)
 ;;
 
-let executable_audit_filter specification host worker_runtimes secret_filter hook =
+let executable_audit_filter specification host worker_runtimes secret_filter register hook
+  =
   let worker =
     hook_worker
       specification
       host
       worker_runtimes
       secret_filter
+      register
       "audit-filter"
       Hook_protocol.Audit_filter
       hook
@@ -959,6 +1038,7 @@ let audit_filter
       secret_filter
       audit
   =
+  register.Extension_owner.poll ();
   match audit.S.filter with
   | None -> Fun.id
   | Some (Chatml_extension _ as extension) ->
@@ -971,19 +1051,10 @@ let audit_filter
       secret_filter
       extension
   | Some (Executable_extension hook) ->
-    executable_audit_filter specification host worker_runtimes secret_filter hook
+    executable_audit_filter specification host worker_runtimes secret_filter register hook
 ;;
 
-let audit
-      specification
-      ~sw
-      (host : Host.t)
-      extensions
-      runtime_instances
-      register
-      worker_runtimes
-      secret_filter
-  =
+let audit_sink specification ~sw (host : Host.t) secret_filter =
   let audit = Option.value_exn specification.S.audit in
   let failure_policy = Lowering.audit_failure audit.failure in
   let sink =
@@ -1019,16 +1090,7 @@ let audit
        | Ok audit -> audit
        | Error error -> fail specification error.code error.message)
   in
-  audit_filter
-    specification
-    host
-    extensions
-    runtime_instances
-    register
-    worker_runtimes
-    secret_filter
-    audit
-    sink
+  sink
 ;;
 
 let available_backends specification host backends =
@@ -1207,16 +1269,18 @@ let config
       worker_runtimes
       secret_filter
   in
+  let audit_sink = audit_sink specification ~sw host secret_filter in
   let audit =
-    audit
+    audit_filter
       specification
-      ~sw
       host
       extensions
       runtime_instances
       register_extension_instance
       worker_runtimes
       secret_filter
+      (Option.value_exn specification.S.audit)
+      audit_sink
   in
   let executor_config =
     Shell_access.Executor.config
@@ -1269,7 +1333,8 @@ let config
   , max_stdin_bytes
   , environment.values
   , resolver
-  , Eio.Path.native_exn cwd )
+  , Eio.Path.native_exn cwd
+  , audit_sink )
 ;;
 
 let create_exn
@@ -1287,9 +1352,18 @@ let create_exn
       ~worker_runtimes
       ~model_completion
       ~check_execution
+      ~native_workers
+      ~model_services
       specification
   =
-  let executor_config, secret_filter, max_stdin_bytes, environment, resolver, cwd =
+  let ( executor_config
+      , secret_filter
+      , max_stdin_bytes
+      , environment
+      , resolver
+      , cwd
+      , audit_sink )
+    =
     config
       specification
       ~sw
@@ -1316,6 +1390,13 @@ let create_exn
   ; cwd
   ; environment
   ; host
+  ; resources =
+      { audit_sink
+      ; approval_provider
+      ; native_workers = List.rev !native_workers
+      ; model_services =
+          Option.map model_completion ~f:(fun _ -> List.rev !model_services)
+      }
   }
 ;;
 
@@ -1337,12 +1418,36 @@ let create
       ?model_completion
       specification
   =
+  let native_workers = ref [] in
+  let model_services = ref [] in
+  let model_completion =
+    Option.map model_completion ~f:(fun select ~agent ~model ->
+      let complete = select ~agent ~model in
+      model_services := { agent; model; complete } :: !model_services;
+      complete)
+  in
   let register_extension_instance =
     Extension_owner.
       { prepare =
           Option.value prepare_extension ~default:(fun ~lifecycle compiled ->
             Chatml_extension.instantiate ~env:host.Host.env ~lifecycle compiled)
       ; register = register_extension_instance
+      ; poll = ignore
+      ; lookup = Map.find
+      ; worker =
+          (fun specification host worker_runtimes secret_filter id kind hook ->
+            let worker =
+              create_hook_worker
+                specification
+                host
+                worker_runtimes
+                secret_filter
+                id
+                kind
+                hook
+            in
+            native_workers := { id; kind; worker } :: !native_workers;
+            worker)
       }
   in
   try
@@ -1362,6 +1467,8 @@ let create
          ~worker_runtimes
          ~model_completion
          ~check_execution
+         ~native_workers
+         ~model_services
          specification)
   with
   | Runtime_error error -> Error [ error ]
@@ -1377,23 +1484,7 @@ let create
 let id t = runtime_id t.spec
 let spec t = t.spec
 let executor_config t = t.executor_config
-
-let executor_config_for_call t =
-  let open Result.Let_syntax in
-  let%bind context = Call_context.current () in
-  let config =
-    match context with
-    | None -> t.executor_config
-    | Some context ->
-      Shell_access.Executor.with_execution_scope
-        t.executor_config
-        ~session_id:context.session_id
-        ~approval_store:context.approval_store
-        ~check:context.check
-  in
-  Call_context.prepare_executor config
-;;
-
+let executor_config_for_call t = Call_context.prepare_executor_for_call t.executor_config
 let redact t value = Shell_access.Secret_filter.redact t.secret_filter value
 let max_stdin_bytes t = t.max_stdin_bytes
 let executable t id = Map.find t.executables id
@@ -1474,4 +1565,186 @@ let load_file t ~source ~max_bytes path =
           ; sha256 = Digestif.SHA256.(to_hex (digest_string contents))
           ; size
           }))
+;;
+
+let with_execution_check t ~check =
+  { t with
+    executor_config = Shell_access.Executor.with_execution_check t.executor_config ~check
+  }
+;;
+
+let rebind_code
+      original
+      ~manifest
+      ~specification
+      ~extensions
+      ~runtime_instances
+      ~register_extension_instance
+      ~prepare_extension
+      ~worker_runtimes
+      ~check_execution
+      ~checkpoint
+  =
+  Chatml.Chatml_checkpoint.protect checkpoint ~f:(fun checkpoint ->
+    let equal = Registry_code_budget.equal_string_with_checkpoint ~checkpoint in
+    let workers = ref original.resources.native_workers in
+    let models = ref (Option.value original.resources.model_services ~default:[]) in
+    let failure code message = fail specification code message in
+    let lookup map key =
+      Map.fold map ~init:None ~f:(fun ~key:current ~data found ->
+        checkpoint ();
+        match found with
+        | Some _ -> found
+        | None -> if equal current key then Some data else None)
+    in
+    let model_completion ~agent ~model =
+      checkpoint ();
+      match !models with
+      | [] -> failure "shell.retained_model_missing" "retained model service is missing"
+      | service :: remaining ->
+        let same_model =
+          match service.model, model with
+          | None, None -> true
+          | Some left, Some right -> equal left right
+          | None, Some _ | Some _, None -> false
+        in
+        if not (equal service.agent agent && same_model)
+        then failure "shell.retained_model_changed" "retained model service order changed";
+        models := remaining;
+        service.complete
+    in
+    let owner =
+      Extension_owner.
+        { prepare =
+            (fun ~lifecycle compiled ->
+              checkpoint ();
+              prepare_extension ~lifecycle compiled)
+        ; register = register_extension_instance
+        ; poll = checkpoint
+        ; lookup
+        ; worker =
+            (fun _specification _host runtimes _secret_filter id kind hook ->
+              checkpoint ();
+              match !workers with
+              | [] ->
+                failure
+                  "shell.retained_worker_missing"
+                  "retained native worker is missing"
+              | occurrence :: remaining ->
+                if
+                  not
+                    (equal occurrence.id id
+                     && Hook_protocol.equal_kind occurrence.kind kind)
+                then
+                  failure
+                    "shell.retained_worker_changed"
+                    "retained native worker order changed";
+                let runtime =
+                  match lookup runtimes hook.S.runtime with
+                  | None ->
+                    failure
+                      "shell.retained_worker_runtime_missing"
+                      "retained worker runtime is missing"
+                  | Some runtime -> runtime
+                in
+                let worker =
+                  match
+                    Hook_worker.with_executor_config
+                      occurrence.worker
+                      runtime.executor_config
+                  with
+                  | Ok worker -> worker
+                  | Error message -> failure "shell.retained_worker_owner_changed" message
+                in
+                workers := remaining;
+                worker)
+        }
+    in
+    (* Native path expressions retain the original actual source bases. The new
+     specification remains the returned code's diagnostic declaration. *)
+    let native_specification = { specification with S.source = original.spec.source } in
+    try
+      checkpoint ();
+      let policy =
+        lowering_result
+          specification
+          (Lowering.policy
+             ~checkpoint
+             original.host
+             ~source:original.spec.source
+             ~chatml_matcher:
+               (chatml_matcher native_specification original.host extensions owner)
+             (Option.value_exn specification.S.policy))
+      in
+      checkpoint ();
+      let reviewer =
+        reviewer
+          native_specification
+          original.host
+          extensions
+          runtime_instances
+          owner
+          worker_runtimes
+          original.secret_filter
+          original.resources.approval_provider
+          manifest
+          (Option.map original.resources.model_services ~f:(fun _ -> model_completion))
+      in
+      let analyzers =
+        analyzers
+          native_specification
+          original.host
+          extensions
+          runtime_instances
+          owner
+          worker_runtimes
+          original.secret_filter
+      in
+      let interceptors =
+        interceptors
+          native_specification
+          original.host
+          extensions
+          runtime_instances
+          owner
+          worker_runtimes
+          original.secret_filter
+      in
+      let audit =
+        audit_filter
+          native_specification
+          original.host
+          extensions
+          runtime_instances
+          owner
+          worker_runtimes
+          original.secret_filter
+          (Option.value_exn specification.S.audit)
+          original.resources.audit_sink
+      in
+      checkpoint ();
+      if not (List.is_empty !workers)
+      then
+        failure "shell.retained_worker_surplus" "retained native worker was not consumed";
+      if not (List.is_empty !models)
+      then
+        failure "shell.retained_model_surplus" "retained model service was not consumed";
+      let code =
+        Shell_access.Executor.Code.create
+          ~manifest_sha256:manifest.M.sha256
+          ~policy
+          ~reviewer:None
+          ~reviewer_with_metadata:reviewer
+          ~analyzers
+          ~interceptors
+          ~audit
+          ~check:check_execution
+      in
+      let executor_config =
+        Shell_access.Executor.with_code original.executor_config code
+      in
+      checkpoint ();
+      Ok { original with spec = specification; executor_config }
+    with
+    | Runtime_error error -> Error [ error ])
 ;;

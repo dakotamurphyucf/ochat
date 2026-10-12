@@ -24,8 +24,14 @@ val limits
   :  Chatmd_shell_spec.Shell_spec.limits
   -> (Shell_access.Limits.t * int, error) result
 
+(** Construct the same declared matcher with stack-safe node traversal. The
+    optional borrowed checkpoint runs before retaining traversal/output nodes.
+    It supplies the enclosing operation's admission; no independent ledger is
+    created or retained by the executable matcher. Original callback exceptions
+    propagate, including through [policy]'s expected lowering-error boundary. *)
 val matcher
-  :  Host.t
+  :  ?checkpoint:(unit -> unit)
+  -> Host.t
   -> Chatmd_shell_spec.Source_ref.t
   -> chatml_matcher:
        (action:Chatmd_shell_spec.Shell_spec.policy_action
@@ -36,7 +42,8 @@ val matcher
   -> Shell_access.Matcher.t
 
 val policy
-  :  Host.t
+  :  ?checkpoint:(unit -> unit)
+  -> Host.t
   -> source:Chatmd_shell_spec.Source_ref.t
   -> chatml_matcher:
        (action:Chatmd_shell_spec.Shell_spec.policy_action

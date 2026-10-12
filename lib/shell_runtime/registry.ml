@@ -37,6 +37,10 @@ type t =
   ; scripts : script String.Map.t
   ; extension_bindings : extension_binding list
   ; inspection : inspection
+  ; runtime_order : Runtime.t list
+  ; admin_policy : Admin_policy.t
+  ; host : Host.t
+  ; resource_check : unit -> (unit, string) Result.t
   }
 
 type prepared =
@@ -166,6 +170,7 @@ let runtime_map
     ~f:(fun audit_sequence ->
       let runtime_instances = String.Table.create () in
       let extension_bindings = ref [] in
+      let created_runtimes = ref [] in
       let register_extension_instance ~runtime_id ~lifecycle instance =
         match lifecycle with
         | Chatmd_shell_spec.Shell_spec.Invocation -> ()
@@ -202,8 +207,10 @@ let runtime_map
           specification
         |> Result.map_error ~f:(List.map ~f:runtime_error)
         |> Result.map ~f:(fun runtime ->
+          created_runtimes := runtime :: !created_runtimes;
           Map.set worker_runtimes ~key:(Runtime.id runtime) ~data:runtime))
-      |> Result.map ~f:(fun runtimes -> runtimes, List.rev !extension_bindings))
+      |> Result.map ~f:(fun runtimes ->
+        runtimes, List.rev !extension_bindings, List.rev !created_runtimes))
 ;;
 
 let extension_map ~compile_extension scripts =
@@ -395,7 +402,16 @@ let script_map runtimes tools =
     |> String.Map.of_alist_exn)
 ;;
 
-let create manifest runtimes scripts extension_bindings =
+let create
+      ~host
+      ~admin_policy
+      ~resource_check
+      ~runtime_order
+      manifest
+      runtimes
+      scripts
+      extension_bindings
+  =
   let tools = tool_map manifest in
   let inspection =
     { manifest_sha256 = manifest.M.sha256
@@ -404,7 +420,17 @@ let create manifest runtimes scripts extension_bindings =
     ; scripts = Map.data scripts
     }
   in
-  { manifest; runtimes; tools; scripts; extension_bindings; inspection }
+  { manifest
+  ; runtimes
+  ; tools
+  ; scripts
+  ; extension_bindings
+  ; inspection
+  ; host
+  ; admin_policy
+  ; resource_check
+  ; runtime_order
+  }
 ;;
 
 let extension_kind instance =
@@ -412,17 +438,13 @@ let extension_kind instance =
   |> Chatmd_shell_spec.Chatmd_script_spec.kind_to_string
 ;;
 
-let snapshot_matches manifest binding snapshot =
+let snapshot_matches ?(equal = String.equal) manifest binding snapshot =
   let instance = binding.instance in
-  String.equal
-    snapshot.Session.Shell_state.Extension_snapshot.runtime_id
-    binding.runtime_id
-  && String.equal snapshot.extension_id (Chatml_extension.instance_id instance)
-  && String.equal snapshot.extension_kind (extension_kind instance)
-  && String.equal snapshot.manifest_sha256 manifest.M.sha256
-  && String.equal
-       snapshot.source_sha256
-       (Chatml_extension.instance_source_revision instance)
+  equal snapshot.Session.Shell_state.Extension_snapshot.runtime_id binding.runtime_id
+  && equal snapshot.extension_id (Chatml_extension.instance_id instance)
+  && equal snapshot.extension_kind (extension_kind instance)
+  && equal snapshot.manifest_sha256 manifest.M.sha256
+  && equal snapshot.source_sha256 (Chatml_extension.instance_source_revision instance)
 ;;
 
 let captured_at_ns host =
@@ -446,8 +468,12 @@ let persisted_snapshot host manifest binding state =
     }
 ;;
 
-let restore_binding manifest snapshots binding =
-  match List.filter snapshots ~f:(snapshot_matches manifest binding) with
+let restore_binding ~checkpoint ~equal manifest snapshots binding =
+  match
+    List.filter snapshots ~f:(fun snapshot ->
+      checkpoint ();
+      snapshot_matches ~equal manifest binding snapshot)
+  with
   | [] -> Ok ()
   | [ snapshot ] ->
     Chatml_extension.restore binding.instance snapshot.state
@@ -477,10 +503,21 @@ let configure_snapshot_handler host manifest snapshots persist binding =
     Result.map (persist updated) ~f:(fun () -> snapshots := updated))
 ;;
 
-let configure_extension_snapshots host manifest extension_bindings initial persist =
+let configure_extension_snapshots
+      ?(checkpoint = ignore)
+      ?(equal = String.equal)
+      host
+      manifest
+      extension_bindings
+      initial
+      persist
+  =
   let snapshots = ref initial in
   Result.bind
-    (List.map extension_bindings ~f:(restore_binding manifest initial) |> Result.all)
+    (List.map extension_bindings ~f:(fun binding ->
+       checkpoint ();
+       restore_binding ~checkpoint ~equal manifest initial binding)
+     |> Result.all)
     ~f:(fun _ ->
       Option.iter persist ~f:(fun persist ->
         List.iter extension_bindings ~f:(fun binding ->
@@ -537,7 +574,7 @@ let instantiate_prepared_after
           Manifest_authorizer.verify grant manifest
           |> Result.map_error ~f:(fun error -> [ authorizer_error error ])
         in
-        let%bind runtimes, extension_bindings =
+        let%bind runtimes, extension_bindings, runtime_order =
           runtime_map
             ~sw
             ~host
@@ -553,7 +590,17 @@ let instantiate_prepared_after
         in
         Eio.Fiber.check ();
         let%bind scripts = script_map runtimes manifest.payload.tools in
-        let registry = create manifest runtimes scripts extension_bindings in
+        let registry =
+          create
+            ~host
+            ~admin_policy:prepared.admin_policy
+            ~resource_check:(fun () -> Activation_gate.check gate)
+            ~runtime_order
+            manifest
+            runtimes
+            scripts
+            extension_bindings
+        in
         let staged = Staged.{ registry; gate } in
         let%bind admitted = preflight staged in
         Eio.Fiber.check ();
@@ -688,3 +735,315 @@ let redact_tool_input t ~tool_name value =
 let script (t : t) name = Map.find t.scripts name
 let runtimes (t : t) = Map.data t.runtimes
 let tools (t : t) = Map.data t.tools
+
+module Code_view = struct
+  type registry = t
+
+  type t =
+    { registry : registry
+    ; gate : Activation_gate.t
+    ; work_steps : int
+    }
+
+  let work_steps t = t.work_steps
+
+  let check t =
+    Result.bind (t.registry.resource_check ()) ~f:(fun () -> Activation_gate.check t.gate)
+  ;;
+
+  module Execution = struct
+    type view = t
+
+    type t =
+      { view : view
+      ; registry : registry
+      ; active : bool Atomic.t
+      ; checkpoint : unit -> unit
+      }
+
+    let check t =
+      if Atomic.get t.active
+      then check t.view
+      else Error "shell code admission has expired"
+    ;;
+
+    let registry t = Result.map (check t) ~f:(fun () -> t.registry)
+
+    let prepare_executor t config =
+      let open Result.Let_syntax in
+      let%bind () = check t in
+      let selected =
+        List.find_map t.view.registry.runtime_order ~f:(fun runtime ->
+          t.checkpoint ();
+          Eio.Fiber.check ();
+          let candidate = Runtime.executor_config runtime in
+          if Shell_access.Executor.same_resource_owner config candidate
+          then Some (Shell_access.Executor.code candidate)
+          else None)
+      in
+      let config =
+        match selected with
+        | None -> config
+        | Some code -> Shell_access.Executor.with_code config code
+      in
+      let%map () = check t in
+      Shell_access.Executor.with_execution_check config ~check:(fun () -> check t)
+    ;;
+  end
+
+  let with_execution t ~checkpoint f =
+    let open Result.Let_syntax in
+    Eio.Fiber.check ();
+    checkpoint ();
+    Eio.Fiber.check ();
+    let%bind () = check t in
+    let active = Atomic.make true in
+    let admission () =
+      if Atomic.get active then check t else Error "shell code admission has expired"
+    in
+    Exn.protect
+      ~finally:(fun () -> Atomic.set active false)
+      ~f:(fun () ->
+        let wrap runtime =
+          checkpoint ();
+          Eio.Fiber.check ();
+          Runtime.with_execution_check runtime ~check:admission
+        in
+        let runtimes = Map.map t.registry.runtimes ~f:wrap in
+        let runtime_order = List.map t.registry.runtime_order ~f:wrap in
+        let registry =
+          { t.registry with runtimes; runtime_order; resource_check = admission }
+        in
+        let execution : Execution.t = { view = t; registry; active; checkpoint } in
+        let%map () = admission () in
+        f execution)
+  ;;
+end
+
+let rebind_code
+      original
+      ~prepared
+      ~grant
+      ~sw
+      ?(extension_snapshots = [])
+      ?persist_extension_snapshots
+      ~max_work_steps
+      ~checkpoint
+      ()
+  =
+  let module B = Registry_code_budget in
+  let manifest = prepared.manifest in
+  let gate = Activation_gate.create () in
+  let instances = ref [] in
+  let close () =
+    Activation_gate.close gate;
+    List.iter !instances ~f:Chatml_extension.close
+  in
+  Eio.Switch.check sw;
+  Eio.Switch.on_release sw close;
+  let result =
+    Exn.protect
+      ~finally:(fun () ->
+        Activation_gate.fail gate;
+        match Activation_gate.check gate with
+        | Ok () -> ()
+        | Error _ -> close ())
+      ~f:(fun () ->
+        B.run ~max_work_steps ~checkpoint (fun budget ->
+          let poll () = B.work budget in
+          let error code message = [ { code; message; runtime_id = None } ] in
+          let open Result.Let_syntax in
+          poll ();
+          let%bind () =
+            original.resource_check ()
+            |> Result.map_error ~f:(error "shell.registry_closed")
+          in
+          let%bind () =
+            Manifest_authorizer.verify grant manifest
+            |> Result.map_error ~f:(fun error -> [ authorizer_error error ])
+          in
+          let%bind validated =
+            Registry_code_validation.create
+              ~original_manifest:original.manifest
+              ~original_runtimes:original.runtime_order
+              ~original_tools:original.tools
+              ~original_policy:original.admin_policy
+              ~candidate_manifest:manifest
+              ~candidate_runtimes:prepared.runtimes
+              ~candidate_policy:prepared.admin_policy
+              ~budget
+            |> Result.map_error ~f:(fun error ->
+              [ { code = error.Registry_resource_footprint.Error.code
+                ; message = "native resource footprint changed: " ^ error.field
+                ; runtime_id = error.runtime_id
+                }
+              ])
+          in
+          let runtime_instances = String.Table.create () in
+          let extension_bindings = ref [] in
+          let register_extension_instance ~runtime_id ~lifecycle instance =
+            poll ();
+            match lifecycle with
+            | Chatmd_shell_spec.Shell_spec.Invocation -> ()
+            | Runtime | Session ->
+              let runtime_id =
+                match lifecycle with
+                | Runtime -> "*"
+                | Session -> runtime_id
+                | Invocation -> assert false
+              in
+              if
+                not
+                  (List.exists !extension_bindings ~f:(fun binding ->
+                     poll ();
+                     phys_equal binding.instance instance))
+              then (
+                poll ();
+                extension_bindings := { runtime_id; instance } :: !extension_bindings)
+          in
+          let prepare_extension ~lifecycle compiled =
+            poll ();
+            poll ();
+            Chatml_extension.prepare_instance ~env:original.host.env ~lifecycle compiled
+            |> Result.map ~f:(fun instance ->
+              instances := instance :: !instances;
+              instance)
+          in
+          let check_execution () =
+            Result.bind (original.resource_check ()) ~f:(fun () ->
+              Activation_gate.check gate)
+          in
+          (* Reuse the original map skeleton and native creation order. Only the
+             temporary comparator closes over this invocation's work ledger. *)
+          let module Key = struct
+            module T = struct
+              type t = string [@@deriving sexp_of]
+
+              let compare = B.compare_string budget
+            end
+
+            include T
+            include Comparator.Make (T)
+          end
+          in
+          let empty = Map.empty (module Key) in
+          let skeleton values =
+            Map.filter_mapi original.runtimes ~f:(fun ~key ~data:_ ->
+              poll ();
+              Map.find values key)
+          in
+          let%bind created, ordered =
+            List.fold_result
+              (Registry_code_validation.runtimes validated)
+              ~init:(empty, [])
+              ~f:(fun (created, ordered) (runtime, specification) ->
+                poll ();
+                let worker_runtimes = skeleton created in
+                let%map runtime =
+                  Runtime.rebind_code
+                    runtime
+                    ~manifest
+                    ~specification
+                    ~extensions:prepared.extensions
+                    ~runtime_instances
+                    ~register_extension_instance
+                    ~prepare_extension
+                    ~worker_runtimes
+                    ~check_execution
+                    ~checkpoint:poll
+                  |> Result.map_error ~f:(List.map ~f:runtime_error)
+                in
+                poll ();
+                ( Map.set created ~key:(Runtime.id runtime) ~data:runtime
+                , runtime :: ordered ))
+          in
+          let runtimes = skeleton created in
+          let runtime_order =
+            List.fold ordered ~init:[] ~f:(fun result value ->
+              poll ();
+              value :: result)
+          in
+          let extension_bindings =
+            List.fold !extension_bindings ~init:[] ~f:(fun result value ->
+              poll ();
+              value :: result)
+          in
+          let tools = Registry_code_validation.tools validated in
+          let inspection =
+            { original.inspection with manifest_sha256 = manifest.M.sha256 }
+          in
+          let registry =
+            { original with
+              manifest
+            ; runtimes
+            ; runtime_order
+            ; tools
+            ; extension_bindings
+            ; inspection
+            }
+          in
+          (* Snapshot descriptors and matching scans share this same ledger;
+             restored state is additionally bounded by each compiled instance. *)
+          List.iter extension_snapshots ~f:(fun snapshot ->
+            poll ();
+            let open Session.Shell_state.Extension_snapshot in
+            List.iter
+              [ snapshot.extension_id
+              ; snapshot.extension_kind
+              ; snapshot.runtime_id
+              ; snapshot.manifest_sha256
+              ; snapshot.source_sha256
+              ]
+              ~f:(fun value -> ignore (B.equal_string budget value value : bool)));
+          let ordered_instances =
+            List.fold !instances ~init:[] ~f:(fun ordered instance ->
+              poll ();
+              instance :: ordered)
+          in
+          let%bind () =
+            List.fold_result ordered_instances ~init:() ~f:(fun () instance ->
+              poll ();
+              Chatml_extension.activate instance
+              |> Result.map_error ~f:(fun diagnostic -> [ diagnostic_error diagnostic ]))
+          in
+          let%bind () =
+            configure_extension_snapshots
+              ~checkpoint:poll
+              ~equal:(B.equal_string budget)
+              original.host
+              manifest
+              extension_bindings
+              extension_snapshots
+              persist_extension_snapshots
+            |> Result.map_error ~f:List.return
+          in
+          poll ();
+          let%map () =
+            Activation_gate.ready gate
+            |> Result.map_error ~f:(error "shell.registry_closed")
+          in
+          registry)
+        |> fun result ->
+        (match result with
+         | Ok (Ok _) -> ()
+         | Error _ | Ok (Error _) -> close ());
+        result)
+  in
+  match result with
+  | Error Invalid_limit ->
+    Error
+      [ { code = "shell.code_invalid_limit"
+        ; message = "invalid code work allowance"
+        ; runtime_id = None
+        }
+      ]
+  | Error Work_limit ->
+    Error
+      [ { code = "shell.code_work_limit"
+        ; message = "code work allowance exhausted"
+        ; runtime_id = None
+        }
+      ]
+  | Ok (Error errors) -> Error errors
+  | Ok (Ok (registry, work_steps)) -> Ok ({ registry; gate; work_steps } : Code_view.t)
+;;

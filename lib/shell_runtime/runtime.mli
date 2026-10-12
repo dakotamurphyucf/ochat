@@ -109,3 +109,39 @@ module For_testing : sig
     -> string
     -> (string String.Map.t, string) result
 end
+
+(** Trusted registry plumbing after complete native-footprint/grant validation.
+    Build new pure code closures and immutable worker-config wrappers using this
+    runtime's retained environment/resolver/backends/executables/raw audit sink
+    and services. No native resource lookup or acquisition occurs. The original
+    source bases govern native path expressions; [specification.source] is the
+    new code's diagnostic provenance, not fresh path authority.
+
+    The registry owns [prepare_extension], [runtime_instances] and registration
+    through activation/failure cleanup. [check_execution] composes with original
+    resource liveness. The borrowed checkpoint polls before retaining new closure
+    structures and propagates unchanged. This low-level operation is not a grant
+    constructor; callers must use [Registry.rebind_code] for code-view admission. *)
+val rebind_code
+  :  t
+  -> manifest:Chatmd_shell_spec.Manifest.t
+  -> specification:Chatmd_shell_spec.Shell_spec.t
+  -> extensions:Chatml_extension.compiled String.Map.t
+  -> runtime_instances:Chatml_extension.instance String.Table.t
+  -> register_extension_instance:
+       (runtime_id:string
+        -> lifecycle:Chatmd_shell_spec.Shell_spec.lifecycle
+        -> Chatml_extension.instance
+        -> unit)
+  -> prepare_extension:
+       (lifecycle:Chatmd_shell_spec.Shell_spec.lifecycle
+        -> Chatml_extension.compiled
+        -> (Chatml_extension.instance, Chatmd_shell_spec.Diagnostic.t) Result.t)
+  -> worker_runtimes:t String.Map.t
+  -> check_execution:(unit -> (unit, string) Result.t)
+  -> checkpoint:(unit -> unit)
+  -> (t, error list) Result.t
+
+(** Add a borrowed execution admission check without changing code, resource
+    ownership or native material. Used by the registry's scoped projection. *)
+val with_execution_check : t -> check:(unit -> (unit, string) Result.t) -> t

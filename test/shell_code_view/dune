@@ -1,0 +1,37 @@
+(executable
+ (name reviewer_fixture)
+ (modules reviewer_fixture)
+ (libraries core eio eio_main jsonaf))
+
+(copy_files ../../lib/shell_runtime/registry_code_budget.ml)
+(copy_files ../../lib/shell_runtime/registry_code_budget.mli)
+(copy_files ../../lib/shell_runtime/registry_footprint_comparison.ml)
+(copy_files ../../lib/shell_runtime/registry_footprint_comparison.mli)
+(copy_files ../../lib/shell_runtime/registry_runtime_footprint.ml)
+(copy_files ../../lib/shell_runtime/registry_runtime_footprint.mli)
+(copy_files ../../lib/shell_runtime/registry_resource_footprint.ml)
+(copy_files ../../lib/shell_runtime/registry_resource_footprint.mli)
+(copy_files ../../lib/shell_runtime/admin_policy.ml)
+(copy_files ../../lib/shell_runtime/admin_policy.mli)
+(copy_files ../../lib/shell_runtime/lowering.ml)
+(copy_files ../../lib/shell_runtime/lowering.mli)
+(copy_files ../../lib/shell_runtime/host.ml)
+(copy_files ../../lib/shell_runtime/host.mli)
+(copy_files ../../lib/shell_runtime/environment.ml)
+(copy_files ../../lib/shell_runtime/environment.mli)
+
+(library
+ (name shell_code_view_foundation_tests)
+ (modules registry_code_budget registry_footprint_comparison registry_runtime_footprint registry_resource_footprint admin_policy lowering host environment foundation_tests)
+ (libraries core eio eio.unix eio_main jsonaf chatml ochat.chatmd_shell_spec ochat.shell_access)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect ppx_jsonaf_conv)))
+
+(copy_files ../chatml_native_hooks/support.ml)
+
+(library
+ (name shell_code_view_execution_tests)
+ (modules support execution_tests)
+ (libraries core eio eio.unix eio_main expect_test_helpers_core chatml chatml_source chatml_prepared_program chatml_linked_program chatml_host_runtime chatml_compilation chatml_moderator_runtime chat_response ochat.ochat_function ochat.shell_runtime ochat.chatmd_shell_spec ochat.shell_access ochat.session)
+ (inline_tests (deps reviewer_fixture.exe))
+ (preprocess (pps ppx_jane ppx_expect)))

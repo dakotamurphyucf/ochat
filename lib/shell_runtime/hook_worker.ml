@@ -20,10 +20,7 @@ type error =
 [@@deriving sexp, compare, equal]
 
 let next_id = Atomic.make 0
-
-let fresh_request_id () =
-  sprintf "shell-hook-%08d" (Atomic.fetch_and_add next_id 1)
-;;
+let fresh_request_id () = sprintf "shell-hook-%08d" (Atomic.fetch_and_add next_id 1)
 
 let create
       ~env
@@ -63,14 +60,15 @@ let invocation t input =
 ;;
 
 let run t input =
-  let perform () = Shell_access.Executor.run t.executor_config (invocation t input) in
-  match t.timeout_seconds with
-  | None -> perform ()
-  | Some seconds ->
-    (try
-       Eio.Time.with_timeout_exn (Eio.Stdenv.clock t.env) seconds perform
-     with
-     | Eio.Time.Timeout -> Error (Shell_access.Executor.Timed_out seconds))
+  match Call_context.prepare_executor_for_call t.executor_config with
+  | Error message -> Error (Shell_access.Executor.Denied message)
+  | Ok config ->
+    let perform () = Shell_access.Executor.run config (invocation t input) in
+    (match t.timeout_seconds with
+     | None -> perform ()
+     | Some seconds ->
+       (try Eio.Time.with_timeout_exn (Eio.Stdenv.clock t.env) seconds perform with
+        | Eio.Time.Timeout -> Error (Shell_access.Executor.Timed_out seconds)))
 ;;
 
 let validate_result t request_id result =
@@ -80,7 +78,10 @@ let validate_result t request_id result =
   in
   if overflow
   then error "shell.hook_output_limit" "hook output exceeded its configured limit"
-  else if not (Poly.equal result.status (`Exited 0))
+  else if
+    match result.status with
+    | `Exited 0 -> false
+    | `Exited _ | `Signaled _ -> true
   then
     error
       ~stderr:(t.redact result.stderr)
@@ -88,13 +89,13 @@ let validate_result t request_id result =
       "hook process did not exit successfully"
   else if String.length result.stdout > t.max_output_bytes
   then error "shell.hook_output_limit" "hook stdout exceeded its configured limit"
-  else
+  else (
     match Hook_protocol.decode_response ~kind:t.kind result.stdout with
     | Error message ->
       error ~stderr:(t.redact result.stderr) "shell.hook_protocol" message
     | Ok response when not (String.equal response.request_id request_id) ->
       error "shell.hook_request_id" "hook response request ID does not match"
-    | Ok response -> Ok response.action
+    | Ok response -> Ok response.action)
 ;;
 
 let invoke (t : t) payload =
@@ -106,11 +107,17 @@ let invoke (t : t) payload =
   let input = Hook_protocol.encode_request request in
   if String.length input > t.max_input_bytes
   then error "shell.hook_input_limit" "hook input exceeded its configured limit"
-  else
+  else (
     match run t input with
     | Error failure ->
       error "shell.hook_execution" (Shell_access.Executor.error_to_string failure)
-    | Ok result -> validate_result t request_id result
+    | Ok result -> validate_result t request_id result)
 ;;
 
 let executable t = t.executable
+
+let with_executor_config t executor_config =
+  if Shell_access.Executor.same_resource_owner t.executor_config executor_config
+  then Ok { t with executor_config }
+  else Error "shell hook worker config belongs to a different resource owner"
+;;

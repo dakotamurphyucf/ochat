@@ -176,3 +176,89 @@ val script : t -> string -> script option
 
 val runtimes : t -> Runtime.t list
 val tools : t -> Chatmd_shell_spec.Shell_tool_spec.t list
+
+module Code_view : sig
+  type registry = t
+
+  (** Fresh authorized specialist code over the receiver's retained native
+      resources. The switch owns fresh hook instances; the original registry,
+      hook state and native registrations remain unchanged. No source loader,
+      grant callback or new native resource is retained. *)
+  type t
+
+  (** Logical comparison/construction work observed by [rebind_code]. *)
+  val work_steps : t -> int
+
+  module Execution : sig
+    (** Borrowed admission for one actual execution. It expires when the owning
+        [with_execution] callback returns, including on exceptions. *)
+    type t
+
+    (** Selected registry for direct Process handlers. Returned runtime configs
+        retain this admission's check as well as both resource-owner checks;
+        retaining the registry cannot extend the admission. *)
+    val registry : t -> (registry, string) Result.t
+
+    (** Trusted native-dispatch adapter composed through [Call_context]. Exact
+        opaque resource ownership selects fresh code; unrelated configs retain
+        their original code. Functional caller overlays preserve that ownership.
+        The supplied config's actual caller/approval/channel/native fields are
+        preserved, and fresh owner/admission checks are composed into it. *)
+    val prepare_executor
+      :  t
+      -> Shell_access.Executor.config
+      -> (Shell_access.Executor.config, string) Result.t
+  end
+
+  (** Enter at execution time under the genuine host-owned native resource loan.
+      Deferred jobs/continuations enter a new admission under their recorded
+      revision's owner and reacquire actual native invocation services; they do
+      not reuse the creating fiber's bindings or an expired borrowed invocation.
+      No ambient current-view is installed. The host owns worker cancellation and
+      joins all admitted work before releasing original resources.
+
+      [checkpoint] is borrowed for this invocation and polls the bounded runtime
+      projection before retention. It must debit the host's existing execution
+      allowance where that host accounts projection work; no fresh allowance is
+      created here. Original exceptions/cancellation/backtraces propagate. *)
+  val with_execution
+    :  t
+    -> checkpoint:(unit -> unit)
+    -> (Execution.t -> 'a)
+    -> ('a, string) Result.t
+end
+
+(** Rebuild only specialist code over this registry's retained native material.
+    [grant] must authorize the actual complete prepared execution manifest.
+    Validate effective typed native declarations and retained material before
+    initializing hooks; raw manifest/body SHA equality is not this comparison.
+    Code/graph changes and diagnostic rebasing are allowed. Native paths, resource
+    declarations, tools/script-file bindings, non-ChatML hook bindings, wiring,
+    lifecycle and controls remain fixed. No path lookup, environment reload,
+    sink reopening, connection acquisition or native-function reminting occurs.
+
+    Original administrative/live resource checks and root-authorized approval
+    services remain. Newly authorized specialist callbacks replace the old
+    specialist callbacks. Raw audit sink/sequence/failure/content/secret controls
+    are retained. Fresh snapshots use the selected complete manifest and actual
+    graph revisions; parent state is untouched.
+
+    [sw] owns fresh instances. The caller completes role/capability/compiler
+    preflight before calling, keeps the original native loan alive, and joins
+    admitted work before release. Failure revokes fresh escaped access; external
+    initializer effects are not rolled back. [max_work_steps] is the remaining
+    logical comparison/construction allowance, checked before work/retention.
+    Errors abort the whole attempt, with no implicit retry or allowance reset.
+    Borrowed callback/cancellation exceptions preserve identity and raw trace. *)
+val rebind_code
+  :  t
+  -> prepared:prepared
+  -> grant:Manifest_authorizer.grant
+  -> sw:Eio.Switch.t
+  -> ?extension_snapshots:Session.Shell_state.Extension_snapshot.t list
+  -> ?persist_extension_snapshots:
+       (Session.Shell_state.Extension_snapshot.t list -> (unit, string) Result.t)
+  -> max_work_steps:int
+  -> checkpoint:(unit -> unit)
+  -> unit
+  -> (Code_view.t, error list) Result.t
