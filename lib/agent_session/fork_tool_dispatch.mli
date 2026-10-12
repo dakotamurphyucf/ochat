@@ -4,13 +4,19 @@ open Core
     driver inside its actual built-in fork invocation. Each call validates that
     expiring owner and branch identity, and the host executes a Delegated_agent
     child with no root provider-history binding. Outcomes remain actor-owned;
-    child conversation history is maintained only by the child stream driver. *)
+    child conversation history is maintained only by the child stream driver.
+    The owning dispatcher supplies the selected executable revision for the exact
+    binding; refreshed managed code can differ from its retained permission
+    identity. This callback opens no resource and is not retained in persistence. *)
 val create
   :  input:Operation_worker.Input.t
   -> borrowed:Native_tool_invocation.borrowed
   -> source:string
   -> parent_call_id:string
   -> now:(unit -> Agent_protocol.Timestamp.t)
+  -> implementation_revision:
+       (Chat_response.Tool_capability.binding
+        -> (string, Agent_protocol.Error.t) Result.t)
   -> prepare:
        (selected:Chat_response.Tool_capability.t
         -> parent:Agent_protocol.Invocation.t

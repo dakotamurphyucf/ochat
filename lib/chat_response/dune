@@ -64,6 +64,7 @@
   shell_preparation
   extension_compiler
   managed_tool_registry
+  managed_code_contract
   one_off_script
   one_off_request
   background_request
@@ -80,6 +81,7 @@
   fork_history
   fork
   compact_history)
+ (private_modules managed_code_contract)
  (libraries ochat.history_chatmd ochat.inference_client ochat.inference ochat.inference_runtime ochat.transcript
   ochat.document_schema
   core

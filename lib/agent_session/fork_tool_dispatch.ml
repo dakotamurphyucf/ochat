@@ -10,7 +10,17 @@ let require = function
   | Error error -> raise (Native_tool_dispatch.Dispatch_error error)
 ;;
 
-let create ~input ~borrowed ~source ~parent_call_id ~now ~prepare ~execute ~for_fork =
+let create
+      ~input
+      ~borrowed
+      ~source
+      ~parent_call_id
+      ~now
+      ~implementation_revision
+      ~prepare
+      ~execute
+      ~for_fork
+  =
   let selected = N.borrowed_capabilities borrowed |> require in
   let parent = N.borrowed_invocation borrowed in
   let check (request : D.request) =
@@ -63,6 +73,7 @@ let create ~input ~borrowed ~source ~parent_call_id ~now ~prepare ~execute ~for_
       |> require
     in
     let reference = C.reference binding in
+    let selected_revision = implementation_revision binding |> require in
     let value =
       Stream_invocation.parse_input ~kind:request.kind ~payload:request.payload
     in
@@ -71,7 +82,7 @@ let create ~input ~borrowed ~source ~parent_call_id ~now ~prepare ~execute ~for_
         ~completion_contract:None
         ~input
         ~request
-        ~implementation_revision:reference.implementation_revision
+        ~implementation_revision:selected_revision
         ~capability_fingerprint:(C.fingerprint selected)
         ~now
         ~value:(Result.ok value |> Option.value ~default:`Null)

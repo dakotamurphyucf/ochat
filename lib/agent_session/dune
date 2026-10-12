@@ -31,6 +31,7 @@
   authored_agent_call
   captured_child_source
   authored_agent_source
+  agent_source_code_view
   authored_agent_binding
   session_management
   session_management_channel

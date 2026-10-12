@@ -30,9 +30,42 @@ val prepare
   -> Prompt.Chat_markdown.top_level_elements list
   -> (t, Chatmd_shell_spec.Diagnostic.t list) result
 
+(** Execution revision selected by this immutable registry for an exact binding.
+    Original registries preserve the existing declaration revision; a rebound
+    registry returns the selected handler fingerprint. This does not change the
+    binding, permission identity or authority fingerprint. *)
+val execution_revision
+  :  t
+  -> Tool_capability.binding
+  -> (string, Tool_capability.error) Result.t
+
 val capabilities : t -> Tool_capability.t
 val definition : t -> Extension_compiler.definition
 val authority_fingerprint : t -> string
+
+(** Compile replacement authored code over this exact registry's existing native
+    and managed capability identities. The caller has admitted the selected
+    artifact and authentic role. Validate unchanged managed tool declarations,
+    exact schemas, targets and uses, plus lifecycle script identities/kinds/limits
+    before compiling. Bodies and selected project graphs may change; diagnostics
+    may rebase. No initializer, native acquisition or capability registration.
+
+    Existing capability/permission identities and authority_fingerprint remain
+    unchanged. The returned definition/handlers carry their actual new executable
+    fingerprints. The owning host must authorize and dispatch the selected code
+    under its original resource/actor checks. Borrowed startup/checkpoint cover
+    the whole comparison and compilation phase and never escape. Original
+    exceptions and cancellation propagate. *)
+val rebind_code
+  :  t
+  -> startup:Startup_compilation.t
+  -> limits:Chatml_compilation.limits
+  -> delegated_moderator:bool
+  -> programs:Chatml_prompt_programs.Restored.t option
+  -> env:Eio_unix.Stdenv.base
+  -> checkpoint:(unit -> unit)
+  -> Prompt.Chat_markdown.top_level_elements list
+  -> (t, Chatmd_shell_spec.Diagnostic.t list) Result.t
 
 (** Resolve the exact live binding, never a same-name target. *)
 val resolve

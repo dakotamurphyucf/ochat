@@ -10,6 +10,8 @@ type t =
   ; definition : EC.definition
   ; tools : (Agent_protocol.Id.Capability.t * EC.t) list
   ; authority_fingerprint : string
+  ; original_elements : CM.top_level_elements list
+  ; execution_revisions : (Agent_protocol.Id.Capability.t * string) list option
   }
 
 let capabilities t = t.capabilities
@@ -300,7 +302,13 @@ let prepare
             in
             (C.reference binding).id, prepared)
         in
-        { capabilities; definition; tools; authority_fingerprint }))
+        { capabilities
+        ; definition
+        ; tools
+        ; authority_fingerprint
+        ; original_elements = elements
+        ; execution_revisions = None
+        }))
     ()
 ;;
 
@@ -330,6 +338,71 @@ let resolve t binding =
            { code = "capability.stale_reference"
            ; message = "managed target does not match its compiled binding"
            })
+;;
+
+let execution_revision t binding =
+  let open Result.Let_syntax in
+  let reference = C.reference binding in
+  let%bind _ = resolve t binding in
+  match t.execution_revisions with
+  | None -> Ok reference.implementation_revision
+  | Some revisions ->
+    Result.of_option
+      (List.Assoc.find revisions reference.id ~equal:Agent_protocol.Id.Capability.equal)
+      ~error:
+        C.
+          { code = "capability.stale_reference"
+          ; message = "selected managed code is missing"
+          }
+;;
+
+let rebind_code
+      t
+      ~startup
+      ~limits
+      ~delegated_moderator
+      ~programs
+      ~env
+      ~checkpoint
+      elements
+  =
+  let open Result.Let_syntax in
+  let poll () =
+    checkpoint ();
+    Startup_compilation.checkpoint startup
+  in
+  let%bind () =
+    Managed_code_contract.validate
+      ~original:t.original_elements
+      ~selected:elements
+      ~checkpoint:poll
+  in
+  let%map definition =
+    EC.prepare_definition_in_domain
+      ~startup
+      ~limits
+      ~delegated_moderator
+      ?programs
+      ~env
+      ~capabilities:t.capabilities
+      elements
+  in
+  let tools =
+    List.map (EC.prepared_tools definition) ~f:(fun prepared ->
+      poll ();
+      let binding =
+        C.find t.capabilities ~name:(EC.declaration prepared).name
+        |> Result.ok
+        |> Option.value_exn
+      in
+      (C.reference binding).id, prepared)
+  in
+  let execution_revisions =
+    List.map tools ~f:(fun (id, prepared) ->
+      poll ();
+      id, EC.fingerprint prepared)
+  in
+  { t with definition; tools; execution_revisions = Some execution_revisions }
 ;;
 
 let revalidate t ~current =
@@ -449,7 +522,17 @@ let delegated_invocation_dependencies delegation invocation =
                 ~id:reference.id
                 ~fingerprint:reference.fingerprint)
       | Script | Moderator | Delegated_agent ->
-        String.equal context.implementation_revision reference.implementation_revision
+        Result.is_ok
+          (execution_revision registry binding
+           |> Result.bind ~f:(fun expected ->
+             if String.equal context.implementation_revision expected
+             then Ok ()
+             else
+               Error
+                 C.
+                   { code = "capability.stale_context"
+                   ; message = "selected code differs"
+                   }))
       | _ -> false
     in
     (match matches with
@@ -481,6 +564,7 @@ let admit t ~current ~selected ~(reference : C.reference) ~invocation =
     C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint
   in
   let%bind prepared = resolve t binding in
+  let%bind implementation_revision = execution_revision t binding in
   let context = invocation.I.context in
   let function_call =
     match invocation.routing with
@@ -491,7 +575,7 @@ let admit t ~current ~selected ~(reference : C.reference) ~invocation =
   | Dispatching
     when function_call
          && String.equal context.tool_name reference.name
-         && String.equal context.implementation_revision reference.implementation_revision
+         && String.equal context.implementation_revision implementation_revision
          && String.equal context.capability_fingerprint (C.fingerprint selected)
          && Result.is_ok (I.validate invocation) -> Ok { prepared; binding; invocation }
   | _ ->

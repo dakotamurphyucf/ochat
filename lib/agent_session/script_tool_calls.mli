@@ -68,6 +68,21 @@ val agent_artifact_for_implementation
        , Agent_protocol.Error.t )
        Result.t
 
+(** Selected code over the same retained native functions. This changes no tool
+    capability, source loan, actor or approval authority. *)
+val with_agent_source_code_view : t -> Agent_source_code_view.t -> t
+
+(** Authenticate any saved target first, then check the actual current native
+    service, invocation ceiling/binding and actor authorization before projecting
+    an exact function's selected defining context. An authenticated saved target
+    wins and returns None here. Expired/foreign scope never becomes absence;
+    original authorization failures and cancellation propagate. *)
+val agent_source_context
+  :  t
+  -> defining_revision:Prompt_revision.t
+  -> implementation:Ochat_function.t
+  -> (Agent_source_code_view.Context.t option, Agent_protocol.Error.t) Result.t
+
 (** The actual caller's validation contract, inherited with the expiring native
     services scope. This does not add helper tools or widen selected capabilities. *)
 val with_authoring_validation_host

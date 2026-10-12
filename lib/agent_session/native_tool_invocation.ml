@@ -395,6 +395,12 @@ let run_with_native
              let%bind binding =
                C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint
              in
+             let%bind implementation_revision =
+               match C.implementation binding, managed with
+               | Managed _, Some service ->
+                 Managed.execution_revision service.definition binding
+               | Native _, _ | Managed _, None -> Ok reference.implementation_revision
+             in
              let c = dispatched.I.context in
              let kind_matches =
                match dispatched.routing, (C.descriptor binding).type_ with
@@ -406,7 +412,7 @@ let run_with_native
              if
                kind_matches
                && String.equal c.tool_name reference.name
-               && String.equal c.implementation_revision reference.implementation_revision
+               && String.equal c.implementation_revision implementation_revision
                && String.equal c.capability_fingerprint (C.fingerprint selected)
              then Ok (binding, selected)
              else

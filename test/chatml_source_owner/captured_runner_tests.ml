@@ -254,3 +254,122 @@ let%expect_test "actual source and runtime policy limits participate in runner i
       "identical numeric policies are stable; changed limits change identities");
   [%expect {| identical numeric policies are stable; changed limits change identities |}]
 ;;
+
+let%test_unit
+    "selected native source view preserves exact revision and function ownership"
+  =
+  with_parent (fun env directory parent factory ->
+    let module View = Agent_session.Agent_source_code_view in
+    Eio.Switch.run (fun resource_sw ->
+      let ctx =
+        context env directory ~post_stream:(fun ~sw:_ ~inputs:_ ->
+          failwith "source view must not execute inference")
+      in
+      let port = Runner.bind factory ~revision:parent ~sw:resource_sw |> ok in
+      let elements = Revision.elements parent in
+      let host =
+        Chat_response.Agent_runtime.host
+          ~env
+          ~workspace:directory
+          ~tool_dir:directory
+          ~prompt_dir:(Revision.materialized_tree parent)
+          ~session_dir:directory
+          ~cache_dir:directory
+          ~home:directory
+          ~session_id:"source-view"
+          ~prompt_elements:elements
+        |> ok
+      in
+      let create_native () =
+        Chat_response.Agent_runtime.create
+          ~agent_source_runner:port
+          ~sw:resource_sw
+          ~ctx
+          ~host
+          ~platform:(Chat_response.Agent_runtime.platform ())
+          ~prompt_elements:elements
+          ~manifest_authorizer:Shell_runtime.Manifest_authorizer.assume_authorized
+          ~approval_provider:Shell_runtime.Approval_broker.None_available
+          ~approval_store:(Shell_access.Approval.create_store ())
+          ~run_agent:(fun ?prompt_dir:_ ?session_id:_ ?observer:_ ~source:_ ~ctx:_ _ _ ->
+            failwith "source view must not invoke legacy agent")
+          ()
+        |> ok
+      in
+      let native = create_native () in
+      let implementation = List.hd_exn native.functions in
+      let unrelated = List.hd_exn (create_native ()).functions in
+      assert (not (phys_equal implementation unrelated));
+      let reparse () =
+        Builder.reparse
+          ~definition:(Revision.definition parent)
+          ~artifact:(Revision.artifact parent)
+          ~materialized_tree:(Revision.materialized_tree parent)
+          ()
+        |> ok
+      in
+      let selected = reparse ()
+      and foreign = reparse () in
+      let retained = ref None in
+      Eio.Switch.run (fun sw ->
+        let view =
+          View.create
+            ~original:parent
+            ~selected
+            ~native
+            ~sw
+            ~max_work_steps:10_000
+            ~checkpoint:Eio.Fiber.check
+          |> ok
+        in
+        retained := Some view;
+        let context =
+          View.find view ~defining_revision:parent ~implementation
+          |> ok
+          |> Option.value_exn
+        in
+        assert (phys_equal (View.Context.revision context) selected);
+        assert (
+          phys_equal
+            (View.Context.reference context)
+            (List.find_exn
+               (CM.Parsed.agent_references
+                  (Revision.parser_context selected |> Option.value_exn))
+               ~f:(fun reference ->
+                 match CM.Agent_reference.invocation reference with
+                 | Tool _ -> true
+                 | Persistent_tool _ | Content _ -> false)));
+        assert (
+          Option.is_none (View.find view ~defining_revision:selected ~implementation |> ok));
+        assert (
+          Option.is_none
+            (View.find view ~defining_revision:foreign ~implementation:unrelated |> ok));
+        assert (
+          Result.is_error (View.find view ~defining_revision:foreign ~implementation));
+        assert (
+          Result.is_error
+            (View.create
+               ~original:parent
+               ~selected
+               ~native
+               ~sw
+               ~max_work_steps:1
+               ~checkpoint:Eio.Fiber.check));
+        let exception Checkpoint in
+        match
+          View.create
+            ~original:parent
+            ~selected
+            ~native
+            ~sw
+            ~max_work_steps:10_000
+            ~checkpoint:(fun () -> raise Checkpoint)
+        with
+        | exception Checkpoint -> ()
+        | _ -> failwith "source view swallowed original checkpoint exception");
+      let closed = Option.value_exn !retained in
+      assert (
+        Result.is_error
+          (View.find closed ~defining_revision:parent ~implementation:unrelated));
+      assert (Result.is_error (View.find_for_preparation closed ~implementation))))
+;;

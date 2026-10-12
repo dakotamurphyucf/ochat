@@ -17,7 +17,15 @@ let%expect_test
     "managed descendants use private dependencies without widening their caller"
   =
   List.iter
-    [ `Success; `Denied; `Revoked; `Invalid_output; `Disclosure; `Pre_reject; `Depth ]
+    [ `Success
+    ; `Rebound
+    ; `Denied
+    ; `Revoked
+    ; `Invalid_output
+    ; `Disclosure
+    ; `Pre_reject
+    ; `Depth
+    ]
     ~f:(fun mode ->
       let calls = ref 0 in
       let finished = ref false in
@@ -61,11 +69,8 @@ let%expect_test
               ~root:dir
               ~sources:[ "input.json", {|{"type":"object"}|}; "output.json", schema ]
           in
-          let elements =
-            Prompt.Chat_markdown.parse_chat_inputs
-              ~dir
-              ~source_loader
-              {|<tool name="read_file"/><tool name="run_chatml"/>
+          let authored =
+            {|<tool name="read_file"/><tool name="run_chatml"/>
 <script id="leaf-code" language="chatml" kind="tool">
 let run ctx input = Task.bind(Tool.call("read_file", input), fun result ->
   match result with | `Ok(value) -> Task.pure(`Complete(value))
@@ -84,6 +89,10 @@ let run ctx input =
 <tool name="leaf" type="chatml" script="leaf-code" entrypoint="run" input_schema="input.json" output_schema="output.json"><uses tool="read_file"/></tool>
 <tool name="root" type="chatml" script="root-code" entrypoint="run" input_schema="input.json" output_schema="output.json"><uses tool="leaf"/></tool>|}
           in
+          let parse authored =
+            Prompt.Chat_markdown.parse_chat_inputs ~dir ~source_loader authored
+          in
+          let elements = parse authored in
           let managed =
             Managed.prepare ~env ~owner:"managed-nesting" ~capabilities:base elements
             |> Result.map_error ~f:(fun errors ->
@@ -91,6 +100,105 @@ let run ctx input =
                 ~sep:"; "
                 (List.map errors ~f:Chatmd_shell_spec.Diagnostic.to_string))
             |> Result.ok_or_failwith
+          in
+          let managed =
+            match mode with
+            | `Rebound ->
+              let selected =
+                String.substr_replace_all
+                  authored
+                  ~pattern:"to_string(count[0]) ++"
+                  ~with_:"\"fresh:\" ++ to_string(count[0]) ++"
+                |> parse
+              in
+              let original_binding =
+                C.find (Managed.capabilities managed) ~name:"root" |> capability
+              in
+              let original_revision =
+                Managed.execution_revision managed original_binding |> capability
+              in
+              let rebound =
+                Chat_response.Startup_compilation.with_context
+                  ~limits:Chatml_compilation.default_limits
+                  ~env
+                  ~checkpoint:Eio.Fiber.check
+                  ~map_error:(fun (error : Chatml_compilation.error) ->
+                    [ Chatmd_shell_spec.Diagnostic.error ~code:error.code error.message ])
+                  ~f:(fun startup ->
+                    let changed_authority =
+                      String.substr_replace_all
+                        authored
+                        ~pattern:"<uses tool=\"leaf\"/>"
+                        ~with_:"<uses tool=\"read_file\"/>"
+                      |> parse
+                    in
+                    (match
+                       Managed.rebind_code
+                         managed
+                         ~startup
+                         ~limits:Chatml_compilation.default_limits
+                         ~delegated_moderator:false
+                         ~programs:None
+                         ~env
+                         ~checkpoint:Eio.Fiber.check
+                         changed_authority
+                     with
+                     | Error [ diagnostic ] ->
+                       [%test_eq: string] "chatml.resource_changed" diagnostic.code
+                     | Ok _ | Error _ -> failwith "managed authority change was admitted");
+                    let exception Checkpoint in
+                    (match
+                       Managed.rebind_code
+                         managed
+                         ~startup
+                         ~limits:Chatml_compilation.default_limits
+                         ~delegated_moderator:false
+                         ~programs:None
+                         ~env
+                         ~checkpoint:(fun () -> raise Checkpoint)
+                         selected
+                     with
+                     | exception Checkpoint -> ()
+                     | _ -> failwith "managed rebind swallowed checkpoint exception");
+                    Managed.rebind_code
+                      managed
+                      ~startup
+                      ~limits:Chatml_compilation.default_limits
+                      ~delegated_moderator:false
+                      ~programs:None
+                      ~env
+                      ~checkpoint:Eio.Fiber.check
+                      selected)
+                  ()
+                |> Result.map_error ~f:(fun errors ->
+                  String.concat
+                    ~sep:"; "
+                    (List.map errors ~f:Chatmd_shell_spec.Diagnostic.to_string))
+                |> Result.ok_or_failwith
+              in
+              assert (
+                phys_equal (Managed.capabilities managed) (Managed.capabilities rebound));
+              assert (
+                String.equal
+                  (Managed.authority_fingerprint managed)
+                  (Managed.authority_fingerprint rebound));
+              assert (
+                String.equal
+                  original_revision
+                  (Managed.execution_revision managed original_binding |> capability));
+              assert (
+                not
+                  (String.equal
+                     original_revision
+                     (Managed.execution_revision rebound original_binding |> capability)));
+              rebound
+            | `Success
+            | `Denied
+            | `Revoked
+            | `Invalid_output
+            | `Disclosure
+            | `Pre_reject
+            | `Depth -> managed
           in
           let registry = ref (Managed.capabilities managed) in
           Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
@@ -249,13 +357,11 @@ let run ctx input =
             List.iter state.invocations ~f:(fun invocation ->
               match invocation.I.context.tool_name with
               | ("root" | "leaf") as name ->
-                let reference =
-                  C.find (Managed.capabilities managed) ~name |> capability |> C.reference
-                in
+                let binding = C.find (Managed.capabilities managed) ~name |> capability in
                 assert (
                   String.equal
                     invocation.context.implementation_revision
-                    reference.implementation_revision);
+                    (Managed.execution_revision managed binding |> capability));
                 let caller_names =
                   match name with
                   | "root" -> [ "root" ]
@@ -313,6 +419,7 @@ let run ctx input =
              [%sexp
                (mode
                 : [ `Success
+                  | `Rebound
                   | `Denied
                   | `Revoked
                   | `Invalid_output
@@ -327,6 +434,8 @@ let run ctx input =
     {|
     (Success 2 8
      "[\"1:private output\",\"1:private output\",\"invocation.unselected_tool\"]")
+    (Rebound 2 8
+     "[\"fresh:1:private output\",\"fresh:1:private output\",\"invocation.unselected_tool\"]")
     (Denied 0 4 "\"invocation.permission_denied\"")
     (Revoked 0 4 "\"invocation.stale_binding\"")
     (Invalid_output 1 5 "\"invocation.invalid_output\"")
