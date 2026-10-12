@@ -320,16 +320,17 @@ test('first-agent prompt is identical to the maintained runtime fixture', async 
     .children.find((n) => n.type === 'code' && n.lang === 'xml');
   assert.equal(example.value, fixture.trimEnd());
 });
-test('XML-like parser error prose remains literal code', async () => {
-  const source = await fs.readFile(
-    new URL('../../docs-src/lib/chatmd/chatmd_parser.doc.md', import.meta.url),
-    'utf8',
-  );
+test('XML-like parser error prose remains literal code', () => {
+  // The shared parser's diagnostic is a literal-code regression fixture,
+  // independent of which examples the maintained module page currently includes.
+  const diagnostic = 'Mismatching tags: <msg> … </user>';
+  const source = `# A\n\nParser failure: \`${diagnostic}\`.\n`;
+  const output = transformMarkdown(source, entry, context).body;
   const codes = [];
-  visit(parser.parse(source), 'inlineCode', (n) => {
+  visit(parser.parse(output), 'inlineCode', (n) => {
     codes.push(n.value);
   });
-  assert.ok(codes.includes('Mismatching tags: <msg> … </user>'));
+  assert.deepEqual(codes, [diagnostic]);
 });
 
 test('linked source titles keep their anchor without overlapping edits', () => {
