@@ -1731,6 +1731,7 @@ module Chat_markdown = struct
   ;;
 
   let parse_owned
+        ~parse_document
         ~canonical_sources
         ~validate_input
         ~validate_document
@@ -1749,7 +1750,7 @@ module Chat_markdown = struct
     let imported_inputs = ref [] in
     let parse_input input =
       validate_input (Chatmd_parser_input.effective input);
-      let document = Chatmd_owned_parser.parse owner ~check_token input in
+      let document = parse_document owner ~check_token input in
       validate_document (List.map document ~f:Chatmd_located_ast.node);
       document
     in
@@ -1857,6 +1858,8 @@ module Chat_markdown = struct
         ~effective
     in
     parse_owned
+      ~parse_document:(fun owner ~check_token input ->
+        Chatmd_owned_parser.parse owner ~check_token input)
       ~canonical_sources:false
       ~validate_input:ignore
       ~validate_document:ignore
@@ -1866,6 +1869,83 @@ module Chat_markdown = struct
       ~root_input
       ~source_loader
       ~dir
+  ;;
+
+  let parse_transcript_inputs ~dir ~limits ~checkpoint contents =
+    let owner = Chatmd_owned_parser.create limits ~checkpoint in
+    let poll () = Chatmd_owned_parser.checkpoint owner in
+    let reject () =
+      failwith "transcript requires literal messages, calls, results or reasoning"
+    in
+    let rec text children =
+      List.iter children ~f:(function
+        | Ast.Text _ -> poll ()
+        | Ast.Element _ -> reject ())
+    and content children =
+      List.iter children ~f:(function
+        | Ast.Text _ -> poll ()
+        | Ast.Element (Img, attributes, children) ->
+          poll ();
+          List.iter attributes ~f:(fun (name, _) ->
+            poll ();
+            if String.equal name "local" then reject ());
+          text children
+        | Ast.Element _ -> reject ())
+    in
+    let validate_document document =
+      List.iter document ~f:(function
+        | Ast.Text value ->
+          poll ();
+          if not (String.is_empty (String.strip value)) then reject ()
+        | Ast.Element
+            ( (Msg | User | Assistant | System | Developer | Tool_call | Tool_response)
+            , _
+            , children ) ->
+          poll ();
+          content children
+        | Ast.Element (Reasoning, _, children) ->
+          poll ();
+          List.iter children ~f:(function
+            | Ast.Text value ->
+              poll ();
+              if not (String.is_empty (String.strip value)) then reject ()
+            | Ast.Element (Summary, _, children) ->
+              poll ();
+              text children
+            | Ast.Element _ -> reject ())
+        | Ast.Element _ -> reject ())
+    in
+    poll ();
+    if String.length contents > Limits.input_bytes limits
+    then failwith "owned ChatMD input byte limit exceeded";
+    let source_file = "transcript.chatmd" in
+    let loader = Source_loader.captured_filesystem ~root:dir ~sources:[] in
+    let root_input =
+      Chatmd_owned_parser.input
+        owner
+        ~role:Root
+        ~path:source_file
+        ~authored:contents
+        ~effective:contents
+    in
+    let parsed =
+      parse_owned
+        ~parse_document:(fun owner ~check_token input ->
+          Chatmd_owned_parser.parse_result owner ~check_token input
+          |> Result.ok_or_failwith)
+        ~canonical_sources:false
+        ~validate_input:(fun contents ->
+          if not (Stdlib.String.is_valid_utf_8 contents)
+          then failwith "transcript must be valid UTF-8")
+        ~validate_document
+        ~check_token:ignore
+        ~owner
+        ~source_file
+        ~root_input
+        ~source_loader:loader
+        ~dir
+    in
+    Parsed.elements parsed
   ;;
 
   let replay_chat_inputs root_input ~source_loader ~dir ~limits ~checkpoint =
@@ -1893,6 +1973,8 @@ module Chat_markdown = struct
            Chatmd_owned_parser.checkpoint owner))
     then failwith "owned ChatMD replay authored input differs from capture";
     parse_owned
+      ~parse_document:(fun owner ~check_token input ->
+        Chatmd_owned_parser.parse owner ~check_token input)
       ~canonical_sources:false
       ~validate_input:ignore
       ~validate_document:ignore
@@ -2036,6 +2118,8 @@ module Chat_markdown = struct
           ~effective:content
       in
       parse_owned
+        ~parse_document:(fun owner ~check_token input ->
+          Chatmd_owned_parser.parse owner ~check_token input)
         ~canonical_sources:true
         ~validate_input
         ~validate_document

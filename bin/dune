@@ -109,6 +109,13 @@
  (libraries core eio_main ochat.notty_eio))
 
 (library
+ (name frontend_transcript)
+ (modules frontend_transcript)
+ (libraries core eio eio.unix ochat.chat_response ochat.agent_protocol
+  ochat.agent_session ochat.document_schema ochat.history_entry ochat.openai)
+ (preprocess (pps ppx_jane)))
+
+(library
  (name tui_transcript_export)
  (modules tui_transcript_export)
  (libraries core eio eio.unix eio_posix ochat.chat_tui ochat.agent_client
@@ -119,7 +126,7 @@
  (public_name chat-tui)
  (name chat_tui)
  (modules chat_tui)
- (libraries inference_composition tui_transcript_export ochat.provider_runtime_host
+ (libraries inference_composition frontend_transcript tui_transcript_export ochat.provider_runtime_host
   core
   eio_main
   jsonaf

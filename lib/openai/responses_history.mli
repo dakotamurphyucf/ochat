@@ -55,8 +55,11 @@ val relation_for_item
   -> Responses.Item.t
   -> History_entry.Payload.Call_relation.t
 
+(** The optional checkpoint polls each preceding/item cell and final reversal;
+    original callback exceptions propagate. Omission preserves legacy behavior. *)
 val of_items
-  :  preceding:History_entry.t list
+  :  ?checkpoint:(unit -> unit)
+  -> preceding:History_entry.t list
   -> allocator:History_entry.Allocator.t
   -> Responses.Item.t list
   -> (History_entry.t list, string) Result.t

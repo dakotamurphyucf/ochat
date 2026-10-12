@@ -124,20 +124,29 @@ let read_import t loader source =
   result
 ;;
 
-let parse t ?(check_token = ignore) input =
+let parse_worker t ?(check_token = ignore) input =
   next_parse t;
   t.calls <- t.calls + 1;
+  let callback_failure = ref None in
+  let call f =
+    try f () with
+    | exn ->
+      let trace = Backtrace.Exn.most_recent () in
+      callback_failure := Some (exn, trace);
+      Exn.raise_with_original_backtrace exn trace
+  in
+  let poll () = call (fun () -> checkpoint t) in
   let module Builder =
     Chatmd_located_ast.Make (struct
       let input = input
-      let checkpoint () = checkpoint t
+      let checkpoint = poll
     end)
   in
   let module Parser = Chatmd_parser_engine.Make (Builder) in
   let next = Chatmd_lexer.create () in
   let depth = ref 0 in
   let token lexbuf =
-    checkpoint t;
+    poll ();
     if t.tokens >= t.limits.tokens then failwith "owned ChatMD token limit exceeded";
     t.tokens <- t.tokens + 1;
     let token = next lexbuf in
@@ -146,12 +155,30 @@ let parse t ?(check_token = ignore) input =
      | END _ -> decr depth
      | SELF _ | TEXT _ | EOF -> ());
     if !depth > t.limits.depth then failwith "owned ChatMD markup nesting limit exceeded";
-    check_token token;
+    call (fun () -> check_token token);
     token
   in
-  let document =
-    Parser.document token (Lexing.from_string (Chatmd_parser_input.effective input))
-  in
-  checkpoint t;
-  document
+  try
+    let document =
+      Parser.document token (Lexing.from_string (Chatmd_parser_input.effective input))
+    in
+    poll ();
+    Ok document
+  with
+  | Parser.Error as exn ->
+    let trace = Backtrace.Exn.most_recent () in
+    (match !callback_failure with
+     | Some (original, trace) -> Exn.raise_with_original_backtrace original trace
+     | None -> Error (exn, trace))
+;;
+
+let parse t ?check_token input =
+  match parse_worker t ?check_token input with
+  | Ok document -> document
+  | Error (exn, trace) -> Exn.raise_with_original_backtrace exn trace
+;;
+
+let parse_result t ?check_token input =
+  parse_worker t ?check_token input
+  |> Result.map_error ~f:(fun _ -> "invalid ChatMarkdown transcript syntax")
 ;;

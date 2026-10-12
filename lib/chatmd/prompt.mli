@@ -379,6 +379,22 @@ module Chat_markdown : sig
     -> string
     -> Parsed.t
 
+  (** Parse an explicitly imported transcript with the same owned grammar and
+      limits. No preprocessing, imports, scripts, tools, configuration, documents
+      or embedded agents are admitted. Only literal message/call/result/reasoning
+      fragments and nonlocal image references are accepted. Validation of actual
+      syntax precedes expansion or declaration/resource loading. Nonwhitespace
+      top-level text (including unsupported opaque export markup) rejects rather
+      than disappearing. This is authored interpretation, not provider replay.
+      Original checkpoint/cancellation exceptions propagate; syntax or admission
+      errors raise [Failure]. No source reads or runtime initialization. *)
+  val parse_transcript_inputs
+    :  dir:Eio.Fs.dir_ty Eio.Path.t
+    -> limits:Limits.t
+    -> checkpoint:(unit -> unit)
+    -> string
+    -> top_level_elements list
+
   (** Replay an actual retained Root input through ordinary authored declaration
       semantics with preprocessing Fn.id. This DOES NOT use generated-bundle
       validate_inert: effective input may legitimately retain a META_REFINE marker.

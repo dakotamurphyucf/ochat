@@ -233,7 +233,7 @@ let implementation_sources =
   ; ( "lib/chatmd/chatmd_source_bundle.ml"
     , "c3e0f8f89c8538ddcec98873739455a673b0e6e894282c21c96046c096bb6ae5" )
   ; ( "lib/chatmd/prompt.ml"
-    , "f5f6b9f7ad8fa55908f6cef17ca1e141087e228f04e74d30a1ebd41f8cd7f22a" )
+    , "74bf3366740e30f3d9213b8e6ab153a5c686fbbd2a651c37e21728057265d914" )
   ; ( "lib/chatmd/source_loader.ml"
     , "202688ce4248d9042c4d865f45f5909a593506d5f1c269c5db0419d9c3d4b85e" )
   ; ( "lib/chatmd_shell_spec/authoring_metadata.ml"
@@ -284,7 +284,7 @@ let implementation_sources =
   ; ( "lib/chatmd/chatmd_parser_input.ml"
     , "ff5449579e75dad66338700683d56b373ee9baedbb6433214e21af5a4df1ab57" )
   ; ( "lib/chatmd/chatmd_owned_parser.ml"
-    , "42130395da8eb0465c96d59a5233ae24adb300e5bd6094609a5cf60d007ca573" )
+    , "8d2369479651190b5176c3231d93aac6f0c497b0e50a57ccebc88c92362a5808" )
   ; ( "lib/agent_session/prompt_revision_builder.ml"
     , "f810e1cc7e94b6ad52e9a4592693f5ca2ed23798f922f44b63b6fef368f05c8e" )
   ]

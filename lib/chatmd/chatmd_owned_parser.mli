@@ -53,3 +53,12 @@ val parse
   -> ?check_token:(Chatmd_tokens.token -> unit)
   -> Chatmd_parser_input.t
   -> Chatmd_located_ast.t list
+
+(** Same grammar, token/depth budget and located builder as [parse]. Only the
+    actual Menhir syntax error becomes [Error]; original checkpoint/check-token
+    exceptions, cancellation and unexpected failures propagate unchanged. *)
+val parse_result
+  :  t
+  -> ?check_token:(Chatmd_tokens.token -> unit)
+  -> Chatmd_parser_input.t
+  -> (Chatmd_located_ast.t list, string) Result.t
