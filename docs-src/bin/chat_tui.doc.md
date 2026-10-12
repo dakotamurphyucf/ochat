@@ -34,6 +34,7 @@ raw protocol clients must discover catalog IDs.
 | `--bearer-token-file FILE` | Connected HTTP token loaded privately with Eio; rejected for Unix endpoints. |
 | `--session ID` | Connected: daemon ID. Implicit local: legacy store ID and mode. |
 | `--new-session` | Create a new local conversation; compatible with native `--local`. Not daemon creation. |
+| `--import-transcript FILE` | Adopt edited literal ChatMarkdown as a new native local conversation; `-file` supplies the separate executable definition. Reject resume, connected/admin and legacy-only combinations before reads. |
 | `--export-file FILE` | Explicit transcript export after interactive exit, including native `--local`. Native export keeps the authored definition separate and rejects it as the destination. |
 | `--auto-persist`, `--no-persist` | New native conversations: durable storage (the default), or temporary storage removed on exit. No-persist cannot resume a native session or use `--data-root`; auto-persist conflicts with `--transient`. Legacy sessions retain their snapshot persistence controls. |
 | `--parallel-tool-calls`, `--no-parallel-tool-calls` | Legacy interactive execution controls, not native/connected runtime overrides. |
@@ -50,12 +51,37 @@ temporary session storage is removed after the client and host finish.
 Shell-manifest authorization is supported by both interactive local modes; it is
 not one of the legacy-only persistence/execution controls.
 
+## Edited transcript adoption
+
+```sh
+chat-tui --no-config --local -file ./agent.chatmd --import-transcript ./edited.chatmd
+```
+
+The definition supplies model, tools and code; the imported file supplies fresh
+neutral history. Presentation history IDs become fresh IDs, while opaque call IDs
+retain the existing converter's pairing. This is authored ChatMarkdown conversion,
+not lossless restoration of provider captures or runtime state. Metadata unsupported
+by the existing converter is not reconstructed. Unsupported opaque top-level export
+markup rejects rather than disappearing.
+
+Import accepts literal messages, tool-call/result text, reasoning summaries and
+remote image references as data. It rejects configuration, scripts, imports,
+documents, agents and local images before conversion. It performs no transcript
+network fetch or tool/inference call. Limits are 8 MiB source, 100000 parser tokens
+and history entries, depth 128, 2 million cooperative work steps and 16 MiB neutral
+input. An admission failure does not create a conversation; an uncertain seed
+acknowledgment triggers one read of the original receipt, without replay. If still
+unknown, the diagnostic includes the original command key and selected storage
+location. This CLI does not retain a durable reconciliation intent; do not rerun
+import with a new identity on the assumption that the first attempt failed.
+
 ## Administration
 
 Use one selector per command. Without `--connect` or `--local`, session listing/info/export/
 reset/rebuild operate on the legacy store. Explicit `--local --session ID`
-selects retained native sessions under the same root without implicitly starting
-a stopped session. Local list, inspect and export do not create or activate one.
+explicitly resumes retained native sessions under the same root. After its single
+authorized attachment, a stopped session starts through the normal lifecycle owner;
+running sessions remain attached. Captured code, identity and workspace are retained. Local list, inspect and export do not create or activate one.
 Explicit `--local --reset-session ID --keep-history` resets the selected stopped
 native session through its revision-checked owner. It retains the identity and
 captured code even if the authored file has been removed; its workspace must
@@ -69,10 +95,17 @@ still be available. Omit `--keep-history` to clear conversation history.
 | `--stop-session ID` | Connected only; graceful by default, `--cancel` cancels active work. |
 | `--delete-session ID` | Connected stopped session; removes by default. Use `--archive` for archive policy. Treat removal as destructive. |
 | `--reset-session ID` | `--keep-history`; supports explicit native `--local`. Only legacy reset supports `--prompt-file FILE` and `--dry-run`. |
-| `--rebuild-from-prompt ID` | Rebuild selected session; not ordinary start. |
+| `--rebuild-from-prompt ID` | Native/connected: adopt the host's current captured catalog code in the same stopped session, archive the old generation and reset history to current authored defaults. Legacy: rebuild its stored prompt copy. Not ordinary start. |
 | `--export-session ID --out FILE` | Export selected session; remote downloads verify blob length/digest before installation. |
 | `--dry-run` | Legacy reset/rebuild only; not daemon administration. |
 | `-prompt-preview-max N` | Legacy dry-run preview length; 0 means unlimited. |
+
+Export before rebuilding if you need the previous conversation transcript. Native
+local rebuild opens the current definition/project under the original admitted
+host policy. Connected rebuild uses the daemon's current captured catalog, so a
+source change requires catalog refresh first. Rebuild does not implicitly update
+locked Git dependencies; dependency Update remains a separate explicit operation.
+Ordinary resume keeps captured code.
 
 `--cancel` is valid only with stop; `--archive` only with delete. Connected
 administration rejects interactive creation/attachment flags. Legacy subcommands

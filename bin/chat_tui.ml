@@ -433,9 +433,14 @@ Ask AI subcommand (ask ai questions about using chat-tui):
 
   chat-tui ask-ai -query QUERY
 
-Interactive mode:
-  chat-tui [-file FILE] [--session NAME | --new-session]
-           [--authorize-shell-manifest]
+Interactive mode (new conversations use the native local host by default):
+  chat-tui [-file FILE] [--new-session] [--import-transcript FILE]
+  chat-tui --local --session ID
+  chat-tui --local --rebuild-from-prompt ID
+
+Import creates a new conversation; -file supplies its separate executable definition.
+Legacy-only --session without --local, parallel-tool flags and implicit shell
+manifest authorization select compatibility mode and cannot import transcripts.
 
 Run with --help for full flag documentation.
 |}
@@ -1239,6 +1244,7 @@ module Cli = struct
     ; export_session_id : string option
     ; export_out_file : string option
     ; export_file : string option
+    ; import_transcript : string option
     ; session_info : string option
     ; start_session_id : string option
     ; stop_session_id : string option
@@ -1346,6 +1352,7 @@ module Cli = struct
         }
     | Embedded_interactive of
         { prompt_file : string
+        ; import_transcript : string option
         ; export_file : string option
         ; storage : Agent_server.Local_storage.t
         ; session_id : string option
@@ -1478,7 +1485,19 @@ module Cli = struct
   ;;
 
   let validate_global t =
-    if (t.local_transient || Option.is_some t.local_data_root) && not t.local
+    if
+      Option.is_some t.import_transcript
+      && (Option.is_some t.session_id
+          || Option.is_some t.connect
+          || (not (List.is_empty (selectors t)))
+          || t.parallel_tool_calls
+          || t.no_parallel_tool_calls
+          || (t.authorize_shell_manifest && not t.local))
+    then
+      Or_error.error_string
+        "Error: --import-transcript creates a new native local conversation; resume, \
+         administration, connected and legacy-only flags cannot be combined."
+    else if (t.local_transient || Option.is_some t.local_data_root) && not t.local
     then Or_error.error_string "Error: --transient and --data-root require --local."
     else if Option.is_some t.session_id && t.new_session
     then
@@ -1565,6 +1584,7 @@ module Cli = struct
         in
         Embedded_interactive
           { prompt_file = t.conversation_file
+          ; import_transcript = t.import_transcript
           ; export_file = t.export_file
           ; storage
           ; session_id = t.session_id
@@ -1766,10 +1786,13 @@ module Cli = struct
           Or_error.error_string
             "Error: native local reset does not support --dry-run or --prompt-file."
         else Ok (Reset { id; keep_history = t.reset_keep_history })
-      | Sel_start_session _
-      | Sel_stop_session _
-      | Sel_delete_session _
-      | Sel_rebuild_from_prompt _ ->
+      | Sel_rebuild_from_prompt id ->
+        if t.dry_run || Option.is_some t.reset_prompt_file
+        then
+          Or_error.error_string
+            "Error: native local rebuild does not support --dry-run or --prompt-file."
+        else Ok (Rebuild { id })
+      | Sel_start_session _ | Sel_stop_session _ | Sel_delete_session _ ->
         Or_error.error_string "Error: this mutation requires --connect."
     in
     Embedded_admin { prompt_file = t.conversation_file; storage; command }
@@ -2037,7 +2060,7 @@ module Daemon_admin = struct
       Agent_client.Session_handle.rebuild
         handle
         ~expected_revision:(Agent_protocol.Public.Snapshot.fields snapshot).revision
-        ~prompt_choice:Pinned
+        ~prompt_choice:Current_catalog
       |> Result.map_error ~f:protocol_error
       |> Or_error.map ~f:(fun session -> write env (session_line session ^ "\n")))
   ;;
@@ -2218,6 +2241,7 @@ module Embedded_interactive = struct
         ~typeahead_config
         ~env
         ~prompt_file
+        ~import_transcript
         ~export_file
         ~storage
         ~session_id
@@ -2237,7 +2261,7 @@ module Embedded_interactive = struct
         ; tool_dir = workspace
         ; home
         ; storage
-        ; start_immediately = true
+        ; start_immediately = Option.is_none import_transcript
         ; permission_profile = interactive_permission_profile ~authorize_shell_manifest
         ; attachment_mode = Agent_protocol.Session.Read_write
         ; event_capacity = 4096
@@ -2280,44 +2304,191 @@ module Embedded_interactive = struct
           ~retryable:false
           ())
     in
+    let seed connection request =
+      match Agent_client.Session_handle.seed connection request with
+      | Ok _ as success -> success
+      | Error failure ->
+        (match Agent_client.Connection.pending_commands connection with
+         | [] -> Error failure
+         | [ pending ] ->
+           (match Agent_client.Connection.reconcile connection pending with
+            | Ok (Committed (Created_session session_id)) ->
+              Ok Agent_protocol.Session_seed.Result.{ session_id }
+            | Ok (Failed rejection) -> Error rejection
+            | Ok (Missing | Unavailable | Pending _ | Committed _) | Error _ ->
+              let storage_location =
+                match
+                  Agent_server.Local_storage.durable_root storage ~home:options.home
+                with
+                | Ok (Some root) -> Agent_server.Local_storage.Root.path root
+                | Ok None -> "transient process-owned storage (removed on host cleanup)"
+                | Error _ -> "selected local storage"
+              in
+              Error
+                (Agent_protocol.Error.create
+                   Interrupted
+                   ~message:
+                     (sprintf
+                        "Unknown session.seed outcome; original command key %s; storage \
+                         %s. One original receipt read did not establish the result. Do \
+                         not rerun transcript import with a new identity. This CLI does \
+                         not retain a durable reconciliation intent."
+                        (Agent_protocol.Idempotency_key.to_string
+                           (Agent_protocol.Session_seed.Request.idempotency_key request))
+                        storage_location)
+                   ~retryable:false
+                   ()))
+         | _ ->
+           Error
+             (Agent_protocol.Error.create
+                Interrupted
+                ~message:"unexpected unresolved commands during transcript admission"
+                ~retryable:false
+                ()))
+    in
     let daemon_options = Inference_composition.daemon_options inference_host in
+    let imported =
+      match import_transcript with
+      | None -> Ok None
+      | Some file ->
+        let ctx =
+          Chat_response.Ctx.create
+            ~inference_context:
+              (Inference_composition.context inference_host Chat_response.Config.default)
+            ~inference_identity:(Inference_host.identity inference_host)
+            ~on_inference_attempt:ignore
+            ~on_inference_completion:ignore
+            ~env
+            ~dir:(Eio.Stdenv.cwd env)
+            ~tool_dir:(Eio.Stdenv.cwd env)
+            ~cache:(Chat_response.Cache.create ~max_size:1 ())
+            ()
+        in
+        Frontend_transcript.load
+          ctx
+          ~file:(absolute_path ~cwd:workspace file)
+          ~checkpoint:Eio.Fiber.check
+        |> Result.map ~f:Option.some
+    in
     let result =
-      Agent_server.Embedded.with_local_host
-        ~daemon_options
-        ~sw
-        ~env
-        ~authoring_package_files
-        ?authoring_budget
-        options
-        ~f:(fun host ->
-          Eio.Switch.run (fun client_sw ->
-            let open Result.Let_syntax in
-            let%bind connection = Agent_server.Embedded.connect_host host in
-            Eio.Switch.on_release client_sw (fun () ->
-              Agent_client.Connection.close connection);
-            let%bind client =
-              match session_id with
-              | None ->
-                let%bind spec = Agent_server.Embedded.session_spec options in
-                Chat_tui.Agent_session_client.create_with_spec
-                  ~sw:client_sw
-                  ~clock:(Eio.Stdenv.clock env)
-                  ~connection
-                  ~spec
-                  ~mode:options.attachment_mode
-                  ()
-              | Some id ->
-                let%bind id = Agent_protocol.Id.Session.of_string id in
-                let%bind () = select_session host id ~require_stopped:false in
-                Chat_tui.Agent_session_client.attach
-                  ~sw:client_sw
-                  ~clock:(Eio.Stdenv.clock env)
-                  ~connection
-                  ~session_id:id
-                  ~mode:options.attachment_mode
-                  ()
-            in
-            run_attached client))
+      Result.bind imported ~f:(fun imported ->
+        Agent_server.Embedded.with_local_host
+          ~daemon_options
+          ~sw
+          ~env
+          ~authoring_package_files
+          ?authoring_budget
+          options
+          ~f:(fun host ->
+            Eio.Switch.run (fun client_sw ->
+              let open Result.Let_syntax in
+              let%bind connection = Agent_server.Embedded.connect_host host in
+              Eio.Switch.on_release client_sw (fun () ->
+                Agent_client.Connection.close connection);
+              let%bind client =
+                match session_id, imported with
+                | None, None ->
+                  let%bind spec = Agent_server.Embedded.session_spec options in
+                  Chat_tui.Agent_session_client.create_with_spec
+                    ~sw:client_sw
+                    ~clock:(Eio.Stdenv.clock env)
+                    ~connection
+                    ~spec
+                    ~mode:options.attachment_mode
+                    ()
+                | None, Some transcript ->
+                  let%bind _ =
+                    Agent_client.Session_handle.initialize
+                      connection
+                      ~implementation_name:"chat-tui-transcript"
+                      ~implementation_version:"dev"
+                  in
+                  let%bind spec = Agent_server.Embedded.session_spec options in
+                  let%bind definition_id =
+                    match spec.prompt with
+                    | Catalog id -> Ok id
+                    | Generated _ | Local_path _ ->
+                      Error
+                        (Agent_protocol.Error.invalid_request
+                           "local seed requires authored code")
+                  in
+                  let%bind definition =
+                    Agent_client.Catalog.get_prompt connection definition_id
+                  in
+                  let%bind expected_revision =
+                    Result.of_option
+                      definition.current_revision
+                      ~error:
+                        (Agent_protocol.Error.invalid_request
+                           "authored code is unavailable")
+                  in
+                  let%bind key =
+                    Agent_protocol.Idempotency_key.of_string
+                      (Agent_protocol.Id.Transaction.create ()
+                       |> Agent_protocol.Id.Transaction.to_string)
+                  in
+                  let%bind request =
+                    Agent_protocol.Session_seed.Request.create
+                      spec
+                      ~code:(Catalog { definition_id; expected_revision })
+                      ~transcript
+                      ~idempotency_key:key
+                  in
+                  let%bind seeded = seed connection request in
+                  let%bind client =
+                    Chat_tui.Agent_session_client.attach
+                      ~sw:client_sw
+                      ~clock:(Eio.Stdenv.clock env)
+                      ~connection
+                      ~session_id:seeded.session_id
+                      ~mode:options.attachment_mode
+                      ()
+                  in
+                  let%map _ =
+                    Chat_tui.Agent_session_client.start client ~queue_if_limited:true
+                  in
+                  client
+                | Some id, None ->
+                  let%bind id = Agent_protocol.Id.Session.of_string id in
+                  let%bind () = select_session host id ~require_stopped:false in
+                  let%bind client =
+                    Chat_tui.Agent_session_client.attach
+                      ~sw:client_sw
+                      ~clock:(Eio.Stdenv.clock env)
+                      ~connection
+                      ~session_id:id
+                      ~mode:options.attachment_mode
+                      ()
+                  in
+                  let fields =
+                    Chat_tui.Agent_projection.fields
+                      (Chat_tui.Agent_session_client.projection client)
+                  in
+                  let session = fields.session in
+                  let%map () =
+                    match session.desired_state, session.observed_state with
+                    | Stopped, Stopped ->
+                      Chat_tui.Agent_session_client.start client ~queue_if_limited:true
+                      |> Result.map ~f:(fun _ -> ())
+                    | Running, Stopped
+                    | ( (Running | Stopped)
+                      , ( Queued_for_slot
+                        | Starting
+                        | Recovering
+                        | Idle
+                        | Running_turn _
+                        | Compacting _
+                        | Waiting_for_permission _
+                        | Stopping
+                        | Failed _ ) ) -> Ok ()
+                  in
+                  client
+                | Some _, Some _ ->
+                  Error
+                    (Agent_protocol.Error.invalid_request
+                       "transcript import cannot resume a session")
+              in
+              run_attached client)))
     in
     Result.map_error result ~f:protocol_error
   ;;
@@ -2388,7 +2559,7 @@ module Embedded_admin = struct
         Daemon_admin.write env (sprintf "Session export written to %s\n" out_file))
   ;;
 
-  let run ~env ~prompt_file ~storage ~command =
+  let run ~transport_policy ~env ~prompt_file ~storage ~command =
     Eio.Switch.run (fun sw ->
       let cwd = Embedded_interactive.working_directory env in
       let options =
@@ -2404,34 +2575,64 @@ module Embedded_admin = struct
           ; event_capacity = 256
           }
       in
-      Agent_server.Embedded.with_local_host ~sw ~env options ~f:(fun host ->
-        let connection = Agent_server.Embedded.host_connection host in
-        let open Result.Let_syntax in
+      let daemon_options =
         match command with
-        | Cli.List { format } ->
-          let%map sessions = list connection in
-          Daemon_admin.write_sessions env format sessions
-        | Info { id; format } ->
-          let%bind id = Agent_protocol.Id.Session.of_string id in
-          let%map snapshot = Agent_client.Admin.get_session connection id in
-          Daemon_admin.write_info env format snapshot
-        | Export { id; out_file } -> export ~env connection id ~out_file
-        | Reset { id; keep_history } ->
-          let%bind session_id = Agent_protocol.Id.Session.of_string id in
-          let%bind () =
-            Embedded_interactive.select_session host session_id ~require_stopped:true
+        | Cli.Rebuild _ ->
+          let host =
+            Inference_composition.create_with_policy
+              ~transport_policy
+              ~sw
+              ~env
+              ~default_model:"gpt-4.5-preview"
           in
-          Daemon_admin.reset ~env ~sw ~connection id ~keep_history
-          |> Result.map_error ~f:(fun error ->
-            Agent_protocol.Error.create
-              Internal_error
-              ~message:(Error.to_string_hum error)
-              ~retryable:false
-              ())
-        | Rebuild _ | Start _ | Stop _ | Delete _ ->
-          Error
-            (Agent_protocol.Error.invalid_request
-               "local read command cannot mutate a session"))
+          Some (Inference_composition.daemon_options host)
+        | List _ | Info _ | Export _ | Reset _ | Start _ | Stop _ | Delete _ -> None
+      in
+      Agent_server.Embedded.with_local_host
+        ?daemon_options
+        ~sw
+        ~env
+        options
+        ~f:(fun host ->
+          let connection = Agent_server.Embedded.host_connection host in
+          let open Result.Let_syntax in
+          match command with
+          | Cli.List { format } ->
+            let%map sessions = list connection in
+            Daemon_admin.write_sessions env format sessions
+          | Info { id; format } ->
+            let%bind id = Agent_protocol.Id.Session.of_string id in
+            let%map snapshot = Agent_client.Admin.get_session connection id in
+            Daemon_admin.write_info env format snapshot
+          | Export { id; out_file } -> export ~env connection id ~out_file
+          | Reset { id; keep_history } ->
+            let%bind session_id = Agent_protocol.Id.Session.of_string id in
+            let%bind () =
+              Embedded_interactive.select_session host session_id ~require_stopped:true
+            in
+            Daemon_admin.reset ~env ~sw ~connection id ~keep_history
+            |> Result.map_error ~f:(fun error ->
+              Agent_protocol.Error.create
+                Internal_error
+                ~message:(Error.to_string_hum error)
+                ~retryable:false
+                ())
+          | Rebuild { id } ->
+            let%bind session_id = Agent_protocol.Id.Session.of_string id in
+            let%bind () =
+              Embedded_interactive.select_session host session_id ~require_stopped:true
+            in
+            Daemon_admin.rebuild ~env ~sw ~connection id
+            |> Result.map_error ~f:(fun error ->
+              Agent_protocol.Error.create
+                Internal_error
+                ~message:(Error.to_string_hum error)
+                ~retryable:false
+                ())
+          | Start _ | Stop _ | Delete _ ->
+            Error
+              (Agent_protocol.Error.invalid_request
+                 "local read command cannot mutate a session"))
       |> Result.map_error ~f:protocol_error)
   ;;
 end
@@ -2497,9 +2698,11 @@ let run_action ~transport_policy ~typeahead_config (action : Cli.action) =
   | Daemon_admin { connect; bearer_token_file; command } ->
     Env.with_env (fun env -> Daemon_admin.run ~env ~connect ~bearer_token_file ~command)
   | Embedded_admin { prompt_file; storage; command } ->
-    Env.with_env (fun env -> Embedded_admin.run ~env ~prompt_file ~storage ~command)
+    Env.with_env (fun env ->
+      Embedded_admin.run ~transport_policy ~env ~prompt_file ~storage ~command)
   | Embedded_interactive
       { prompt_file
+      ; import_transcript
       ; export_file
       ; storage
       ; session_id
@@ -2514,6 +2717,7 @@ let run_action ~transport_policy ~typeahead_config (action : Cli.action) =
         ~typeahead_config
         ~env
         ~prompt_file
+        ~import_transcript
         ~export_file
         ~storage
         ~session_id
@@ -2789,11 +2993,21 @@ let raw_flags_param =
         ~doc:
           "Use durable storage for a new local conversation (the native default). Legacy \
            sessions save on exit without prompting."
+    and import_transcript =
+      flag
+        "--import-transcript"
+        (optional string)
+        ~doc:
+          "FILE Import an edited literal ChatMD transcript into a NEW native local \
+           conversation. The -file definition supplies code/model/tools separately; \
+           transcript scripts/configuration/imports and resource execution reject."
     and rebuild_session_id =
       flag
         "--rebuild-from-prompt"
         (optional string)
-        ~doc:"NAME Rebuild session NAME from its stored prompt.chatmd copy and exit."
+        ~doc:
+          "NAME Rebuild a stopped native/connected session from the host current \
+           catalog, resetting history. Legacy mode uses its stored prompt copy."
     and help_short =
       flag "--help-short" no_arg ~doc:"Print a short usage summary and exit."
     and format =
@@ -2864,6 +3078,7 @@ let raw_flags_param =
      ; no_persist
      ; auto_persist
      ; rebuild_session_id
+     ; import_transcript
      ; help_short
      ; format
      ; json

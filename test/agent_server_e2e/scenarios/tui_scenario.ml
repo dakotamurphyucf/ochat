@@ -279,8 +279,150 @@ let connected http env temporary =
       "connected TUI changed detached liveness")
 ;;
 
+(* Real terminal adoption and maintenance share the same durable embedded host.
+   Transcript data is separate from the configured definition/module inventory. *)
+let imported_project_rebuild env temporary =
+  let fixture = F.create env temporary "tui-import-project" in
+  Support.Provider_fixture.provision ~env fixture;
+  let edit_project = configure_project temporary fixture in
+  let roots = Temp.roots temporary in
+  let root = Filename.concat roots.data "import-project-store" in
+  let input = Filename.concat roots.artifacts "edited-transcript.chatmd" in
+  let output = Filename.concat roots.artifacts "imported-export.chatmd" in
+  Eio.Path.save
+    ~create:(`Exclusive 0o600)
+    (Temp.path temporary input)
+    {|<developer>TUI-fixture-ready</developer>
+<user ochat-history-id="3:old:41">IMPORTED-EDITED-HISTORY</user>|};
+  let definition = Eio.Path.load (Temp.path temporary (Config.prompt_path fixture)) in
+  Eio.Switch.run (fun sw ->
+    let child =
+      spawn
+        ~sw
+        env
+        fixture
+        ~columns:100
+        ~rows:30
+        [ "--local"
+        ; "--data-root"
+        ; root
+        ; "-file"
+        ; Config.prompt_path fixture
+        ; "--import-transcript"
+        ; input
+        ; "--export-file"
+        ; output
+        ]
+    in
+    ready env child;
+    Pty.await_text child ~clock:(Eio.Stdenv.clock env) "IMPORTED-EDITED-HISTORY";
+    Pty.await_text child ~clock:(Eio.Stdenv.clock env) "TUI-project-captured";
+    submit child "stop-after-import";
+    Pty.await_text child ~clock:(Eio.Stdenv.clock env) "TUI-project-captured:submitted";
+    quit env child);
+  let exported = Eio.Path.load (Temp.path temporary output) in
+  F.require
+    (String.is_substring exported ~substring:"IMPORTED-EDITED-HISTORY")
+    "native import/export lost edited transcript";
+  F.require
+    (String.equal
+       definition
+       (Eio.Path.load (Temp.path temporary (Config.prompt_path fixture))))
+    "native adoption overwrote executable definition";
+  let command arguments =
+    Eio.Switch.run (fun sw ->
+      let child =
+        Support.Process_manager.spawn
+          ~sw
+          ~env
+          ~cwd:(Temp.path temporary (Config.physical_workspace fixture))
+          ~environment:(F.environment temporary)
+          ~max_output_bytes:65536
+          (F.tui_executable env
+           :: "--no-config"
+           :: "--local"
+           :: "--data-root"
+           :: root
+           :: "-file"
+           :: Config.prompt_path fixture
+           :: arguments)
+      in
+      let result =
+        Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
+          Support.Process_manager.await child)
+      in
+      F.require
+        (Support.Process_manager.equal_exit result.exit (Exited 0))
+        ("native project command failed: " ^ result.stderr.contents);
+      F.require
+        (not (result.stdout.truncated || result.stderr.truncated))
+        "native project command output truncated";
+      result.stdout.contents)
+  in
+  let session =
+    match Jsonaf.of_string (command [ "--list-sessions"; "--json" ]) with
+    | `Array [ json ] -> Agent_protocol.Session.of_json json |> F.ok
+    | _ -> failwith "transcript adoption did not create exactly one conversation"
+  in
+  let id = Agent_protocol.Id.Session.to_string session.id in
+  let inspect () =
+    command [ "--session-info"; id; "--json" ]
+    |> Jsonaf.of_string
+    |> Agent_protocol.Public.Snapshot.of_json
+    |> F.ok
+    |> Agent_protocol.Public.Snapshot.fields
+  in
+  let before = inspect () in
+  edit_project ();
+  ignore (command [ "--rebuild-from-prompt"; id ] : string);
+  let after = inspect () in
+  F.require
+    (Agent_protocol.Id.Session.equal before.session.id after.session.id)
+    "explicit rebuild replaced conversation identity";
+  F.require
+    (after.session.generation > before.session.generation)
+    "explicit rebuild did not advance generation";
+  F.require
+    (not
+       (Option.equal
+          Agent_protocol.Id.Prompt_revision.equal
+          before.session.prompt_revision
+          after.session.prompt_revision))
+    "explicit rebuild retained the old captured program revision";
+  F.require
+    (not
+       (List.exists after.canonical_history.entries ~f:(fun entry ->
+          List.mem
+            (Support.Public_view.history_text entry)
+            "IMPORTED-EDITED-HISTORY"
+            ~equal:String.equal)))
+    "explicit rebuild unexpectedly retained imported conversation history";
+  Eio.Switch.run (fun sw ->
+    let child =
+      spawn
+        ~sw
+        env
+        fixture
+        ~columns:100
+        ~rows:30
+        [ "--local"
+        ; "--data-root"
+        ; root
+        ; "-file"
+        ; Config.prompt_path fixture
+        ; "--session"
+        ; id
+        ]
+    in
+    ready env child;
+    submit child "run-current-code";
+    Pty.await_text child ~clock:(Eio.Stdenv.clock env) "TUI-project-edited:submitted";
+    quit env child)
+;;
+
 let cases =
   [ "local.durable-retained-commands", Local_storage_scenario.run
+  ; "pty.local-transcript-import-current-rebuild", imported_project_rebuild
   ; "trace.messages-stable-ids", Tui_trace_scenario.messages
   ; "trace.reasoning-tools-progress", Tui_stream_scenario.run
   ; "trace.deferred-overlays-agent-page", Tui_stream_scenario.overlays
