@@ -31,6 +31,8 @@
   authored_agent_call
   captured_child_source
   authored_agent_source
+  authored_native_contract
+  authored_code_preparation
   agent_source_code_view
   authored_agent_binding
   session_management
@@ -189,7 +191,7 @@
   quota_manager
   start_queue
   inference_ledger)
- (private_modules workspace_ownership pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles
+ (private_modules workspace_ownership authored_native_contract pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles
   prompt_project_baseline_record prompt_project_baseline_document)
  (libraries ochat.inference_client ochat.inference_runtime ochat.inference ochat.history_chatmd ochat.transcript
   core
