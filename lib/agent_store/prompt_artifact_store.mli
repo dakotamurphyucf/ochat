@@ -73,6 +73,23 @@ val create : env:Eio_unix.Stdenv.base -> root:string -> (t, Store_error.t) resul
     load or authority grant; each [load] still validates its artifact document. *)
 val open_existing : env:Eio_unix.Stdenv.base -> root:string -> (t, Store_error.t) result
 
+(** Remove interrupted [.install-<transaction>] trees under exclusive startup
+    storage ownership, before any artifact publisher is allowed to run. This
+    operation cannot distinguish an active install from an abandoned one; the
+    caller must hold the storage lock and exclude all publishers until return.
+
+    A complete bounded, link-rejecting scan precedes deletion. Installed revisions
+    and unknown names are preserved; no file contents are read. [max_entries]
+    covers directory enumeration and inspections across the complete operation.
+    Returns the number of removed staging roots. Scan failures leave all entries
+    intact; interrupted deletion can be finished by a later exclusive recovery.
+    Callback exceptions and cancellation propagate unchanged. *)
+val discard_interrupted_installs
+  :  t
+  -> max_entries:int
+  -> checkpoint:(unit -> unit)
+  -> (int, Store_error.t) result
+
 (** [install] writes owner-read-only files into an exclusive staging directory,
     flushes files and staging directories, then renames it to the revision ID and
     flushes the artifact parent before acknowledgment. Uncertain final publication

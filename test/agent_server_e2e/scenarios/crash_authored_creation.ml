@@ -227,8 +227,10 @@ let run_child ?(lose_ack = false) env ~root ~boundary ~mode ~recover =
                     Eio.Promise.await child_waiting;
                     let admitted = record daemon in
                     let child =
-                      R.load (Daemon.registry daemon) admitted.admission.child_session_id
-                      |> F.protocol_ok
+                      (* Inspect the already executing child without competing with
+                         its startup lifecycle reservation. *)
+                      R.find (Daemon.registry daemon) admitted.admission.child_session_id
+                      |> Option.value_exn
                     in
                     let child_state = state child in
                     F.require

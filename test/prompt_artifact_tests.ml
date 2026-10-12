@@ -38,6 +38,80 @@ let reader env root ~bytes =
   |> store_ok
 ;;
 
+let%expect_test "exclusive startup discards only fully scanned interrupted installs" =
+  with_temp_directory "ochat-prompt-staging" (fun env root ->
+    let store = A.create ~env ~root |> store_ok in
+    let artifact = make () in
+    A.install store ~transaction_id artifact |> store_ok;
+    let path name = Eio.Path.(Eio.Stdenv.fs env / root / name) in
+    let staging () =
+      ".install-" ^ P.Id.Transaction.to_string (P.Id.Transaction.create ())
+    in
+    let first = staging () in
+    let second = staging () in
+    let payload name = Filename.concat name "tree/partial.chatmd" in
+    List.iter [ first; second; ".install-unknown"; "notes" ] ~f:(fun name ->
+      Eio.Path.mkdirs ~exists_ok:false ~perm:0o700 (path (Filename.concat name "tree"));
+      Eio.Path.save ~create:(`Exclusive 0o600) (path (payload name)) "retained bytes");
+    let discard ?(max_entries = 4096) checkpoint =
+      A.discard_interrupted_installs store ~max_entries ~checkpoint
+    in
+    let present name =
+      match Eio.Path.kind ~follow:false (path name) with
+      | `Not_found -> false
+      | _ -> true
+    in
+    let unchanged () =
+      List.iter [ first; second; ".install-unknown"; "notes" ] ~f:(fun name ->
+        [%test_eq: string] (Eio.Path.load (path (payload name))) "retained bytes");
+      assert (
+        A.Artifact.same_content artifact (A.load store artifact.revision_id |> store_ok))
+    in
+    (* Even a safe earlier candidate must survive a later unsafe candidate. *)
+    let linked = Filename.concat second "linked" in
+    Eio.Path.symlink ~link_to:(Filename.concat root (payload "notes")) (path linked);
+    assert (Result.is_error (discard Eio.Fiber.check));
+    unchanged ();
+    Eio.Path.unlink (path linked);
+    assert (Result.is_error (discard ~max_entries:0 Eio.Fiber.check));
+    unchanged ();
+    let marker = Failure "staging checkpoint origin" in
+    List.iter [ marker; Eio.Cancel.Cancelled marker ] ~f:(fun original ->
+      let caught =
+        try
+          ignore (discard (fun () -> raise original));
+          false
+        with
+        | actual -> phys_equal actual original
+      in
+      assert caught;
+      unchanged ());
+    let interrupted =
+      try
+        ignore
+          (discard (fun () ->
+             if not (present (payload first) && present (payload second))
+             then raise marker));
+        false
+      with
+      | actual -> phys_equal actual marker
+    in
+    assert interrupted;
+    assert (present first && present second);
+    [%test_eq: int] (discard Eio.Fiber.check |> store_ok) 2;
+    [%test_eq: int] (discard Eio.Fiber.check |> store_ok) 0;
+    assert (not (present first || present second));
+    List.iter [ ".install-unknown"; "notes" ] ~f:(fun name ->
+      [%test_eq: string] (Eio.Path.load (path (payload name))) "retained bytes");
+    assert (
+      A.Artifact.same_content artifact (A.load store artifact.revision_id |> store_ok));
+    print_endline
+      "Unsafe or bounded scans delete nothing; interrupted deletion resumes; installed \
+       and unknown entries survive");
+  [%expect
+    {| Unsafe or bounded scans delete nothing; interrupted deletion resumes; installed and unknown entries survive |}]
+;;
+
 let%expect_test "borrowed tree verification bounds mutations and preserves checkpoints" =
   with_temp_directory "ochat-prompt-bounded-tree" (fun env root ->
     let store = A.create ~env ~root |> store_ok in

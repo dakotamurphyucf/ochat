@@ -1665,6 +1665,27 @@ let start
   in
   let startup_cleanup = Startup_cleanup.create ~sw ~store in
   Startup_cleanup.protect startup_cleanup (fun () ->
+    let%bind () =
+      match options.startup_mode with
+      | Operator_only -> Ok ()
+      | Execute | On_demand ->
+        (* The exclusive store owner exists, but no embedding callback, catalog
+           publication or runtime publisher has been allowed to start yet. *)
+        let%bind artifacts =
+          Agent_store.Prompt_artifact_store.open_existing
+            ~env
+            ~root:
+              (Agent_store.Data_root.prompt_artifacts_path
+                 (Agent_store.Session_store.data_root store))
+          |> Result.map_error ~f:protocol_of_store
+        in
+        Agent_store.Prompt_artifact_store.discard_interrupted_installs
+          artifacts
+          ~max_entries:options.factory_limits.delegation_artifact_max_entries
+          ~checkpoint:Eio.Fiber.check
+        |> Result.map_error ~f:protocol_of_store
+        |> Result.map ~f:ignore
+    in
     let%bind () = before_activation store in
     let%bind provider_operator =
       match options.provider_operator_factory with

@@ -243,6 +243,10 @@ let open_existing ~env ~root =
       Error (Store_error.of_exn ~operation:"open prompt artifact store" ~path:root exn))
 ;;
 
+let discard_interrupted_installs t ~max_entries ~checkpoint =
+  Prompt_artifact_staging.discard ~env:t.env ~root:t.root ~max_entries ~checkpoint
+;;
+
 let revision_directory t revision_id =
   Filename.concat t.root (Agent_protocol.Id.Prompt_revision.to_string revision_id)
 ;;
