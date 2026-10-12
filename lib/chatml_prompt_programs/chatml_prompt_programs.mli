@@ -35,6 +35,9 @@ module Limits : sig
 
   (** Literal configured ceiling, not remaining/consumed accounting. *)
   val max_programs : t -> int
+
+  (** Complete immutable numeric policy, including document ceilings. No custody bytes. *)
+  val policy_identity : t -> Sexp.t
 end
 
 module Binding : sig

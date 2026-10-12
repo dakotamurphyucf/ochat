@@ -66,6 +66,24 @@ val read_state
   -> Agent_protocol.Id.Session.t
   -> (Agent_session.Session_state.t, Agent_protocol.Error.t) result
 
+(** Startup-only immutable indexed read. Requires no loaded entries, no installed
+    loader or active lifecycle reservations, and a live registry. The supplied
+    entry must equal the actual indexed projection. A read lease excludes owner
+    shutdown through [f], which runs outside the registry mutex; the same startup
+    conditions and exact entry are checked before delivering its result.
+
+    The caller owns the exclusive host/store startup scope, before publishing
+    connections or starting recovery/actors/schedulers. [f] may read this entry's
+    retained files under their existing owner; it must not mutate this registry,
+    install a loader, activate sessions, or retain a borrowed native Handle. No
+    source or runtime authority is conveyed by the entry. Original exceptions and
+    cancellation propagate through protected read-lease cleanup. *)
+val with_indexed_retention_read
+  :  t
+  -> Agent_store.Session_index.Entry.t
+  -> f:(Agent_store.Session_index.Entry.t -> ('a, Agent_protocol.Error.t) Result.t)
+  -> ('a, Agent_protocol.Error.t) Result.t
+
 (** Same immutable authorization/IO boundary as [read_state]. Loaded state and
     transient calls are captured atomically in one mailbox turn; stored reads
     advertise Unavailable rather than inventing empty live-call state. *)

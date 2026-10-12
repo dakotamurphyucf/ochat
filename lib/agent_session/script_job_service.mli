@@ -39,6 +39,18 @@ val create
   :  env:Eio_unix.Stdenv.base
   -> policy:Chat_response.One_off_request.policy
   -> current_capabilities:(unit -> Chat_response.Tool_capability.t)
+  -> prepare_source:
+       (binding:Chat_response.Tool_capability.binding
+        -> owner:Agent_protocol.Job.launch_owner
+        -> request:Chat_response.Background_request.t
+        -> checkpoint:(unit -> unit)
+        -> ( Chat_response.Background_request.Agent_artifact.t option
+             , Agent_protocol.Error.t )
+             Result.t)
+       (** Bound to actual native registrations. Runs cancellably before stage,
+           outside actor/capacity coordination; must install and verify selected
+           code first. No callback retained in the persisted request. Scope,
+           exact binding/pins and cancellation are rechecked after preparation. *)
   -> host:host
   -> t
 

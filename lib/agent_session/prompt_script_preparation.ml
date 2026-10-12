@@ -70,6 +70,7 @@ module Policy = struct
     }
 
   let compilation t = t.compilation
+  let max_work_steps t = t.max_work_steps
 
   let create
         ~compilation
@@ -148,7 +149,7 @@ let runtime_errors diagnostics =
       error.message)
 ;;
 
-let capture
+let capture_for_role
       policy
       ?startup
       ~root_role
@@ -198,10 +199,7 @@ let capture
           let%bind roles =
             Roles.collect
               (Owner.Capture.value capture)
-              ~root_role:
-                (match root_role with
-                 | Root_role.Ui -> Roles.Role.Ui
-                 | Headless -> Roles.Role.Headless)
+              ~root_role
               ~max_context_roles:policy.max_context_roles
               ~max_reference_visits:policy.max_reference_visits
               ~checkpoint:poll
@@ -312,5 +310,70 @@ let capture
             { Prepared.programs; plans; captured_plans }
         with
         | Abort.Stop errors -> Error errors))
+    ()
+;;
+
+let capture
+      policy
+      ?startup
+      ~root_role
+      ~host
+      ~scope
+      ~capture
+      ~operation
+      ~provided
+      ~env
+      ~checkpoint
+      ()
+  =
+  let root_role =
+    match root_role with
+    | Root_role.Ui -> Roles.Role.Ui
+    | Headless -> Roles.Role.Headless
+  in
+  capture_for_role
+    policy
+    ?startup
+    ~root_role
+    ~host
+    ~scope
+    ~capture
+    ~operation
+    ~provided
+    ~env
+    ~checkpoint
+    ()
+;;
+
+let capture_child
+      policy
+      ?startup
+      ~invocation
+      ~host
+      ~scope
+      ~capture
+      ~operation
+      ~provided
+      ~env
+      ~checkpoint
+      ()
+  =
+  let root_role =
+    match invocation with
+    | Runtime_script_preparation.Invocation.Ui -> Roles.Role.Ui
+    | Headless -> Roles.Role.Headless
+    | Delegated_ui -> Roles.Role.Delegated_ui
+  in
+  capture_for_role
+    policy
+    ?startup
+    ~root_role
+    ~host
+    ~scope
+    ~capture
+    ~operation
+    ~provided
+    ~env
+    ~checkpoint
     ()
 ;;

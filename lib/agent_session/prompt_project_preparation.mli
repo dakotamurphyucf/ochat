@@ -52,3 +52,26 @@ val capture
   -> checkpoint:(unit -> unit)
   -> unit
   -> (Prepared.t, Prompt_revision_builder.Diagnostic.t list) Result.t
+
+(** Same authoritative receipt/slot/role operation selection for a genuinely
+    captured child. Delegated UI is permitted only as an explicit actual child
+    invocation. Original source intent remains unchanged. This prepares portable
+    custody/association; no dependency baseline publication or child reservation.
+    Bounds, original callbacks and failures match [capture]. *)
+val capture_child
+  :  Prompt_script_preparation.Policy.t
+  -> ?startup:Chat_response.Startup_compilation.t
+  -> mode:Mode.t
+  -> snapshot:Prompt_project_baseline_store.Snapshot.t
+  -> artifact_store:Agent_store.Prompt_artifact_store.t
+  -> baseline_limits:Prompt_project_baseline.Limits.t
+  -> custody_limits:Chatml_prompt_programs.Limits.t
+  -> invocation:Runtime_script_preparation.Invocation.t
+  -> host:Prompt_script_preparation.Host.t
+  -> scope:Prompt_source_owner.Scope.t
+  -> capture:Prompt_source_owner.Capture.t
+  -> provided:(Chatml_prompt_programs.Binding.t * Chatml_prepared_program.t) list
+  -> env:Eio_unix.Stdenv.base
+  -> checkpoint:(unit -> unit)
+  -> unit
+  -> (Prepared.t, Prompt_revision_builder.Diagnostic.t list) Result.t

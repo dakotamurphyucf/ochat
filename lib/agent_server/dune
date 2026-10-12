@@ -71,6 +71,7 @@
   session_seed_receipt
   session_seed_command
   session_factory
+  retained_job_artifacts
   local_storage
   local_selection
   retained_session

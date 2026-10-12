@@ -46,6 +46,9 @@ type t =
       expanded MCP names. Forcing requires the host's secure ID generator.
       Selection never rebuilds tool declarations; invocation policy remains
       the owning service's responsibility. *)
+  ; native_registrations : Native_tool_pool.Registration.t list
+    (** Exact original source associations. Native inheritance filters actual
+        function identity; it never discovers source authority by name or JSON. *)
   ; capabilities : (Tool_capability.t, Tool_capability.error) result Lazy.t
     (** Extension preparation includes source-bound managed capabilities here;
         [functions] continues to contain only actual native implementations. *)
@@ -268,7 +271,22 @@ type native_registration = Native_tool_pool.Registration.t =
     (** Trusted metadata on this implementation, retained in its capability
         identity and selection. The host still must fulfill the corresponding
         authoring policy before general model-visible exposure. *)
+  ; source_requirement : Native_tool_pool.Source_requirement.t
   }
+
+(** Bound count with a prefix traversal before lookup, polling every visited
+    registration under the caller's shared startup/job checkpoint. Reject foreign
+    native functions and Source without an installed-artifact preparer. Ordinary
+    and Managed bindings need no source selection. Caller must already verify
+    the selected binding/request pins. Exceptions and cancellation keep identity. *)
+val prepare_agent_source
+  :  t
+  -> binding:Tool_capability.binding
+  -> owner:Agent_protocol.Job.launch_owner
+  -> request:Background_request.t
+  -> max_registrations:int
+  -> checkpoint:(unit -> unit)
+  -> (Background_request.Agent_artifact.t option, Agent_protocol.Error.t) Result.t
 
 (** Prepare a definition for an extensibility-aware host. Validates the captured
     declarations, constructs native resources through the same shell authorization

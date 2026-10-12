@@ -40,6 +40,10 @@ val compilation : t -> Chatml_compilation.limits
 val restoration : t -> Chatml_prompt_programs.Limits.t
 val max_custody_work_steps : t -> int
 
+(** Complete bounded numeric compilation/planning/restoration policy. Contains no
+    callbacks, compiler state, parsed inputs or execution authority. *)
+val policy_identity : t -> Sexp.t
+
 (** Plan the actual parser's scripts before authoring helpers are added. Uses the
     existing pure shell manifest compiler and the explicit invocation contract.
     No filesystem access, native setup or initializer. The borrowed startup owner

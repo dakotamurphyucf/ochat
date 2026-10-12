@@ -41,9 +41,10 @@ let source_values captures =
   |> List.sort ~compare:(fun (left, _) (right, _) -> String.compare left right)
 ;;
 
-let artifact_sources sources =
+let artifact_sources ?(checkpoint = Eio.Fiber.check) sources =
   sources
   |> List.map ~f:(fun (relative_path, contents) ->
+    checkpoint ();
     Agent_store.Prompt_artifact_store.Source.create ~relative_path ~contents)
   |> Result.all
 ;;
@@ -53,6 +54,7 @@ let shell_digest (inspection : Chat_response.Agent_runtime.resource_inspection) 
 ;;
 
 let build_manifest
+      ?(checkpoint = Eio.Fiber.check)
       definition
       ~canonical_source
       ~root
@@ -68,6 +70,7 @@ let build_manifest
     ; root_sha256 = (Chatmd_shell_spec.Source_ref.digest root : string)
     ; sources =
         (List.map sources ~f:(fun (path, contents) ->
+           checkpoint ();
            path, Chatmd_shell_spec.Source_ref.digest contents)
          : (string * string) list)
     ; shell_manifest_sha256 : string
@@ -481,8 +484,9 @@ let prepared_revision
        |> Or_error.ok_exn)
 ;;
 
-let parse_artifact ?content_limits artifact_store artifact =
+let parse_artifact ?checkpoint ?content_limits artifact_store artifact =
   parse_tree
+    ?checkpoint
     ?content_limits
     (Agent_store.Prompt_artifact_store.materialized_tree
        artifact_store
@@ -528,6 +532,7 @@ let restore ?content_limits ~artifact_store (definition : Prompt_definition.t) r
 ;;
 
 let publish_capture
+      ?(checkpoint = Eio.Fiber.check)
       ?prepare_programs
       ?prepare_content
       ~source_receipt
@@ -551,154 +556,166 @@ let publish_capture
     | None -> Ok None
     | Some prepare -> Result.map (prepare captured) ~f:Option.some
   in
-  try
-    let root_input = Prompt.Chat_markdown.Parsed.root_input (Capture.root captured) in
-    let root = Chatmd_parser_input.authored root_input in
-    let sources = Capture.sources captured in
-    let root_relative_path = Chatmd_parser_input.path root_input in
-    let%bind authored =
-      Prompt_program_custody.authored
-        ~root_file:root_relative_path
-        ~sources:((root_relative_path, root) :: sources)
-      |> Result.map_error ~f:(fun e ->
-        [ diagnostic "prompt.custody" (Error.to_string_hum e) ])
-    in
-    let%bind programs =
-      Prompt_program_custody.prepare
-        authored
-        ~parsed_contexts:
-          (Capture.root captured :: List.map (Capture.agents captured) ~f:snd)
-        ~root:root_input
-        ~supplied
-        ~checkpoint:Eio.Fiber.check
-      |> Result.map_error ~f:(fun _ ->
-        [ diagnostic "prompt.custody" "Preparation custody does not match actual capture"
-        ])
-    in
-    let contexts = Capture.root captured :: List.map (Capture.agents captured) ~f:snd in
-    let%bind prepared_content =
-      match supplied_content with
-      | None ->
-        let captured_slot =
-          List.exists contexts ~f:(fun parsed ->
-            Prompt_content_custody.requires_captured_documents
-              parsed
-              ~checkpoint:Eio.Fiber.check)
-        in
-        if captured_slot
-        then
-          Error
-            [ diagnostic
-                "prompt.content"
-                "Captured documents require completed source acquisition"
-            ]
-        else Ok None
-      | Some supplied ->
-        let limits = Chatmd_content_capture.limits supplied in
-        let%map prepared =
-          Prompt_content_custody.prepare
-            ~parsed_contexts:contexts
-            ~programs
-            ~supplied:(Some supplied)
-            ~limits
-            ~checkpoint:Eio.Fiber.check
-          |> Result.map_error ~f:(fun _ ->
-            [ diagnostic
-                "prompt.content"
-                "Document custody does not match actual capture or allowance"
-            ])
-        in
-        Some prepared
-    in
-    let content =
-      Option.map prepared_content ~f:Prompt_content_custody.Prepared.content
-    in
-    let canonical_source = canonical_source () in
-    let shell_manifest_sha256 = Capture.shell_manifest_sha256 captured in
-    let%bind programs_sha256 =
-      Prompt_program_custody.fingerprint programs ~checkpoint:Eio.Fiber.check
-      |> Result.map_error ~f:(fun _ ->
-        [ diagnostic "prompt.custody" "Complete program manifest exceeds artifact policy"
-        ])
-    in
-    let manifest =
-      build_manifest
-        definition
-        ~canonical_source
-        ~root
-        ~sources
-        ~shell_manifest_sha256
-        ~programs_sha256
-    in
-    let%bind manifest =
-      match content with
-      | None -> Ok manifest
-      | Some content ->
-        let%map digest =
-          Prompt_content_custody.fingerprint content ~checkpoint:Eio.Fiber.check
-          |> Result.map_error ~f:(fun _ ->
-            [ diagnostic
-                "prompt.content"
-                "Complete content manifest exceeds artifact policy"
-            ])
-        in
-        manifest ^ "#document-content.v1:" ^ digest
-    in
-    let manifest =
-      match source_receipt with
-      | None -> manifest
-      | Some receipt ->
-        manifest
-        ^ "#source-selection:"
-        ^ Agent_store.Prompt_source_receipt.fingerprint receipt
-    in
-    let revision_id = revision_id manifest in
-    let%bind source_values =
-      artifact_sources sources |> Result.map_error ~f:(fun error -> [ store_error error ])
-    in
-    let%bind artifact =
-      Agent_store.Prompt_artifact_store.Artifact.create
-        ~revision_id
-        ~prompt_definition_id:definition.id
-        ?source_receipt
-        ~canonical_source
-        ~root_relative_path
-        ~root_chatmd:root
-        ~sources:source_values
-        ~parser_schema_version:5
-        ~runtime_schema_version:1
-        ~shell_manifest_sha256
-        ~program_bundle:(Chatml_prompt_programs.to_storage programs)
-        ?content_bundle:(Option.map content ~f:Chatmd_prompt_content.to_storage)
-        ~created_at
-        ()
-      |> Result.map_error ~f:(fun e -> [ store_error e ])
-    in
-    let fresh_replay =
-      Option.map prepared_content ~f:(fun prepared ->
-        replay_custody
-          ~content_input:(Content_input.Fresh prepared)
-          (Agent_store.Prompt_artifact_store.materialized_tree artifact_store revision_id)
-          artifact)
-    in
-    let%bind artifact =
-      install artifact_store ~transaction_id artifact
-      |> Result.map_error ~f:(fun e -> [ store_error e ])
-    in
-    let replayed =
-      match fresh_replay with
-      | None -> parse_artifact artifact_store artifact
-      | Some ((tree, _, _) as replayed) ->
-        Agent_store.Prompt_artifact_store.verify_tree ~root:tree artifact
-        |> Result.map_error ~f:(fun error ->
-          Sexp.to_string_hum ([%sexp_of: Agent_store.Store_error.t] error))
-        |> Result.ok_or_failwith;
-        replayed
-    in
-    Ok (prepared_revision ~definition ~artifact replayed)
-  with
-  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
-  | exn -> Error [ exception_error ~source:definition.root_file exn ]
+  Prompt_parser_boundary.run
+    ~checkpoint
+    ~on_parser_error:(fun exn ->
+      Error [ exception_error ~source:definition.root_file exn ])
+    ~f:(fun checkpoint ->
+      checkpoint ();
+      let root_input = Prompt.Chat_markdown.Parsed.root_input (Capture.root captured) in
+      let root = Chatmd_parser_input.authored root_input in
+      let sources = Capture.sources captured in
+      let root_relative_path = Chatmd_parser_input.path root_input in
+      let%bind authored =
+        Prompt_program_custody.authored
+          ~root_file:root_relative_path
+          ~sources:((root_relative_path, root) :: sources)
+        |> Result.map_error ~f:(fun e ->
+          [ diagnostic "prompt.custody" (Error.to_string_hum e) ])
+      in
+      let%bind programs =
+        Prompt_program_custody.prepare
+          authored
+          ~parsed_contexts:
+            (Capture.root captured :: List.map (Capture.agents captured) ~f:snd)
+          ~root:root_input
+          ~supplied
+          ~checkpoint
+        |> Result.map_error ~f:(fun _ ->
+          [ diagnostic
+              "prompt.custody"
+              "Preparation custody does not match actual capture"
+          ])
+      in
+      let contexts = Capture.root captured :: List.map (Capture.agents captured) ~f:snd in
+      let%bind prepared_content =
+        match supplied_content with
+        | None ->
+          let captured_slot =
+            List.exists contexts ~f:(fun parsed ->
+              Prompt_content_custody.requires_captured_documents parsed ~checkpoint)
+          in
+          if captured_slot
+          then
+            Error
+              [ diagnostic
+                  "prompt.content"
+                  "Captured documents require completed source acquisition"
+              ]
+          else Ok None
+        | Some supplied ->
+          let limits = Chatmd_content_capture.limits supplied in
+          let%map prepared =
+            Prompt_content_custody.prepare
+              ~parsed_contexts:contexts
+              ~programs
+              ~supplied:(Some supplied)
+              ~limits
+              ~checkpoint
+            |> Result.map_error ~f:(fun _ ->
+              [ diagnostic
+                  "prompt.content"
+                  "Document custody does not match actual capture or allowance"
+              ])
+          in
+          Some prepared
+      in
+      let content =
+        Option.map prepared_content ~f:Prompt_content_custody.Prepared.content
+      in
+      let canonical_source = canonical_source () in
+      let shell_manifest_sha256 = Capture.shell_manifest_sha256 captured in
+      let%bind programs_sha256 =
+        Prompt_program_custody.fingerprint programs ~checkpoint
+        |> Result.map_error ~f:(fun _ ->
+          [ diagnostic
+              "prompt.custody"
+              "Complete program manifest exceeds artifact policy"
+          ])
+      in
+      let manifest =
+        build_manifest
+          ~checkpoint
+          definition
+          ~canonical_source
+          ~root
+          ~sources
+          ~shell_manifest_sha256
+          ~programs_sha256
+      in
+      let%bind manifest =
+        match content with
+        | None -> Ok manifest
+        | Some content ->
+          let%map digest =
+            Prompt_content_custody.fingerprint content ~checkpoint
+            |> Result.map_error ~f:(fun _ ->
+              [ diagnostic
+                  "prompt.content"
+                  "Complete content manifest exceeds artifact policy"
+              ])
+          in
+          manifest ^ "#document-content.v1:" ^ digest
+      in
+      let manifest =
+        match source_receipt with
+        | None -> manifest
+        | Some receipt ->
+          manifest
+          ^ "#source-selection:"
+          ^ Agent_store.Prompt_source_receipt.fingerprint receipt
+      in
+      let revision_id = revision_id manifest in
+      let%bind source_values =
+        artifact_sources ~checkpoint sources
+        |> Result.map_error ~f:(fun error -> [ store_error error ])
+      in
+      let%bind artifact =
+        Agent_store.Prompt_artifact_store.Artifact.create
+          ~revision_id
+          ~prompt_definition_id:definition.id
+          ?source_receipt
+          ~canonical_source
+          ~root_relative_path
+          ~root_chatmd:root
+          ~sources:source_values
+          ~parser_schema_version:5
+          ~runtime_schema_version:1
+          ~shell_manifest_sha256
+          ~program_bundle:(Chatml_prompt_programs.to_storage programs)
+          ?content_bundle:(Option.map content ~f:Chatmd_prompt_content.to_storage)
+          ~created_at
+          ()
+        |> Result.map_error ~f:(fun e -> [ store_error e ])
+      in
+      let fresh_replay =
+        Option.map prepared_content ~f:(fun prepared ->
+          replay_custody
+            ~checkpoint
+            ~content_input:(Content_input.Fresh prepared)
+            (Agent_store.Prompt_artifact_store.materialized_tree
+               artifact_store
+               revision_id)
+            artifact)
+      in
+      checkpoint ();
+      let%bind artifact =
+        install artifact_store ~transaction_id artifact
+        |> Result.map_error ~f:(fun e -> [ store_error e ])
+      in
+      let replayed =
+        match fresh_replay with
+        | None -> parse_artifact ~checkpoint artifact_store artifact
+        | Some ((tree, _, _) as replayed) ->
+          Agent_store.Prompt_artifact_store.verify_tree ~root:tree artifact
+          |> Result.map_error ~f:(fun error ->
+            Sexp.to_string_hum ([%sexp_of: Agent_store.Store_error.t] error))
+          |> Result.ok_or_failwith;
+          replayed
+      in
+      let revision = prepared_revision ~checkpoint ~definition ~artifact replayed in
+      checkpoint ();
+      Ok revision)
 ;;
 
 let build
@@ -736,6 +753,7 @@ let build
 ;;
 
 let publish_selected_capture
+      ?checkpoint
       ?prepare_programs
       ?prepare_content
       ~capture
@@ -763,6 +781,7 @@ let publish_selected_capture
       ]
   else
     publish_capture
+      ?checkpoint
       ?prepare_programs
       ?prepare_content
       ~source_receipt:(Some source_receipt)
@@ -797,6 +816,7 @@ let build_captured
 ;;
 
 let build_captured_entry
+      ?checkpoint
       ?prepare_programs
       ?prepare_content
       ~entry
@@ -807,6 +827,7 @@ let build_captured_entry
       ()
   =
   publish_selected_capture
+    ?checkpoint
     ?prepare_programs
     ?prepare_content
     ~capture

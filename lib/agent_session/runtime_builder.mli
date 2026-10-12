@@ -61,6 +61,7 @@ module Script_preparation = Runtime_script_preparation
     registrations reject. An empty list supplies no additional implementations. *)
 val prepare_resources
   :  startup:Chat_response.Startup_compilation.t option
+  -> agent_source:Captured_agent_runner.Source_binding.t option
   -> root_invocation:
        Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
   -> script_preparation:Script_preparation.t option
@@ -113,6 +114,7 @@ type authored_resources = private
     approvals or derive authority from model-supplied arguments. *)
 val prepare_authored_resources
   :  startup:Chat_response.Startup_compilation.t option
+  -> agent_source:Captured_agent_runner.Source_binding.t option
   -> script_preparation:Script_preparation.t option
   -> content_limits:Chatmd_prompt_content.Limits.t option
   -> native_registrations:Chat_response.Agent_runtime.native_registration list
@@ -366,6 +368,7 @@ val moderator_snapshot_observer
     effects on external tools/files are not rolled back by session transactions. *)
 val build
   :  startup:Chat_response.Startup_compilation.t option
+  -> agent_source:Captured_agent_runner.Source_binding.t option
   -> root_invocation:
        Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
   -> script_preparation:Script_preparation.t option
@@ -409,6 +412,7 @@ val build
     ordinary hosts continue using [build]. *)
 val build_with_extensions
   :  startup:Chat_response.Startup_compilation.t option
+  -> agent_source:Captured_agent_runner.Source_binding.t option
   -> root_invocation:
        Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
   -> script_preparation:Script_preparation.t option
@@ -544,7 +548,15 @@ val build_authored_child
     belong to this runtime; install and retire it with the foreground worker. *)
 val inference_execution : t -> Inference_client.Execution.t
 
-(** Host-only attachment of actual admitted original-source loan. Factory validates
+(** [agent_source] binds each actual restored revision before native registration.
+    None preserves legacy native construction. Some requires explicit semantic
+    policy and owned revision; it uses this constructor's actual shell policies.
+    The binding retains the explicit host content ceiling, never inferred from
+    stored metadata. Bound ports borrow host Store/source owners
+    through the resource switch. Fresh persistent specialist rebind remains a
+    separate Authored/code-view operation.
+
+    Host-only attachment of actual admitted original-source loan. Factory validates
     receipt/current catalog before native setup; runtime/private resources share
     one root loan under actual ancestor lifetime. No tool/native grant is created.
     Live runtime close first joins its existing borrowers, then releases only an

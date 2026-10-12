@@ -11,6 +11,7 @@ module Limits = struct
     ; metadata_bytes : int
     ; work_steps : int
     }
+  [@@deriving sexp_of]
 
   let create ~max_programs ~max_metadata_bytes ~max_work_steps =
     if max_programs <= 0 || max_metadata_bytes <= 0 || max_work_steps <= 0
@@ -22,6 +23,8 @@ module Limits = struct
         ; work_steps = max_work_steps
         }
   ;;
+
+  let policy_identity = sexp_of_t
 end
 
 module Program = struct

@@ -13,6 +13,9 @@ module Limits : sig
     -> max_metadata_bytes:int
     -> max_work_steps:int
     -> t Or_error.t
+
+  (** Bounded immutable numeric policy projection; contains no callback or authority. *)
+  val policy_identity : t -> Sexp.t
 end
 
 module Program : sig

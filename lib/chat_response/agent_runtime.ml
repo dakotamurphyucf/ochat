@@ -16,10 +16,12 @@ type native_registration = Native_tool_pool.Registration.t =
   ; implementation_revision : string
   ; result_contract : Tool_capability.result_contract
   ; authoring_metadata : Chatmd_shell_spec.Authoring_metadata.t option
+  ; source_requirement : Native_tool_pool.Source_requirement.t
   }
 
 type t =
   { functions : Ochat_function.t list
+  ; native_registrations : Native_tool_pool.Registration.t list
   ; capabilities : (Tool_capability.t, Tool_capability.error) result Lazy.t
   ; classifications : (string * Tool_execution_event.agent_page_kind) list
   ; shell_tool_names : String.Set.t
@@ -676,6 +678,7 @@ let create_native
   in
   let native =
     { functions = Native_tool_pool.functions pool
+    ; native_registrations = Native_tool_pool.registrations pool
     ; capabilities
     ; classifications = Native_tool_pool.classifications pool
     ; shell_tool_names = shell_tool_names declarations
@@ -1006,6 +1009,9 @@ let inherit_native ?managed ~(parent : t) ~capabilities () =
   Ok
     { parent with
       functions = List.rev functions
+    ; native_registrations =
+        List.filter parent.native_registrations ~f:(fun registration ->
+          List.exists functions ~f:(phys_equal registration.implementation))
     ; capabilities = lazy (Ok capabilities)
     ; classifications =
         List.filter parent.classifications ~f:(fun (name, _) -> Set.mem names name)
@@ -1013,4 +1019,55 @@ let inherit_native ?managed ~(parent : t) ~capabilities () =
     ; moderator_shell_runtime = None
     ; legacy_moderator = None
     }
+;;
+
+let prepare_agent_source t ~binding ~owner ~request ~max_registrations ~checkpoint =
+  let open Result.Let_syntax in
+  let poll () =
+    Eio.Fiber.check ();
+    checkpoint ();
+    Eio.Fiber.check ()
+  in
+  let invalid message = Error (Agent_protocol.Error.invalid_request message) in
+  if max_registrations < 0
+  then invalid "invalid source registration count allowance"
+  else (
+    match Tool_capability.native_implementation binding with
+    | None -> Ok None
+    | Some implementation ->
+      let rec admit remaining = function
+        | [] -> Ok ()
+        | _ :: _ when remaining <= 0 ->
+          invalid "source registrations exceed their count allowance"
+        | _ :: rest ->
+          poll ();
+          admit (remaining - 1) rest
+      in
+      let%bind () = admit max_registrations t.native_registrations in
+      let rec find found = function
+        | [] ->
+          (match found with
+           | None -> invalid "native source target belongs to another runtime"
+           | Some Native_tool_pool.Source_requirement.Ordinary -> Ok None
+           | Some (Source None) -> invalid "queued source preparer is unavailable"
+           | Some (Source (Some registration)) ->
+             Native_source_registration.prepare
+               registration
+               ~binding
+               ~owner
+               ~request
+               ~checkpoint)
+        | registration :: rest ->
+          poll ();
+          if
+            phys_equal
+              implementation
+              registration.Native_tool_pool.Registration.implementation
+          then (
+            match found with
+            | None -> find (Some registration.source_requirement) rest
+            | Some _ -> invalid "native source target has ambiguous registrations")
+          else find found rest
+      in
+      find None t.native_registrations)
 ;;

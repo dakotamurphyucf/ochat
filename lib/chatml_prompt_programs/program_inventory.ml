@@ -68,6 +68,20 @@ module Limits = struct
       })
   ;;
 
+  let policy_identity t =
+    let module D = Document_schema.Limits in
+    [%sexp
+      (t.max_programs : int)
+    , (t.max_parser_inputs : int)
+    , (t.max_logical_sources : int)
+    , (t.max_total_input_bytes : int)
+    , (t.project_work_steps : int)
+    , (D.max_bytes t.document : int)
+    , (D.max_depth t.document : int)
+    , (D.max_fields t.document : int)
+    , (D.max_nodes t.document : int)]
+  ;;
+
   let max_programs t = t.max_programs
   let max_parser_inputs t = t.max_parser_inputs
   let max_logical_sources t = t.max_logical_sources

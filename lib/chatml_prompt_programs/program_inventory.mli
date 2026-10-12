@@ -22,6 +22,7 @@ module Limits : sig
     -> document:Document_schema.Limits.t
     -> t Or_error.t
 
+  val policy_identity : t -> Sexp.t
   val max_programs : t -> int
   val max_parser_inputs : t -> int
   val max_logical_sources : t -> int

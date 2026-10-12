@@ -52,7 +52,7 @@ let store_message = function
   | Store error -> Sexp.to_string_hum (Agent_store.Store_error.sexp_of_t error)
 ;;
 
-let capture
+let capture_with
       policy
       ?startup
       ~mode
@@ -60,7 +60,7 @@ let capture
       ~artifact_store
       ~baseline_limits
       ~custody_limits
-      ~root_role
+      ~capture_sources
       ~host
       ~scope
       ~capture
@@ -182,10 +182,9 @@ let capture
             in
             let open Result.Let_syntax in
             let%map prepared =
-              Sources.capture
+              capture_sources
                 policy
-                ~startup
-                ~root_role
+                ?startup:(Some startup)
                 ~host
                 ~scope
                 ~capture
@@ -209,5 +208,75 @@ let capture
             { Prepared.programs; association }
           with
           | Abort.Stop diagnostics -> Error diagnostics))
+    ()
+;;
+
+let capture
+      policy
+      ?startup
+      ~mode
+      ~snapshot
+      ~artifact_store
+      ~baseline_limits
+      ~custody_limits
+      ~root_role
+      ~host
+      ~scope
+      ~capture
+      ~provided
+      ~env
+      ~checkpoint
+      ()
+  =
+  capture_with
+    policy
+    ?startup
+    ~mode
+    ~snapshot
+    ~artifact_store
+    ~baseline_limits
+    ~custody_limits
+    ~capture_sources:(Sources.capture ~root_role)
+    ~host
+    ~scope
+    ~capture
+    ~provided
+    ~env
+    ~checkpoint
+    ()
+;;
+
+let capture_child
+      policy
+      ?startup
+      ~mode
+      ~snapshot
+      ~artifact_store
+      ~baseline_limits
+      ~custody_limits
+      ~invocation
+      ~host
+      ~scope
+      ~capture
+      ~provided
+      ~env
+      ~checkpoint
+      ()
+  =
+  capture_with
+    policy
+    ?startup
+    ~mode
+    ~snapshot
+    ~artifact_store
+    ~baseline_limits
+    ~custody_limits
+    ~capture_sources:(Sources.capture_child ~invocation)
+    ~host
+    ~scope
+    ~capture
+    ~provided
+    ~env
+    ~checkpoint
     ()
 ;;

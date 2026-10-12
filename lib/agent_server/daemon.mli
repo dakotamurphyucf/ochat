@@ -36,6 +36,11 @@ type options =
     (** Positive complete-invocation first-Created/receipt recovery profile shared
         by Execute/On_demand startup and Pending original command reconciliation.
         No runtime/source recapture occurs; limits do not enlarge transport bytes. *)
+  ; retained_artifact_limits : Retained_job_artifacts.Limits.t
+    (** Aggregate startup-only session/archive/job inventory and collector traversal
+        bounds. Used before installing a loader or recovering actors. Existing
+        snapshot/journal/archive byte ceilings remain per-file. Incomplete protection
+        skips all artifact pruning; it does not weaken ordinary recovery validation. *)
   ; quota_limits : Agent_session.Quota_manager.limits
   ; reviewer_resolver : Catalog_builder.reviewer_resolver option
   ; policy_evaluator_resolver : Catalog_builder.policy_evaluator_resolver option

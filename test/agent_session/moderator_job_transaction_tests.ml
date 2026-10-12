@@ -73,6 +73,9 @@ let%expect_test "moderator saves select jobs before persistence and never reject
          in
          let jobs =
            Jobs.create
+             ~prepare_source:(fun ~binding:_ ~owner:_ ~request:_ ~checkpoint ->
+               checkpoint ();
+               Ok None)
              ~env
              ~policy:Chat_response.One_off_request.default_policy
              ~current_capabilities:(fun () -> !registry)

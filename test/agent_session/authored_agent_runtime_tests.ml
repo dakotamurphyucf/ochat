@@ -118,6 +118,7 @@ let on_event ctx state event = match event with
                 ()
             in
             B.prepare_authored_resources
+              ~agent_source:None
               ~startup:None
               ~script_preparation:(Some (Fixtures.script_preparation ()))
               ~content_limits:None

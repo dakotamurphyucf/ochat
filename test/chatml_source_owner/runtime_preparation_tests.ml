@@ -272,6 +272,7 @@ let%expect_test
         in
         let resources =
           B.prepare_resources
+            ~agent_source:None
             ~startup:None
             ~root_invocation:Ui
             ~script_preparation:(Some (policy ()))

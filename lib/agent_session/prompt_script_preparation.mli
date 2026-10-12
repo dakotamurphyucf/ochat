@@ -33,6 +33,10 @@ module Policy : sig
 
   val compilation : t -> Chatml_compilation.limits
 
+  (** The same whole source-helper cooperative work ceiling, for enclosing child
+      capture/publication. Does not reset native or semantic inner allowances. *)
+  val max_work_steps : t -> int
+
   (** One source-only callback's policy. Compilation supplies the original startup
       deadline; it does not authorize compilation or activation. Role/reference
       counts are bounded before queue/list retention. Work covers ALL role planning,
@@ -115,6 +119,26 @@ val capture
   :  Policy.t
   -> ?startup:Chat_response.Startup_compilation.t
   -> root_role:Root_role.t
+  -> host:Host.t
+  -> scope:Prompt_source_owner.Scope.t
+  -> capture:Prompt_source_owner.Capture.t
+  -> operation:
+       (Chat_response.Script_contract_plan.Program.t -> Chatml_project_build.Operation.t)
+  -> provided:(Chatml_prompt_programs.Binding.t * Chatml_prepared_program.t) list
+  -> env:Eio_unix.Stdenv.base
+  -> checkpoint:(unit -> unit)
+  -> unit
+  -> (Prepared.t, Prompt_revision_builder.Diagnostic.t list) Result.t
+
+(** Same source batch for a genuine selected child Root. Explicit invocation may
+    be delegated UI for a persistent child; it never changes the original source
+    Definition or grants. Only that exact Root plan is active. Role discovery,
+    bounds, operation callback, custody and original exception semantics match
+    [capture]. Ordinary frontend [capture] retains its Ui|Headless contract. *)
+val capture_child
+  :  Policy.t
+  -> ?startup:Chat_response.Startup_compilation.t
+  -> invocation:Runtime_script_preparation.Invocation.t
   -> host:Host.t
   -> scope:Prompt_source_owner.Scope.t
   -> capture:Prompt_source_owner.Capture.t

@@ -1,12 +1,19 @@
 open Core
 module CM = Prompt.Chat_markdown
 
+module Source_requirement = struct
+  type t =
+    | Ordinary
+    | Source of Native_source_registration.t option
+end
+
 module Registration = struct
   type t =
     { implementation : Ochat_function.t
     ; implementation_revision : string
     ; result_contract : Tool_capability.result_contract
     ; authoring_metadata : Chatmd_shell_spec.Authoring_metadata.t option
+    ; source_requirement : Source_requirement.t
     }
 end
 
@@ -29,6 +36,7 @@ type t =
   { functions : Ochat_function.t list
   ; capabilities : (Tool_capability.t, Tool_capability.error) Result.t Lazy.t
   ; classifications : (string * Tool_execution_event.agent_page_kind) list
+  ; registrations : Registration.t list
   }
 
 let error code message = Error.{ code; message }
@@ -127,6 +135,13 @@ let build_functions
               "agent.persistence_contract"
               "authored registration does not match its declaration's persistence \
                contract")
+       | Persistent_agent _ ->
+         let source_requirement =
+           match registration.source_requirement with
+           | Ordinary -> Source_requirement.Source None
+           | Source _ as source -> source
+         in
+         Ok [ { registration with source_requirement } ]
        | _ -> Ok [ registration ])
     | None ->
       functions_of_tool ~agent_source_runner ~sw ~ctx ~host ~run_agent shell declaration
@@ -146,11 +161,28 @@ let build_functions
           Sexp.to_string identity |> Chatmd_shell_spec.Source_ref.digest
         in
         List.map functions ~f:(fun implementation ->
+          let source_requirement =
+            match declaration with
+            | CM.Agent specification ->
+              let registration =
+                Option.bind agent_source_runner ~f:(fun runner ->
+                  Option.map runner.Tool.Agent_source_runner.prepare ~f:(fun prepare ->
+                    Native_source_registration.create
+                      ~implementation
+                      ~prepare:(fun ~owner ~request:_ ~checkpoint ->
+                        prepare ~declaration:specification ~owner ~checkpoint
+                        |> Result.map ~f:Option.some)))
+              in
+              Source_requirement.Source registration
+            | Persistent_agent _ -> Source None
+            | _ -> Ordinary
+          in
           Registration.
             { implementation
             ; implementation_revision
             ; result_contract = Native_output
             ; authoring_metadata = None
+            ; source_requirement
             })))
   |> Result.all
   |> Result.map ~f:List.concat
@@ -295,9 +327,11 @@ let create
   { functions
   ; capabilities
   ; classifications = List.filter_map tools ~f:Tool.agent_page_classification
+  ; registrations
   }
 ;;
 
 let functions t = t.functions
 let capabilities t = t.capabilities
 let classifications t = t.classifications
+let registrations t = t.registrations

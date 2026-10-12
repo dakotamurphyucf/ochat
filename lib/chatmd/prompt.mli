@@ -254,6 +254,18 @@ module Chat_markdown : sig
   end
 
   module Agent_reference : sig
+    module Source_mode : sig
+      (** Authored selection for NEW file-backed child admissions. File is the
+          accepted default; Captured selects the defining revision's exact code.
+          Recorded queued/running/replayed work always uses its saved artifact,
+          independently of this current declaration setting. Neither mode grants
+          native/source authority. *)
+      type t =
+        | File
+        | Captured
+      [@@deriving equal, sexp_of]
+    end
+
     (** Actual emitted invocation descriptor. The parser records the distinction;
         host role/source-mode policy remains with the caller. *)
     type invocation =
@@ -264,6 +276,7 @@ module Chat_markdown : sig
     type t
 
     val invocation : t -> invocation
+    val source_mode : t -> Source_mode.t
 
     (** Genuine effective Root/Import tag range. Display source context and
         materialized paths remain separate from this declaration owner. *)
@@ -362,6 +375,9 @@ module Chat_markdown : sig
       -> t Core.Or_error.t
 
     val input_bytes : t -> int
+
+    (** Complete immutable numeric parsing policy. *)
+    val policy_identity : t -> Core.Sexp.t
   end
 
   (** Explicit parser-owned preparation callback. Ordinary production wrapper

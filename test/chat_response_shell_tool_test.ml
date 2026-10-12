@@ -300,6 +300,7 @@ let%expect_test
         R.
           { implementation
           ; result_contract = contract
+          ; source_requirement = Ordinary
           ; authoring_metadata = None
           ; implementation_revision = Chatmd_shell_spec.Source_ref.digest revision
           }

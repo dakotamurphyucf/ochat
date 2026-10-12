@@ -43,6 +43,7 @@ module Error : sig
     | Catalog of Core.Error.t
     | Seal of Agent_session.Prompt_catalog.Seal.Error.t
     | Artifacts of Agent_store.Store_error.t
+    | Preparation of Agent_session.Prompt_revision_builder.Diagnostic.t list
 end
 
 (** Borrow the exclusively owned actual Session_store and already opened baseline
@@ -147,3 +148,20 @@ val prune
   -> additional:Agent_protocol.Id.Prompt_revision.t list
   -> checkpoint:(unit -> unit)
   -> (int, Error.t) Result.t
+
+(** Prepare portable child custody using the SAME host admission and actual current
+    baseline snapshot. The caller supplies its original live Scope/Capture and
+    Startup; no source authority or compiler callback is retained. Mode.Build
+    preserves known selections and rejects configured Untracked history. This
+    operation neither publishes history nor installs/reserves a child artifact.
+    Artifact retention through queue/delegation admission remains caller owned. *)
+val prepare_child_programs
+  :  t
+  -> sources:Agent_session.Prompt_script_preparation.Host.t
+  -> startup:Chat_response.Startup_compilation.t
+  -> invocation:Agent_session.Runtime_script_preparation.Invocation.t
+  -> scope:Agent_session.Prompt_source_owner.Scope.t
+  -> capture:Agent_session.Prompt_source_owner.Capture.t
+  -> env:Eio_unix.Stdenv.base
+  -> checkpoint:(unit -> unit)
+  -> (Chatml_prompt_programs.t, Error.t) Result.t

@@ -164,6 +164,7 @@ let run ctx input =
             ()
         in
         B.prepare_authored_resources
+          ~agent_source:None
           ~startup:None
           ~script_preparation:(Some (Fixtures.script_preparation ()))
           ~content_limits:None
@@ -206,6 +207,7 @@ let run ctx input =
             ()
         in
         B.prepare_resources
+          ~agent_source:None
           ~startup:None
           ~root_invocation:Ui
           ~script_preparation:(Some (Fixtures.script_preparation ()))

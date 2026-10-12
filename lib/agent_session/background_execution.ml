@@ -98,6 +98,23 @@ let run
         ; deadline = Some deadline
         }
     in
+    let%bind script_tools =
+      match B.agent_artifact request, prepared with
+      | None, _ -> Ok script_tools
+      | Some artifact, B.Tool { reference; _ } ->
+        let%map binding =
+          C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint
+          |> Result.map_error ~f:(fun error ->
+            Agent_protocol.Error.invalid_request error.C.message)
+        in
+        Script_tool_calls.with_agent_artifact
+          script_tools
+          ~binding
+          ~parent_invocation:root.context.id
+          artifact
+      | Some _, Script _ ->
+        Error (Agent_protocol.Error.invalid_request "script job cannot select agent code")
+    in
     execute ~invocation:root (fun ~dispatched ->
       N.with_dispatched_scope
         ~execute

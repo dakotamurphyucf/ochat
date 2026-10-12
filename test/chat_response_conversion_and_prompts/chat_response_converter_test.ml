@@ -358,7 +358,10 @@ let%test_unit "owned content dispatch bypasses stale legacy cache in every outpu
     let runner =
       Chat_response.Tool.Agent_source_runner.
         { revision = Chatml_source.Digest.of_contents "owned-content" ~checkpoint:ignore
-        ; run = (fun ~declaration:_ ~ctx:_ ~source:_ ~observer:_ _ -> assert false)
+        ; run =
+            (fun ~implementation:_ ~declaration:_ ~ctx:_ ~source:_ ~observer:_ _ ->
+              assert false)
+        ; prepare = None
         ; run_content =
             (fun ~declaration:actual ~ctx:actual_ctx ->
               assert (phys_equal actual declaration);

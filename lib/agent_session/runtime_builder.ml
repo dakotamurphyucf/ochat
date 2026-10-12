@@ -256,6 +256,7 @@ let run_agent
 
 let create_agent_runtime
       ~invocation
+      ~agent_source_runner
       ~startup
       ~compilation_limits
       ~programs
@@ -275,6 +276,7 @@ let create_agent_runtime
   match extensions with
   | false ->
     Agent_runtime.create
+      ?agent_source_runner
       ~startup
       ~compilation_limits
       ?programs
@@ -294,6 +296,7 @@ let create_agent_runtime
     |> Result.map ~f:(fun native -> native, None, None)
   | true ->
     Agent_runtime.prepare_extensions
+      ?agent_source_runner
       ~startup
       ~compilation_limits
       ?programs
@@ -321,6 +324,7 @@ let declares_native = Extensibility_native_tools.declares
 
 let create_authored_resources
       ~startup
+      ~agent_source
       ~script_preparation
       ~revision
       ~additional_native_registrations
@@ -348,6 +352,23 @@ let create_authored_resources
     ~f:(fun startup ~compilation_limits ~programs ->
       let elements = Prompt_revision.elements revision in
       let open Result.Let_syntax in
+      let%bind agent_source_runner =
+        match agent_source, script_preparation with
+        | None, _ -> Ok None
+        | Some _, None ->
+          Error (failure "installed child source requires explicit script policy")
+        | Some binding, Some policy ->
+          Captured_agent_runner.Source_binding.bind
+            binding
+            ~script_preparation:policy
+            ~manifest_authorizer
+            ~approval_provider
+            ~response_dir
+            ~env
+            ~revision
+            ~sw
+          |> Result.map ~f:Option.some
+      in
       let%bind () =
         match
           delegated_moderator
@@ -427,6 +448,7 @@ let create_authored_resources
       let%bind native, definition, managed =
         create_agent_runtime
           ~invocation
+          ~agent_source_runner
           ~startup
           ~compilation_limits
           ~programs
@@ -465,6 +487,7 @@ let create_authored_resources
 
 let prepare_resources_internal
       ~startup
+      ~agent_source
       ~script_preparation
       ~native_registrations
       ~invocation
@@ -510,6 +533,7 @@ let prepare_resources_internal
   let%bind host = host ~env ~paths ~session_id ~elements in
   create_authored_resources
     ~startup
+    ~agent_source
     ~script_preparation
     ~revision
     ~additional_native_registrations:native_registrations
@@ -527,9 +551,10 @@ let prepare_resources_internal
     ~response_dir
 ;;
 
-let prepare_resources ~startup ~root_invocation =
+let prepare_resources ~startup ~agent_source ~root_invocation =
   prepare_resources_internal
     ~startup
+    ~agent_source
     ~invocation:(Script_preparation.Invocation.of_root root_invocation)
 ;;
 
@@ -541,6 +566,7 @@ type authored_resources =
 
 let prepare_authored_resources
       ~startup
+      ~agent_source
       ~script_preparation
       ~content_limits
       ~native_registrations
@@ -584,6 +610,7 @@ let prepare_authored_resources
       let%map resources =
         prepare_resources_internal
           ~startup:(Some startup)
+          ~agent_source
           ~script_preparation
           ~native_registrations
           ~invocation:Delegated_ui
@@ -1174,6 +1201,7 @@ let guarded_services authority (services : extension_services) =
 
 let build_with_services
       ~startup
+      ~agent_source
       ~native_registrations
       ~extension_services
       ~sw
@@ -1354,6 +1382,7 @@ let build_with_services
       let%map resources =
         create_authored_resources
           ~startup
+          ~agent_source
           ~script_preparation
           ~revision
           ~additional_native_registrations:native_registrations
@@ -2046,6 +2075,7 @@ let build_with_services
 
 let build
       ~startup
+      ~agent_source
       ~root_invocation
       ~script_preparation
       ~sw
@@ -2061,6 +2091,7 @@ let build
   =
   build_with_services
     ~startup
+    ~agent_source
     ~native_registrations:[]
     ~sw
     ~env
@@ -2077,6 +2108,7 @@ let build
 
 let build_with_extensions
       ~startup
+      ~agent_source
       ~root_invocation
       ~script_preparation
       ~native_registrations
@@ -2094,6 +2126,7 @@ let build_with_extensions
   =
   build_with_services
     ~startup
+    ~agent_source
     ~native_registrations
     ~sw
     ~env
@@ -2118,6 +2151,7 @@ let build_generated
   =
   build_with_services
     ~startup:None
+    ~agent_source:None
     ~native_registrations:[]
     ~source:
       (Generated
@@ -2128,6 +2162,7 @@ let build_generated
 let build_authored_child ~services ~revision ~prepared ~authority ~history =
   build_with_services
     ~startup:None
+    ~agent_source:None
     ~native_registrations:[]
     ~source:(Authored_child { revision; prepared; authority })
     ~existing_history:(Some history)

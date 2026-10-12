@@ -45,6 +45,15 @@ let compilation t = t.compilation
 let restoration t = t.restoration
 let max_custody_work_steps t = t.max_custody_work_steps
 
+let policy_identity t =
+  [%sexp
+    (t.compilation.wall_seconds : float)
+  , (t.compilation.max_source_bytes : int)
+  , (Plan.Limits.policy_identity t.planning : Sexp.t)
+  , (Chatml_prompt_programs.Limits.policy_identity t.restoration : Sexp.t)
+  , (t.max_custody_work_steps : int)]
+;;
+
 let failure message =
   Agent_protocol.Error.create Invalid_state ~message ~retryable:false ()
 ;;

@@ -559,6 +559,7 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                Result.is_error
                  (build
                     (B.build
+                       ~agent_source:None
                        ~startup:None
                        ~root_invocation:Ui
                        ~script_preparation:(Some (Fixtures.script_preparation ())))));
@@ -568,6 +569,7 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
           let runtime =
             build
               (B.build_with_extensions
+                 ~agent_source:None
                  ~startup:None
                  ~root_invocation:Ui
                  ~script_preparation:(Some (Fixtures.script_preparation ()))
@@ -1083,6 +1085,7 @@ let on_event : context -> state -> event -> state task =
       let inference = Inference_ports.create ~config:Chat_response.Config.default () in
       let runtime =
         B.build
+          ~agent_source:None
           ~startup:None
           ~root_invocation:Ui
           ~script_preparation:(Some (Fixtures.script_preparation ()))

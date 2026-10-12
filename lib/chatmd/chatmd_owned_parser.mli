@@ -11,6 +11,9 @@ module Limits : sig
     -> t Or_error.t
 
   val input_bytes : t -> int
+
+  (** Complete numeric parsing policy; no parsed inputs or callbacks. *)
+  val policy_identity : t -> Sexp.t
 end
 
 (** Invocation-local parser budget for one Root and all its raw imports.

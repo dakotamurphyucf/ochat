@@ -148,10 +148,16 @@ val build_captured
     installation/verification and error policy. Original [build_captured] still
     requires its original basename. Builder consumes its own immutable Capture
     and has no Source_owner dependency; metadata cannot itself prove native reads.
+    The optional checkpoint defaults to Eio cancellation and is borrowed through
+    publication admission, custody/hash loops, final replay and checks before
+    installation/delivery. It polls the caller's same deadline/work allowance;
+    it does not preempt native primitives. Its exceptions retain identity and raw
+    backtrace through the existing parser diagnostic boundary.
     Original operator receipt/canonical source is preserved independently of the
     selected Root member. Does not select executable roles or reserve a child. *)
 val build_captured_entry
-  :  ?prepare_programs:
+  :  ?checkpoint:(unit -> unit)
+  -> ?prepare_programs:
        (Capture.t -> (Chatml_prompt_programs.t, Diagnostic.t list) Result.t)
   -> ?prepare_content:
        (Capture.t -> (Chatmd_content_capture.t, Diagnostic.t list) Result.t)
@@ -162,3 +168,8 @@ val build_captured_entry
   -> created_at:Agent_protocol.Timestamp.t
   -> unit
   -> (Prompt_revision.t, Diagnostic.t list) Result.t
+
+(** Actual existing bounded capture profile used by Catalog and fresh child
+    admission: 8 MiB input, 1024 parse calls, 100000 tokens, depth 128.
+    The immutable limits grant no filesystem or source authority. *)
+val capture_limits : unit -> Prompt.Chat_markdown.Limits.t

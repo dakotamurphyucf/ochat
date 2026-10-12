@@ -19,6 +19,55 @@ type t
     ceiling: native borrows still supply the exact permitted selection. *)
 val current_native_services : unit -> (t, string) result
 
+module Native_services_scope : sig
+  type nonrec t =
+    | Unbound
+    | Active of t
+    | Expired
+end
+
+(** Direct projection of the existing fiber-local services owner. Unbound means
+    no binding exists, as in genuine direct Driver dispatch. A present expired or
+    invocation/session/generation-mismatched binding is Expired, never Unbound.
+    This query does not authorize an invocation or discover a stored artifact. *)
+val native_services_scope : unit -> Native_services_scope.t
+
+(** Trusted recorded-job projection tied to the exact admitted target binding.
+    Functional service overlays retain the association; nested foreign targets
+    cannot retrieve it. Dispatch installs this actual derived service as the
+    current native services, not the original service's authority. *)
+val with_agent_artifact
+  :  t
+  -> binding:Chat_response.Tool_capability.binding
+  -> parent_invocation:Agent_protocol.Id.Invocation.t
+  -> Chat_response.Background_request.Agent_artifact.t
+  -> t
+
+(** Require this exact current service, active matching session/generation,
+    invocation fingerprint equal to its actual borrowed capability ceiling, and
+    original binding reference/implementation resolved inside that same ceiling,
+    and the exact supplied genuine background root as its direct parent. Even a
+    same-binding recursive descendant cannot borrow another call's selection.
+    Invoke existing current
+    authorization, then recheck cancellation and identity after any yielding wait.
+    Expired/unbound/foreign rejects; None is ordinary unselected dispatch only. *)
+val agent_artifact
+  :  t
+  -> ( Chat_response.Background_request.Agent_artifact.t option
+       , Agent_protocol.Error.t )
+       Result.t
+
+(** Same saved-service/ceiling/parent/reauthorization admission as agent_artifact,
+    then require this exact actual native function to consume the selection.
+    Distinct nested functions and direct None return no selection after admission;
+    expired/foreign scope still rejects. No names or reconstructed descriptors. *)
+val agent_artifact_for_implementation
+  :  t
+  -> implementation:Ochat_function.t option
+  -> ( Chat_response.Background_request.Agent_artifact.t option
+       , Agent_protocol.Error.t )
+       Result.t
+
 (** The actual caller's validation contract, inherited with the expiring native
     services scope. This does not add helper tools or widen selected capabilities. *)
 val with_authoring_validation_host

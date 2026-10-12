@@ -54,13 +54,26 @@ module Agent_source_runner : sig
       callback rejection/exception never falls back to Fetch. *)
   type t =
     { revision : Chatml_source.Digest.t
+    ; prepare :
+        (declaration:Prompt.Chat_markdown.agent_tool
+         -> owner:Agent_protocol.Job.launch_owner
+         -> checkpoint:(unit -> unit)
+         -> (Background_request.Agent_artifact.t, Agent_protocol.Error.t) Result.t)
+          option
+      (** Genuine installed-artifact owner for new queued admission. None leaves
+          invocation behavior unchanged but rejects queued source admission. It
+          must install/verify before returning, never invoke the agent here. *)
     ; run :
-        declaration:Prompt.Chat_markdown.agent_tool
+        implementation:Ochat_function.t option
+        -> declaration:Prompt.Chat_markdown.agent_tool
         -> ctx:Eio_unix.Stdenv.base Ctx.t
         -> source:string
         -> observer:Agent_response_loop.observer option
         -> Prompt.Chat_markdown.content_item list
         -> string
+      (** Actual agent_fn supplies its exact constructed function. Direct None
+          cannot consume a saved queued target. Nested Driver tool functions are
+          distinct native identities even when names/declarations agree. *)
     ; run_content :
         declaration:Prompt.Chat_markdown.agent_content
         -> ctx:Eio_unix.Stdenv.base Ctx.t

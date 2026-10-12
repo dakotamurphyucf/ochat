@@ -624,6 +624,28 @@ let read_state t ~authorize session_id =
   |> Result.map ~f:fst
 ;;
 
+let with_indexed_retention_read t indexed ~f =
+  let session_id = indexed.Agent_store.Session_index.Entry.session.id in
+  let check () =
+    if
+      Option.is_some t.loader
+      || (not (Map.is_empty (Atomic.get t.sessions)))
+      || (not (Map.is_empty t.reservations))
+      || not (List.is_empty t.failed_cleanups)
+    then Error (lifecycle_conflict "artifact retention requires indexed-only startup")
+    else (
+      match Map.find t.indexed session_id with
+      | Some actual when Agent_store.Session_index.Entry.equal indexed actual -> Ok actual
+      | Some _ | None ->
+        Error (lifecycle_conflict "retained indexed session projection changed"))
+  in
+  with_read_snapshot
+    t
+    ~capture:check
+    ~check_current:(fun _ -> Result.map (check ()) ~f:(fun _ -> ()))
+    f
+;;
+
 let read_observation t ~authorize ~now session_id =
   let open Result.Let_syntax in
   let%map state, snapshot =

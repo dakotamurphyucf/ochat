@@ -58,6 +58,7 @@ module Error = struct
     | Catalog of Core.Error.t
     | Seal of Catalog.Seal.Error.t
     | Artifacts of Agent_store.Store_error.t
+    | Preparation of Builder.Diagnostic.t list
 end
 
 type admission =
@@ -541,4 +542,49 @@ let prune t ~additional ~checkpoint =
            t.catalog
            ~additional:(Store.Snapshot.protected_revisions snapshot @ additional)
          |> Result.map_error ~f:(fun e -> Error.Artifacts e))
+;;
+
+let prepare_child_programs
+      t
+      ~sources
+      ~startup
+      ~invocation
+      ~scope
+      ~capture
+      ~env
+      ~checkpoint
+  =
+  let open Result.Let_syntax in
+  let%bind () = reserve t in
+  let token = ref () in
+  t.admission <- Reserved token;
+  Fun.protect
+    ~finally:(fun () -> release t token)
+    (fun () ->
+       checkpoint ();
+       let%bind snapshot =
+         Store.snapshot t.baselines ~checkpoint
+         |> Result.map_error ~f:(fun error -> Error.History error)
+       in
+       let%map prepared =
+         Capture.capture_child
+           t.policy.source_preparation
+           ~startup
+           ~mode:Capture.Mode.Build
+           ~snapshot
+           ~artifact_store:t.artifacts
+           ~baseline_limits:t.policy.baseline_limits
+           ~custody_limits:t.policy.custody_limits
+           ~invocation
+           ~host:sources
+           ~scope
+           ~capture
+           ~provided:[]
+           ~env
+           ~checkpoint
+           ()
+         |> Result.map_error ~f:(fun diagnostics -> Error.Preparation diagnostics)
+       in
+       checkpoint ();
+       Capture.Prepared.programs prepared)
 ;;

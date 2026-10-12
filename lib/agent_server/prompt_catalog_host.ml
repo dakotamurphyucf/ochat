@@ -48,6 +48,9 @@ module Error = struct
     | Catalog error -> Core.Error.to_string_hum error
     | Seal error -> Sexp.to_string_hum (Catalog.Seal.Error.sexp_of_t error)
     | Artifacts error -> Sexp.to_string_hum (Agent_store.Store_error.sexp_of_t error)
+    | Preparation diagnostics ->
+      Sexp.to_string_hum
+        ([%sexp_of: Agent_session.Prompt_revision_builder.Diagnostic.t list] diagnostics)
   ;;
 
   let message = function
@@ -249,4 +252,33 @@ let retire t = Publication.retire t.Prepared.publication
 let prune t ~additional ~checkpoint =
   Publication.prune t.publication ~additional ~checkpoint
   |> Result.map_error ~f:(fun error -> Error.Publication error)
+;;
+
+let prepare_child_programs t ~startup ~invocation ~scope ~capture ~checkpoint =
+  let result =
+    let open Result.Let_syntax in
+    let%bind result =
+      Source_host.with_host t.sources ~f:(fun _ sources ->
+        Publication.prepare_child_programs
+          t.publication
+          ~sources
+          ~startup
+          ~invocation
+          ~scope
+          ~capture
+          ~env:t.env
+          ~checkpoint)
+      |> Result.map_error ~f:(fun error -> Error.Sources error)
+    in
+    Result.map_error result ~f:(fun error -> Error.Publication error)
+  in
+  Result.map_error result ~f:(function
+    | Error.Publication (Publication.Error.Preparation diagnostics) -> diagnostics
+    | error ->
+      [ Agent_session.Prompt_revision_builder.Diagnostic.
+          { code = "prompt.child_project_host"
+          ; message = Error.message error
+          ; source = None
+          }
+      ])
 ;;

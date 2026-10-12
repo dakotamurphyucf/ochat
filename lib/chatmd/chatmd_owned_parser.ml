@@ -7,6 +7,7 @@ module Limits = struct
     ; tokens : int
     ; depth : int
     }
+  [@@deriving sexp_of]
 
   let create ~max_input_bytes ~max_parse_calls ~max_tokens ~max_depth =
     if max_input_bytes <= 0 || max_parse_calls <= 0 || max_tokens <= 0 || max_depth <= 0
@@ -20,6 +21,7 @@ module Limits = struct
         }
   ;;
 
+  let policy_identity = sexp_of_t
   let input_bytes t = t.input_bytes
 end
 

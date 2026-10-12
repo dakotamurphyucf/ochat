@@ -82,3 +82,19 @@ val prune
   -> additional:Agent_protocol.Id.Prompt_revision.t list
   -> checkpoint:(unit -> unit)
   -> (int, Error.t) Result.t
+
+(** Actual Builder child callback: borrow this host's administrative source grants,
+    preserve current dependency history and the original child Startup/Scope.
+    Source diagnostics retain their original values; admission failures become
+    finite host diagnostics. No additional authority escapes. No index publication
+    or fresh artifact retention is performed by this custody-only operation. *)
+val prepare_child_programs
+  :  t
+  -> startup:Chat_response.Startup_compilation.t
+  -> invocation:Agent_session.Runtime_script_preparation.Invocation.t
+  -> scope:Agent_session.Prompt_source_owner.Scope.t
+  -> capture:Agent_session.Prompt_source_owner.Capture.t
+  -> checkpoint:(unit -> unit)
+  -> ( Chatml_prompt_programs.t
+       , Agent_session.Prompt_revision_builder.Diagnostic.t list )
+       Result.t

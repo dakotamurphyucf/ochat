@@ -90,6 +90,18 @@ type model_job_inference =
       Inference.Request.Target.t -> (unit, Agent_protocol.Error.t) Result.t
   }
 
+module Child_source_policy : sig
+  (** Host acquisition policy; retains no original directory. Its callback borrows
+      actual original Scope and current dependency history for each new File child.
+      Runtime semantic/shell/content policies remain the actual Factory policies. *)
+  type t
+
+  val create
+    :  source:Agent_session.Captured_agent_runner.Source.t
+    -> runtime_policy_revision:Chatml_source.Digest.t
+    -> t
+end
+
 type t
 
 type generated_lifetime =
@@ -120,6 +132,7 @@ val create
   -> authoring_validation_host:Chat_response.Authoring_validation.host option
   -> script_preparation:Agent_session.Runtime_script_preparation.t option
   -> content_limits:Chatmd_prompt_content.Limits.t option
+  -> child_sources:Child_source_policy.t option
   -> durability:Agent_store.Journal_segment.durability
   -> limits:limits
   -> t
@@ -312,6 +325,35 @@ val read_session
   :  t
   -> Agent_store.Session_index.Entry.t
   -> (Agent_session.Session_state.t, Agent_protocol.Error.t) Result.t
+
+(** Startup-only fold before any loader, recovered actor or scheduler exists.
+    The actual indexed projection is checked under Registry's read lease. One
+    same-store Handle owns the nonactivating immutable current state read and all
+    archive reads, then closes before return. Current snapshot/journal decoding
+    uses the existing recovery/state validators; archive reads are deferred until
+    their complete reference list is admitted by [admit_archive], before retaining
+    its lookup or reading an archive. Ordinary [read_session] validation stays
+    unchanged.
+
+    Fold the current state and each referenced pre-change snapshot once through
+    the existing checksum/session/revision/disposition archive decoder. Nested
+    historical references must name the same archive file identity present in the
+    complete current list; no recursive replay or second decoder. [checkpoint]
+    covers reference traversal/comparison. The caller owns aggregate read-count,
+    job and logical traversal-work admission; existing storage byte ceilings remain
+    per state/archive, not a newly claimed aggregate I/O budget. Any error aborts
+    the complete protection attempt; no actor, source, target or runtime activates.
+    Caller holds exclusive startup ownership and must skip all pruning on failure.
+    Callback exceptions retain identity through existing Handle/read cleanup. *)
+val fold_indexed_retained_states
+  :  t
+  -> Agent_store.Session_index.Entry.t
+  -> authorize:(Agent_protocol.Session.t -> (unit, Agent_protocol.Error.t) Result.t)
+  -> checkpoint:(unit -> unit)
+  -> admit_archive:(unit -> (unit, Agent_protocol.Error.t) Result.t)
+  -> init:'a
+  -> f:('a -> Agent_session.Session_state.t -> ('a, Agent_protocol.Error.t) Result.t)
+  -> ('a, Agent_protocol.Error.t) Result.t
 
 (** Reconstructs one indexed session on demand. The caller must serialize
     loads for a session ID and register the returned entry exactly once. *)

@@ -26,6 +26,7 @@ type options =
   ; timing : Agent_protocol.Initialize.Timing.t
   ; factory_limits : Session_factory.limits
   ; seed_recovery_limits : Session_factory.Seed_recovery_limits.t
+  ; retained_artifact_limits : Retained_job_artifacts.Limits.t
   ; quota_limits : Agent_session.Quota_manager.limits
   ; reviewer_resolver : Catalog_builder.reviewer_resolver option
   ; policy_evaluator_resolver : Catalog_builder.policy_evaluator_resolver option
@@ -166,6 +167,14 @@ let default_options =
           }
       }
   ; seed_recovery_limits = Session_factory.Seed_recovery_limits.default
+  ; retained_artifact_limits =
+      Retained_job_artifacts.Limits.create
+        ~max_sessions:4096
+        ~max_archives:4096
+        ~max_jobs:65536
+        ~max_work_steps:10_000_000
+      |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+      |> Result.ok_or_failwith
   ; quota_limits =
       { global_running_sessions = 256
       ; per_principal_running_sessions = 64
@@ -1162,6 +1171,54 @@ let compose
     ; subscriber_queue_capacity = config.server.subscriber_queue_capacity
     }
   in
+  let%bind child_sources =
+    match options.script_preparation with
+    | None -> Ok None
+    | Some _ ->
+      let module Runner = Agent_session.Captured_agent_runner in
+      let module Sources = Agent_session.Prompt_script_preparation in
+      let identity tag =
+        (* These version tags are the actual Daemon host policy implementation.
+           Configuration has already passed bounded administrative admission. *)
+        [%sexp
+          (tag : string)
+        , (options.implementation_name : string)
+        , (options.implementation_version : string)
+        , (config.server.project_sources : Project_source_configuration.t option)]
+        |> Sexp.to_string_mach
+        |> fun contents ->
+        Chatml_source.Digest.of_contents contents ~checkpoint:Eio.Fiber.check
+      in
+      let%bind source =
+        Project_source_host.with_host project_sources ~f:(fun policy _ ->
+          Runner.Source.create
+            ~policy_revision:(identity "ochat.daemon.child-source.v1")
+            ~compilation:(Sources.Policy.compilation policy)
+            ~parser_limits:(Agent_session.Prompt_revision_builder.capture_limits ())
+            ~max_work_steps:(Sources.Policy.max_work_steps policy)
+            ~preprocess:Meta_prompting.Preprocessor.preprocess
+            ~prepare_programs:(fun startup ~invocation scope capture ->
+              Prompt_catalog_host.prepare_child_programs
+                project_catalog
+                ~startup
+                ~invocation
+                ~scope
+                ~capture
+                ~checkpoint:(fun () ->
+                  Chat_response.Startup_compilation.checkpoint startup)))
+        |> Result.map_error ~f:(fun error ->
+          Agent_protocol.Error.invalid_request
+            (Sexp.to_string_hum (Project_source_host.Error.sexp_of_t error)))
+      in
+      let%map source =
+        Result.map_error source ~f:(fun error ->
+          Agent_protocol.Error.invalid_request (Core.Error.to_string_hum error))
+      in
+      Some
+        (Session_factory.Child_source_policy.create
+           ~source
+           ~runtime_policy_revision:(identity "ochat.daemon.child-runtime.v1"))
+  in
   let factory =
     Session_factory.create
       ~sw
@@ -1186,6 +1243,7 @@ let compose
       ~authoring_validation_host:options.authoring_validation_host
       ~script_preparation:options.script_preparation
       ~content_limits:options.content_limits
+      ~child_sources
       ~durability:(durability config.server)
       ~limits:factory_limits
   in
@@ -1242,23 +1300,24 @@ let compose
            ~factory)
     else None
   in
-  if execute
-  then Session_registry.install_loader registry (Session_factory.recover_session factory);
   Session_registry.install_reader registry (Session_factory.read_session factory);
-  let%bind () =
-    if not execute
-    then Ok ()
-    else (
-      let%bind _ = Session_factory.recover_sessions factory in
-      let%bind () = Session_factory.reconcile_generated_creations factory in
-      let%bind entries =
-        Agent_store.Session_store.list_sessions_checked store
-        |> Result.map_error ~f:protocol_of_store
-      in
-      let pinned_revisions =
-        List.filter_map entries ~f:(fun entry ->
-          entry.Agent_store.Session_index.Entry.session.prompt_revision)
-      in
+  (* No loader, actor, runtime or scheduler exists yet. The exclusive startup
+     Store owner and Indexed-only read leases cover the complete collection.
+     Any incomplete proof skips all deletion; recovery still uses its original
+     diagnostics rather than treating retention failure as ordinary success. *)
+  if execute
+  then (
+    match
+      Retained_job_artifacts.collect
+        ~factory
+        ~entries:indexed_sessions
+        ~authorize:(fun _ -> Ok ())
+        ~request_policy:Chat_response.One_off_request.default_policy
+        ~limits:options.retained_artifact_limits
+        ~checkpoint:Eio.Fiber.check
+    with
+    | Error _ -> ()
+    | Ok protected ->
       ignore
         (Agent_store.Delegation_store.with_artifact_retention
            (Agent_store.Session_store.delegations store)
@@ -1269,10 +1328,19 @@ let compose
            ~f:(fun generated_revisions ->
              Prompt_catalog_host.prune
                project_catalog
-               ~additional:(generated_revisions @ pinned_revisions)
+               ~additional:
+                 (generated_revisions @ Retained_job_artifacts.revisions protected)
                ~checkpoint:Eio.Fiber.check
              |> Result.map_error ~f:project_error)
-         : (int, Agent_store.Store_error.t) result);
+         : (int, Agent_store.Store_error.t) result));
+  if execute
+  then Session_registry.install_loader registry (Session_factory.recover_session factory);
+  let%bind () =
+    if not execute
+    then Ok ()
+    else (
+      let%bind _ = Session_factory.recover_sessions factory in
+      let%bind () = Session_factory.reconcile_generated_creations factory in
       let%bind () = Start_scheduler.seed_recovered ~registry ~queue:start_queue in
       let startup_time = timestamp env in
       let%bind () =

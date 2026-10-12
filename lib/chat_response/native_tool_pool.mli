@@ -5,12 +5,22 @@ open Core
     does not initialize script hooks, compile managed handlers or publish tools.
     MCP declarations retain their existing discovery and switch ownership. *)
 
+module Source_requirement : sig
+  type t =
+    | Ordinary
+    | Source of Native_source_registration.t option
+    (** [Source None] rejects queued admission without a source fallback. *)
+end
+
 module Registration : sig
   type t =
     { implementation : Ochat_function.t
     ; implementation_revision : string
     ; result_contract : Tool_capability.result_contract
     ; authoring_metadata : Chatmd_shell_spec.Authoring_metadata.t option
+    ; source_requirement : Source_requirement.t
+      (** Actual emitted function's source ownership. The installed-artifact
+          preparer belongs to that exact function and its native/source lifetime. *)
     }
 end
 
@@ -70,3 +80,4 @@ val create
 val functions : t -> Ochat_function.t list
 val capabilities : t -> (Tool_capability.t, Tool_capability.error) Result.t Lazy.t
 val classifications : t -> (string * Tool_execution_event.agent_page_kind) list
+val registrations : t -> Registration.t list

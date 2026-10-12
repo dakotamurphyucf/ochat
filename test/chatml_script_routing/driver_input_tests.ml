@@ -34,10 +34,16 @@ let%test_unit "agent source interception precedes Fetch and preserves callback f
       let runner =
         Tool.Agent_source_runner.
           { revision = digest "owned-source-policy"
+          ; prepare = None
           ; run_content =
               (fun ~declaration:_ ~ctx:_ -> failwith "unexpected content agent")
           ; run =
-              (fun ~declaration:actual ~ctx:actual_ctx ~source ~observer items ->
+              (fun ~implementation:_
+                ~declaration:actual
+                ~ctx:actual_ctx
+                ~source
+                ~observer
+                items ->
                 assert (phys_equal actual_ctx ctx);
                 [%test_eq: string] actual.name declaration.name;
                 [%test_eq: string] actual.agent declaration.agent;
@@ -101,10 +107,11 @@ let%test_unit "source policy revision changes agent permission identity only" =
         let runner =
           Tool.Agent_source_runner.
             { revision = digest revision
+            ; prepare = None
             ; run_content =
                 (fun ~declaration:_ ~ctx:_ -> failwith "unexpected content agent")
             ; run =
-                (fun ~declaration:_ ~ctx:_ ~source:_ ~observer:_ _ ->
+                (fun ~implementation:_ ~declaration:_ ~ctx:_ ~source:_ ~observer:_ _ ->
                   failwith "uninvoked source runner")
             }
         in
@@ -340,7 +347,10 @@ let%expect_test
     let child_runner =
       Tool.Agent_source_runner.
         { revision = digest "child-revision"
-        ; run = (fun ~declaration:_ ~ctx:_ ~source:_ ~observer:_ _ -> assert false)
+        ; run =
+            (fun ~implementation:_ ~declaration:_ ~ctx:_ ~source:_ ~observer:_ _ ->
+              assert false)
+        ; prepare = None
         ; run_content =
             (fun ~declaration ~ctx:_ ->
               let key = CM.Agent_reference.queued_key (reference child declaration) in
@@ -354,7 +364,10 @@ let%expect_test
     in
     let rec caller_runner : Tool.Agent_source_runner.t =
       { revision = digest "caller-revision"
-      ; run = (fun ~declaration:_ ~ctx:_ ~source:_ ~observer:_ _ -> assert false)
+      ; run =
+          (fun ~implementation:_ ~declaration:_ ~ctx:_ ~source:_ ~observer:_ _ ->
+            assert false)
+      ; prepare = None
       ; run_content =
           (fun ~declaration ~ctx ->
             match CM.Agent_reference.queued_key (reference caller declaration) with

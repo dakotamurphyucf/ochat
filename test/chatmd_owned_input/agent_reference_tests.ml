@@ -33,10 +33,14 @@ let%expect_test
     let dir = Eio.Stdenv.cwd env in
     let ordinary = {|<tool name="once" agent="../agents/a.chatmd" local/>|} in
     let persistent =
-      {|<tool name="keep" agent="../agents/a.chatmd" local persistence="optional"/>|}
+      {|<tool name="keep" agent="../agents/a.chatmd" local persistence="optional" source_mode="captured"/>|}
     in
-    let child = {|<agent src="../agents/b.chatmd" local>child</agent>|} in
-    let opening = {|<agent src="../agents/a.chatmd" local>parent|} in
+    let child =
+      {|<agent src="../agents/b.chatmd" local source_mode="file">child</agent>|}
+    in
+    let opening =
+      {|<agent src="../agents/a.chatmd" local source_mode="captured">parent|}
+    in
     let parent = opening ^ child ^ "</agent>" in
     let root =
       {|<import src="parts/tools.chatmd"/><user><import src="parts/content.chatmd"/></user>
@@ -85,6 +89,14 @@ let%expect_test
       let range = A.range reference in
       assert (Input.Range.end_byte range = start_byte + String.length tag);
       assert (Option.equal String.equal (A.queued_key reference) target);
+      let expected_mode =
+        if
+          String.equal role "optional:keep"
+          || (String.equal role "content" && Int.equal start_byte 2)
+        then A.Source_mode.Captured
+        else File
+      in
+      assert (A.Source_mode.equal expected_mode (A.source_mode reference));
       let exact =
         String.sub
           (Input.effective (Input.Range.input range))
@@ -115,7 +127,8 @@ let%expect_test
       List.equal
         (fun a b ->
            String.equal (kind a) (kind b)
-           && Option.equal String.equal (A.queued_key a) (A.queued_key b))
+           && Option.equal String.equal (A.queued_key a) (A.queued_key b)
+           && A.Source_mode.equal (A.source_mode a) (A.source_mode b))
         references
         (CM.Parsed.agent_references replay)));
   [%expect
@@ -311,4 +324,43 @@ let%expect_test "projected nested content agents retain their exact original ref
     (77 agents/grandchild.chatmd)
     (146 agents/child.chatmd)
     |}]
+;;
+
+let%test_unit "source mode admission is exact and captured never silently becomes legacy" =
+  Eio_main.run (fun env ->
+    let dir = env#cwd in
+    List.iter
+      [ {|<tool name="a" agent="child.chatmd" local source_mode/>|}
+      ; {|<tool name="a" agent="child.chatmd" local source_mode="other"/>|}
+      ; {|<tool name="a" agent="child.chatmd" local source_mode="file" source_mode="captured"/>|}
+      ; {|<tool name="read_file" source_mode="file"/>|}
+      ; {|<user><agent src="child.chatmd" local source_mode="FILE"/></user>|}
+      ; {|<user><agent src="https://example.invalid/a" source_mode="captured"/></user>|}
+      ]
+      ~f:(fun root ->
+        match parse dir [ "root.chatmd", root ] with
+        | _ -> assert false
+        | exception Failure _ -> ());
+    List.iter
+      [ {|<tool name="a" agent="child.chatmd" local source_mode="captured"/>|}
+      ; {|<user><agent src="child.chatmd" local source_mode="captured"/></user>|}
+      ]
+      ~f:(fun root ->
+        let parsed = parse dir [ "root.chatmd", root ] in
+        assert (
+          A.Source_mode.equal
+            Captured
+            (A.source_mode (List.hd_exn (CM.Parsed.agent_references parsed))));
+        match
+          CM.parse_chat_inputs
+            ~source:"root.chatmd"
+            ~source_loader:
+              (Source_loader.captured_filesystem
+                 ~root:dir
+                 ~sources:[ "root.chatmd", root ])
+            ~dir
+            root
+        with
+        | _ -> assert false
+        | exception Failure _ -> ()))
 ;;

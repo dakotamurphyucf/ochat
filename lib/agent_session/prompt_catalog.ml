@@ -422,13 +422,7 @@ let prepare_owned
                              ~env:t.env
                              ~definition
                              ~preprocess:Meta_prompting.Preprocessor.preprocess
-                             ~limits:
-                               (Prompt.Chat_markdown.Limits.create
-                                  ~max_input_bytes:(8 * 1024 * 1024)
-                                  ~max_parse_calls:1024
-                                  ~max_tokens:100_000
-                                  ~max_depth:128
-                                |> Or_error.ok_exn)
+                             ~limits:(Prompt_revision_builder.capture_limits ())
                              ~checkpoint
                            |> Result.map ~f:(fun capture ->
                              let prepare_content =

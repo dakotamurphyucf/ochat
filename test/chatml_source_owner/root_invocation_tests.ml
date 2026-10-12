@@ -114,6 +114,7 @@ let build env sw root fixture target (state : State.t) revision ~startup ~snapsh
   let paths = paths root revision in
   Eio.Path.mkdirs ~perm:0o700 ~exists_ok:true paths.cache_dir;
   B.build
+    ~agent_source:None
     ~startup
     ~root_invocation:state.State.spec.root_invocation
     ~script_preparation:(Some (Runtime_preparation_tests.policy ()))

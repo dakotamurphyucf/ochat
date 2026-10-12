@@ -60,8 +60,15 @@ module Res = Openai.Responses
 module Agent_source_runner = struct
   type t =
     { revision : Chatml_source.Digest.t
+    ; prepare :
+        (declaration:CM.agent_tool
+         -> owner:Agent_protocol.Job.launch_owner
+         -> checkpoint:(unit -> unit)
+         -> (Background_request.Agent_artifact.t, Agent_protocol.Error.t) Result.t)
+          option
     ; run :
-        declaration:CM.agent_tool
+        implementation:Ochat_function.t option
+        -> declaration:CM.agent_tool
         -> ctx:Eio_unix.Stdenv.base Ctx.t
         -> source:string
         -> observer:Agent_response_loop.observer option
@@ -166,6 +173,9 @@ let agent_fn ?agent_source_runner ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.a
     ;;
   end
   in
+  (* Construction is synchronous and cannot invoke its callback. Initialize this
+     private identity cell before returning the actual function for registration. *)
+  let implementation = ref None in
   let run ~ctx ~source ?observer (user_msg : string) : string =
     (* Build a basic content item from the provided user input. *)
     let basic_item : CM.basic_content_item =
@@ -181,7 +191,13 @@ let agent_fn ?agent_source_runner ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.a
     let items = [ CM.Basic basic_item ] in
     match agent_source_runner with
     | Some runner ->
-      runner.Agent_source_runner.run ~declaration:agent_spec ~ctx ~source ~observer items
+      runner.Agent_source_runner.run
+        ~implementation:(Some (Option.value_exn !implementation))
+        ~declaration:agent_spec
+        ~ctx
+        ~source
+        ~observer
+        items
     | None ->
       let prompt_xml = Fetch.get ~ctx agent ~is_local in
       let prompt_dir = if is_local then Fetch.resolve_local_dir ~ctx agent else None in
@@ -194,32 +210,36 @@ let agent_fn ?agent_source_runner ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.a
         prompt_xml
         items
   in
-  Ochat_function.create_streaming_function
-    (module M)
-    (fun ~invocation args ->
-       let source = Fork.Invocation_id.create () |> Fork.Invocation_id.to_string in
-       let observer =
-         if Ochat_function.Invocation.is_observed invocation
-         then (
-           let trace =
-             Agent_trace.create
-               ~emit:(Ochat_function.Invocation.emit invocation)
-               ~emit_trace:(Ochat_function.Invocation.emit_trace invocation)
-           in
-           Some
-             Agent_response_loop.
-               { on_event = Agent_trace.on_transcript_event trace
-               ; on_tool_execution = Agent_trace.on_tool_execution trace
-               })
-         else None
-       in
-       let ctx =
-         Option.value_map
-           (Ochat_function.Invocation.inference_parent invocation)
-           ~default:ctx
-           ~f:(fun parent -> Ctx.with_inference_parent ctx ~parent)
-       in
-       Res.Tool_output.Output.Text (run ~ctx ~source ?observer args))
+  let function_ =
+    Ochat_function.create_streaming_function
+      (module M)
+      (fun ~invocation args ->
+         let source = Fork.Invocation_id.create () |> Fork.Invocation_id.to_string in
+         let observer =
+           if Ochat_function.Invocation.is_observed invocation
+           then (
+             let trace =
+               Agent_trace.create
+                 ~emit:(Ochat_function.Invocation.emit invocation)
+                 ~emit_trace:(Ochat_function.Invocation.emit_trace invocation)
+             in
+             Some
+               Agent_response_loop.
+                 { on_event = Agent_trace.on_transcript_event trace
+                 ; on_tool_execution = Agent_trace.on_tool_execution trace
+                 })
+           else None
+         in
+         let ctx =
+           Option.value_map
+             (Ochat_function.Invocation.inference_parent invocation)
+             ~default:ctx
+             ~f:(fun parent -> Ctx.with_inference_parent ctx ~parent)
+         in
+         Res.Tool_output.Output.Text (run ~ctx ~source ?observer args))
+  in
+  implementation := Some function_;
+  function_
 ;;
 
 (** [mcp_tool ~sw ~ctx decl] resolves a `{<tool mcp_server="…"/>}`

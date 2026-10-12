@@ -154,6 +154,7 @@ let%expect_test
         [%test_eq: string]
           "ANSWER"
           (port.run
+             ~implementation:None
              ~declaration
              ~ctx
              ~source:"ordinary-call"
@@ -212,4 +213,44 @@ let%test_unit "caller cancellation joins provider cleanup and leaves sibling cal
       assert !cleaned;
       block := false;
       [%test_eq: string] "ANSWER" (port.run_content ~declaration:(descriptor parent) ~ctx)))
+;;
+
+let%expect_test "actual source and runtime policy limits participate in runner identity" =
+  with_workspace (fun _env directory _root ->
+    let tag = Chatml_source.Digest.of_contents "identity-host-v1" ~checkpoint:ignore in
+    let source max_work_steps =
+      Runner.Source.create
+        ~policy_revision:tag
+        ~compilation:Chatml_compilation.default_limits
+        ~parser_limits:(Agent_session.Prompt_revision_builder.capture_limits ())
+        ~max_work_steps
+        ~preprocess:Fn.id
+        ~prepare_programs:(fun _ ~invocation:_ _ _ ->
+          failwith "identity construction must not prepare programs")
+      |> Or_error.ok_exn
+      |> Runner.Source.policy_identity
+    in
+    let runtime max_custody_work_steps content_limits =
+      Runner.create
+        ~script_preparation:(Runtime_preparation_tests.policy ~max_custody_work_steps ())
+        ~content_limits
+        ~policy_revision:tag
+        ~manifest_authorizer:Shell_runtime.Manifest_authorizer.assume_authorized
+        ~approval_provider:Shell_runtime.Approval_broker.None_available
+        ~response_dir:directory
+      |> Runner.policy_identity
+    in
+    let equal = Chatml_source.Digest.equal in
+    assert (equal (source 100) (source 100));
+    assert (not (equal (source 100) (source 101)));
+    assert (equal (runtime 100 None) (runtime 100 None));
+    assert (not (equal (runtime 100 None) (runtime 101 None)));
+    assert (
+      not
+        (equal
+           (runtime 100 None)
+           (runtime 100 Agent_server.Daemon.default_options.content_limits)));
+    print_endline
+      "identical numeric policies are stable; changed limits change identities");
+  [%expect {| identical numeric policies are stable; changed limits change identities |}]
 ;;

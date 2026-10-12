@@ -223,6 +223,13 @@ module Chat_markdown = struct
   module Document_occurrence = Chatmd_document_occurrence
 
   module Agent_reference = struct
+    module Source_mode = struct
+      type t =
+        | File
+        | Captured
+      [@@deriving equal, sexp_of]
+    end
+
     type invocation =
       | Tool of agent_tool
       | Persistent_tool of agent_tool * agent_persistence
@@ -232,9 +239,11 @@ module Chat_markdown = struct
       { invocation : invocation
       ; range : Chatmd_parser_input.Range.t
       ; queued_key : string option
+      ; source_mode : Source_mode.t
       }
 
     let invocation t = t.invocation
+    let source_mode t = t.source_mode
     let range t = t.range
     let queued_key t = t.queued_key
   end
@@ -268,8 +277,14 @@ module Chat_markdown = struct
         * agent_persistence option
         * Chatmd_parser_input.Range.t
         * string option
+        * Agent_reference.Source_mode.t
     | Owned_agent_content of
-        string * bool * chat_element list * Chatmd_parser_input.Range.t * string option
+        string
+        * bool
+        * chat_element list
+        * Chatmd_parser_input.Range.t
+        * string option
+        * Agent_reference.Source_mode.t
   (* Convert a <msg> element’s children into an Items or a single Text. *)
 
   let content_items_of_elements
@@ -317,11 +332,12 @@ module Chat_markdown = struct
       | Agent (url, is_local, children) :: rest ->
         let items = build ~path_rev:(index :: path_rev) ~index:0 children in
         Agent { url; is_local; items } :: build ~path_rev ~index:(index + 1) rest
-      | Owned_agent_content (url, is_local, children, range, queued_key) :: rest ->
+      | Owned_agent_content (url, is_local, children, range, queued_key, source_mode)
+        :: rest ->
         let items = build ~path_rev:(index :: path_rev) ~index:0 children in
         let agent = { url; is_local; items } in
         on_agent
-          ({ invocation = Agent_reference.Content agent; range; queued_key }
+          ({ invocation = Agent_reference.Content agent; range; queued_key; source_mode }
            : Agent_reference.t);
         Agent agent :: build ~path_rev ~index:(index + 1) rest
       | ( Message _
@@ -446,8 +462,8 @@ module Chat_markdown = struct
     | Reasoning r ->
       let ss = List.map r.summary ~f:(fun s -> s.text) |> String.concat ~sep:" " in
       Printf.sprintf "<reasoning id=\"%s\">%s</reasoning>" r.id ss
-    | Agent (url, is_local, children) | Owned_agent_content (url, is_local, children, _, _)
-      ->
+    | Agent (url, is_local, children)
+    | Owned_agent_content (url, is_local, children, _, _, _) ->
       let sub_items = List.map children ~f:chat_element_to_string in
       Printf.sprintf
         "<agent src=\"%s\" local=\"%b\">%s</agent>"
@@ -499,7 +515,7 @@ module Chat_markdown = struct
     | Extension_script script -> Chatmd_extension_declaration.serialize_script script
     | Authoring_context config -> Chatmd_extension_declaration.serialize_authoring config
     | Authoring_help help -> Chatmd_extension_declaration.serialize_help help
-    | Owned_agent_tool (specification, policy, _, _) ->
+    | Owned_agent_tool (specification, policy, _, _, _) ->
       let tool =
         match policy with
         | None -> (Agent specification : tool)
@@ -700,6 +716,21 @@ module Chat_markdown = struct
       resolved, !queued_key)
   ;;
 
+  let agent_source_mode attrs =
+    match List.filter attrs ~f:(fun (name, _) -> String.equal name "source_mode") with
+    | [] | [ (_, Some "file") ] -> Agent_reference.Source_mode.File
+    | [ (_, Some "captured") ] -> Captured
+    | _ -> failwith "Agent source_mode must be file or captured, specified once."
+  ;;
+
+  let check_agent_source_mode ~owned ~local source_mode =
+    match source_mode with
+    | Agent_reference.Source_mode.File -> ()
+    | Captured ->
+      if not owned then failwith "captured source_mode requires owned prompt preparation";
+      if not local then failwith "captured source_mode requires a local agent reference"
+  ;;
+
   let owned_agent_range = function
     | Some range -> range
     | None -> failwith "Owned agent declaration lacks its parser range"
@@ -881,6 +912,7 @@ module Chat_markdown = struct
             ; source_context
             }
         | Element (Agent, attrs, __bin_read_content_item__) ->
+          let source_mode = agent_source_mode attrs in
           let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
           let url_attr =
             List.find_map attr ~f:(fun (nm, v) ->
@@ -890,6 +922,7 @@ module Chat_markdown = struct
           let agent_is_local =
             List.exists attr ~f:(fun (nm, _) -> String.(nm = "local"))
           in
+          check_agent_source_mode ~owned:owned_documents ~local:agent_is_local source_mode;
           if owned_documents
           then (
             let range = owned_agent_range range in
@@ -900,7 +933,8 @@ module Chat_markdown = struct
                 ~reference:agent_url
                 ~is_local:agent_is_local
             in
-            Owned_agent_content (agent_url, agent_is_local, children, range, queued_key))
+            Owned_agent_content
+              (agent_url, agent_is_local, children, range, queued_key, source_mode))
           else (
             let agent_url =
               if agent_is_local
@@ -922,6 +956,11 @@ module Chat_markdown = struct
           in
           let command = Hashtbl.find tbl "command" in
           let agent = Hashtbl.find tbl "agent" in
+          let source_mode = agent_source_mode attrs in
+          if
+            Option.is_none agent
+            && List.exists attrs ~f:(fun (name, _) -> String.equal name "source_mode")
+          then failwith "source_mode is only supported on agent declarations";
           let mcp_server = Hashtbl.find tbl "mcp_server" in
           let description = Hashtbl.find tbl "description" in
           let is_local = Hashtbl.mem tbl "local" in
@@ -1029,6 +1068,7 @@ module Chat_markdown = struct
               let description = Option.map description ~f:String.strip in
               Tool (Custom { name; description; command = cmd; source = source_ref })
             | None, Some agent_url, None ->
+              check_agent_source_mode ~owned:owned_documents ~local:is_local source_mode;
               if String.is_empty name then failwith "Tool name cannot be empty.";
               let agent_url = String.strip agent_url in
               if String.is_empty agent_url then failwith "Tool agent URL cannot be empty.";
@@ -1045,7 +1085,7 @@ module Chat_markdown = struct
                 in
                 let specification = { name; description; agent; is_local } in
                 Owned_agent_tool
-                  (specification, Option.join persistence, range, queued_key))
+                  (specification, Option.join persistence, range, queued_key, source_mode))
               else (
                 let agent =
                   if is_local
@@ -1179,14 +1219,14 @@ module Chat_markdown = struct
     | Config c -> Some (Config c)
     | Reasoning r -> Some (Reasoning r)
     | Tool t -> Some (Tool t)
-    | Owned_agent_tool (specification, policy, range, queued_key) ->
+    | Owned_agent_tool (specification, policy, range, queued_key, source_mode) ->
       let tool, invocation =
         match policy with
         | None -> (Agent specification : tool), Agent_reference.Tool specification
         | Some policy ->
           Persistent_agent (specification, policy), Persistent_tool (specification, policy)
       in
-      on_agent ({ invocation; range; queued_key } : Agent_reference.t);
+      on_agent ({ invocation; range; queued_key; source_mode } : Agent_reference.t);
       Some (Tool tool)
     | Shell_runtime runtime -> Some (Shell_runtime runtime)
     | Moderator_runtime moderator -> Some (Moderator_runtime moderator)

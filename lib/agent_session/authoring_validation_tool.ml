@@ -65,6 +65,7 @@ let registration ~env ~host =
     { implementation
     ; implementation_revision
     ; result_contract = Native_output
+    ; source_requirement = Ordinary
     ; authoring_metadata = Some V.helper_metadata
     }
 ;;

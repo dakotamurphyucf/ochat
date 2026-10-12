@@ -82,6 +82,15 @@ type model_job_inference =
       Inference.Request.Target.t -> (unit, Agent_protocol.Error.t) Result.t
   }
 
+module Child_source_policy = struct
+  type t =
+    { source : Agent_session.Captured_agent_runner.Source.t
+    ; runtime_policy_revision : Chatml_source.Digest.t
+    }
+
+  let create ~source ~runtime_policy_revision = { source; runtime_policy_revision }
+end
+
 type t =
   { sw : Eio.Switch.t
   ; env : Eio_unix.Stdenv.base
@@ -111,6 +120,7 @@ type t =
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
   ; script_preparation : Agent_session.Runtime_script_preparation.t option
   ; content_limits : Chatmd_prompt_content.Limits.t option
+  ; child_sources : Child_source_policy.t option
   ; generated_creation : Agent_session.Generated_session_request.service
   ; managed_sessions : Agent_session.Managed_session_service.t
   ; managed_output_cursors : Managed_output_cursor.t
@@ -1417,7 +1427,7 @@ let authorize_extension_native t actor_ref profile native invocation binding =
               (unavailable Permission_denied "reviewer returned an invalid grant scope"))))
 ;;
 
-let extension_jobs t actor_ref registry =
+let extension_jobs t actor_ref registry native =
   let module A = Agent_session.Session_actor in
   let module Jobs = Agent_session.Script_job_service in
   let host : Jobs.host =
@@ -1482,6 +1492,15 @@ let extension_jobs t actor_ref registry =
     }
   in
   Jobs.create
+    ~prepare_source:(fun ~binding ~owner ~request ~checkpoint ->
+      Chat_response.Agent_runtime.prepare_agent_source
+        native
+        ~binding
+        ~owner
+        ~request
+        ~max_registrations:
+          Chat_response.One_off_request.default_policy.execution.max_array_items
+        ~checkpoint)
     ~env:t.env
     ~policy:Chat_response.One_off_request.default_policy
     ~current_capabilities:(fun () -> registry)
@@ -1759,7 +1778,7 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
           |> fun tools ->
           Agent_session.Script_tool_calls.with_job_service
             tools
-            (extension_jobs t actor_ref registry)
+            (extension_jobs t actor_ref registry native)
           |> fun tools ->
           Agent_session.Script_tool_calls.with_subscription_service
             tools
@@ -2449,6 +2468,28 @@ let original_source_lease (t : t) ~sw ~revision =
     ~checkpoint:Eio.Fiber.check
 ;;
 
+let source_binding (t : t) ~source_lease =
+  match t.child_sources with
+  | None -> Ok None
+  | Some policy ->
+    let open Result.Let_syntax in
+    let%map artifacts =
+      Agent_store.Prompt_artifact_store.create
+        ~env:t.env
+        ~root:
+          (Agent_store.Data_root.prompt_artifacts_path
+             (Agent_store.Session_store.data_root t.store))
+      |> Result.map_error ~f:protocol_of_store
+    in
+    Some
+      (Agent_session.Captured_agent_runner.Source_binding.create
+         ~source:policy.source
+         ~runtime_policy_revision:policy.runtime_policy_revision
+         ~content_limits:t.content_limits
+         ~artifact_store:artifacts
+         ~source_lease)
+;;
+
 let source_attachment_error error =
   unavailable Invalid_state (Core.Error.to_string_hum error)
 ;;
@@ -2472,6 +2513,7 @@ let prepare_authored_graph
   =
   let open Result.Let_syntax in
   let%bind inference_context = resolve_state_inference_context t state in
+  let%bind agent_source = source_binding t ~source_lease in
   Authored_resources.prepare
     t.authored_resources
     ~sw
@@ -2480,6 +2522,7 @@ let prepare_authored_graph
     ~services:t.authored_services
     ~build:(fun ~parent_revision ~tool_name ~native_registrations ->
       Agent_session.Runtime_builder.prepare_authored_resources
+        ~agent_source
         ~startup
         ~script_preparation:t.script_preparation
         ~content_limits:t.content_limits
@@ -2626,8 +2669,10 @@ let independent_resource_host t =
                   ~authoring_validation_host:t.authoring_validation_host
               in
               let%bind inference_context = resolve_state_inference_context t state in
+              let%bind agent_source = source_binding t ~source_lease in
               let%bind resources =
                 B.prepare_resources
+                  ~agent_source
                   ~startup:(Some startup)
                   ~root_invocation:state.Agent_session.Session_state.spec.root_invocation
                   ~script_preparation:t.script_preparation
@@ -3193,12 +3238,14 @@ let prepare_runtime_at_paths
             ~checkpoint:Eio.Fiber.check
             ~f:(fun startup ~compilation_limits:_ ~programs:_ ->
               let source_lease = original_source_lease t ~sw ~revision in
+              let%bind agent_source = source_binding t ~source_lease in
               let built =
                 match t.qualify_chatml_extensions with
                 | false ->
                   construct
                     sw
                     (Agent_session.Runtime_builder.build
+                       ~agent_source
                        ~startup:(Some startup)
                        ~root_invocation:
                          state.Agent_session.Session_state.spec.root_invocation
@@ -3237,6 +3284,7 @@ let prepare_runtime_at_paths
                     construct
                       sw
                       (B.build_with_extensions
+                         ~agent_source
                          ~startup:(Some startup)
                          ~root_invocation:
                            state.Agent_session.Session_state.spec.root_invocation
@@ -6174,7 +6222,11 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
          entry))
 ;;
 
-let read_owned_session t handle =
+type archive_validation =
+  | Validate_archives
+  | Defer_archive_reads
+
+let read_owned_session_with_archives t handle archive_validation =
   let open Result.Let_syntax in
   let%bind metadata =
     Agent_store.Session_store.Handle.metadata_checked handle
@@ -6203,7 +6255,13 @@ let read_owned_session t handle =
       ~validate_transaction:
         (Agent_session.Session_persistence.validate_transaction
            ~limits:t.journal_document_limits)
-      ~validate:(validate_recovery_state t handle)
+      ~validate:(fun restored ->
+        match archive_validation, restored with
+        | Validate_archives, _ -> validate_recovery_state t handle restored
+        | Defer_archive_reads, None ->
+          Error (Agent_store.Store_error.Corrupt "durable session has no valid snapshot")
+        | Defer_archive_reads, Some restored ->
+          Agent_session.Session_persistence.validate restored)
     |> Result.map_error ~f:protocol_of_store
   in
   let%bind restored =
@@ -6218,6 +6276,99 @@ let read_owned_session t handle =
     | Catalog _ | Local_path _ -> Ok ()
   in
   state
+;;
+
+let read_owned_session t handle =
+  read_owned_session_with_archives t handle Validate_archives
+;;
+
+let fold_indexed_retained_states t indexed ~authorize ~checkpoint ~admit_archive ~init ~f =
+  let module Archive = Agent_session.Session_state.Compaction_archive in
+  let open Result.Let_syntax in
+  let poll () =
+    Eio.Fiber.check ();
+    checkpoint ();
+    Eio.Fiber.check ()
+  in
+  Session_registry.with_indexed_retention_read t.registry indexed ~f:(fun indexed ->
+    poll ();
+    let%bind () = authorize indexed.Agent_store.Session_index.Entry.session in
+    poll ();
+    Eio.Switch.run (fun sw ->
+      let%bind handle =
+        Agent_store.Session_store.open_session
+          t.store
+          ~sw
+          ~actor_lock_nonce:
+            (Agent_protocol.Id.Transaction.create ()
+             |> Agent_protocol.Id.Transaction.to_string)
+          indexed.session.id
+        |> Result.map_error ~f:protocol_of_store
+      in
+      Session_registry.with_recovery_handle t.registry ~store:t.store handle (fun () ->
+        let%bind () =
+          if Agent_store.Session_store.owns_handle t.store handle
+          then Ok ()
+          else Error (corrupt "retention handle belongs to another store")
+        in
+        let%bind state = read_owned_session_with_archives t handle Defer_archive_reads in
+        let%bind () = authorize (Agent_session.Session_state.summary state) in
+        (* Admit the entire prefix before retaining its filename lookup or reading
+           any archive. Filenames contain only validated bounded operation IDs
+           and a fixed kind prefix; map comparisons therefore have a fixed cap. *)
+        let rec admit = function
+          | [] -> Ok ()
+          | _ :: rest ->
+            poll ();
+            let%bind () = admit_archive () in
+            admit rest
+        in
+        let references = state.conversation.compaction_archives in
+        let%bind () = admit references in
+        let%bind inventory =
+          List.fold_result
+            references
+            ~init:String.Map.empty
+            ~f:(fun inventory reference ->
+              poll ();
+              let filename = Agent_session.Compaction_archive.filename reference in
+              if Map.mem inventory filename
+              then Error (corrupt "retained archive inventory repeats a file")
+              else Ok (Map.set inventory ~key:filename ~data:reference))
+        in
+        let check_nested (historical : Agent_session.Session_state.t) =
+          List.fold_result
+            historical.conversation.compaction_archives
+            ~init:()
+            ~f:(fun () reference ->
+              poll ();
+              match
+                Map.find inventory (Agent_session.Compaction_archive.filename reference)
+              with
+              | Some original
+                when Archive.equal_kind original.kind reference.kind
+                     && Int64.equal original.revision reference.revision
+                     && String.equal original.sha256 reference.sha256 -> Ok ()
+              | Some _ | None ->
+                Error (corrupt "historical archive is absent from retained inventory"))
+        in
+        let%bind accumulator = f init state in
+        let%bind result =
+          List.fold_result references ~init:accumulator ~f:(fun accumulator reference ->
+            poll ();
+            let%bind historical =
+              Agent_session.Compaction_archive.read
+                ~env:t.env
+                ~handle
+                ~max_payload_length:t.limits.snapshot_payload_limit
+                reference
+            in
+            let%bind () = check_nested historical in
+            f accumulator historical)
+        in
+        poll ();
+        let%map () = authorize (Agent_session.Session_state.summary state) in
+        result)))
 ;;
 
 let read_session t index_entry =
@@ -8660,6 +8811,7 @@ let create
       ~authoring_validation_host
       ~script_preparation
       ~content_limits
+      ~child_sources
       ~durability
       ~limits
   =
@@ -8706,6 +8858,7 @@ let create
     ; authoring_validation_host
     ; script_preparation
     ; content_limits
+    ; child_sources
     ; durability
     ; limits
     ; document_limits =

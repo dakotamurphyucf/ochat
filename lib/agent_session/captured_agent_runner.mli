@@ -5,9 +5,9 @@ open Core
     No original source grant or initialized child state is retained. *)
 type t
 
-(** [policy_revision] is the host's versioned identity for the complete supplied
-    execution policy, including shell authorizer/approval behavior, script/content
-    limits and host implementation changes. A digest grants no permissions. The
+(** [policy_revision] is the host's versioned identity for the supplied callback
+    implementation, including shell authorizer/approval behavior and host changes.
+    Actual script/content numeric limits are incorporated automatically. A digest grants no permissions. The
     factory's implementation/mode tag and each defining artifact's complete
     manifest digest participate separately in the returned port identity.
 
@@ -22,6 +22,9 @@ val create
   -> approval_provider:Shell_runtime.Approval_broker.provider
   -> response_dir:Eio.Fs.dir_ty Eio.Path.t
   -> t
+
+(** Host implementation tag plus actual script/content numeric policy. *)
+val policy_identity : t -> Chatml_source.Digest.t
 
 (** Bind exact owned parser/program/content custody to one runtime switch.
     Reject legacy or inconsistent owned revisions. Performs bounded metadata
@@ -52,3 +55,82 @@ val bind
   -> revision:Prompt_revision.t
   -> sw:Eio.Switch.t
   -> (Chat_response.Tool.Agent_source_runner.t, Agent_protocol.Error.t) Result.t
+
+module Source : sig
+  (** Acquisition policy, distinct from runtime restoration/activation policy.
+      The callback uses the SAME Startup and actual Scope with current history.
+      policy_revision versions preprocessing/preparation callbacks and host
+      implementation. Actual parser/compiler/work limits are incorporated
+      automatically; the digest grants no authority and binds
+      installed-factory native implementation identity separately from captured. *)
+  type t
+
+  val create
+    :  policy_revision:Chatml_source.Digest.t
+    -> compilation:Chatml_compilation.limits
+    -> parser_limits:Prompt.Chat_markdown.Limits.t
+    -> max_work_steps:int
+    -> preprocess:(string -> string)
+    -> prepare_programs:
+         (Chat_response.Startup_compilation.t
+          -> invocation:Runtime_script_preparation.Invocation.t
+          -> Prompt_source_owner.Scope.t
+          -> Prompt_source_owner.Capture.t
+          -> ( Chatml_prompt_programs.t
+               , Prompt_revision_builder.Diagnostic.t list )
+               Result.t)
+    -> t Or_error.t
+
+  (** Host implementation tag plus actual admitted numeric acquisition policy. *)
+  val policy_identity : t -> Chatml_source.Digest.t
+end
+
+(** Installed headless runtime binding. Exact saved current-services artifact wins
+    before File/Captured selection. New File uses the actual original source lease;
+    new Captured uses retained code. Both install/verify before returning a queued
+    reference, then execute under authentic Headless policy. The runtime switch
+    joins preparation/execution before releasing Store/lease. No native resource
+    or source capability is serialized. Child ports belong to the selected child;
+    invocation content retains its caller's port. The explicit prune embedding
+    must serialize selection/install/admission; Daemon prunes only pre-recovery.
+    Persistent precreated specialists require their separate Authored/code-view
+    owner and cannot use this ordinary headless implementation. *)
+val bind_installed
+  :  t
+  -> source:Source.t
+  -> artifact_store:Agent_store.Prompt_artifact_store.t
+  -> source_lease:Prompt_source_lease.t
+  -> env:Eio_unix.Stdenv.base
+  -> revision:Prompt_revision.t
+  -> sw:Eio.Switch.t
+  -> (Chat_response.Tool.Agent_source_runner.t, Agent_protocol.Error.t) Result.t
+
+module Source_binding : sig
+  (** Immutable original-source template; borrows Store and source lease, without
+      opening or claiming either. Bound ports belong to their actual resource
+      switch. Join them before releasing the borrowed host owners. *)
+  type t
+
+  val create
+    :  source:Source.t
+    -> runtime_policy_revision:Chatml_source.Digest.t
+    -> content_limits:Chatmd_prompt_content.Limits.t option
+    -> artifact_store:Agent_store.Prompt_artifact_store.t
+    -> source_lease:Prompt_source_lease.t
+    -> t
+
+  (** Bind the exact restored revision before native registration, using its
+      constructor's actual shell/content policies and response directory. No
+      source read or initializer. Missing/closed source loans still permit saved
+      or Captured selections; a new File selection rejects without fallback. *)
+  val bind
+    :  t
+    -> script_preparation:Runtime_script_preparation.t
+    -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+    -> approval_provider:Shell_runtime.Approval_broker.provider
+    -> response_dir:Eio.Fs.dir_ty Eio.Path.t
+    -> env:Eio_unix.Stdenv.base
+    -> revision:Prompt_revision.t
+    -> sw:Eio.Switch.t
+    -> (Chat_response.Tool.Agent_source_runner.t, Agent_protocol.Error.t) Result.t
+end

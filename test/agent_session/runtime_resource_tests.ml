@@ -98,6 +98,7 @@ let run ctx input =
             ()
         in
         B.prepare_resources
+          ~agent_source:None
           ~startup:None
           ~root_invocation:Ui
           ~script_preparation:(Some (script_preparation ()))

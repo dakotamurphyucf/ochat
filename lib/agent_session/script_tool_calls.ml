@@ -68,6 +68,11 @@ type t =
   ; authoring_services : Authoring_services.t option
   ; generated_creation_service : Generated_session_request.service option
   ; managed_session_service : Managed_session_service.t option
+  ; agent_artifact :
+      (C.binding
+      * Agent_protocol.Id.Invocation.t
+      * Chat_response.Background_request.Agent_artifact.t)
+        option
   }
 
 type native_services =
@@ -140,15 +145,119 @@ let with_native_services tools ~session_id ~generation f =
             f))
 ;;
 
+module Native_services_scope = struct
+  type nonrec t =
+    | Unbound
+    | Active of t
+    | Expired
+end
+
+let native_services_scope () =
+  match Eio.Fiber.get native_services_key with
+  | None -> Native_services_scope.Unbound
+  | Some context ->
+    (match Native_tool_invocation.current_scope () with
+     | Active invocation
+       when Atomic.get context.active
+            && Agent_protocol.Id.Session.equal
+                 context.session_id
+                 invocation.context.session_id
+            && Int.equal context.generation invocation.context.generation ->
+       Native_services_scope.Active context.tools
+     | Active _ | Expired | Unbound -> Native_services_scope.Expired)
+;;
+
 let current_native_services () =
-  match Eio.Fiber.get native_services_key, Native_tool_invocation.current_scope () with
-  | Some context, Active invocation
-    when Atomic.get context.active
-         && Agent_protocol.Id.Session.equal
-              context.session_id
-              invocation.context.session_id
-         && Int.equal context.generation invocation.context.generation -> Ok context.tools
-  | _ -> Error "native tool services do not belong to an active invoking session"
+  match native_services_scope () with
+  | Native_services_scope.Active services -> Ok services
+  | Unbound | Expired ->
+    Error "native tool services do not belong to an active invoking session"
+;;
+
+let with_agent_artifact t ~binding ~parent_invocation artifact =
+  { t with agent_artifact = Some (binding, parent_invocation, artifact) }
+;;
+
+let agent_artifact t =
+  let open Result.Let_syntax in
+  let denied message = Error (Agent_protocol.Error.invalid_request message) in
+  let validate () =
+    let%bind current =
+      current_native_services ()
+      |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+    in
+    if not (phys_equal current t)
+    then denied "selected agent code belongs to another native service"
+    else (
+      match t.agent_artifact, Native_tool_invocation.current_scope () with
+      | None, Active _ -> Ok None
+      | Some (binding, parent_invocation, artifact), Active invocation ->
+        let reference = C.reference binding in
+        let%bind borrowed = Native_tool_invocation.borrow () in
+        let%bind ceiling = Native_tool_invocation.borrowed_capabilities borrowed in
+        if
+          Option.is_none (C.native_implementation binding)
+          || not
+               (String.equal
+                  (C.fingerprint ceiling)
+                  invocation.context.capability_fingerprint
+                && String.equal
+                     reference.implementation_revision
+                     invocation.context.implementation_revision
+                && String.equal reference.name invocation.context.tool_name
+                && Option.equal
+                     Agent_protocol.Id.Invocation.equal
+                     (Some parent_invocation)
+                     invocation.context.parent_invocation)
+        then denied "selected agent code does not match this native invocation"
+        else (
+          let%bind ceiling_binding =
+            C.resolve ceiling ~id:reference.id ~fingerprint:reference.fingerprint
+            |> Result.map_error ~f:(fun error ->
+              Agent_protocol.Error.invalid_request error.C.message)
+          in
+          let%bind current_binding =
+            C.resolve (t.registry ()) ~id:reference.id ~fingerprint:reference.fingerprint
+            |> Result.map_error ~f:(fun error ->
+              Agent_protocol.Error.invalid_request error.C.message)
+          in
+          match
+            ( C.native_implementation binding
+            , C.native_implementation ceiling_binding
+            , C.native_implementation current_binding )
+          with
+          | Some original, Some ceiling, Some current
+            when phys_equal original ceiling && phys_equal original current ->
+            Ok (Some (binding, artifact, invocation))
+          | Some _, _, _ | None, _, _ ->
+            denied "selected agent code native implementation has changed")
+      | _, (Expired | Unbound) -> denied "selected agent code scope has ended")
+  in
+  Eio.Fiber.check ();
+  let%bind selected = validate () in
+  match selected with
+  | None -> Ok None
+  | Some (binding, _, invocation) ->
+    let%bind () = t.authorize invocation binding in
+    Eio.Fiber.check ();
+    let%bind selected = validate () in
+    (match selected with
+     | Some (_, artifact, current)
+       when Agent_protocol.Id.Invocation.equal invocation.context.id current.context.id ->
+       Ok (Some artifact)
+     | None | Some _ ->
+       denied "selected agent code invocation changed during authorization")
+;;
+
+let agent_artifact_for_implementation t ~implementation =
+  let open Result.Let_syntax in
+  let%map selected = agent_artifact t in
+  match selected, t.agent_artifact, implementation with
+  | Some artifact, Some (binding, _, _), Some implementation ->
+    (match C.native_implementation binding with
+     | Some original when phys_equal implementation original -> Some artifact
+     | Some _ | None -> None)
+  | _, _, _ -> None
 ;;
 
 let create
@@ -186,6 +295,7 @@ let create
   ; authoring_services = None
   ; generated_creation_service = None
   ; managed_session_service = None
+  ; agent_artifact = None
   }
 ;;
 
