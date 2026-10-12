@@ -51,6 +51,7 @@ let%expect_test "authored reservations preserve source identity through durable 
           let reserve
                 ?(origin = Some origin)
                 ?(parent_revision_id = (Source.identity source).parent_revision_id)
+                ?manifest_sha256
                 label
                 (artifact : Artifacts.Artifact.t)
             =
@@ -58,7 +59,8 @@ let%expect_test "authored reservations preserve source identity through durable 
               { child_session_id = P.Id.Session.create ()
               ; revision_id = artifact.revision_id
               ; transaction_id = P.Id.Transaction.create ()
-              ; manifest_sha256 = artifact.manifest_sha256
+              ; manifest_sha256 =
+                  Option.value manifest_sha256 ~default:artifact.manifest_sha256
               ; parent_revision_id
               ; parent_stop_epoch = Some 0L
               ; authority_sha256 = Chatmd_shell_spec.Source_ref.digest "parent-policy"
@@ -193,6 +195,103 @@ let%expect_test "authored reservations preserve source identity through durable 
             incompatible
           |> store_ok;
           Source.load_artifact ~artifact_store:artifacts ~reservation:wrong_contract
+          |> denied;
+          Source.load_recorded_artifact
+            ~artifact_store:artifacts
+            ~reservation:wrong_contract
+          |> denied;
+          (* Envelope inspection deliberately proves no original resource grant.
+             Use an actual current publisher, then independently vary the three
+             distinguishing metadata fields through every presence combination. *)
+          let definition =
+            Agent_session.Prompt_revision.definition (Source.defining_revision source)
+          in
+          Eio.Path.save
+            ~create:(`Or_truncate 0o600)
+            Eio.Path.(Eio.Stdenv.fs env / definition.root_file)
+            "<developer>Current publisher.</developer>";
+          let modern =
+            Agent_session.Prompt_revision_builder.build
+              ~env
+              ~artifact_store:artifacts
+              ~transaction_id:(P.Id.Transaction.create ())
+              ~created_at:timestamp
+              definition
+            |> Authored_agent_source_tests.built
+            |> Agent_session.Prompt_revision.artifact
+          in
+          let modern_record = reserve "modern-publisher" modern in
+          Source.load_artifact ~artifact_store:artifacts ~reservation:modern_record
+          |> denied;
+          Source.load_recorded_artifact
+            ~artifact_store:artifacts
+            ~reservation:modern_record
+          |> protocol_ok
+          |> ignore;
+          let wrong_digest_artifact = candidate () in
+          let wrong_digest =
+            reserve
+              ~manifest_sha256:(Chatmd_shell_spec.Source_ref.digest "different-manifest")
+              "wrong-recorded-digest"
+              wrong_digest_artifact
+          in
+          Artifacts.install
+            artifacts
+            ~transaction_id:wrong_digest.admission.transaction_id
+            wrong_digest_artifact
+          |> store_ok;
+          Source.load_recorded_artifact
+            ~artifact_store:artifacts
+            ~reservation:wrong_digest
+          |> denied;
+          let check_envelope label ~metadata ~parser ~runtime ~admitted =
+            let present bit value = if metadata land bit <> 0 then Some value else None in
+            let artifact =
+              Artifacts.Artifact.create
+                ~revision_id:(P.Id.Prompt_revision.create ())
+                ?prompt_definition_id:(present 1 definition.id)
+                ?canonical_source:(present 2 (Option.value_exn modern.canonical_source))
+                ?shell_manifest_sha256:
+                  (present 4 (Option.value_exn modern.shell_manifest_sha256))
+                ~root_chatmd:"<developer>Envelope.</developer>"
+                ~sources:[]
+                ~parser_schema_version:parser
+                ~runtime_schema_version:runtime
+                ~created_at:timestamp
+                ()
+              |> store_ok
+            in
+            let record = reserve label artifact in
+            Artifacts.install
+              artifacts
+              ~transaction_id:record.admission.transaction_id
+              artifact
+            |> store_ok;
+            let result =
+              Source.load_recorded_artifact ~artifact_store:artifacts ~reservation:record
+            in
+            if admitted then result |> protocol_ok |> ignore else denied result
+          in
+          List.iter (List.range 0 8) ~f:(fun metadata ->
+            check_envelope
+              (sprintf "metadata-%d" metadata)
+              ~metadata
+              ~parser:5
+              ~runtime:1
+              ~admitted:(metadata = 0 || metadata = 7));
+          List.iter
+            [ 4, 1; 5, 2 ]
+            ~f:(fun (parser, runtime) ->
+              check_envelope
+                (sprintf "schema-%d-%d" parser runtime)
+                ~metadata:7
+                ~parser
+                ~runtime
+                ~admitted:false);
+          Source.load_recorded_artifact ~artifact_store:artifacts ~reservation:replay
+          |> protocol_ok
+          |> ignore;
+          Source.load_recorded_artifact ~artifact_store:artifacts ~reservation:generated
           |> denied;
           let root = Artifacts.materialized_tree artifacts retained.revision_id in
           let file = Eio.Path.(root / retained.root_relative_path) in
