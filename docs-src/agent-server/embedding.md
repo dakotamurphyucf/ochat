@@ -57,6 +57,26 @@ transient hosts omit persisted child delegation. An embedding application can
 set `qualify_chatml_extensions = false` as a compatibility override, which also
 suppresses extension discovery. This override has no CLI/configuration-file flag.
 
+For new configured ChatML sessions, `Embedded.start`, `open_local_host` and
+`with_local_host` accept `~root_invocation:Headless` or `~root_invocation:Ui`.
+An explicit argument takes precedence over `daemon_options.root_invocation`;
+omitting both uses `Ui`. The selected role supplies the real moderator interface
+during project preparation and execution. Daemon catalog reloads retain the
+host's selected role.
+
+These convenience functions also accept `~project_sources`, using the existing
+`Project_source_configuration.t` operator policy for external roots and Git
+repositories. Omission permits local acquisition beneath the prompt's retained
+original root. The normal source host validates and admits each configured grant;
+project paths and captured artifact locations do not themselves grant access.
+See the [project source host contract](../development/project-source-host.md).
+
+Use `open_local_host` and `attach_retained` to attach an existing conversation.
+Its saved code, inference target and UI/headless role remain authoritative even
+when current host defaults differ or original source files have been removed.
+The [embedded project tests](../../test/chatml_composition/embedded_project_tests.ml)
+exercise both roles, explicit source grants, cold restoration and catalog reload.
+
 `Embedded.start` initializes the Unix cryptographic RNG before allocating its
 transient root or any session IDs. Callers do not need to initialize it first.
 Older builds had a [local stdio startup defect](troubleshooting.md#local-stdio-rng-initialization)
