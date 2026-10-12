@@ -642,12 +642,14 @@ let state_visible_to principal state =
 ;;
 
 let find_visible_entry t context session_id =
-  let open Result.Let_syntax in
-  let%bind entry = find_entry t session_id in
-  let%bind state = Agent_session.Session_actor.state entry.actor in
-  if state_visible_to (Connection_context.principal context) state
-  then Ok (entry, state)
-  else Error (error Permission_denied "session is not visible to this principal")
+  (* Visible lookup is a bounded read. Release its reservation before attachment,
+     subscriptions or downstream work; writable admission remains fail-fast. *)
+  Session_registry.with_loaded_read t.registry session_id (fun entry ->
+    let open Result.Let_syntax in
+    let%bind state = Agent_session.Session_actor.state entry.actor in
+    if state_visible_to (Connection_context.principal context) state
+    then Ok (entry, state)
+    else Error (error Permission_denied "session is not visible to this principal"))
 ;;
 
 let require_connection_attachment context ~session_id ~attachment_id =
