@@ -120,11 +120,15 @@ let prepare
     P.Run_limits.check_count (List.length previous.owned_work + List.length owned_work)
   in
   let owned = Set.of_list (module P.Run_work) (previous.owned_work @ owned_work) in
+  let completed =
+    List.find work_state.Session_state.moderator_executions ~f:(fun completed ->
+      P.Id.Moderator_execution.equal completed.context.id executing.context.id)
+  in
+  let initial_single_turn =
+    Run_event_scope.is_initial_single_turn previous executing.context
+  in
   let%bind terminal_work =
-    match
-      List.find work_state.Session_state.moderator_executions ~f:(fun completed ->
-        P.Id.Moderator_execution.equal completed.context.id executing.context.id)
-    with
+    match completed with
     | None -> Ok previous.terminal_work
     | Some completed -> Run_callback_evidence.capture previous ~executing ~completed
   in
@@ -136,10 +140,30 @@ let prepare
   let%bind lifecycle, relinquished, owned =
     match action with
     | None ->
-      let lifecycle =
-        match previous.lifecycle with
-        | Admitted -> P.Run.Lifecycle.Active
-        | Active | Waiting _ | Terminal _ -> previous.lifecycle
+      let%bind lifecycle =
+        if initial_single_turn && Set.is_empty owned
+        then (
+          match completed with
+          | Some completed
+            when P.Moderator_execution.equal_context executing.context completed.context
+                 &&
+                 match executing.status, completed.status with
+                 | Running, Completed _ -> true
+                 | _, _ -> false ->
+            (match completed.requests with
+             | None
+             | Some { request_turn = false; request_compaction = false; end_session = _ }
+               -> Ok (P.Run.Lifecycle.Terminal (Completed None))
+             | Some { request_turn = true; _ } | Some { request_compaction = true; _ } ->
+               Error
+                 (conflict
+                    "single-turn startup requires a scoped decision for pending work"))
+          | Some _ | None ->
+            Error (conflict "single-turn startup requires its actual completed callback"))
+        else (
+          match previous.lifecycle with
+          | Admitted -> Ok P.Run.Lifecycle.Active
+          | Active | Waiting _ | Terminal _ -> Ok previous.lifecycle)
       in
       Ok (lifecycle, previous.relinquished_work, Set.to_list owned)
     | Some P.Run_action.Continue ->
@@ -238,7 +262,7 @@ let prepare
       ~terminal_work
       ~now
   in
-  let%map index =
+  let%bind index =
     match action with
     | None -> Run_state.advance index ~run ~intents:[]
     | Some action ->
@@ -259,27 +283,26 @@ let prepare
         | Terminal _ -> Run_intent.consume intent ~operation_id:None
         | Admitted | Active | Waiting _ -> Ok intent
       in
-      let%bind index = Run_state.commit index ~run ~receipt ~intent:(Some intent) in
-      let%bind index =
-        match run.lifecycle with
-        | Admitted | Active | Waiting _ -> Ok index
-        | Terminal terminal ->
-          let%bind terminal_receipt =
-            make_receipt
-              state
-              run
-              ~kind:Terminal
-              ~key:
-                ("run-terminal:"
-                 ^ P.Id.Run.to_string run.id
-                 ^ ":"
-                 ^ Int64.to_string run.revision)
-              ~digest:(digest (P.Run.Terminal.to_json terminal))
-              ~now
-          in
-          Run_state.commit index ~run ~receipt:terminal_receipt ~intent:None
+      Run_state.commit index ~run ~receipt ~intent:(Some intent)
+  in
+  let%map index =
+    match run.lifecycle with
+    | Admitted | Active | Waiting _ -> Ok index
+    | Terminal terminal ->
+      let%bind terminal_receipt =
+        make_receipt
+          state
+          run
+          ~kind:Terminal
+          ~key:
+            ("run-terminal:"
+             ^ P.Id.Run.to_string run.id
+             ^ ":"
+             ^ Int64.to_string run.revision)
+          ~digest:(digest (P.Run.Terminal.to_json terminal))
+          ~now
       in
-      Ok index
+      Run_state.commit index ~run ~receipt:terminal_receipt ~intent:None
   in
   { run; delta = Session_delta.Run_state_changed index }
 ;;

@@ -2,7 +2,13 @@
     calls or callback execution. The actor establishes live scope/authority and
     passes a validated prospective state from its actual staged-work delta. New
     custody is captured even without an authored action. It persists the returned
-    delta with its prospective moderator checkpoint and actual event receipt. *)
+    delta with its prospective moderator checkpoint and actual event receipt.
+
+    An exact completed initial Single_turn callback with no action, owned work
+    or pending turn/compaction request completes with no result and a terminal
+    receipt in that same transaction. No input, continuation or work is fabricated.
+    Unowned scheduling without a scoped decision rejects that startup checkpoint;
+    explicit session-end disposition remains effective. Workflow is unchanged. *)
 type t
 
 val prepare

@@ -6,3 +6,12 @@ val select
   :  Session_state.t
   -> executing:Agent_protocol.Moderator_execution.t
   -> (Agent_protocol.Run.t option, Agent_protocol.Error.t) result
+
+(** Initial Single_turn callback shape only, not authority. Used after the
+    actor's actual source selection to require a checkpoint even when the
+    callback stages no action/work. [select] and live actor checks remain
+    necessary before admitting any resulting transition. *)
+val is_initial_single_turn
+  :  Agent_protocol.Run.t
+  -> Agent_protocol.Moderator_execution.context
+  -> bool

@@ -2337,7 +2337,7 @@ module Coverage = struct
   let run_mappings =
     List.concat_map
       [ ( "moderator_v1"
-        , "457b633c244e75ebe3bfb247ec19a0475dd2d7148019c542e95ff02c17a708e7"
+        , "5d32951cdfe26278e78887fc19d07be4f4024fb6b11b0b4ee16e7947caf78c5f"
         , [ ( "module/Run"
             , "6eb6e335f86f30019f0bf3f7ff05141fbe26e7c95312a31501ab52bc016ef0e0" )
           ; ( "module_export/Run.continue"
@@ -2348,7 +2348,7 @@ module Coverage = struct
             , "79322e34f129f854d870a6f52dd729f64afabd8255eb83e9642ccd2ee8b1dc23" )
           ] )
       ; ( "delegated_moderator_v1"
-        , "9e97ab7e6d08a9dac533944163541d21f8d2fb1db91ad46ef5eb3b72cadb61e6"
+        , "9b026f950a26a85042b0c022ecf2010656999b3d7134613b227ebc123775f58e"
         , [ ( "module/Run"
             , "845fbe661e06d288d0974a92ecb3b14cde3918f2d126dfb0f4b8cc7c49de919b" )
           ; ( "module_export/Run.continue"
@@ -3657,7 +3657,7 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "e378015fd3c06a499a3e1e7a8d513e97109703341cbfd1b3f10f310c1ef20cdd" ]
+                   [ "b609f6eee543b5a8288e5100eef55658f7271a12aada185377042464a52a9228" ]
                ; evidence =
                    [ "test/agent_session/run_action_scope_tests.ml"
                    ; "test/run_lifecycle_protocol_test.ml"

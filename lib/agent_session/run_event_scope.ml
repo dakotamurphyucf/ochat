@@ -33,6 +33,15 @@ let owns_job (run : P.Run.t) (job : P.Moderator_execution.job_attempt) =
       -> false)
 ;;
 
+let is_initial_single_turn (run : P.Run.t) (context : P.Moderator_execution.context) =
+  P.Run.Mode.equal run.mode Single_turn
+  && P.Run.Lifecycle.equal run.lifecycle Admitted
+  && P.Moderator_execution.equal_phase context.phase Session_start
+  && Option.is_none context.operation_id
+  && Option.is_none context.job
+  && List.is_empty run.owned_work
+;;
+
 let selected_by_context (run : P.Run.t) (context : P.Moderator_execution.context) =
   match context.operation_id, context.job, run.lifecycle with
   | Some id, None, (Admitted | Active) -> owns_operation run id
@@ -47,7 +56,6 @@ let selected_by_context (run : P.Run.t) (context : P.Moderator_execution.context
         false)
   | None, None, Admitted ->
     P.Moderator_execution.equal_phase context.phase Session_start
-    && P.Run.Mode.equal run.mode Workflow
     && List.is_empty run.owned_work
   | Some _, Some _, _
   | None, None, (Waiting _ | Terminal _)

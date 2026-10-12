@@ -4028,9 +4028,12 @@ let prepared_run_delta t (borrow : queued_event_borrow) completed requests job_d
         | _ -> None)
       |> Result.all
     in
-    let owns_callback =
+    let run =
       Option.bind t.state.run_state ~f:(fun index ->
         Run_state.find index (Run_scope.run_id scope))
+    in
+    let owns_callback =
+      run
       |> Option.exists ~f:(fun run ->
         List.exists run.Agent_protocol.Run.owned_work ~f:(fun work ->
           match work.Agent_protocol.Run_work.key with
@@ -4040,7 +4043,15 @@ let prepared_run_delta t (borrow : queued_event_borrow) completed requests job_d
           | Retained (Job _ | Schedule _ | Invocation _ | Subscription _ | Delivery _) ->
             false))
     in
-    if Option.is_none action && List.is_empty owned_work && not owns_callback
+    let initial_single_turn =
+      Option.exists run ~f:(fun run ->
+        Run_event_scope.is_initial_single_turn run borrow.receipt.context)
+    in
+    if
+      Option.is_none action
+      && List.is_empty owned_work
+      && (not owns_callback)
+      && not initial_single_turn
     then Ok []
     else (
       let%bind work_transition =

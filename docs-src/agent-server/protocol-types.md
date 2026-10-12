@@ -5107,6 +5107,9 @@ type t = private
   }
 [@@deriving sexp]
 
+(** Both modes accept [Authored_start]; the actor still requires a genuine
+    unconsumed source-bound startup. Single_turn does not recreate a consumed
+    startup or authorize caller-supplied source identity. *)
 val create
   :  session_id:Id.Session.t
   -> attachment_id:Id.Attachment.t

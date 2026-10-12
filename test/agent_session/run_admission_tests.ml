@@ -8,6 +8,7 @@ let with_startup_actor
       ?make_worker
       ?make_job_results
       ?make_persistence
+      ?(mode = P.Run.Mode.Workflow)
       ?(after_close = fun _ _ _ -> ())
       ?(prepare = ignore)
       f
@@ -110,7 +111,7 @@ let with_startup_actor
             ~attachment_id:attachment.id
             ~generation:state.identity.generation
             ~expected_revision:state.counters.revision
-            ~mode:Workflow
+            ~mode
             ~input:Authored_start
             ~key:(P.Idempotency_key.of_string key |> protocol_ok)
           |> protocol_ok
@@ -143,6 +144,107 @@ let with_startup_actor
               attachment))
     in
     after_close env workspace_instance result)
+;;
+
+let%test_unit "single-turn startup requires exact completed prospective evidence" =
+  with_startup_actor ~mode:Single_turn (fun actor _ _ request start manager _ _ _ ->
+    let request = request "single-start-evidence" in
+    let roundtrip = P.Run_start.to_json request |> P.Run_start.of_json |> protocol_ok in
+    assert (P.Run.Mode.equal roundtrip.mode Single_turn);
+    (match roundtrip.input with
+     | Authored_start -> ()
+     | User_submission _ -> failwith "authored input changed through codec");
+    ignore (start request |> protocol_ok : P.Run_receipt.t);
+    let state = A.Session_actor.state actor |> protocol_ok in
+    let run = Option.value_exn state.run_state |> A.Run_state.runs |> List.hd_exn in
+    let snapshot =
+      Chat_response.Moderator_manager.identity_snapshot manager |> Result.ok_or_failwith
+    in
+    let executing, _ =
+      A.Queued_moderator_event.claim_ordinary
+        ~state
+        ~id:(P.Id.Moderator_execution.of_string "mex_single_start" |> protocol_ok)
+        ~snapshot
+        ~operation_id:None
+        ~event:Session_start
+        ~now:timestamp
+      |> protocol_ok
+    in
+    let scope =
+      A.Run_scope.create ~run ~execution_id:executing.context.id |> protocol_ok
+    in
+    let projected completed =
+      let running =
+        P.Moderator_execution.create completed.P.Moderator_execution.context
+        |> protocol_ok
+      in
+      let delta =
+        match completed.status with
+        | Running -> A.Session_delta.Moderator_execution_changed running
+        | Completed _ | Failed _ | Interrupted _ ->
+          Batch
+            [ Moderator_execution_changed running; Moderator_execution_changed completed ]
+      in
+      A.Session_delta.apply state delta |> protocol_ok
+    in
+    let prepare work_state =
+      A.Run_transition.prepare
+        state
+        ~scope
+        ~executing
+        ~work_state
+        ~owned_work:[]
+        ~action:None
+        ~now:timestamp
+    in
+    assert (Result.is_error (prepare state));
+    assert (Result.is_error (prepare (projected executing)));
+    let requests : P.Invocation.follow_up =
+      { request_turn = false; request_compaction = false; end_session = None }
+    in
+    let completed requests =
+      P.Moderator_execution.complete
+        executing
+        ~checkpoint_sha256:executing.context.checkpoint_sha256
+        ~requests
+      |> protocol_ok
+    in
+    let foreign =
+      P.Moderator_execution.create
+        { executing.context with
+          source = { executing.context.source with source_sha256 = String.make 64 'f' }
+        }
+      |> protocol_ok
+      |> fun foreign ->
+      P.Moderator_execution.complete
+        foreign
+        ~checkpoint_sha256:executing.context.checkpoint_sha256
+        ~requests
+      |> protocol_ok
+    in
+    assert (Result.is_error (prepare (projected foreign)));
+    List.iter
+      [ { requests with request_turn = true }
+      ; { requests with request_compaction = true }
+      ]
+      ~f:(fun requests ->
+        assert (Result.is_error (prepare (projected (completed requests)))));
+    let completed = completed requests in
+    assert (Option.is_none completed.requests);
+    let prepared = prepare (projected completed) |> protocol_ok in
+    let settled =
+      A.Session_delta.apply (projected completed) (A.Run_transition.delta prepared)
+      |> protocol_ok
+    in
+    let index = Option.value_exn settled.run_state in
+    let terminal = List.hd_exn (A.Run_state.runs index) in
+    assert (P.Run.Lifecycle.equal terminal.lifecycle (Terminal (Completed None)));
+    assert (List.is_empty terminal.owned_work);
+    assert (List.is_empty (A.Run_state.intents index));
+    [%test_eq: int]
+      (List.count (A.Run_state.receipts index) ~f:(fun receipt ->
+         P.Run_receipt.Kind.equal receipt.kind Terminal))
+      1)
 ;;
 
 let%expect_test "actual startup admission retries without initialization or mutation" =
