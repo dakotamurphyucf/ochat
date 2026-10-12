@@ -103,7 +103,7 @@ process.exitCode = Number(process.env.FAKE_DUNE_EXIT);
     assert.equal(report.exitCode, duneExit);
     assert.equal(report.signal, null);
     assert.equal(report.architecture, process.arch);
-    assert.equal(report.timeoutSeconds, { e2e: 1500, normal: 3600, "git-native": 2700 }[tier]);
+    assert.equal(report.timeoutSeconds, { e2e: 1500, normal: 3900, "git-native": 2700 }[tier]);
     assert.deepEqual(report.command, ["dune", ...invocation]);
     const aliases = {
       e2e: ["@agent-e2e-pr"],

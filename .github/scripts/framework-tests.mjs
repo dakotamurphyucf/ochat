@@ -19,12 +19,12 @@ if (!Object.hasOwn(commands, tier))
   throw new Error("Expected normal, e2e or git-native");
 if (tier !== "e2e" && !path.isAbsolute(process.env.OCHAT_TEST_GIT_2_56_DIRECTORY ?? ""))
   throw new Error("Pinned Git fixture provisioning is required before native tests");
-// An uncached Linux run reached the 45-minute aggregate limit with late tests
-// still running and no completed process failures. Its CPU-heavy tests took
-// 1.4–1.8 times the passing PR run; trace-based completion estimates were 52–56
-// minutes. Allow a bounded hour for compilation and the complete normal suite;
+// Cold Linux run 38278439617 exhausted 60 minutes with all 12,254 completed
+// processes successful. Only the final repair partition was interrupted: it
+// had 35.5 seconds to run versus 48.6 seconds in the previous CI run. Allow five
+// minutes of aggregate headroom for compilation and the complete normal suite;
 // individual test/runtime deadlines and two-worker concurrency remain unchanged.
-const timeoutMinutes = { normal: 60, e2e: 25, "git-native": 45 };
+const timeoutMinutes = { normal: 65, e2e: 25, "git-native": 45 };
 const timeoutMs = timeoutMinutes[tier] * 60 * 1000;
 fs.mkdirSync(".ci-evidence", { recursive: true });
 // Verbose output identifies started actions even while their output is buffered.
