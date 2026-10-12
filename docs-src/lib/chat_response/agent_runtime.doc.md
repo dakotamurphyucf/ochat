@@ -6,6 +6,13 @@ See [agent-core embedding](../../agent-server/embedding.md),
 [session/history behavior](../../agent-server/sessions-and-workspaces.md),
 and [protocol synchronization](../../agent-server/protocol.md).
 
+Declaration inspection (`inspect_resources`) checks captured shell material and
+administrative policy without authorizing execution. Configured hooks use
+`inspect_prepared_shell` to obtain the complete compiled-program identity, including
+imported dependencies and selected entrypoints. Its security result is separate
+from the requested identity so operators can obtain the material to sign; runtime
+activation still requires the complete identity to pass security and grant checks.
+
 ## Public contract
 
 [Interface](../../../lib/chat_response/agent_runtime.mli) · [implementation](../../../lib/chat_response/agent_runtime.ml)
@@ -62,6 +69,26 @@ type shell_inspection =
   ; security_status : Shell_runtime.Manifest_security.status
   }
 
+type resource_inspection =
+  { manifest : Chatmd_shell_spec.Manifest.t
+  ; live_runtimes : Chatmd_shell_spec.Shell_spec.t list
+  ; administrative_policy : Shell_runtime.Admin_policy.t
+  }
+
+(** Complete requested execution identity remains inspectable even if the current
+    signature/trust check rejects. This is neither a manifest grant nor runtime
+    activation; an operator can use the actual canonical identity/signature
+    payload before installing its signature. *)
+type prepared_shell_inspection =
+  { manifest : Chatmd_shell_spec.Manifest.t
+  ; live_runtimes : Chatmd_shell_spec.Shell_spec.t list
+  ; administrative_policy : Shell_runtime.Admin_policy.t
+  ; security_check :
+      ( Shell_runtime.Manifest_security.status
+        , Shell_runtime.Manifest_security.error list )
+        Result.t
+  }
+
 (** Pure declaration preparation shared by source planning and runtime inspection.
     Returns the actual manifest compiler's transient material so callers can
     select effective scripts and invocation contracts. Does not consult host
@@ -77,12 +104,41 @@ val prepare_shell_manifest
 
 (** [inspect_shell ~env ~platform ~prompt_elements] evaluates requested shell
     declarations against host administrative and trust policy without
-    authorizing a manifest or instantiating any executable runtime. *)
+    authorizing a manifest or instantiating any executable runtime. This legacy
+    text inspection rejects project-selected hooks, whose complete security
+    identity requires [inspect_prepared_shell] and authentic captured programs. *)
 val inspect_shell
   :  env:Eio_unix.Stdenv.base
   -> platform:Chatmd_shell_spec.Shell_spec.platform
   -> prompt_elements:Prompt.Chat_markdown.top_level_elements list
   -> (shell_inspection, diagnostic list) result
+
+(** Resource-only declaration/admin inspection for capture before prepared
+    programs exist. No signature status is asserted for uncompiled dependencies.
+    No initializer, native setup, provider or source acquisition. *)
+val inspect_resources
+  :  env:Eio_unix.Stdenv.base
+  -> platform:Chatmd_shell_spec.Shell_spec.platform
+  -> prompt_elements:Prompt.Chat_markdown.top_level_elements list
+  -> (resource_inspection, diagnostic list) Result.t
+
+(** Prepare through the same authentic Shell_preparation owner as activation,
+    including every custom matcher alternative, without native resource setup,
+    tool authorization or initialization. Supplied captured programs are the only
+    configured source inventory; missing configured custody rejects without text
+    fallback. Projection/serialization share the borrowed startup deadline and
+    exact metadata/input allowances. Security outcome cannot hide the complete
+    requested identity. No original source lookup, provider or process effects. *)
+val inspect_prepared_shell
+  :  ?startup:Startup_compilation.t
+  -> ?programs:Chatml_prompt_programs.Restored.t
+  -> env:Eio_unix.Stdenv.base
+  -> limits:Chatml_compilation.limits
+  -> checkpoint:(unit -> unit)
+  -> platform:Chatmd_shell_spec.Shell_spec.platform
+  -> prompt_elements:Prompt.Chat_markdown.top_level_elements list
+  -> unit
+  -> (prepared_shell_inspection, diagnostic list) Result.t
 
 (** [platform ()] returns the manifest platform for the current host. *)
 val platform : unit -> Chatmd_shell_spec.Shell_spec.platform
