@@ -24,8 +24,9 @@ when needed. Existing branches must contain this workflow change to adopt it.
 | Job | Required behavior when selected |
 | --- | --- |
 | `changes` | Run policy tests, inspect the complete Git diff, record selection and deployment baseline. Runs except on draft PR events. |
-| `framework (normal)` | Run `opam exec -- dune runtest --force`. |
-| `framework (e2e)` | Run `opam exec -- dune build --force @agent-e2e-pr`: daemon smoke, Unix/stdio/HTTP transports, transport conformance, workspaces and multiple clients. |
+| `framework (normal, x64)` | Run `opam exec -- dune runtest --force -j 2`. |
+| `framework (e2e, x64)` | Run `opam exec -- dune build --force -j 2 @agent-e2e-pr`: daemon smoke, Unix/stdio/HTTP transports, transport conformance, workspaces and multiple clients. |
+| `framework (git-native, arm64)` | Run the ChatML Git host, bounded-process and private-storage test aliases with `-j 2` on the native ARM64 runner. |
 | `semantics` | Run the offline documentation checks and bundled authoring-source tests; retain evidence for this exact revision. |
 | `website (preview)` and `website (production)` | Unit/Astro checks, one build per environment, performance, search, full browser-test discovery and retained build; production packaging checks. |
 | `browser (environment, shard)` | Two shards per environment, two workers each, zero retries; Chromium/Firefox/WebKit tests against that environment's downloaded build. |
@@ -35,9 +36,13 @@ when needed. Existing branches must contain this workflow change to adopt it.
 
 Framework commands run through `.github/scripts/framework-tests.mjs`, which
 records the command, revision, elapsed time, exit status, and full output. Commands
-have a 25-minute bound within a 45-minute job. Failures, timeouts, cancellations,
-missing selections, and unexpected skips cannot satisfy the gate. Both framework
-tiers run independently; a failure does not cancel evidence from the other tier.
+have tier-specific execution bounds: 65 minutes for normal, 25 for E2E and 45
+for Git-native. Setup and evidence collection have additional job headroom:
+90 minutes for normal/Git-native and 60 for E2E. These are upper bounds, not
+expected durations. Individual test deadlines remain in force. Failures,
+timeouts, cancellations, missing selections and unexpected skips cannot satisfy
+the gate. The three framework tiers run independently; a failure does not cancel
+evidence from the other tiers.
 
 Load, soak, live-provider, and manual-terminal tiers remain separate. These jobs
 receive no model credentials and make no paid model requests. Website jobs start
@@ -252,3 +257,16 @@ Implementation references: [GitHub cache semantics](https://docs.github.com/en/a
 [setup-ocaml dependency cache guidance](https://github.com/ocaml/setup-ocaml#caching),
 [opam lock behavior](https://opam.ocaml.org/doc/man/opam-lock.html), and
 [Dune caches](https://dune.readthedocs.io/en/latest/reference/caches.html).
+
+### Documentation fast-path qualification
+
+The first documentation fast-path PR run
+[38313856914](https://github.com/dakotamurphyucf/ochat/actions/runs/38313856914)
+qualified revision `5b5c1194509d123757b93bd5e01843b83c4b6286` in 13 minutes
+32 seconds from workflow creation to the required release gate. The framework
+matrix was explicitly skipped; semantic/authoring checks, both website builds,
+all four browser shards and both artifact-qualification jobs passed. Selection
+evidence matched the locally reviewed diff: two prose files and six documentation
+fingerprint owners qualified for the fast path. This is one observed PR run, not
+a runtime-suite speedup or a guaranteed future duration. Main publication and
+hosted verification are separate checks.
