@@ -52,6 +52,20 @@ val capture
 val identity : t -> Identity.t
 val fingerprint : t -> string
 
+(** The exact immutable parent supplied to [capture], retained without source
+    copying. Its captured parser/artifact data is not live source authority:
+    fresh acquisition still requires the host's admitted original-source loan.
+    This constant-time accessor performs no reads, callbacks or admission. *)
+val defining_revision : t -> Prompt_revision.t
+
+(** The exact parser-emitted persistence-enabled reference already admitted by
+    [capture], physically associated with [defining_revision]'s Parsed and actual
+    declaration/policy. [None] means the defining revision genuinely has no owned
+    parser custody. Owned missing/foreign references reject during capture; they
+    never become [None] or a path-based fallback. Retaining this immutable object
+    does not grant filesystem, native execution or delegation authority. *)
+val defining_reference : t -> Prompt.Chat_markdown.Agent_reference.t option
+
 (** Descriptor with a portable root-relative agent path. Runtime resource
     construction must use the child's materialized revision, not this path as a
     process-relative file lookup. *)

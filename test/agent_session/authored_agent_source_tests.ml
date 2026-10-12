@@ -72,6 +72,37 @@ let%expect_test
     let parent = build () in
     let captured = S.capture ~parent ~tool_name:"researcher" () |> protocol_ok in
     let reviewer = S.capture ~parent ~tool_name:"reviewer" () |> protocol_ok in
+    assert (phys_equal parent (S.defining_revision captured));
+    let parsed = R.parser_context parent |> Option.value_exn in
+    let reference = S.defining_reference captured |> Option.value_exn in
+    let reviewer_reference = S.defining_reference reviewer |> Option.value_exn in
+    assert (not (phys_equal reference reviewer_reference));
+    List.iter [ reference; reviewer_reference ] ~f:(fun reference ->
+      assert (List.exists (CM.Parsed.agent_references parsed) ~f:(phys_equal reference)));
+    (match CM.Agent_reference.invocation reference with
+     | Persistent_tool (declaration, Optional) ->
+       [%test_eq: string] "researcher" declaration.name;
+       assert (
+         List.exists (R.elements parent) ~f:(function
+           | CM.Tool (Persistent_agent (actual, Optional)) ->
+             phys_equal declaration actual
+           | _ -> false))
+     | Persistent_tool (_, Persistent) | Tool _ | Content _ ->
+       failwith "defining reference lost the actual declaration/policy");
+    [%test_eq: string option]
+      (Some "agents/researcher.chatmd")
+      (CM.Agent_reference.queued_key reference);
+    let range = CM.Agent_reference.range reference in
+    let input = Chatmd_parser_input.Range.input range in
+    [%test_eq: string] "definitions/tools.chatmd" (Chatmd_parser_input.path input);
+    [%test_eq: string]
+      {|<tool name="researcher" agent="../agents/researcher.chatmd" local persistence="optional" description="Research carefully"/>|}
+      (String.sub
+         (Chatmd_parser_input.effective input)
+         ~pos:(Chatmd_parser_input.Range.start_byte range)
+         ~len:
+           (Chatmd_parser_input.Range.end_byte range
+            - Chatmd_parser_input.Range.start_byte range));
     assert (not (String.equal (S.fingerprint captured) (S.fingerprint reviewer)));
     [%test_eq: string] "agents/researcher.chatmd" (S.declaration captured).agent;
     assert (CM.equal_agent_persistence (S.identity captured).policy Optional);
@@ -151,6 +182,10 @@ let%expect_test
     let again =
       S.capture ~parent:parent_again ~tool_name:"researcher" () |> protocol_ok
     in
+    assert (phys_equal parent_again (S.defining_revision again));
+    assert (not (phys_equal reference (S.defining_reference again |> Option.value_exn)));
+    assert (phys_equal parent (S.defining_revision captured));
+    assert (phys_equal reference (S.defining_reference captured |> Option.value_exn));
     assert (S.Identity.equal (S.identity captured) (S.identity again));
     [%test_eq: string] (S.fingerprint captured) (S.fingerprint again);
     (* A copied store has different materialized paths but the same source identity. *)

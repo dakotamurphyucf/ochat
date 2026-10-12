@@ -18,10 +18,14 @@ type t =
   { identity : Identity.t
   ; declaration : CM.agent_tool
   ; source : Captured_child_source.t
+  ; defining_revision : Prompt_revision.t
+  ; defining_reference : CM.Agent_reference.t option
   }
 
 let identity t = t.identity
 let declaration t = t.declaration
+let defining_revision t = t.defining_revision
+let defining_reference t = t.defining_reference
 
 let program_fingerprint t =
   (match Captured_child_source.programs_sha256 t.source with
@@ -68,7 +72,7 @@ let capture ?(checkpoint = Eio.Fiber.check) ?content_limits ~parent ~tool_name (
     | true -> Ok ()
     | false -> denied "persistent authored agent source must be captured locally"
   in
-  let%map source =
+  let%map source, defining_reference =
     match Prompt_revision.parser_context parent with
     | None ->
       Captured_child_source.capture_legacy_tool
@@ -76,6 +80,7 @@ let capture ?(checkpoint = Eio.Fiber.check) ?content_limits ~parent ~tool_name (
         ~declaration
         ~content_limits
         ~checkpoint
+      |> Result.map ~f:(fun source -> source, None)
     | Some parsed ->
       let references =
         List.filter (CM.Parsed.agent_references parsed) ~f:(fun reference ->
@@ -89,6 +94,7 @@ let capture ?(checkpoint = Eio.Fiber.check) ?content_limits ~parent ~tool_name (
       (match references with
        | [ reference ] ->
          Captured_child_source.capture ~parent ~reference ~content_limits ~checkpoint
+         |> Result.map ~f:(fun source -> source, Some reference)
        | [] | _ :: _ ->
          denied "persistent authored declaration lacks one exact owned parser reference")
   in
@@ -102,7 +108,12 @@ let capture ?(checkpoint = Eio.Fiber.check) ?content_limits ~parent ~tool_name (
     ; policy
     }
   in
-  { identity; declaration = { declaration with agent = root_relative_path }; source }
+  { identity
+  ; declaration = { declaration with agent = root_relative_path }
+  ; source
+  ; defining_revision = parent
+  ; defining_reference
+  }
 ;;
 
 let authored_sources t = Captured_child_source.authored_sources t.source
