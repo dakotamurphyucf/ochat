@@ -13,6 +13,15 @@ val create
   -> max_bytes:int
   -> (t, Store_error.t) result
 
+(** Borrow an existing directory capability without acquiring an ambient root.
+    The directory must expose a native path for bounded directory streaming.
+    This reader cannot select a different root with [at_root]. *)
+val create_at
+  :  root:Eio.Fs.dir_ty Eio.Path.t
+  -> max_entries:int
+  -> max_bytes:int
+  -> (t, Store_error.t) result
+
 val root : t -> string
 
 (** Remaining bytes in this reader's existing shared invocation allowance.
@@ -37,7 +46,25 @@ val at_root : t -> root:string -> (t, Store_error.t) result
     stopping at the budget. Returns sorted names. Rejects linked directories. *)
 val list : t -> directory:string -> (string list, Store_error.t) result
 
+(** Cooperative bounded directory enumeration. Checkpoints run in the calling
+    Eio domain, including during enumeration, and their original exceptions and
+    cancellation propagate. Shares this reader's entry allowance. *)
+val list_with_checkpoint
+  :  t
+  -> directory:string
+  -> checkpoint:(unit -> unit)
+  -> (string list, Store_error.t) result
+
 (** Read a regular file without following observed links or accepting parent-path
     traversal. Enforces both the per-file and remaining aggregate byte ceilings,
     including growth after stat. Every error invalidates the collection attempt. *)
 val read : t -> path:string -> max_bytes:int -> (string, Store_error.t) result
+
+(** The same bounded read, with calling-domain checkpoints between bounded
+    chunks. Callback exceptions and cancellation propagate unchanged. *)
+val read_with_checkpoint
+  :  t
+  -> path:string
+  -> max_bytes:int
+  -> checkpoint:(unit -> unit)
+  -> (string, Store_error.t) result

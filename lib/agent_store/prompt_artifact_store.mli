@@ -115,6 +115,19 @@ val verify_tree
   -> Artifact.t
   -> (unit, Store_error.t) result
 
+(** Verify an already admitted artifact against a borrowed native directory
+    capability. Inventory enumeration and reads share finite entry/byte ceilings
+    derived from the exact artifact paths and content lengths. Unexpected names,
+    links, changed lengths or contents reject before accepting the tree. Caller
+    checkpoints run during enumeration, reads and comparisons; their original
+    failures/cancellation propagate. The owner must serialize writes; this is
+    verification at one boundary, not continuous filesystem isolation. *)
+val verify_tree_with_checkpoint
+  :  root:Eio.Fs.dir_ty Eio.Path.t
+  -> Artifact.t
+  -> checkpoint:(unit -> unit)
+  -> (unit, Store_error.t) result
+
 val exists : t -> Agent_protocol.Id.Prompt_revision.t -> bool
 
 (** [prune_unreferenced t ~protected] removes installed revision directories

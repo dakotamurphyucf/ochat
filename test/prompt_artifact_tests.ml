@@ -38,6 +38,61 @@ let reader env root ~bytes =
   |> store_ok
 ;;
 
+let%expect_test "borrowed tree verification bounds mutations and preserves checkpoints" =
+  with_temp_directory "ochat-prompt-bounded-tree" (fun env root ->
+    let store = A.create ~env ~root |> store_ok in
+    let artifact = make () in
+    A.install store ~transaction_id artifact |> store_ok;
+    let tree = A.materialized_tree store artifact.revision_id in
+    let verify checkpoint =
+      A.verify_tree_with_checkpoint ~root:tree artifact ~checkpoint
+    in
+    verify Eio.Fiber.check |> store_ok;
+    let marker = Failure "bounded tree callback origin" in
+    let domain = (Stdlib.Domain.self () :> int) in
+    let total = ref 0 in
+    verify (fun () ->
+      assert (Int.equal domain (Stdlib.Domain.self () :> int));
+      incr total)
+    |> store_ok;
+    assert (!total > 0);
+    for rejected = 1 to !total do
+      let calls = ref 0 in
+      let preserved =
+        try
+          ignore
+            (verify (fun () ->
+               assert (Int.equal domain (Stdlib.Domain.self () :> int));
+               incr calls;
+               if !calls = rejected then raise marker));
+          false
+        with
+        | exn -> phys_equal exn marker
+      in
+      assert preserved;
+      verify Eio.Fiber.check |> store_ok
+    done;
+    let borrowed =
+      Agent_store.Retention_reader.create_at ~root:tree ~max_entries:8 ~max_bytes:64
+      |> store_ok
+    in
+    assert (Result.is_error (Agent_store.Retention_reader.at_root borrowed ~root));
+    let source = Eio.Path.(tree / "library/tools.chatmd") in
+    Eio.Path.unlink source;
+    Eio.Path.save ~create:(`Exclusive 0o400) source (String.make 65_536 'x');
+    assert (Result.is_error (verify Eio.Fiber.check));
+    Eio.Path.unlink source;
+    Eio.Path.save ~create:(`Exclusive 0o400) source "tool source";
+    Eio.Path.mkdir ~perm:0o700 Eio.Path.(tree / "unexpected");
+    assert (Result.is_error (verify Eio.Fiber.check));
+    Eio.Path.rmdir Eio.Path.(tree / "unexpected");
+    verify Eio.Fiber.check |> store_ok;
+    print_endline
+      "same capability; bounded growth/inventory; callback identity; reusable tree");
+  [%expect
+    {|same capability; bounded growth/inventory; callback identity; reusable tree|}]
+;;
+
 let%expect_test
     "loaded manifest original byte evidence survives exact reinstall and retention"
   =

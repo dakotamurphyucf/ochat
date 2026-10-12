@@ -521,42 +521,104 @@ let load_private_bundle t directory reader ~pool manifest =
     Result.map (Program_bundle.restore manifest (List.rev payloads)) ~f:Option.some
 ;;
 
-let materialized_files (artifact : Artifact.t) =
-  (artifact.root_relative_path, artifact.root_sha256)
-  :: List.map artifact.sources ~f:(fun source ->
-    source.Source.relative_path, source.sha256)
-;;
-
-let rec verify_tree_node root expected relative =
-  let path = if String.is_empty relative then root else Eio.Path.(root / relative) in
-  match Eio.Path.kind ~follow:false path with
-  | `Directory ->
-    Eio.Path.read_dir path
-    |> List.iter ~f:(fun name ->
-      verify_tree_node
-        root
-        expected
-        (if String.is_empty relative then name else Filename.concat relative name))
-  | `Regular_file ->
-    (match List.Assoc.find expected relative ~equal:String.equal with
-     | Some digest when String.equal digest (sha256 (Eio.Path.load path)) -> ()
-     | _ -> failwith ("materialized prompt source differs: " ^ relative))
-  | _ -> failwith ("invalid materialized prompt source kind: " ^ relative)
+let verify_tree_with_checkpoint ~root (artifact : Artifact.t) ~checkpoint =
+  let open Result.Let_syntax in
+  let poll () =
+    Eio.Fiber.check ();
+    checkpoint ();
+    Eio.Fiber.check ()
+  in
+  poll ();
+  let files =
+    (artifact.root_relative_path, artifact.root_chatmd)
+    :: List.map artifact.sources ~f:(fun source ->
+      poll ();
+      source.Source.relative_path, source.contents)
+  in
+  let files = String.Map.of_alist_exn files in
+  let directories =
+    Map.fold files ~init:(String.Set.singleton ".") ~f:(fun ~key ~data:_ directories ->
+      let rec add directories path =
+        poll ();
+        let directory = Filename.dirname path in
+        if String.equal directory "."
+        then directories
+        else add (Set.add directories directory) directory
+      in
+      add directories key)
+  in
+  let max_bytes =
+    Map.fold files ~init:0 ~f:(fun ~key:_ ~data bytes ->
+      poll ();
+      bytes + String.length data)
+  in
+  (* Each directory consumes its kind, open and returned-child entries; each
+     file consumes its returned name, kind and bounded read. *)
+  let max_entries = (3 * (Map.length files + Set.length directories)) + 1 in
+  let%bind reader = Retention_reader.create_at ~root ~max_entries ~max_bytes in
+  let seen = ref String.Set.empty in
+  let equal_contents expected actual =
+    let rec loop offset =
+      poll ();
+      if offset = String.length expected
+      then true
+      else (
+        let length = Int.min 4096 (String.length expected - offset) in
+        let rec equal_chunk index =
+          index = offset + length
+          || (Char.equal expected.[index] actual.[index] && equal_chunk (index + 1))
+        in
+        if equal_chunk offset then loop (offset + length) else false)
+    in
+    Int.equal (String.length expected) (String.length actual) && loop 0
+  in
+  let rec verify relative =
+    poll ();
+    let%bind kind = Retention_reader.kind reader ~path:relative in
+    match kind with
+    | `Directory ->
+      if not (Set.mem directories relative)
+      then Error (Store_error.Corrupt "unexpected materialized prompt directory")
+      else (
+        let%bind names =
+          Retention_reader.list_with_checkpoint
+            reader
+            ~directory:relative
+            ~checkpoint:poll
+        in
+        List.fold_result names ~init:() ~f:(fun () name ->
+          let child =
+            if String.equal relative "." then name else Filename.concat relative name
+          in
+          verify child))
+    | `File ->
+      (match Map.find files relative with
+       | None -> Error (Store_error.Corrupt "unexpected materialized prompt source")
+       | Some expected ->
+         let%bind actual =
+           Retention_reader.read_with_checkpoint
+             reader
+             ~path:relative
+             ~max_bytes:(String.length expected)
+             ~checkpoint:poll
+         in
+         if equal_contents expected actual
+         then (
+           seen := Set.add !seen relative;
+           Ok ())
+         else Error (Store_error.Corrupt "materialized prompt source differs"))
+  in
+  let%bind () = verify "." in
+  Map.fold files ~init:(Ok ()) ~f:(fun ~key ~data:_ result ->
+    let%bind () = result in
+    poll ();
+    if Set.mem !seen key
+    then Ok ()
+    else Error (Store_error.Corrupt "missing materialized prompt source"))
 ;;
 
 let verify_tree ~root artifact =
-  try
-    let expected = materialized_files artifact in
-    verify_tree_node root expected "";
-    List.iter expected ~f:(fun (relative, _) ->
-      match Eio.Path.kind ~follow:false Eio.Path.(root / relative) with
-      | `Regular_file -> ()
-      | _ -> failwith ("missing materialized prompt source: " ^ relative));
-    Ok ()
-  with
-  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
-  | exn ->
-    Error (Store_error.Corrupt ("prompt tree verification failed: " ^ Exn.to_string exn))
+  verify_tree_with_checkpoint ~root artifact ~checkpoint:Eio.Fiber.check
 ;;
 
 let verify_materialized_tree t artifact =
