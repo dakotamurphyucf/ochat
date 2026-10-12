@@ -46,8 +46,10 @@ let coordinator =
 ;;
 
 let state daemon id =
-  R.with_loaded_read (D.registry daemon) id (fun entry -> A.state entry.actor)
-  |> protocol_ok
+  (* Poll immutable state without reserving the parent's lifecycle while its
+     real helper may be admitting a child. The passive read still revalidates
+     the retained actor/store binding before returning. *)
+  R.read_state (D.registry daemon) ~authorize:(fun _ -> Ok ()) id |> protocol_ok
 ;;
 
 let function_call name arguments =
