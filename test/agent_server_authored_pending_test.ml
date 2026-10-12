@@ -18,8 +18,8 @@ let check_history expected actual =
 ;;
 
 let state daemon id =
-  let entry = R.load (D.registry daemon) id |> protocol_ok in
-  A.state entry.actor |> protocol_ok
+  R.with_loaded_read (D.registry daemon) id (fun entry -> A.state entry.actor)
+  |> protocol_ok
 ;;
 
 let call_events index id name args =
@@ -391,14 +391,56 @@ let%expect_test
               | None -> failwith "lost authored origin");
             phase := "concurrent deferred continuation";
             Failure_diagnostic.mark diagnostic "concurrent deferred continuation";
+            (* Hold the real child read reservation while both continuation
+               calls enter dispatch. The old nonwaiting authorization rejected
+               this ordinary overlap; bounded validation must wait for release. *)
+            let entered, enter = Eio.Promise.create () in
+            let release_read, release = Eio.Promise.create () in
+            let held_read =
+              Eio.Fiber.fork_promise ~sw (fun () ->
+                R.with_loaded_read (D.registry daemon) left (fun _ ->
+                  Eio.Promise.resolve enter ();
+                  Eio.Promise.await release_read;
+                  Ok ()))
+            in
+            Eio.Promise.await entered;
             let continued =
-              invoke_batch
-                daemon
-                attach
-                parent.id
-                [ "researcher", named ~session_id:left "Deferred first."
-                ; "researcher", named ~session_id:left "Deferred second."
-                ]
+              Exn.protect
+                ~finally:(fun () ->
+                  Eio.Cancel.protect (fun () ->
+                    if not (Eio.Promise.is_resolved release_read)
+                    then Eio.Promise.resolve release ();
+                    Eio.Promise.await_exn held_read |> protocol_ok))
+                ~f:(fun () ->
+                  let continued =
+                    Eio.Fiber.fork_promise ~sw (fun () ->
+                      invoke_batch
+                        daemon
+                        attach
+                        parent.id
+                        [ "researcher", named ~session_id:left "Deferred first."
+                        ; "researcher", named ~session_id:left "Deferred second."
+                        ])
+                  in
+                  await (fun () ->
+                    Int.equal
+                      2
+                      (List.count
+                         (state daemon parent.id).invocations
+                         ~f:(fun invocation ->
+                           match invocation.status with
+                           | Dispatching -> true
+                           | _ -> false))
+                    || Eio.Promise.is_resolved continued);
+                  (* Drain runnable validation work without advancing the clock
+                     or changing authority. The same release protocol is tested
+                     against the old implementation as a negative control. *)
+                  for _ = 1 to 128 do
+                    Eio.Fiber.yield ()
+                  done;
+                  Eio.Promise.resolve release ();
+                  Eio.Promise.await_exn held_read |> protocol_ok;
+                  Eio.Promise.await_exn continued)
             in
             let deferred =
               List.map continued ~f:(fun (_, value) ->

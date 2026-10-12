@@ -8094,8 +8094,9 @@ let managed_child_access t borrowed child_id =
 let managed_child t borrowed child_id =
   let open Result.Let_syntax in
   let%bind validate = managed_child_access t borrowed child_id in
-  let%bind child = Session_registry.load t.registry child_id in
-  validate child
+  (* Authorization is a bounded read: wait for overlapping lifecycle/read
+     admission, then revalidate under exclusion. Release before later work. *)
+  Session_registry.with_loaded_read t.registry child_id validate
 ;;
 
 let managed_status t borrowed child_id =

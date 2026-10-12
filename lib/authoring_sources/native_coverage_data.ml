@@ -201,7 +201,7 @@ let implementation_sources =
   ; ( "lib/agent_server/managed_output_page.ml"
     , "a14130666a4495de0c35df1c01974922da31daed064f1f7622a9b686b9c38ba5" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "6d3dcf0a8efbf67e69c3be0e0aaaa9c2b7b024e708df3f37d93811f6bd45d6bf" )
+    , "baa566dd7e4e43b650a355e153587e513a685867ecf1cac0a8cae59ad0262a4c" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "6e318b45f799b485f802dc6d5e4d8bc031721e379cc8800f6ed484d59694840d" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"

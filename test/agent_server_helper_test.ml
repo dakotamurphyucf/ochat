@@ -46,8 +46,8 @@ let coordinator =
 ;;
 
 let state daemon id =
-  let entry = R.load (D.registry daemon) id |> protocol_ok in
-  A.state entry.actor |> protocol_ok
+  R.with_loaded_read (D.registry daemon) id (fun entry -> A.state entry.actor)
+  |> protocol_ok
 ;;
 
 let function_call name arguments =
