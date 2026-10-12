@@ -131,7 +131,12 @@ a stock control that succeeds at 2048. Independent reservation boundaries are
 private-storage tests cover the narrowly shared native root checks. Linux native
 code is implemented. `.github/scripts/provision-git-host.sh` downloads
 checksum-pinned Git 2.56.0 into disposable runner storage and prepares the fixed
-helper inventory without replacing system Git. Required final milestone CI runs
+helper inventory without replacing system Git. Its native Linux build explicitly
+selects upstream's optional C-only profile (`NO_RUST=YesPlease`), keeping Cargo
+outside the sanitized build PATH. The admitted profile uses independent SHA1 or
+SHA256 repositories, not Rust-only cross-format compatibility hashes. HTTPS/TLS
+still uses system libcurl. This differs from the Rust-enabled macOS candidate and
+must pass the same actual native/TLS tests. Required final milestone CI runs
 the normal x64 suite and the ARM `git-native` actual Git/process/private-storage
 aliases. Those Linux rows remain unqualified until that final CI is green; the
 local macOS qualification uses the separately built candidate profile.

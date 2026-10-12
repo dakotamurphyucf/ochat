@@ -47,8 +47,10 @@ sudo apt-get install --yes --no-install-recommends \
 printf '%s  %s\n' "$archive_sha256" "$archive" | /usr/bin/sha256sum --check --strict
 /usr/bin/tar -xJf "$archive" -C "$attempt" --no-same-owner
 
-# Match the maintained source profile qualified on macOS; system libcurl still
-# provides HTTPS/TLS when Git's direct OpenSSL hash backend is disabled.
+# Use Git 2.56's supported C-only profile: the admitted host commands do not need
+# Rust-only cross-format compatibility hashes. This differs from the maintained
+# Rust-enabled macOS candidate and must pass the same native/TLS qualification.
+# System libcurl provides HTTPS/TLS when direct OpenSSL hashing is disabled.
 # Native compilation, no -march=native, cross compilation or global install.
 # The compiled default helper path is owned and empty; tests explicitly select
 # their sealed helper path. The source/build tree is never an exposed PATH.
@@ -56,7 +58,7 @@ readonly build_arguments=(
   -j2 -C "$source" git git-remote-https
   CC=/usr/bin/gcc CURL_CONFIG=/usr/bin/curl-config
   NO_GETTEXT=YesPlease NO_TCLTK=YesPlease NO_PERL=YesPlease
-  NO_EXPAT=YesPlease NO_OPENSSL=YesPlease
+  NO_EXPAT=YesPlease NO_OPENSSL=YesPlease NO_RUST=YesPlease
   "prefix=${attempt}/uninstalled" "gitexecdir=${attempt}/default-exec"
 )
 /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C \
