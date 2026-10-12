@@ -11,6 +11,7 @@
   workspace_cleanup
   prompt_definition
   prompt_revision
+  prompt_source_entry
   prompt_parser_boundary
   prompt_program_custody
   prompt_project_baseline_record

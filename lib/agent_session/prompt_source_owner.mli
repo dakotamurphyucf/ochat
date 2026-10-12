@@ -151,6 +151,22 @@ module Scope : sig
     -> checkpoint:(unit -> unit)
     -> (Capture.t, Error.t) Result.t
 
+  (** Capture an exact parser-owned selected member through this SAME original
+      receipt and retained Local. No new root permission or native reopen.
+      Shares [capture]'s bounded walker, current policy/cancellation and joined
+      operation lifecycle. The resulting Capture shares this admission's exact
+      affinity; genuine leases accept it, foreign native admissions reject.
+      Original Definition policy stays unchanged; executable invocation selection
+      is a separate host preparation responsibility. *)
+  val capture_entry
+    :  t
+    -> entry:Prompt_source_entry.t
+    -> env:Eio_unix.Stdenv.base
+    -> preprocess:(string -> string)
+    -> limits:Prompt.Chat_markdown.Limits.t
+    -> checkpoint:(unit -> unit)
+    -> (Capture.t, Error.t) Result.t
+
   (** Capture rendered documents through this SAME retained Local. Reject foreign
       capture admission/receipt before any read. Derive contexts from the actual
       immutable Builder capture; no root/Local getter or artifact-path reopen.

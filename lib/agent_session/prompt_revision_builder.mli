@@ -141,3 +141,24 @@ val build_captured
   -> created_at:Agent_protocol.Timestamp.t
   -> Prompt_definition.t
   -> (Prompt_revision.t, Diagnostic.t list) Result.t
+
+(** Publish the exact selected portable member after original-source capture.
+    Root path, Entry receipt and original Definition must agree BEFORE hooks.
+    Shares [build_captured]'s complete semantic custody, final-tree replay,
+    installation/verification and error policy. Original [build_captured] still
+    requires its original basename. Builder consumes its own immutable Capture
+    and has no Source_owner dependency; metadata cannot itself prove native reads.
+    Original operator receipt/canonical source is preserved independently of the
+    selected Root member. Does not select executable roles or reserve a child. *)
+val build_captured_entry
+  :  ?prepare_programs:
+       (Capture.t -> (Chatml_prompt_programs.t, Diagnostic.t list) Result.t)
+  -> ?prepare_content:
+       (Capture.t -> (Chatmd_content_capture.t, Diagnostic.t list) Result.t)
+  -> entry:Prompt_source_entry.t
+  -> capture:Capture.t
+  -> artifact_store:Agent_store.Prompt_artifact_store.t
+  -> transaction_id:Agent_protocol.Id.Transaction.t
+  -> created_at:Agent_protocol.Timestamp.t
+  -> unit
+  -> (Prompt_revision.t, Diagnostic.t list) Result.t

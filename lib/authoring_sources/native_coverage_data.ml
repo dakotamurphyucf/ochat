@@ -261,7 +261,7 @@ let implementation_sources =
   ; ( "lib/chat_response/one_off_script.ml"
     , "cffac7c805a03e71b84b168d7686b0bac019db7c4d431210d4560331a8f43986" )
   ; ( "lib/agent_session/prompt_source_owner.ml"
-    , "969585145f8f57ed90e89c1837a44325e8c718d8121e9760886a61e26e4b70e9" )
+    , "17148add08c7a6648c10701598551dd40c5eab3b97880f91c6104a02c95cde40" )
   ; ( "lib/agent_session/prompt_source_lease.ml"
     , "7413c0ed3e84375cd7e95343ceb83d9485c02b4d378ff940336beb449680dbe0" )
   ; ( "lib/agent_session/prompt_catalog.ml"

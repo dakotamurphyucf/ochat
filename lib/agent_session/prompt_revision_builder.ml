@@ -733,11 +733,12 @@ let build
       captured)
 ;;
 
-let build_captured
+let publish_selected_capture
       ?prepare_programs
       ?prepare_content
       ~capture
       ~source_receipt
+      ~root_member
       ~artifact_store
       ~transaction_id
       ~created_at
@@ -751,10 +752,7 @@ let build_captured
           definition.id
           (Receipt.definition_id source_receipt)))
     || (not (String.equal definition.root_file (Receipt.root_file source_receipt)))
-    || not
-         (String.equal
-            (Chatmd_parser_input.path root_input)
-            (Filename.basename definition.root_file))
+    || not (String.equal (Chatmd_parser_input.path root_input) root_member)
   then
     Error
       [ diagnostic
@@ -772,4 +770,48 @@ let build_captured
       ~created_at
       definition
       capture
+;;
+
+let build_captured
+      ?prepare_programs
+      ?prepare_content
+      ~capture
+      ~source_receipt
+      ~artifact_store
+      ~transaction_id
+      ~created_at
+      (definition : Prompt_definition.t)
+  =
+  publish_selected_capture
+    ?prepare_programs
+    ?prepare_content
+    ~capture
+    ~source_receipt
+    ~root_member:(Filename.basename definition.root_file)
+    ~artifact_store
+    ~transaction_id
+    ~created_at
+    definition
+;;
+
+let build_captured_entry
+      ?prepare_programs
+      ?prepare_content
+      ~entry
+      ~capture
+      ~artifact_store
+      ~transaction_id
+      ~created_at
+      ()
+  =
+  publish_selected_capture
+    ?prepare_programs
+    ?prepare_content
+    ~capture
+    ~source_receipt:(Prompt_source_entry.receipt entry)
+    ~root_member:(Source.Portable_path.to_string (Prompt_source_entry.member entry))
+    ~artifact_store
+    ~transaction_id
+    ~created_at
+    (Prompt_source_entry.definition entry)
 ;;

@@ -428,18 +428,39 @@ module Scope = struct
           | Ok (Ok value) -> Result.map (check t) ~f:(fun () -> value)))
   ;;
 
-  let capture t ~env ~definition ~preprocess ~limits ~checkpoint =
+  type capture_selection =
+    | Original of Prompt_definition.t
+    | Selected of Prompt_source_entry.t
+
+  let capture_selected t ~selection ~env ~preprocess ~limits ~checkpoint =
     run t (fun () ->
       let receipt = receipt t.owner in
+      let definition =
+        match selection with
+        | Original definition -> definition
+        | Selected entry -> Prompt_source_entry.definition entry
+      in
+      let selection_matches =
+        match selection with
+        | Original _ -> true
+        | Selected entry -> Receipt.equal receipt (Prompt_source_entry.receipt entry)
+      in
       if
-        (not
-           (Agent_protocol.Id.Prompt_definition.equal
-              definition.Prompt_definition.id
-              (Receipt.definition_id receipt)))
+        (not selection_matches)
+        || (not
+              (Agent_protocol.Id.Prompt_definition.equal
+                 definition.Prompt_definition.id
+                 (Receipt.definition_id receipt)))
         || not (String.equal definition.root_file (Receipt.root_file receipt))
       then Error (Error.foreign_receipt ())
       else (
-        match Source.Portable_path.create (Filename.basename definition.root_file) with
+        let member =
+          match selection with
+          | Original _ ->
+            Source.Portable_path.create (Filename.basename definition.root_file)
+          | Selected entry -> Ok (Prompt_source_entry.member entry)
+        in
+        match member with
         | Error _ -> Error (Error.create Invalid_binding)
         | Ok entry ->
           let module Abort = struct
@@ -508,6 +529,20 @@ module Scope = struct
                       ; source = Some definition.root_file
                       }
                   ]))))
+  ;;
+
+  let capture t ~env ~definition ~preprocess ~limits ~checkpoint =
+    capture_selected
+      t
+      ~selection:(Original definition)
+      ~env
+      ~preprocess
+      ~limits
+      ~checkpoint
+  ;;
+
+  let capture_entry t ~entry ~env ~preprocess ~limits ~checkpoint =
+    capture_selected t ~selection:(Selected entry) ~env ~preprocess ~limits ~checkpoint
   ;;
 
   let capture_documents t ~capture ~limits ~checkpoint =
