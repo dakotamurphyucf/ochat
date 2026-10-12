@@ -177,8 +177,8 @@ let%test_unit "new runtime rejects a changed tree even when the revision is cach
     in
     match result with
     | Error error ->
-      assert (
-        String.is_substring error.message ~substring:"prompt tree verification failed")
+      [%test_eq: Agent_protocol.Error.code] Journal_corrupt error.code;
+      assert (not error.retryable)
     | Ok _ -> failwith "cached revision accepted an altered materialized tree")
 ;;
 
