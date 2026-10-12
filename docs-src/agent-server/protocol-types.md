@@ -499,10 +499,13 @@ type t =
   | Server_health of Health.Request.t
   | Prompt_list of Prompt.List_request.t
   | Prompt_get of Prompt.Get_request.t
+  | Prompt_dependencies_status
+  | Prompt_dependencies_update of Prompt_dependency_selection.Update_request.t
   | Workspace_list of Workspace.List_request.t
   | Workspace_get of Workspace.Get_request.t
   | Blob_read of Blob.Read_request.t
   | Session_create of Session.Create_request.t
+  | Session_seed of Session_seed.Request.t
   | Session_list of Session.List_request.t
   | Session_search of Search_query.t
   | Session_search_navigate of Search_navigation.Request.t
@@ -610,6 +613,7 @@ type committed =
   | Provider_logout of Provider_operator.Logout_result.t
   | Provider_selection of Provider_operator.Selection_result.t
   | Provider_configuration of Provider_operator.Configuration_result.t
+  | Prompt_dependencies_updated of Prompt_dependency_selection.Update_result.t
   | Created_session of Id.Session.t
   | Attached_session of Id.Session.t
   | Session_mutation of
@@ -1407,6 +1411,11 @@ type kind =
   | Tool_output
   | Other
 [@@deriving compare, equal, sexp]
+
+(** Classification of the existing neutral semantic payload. No provider DTO
+    lowering or execution occurs. Developer messages project as System while
+    retaining their actual neutral role in the payload. *)
+val classification : History_entry.Payload.Semantic.t -> role * kind
 
 type provenance =
   | Canonical
@@ -2892,10 +2901,13 @@ type t =
   | Server_health of Health.Response.t
   | Prompt_list of Prompt.t Page.t
   | Prompt_get of Prompt.t
+  | Prompt_dependencies_status of Prompt_dependency_selection.Status.t
+  | Prompt_dependencies_update of Prompt_dependency_selection.Update_result.t
   | Workspace_list of Workspace.t Page.t
   | Workspace_get of Workspace.t
   | Blob_read of Blob.Chunk.t
   | Session_create of Create.t
+  | Session_seed of Session_seed.Result.t
   | Session_list of Session_catalog.t Page.t
   | Session_search of Search_page.t
   | Session_search_navigate of Search_navigation.Response.t
@@ -3926,6 +3938,128 @@ module Get_request : sig
 
   (** [of_json json] decodes a prompt lookup request. *)
   val of_json : Jsonaf.t -> (t, Error.t) result
+end
+```
+
+## prompt_dependency_selection
+
+[JSON codec](../../lib/agent_protocol/prompt_dependency_selection.ml) · [interface](../../lib/agent_protocol/prompt_dependency_selection.mli)
+
+```ocaml
+open! Core
+module Error = Protocol_error
+
+(** Bounded operator control of the host's installed dependency selection.
+    These values contain no source authority, repository/pin overrides or native
+    paths. Both methods require [configuration.admin]; construction grants none. *)
+module Generation : sig
+  type t [@@deriving compare, equal, sexp]
+
+  (** Nonnegative generation of the actual persisted dependency-history index. *)
+  val of_int : int -> (t, Error.t) Result.t
+
+  val to_int : t -> int
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  val to_json : t -> Jsonaf.t
+end
+
+module Status_request : sig
+  (** The status method accepts exactly an empty JSON object. *)
+  val of_json : Jsonaf.t -> (unit, Error.t) Result.t
+
+  val to_json : unit -> Jsonaf.t
+end
+
+module Status : sig
+  module History : sig
+    type t =
+      | Tracked of Generation.t
+      | Missing
+      | Invalid
+    [@@deriving equal, sexp]
+  end
+
+  module Publication : sig
+    type t =
+      | Available
+      | Busy
+      | Uncertain
+      | Closed
+    [@@deriving equal, sexp]
+  end
+
+  type t =
+    { history : History.t
+    ; publication : Publication.t
+    }
+  [@@deriving equal, sexp]
+
+  (** Last installed history and current admission state. Busy/Uncertain do not
+      establish the generation currently on disk or authorize a new acquisition.
+      A read neither repairs missing history nor retries publication. *)
+  val to_json : t -> Jsonaf.t
+
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+end
+
+module Update_request : sig
+  type t [@@deriving equal, sexp]
+
+  (** Admit 1..1024 distinct typed definition IDs, then canonicalize typed-ID
+      ordering. Count admission precedes derived allocations. Unknown/disabled
+      targets and expected-generation affinity remain actual host checks before
+      acquisition. The bounded existing key identifies this exact mutation. *)
+  val create
+    :  definitions:Id.Prompt_definition.t list
+    -> expected_generation:Generation.t
+    -> idempotency_key:Idempotency_key.t
+    -> (t, Error.t) Result.t
+
+  val definitions : t -> Id.Prompt_definition.t list
+  val expected_generation : t -> Generation.t
+  val idempotency_key : t -> Idempotency_key.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+end
+
+module Update_result : sig
+  module Target : sig
+    type outcome =
+      | Ready of Id.Prompt_revision.t
+      | Unavailable of { reason : string }
+    [@@deriving equal, sexp]
+
+    type t =
+      { definition_id : Id.Prompt_definition.t
+      ; outcome : outcome
+      }
+    [@@deriving equal, sexp]
+  end
+
+  type t [@@deriving equal, sexp]
+
+  (** Exactly one installed index transition: next generation is previous + 1,
+      checked without overflow. Admit 1..1024 distinct target IDs and canonicalize
+      their order. Unavailable reasons must be nonempty, NUL-free and <=4096 UTF-8
+      bytes; the host supplies redacted diagnostics, never raw credentials/paths.
+      Publication success does not claim all targets' fresh sources were usable:
+      unavailable targets retain their previous successful dependency history. *)
+  val create
+    :  previous_generation:Generation.t
+    -> generation:Generation.t
+    -> targets:Target.t list
+    -> (t, Error.t) Result.t
+
+  val previous_generation : t -> Generation.t
+  val generation : t -> Generation.t
+  val targets : t -> Target.t list
+
+  (** Validate the exact target set and previous generation against the request;
+      clients reject a successful response that describes another mutation. *)
+  val matches_request : t -> Update_request.t -> bool
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
 end
 ```
 
@@ -4973,6 +5107,9 @@ type t = private
   }
 [@@deriving sexp]
 
+(** Both modes accept [Authored_start]; the actor still requires a genuine
+    unconsumed source-bound startup. Single_turn does not recreate a consumed
+    startup or authorize caller-supplied source identity. *)
 val create
   :  session_id:Id.Session.t
   -> attachment_id:Id.Attachment.t
@@ -6577,6 +6714,100 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 (** Snapshot lifecycle observations use this decoder. Both string IDs are
     admitted through their validated constructors; decoding grants no authority. *)
 val t_of_sexp : Sexplib0.Sexp.t -> t
+```
+
+## session_seed
+
+[JSON codec](../../lib/agent_protocol/session_seed.ml) · [interface](../../lib/agent_protocol/session_seed.mli)
+
+```ocaml
+open! Core
+module Error = Protocol_error
+
+(** New stopped conversation with an already-converted neutral transcript.
+    This command conveys no runtime, source, workspace or tool authority. *)
+module Transcript : sig
+  type t [@@deriving sexp]
+
+  (** Validate complete neutral payloads, distinct IDs and ordered relations.
+      Entries must be nonredacted Canonical entries at content revision zero;
+      their role/kind must agree with the neutral payload owner. Provider item IDs,
+      opaque call IDs, field order and numeric spellings remain unchanged. Missing
+      archived calls remain legal under the existing relation validator.
+
+      Bound input before derived allocations. Positive [max_entries] and
+      [max_work_steps] cover this invocation, including semantic validation;
+      [limits] bounds compact JSON bytes, depth, fields and nodes. Checkpoint
+      exceptions propagate unchanged. This operation invokes no Converter.
+      The actual new session namespace is checked separately by its state owner. *)
+  val create
+    :  History.entry list
+    -> next_history_sequence:int64
+    -> limits:Document_schema.Limits.t
+    -> max_entries:int
+    -> max_work_steps:int
+    -> checkpoint:(unit -> unit)
+    -> (t, Error.t) Result.t
+
+  val entries : t -> History.entry list
+  val next_history_sequence : t -> int64
+  val to_json : t -> Jsonaf.t
+
+  (** Strict admission under the existing 16 MiB transport/durable document
+      ceiling. The sexp reader applies the same invariant checks. No client
+      provenance becomes a private invocation, authorization or operation receipt. *)
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+end
+
+module Code_selection : sig
+  type t =
+    | Catalog of
+        { definition_id : Id.Prompt_definition.t
+        ; expected_revision : Id.Prompt_revision.t
+        }
+    | Retained of Session_lifecycle.Expected.t
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+end
+
+module Request : sig
+  type t [@@deriving sexp]
+
+  (** Validate an authored Catalog prompt selector and Configured workspace,
+      [start_immediately=false] and ordinary Spec metadata/host combinations.
+      Catalog selection must agree with [spec.prompt]; Retained selection is
+      checked against the actual retained definition by the host. No initial
+      attachment or subscription exists in this request.
+
+      The original command binds the complete seed, selector, Spec and key;
+      existing request and receipt ceilings still apply. There is no hidden
+      upload table or truncated history. A different key is a new conversation. *)
+  val create
+    :  Session.Spec.t
+    -> code:Code_selection.t
+    -> transcript:Transcript.t
+    -> idempotency_key:Idempotency_key.t
+    -> (t, Error.t) Result.t
+
+  val spec : t -> Session.Spec.t
+  val code : t -> Code_selection.t
+  val transcript : t -> Transcript.t
+  val idempotency_key : t -> Idempotency_key.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+end
+
+module Result : sig
+  type t = { session_id : Id.Session.t } [@@deriving sexp]
+
+  (** Persisted stopped identity. Activation/attachment is a subsequent separately
+      authorized command. The ordinary receipt summary is Created_session. *)
+  val to_json : t -> Jsonaf.t
+
+  val of_json : Jsonaf.t -> (t, Error.t) Core.Result.t
+end
 ```
 
 ## session_work

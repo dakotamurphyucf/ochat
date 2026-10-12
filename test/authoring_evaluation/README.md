@@ -83,8 +83,9 @@ comparisons. These fixtures do not solve or score the held-out task suite.
 ## Runtime oracles
 
 `Execution_cases` now implements the one-off ledger and standalone delta task
-oracles. They create an actual embedded session, serialize fake-provider tool
-calls, and inspect outcomes returned through the public session protocol. The
+oracles. These and the following runtime checks create actual local sessions
+(embedded or configured daemon), serialize fake-provider tool calls, and inspect
+outcomes returned through the public session protocol. The
 candidate source runs through ordinary admission, invocation dispatch, and file/
 schema enforcement. No new tool implementation is accepted from candidate ChatMD:
 the harness fixes the root definition and allowed file roots itself. Every host
@@ -106,12 +107,24 @@ results use explicit `json` annotations to retain the full recursive result type
 The scripts do not add host primitives, shell access, or native dependencies.
 
 `Moderator_cases` evaluates the quota task through eight sequential calls within
-one embedded session. It checks successful decrement, rejection without decrement,
+one configured daemon session. It checks successful decrement, rejection without
+decrement,
 zero/negative requests, fractional/wrong-type schema failures, exact exhaustion,
 and subsequent rejection. Mutations that reset successful state, alter rejected
 state, leave a call unresolved or resolve it twice fail. The default synchronous
 host still sends one batch; sequential mode explicitly expects one provider step
 per call and one final response, and still rejects unexpected jobs/extra work.
+
+Sequential quota and repair-tally checks use the existing configured daemon fixture
+with a checkpoint cadence of 1,000 events or 60 seconds. They retain per-transaction
+journal flushing, initial and shutdown snapshots, and the complete retention
+preflight before pruning. The ten-second completion deadline, exact provider counts,
+canonical state and outcome checks remain unchanged. These checks measure extension
+semantics; deterministic storage tests separately cover periodic retained-checkpoint
+replay, changed snapshot/archive rejection and current/fallback pruning. Batched
+checks and background completion-replay checks retain their existing host defaults.
+The configured fixture uses genuine detached durable sessions; process-bound
+embedded sessions keep their existing policy in the other checks.
 
 The quota candidate has exactly `source`, `binding`, `input_schema` and
 `output_schema` fields. This is an evaluation submission envelope, not a new
@@ -174,7 +187,8 @@ lifecycle integration, not crash/restart recovery or real-model review quality.
 
 `Execution_host.with_session` shares startup/cleanup between these adaptive
 lifecycle calls and the existing synchronous/background scenarios. Durable storage
-is explicitly selected only for the child scenario; defaults remain transient.
+is selected for the child scenario and the configured sequential quota/tally
+fixtures; other execution hosts keep their existing storage selections.
 
 The remaining three task transcripts now have execution oracles:
 
@@ -185,7 +199,7 @@ The remaining three task transcripts now have execution oracles:
 - The tally task first submits a moderator that leaves the tool invocation
   unresolved. After the configured context-loss stimulus, the provider has no
   documentation messages, retrieves the installed event contract again, and
-  repairs the program. Six sequential embedded-session calls check retained state,
+  repairs the program. Six sequential configured-session calls check retained state,
   negative/zero amounts, exact cancellation to zero and rejection of a fraction.
 - The missing-Process task uses a private generic moderator host with an actual
   pure SHA-256 native registration. Its delegated surface excludes Process/Model.

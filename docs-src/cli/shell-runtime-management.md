@@ -17,14 +17,41 @@ $ ochat shell inspect agent.chatmd
 $ ochat shell inspect agent.chatmd -canonical
 ```
 
-Output includes requested/live manifest digest, administrative-policy source,
-signature status, trusted-source count, and effective runtimes/profile
-versions. `-canonical` prints canonical requested manifest JSON. Secret values
-are excluded.
+Legacy text inspection retains the v1 resource-manifest encoding. A configured
+hook needs its captured project graph; raw text inspection rejects it rather than
+printing a body-only hash as executable authorization.
 
-Inspection parses and compiles ChatMD, resolves live paths/executable metadata
-needed for inspection, and applies host security validation. It does not grant
-authority or spawn a command.
+```console
+$ ochat shell inspect -config agent-server.sexp -prompt ci-agent -canonical
+$ ochat shell inspect -config agent-server.sexp -prompt ci-agent -revision REVISION_ID -invocation headless -canonical
+$ ochat shell inspect -config agent-server.sexp -prompt ci-agent -signature-payload -issuer example.org -audience ochat -issued-at 1791691200
+```
+
+Configured inspection opens an explicit `Operator_only` daemon owner using the
+selected configuration. Startup performs normal source admission and catalog,
+artifact and project-history preparation. It does not implicitly update locked
+Git selections. The subsequent inspection query compiles that captured revision;
+it does not recapture sources, create a session, initialize hooks, set up native
+tools or call an inference provider. Retained inspection requires an invocation
+(`ui`, `headless` or `delegated-ui`) matching the stored program contract. It can
+inspect that graph after the original files have been removed; there is no fresh
+file fallback.
+
+Output distinguishes `execution manifest` from `resource manifest`. The execution
+hash covers the v2 canonical encoding of the original resource manifest and every
+actually compiled prepared hook entrypoint's complete graph fingerprint,
+including custom matcher entrypoints. A dependency-only code change therefore
+requires a new grant or signature. Empty prepared projection keeps the exact
+legacy v1 bytes. Secret values remain excluded.
+
+`-canonical` prints the requested execution identity. Configured inspection reports
+security acceptance or rejection separately, so a missing required signature
+does not prevent obtaining the identity to sign. `-signature-payload` requires
+`-issuer` and prints the exact canonical Ed25519 payload for external signing; it
+never generates or loads a private key. `-audience` is repeatable, the issue time
+defaults to the host clock, and `-expires-at` sets optional Unix-second expiry.
+The signature and runtime grant must cover this same complete manifest. Inspection
+output grants no authority.
 
 ## Validate and replay audit
 
@@ -112,7 +139,9 @@ Eio and are never silently ignored when policy requires them.
 ## Exit behavior
 
 Parse, reference, manifest, policy, trust/signature, session, audit, and
-management errors print safe diagnostics and exit nonzero. Revocation without
+management errors print safe diagnostics and exit nonzero. Configured inspection
+prints a rejected security result alongside the requested identity for signing;
+that successful read-only inspection does not authorize runtime startup. Revocation without
 `-confirm` exits with refusal. Commands do not print raw secrets.
 
 ## Related documentation

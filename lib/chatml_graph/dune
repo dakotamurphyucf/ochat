@@ -1,0 +1,7 @@
+(library
+ (name chatml_graph)
+ (public_name ochat.chatml_graph)
+ (wrapped false)
+ (modules chatml_configured_lookup chatml_dependency_graph chatml_dependency_session)
+ (libraries core source chatml_source chatml_prepared_program chatml_diagnostic)
+ (preprocess (pps ppx_jane)))

@@ -12,12 +12,51 @@ module Registry : sig
   val artifact_count : t -> int
 
   (** [compile_script registry script] returns the cached compiled artifact for
-      [script] or compiles it once and caches the result. *)
+      [script] or compiles it once and caches the result. Configured projects
+      require [prepare_script]; they never fall back to compiling only the body. *)
   val compile_script
     :  ?surface:Chatml.Chatml_builtin_surface.surface
     -> t
     -> CM.script
     -> (t * artifact, string) result
+
+  (** Compile exact retained program custody against this host's legacy moderator
+      surface and actual tool pool. No initializer runs. Snapshot identity covers
+      the complete module graph. Even an existing cached artifact cannot bypass
+      current declaration or tool admission. *)
+  val prepare_script
+    :  ?surface:Chatml.Chatml_builtin_surface.surface
+    -> t
+    -> CM.script
+    -> programs:Chatml_prompt_programs.Restored.t
+    -> capabilities:Tool_capability.t
+    -> env:Eio_unix.Stdenv.base
+    -> checkpoint:(unit -> unit)
+    -> limits:Chatml_compilation.limits
+    -> max_dependency_depth:int
+    -> (t * artifact, string) result
+
+  (** Prepare all actual legacy declarations without initialization, retaining the
+      final selected artifact as [of_elements] does. Supplied custody is mandatory
+      for every declaration and admits project requirements against this exact
+      live tool pool. The host supplies its actual surface, remaining compiler
+      limits and checkpoint; this operation does not reset an outer startup ledger.
+      Limits govern joined compilation for both captured and Single legacy branches.
+      A supplied startup context shares its deadline/input allowances; activation
+      is not part of this preparation.
+      Diagnostics retain the declaring source. Callback exceptions propagate. *)
+  val prepare_elements
+    :  t
+    -> ?startup:Startup_compilation.t
+    -> ?programs:Chatml_prompt_programs.Restored.t
+    -> surface:Chatml.Chatml_builtin_surface.surface
+    -> capabilities:Tool_capability.t
+    -> env:Eio_unix.Stdenv.base
+    -> checkpoint:(unit -> unit)
+    -> limits:Chatml_compilation.limits
+    -> max_dependency_depth:int
+    -> CM.top_level_elements list
+    -> (t * artifact option, Chatmd_shell_spec.Diagnostic.t list) Result.t
 
   (** [of_elements registry elements] compiles any moderator scripts declared
       by [elements]. *)
@@ -82,7 +121,8 @@ val unsubscribe : subscription -> unit
 (** [overlay_revision t] returns the installed identity-overlay revision. *)
 val overlay_revision : t -> int
 
-(** Exact compiled v1 source identity for deferred invocation observations.
+(** Exact compiled v1 source revision for deferred invocation observations.
+    Linked dependencies/scopes/contracts participate, not just the entry body.
     Legacy moderators have no invocation observer. This does not enter the
     manager or read mutable script state. *)
 val invocation_observer : t -> Agent_protocol.Invocation.observer option
@@ -94,10 +134,12 @@ val extension_definition : t -> Extension_compiler.definition option
 
 (** [create ~artifact ~capabilities ?snapshot ()] instantiates a fresh runtime
     session for [artifact], optionally restoring persisted durable state.
-    Extensibility-v1 requires [env]. Initialization and each event receive fresh
-    lexical controls under declared limits, with inherited parent budgets.
-    [execution_policy] is a trusted host override; submitted code cannot set it.
-    Legacy artifacts retain their existing execution behavior. *)
+    Prepared graphs and extensibility-v1 require [env]; their initialization and
+    events receive fresh lexical controls with inherited parent budgets.
+    Prepared legacy graphs use the supplied [execution_policy] or the default
+    bounded runner. [execution_policy] is a trusted host override; submitted code
+    cannot set it. Single legacy artifacts retain their existing uncontrolled
+    execution behavior. *)
 val create
   :  artifact:Registry.artifact
   -> capabilities:Moderation.Capabilities.t

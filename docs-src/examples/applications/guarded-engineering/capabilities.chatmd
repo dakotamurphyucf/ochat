@@ -41,7 +41,7 @@ to work around its runtime or file boundary.
   <arguments mode="required" min_count="2" max_count="2" max_item_bytes="256"/>
 </tool>
 
-<script id="check-report" language="chatml" kind="tool" src="scripts/check-report.chatml"/>
+<script id="check-report" language="chatml" kind="tool" project="chatml.project.json" src="scripts/check-report.chatml"/>
 <tool name="summarize_checks" type="chatml" script="check-report" entrypoint="run"
       input_schema="schemas/check-input.json" output_schema="schemas/check-output.json"
       description="Count failures in saved report files, such as latest.json, beneath the reports root. This calculation reads evidence; it does not run checks or change files.">

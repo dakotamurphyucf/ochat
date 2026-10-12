@@ -1,0 +1,9 @@
+(copy_files ../../bin/managed_completion_presentation.ml)
+(copy_files ../../bin/managed_completion_presentation.mli)
+
+(library
+ (name managed_completion_presentation_tests)
+ (libraries core expect_test_helpers_core ochat.agent_client ochat.agent_protocol
+  ochat.history_chatmd ochat.history_entry ochat.transcript ochat.document_schema)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

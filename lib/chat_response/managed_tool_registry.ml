@@ -10,6 +10,8 @@ type t =
   ; definition : EC.definition
   ; tools : (Agent_protocol.Id.Capability.t * EC.t) list
   ; authority_fingerprint : string
+  ; original_elements : CM.top_level_elements list
+  ; execution_revisions : (Agent_protocol.Id.Capability.t * string) list option
   }
 
 let capabilities t = t.capabilities
@@ -17,244 +19,297 @@ let definition t = t.definition
 let authority_fingerprint t = t.authority_fingerprint
 
 let prepare
+      ?startup
       ?(limits = Chatml_compilation.default_limits)
       ?(delegated_moderator = false)
+      ?programs
       ~env
       ~owner
       ~capabilities
       elements
   =
-  let open Result.Let_syntax in
-  let fail code message = Error [ D.error ~code message ] in
-  let%bind () =
-    if List.length elements > 16_384
-    then fail "chatml.definition_limit" "too many definition elements"
-    else Ok ()
-  in
-  let scripts =
-    List.filter_map elements ~f:(function
-      | CM.Extension_script script -> Some script
-      | _ -> None)
-  in
-  let tools =
-    List.filter_map elements ~f:(function
-      | CM.Tool (Extension tool) -> Some tool
-      | _ -> None)
-  in
-  let helps =
-    List.filter_map elements ~f:(function
-      | CM.Authoring_help help -> Some help
-      | _ -> None)
-  in
-  let%bind () =
-    if List.length scripts > 128 || List.length tools > 4096 || List.length helps > 4096
-    then fail "chatml.definition_limit" "too many captured extension declarations"
-    else Ok ()
-  in
-  let%bind () =
-    try
-      ignore (CM.validate_declarations elements);
-      Ok ()
-    with
-    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
-    | exn ->
-      fail "chatml.invalid_definition" (String.prefix (Exn.to_string exn) (16 * 1024))
-  in
-  let remaining = ref (8 * 1024 * 1024) in
-  let seen = Hash_set.create (module String) in
-  let consume text =
-    if String.length text > 8 * 1024 * 1024
-    then fail "chatml.definition_limit" "captured source/schema budget exceeded"
-    else if Hash_set.mem seen text
-    then Ok ()
-    else if String.length text > !remaining
-    then fail "chatml.definition_limit" "captured source/schema budget exceeded"
-    else (
-      Hash_set.add seen text;
-      remaining := !remaining - String.length text;
-      Ok ())
-  in
-  let%bind () =
-    List.fold_result scripts ~init:() ~f:(fun () script ->
-      let%bind () = consume (Spec.script_text script) in
-      EC.validate_script ~max_source_bytes:limits.max_source_bytes script)
-  in
-  let schema_json = Hashtbl.create (module String) in
-  let validate_schema (schema : Spec.schema) =
-    let%bind () = consume schema.source_text in
-    match Hashtbl.find schema_json schema.source_text with
-    | Some (sha256, _) when String.equal sha256 schema.source_sha256 -> Ok ()
-    | None | Some _ ->
-      let%map _ = Spec.validate_schema schema in
-      Hashtbl.set
-        schema_json
-        ~key:schema.source_text
-        ~data:(schema.source_sha256, Jsonaf.of_string schema.source_text)
-  in
-  let%bind () =
-    List.fold_result tools ~init:() ~f:(fun () tool ->
-      let%bind () =
-        match C.find capabilities ~name:tool.Spec.name with
-        | Ok _ ->
-          fail
-            "capability.duplicate_name"
-            "extension conflicts with an existing capability"
-        | Error _ -> Ok ()
-      in
-      List.fold_result
-        (tool.input_schema :: tool.output_schema :: Option.to_list tool.completion_schema)
-        ~init:()
-        ~f:(fun () schema -> validate_schema schema))
-  in
-  let names =
-    String.Set.of_list
-      (List.map tools ~f:(fun tool -> tool.Spec.name)
-       @ List.map (C.references capabilities) ~f:(fun reference -> reference.C.name))
-  in
-  let%bind () =
-    List.fold_result tools ~init:() ~f:(fun () tool ->
-      match List.find tool.Spec.uses ~f:(fun name -> not (Set.mem names name)) with
-      | None -> Ok ()
-      | Some _ ->
-        Error
-          [ D.error
-              ~source:tool.source_ref
-              ~code:"capability.not_selected"
-              "extension requires an unavailable tool"
-          ])
-  in
-  let%bind () =
-    List.fold_result helps ~init:() ~f:(fun () help ->
-      let%bind () =
-        if not (Set.mem names help.Spec.tool)
-        then fail "authoring.unknown_tool" "help references an unavailable tool"
-        else
-          Chatmd_shell_spec.Authoring_metadata.validate_help help.help
-          |> Result.map_error ~f:(fun message ->
-            [ D.error ~source:help.source_ref ~code:"authoring.invalid_metadata" message ])
-      in
-      let%bind () =
-        match C.find capabilities ~name:help.tool with
-        | Error _ -> Ok ()
-        | Ok binding ->
-          (match (C.metadata binding).authoring with
-           | Some admitted
-             when Chatmd_shell_spec.Authoring_metadata.equal_help admitted help.help ->
-             Ok ()
-           | None | Some _ ->
-             fail
-               "authoring.metadata_override"
-               "existing capability help must match its admitted metadata")
-      in
-      consume (Sexp.to_string (Spec.sexp_of_authoring_help help)))
-  in
-  let base_permissions =
-    List.map (C.references capabilities) ~f:(fun reference ->
-      let binding =
-        C.find capabilities ~name:reference.name |> Result.ok |> Option.value_exn
-      in
-      reference.name, C.permission_fingerprint binding)
-  in
-  let compact_schema (schema : Spec.schema) = { schema with source_text = "" } in
-  let compact_tool (tool : Spec.tool) =
-    { tool with
-      input_schema = compact_schema tool.input_schema
-    ; output_schema = compact_schema tool.output_schema
-    ; completion_schema = Option.map tool.completion_schema ~f:compact_schema
-    }
-  in
-  let compact_script (script : Spec.script) =
-    { script with
-      source =
-        (match script.source with
-         | Inline _ -> Inline ""
-         | Src source -> Src { source with source_text = "" })
-    }
-  in
-  (* Content digests were validated above. Do not repeat shared source/schema
+  let checkpoint = Eio.Fiber.check in
+  let map_error (e : Chatml_compilation.error) = [ D.error ~code:e.code e.message ] in
+  Startup_compilation.with_context
+    ?startup
+    ~limits
+    ~env
+    ~checkpoint
+    ~map_error
+    ~f:(fun startup ->
+      Startup_compilation.within startup ~map_error ~f:(fun () ->
+        let checkpoint () = Startup_compilation.checkpoint startup in
+        let open Result.Let_syntax in
+        let fail code message = Error [ D.error ~code message ] in
+        let%bind () =
+          if List.length elements > 16_384
+          then fail "chatml.definition_limit" "too many definition elements"
+          else Ok ()
+        in
+        let scripts =
+          List.filter_map elements ~f:(function
+            | CM.Extension_script script -> Some script
+            | _ -> None)
+        in
+        let tools =
+          List.filter_map elements ~f:(function
+            | CM.Tool (Extension tool) -> Some tool
+            | _ -> None)
+        in
+        let helps =
+          List.filter_map elements ~f:(function
+            | CM.Authoring_help help -> Some help
+            | _ -> None)
+        in
+        let%bind () =
+          if
+            List.length scripts > 128
+            || List.length tools > 4096
+            || List.length helps > 4096
+          then fail "chatml.definition_limit" "too many captured extension declarations"
+          else Ok ()
+        in
+        let%bind () =
+          try
+            ignore (CM.validate_declarations elements);
+            Ok ()
+          with
+          | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+          | exn ->
+            fail
+              "chatml.invalid_definition"
+              (String.prefix (Exn.to_string exn) (16 * 1024))
+        in
+        let consume text =
+          Startup_compilation.admit_text startup text
+          |> Result.map_error ~f:(fun e ->
+            [ D.error ~code:e.Chatml_compilation.code e.message ])
+        in
+        let%bind () =
+          List.fold_result scripts ~init:() ~f:(fun () script ->
+            checkpoint ();
+            let%bind () = consume (Spec.script_text script) in
+            EC.validate_script ~max_source_bytes:limits.max_source_bytes script)
+        in
+        let schema_json = Hashtbl.create (module String) in
+        let validate_schema (schema : Spec.schema) =
+          checkpoint ();
+          let%bind () = consume schema.source_text in
+          match Hashtbl.find schema_json schema.source_text with
+          | Some (sha256, _) when String.equal sha256 schema.source_sha256 -> Ok ()
+          | None | Some _ ->
+            let%map _ = Spec.validate_schema schema in
+            Hashtbl.set
+              schema_json
+              ~key:schema.source_text
+              ~data:(schema.source_sha256, Jsonaf.of_string schema.source_text)
+        in
+        let%bind () =
+          List.fold_result tools ~init:() ~f:(fun () tool ->
+            checkpoint ();
+            let%bind () =
+              match C.find capabilities ~name:tool.Spec.name with
+              | Ok _ ->
+                fail
+                  "capability.duplicate_name"
+                  "extension conflicts with an existing capability"
+              | Error _ -> Ok ()
+            in
+            List.fold_result
+              (tool.input_schema
+               :: tool.output_schema
+               :: Option.to_list tool.completion_schema)
+              ~init:()
+              ~f:(fun () schema -> validate_schema schema))
+        in
+        let names =
+          String.Set.of_list
+            (List.map tools ~f:(fun tool -> tool.Spec.name)
+             @ List.map (C.references capabilities) ~f:(fun reference -> reference.C.name)
+            )
+        in
+        let%bind () =
+          List.fold_result tools ~init:() ~f:(fun () tool ->
+            checkpoint ();
+            match List.find tool.Spec.uses ~f:(fun name -> not (Set.mem names name)) with
+            | None -> Ok ()
+            | Some _ ->
+              Error
+                [ D.error
+                    ~source:tool.source_ref
+                    ~code:"capability.not_selected"
+                    "extension requires an unavailable tool"
+                ])
+        in
+        let%bind () =
+          List.fold_result helps ~init:() ~f:(fun () help ->
+            checkpoint ();
+            let%bind () =
+              if not (Set.mem names help.Spec.tool)
+              then fail "authoring.unknown_tool" "help references an unavailable tool"
+              else
+                Chatmd_shell_spec.Authoring_metadata.validate_help help.help
+                |> Result.map_error ~f:(fun message ->
+                  [ D.error
+                      ~source:help.source_ref
+                      ~code:"authoring.invalid_metadata"
+                      message
+                  ])
+            in
+            let%bind () =
+              match C.find capabilities ~name:help.tool with
+              | Error _ -> Ok ()
+              | Ok binding ->
+                (match (C.metadata binding).authoring with
+                 | Some admitted
+                   when Chatmd_shell_spec.Authoring_metadata.equal_help admitted help.help
+                   -> Ok ()
+                 | None | Some _ ->
+                   fail
+                     "authoring.metadata_override"
+                     "existing capability help must match its admitted metadata")
+            in
+            consume (Sexp.to_string (Spec.sexp_of_authoring_help help)))
+        in
+        let base_permissions =
+          List.map (C.references capabilities) ~f:(fun reference ->
+            let binding =
+              C.find capabilities ~name:reference.name |> Result.ok |> Option.value_exn
+            in
+            reference.name, C.permission_fingerprint binding)
+        in
+        let compact_schema (schema : Spec.schema) = { schema with source_text = "" } in
+        let compact_tool (tool : Spec.tool) =
+          { tool with
+            input_schema = compact_schema tool.input_schema
+          ; output_schema = compact_schema tool.output_schema
+          ; completion_schema = Option.map tool.completion_schema ~f:compact_schema
+          }
+        in
+        let compact_script (script : Spec.script) =
+          { script with
+            source =
+              (match script.source with
+               | Inline _ -> Inline ""
+               | Src source -> Src { source with source_text = "" })
+          }
+        in
+        (* Content digests were validated above. Do not repeat shared source/schema
      bodies in a potentially large aggregate fingerprint or descriptor tree.
      Bind the full captured definition and its actual base authority. Including
      all declarations is conservative and avoids recursively hashing live managed
      references. Runtime recursion is distinct from parser-checked uses cycles. *)
-  let authority_fingerprint =
-    [%sexp
-      ("ochat.managed-authority.v1" : string)
-    , (List.map scripts ~f:compact_script : Spec.script list)
-    , (List.map tools ~f:compact_tool : Spec.tool list)
-    , (helps : Spec.authoring_help list)
-    , (base_permissions : (string * string) list)
-    , (Chatml_compilation.contract Tool_v1 : Sexp.t)
-    , (Chatml_compilation.contract
-         (match delegated_moderator with
-          | false -> Moderator_v1
-          | true -> Delegated_moderator_v1)
-       : Sexp.t)
-    , (Chatmd_shell_spec.Tool_schema.dialect : string)]
-    |> Sexp.to_string
-    |> Chatmd_shell_spec.Source_ref.digest
-  in
-  let registrations =
-    List.map tools ~f:(fun tool ->
-      let help_metadata =
-        match
-          List.find helps ~f:(fun help -> String.equal help.Spec.tool tool.Spec.name)
-        with
-        | None -> Chatmd_shell_spec.Authoring_metadata.empty
-        | Some help ->
-          { Chatmd_shell_spec.Authoring_metadata.authoring = Some help.help
-          ; helper = None
-          }
-      in
-      let info : Openai.Completions.tool =
-        { type_ = "function"
-        ; function_ =
-            { name = tool.name
-            ; description = tool.description
-            ; parameters =
-                Hashtbl.find_exn schema_json tool.input_schema.source_text |> snd
-            ; strict = false
-            }
-        }
-      in
-      C.
-        { descriptor = info
-        ; target = tool.implementation
-        ; metadata = help_metadata
-        ; implementation_revision =
+        let authority_fingerprint =
+          [%sexp
+            ("ochat.managed-authority.v1" : string)
+          , (List.map scripts ~f:compact_script : Spec.script list)
+          , (List.map tools ~f:compact_tool : Spec.tool list)
+          , (helps : Spec.authoring_help list)
+          , (base_permissions : (string * string) list)
+          , (Chatml_compilation.contract Tool_v1 : Sexp.t)
+          , (Chatml_compilation.contract
+               (match delegated_moderator with
+                | false -> Moderator_v1
+                | true -> Delegated_moderator_v1)
+             : Sexp.t)
+          , (Chatmd_shell_spec.Tool_schema.dialect : string)]
+          |> Sexp.to_string
+          |> Chatmd_shell_spec.Source_ref.digest
+        in
+        let authority_fingerprint =
+          match programs with
+          | None -> authority_fingerprint
+          | Some inventory ->
+            let module P = Chatml_prompt_programs in
+            let graphs =
+              List.map (P.Restored.programs inventory) ~f:(fun program ->
+                checkpoint ();
+                ( P.Binding.script_id (P.Restored.Program.binding program)
+                , Chatml_prepared_program.fingerprint
+                    (P.Restored.Program.prepared program) ))
+            in
             [%sexp
-              ("ochat.managed-declaration.v1" : string)
-            , (compact_tool tool : Spec.tool)
-            , (authority_fingerprint : string)]
+              (authority_fingerprint : string)
+            , (graphs : (string * Chatml_source.Digest.t) list)]
             |> Sexp.to_string
             |> Chatmd_shell_spec.Source_ref.digest
-        })
-  in
-  let%bind capabilities =
-    C.extend_managed
-      capabilities
-      ~owner
-      ~resource_fingerprint:authority_fingerprint
-      registrations
-    |> Result.map_error ~f:(fun error -> [ D.error ~code:error.C.code error.message ])
-  in
-  let%map definition =
-    EC.prepare_definition_in_domain
-      ~limits
-      ~delegated_moderator
-      ~env
-      ~capabilities
-      elements
-  in
-  let tools =
-    List.map (EC.prepared_tools definition) ~f:(fun prepared ->
-      let binding =
-        C.find capabilities ~name:(EC.declaration prepared).name
-        |> Result.ok
-        |> Option.value_exn
-      in
-      (C.reference binding).id, prepared)
-  in
-  { capabilities; definition; tools; authority_fingerprint }
+        in
+        checkpoint ();
+        let registrations =
+          List.map tools ~f:(fun tool ->
+            checkpoint ();
+            let help_metadata =
+              match
+                List.find helps ~f:(fun help ->
+                  String.equal help.Spec.tool tool.Spec.name)
+              with
+              | None -> Chatmd_shell_spec.Authoring_metadata.empty
+              | Some help ->
+                { Chatmd_shell_spec.Authoring_metadata.authoring = Some help.help
+                ; helper = None
+                }
+            in
+            let info : Openai.Completions.tool =
+              { type_ = "function"
+              ; function_ =
+                  { name = tool.name
+                  ; description = tool.description
+                  ; parameters =
+                      Hashtbl.find_exn schema_json tool.input_schema.source_text |> snd
+                  ; strict = false
+                  }
+              }
+            in
+            C.
+              { descriptor = info
+              ; target = tool.implementation
+              ; metadata = help_metadata
+              ; implementation_revision =
+                  [%sexp
+                    ("ochat.managed-declaration.v1" : string)
+                  , (compact_tool tool : Spec.tool)
+                  , (authority_fingerprint : string)]
+                  |> Sexp.to_string
+                  |> Chatmd_shell_spec.Source_ref.digest
+              })
+        in
+        checkpoint ();
+        let%bind capabilities =
+          C.extend_managed
+            capabilities
+            ~owner
+            ~resource_fingerprint:authority_fingerprint
+            registrations
+          |> Result.map_error ~f:(fun error ->
+            [ D.error ~code:error.C.code error.message ])
+        in
+        let%map definition =
+          EC.prepare_definition_in_domain
+            ~startup
+            ~limits
+            ~delegated_moderator
+            ?programs
+            ~env
+            ~capabilities
+            elements
+        in
+        let tools =
+          List.map (EC.prepared_tools definition) ~f:(fun prepared ->
+            let binding =
+              C.find capabilities ~name:(EC.declaration prepared).name
+              |> Result.ok
+              |> Option.value_exn
+            in
+            (C.reference binding).id, prepared)
+        in
+        { capabilities
+        ; definition
+        ; tools
+        ; authority_fingerprint
+        ; original_elements = elements
+        ; execution_revisions = None
+        }))
+    ()
 ;;
 
 let resolve t binding =
@@ -283,6 +338,71 @@ let resolve t binding =
            { code = "capability.stale_reference"
            ; message = "managed target does not match its compiled binding"
            })
+;;
+
+let execution_revision t binding =
+  let open Result.Let_syntax in
+  let reference = C.reference binding in
+  let%bind _ = resolve t binding in
+  match t.execution_revisions with
+  | None -> Ok reference.implementation_revision
+  | Some revisions ->
+    Result.of_option
+      (List.Assoc.find revisions reference.id ~equal:Agent_protocol.Id.Capability.equal)
+      ~error:
+        C.
+          { code = "capability.stale_reference"
+          ; message = "selected managed code is missing"
+          }
+;;
+
+let rebind_code
+      t
+      ~startup
+      ~limits
+      ~delegated_moderator
+      ~programs
+      ~env
+      ~checkpoint
+      elements
+  =
+  let open Result.Let_syntax in
+  let poll () =
+    checkpoint ();
+    Startup_compilation.checkpoint startup
+  in
+  let%bind () =
+    Managed_code_contract.validate
+      ~original:t.original_elements
+      ~selected:elements
+      ~checkpoint:poll
+  in
+  let%map definition =
+    EC.prepare_definition_in_domain
+      ~startup
+      ~limits
+      ~delegated_moderator
+      ?programs
+      ~env
+      ~capabilities:t.capabilities
+      elements
+  in
+  let tools =
+    List.map (EC.prepared_tools definition) ~f:(fun prepared ->
+      poll ();
+      let binding =
+        C.find t.capabilities ~name:(EC.declaration prepared).name
+        |> Result.ok
+        |> Option.value_exn
+      in
+      (C.reference binding).id, prepared)
+  in
+  let execution_revisions =
+    List.map tools ~f:(fun (id, prepared) ->
+      poll ();
+      id, EC.fingerprint prepared)
+  in
+  { t with definition; tools; execution_revisions = Some execution_revisions }
 ;;
 
 let revalidate t ~current =
@@ -402,7 +522,17 @@ let delegated_invocation_dependencies delegation invocation =
                 ~id:reference.id
                 ~fingerprint:reference.fingerprint)
       | Script | Moderator | Delegated_agent ->
-        String.equal context.implementation_revision reference.implementation_revision
+        Result.is_ok
+          (execution_revision registry binding
+           |> Result.bind ~f:(fun expected ->
+             if String.equal context.implementation_revision expected
+             then Ok ()
+             else
+               Error
+                 C.
+                   { code = "capability.stale_context"
+                   ; message = "selected code differs"
+                   }))
       | _ -> false
     in
     (match matches with
@@ -434,6 +564,7 @@ let admit t ~current ~selected ~(reference : C.reference) ~invocation =
     C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint
   in
   let%bind prepared = resolve t binding in
+  let%bind implementation_revision = execution_revision t binding in
   let context = invocation.I.context in
   let function_call =
     match invocation.routing with
@@ -444,7 +575,7 @@ let admit t ~current ~selected ~(reference : C.reference) ~invocation =
   | Dispatching
     when function_call
          && String.equal context.tool_name reference.name
-         && String.equal context.implementation_revision reference.implementation_revision
+         && String.equal context.implementation_revision implementation_revision
          && String.equal context.capability_fingerprint (C.fingerprint selected)
          && Result.is_ok (I.validate invocation) -> Ok { prepared; binding; invocation }
   | _ ->

@@ -49,6 +49,7 @@ type t =
   ; durable_requests : bool
   ; requires_active_moderator : C.reference -> bool
   ; authorize : I.t -> C.binding -> (unit, Agent_protocol.Error.t) result
+  ; admission_check : (I.t -> C.binding -> (unit, Agent_protocol.Error.t) result) option
   ; preparation : preparation_policy option
   ; prepare_output :
       Openai.Responses.Tool_output.Output.t -> (Jsonaf.t, Agent_protocol.Error.t) result
@@ -68,6 +69,13 @@ type t =
   ; authoring_services : Authoring_services.t option
   ; generated_creation_service : Generated_session_request.service option
   ; managed_session_service : Managed_session_service.t option
+  ; agent_source_code_view : Agent_source_code_view.t option
+  ; shell_code_view : Shell_runtime.Registry.Code_view.t option
+  ; agent_artifact :
+      (C.binding
+      * Agent_protocol.Id.Invocation.t
+      * Chat_response.Background_request.Agent_artifact.t)
+        option
   }
 
 type native_services =
@@ -79,6 +87,21 @@ type native_services =
 
 let native_services_key = Eio.Fiber.create_key ()
 
+let implementation_revision t selected (reference : C.reference) =
+  let open Result.Let_syntax in
+  let%bind binding =
+    C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint
+    |> Result.map_error ~f:(fun error ->
+      Agent_protocol.Error.invalid_request error.C.message)
+  in
+  match C.implementation binding, t.managed with
+  | Managed _, Some service ->
+    Managed.execution_revision (service t).definition binding
+    |> Result.map_error ~f:(fun error ->
+      Agent_protocol.Error.invalid_request error.C.message)
+  | Native _, _ | Managed _, None -> Ok reference.implementation_revision
+;;
+
 let with_native_services tools ~session_id ~generation f =
   let context = { tools; session_id; generation; active = Atomic.make true } in
   Exn.protect
@@ -86,7 +109,10 @@ let with_native_services tools ~session_id ~generation f =
     ~f:(fun () ->
       Eio.Fiber.with_binding native_services_key context (fun () ->
         match tools.shell_context with
-        | None -> Shell_runtime.Call_context.without_services f
+        | None ->
+          (match tools.shell_code_view with
+           | None -> Shell_runtime.Call_context.without_services f
+           | Some _ -> failwith "selected shell code requires current caller services")
         | Some services ->
           let check () =
             let open Result.Let_syntax in
@@ -106,13 +132,17 @@ let with_native_services tools ~session_id ~generation f =
               C.find (tools.registry ()) ~name:invocation.context.tool_name
               |> Result.map_error ~f:(fun error -> error.C.message)
             in
+            let%bind expected_revision =
+              implementation_revision tools (tools.registry ()) (C.reference binding)
+              |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+            in
             let%bind () =
               match tools.is_halted () with
               | true -> Error "shell caller is halted or stopping"
               | false ->
                 (match
                    String.equal
-                     (C.reference binding).implementation_revision
+                     expected_revision
                      invocation.context.implementation_revision
                  with
                  | true -> Ok ()
@@ -121,34 +151,279 @@ let with_native_services tools ~session_id ~generation f =
             tools.authorize invocation binding
             |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
           in
-          Shell_runtime.Call_context.with_services
-            ~prepare_executor:
-              (Session_management_channel.prepare_executor
-                 ~grants:tools.session_helpers
-                 ~creation:tools.generated_creation_service
-                 ~sessions:tools.managed_session_service
-                 ~authoring:tools.authoring_services)
-            (fun () ->
-               let open Result.Let_syntax in
-               let%map services = services () in
-               { services with
-                 check =
-                   (fun () ->
-                     let%bind () = check () in
-                     services.check ())
-               })
-            f))
+          let enter code =
+            Shell_runtime.Call_context.with_services
+              ~prepare_executor:(fun config ->
+                let open Result.Let_syntax in
+                let%bind config =
+                  Session_management_channel.prepare_executor
+                    ~grants:tools.session_helpers
+                    ~creation:tools.generated_creation_service
+                    ~sessions:tools.managed_session_service
+                    ~authoring:tools.authoring_services
+                    config
+                in
+                match code with
+                | None -> Ok config
+                | Some execution ->
+                  Shell_runtime.Registry.Code_view.Execution.prepare_executor
+                    execution
+                    config)
+              (fun () ->
+                 let open Result.Let_syntax in
+                 let%map services = services () in
+                 { services with
+                   check =
+                     (fun () ->
+                       let%bind () = check () in
+                       services.check ())
+                 })
+              f
+          in
+          (match tools.shell_code_view with
+           | None -> enter None
+           | Some view ->
+             Shell_runtime.Registry.Code_view.with_execution
+               view
+               ~checkpoint:Eio.Fiber.check
+               (fun execution -> enter (Some execution))
+             |> Result.ok_or_failwith)))
+;;
+
+module Native_services_scope = struct
+  type nonrec t =
+    | Unbound
+    | Active of t
+    | Expired
+end
+
+let native_services_scope () =
+  match Eio.Fiber.get native_services_key with
+  | None -> Native_services_scope.Unbound
+  | Some context ->
+    (match Native_tool_invocation.current_scope () with
+     | Active invocation
+       when Atomic.get context.active
+            && Agent_protocol.Id.Session.equal
+                 context.session_id
+                 invocation.context.session_id
+            && Int.equal context.generation invocation.context.generation ->
+       Native_services_scope.Active context.tools
+     | Active _ | Expired | Unbound -> Native_services_scope.Expired)
 ;;
 
 let current_native_services () =
-  match Eio.Fiber.get native_services_key, Native_tool_invocation.current_scope () with
-  | Some context, Active invocation
-    when Atomic.get context.active
-         && Agent_protocol.Id.Session.equal
-              context.session_id
-              invocation.context.session_id
-         && Int.equal context.generation invocation.context.generation -> Ok context.tools
-  | _ -> Error "native tool services do not belong to an active invoking session"
+  match native_services_scope () with
+  | Native_services_scope.Active services -> Ok services
+  | Unbound | Expired ->
+    Error "native tool services do not belong to an active invoking session"
+;;
+
+let with_agent_artifact t ~binding ~parent_invocation artifact =
+  { t with agent_artifact = Some (binding, parent_invocation, artifact) }
+;;
+
+let check_metadata_admission t invocation binding =
+  let open Result.Let_syntax in
+  let%bind borrowed = Native_tool_invocation.borrow () in
+  let%bind () = Native_tool_invocation.require_native_admission borrowed ~binding in
+  let%bind check =
+    Result.of_option
+      t.admission_check
+      ~error:
+        (Agent_protocol.Error.invalid_request
+           "current native authority check unavailable")
+  in
+  let%bind () =
+    if t.is_halted ()
+    then Error (Agent_protocol.Error.invalid_request "native metadata owner has stopped")
+    else Ok ()
+  in
+  let%bind () = check invocation binding in
+  Eio.Fiber.check ();
+  let%bind () = Native_tool_invocation.require_native_admission borrowed ~binding in
+  if t.is_halted ()
+  then Error (Agent_protocol.Error.invalid_request "native metadata owner has stopped")
+  else (
+    let%bind () = check invocation binding in
+    let%bind () =
+      if t.is_halted ()
+      then
+        Error (Agent_protocol.Error.invalid_request "native metadata owner has stopped")
+      else Ok ()
+    in
+    Eio.Fiber.check ();
+    Native_tool_invocation.require_native_admission borrowed ~binding)
+;;
+
+let require_final_metadata_admission t binding =
+  let open Result.Let_syntax in
+  Eio.Fiber.check ();
+  let%bind current =
+    current_native_services () |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+  in
+  if not (phys_equal current t)
+  then Error (Agent_protocol.Error.invalid_request "native metadata service changed")
+  else (
+    let%bind borrowed = Native_tool_invocation.borrow () in
+    Native_tool_invocation.require_native_admission borrowed ~binding)
+;;
+
+let agent_artifact t =
+  let open Result.Let_syntax in
+  let denied message = Error (Agent_protocol.Error.invalid_request message) in
+  let validate () =
+    let%bind current =
+      current_native_services ()
+      |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+    in
+    if not (phys_equal current t)
+    then denied "selected agent code belongs to another native service"
+    else (
+      match t.agent_artifact, Native_tool_invocation.current_scope () with
+      | None, Active _ -> Ok None
+      | Some (binding, parent_invocation, artifact), Active invocation ->
+        let reference = C.reference binding in
+        let%bind borrowed = Native_tool_invocation.borrow () in
+        let%bind ceiling = Native_tool_invocation.borrowed_capabilities borrowed in
+        if
+          Option.is_none (C.native_implementation binding)
+          || not
+               (String.equal
+                  (C.fingerprint ceiling)
+                  invocation.context.capability_fingerprint
+                && String.equal
+                     reference.implementation_revision
+                     invocation.context.implementation_revision
+                && String.equal reference.name invocation.context.tool_name
+                && Option.equal
+                     Agent_protocol.Id.Invocation.equal
+                     (Some parent_invocation)
+                     invocation.context.parent_invocation)
+        then denied "selected agent code does not match this native invocation"
+        else (
+          let%bind ceiling_binding =
+            C.resolve ceiling ~id:reference.id ~fingerprint:reference.fingerprint
+            |> Result.map_error ~f:(fun error ->
+              Agent_protocol.Error.invalid_request error.C.message)
+          in
+          let%bind current_binding =
+            C.resolve (t.registry ()) ~id:reference.id ~fingerprint:reference.fingerprint
+            |> Result.map_error ~f:(fun error ->
+              Agent_protocol.Error.invalid_request error.C.message)
+          in
+          match
+            ( C.native_implementation binding
+            , C.native_implementation ceiling_binding
+            , C.native_implementation current_binding )
+          with
+          | Some original, Some ceiling, Some current
+            when phys_equal original ceiling && phys_equal original current ->
+            Ok (Some (binding, artifact, invocation))
+          | Some _, _, _ | None, _, _ ->
+            denied "selected agent code native implementation has changed")
+      | _, (Expired | Unbound) -> denied "selected agent code scope has ended")
+  in
+  Eio.Fiber.check ();
+  let%bind selected = validate () in
+  match selected with
+  | None -> Ok None
+  | Some (binding, _, invocation) ->
+    let%bind () = check_metadata_admission t invocation binding in
+    Eio.Fiber.check ();
+    let%bind selected = validate () in
+    (match selected with
+     | Some (binding, artifact, current)
+       when Agent_protocol.Id.Invocation.equal invocation.context.id current.context.id ->
+       let%map () = require_final_metadata_admission t binding in
+       Some artifact
+     | None | Some _ ->
+       denied "selected agent code invocation changed during authorization")
+;;
+
+let agent_artifact_for_implementation t ~implementation =
+  let open Result.Let_syntax in
+  let%map selected = agent_artifact t in
+  match selected, t.agent_artifact, implementation with
+  | Some artifact, Some (binding, _, _), Some implementation ->
+    (match C.native_implementation binding with
+     | Some original when phys_equal implementation original -> Some artifact
+     | Some _ | None -> None)
+  | _, _, _ -> None
+;;
+
+let with_agent_source_code_view t view = { t with agent_source_code_view = Some view }
+let with_shell_code_view t view = { t with shell_code_view = Some view }
+
+let agent_source_context t ~defining_revision ~implementation =
+  let open Result.Let_syntax in
+  let denied message = Error (Agent_protocol.Error.invalid_request message) in
+  let%bind recorded =
+    agent_artifact_for_implementation t ~implementation:(Some implementation)
+  in
+  match recorded with
+  | Some _ -> Ok None
+  | None ->
+    let validate () =
+      let%bind current =
+        current_native_services ()
+        |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+      in
+      if (not (phys_equal current t)) || t.is_halted ()
+      then denied "selected source code has stale or foreign native services"
+      else (
+        let%bind borrowed = Native_tool_invocation.borrow () in
+        let%bind ceiling = Native_tool_invocation.borrowed_capabilities borrowed in
+        match Native_tool_invocation.current_scope () with
+        | Expired | Unbound -> denied "selected source code invocation expired"
+        | Active invocation ->
+          let%bind binding =
+            C.find ceiling ~name:invocation.context.tool_name
+            |> Result.map_error ~f:(fun error ->
+              Agent_protocol.Error.invalid_request error.C.message)
+          in
+          let reference = C.reference binding in
+          let%bind current =
+            C.resolve (t.registry ()) ~id:reference.id ~fingerprint:reference.fingerprint
+            |> Result.map_error ~f:(fun error ->
+              Agent_protocol.Error.invalid_request error.C.message)
+          in
+          if
+            not
+              (String.equal
+                 reference.implementation_revision
+                 invocation.context.implementation_revision)
+          then denied "selected source code native implementation changed"
+          else (
+            match C.native_implementation binding, C.native_implementation current with
+            | Some original, Some current when phys_equal original current ->
+              Ok (invocation, binding, phys_equal original implementation)
+            | Some _, Some _ | Some _, None | None, Some _ | None, None ->
+              denied "selected source code is not the admitted native implementation"))
+    in
+    let%bind invocation, binding, matches_implementation = validate () in
+    if not matches_implementation
+    then (
+      let%map () = require_final_metadata_admission t binding in
+      None)
+    else (
+      let%bind () = check_metadata_admission t invocation binding in
+      Eio.Fiber.check ();
+      let%bind current, _, matches_implementation = validate () in
+      if
+        (not
+           (Agent_protocol.Id.Invocation.equal invocation.context.id current.context.id))
+        || not matches_implementation
+      then denied "selected source code invocation changed during authorization"
+      else (
+        let%bind context =
+          match t.agent_source_code_view with
+          | None -> Ok None
+          | Some view ->
+            Agent_source_code_view.find view ~defining_revision ~implementation
+        in
+        let%map () = require_final_metadata_admission t binding in
+        context))
 ;;
 
 let create
@@ -168,6 +443,7 @@ let create
   ; durable_requests = false
   ; requires_active_moderator
   ; authorize
+  ; admission_check = None
   ; preparation = None
   ; prepare_output
   ; defer_observation
@@ -186,6 +462,9 @@ let create
   ; authoring_services = None
   ; generated_creation_service = None
   ; managed_session_service = None
+  ; agent_source_code_view = None
+  ; shell_code_view = None
+  ; agent_artifact = None
   }
 ;;
 
@@ -254,6 +533,7 @@ let native_dispatch_base t ~declared ~input ~capabilities =
 let is_halted t = t.is_halted ()
 let current_capabilities t = t.registry ()
 let authorize t = t.authorize
+let with_admission_check t ~check = { t with admission_check = Some check }
 
 let with_authorization_guard t ~check =
   let authorize invocation binding =
@@ -262,6 +542,13 @@ let with_authorization_guard t ~check =
     let%bind () = t.authorize invocation binding in
     check ()
   in
+  let admission_check =
+    Option.map t.admission_check ~f:(fun admission_check invocation binding ->
+      let open Result.Let_syntax in
+      let%bind () = check () in
+      let%bind () = admission_check invocation binding in
+      check ())
+  in
   let prepare_output output =
     let open Result.Let_syntax in
     let%bind () = check () in
@@ -269,7 +556,7 @@ let with_authorization_guard t ~check =
     let%map () = check () in
     output
   in
-  { t with authorize; prepare_output }
+  { t with authorize; admission_check; prepare_output }
 ;;
 
 let with_lifecycle t ~is_halted = { t with is_halted }
@@ -719,6 +1006,9 @@ let with_scope_results
           let%bind () = checked `Input (fun () -> validate_value prepared.input) in
           let%bind invocation =
             checked `Admission (fun () ->
+              let%bind implementation_revision =
+                implementation_revision t selected reference
+              in
               I.create
                 ?observer
                 ?parent_event
@@ -732,7 +1022,7 @@ let with_scope_results
                 ; parent_invocation
                 ; parent_job = None
                 ; tool_name = reference.name
-                ; implementation_revision = reference.implementation_revision
+                ; implementation_revision
                 ; capability_fingerprint = C.fingerprint selected
                 ; input = prepared.input
                 ; created_at = t.now ()
@@ -902,7 +1192,7 @@ let with_invocation t ~prepared ~capabilities ~(parent : I.t) f =
     ~observer:
       (Some
          { script_id = (EC.script prepared).id
-         ; source_sha256 = (EC.script prepared).source_sha256
+         ; source_sha256 = EC.source_revision prepared
          })
     ~valid_parent
     ~execute:capabilities.Operation_worker.Capabilities.with_invocation
@@ -942,7 +1232,7 @@ let with_managed_invocation t ~execution ~borrowed f =
     ~observer:
       (Some
          { script_id = (EC.script prepared).id
-         ; source_sha256 = (EC.script prepared).source_sha256
+         ; source_sha256 = EC.source_revision prepared
          })
     ~valid_parent
     ~execute:(Native_tool_invocation.execute_borrowed borrowed)
@@ -1256,11 +1546,11 @@ let run_managed t service execution borrowed with_result =
                     start_effects := local_effects;
                     Ok ignore)
                 in
-                Chatml_execution.run_in_scope
+                EC.Program.run_in_scope
+                  (EC.program prepared)
                   ?prepare_result
                   ~control
                   ~config
-                  ~program:(EC.program prepared)
                   ~entrypoint
                   ~arguments:[ ABI.context scope; ABI.input scope ]
                   ())
@@ -1402,15 +1692,18 @@ let with_one_off ?observer t ~prepared ~limits ~max_nested_calls ~borrowed ~mode
 
 let with_moderator_scope t ~definition ~execute ~parent ~valid_parent f =
   match
-    List.find_map (EC.compiled_scripts definition) ~f:(fun (script, _) ->
+    List.find_map (EC.compiled_scripts definition) ~f:(fun (script, program) ->
       match script.Chatmd_shell_spec.Extension_spec.kind with
-      | Moderator_script -> Some script
+      | Moderator_script -> Some (script, program)
       | Tool_script -> None)
   with
   | None -> f (fun ~name:_ ~args:_ -> tool_error "invocation.inactive_scope")
-  | Some script ->
+  | Some (script, program) ->
     let observer : I.observer =
-      { script_id = script.id; source_sha256 = script.source_sha256 }
+      { script_id = script.id
+      ; source_sha256 =
+          EC.Program.source_revision program ~single_file_revision:script.source_sha256
+      }
     in
     let moderator_names =
       List.fold
@@ -1619,6 +1912,10 @@ let native_dispatch t ~declared ~input ~capabilities =
       ~source
       ~parent_call_id
       ~now:t.now
+      ~implementation_revision:(fun binding ->
+        let open Result.Let_syntax in
+        let%bind selected = N.borrowed_capabilities borrowed in
+        implementation_revision t selected (C.reference binding))
       ~prepare
       ~execute
       ~for_fork

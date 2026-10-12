@@ -1,0 +1,7 @@
+(library
+ (name chatml_prompt_programs)
+ (public_name ochat.chatml_prompt_programs)
+ (modules chatml_prompt_programs program_source_revision program_fields program_binding program_inventory program_encoding program_document program_restore program_declaration_match program_retained)
+ (private_modules program_source_revision program_fields program_binding program_inventory program_encoding program_document program_restore program_declaration_match program_retained)
+ (libraries core digestif jsonaf document_schema source chatml_source chatml_prepared_program chatml_program_document chatml_project_build chatml_project chatml chatmd agent_store)
+ (preprocess (pps ppx_jane)))

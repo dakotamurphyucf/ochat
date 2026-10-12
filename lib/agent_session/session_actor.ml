@@ -500,6 +500,9 @@ type _ request =
   | Replace_shell_approval_grants :
       Run_preparation.t option * Session.Shell_state.Approval_grant.persisted list
       -> unit request
+  | Replace_shell_extension_snapshots :
+      Run_preparation.t option * Session.Shell_state.Extension_snapshot.t list
+      -> unit request
   | Shell_manifest_grants : Session.Shell_state.Manifest_grant.persisted list request
   | Add_shell_manifest_grant :
       Run_preparation.t option * Session.Shell_state.Manifest_grant.persisted
@@ -2128,7 +2131,15 @@ let set_runtime_worker t worker inference =
 let change_moderator t moderator =
   if moderator_is_borrowed t
   then Error (error Conflict "moderator invocation owns the moderator checkpoint")
-  else transition t ~delta:(Session_delta.Moderator_changed moderator) ~payloads:[]
+  else (
+    let state = { t.state with moderator } in
+    transition
+      t
+      ~delta:(Session_delta.Moderator_changed moderator)
+      ~payloads:
+        [ Agent_protocol.Event.Durable.Payload.Session_updated
+            (Session_state.summary state)
+        ])
 ;;
 
 let change_workspace t workspace =
@@ -4028,9 +4039,12 @@ let prepared_run_delta t (borrow : queued_event_borrow) completed requests job_d
         | _ -> None)
       |> Result.all
     in
-    let owns_callback =
+    let run =
       Option.bind t.state.run_state ~f:(fun index ->
         Run_state.find index (Run_scope.run_id scope))
+    in
+    let owns_callback =
+      run
       |> Option.exists ~f:(fun run ->
         List.exists run.Agent_protocol.Run.owned_work ~f:(fun work ->
           match work.Agent_protocol.Run_work.key with
@@ -4040,7 +4054,15 @@ let prepared_run_delta t (borrow : queued_event_borrow) completed requests job_d
           | Retained (Job _ | Schedule _ | Invocation _ | Subscription _ | Delivery _) ->
             false))
     in
-    if Option.is_none action && List.is_empty owned_work && not owns_callback
+    let initial_single_turn =
+      Option.exists run ~f:(fun run ->
+        Run_event_scope.is_initial_single_turn run borrow.receipt.context)
+    in
+    if
+      Option.is_none action
+      && List.is_empty owned_work
+      && (not owns_callback)
+      && not initial_single_turn
     then Ok []
     else (
       let%bind work_transition =
@@ -4183,6 +4205,7 @@ let commit_queued_event t borrow snapshot requests decision notifications =
 let finish_queued_event t borrow interrupted =
   let open Result.Let_syntax in
   let%bind () = validate_queued_event_borrow t borrow in
+  let run_scope = Option.map borrow.run_actions ~f:Run_action_service.scope in
   Option.iter borrow.run_actions ~f:Run_action_service.close;
   borrow.run_actions <- None;
   borrow.callback_active <- false;
@@ -4226,13 +4249,25 @@ let finish_queued_event t borrow interrupted =
             ; details = `Null
             }
       in
+      let%bind run_deltas =
+        match run_scope with
+        | None -> Ok []
+        | Some scope ->
+          Run_transition.fail_callback
+            t.state
+            ~scope
+            ~executing:borrow.receipt
+            ~completed:terminal
+            ~now:(t.services.now ())
+      in
       transition
         t
         ~delta:
           (Session_delta.Batch
              (children_deltas
               @ permission_deltas
-              @ [ Moderator_execution_changed terminal ]))
+              @ [ Session_delta.Moderator_execution_changed terminal ]
+              @ run_deltas))
         ~payloads:permission_payloads
       |> Result.map ~f:ignore
   in
@@ -7443,6 +7478,18 @@ let run_queued_event_borrow t borrow f =
   let finish interrupted =
     Eio.Cancel.protect (fun () -> call t (Finish_queued_event (borrow, interrupted)))
   in
+  let finish_after_failure interrupted =
+    let report message =
+      (* The primary callback failure remains the caller's exception/result.
+         Cleanup failure is secondary evidence, never a replacement outcome. *)
+      try Eio.traceln "queued moderator cleanup failed: %s" message with
+      | _ -> ()
+    in
+    match finish interrupted with
+    | Ok () -> ()
+    | Error failure -> report failure.message
+    | exception cleanup -> report (Exn.to_string cleanup)
+  in
   let execute () =
     Eio.Cancel.sub (fun context ->
       let active = ref true in
@@ -7470,9 +7517,11 @@ let run_queued_event_borrow t borrow f =
                      (borrow, snapshot, requests, decision, notifications))))))
   in
   match execute () with
-  | result ->
+  | Error failure ->
+    finish_after_failure false;
+    Error failure
+  | Ok () ->
     let%bind () = finish false in
-    let%bind () = result in
     (match borrow.committed with
      | true -> Ok true
      | false ->
@@ -7484,7 +7533,7 @@ let run_queued_event_borrow t borrow f =
       | Eio.Cancel.Cancelled _ -> true
       | _ -> false
     in
-    ignore (finish interrupted : (unit, Agent_protocol.Error.t) result);
+    finish_after_failure interrupted;
     Stdlib.Printexc.raise_with_backtrace exn backtrace
 ;;
 
@@ -8670,6 +8719,12 @@ let revoke_grant t attachment_id grant_id reason =
 
 let replace_shell_approval_grants ?run_preparation t approval_grants =
   let shell = { t.state.shell with approval_grants } in
+  transition ?run_preparation t ~delta:(Session_delta.Shell_changed shell) ~payloads:[]
+  |> Result.map ~f:(fun _ -> ())
+;;
+
+let replace_shell_extension_snapshots ?run_preparation t extension_snapshots =
+  let shell = { t.state.shell with extension_snapshots } in
   transition ?run_preparation t ~delta:(Session_delta.Shell_changed shell) ~payloads:[]
   |> Result.map ~f:(fun _ -> ())
 ;;
@@ -11682,6 +11737,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Change_moderator _
   | Change_workspace _
   | Replace_shell_approval_grants _
+  | Replace_shell_extension_snapshots _
   | Add_shell_manifest_grant _
   | Reset _
   | Upgrade_prompt _
@@ -12184,6 +12240,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Shell_approval_grants -> Ok t.state.shell.approval_grants
     | Replace_shell_approval_grants (run_preparation, approval_grants) ->
       replace_shell_approval_grants ?run_preparation t approval_grants
+    | Replace_shell_extension_snapshots (run_preparation, extension_snapshots) ->
+      replace_shell_extension_snapshots ?run_preparation t extension_snapshots
     | Shell_manifest_grants -> Ok t.state.shell.manifest_grants
     | Add_shell_manifest_grant (run_preparation, grant) ->
       add_shell_manifest_grant ?run_preparation t grant
@@ -12946,6 +13004,10 @@ let replace_shell_approval_grants t approval_grants =
   call t (Replace_shell_approval_grants (None, approval_grants))
 ;;
 
+let replace_shell_extension_snapshots t extension_snapshots =
+  call t (Replace_shell_extension_snapshots (None, extension_snapshots))
+;;
+
 let shell_manifest_grants t = call t Shell_manifest_grants
 let add_shell_manifest_grant t grant = call t (Add_shell_manifest_grant (None, grant))
 
@@ -13044,6 +13106,10 @@ module Constructor_mutations = struct
 
   let replace_shell_approval_grants t ~preparation approval_grants =
     call t (Replace_shell_approval_grants (Some preparation, approval_grants))
+  ;;
+
+  let replace_shell_extension_snapshots t ~preparation extension_snapshots =
+    call t (Replace_shell_extension_snapshots (Some preparation, extension_snapshots))
   ;;
 
   let add_shell_manifest_grant t ~preparation grant =

@@ -247,6 +247,7 @@ let%expect_test "ordinary moderator events own foreground calls and preserve que
      (pending 0) (queued 1) (state 0) (operation_finished true))
     ((mode Save_failure) (calls 1) (rejected 1) (completed 0) (failed 1)
      (pending 0) (queued 1) (state 0) (operation_finished true))
+    +queued moderator cleanup failed: injected invocation save failure
     ((mode Terminal_save_failure) (calls 1) (rejected 2) (completed 0) (failed 1)
      (pending 0) (queued 1) (state 0) (operation_finished true))
     ((mode Cancel) (calls 1) (rejected 0) (completed 0) (failed 1) (pending 0)

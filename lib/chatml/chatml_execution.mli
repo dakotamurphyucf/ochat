@@ -1,7 +1,9 @@
 open Core
 
 (** Host execution budget shared by initialization, pure evaluation, task
-    continuations and nested ChatML runs. Does not grant tool authority. *)
+    continuations and nested ChatML runs. Does not grant tool authority.
+    Diagnostic/site validation uses the same cancellation/deadline/lifetime
+    polling without consuming execution fuel. *)
 type limits =
   { fuel : int
   ; max_tasks : int
@@ -145,6 +147,38 @@ val run
   -> env:< mono_clock : _ Eio.Time.Mono.t ; .. >
   -> config:Chatml_host_runtime.runtime_config
   -> program:Chatml_host_runtime.compiled_script
+  -> entrypoint:string
+  -> arguments:Chatml.Chatml_lang.value list
+  -> unit
+  -> (Chatml.Chatml_lang.value, error) result
+
+(** Linked execution under the caller's current scope. Exact installer validation,
+    every initializer and invocation share one budget/control/depth level. Only
+    compiled selected descriptors may run. Same argument/result checks and
+    prepare_result commit boundary as run_in_scope; no implicit source capture. *)
+val run_prepared_in_scope
+  :  Chatml_linked_program.t
+  -> control:Chatml.Chatml_lang.execution_control option
+  -> config:Chatml_host_runtime.runtime_config
+  -> entrypoint:string
+  -> arguments:Chatml.Chatml_lang.value list
+  -> ?prepare_result:
+       (value:Chatml.Chatml_lang.value
+        -> local_effects:Chatml.Chatml_lang.eff list
+        -> (unit -> unit, string) result)
+  -> unit
+  -> (Chatml.Chatml_lang.value, error) result
+
+(** Fresh linked instance under the existing aggregate with_control policy.
+    Cancellation/ancestor exhaustion/lifetime behavior matches run. Persistent
+    sessions use create_runner/run_scoped plus Host's prepared session API and
+    existing events; no separate persistent budget owner is manufactured. *)
+val run_prepared
+  :  Chatml_linked_program.t
+  -> ?policy:policy
+  -> ?context:context
+  -> env:< mono_clock : _ Eio.Time.Mono.t ; .. >
+  -> config:Chatml_host_runtime.runtime_config
   -> entrypoint:string
   -> arguments:Chatml.Chatml_lang.value list
   -> unit

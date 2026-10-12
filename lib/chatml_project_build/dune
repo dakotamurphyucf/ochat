@@ -1,0 +1,7 @@
+(library
+ (name chatml_project_build)
+ (public_name ochat.chatml_project_build)
+ (modules chatml_project_build project_build_model project_build_dependency project_build_budget project_build_selection_gate project_build_scope project_build_closure project_build_receipt project_build_entry project_build_assembly project_build_restore project_build_restore_catalog)
+ (private_modules project_build_model project_build_dependency project_build_budget project_build_selection_gate project_build_scope project_build_closure project_build_receipt project_build_entry project_build_assembly project_build_restore project_build_restore_catalog)
+ (libraries core source chatml_source chatml_prepared_program chatml_project chatml_catalog document_schema chatml)
+ (preprocess (pps ppx_jane)))

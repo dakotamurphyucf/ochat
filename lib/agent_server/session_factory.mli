@@ -90,6 +90,18 @@ type model_job_inference =
       Inference.Request.Target.t -> (unit, Agent_protocol.Error.t) Result.t
   }
 
+module Child_source_policy : sig
+  (** Host acquisition policy; retains no original directory. Its callback borrows
+      actual original Scope and current dependency history for each new File child.
+      Runtime semantic/shell/content policies remain the actual Factory policies. *)
+  type t
+
+  val create
+    :  source:Agent_session.Captured_agent_runner.Source.t
+    -> runtime_policy_revision:Chatml_source.Digest.t
+    -> t
+end
+
 type t
 
 type generated_lifetime =
@@ -118,6 +130,9 @@ val create
   -> independent_lifetime_policy:string option
   -> chatml_runtime_policy:Chat_response.Runtime_semantics.policy
   -> authoring_validation_host:Chat_response.Authoring_validation.host option
+  -> script_preparation:Agent_session.Runtime_script_preparation.t option
+  -> content_limits:Chatmd_prompt_content.Limits.t option
+  -> child_sources:Child_source_policy.t option
   -> durability:Agent_store.Journal_segment.durability
   -> limits:limits
   -> t
@@ -132,8 +147,55 @@ val model_job_inference
   -> Agent_protocol.Job.t
   -> (model_job_inference, Agent_protocol.Error.t) Result.t
 
-(** [install_catalogs] atomically publishes catalogs used for future session
-    creation while retaining permission revisions pinned by existing sessions. *)
+module Catalog_seal : sig
+  module Error : sig
+    type t =
+      | Busy
+      | Workspaces_busy
+      | Publication_uncertain
+      | Foreign_domain
+      | Stale_preparation
+      | Aborted
+      | Committed
+    [@@deriving equal, sexp_of]
+  end
+
+  (** Creating-domain reservation for precomputed immutable catalog state. None of
+      these operations acquires locks, polls, invokes callbacks, allocates or yields.
+      This token neither acquires native source authority nor admits authorization. *)
+  type t
+
+  (** Before acknowledged durability only. Releases both reservations, preserving
+      published state; repeated abort succeeds. Committed/uncertain tokens reject. *)
+  val abort : t -> (unit, Error.t) Result.t
+
+  (** Preserves old pointers and permanently blocks replacements on this owner.
+      Repeated marking succeeds; committed/aborted tokens reject. *)
+  val mark_uncertain : t -> (unit, Error.t) Result.t
+
+  (** After acknowledged durability only. Installs precomputed pointers; repeated
+      commit succeeds without reinstalling old state. Aborted/uncertain reject. *)
+  val commit : t -> (unit, Error.t) Result.t
+end
+
+(** Preallocate and reserve the actual workspace/profile/history/grant replacement
+    before external durable publication. This token owns no Prompt_catalog or
+    baseline transaction. The host seals those separately and commits ALL pointer
+    swaps in one same-domain protected nonyielding phase only after durable success.
+    Current sessions' pinned profile revisions remain available. Original checkpoint
+    exceptions/cancellation propagate; legacy installation cannot invalidate a seal. *)
+val seal_catalogs
+  :  t
+  -> workspaces:Agent_session.Workspace_catalog.t
+  -> permission_profiles:Agent_session.Permission_policy.t list
+  -> manifest_grants:Operator_manifest_grant.t list
+  -> checkpoint:(unit -> unit)
+  -> (Catalog_seal.t, Catalog_seal.Error.t) Result.t
+
+(** Compatibility publication for future sessions, retaining pinned permission
+    revisions. Uses the same reservation as [seal_catalogs] and rejects pending,
+    uncertain or foreign-domain installation before either catalog changes.
+    Does not replace native source ownership or authorization admission. *)
 val install_catalogs
   :  t
   -> workspaces:Agent_session.Workspace_catalog.t
@@ -141,6 +203,12 @@ val install_catalogs
   -> manifest_grants:Operator_manifest_grant.t list
   -> unit
 
+(** Fresh catalog-dependent creation borrows one coordinated publication generation
+    through source/workspace/profile selection, layout and joined runtime preflight.
+    Factory or Prompt_catalog sealed/uncertain state rejects before source selection.
+    Coordinated publishers must reserve [seal_catalogs] before durable publication.
+    Existing pinned restoration and inherited child creation keep their own captured
+    admission paths; they do not select a new prompt definition here. *)
 val create_session
   :  t
   -> command_audit:Document_schema.Document.t option
@@ -163,7 +231,9 @@ val prepare_administration
 
 (** [import_legacy t ~principal ~source_id ~source_path ~legacy request]
     creates one stopped durable session from a validated legacy snapshot. It
-    records immutable source provenance and never mutates [source_path]. *)
+    records immutable source provenance and never mutates [source_path]. Uses the
+    SAME scoped publication admission as [create_session] through joined layout and
+    durable creation; pending/uncertain publication rejects before source selection. *)
 val import_legacy
   :  t
   -> principal:Agent_protocol.Principal.t
@@ -256,6 +326,35 @@ val read_session
   -> Agent_store.Session_index.Entry.t
   -> (Agent_session.Session_state.t, Agent_protocol.Error.t) Result.t
 
+(** Startup-only fold before any loader, recovered actor or scheduler exists.
+    The actual indexed projection is checked under Registry's read lease. One
+    same-store Handle owns the nonactivating immutable current state read and all
+    archive reads, then closes before return. Current snapshot/journal decoding
+    uses the existing recovery/state validators; archive reads are deferred until
+    their complete reference list is admitted by [admit_archive], before retaining
+    its lookup or reading an archive. Ordinary [read_session] validation stays
+    unchanged.
+
+    Fold the current state and each referenced pre-change snapshot once through
+    the existing checksum/session/revision/disposition archive decoder. Nested
+    historical references must name the same archive file identity present in the
+    complete current list; no recursive replay or second decoder. [checkpoint]
+    covers reference traversal/comparison. The caller owns aggregate read-count,
+    job and logical traversal-work admission; existing storage byte ceilings remain
+    per state/archive, not a newly claimed aggregate I/O budget. Any error aborts
+    the complete protection attempt; no actor, source, target or runtime activates.
+    Caller holds exclusive startup ownership and must skip all pruning on failure.
+    Callback exceptions retain identity through existing Handle/read cleanup. *)
+val fold_indexed_retained_states
+  :  t
+  -> Agent_store.Session_index.Entry.t
+  -> authorize:(Agent_protocol.Session.t -> (unit, Agent_protocol.Error.t) Result.t)
+  -> checkpoint:(unit -> unit)
+  -> admit_archive:(unit -> (unit, Agent_protocol.Error.t) Result.t)
+  -> init:'a
+  -> f:('a -> Agent_session.Session_state.t -> ('a, Agent_protocol.Error.t) Result.t)
+  -> ('a, Agent_protocol.Error.t) Result.t
+
 (** Reconstructs one indexed session on demand. The caller must serialize
     loads for a session ID and register the returned entry exactly once. *)
 val recover_session
@@ -314,3 +413,70 @@ val rebuild_index_projections : t -> (unit, Agent_protocol.Error.t) Result.t
 (** Retry durable initial-start intents only on actual loaded selected owners;
     never discover/load indexed sessions. Current linkage still governs each start. *)
 val resume_selected_initial_starts : t -> unit
+
+module Seed_recovery_limits : sig
+  (** One complete seed reconciliation invocation. Session rows/first complete
+      transactions are counted before retention; bytes conservatively cover all
+      charged frames/read buffers, including rechecks. Work counts each borrowed
+      checkpoint through enumeration, decoding, comparisons and repair; bounded
+      admitted codec/comparator stages may be nonpreemptible between polls.
+      These are independent positive bounds, not a heap sandbox or transport
+      allowance. A byte-admitted document may still exceed the work bound. *)
+  type t
+
+  val create
+    :  max_sessions:int
+    -> max_transactions:int
+    -> max_input_bytes:int
+    -> max_work_steps:int
+    -> (t, Agent_protocol.Error.t) Result.t
+
+  (** Configurable host default: 4096 rows/first transactions, 256 MiB conservative
+      aggregate, 2M cooperative steps. Startup and receipt service borrow the same
+      configured profile; each reconciliation is one fresh invocation. *)
+  val default : t
+
+  val max_sessions : t -> int
+  val max_transactions : t -> int
+  val max_input_bytes : t -> int
+  val max_work_steps : t -> int
+end
+
+module Seed_outcome : sig
+  type t =
+    | Created of Session_registry.entry
+    | Rejected of Agent_protocol.Error.t
+    | Uncertain of Agent_protocol.Error.t
+
+  (** Rejected proves no layout attempt occurred. Uncertain must retain the
+      original protected Pending and must not execute creation again. Created
+      owns an unloaded stopped entry after journal/snapshot/index admission.
+      Exceptions retain their identity/backtrace after joined cleanup. *)
+end
+
+(** Admit a new stopped identity under actual current catalog/workspace/profile
+    policy. Retained selection borrows the exact authorized lifecycle owner and
+    accepts authored roots only; current profile digest/runtime policy must still
+    authorize its pinned policy. Prelayout complete Created bounds precede Store
+    allocation. No Converter, initializer, provider request, attachment or runtime
+    load occurs. Caller holds the real original protected command reservation. *)
+val seed_session
+  :  t
+  -> principal:Agent_protocol.Principal.t
+  -> request:Agent_protocol.Session_seed.Request.t
+  -> command_audit:Document_schema.Document.t
+  -> checkpoint:(unit -> unit)
+  -> Seed_outcome.t
+
+(** Before request service in Execute and On_demand modes, scan the actual owned
+    store under finite positive aggregate limits, validating real Created audit
+    evidence. Recover the original identity/result into existing protected
+    receipts and repair incomplete initial snapshot/index through existing
+    storage owners. No actor/runtime/provider/source reconstruction occurs.
+    Absent/ambiguous outcomes remain Pending; conflicting identities fail closed.
+    General snapshot-less replay and legacy import rules remain unchanged. *)
+val reconcile_seed_creations
+  :  t
+  -> limits:Seed_recovery_limits.t
+  -> checkpoint:(unit -> unit)
+  -> (unit, Agent_protocol.Error.t) Result.t

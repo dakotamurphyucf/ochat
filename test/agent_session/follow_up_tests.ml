@@ -803,6 +803,7 @@ let%expect_test "runtime owner drains observation batches and applies durable te
            ; automatic_turn_policy = None
            ; check_execution = None
            ; ancestor_capabilities = None
+           ; source_lease = Agent_session.Prompt_source_lease.legacy
            ; activity = None
            ; native_runtime = None
            ; moderator_activation = None
@@ -1179,6 +1180,7 @@ let%expect_test
                ; automatic_turn_policy = None
                ; check_execution = None
                ; ancestor_capabilities = None
+               ; source_lease = Agent_session.Prompt_source_lease.legacy
                ; activity = None
                ; native_runtime = None
                ; moderator_activation = None

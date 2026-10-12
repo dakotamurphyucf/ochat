@@ -1,5 +1,6 @@
 open Core
 module Spec = Chatmd_shell_spec.Extension_spec
+module Program = Script_program
 module D = Chatmd_shell_spec.Diagnostic
 module X = Chatml.Chatml_extension_surface
 module S = Chatmd_shell_spec.Chatmd_script_spec
@@ -9,7 +10,7 @@ type t =
   { declaration : Spec.tool
   ; script : Spec.script
   ; limits : S.limits
-  ; program : Chatml_host_runtime.compiled_script
+  ; program : Program.t
   ; capabilities : Tool_capability.t
   ; fingerprint : string
   ; input_schema : Chatmd_shell_spec.Tool_schema.t
@@ -19,6 +20,11 @@ type t =
 
 let declaration t = t.declaration
 let script t = t.script
+
+let source_revision t =
+  Program.source_revision t.program ~single_file_revision:t.script.source_sha256
+;;
+
 let execution_limits t = t.limits
 let program t = t.program
 let capabilities t = t.capabilities
@@ -101,7 +107,6 @@ let prepare_with
     | _ ->
       fail "chatml.missing_handler" "required versioned handler script is unavailable"
   in
-  let source = Spec.script_text script in
   let%bind () = validate_script ~max_source_bytes script in
   let%bind input_schema = validate_schema tool.input_schema in
   let%bind output_schema = validate_schema tool.output_schema in
@@ -111,7 +116,7 @@ let prepare_with
     | Some schema -> validate_schema schema |> Result.map ~f:Option.some
   in
   let%bind program =
-    compile ~target ~source
+    compile ~target ~script ~capabilities:selected
     |> Result.map_error ~f:(fun (error : Chatml_compilation.error) ->
       [ D.error ~source:script.source_ref ~code:error.code error.message ])
   in
@@ -126,6 +131,17 @@ let prepare_with
     |> Sexp.to_string
     |> Chatmd_shell_spec.Source_ref.digest
   in
+  let fingerprint =
+    match program with
+    | Program.Single _ -> fingerprint
+    | Prepared linked ->
+      [%sexp
+        (fingerprint : string)
+      , (Chatml_prepared_program.fingerprint (Chatml_linked_program.prepared linked)
+         : Chatml_source.Digest.t)]
+      |> Sexp.to_string
+      |> Chatmd_shell_spec.Source_ref.digest
+  in
   Ok
     { declaration = tool
     ; script
@@ -139,8 +155,23 @@ let prepare_with
     }
 ;;
 
+let require_single_file (script : Spec.script) =
+  match script.project_selection with
+  | None -> Ok ()
+  | Some _ ->
+    Error
+      Chatml_compilation.
+        { code = "chatml.missing_program"
+        ; message = "configured script requires captured project preparation"
+        ; diagnostic = None
+        }
+;;
+
 let prepare ?(max_source_bytes = 256 * 1024) ~scripts ~capabilities tool =
-  let compile ~target ~source =
+  let compile ~target ~script ~capabilities:_ =
+    let open Result.Let_syntax in
+    let%bind () = require_single_file script in
+    let source = Spec.script_text script in
     let surface, required_bindings =
       match target with
       | Chatml_compilation.One_off_v1 -> X.one_off_v1, X.one_off_entrypoints
@@ -149,6 +180,7 @@ let prepare ?(max_source_bytes = 256 * 1024) ~scripts ~capabilities tool =
       | Delegated_moderator_v1 -> X.delegated_moderator_v1, X.moderator_entrypoints
     in
     Chatml_host_runtime.compile_script ~surface ~required_bindings ~source ()
+    |> Result.map ~f:(fun program -> Program.Single program)
     |> Result.map_error ~f:(fun message ->
       Chatml_compilation.{ code = "chatml.invalid_handler"; message; diagnostic = None })
   in
@@ -162,8 +194,12 @@ let prepare_in_domain
       ~capabilities
       tool
   =
-  let compile ~target ~source =
+  let compile ~target ~script ~capabilities:_ =
+    let open Result.Let_syntax in
+    let%bind () = require_single_file script in
+    let source = Spec.script_text script in
     Chatml_compilation.compile ~limits ~env ~target ~source ()
+    |> Result.map ~f:(fun program -> Program.Single program)
   in
   prepare_with
     ~compile
@@ -175,7 +211,7 @@ let prepare_in_domain
 
 type definition =
   { prepared_tools : t list
-  ; compiled_scripts : (Spec.script * Chatml_host_runtime.compiled_script) list
+  ; compiled_scripts : (Spec.script * Program.t) list
   ; definition_capabilities : Tool_capability.t
   ; definition_fingerprint : string
   }
@@ -279,6 +315,11 @@ let prepare_delegated_definition_in_domain
       (fun () ->
          let%map compiled_scripts =
            List.fold_result scripts ~init:[] ~f:(fun compiled script ->
+             let%bind () =
+               require_single_file script
+               |> Result.map_error ~f:(fun e ->
+                 [ D.error ~source:script.source_ref ~code:e.code e.message ])
+             in
              let%map program =
                Chatml_compilation.compile
                  ~limits
@@ -289,7 +330,7 @@ let prepare_delegated_definition_in_domain
                |> Result.map_error ~f:(fun e ->
                  [ D.error ~source:script.source_ref ~code:e.code e.message ])
              in
-             (script, program) :: compiled)
+             (script, Program.Single program) :: compiled)
          in
          let definition_fingerprint =
            [%sexp
@@ -313,175 +354,242 @@ let prepare_delegated_definition_in_domain
 ;;
 
 let prepare_definition_in_domain
+      ?startup
       ?(limits = Chatml_compilation.default_limits)
       ?(delegated_moderator = false)
+      ?programs
       ~env
       ~capabilities
       elements
   =
-  let module CM = Prompt.Chat_markdown in
-  let open Result.Let_syntax in
-  let fail code message = Error [ D.error ~code message ] in
-  let moderator_target =
-    match delegated_moderator with
-    | false -> Chatml_compilation.Moderator_v1
-    | true -> Delegated_moderator_v1
-  in
-  let%bind () =
-    if
-      (not (Float.is_finite limits.wall_seconds))
-      || Float.(limits.wall_seconds <= 0. || limits.wall_seconds > 30.)
-      || limits.max_source_bytes <= 0
-      || limits.max_source_bytes > 1024 * 1024
-    then fail "chatml.invalid_limits" "invalid definition compilation limits"
-    else if List.length elements > 16_384
-    then fail "chatml.definition_limit" "too many definition elements"
-    else Ok ()
-  in
-  let scripts =
-    List.filter_map elements ~f:(function
-      | CM.Extension_script script -> Some script
-      | _ -> None)
-  in
-  let tools =
-    List.filter_map elements ~f:(function
-      | CM.Tool (Extension tool) -> Some tool
-      | _ -> None)
-  in
-  let%bind () =
-    if List.length scripts > 128 || List.length tools > 4096
-    then fail "chatml.definition_limit" "too many extension scripts or tools"
-    else Ok ()
-  in
-  let%bind _ =
-    try Ok (CM.validate_declarations elements) with
-    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
-    | exn ->
-      fail "chatml.invalid_definition" (String.prefix (Exn.to_string exn) (16 * 1024))
-  in
-  let source_bytes = ref 0 in
-  let sources = Hash_set.create (module String) in
-  let consume text =
-    if Hash_set.mem sources text
-    then Ok ()
-    else if String.length text > (8 * 1024 * 1024) - !source_bytes
-    then
-      fail
-        "chatml.definition_limit"
-        "definition exceeds distinct source/schema byte budget"
-    else (
-      Hash_set.add sources text;
-      source_bytes := !source_bytes + String.length text;
-      Ok ())
-  in
-  let schema_cache = Hashtbl.create (module String) in
-  let validate_schema (schema : Spec.schema) =
-    let%bind () = consume schema.source_text in
-    if
-      not
-        (String.equal
-           schema.source_sha256
-           (Chatmd_shell_spec.Source_ref.digest schema.source_text))
-    then Spec.validate_schema schema
-    else (
-      match Hashtbl.find schema_cache schema.source_text with
-      | Some compiled -> Ok compiled
-      | None ->
-        let%map compiled = Spec.validate_schema schema in
-        Hashtbl.set schema_cache ~key:schema.source_text ~data:compiled;
-        compiled)
-  in
-  let%bind () =
-    List.fold scripts ~init:(Ok ()) ~f:(fun result script ->
-      let%bind () = result in
-      let%bind () = consume (Spec.script_text script) in
-      validate_script ~max_source_bytes:limits.max_source_bytes script)
-  in
-  let%bind () =
-    List.fold tools ~init:(Ok ()) ~f:(fun result tool ->
-      let%bind () = result in
-      List.fold
-        (tool.Spec.input_schema
-         :: tool.output_schema
-         :: Option.to_list tool.completion_schema)
-        ~init:(Ok ())
-        ~f:(fun result schema ->
-          let%bind () = result in
-          Result.map (validate_schema schema) ~f:(fun _ -> ())))
-  in
-  let cache = Hashtbl.create (module String) in
-  let compile ~target ~source =
-    let key = Sexp.to_string (Chatml_compilation.sexp_of_target target) ^ ":" ^ source in
-    match Hashtbl.find cache key with
-    | Some compiled -> Ok compiled
-    | None ->
-      let%map compiled = Chatml_compilation.compile ~limits ~env ~target ~source () in
-      Hashtbl.set cache ~key ~data:compiled;
-      compiled
-  in
-  try
-    Eio.Time.Timeout.run_exn
-      (Eio.Time.Timeout.seconds (Eio.Stdenv.mono_clock env) limits.wall_seconds)
-      (fun () ->
-         let%bind compiled_scripts =
-           List.fold scripts ~init:(Ok []) ~f:(fun result script ->
-             let%bind compiled = result in
-             let target =
-               match script.Spec.kind with
-               | Moderator_script -> moderator_target
-               | Tool_script -> Tool_v1
-             in
-             compile ~target ~source:(Spec.script_text script)
-             |> Result.map ~f:(fun program -> (script, program) :: compiled)
-             |> Result.map_error ~f:(fun error ->
-               [ D.error ~source:script.source_ref ~code:error.code error.message ]))
-           |> Result.map ~f:List.rev
-         in
-         let%map prepared_tools =
-           List.fold tools ~init:(Ok []) ~f:(fun result tool ->
-             let%bind prepared = result in
-             let id =
-               match tool.Spec.implementation with
-               | Moderator id -> id
-               | Standalone { script; _ } -> script
-             in
-             (* Registry validation established the script identity and kind.
+  let checkpoint = Eio.Fiber.check in
+  let map_error (e : Chatml_compilation.error) = [ D.error ~code:e.code e.message ] in
+  Startup_compilation.with_context
+    ?startup
+    ~limits
+    ~env
+    ~checkpoint
+    ~map_error
+    ~f:(fun startup ->
+      Startup_compilation.within startup ~map_error ~f:(fun () ->
+        let checkpoint () = Startup_compilation.checkpoint startup in
+        let module CM = Prompt.Chat_markdown in
+        let open Result.Let_syntax in
+        let fail code message = Error [ D.error ~code message ] in
+        let moderator_target =
+          match delegated_moderator with
+          | false -> Chatml_compilation.Moderator_v1
+          | true -> Delegated_moderator_v1
+        in
+        let%bind () =
+          if
+            (not (Float.is_finite limits.wall_seconds))
+            || Float.(limits.wall_seconds <= 0. || limits.wall_seconds > 30.)
+            || limits.max_source_bytes <= 0
+            || limits.max_source_bytes > 1024 * 1024
+          then fail "chatml.invalid_limits" "invalid definition compilation limits"
+          else if List.length elements > 16_384
+          then fail "chatml.definition_limit" "too many definition elements"
+          else Ok ()
+        in
+        let scripts =
+          List.filter_map elements ~f:(function
+            | CM.Extension_script script -> Some script
+            | _ -> None)
+        in
+        let tools =
+          List.filter_map elements ~f:(function
+            | CM.Tool (Extension tool) -> Some tool
+            | _ -> None)
+        in
+        let%bind () =
+          if List.length scripts > 128 || List.length tools > 4096
+          then fail "chatml.definition_limit" "too many extension scripts or tools"
+          else Ok ()
+        in
+        let%bind _ =
+          try Ok (CM.validate_declarations elements) with
+          | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+          | exn ->
+            fail
+              "chatml.invalid_definition"
+              (String.prefix (Exn.to_string exn) (16 * 1024))
+        in
+        let consume text =
+          Startup_compilation.admit_text startup text
+          |> Result.map_error ~f:(fun e ->
+            [ D.error ~code:e.Chatml_compilation.code e.message ])
+        in
+        let schema_cache = Hashtbl.create (module String) in
+        let validate_schema (schema : Spec.schema) =
+          checkpoint ();
+          let%bind () = consume schema.source_text in
+          if
+            not
+              (String.equal
+                 schema.source_sha256
+                 (Chatmd_shell_spec.Source_ref.digest schema.source_text))
+          then Spec.validate_schema schema
+          else (
+            match Hashtbl.find schema_cache schema.source_text with
+            | Some compiled -> Ok compiled
+            | None ->
+              let%map compiled = Spec.validate_schema schema in
+              Hashtbl.set schema_cache ~key:schema.source_text ~data:compiled;
+              compiled)
+        in
+        let%bind () =
+          List.fold scripts ~init:(Ok ()) ~f:(fun result script ->
+            let%bind () = result in
+            checkpoint ();
+            let%bind () = consume (Spec.script_text script) in
+            validate_script ~max_source_bytes:limits.max_source_bytes script)
+        in
+        let%bind () =
+          List.fold tools ~init:(Ok ()) ~f:(fun result tool ->
+            let%bind () = result in
+            checkpoint ();
+            List.fold
+              (tool.Spec.input_schema
+               :: tool.output_schema
+               :: Option.to_list tool.completion_schema)
+              ~init:(Ok ())
+              ~f:(fun result schema ->
+                let%bind () = result in
+                checkpoint ();
+                Result.map (validate_schema schema) ~f:(fun _ -> ())))
+        in
+        let cache = Hashtbl.create (module String) in
+        let compile ~target ~(script : Spec.script) ~capabilities =
+          let%bind selected =
+            match programs, script.project_selection with
+            | None, None -> Ok None
+            | None, Some _ ->
+              Error
+                Chatml_compilation.
+                  { code = "chatml.missing_program"
+                  ; message = "configured script requires captured project preparation"
+                  ; diagnostic = None
+                  }
+            | Some programs, _ ->
+              Prepared_script.select programs ~script ~target ~capabilities ~checkpoint
+              |> Result.map ~f:Option.some
+          in
+          let source = Spec.script_text script in
+          let key =
+            match selected with
+            | None ->
+              "single:"
+              ^ Sexp.to_string (Chatml_compilation.sexp_of_target target)
+              ^ ":"
+              ^ source
+            | Some selected ->
+              "prepared:"
+              ^ Chatml_source.Digest.to_hex (Prepared_script.fingerprint selected)
+          in
+          match Hashtbl.find cache key with
+          | Some compiled -> Ok compiled
+          | None ->
+            let%bind compiled =
+              match selected with
+              | None ->
+                let%bind limits = Startup_compilation.remaining_limits startup in
+                Chatml_compilation.compile ~limits ~env ~target ~source ()
+                |> Result.map ~f:(fun program -> Program.Single program)
+              | Some selected ->
+                let%bind () =
+                  Startup_compilation.admit_prepared
+                    startup
+                    (Prepared_script.prepared selected)
+                in
+                let%bind limits = Startup_compilation.remaining_limits startup in
+                Prepared_script.compile selected ~env ~limits ~max_dependency_depth:128
+            in
+            Hashtbl.set cache ~key ~data:compiled;
+            Ok compiled
+        in
+        let%bind compiled_scripts =
+          List.fold scripts ~init:(Ok []) ~f:(fun result script ->
+            let%bind compiled = result in
+            checkpoint ();
+            let target =
+              match script.Spec.kind with
+              | Moderator_script -> moderator_target
+              | Tool_script -> Tool_v1
+            in
+            compile ~target ~script ~capabilities
+            |> Result.map ~f:(fun program -> (script, program) :: compiled)
+            |> Result.map_error ~f:(fun error ->
+              [ D.error ~source:script.source_ref ~code:error.code error.message ]))
+          |> Result.map ~f:List.rev
+        in
+        let%map prepared_tools =
+          List.fold tools ~init:(Ok []) ~f:(fun result tool ->
+            let%bind prepared = result in
+            checkpoint ();
+            let id =
+              match tool.Spec.implementation with
+              | Moderator id -> id
+              | Standalone { script; _ } -> script
+            in
+            (* Registry validation established the script identity and kind.
              Reuse that exact compiled program without hashing the source again
              for every tool bound to a shared handler. *)
-             let program =
-               List.find_map_exn compiled_scripts ~f:(fun (script, program) ->
-                 Option.some_if (String.equal script.Spec.id id) program)
-             in
-             let%map tool =
-               prepare_with
-                 ~validate_schema
-                 ~moderator_target
-                 ~compile:(fun ~target:_ ~source:_ -> Ok program)
-                 ~max_source_bytes:limits.max_source_bytes
-                 ~scripts
-                 ~capabilities
-                 tool
-             in
-             tool :: prepared)
-           |> Result.map ~f:List.rev
-         in
-         let definition_fingerprint =
-           [%sexp
-             ("ochat.extension-definition.v1" : string)
-           , (scripts : Spec.script list)
-           , (List.map prepared_tools ~f:fingerprint : string list)
-           , (Tool_capability.fingerprint capabilities : string)
-           , (Chatml_compilation.contract Tool_v1 : Sexp.t)
-           , (Chatml_compilation.contract moderator_target : Sexp.t)]
-           |> Sexp.to_string
-           |> Chatmd_shell_spec.Source_ref.digest
-         in
-         { prepared_tools
-         ; compiled_scripts
-         ; definition_capabilities = capabilities
-         ; definition_fingerprint
-         })
-  with
-  | Eio.Time.Timeout ->
-    fail "chatml.compile_timeout" "definition exceeded its aggregate compilation budget"
+            let program =
+              List.find_map_exn compiled_scripts ~f:(fun (script, program) ->
+                Option.some_if (String.equal script.Spec.id id) program)
+            in
+            let%map tool =
+              prepare_with
+                ~validate_schema
+                ~moderator_target
+                ~compile:(fun ~target ~script ~capabilities ->
+                  match program with
+                  | Program.Single _ -> Ok program
+                  | Prepared _ -> compile ~target ~script ~capabilities)
+                ~max_source_bytes:limits.max_source_bytes
+                ~scripts
+                ~capabilities
+                tool
+            in
+            tool :: prepared)
+          |> Result.map ~f:List.rev
+        in
+        let definition_fingerprint =
+          [%sexp
+            ("ochat.extension-definition.v1" : string)
+          , (scripts : Spec.script list)
+          , (List.map prepared_tools ~f:fingerprint : string list)
+          , (Tool_capability.fingerprint capabilities : string)
+          , (Chatml_compilation.contract Tool_v1 : Sexp.t)
+          , (Chatml_compilation.contract moderator_target : Sexp.t)]
+          |> Sexp.to_string
+          |> Chatmd_shell_spec.Source_ref.digest
+        in
+        let definition_fingerprint =
+          let graphs =
+            List.filter_map compiled_scripts ~f:(fun (script, program) ->
+              match program with
+              | Program.Single _ -> None
+              | Prepared linked ->
+                Some
+                  ( script.Spec.id
+                  , Chatml_prepared_program.fingerprint
+                      (Chatml_linked_program.prepared linked) ))
+          in
+          match graphs with
+          | [] -> definition_fingerprint
+          | _ ->
+            [%sexp
+              (definition_fingerprint : string)
+            , (graphs : (string * Chatml_source.Digest.t) list)]
+            |> Sexp.to_string
+            |> Chatmd_shell_spec.Source_ref.digest
+        in
+        { prepared_tools
+        ; compiled_scripts
+        ; definition_capabilities = capabilities
+        ; definition_fingerprint
+        }))
+    ()
 ;;

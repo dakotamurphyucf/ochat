@@ -1,0 +1,7 @@
+(library
+ (name chatml_catalog)
+ (public_name ochat.chatml_catalog)
+ (modules chatml_catalog chatml_catalog_error chatml_catalog_plan chatml_catalog_capture)
+ (private_modules chatml_catalog_error chatml_catalog_plan chatml_catalog_capture)
+ (libraries core source chatml_source chatml_prepared_program chatml_project document_schema)
+ (preprocess (pps ppx_jane)))

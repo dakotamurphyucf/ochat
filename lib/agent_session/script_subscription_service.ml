@@ -107,7 +107,7 @@ let validate_origin scope =
      | Moderator _, Dispatching
        when P.Id.Invocation.equal invocation.context.id id
             && String.equal script.id scope.source.script_id
-            && String.equal script.source_sha256 scope.source.source_sha256
+            && String.equal (EC.source_revision prepared) scope.source.source_sha256
             && String.equal (EC.declaration prepared).name invocation.context.tool_name
             &&
             match origin with

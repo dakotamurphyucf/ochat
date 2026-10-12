@@ -259,6 +259,12 @@ module Constructor_mutations : sig
     -> Session.Shell_state.Approval_grant.persisted list
     -> (unit, Agent_protocol.Error.t) result
 
+  val replace_shell_extension_snapshots
+    :  t
+    -> preparation:Run_preparation.t
+    -> Session.Shell_state.Extension_snapshot.t list
+    -> (unit, Agent_protocol.Error.t) result
+
   val add_shell_manifest_grant
     :  t
     -> preparation:Run_preparation.t
@@ -723,6 +729,9 @@ val set_runtime_worker
   -> inference:Inference_client.Execution.t option
   -> (unit, Agent_protocol.Error.t) result
 
+(** Durably installs the supplied checkpoint, including an unchanged value.
+    Publishes a public Session_updated position after commit so subscribers can
+    reach the returned revision. Private moderator state is not disclosed. *)
 val change_moderator
   :  t
   -> Jsonaf.t option
@@ -737,6 +746,17 @@ val shell_approval_grants
 val replace_shell_approval_grants
   :  t
   -> Session.Shell_state.Approval_grant.persisted list
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Trusted live shell code owners persist their admitted snapshots through the
+    existing shell transaction. Other shell fields retain the actor's current
+    values. This grants no execution or snapshot-admission authority; the caller
+    must reject expired code/resource owners before invoking it. Constructor
+    callers use [Constructor_mutations] and update their own candidate shell
+    projection only after the durable operation succeeds. *)
+val replace_shell_extension_snapshots
+  :  t
+  -> Session.Shell_state.Extension_snapshot.t list
   -> (unit, Agent_protocol.Error.t) result
 
 val shell_manifest_grants

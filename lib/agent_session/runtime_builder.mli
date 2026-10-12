@@ -17,18 +17,38 @@ type model_job_outcome =
 (** Native resources and compiled, non-evaluated extension definitions. No
     operation worker, moderator manager, history or actor service is installed. *)
 type resources = private
-  { native : Chat_response.Agent_runtime.t
+  { source_lease : Prompt_source_lease.t
+  ; native : Chat_response.Agent_runtime.t
   ; definition : Chat_response.Extension_compiler.definition option
   ; managed : Chat_response.Managed_tool_registry.t option
   ; authoring : Authoring_runtime.t option
   }
 
+(** Explicit host compilation/planning/restoration policy, shared by resource
+    preparation and full runtime construction. *)
+module Script_preparation = Runtime_script_preparation
+
+(** On [prepare_resources], [prepare_authored_resources], [build] and
+    [build_with_extensions], [startup = Some context] borrows the host's exact
+    original compilation limits/deadline for joined preparation. [None] starts an
+    independent preparation. Returned resources/runtime never retain the context;
+    activation follows complete preflight outside the compilation timer. *)
+
 (** Reconstruct an authored revision's resources using the same native/extension
     registration path as normal runtime construction, including contextual one-off
     and validation helpers. Verify the stored source tree first. Does not convert
-    prompt messages, reserve history, evaluate ChatML initializers or invoke a
-    moderator/model. Authorized native setup (including shell policy checks and
-    MCP connections) can perform IO; this is not the no-effect authoring validator.
+    prompt messages, reserve history or invoke a moderator/model. Owned parser/
+    program custody requires [Some script_preparation], including parser-only
+    revisions. Planning uses the original parser before helper augmentation;
+    native resources consume its admitted document projection. Compilation and
+    restoration share one startup deadline. [root_invocation] is the explicitly
+    retained root contract: both captured-role restoration and native legacy
+    compilation use it; neither source nor the current frontend selects a role.
+    After complete preflight, native shell hooks may activate under their separate
+    execution controls. Authorized native
+    setup (including shell policy checks and MCP connections) can perform IO;
+    this is not the no-effect authoring validator.
+
 
     Resources belong to [sw]. The host must retain it through every borrower and
     release it after failed preparation. This does not authorize delegation:
@@ -40,7 +60,12 @@ type resources = private
     standard helpers. Explicit declarations select them; duplicate/mismatched
     registrations reject. An empty list supplies no additional implementations. *)
 val prepare_resources
-  :  native_registrations:Chat_response.Agent_runtime.native_registration list
+  :  startup:Chat_response.Startup_compilation.t option
+  -> agent_source:Captured_agent_runner.Source_binding.t option
+  -> root_invocation:
+       Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+  -> script_preparation:Script_preparation.t option
+  -> native_registrations:Chat_response.Agent_runtime.native_registration list
   -> native_service_revision:string option
   -> env:Eio_unix.Stdenv.base
   -> inference_context:Inference_runtime.Context.t
@@ -64,13 +89,31 @@ type authored_resources = private
   { source : Authored_agent_source.t
   ; revision : Prompt_revision.t
   ; resources : resources
+  ; agent_source : Captured_agent_runner.Source_binding.t option
+  ; code_authorizer : Prompt_revision.t -> Shell_runtime.Manifest_authorizer.t
   }
+
+(** The actual constructor's original source loan and root-authorized specialist
+    manifest policy. These borrow the same existing resource lifetime. Selected
+    code never derives new authority from its artifact directory, source metadata
+    or a nested private Root. The authorizer checks the selected complete prepared
+    execution identity through the original live grant store and host policy. *)
+val authored_source_binding
+  :  authored_resources
+  -> Captured_agent_runner.Source_binding.t option
+
+val authored_code_authorizer
+  :  authored_resources
+  -> Prompt_revision.t
+  -> Shell_runtime.Manifest_authorizer.t
 
 (** Prepare the named specialist's private resources from its defining parent's
     captured source tree. Retains the authored parser, source-relative paths and
     host-supplied workspace/tool/storage capabilities. Only [prompt_dir] is re-rooted
     to the specialist's captured source directory. Does not prepare/expose the
-    parent's public tools, install an artifact/session or initialize scripts.
+    parent's public tools or install an artifact/session. Script preparation and
+    native hook activation follow [prepare_resources]. [content_limits] explicitly
+    bounds retained document restoration; no implicit content policy is selected.
 
     Native setup follows [prepare_resources], including explicit shell admission
     and MCP connection effects. The host must authorize this private closure and
@@ -86,9 +129,43 @@ type authored_resources = private
     root's operator/workspace/principal authority. It must not grant execution
     approvals or derive authority from model-supplied arguments. *)
 val prepare_authored_resources
-  :  native_registrations:Chat_response.Agent_runtime.native_registration list
+  :  startup:Chat_response.Startup_compilation.t option
+  -> agent_source:Captured_agent_runner.Source_binding.t option
+  -> script_preparation:Script_preparation.t option
+  -> content_limits:Chatmd_prompt_content.Limits.t option
+  -> native_registrations:Chat_response.Agent_runtime.native_registration list
   -> parent_revision:Prompt_revision.t
   -> tool_name:string
+  -> native_service_revision:string option
+  -> env:Eio_unix.Stdenv.base
+  -> inference_context:Inference_runtime.Context.t
+  -> inference_identity:Chat_response.Neutral_turn.Identity.t
+  -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
+  -> on_inference_completion:(Inference_client.Completion.t -> unit)
+  -> on_inference_observation:(Inference.Observation.t -> unit)
+  -> sw:Eio.Switch.t
+  -> paths:Runtime_paths.t
+  -> storage_paths:Runtime_paths.t
+  -> session_id:Agent_protocol.Id.Session.t
+  -> one_off_policy:Chat_response.One_off_request.policy
+  -> authoring_validation_host:Chat_response.Authoring_validation.host option
+  -> manifest_authorizer:(Prompt_revision.t -> Shell_runtime.Manifest_authorizer.t)
+  -> approval_provider:Shell_runtime.Approval_broker.provider
+  -> approval_store:Shell_access.Approval.store
+  -> (authored_resources, Agent_protocol.Error.t) result
+
+(** Build the exact role-selected source previously admitted by
+    [Authored_source_preparation.with_prepared], without recapture or role
+    selection. Nested wrappers must have been planned against that same revision
+    owner. [startup] borrows the original invocation across capture and all native
+    compilation; incompatible original policy limits reject before resource
+    effects. It never escapes. Native setup, approval and lifetime rules are those
+    of [prepare_authored_resources]. *)
+val prepare_authored_resources_from_source
+  :  Authored_source_preparation.t
+  -> startup:Chat_response.Startup_compilation.t
+  -> agent_source:Captured_agent_runner.Source_binding.t option
+  -> native_registrations:Chat_response.Agent_runtime.native_registration list
   -> native_service_revision:string option
   -> env:Eio_unix.Stdenv.base
   -> inference_context:Inference_runtime.Context.t
@@ -209,7 +286,8 @@ type background_executor =
   }
 
 type t =
-  { worker : Operation_worker.t
+  { source_lease : Prompt_source_lease.t
+  ; worker : Operation_worker.t
   ; inference_execution : Inference_client.Execution.t
   ; now : unit -> Agent_protocol.Timestamp.t
     (** Host wall clock shared by foreground, idle and delegated moderation and
@@ -269,6 +347,9 @@ type t =
       ?prepare:prepare_enqueue
       -> Jsonaf.t
       -> (Jsonaf.t option, Agent_protocol.Error.t) result
+    (** Raw event JSON passes existing bounded Session snapshot admission before
+        runtime value conversion or [prepare]. Rejection leaves the live moderator
+        snapshot/queue unchanged and uses the existing Invalid_state error mapping. *)
   ; drain_internal_events :
       History_entry.t list -> (moderator_drain, Agent_protocol.Error.t) result
   ; execute_model_job :
@@ -332,7 +413,12 @@ val moderator_snapshot_observer
     Supply the same paths outside detached administrative preparation. Initializer
     effects on external tools/files are not rolled back by session transactions. *)
 val build
-  :  sw:Eio.Switch.t
+  :  startup:Chat_response.Startup_compilation.t option
+  -> agent_source:Captured_agent_runner.Source_binding.t option
+  -> root_invocation:
+       Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+  -> script_preparation:Script_preparation.t option
+  -> sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
   -> inference_context:Inference_runtime.Context.t
   -> inference_identity:Chat_response.Neutral_turn.Identity.t
@@ -371,7 +457,12 @@ val build
     delivery remain under implementation. Public feature negotiation is unchanged;
     ordinary hosts continue using [build]. *)
 val build_with_extensions
-  :  native_registrations:Chat_response.Agent_runtime.native_registration list
+  :  startup:Chat_response.Startup_compilation.t option
+  -> agent_source:Captured_agent_runner.Source_binding.t option
+  -> root_invocation:
+       Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+  -> script_preparation:Script_preparation.t option
+  -> native_registrations:Chat_response.Agent_runtime.native_registration list
   -> services:extension_services
   -> sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
@@ -462,6 +553,13 @@ val build_generated
     history. This path never reconstructs tools or implicitly executes prompt
     content while allocating initial history.
 
+    [code] supplies already preflighted selected code over these exact original
+    private resources. The constructor checks its original/selected affinity,
+    uses its selected moderator/managed handlers and registration preparers, and
+    enters its source/shell views separately at each actual dispatch. None keeps
+    the original specialist identity check and resources for genuine legacy
+    construction; it cannot admit a changed source as the original code.
+
     The specialist's own moderator-handled tools dispatch to its own manager.
     Delegated moderators use the tool-mediated compiler surface: legacy moderator
     scripts, direct Process/Model recipes and implicit ChatMD input loading are
@@ -472,6 +570,7 @@ val build_authored_child
   :  services:extension_services
   -> revision:Prompt_revision.t
   -> prepared:authored_resources
+  -> code:Authored_code_preparation.t option
   -> authority:Delegation_authority.t
   -> history:History_entry.t list
   -> sw:Eio.Switch.t
@@ -502,3 +601,28 @@ val build_authored_child
 (** Borrowed selected inference execution. Its host tracking ports and lifetime
     belong to this runtime; install and retire it with the foreground worker. *)
 val inference_execution : t -> Inference_client.Execution.t
+
+(** [agent_source] binds each actual restored revision before native registration.
+    None preserves legacy native construction. Some requires explicit semantic
+    policy and owned revision; it uses this constructor's actual shell policies.
+    The binding retains the explicit host content ceiling, never inferred from
+    stored metadata. Bound ports borrow host Store/source owners
+    through the resource switch. Fresh persistent specialist rebind remains a
+    separate Authored/code-view operation.
+
+    Host-only attachment of actual admitted original-source loan. Factory validates
+    receipt/current catalog before native setup; runtime/private resources share
+    one root loan under actual ancestor lifetime. No tool/native grant is created.
+    Live runtime close first joins its existing borrowers, then releases only an
+    owned loan. Existing constructors default to legacy/no source authority. *)
+val with_source_lease : t -> source_lease:Prompt_source_lease.t -> t Or_error.t
+
+val with_resource_source_lease
+  :  resources
+  -> source_lease:Prompt_source_lease.t
+  -> resources Or_error.t
+
+val with_authored_source_lease
+  :  authored_resources
+  -> source_lease:Prompt_source_lease.t
+  -> authored_resources Or_error.t

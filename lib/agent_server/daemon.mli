@@ -20,6 +20,11 @@ type startup_mode =
 
 type options =
   { startup_mode : startup_mode
+  ; root_invocation :
+      Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+    (** Trusted root invocation for newly captured catalog definitions, including
+        reload. Defaults to Ui. Retained session Spec remains authoritative; this
+        does not reinterpret an existing revision or select a role by digest. *)
   ; implementation_name : string
   ; implementation_version : string
   ; features : string list
@@ -27,6 +32,15 @@ type options =
   ; protocol_limits : Agent_protocol.Initialize.Limits.t
   ; timing : Agent_protocol.Initialize.Timing.t
   ; factory_limits : Session_factory.limits
+  ; seed_recovery_limits : Session_factory.Seed_recovery_limits.t
+    (** Positive complete-invocation first-Created/receipt recovery profile shared
+        by Execute/On_demand startup and Pending original command reconciliation.
+        No runtime/source recapture occurs; limits do not enlarge transport bytes. *)
+  ; retained_artifact_limits : Retained_job_artifacts.Limits.t
+    (** Aggregate startup-only session/archive/job inventory and collector traversal
+        bounds. Used before installing a loader or recovering actors. Existing
+        snapshot/journal/archive byte ceilings remain per-file. Incomplete protection
+        skips all artifact pruning; it does not weaken ordinary recovery validation. *)
   ; quota_limits : Agent_session.Quota_manager.limits
   ; reviewer_resolver : Catalog_builder.reviewer_resolver option
   ; policy_evaluator_resolver : Catalog_builder.policy_evaluator_resolver option
@@ -54,6 +68,16 @@ type options =
         extensions enabled, None selects the installed native
         targets/catalog. An explicit host retains its target/compiler/source
         restrictions. This does not grant tool execution authority. *)
+  ; content_limits : Chatmd_prompt_content.Limits.t option
+    (** Fixed host policy for capturing documents during catalog startup/reload
+        and restoring them from session artifacts. Capture borrows the catalog's
+        original source scope; stored metadata never acquires source authority or
+        selects these limits. None rejects captured imports and content-bearing
+        stored revisions, while ordinary dynamic imports retain their behavior. *)
+  ; script_preparation : Agent_session.Runtime_script_preparation.t option
+    (** Host compilation, role planning and semantic graph restoration ceilings.
+        Required for owned prompt revisions, including parser-only custody.
+        Independent of storage admission and readonly authoring helper policy. *)
   ; provider_operator_factory : Provider_operator_port.factory option
     (** Optional host-owned provider service. Initialize once with actual server
         identity; missing service advertises no provider.operator capability.
@@ -100,6 +124,35 @@ val factory : t -> Session_factory.t
 
 val blob_store : t -> Agent_store.Blob_store.t
 val prompts : t -> Agent_session.Prompt_catalog.t
+
+module Shell_inspection_selection : sig
+  type t =
+    | Current
+    | Retained of
+        { revision_id : Agent_protocol.Id.Prompt_revision.t
+        ; invocation : Agent_session.Runtime_script_preparation.Invocation.t
+        }
+end
+
+(** Trusted host inspection of one actual catalog-owned captured revision.
+    Current selects that definition's actual captured Ready role. Retained uses
+    existing definition-affine restoration and a trusted explicit invocation;
+    authentic stored binding/contract selection must agree or inspection rejects.
+    No current-host role inference or recapture fallback for historical code.
+    Host script/content policies remain fixed; filenames/digests never select roles.
+    No session, actor, initializer, native tool setup, provider or new source
+    acquisition. This query does not grant execution and is not an unauthenticated
+    transport RPC. The explicit Operator_only CLI owner can print/sign complete
+    requested identity even when its security check rejects. *)
+val inspect_prompt_shell
+  :  t
+  -> definition_id:Agent_protocol.Id.Prompt_definition.t
+  -> selection:Shell_inspection_selection.t
+  -> checkpoint:(unit -> unit)
+  -> ( Chat_response.Agent_runtime.prepared_shell_inspection
+       , Agent_protocol.Error.t )
+       Result.t
+
 val workspaces : t -> Agent_session.Workspace_catalog.t
 val close_connection : t -> Connection_context.t -> unit
 

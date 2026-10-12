@@ -56,6 +56,7 @@ let registration () =
     ; implementation_revision =
         Chatmd_shell_spec.Source_ref.digest "ochat.agent-stop.native.v1"
     ; result_contract = Invocation_v1
+    ; source_requirement = Ordinary
     ; authoring_metadata = None
     }
 ;;

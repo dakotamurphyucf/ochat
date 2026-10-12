@@ -4,6 +4,10 @@
  (modules
   config
   config_parser
+  project_source_configuration
+  project_source_policy
+  project_source_header
+  project_source_host
   authoring_options
   session_helper_policy
   authenticator
@@ -13,6 +17,9 @@
   catalog_identity
   operator_manifest_grant
   catalog_builder
+  prompt_catalog_publication
+  prompt_catalog_host
+  prompt_dependency_projection
   runtime_owner
   delegated_runtime
   graph_tracking
@@ -56,7 +63,15 @@
   permission_scheduler
   schedule_scheduler
   maintenance
+  session_factory_catalogs
+  session_projection
+  session_seed_layout
+  session_seed_recovery
+  session_seed_admission
+  session_seed_receipt
+  session_seed_command
   session_factory
+  retained_job_artifacts
   local_storage
   local_selection
   retained_session
@@ -66,14 +81,23 @@
   startup_cleanup
   daemon
   provider_operator_port
+  dependency_administration
+  dependency_update_receipt
   command_handler
   dispatcher)
+ (private_modules session_projection session_seed_layout session_seed_recovery session_factory_catalogs session_seed_admission session_seed_receipt session_seed_command
+  project_source_header dependency_update_receipt)
  (libraries ochat.operator_authorization
  core
   base64
   cstruct
   digestif
   ochat.document_schema
+  ochat.chatml_git_host
+  ochat.chatml_local_roots
+  ochat.chatml_project_prepare
+  ochat.chatml_local_capture
+  ochat.chatml_git_catalog
   eio
   eio.unix
   mirage-crypto-rng.unix

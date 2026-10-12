@@ -1,0 +1,5 @@
+(library
+ (name chatml_native_hooks_tests)
+ (libraries core eio eio_main expect_test_helpers_core chatml chatml_source chatml_prepared_program chatml_linked_program chatml_linked_runtime chatml_host_runtime chatml_compilation chatml_execution chatml_diagnostic source shell_runtime ochat.chatmd_shell_spec ochat.session)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

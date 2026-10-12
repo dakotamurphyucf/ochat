@@ -350,6 +350,7 @@ let%expect_test "job starts commit atomically with managed handler and event che
     (Handler_cancelled false)
     (Handler_cancelled true)
     (Event false)
+    +queued moderator cleanup failed: injected job transition failure
     (Event true)
     |}]
 ;;

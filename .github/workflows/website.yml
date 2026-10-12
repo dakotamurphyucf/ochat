@@ -1,6 +1,7 @@
 name: Website
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   push:
     branches: [main]
   workflow_dispatch:
@@ -18,8 +19,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  # Always start detection and the final gate. Do not use workflow path filters.
+  # Drafts allocate no runners. Ready-for-review events run normal qualification.
+  # Keep detection and the final gate for all other events; do not use path filters.
   changes:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -99,10 +102,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tier: [normal, e2e]
-    runs-on: ubuntu-24.04
-    # Keep setup and evidence upload outside the normal suite's 60-minute budget.
-    timeout-minutes: ${{ matrix.tier == 'normal' && 90 || 60 }}
+        include:
+          - tier: normal
+            arch: x64
+            runner: ubuntu-24.04
+          - tier: e2e
+            arch: x64
+            runner: ubuntu-24.04
+          - tier: git-native
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    # Setup/evidence remain outside each bounded suite's operational deadline.
+    timeout-minutes: ${{ matrix.tier == 'e2e' && 60 || 90 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -116,12 +128,16 @@ jobs:
         with:
           cold: ${{ needs.changes.outputs.cold }}
           tier: ${{ matrix.tier }}
+      - name: Provision pinned Git candidate for real native qualification
+        if: matrix.tier != 'e2e'
+        timeout-minutes: 20
+        run: bash .github/scripts/provision-git-host.sh
       - name: Run framework tests
         run: opam exec -- node .github/scripts/framework-tests.mjs ${{ matrix.tier }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: framework-evidence-${{ matrix.tier }}
+          name: framework-evidence-${{ matrix.tier }}-${{ matrix.arch }}
           overwrite: true
           include-hidden-files: true
           retention-days: 90
@@ -305,7 +321,7 @@ jobs:
           if-no-files-found: error
           overwrite: true
   release-gate:
-    if: always()
+    if: always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     needs: [changes, semantics, framework, website, browser, website-qualification]
     runs-on: ubuntu-24.04
     timeout-minutes: 5

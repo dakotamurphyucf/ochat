@@ -1,0 +1,5 @@
+(library
+ (name chatml_stdlib_composition_tests)
+ (libraries core eio chatml chatml_typechecker chatml_resolver chatml_builtin_modules)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

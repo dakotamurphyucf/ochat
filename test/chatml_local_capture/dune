@@ -1,0 +1,5 @@
+(library
+ (name chatml_local_capture_tests)
+ (libraries core core_unix eio eio.unix eio_main source chatml_source chatml_prepared_program chatml_project chatml_catalog chatml_local_source chatml_local_capture document_schema)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

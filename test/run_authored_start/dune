@@ -1,0 +1,6 @@
+(library
+ (name run_authored_start_tests)
+ (libraries agent_server_test_support core eio eio_main mirage-crypto-rng.unix
+  ochat.agent_client ochat.agent_protocol ochat.agent_server)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

@@ -56,9 +56,14 @@ daemon manifest-grant creation RPC: bootstrap entries belong to operator config.
 
 For a reviewed deployment, derive the bootstrap inputs as follows:
 
-1. Inspect the exact configured root source with the daemon account/platform and
-   host security environment. Copy the `requested manifest:` SHA-256 from
-   `ochat shell inspect FILE -canonical`; review the accompanying canonical JSON.
+1. Inspect with the daemon account/platform and host security environment. For
+   configured hooks, use `ochat shell inspect -config CONFIG -prompt NAME -canonical`
+   and copy its `execution manifest:` SHA-256 after reviewing the canonical JSON.
+   This opens an explicit Operator_only owner for normal catalog preparation;
+   the query itself runs no initializer or provider. For legacy unconfigured
+   hooks, raw `ochat shell inspect FILE -canonical` retains the v1 identity.
+   See [complete inspection and signing](../cli/shell-runtime-management.md#inspect-a-runtime)
+   for retained revisions and canonical signature output.
 2. Compute the root source bytes' SHA-256, for example `shasum -a 256 FILE` with
    the real path quoted. `source_sha256` is this root hash, not the hash of a
    ChatMD export, the artifact's manifest file, or a directory listing. Imported
@@ -69,13 +74,18 @@ For a reviewed deployment, derive the bootstrap inputs as follows:
 4. Add a config grant with the configured prompt/workspace names and both hashes,
    validate, then reload the catalog or start the daemon. Create/start the intended
    session with `require_grant` and verify the runtime accepts the same identity.
-5. If the runtime's compiled manifest differs from the pinned artifact/inspection,
-   stop and investigate source context/platform/policy. Never substitute a broad
-   grant or suppress the comparison just to make startup pass.
+5. Compare the runtime execution hash with the complete inspection and grant,
+   and compare its resource hash separately with the pinned artifact. The v2
+   execution digest intentionally differs from the raw artifact digest. If
+   either corresponding comparison fails, investigate source context/platform/
+   policy; never substitute a broad grant or suppress a mismatch.
 
-The daemon compares the grant against `Artifact.root_sha256`, the pinned shell
-manifest digest, the runtime request's manifest digest, and the session's prompt,
-workspace and creating principal. This is exact identity matching, not a wildcard
+The daemon checks `Artifact.root_sha256` and the pinned raw shell resource digest
+against the actual captured declaration/material. The operator grant binds the
+runtime request's complete execution-manifest digest plus the session's prompt,
+workspace and creating principal. Prepared dependency fingerprints and all selected
+hook entrypoints participate in that execution digest; a raw v1 grant cannot
+silently authorize prepared code. This is exact identity matching, not a wildcard
 grant over future edits. Redacted `prompt.get` is not a full manifest download.
 
 `assume_authorized` is an explicit host trust decision for reviewed prompts, not

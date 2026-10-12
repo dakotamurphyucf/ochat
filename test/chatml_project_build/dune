@@ -1,0 +1,5 @@
+(library
+ (name chatml_project_build_tests)
+ (libraries core jsonaf source chatml_source chatml_prepared_program document_schema chatml_project chatml_catalog chatml_project_build chatml expect_test_helpers_core)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

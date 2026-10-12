@@ -1,4 +1,7 @@
 open! Core
+
+let current_version = 10
+
 module P = Agent_protocol
 module X = Persistence_codec
 module J = P.Json_codec
@@ -185,17 +188,33 @@ let identity_shape =
     ]
 ;;
 
-let spec_to_jsonaf (t : S.Spec.t) =
+let root_invocation_to_jsonaf
+  : Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t -> Jsonaf.t
+  = function
+  | Ui -> `String "ui"
+  | Headless -> `String "headless"
+;;
+
+let root_invocation_of_jsonaf =
+  J.enum
+    ~name:"root invocation"
+    [ "ui", Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.Ui
+    ; "headless", Headless
+    ]
+;;
+
+let project_spec (t : 'workspace S.Spec.fields) ~workspace =
   `Object
     [ "protocol", P.Session.Spec.to_json t.protocol
     ; ( "prompt_definition_id"
       , (X.option_json P.Id.Prompt_definition.to_json) t.prompt_definition_id )
+    ; "root_invocation", root_invocation_to_jsonaf t.root_invocation
     ; "prompt_revision_id", P.Id.Prompt_revision.to_json t.prompt_revision_id
     ; "configuration_revision", X.int64_json t.configuration_revision
     ; "inference_target", Inference.Selection.to_json t.inference_target
     ; ( "delegation"
       , (X.option_json Agent_store.Delegation_store.reference_to_jsonaf) t.delegation )
-    ; "workspace_instance", Workspace_instance.to_jsonaf t.workspace_instance
+    ; "workspace_instance", workspace t.workspace_instance
     ; "permission_profile", X.text_json t.permission_profile
     ; "permission_profile_digest", X.text_json t.permission_profile_digest
     ; "runtime_policy", (X.option_json X.text_json) t.runtime_policy
@@ -203,12 +222,17 @@ let spec_to_jsonaf (t : S.Spec.t) =
     ]
 ;;
 
+let spec_to_jsonaf t = project_spec t ~workspace:Workspace_instance.to_jsonaf
+
 let spec_of_jsonaf ~limits json =
   let open Result.Let_syntax in
   let%bind fields = X.object_ json in
   let%bind protocol = X.required fields "protocol" P.Session.Spec.of_json in
   let%bind prompt_definition_id =
     X.required fields "prompt_definition_id" (X.nullable P.Id.Prompt_definition.of_json)
+  in
+  let%bind root_invocation =
+    X.required fields "root_invocation" root_invocation_of_jsonaf
   in
   let%bind prompt_revision_id =
     X.required fields "prompt_revision_id" P.Id.Prompt_revision.of_json
@@ -238,6 +262,7 @@ let spec_of_jsonaf ~limits json =
   let t : S.Spec.t =
     { protocol
     ; prompt_definition_id
+    ; root_invocation
     ; prompt_revision_id
     ; configuration_revision
     ; inference_target
@@ -256,6 +281,7 @@ let spec_shape =
   X.shape_exn
     [ "protocol", Shapes.protocol_spec
     ; "prompt_definition_id", X.nullable_shape Document_schema.Shape.value
+    ; "root_invocation", Document_schema.Shape.value
     ; "prompt_revision_id", Document_schema.Shape.value
     ; "configuration_revision", Document_schema.Shape.value
     ; "inference_target", Document_schema.Shape.value
@@ -607,7 +633,13 @@ let run_state_fields field value =
   | Nullable, None -> [ "run_state", `Null ]
 ;;
 
-let state_to_jsonaf ?(raw_pending = false) (t : S.t) ~limits ~presence =
+let project_fields_with_presence
+      ?(raw_pending = false)
+      (t : 'spec S.fields)
+      ~spec
+      ~limits
+      ~presence
+  =
   let run_state_field =
     if Session_state_presence.run_state_is_absent presence then Missing else Nullable
   in
@@ -618,7 +650,7 @@ let state_to_jsonaf ?(raw_pending = false) (t : S.t) ~limits ~presence =
   in
   `Object
     ([ "identity", identity_to_jsonaf t.identity
-     ; "spec", spec_to_jsonaf t.spec
+     ; "spec", spec t.spec
      ; "lifecycle", lifecycle_to_jsonaf t.lifecycle
      ; "runtime_initialization", initialization_to_jsonaf t.runtime_initialization
      ; "pending_initial_start", X.bool_json t.pending_initial_start
@@ -666,6 +698,19 @@ let state_to_jsonaf ?(raw_pending = false) (t : S.t) ~limits ~presence =
        ; "failure", (X.option_json P.Error.to_json) t.failure
        ; "counters", counters_to_jsonaf t.counters
        ])
+;;
+
+let state_to_jsonaf ?raw_pending t ~limits ~presence =
+  project_fields_with_presence ?raw_pending t ~spec:spec_to_jsonaf ~limits ~presence
+;;
+
+let project_fields t ~spec ~limits =
+  project_fields_with_presence
+    ~raw_pending:true
+    t
+    ~spec
+    ~limits
+    ~presence:Session_state_presence.authored
 ;;
 
 let equal_values previous ~limits next =
@@ -1235,11 +1280,40 @@ let upgrade document ~limits =
                    name, if String.equal name "conversation" then conversation else value))))
       | _ -> F.invalid "conversation" "must be an object")
   in
+  let%bind root_invocation_step =
+    D.Conversion.Step.of_function ~kind:"session.state" ~from_version:9 ~f:(fun payload ->
+      let module F = Agent_store.Document_fields in
+      let%bind spec = F.required payload "spec" Result.return in
+      let%bind spec =
+        match spec with
+        | `Object fields ->
+          (match D.Json.field spec ~name:"root_invocation" with
+           | Absent -> Ok (`Object (fields @ [ "root_invocation", `String "ui" ]))
+           | Null -> F.invalid "root_invocation" "root invocation must not be null"
+           | Value raw ->
+             let%map
+                 (_
+                   : Chat_response.Script_contract_plan.Program.Role.Moderator_invocation
+                     .t)
+               =
+               root_invocation_of_jsonaf raw |> X.document_result
+             in
+             spec)
+        | _ -> F.invalid "spec" "must be an object"
+      in
+      match payload with
+      | `Object fields ->
+        Ok
+          (`Object
+              (List.map fields ~f:(fun (name, value) ->
+                 name, if String.equal name "spec" then spec else value)))
+      | _ -> F.invalid "payload" "must be an object")
+  in
   let%bind conversion =
     D.Conversion.create
       ~limits
-      ~targets:[ "session.state", 9 ]
-      ~max_steps:8
+      ~targets:[ "session.state", 10 ]
+      ~max_steps:9
       ~max_operations:100_000
       ~steps:
         [ step
@@ -1250,6 +1324,7 @@ let upgrade document ~limits =
         ; history_revision_step
         ; run_step
         ; pending_input_step
+        ; root_invocation_step
         ]
   in
   D.Conversion.upgrade conversion document
@@ -1260,7 +1335,7 @@ let codec ~limits ~presence =
     D.Domain_codec.create_validated
       ~limits
       ~kind:"session.state"
-      ~version:9
+      ~version:current_version
       ~shape
       ~supported_semantics:[]
       ~validate:(fun state -> X.document_result (S.validate state))
@@ -1326,7 +1401,7 @@ let encode t ~limits =
         |> X.document_result
       in
       let%bind.Result document =
-        D.Document.create ~limits ~kind:"session.state" ~version:9 ~payload
+        D.Document.create ~limits ~kind:"session.state" ~version:current_version ~payload
       in
       let%bind.Result admitted = decode ~limits document in
       D.Domain_codec.encode (codec_for admitted ~limits) admitted.carrier
@@ -1657,7 +1732,7 @@ module Transaction = struct
       D.Domain_codec.create
         ~limits
         ~kind:"session.state"
-        ~version:9
+        ~version:current_version
         ~shape
         ~supported_semantics:[]
         ~decode:(fun json -> state_fields_of_jsonaf ~limits json |> X.document_result)
@@ -1692,7 +1767,11 @@ module Transaction = struct
           |> X.document_result
         in
         let%bind document =
-          D.Document.create ~limits ~kind:"session.state" ~version:9 ~payload
+          D.Document.create
+            ~limits
+            ~kind:"session.state"
+            ~version:current_version
+            ~payload
         in
         let%bind carrier =
           D.Domain_codec.decode

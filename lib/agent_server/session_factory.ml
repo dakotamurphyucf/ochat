@@ -1,4 +1,5 @@
 open! Core
+module Catalogs = Session_factory_catalogs
 
 type generated_lifetime =
   | Owned
@@ -81,6 +82,15 @@ type model_job_inference =
       Inference.Request.Target.t -> (unit, Agent_protocol.Error.t) Result.t
   }
 
+module Child_source_policy = struct
+  type t =
+    { source : Agent_session.Captured_agent_runner.Source.t
+    ; runtime_policy_revision : Chatml_source.Digest.t
+    }
+
+  let create ~source ~runtime_policy_revision = { source; runtime_policy_revision }
+end
+
 type t =
   { sw : Eio.Switch.t
   ; env : Eio_unix.Stdenv.base
@@ -97,12 +107,7 @@ type t =
   ; idempotency_store : Agent_store.Idempotency_store.t
   ; blob_store : Agent_store.Blob_store.t
   ; prompts : Agent_session.Prompt_catalog.t
-  ; workspaces : Agent_session.Workspace_catalog.t
-  ; catalog_mutex : Eio.Mutex.t
-  ; mutable permission_profiles : (string, Agent_session.Permission_policy.t) Map.Poly.t
-  ; mutable permission_profile_revisions :
-      (string, Agent_session.Permission_policy.t) Map.Poly.t
-  ; mutable manifest_grants : Operator_manifest_grant.t list
+  ; catalogs : Catalogs.t
   ; quota_manager : Agent_session.Quota_manager.t
   ; job_capacity : Job_capacity.t
   ; tool_dir : string
@@ -113,6 +118,9 @@ type t =
   ; independent_lifetime_policy : string option
   ; chatml_runtime_policy : Chat_response.Runtime_semantics.policy
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
+  ; script_preparation : Agent_session.Runtime_script_preparation.t option
+  ; content_limits : Chatmd_prompt_content.Limits.t option
+  ; child_sources : Child_source_policy.t option
   ; generated_creation : Agent_session.Generated_session_request.service
   ; managed_sessions : Agent_session.Managed_session_service.t
   ; managed_output_cursors : Managed_output_cursor.t
@@ -143,22 +151,14 @@ type runtime_source =
       ; materialized_tree : Eio.Fs.dir_ty Eio.Path.t
       }
 
+module Catalog_seal = Catalogs.Seal
+
+let seal_catalogs t ~workspaces ~permission_profiles ~manifest_grants ~checkpoint =
+  Catalogs.seal t.catalogs ~workspaces ~permission_profiles ~manifest_grants ~checkpoint
+;;
+
 let install_catalogs t ~workspaces ~permission_profiles ~manifest_grants =
-  Agent_session.Workspace_catalog.install t.workspaces ~replacement:workspaces;
-  Eio.Mutex.use_rw ~protect:true t.catalog_mutex (fun () ->
-    t.permission_profiles
-    <- List.fold permission_profiles ~init:Map.Poly.empty ~f:(fun profiles profile ->
-         Map.set profiles ~key:profile.Agent_session.Permission_policy.id ~data:profile);
-    t.permission_profile_revisions
-    <- List.fold
-         permission_profiles
-         ~init:t.permission_profile_revisions
-         ~f:(fun profiles profile ->
-           Map.set
-             profiles
-             ~key:profile.Agent_session.Permission_policy.revision_digest
-             ~data:profile);
-    t.manifest_grants <- manifest_grants)
+  Catalogs.install t.catalogs ~workspaces ~permission_profiles ~manifest_grants
 ;;
 
 let now t =
@@ -202,7 +202,7 @@ let resolve_workspace_definition t definition = function
   | Agent_protocol.Session.Workspace_request.Configured workspace_id ->
     let open Result.Let_syntax in
     let%bind workspace =
-      Agent_session.Workspace_catalog.find t.workspaces workspace_id
+      Catalogs.find_workspace t.catalogs workspace_id
       |> Result.of_option
            ~error:(unavailable Workspace_not_found "workspace is not in the catalog")
     in
@@ -215,14 +215,13 @@ let resolve_workspace_definition t definition = function
 ;;
 
 let permission_profile t id =
-  Eio.Mutex.use_ro t.catalog_mutex (fun () -> Map.find t.permission_profiles id)
+  Catalogs.find_profile t.catalogs id
   |> Result.of_option
        ~error:(unavailable Configuration_invalid "permission profile is unavailable")
 ;;
 
 let permission_profile_revision t digest =
-  Eio.Mutex.use_ro t.catalog_mutex (fun () ->
-    Map.find t.permission_profile_revisions digest)
+  Catalogs.find_profile_revision t.catalogs digest
   |> Result.of_option
        ~error:
          (unavailable
@@ -231,16 +230,7 @@ let permission_profile_revision t digest =
 ;;
 
 let rewrite_session_workspace_path ~final_directory instance =
-  match instance.Agent_session.Workspace_instance.source_kind with
-  | Temporary Session_dir ->
-    let parent = Eio_posix.Low_level.realpath (Filename.dirname final_directory) in
-    let final_directory = Filename.concat parent (Filename.basename final_directory) in
-    let native_path = Filename.concat final_directory "workspace" in
-    { instance with
-      canonical_root = { instance.canonical_root with native_path }
-    ; configured_root = Some native_path
-    }
-  | Physical | Current | Temporary System_tmp -> instance
+  Agent_session.Workspace_resolver.published_instance instance ~final_directory
 ;;
 
 let session_identity principal request session_id now =
@@ -270,6 +260,7 @@ let session_spec request definition revision instance profile ~inference_target 
     { protocol = request.Agent_protocol.Session.Create_request.spec
     ; prompt_definition_id = Some definition.Agent_session.Prompt_definition.id
     ; delegation = None
+    ; root_invocation = Agent_session.Prompt_definition.root_invocation definition
     ; prompt_revision_id = Agent_session.Prompt_revision.id revision
     ; configuration_revision = 0L
     ; inference_target
@@ -350,67 +341,8 @@ let imported_state provisional legacy =
   state
 ;;
 
-let metadata state =
-  Agent_store.Session_store.Metadata.
-    { schema_version = Agent_store.Session_store.current_metadata_schema_version
-    ; session = Agent_session.Session_state.summary state
-    ; prompt_artifact =
-        Agent_protocol.Id.Prompt_revision.to_string state.spec.prompt_revision_id
-    ; workspace_identity = state.spec.workspace_instance.conflict_domain
-    ; data_schema_version = Agent_session.Session_state.current_schema_version
-    }
-;;
-
-let runnable_job job =
-  match job.Agent_protocol.Job.status with
-  | Queued -> true
-  | Running
-  | Waiting_permission _
-  | Waiting_completion _
-  | Succeeded
-  | Failed _
-  | Cancelled
-  | Interrupted _ -> false
-;;
-
-let deliverable_job job =
-  match job.Agent_protocol.Job.delivery with
-  | Pending -> true
-  | Not_required | Delivered _ | Discarded _ -> false
-;;
-
-let active_schedule schedule =
-  match schedule.Agent_protocol.Schedule.status with
-  | Scheduled | Delivering -> true
-  | Delivered | Cancelled | Failed _ -> false
-;;
-
-let owner_grace_deadline state =
-  List.find_map state.Agent_session.Session_state.attachments ~f:(fun attachment ->
-    match attachment.Agent_protocol.Session.Attachment.mode, attachment.owner_lease with
-    | Owner_read_write, Some lease -> lease.disconnect_grace_until
-    | (Owner_read_write | Read_write | Read_only), _ -> None)
-;;
-
-let index_entry state =
-  let earliest_schedule_due =
-    state.Agent_session.Session_state.schedules
-    |> List.filter ~f:active_schedule
-    |> List.map ~f:(fun schedule -> schedule.Agent_protocol.Schedule.next_due_at)
-    |> List.min_elt ~compare:Agent_protocol.Timestamp.compare
-  in
-  Agent_store.Session_index.Entry.
-    { session = Agent_session.Session_state.summary state
-    ; runnable_job_count = List.count state.jobs ~f:runnable_job
-    ; deliverable_job_count = List.count state.jobs ~f:deliverable_job
-    ; earliest_schedule_due
-    ; owner_grace_deadline = owner_grace_deadline state
-    ; pending_initial_start = state.pending_initial_start
-    ; archived = false
-    ; lifecycle_revision = Agent_store.Session_archive_record.Revision.zero
-    ; admission = Automatic
-    }
-;;
+let metadata = Session_projection.metadata
+let index_entry = Session_projection.index_entry
 
 let initialize_layout
       t
@@ -494,6 +426,24 @@ let lookup_state_source t (state : Agent_session.Session_state.t) =
       |> Result.map_error ~f:protocol_of_store
     in
     let%bind () = validate_delegated_target state record in
+    let%bind () =
+      if
+        Agent_protocol.Id.Session.equal
+          state.identity.session_id
+          record.admission.child_session_id
+        && Agent_protocol.Id.Prompt_revision.equal
+             revision_id
+             state.spec.prompt_revision_id
+        && Agent_protocol.Id.Prompt_revision.equal
+             revision_id
+             record.admission.revision_id
+      then Ok ()
+      else
+        Error
+          (protocol_of_store
+             (Agent_store.Store_error.Corrupt
+                "delegated state differs from its recorded artifact identity"))
+    in
     let%bind artifact_store =
       Agent_store.Prompt_artifact_store.open_existing
         ~env:t.env
@@ -505,7 +455,7 @@ let lookup_state_source t (state : Agent_session.Session_state.t) =
     let%map artifact =
       match record.admission.authored_tool with
       | Some _ ->
-        Agent_session.Authored_agent_source.load_artifact
+        Agent_session.Authored_agent_source.load_recorded_artifact
           ~artifact_store
           ~reservation:record
       | None ->
@@ -765,7 +715,7 @@ let parent_stop_recovery t ~policy (state : Agent_session.Session_state.t) =
        Ok (Some { reference; epoch; stop }))
 ;;
 
-let runtime_paths t handle source state =
+let runtime_paths t handle source (state : Agent_session.Session_state.t) =
   match t.home with
   | None ->
     Error
@@ -1029,7 +979,12 @@ let manifest_now_ns t () =
   |> Int63.to_int64
 ;;
 
-let operator_manifest_authorizer t ~manifest_sha256 revision state =
+let operator_manifest_authorizer
+      t
+      ~manifest_sha256
+      revision
+      (state : Agent_session.Session_state.t)
+  =
   let artifact = Agent_session.Prompt_revision.artifact revision in
   fun request ->
     let open Shell_runtime.Manifest_authorizer in
@@ -1043,8 +998,9 @@ let operator_manifest_authorizer t ~manifest_sha256 revision state =
       , Some workspace_definition_id
       , Some principal_id
       , Some hash )
-      when String.equal hash request.manifest.sha256 ->
-      let grants = Eio.Mutex.use_ro t.catalog_mutex (fun () -> t.manifest_grants) in
+      when String.equal hash (Chatmd_shell_spec.Manifest.resource_sha256 request.manifest)
+      ->
+      let grants = Catalogs.manifest_grants t.catalogs in
       if
         List.exists grants ~f:(fun grant ->
           Operator_manifest_grant.authorizes
@@ -1355,14 +1311,14 @@ let extension_actor actor_ref =
     ~error:(unavailable Invalid_state "extension runtime is not installed in a session")
 ;;
 
-let authorize_extension_native t actor_ref profile native invocation binding =
+let check_extension_native actor_ref profile invocation =
   let module A = Agent_session.Session_actor in
   let module I = Agent_protocol.Invocation in
   let module Policy = Agent_session.Permission_policy in
   let open Result.Let_syntax in
   let%bind actor = extension_actor actor_ref in
   let%bind state = A.state actor in
-  let%bind () =
+  let%map () =
     match Agent_session.Native_tool_invocation.current_scope () with
     | Active current
       when I.equal_context current.context invocation.I.context
@@ -1379,6 +1335,14 @@ let authorize_extension_native t actor_ref profile native invocation binding =
            Permission_denied
            "native invocation has no current scoped authority")
   in
+  actor, state
+;;
+
+let authorize_extension_native t actor_ref profile native invocation binding =
+  let module A = Agent_session.Session_actor in
+  let module Policy = Agent_session.Permission_policy in
+  let open Result.Let_syntax in
+  let%bind actor, state = check_extension_native actor_ref profile invocation in
   if
     Set.mem
       native.Chat_response.Agent_runtime.shell_tool_names
@@ -1489,7 +1453,7 @@ let authorize_extension_native t actor_ref profile native invocation binding =
               (unavailable Permission_denied "reviewer returned an invalid grant scope"))))
 ;;
 
-let extension_jobs t actor_ref registry =
+let extension_jobs t actor_ref registry native =
   let module A = Agent_session.Session_actor in
   let module Jobs = Agent_session.Script_job_service in
   let host : Jobs.host =
@@ -1554,6 +1518,15 @@ let extension_jobs t actor_ref registry =
     }
   in
   Jobs.create
+    ~prepare_source:(fun ~binding ~owner ~request ~checkpoint ->
+      Chat_response.Agent_runtime.prepare_agent_source
+        native
+        ~binding
+        ~owner
+        ~request
+        ~max_registrations:
+          Chat_response.One_off_request.default_policy.execution.max_array_items
+        ~checkpoint)
     ~env:t.env
     ~policy:Chat_response.One_off_request.default_policy
     ~current_capabilities:(fun () -> registry)
@@ -1817,6 +1790,11 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
               | output -> Ok (Openai.Responses.Tool_output.Output.jsonaf_of_t output))
             ~defer_observation:(fun _ -> Ok ())
           |> fun tools ->
+          Agent_session.Script_tool_calls.with_admission_check
+            tools
+            ~check:(fun invocation _binding ->
+              check_extension_native actor_ref profile invocation |> Result.map ~f:ignore)
+          |> fun tools ->
           Agent_session.Script_tool_calls.with_generated_creation_service
             tools
             t.generated_creation
@@ -1831,7 +1809,7 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
           |> fun tools ->
           Agent_session.Script_tool_calls.with_job_service
             tools
-            (extension_jobs t actor_ref registry)
+            (extension_jobs t actor_ref registry native)
           |> fun tools ->
           Agent_session.Script_tool_calls.with_subscription_service
             tools
@@ -2161,7 +2139,7 @@ let model_job_inference t entry job =
 
 let job_services
       t
-      state
+      (state : Agent_session.Session_state.t)
       actor_ref
       pending
       ~initialization_scope
@@ -2506,10 +2484,424 @@ let resolve_state_inference_context t (state : Agent_session.Session_state.t) =
         (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
 ;;
 
+let original_source_lease (t : t) ~sw ~revision =
+  let receipt = (Agent_session.Prompt_revision.artifact revision).source_receipt in
+  let selection =
+    Option.bind receipt ~f:(fun receipt ->
+      Agent_session.Prompt_catalog.source_selection
+        t.prompts
+        (Agent_store.Prompt_source_receipt.definition_id receipt))
+  in
+  Agent_session.Prompt_source_lease.create
+    receipt
+    ~selection
+    ~sw
+    ~checkpoint:Eio.Fiber.check
+;;
+
+let source_binding (t : t) ~source_lease =
+  match t.child_sources with
+  | None -> Ok None
+  | Some policy ->
+    let open Result.Let_syntax in
+    let%map artifacts =
+      Agent_store.Prompt_artifact_store.create
+        ~env:t.env
+        ~root:
+          (Agent_store.Data_root.prompt_artifacts_path
+             (Agent_store.Session_store.data_root t.store))
+      |> Result.map_error ~f:protocol_of_store
+    in
+    Some
+      (Agent_session.Captured_agent_runner.Source_binding.create
+         ~source:policy.source
+         ~runtime_policy_revision:policy.runtime_policy_revision
+         ~content_limits:t.content_limits
+         ~artifact_store:artifacts
+         ~source_lease)
+;;
+
+let source_attachment_error error =
+  unavailable Invalid_state (Core.Error.to_string_hum error)
+;;
+
+let restore_authored_code
+      t
+      ~artifacts
+      ~source
+      (record : Agent_store.Delegation_store.record)
+  =
+  let module B = Chat_response.Background_request.Agent_artifact in
+  let module Path = Source.Portable_path in
+  let module Source = Agent_session.Authored_agent_source in
+  let open Result.Let_syntax in
+  let%bind manifest_sha256 =
+    Chatml_source.Digest.of_hex record.admission.manifest_sha256
+    |> Result.map_error ~f:(fun _ ->
+      protocol_of_store
+        (Agent_store.Store_error.Corrupt "authored artifact digest is invalid"))
+  in
+  let%bind root_relative_path =
+    Path.create (Source.identity source).root_relative_path
+    |> Result.map_error ~f:(fun _ ->
+      protocol_of_store
+        (Agent_store.Store_error.Corrupt "authored artifact member is invalid"))
+  in
+  Agent_session.Prompt_child_source.restore
+    ~artifact_store:artifacts
+    ~definition:
+      (Agent_session.Prompt_revision.definition (Source.defining_revision source))
+    ~content_limits:t.content_limits
+    (B.create
+       ~revision_id:record.admission.revision_id
+       ~manifest_sha256
+       ~root_relative_path)
+    ~checkpoint:Eio.Fiber.check
+  |> Result.map ~f:Agent_session.Prompt_child_source.revision
+;;
+
+let restore_authored_selection t ~artifacts ~public record =
+  let module Source = Agent_session.Authored_agent_source in
+  let open Result.Let_syntax in
+  let%bind origin =
+    Result.of_option
+      record.Agent_store.Delegation_store.admission.authored_tool
+      ~error:(unavailable Permission_denied "authored selection has no original wrapper")
+  in
+  let%bind prepared =
+    Authored_resources.find t.authored_resources ~public ~name:origin.name
+  in
+  match Source.defining_reference prepared.source with
+  | None -> Source.load_artifact ~artifact_store:artifacts ~reservation:record
+  | Some _ ->
+    restore_authored_code t ~artifacts ~source:prepared.source record
+    |> Result.map ~f:Agent_session.Prompt_revision.artifact
+;;
+
+let select_authored_code t ~binding ~parent ~reference ~recorded ~checkpoint =
+  let module Child = Agent_session.Prompt_child_source in
+  let open Result.Let_syntax in
+  let%bind policy =
+    Result.of_option
+      t.script_preparation
+      ~error:
+        (unavailable Invalid_state "authored child requires script preparation policy")
+  in
+  match binding with
+  | Some binding ->
+    Agent_session.Captured_agent_runner.Source_binding.select_child
+      binding
+      ~script_preparation:policy
+      ~env:t.env
+      ~parent
+      ~reference
+      ~invocation:Delegated_ui
+      ~recorded
+      ~checkpoint
+  | None ->
+    let%bind artifacts =
+      Agent_store.Prompt_artifact_store.create
+        ~env:t.env
+        ~root:
+          (Agent_store.Data_root.prompt_artifacts_path
+             (Agent_store.Session_store.data_root t.store))
+      |> Result.map_error ~f:protocol_of_store
+    in
+    (match recorded, Prompt.Chat_markdown.Agent_reference.source_mode reference with
+     | Some recorded, _ ->
+       Child.restore
+         ~artifact_store:artifacts
+         ~definition:(Agent_session.Prompt_revision.definition parent)
+         ~content_limits:t.content_limits
+         recorded
+         ~checkpoint
+     | None, Captured ->
+       Child.captured
+         ~parent
+         ~reference
+         ~artifact_store:artifacts
+         ~policy
+         ~invocation:Delegated_ui
+         ~content_limits:t.content_limits
+         ~env:t.env
+         ~checkpoint
+     | None, File ->
+       Error (unavailable Permission_denied "authored File source owner is unavailable"))
+;;
+
+let prepare_authored_job_source
+      t
+      ?selected_context
+      ~actor_ref
+      prepared
+      ~implementation
+      ~owner
+      ~request
+      ~checkpoint
+  =
+  let module C = Chat_response.Tool_capability in
+  let module B = Chat_response.Background_request in
+  let module A = Agent_session.Session_actor in
+  let module Source = Agent_session.Authored_agent_source in
+  let open Result.Let_syntax in
+  checkpoint ();
+  let%bind actor = extension_actor actor_ref in
+  let%bind state = A.state actor in
+  let%bind parent =
+    Session_registry.find t.registry state.identity.session_id
+    |> Result.of_option
+         ~error:(unavailable Invalid_state "authored source runtime is not installed")
+  in
+  Runtime_owner.with_background_runtime parent.runtime (fun runtime ->
+    let%bind native =
+      Result.of_option
+        runtime.Agent_session.Runtime_builder.native_runtime
+        ~error:
+          (unavailable Invalid_state "authored source native resources are unavailable")
+    in
+    let%bind capabilities =
+      Lazy.force native.capabilities
+      |> Result.map_error ~f:(fun error -> unavailable Permission_denied error.C.message)
+    in
+    let%bind execution =
+      B.prepare
+        ~env:t.env
+        ~current_capabilities:(fun () -> capabilities)
+        ~policy:(B.policy request)
+        request
+    in
+    let%bind input =
+      match execution with
+      | Script _ ->
+        Error (unavailable Invalid_request "authored source requires a Tool request")
+      | Tool { capabilities; reference; input; _ } ->
+        let%bind binding =
+          C.resolve capabilities ~id:reference.id ~fingerprint:reference.fingerprint
+          |> Result.map_error ~f:(fun error ->
+            unavailable Permission_denied error.C.message)
+        in
+        (match C.native_implementation binding with
+         | Some actual when phys_equal actual implementation -> Ok input
+         | Some _ | None ->
+           Error
+             (unavailable
+                Permission_denied
+                "authored source belongs to another native function"))
+    in
+    let source = prepared.Agent_session.Runtime_builder.source in
+    let%bind call =
+      Chat_response.Agent_tool_contract.decode (Source.identity source).policy input
+    in
+    let%bind _ =
+      Agent_session.Job_launch.derive
+        ~session_id:state.identity.session_id
+        ~generation:state.identity.generation
+        ~invocations:state.invocations
+        ~events:state.moderator_executions
+        ~jobs:state.jobs
+        ~owner
+    in
+    match call.session_id with
+    | Some _ -> Ok None
+    | None ->
+      let%bind parent, reference =
+        match selected_context with
+        | Some (parent, reference) -> Ok (parent, reference)
+        | None ->
+          let%map reference =
+            Result.of_option
+              (Source.defining_reference source)
+              ~error:
+                (unavailable
+                   Permission_denied
+                   "authored queued source has no owned declaration")
+          in
+          Source.defining_revision source, reference
+      in
+      let%bind binding = source_binding t ~source_lease:prepared.resources.source_lease in
+      checkpoint ();
+      let%map selected =
+        select_authored_code
+          t
+          ~binding
+          ~parent
+          ~reference
+          ~recorded:(B.agent_artifact request)
+          ~checkpoint
+      in
+      checkpoint ();
+      Some (Agent_session.Prompt_child_source.reference selected))
+;;
+
+let prepare_authored_code
+      t
+      ~prepared
+      ~revision
+      ~authority
+      ~(state : Agent_session.Session_state.t)
+      ~profile
+      ~sw
+      ~actor_ref
+      ~approval_provider
+      ~storage_paths
+      ~shell_state
+      ~run_preparation
+  =
+  let module B = Agent_session.Runtime_builder in
+  let module Code = Agent_session.Authored_code_preparation in
+  let module C = Chat_response.Tool_capability in
+  let open Result.Let_syntax in
+  match Agent_session.Authored_agent_source.defining_reference prepared.B.source with
+  | None -> Ok None
+  | Some _ ->
+    let%bind policy =
+      Result.of_option
+        t.script_preparation
+        ~error:
+          (unavailable Invalid_state "selected specialist requires script preparation")
+    in
+    let%bind capabilities =
+      Lazy.force prepared.resources.native.capabilities
+      |> Result.map_error ~f:(fun error -> unavailable Permission_denied error.C.message)
+    in
+    let authorize () =
+      let artifact = Agent_session.Prompt_revision.artifact revision in
+      Agent_session.Delegation_authority.check_authored_preparation
+        authority
+        ~origin:
+          { name =
+              (Agent_session.Authored_agent_source.identity prepared.source).tool_name
+          ; source_sha256 =
+              Agent_session.Authored_agent_source.fingerprint prepared.source
+          }
+        ~capabilities
+        ~session_id:state.identity.session_id
+        ~revision_id:artifact.revision_id
+        ~manifest_sha256:artifact.manifest_sha256
+        ~permission_profile:profile
+    in
+    let%bind () = authorize () in
+    let exception Admission_rejected of Agent_protocol.Error.t in
+    let check_authority () =
+      Eio.Fiber.check ();
+      match authorize () with
+      | Ok () -> Eio.Fiber.check ()
+      | Error error -> raise (Admission_rejected error)
+    in
+    let prepare_persistent_source
+          ~binding
+          ~defining_revision
+          ~reference
+          ~owner
+          ~request
+          ~checkpoint
+      =
+      checkpoint ();
+      let%bind implementation =
+        C.native_implementation binding
+        |> Result.of_option
+             ~error:
+               (unavailable Permission_denied "persistent source is not a native binding")
+      in
+      let%bind public =
+        Lazy.force prepared.resources.native.capabilities
+        |> Result.map_error ~f:(fun error ->
+          unavailable Permission_denied error.C.message)
+      in
+      let saved = C.reference binding in
+      let%bind current =
+        C.resolve public ~id:saved.id ~fingerprint:saved.fingerprint
+        |> Result.map_error ~f:(fun error ->
+          unavailable Permission_denied error.C.message)
+      in
+      let%bind () =
+        match C.native_implementation current with
+        | Some actual when phys_equal actual implementation -> Ok ()
+        | None | Some _ ->
+          Error (unavailable Permission_denied "persistent source native owner changed")
+      in
+      let%bind nested =
+        Authored_resources.find t.authored_resources ~public ~name:saved.name
+      in
+      prepare_authored_job_source
+        t
+        ~selected_context:(defining_revision, reference)
+        ~actor_ref
+        nested
+        ~implementation
+        ~owner
+        ~request
+        ~checkpoint
+    in
+    let persist_extension_snapshots extension_snapshots =
+      Eio.Switch.check sw;
+      let saved =
+        match !actor_ref with
+        | None -> Ok ()
+        | Some actor ->
+          (match !run_preparation with
+           | None ->
+             Agent_session.Session_actor.replace_shell_extension_snapshots
+               actor
+               extension_snapshots
+           | Some preparation ->
+             Agent_session.Session_actor.Constructor_mutations
+             .replace_shell_extension_snapshots
+               actor
+               ~preparation
+               extension_snapshots)
+          |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+      in
+      Result.map saved ~f:(fun () ->
+        (* Initialization transfers this same projection into its candidate only
+           after the actor's acknowledged write; it must not restore stale state. *)
+        shell_state := { !shell_state with Session.Shell_state.extension_snapshots })
+    in
+    Chat_response.Startup_compilation.with_context
+      ~limits:(Agent_session.Runtime_script_preparation.compilation policy)
+      ~env:t.env
+      ~checkpoint:Eio.Fiber.check
+      ~map_error:(fun error ->
+        unavailable Prompt_unavailable error.Chatml_compilation.message)
+      ~f:(fun startup ->
+        let prepared =
+          try
+            Code.prepare
+              { source = prepared.source
+              ; revision = prepared.revision
+              ; native = prepared.resources.native
+              ; definition = prepared.resources.definition
+              ; managed = prepared.resources.managed
+              ; agent_source = B.authored_source_binding prepared
+              ; prepare_persistent_source = Some prepare_persistent_source
+              }
+              ~selected:revision
+              ~script_preparation:policy
+              ~startup
+              ~env:t.env
+              ~sw
+              ~manifest_authorizer:(B.authored_code_authorizer prepared revision)
+              ~approval_provider
+              ~response_dir:
+                Eio.Path.(
+                  storage_paths.Agent_session.Runtime_paths.session_dir / "responses")
+              ~extension_snapshots:!shell_state.Session.Shell_state.extension_snapshots
+              ~persist_extension_snapshots
+              ~check_authority
+              ~checkpoint:Eio.Fiber.check
+          with
+          | Admission_rejected error -> Error error
+        in
+        Result.map prepared ~f:Option.some)
+      ()
+;;
+
 let prepare_authored_graph
       t
+      ~startup
       ~sw
       ~revision
+      ~source_lease
       ~paths
       ~storage_paths
       ~(state : Agent_session.Session_state.t)
@@ -2523,17 +2915,30 @@ let prepare_authored_graph
   =
   let open Result.Let_syntax in
   let%bind inference_context = resolve_state_inference_context t state in
+  let%bind agent_source = source_binding t ~source_lease in
   Authored_resources.prepare
     t.authored_resources
     ~sw
     ~max_depth:t.limits.delegation_max_depth
     ~revision
     ~services:t.authored_services
-    ~build:(fun ~parent_revision ~tool_name ~native_registrations ->
-      Agent_session.Runtime_builder.prepare_authored_resources
-        ~native_registrations
-        ~parent_revision
+    ~prepare_source:(prepare_authored_job_source t ?selected_context:None ~actor_ref)
+    ~capture:(fun ~parent_revision ~tool_name ->
+      Agent_session.Authored_source_preparation.with_prepared
+        ~startup:(Some startup)
+        ~script_preparation:t.script_preparation
+        ~content_limits:t.content_limits
+        ~parent:parent_revision
         ~tool_name
+        ~env:t.env
+        ~checkpoint:Eio.Fiber.check
+        ~f:(fun _ source -> Ok source))
+    ~build:(fun ~source ~native_registrations ->
+      Agent_session.Runtime_builder.prepare_authored_resources_from_source
+        source
+        ~agent_source
+        ~startup
+        ~native_registrations
         ~native_service_revision
         ~inference_context
         ~inference_identity:(Graph_tracking.identity tracking)
@@ -2549,7 +2954,7 @@ let prepare_authored_graph
         ~authoring_validation_host
         ~manifest_authorizer:(fun specialist ->
           match
-            Chat_response.Agent_runtime.inspect_shell
+            Chat_response.Agent_runtime.inspect_resources
               ~env:t.env
               ~platform:(Chat_response.Agent_runtime.platform ())
               ~prompt_elements:(Agent_session.Prompt_revision.elements specialist)
@@ -2568,7 +2973,10 @@ let prepare_authored_graph
               actor_ref
               shell_state)
         ~approval_provider:(shell_approval_provider t profile actor_ref)
-        ~approval_store:(shell_approval_store state actor_ref shell_state))
+        ~approval_store:(shell_approval_store state actor_ref shell_state)
+      |> Result.bind ~f:(fun prepared ->
+        Agent_session.Runtime_builder.with_authored_source_lease prepared ~source_lease
+        |> Result.map_error ~f:source_attachment_error))
 ;;
 
 let independent_resource_host t =
@@ -2634,64 +3042,87 @@ let independent_resource_host t =
           Error
             (unavailable Permission_denied "independent ancestry has no authored root")
         | Authored revision ->
-          let%bind paths = runtime_paths t handle source state in
-          let%bind profile = restore_state_profile t state in
-          let actor_ref = ref (Some parent.actor) in
-          let shell_state = ref state.shell in
-          let%bind tracking = create_graph_tracking t actor_ref in
-          register_tracking tracking;
-          let%bind prepared, native_registrations =
-            prepare_authored_graph
-              t
-              ~sw
-              ~revision
-              ~paths
-              ~storage_paths:paths
-              ~state
-              ~profile
-              ~actor_ref
-              ~tracking
-              ~shell_state
-              ~native_service_revision:
-                (Agent_session.Session_management_channel.policy_fingerprint
-                   t.session_helpers)
-              ~one_off_policy:Chat_response.One_off_request.default_policy
-              ~authoring_validation_host:t.authoring_validation_host
-          in
-          let%bind inference_context = resolve_state_inference_context t state in
-          let%bind resources =
-            B.prepare_resources
-              ~inference_context
-              ~inference_identity:(Graph_tracking.identity tracking)
-              ~on_inference_attempt:(Graph_tracking.on_attempt tracking)
-              ~on_inference_completion:(Graph_tracking.on_completion tracking)
-              ~on_inference_observation:(Graph_tracking.on_observation tracking)
-              ~native_registrations
-              ~native_service_revision:
-                (Agent_session.Session_management_channel.policy_fingerprint
-                   t.session_helpers)
-              ~env:t.env
-              ~sw
-              ~paths
-              ~storage_paths:paths
-              ~revision
-              ~session_id:state.identity.session_id
-              ~one_off_policy:Chat_response.One_off_request.default_policy
-              ~authoring_validation_host:t.authoring_validation_host
-              ~manifest_authorizer:
-                (manifest_authorizer t profile revision state actor_ref shell_state)
-              ~approval_provider:(shell_approval_provider t profile actor_ref)
-              ~approval_store:(shell_approval_store state actor_ref shell_state)
-          in
-          let%bind public =
-            Lazy.force resources.native.capabilities
-            |> Result.map_error ~f:(fun error ->
-              unavailable Permission_denied error.Chat_response.Tool_capability.message)
-          in
-          let%map () =
-            Authored_resources.install t.authored_resources ~sw ~public prepared
-          in
-          resources)
+          Agent_session.Runtime_script_preparation.with_revision
+            t.script_preparation
+            revision
+            ~env:t.env
+            ~invocation:
+              (Agent_session.Runtime_script_preparation.Invocation.of_root
+                 state.spec.root_invocation)
+            ~checkpoint:Eio.Fiber.check
+            ~f:(fun startup ~compilation_limits:_ ~programs:_ ->
+              let%bind paths = runtime_paths t handle source state in
+              let%bind profile = restore_state_profile t state in
+              let actor_ref = ref (Some parent.actor) in
+              let shell_state = ref state.shell in
+              let%bind tracking = create_graph_tracking t actor_ref in
+              register_tracking tracking;
+              let source_lease = original_source_lease t ~sw ~revision in
+              let%bind prepared, native_registrations =
+                prepare_authored_graph
+                  t
+                  ~startup
+                  ~sw
+                  ~revision
+                  ~source_lease
+                  ~paths
+                  ~storage_paths:paths
+                  ~state
+                  ~profile
+                  ~actor_ref
+                  ~tracking
+                  ~shell_state
+                  ~native_service_revision:
+                    (Agent_session.Session_management_channel.policy_fingerprint
+                       t.session_helpers)
+                  ~one_off_policy:Chat_response.One_off_request.default_policy
+                  ~authoring_validation_host:t.authoring_validation_host
+              in
+              let%bind inference_context = resolve_state_inference_context t state in
+              let%bind agent_source = source_binding t ~source_lease in
+              let%bind resources =
+                B.prepare_resources
+                  ~agent_source
+                  ~startup:(Some startup)
+                  ~root_invocation:state.Agent_session.Session_state.spec.root_invocation
+                  ~script_preparation:t.script_preparation
+                  ~inference_context
+                  ~inference_identity:(Graph_tracking.identity tracking)
+                  ~on_inference_attempt:(Graph_tracking.on_attempt tracking)
+                  ~on_inference_completion:(Graph_tracking.on_completion tracking)
+                  ~on_inference_observation:(Graph_tracking.on_observation tracking)
+                  ~native_registrations
+                  ~native_service_revision:
+                    (Agent_session.Session_management_channel.policy_fingerprint
+                       t.session_helpers)
+                  ~env:t.env
+                  ~sw
+                  ~paths
+                  ~storage_paths:paths
+                  ~revision
+                  ~session_id:state.identity.session_id
+                  ~one_off_policy:Chat_response.One_off_request.default_policy
+                  ~authoring_validation_host:t.authoring_validation_host
+                  ~manifest_authorizer:
+                    (manifest_authorizer t profile revision state actor_ref shell_state)
+                  ~approval_provider:(shell_approval_provider t profile actor_ref)
+                  ~approval_store:(shell_approval_store state actor_ref shell_state)
+              in
+              let%bind resources =
+                B.with_resource_source_lease resources ~source_lease
+                |> Result.map_error ~f:source_attachment_error
+              in
+              let%bind public =
+                Lazy.force resources.native.capabilities
+                |> Result.map_error ~f:(fun error ->
+                  unavailable
+                    Permission_denied
+                    error.Chat_response.Tool_capability.message)
+              in
+              let%map () =
+                Authored_resources.install t.authored_resources ~sw ~public prepared
+              in
+              resources))
   ; build_generated =
       (fun ~sw:_ ~parent ancestor ->
         let state = ancestor.R.state in
@@ -2727,9 +3158,11 @@ let independent_resource_host t =
             Authored_resources.resolve t.authored_resources record ~public:capabilities
           in
           let%bind _ =
-            Agent_session.Authored_agent_source.load_artifact
-              ~artifact_store
-              ~reservation:record
+            restore_authored_selection
+              t
+              ~artifacts:artifact_store
+              ~public:capabilities
+              record
           in
           let%bind selected =
             Chat_response.Background_request.rebind_capabilities
@@ -3207,67 +3640,99 @@ let prepare_runtime_at_paths
       match source with
       | Authored revision ->
         let construct_root sw =
-          match t.qualify_chatml_extensions with
-          | false ->
-            construct
-              sw
-              (Agent_session.Runtime_builder.build ~revision)
-              (manifest_authorizer
-                 ~run_preparation
-                 t
-                 profile
-                 revision
-                 state
-                 actor_ref
-                 shell_state)
-          | true ->
-            let module B = Agent_session.Runtime_builder in
-            let services = extension_services t profile actor_ref ~state in
-            let%bind prepared, native_registrations =
-              prepare_authored_graph
-                t
-                ~sw
-                ~revision
-                ~paths
-                ~storage_paths
-                ~state
-                ~profile
-                ~actor_ref
-                ~tracking
-                ~shell_state
-                ~native_service_revision:services.native_service_revision
-                ~one_off_policy:services.one_off_policy
-                ~authoring_validation_host:services.authoring_validation_host
-            in
-            let%bind runtime =
-              construct
-                sw
-                (B.build_with_extensions ~native_registrations ~revision ~services)
-                (manifest_authorizer
-                   ~run_preparation
-                   t
-                   profile
-                   revision
-                   state
-                   actor_ref
-                   shell_state)
-            in
-            let installed =
-              let%bind public =
-                Lazy.force (Option.value_exn runtime.native_runtime).capabilities
-                |> Result.map_error ~f:(fun error ->
-                  unavailable
-                    Permission_denied
-                    error.Chat_response.Tool_capability.message)
+          Agent_session.Runtime_script_preparation.with_revision
+            t.script_preparation
+            revision
+            ~env:t.env
+            ~invocation:
+              (Agent_session.Runtime_script_preparation.Invocation.of_root
+                 state.spec.root_invocation)
+            ~checkpoint:Eio.Fiber.check
+            ~f:(fun startup ~compilation_limits:_ ~programs:_ ->
+              let source_lease = original_source_lease t ~sw ~revision in
+              let%bind agent_source = source_binding t ~source_lease in
+              let built =
+                match t.qualify_chatml_extensions with
+                | false ->
+                  construct
+                    sw
+                    (Agent_session.Runtime_builder.build
+                       ~agent_source
+                       ~startup:(Some startup)
+                       ~root_invocation:
+                         state.Agent_session.Session_state.spec.root_invocation
+                       ~script_preparation:t.script_preparation
+                       ~revision)
+                    (manifest_authorizer
+                       ~run_preparation
+                       t
+                       profile
+                       revision
+                       state
+                       actor_ref
+                       shell_state)
+                | true ->
+                  let module B = Agent_session.Runtime_builder in
+                  let services = extension_services t profile actor_ref ~state in
+                  let%bind prepared, native_registrations =
+                    prepare_authored_graph
+                      t
+                      ~startup
+                      ~sw
+                      ~revision
+                      ~source_lease
+                      ~paths
+                      ~storage_paths
+                      ~state
+                      ~profile
+                      ~actor_ref
+                      ~tracking
+                      ~shell_state
+                      ~native_service_revision:services.native_service_revision
+                      ~one_off_policy:services.one_off_policy
+                      ~authoring_validation_host:services.authoring_validation_host
+                  in
+                  let%bind runtime =
+                    construct
+                      sw
+                      (B.build_with_extensions
+                         ~agent_source
+                         ~startup:(Some startup)
+                         ~root_invocation:
+                           state.Agent_session.Session_state.spec.root_invocation
+                         ~script_preparation:t.script_preparation
+                         ~native_registrations
+                         ~revision
+                         ~services)
+                      (manifest_authorizer
+                         ~run_preparation
+                         t
+                         profile
+                         revision
+                         state
+                         actor_ref
+                         shell_state)
+                  in
+                  let installed =
+                    let%bind public =
+                      Lazy.force (Option.value_exn runtime.native_runtime).capabilities
+                      |> Result.map_error ~f:(fun error ->
+                        unavailable
+                          Permission_denied
+                          error.Chat_response.Tool_capability.message)
+                    in
+                    Authored_resources.install t.authored_resources ~sw ~public prepared
+                  in
+                  (match installed with
+                   | Ok () -> Ok runtime
+                   | Error error ->
+                     (try Eio.Cancel.protect runtime.close with
+                      | _ -> ());
+                     Error error)
               in
-              Authored_resources.install t.authored_resources ~sw ~public prepared
-            in
-            (match installed with
-             | Ok () -> Ok runtime
-             | Error error ->
-               (try Eio.Cancel.protect runtime.close with
-                | _ -> ());
-               Error error)
+              Result.bind built ~f:(fun runtime ->
+                Agent_session.Runtime_builder.with_source_lease runtime ~source_lease
+                |> Result.map_error ~f:source_attachment_error))
         in
         prepare_extension_runtime_scope t construct_root
       | Generated_artifact { artifact; _ } ->
@@ -3327,7 +3792,15 @@ let prepare_runtime_at_paths
              | Error { code = Server_shutting_down; _ }, _ | Ok _, _ -> Ok ()
              | Error error, _ -> Error error)
         in
-        let build ~sw ~native ~current ~managed ~managed_current ~ancestor_capabilities =
+        let build
+              ~sw
+              ~native
+              ~current
+              ~managed
+              ~managed_current
+              ~ancestor_capabilities
+              ~source_lease
+          =
           let%bind source, selected =
             match record.admission.authored_tool with
             | Some origin ->
@@ -3340,25 +3813,12 @@ let prepare_runtime_at_paths
               let%bind selected =
                 Authored_resources.resolve t.authored_resources record ~public:current
               in
-              let%bind artifact =
-                Agent_session.Authored_agent_source.load_artifact
-                  ~artifact_store
-                  ~reservation:record
-              in
               let%map revision =
-                Agent_session.Prompt_revision_builder.reparse
-                  ~definition:(Agent_session.Prompt_revision.definition prepared.revision)
-                  ~artifact
-                  ~materialized_tree:
-                    (Agent_store.Prompt_artifact_store.materialized_tree
-                       artifact_store
-                       artifact.revision_id)
-                |> Result.map_error ~f:(fun errors ->
-                  unavailable
-                    Prompt_unavailable
-                    (List.map errors ~f:(fun error ->
-                       error.Agent_session.Prompt_revision_builder.Diagnostic.message)
-                     |> String.concat ~sep:"\n"))
+                restore_authored_code
+                  t
+                  ~artifacts:artifact_store
+                  ~source:prepared.source
+                  record
               in
               `Authored (prepared, revision), selected
             | None ->
@@ -3468,13 +3928,28 @@ let prepare_runtime_at_paths
                    ~inherited_managed
                    ~authority)
             | `Authored (prepared, revision) ->
-              let%map history =
+              let%bind history =
                 Result.of_option
                   existing_history
                   ~error:
                     (unavailable
                        Invalid_state
                        "authored child requires admitted stored history")
+              in
+              let%map code =
+                prepare_authored_code
+                  t
+                  ~prepared
+                  ~revision
+                  ~authority
+                  ~state
+                  ~profile
+                  ~sw
+                  ~actor_ref
+                  ~approval_provider
+                  ~storage_paths
+                  ~shell_state
+                  ~run_preparation
               in
               fun ~sw
                 ~env
@@ -3493,6 +3968,7 @@ let prepare_runtime_at_paths
                   ~services
                   ~revision
                   ~prepared
+                  ~code
                   ~authority
                   ~history
                   ~sw
@@ -3508,10 +3984,16 @@ let prepare_runtime_at_paths
                   ~history_namespace
                   ~next_history_sequence
           in
-          let%map runtime =
+          let%bind runtime =
             construct sw build (fun _ ->
               Shell_runtime.Manifest_authorizer.Reject
                 "generated definitions cannot authorize new shell manifests")
+          in
+          let%map runtime =
+            Agent_session.Runtime_builder.with_source_lease
+              runtime
+              ~source_lease:(Agent_session.Prompt_source_lease.borrow source_lease)
+            |> Result.map_error ~f:source_attachment_error
           in
           { runtime with ancestor_capabilities = Some ancestor_capabilities }
         in
@@ -3550,7 +4032,14 @@ let prepare_runtime_at_paths
                    Agent_session.Script_tool_calls.current_capabilities tools
                  | None -> current
                in
-               build ~sw ~native ~current ~managed ~managed_current ~ancestor_capabilities)
+               build
+                 ~sw
+                 ~native
+                 ~current
+                 ~managed
+                 ~managed_current
+                 ~ancestor_capabilities
+                 ~source_lease:parent_runtime.source_lease)
          | Independent _ ->
            let retained = ref None in
            let with_resources f =
@@ -3600,7 +4089,8 @@ let prepare_runtime_at_paths
                  ~current
                  ~managed:parent_resources.managed
                  ~managed_current:(fun () -> current)
-                 ~ancestor_capabilities))
+                 ~ancestor_capabilities
+                 ~source_lease:parent_resources.source_lease))
     in
     runtime, shell_state
   in
@@ -3707,7 +4197,7 @@ let quota_overflow = function
   | Queue -> Queue
 ;;
 
-let capacity_for_state t state =
+let capacity_for_state t (state : Agent_session.Session_state.t) =
   let open Result.Let_syntax in
   match state.Agent_session.Session_state.spec.quota_key with
   | None -> Ok None
@@ -3724,7 +4214,7 @@ let capacity_for_state t state =
              (unavailable Invalid_state "durable session has no workspace definition")
     in
     let%bind workspace =
-      Agent_session.Workspace_catalog.find t.workspaces definition_id
+      Catalogs.find_workspace t.catalogs definition_id
       |> Result.of_option
            ~error:(unavailable Workspace_not_found "workspace definition is unavailable")
     in
@@ -3899,8 +4389,37 @@ let create_retention_preflight t handle journal =
     ~validate:(validate_recovery_document t handle)
 ;;
 
+let seed_recovery t =
+  Session_seed_recovery.create
+    ~env:t.env
+    ~store:t.store
+    ~registry:t.registry
+    ~idempotency_store:t.idempotency_store
+    ~journal_document_limits:t.journal_document_limits
+    ~storage_limits:
+      { max_journal_payload = t.limits.max_journal_payload
+      ; max_segment_bytes = t.limits.max_segment_bytes
+      ; max_segment_frames = t.limits.max_segment_frames
+      ; snapshot_payload_limit = t.limits.snapshot_payload_limit
+      }
+    ~max_work_steps:(Document_schema.Limits.max_nodes t.document_limits)
+;;
+
+let with_seed_work = Session_seed_recovery.with_work
+
+let require_seed_success t handle =
+  Session_seed_recovery.require_success (seed_recovery t) handle
+;;
+
 let prune_snapshot t handle journal persistence _installed =
   let open Result.Let_syntax in
+  (* The first audited Created is the Pending seed's recovery authority. Neither
+     cache maintenance nor closure may seal it away before durable Success. *)
+  let%bind () =
+    require_seed_success t handle
+    |> Result.map_error ~f:(fun failure ->
+      Agent_store.Store_error.Corrupt failure.message)
+  in
   let directory = Agent_store.Session_store.Handle.snapshot_directory handle in
   let%bind () =
     match Agent_session.Session_persistence.retention_preflight persistence with
@@ -4781,31 +5300,47 @@ let create_loaded_entry
 
 let close_recovered_entry t owner handle journal persistence actor =
   Session_recovery_owner.with_entry_close owner (fun () ->
-    let first_close = not (Session_recovery_owner.is_closing owner) in
-    Session_recovery_owner.prepare_close owner;
-    let checkpoint_failure =
+    let maintain_checkpoint () =
+      let first_close = not (Session_recovery_owner.is_closing owner) in
+      Session_recovery_owner.prepare_close owner;
       if first_close
       then (
         match Agent_store.Session_store.Handle.metadata_checked handle with
         | Error _ -> None (* Unavailable projection cannot admit cache maintenance. *)
         | Ok _ ->
-          (match checkpoint_entry t handle journal persistence actor with
-           | Ok () -> None
-           | Error failure ->
-             Session_recovery_owner.record_checkpoint_failure owner failure;
-             Some failure))
+          (match require_seed_success t handle with
+           | Error _ ->
+             None (* Retain genuine Pending proof; still close all resources. *)
+           | Ok () ->
+             (match checkpoint_entry t handle journal persistence actor with
+              | Ok () -> None
+              | Error failure ->
+                Session_recovery_owner.record_checkpoint_failure owner failure;
+                Some failure)))
       else None
     in
-    match Session_recovery_owner.close owner with
-    | Error failure ->
-      raise
-        (Session_registry.Cleanup_failed
-           (Session_registry.Cleanup_failure.rejected failure))
-    | Ok () ->
-      Option.iter checkpoint_failure ~f:(fun failure ->
-        raise
-          (Session_registry.Cleanup_failed
-             (Session_registry.Cleanup_failure.rejected failure))))
+    match maintain_checkpoint () with
+    | checkpoint_failure ->
+      (match Session_recovery_owner.close owner with
+       | Error failure ->
+         raise
+           (Session_registry.Cleanup_failed
+              (Session_registry.Cleanup_failure.rejected failure))
+       | Ok () ->
+         Option.iter checkpoint_failure ~f:(fun failure ->
+           raise
+             (Session_registry.Cleanup_failed
+                (Session_registry.Cleanup_failure.rejected failure))))
+    | exception exn ->
+      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      (* The actual owner bracket joins/releases resources even when the gate or
+         checkpoint throws, retaining secondary cleanup diagnostics alongside the
+         original exception and backtrace. It never recursively closes the entry. *)
+      let (_ : (Session_registry.entry, Agent_protocol.Error.t) Result.t) =
+        Session_registry.with_recovery_owner t.registry owner (fun () ->
+          Exn.raise_with_original_backtrace exn backtrace)
+      in
+      assert false)
 ;;
 
 let create_unloaded_entry
@@ -4989,7 +5524,14 @@ let commit_creation t persistence state ~command_audit =
   transition
 ;;
 
-let persist_initial_snapshot t handle journal persistence state =
+let persist_initial_snapshot
+      ?(retain_initial_proof = false)
+      t
+      handle
+      journal
+      persistence
+      state
+  =
   let open Result.Let_syntax in
   let%bind installed =
     Agent_session.Session_persistence.install_snapshot
@@ -5001,13 +5543,16 @@ let persist_initial_snapshot t handle journal persistence state =
       state
     |> Result.map_error ~f:protocol_of_store
   in
-  ignore
-    (prune_snapshot t handle journal persistence installed
-     : (unit, Agent_store.Store_error.t) result);
+  if not retain_initial_proof
+  then
+    ignore
+      (prune_snapshot t handle journal persistence installed
+       : (unit, Agent_store.Store_error.t) result);
   persist_metadata t handle state |> Result.map_error ~f:protocol_of_store
 ;;
 
-let finish_unloaded_creation t handle state ~command_audit =
+let finish_unloaded_creation ?(retain_initial_proof = false) t handle state ~command_audit
+  =
   let open Result.Let_syntax in
   let%bind state, capacity = prepare_initial_capacity t state in
   let cleanup = ref (fun () -> Option.iter capacity ~f:Session_capacity.release) in
@@ -5058,7 +5603,9 @@ let finish_unloaded_creation t handle state ~command_audit =
     | Error _ as failure -> failure
     | Ok creation ->
       let state = creation.Agent_session.Session_transition.state in
-      (match persist_initial_snapshot t handle journal persistence state with
+      (match
+         persist_initial_snapshot ~retain_initial_proof t handle journal persistence state
+       with
        | Error _ as failure -> failure
        | Ok () ->
          (* [create_unloaded_entry] takes ownership on entry, including failures. *)
@@ -5129,7 +5676,24 @@ let finish_creation t handle _revision _profile provisional ~command_audit =
     Exn.raise_with_original_backtrace exn backtrace
 ;;
 
-let create_session
+let with_catalog_admission t ~f =
+  match
+    Catalogs.with_admission t.catalogs ~f:(fun () ->
+      match Agent_session.Prompt_catalog.publication_state t.prompts with
+      | Available -> f ()
+      | Sealed -> Error (unavailable Conflict "prompt catalog publication is pending")
+      | Uncertain ->
+        Error (unavailable Invalid_state "prompt catalog publication is uncertain"))
+  with
+  | Ok result -> result
+  | Error Busy -> Error (unavailable Conflict "factory catalog publication is pending")
+  | Error Publication_uncertain ->
+    Error (unavailable Invalid_state "factory catalog publication is uncertain")
+  | Error Foreign_domain ->
+    Error (unavailable Invalid_state "factory catalog belongs to another Eio domain")
+;;
+
+let create_session_admitted
       t
       ~command_audit
       ~principal
@@ -5218,6 +5782,11 @@ let create_session
     Exn.raise_with_original_backtrace exn backtrace
 ;;
 
+let create_session t ~command_audit ~principal request =
+  with_catalog_admission t ~f:(fun () ->
+    create_session_admitted t ~command_audit ~principal request)
+;;
+
 let validate_import_request request legacy source_path =
   let spec = request.Agent_protocol.Session.Create_request.spec in
   if not (Filename.is_absolute source_path)
@@ -5262,7 +5831,7 @@ let save_legacy_provenance t handle ~source_id ~source_path legacy =
   |> Result.map_error ~f:protocol_of_store
 ;;
 
-let import_legacy t ~principal ~source_id ~source_path ~legacy request =
+let import_legacy_admitted t ~principal ~source_id ~source_path ~legacy request =
   let open Result.Let_syntax in
   let%bind () = validate_import_request request legacy source_path in
   let%bind definition, revision = resolve_prompt t request.spec.prompt in
@@ -5323,6 +5892,11 @@ let import_legacy t ~principal ~source_id ~source_path ~legacy request =
     failure
 ;;
 
+let import_legacy t ~principal ~source_id ~source_path ~legacy request =
+  with_catalog_admission t ~f:(fun () ->
+    import_legacy_admitted t ~principal ~source_id ~source_path ~legacy request)
+;;
+
 let with_uninstalled_recovery_entry
       t
       (entry : Session_registry.entry)
@@ -5360,7 +5934,7 @@ let close_recovery_handle t handle =
 
 let corrupt message = protocol_of_store (Agent_store.Store_error.Corrupt message)
 
-let validate_snapshot handle installed state =
+let validate_snapshot handle installed (state : Agent_session.Session_state.t) =
   let snapshot = installed.Agent_store.Snapshot.snapshot in
   let session_id = Agent_store.Session_store.Handle.session_id handle in
   let prompt_revision =
@@ -5446,7 +6020,7 @@ let open_recovery t handle =
 let recovered_revision = restore_state_source
 let recovered_profile = restore_state_profile
 
-let verify_recovered_workspace t state =
+let verify_recovered_workspace t (state : Agent_session.Session_state.t) =
   Agent_session.Workspace_resolver.verify_available
     ~env:t.env
     state.Agent_session.Session_state.spec.workspace_instance
@@ -5528,7 +6102,7 @@ let interrupted_reviewer_jobs state now =
   List.filter_map state.Agent_session.Session_state.jobs ~f:(interrupted_reviewer_job now)
 ;;
 
-let recovery_attachment_deltas state ~now =
+let recovery_attachment_deltas (state : Agent_session.Session_state.t) ~now =
   let disconnect_owner attachment lease disconnect_grace_ms =
     let grace =
       now
@@ -5821,6 +6395,7 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
       ~capacity:None
   in
   Session_registry.with_recovery_owner t.registry owner (fun () ->
+    let%bind () = require_seed_success t handle in
     let%bind parent_policy = prepare_parent_policy () in
     let%bind lifecycle =
       Agent_store.Session_store.read_lifecycle t.store handle
@@ -6060,7 +6635,11 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
          entry))
 ;;
 
-let read_owned_session t handle =
+type archive_validation =
+  | Validate_archives
+  | Defer_archive_reads
+
+let read_owned_session_with_archives t handle archive_validation =
   let open Result.Let_syntax in
   let%bind metadata =
     Agent_store.Session_store.Handle.metadata_checked handle
@@ -6089,7 +6668,13 @@ let read_owned_session t handle =
       ~validate_transaction:
         (Agent_session.Session_persistence.validate_transaction
            ~limits:t.journal_document_limits)
-      ~validate:(validate_recovery_state t handle)
+      ~validate:(fun restored ->
+        match archive_validation, restored with
+        | Validate_archives, _ -> validate_recovery_state t handle restored
+        | Defer_archive_reads, None ->
+          Error (Agent_store.Store_error.Corrupt "durable session has no valid snapshot")
+        | Defer_archive_reads, Some restored ->
+          Agent_session.Session_persistence.validate restored)
     |> Result.map_error ~f:protocol_of_store
   in
   let%bind restored =
@@ -6104,6 +6689,99 @@ let read_owned_session t handle =
     | Catalog _ | Local_path _ -> Ok ()
   in
   state
+;;
+
+let read_owned_session t handle =
+  read_owned_session_with_archives t handle Validate_archives
+;;
+
+let fold_indexed_retained_states t indexed ~authorize ~checkpoint ~admit_archive ~init ~f =
+  let module Archive = Agent_session.Session_state.Compaction_archive in
+  let open Result.Let_syntax in
+  let poll () =
+    Eio.Fiber.check ();
+    checkpoint ();
+    Eio.Fiber.check ()
+  in
+  Session_registry.with_indexed_retention_read t.registry indexed ~f:(fun indexed ->
+    poll ();
+    let%bind () = authorize indexed.Agent_store.Session_index.Entry.session in
+    poll ();
+    Eio.Switch.run (fun sw ->
+      let%bind handle =
+        Agent_store.Session_store.open_session
+          t.store
+          ~sw
+          ~actor_lock_nonce:
+            (Agent_protocol.Id.Transaction.create ()
+             |> Agent_protocol.Id.Transaction.to_string)
+          indexed.session.id
+        |> Result.map_error ~f:protocol_of_store
+      in
+      Session_registry.with_recovery_handle t.registry ~store:t.store handle (fun () ->
+        let%bind () =
+          if Agent_store.Session_store.owns_handle t.store handle
+          then Ok ()
+          else Error (corrupt "retention handle belongs to another store")
+        in
+        let%bind state = read_owned_session_with_archives t handle Defer_archive_reads in
+        let%bind () = authorize (Agent_session.Session_state.summary state) in
+        (* Admit the entire prefix before retaining its filename lookup or reading
+           any archive. Filenames contain only validated bounded operation IDs
+           and a fixed kind prefix; map comparisons therefore have a fixed cap. *)
+        let rec admit = function
+          | [] -> Ok ()
+          | _ :: rest ->
+            poll ();
+            let%bind () = admit_archive () in
+            admit rest
+        in
+        let references = state.conversation.compaction_archives in
+        let%bind () = admit references in
+        let%bind inventory =
+          List.fold_result
+            references
+            ~init:String.Map.empty
+            ~f:(fun inventory reference ->
+              poll ();
+              let filename = Agent_session.Compaction_archive.filename reference in
+              if Map.mem inventory filename
+              then Error (corrupt "retained archive inventory repeats a file")
+              else Ok (Map.set inventory ~key:filename ~data:reference))
+        in
+        let check_nested (historical : Agent_session.Session_state.t) =
+          List.fold_result
+            historical.conversation.compaction_archives
+            ~init:()
+            ~f:(fun () reference ->
+              poll ();
+              match
+                Map.find inventory (Agent_session.Compaction_archive.filename reference)
+              with
+              | Some original
+                when Archive.equal_kind original.kind reference.kind
+                     && Int64.equal original.revision reference.revision
+                     && String.equal original.sha256 reference.sha256 -> Ok ()
+              | Some _ | None ->
+                Error (corrupt "historical archive is absent from retained inventory"))
+        in
+        let%bind accumulator = f init state in
+        let%bind result =
+          List.fold_result references ~init:accumulator ~f:(fun accumulator reference ->
+            poll ();
+            let%bind historical =
+              Agent_session.Compaction_archive.read
+                ~env:t.env
+                ~handle
+                ~max_payload_length:t.limits.snapshot_payload_limit
+                reference
+            in
+            let%bind () = check_nested historical in
+            f accumulator historical)
+        in
+        poll ();
+        let%map () = authorize (Agent_session.Session_state.summary state) in
+        result)))
 ;;
 
 let read_session t index_entry =
@@ -6934,7 +7612,25 @@ let create_delegated_session
         |> Result.map_error ~f:(fun error ->
           unavailable Permission_denied error.C.message)
       in
-      let%bind source = prepare_source ~runtime ~capabilities in
+      (* Resolve the actual durable scoped key before a source callback can read
+         current files. Existing authored admission must restore its recorded
+         artifact; it cannot select a newer File revision on retry. *)
+      let key : D.Key.t =
+        { parent_session_id
+        ; parent_generation = before.identity.generation
+        ; principal_id
+        ; idempotency_key
+        }
+      in
+      let ledger = S.delegations t.store in
+      let%bind existing = D.find ledger key |> Result.map_error ~f:protocol_of_store in
+      let%bind () =
+        match existing with
+        | Some { revocation = Some _; _ } ->
+          Error (unavailable Permission_denied "generated admission was revoked")
+        | None | Some { revocation = None; _ } -> Ok ()
+      in
+      let%bind source = prepare_source ~runtime ~capabilities ~existing in
       let artifact = source.artifact in
       let%bind parent_target =
         match Inference.Selection.view before.spec.inference_target with
@@ -6968,14 +7664,6 @@ let create_delegated_session
           ~labels:[]
           ()
       in
-      let key : D.Key.t =
-        { parent_session_id
-        ; parent_generation = before.identity.generation
-        ; principal_id
-        ; idempotency_key
-        }
-      in
-      let ledger = S.delegations t.store in
       let candidate : D.Admission.t =
         { child_session_id = P.Id.Session.create ()
         ; revision_id = artifact.revision_id
@@ -6991,6 +7679,7 @@ let create_delegated_session
         ; inference_target = Some inference_target
         }
       in
+      Eio.Fiber.check ();
       Eio.Cancel.protect (fun () ->
         let%bind reservation =
           D.reserve
@@ -7050,7 +7739,7 @@ let create_delegated_session
         let%bind record = source.install ~artifacts ~record in
         let reference = D.reference record in
         let child_id = record.admission.child_session_id in
-        let verify state =
+        let verify (state : State.t) =
           match state.State.spec.delegation with
           | Some actual when D.Reference.equal reference actual ->
             validate_delegated_target state record
@@ -7208,7 +7897,9 @@ let create_delegated_session
              let%map () = resume_generated_initial_start t entry in
              entry)))
   in
-  with_generated_creation_lock t run
+  (* Serialize the exact key while fresh source acquisition remains cancellable.
+     Reservation and durable publication have their own protected phase above. *)
+  with_generated_creation_lock ~protect:false t run
 ;;
 
 let create_generated_session
@@ -7223,7 +7914,7 @@ let create_generated_session
   let module G = Agent_session.Generated_definition in
   let module C = Chat_response.Tool_capability in
   let open Result.Let_syntax in
-  let prepare_source ~runtime:_ ~capabilities =
+  let prepare_source ~runtime:_ ~capabilities ~existing:_ =
     let%map () =
       C.references
         (Chat_response.Generated_admission.capabilities (G.admission definition))
@@ -7308,7 +7999,10 @@ let create_authored_session
   let module Source = Agent_session.Authored_agent_source in
   let module C = Chat_response.Tool_capability in
   let open Result.Let_syntax in
-  let prepare_source ~runtime:_ ~capabilities =
+  let prepare_source ~runtime:_ ~capabilities ~existing =
+    let module D = Agent_store.Delegation_store in
+    let module Revision = Agent_session.Prompt_revision in
+    let module Child = Agent_session.Prompt_child_source in
     let source = prepared.B.source in
     let name = (Source.identity source).tool_name in
     let%bind current =
@@ -7323,27 +8017,15 @@ let create_authored_session
       |> Result.map_error ~f:(fun error -> unavailable Permission_denied error.C.message)
     in
     let%bind () =
-      match
+      if
         String.equal (Source.fingerprint source) (Source.fingerprint current.source)
         && String.equal (C.fingerprint private_capabilities) (C.fingerprint expected)
-      with
-      | true -> Ok ()
-      | false ->
+      then Ok ()
+      else
         Error
           (unavailable Permission_denied "authored source or private resources changed")
     in
-    let elements = Agent_session.Prompt_revision.elements prepared.revision in
-    let%bind _ =
-      Chat_response.Initial_prompt_history.create ~session_id:parent_session_id elements
-    in
-    let%bind artifact =
-      Source.artifact
-        source
-        ~revision_id:(P.Id.Prompt_revision.create ())
-        ~created_at:(now t)
-      |> Result.map_error ~f:protocol_of_store
-    in
-    let%map capability_pins =
+    let%bind capability_pins =
       Chat_response.Background_request.capability_pins private_capabilities
     in
     let request_sha256 =
@@ -7353,6 +8035,109 @@ let create_authored_session
       , (capability_pins : (string * string) list)]
       |> Sexp.to_string_mach
       |> Chatmd_shell_spec.Source_ref.digest
+    in
+    (* Original wrapper/private authority stays fixed. Selected executable bytes
+       are separate admission fields; edits do not change a retry's request. *)
+    let validate_record (record : D.record) =
+      match record.admission.authored_tool with
+      | Some origin
+        when String.equal origin.name name
+             && String.equal origin.source_sha256 (Source.fingerprint source)
+             && String.equal record.request_sha256 request_sha256
+             && List.equal
+                  (fun (name, pin) (other_name, other_pin) ->
+                     String.equal name other_name && String.equal pin other_pin)
+                  record.admission.capability_pins
+                  capability_pins -> Ok ()
+      | None | Some _ ->
+        Error (unavailable Conflict "authored creation key has different original inputs")
+    in
+    let%bind artifacts =
+      Agent_store.Prompt_artifact_store.create
+        ~env:t.env
+        ~root:
+          (Agent_store.Data_root.prompt_artifacts_path
+             (Agent_store.Session_store.data_root t.store))
+      |> Result.map_error ~f:protocol_of_store
+    in
+    let%bind selected =
+      match existing with
+      | Some record ->
+        let%bind () = validate_record record in
+        let%map revision = restore_authored_code t ~artifacts ~source record in
+        Some revision
+      | None ->
+        (match Source.defining_reference source, t.script_preparation with
+         | None, _ -> Ok None
+         | Some _, None ->
+           Error
+             (unavailable
+                Invalid_state
+                "authored child requires script preparation policy")
+         | Some reference, Some _policy ->
+           let original_parent = Source.defining_revision source in
+           let%bind parent, reference, recorded =
+             match Agent_session.Script_tool_calls.native_services_scope () with
+             | Active services ->
+               let%bind recorded =
+                 Agent_session.Script_tool_calls.agent_artifact services
+               in
+               let%bind binding =
+                 C.find capabilities ~name
+                 |> Result.map_error ~f:(fun error ->
+                   unavailable Permission_denied error.C.message)
+               in
+               let%bind implementation =
+                 C.native_implementation binding
+                 |> Result.of_option
+                      ~error:
+                        (unavailable Permission_denied "authored wrapper is not native")
+               in
+               let%map context =
+                 Agent_session.Script_tool_calls.agent_source_context
+                   services
+                   ~defining_revision:original_parent
+                   ~implementation
+               in
+               (match context with
+                | None -> original_parent, reference, recorded
+                | Some context ->
+                  ( Agent_session.Agent_source_code_view.Context.revision context
+                  , Agent_session.Agent_source_code_view.Context.reference context
+                  , recorded ))
+             | Expired ->
+               Error (unavailable Permission_denied "authored source services expired")
+             | Unbound -> Ok (original_parent, reference, None)
+           in
+           let%bind binding =
+             source_binding t ~source_lease:current.resources.source_lease
+           in
+           let%bind child =
+             select_authored_code
+               t
+               ~binding
+               ~parent
+               ~reference
+               ~recorded
+               ~checkpoint:Eio.Fiber.check
+           in
+           Ok (Some (Child.revision child)))
+    in
+    let%bind artifact, elements =
+      match selected with
+      | Some revision -> Ok (Revision.artifact revision, Revision.elements revision)
+      | None ->
+        let%map artifact =
+          Source.artifact
+            source
+            ~revision_id:(P.Id.Prompt_revision.create ())
+            ~created_at:(now t)
+          |> Result.map_error ~f:protocol_of_store
+        in
+        artifact, Revision.elements prepared.revision
+    in
+    let%map _ =
+      Chat_response.Initial_prompt_history.create ~session_id:parent_session_id elements
     in
     { artifact
     ; config = Chat_response.Config.of_elements elements
@@ -7364,12 +8149,24 @@ let create_authored_session
           Chat_response.Initial_prompt_history.create ~session_id elements)
     ; install =
         (fun ~artifacts ~record ->
-          Source.install_reserved
-            ~delegations:(Agent_store.Session_store.delegations t.store)
-            ~reservation:record
-            ~artifact_store:artifacts
-            ~capability_pins
-            source)
+          match selected with
+          | None ->
+            Source.install_reserved
+              ~delegations:(Agent_store.Session_store.delegations t.store)
+              ~reservation:record
+              ~artifact_store:artifacts
+              ~capability_pins
+              source
+          | Some _ ->
+            let ledger = Agent_store.Session_store.delegations t.store in
+            let%bind current =
+              D.resolve ledger (D.reference record)
+              |> Result.map_error ~f:protocol_of_store
+            in
+            let%bind () = validate_record current in
+            let%bind _ = restore_authored_code t ~artifacts ~source current in
+            D.advance ledger current Artifact_installed
+            |> Result.map_error ~f:protocol_of_store)
     }
   in
   create_delegated_session
@@ -7518,27 +8315,6 @@ let reconcile_generated_creations t =
                           (List.map errors ~f:Chatmd_shell_spec.Diagnostic.to_string
                            |> String.concat ~sep:"\n")
                       in
-                      let%bind _ =
-                        match record.admission.authored_tool with
-                        | Some _ ->
-                          Agent_session.Authored_agent_source.load_artifact
-                            ~artifact_store:artifacts
-                            ~reservation:record
-                        | None ->
-                          G.load_artifact
-                            ~artifact_store:artifacts
-                            ~revision_id:record.admission.revision_id
-                            ~manifest_sha256:record.admission.manifest_sha256
-                          |> Result.map_error ~f:diagnostics
-                      in
-                      let%bind record =
-                        D.advance ledger record Artifact_installed
-                        |> Result.map_error ~f:protocol_of_store
-                      in
-                      let%bind () =
-                        D.discard_uninstalled_staging ledger record
-                        |> Result.map_error ~f:protocol_of_store
-                      in
                       (match
                          match record.admission.authored_tool with
                          | Some _ ->
@@ -7553,6 +8329,29 @@ let reconcile_generated_creations t =
                        with
                        | Error _ -> revoke record Authority_changed
                        | Ok selected ->
+                         let%bind _ =
+                           match record.admission.authored_tool with
+                           | Some _ ->
+                             restore_authored_selection
+                               t
+                               ~artifacts
+                               ~public:current
+                               record
+                           | None ->
+                             G.load_artifact
+                               ~artifact_store:artifacts
+                               ~revision_id:record.admission.revision_id
+                               ~manifest_sha256:record.admission.manifest_sha256
+                             |> Result.map_error ~f:diagnostics
+                         in
+                         let%bind record =
+                           D.advance ledger record Artifact_installed
+                           |> Result.map_error ~f:protocol_of_store
+                         in
+                         let%bind () =
+                           D.discard_uninstalled_staging ledger record
+                           |> Result.map_error ~f:protocol_of_store
+                         in
                          let reference = D.reference record in
                          let child_id = record.admission.child_session_id in
                          let verify (state : State.t) =
@@ -7618,9 +8417,11 @@ let reconcile_generated_creations t =
                                  let%bind () =
                                    match record.admission.authored_tool with
                                    | Some _ ->
-                                     Agent_session.Authored_agent_source.load_artifact
-                                       ~artifact_store:artifacts
-                                       ~reservation:record
+                                     restore_authored_selection
+                                       t
+                                       ~artifacts
+                                       ~public:current
+                                       record
                                      |> Result.map ~f:ignore
                                    | None ->
                                      G.restore
@@ -7732,7 +8533,7 @@ let reconcile_generated_creations t =
                                  installed ()))))))))
 ;;
 
-let managed_child t borrowed child_id =
+let managed_child_access t borrowed child_id =
   let module N = Agent_session.Native_tool_invocation in
   let module A = Agent_session.Session_actor in
   let module D = Agent_store.Delegation_store in
@@ -7794,35 +8595,44 @@ let managed_child t borrowed child_id =
     | false -> Error (denied ())
   in
   let%bind () = validate_parent initial_parent in
-  let%bind child = Session_registry.load t.registry child_id in
-  let%bind child_state = A.state child.actor in
-  let%bind () =
-    match child_state.spec.delegation with
-    | Some actual
-      when D.Reference.equal actual reference
-           && P.Id.Prompt_revision.equal
-                child_state.spec.prompt_revision_id
-                reference.revision_id -> Ok ()
-    | _ -> Error (denied ())
-  in
-  let%bind final_parent, final_principal = parent_state () in
-  let%bind () =
-    match P.Id.Principal.equal principal final_principal with
-    | true -> validate_parent final_parent
-    | false -> Error (denied ())
-  in
-  let%bind _ = N.borrowed_capabilities borrowed in
-  (* Native/parent checks may yield. Refresh the private child's revocation after
-     those waits, before returning even bounded metadata. *)
-  let%bind current =
-    D.resolve ledger reference |> Result.map_error ~f:protocol_of_store
-  in
-  let%map () =
-    match current.stage, current.revocation with
-    | Linked, None -> authorize_independent t current
-    | _ -> Error (denied ())
-  in
-  child, child_state
+  Ok
+    (fun (child : Session_registry.entry) ->
+      let%bind child_state = A.state child.actor in
+      let%bind () =
+        match child_state.spec.delegation with
+        | Some actual
+          when D.Reference.equal actual reference
+               && P.Id.Prompt_revision.equal
+                    child_state.spec.prompt_revision_id
+                    reference.revision_id -> Ok ()
+        | _ -> Error (denied ())
+      in
+      let%bind final_parent, final_principal = parent_state () in
+      let%bind () =
+        match P.Id.Principal.equal principal final_principal with
+        | true -> validate_parent final_parent
+        | false -> Error (denied ())
+      in
+      let%bind _ = N.borrowed_capabilities borrowed in
+      (* Native/parent checks may yield. Refresh the private child's revocation
+         after those waits, before returning even bounded metadata. *)
+      let%bind current =
+        D.resolve ledger reference |> Result.map_error ~f:protocol_of_store
+      in
+      let%map () =
+        match current.stage, current.revocation with
+        | Linked, None -> authorize_independent t current
+        | _ -> Error (denied ())
+      in
+      child, child_state)
+;;
+
+let managed_child t borrowed child_id =
+  let open Result.Let_syntax in
+  let%bind validate = managed_child_access t borrowed child_id in
+  (* Authorization is a bounded read: wait for overlapping lifecycle/read
+     admission, then revalidate under exclusion. Release before later work. *)
+  Session_registry.with_loaded_read t.registry child_id validate
 ;;
 
 let managed_status t borrowed child_id =
@@ -7938,50 +8748,57 @@ let managed_send t borrowed child_id ~key ~message =
 let managed_read t borrowed child_id ~receipt_id ~cursor ~limit =
   let module P = Agent_protocol in
   let open Result.Let_syntax in
-  let authorize () =
-    managed_child t borrowed child_id
-    |> Result.map_error ~f:(fun _ ->
-      P.Invocation.
-        { code = "agent.management.denied"
-        ; message = "The child session is unavailable to this caller."
-        ; retryable = false
-        ; details = `Null
-        })
+  let denied _ =
+    P.Invocation.
+      { code = "agent.management.denied"
+      ; message = "The child session is unavailable to this caller."
+      ; retryable = false
+      ; details = `Null
+      }
   in
-  let%bind child, state = authorize () in
-  let result =
-    let open Result.Let_syntax in
-    let%bind history_epoch =
-      Agent_session.Durable_event_log.history_epoch
-        child.durable_events
-        ~through_sequence:state.counters.event_sequence
-    in
-    Managed_output_page.read
-      t.managed_output_cursors
-      ~state
-      ~receipt_id
-      ~cursor
-      ~history_epoch
-      ~limit
-      ~max_bytes:t.limits.managed_output_page_max_bytes
+  let%bind validate =
+    managed_child_access t borrowed child_id |> Result.map_error ~f:denied
   in
-  let%bind _, current = authorize () in
-  let result =
-    match
-      Int.equal current.identity.generation state.identity.generation
-      && Int.equal
-           current.conversation.compaction_generation
-           state.conversation.compaction_generation
-    with
-    | true -> result
-    | false ->
-      Error
-        (P.Error.create
-           Snapshot_required
-           ~message:"The session changed while reading output; request a fresh snapshot."
-           ~retryable:false
-           ~data:(`Object [ "snapshot_required", `True ])
-           ())
+  let%bind result =
+    Session_registry.with_loaded_read t.registry child_id (fun child ->
+      let%bind _, state = validate child in
+      let result =
+        let open Result.Let_syntax in
+        let%bind history_epoch =
+          Agent_session.Durable_event_log.history_epoch
+            child.durable_events
+            ~through_sequence:state.counters.event_sequence
+        in
+        Managed_output_page.read
+          t.managed_output_cursors
+          ~state
+          ~receipt_id
+          ~cursor
+          ~history_epoch
+          ~limit
+          ~max_bytes:t.limits.managed_output_page_max_bytes
+      in
+      let%bind _, current = validate child in
+      let result =
+        match
+          Int.equal current.identity.generation state.identity.generation
+          && Int.equal
+               current.conversation.compaction_generation
+               state.conversation.compaction_generation
+        with
+        | true -> result
+        | false ->
+          Error
+            (P.Error.create
+               Snapshot_required
+               ~message:
+                 "The session changed while reading output; request a fresh snapshot."
+               ~retryable:false
+               ~data:(`Object [ "snapshot_required", `True ])
+               ())
+      in
+      Ok result)
+    |> Result.map_error ~f:denied
   in
   Result.map_error result ~f:(fun error ->
     P.Invocation.
@@ -8529,6 +9346,9 @@ let create
       ~independent_lifetime_policy
       ~chatml_runtime_policy
       ~authoring_validation_host
+      ~script_preparation
+      ~content_limits
+      ~child_sources
       ~durability
       ~limits
   =
@@ -8543,17 +9363,7 @@ let create
       |> Result.ok_or_failwith
       |> Option.some
   in
-  let profiles =
-    List.fold permission_profiles ~init:Map.Poly.empty ~f:(fun profiles profile ->
-      Map.set profiles ~key:profile.Agent_session.Permission_policy.id ~data:profile)
-  in
-  let revisions =
-    List.fold permission_profiles ~init:Map.Poly.empty ~f:(fun profiles profile ->
-      Map.set
-        profiles
-        ~key:profile.Agent_session.Permission_policy.revision_digest
-        ~data:profile)
-  in
+  let catalogs = Catalogs.create ~workspaces ~permission_profiles ~manifest_grants in
   let bundle_limits =
     Option.value_map
       authoring_validation_host
@@ -8572,11 +9382,7 @@ let create
     ; idempotency_store
     ; blob_store
     ; prompts
-    ; workspaces
-    ; catalog_mutex = Eio.Mutex.create ()
-    ; permission_profiles = profiles
-    ; permission_profile_revisions = revisions
-    ; manifest_grants
+    ; catalogs
     ; quota_manager
     ; job_capacity
     ; tool_dir
@@ -8587,6 +9393,9 @@ let create
     ; independent_lifetime_policy
     ; chatml_runtime_policy
     ; authoring_validation_host
+    ; script_preparation
+    ; content_limits
+    ; child_sources
     ; durability
     ; limits
     ; document_limits =
@@ -8682,4 +9491,287 @@ let validate_session_removal t (state : Agent_session.Session_state.t) =
     if live
     then Error (unavailable Conflict "session has a live durable delegation obligation")
     else Ok ())
+;;
+
+module Seed_recovery_limits = Session_seed_recovery.Limits
+
+module Seed_outcome = struct
+  type t =
+    | Created of Session_registry.entry
+    | Rejected of Agent_protocol.Error.t
+    | Uncertain of Agent_protocol.Error.t
+end
+
+let seed_definition t id =
+  match Agent_session.Prompt_catalog.find t.prompts id with
+  | None -> Error (unavailable Prompt_not_found "seed definition is absent")
+  | Some entry -> Ok entry.definition
+;;
+
+let seed_from_recipe
+      t
+      recipe
+      ~principal
+      ~request
+      ~command_audit
+      ~attempted
+      ~retained_source
+      ~checkpoint
+  =
+  let open Result.Let_syntax in
+  let%bind candidate =
+    Session_seed_layout.prepare
+      recipe
+      ~env:t.env
+      ~store:t.store
+      ~principal
+      ~request
+      ~command_audit
+      ~timestamp:(now t)
+      ~limits:t.journal_document_limits
+      ~max_work_steps:(Document_schema.Limits.max_nodes t.document_limits)
+      ~checkpoint
+  in
+  checkpoint ();
+  let%bind () =
+    match retained_source with
+    | None -> Ok ()
+    | Some (handle, current) ->
+      if Agent_store.Session_store.Lifecycle.Current.is_current current handle
+      then Ok ()
+      else Error (unavailable Conflict "seed retained source changed during admission")
+  in
+  let physical_roots =
+    Catalogs.workspace_definitions t.catalogs
+    |> List.filter_map ~f:(fun definition ->
+      checkpoint ();
+      match definition.Agent_session.Workspace_definition.source with
+      | Physical { configured_root } -> Some configured_root
+      | Temporary _ -> None)
+  in
+  attempted := true;
+  let%bind handle, state =
+    Session_seed_layout.install candidate ~sw:t.sw ~physical_roots ~checkpoint
+    |> Result.map_error ~f:protocol_of_store
+  in
+  match
+    finish_unloaded_creation
+      ~retain_initial_proof:true
+      t
+      handle
+      state
+      ~command_audit:(Some command_audit)
+  with
+  | Ok _ as success -> success
+  | Error _ as failure ->
+    close_actor_lock_after_failure t handle;
+    failure
+  | exception exn ->
+    let backtrace = Backtrace.Exn.most_recent () in
+    close_actor_lock_after_failure t handle;
+    Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let seed_session t ~principal ~request ~command_audit ~checkpoint =
+  let module P = Agent_protocol in
+  let module S = Agent_session in
+  let module R = P.Session_seed.Request in
+  let attempted = ref false in
+  let admit () =
+    let open Result.Let_syntax in
+    if not (P.Principal.has_scope principal Create_sessions)
+    then Error (unavailable Permission_denied "seed creation scope is required")
+    else
+      with_seed_work
+        ~max_work_steps:(Document_schema.Limits.max_nodes t.document_limits)
+        ~checkpoint
+        (fun checkpoint ->
+           let%bind audit =
+             Agent_store.Idempotency_store.Command_audit.decode command_audit
+             |> Result.map_error ~f:protocol_of_store
+           in
+           let%bind digest =
+             P.Json_codec.canonical_string (R.to_json request)
+             |> Result.map ~f:(fun encoded ->
+               Digestif.SHA256.(digest_string encoded |> to_hex))
+           in
+           let%bind () =
+             if
+               audit.protected_record
+               && Option.is_none audit.key.session_id
+               && String.equal audit.key.method_name "session.seed"
+               && P.Id.Principal.equal audit.key.principal_id principal.id
+               && P.Idempotency_key.equal
+                    audit.key.idempotency_key
+                    (R.idempotency_key request)
+               && String.equal audit.request_digest digest
+             then Ok ()
+             else Error (unavailable Invalid_request "seed original audit differs")
+           in
+           let%bind () =
+             match
+               Agent_store.Idempotency_store.lookup
+                 t.idempotency_store
+                 ~key:audit.key
+                 ~request_digest:audit.request_digest
+             with
+             | Replay
+                 { retention = Protected
+                 ; outcome = Pending
+                 ; accepted_transaction_sequence = None
+                 ; _
+                 } -> Ok ()
+             | Missing | Conflict _ | Replay _ ->
+               Error
+                 (unavailable
+                    Invalid_state
+                    "seed creation requires its actual original protected Pending receipt")
+           in
+           checkpoint ();
+           with_catalog_admission t ~f:(fun () ->
+             let create ?(retained_source = None) recipe =
+               seed_from_recipe
+                 t
+                 recipe
+                 ~principal
+                 ~request
+                 ~command_audit
+                 ~attempted
+                 ~retained_source
+                 ~checkpoint
+             in
+             let select definition =
+               let%bind workspace =
+                 resolve_workspace_definition t definition (R.spec request).workspace
+               in
+               let%map profile =
+                 permission_profile t definition.S.Prompt_definition.permission_profile
+               in
+               workspace, profile
+             in
+             match R.code request with
+             | Catalog { definition_id; expected_revision } ->
+               let%bind definition, revision = resolve_prompt t (Catalog definition_id) in
+               let%bind () =
+                 if
+                   P.Id.Prompt_revision.equal
+                     expected_revision
+                     (S.Prompt_revision.id revision)
+                 then Ok ()
+                 else Error (unavailable Conflict "seed catalog revision changed")
+               in
+               let%bind workspace, profile = select definition in
+               let%bind target =
+                 t.inference_policy.capture_inference_target
+                   ~prompt_revision_id:(S.Prompt_revision.id revision)
+                   ~config:
+                     (Chat_response.Config.of_elements
+                        (S.Prompt_revision.elements revision))
+                 |> Result.map_error ~f:(fun error ->
+                   unavailable
+                     Invalid_state
+                     (Sexp.to_string_hum
+                        (Inference_runtime.Preparation_error.sexp_of_t error)))
+               in
+               let%bind inference_target =
+                 Inference.Selection.captured target ~limits:t.document_limits
+                 |> Result.map_error ~f:(fun error ->
+                   unavailable
+                     Invalid_request
+                     (Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error)))
+               in
+               let%bind recipe =
+                 Session_seed_admission.catalog
+                   request
+                   ~definition
+                   ~revision
+                   ~workspace
+                   ~profile
+                   ~inference_target
+                   ~checkpoint
+               in
+               create recipe
+             | Retained expected ->
+               let reference = P.Session_lifecycle.Expected.reference expected in
+               let%bind () =
+                 if
+                   P.Id.Server.equal
+                     (P.Session_ref.server_id reference)
+                     (Agent_store.Session_store.server_id t.store)
+                 then Ok ()
+                 else
+                   Error
+                     (unavailable Invalid_request "seed source belongs to another host")
+               in
+               let retained =
+                 Retained_session.create
+                   ~store:t.store
+                   ~registry:t.registry
+                   ~read_owned:(read_owned_session t)
+               in
+               Retained_session.with_state
+                 retained
+                 ~session_id:(P.Session_ref.session_id reference)
+                 ~authorize:(fun summary ->
+                   if
+                     P.Principal.has_scope principal View_session_transcript
+                     && Authorization.session_visible_to principal summary
+                   then Ok ()
+                   else Error (unavailable Permission_denied "seed source is not visible"))
+                 ~f:(fun handle state ->
+                   let%bind lifecycle =
+                     Agent_store.Session_store.read_lifecycle t.store handle
+                     |> Result.map_error ~f:protocol_of_store
+                   in
+                   let%bind () =
+                     if
+                       state.identity.generation
+                       = P.Session_lifecycle.Expected.generation expected
+                       && Int64.equal
+                            state.counters.revision
+                            (P.Session_lifecycle.Expected.session_revision expected)
+                       && P.Session_lifecycle.Revision.equal
+                            (Agent_store.Session_archive_record.revision
+                               (Agent_store.Session_store.Lifecycle.Observation.value
+                                  lifecycle))
+                            (P.Session_lifecycle.Expected.lifecycle_revision expected)
+                     then Ok ()
+                     else Error (unavailable Conflict "seed retained anchor changed")
+                   in
+                   let%bind definition_id =
+                     Result.of_option
+                       state.spec.prompt_definition_id
+                       ~error:
+                         (unavailable
+                            Invalid_request
+                            "retained seed has no catalog definition")
+                   in
+                   let%bind definition = seed_definition t definition_id in
+                   let%bind workspace, current_profile = select definition in
+                   let%bind current =
+                     Agent_store.Session_store.current_lifecycle
+                       t.store
+                       handle
+                       ~current_entry:(index_entry state)
+                     |> Result.map_error ~f:protocol_of_store
+                   in
+                   let%bind recipe =
+                     Session_seed_admission.retained
+                       request
+                       ~state
+                       ~definition
+                       ~workspace
+                       ~current_profile
+                       ~checkpoint
+                   in
+                   create ~retained_source:(Some (handle, current)) recipe)))
+  in
+  match admit () with
+  | Ok entry -> Seed_outcome.Created entry
+  | Error error ->
+    if !attempted then Seed_outcome.Uncertain error else Seed_outcome.Rejected error
+;;
+
+let reconcile_seed_creations t ~limits ~checkpoint =
+  Session_seed_recovery.reconcile (seed_recovery t) ~limits ~checkpoint
 ;;

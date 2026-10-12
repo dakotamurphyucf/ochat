@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "namespace": "ochat.examples.checked-json",
+  "modules": {
+    "Checked_json": {
+      "implementation": "src/checked_json.chatml",
+      "interface": "src/checked_json.chatmli"
+    }
+  },
+  "environments": {
+    "default": {
+      "modules": {"Checked_json": "self.Checked_json"}
+    }
+  }
+}

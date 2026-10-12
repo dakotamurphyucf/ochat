@@ -319,7 +319,7 @@ let%expect_test "session creation returns the requested attachment after session
   [%expect
     {|
     ((attachment_mode Read_only) (first_event_present true) (revision 6)
-     (sequence 2))
+     (sequence 3))
     |}]
 ;;
 

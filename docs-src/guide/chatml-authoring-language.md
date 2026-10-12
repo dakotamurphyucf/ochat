@@ -16,6 +16,9 @@ tokens; indentation does not define blocks. Use lowercase names for bindings and
 uppercase names for modules. Identifiers contain ASCII letters, digits and
 underscores and cannot start with a digit. `_` is a wildcard, not an ordinary name.
 Variant tags begin with a backtick. There is no OCaml character literal syntax.
+Optional `;;` separates statements at the top level or inside a module, including
+ambiguous boundaries such as `type t = int ;; Graph.run()`. Ordinary declaration
+sequences do not require it. A single `;` still sequences expressions.
 
 Literals include decimal integers, decimal floats with digits on both sides of
 the dot, booleans, double-quoted strings and unit `()`. A negative number uses a
@@ -39,9 +42,9 @@ including CRLF line endings. There are no `//` or `#` line comments.
 | Mutation | `cell := value`, `array[index] <- value`; both return unit |
 | Sequencing | `first; second` evaluates both and returns the second value |
 
-Arithmetic does not implicitly convert integers to floats. Direct equality on
-known array, ref, function and task types is rejected. Generic helpers currently
-can bypass that static restriction and compare such values by identity; see the
+Arithmetic does not implicitly convert integers to floats. Equality on array,
+ref, function, task and module types is rejected, including through generic
+helpers whose equality requirements are preserved; see the
 [inference boundary](chatml-inference.md#matching-and-equality-use-inferred-types).
 Equality is not a general serialization/comparison operation. `=` introduces
 bindings and record fields, not equality. There are no
@@ -81,11 +84,36 @@ to choose a result. Arrays are homogeneous and mutable; `ref(value)` creates a
 mutable cell, read with `!cell`. Copy-updating a record creates a new record;
 referenced mutable arrays/cells are not deep-copied.
 
-Modules group definitions in `module Name = struct ... end`. They can use outer
-bindings, but export only their own definitions. `open Name` imports values
-without re-exporting them and rejects name collisions, including builtins.
-Qualified calls such as `Array.fold(...)` avoid collisions. There are no functors,
-signatures, module type declarations or module-local type declarations.
+Modules group definitions in `module Name = struct ... end`. A module is
+non-recursive: its new binding is not in scope inside its body, even in a function
+called later. The binding is installed only after the body succeeds. Earlier
+lexical bindings remain available; recursive functions use `let rec`. An unsigned
+module exports its own value, type and nested module declarations. Outer or
+opened-only bindings are not
+implicitly exported. Module values have a distinct type from ordinary records.
+
+Declare transparent type aliases inside modules and refer to them with qualified
+paths such as `Counter.total` or `Outer.Inner.t`. `open Name` brings public values,
+types and nested module names into scope without re-exporting them, and rejects
+name collisions, including builtins. Opened polymorphic functions remain
+polymorphic; mutable exports retain shared state and type constraints. Qualified
+calls such as `Array.fold(...)` avoid collisions.
+
+An optional inline contract has the form
+`module Name : sig ... end = struct ... end`. Its items are transparent
+`type name = type_expr`, `val name : type_expr` and nested
+`module Name : sig ... end` declarations. A value specification such as
+`val identity : fun('a) -> 'a` claims universal polymorphism; an equality-using
+generic function requires a specification such as
+`val same : fun('a, 'a) -> bool where equality('a)`. The implementation must
+satisfy these claims. A signed module exposes only its specified public members
+in checking and at runtime, while public closures retain private implementation
+bindings. See the [checked module examples](chatml-inference.md#modules-and-records-have-different-representations).
+
+There are no functors, module type declarations or abstract signature types.
+Inline modules work within the submitted program. Configured multi-file module
+loading and companion `.chatmli` linkage are not yet implemented; interface syntax
+parsing alone does not load or link a file.
 
 <!-- ochat-authoring-example: {"id":"language.closures-loops-recursion","surface":"one_off_v1","result":"6:10:true"} -->
 ```ocaml
@@ -138,10 +166,15 @@ Use top-level named types for intentional recursion and for stable record/varian
 contracts. Types are structural aliases, not nominal runtime wrappers. Bindings
 can have annotations; individual parameters and arbitrary expressions cannot.
 Only previously declared type names and the current recursive name are in scope.
-Recursive types must be contractive; `type bad = bad` is rejected. There are no
-type parameters or mutually recursive type declarations. `array` and `task` are
-supported postfix constructors; refs and open rows are inferred rather than
-written as explicit annotation syntax.
+Recursive types must be contractive; `type bad = bad` is rejected. Transparent
+aliases can have scoped parameters: `type 'a box = {value: 'a}`, used as `int box`,
+or ``type ('a, 'e) outcome = [ `Ok('a) | `Error('e) ]``, used as `(int, string) outcome`.
+Recursive applications must preserve those parameters; mutual type declarations
+are unsupported. `array` and `task` are supported postfix constructors; refs and
+open rows are inferred rather than written as explicit annotation syntax.
+Explicit function types retain exact arity: `fun() -> int` takes no arguments,
+`fun(unit) -> int` takes one unit value, and `fun(int) -> fun(int) -> int` returns
+a function. Legacy arrows keep their flattening and unit-erasure behavior.
 
 <!-- ochat-authoring-example: {"id":"language.recursive-data-and-record-patterns","surface":"one_off_v1","result":"total=7"} -->
 ```ocaml
@@ -163,6 +196,33 @@ let main input =
   Task.pure(`String(
     label(details) ++ "=" ++ to_string(evaluate(details.expression))
   ))
+```
+
+Tuples preserve heterogeneous elements and nested shape. Use `(|a, b|)` for a
+value and `int * string` for its product type; a tuple is one function argument.
+Match patterns can inspect existing records/variants inside tuple elements.
+A total tuple pattern or default arm establishes coverage. Immutable tuple
+containers share mutable children and follow the ordinary value restriction.
+
+<!-- ochat-authoring-example: {"id":"language.tuple-values-and-match","surface":"one_off_v1","result":"sample=7"} -->
+```ocaml
+type labelled = int * string
+let label : fun(labelled) -> string = fun value ->
+  match value with | (|count, name|) -> name ++ "=" ++ to_string(count)
+let main input = Task.pure(`String(label((|7, "sample"|))))
+```
+
+Let and function parameter binders can use names, `_`, and nested tuples.
+Other patterns belong in `match`. A destructuring RHS runs once before its new
+names enter scope. The value restriction applies to that whole RHS, and mutable
+children remain shared. A tuple parameter consumes one argument regardless of
+its number of names; a wildcard parameter also consumes an argument.
+
+<!-- ochat-authoring-example: {"id":"language.tuple-binders","surface":"one_off_v1","result":"seven=8"} -->
+```ocaml
+let (|count, (|_, label|)|) = (|7, (|true, "seven"|)|)
+let describe (|n, text|) step = text ++ "=" ++ to_string(n + step)
+let main input = Task.pure(`String(describe((|count, label|), 1)))
 ```
 
 Do not treat successful inference as validation of a tool's JSON arguments or

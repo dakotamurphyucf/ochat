@@ -441,18 +441,22 @@ let execute runtime (tool : S.t) ~invocation request =
     | Ok config -> config
     | Error message -> fail "shell.tool_scope_unavailable" message
   in
-  match tool.stream with
-  | Finalized -> SA.Executor.run config request
-  | Sanitized ->
-    SA.Executor.run_streaming config request ~on_progress:(fun progress ->
-      Ochat_function.Invocation.emit
-        invocation
-        { channel = (progress.channel :> Ochat_function.Progress.channel)
-        ; update = Append progress.text
-        })
+  let manifest_sha256 = SA.Executor.manifest_sha256 config in
+  let result =
+    match tool.stream with
+    | Finalized -> SA.Executor.run config request
+    | Sanitized ->
+      SA.Executor.run_streaming config request ~on_progress:(fun progress ->
+        Ochat_function.Invocation.emit
+          invocation
+          { channel = (progress.channel :> Ochat_function.Progress.channel)
+          ; update = Append progress.text
+          })
+  in
+  Result.map result ~f:(fun result -> manifest_sha256, result)
 ;;
 
-let run registry runtime (tool : S.t) prepared_script ~invocation input =
+let run _manifest runtime (tool : S.t) prepared_script ~invocation input =
   let stdin = validate_stdin runtime tool input in
   let rationale = validate_rationale tool input in
   let request = request runtime tool prepared_script input in
@@ -470,12 +474,8 @@ let run registry runtime (tool : S.t) prepared_script ~invocation input =
   | Error error ->
     let error = R.error_of_executor error in
     fail error.code error.message
-  | Ok result ->
-    let manifest = Shell_runtime.Registry.manifest registry in
-    R.of_executor
-      ~runtime_id:(Shell_runtime.Runtime.id runtime)
-      ~manifest_sha256:manifest.M.sha256
-      result
+  | Ok (manifest_sha256, result) ->
+    R.of_executor ~runtime_id:(Shell_runtime.Runtime.id runtime) ~manifest_sha256 result
     |> render_result tool
 ;;
 
@@ -486,18 +486,18 @@ let error_output error =
   |> fun text -> Res.Tool_output.Output.Text text
 ;;
 
-let run_tool registry runtime tool prepared_script ~invocation serialized_input =
+let run_tool manifest runtime tool prepared_script ~invocation serialized_input =
   try
     serialized_input
     |> input_of_string
-    |> run registry runtime tool prepared_script ~invocation
+    |> run manifest runtime tool prepared_script ~invocation
     |> fun text -> Res.Tool_output.Output.Text text
   with
   | Tool_error error -> error_output error
 ;;
 
-let create_exn registry (tool : S.t) =
-  match Shell_runtime.Registry.runtime registry tool.S.runtime with
+let create_exn ~manifest ~runtime ~script ~check (tool : S.t) =
+  match runtime tool.S.runtime with
   | None ->
     Error
       { code = "shell.tool_runtime_missing"
@@ -509,7 +509,7 @@ let create_exn registry (tool : S.t) =
       match tool.mode with
       | Script_file _ ->
         Some
-          (Shell_runtime.Registry.script registry tool.name
+          (script tool.name
            |> require_some
                 "shell.tool_script_missing"
                 ("script tool was not prepared during registry instantiation: "
@@ -530,10 +530,32 @@ let create_exn registry (tool : S.t) =
       (Ochat_function.create_streaming_function
          (module Definition)
          (fun ~invocation input ->
-            run_tool registry runtime tool prepared_script ~invocation input))
+            match check () with
+            | Error message -> error_output { code = "shell.tool_inactive"; message }
+            | Ok () -> run_tool manifest runtime tool prepared_script ~invocation input))
 ;;
 
 let create registry tool =
-  try create_exn registry tool with
+  try
+    create_exn
+      ~manifest:(Shell_runtime.Registry.manifest registry)
+      ~runtime:(Shell_runtime.Registry.runtime registry)
+      ~script:(Shell_runtime.Registry.script registry)
+      ~check:(fun () -> Ok ())
+      tool
+  with
+  | Tool_error error -> Error error
+;;
+
+let prepare staged tool =
+  let module Staged = Shell_runtime.Registry.Staged in
+  try
+    create_exn
+      ~manifest:(Staged.manifest staged)
+      ~runtime:(Staged.runtime staged)
+      ~script:(Staged.script staged)
+      ~check:(fun () -> Staged.check staged)
+      tool
+  with
   | Tool_error error -> Error error
 ;;

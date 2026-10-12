@@ -1,0 +1,21 @@
+(copy_files ../../lib/agent_server/project_source_header.ml)
+(copy_files ../../lib/agent_server/project_source_header.mli)
+(copy_files ../../lib/agent_server/project_source_configuration.ml)
+(copy_files ../../lib/agent_server/project_source_configuration.mli)
+
+(library
+ (name project_source_host_tests)
+ (modules support configuration_tests configuration_codec_tests lifecycle_tests native_tests daemon_dependency_tests child_execution_tests git_fixture_support tls_fixture https_fixture project_source_header project_source_configuration)
+ (libraries core core_unix eio eio.unix eio_main tls-eio x509 digestif mirage-crypto-rng.unix agent_server_test_support ochat.agent_server ochat.agent_store ochat.agent_session ochat.chatml_git_host)
+ (inline_tests)
+ (foreign_stubs (language c) (names test_limits_stubs))
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(rule
+ (target git_fixture_support.ml)
+ (deps ../chatml_git_host/support.ml)
+ (action (copy %{deps} %{target})))
+(copy_files ../chatml_git_host/https_fixture.ml)
+(copy_files ../chatml_git_host/https_fixture.mli)
+(copy_files ../responses_driver/tls_fixture.ml)
+(copy_files ../bounded_process/test_limits_stubs.c)

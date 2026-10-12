@@ -19,6 +19,84 @@ type t
     ceiling: native borrows still supply the exact permitted selection. *)
 val current_native_services : unit -> (t, string) result
 
+module Native_services_scope : sig
+  type nonrec t =
+    | Unbound
+    | Active of t
+    | Expired
+end
+
+(** Direct projection of the existing fiber-local services owner. Unbound means
+    no binding exists, as in genuine direct Driver dispatch. A present expired or
+    invocation/session/generation-mismatched binding is Expired, never Unbound.
+    This query does not authorize an invocation or discover a stored artifact. *)
+val native_services_scope : unit -> Native_services_scope.t
+
+(** Trusted recorded-job projection tied to the exact admitted target binding.
+    Functional service overlays retain the association; nested foreign targets
+    cannot retrieve it. Dispatch installs this actual derived service as the
+    current native services, not the original service's authority. *)
+val with_agent_artifact
+  :  t
+  -> binding:Chat_response.Tool_capability.binding
+  -> parent_invocation:Agent_protocol.Id.Invocation.t
+  -> Chat_response.Background_request.Agent_artifact.t
+  -> t
+
+(** Require this exact current service, active matching session/generation,
+    invocation fingerprint equal to its actual borrowed capability ceiling, and
+    original binding reference/implementation resolved inside that same ceiling,
+    and the exact supplied genuine background root as its direct parent. Even a
+    same-binding recursive descendant cannot borrow another call's selection.
+    Require the exact executing native handler's completed admission and current
+    host authority, then recheck lifetime and identity after all yielding callbacks.
+    Metadata never issues another permission request.
+    Expired/unbound/foreign rejects; None is ordinary unselected dispatch only. *)
+val agent_artifact
+  :  t
+  -> ( Chat_response.Background_request.Agent_artifact.t option
+       , Agent_protocol.Error.t )
+       Result.t
+
+(** Same saved-service/ceiling/parent/current admission as agent_artifact,
+    then require this exact actual native function to consume the selection.
+    Distinct nested functions and direct None return no selection after admission;
+    expired/foreign scope still rejects. No names or reconstructed descriptors. *)
+val agent_artifact_for_implementation
+  :  t
+  -> implementation:Ochat_function.t option
+  -> ( Chat_response.Background_request.Agent_artifact.t option
+       , Agent_protocol.Error.t )
+       Result.t
+
+(** Selected code over the same retained native functions. This changes no tool
+    capability, source loan, actor or approval authority. *)
+val with_agent_source_code_view : t -> Agent_source_code_view.t -> t
+
+(** Selected specialist hooks over the same original native functions/resources.
+    Each actual native dispatch enters a NEW borrowed code admission and composes
+    its executor projection after the existing current caller/channel adapter.
+    Neither a creating fiber's scope nor a borrowed execution is retained. The
+    owning resource switch must outlive the code view and all joined dispatch.
+    Requires genuine shell caller services; missing/expired code or caller scope
+    rejects at native entry without running the original specialist code instead.
+    Original callback/cancellation exceptions retain identity. *)
+val with_shell_code_view : t -> Shell_runtime.Registry.Code_view.t -> t
+
+(** Authenticate any saved target first, then check the actual current native
+    service, invocation ceiling/binding, completed native admission and current actor
+    authority before projecting
+    the invoking function's selected defining context. A different actual native
+    function returns None after scope validation, never another selected row
+    under this invocation's authorization. An authenticated saved target
+    wins and returns None here. Expired/foreign scope never becomes absence;
+    original current-authority failures and cancellation propagate. *)
+val agent_source_context
+  :  t
+  -> defining_revision:Prompt_revision.t
+  -> implementation:Ochat_function.t
+  -> (Agent_source_code_view.Context.t option, Agent_protocol.Error.t) Result.t
+
 (** The actual caller's validation contract, inherited with the expiring native
     services scope. This does not add helper tools or widen selected capabilities. *)
 val with_authoring_validation_host
@@ -128,8 +206,22 @@ val authorize
   -> Chat_response.Tool_capability.binding
   -> (unit, Agent_protocol.Error.t) result
 
+(** Trusted host's current actor/profile/resource check, separate from the
+    permission action in [authorize]. Source/artifact metadata requires the exact
+    currently admitted native handler, existing service/ceiling checks and this
+    check before and after yielding. Install before [with_authorization_guard] so
+    inherited authority is composed. Missing check rejects; metadata never calls
+    the permission action again. Callback failures and cancellation propagate. *)
+val with_admission_check
+  :  t
+  -> check:
+       (Agent_protocol.Invocation.t
+        -> Chat_response.Tool_capability.binding
+        -> (unit, Agent_protocol.Error.t) result)
+  -> t
+
 (** Additional host authority gate, before and after the existing authorization
-    (including permission waits) and output preparation. Preserves
+    (including permission waits), metadata admission checks and output preparation. Preserves
     the original invocation/approval service, selected tools and owned work. *)
 val with_authorization_guard
   :  t

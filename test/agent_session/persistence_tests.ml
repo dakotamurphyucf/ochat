@@ -245,6 +245,7 @@ let%expect_test
     save "parts/schema.json" {|{"type":"object"}|};
     let definition =
       Agent_session.Prompt_definition.create
+        ~root_invocation:Ui
         ~id:prompt_id
         ~config_name:"extensions"
         ~root_file:(Filename.concat temporary "prompt/root.chatmd")

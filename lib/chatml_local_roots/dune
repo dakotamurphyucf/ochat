@@ -1,0 +1,7 @@
+(library
+ (name chatml_local_roots)
+ (public_name ochat.chatml_local_roots)
+ (modules chatml_local_roots chatml_local_locator)
+ (private_modules chatml_local_locator)
+ (libraries core eio ochat.chatml_local_source)
+ (preprocess (pps ppx_jane)))

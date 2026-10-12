@@ -32,8 +32,8 @@ reordering distinct declarations does not change the resulting metadata.
 the compiler's builtin type algebra. This is metadata for reference generators,
 not executable ChatML annotation syntax. It preserves explicit argument lists,
 open/closed row structure, recursive binders and constructor payloads. In
-particular, `TTuple` in this representation does not advertise arbitrary tuple
-expressions in the language.
+particular, `TTuple` describes an ordered product; variant constructor arguments
+retain a separate list. Source products use `(|a, b|)` and product types use `a * b`.
 
 `reference_items` renders the same schemes into readable reference signatures.
 Include `reference_notation` with them: this is descriptive notation, not source

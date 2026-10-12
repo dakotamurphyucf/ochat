@@ -1,0 +1,7 @@
+(library
+ (name chatml_program_document)
+ (public_name ochat.chatml_program_document)
+ (modules chatml_program_document program_metadata program_encoding)
+ (private_modules program_metadata program_encoding)
+ (libraries core jsonaf document_schema source chatml_source chatml_prepared_program)
+ (preprocess (pps ppx_jane)))

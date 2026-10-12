@@ -19,6 +19,15 @@ type t
 
 val default_permission_profile : Config.Permission_profile.t
 
+(** Pure specification for a new session in the catalog installed by
+    [open_local_host] with these options. Uses the existing embedded prompt and
+    workspace identities, process-bound liveness, selected persistence and
+    start intent. This constructs no host, session, attachment or authority;
+    normal protocol admission still validates it against the actual host. *)
+val session_spec
+  :  options
+  -> (Agent_protocol.Session.Spec.t, Agent_protocol.Error.t) Result.t
+
 (** Explicit process-local authorization permits the compiled shell manifests to
     load. Ordinary tool approval, shell command policy, capability checks and
     sandbox enforcement remain unchanged. With [false], startup requires a grant.
@@ -38,6 +47,9 @@ val start
   :  sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
   -> ?daemon_options:Daemon.options
+  -> ?root_invocation:
+       Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+  -> ?project_sources:Project_source_configuration.t
   -> ?authoring_package_files:string list
        (** Absolute paths captured through the shared bounded loader before store
          creation. Packages configure the same host as daemon configuration;
@@ -65,12 +77,23 @@ val open_host
   -> unit
   -> (host, Agent_protocol.Error.t) result
 
-(** Additions to Embedded: reuse the exact local composition and actual host
-    cleanup owner without creating a replacement session. *)
+(** Reuse the exact local composition and actual host cleanup owner without
+    creating a replacement session. [root_invocation] overrides the trusted daemon
+    option for new captures only; omission preserves that option (Ui by default).
+    [project_sources] supplies existing operator-selected source declarations to
+    normal native admission. Omission keeps local-only authority. Absolute roots
+    and Git grants are validated by the existing source host; labels, artifacts
+    and the current directory supply no authority. Retained Spec/code/target win
+    on attachment regardless of the current host selection.
+
+    [start] and [with_local_host] forward these same choices. *)
 val open_local_host
   :  sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
   -> ?daemon_options:Daemon.options
+  -> ?root_invocation:
+       Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+  -> ?project_sources:Project_source_configuration.t
   -> ?authoring_package_files:string list
   -> ?authoring_budget:Chat_response.Authoring_validation.context_budget
   -> options
@@ -95,6 +118,9 @@ val with_local_host
   :  sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
   -> ?daemon_options:Daemon.options
+  -> ?root_invocation:
+       Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+  -> ?project_sources:Project_source_configuration.t
   -> ?authoring_package_files:string list
   -> ?authoring_budget:Chat_response.Authoring_validation.context_budget
   -> options
@@ -110,6 +136,55 @@ val host_connection : host -> Agent_client.Connection.t
 val host_principal : host -> Agent_protocol.Principal.t
 
 val host_dispatcher : host -> Dispatcher.t
+
+module Script_selection : sig
+  (** Actual frozen source classification, not command or native authority. *)
+  type t = private
+    { session : Agent_protocol.Session.t
+    ; moderator : Chat_response.Script_contract_plan.Program.Role.t option
+    }
+end
+
+(** Read the exactly anchored session through this host's genuine local principal
+    and the nonactivating registry reader. Restore its actual definition-affine
+    revision and use Spec's retained root invocation with the same fixed host
+    preparation policy. Validate the actual planner/custody, then project the
+    moderator role using native preparation's precedence: one versioned moderator
+    before legacy, otherwise ordinary/hook-only. Multiple versioned moderators,
+    missing/foreign custody and legacy absence of authoritative Parsed reject.
+
+    Recheck the complete lifecycle/session anchor before delivery. No session
+    attachment, runtime activation, initializer, provider, source recapture or
+    filename/digest inference. Subsequent command admission still validates its
+    actual positions and capabilities. Policy/Startup and original checkpoint
+    exception lifetimes follow Runtime_script_preparation.with_revision_plan. *)
+val session_script_selection
+  :  host
+  -> expected:Agent_protocol.Session_lifecycle.Expected.t
+  -> checkpoint:(unit -> unit)
+  -> (Script_selection.t, Agent_protocol.Error.t) Result.t
+
+(** Second phase after the caller's exact Session.start on its existing handle.
+    Join the actual retained runtime's lifecycle activation through its existing
+    Execution_gate; completed activation is never replayed. Requires the same
+    session/generation/captured source, live read-write attachment and current
+    local principal. Phase two selects its current retained configuration/target
+    at entry and rejects their changes during the join. Reject owner changes, failed/halted or
+    busy outcome. Authorized activation may change history; this returns a NEW
+    admission anchor for the subsequent explicit user message. It is not a retry
+    or a claim that the start reply remains current. Caller must wait for this
+    exact position on its sole reader and retain the final command CAS.
+
+    Borrow/join only this runtime; do not drain unrelated work or recapture code.
+    No borrowed checkpoint runs after the final actor observation. Original
+    callback failures/cancellation propagate and the lease is released first. *)
+val complete_script_activation
+  :  host
+  -> started:Agent_protocol.Session.t
+  -> attachment_id:Agent_protocol.Id.Attachment.t
+  -> checkpoint:(unit -> unit)
+  -> (Agent_protocol.Session.t, Agent_protocol.Error.t) Result.t
+
 val connect_host : host -> (Agent_client.Connection.t, Agent_protocol.Error.t) result
 val close_host : host -> unit
 val connection : t -> Agent_client.Connection.t

@@ -1,145 +1,69 @@
-# ChatMarkdown prompt parsing (`prompt.ml`)
+# ChatMarkdown prompt parsing
 
-Current parsing retains source-loader provenance across imports/scripts, extension schemas and nested prompt capture. Daemon prompt revisions use verified stored artifacts; ordinary local parsing does not snapshot an arbitrary workspace.
+`Prompt.Chat_markdown` converts ChatMD into typed messages, configuration and
+runtime declarations. Parsing does not initialize ChatML or authorize tools.
+Source loading and optional authored preprocessing remain explicit host work.
 
-Versioned extension declarations and their current runtime limits are described in
-[extension foundations](../../agent-server/extensibility-foundations.md). The parser
-uses [strict extension declaration helpers](../../../lib/chatmd/chatmd_extension_declaration.mli)
-and [bounded source loading](../../../lib/chatmd/source_loader.mli).
+## Ordinary parsing
 
-See [agent-host integration](../../agent-server/embedding.md) and
-[orchestration semantics](../../agent-server/chatml-orchestration.md).
+`parse_chat_inputs` retains the existing authored parsing interface and default
+meta preprocessing. `parse_chat_inputs_without_preprocessing` accepts a supplied
+source loader and skips that transformation. Both use the same lexer, grammar,
+import expansion and declaration conversion as the owned preparation path.
 
-This document complements the inline **odoc** comments inside
-`prompt.mli` / `prompt.ml`.  It provides a broader overview, usage
-examples, and clarifications that fall outside the scope of API
-documentation.
+Imports resolve relative to their declaring source. Expansion rejects active
+import cycles, excessive import nesting and duplicate namespace aliases. Unknown
+markup inside recognized elements remains literal text; it does not add a new
+language tag. See the [ChatMD reference](../../overview/chatmd-language.md) for the
+supported vocabulary and the contexts that expand imports.
 
----
+## Exact inputs and declaration ownership
 
-## 1. What the module does
+Hosts that need to retain code use `prepare_chat_inputs` with explicit limits,
+checkpoint, loader and preprocessing callback. The callback runs once for the
+root; imports use their raw bytes. The returned immutable `Parsed.t` contains:
 
-* Parses a ChatMarkdown document (a constrained XML dialect) using
-  `Chatmd_lexer` + `Chatmd_parser` (Menhir-generated).
-* Expands `<import/>` directives recursively, keeping track of the base
-  directory.
-* Produces a strongly-typed OCaml representation (`top_level_elements
-  list`).  Every record derives `jsonaf`, `sexp`, `bin_io`, `hash`, and
-  `compare`.
+- Converted elements and the exact root parser input.
+- Root and imported input ownership, including authored/effective bytes and hashes.
+- Script declarations with their actual qualified IDs, extracted bodies and
+  parser-produced ranges.
 
-Why that matters: you can pattern-match and transform the prompt safely
-instead of juggling `((string * string) list) option` blobs.
+A declaration range covers its tag, including the closing tag where present.
+Offsets are half-open byte offsets in the effective parser input. When a
+preprocessor changes the root, those offsets do not describe the original file.
+An external script body belongs to its loaded source; its declaration range still
+identifies the ChatMD tag that selected it. Source-reference lines and byte columns
+are one-based; CRLF counts as one line break. UTF-8 columns count bytes.
 
----
+The ordinary `Script` value retains an optional source reference. Parser-produced
+values carry their source; manually constructed values may have none. The owned
+`Declaration` API provides the exact range and input association.
 
-## 2. Quick start
+## Captured replay and bounds
 
-```ocaml
-open Chatmd_prompt   (* public name: Chat_markdown inside prompt.ml *)
+`replay_chat_inputs` accepts a retained root input and a captured source loader.
+It verifies the authored root bytes and parses the retained effective bytes.
+Imports, scripts and schemas resolve through captured input; missing captures
+fail. Replay has no preprocessing callback and cannot fall back to live files.
+This is authored replay, distinct from generated definitions, whose validation
+continues to reject executable meta preprocessing.
 
-let env        = Eio.Stdenv.cwd env    (* anywhere in your app *)
-let prompt_dir = Io.ensure_chatmd_dir ~cwd:env in
+One owned invocation bounds each input, total parse calls and tokens, and both
+per-file and expanded markup depth. Imports share its counters. Referenced
+script/schema reads preserve any tighter loader bound. Checkpoint exceptions and
+cancellation propagate, including cancellation requested by the final callback.
 
-let raw        = Io.load_doc ~dir:prompt_dir "hello.chatmd" in
-let messages   = Chat_markdown.parse_chat_inputs ~dir:prompt_dir raw in
+`Prompt_revision_builder.capture` prepares each distinct queued root once and
+retains an immutable authored inventory plus parser results. Its joint limit is
+256 authored files and 8 MiB of authored bytes plus distinct transformed effective
+payloads. Fresh publication replays the retained root against the installed
+captured tree. Persisting effective-input associations across process restart is
+a separate artifact-custody contract; a `Parsed.t` alone is not durable storage.
 
-List.iter messages ~f:(function
-  | Chat_markdown.User      m -> printf "User: %s\n"  (Option.value ~default:"" m.content)
-  | Chat_markdown.Assistant m -> printf "Assistant: ..."                (* etc. *)
-  | _ -> ())
-```
+## Interfaces and evidence
 
----
-
-## 3. Selected type cheatsheet
-
-| OCaml Type | ChatMarkdown construct |
-|------------|-----------------------|
-| `msg` / `user_msg` / `assistant_msg` | `<msg role="…">…</msg>`, `<user>`, `<assistant>` |
-| `tool_call_msg` | `<tool_call id="…" function_name="…">JSON args</tool_call>` |
-| `tool_response_msg` | `<tool_response id="…">JSON result</tool_response>` |
-| `config` | `<config max_tokens="2048" temperature="0.2" />` |
-| `tool` | `<tool name="grep" command="grep -nH {{pattern}} {{file}}" />` |
-| `reasoning` / `summary` | openAI-style assistant reasoning blocks |
-
-Every record field corresponds 1-to-1 to an attribute or piece of
-content in the source document.  See the generated odoc pages for full
-details.
-
----
-
-## 4. `parse_chat_inputs` – algorithm in a glance
-
-1. `Lexing` – leverages `Str` to recognise tags and attributes.
-2. `Parsing` – Menhir builds an AST defined by `Chatmd_ast`.
-3. `Import expansion` – recursive, duplicates prevented by the call
-   stack (no explicit cycle detection yet).
-4. `Normalisation` – shorthand tags remapped, stray text filtered.
-
-Execution is {i synchronous}; wrap the call in a separate Eio domain if
-the prompt is large (> 100 KB) and you need to keep the UI responsive.
-
----
-
-## 5. Edge cases & limitations
-
-* Cyclic imports yield a stack overflow (Menhir recursion) – to be fixed
-  in a future release.
-* Unknown XML fragments inside a recognised element are preserved as raw
-  text but are **not** validated.
-* Invalid UTF-8 is propagated as-is; ensure the source is normalised
-  before feeding it to the parser.
-
----
-
-## 6. Metadata helpers
-
-`Chatmd_prompt.Metadata` is a lightweight in-process registry for
-attaching arbitrary annotations to any value returned by
-`parse_chat_inputs`.  Because storing the pairs externally keeps record
-types unchanged, you can evolve metadata independently from the wire
-format.
-
-| Function | Purpose |
-|----------|---------|
-| `add elt ~key ~value` | Append a pair to `elt`’s metadata list. Multiple entries with the same key are allowed. |
-| `get elt` | Retrieve the list currently associated with `elt` or `None` if none. |
-| `set elt kvs` | Replace the list with `kvs`. |
-| `clear ()` | Remove **all** metadata; call this between two independent requests in services that hold state. |
-
-The functions mutate global state and therefore are {i not} thread-safe
-by design.  If you use metadata from multiple Eio fibres, wrap the calls
-in a mutex or reconsider your design.
-
----
-
-## 7. Re-exported helpers
-
-Although `prompt.ml` itself does not perform I/O, the typical workflow
-relies on:
-
-* `Io.load_doc` – load a file as a string.
-* `Io.ensure_chatmd_dir` – lazily create the hidden `.chatmd` cache.
-
-Refer to [`io.mli`](../../../lib/io.mli) for details.
-
-## Shell declaration dispatch
-
-`Prompt.Chat_markdown` exposes compatibility-facing top-level variants for
-shell runtimes, shell tools, shell ChatML scripts, and moderator runtime
-bindings. It delegates strict nested conversion/serialization to focused
-ChatMD modules and keeps source provenance through import expansion.
-
-Manifest compilation, authorization, filesystem probing, and live runtime
-instantiation are deliberately outside `prompt.ml`; they belong to
-`Chatmd_shell_spec` and `Shell_runtime`. This keeps the already-large Prompt
-module a dispatch/assembly boundary pending a broader future refactor.
-
-## Generated bundles
-
-The separate `Chat_markdown.parse_source_bundle` entry point parses bounded,
-captured-only sources without invoking preprocessing. It preserves canonical
-source provenance through inline imports and returns the root plus uniquely
-reachable local agent definitions. See [generated source bundle contracts](../../agent-server/extensibility-foundations.md#generated-source-bundles)
-for limits and the execution-admission work still required before using these
-declarations to create a runtime.
+[Prompt interface](../../../lib/chatmd/prompt.mli),
+[input and range ownership](../../../lib/chatmd/chatmd_parser_input.mli),
+[capture owner](../../../lib/agent_session/prompt_revision_builder.mli).
+The compact [owned-input tests](../../../test/chatmd_owned_input/) exercise exact
+byte ranges, preprocessing/replay, aggregate limits and interruption invariants.

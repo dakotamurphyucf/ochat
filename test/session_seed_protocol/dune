@@ -1,0 +1,6 @@
+(library
+ (name session_seed_protocol_tests)
+ (libraries core ochat.agent_protocol ochat.history_entry ochat.document_schema expect_test_helpers_core)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

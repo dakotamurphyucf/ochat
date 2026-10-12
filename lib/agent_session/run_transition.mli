@@ -2,7 +2,13 @@
     calls or callback execution. The actor establishes live scope/authority and
     passes a validated prospective state from its actual staged-work delta. New
     custody is captured even without an authored action. It persists the returned
-    delta with its prospective moderator checkpoint and actual event receipt. *)
+    delta with its prospective moderator checkpoint and actual event receipt.
+
+    An exact completed initial Single_turn callback with no action, owned work
+    or pending turn/compaction request completes with no result and a terminal
+    receipt in that same transaction. No input, continuation or work is fabricated.
+    Unowned scheduling without a scoped decision rejects that startup checkpoint;
+    explicit session-end disposition remains effective. Workflow is unchanged. *)
 type t
 
 val prepare
@@ -26,6 +32,21 @@ val settle_operation
   :  Session_state.t
   -> operation_id:Agent_protocol.Id.Operation.t
   -> outcome:Agent_protocol.Run_work.Terminal.outcome
+  -> now:Agent_protocol.Timestamp.t
+  -> (Session_delta.t list, Agent_protocol.Error.t) result
+
+(** Retire a failed/interrupted actual callback in its enclosing actor transaction.
+    The immutable scope must identify this execution and the current run source,
+    principal and generation. A closed scope is accepted only for retirement;
+    this operation grants no callback authority. Later revisions caused by owned
+    work are preserved, and an already terminal winner remains unchanged. Other
+    unresolved custody receives honest Unconfirmed evidence; no work is cancelled.
+    Persist these deltas with [completed] in the same session transaction. *)
+val fail_callback
+  :  Session_state.t
+  -> scope:Run_scope.t
+  -> executing:Agent_protocol.Moderator_execution.t
+  -> completed:Agent_protocol.Moderator_execution.t
   -> now:Agent_protocol.Timestamp.t
   -> (Session_delta.t list, Agent_protocol.Error.t) result
 

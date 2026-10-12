@@ -106,3 +106,41 @@ val read : t -> span -> string
     are supported. Ties retain [sp1]'s endpoint metadata. Both spans must
     describe the same document; line/column metadata is not recomputed. *)
 val merge : span -> span -> span
+
+module Portable_path : sig
+  (** Exact portable relative path: nonempty valid UTF-8, at most 1024 bytes,
+      no empty/dot/parent components or backslash, colon, NUL, CR or LF.
+      Does not rewrite, case-fold, open or normalize the supplied bytes. *)
+  type t [@@deriving compare, equal, sexp_of]
+
+  val create : string -> t Core.Or_error.t
+  val to_string : t -> string
+
+  (** Pure shared inventory identity validation. Exact duplicates and ASCII-case
+      collisions are checked first in canonical path order, then proper component
+      prefix file/directory conflicts. Unicode normalization/case equivalence and
+      filesystem semantics are not inferred. Return original validated paths;
+      prefix conflicts return the parent path first. Callers deduplicate legitimate
+      repeated references and group by their own namespace before calling.
+      Path bytes are bounded by create; poll inventory, comparisons and prefixes.
+      No input mutation, retained callback or I/O. *)
+  val first_collision : t list -> checkpoint:(unit -> unit) -> (t * t) option
+end
+
+module Position_index : sig
+  (** Immutable byte-position index affine to its supplied string. Owns that
+      string without copying, with one array slot per 4096 bytes plus the first.
+      LF and bare CR advance line; CRLF advances once. Columns are zero-based
+      bytes, preserving the captured-source coordinate convention. *)
+  type t
+
+  val create : string -> checkpoint:(unit -> unit) -> t
+
+  (** Validate [0..byte_length], then scan at most one 4096-byte block.
+      Hash/index/position checkpoint exceptions propagate unchanged. *)
+  val position
+    :  t
+    -> byte_offset:int
+    -> checkpoint:(unit -> unit)
+    -> position Core.Or_error.t
+end

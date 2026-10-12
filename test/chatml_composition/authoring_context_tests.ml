@@ -99,7 +99,7 @@ let%expect_test
     | `String s -> s
     | _ -> failwith "expected multiple source pages"
   in
-  let rec collect count reversed response =
+  let rec collect count max_tokens reversed response =
     assert (count < 100);
     (match field response "operation" with
      | `String "prepare" -> require_json `False (field response "package_complete")
@@ -108,19 +108,34 @@ let%expect_test
     require_json
       (`Number (Int.to_string ((String.length (Jsonaf.to_string response) + 2) / 3)))
       (field budget "token_estimate");
-    assert ((String.length (Jsonaf.to_string response) + 2) / 3 <= 6000);
+    require_json (`Number (Int.to_string max_tokens)) (field budget "max_tokens");
+    assert ((String.length (Jsonaf.to_string response) + 2) / 3 <= max_tokens);
+    let minimum =
+      match field budget "minimum_next_tokens" with
+      | `Null -> None
+      | `Number text -> Some (Int.of_string text)
+      | _ -> failwith "invalid next-page budget"
+    in
     let page = items response in
-    assert (not (List.is_empty page));
+    if List.is_empty page
+    then (
+      assert (Option.exists minimum ~f:(fun tokens -> tokens > max_tokens));
+      require_json `False (field response "complete"));
     let reversed = List.rev_append page reversed in
     match field response "next_cursor" with
     | `Null ->
       assert (Jsonaf.exactly_equal (field response "complete") `True);
       List.rev reversed
     | `String cursor ->
-      collect (count + 1) reversed (query (request ~cursor ~max_tokens:6000 "continue"))
+      let max_tokens = Int.max 6000 (Option.value minimum ~default:6000) in
+      collect
+        (count + 1)
+        max_tokens
+        reversed
+        (query (request ~cursor ~max_tokens "continue"))
     | _ -> failwith "invalid cursor"
   in
-  let paged = collect 0 [] first in
+  let paged = collect 0 6000 [] first in
   let whole =
     query
       (request
@@ -183,7 +198,7 @@ let%expect_test
   require_json `False (field prepared "package_complete");
   require_json `False (field prepared "complete");
   require_json (`String "reviewed_builtin_feature_coverage") (field prepared "coverage");
-  let prepared_pages = collect 0 [] prepared in
+  let prepared_pages = collect 0 6000 [] prepared in
   let prepared_whole =
     query
       (request

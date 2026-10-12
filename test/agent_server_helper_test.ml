@@ -46,8 +46,10 @@ let coordinator =
 ;;
 
 let state daemon id =
-  let entry = R.load (D.registry daemon) id |> protocol_ok in
-  A.state entry.actor |> protocol_ok
+  (* Poll immutable state without reserving the parent's lifecycle while its
+     real helper may be admitting a child. The passive read still revalidates
+     the retained actor/store binding before returning. *)
+  R.read_state (D.registry daemon) ~authorize:(fun _ -> Ok ()) id |> protocol_ok
 ;;
 
 let function_call name arguments =
@@ -1586,8 +1588,14 @@ let run env helper ~native_watch =
                 let head =
                   Option.map (List.hd snapshot.queued_internal_events) ~f:(function
                     | Session.Snapshot.Variant (tag, _) -> bounded tag
-                    | Unit | Bool _ | Int _ | Float _ | String _ | Array _ | Record _ ->
-                      "non-variant")
+                    | Unit
+                    | Bool _
+                    | Int _
+                    | Float _
+                    | String _
+                    | Array _
+                    | Record _
+                    | Tuple _ -> "non-variant")
                 in
                 [%sexp
                   (List.length snapshot.queued_internal_events : int)

@@ -234,7 +234,14 @@ let%expect_test "open shadowing is rejected" =
     |}
   in
   print_endline (check_program_formatted code);
-  [%expect {| Type error: open M would shadow existing binding 'x' |}]
+  [%expect
+    {|
+    line 6, characters 6-12:
+    6|    open M
+          ^^^^^^
+
+    Type error: open M would shadow existing binding 'x'
+    |}]
 ;;
 
 let%expect_test "record_keys accepts wider records" =
@@ -1774,7 +1781,7 @@ let%test_unit "explicit recursive type helpers are cycle-safe" =
   in
   let rendered = Chatml_typechecker.show_type ty in
   if not (String.is_substring rendered ~substring:"mu a.") then failwith rendered;
-  Chatml_typechecker.ensure_equality_type ty;
+  Chatml_typechecker.ensure_equality_type (Chatml_typechecker.create_state ()) ty;
   match Chatml_typechecker.record_field_type ty "next" with
   | Some _ -> ()
   | None -> failwith "expected to find recursive record field through Mu"
@@ -1890,18 +1897,24 @@ let%test_unit "unguarded recursive type declaration is rejected" =
 
 let%test_unit "ordinary non-recursive bindings still generalize" =
   let state = Chatml_typechecker.create_state () in
-  let free = Chatml_typechecker.Var (ref (Chatml_typechecker.Free ("z", 1))) in
+  let free =
+    Chatml_typechecker.Var
+      (ref (Chatml_typechecker.Free { name = "z"; level = 1; equality = None }))
+  in
   let ty = Chatml_typechecker.Fun ([ Chatml_typechecker.TInt ], free) in
-  let env = Chatml_typechecker.Env.empty in
+  let env = Chatml_typechecker.Value_scope.empty in
   let env' = Chatml_typechecker.add_generalized state env "f" ty in
-  let stored = Chatml_typechecker.Env.find_exn env' "f" in
+  let stored = Chatml_typechecker.lookup_scheme env' "f" in
   if not (Chatml_typechecker.contains_generic stored)
   then failwith "expected ordinary non-recursive binding to generalize"
 ;;
 
-let%test_unit "bindings containing recursive types remain monomorphic" =
+let%test_unit "recursive arguments do not suppress independent result generalization" =
   let state = Chatml_typechecker.create_state () in
-  let free = Chatml_typechecker.Var (ref (Chatml_typechecker.Free ("z", 1))) in
+  let free =
+    Chatml_typechecker.Var
+      (ref (Chatml_typechecker.Free { name = "z"; level = 1; equality = None }))
+  in
   let recursive_expr_ty =
     Chatml_typechecker.Mu
       ( "expr"
@@ -1918,15 +1931,15 @@ let%test_unit "bindings containing recursive types remain monomorphic" =
              , Chatml_typechecker.Empty_row )) )
   in
   let ty = Chatml_typechecker.Fun ([ recursive_expr_ty ], free) in
-  let env = Chatml_typechecker.Env.empty in
+  let env = Chatml_typechecker.Value_scope.empty in
   let env' = Chatml_typechecker.add_generalized state env "f" ty in
-  let stored = Chatml_typechecker.Env.find_exn env' "f" in
-  if Chatml_typechecker.contains_generic stored
-  then failwith "recursive binding should have remained monomorphic";
+  let stored = Chatml_typechecker.lookup_scheme env' "f" in
+  if not (Chatml_typechecker.contains_generic stored)
+  then failwith "independent result variable should generalize";
   match stored with
   | Chatml_typechecker.Fun
       ( [ Chatml_typechecker.Mu _ ]
-      , Chatml_typechecker.Var { contents = Chatml_typechecker.Free _ } ) -> ()
+      , Chatml_typechecker.Generic { name = "z"; equality = None } ) -> ()
   | _ -> failwith ("unexpected stored type: " ^ Chatml_typechecker.show_type stored)
 ;;
 
@@ -2060,7 +2073,7 @@ let%expect_test "recursive unification preserves payload constraints and binder 
   let open Chatml_typechecker in
   let record fields = Record (Row (Env.of_list fields, Empty_row)) in
   let graph payload =
-    let knot = ref (Free ("knot", 0)) in
+    let knot = ref (Free { name = "knot"; level = 0; equality = None }) in
     let ty = record [ "next", Var knot; "value", payload ] in
     knot := Bound ty;
     ty
@@ -2081,12 +2094,14 @@ let%expect_test "recursive unification preserves payload constraints and binder 
   check "payload mismatch after back edge" (graph TInt) (graph String);
   check "inferred against explicit" (graph TInt) (declared "node" TInt);
   check "explicit against inferred" (declared "node" TInt) (graph TInt);
-  let shared_free = Var (ref (Free ("shared_free", 0))) in
+  let shared_free =
+    Var (ref (Free { name = "shared_free"; level = 0; equality = None }))
+  in
   check
     "shared free payload under alpha renamed binders"
     (declared "a" shared_free)
     (declared "b" shared_free);
-  let shared = Var (ref (Free ("shared", 0))) in
+  let shared = Var (ref (Free { name = "shared"; level = 0; equality = None })) in
   check
     "sibling constraints are rechecked"
     (Tuple [ graph shared; graph shared ])

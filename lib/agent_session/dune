@@ -6,11 +6,22 @@
   workspace_catalog
   workspace_instance
   workspace_resolver
+  workspace_ownership
   runtime_paths
   workspace_lease
   workspace_cleanup
   prompt_definition
   prompt_revision
+  prompt_source_entry
+  prompt_child_source
+  prompt_parser_boundary
+  prompt_program_custody
+  prompt_project_baseline_record
+  prompt_project_baseline_document
+  prompt_project_baseline
+  prompt_project_preparation
+  prompt_project_baseline_store
+  prompt_content_custody
   prompt_revision_builder
   generated_definition
   generated_session_request
@@ -18,7 +29,12 @@
   extensibility_native_tools
   managed_session_service
   authored_agent_call
+  captured_child_source
   authored_agent_source
+  authored_source_preparation
+  authored_native_contract
+  authored_code_preparation
+  agent_source_code_view
   authored_agent_binding
   session_management
   session_management_channel
@@ -33,7 +49,13 @@
   pending_carrier_admission
   session_replacement_delta
   managed_submission_tracking
+  prompt_source_owner
+  prompt_project_route
+  prompt_script_sources
+  prompt_script_roles
+  prompt_script_preparation
   prompt_catalog
+  prompt_source_lease
   security_grant
   session_record_shapes
   persistence_codec
@@ -154,6 +176,8 @@
   active_calls
   operation_worker
   turn_worker
+  runtime_script_preparation
+  captured_agent_runner
   runtime_builder
   runtime_activity
   queued_moderator_event
@@ -168,13 +192,23 @@
   quota_manager
   start_queue
   inference_ledger)
- (private_modules pending_carrier_admission)
+ (private_modules workspace_ownership authored_native_contract pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles
+  prompt_project_baseline_record prompt_project_baseline_document)
  (libraries ochat.inference_client ochat.inference_runtime ochat.inference ochat.history_chatmd ochat.transcript
   core
+  core_unix
   digestif
   eio
   eio.unix
   ochat.document_schema
+  jsonaf
+  chatml_prompt_programs
+  ochat.chatmd_content_capture
+  ochat.chatmd_prompt_content
+  ochat.chatml_local_source
+  ochat.chatml_project_prepare
+  ochat.chatml_local_roots
+  ochat.chatml_git_host
   ochat.agent_protocol
   ochat.agent_store
   chatmd

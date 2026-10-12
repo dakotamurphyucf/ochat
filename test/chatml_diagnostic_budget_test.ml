@@ -81,7 +81,9 @@ let%expect_test "unification cancellation reaches occurs checks and recursive un
       T.Row (T.Env.singleton (Int.to_string i) T.TInt, rest))
   in
   List.iter
-    [ "occurs", T.Var (ref (T.Free ("fresh", 0))), dag 80
+    [ ( "occurs"
+      , T.Var (ref (T.Free { name = "fresh"; level = 0; equality = None }))
+      , dag 80 )
     ; "contractiveness", T.Mu ("r", dag 80), T.Boolean
     ; "row-merge", row, T.Row (T.Env.singleton "0" T.TInt, T.Empty_row)
     ]
@@ -109,7 +111,7 @@ let%expect_test "ordinary structured and recursive diagnostics retain their disp
   let row =
     T.Row (T.Env.of_list [ "value", T.TInt; "next", T.Rec_var "node" ], T.Empty_row)
   in
-  let cyclic = ref (T.Free ("a", 0)) in
+  let cyclic = ref (T.Free { name = "a"; level = 0; equality = None }) in
   cyclic
   := T.Bound (T.Record (T.Row (T.Env.singleton "next" (T.Var cyclic), T.Empty_row)));
   let cases =
@@ -122,7 +124,7 @@ let%expect_test "ordinary structured and recursive diagnostics retain their disp
                [ "None", T.Variant_payload []
                ; "Pair", T.Variant_payload [ T.TInt; T.String ]
                ]
-           , T.Generic "rest" ))
+           , T.Generic { name = "rest"; equality = None } ))
     ; T.Record
         (T.Row
            (T.Env.singleton "a" T.TInt, T.Row (T.Env.singleton "a" T.String, T.Empty_row)))

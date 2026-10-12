@@ -61,6 +61,7 @@ let on_event ctx state event = match event with
 <tool name="counter" type="moderator" moderator="owner" input_schema="input.json" output_schema="output.json"/>|};
       let catalog =
         Agent_session.Prompt_definition.create
+          ~root_invocation:Ui
           ~id:prompt_id
           ~config_name:"authored-runtime"
           ~root_file:(Eio.Path.native_exn Eio.Path.(root / "root.chatmd"))
@@ -117,6 +118,10 @@ let on_event ctx state event = match event with
                 ()
             in
             B.prepare_authored_resources
+              ~agent_source:None
+              ~startup:None
+              ~script_preparation:(Some (Fixtures.script_preparation ()))
+              ~content_limits:None
               ~inference_context:inference.context
               ~inference_identity:inference.identity
               ~on_inference_attempt:ignore
@@ -247,6 +252,7 @@ let on_event ctx state event = match event with
               ~artifact
               ~materialized_tree:
                 (Artifacts.materialized_tree artifacts artifact.revision_id)
+              ()
             |> Authored_agent_source_tests.built
           in
           let authority =
@@ -387,6 +393,7 @@ let on_event ctx state event = match event with
               ~services
               ~revision
               ~prepared
+              ~code:None
               ~authority
               ~history:[]
               ~sw

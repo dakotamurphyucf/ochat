@@ -8,12 +8,14 @@ context. Instruction helper compatibility names emit developer-role messages.
 
 ChatMarkdown (ChatMD) is a **small, closed XML vocabulary embedded in Markdown** for authoring LLM conversations as plain files.
 
-The core idea is simple: a ChatMD file is both:
+ChatMD describes runnable agent definitions and readable conversation transcripts.
+In a managed session, the authored definition stays separate from the stored
+conversation. Export a transcript explicitly when you want a readable file of
+tool calls, tool results and replies; importing an edited transcript starts a new
+conversation. Resuming an existing conversation uses its captured code. An explicit
+rebuild while the session is stopped adopts edits to the definition and scripts.
 
-- a **prompt** (model config, tool permissions, instructions, context), and
-- an **auditable transcript** (tool calls + tool outputs + assistant replies).
-
-This makes workflows **reproducible**, **diffable**, and easy to review.
+These files make agent definitions and exported conversations easy to review.
 
 ## “What the model sees” (and the explicit exceptions)
 
@@ -571,6 +573,31 @@ The runtime is compiled and authorized before the tool is exposed. See the
 <tool name="triage" agent="prompts/triage.chatmd" local description="Triage a bug report"/>
 ```
 
+For local agent tools in a managed host, `source_mode="file"` is the default:
+each new child captures the current source files before it starts. Use
+`source_mode="captured"` to select the child code retained with the defining
+conversation instead:
+
+```xml
+<tool name="triage" agent="prompts/triage.chatmd" local source_mode="captured"/>
+```
+
+A queued child keeps the installed revision selected at admission. Editing the
+files afterward does not change that queued or running child's code, including
+when its recorded work is retried or recovered. Source selection does not grant
+additional tools or access to files outside the host's admitted source roots.
+Persistent specialists use the same selection rules for new sessions. Resuming
+a specialist by its session ID uses that session's retained revision, even if the
+original files changed or were removed. Retrying the same creation request also
+retains its recorded revision.
+
+Refreshing a specialist's code keeps its originally admitted tools and native
+resources. Updated moderator scripts, managed tools and shell hooks must pass
+validation against those bindings, and changed shell code needs authorization for
+its new execution manifest. Source edits cannot silently add tools or widen
+permissions; changes to those declarations require a new defining session or an
+explicit rebuild.
+
 ### 5.5 MCP-backed tools (import tools from an MCP server)
 
 ```xml
@@ -738,7 +765,15 @@ Here’s a summary produced by my sub-agent:
 Notes:
 
 - Any children of `<agent>` become the sub-agent’s runtime input.
-- Results are cached (so repeated identical agent calls can be cheap).
+- The legacy unowned content path may cache repeated agent results. Owned managed
+  child dispatch executes each selected invocation; source capture does not cache
+  its answer.
+
+Owned local content agents accept the same `source_mode="file"|"captured"`
+selection. For example, `<agent src="prompts/summarise.chatmd" local
+source_mode="captured">...</agent>` uses the retained child code. The default
+is `file`; nested agent calls select their own declared child rather than reuse
+an enclosing queued tool's selected revision.
 
 ---
 

@@ -1,0 +1,8 @@
+(copy_files ../agent_server_e2e/support/crash_fault_io.ml)
+
+(library
+ (name chatml_source_owner_tests)
+ (modules support receipt_tests owner_tests catalog_tests seal_tests lifecycle_tests project_tests script_tests preparation_tests runtime_preparation_tests root_invocation_tests captured_child_tests captured_runner_tests selection_tests baseline_tests project_preparation_tests publication_tests daemon_history_tests shell_inspection_tests daemon_content_tests selected_member_tests child_source_tests persistent_source_tests crash_fault_io)
+ (libraries builtin_instructions core eio eio.unix eio.mock eio_main mirage-crypto-rng.unix inference_fixture agent_server_test_support ochat.agent_session ochat.agent_server ochat.agent_store ochat.chatml_project_prepare)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

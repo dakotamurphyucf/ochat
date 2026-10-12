@@ -437,7 +437,7 @@ let relation_for_item ~history item =
      | None -> Unresolved)
 ;;
 
-let of_items ~preceding ~allocator items =
+let of_items ?(checkpoint = ignore) ~preceding ~allocator items =
   let open Result.Let_syntax in
   let key kind provider_id =
     (match kind with
@@ -446,6 +446,7 @@ let of_items ~preceding ~allocator items =
     ^ provider_id
   in
   let update nearest entry =
+    checkpoint ();
     let semantic = P.semantic (History_entry.payload entry) in
     match S.view semantic, (S.metadata semantic).call_id with
     | Call { kind; _ }, Value provider_id ->
@@ -458,6 +459,7 @@ let of_items ~preceding ~allocator items =
   let nearest = List.fold preceding ~init:String.Map.empty ~f:update in
   let%map _, reversed =
     List.fold_result items ~init:(nearest, []) ~f:(fun (nearest, acc) item ->
+      checkpoint ();
       let%bind payload = of_item item in
       let semantic = P.semantic payload in
       let relation =
@@ -473,5 +475,7 @@ let of_items ~preceding ~allocator items =
       let%map entry = History_entry.create ~allocator payload in
       update nearest entry, entry :: acc)
   in
-  List.rev reversed
+  List.fold reversed ~init:[] ~f:(fun entries entry ->
+    checkpoint ();
+    entry :: entries)
 ;;

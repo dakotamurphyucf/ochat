@@ -36,6 +36,7 @@ type t =
   ; language : string
   ; kind : kind
   ; source : source
+  ; project_selection : Script_project.t option [@jsonaf.option] [@sexp.option]
   ; source_ref : Source_ref.t
   ; source_sha256 : string
   ; limits : limits

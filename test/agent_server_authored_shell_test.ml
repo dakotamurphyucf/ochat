@@ -312,13 +312,41 @@ let qualify_authored_shell ~snapshot_replacement =
           | _ -> failwith "expected one new authored child"
         in
         let entry =
-          R.load (D.registry daemon) record.admission.child_session_id |> protocol_ok
+          R.with_loaded_read
+            (D.registry daemon)
+            record.admission.child_session_id
+            (fun entry -> Ok entry)
+          |> protocol_ok
         in
         entry, fun () -> Eio.Promise.resolve ready_u ()
       in
       let child, release = create () in
       let child_id = (state child).identity.session_id in
-      let handle = attach client child_id in
+      let entered, entered_u = Eio.Promise.create () in
+      let release_read, release_read_u = Eio.Promise.create () in
+      let reader =
+        Eio.Fiber.fork_promise ~sw (fun () ->
+          R.with_loaded_read (D.registry daemon) child_id (fun _ ->
+            Eio.Promise.resolve entered_u ();
+            Eio.Promise.await release_read;
+            Ok ()))
+      in
+      Eio.Promise.await entered;
+      let attached = Eio.Fiber.fork_promise ~sw (fun () -> attach client child_id) in
+      (* Keep the real read reservation held while the HTTP command arrives.
+         The old lookup returns Conflict under this same finite schedule. *)
+      let waited =
+        Exn.protect
+          ~finally:(fun () -> Eio.Promise.resolve release_read_u ())
+          ~f:(fun () ->
+            for _ = 1 to 256 do
+              Eio.Fiber.yield ()
+            done;
+            Option.is_none (Eio.Promise.peek attached))
+      in
+      Eio.Promise.await_exn reader |> protocol_ok;
+      let handle = Eio.Promise.await_exn attached in
+      assert waited;
       release ();
       let permission = pending child in
       assert (P.Id.Session.equal permission.session_id child_id);
@@ -412,10 +440,48 @@ let qualify_authored_shell ~snapshot_replacement =
       initialize peer_client;
       let peer = attach peer_client child_id in
       mark "concurrent permission approval";
+      let require_missing_receipt connection command =
+        match
+          Agent_client.Connection.request_without_history
+            connection
+            (Command_receipt
+               { method_name = P.Command.method_name command
+               ; original_params = P.Command.params command
+               })
+          |> protocol_ok
+        with
+        | Command_receipt Missing -> ()
+        | _ -> failwith "conflicting writer command was already admitted"
+      in
+      let rec request_after_unadmitted_conflict connection command =
+        match Agent_client.Connection.request_without_history connection command with
+        | Error { code = Conflict; retryable = true; _ } ->
+          require_missing_receipt connection command;
+          Eio.Fiber.yield ();
+          request_after_unadmitted_conflict connection command
+        | result -> result
+      in
+      let approve_concurrently connection handle key =
+        let command =
+          P.Command.Permission_respond
+            { session_id = child_id
+            ; attachment_id = (H.attachment handle).id
+            ; permission_id = permission.id
+            ; permission_generation = permission.generation
+            ; choice = Approve_session
+            ; reason = None
+            ; idempotency_key = P.Idempotency_key.of_string key |> protocol_ok
+            }
+        in
+        match request_after_unadmitted_conflict connection command with
+        | Ok (Permission_respond result) -> Ok result.permission
+        | Ok _ -> failwith "unexpected concurrent approval result"
+        | Error _ as failure -> failure
+      in
       let first, second =
         Eio.Fiber.pair
-          (fun () -> approve handle permission Approve_session)
-          (fun () -> approve peer permission Approve_session)
+          (fun () -> approve_concurrently client handle "concurrent-approval-first")
+          (fun () -> approve_concurrently peer_client peer "concurrent-approval-second")
       in
       (match first, second with
        | Ok _, Error { code = Already_resolved; _ }
@@ -525,10 +591,29 @@ let qualify_authored_shell ~snapshot_replacement =
       ignore (pending cancelled_child : P.Permission.t);
       let operation = Option.value_exn (state cancelled_child).active_operation in
       mark "concurrent cancellation";
+      let cancel_concurrently connection handle key =
+        let command =
+          P.Command.Session_cancel_operation
+            { session_id = cancelled_id
+            ; attachment_id = (H.attachment handle).id
+            ; operation_id = operation.id
+            ; idempotency_key = P.Idempotency_key.of_string key |> protocol_ok
+            }
+        in
+        match request_after_unadmitted_conflict connection command with
+        | Ok (Session_cancel_operation result) -> Ok result.session
+        | Ok _ -> failwith "unexpected concurrent cancellation result"
+        | Error _ as failure -> failure
+      in
       let first, second =
         Eio.Fiber.pair
-          (fun () -> H.cancel_operation first_canceller operation.id)
-          (fun () -> H.cancel_operation second_canceller operation.id)
+          (fun () ->
+             cancel_concurrently client first_canceller "concurrent-cancellation-first")
+          (fun () ->
+             cancel_concurrently
+               cancel_client
+               second_canceller
+               "concurrent-cancellation-second")
       in
       (match first, second with
        | Ok _, Ok _
@@ -638,7 +723,7 @@ let%expect_test "private authored shell manifests need an exact operator grant" 
     let source_sha256, root_manifest, private_manifest =
       with_daemon env root base principal provider (fun _ daemon _ ->
         let parent = revision daemon in
-        let source = Source.capture ~parent ~tool_name:"researcher" |> protocol_ok in
+        let source = Source.capture ~parent ~tool_name:"researcher" () |> protocol_ok in
         let child = Source.resource_revision ~parent source |> protocol_ok in
         let inspection =
           Chat_response.Agent_runtime.inspect_shell

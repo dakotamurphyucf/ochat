@@ -1,0 +1,13 @@
+(library
+ (name chatml_checked_graph)
+ (public_name ochat.chatml_checked_graph)
+ (modules chatml_checked_graph)
+ (libraries core chatml chatml_typechecker chatml_configured_check chatml_graph chatml_prepared_program)
+ (preprocess (pps ppx_jane)))
+
+(library
+ (name chatml_linked_program)
+ (public_name ochat.chatml_linked_program)
+ (modules chatml_linked_program)
+ (libraries core chatml chatml_typechecker chatml_configured_check chatml_checked_graph chatml_resolver chatml_graph chatml_prepared_program)
+ (preprocess (pps ppx_jane)))

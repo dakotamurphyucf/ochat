@@ -300,6 +300,7 @@ let%expect_test
         R.
           { implementation
           ; result_contract = contract
+          ; source_requirement = Ordinary
           ; authoring_metadata = None
           ; implementation_revision = Chatmd_shell_spec.Source_ref.digest revision
           }
@@ -946,4 +947,90 @@ let%expect_test "moderator Process.run rejects invalid arguments and missing run
   let missing = handler moderator_session ~command:"/bin/echo" ~args:(Lang.VArray [||]) in
   printf "invalid=%b missing=%b\n" (Result.is_error invalid) (Result.is_error missing);
   [%expect {| invalid=true missing=true |}]
+;;
+
+let%expect_test "managed admission precedes native hook initialization" =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let module R = Chat_response.Agent_runtime in
+    let module C = Chat_response.Tool_capability in
+    let root = Eio.Path.(Eio.Stdenv.cwd env / "_build" / "staged-agent-startup") in
+    Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 root;
+    Eio.Path.save ~create:(`Or_truncate 0o600) Eio.Path.(root / "schema.json") "true";
+    let prepare ~initial_state ~handler f =
+      let source =
+        sprintf
+          {|<script id="reviewer" language="chatml" kind="shell_reviewer">
+let initial_state = %s
+let review ctx state = Task.bind(Review.deny("fixture"), fun ignored -> Task.pure(state))
+</script>
+<shell_access id="checks" extends="builtin:yolo@1">
+  <reviewers strategy="first_terminal">
+    <reviewer id="review" kind="chatml" script="reviewer" lifecycle="session" failure="deny"/>
+  </reviewers>
+</shell_access>
+<tool name="probe" type="shell" mode="fixed" runtime="checks" command="/bin/echo"/>
+<script id="handler" language="chatml" kind="tool">%s</script>
+<tool name="managed" type="chatml" script="handler" entrypoint="run" input_schema="schema.json" output_schema="schema.json"/>|}
+          initial_state
+          handler
+      in
+      Eio.Switch.run (fun sw ->
+        with_agent_runtime_input env root source (fun ~ctx ~host ~elements ->
+          R.prepare_extensions
+            ~sw
+            ~ctx
+            ~host
+            ~platform:S.Macos
+            ~prompt_elements:elements
+            ~manifest_authorizer:Shell_runtime.Manifest_authorizer.assume_authorized
+            ~approval_provider:Shell_runtime.Approval_broker.None_available
+            ~approval_store:(Shell_access.Approval.create_store ())
+            ~run_agent:
+              (fun
+                ?prompt_dir:_ ?session_id:_ ?observer:_ ~source:_ ~ctx:_ _ _ ->
+              failwith "unexpected nested agent")
+            ()
+          |> f))
+    in
+    prepare ~initial_state:"1 / 0" ~handler:"let run = 42" (function
+      | Ok _ -> failwith "invalid managed handler accepted"
+      | Error diagnostics ->
+        assert (not (List.is_empty diagnostics));
+        assert (
+          List.exists diagnostics ~f:(fun diagnostic ->
+            Option.is_some diagnostic.R.source));
+        assert (
+          List.for_all diagnostics ~f:(fun diagnostic ->
+            not (String.is_prefix diagnostic.R.code ~prefix:"shell.")));
+        print_endline
+          "invalid managed script: source diagnostic before native initializer");
+    let handler = "let run ctx input = Task.pure(`Complete(input))" in
+    prepare ~initial_state:"1 / 0" ~handler (function
+      | Error [ { code = "shell.chatml_activate"; _ } ] ->
+        print_endline "valid managed script: native initializer is now reached"
+      | Error diagnostics -> ignore (agent_runtime_or_fail (Error diagnostics) : unit)
+      | Ok _ -> failwith "poison native initializer accepted");
+    prepare ~initial_state:"0" ~handler (fun result ->
+      let resources = agent_runtime_or_fail result in
+      let implementation = runtime_function resources.native "probe" in
+      let capabilities =
+        Lazy.force resources.native.capabilities
+        |> Result.map_error ~f:(fun error -> error.C.message)
+        |> Result.ok_or_failwith
+      in
+      let binding =
+        C.find capabilities ~name:"probe"
+        |> Result.map_error ~f:(fun error -> error.C.message)
+        |> Result.ok_or_failwith
+      in
+      assert (
+        phys_equal implementation (C.native_implementation binding |> Option.value_exn));
+      print_endline "successful startup: the admitted native implementation is retained"));
+  [%expect
+    {|
+    invalid managed script: source diagnostic before native initializer
+    valid managed script: native initializer is now reached
+    successful startup: the admitted native implementation is retained
+    |}]
 ;;

@@ -31,11 +31,19 @@ val create
   -> server_health:(Agent_protocol.Health.Request.t -> Agent_protocol.Health.Response.t)
   -> cancel_job:(Agent_protocol.Id.Job.t -> unit)
   -> create_session:create_session
+  -> seed_factory:Session_factory.t option
+  -> seed_recovery_limits:Session_factory.Seed_recovery_limits.t
+       (** [Some factory] borrows the actual same Store/Registry factory used by this
+      host; it is not another source owner. [None] returns an unsupported capability
+      error for session.seed and must not advertise sessions.seed. Daemon (including
+      Embedded and its stdio dispatcher) supplies its actual existing Factory.
+      Pending receipt lookup borrows the same bounded recovery profile as startup. *)
   -> prepare_session_start:
        (Session_registry.entry -> (unit, Agent_protocol.Error.t) result)
   -> workspace_retained:
        (Agent_session.Session_state.t -> (bool, Agent_protocol.Error.t) result)
   -> provider_operator:Provider_operator_port.t option
+  -> dependency_administration:Dependency_administration.t option
   -> prepare_administration:
        (Session_registry.entry
         -> previous:Agent_session.Session_state.t

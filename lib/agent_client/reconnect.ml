@@ -498,6 +498,10 @@ let read_audit t ~limit =
   with_handle t (fun handle -> Session_handle.read_audit handle ~limit)
 ;;
 
+let read_canonical t ~revision ~limits ~checkpoint =
+  with_handle t (fun handle -> Canonical_export.read handle ~revision ~limits ~checkpoint)
+;;
+
 let mark_closed t =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     if not t.closed

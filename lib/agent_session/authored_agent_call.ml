@@ -215,6 +215,7 @@ let registration ?(wait_timeout_ms = 10000) ~source ~capabilities ~services () =
     { implementation
     ; implementation_revision
     ; result_contract = Invocation_v1
+    ; source_requirement = Source None
     ; authoring_metadata = None
     }
 ;;

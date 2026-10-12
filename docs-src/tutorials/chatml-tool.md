@@ -1,9 +1,10 @@
 # Make a reusable ChatML tool
 
 Give the agent a tool named `summarize_checks` that accepts report filenames and
-returns failure counts. This wraps the [previous lesson's program](chatml-program.md)
-in a declaration with input/output schemas and an explicit selected-tool dependency.
-The calculation stays in one maintained source file.
+returns failure counts. This exposes the [previous lesson's calculation](chatml-program.md)
+through a configured source graph, input/output schemas and an explicit selected
+file-tool binding. `Checked_json` owns the reusable pure decoder; the report
+script owns its domain checks and effectful workflow.
 
 Use a standalone tool for logic that can start fresh on every invocation.
 For a tool that needs to remember a review queue or coordinate later results,
@@ -21,6 +22,10 @@ the source viewer below to read every file; download and extract the
 chatml-tool/
   agent.chatmd
   scripts/aggregate.chatml
+  chatml.project.json
+  libraries/checked-json/chatml.project.json
+  libraries/checked-json/src/checked_json.chatml
+  libraries/checked-json/src/checked_json.chatmli
   schemas/input.json
   schemas/output.json
   reports/report-a.json
@@ -45,7 +50,8 @@ the file reader, attaches the script as `kind="tool"`, and exposes its `run`
 entry point as a named tool. The binding portion is:
 
 ```xml
-<script id="report_program" language="chatml" kind="tool" src="scripts/aggregate.chatml"/>
+<script id="report_program" language="chatml" kind="tool"
+        project="chatml.project.json" src="scripts/aggregate.chatml"/>
 <tool name="summarize_checks" type="chatml" script="report_program" entrypoint="run"
       input_schema="schemas/input.json" output_schema="schemas/output.json"
       description="Count failures by check name across the selected report files.">
@@ -62,13 +68,34 @@ filesystem API or a new root. In this root, the file reader permits only the
 bundled reports directory. The script has no need to read its own source:
 Ochat loads the attached file as part of the definition.
 
-## Reuse the calculation, change the calling contract
+## Select the module and validate before effects
 
-The shared [aggregate script](../examples/learning/check-reports/scripts/aggregate.chatml)
-exports both entry points. `main(input)` calculates the summary. `run(ctx, input)`
-extracts `input.files`, sequences that task and wraps its JSON in the tool's `Complete`
-outcome. `ctx` is the supplied invocation context; this calculation does not need
-to inspect it.
+The [project declaration](../examples/learning/check-reports/chatml.project.json)
+selects a local decoder package inside the assembled bundle. Its default environment
+binds `Checked_json` to `Decoder.Checked_json`; the
+[public companion](../examples/libraries/checked-json/src/checked_json.chatmli)
+exposes transparent error paths and checked result types while hiding implementation
+helpers. No decoder builtin, source concatenation or external source grant is used.
+Use the complete archive: the raw source subdirectory alone omits its assembled
+library companions.
+
+The configured [aggregate script](../examples/learning/check-reports/scripts/aggregate.chatml)
+checks the whole filename collection before creating any tasks. Its decoder keeps
+missing fields, explicit nulls, wrong shapes and invalid statuses distinct. Typed
+field/index segments carry the error path; `describe` only renders that path for
+the invocation's error message. Object lookup preserves the first duplicate key.
+
+`Task.iter_array` reads sequentially after validation. The local table counts failed
+checks, and `Hashtbl.to_array` exports a snapshot in first-failure order. Each call
+creates a fresh table. Pure decoder callbacks finish before tool work begins;
+they use receiver-first, callback-last APIs such as
+`Checked_json.array(input, Checked_json.string)`.
+
+`run(ctx, input)` accepts the schema's `files` field and wraps the resulting JSON
+in `Complete`. `ctx` remains the authentic invocation context; the calculation
+does not inspect it. The source also has a `main` helper, but the
+[one-off lesson](chatml-program.md) uses a separate self-contained program because
+`run_chatml` cannot load this configured module graph.
 
 The model sees the named tool and its schema. It submits `{"files": ["report-a.json", "report-b.json"]}`,
 not a program or an arbitrary function name. The runtime validates the input,
@@ -82,7 +109,7 @@ verification-step failure once, just as in the previous lesson. Ask for either
 report alone to change the calculation. Repeating a call starts with fresh script
 globals; this is not a retained specialist conversation or persistent queue.
 
-An input missing `files`, or containing a non-array `files`, is rejected before file reads.
+An input missing `files`, containing a non-array `files`, or containing any non-string filename is rejected before all file reads.
 A missing or denied file fails the operation. Invalid report contents fail during
 decoding. An output that violates the declared schema is rejected rather than
 presented as a valid tool result. Inspect the actual tool outcome, not just the
@@ -95,7 +122,8 @@ definition; modifying a file does not silently replace a running captured artifa
 ## Finish and extend
 
 Quit with Esc, then `:q` and Enter after the request completes. To reuse this
-tool, carry its script, schemas and file-access declaration with the root.
+tool, carry its script, project, decoder implementation/interface, schemas and
+file-access declaration with the root.
 
 To retain state across calls, learn about
 [stateful moderator tools](../guide/chatml-authoring-runtime.md#moderator-tools-and-session-owned-state).

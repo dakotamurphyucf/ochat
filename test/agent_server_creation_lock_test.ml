@@ -295,6 +295,69 @@ let on_event ctx state event = Task.pure(state)
                       |> protocol_ok
                     in
                     assert (D.equal_stage record.stage Linked);
+                    let replay () =
+                      Agent_server.Session_factory.create_generated_session
+                        (Daemon.factory daemon)
+                        ~parent_session_id:parent.id
+                        ~idempotency_key:
+                          (P.Idempotency_key.of_string "publication" |> protocol_ok)
+                        ~display_name:None
+                        definition
+                    in
+                    (* An exclusive observer can reject even an exact replay.
+                       Preserve that lifecycle guard; ordinary polling instead
+                       uses the registry's existing passive read lifetime. *)
+                    let with_observer read f =
+                      let entered, enter = Eio.Promise.create () in
+                      let released, release = Eio.Promise.create () in
+                      let hold () =
+                        Eio.Promise.resolve enter ();
+                        Eio.Promise.await released;
+                        Ok ()
+                      in
+                      let reader = Eio.Fiber.fork_promise ~sw (fun () -> read hold) in
+                      Exn.protect
+                        ~finally:(fun () ->
+                          Eio.Cancel.protect (fun () ->
+                            Eio.Promise.resolve release ();
+                            Eio.Promise.await_exn reader |> protocol_ok |> ignore))
+                        ~f:(fun () ->
+                          Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+                            Eio.Promise.await entered);
+                          Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. f)
+                    in
+                    with_observer
+                      (fun hold ->
+                         Agent_server.Session_registry.with_loaded_read
+                           (Daemon.registry daemon)
+                           parent.id
+                           (fun observed ->
+                              let snapshot = A.state observed.actor |> protocol_ok in
+                              Result.map (hold ()) ~f:(fun () -> snapshot)))
+                      (fun () ->
+                         match replay () with
+                         | Error failure ->
+                           [%test_eq: P.Error.code] Conflict failure.code;
+                           [%test_eq: string]
+                             "parent lifecycle is reserved"
+                             failure.message
+                         | Ok _ -> assert false);
+                    with_observer
+                      (fun hold ->
+                         Agent_server.Session_registry.read_state
+                           (Daemon.registry daemon)
+                           ~authorize:(fun _ -> hold ())
+                           parent.id)
+                      (fun () ->
+                         let repeated = replay () |> protocol_ok in
+                         let repeated_state = A.state repeated.actor |> protocol_ok in
+                         [%test_eq: P.Id.Session.t]
+                           state.identity.session_id
+                           repeated_state.identity.session_id;
+                         assert (
+                           D.Reference.equal
+                             (D.reference record)
+                             (Option.value_exn repeated_state.spec.delegation)));
                     print_s [%sexp (moderated : bool), (linked_while_locked : bool)]))))));
   [%expect
     {|

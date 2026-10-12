@@ -1242,11 +1242,16 @@ let%test_unit "v1 emit and timers cannot carry forged native event constructors"
     Chatml_value_codec.jsonaf_to_value (`Object [ "type", `String "Tool_invoked" ])
   in
   (match (find "Runtime" "emit").impl [ payload ] with
-   | L.VTask (TPerform { op = "Runtime.emit_json"; args = [ value ] }) ->
+   | L.VTask { step = TPerform { op = "Runtime.emit_json"; args = [ value ] }; _ } ->
      assert (phys_equal value payload)
    | _ -> assert false);
   match (find "Schedule" "after_ms").impl [ L.VInt 1; payload ] with
-  | L.VTask (TMap (TPerform { op = "Schedule.after_ms_json"; args = [ _; value ] }, _)) ->
-    assert (phys_equal value payload)
+  | L.VTask
+      { step =
+          TMap
+            ( { step = TPerform { op = "Schedule.after_ms_json"; args = [ _; value ] }; _ }
+            , _ )
+      ; _
+      } -> assert (phys_equal value payload)
   | _ -> assert false
 ;;

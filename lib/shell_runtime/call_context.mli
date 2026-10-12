@@ -26,6 +26,15 @@ val prepare_executor
   :  Shell_access.Executor.config
   -> (Shell_access.Executor.config, string) result
 
+(** Bind the actual caller's session, approval store and admission check, then
+    apply [prepare_executor]'s trusted adapter. Unbound calls retain the original
+    owner config. Expired or rejected caller services fail without falling back
+    to registration-owner services. This is the shared dispatch boundary for
+    runtimes and their retained executable hook workers. *)
+val prepare_executor_for_call
+  :  Shell_access.Executor.config
+  -> (Shell_access.Executor.config, string) result
+
 (** Explicitly clear ambient services for a host using its own original runtime.
     This is not suitable for delegated callers requiring another session identity. *)
 val without_services : (unit -> 'a) -> 'a

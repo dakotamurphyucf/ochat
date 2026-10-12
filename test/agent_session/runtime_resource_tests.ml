@@ -51,6 +51,7 @@ let run ctx input =
 <tool name="reader" type="chatml" script="reader-script" entrypoint="run" input_schema="schema.json" output_schema="schema.json"><uses tool="read_file"/></tool>|};
       let definition =
         Agent_session.Prompt_definition.create
+          ~root_invocation:Ui
           ~id:prompt_id
           ~config_name:"resource-preparation"
           ~root_file:(Eio.Path.native_exn Eio.Path.(root / "root.chatmd"))
@@ -97,6 +98,10 @@ let run ctx input =
             ()
         in
         B.prepare_resources
+          ~agent_source:None
+          ~startup:None
+          ~root_invocation:Ui
+          ~script_preparation:(Some (script_preparation ()))
           ~inference_context:inference.context
           ~inference_identity:inference.identity
           ~on_inference_attempt:ignore

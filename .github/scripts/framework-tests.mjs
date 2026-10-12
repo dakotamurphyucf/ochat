@@ -8,14 +8,24 @@ const tier = process.argv[2];
 const commands = {
   normal: ["runtest", "--force", "-j", "2"],
   e2e: ["build", "--force", "-j", "2", "@agent-e2e-pr"],
+  "git-native": [
+    "build", "--force", "-j", "2",
+    "@test/chatml_git_host/runtest",
+    "@test/bounded_process/runtest",
+    "@test/private_storage/runtest",
+  ],
 };
-if (!Object.hasOwn(commands, tier)) throw new Error("Expected normal or e2e");
-// An uncached Linux run reached the 45-minute aggregate limit with late tests
-// still running and no completed process failures. Its CPU-heavy tests took
-// 1.4–1.8 times the passing PR run; trace-based completion estimates were 52–56
-// minutes. Allow a bounded hour for compilation and the complete normal suite;
+if (!Object.hasOwn(commands, tier))
+  throw new Error("Expected normal, e2e or git-native");
+if (tier !== "e2e" && !path.isAbsolute(process.env.OCHAT_TEST_GIT_2_56_DIRECTORY ?? ""))
+  throw new Error("Pinned Git fixture provisioning is required before native tests");
+// Cold Linux run 38278439617 exhausted 60 minutes with all 12,254 completed
+// processes successful. Only the final repair partition was interrupted: it
+// had 35.5 seconds to run versus 48.6 seconds in the previous CI run. Allow five
+// minutes of aggregate headroom for compilation and the complete normal suite;
 // individual test/runtime deadlines and two-worker concurrency remain unchanged.
-const timeoutMs = (tier === "normal" ? 60 : 25) * 60 * 1000;
+const timeoutMinutes = { normal: 65, e2e: 25, "git-native": 45 };
+const timeoutMs = timeoutMinutes[tier] * 60 * 1000;
 fs.mkdirSync(".ci-evidence", { recursive: true });
 // Verbose output identifies started actions even while their output is buffered.
 // Write the trace inside the uploaded evidence directory, including on timeout.
@@ -27,6 +37,7 @@ const command = [
 const start = Date.now();
 const report = {
   tier,
+  architecture: process.arch,
   revision: execFileSync("git", ["rev-parse", "HEAD"], {
     encoding: "utf8",
   }).trim(),

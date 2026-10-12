@@ -1,0 +1,7 @@
+(library
+ (name agent_completion_view_tests)
+ (modules support completion_view_tests)
+ (libraries core eio_main ochat.agent_client ochat.agent_protocol ochat.transcript mirage-crypto-rng.unix)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

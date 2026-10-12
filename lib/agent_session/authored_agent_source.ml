@@ -17,23 +17,44 @@ end
 type t =
   { identity : Identity.t
   ; declaration : CM.agent_tool
-  ; parent_artifact : Store.Artifact.t
-  ; root_chatmd : string
-  ; sources : Store.Source.t list
+  ; source : Captured_child_source.t
+  ; defining_revision : Prompt_revision.t
+  ; defining_reference : CM.Agent_reference.t option
   }
 
 let identity t = t.identity
 let declaration t = t.declaration
+let defining_revision t = t.defining_revision
+let defining_reference t = t.defining_reference
 
-let fingerprint t =
-  [%sexp ("ochat.authored-agent-source.v1" : string), (t.identity : Identity.t)]
+let program_fingerprint t =
+  (match Captured_child_source.programs_sha256 t.source with
+   | None ->
+     [%sexp ("ochat.authored-agent-source.v1" : string), (t.identity : Identity.t)]
+   | Some programs_sha256 ->
+     [%sexp
+       ("ochat.authored-agent-source.v2" : string)
+     , (t.identity : Identity.t)
+     , (programs_sha256 : string)])
   |> Sexp.to_string_mach
   |> Chatmd_shell_spec.Source_ref.digest
 ;;
 
+let fingerprint t =
+  match Captured_child_source.content_sha256 t.source with
+  | None -> program_fingerprint t
+  | Some content_sha256 ->
+    [%sexp
+      ("ochat.authored-agent-source.v3" : string)
+    , (program_fingerprint t : string)
+    , (content_sha256 : string)]
+    |> Sexp.to_string_mach
+    |> Chatmd_shell_spec.Source_ref.digest
+;;
+
 let denied message = Error (P.Error.create Permission_denied ~message ~retryable:false ())
 
-let capture ~parent ~tool_name =
+let capture ?(checkpoint = Eio.Fiber.check) ?content_limits ~parent ~tool_name () =
   let open Result.Let_syntax in
   let%bind declaration, policy =
     List.filter_map (Prompt_revision.elements parent) ~f:(function
@@ -51,105 +72,68 @@ let capture ~parent ~tool_name =
     | true -> Ok ()
     | false -> denied "persistent authored agent source must be captured locally"
   in
+  let%map source, defining_reference =
+    match Prompt_revision.parser_context parent with
+    | None ->
+      Captured_child_source.capture_legacy_tool
+        ~parent
+        ~declaration
+        ~content_limits
+        ~checkpoint
+      |> Result.map ~f:(fun source -> source, None)
+    | Some parsed ->
+      let references =
+        List.filter (CM.Parsed.agent_references parsed) ~f:(fun reference ->
+          checkpoint ();
+          match CM.Agent_reference.invocation reference with
+          | Persistent_tool (candidate, candidate_policy) ->
+            phys_equal candidate declaration
+            && CM.equal_agent_persistence candidate_policy policy
+          | Tool _ | Content _ -> false)
+      in
+      (match references with
+       | [ reference ] ->
+         Captured_child_source.capture ~parent ~reference ~content_limits ~checkpoint
+         |> Result.map ~f:(fun source -> source, Some reference)
+       | [] | _ :: _ ->
+         denied "persistent authored declaration lacks one exact owned parser reference")
+  in
   let parent_artifact = Prompt_revision.artifact parent in
-  let%bind root_source =
-    Store.Source.create
-      ~relative_path:parent_artifact.root_relative_path
-      ~contents:parent_artifact.root_chatmd
-    |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
-  in
-  let all_sources = root_source :: parent_artifact.sources in
-  let tree = Prompt_revision.materialized_tree parent in
-  let relative_path =
-    let open Option.Let_syntax in
-    let%bind root = Eio.Path.native tree in
-    let%bind reference = String.chop_prefix declaration.agent ~prefix:(root ^ "/") in
-    (* Authored imports preserve paths such as definitions/../agents/child.chatmd.
-       Normalize only the portion beneath the verified artifact tree; never consult
-       realpath or follow an external live-file alias to decide source identity. *)
-    let loader = Source_loader.confined_filesystem ~root:tree in
-    Source_loader.root loader ~file:reference
-    |> Result.ok
-    |> Option.map ~f:Source_loader.relative_path
-  in
-  let%bind selected =
-    List.find all_sources ~f:(fun source ->
-      Option.value_map
-        relative_path
-        ~default:false
-        ~f:(String.equal source.Store.Source.relative_path))
-    |> Result.of_option
-         ~error:
-           (P.Error.create
-              Permission_denied
-              ~message:
-                "persistent authored agent is not in the parent's captured source closure"
-              ~retryable:false
-              ())
-  in
+  let root_relative_path = Captured_child_source.root_relative_path source in
   let identity : Identity.t =
     { parent_revision_id = parent_artifact.revision_id
     ; parent_manifest_sha256 = parent_artifact.manifest_sha256
     ; tool_name
-    ; root_relative_path = selected.relative_path
+    ; root_relative_path
     ; policy
     }
   in
-  Ok
-    { identity
-    ; declaration = { declaration with agent = selected.relative_path }
-    ; parent_artifact
-    ; root_chatmd = selected.contents
-    ; sources =
-        List.filter all_sources ~f:(fun source ->
-          not (String.equal source.relative_path selected.relative_path))
-    }
+  { identity
+  ; declaration = { declaration with agent = root_relative_path }
+  ; source
+  ; defining_revision = parent
+  ; defining_reference
+  }
+;;
+
+let authored_sources t = Captured_child_source.authored_sources t.source
+
+let with_programs ?(checkpoint = Eio.Fiber.check) t programs =
+  Result.map
+    (Captured_child_source.with_programs t.source programs ~checkpoint)
+    ~f:(fun source -> { t with source })
 ;;
 
 let artifact t ~revision_id ~created_at =
-  Store.Artifact.create
-    ~revision_id
-    ~root_relative_path:t.identity.root_relative_path
-    ~root_chatmd:t.root_chatmd
-    ~sources:t.sources
-    ~parser_schema_version:t.parent_artifact.parser_schema_version
-    ~runtime_schema_version:t.parent_artifact.runtime_schema_version
-    ~created_at
-    ()
+  Captured_child_source.artifact t.source ~revision_id ~created_at
 ;;
 
-let resource_revision ~parent t =
+let resource_revision ?(checkpoint = Eio.Fiber.check) ~parent t =
   let open Result.Let_syntax in
-  let%bind () =
-    match
-      P.Id.Prompt_revision.equal (Prompt_revision.id parent) t.identity.parent_revision_id
-      && String.equal
-           (Prompt_revision.artifact parent).manifest_sha256
-           t.identity.parent_manifest_sha256
-    with
-    | true -> Ok ()
-    | false -> denied "authored resource preparation requires its original source owner"
-  in
   let%bind revision_id =
     P.Id.Prompt_revision.of_string ("prv_authored_" ^ fingerprint t)
   in
-  let%bind artifact =
-    artifact t ~revision_id ~created_at:t.parent_artifact.created_at
-    |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
-  in
-  Prompt_revision_builder.reparse
-    ~definition:(Prompt_revision.definition parent)
-    ~artifact
-    ~materialized_tree:(Prompt_revision.materialized_tree parent)
-  |> Result.map_error ~f:(fun diagnostics ->
-    P.Error.create
-      Prompt_unavailable
-      ~message:
-        (List.map diagnostics ~f:(fun diagnostic ->
-           diagnostic.Prompt_revision_builder.Diagnostic.message)
-         |> String.concat ~sep:"\n")
-      ~retryable:false
-      ())
+  Captured_child_source.resource_revision t.source ~parent ~revision_id ~checkpoint
 ;;
 
 let store_result result =
@@ -176,6 +160,37 @@ let load_artifact ~artifact_store ~(reservation : Agent_store.Delegation_store.r
   with
   | true, 5, 1, None, None, None -> Ok stored
   | _ -> denied "authored artifact differs from its reserved source contract"
+;;
+
+let load_recorded_artifact
+      ~artifact_store
+      ~(reservation : Agent_store.Delegation_store.record)
+  =
+  let open Result.Let_syntax in
+  let%bind () =
+    match reservation.admission.authored_tool with
+    | Some _ -> Ok ()
+    | None -> denied "authored artifact requires an authored reservation"
+  in
+  let%bind stored =
+    Store.load artifact_store reservation.admission.revision_id |> store_result
+  in
+  let%bind () =
+    if
+      P.Id.Prompt_revision.equal stored.revision_id reservation.admission.revision_id
+      && String.equal stored.manifest_sha256 reservation.admission.manifest_sha256
+    then Ok ()
+    else denied "authored artifact differs from its recorded revision or manifest"
+  in
+  match
+    ( stored.parser_schema_version
+    , stored.runtime_schema_version
+    , stored.prompt_definition_id
+    , stored.canonical_source
+    , stored.shell_manifest_sha256 )
+  with
+  | 5, 1, None, None, None | 5, 1, Some _, Some _, Some _ -> Ok stored
+  | _ -> denied "authored artifact differs from its recorded publisher contract"
 ;;
 
 let install_reserved ~delegations ~reservation ~artifact_store ~capability_pins t =

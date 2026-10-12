@@ -1575,3 +1575,271 @@ let%expect_test "unsubscribed handles coexist without taking notification owners
   [%expect
     {| passive attach/create share connection; exactly one subscribed owner; passive close retains owner |}]
 ;;
+
+module Canonical_export_cases = struct
+  module Export = Agent_client.Canonical_export
+
+  let content ?(fields = snapshot_fields) entries =
+    let snapshot = Public.Snapshot.create fields |> protocol_ok in
+    `Object
+      [ "snapshot", Public.Snapshot.to_json snapshot
+      ; "history", `Array (List.map entries ~f:Public.History.to_json)
+      ]
+    |> Jsonaf.to_string
+  ;;
+
+  let complete = { snapshot_fields with canonical_history = window [ entry ] }
+  let original = content ~fields:complete [ entry ]
+
+  let limits bytes =
+    Document_schema.Limits.create
+      ~max_bytes:bytes
+      ~max_depth:64
+      ~max_nodes:10000
+      ~max_fields:10000
+    |> function
+    | Ok limits -> limits
+    | Error error -> raise_s [%sexp (error : Document_schema.Error.t)]
+  ;;
+
+  let with_export content ~metadata f =
+    Mirage_crypto_rng_unix.use_default ();
+    Eio_main.run (fun env ->
+      Eio.Switch.run (fun sw ->
+        let attachment_id =
+          P.Id.Attachment.of_string "att_canonical_export" |> protocol_ok
+        in
+        let blob =
+          P.Blob.Metadata.create
+            ~id:(P.Id.Blob.of_string "blb_canonical_export" |> protocol_ok)
+            ~kind:File
+            ~media_type:"application/json"
+            ~byte_length:(Int64.of_int (String.length content))
+            ~digest:Digestif.SHA256.(digest_string content |> to_hex)
+            ()
+          |> protocol_ok
+        in
+        let metadata =
+          metadata
+            P.Method_result.Export.
+              { blob; session_revision = 0L; latest_event_sequence = 0L }
+        in
+        let reads = ref 0 in
+        let exported = ref 0 in
+        let public result =
+          Public.Result.Non_history.of_internal result
+          |> Result.map ~f:(fun result -> Public.Result.Non_history result)
+        in
+        let request = function
+          | P.Command.Session_attach _ ->
+            Ok
+              (Public.Result.Session_attach
+                 { attachment =
+                     { id = attachment_id
+                     ; session_id
+                     ; mode = Read_only
+                     ; owner_lease = None
+                     }
+                 ; replay = Snapshot snapshot
+                 ; latest_event_sequence = 0L
+                 ; reclaim_token = None
+                 })
+          | Session_export request ->
+            incr exported;
+            assert (P.Id.Session.equal request.session_id session_id);
+            assert (
+              Option.equal
+                P.Id.Attachment.equal
+                request.attachment_id
+                (Some attachment_id));
+            assert (Option.equal Int64.equal request.revision (Some 0L));
+            assert (Option.is_none request.history);
+            (match request.format with
+             | Json -> ()
+             | Chatmd -> assert false);
+            public (Session_export metadata)
+          | Blob_read request ->
+            incr reads;
+            assert (P.Id.Session.equal request.session_id session_id);
+            assert (
+              Option.equal
+                P.Id.Attachment.equal
+                request.attachment_id
+                (Some attachment_id));
+            let offset = Int64.to_int_exn request.offset in
+            let count = Int.min 97 (String.length content - offset) in
+            let next_offset = offset + count in
+            public
+              (Blob_read
+                 { blob = metadata.blob
+                 ; offset = request.offset
+                 ; next_offset = Int64.of_int next_offset
+                 ; data_base64 =
+                     Base64.encode_exn (String.sub content ~pos:offset ~len:count)
+                 ; eof = next_offset = String.length content
+                 })
+          | Session_detach _ ->
+            public (Session_detach { revision = 0L; latest_event_sequence = 0L })
+          | _ -> Error (P.Error.invalid_request "unexpected export fixture command")
+        in
+        let connection =
+          Agent_client.Transport.create
+            ~request
+            ~next_notification:(fun () -> None)
+            ~close:Fn.ignore
+          |> Agent_client.Connection.create
+        in
+        let handle =
+          Agent_client.Session_handle.attach
+            ~sw
+            ~clock:env#clock
+            ~connection
+            ~session_id
+            ~mode:Read_only
+            ~subscribe:false
+            ()
+          |> protocol_ok
+        in
+        Exn.protect
+          ~finally:(fun () ->
+            Agent_client.Session_handle.close handle;
+            Agent_client.Connection.close connection)
+          ~f:(fun () -> f handle reads exported)))
+  ;;
+
+  let read ?(checkpoint = Fn.ignore) ?max_bytes handle =
+    Export.read
+      handle
+      ~revision:0L
+      ~limits:(limits (Option.value max_bytes ~default:100_000))
+      ~checkpoint
+  ;;
+end
+
+let%expect_test
+    "canonical export uses the exact authorized complete history, not the live view"
+  =
+  let open Canonical_export_cases in
+  with_export original ~metadata:Fn.id (fun handle reads exported ->
+    let admitted = read handle ~max_bytes:(String.length original) |> protocol_ok in
+    let fields = Export.snapshot admitted |> Public.Snapshot.fields in
+    assert (List.equal Public.History.equal fields.canonical_history.entries [ entry ]);
+    assert (Int64.equal (Export.metadata admitted).session_revision 0L);
+    assert (!reads > 1 && !exported = 1);
+    assert (
+      List.is_empty
+        (Agent_client.Session_handle.projection handle
+         |> Agent_client.Projection.snapshot
+         |> Public.Snapshot.fields)
+          .canonical_history
+          .entries);
+    print_endline
+      "exact revision; complete Full history; authenticated chunks; live view unchanged");
+  [%expect
+    {| exact revision; complete Full history; authenticated chunks; live view unchanged |}]
+;;
+
+let%test_unit
+    "canonical export rejects incomplete, contradictory, undisclosed or unauthenticated \
+     evidence"
+  =
+  let open Canonical_export_cases in
+  let redacted =
+    Public.History.redacted
+      history_id
+      ~provenance:Canonical
+      (Public.History.Redaction.create ~disclosed_header:None)
+    |> protocol_ok
+  in
+  let visible =
+    Public.History.visible
+      history_id
+      ~provenance:Canonical
+      (Public.History.Visible.of_semantic semantic |> Option.value_exn)
+    |> protocol_ok
+  in
+  let foreign = P.Id.Session.of_string "ses_export_foreign" |> protocol_ok in
+  let altered =
+    [ content ~fields:complete []
+    ; content
+        ~fields:
+          { complete with
+            canonical_history = { (window [ entry ]) with structurally_complete = false }
+          }
+        [ entry ]
+    ; content
+        ~fields:{ complete with canonical_history = window [ redacted ] }
+        [ redacted ]
+    ; content ~fields:{ complete with canonical_history = window [ visible ] } [ visible ]
+    ; content ~fields:{ complete with session = { session with id = foreign } } [ entry ]
+    ; content
+        ~fields:{ complete with session = { session with revision = 1L }; revision = 1L }
+        [ entry ]
+    ; content
+        ~fields:
+          { complete with
+            session = { session with latest_event_sequence = 1L }
+          ; latest_event_sequence = 1L
+          }
+        [ entry ]
+    ; "{"
+    ]
+  in
+  List.iter altered ~f:(fun content ->
+    with_export content ~metadata:Fn.id (fun handle _ _ ->
+      assert (Result.is_error (read handle))));
+  List.iter
+    [ (fun (value : P.Method_result.Export.t) -> { value with session_revision = 1L })
+    ; (fun value ->
+        { value with blob = { value.blob with media_type = "text/markdown" } })
+    ; (fun value -> { value with blob = { value.blob with byte_length = 100_001L } })
+    ]
+    ~f:(fun metadata ->
+      with_export original ~metadata (fun handle reads _ ->
+        assert (Result.is_error (read handle));
+        assert (!reads = 0)));
+  with_export
+    original
+    ~metadata:(fun value ->
+      { value with blob = { value.blob with digest = String.make 64 '0' } })
+    (fun handle _ _ -> assert (Result.is_error (read handle)));
+  with_export original ~metadata:Fn.id (fun handle reads _ ->
+    assert (Result.is_error (read handle ~max_bytes:(String.length original - 1)));
+    assert (!reads = 0))
+;;
+
+let%test_unit
+    "canonical export preserves checkpoint exception identity at each observed stage"
+  =
+  let open Canonical_export_cases in
+  with_export original ~metadata:Fn.id (fun handle _ _ ->
+    let count = ref 0 in
+    ignore (read handle ~checkpoint:(fun () -> incr count) |> protocol_ok : Export.t);
+    let marker = Failure "export checkpoint" in
+    for selected = 1 to !count do
+      let position = ref 0 in
+      match
+        read handle ~checkpoint:(fun () ->
+          incr position;
+          if !position = selected then raise marker)
+      with
+      | _ -> assert false
+      | exception exn -> assert (phys_equal exn marker)
+    done;
+    assert (Result.is_ok (read handle));
+    let delivered = ref false in
+    let position = ref 0 in
+    (match
+       Eio.Cancel.sub (fun context ->
+         ignore
+           (read handle ~checkpoint:(fun () ->
+              incr position;
+              if !position = !count then Eio.Cancel.cancel context marker)
+            |> protocol_ok
+            : Export.t);
+         delivered := true)
+     with
+     | () -> assert false
+     | exception Eio.Cancel.Cancelled reason -> assert (phys_equal reason marker));
+    assert (not !delivered))
+;;

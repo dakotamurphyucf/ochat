@@ -61,6 +61,8 @@ actor state and authorization, not merely passing JSON validation.
 | `server.health` | `Health.Request` | Authentication only; details scoped | Current health projection. |
 | `prompt.list` | `Prompt.List_request` | `prompt.list` | Paged catalog. |
 | `prompt.get` | `Prompt.Get_request` | `prompt.list` | Prompt definition/revision projection. |
+| `prompt.dependencies.status` | `Prompt_dependency_selection.Status_request` | `configuration.admin` | Last installed dependency-history generation or missing/invalid history, plus available/busy/uncertain/closed publication state; no acquisition or repair. |
+| `prompt.dependencies.update` | `Prompt_dependency_selection.Update_request` | `configuration.admin` | Explicit bounded target set and expected generation; one installed publication result with each actual Ready revision or Unavailable outcome. No automatic retry. |
 | `workspace.list` | `Workspace.List_request` | `workspace.list` | Paged catalog. |
 | `workspace.get` | `Workspace.Get_request` | `workspace.list` | Workspace projection. |
 | `project.create` | `Organization_request.Create` | `organization.manage` plus owner/admin visibility | Host-qualified logical project create. |
@@ -75,6 +77,7 @@ actor state and authorization, not merely passing JSON validation.
 | `collection.delete` | `Organization_request.Collection.Delete` | `organization.manage` plus owner/admin visibility | Host-qualified logical collection delete. |
 | `blob.read` | `Blob.Read_request` | `session.transcript.read` plus blob ownership | Bounded chunk with cursor and metadata. |
 | `session.create` | `Session.Create_request` | `session.create` plus requested attachment scopes | Session, mutation acknowledgement and optional attachment/replay. |
+| `session.seed` | `Session_seed.Request` | `session.create`; Retained also requires `session.transcript.read` and source visibility | New stopped identity with validated neutral history and exact Catalog/Retained code; no attachment or initializer. |
 | `session.list` | `Session.List_request` | `session.transcript.read` | Paged visible sessions with filters. |
 | `activity.list` | `Activity_query` | `session.transcript.read` and `security.read` plus current session visibility | Bounded immutable activity/attention summaries, selected catalog order. |
 | `session.work` | `Session_work.Query` | `session.transcript.read` and `security.read` plus current session visibility | Bounded payload-free retained work with typed occurrence witnesses. |
@@ -831,3 +834,102 @@ exclusive notification-reader boundary. These are separate proofs. Client helper
 do not implement a second runtime, authority cache, local credential store or
 frontend transcript mutation. Read-only and unsupported decisions remain typed
 host errors, and reconnect never makes an unresolved receipt safe to replay.
+
+
+## Explicit prompt dependency updates
+
+`prompt.dependencies.status` accepts exactly `{}`. Its history is
+`{"state":"tracked","generation":7}`, `{"state":"missing"}`, or
+`{"state":"invalid"}`; publication is `available`, `busy`, `uncertain`, or
+`closed`. The generation describes the last installed catalog history. During an
+uncertain publication it does not prove the current durable generation or which
+command caused it. Missing/invalid history is preserved, never treated as an empty
+first admission.
+
+An operator with `configuration.admin` can explicitly update 1..1024 distinct
+prompt-definition IDs from the installed configuration. IDs are normalized into
+canonical order. Empty sets, duplicate IDs, unknown fields and invalid generation
+or key values reject; the host also rejects unknown/disabled targets, stale
+history and missing/invalid history before source acquisition.
+
+```json
+{"jsonrpc":"2.0","id":"update-dependencies","method":"prompt.dependencies.update","params":{"definitions":["prd_main"],"expected_generation":7,"idempotency_key":"dependencies:main:7"}}
+```
+
+This is separate from organization `project.update`. The request supplies no
+repository pins, source paths, credentials or tool grants. The host uses its
+existing admitted source configuration and finite capture limits. A successful
+result reports `previous_generation`, `generation` and the exact `targets` set.
+Each target has an `outcome` of `{"state":"ready","revision":"prv_..."}` or
+`{"state":"unavailable","reason":"source unavailable"}`. A published catalog
+can mark a target unavailable while preserving its last successful dependency
+history. The result advances the installed index generation once; existing
+sessions retain their captured prompt revisions.
+
+The client helpers are `Agent_client.Admin.dependency_selection_status` and
+`Agent_client.Admin.update_dependencies`, over the existing typed connection and
+all existing transports. Hosts without dependency administration return
+`invalid_state`; wire support alone grants no administrative authority.
+
+An interrupted update retains its exact method, normalized parameters and key.
+Read `command.receipt` with that original request; it never executes the update.
+A committed summary has kind `prompt_dependencies_updated` and the same bounded
+result. Missing, unavailable or pending receipts do not establish noncommit and
+must not trigger a new-key admission. Unknown publication leaves Protected
+Pending, suppressing reexecution; current administrative authorization applies
+to request, replay and receipt reads. Status reads remain useful while the result
+is unknown, but cannot resolve an individual pending receipt from generation
+alone. Do not automatically retry, initialize missing history or infer rollback
+from cancellation. Durable baseline publication and terminal receipt completion
+are separate writes; a lost receipt acknowledgment can follow a committed
+catalog. See [operations](operations.md#explicit-dependency-selection) for operator
+reconciliation.
+
+## Seed a stopped conversation
+
+`session.seed` accepts a complete validated `Session_seed.Request`: `spec`,
+`code`, `transcript` and the original `idempotency_key`. The Spec names an authored
+catalog definition and a currently permitted configured workspace, with
+`start_immediately=false`. Catalog code selection names that same definition and
+its exact expected prompt revision. Retained selection supplies the original
+host/session/generation/canonical/lifecycle `Expected` anchor. A different key
+creates a different conversation.
+
+The transcript is already-converted neutral history, not ChatMD source. Its
+canonical entries retain their supplied IDs, developer/user/assistant/tool roles,
+ordered call relations, opaque provider fields, numeric spellings and high-water
+mark. Redacted, malformed or nonzero-content-revision entries reject: retained
+in-place edit metadata is not a fresh seed. A frontend may convert a user-edited
+transcript into fresh neutral entries for this new conversation. Admission does
+not execute transcript markup, reconstruct old tool receipts, rerun conversion or copy old
+shell/moderator state. The existing 16 MiB encoded request ceiling remains; the
+complete escaped first Created transaction must also fit the host's finite
+journal profile before any layout allocation. Smaller structural/work limits
+can reject a byte-valid request. There is no hidden upload or truncated-history
+fallback. The reusable client entrypoint is `Agent_client.Session_handle.seed`.
+
+A successful result is exactly `session_id`; the new session is stopped and
+uninitialized. Attachment, explicit activation and authored/user run admission
+remain separate authorized commands. Retained code may be used when current
+source is unavailable, but its current definition metadata must exist and be
+enabled. Its pinned profile digest and runtime policy must still match current
+policy; drift rejects rather than retaining revoked privileges. Generated and
+delegated Specs cannot become independent authored roots through this command.
+The newly requested workspace is admitted under current policy; an old temporary
+instance is never cloned by labels. Same-session resume remains a different
+operation.
+
+Hosts advertise `sessions.seed` only when their actual seed Factory is present.
+An unsupported custom host omits it from initialize and server discovery and
+returns `method_not_found`. Current original operator authorization governs
+admission, replay and receipt reads, including retained-source visibility.
+
+On interruption, preserve the complete original request and key. The existing
+`command.receipt` returns `committed` with a `created_session` summary when the
+exact durable Success is known. Pending, missing or unavailable receipts are not
+permission to issue a new key or retry creation. A real audited first Created
+can precede terminal receipt acknowledgment; bounded startup/receipt recovery
+repairs only that exact initial creation and completes its original identity.
+It does not activate a runtime. Unknown or conflicting evidence stays failed
+closed. Original cancellation may follow publication and does not prove that
+creation rolled back. See [operations](operations.md#stopped-transcript-admission).

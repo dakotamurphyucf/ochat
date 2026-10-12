@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 
-test('batch preparation and continuation remain distinct at the historical anchor', async ({
+test('definition preparation and captured versioned resume remain distinct at the historical anchor', async ({
   page,
 }) => {
   await page.goto(
@@ -10,22 +10,50 @@ test('batch preparation and continuation remain distinct at the historical ancho
   await expect(page.locator('[id="130-second-smoke-test"]')).toBeAttached();
   const preparation = page.locator('pre').filter({ hasText: 'mktemp -d' });
   await expect(preparation).toContainText(
-    'cp docs-src/examples/agent-server/prompts/hello.chatmd "$OCHAT_BATCH/prompt.chatmd"',
+    'cp docs-src/examples/agent-server/prompts/hello.chatmd "$OCHAT_BATCH/definition.chatmd"',
   );
-  await expect(preparation).toContainText('<user>Greet a new Ochat user');
-  const continuation = page
+  await expect(preparation).toContainText(
+    '<user>Greet a new Ochat user in one sentence.</user>',
+  );
+  await expect(preparation).toContainText(
+    '>> "$OCHAT_BATCH/definition.chatmd"',
+  );
+  await expect(preparation).toContainText(
+    '-prompt-file "$OCHAT_BATCH/definition.chatmd"',
+  );
+  await expect(preparation).toContainText('-storage-root "$OCHAT_BATCH/store"');
+  await expect(preparation).toContainText(
+    '-output-file "$OCHAT_BATCH/transcript.chatmd"',
+  );
+
+  const resume = page
     .locator('pre')
-    .filter({ hasText: 'Now describe ChatMD' });
-  await expect(continuation).toContainText('chat-completion -output-file');
-  await expect(continuation).not.toContainText('-prompt-file');
-  await expect(page.locator('.sl-markdown-content')).toContainText(
-    'every invocation with this flag appends it again',
+    .filter({ hasText: '-session-id SESSION_ID' });
+  await expect(resume).toContainText(
+    'chat-completion -prompt-file /work/prompts/definition.chatmd',
   );
-  await page
-    .locator('.sl-markdown-content')
-    .getByRole('link', {
-      name: 'ochat shell runtime management',
-    })
+  await expect(resume).toContainText('-storage-root /work/private/agent-store');
+  await expect(resume).toContainText(
+    "-message 'Review the next change.' -run-mode single-turn",
+  );
+  await expect(resume).toContainText(
+    '-output-file /work/private/next-transcript.chatmd',
+  );
+  await expect(resume).not.toContainText('-rebuild');
+  await expect(resume).not.toContainText('-import-transcript');
+  const content = page.locator('.sl-markdown-content');
+  await expect(content).toContainText('The definition remains unchanged.');
+  await expect(content).toContainText(
+    'Retained execution uses its stored definition, invocation role and provider target even if the original file has disappeared.',
+  );
+  await expect(content).toContainText(
+    'It does not adopt edits from the current file.',
+  );
+  await expect(content).toContainText(
+    'Ordinary/legacy explicit -message is rejected',
+  );
+  await content
+    .getByRole('link', { name: 'shell inspection', exact: true })
     .click();
   await expect(page).toHaveURL('/docs/reference/commands/shell-management/');
   await expect(page.locator('.sl-markdown-content')).toContainText(

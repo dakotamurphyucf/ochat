@@ -9,7 +9,7 @@ let lower result =
   Result.map_error result ~f:(fun _ -> invalid "invalid configuration value")
 ;;
 
-let target state =
+let target (state : Session_state.t) =
   match Inference.Selection.view state.Session_state.spec.inference_target with
   | Captured target -> Ok target
   | Unresolved ->

@@ -1,7 +1,7 @@
 open! Core
 open Chatml_lang
 open Jsonaf
-module Eval = Chatml_eval
+module Composition = Chatml_builtin_composition
 module Debug_log = Chatml_debug_log
 module Value_codec = Chatml_value_codec
 
@@ -29,6 +29,8 @@ and ty =
   | TRef of ty
   | TTuple of ty list
   | TRecord of row
+  | TModule of row
+  | TField_receiver of string * row
   | TVariant of variant_row
   | TFun of ty list * ty
   | TMu of string * ty
@@ -66,27 +68,14 @@ type builtin_module =
   ; exports : builtin list
   }
 
-let apply_chatml (name : string) (fn : value) (args : value list) : value =
-  match Eval.apply_value_result fn args with
-  | Ok value -> value
-  | Error err ->
-    let message =
-      match fn with
-      | VClosure _ when String.equal err.message "Function arity mismatch" ->
-        Printf.sprintf "%s: function arity mismatch" name
-      | VBuiltin _ | VClosure _ -> err.message
-      | _ -> Printf.sprintf "%s: expected a function" name
-    in
-    (* Re-raise as [Failure] so the outer VBuiltin call site converts it
-       into a span-attached ChatML runtime error. *)
-    failwith message
-;;
+let apply_chatml name fn args = Chatml_builtin_callback.apply fn ~name args
 
 let module_scheme (m : builtin_module) : ty =
-  record (List.map m.exports ~f:(fun b -> b.name, b.scheme))
+  TModule (closed_row (List.map m.exports ~f:(fun b -> b.name, b.scheme)))
 ;;
 
 let option_ty (a : string) : ty = variant [ "None", []; "Some", [ TVar a ] ]
+let outcome_of_ty value error = variant [ "Ok", [ value ]; "Error", [ error ] ]
 let task_ty (a : ty) : ty = TCon ("task", [ a ])
 let string_array_ty : ty = TArray TString
 let option_of_ty ty = variant [ "None", []; "Some", [ ty ] ]
@@ -227,6 +216,9 @@ let rec value_to_string (v : value) : string =
   | VArray arr ->
     let contents = Array.to_list arr |> List.map ~f:value_to_string in
     "[|" ^ String.concat ~sep:", " contents ^ "|]"
+  | VTuple values ->
+    let contents = Chatml_tuple.to_list values |> List.map ~f:value_to_string in
+    "(|" ^ String.concat ~sep:", " contents ^ "|)"
   | VRecord fields ->
     let rendered_fields =
       Map.to_alist fields |> List.map ~f:(fun (k, v') -> k ^ " = " ^ value_to_string v')
@@ -243,10 +235,17 @@ let rec value_to_string (v : value) : string =
       "{operation = " ^ eff.op ^ ", args = [" ^ String.concat ~sep:", " args ^ "]}"
     in
     let rec print_task task =
-      match task with
+      match task.step with
       | TPure v -> "pure(" ^ value_to_string v ^ ")"
       | TBind (t, v) -> "bind(" ^ print_task t ^ ", " ^ value_to_string v ^ ")"
       | TMap (t, v) -> "map(" ^ print_task t ^ ", " ^ value_to_string v ^ ")"
+      | TArray (mode, input, fn) ->
+        Chatml_task_array_mode.name mode
+        ^ "("
+        ^ value_to_string (VArray input)
+        ^ ", "
+        ^ value_to_string fn
+        ^ ")"
       | TFail s -> "fail(" ^ s ^ ")"
       | TCatch (t, v) -> "catch(" ^ print_task t ^ ", " ^ value_to_string v ^ ")"
       | TPerform eff -> "perform(" ^ eff_to_string eff ^ ")"
@@ -317,6 +316,10 @@ let render_debug ?(max_bytes = 4096) ?(max_nodes = 256) ?(max_depth = 16) render
         add "[|";
         separated (fun f -> Array.iter values ~f) child;
         add "|]"
+      | VTuple values ->
+        add "(|";
+        separated (fun f -> Chatml_tuple.iter values ~f) child;
+        add "|)"
       | VRecord fields ->
         add "{ ";
         let first = ref true in
@@ -337,37 +340,44 @@ let render_debug ?(max_bytes = 4096) ?(max_nodes = 256) ?(max_depth = 16) render
            add "(";
            separated (fun f -> List.iter fields ~f) child;
            add ")")
-      | VTask (TPure value) ->
+      | VTask { step = TPure value; _ } ->
         add "pure(";
         child value;
         add ")"
-      | VTask (TFail text) ->
+      | VTask { step = TFail text; _ } ->
         add "fail(";
         add text;
         add ")"
-      | VTask (TBind (nested, fn)) ->
+      | VTask { step = TBind (nested, fn); _ } ->
         add "bind(";
         task nested;
         add ", ";
         child fn;
         add ")"
-      | VTask (TMap (nested, fn)) ->
+      | VTask { step = TMap (nested, fn); _ } ->
         add "map(";
         task nested;
         add ", ";
         child fn;
         add ")"
-      | VTask (TCatch (nested, fn)) ->
+      | VTask { step = TArray (mode, input, fn); _ } ->
+        add (Chatml_task_array_mode.name mode);
+        add "(";
+        child (VArray input);
+        add ", ";
+        child fn;
+        add ")"
+      | VTask { step = TCatch (nested, fn); _ } ->
         add "catch(";
         task nested;
         add ", ";
         child fn;
         add ")"
-      | VTask (TPerform eff) ->
+      | VTask { step = TPerform eff; _ } ->
         add "perform(";
         render_eff eff;
         add ")"
-      | VTask (TSpawn eff) ->
+      | VTask { step = TSpawn eff; _ } ->
         add "spawn(";
         render_eff eff;
         add ")")
@@ -442,7 +452,7 @@ let rec value_to_pretty_string_with_depth ?(depth = 0) (v : value) : string =
       ^ indent depth
       ^ "}"
     in
-    match task with
+    match task.step with
     | TPure value ->
       "pure(\n"
       ^ indent_block (depth + 1) (compact_nested value)
@@ -460,6 +470,15 @@ let rec value_to_pretty_string_with_depth ?(depth = 0) (v : value) : string =
     | TMap (task, fn) ->
       "map(\n"
       ^ indent_block (depth + 1) (compact_task task)
+      ^ ",\n"
+      ^ indent_block (depth + 1) (value_to_string fn)
+      ^ "\n"
+      ^ indent depth
+      ^ ")"
+    | TArray (mode, input, fn) ->
+      Chatml_task_array_mode.name mode
+      ^ "(\n"
+      ^ indent_block (depth + 1) (compact_nested (VArray input))
       ^ ",\n"
       ^ indent_block (depth + 1) (value_to_string fn)
       ^ "\n"
@@ -507,6 +526,13 @@ let rec value_to_pretty_string_with_depth ?(depth = 0) (v : value) : string =
         |> String.concat ~sep:",\n"
       in
       "[|\n" ^ contents ^ "\n" ^ indent depth ^ "|]")
+  | VTuple values ->
+    let contents =
+      Chatml_tuple.to_list values
+      |> List.map ~f:(fun value -> indent_block (depth + 1) (compact_nested value))
+      |> String.concat ~sep:",\n"
+    in
+    "(|\n" ^ contents ^ "\n" ^ indent depth ^ "|)"
   | VRecord fields ->
     if Map.is_empty fields
     then "{ }"
@@ -598,7 +624,7 @@ let make_task_nullary_perform_builtin (name : string) (result_ty : ty) ~(op : st
   make_nullary_builtin
     name
     (TFun ([], task_ty result_ty))
-    (fun () -> VTask (TPerform { op; args = [] }))
+    (fun () -> VTask (Task.create (TPerform { op; args = [] })))
 ;;
 
 let make_task_unary_perform_builtin
@@ -611,7 +637,7 @@ let make_task_unary_perform_builtin
   make_unary_builtin
     name
     (TFun ([ arg_ty ], task_ty result_ty))
-    (fun arg -> VTask (TPerform { op; args = [ arg ] }))
+    (fun arg -> VTask (Task.create (TPerform { op; args = [ arg ] })))
 ;;
 
 let make_task_binary_perform_builtin
@@ -625,7 +651,7 @@ let make_task_binary_perform_builtin
   make_binary_builtin
     name
     (TFun ([ lhs_ty; rhs_ty ], task_ty result_ty))
-    (fun lhs rhs -> VTask (TPerform { op; args = [ lhs; rhs ] }))
+    (fun lhs rhs -> VTask (Task.create (TPerform { op; args = [ lhs; rhs ] })))
 ;;
 
 let shell_field name field scheme =
@@ -776,7 +802,7 @@ let make_task_nullary_spawn_builtin (name : string) (result_ty : ty) ~(op : stri
   make_nullary_builtin
     name
     (TFun ([], task_ty result_ty))
-    (fun () -> VTask (TSpawn { op; args = [] }))
+    (fun () -> VTask (Task.create (TSpawn { op; args = [] })))
 ;;
 
 let make_task_unary_spawn_builtin
@@ -789,7 +815,7 @@ let make_task_unary_spawn_builtin
   make_unary_builtin
     name
     (TFun ([ arg_ty ], task_ty result_ty))
-    (fun arg -> VTask (TSpawn { op; args = [ arg ] }))
+    (fun arg -> VTask (Task.create (TSpawn { op; args = [ arg ] })))
 ;;
 
 let make_task_binary_spawn_builtin
@@ -803,7 +829,7 @@ let make_task_binary_spawn_builtin
   make_binary_builtin
     name
     (TFun ([ lhs_ty; rhs_ty ], task_ty result_ty))
-    (fun lhs rhs -> VTask (TSpawn { op; args = [ lhs; rhs ] }))
+    (fun lhs rhs -> VTask (Task.create (TSpawn { op; args = [ lhs; rhs ] })))
 ;;
 
 let hash_string_md5 s =
@@ -850,7 +876,7 @@ let builtins : builtin list =
       (fun v -> VArray (Array.copy (expect_array "array_copy" v)))
   ; make_unary_builtin
       "record_keys"
-      (TFun ([ TRecord (TRow_var "r") ], TArray TString))
+      (TFun ([ TField_receiver ("__record_keys_kind", TRow_var "r") ], TArray TString))
       (fun v ->
          let keys =
            expect_record_like "record_keys" v
@@ -1218,6 +1244,27 @@ let json_module =
              try jsonaf_to_value (Jsonaf.of_string s) with
              | exn -> failwith (Printf.sprintf "Json.parse: %s" (Exn.to_string exn)))
       ; make_unary_builtin
+          "parse_result"
+          (TFun
+             ( [ TString ]
+             , outcome_of_ty
+                 json_ty
+                 (variant [ "Invalid_syntax", [ record [ "message", TString ] ] ]) ))
+          (fun value ->
+             match Jsonaf.parse (expect_string "Json.parse_result" value) with
+             | Ok json -> VVariant ("Ok", [ jsonaf_to_value json ])
+             | Error error ->
+               VVariant
+                 ( "Error"
+                 , [ VVariant
+                       ( "Invalid_syntax"
+                       , [ VRecord
+                             (String.Map.singleton
+                                "message"
+                                (VString (Error.to_string_hum error)))
+                         ] )
+                   ] ))
+      ; make_unary_builtin
           "stringify"
           (TFun ([ json_ty ], TString))
           (fun v ->
@@ -1483,7 +1530,7 @@ let string_module : builtin_module =
              then failwith "String.slice: start and len must be non-negative"
              else if start > String.length s
              then failwith "String.slice: start out of bounds"
-             else if start + len > String.length s
+             else if len > String.length s - start
              then failwith "String.slice: start+len out of bounds"
              else VString (String.sub s ~pos:start ~len))
       ; make_binary_builtin
@@ -1590,7 +1637,7 @@ let array_module : builtin_module =
              then failwith "Array.sub: start and len must be non-negative"
              else if start > Array.length a
              then failwith "Array.sub: start out of bounds"
-             else if start + len > Array.length a
+             else if len > Array.length a - start
              then failwith "Array.sub: start+len out of bounds"
              else VArray (Array.sub a ~pos:start ~len))
       ; (* new: reverse (pure) *)
@@ -1713,6 +1760,12 @@ let array_module : builtin_module =
                |> Array.of_list
              in
              VArray kept)
+      ; make_binary_builtin
+          "filter_map"
+          (TFun
+             ([ TArray (TVar "a"); TFun ([ TVar "a" ], option_ty "b") ], TArray (TVar "b")))
+          (fun values f ->
+             VArray (Composition.filter_map (expect_array "Array.filter_map" values) ~f))
       ; (* exists : 'a array -> ('a -> bool) -> bool *)
         make_binary_builtin
           "exists"
@@ -1787,27 +1840,62 @@ let task_module : builtin_module =
       [ make_unary_builtin
           "pure"
           (TFun ([ TVar "a" ], task_ty (TVar "a")))
-          (fun v -> VTask (TPure v))
+          (fun v -> VTask (Task.create (TPure v)))
       ; make_binary_builtin
           "bind"
           (TFun
              ( [ task_ty (TVar "a"); TFun ([ TVar "a" ], task_ty (TVar "b")) ]
              , task_ty (TVar "b") ))
-          (fun t k -> VTask (TBind (expect_task "Task.bind" t, k)))
+          (fun t k -> VTask (Task.create (TBind (expect_task "Task.bind" t, k))))
       ; make_binary_builtin
           "map"
           (TFun ([ task_ty (TVar "a"); TFun ([ TVar "a" ], TVar "b") ], task_ty (TVar "b")))
-          (fun t f -> VTask (TMap (expect_task "Task.map" t, f)))
+          (fun t f -> VTask (Task.create (TMap (expect_task "Task.map" t, f))))
+      ; make_binary_builtin
+          "map_array"
+          (TFun
+             ( [ TArray (TVar "a"); TFun ([ TVar "a" ], task_ty (TVar "b")) ]
+             , task_ty (TArray (TVar "b")) ))
+          (fun input f ->
+             VTask (Task.create (TArray (Map, expect_array "Task.map_array" input, f))))
+      ; make_binary_builtin
+          "iter_array"
+          (TFun ([ TArray (TVar "a"); TFun ([ TVar "a" ], task_ty TUnit) ], task_ty TUnit))
+          (fun input f ->
+             VTask (Task.create (TArray (Iter, expect_array "Task.iter_array" input, f))))
       ; make_unary_builtin
           "fail"
           (TFun ([ TString ], task_ty (TVar "a")))
-          (fun s -> VTask (TFail (expect_string "Task.fail" s)))
+          (fun s -> VTask (Task.create (TFail (expect_string "Task.fail" s))))
       ; make_binary_builtin
           "catch"
           (TFun
              ( [ task_ty (TVar "a"); TFun ([ TString ], task_ty (TVar "a")) ]
              , task_ty (TVar "a") ))
-          (fun t h -> VTask (TCatch (expect_task "Task.catch" t, h)))
+          (fun t h -> VTask (Task.create (TCatch (expect_task "Task.catch" t, h))))
+      ]
+  }
+;;
+
+let outcome_module : builtin_module =
+  let a = TVar "a" in
+  let b = TVar "b" in
+  let e = TVar "e" in
+  let f = TVar "f" in
+  { name = "Outcome"
+  ; exports =
+      [ make_binary_builtin
+          "map"
+          (TFun ([ outcome_of_ty a e; TFun ([ a ], b) ], outcome_of_ty b e))
+          (fun value f -> Composition.Outcome.map value ~f)
+      ; make_binary_builtin
+          "bind"
+          (TFun ([ outcome_of_ty a e; TFun ([ a ], outcome_of_ty b e) ], outcome_of_ty b e))
+          (fun value f -> Composition.Outcome.bind value ~f)
+      ; make_binary_builtin
+          "map_error"
+          (TFun ([ outcome_of_ty a e; TFun ([ e ], f) ], outcome_of_ty a f))
+          (fun value f -> Composition.Outcome.map_error value ~f)
       ]
   }
 ;;
@@ -1817,6 +1905,7 @@ let modules : builtin_module list =
   ; array_module
   ; json_module
   ; task_module
+  ; outcome_module
   ; { name = "Option"
     ; exports =
         [ make_nullary_builtin
@@ -1844,6 +1933,14 @@ let modules : builtin_module list =
                | VVariant ("Some", [ _ ]) -> VBool true
                | _ -> failwith "Option.is_some: expected `None or `Some(_)")
         ; make_binary_builtin
+            "map"
+            (TFun ([ option_ty "a"; TFun ([ TVar "a" ], TVar "b") ], option_ty "b"))
+            (fun value f -> Composition.Option.map value ~f)
+        ; make_binary_builtin
+            "bind"
+            (TFun ([ option_ty "a"; TFun ([ TVar "a" ], option_ty "b") ], option_ty "b"))
+            (fun value f -> Composition.Option.bind value ~f)
+        ; make_binary_builtin
             "get_or"
             (TFun ([ option_ty "a"; TVar "a" ], TVar "a"))
             (fun opt default ->
@@ -1860,6 +1957,10 @@ let modules : builtin_module list =
             "create"
             (TFun ([], tbl_ty "a"))
             (fun () -> VRef (ref (VArray [||])))
+        ; make_unary_builtin
+            "to_array"
+            (TFun ([ tbl_ty "a" ], TArray (entry_ty "a")))
+            (fun table -> VArray (Chatml_table_snapshot.to_array table))
         ; make_ternary_builtin
             "set"
             (TFun ([ tbl_ty "a"; TString; TVar "a" ], TUnit))
@@ -2162,15 +2263,16 @@ let turn_module : builtin_module =
                | Some target_id -> "Turn.replace_message", [ VString target_id; item ]
                | None -> "Turn.append_message", [ item ]
              in
-             VTask (TPerform { op; args }))
+             VTask (Task.create (TPerform { op; args })))
       ; make_unary_builtin
           "append_notice"
           (TFun ([ TString ], task_ty TUnit))
           (fun text ->
              let text = expect_string "Turn.append_notice" text in
              VTask
-               (TPerform
-                  { op = "Turn.append_message"; args = [ item_notice_value ~text ] }))
+               (Task.create
+                  (TPerform
+                     { op = "Turn.append_message"; args = [ item_notice_value ~text ] })))
       ; make_task_unary_perform_builtin
           "append_message"
           item_ty
@@ -2421,8 +2523,11 @@ let model_module : builtin_module =
              let recipe = expect_string "Model.call_text" recipe in
              let text = expect_string "Model.call_text" text in
              VTask
-               (TPerform
-                  { op = "Model.call"; args = [ VString recipe; json_string_value text ] }))
+               (Task.create
+                  (TPerform
+                     { op = "Model.call"
+                     ; args = [ VString recipe; json_string_value text ]
+                     })))
       ; make_task_binary_perform_builtin
           "call_json"
           TString
@@ -2437,10 +2542,11 @@ let model_module : builtin_module =
              let recipe = expect_string "Model.spawn_text" recipe in
              let text = expect_string "Model.spawn_text" text in
              VTask
-               (TSpawn
-                  { op = "Model.spawn"
-                  ; args = [ VString recipe; json_string_value text ]
-                  }))
+               (Task.create
+                  (TSpawn
+                     { op = "Model.spawn"
+                     ; args = [ VString recipe; json_string_value text ]
+                     })))
       ]
   }
 ;;

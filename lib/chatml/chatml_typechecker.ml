@@ -24,10 +24,9 @@
     • monomorphic bindings are {e not} instantiated on lookup, so helper
       functions preserve sharing between a parameter's projected fields and
       the value they eventually return;
-    • lambda parameters whose type has been constrained by record field
-      accesses are reopened to an open row before generalisation, allowing
-      helpers such as state-transition functions to accept larger records
-      than the subset of fields they touch;
+    • field projection and open record patterns infer open rows directly,
+      allowing helpers to accept larger records than the fields they touch;
+      exact patterns and annotations retain their closed-row requirements;
     • record copy-update (`{ r with field = v }`) preserves the base row's
       open tail and layers updated fields in front, so helpers can both
       override existing fields and add new ones while still accepting
@@ -48,11 +47,26 @@
     Everything else in this file exists to implement the inference engine
     itself and is **not** part of the stable API.
 *)
+module Syntax_name = Chatml.Chatml_syntax_name
 
 open Core
 open Chatml.Chatml_lang
 module Builtin_spec = Chatml.Chatml_builtin_spec
 module Builtin_surface = Chatml.Chatml_builtin_surface
+module Binding_pattern = Chatml.Chatml_binding_pattern
+module Type_alias = Chatml_type_alias
+module Type_probe = Chatml_type_probe
+module Type_scheme = Chatml_type_scheme
+module Signature_check = Chatml_signature_check
+module Type_snapshot = Chatml_type_snapshot
+module Value_scope = Chatml_value_scope
+module Configured_lookup = Chatml_configured_lookup
+module Configured_resolution = Chatml_configured_resolution
+module Semantic = Chatml_semantic_recorder
+module Semantic_binding = Chatml_semantic_binding
+module Semantic_scope = Chatml_semantic_scope
+module Semantic_elaboration = Chatml_semantic_elaboration
+module Semantic_host = Chatml_semantic_host
 
 (***************************************************************************)
 (* A Hindley-Milner style type-checker for the ChatML language.            *)
@@ -64,63 +78,7 @@ module Builtin_surface = Chatml.Chatml_builtin_surface
 
 (** --------------------------------------------------------------------- *)
 
-module Env = struct
-  type 'a t = 'a String.Map.t
-
-  let empty : 'a t = String.Map.empty
-  let add k v m : 'a t = Map.set m ~key:k ~data:v
-  let find m k = Map.find m k
-  let find_exn m k = Map.find_exn m k
-  let of_list l = List.fold l ~init:empty ~f:(fun acc (k, v) -> add k v acc)
-  let merge m1 m2 = Map.merge_skewed m1 m2 ~combine:(fun ~key:_ v_left _v_right -> v_left)
-  let is_empty = Map.is_empty
-  let bindings = Map.to_alist
-  let map m ~f = Map.map m ~f
-  let iter m ~f = Map.iteri m ~f:(fun ~key ~data -> f key data)
-
-  let choose m =
-    match Map.min_elt m with
-    | None -> raise_notrace (Invalid_argument "empty map")
-    | Some (k, v) -> k, v
-  ;;
-
-  let exists m f = Map.existsi m ~f:(fun ~key ~data -> f key data)
-  let fold m ~init ~f = Map.fold m ~init ~f:(fun ~key ~data acc -> f ~key ~data acc)
-  let singleton = String.Map.singleton
-end
-
-(** --------------------------------------------------------------------- *)
-
-(** 2. Types and type variables                                            *)
-
-(** --------------------------------------------------------------------- *)
-
-type name = string
-
-type typ =
-  | Fun of typ list * typ
-  | Generic of name
-  | Var of tv ref
-  | Con of string * typ list
-  | Mu of name * typ
-  | Rec_var of name
-  | Ref of typ
-  | Record of typ (* row *)
-  | Variant of typ (* row with Variant_payload fields *)
-  | Variant_payload of typ list (* constructor arguments, never a value type *)
-  | Tuple of typ list
-  | Array of typ
-  | TInt
-  | TFloat
-  | Boolean
-  | String
-  | Row of typ Env.t * typ (* fields * tail *)
-  | Empty_row
-  | Unit
-
-and tv =
-  | Bound of typ
-  | Free of name * int (* name, level *)
+include Chatml_inferred_type
 
 (** --------------------------------------------------------------------- *)
 
@@ -136,54 +94,103 @@ module SpanTbl = Hashtbl.Make (struct
     type t = span_key [@@deriving compare, hash, sexp]
   end)
 
-type infer_state =
+(* Inference identities and weak cells belong to one compilation. Annotation
+   ownership belongs to one unit and never changes when another unit is checked.
+   The immutable invocation callback is outside this machine: compiler helpers
+   can protect its exception origin without copying counters or swapping state. *)
+type inference_machine =
   { mutable current_id : int
   ; mutable current_lvl : int
-  ; mutable mu_id : int (* NEW: never reset *)
-  ; span_types : typ SpanTbl.t
-  ; checkpoint : unit -> unit
+  ; mutable mu_id : int
   ; mutable until_checkpoint : int
   }
 
-let create_state ?(checkpoint = fun () -> ()) () : infer_state =
-  { current_id = 0
-  ; current_lvl = 0
-  ; mu_id = 0
-  ; span_types = SpanTbl.create ()
+type configured_module = Configured_resolution.Public_module.t
+
+type configured_annotation = Configured_resolution.Annotation.t =
+  | Value_read of Configured_lookup.Origin.t
+  | Inert_open of Configured_lookup.Origin.t
+
+type infer_state =
+  { semantic : Semantic.Frame.t option
+  ; semantic_members : Semantic_binding.Members.t SpanTbl.t option
+  ; configured : Configured_resolution.t option
+  ; shared : inference_machine
+  ; checkpoint : unit -> unit
+  ; source : Chatml_source.t option
+  ; span_types : typ SpanTbl.t
+  ; module_visibility : Chatml.Chatml_module_visibility.t SpanTbl.t
+  ; configured_annotations : configured_annotation SpanTbl.t
+  }
+
+let create_state ?(checkpoint = fun () -> ()) ?source () : infer_state =
+  { semantic = None
+  ; semantic_members = None
+  ; configured = None
+  ; shared = { current_id = 0; current_lvl = 0; mu_id = 0; until_checkpoint = 0 }
   ; checkpoint
-  ; until_checkpoint = 0
+  ; source
+  ; span_types = SpanTbl.create ()
+  ; module_visibility = SpanTbl.create ()
+  ; configured_annotations = SpanTbl.create ()
+  }
+;;
+
+(* New unit annotations, same inference graph. No fresh gensym or type cells. *)
+let for_source state source =
+  { semantic = None
+  ; semantic_members = None
+  ; configured = None
+  ; shared = state.shared
+  ; checkpoint = state.checkpoint
+  ; source = Some source
+  ; span_types = SpanTbl.create ()
+  ; module_visibility = SpanTbl.create ()
+  ; configured_annotations = SpanTbl.create ()
   }
 ;;
 
 let checkpoint state =
-  state.until_checkpoint <- state.until_checkpoint - 1;
-  if state.until_checkpoint <= 0
+  state.shared.until_checkpoint <- state.shared.until_checkpoint - 1;
+  if state.shared.until_checkpoint <= 0
   then (
-    state.until_checkpoint <- 64;
+    state.shared.until_checkpoint <- 64;
     state.checkpoint ())
 ;;
 
 (* Levels govern generalization, not variable identity. An inferred variable can
    escape an inner level through an outer parameter or captured mutable value.
    Reusing its name would conflate distinct binders when schemes instantiate. *)
-let enter_level (state : infer_state) = state.current_lvl <- state.current_lvl + 1
+let enter_level (state : infer_state) =
+  state.shared.current_lvl <- state.shared.current_lvl + 1
+;;
 
 let exit_level (state : infer_state) =
-  if state.current_lvl <= 0
+  if state.shared.current_lvl <= 0
   then failwith "Typechecker level stack underflow"
-  else state.current_lvl <- state.current_lvl - 1
+  else state.shared.current_lvl <- state.shared.current_lvl - 1
+;;
+
+(* Every independent source starts at inference root level, even when required
+   while its importer is inferring a let/lambda body. Otherwise its weak exports
+   can escape above level0 and be generalized by that importer. Identity counters
+   and cells remain shared; restore the caller's lexical level on every exit. *)
+let with_unit_level state ~f =
+  let previous = state.shared.current_lvl in
+  state.shared.current_lvl <- 0;
+  Exn.protect ~f ~finally:(fun () -> state.shared.current_lvl <- previous)
 ;;
 
 let gensym (state : infer_state) : string =
-  let id = state.current_id in
-  state.current_id <- state.current_id + 1;
+  let id = state.shared.current_id in
+  state.shared.current_id <- state.shared.current_id + 1;
   let letter = Char.of_int_exn ((id mod 26) + Char.to_int 'a') |> Char.to_string in
   if id >= 26 then letter ^ Int.to_string (id / 26) else letter
 ;;
 
 let gensym_mu (state : infer_state) : string =
-  let id = state.mu_id in
-  state.mu_id <- state.mu_id + 1;
+  let id = state.shared.mu_id in
+  state.shared.mu_id <- state.shared.mu_id + 1;
   Int.to_string id
 ;;
 
@@ -191,40 +198,94 @@ let record_span_type (state : infer_state) (span : Source.span) (ty : typ) : uni
   Hashtbl.set state.span_types ~key:(span_to_key span) ~data:ty
 ;;
 
-type diagnostic =
-  { message : string
-  ; span : Source.span option
-  }
+type diagnostic = Chatml_diagnostic.t
 
 exception Type_error of string
 exception Type_error_with_loc of string * Source.span
+exception Type_diagnostic of diagnostic
 
-type checked_program = { span_types : typ SpanTbl.t }
+type checked_program =
+  { source : Chatml_source.t option
+  ; span_types : typ SpanTbl.t
+  ; module_visibility : Chatml.Chatml_module_visibility.t SpanTbl.t
+  ; configured_annotations : configured_annotation SpanTbl.t
+  }
 
+let checked_module_visibility (checked : checked_program) span =
+  Hashtbl.find checked.module_visibility (span_to_key span)
+;;
+
+(* Raw-span lookup is a single-unit compatibility view. *)
 let checked_lookup_span_type (checked : checked_program) (span : Source.span) : typ option
   =
   Hashtbl.find checked.span_types (span_to_key span)
 ;;
 
-let format_diagnostic (source_text : string) (diagnostic : diagnostic) : string =
-  match diagnostic.span with
-  | None -> Printf.sprintf "Type error: %s" diagnostic.message
-  | Some span ->
-    let source = Source.read (Source.make source_text) span in
-    let caret_count = Int.max 1 (span.right.column - span.left.column) in
-    Printf.sprintf
-      "line %i, characters %i-%i:\n%i|    %s%s\n      %s\n\nType error: %s"
-      span.left.line
-      span.left.column
-      span.right.column
-      span.left.line
-      source
-      (String.make (span.left.column + 3) ' ')
-      (String.make caret_count '^')
-      diagnostic.message
+(* Location admission already validated coordinates; source and revision must
+   match before identical offset pairs can query this unit's table. *)
+let checked_owns_location (checked : checked_program) location =
+  match checked.source with
+  | None -> false
+  | Some source ->
+    Chatml_source.Id.equal
+      (Chatml_source.id source)
+      (Chatml_source.Location.source location)
+    && Chatml_source.Digest.equal
+         (Chatml_source.digest source)
+         (Chatml_source.Location.source_digest location)
 ;;
 
-let new_var (state : infer_state) level = Var (ref (Free (gensym state, level)))
+let checked_lookup_location_type checked location =
+  if checked_owns_location checked location
+  then checked_lookup_span_type checked (Chatml_source.Location.span location)
+  else None
+;;
+
+let checked_lookup_location_visibility checked location =
+  if checked_owns_location checked location
+  then checked_module_visibility checked (Chatml_source.Location.span location)
+  else None
+;;
+
+(* Raw span compatibility follows other per-unit tables. Owned callers must use
+   the location projection to prevent identical foreign offsets from matching. *)
+let checked_configured_annotation (checked : checked_program) span =
+  Hashtbl.find checked.configured_annotations (span_to_key span)
+;;
+
+let checked_location_configured_annotation checked location =
+  if checked_owns_location checked location
+  then checked_configured_annotation checked (Chatml_source.Location.span location)
+  else None
+;;
+
+let format_diagnostic source_text diagnostic =
+  Chatml_diagnostic.render_legacy
+    diagnostic
+    ~source:source_text
+    ~label:"Type error"
+    ~checkpoint:(fun () -> ())
+;;
+
+let new_var (state : infer_state) ?equality level =
+  Var (ref (Free { name = gensym state; level; equality }))
+;;
+
+let add_free_equality tv required =
+  match !tv with
+  | Bound _ -> failwith "internal: equality requirement expected a free variable"
+  | Free info ->
+    let equality =
+      match info.equality with
+      | None -> required
+      | Some previous ->
+        (match Equality_requirement.combine previous required with
+         | Ok combined -> combined
+         | Error Value_and_row ->
+           raise (Type_error "Type variable cannot be both a value and a record row"))
+    in
+    tv := Free { info with equality = Some equality }
+;;
 
 let tv_ref_mem (needle : tv ref) (haystack : tv ref list) : bool =
   List.exists haystack ~f:(fun candidate -> phys_equal needle candidate)
@@ -245,7 +306,8 @@ let rec substitute_rec_var
   let substitute = substitute_rec_var ~checkpoint ~target ~replacement in
   match ty with
   | Fun (params, ret) -> Fun (List.map params ~f:substitute, substitute ret)
-  | Generic _ | Var _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> ty
+  | Generic _ | Var _ | TInt | TFloat | Boolean | String | Empty_row | Unit | Shape_kind _
+    -> ty
   | Con (name, args) -> Con (name, List.map args ~f:substitute)
   | Mu (binder, body) when String.equal binder target -> Mu (binder, body)
   | Mu (binder, body) -> Mu (binder, substitute body)
@@ -253,6 +315,8 @@ let rec substitute_rec_var
   | Rec_var _ -> ty
   | Ref t -> Ref (substitute t)
   | Record row -> Record (substitute row)
+  | Module row -> Module (substitute row)
+  | Field_receiver (kind, row) -> Field_receiver (substitute kind, substitute row)
   | Variant row -> Variant (substitute row)
   | Tuple ts -> Tuple (List.map ts ~f:substitute)
   | Variant_payload ts -> Variant_payload (List.map ts ~f:substitute)
@@ -274,180 +338,27 @@ let unfold_mu ?checkpoint (ty : typ) : typ =
 (** --------------------------------------------------------------------- *)
 
 let instantiate (state : infer_state) ty =
-  let table = Hashtbl.create (module String) in
-  let rec inst (seen : tv ref list) ty =
-    checkpoint state;
-    match ty with
-    | Fun (ps, r) -> Fun (List.map ps ~f:(inst seen), inst seen r)
-    | Generic x ->
-      (match Hashtbl.find table x with
-       | Some t -> t
-       | None ->
-         let v = new_var state state.current_lvl in
-         Hashtbl.add_exn table ~key:x ~data:v;
-         v)
-    | Con (n, args) -> Con (n, List.map args ~f:(inst seen))
-    | Var ({ contents = Bound t } as tvref) ->
-      if tv_ref_mem tvref seen then Var tvref else inst (tvref :: seen) t
-    | Var ({ contents = Free _ } as tvref) -> Var tvref
-    | Mu (binder, body) -> Mu (binder, inst seen body)
-    | Rec_var _ as rec_var -> rec_var
-    | Ref t -> Ref (inst seen t)
-    | Record r -> Record (inst seen r)
-    | Variant r -> Variant (inst seen r)
-    | Tuple ts -> Tuple (List.map ts ~f:(inst seen))
-    | Variant_payload ts -> Variant_payload (List.map ts ~f:(inst seen))
-    | Row (fields, t) -> Row (Env.map fields ~f:(inst seen), inst seen t)
-    | Array t -> Array (inst seen t)
-    | t -> t
-  in
-  inst [] ty
+  match
+    Type_scheme.instantiate
+      ty
+      ~level:state.shared.current_lvl
+      ~fresh_name:(fun () -> gensym state)
+      ~checkpoint:(fun () -> checkpoint state)
+  with
+  | Ok ty -> ty
+  | Error Representation_equality ->
+    raise (Type_error "A representation kind cannot carry value equality")
+  | Error (Conflicting_equality Value_and_row) ->
+    raise (Type_error "Type variable cannot be both a value and a record row")
 ;;
 
-(**
-  Generalisation
-  We now adopt the same strategy that the Nox checker uses: all free type variables that were
-  introduced at a deeper level than the current one are turned into
-  universally-quantified (Generic) type variables.
-*)
 let generalise (state : infer_state) ty =
-  let rec gen (seen : tv ref list) ty =
-    checkpoint state;
-    match ty with
-    | Fun (params, ret) -> Fun (List.map params ~f:(gen seen), gen seen ret)
-    | Var ({ contents = Bound t } as tvref) ->
-      if tv_ref_mem tvref seen then Var tvref else gen (tvref :: seen) t
-    | Var { contents = Free (name, lvl) } when lvl > state.current_lvl -> Generic name
-    | Var ({ contents = Free _ } as tvref) -> Var tvref
-    | Con (n, args) -> Con (n, List.map args ~f:(gen seen))
-    | Mu (binder, body) -> Mu (binder, gen seen body)
-    | Rec_var _ as rec_var -> rec_var
-    | Ref t -> Ref (gen seen t)
-    | Record row -> Record (gen seen row)
-    | Variant row -> Variant (gen seen row)
-    | Tuple ts -> Tuple (List.map ts ~f:(gen seen))
-    | Variant_payload ts -> Variant_payload (List.map ts ~f:(gen seen))
-    | Row (fields, tail) -> Row (Env.map fields ~f:(gen seen), gen seen tail)
-    | Array t -> Array (gen seen t)
-    | t -> t
-  in
-  gen [] ty
+  Type_scheme.generalise ty ~level:state.shared.current_lvl ~checkpoint:(fun () ->
+    checkpoint state)
 ;;
 
-let has_recursive_type ?(checkpoint = fun () -> ()) (ty : typ) : bool =
-  let rec aux (seen : tv ref list) ty =
-    checkpoint ();
-    match ty with
-    | Fun (params, ret) -> List.exists params ~f:(aux seen) || aux seen ret
-    | Var ({ contents = Bound t } as tv) ->
-      if tv_ref_mem tv seen then true else aux (tv :: seen) t
-    | Con (_n, args) -> List.exists args ~f:(aux seen)
-    | Mu (_binder, _body) -> true
-    | Rec_var _ -> true
-    | Var { contents = Free _ }
-    | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> false
-    | Ref t | Record t | Variant t | Array t -> aux seen t
-    | Tuple ts | Variant_payload ts -> List.exists ts ~f:(aux seen)
-    | Row (fields, tail) ->
-      Env.exists fields (fun _field ty' -> aux seen ty') || aux seen tail
-  in
-  aux [] ty
-;;
-
-let check_contractive ?(checkpoint = fun () -> ()) (ty : typ) : (unit, string) result =
-  let rec check_list
-            (seen : tv ref list)
-            ~(target : name option)
-            ~(guarded : bool)
-            ~(scope : name list)
-            (tys : typ list)
-    : (unit, string) result
-    =
-    match tys with
-    | [] -> Ok ()
-    | hd :: tl ->
-      (match check_ty seen ~target ~guarded ~scope hd with
-       | Ok () -> check_list seen ~target ~guarded ~scope tl
-       | Error _ as err -> err)
-  and check_fields
-        (seen : tv ref list)
-        ~(target : name option)
-        ~(guarded : bool)
-        ~(scope : name list)
-        (fields : typ Env.t)
-    : (unit, string) result
-    =
-    fields |> Env.bindings |> List.map ~f:snd |> check_list seen ~target ~guarded ~scope
-  and check_ty
-        (seen : tv ref list)
-        ~(target : name option)
-        ~(guarded : bool)
-        ~(scope : name list)
-        (ty : typ)
-    : (unit, string) result
-    =
-    checkpoint ();
-    match ty with
-    | Fun (params, ret) ->
-      (match check_list seen ~target ~guarded:true ~scope params with
-       | Ok () -> check_ty seen ~target ~guarded:true ~scope ret
-       | Error _ as err -> err)
-    | Var ({ contents = Bound bound_ty } as tv) ->
-      if tv_ref_mem tv seen
-      then Ok ()
-      else check_ty (tv :: seen) ~target ~guarded ~scope bound_ty
-    | Con (_n, args) -> check_list seen ~target ~guarded ~scope args
-    | Var { contents = Free _ }
-    | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> Ok ()
-    | Mu (binder, body) ->
-      let scope' = binder :: scope in
-      let outer_target =
-        match target with
-        | Some target_name when String.equal target_name binder -> None
-        | _ -> target
-      in
-      (match check_ty seen ~target:(Some binder) ~guarded:false ~scope:scope' body with
-       | Error _ as err -> err
-       | Ok () -> check_ty seen ~target:outer_target ~guarded ~scope:scope' body)
-    | Rec_var binder ->
-      if not (rec_name_mem binder scope)
-      then Error (Printf.sprintf "Unbound recursive type variable '%s'" binder)
-      else (
-        match target with
-        | Some target_binder when String.equal target_binder binder && not guarded ->
-          Error (Printf.sprintf "Unguarded recursive type variable '%s'" binder)
-        | _ -> Ok ())
-    | Ref inner | Record inner | Array inner ->
-      check_ty seen ~target ~guarded:true ~scope inner
-    | Variant row -> check_variant_row seen ~target ~guarded:true ~scope row
-    | Variant_payload _ -> Error "Variant payload is only valid in a variant row"
-    | Tuple tys -> check_list seen ~target ~guarded:true ~scope tys
-    | Row (fields, tail) ->
-      (match check_fields seen ~target ~guarded ~scope fields with
-       | Ok () -> check_ty seen ~target ~guarded ~scope tail
-       | Error _ as err -> err)
-  and check_variant_row seen ~target ~guarded ~scope row =
-    checkpoint ();
-    match row with
-    | Row (cases, tail) ->
-      let rec check_cases = function
-        | [] -> check_variant_row seen ~target ~guarded ~scope tail
-        | (_, Variant_payload arguments) :: rest ->
-          (match check_list seen ~target ~guarded ~scope arguments with
-           | Ok () -> check_cases rest
-           | Error _ as error -> error)
-        | _ -> Error "Variant row fields must retain constructor payload arity"
-      in
-      check_cases (Env.bindings cases)
-    | Var ({ contents = Bound row } as tv) ->
-      if tv_ref_mem tv seen
-      then Ok ()
-      else check_variant_row (tv :: seen) ~target ~guarded ~scope row
-    | Empty_row | Generic _ | Var { contents = Free _ } -> Ok ()
-    | _ -> Error "Invalid variant row"
-  in
-  check_ty [] ~target:None ~guarded:false ~scope:[] ty
-;;
+let has_recursive_type = Chatml_type_validity.has_recursive_type
+let check_contractive = Chatml_type_validity.check_contractive
 
 (** --------------------------------------------------------------------- *)
 
@@ -467,7 +378,7 @@ let merge_fields ?(checkpoint = fun () -> ()) row =
       else aux seen (binder :: seen_rec) (unfold_mu ~checkpoint mu)
     | Rec_var _ as rec_var -> Env.empty, rec_var
     | Var _ as var -> Env.empty, var
-    | Record r -> aux seen seen_rec r
+    | Record r | Module r | Field_receiver (_, r) -> aux seen seen_rec r
     | Variant r -> aux seen seen_rec r
     | Row (fs, rest) ->
       (match aux seen seen_rec rest with
@@ -487,33 +398,49 @@ let merge_fields ?(checkpoint = fun () -> ()) row =
 
 let occurs ?(checkpoint = fun () -> ()) tv ty =
   let found = ref false in
-  let rec aux (seen : tv ref list) ty =
+  let seen = ref [] in
+  (* The target is fixed and Bound links do not change during this invocation.
+     Reaching a shared Bound node through another sibling adds no obligation:
+     Free lowering is the same idempotent minimum, and Mu does not substitute.
+     Retain all sibling traversal, including after finding the target. *)
+  let rec aux ty =
     checkpoint ();
     match ty with
     | Fun (ps, r) ->
-      List.iter ps ~f:(aux seen);
-      aux seen r
-    | Con (_n, args) -> List.iter args ~f:(aux seen)
+      List.iter ps ~f:aux;
+      aux r
+    | Con (_n, args) -> List.iter args ~f:aux
     | Var tv' when phys_equal tv tv' -> found := true
     | Var ({ contents = Bound ty } as tv') ->
-      if not (tv_ref_mem tv' seen) then aux (tv' :: seen) ty
-    | Var ({ contents = Free (name, lvl) } as tv') ->
+      let visited =
+        List.exists !seen ~f:(fun previous ->
+          checkpoint ();
+          phys_equal tv' previous)
+      in
+      if not visited
+      then (
+        seen := tv' :: !seen;
+        aux ty)
+    | Var ({ contents = Free ({ level = lvl; _ } as info) } as tv') ->
       let new_lvl =
         match !tv with
-        | Free (_, lvl_tv) -> Int.min lvl lvl_tv
+        | Free { level = lvl_tv; _ } -> Int.min lvl lvl_tv
         | _ -> lvl
       in
-      tv' := Free (name, new_lvl)
-    | Mu (_binder, body) -> aux seen body
+      tv' := Free { info with level = new_lvl }
+    | Mu (_binder, body) -> aux body
     | Rec_var _ -> ()
-    | Ref t | Record t | Variant t | Array t -> aux seen t
-    | Tuple ts | Variant_payload ts -> List.iter ts ~f:(aux seen)
+    | Ref t | Record t | Module t | Variant t | Array t -> aux t
+    | Field_receiver (kind, row) ->
+      aux kind;
+      aux row
+    | Tuple ts | Variant_payload ts -> List.iter ts ~f:aux
     | Row (fs, rest) ->
-      Env.iter fs ~f:(fun _ t -> aux seen t);
-      aux seen rest
-    | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> ()
+      Env.iter fs ~f:(fun _ t -> aux t);
+      aux rest
+    | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit | Shape_kind _ -> ()
   in
-  aux [] ty;
+  aux ty;
   !found
 ;;
 
@@ -535,6 +462,11 @@ let resolve_bound_type ?(checkpoint = fun () -> ()) (ty : typ) : typ =
     match ty with
     | Var ({ contents = Bound bound_ty } as tv) ->
       if tv_ref_mem tv seen then Var tv else aux (tv :: seen) seen_rec bound_ty
+    | Field_receiver (kind, row) ->
+      (match aux seen seen_rec kind with
+       | Shape_kind Record -> Record row
+       | Shape_kind Module -> Module row
+       | _ -> Field_receiver (kind, row))
     | Mu (binder, _body) as mu ->
       if rec_name_mem binder seen_rec
       then mu
@@ -553,9 +485,9 @@ let rec can_infer_mu_through ?(checkpoint = fun () -> ()) (ty : typ) : bool =
   (* | Empty_row -> true  (* not needed *) *)
 
   (* disallow recursion through computational / mutable shapes *)
-  | Fun _ | Ref _ | Array _ -> false
+  | Fun _ | Ref _ | Array _ | Module _ | Field_receiver _ -> false
   (* be conservative for the rest *)
-  | TInt | TFloat | Boolean | String | Unit -> false
+  | TInt | TFloat | Boolean | String | Unit | Shape_kind _ -> false
   | Generic _ -> false
   | Var { contents = Free _ } -> false
   | Var { contents = Bound t } -> can_infer_mu_through ~checkpoint t
@@ -601,10 +533,12 @@ let ensure_guarded_cycle ?(checkpoint = fun () -> ()) (target : tv ref) (ty : ty
          For guardedness of inferred cycles, ignore it. *)
       false
     (* Base types *)
-    | TInt | TFloat | Boolean | String | Unit | Empty_row -> false
+    | TInt | TFloat | Boolean | String | Unit | Empty_row | Shape_kind _ -> false
     (* “Data guards” *)
     | Variant row -> bad seen_tv seen_mu ~guarded:true row
-    | Record row -> bad seen_tv seen_mu ~guarded:true row
+    | Record row | Module row -> bad seen_tv seen_mu ~guarded:true row
+    | Field_receiver (kind, row) ->
+      bad seen_tv seen_mu ~guarded kind || bad seen_tv seen_mu ~guarded:true row
     | Tuple ts | Variant_payload ts ->
       List.exists ts ~f:(bad seen_tv seen_mu ~guarded:true)
     | Con (_n, args) -> List.exists args ~f:(bad seen_tv seen_mu ~guarded:true)
@@ -696,7 +630,10 @@ let rec unify (state : infer_state) lhs rhs =
       | Rec_var _, _ | _, Rec_var _ ->
         raise (Type_error "Cannot unify recursive type variable with non-recursive type")
       (* Your occurs-knot case (possibly gated to reject Fun recursion like x(x)) *)
-      | Var ({ contents = Free _ } as tv), t | t, Var ({ contents = Free _ } as tv) ->
+      | Var ({ contents = Free info } as tv), t | t, Var ({ contents = Free info } as tv)
+        ->
+        Option.iter info.equality ~f:(fun requirement ->
+          require_equality state requirement t);
         if occurs ~checkpoint:(fun () -> checkpoint state) tv t
         then (
           if not (can_infer_mu_through ~checkpoint:(fun () -> checkpoint state) t)
@@ -705,7 +642,24 @@ let rec unify (state : infer_state) lhs rhs =
           tv := Bound t (* cyclic bind; NO Rec_var/Mu synthesis *))
         else tv := Bound t
       | Ref t1, Ref t2 | Array t1, Array t2 -> go active env_l env_r t1 t2
-      | Record r1, Record r2 | Variant r1, Variant r2 -> go active env_l env_r r1 r2
+      | Record r1, Record r2 | Module r1, Module r2 -> go_rows active env_l env_r r1 r2
+      | Variant r1, Variant r2 -> go active env_l env_r r1 r2
+      | Field_receiver (k1, r1), Field_receiver (k2, r2) ->
+        go active env_l env_r k1 k2;
+        go_rows active env_l env_r r1 r2
+      | Field_receiver (kind, receiver_row), Record row ->
+        go active env_l env_r kind (Shape_kind Record);
+        go_rows active env_l env_r receiver_row row
+      | Record row, Field_receiver (kind, receiver_row) ->
+        go active env_l env_r (Shape_kind Record) kind;
+        go_rows active env_l env_r row receiver_row
+      | Field_receiver (kind, receiver_row), Module row ->
+        go active env_l env_r kind (Shape_kind Module);
+        go_rows active env_l env_r receiver_row row
+      | Module row, Field_receiver (kind, receiver_row) ->
+        go active env_l env_r (Shape_kind Module) kind;
+        go_rows active env_l env_r row receiver_row
+      | Shape_kind left, Shape_kind right when Shape_kind.equal left right -> ()
       | Variant_payload ts1, Variant_payload ts2 ->
         if List.length ts1 <> List.length ts2
         then raise (Type_error "Variant constructor arity mismatch");
@@ -751,21 +705,40 @@ let rec unify (state : infer_state) lhs rhs =
     let missing_l, missing_r =
       collect (Env.bindings map_l) (Env.bindings map_r) Env.empty Env.empty
     in
-    match Env.is_empty missing_l, Env.is_empty missing_r with
-    | true, true -> go active env_l env_r tail_l tail_r
-    | true, false -> go active env_r env_l tail_r (Row (missing_r, tail_l))
-    | false, true -> go active env_l env_r tail_l (Row (missing_l, tail_r))
-    | false, false ->
-      (match tail_l with
-       | Var ({ contents = Free _ } as tv) ->
-         let row_var = new_var state state.current_lvl in
-         go active env_r env_l tail_r (Row (missing_r, row_var));
-         (match !tv with
-          | Bound _ -> raise (Type_error "Recursive row types")
-          | _ -> ());
-         tv := Bound (Row (missing_l, row_var))
-       | Empty_row -> go active env_l env_r tail_l (Row (missing_l, new_var state 0))
-       | _ -> assert false)
+    (* Copy-updates may overlay fields on the same unknown base row. Equality
+       of those rows requires the base to provide any field overridden on only
+       one side. Use a fresh remainder rather than a recursive row equation;
+       flatten again to check newly exposed field types. This is shared row
+       unification, so nested records and container/function types obey the
+       same rule as direct branch results. *)
+    match tail_l, tail_r with
+    | Var ({ contents = Free _ } as left), Var right
+      when phys_equal left right && not (Env.is_empty missing_l && Env.is_empty missing_r)
+      ->
+      let required = Env.merge missing_l missing_r in
+      go
+        active
+        env_l
+        env_r
+        tail_l
+        (Row (required, new_var state state.shared.current_lvl));
+      go_rows active env_l env_r lhs rhs
+    | _ ->
+      (match Env.is_empty missing_l, Env.is_empty missing_r with
+       | true, true -> go active env_l env_r tail_l tail_r
+       | true, false -> go active env_r env_l tail_r (Row (missing_r, tail_l))
+       | false, true -> go active env_l env_r tail_l (Row (missing_l, tail_r))
+       | false, false ->
+         (match tail_l with
+          | Var ({ contents = Free _ } as tv) ->
+            let row_var = new_var state state.shared.current_lvl in
+            go active env_r env_l tail_r (Row (missing_r, row_var));
+            (match !tv with
+             | Bound _ -> raise (Type_error "Recursive row types")
+             | _ -> ());
+            go active env_l env_r (Var tv) (Row (missing_l, row_var))
+          | Empty_row -> go active env_l env_r tail_l (Row (missing_l, new_var state 0))
+          | _ -> assert false))
   in
   go [] MuEnv.empty MuEnv.empty lhs rhs
 
@@ -811,6 +784,7 @@ and render_type ?(poll = fun () -> ()) ?bounds ty =
     | Boolean -> add "bool"
     | String -> add "string"
     | Unit -> add "unit"
+    | Shape_kind kind -> add (Shape_kind.name kind)
     | Array t ->
       postfix depth seen seen_rec t;
       add " array"
@@ -837,6 +811,17 @@ and render_type ?(poll = fun () -> ()) ?bounds ty =
       add "{";
       show_row_fields depth seen seen_rec false row;
       add "}"
+    | Module row ->
+      add "module{";
+      show_row_fields depth seen seen_rec false row;
+      add "}"
+    | Field_receiver (kind, row) ->
+      (match resolve (depth + 1) seen kind with
+       | Shape_kind Record -> add "{"
+       | Shape_kind Module -> add "module{"
+       | _ -> add "record_or_module{");
+      show_row_fields depth seen seen_rec false row;
+      add "}"
     | Tuple ts | Variant_payload ts ->
       add "(";
       separated " * " ts child;
@@ -847,10 +832,13 @@ and render_type ?(poll = fun () -> ()) ?bounds ty =
       add "]"
     | Row _ as row -> show_row_fields depth seen seen_rec false row
     | Empty_row -> ()
-    | Generic n -> add n
-    | Var { contents = Free (n, _) } ->
+    | Generic { name; equality } ->
+      add name;
+      qualification equality
+    | Var { contents = Free { name; equality; _ } } ->
       add "'";
-      add n
+      add name;
+      qualification equality
     | Var ({ contents = Bound t } as tv) ->
       (match tv_ref_mem tv seen with
        | true -> add "'rec"
@@ -863,6 +851,16 @@ and render_type ?(poll = fun () -> ()) ?bounds ty =
       add "(";
       separated ", " args child;
       add ")"
+  and qualification = function
+    | None -> ()
+    | Some Equality_requirement.Value -> add " [equality]"
+    | Some (Equality_requirement.Row excluded) ->
+      add " [row equality";
+      if not (Set.is_empty excluded)
+      then (
+        add " except ";
+        separated ", " (Set.to_list excluded) add);
+      add "]"
   and postfix depth seen seen_rec ty =
     match resolve (depth + 1) seen ty with
     | Fun _ ->
@@ -887,7 +885,8 @@ and render_type ?(poll = fun () -> ()) ?bounds ty =
           (binder :: seen_rec)
           (unfold_mu ~checkpoint:(fun () -> step depth) mu)
     | Rec_var _ as rec_var -> Env.empty, rec_var
-    | Record r | Variant r -> row_fields (depth + 1) seen seen_rec r
+    | Record r | Module r | Field_receiver (_, r) | Variant r ->
+      row_fields (depth + 1) seen seen_rec r
     | Row (fs, rest) ->
       let rest_fields, tail = row_fields (depth + 1) seen seen_rec rest in
       let fields =
@@ -963,7 +962,7 @@ and row_fields_and_tail row =
       then Env.empty, mu
       else aux seen (binder :: seen_rec) (unfold_mu mu)
     | Rec_var _ as rec_var -> Env.empty, rec_var
-    | Record r -> aux seen seen_rec r
+    | Record r | Module r | Field_receiver (_, r) -> aux seen seen_rec r
     | Variant r -> aux seen seen_rec r
     | Row (fs, rest) ->
       let rest_fields, tail = aux seen seen_rec rest in
@@ -1027,91 +1026,113 @@ and show_variant_row row =
   in
   fields_str ^ tail_str
 
-and ensure_equality_type ?(checkpoint = fun () -> ()) ty =
-  let rec ensure_equality_type_with_seen (seen : tv ref list) (seen_rec : name list) ty =
-    checkpoint ();
-    match resolve_bound_type_for_display_with_seen seen ty with
-    | TInt | TFloat | Boolean | String | Unit | Generic _ -> ()
-    | Var { contents = Free _ } -> ()
-    | Var ({ contents = Bound t } as tv) ->
-      if tv_ref_mem tv seen
-      then ()
-      else ensure_equality_type_with_seen (tv :: seen) seen_rec t
-    | Con (name, args) ->
-      (* If you want equality for some constructed types, recurse.
-             Tasks should almost certainly NOT be equality-comparable. *)
-      if String.equal name "task"
-      then raise (Type_error "Equality is not supported for Task values")
-      else List.iter args ~f:(ensure_equality_type_with_seen seen seen_rec)
-    | Mu (binder, body) ->
-      if rec_name_mem binder seen_rec
-      then ()
-      else ensure_equality_type_with_seen seen (binder :: seen_rec) body
-    | Rec_var binder when rec_name_mem binder seen_rec -> ()
-    | Rec_var _ -> ()
-    | Tuple ts | Variant_payload ts ->
-      List.iter ts ~f:(ensure_equality_type_with_seen seen seen_rec)
-    | Record row | Variant row -> ensure_equality_row_with_seen seen seen_rec row
-    | Array _ -> raise (Type_error "Equality is not supported for arrays")
-    | Ref _ -> raise (Type_error "Equality is not supported for refs")
-    | Fun _ -> raise (Type_error "Equality is not supported for functions")
-    | Row _ | Empty_row -> ensure_equality_row_with_seen seen seen_rec ty
-  and ensure_equality_row_with_seen (seen : tv ref list) (seen_rec : name list) row =
-    checkpoint ();
-    let fields, tail = row_fields_and_tail_with_seen seen seen_rec row in
-    Env.iter fields ~f:(fun _field ty -> ensure_equality_type_with_seen seen seen_rec ty);
-    match tail with
-    | Empty_row | Var { contents = Free _ } | Generic _ | Rec_var _ -> ()
-    | Mu (binder, body) ->
-      if rec_name_mem binder seen_rec
-      then ()
-      else ensure_equality_row_with_seen seen (binder :: seen_rec) body
-    | Var ({ contents = Bound t } as tv) ->
-      if tv_ref_mem tv seen
-      then ()
-      else ensure_equality_row_with_seen (tv :: seen) seen_rec t
-    | _ -> ()
-  and resolve_bound_type_for_display_with_seen (seen : tv ref list) ty =
-    checkpoint ();
-    match ty with
-    | Var ({ contents = Bound bound_ty } as tv) ->
-      if tv_ref_mem tv seen
-      then Var tv
-      else resolve_bound_type_for_display_with_seen (tv :: seen) bound_ty
-    | _ -> ty
-  and row_fields_and_tail_with_seen (seen : tv ref list) (seen_rec : name list) row =
-    checkpoint ();
-    match row with
-    | Var ({ contents = Bound ty } as tv) ->
-      if tv_ref_mem tv seen
-      then Env.empty, Var tv
-      else row_fields_and_tail_with_seen (tv :: seen) seen_rec ty
-    | Mu (binder, _body) as mu ->
-      if rec_name_mem binder seen_rec
-      then Env.empty, mu
-      else
-        row_fields_and_tail_with_seen seen (binder :: seen_rec) (unfold_mu ~checkpoint mu)
-    | Rec_var _ as rec_var -> Env.empty, rec_var
-    | Record r -> row_fields_and_tail_with_seen seen seen_rec r
-    | Variant r -> row_fields_and_tail_with_seen seen seen_rec r
-    | Row (fs, rest) ->
-      let rest_fields, tail = row_fields_and_tail_with_seen seen seen_rec rest in
-      Env.merge fs rest_fields, tail
-    | Empty_row -> Env.empty, Empty_row
-    | Var _ as var -> Env.empty, var
-    | Generic _ as generic -> Env.empty, generic
-    | other -> Env.empty, other
+and require_equality state requirement ty =
+  let module Binder = struct
+    type t =
+      { name : name
+      ; body : typ
+      ; outer : t list
+      }
+  end
   in
-  ensure_equality_type_with_seen [] [] ty
+  let same_scope left right = List.equal phys_equal left right in
+  let unsupported what = raise (Type_error ("Equality is not supported for " ^ what)) in
+  let rec require seen seen_rec scope requirement ty =
+    checkpoint state;
+    match ty with
+    | Var ({ contents = Free _ } as tv) -> add_free_equality tv requirement
+    | Var ({ contents = Bound bound } as tv) ->
+      if
+        not
+          (List.exists seen ~f:(fun (prior, obligation, prior_scope) ->
+             phys_equal tv prior
+             && Equality_requirement.equal requirement obligation
+             && same_scope scope prior_scope))
+      then require ((tv, requirement, scope) :: seen) seen_rec scope requirement bound
+    | Generic { name; equality } ->
+      let sufficient =
+        match equality with
+        | None -> false
+        | Some declared ->
+          (match Equality_requirement.combine declared requirement with
+           | Error _ -> false
+           | Ok combined -> Equality_requirement.equal declared combined)
+      in
+      if not sufficient
+      then raise (Type_error ("Equality requires a constrained type parameter '" ^ name))
+    | Mu (name, body) ->
+      require_binder seen seen_rec requirement { Binder.name; body; outer = scope }
+    | Rec_var name ->
+      (match List.find scope ~f:(fun binder -> String.equal binder.Binder.name name) with
+       | Some binder -> require_binder seen seen_rec requirement binder
+       | None -> raise (Type_error ("Unbound recursive equality variable '" ^ name)))
+    | _ ->
+      (match requirement with
+       | Equality_requirement.Value ->
+         (match ty with
+          | TInt | TFloat | Boolean | String | Unit -> ()
+          | Record row | Variant row ->
+            require seen seen_rec scope (Row String.Set.empty) row
+          | Field_receiver (kind, row) ->
+            unify state kind (Shape_kind Record);
+            require seen seen_rec scope (Row String.Set.empty) row
+          | Module _ -> unsupported "modules"
+          | Array _ -> unsupported "arrays"
+          | Ref _ -> unsupported "refs"
+          | Fun _ -> unsupported "functions"
+          | Con ("task", _) -> unsupported "Task values"
+          | Con (_, args) | Tuple args | Variant_payload args ->
+            List.iter args ~f:(require seen seen_rec scope Value)
+          | Row _ | Empty_row -> require seen seen_rec scope (Row String.Set.empty) ty
+          | Shape_kind _ -> unsupported "representation kinds"
+          | Var _ | Generic _ | Mu _ | Rec_var _ -> assert false)
+       | Row excluded ->
+         (match ty with
+          | Empty_row -> ()
+          | Row (fields, tail) ->
+            Env.iter fields ~f:(fun label field ->
+              checkpoint state;
+              if not (Set.mem excluded label) then require seen seen_rec scope Value field);
+            let shadowed =
+              Set.union excluded (Set.of_list (module String) (Map.keys fields))
+            in
+            require seen seen_rec scope (Row shadowed) tail
+          | Record row | Variant row -> require seen seen_rec scope requirement row
+          | Field_receiver (kind, row) ->
+            unify state kind (Shape_kind Record);
+            require seen seen_rec scope requirement row
+          | Module _ -> unsupported "modules"
+          | TInt
+          | TFloat
+          | Boolean
+          | String
+          | Unit
+          | Array _
+          | Ref _
+          | Fun _
+          | Con _
+          | Tuple _
+          | Variant_payload _
+          | Shape_kind _ -> raise (Type_error "Equality expected a record or variant row")
+          | Var _ | Generic _ | Mu _ | Rec_var _ -> assert false))
+  and require_binder seen seen_rec requirement binder =
+    (* Names are lexical: shadowing a binder must not discharge a different
+       obligation. Identity here belongs to one scoped traversal binding. *)
+    if
+      not
+        (List.exists seen_rec ~f:(fun (prior, obligation) ->
+           phys_equal binder prior && Equality_requirement.equal requirement obligation))
+    then
+      require
+        seen
+        ((binder, requirement) :: seen_rec)
+        (binder :: binder.Binder.outer)
+        requirement
+        binder.body
+  in
+  require [] [] [] requirement ty
 
-and ensure_equality_row row =
-  let fields, tail = row_fields_and_tail row in
-  Env.iter fields ~f:(fun _field ty -> ensure_equality_type ty);
-  match tail with
-  | Empty_row | Var { contents = Free _ } | Generic _ -> ()
-  | Var { contents = Bound t } -> ensure_equality_row t
-  | _ -> ()
-;;
+and ensure_equality_type state ty = require_equality state Equality_requirement.Value ty
 
 (** --------------------------------------------------------------------- *)
 
@@ -1124,8 +1145,8 @@ and ensure_equality_row row =
 (* -------------------------------------------------------------------------- *)
 
 type scheme = typ
-type tenv = scheme Env.t
-type type_env = typ Env.t
+type tenv = Value_scope.t
+type type_env = Type_alias.t
 
 (* Unlike a classical HM environment that stores only polymorphic schemes,
    ChatML's typing environment stores both:
@@ -1148,147 +1169,35 @@ let contains_generic ?(checkpoint = fun () -> ()) (ty : typ) : bool =
     | Mu (_binder, body) -> aux seen body
     | Rec_var _ -> false
     | Var { contents = Free _ } -> false
-    | Ref t | Record t | Variant t | Array t -> aux seen t
+    | Ref t | Record t | Module t | Variant t | Array t -> aux seen t
+    | Field_receiver (kind, row) -> aux seen kind || aux seen row
     | Tuple ts | Variant_payload ts -> List.exists ts ~f:(aux seen)
     | Row (fields, tail) ->
       Env.exists fields (fun _field ty' -> aux seen ty') || aux seen tail
-    | TInt | TFloat | Boolean | String | Empty_row | Unit -> false
+    | TInt | TFloat | Boolean | String | Empty_row | Unit | Shape_kind _ -> false
   in
   aux [] ty
 ;;
 
-let primitive_type_of_name (name : string) : typ option =
-  match name with
-  | "int" -> Some TInt
-  | "float" -> Some TFloat
-  | "bool" -> Some Boolean
-  | "string" -> Some String
-  | "unit" -> Some Unit
-  | _ -> None
+let alias_result = function
+  | Ok value -> value
+  | Error diagnostic -> raise (Type_diagnostic diagnostic)
 ;;
 
-let contains_rec_var_name ?(checkpoint = fun () -> ()) (target : name) (ty : typ) : bool =
-  let rec aux (seen : tv ref list) ty =
-    checkpoint ();
-    match ty with
-    | Rec_var name when String.equal name target -> true
-    | Rec_var _ -> false
-    | Fun (params, ret) -> List.exists params ~f:(aux seen) || aux seen ret
-    | Var ({ contents = Bound t } as tv) ->
-      if tv_ref_mem tv seen then false else aux (tv :: seen) t
-    | Con (_n, args) -> List.exists args ~f:(aux seen)
-    | Var { contents = Free _ }
-    | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> false
-    | Mu (binder, body) -> if String.equal binder target then false else aux seen body
-    | Ref t | Record t | Variant t | Array t -> aux seen t
-    | Tuple ts | Variant_payload ts -> List.exists ts ~f:(aux seen)
-    | Row (fields, tail) ->
-      Env.exists fields (fun _field ty' -> aux seen ty') || aux seen tail
-  in
-  aux [] ty
-;;
-
-let ensure_unique_type_labels
-      ?(checkpoint = fun () -> ())
-      ~(what : string)
-      (labels : string list)
-  : unit
-  =
-  let seen = Hash_set.create (module String) in
-  match
-    List.find labels ~f:(fun label ->
-      checkpoint ();
-      if Hash_set.mem seen label
-      then true
-      else (
-        Hash_set.add seen label;
-        false))
-  with
-  | None -> ()
-  | Some label -> raise (Type_error (Printf.sprintf "Duplicate %s label '%s'" what label))
-;;
-
-let rec typ_of_type_expr
-          ?(checkpoint = fun () -> ())
-          ?self_name
-          (types : type_env)
-          (expr : type_expr)
-  : typ
-  =
-  checkpoint ();
-  let convert = typ_of_type_expr ~checkpoint ?self_name types in
-  match expr with
-  | TEName name ->
-    (match primitive_type_of_name name with
-     | Some ty -> ty
-     | None ->
-       (match self_name with
-        | Some self when String.equal self name -> Rec_var name
-        | _ ->
-          (match Env.find types name with
-           | Some ty -> ty
-           | None -> raise (Type_error (Printf.sprintf "Unknown type '%s'" name)))))
-  | TEArrow (lhs, rhs) ->
-    let lhs_ty = convert lhs in
-    let params, ret =
-      match convert rhs with
-      | Fun (params, ret) -> params, ret
-      | rhs_ty -> [], rhs_ty
-    in
-    (match lhs_ty with
-     | Unit -> Fun (params, ret)
-     | _ -> Fun (lhs_ty :: params, ret))
-  | TEConstr (name, args) ->
-    (match name, List.map args ~f:convert with
-     | "array", [ arg_ty ] -> Array arg_ty
-     | "task", [ arg_ty ] -> Con ("task", [ arg_ty ])
-     | _, _ -> raise (Type_error (Printf.sprintf "Unknown type constructor '%s'" name)))
-  | TERecord fields ->
-    ensure_unique_type_labels
-      ~checkpoint
-      ~what:"type record field"
-      (List.map fields ~f:fst);
-    Record
-      (Row
-         ( Env.of_list
-             (List.map fields ~f:(fun (label, ty_expr) -> label, convert ty_expr))
-         , Empty_row ))
-  | TEVariant cases ->
-    ensure_unique_type_labels
-      ~checkpoint
-      ~what:"type variant constructor"
-      (List.map cases ~f:fst);
-    let payload_ty payloads = Variant_payload (List.map payloads ~f:convert) in
-    Variant
-      (Row
-         ( Env.of_list
-             (List.map cases ~f:(fun (tag, payloads) -> tag, payload_ty payloads))
-         , Empty_row ))
+let typ_of_type_expr ?semantic ?source ?lookup ?(checkpoint = fun () -> ()) types expr =
+  Type_alias.elaborate ?semantic ?source ?lookup types expr ~checkpoint |> alias_result
 ;;
 
 let infer_type_decl
+      ?semantic
+      ?source
+      ?lookup
       ?(checkpoint = fun () -> ())
-      (types : type_env)
-      (name : string)
-      (body : type_expr)
-  : type_env
+      types
+      declaration
   =
-  checkpoint ();
-  if Option.is_some (primitive_type_of_name name)
-  then raise (Type_error (Printf.sprintf "Cannot redefine primitive type '%s'" name))
-  else (
-    match Env.find types name with
-    | Some _ -> raise (Type_error (Printf.sprintf "Duplicate type declaration '%s'" name))
-    | None ->
-      let body_ty = typ_of_type_expr ~checkpoint ~self_name:name types body in
-      let declared_ty =
-        if contains_rec_var_name ~checkpoint name body_ty
-        then Mu (name, body_ty)
-        else body_ty
-      in
-      if has_recursive_type ~checkpoint declared_ty
-      then ensure_contractive_type ~checkpoint declared_ty;
-      Env.add name declared_ty types)
+  Type_alias.declare ?semantic ?source ?lookup types declaration ~checkpoint
+  |> alias_result
 ;;
 
 let builtin_row_var_name (name : string) = "__builtin_row_" ^ name
@@ -1297,7 +1206,7 @@ let rec typ_of_builtin_ty ?(checkpoint = fun () -> ()) (ty : Builtin_spec.ty) : 
   checkpoint ();
   let convert = typ_of_builtin_ty ~checkpoint in
   match ty with
-  | Builtin_spec.TVar name -> Generic name
+  | Builtin_spec.TVar name -> Generic { name; equality = None }
   | Builtin_spec.TCon (n, args) -> Con (n, List.map args ~f:convert)
   | Builtin_spec.TInt -> TInt
   | Builtin_spec.TFloat -> TFloat
@@ -1308,6 +1217,10 @@ let rec typ_of_builtin_ty ?(checkpoint = fun () -> ()) (ty : Builtin_spec.ty) : 
   | Builtin_spec.TRef inner -> Ref (convert inner)
   | Builtin_spec.TTuple tys -> Tuple (List.map tys ~f:convert)
   | Builtin_spec.TRecord row -> Record (typ_of_builtin_row ~checkpoint row)
+  | Builtin_spec.TModule row -> Module (typ_of_builtin_row ~checkpoint row)
+  | Builtin_spec.TField_receiver (kind, row) ->
+    Field_receiver
+      (Generic { name = kind; equality = None }, typ_of_builtin_row ~checkpoint row)
   | Builtin_spec.TVariant row -> Variant (typ_of_builtin_variant_row ~checkpoint row)
   | Builtin_spec.TFun (params, ret) -> Fun (List.map params ~f:convert, convert ret)
   | Builtin_spec.TMu (binder, body) -> Mu (binder, convert body)
@@ -1317,7 +1230,8 @@ and typ_of_builtin_row ?(checkpoint = fun () -> ()) (row : Builtin_spec.row) : t
   checkpoint ();
   match row with
   | Builtin_spec.TRow_empty -> Empty_row
-  | Builtin_spec.TRow_var name -> Generic (builtin_row_var_name name)
+  | Builtin_spec.TRow_var name ->
+    Generic { name = builtin_row_var_name name; equality = None }
   | Builtin_spec.TRow_extend (fields, tail) ->
     Row
       ( Env.of_list
@@ -1328,7 +1242,8 @@ and typ_of_builtin_variant_row ?(checkpoint = fun () -> ()) row : typ =
   checkpoint ();
   match row with
   | Builtin_spec.TVariant_row_empty -> Empty_row
-  | Builtin_spec.TVariant_row_var name -> Generic (builtin_row_var_name name)
+  | Builtin_spec.TVariant_row_var name ->
+    Generic { name = builtin_row_var_name name; equality = None }
   | Builtin_spec.TVariant_row_extend (cases, tail) ->
     Row
       ( Env.of_list
@@ -1337,77 +1252,96 @@ and typ_of_builtin_variant_row ?(checkpoint = fun () -> ()) row : typ =
       , typ_of_builtin_variant_row ~checkpoint tail )
 ;;
 
-let init_env_with_surface ?(checkpoint = fun () -> ()) (surface : Builtin_surface.surface)
+let init_env_with_static
+      ?semantic
+      ?(checkpoint = fun () -> ())
+      (surface : Chatml.Chatml_static_surface.t)
   : tenv
   =
+  let module Static = Chatml.Chatml_static_surface in
   let globals =
-    surface.globals
-    |> List.map ~f:(fun builtin ->
-      builtin.name, typ_of_builtin_ty ~checkpoint builtin.scheme)
+    List.map (Static.globals surface) ~f:(fun (b : Static.Binding.t) ->
+      checkpoint ();
+      b.name, typ_of_builtin_ty ~checkpoint b.scheme)
   in
   let modules =
-    surface.modules
-    |> List.map ~f:(fun builtin_module ->
-      ( builtin_module.name
-      , typ_of_builtin_ty ~checkpoint (Builtin_spec.module_scheme builtin_module) ))
+    List.map (Static.modules surface) ~f:(fun (m : Static.Module.t) ->
+      checkpoint ();
+      m.name, typ_of_builtin_ty ~checkpoint (Static.Module.scheme ~checkpoint m))
   in
-  Env.of_list (globals @ modules)
+  let values = Env.of_list (globals @ modules) |> Value_scope.of_schemes in
+  match semantic with
+  | None -> values
+  | Some frame -> Semantic_host.values_exn frame values ~globals ~modules ~checkpoint
+;;
+
+let init_env_with_surface ?(checkpoint = fun () -> ()) surface =
+  init_env_with_static
+    ~checkpoint
+    (Chatml.Chatml_static_surface.of_runtime_surface surface ~checkpoint)
 ;;
 
 let init_env () : tenv = init_env_with_surface Builtin_surface.core_surface
 
-let init_types_with_surface
-      ?(checkpoint = fun () -> ())
-      (surface : Builtin_surface.surface)
-  : type_env
-  =
-  List.fold surface.type_aliases ~init:Env.empty ~f:(fun env alias ->
-    if Option.is_some (primitive_type_of_name alias.name)
-    then
-      raise (Type_error (Printf.sprintf "Cannot redefine primitive type '%s'" alias.name))
-    else (
-      match Env.find env alias.name with
-      | Some _ ->
-        raise (Type_error (Printf.sprintf "Duplicate type declaration '%s'" alias.name))
-      | None ->
-        let alias_ty = typ_of_builtin_ty ~checkpoint alias.body in
-        if has_recursive_type ~checkpoint alias_ty
-        then ensure_contractive_type ~checkpoint alias_ty;
-        Env.add alias.name alias_ty env))
+let init_types_with_static ?semantic ?(checkpoint = fun () -> ()) surface : type_env =
+  List.fold
+    (Chatml.Chatml_static_surface.type_aliases surface)
+    ~init:Type_alias.empty
+    ~f:(fun env (alias : Builtin_surface.builtin_type_alias) ->
+      let alias_ty = typ_of_builtin_ty ~checkpoint alias.body in
+      let metadata =
+        Option.map semantic ~f:(fun frame ->
+          Semantic_host.alias_exn frame env ~name:alias.name ~body:alias_ty ~checkpoint)
+      in
+      let semantic_binding = Option.map metadata ~f:fst in
+      match
+        Type_alias.add_host
+          ?semantic_binding
+          env
+          ~name:alias.name
+          ~body:alias_ty
+          ~checkpoint
+      with
+      | Ok types ->
+        Option.value_map metadata ~default:types ~f:(fun (_, context) ->
+          Type_alias.with_semantic_context types context)
+      | Error message -> raise (Type_error message))
+;;
+
+let init_types_with_surface ?(checkpoint = fun () -> ()) surface =
+  init_types_with_static
+    ~checkpoint
+    (Chatml.Chatml_static_surface.of_runtime_surface surface ~checkpoint)
 ;;
 
 (* Instantiate only genuinely polymorphic schemes.  Monomorphic bindings are
    returned as-is so that all uses share the same mutable inference variables. *)
-let lookup (state : infer_state) (env : tenv) x =
-  match Env.find env x with
-  | Some sc ->
-    if contains_generic ~checkpoint:(fun () -> checkpoint state) sc
-    then instantiate state sc
-    else sc
+let lookup_scheme (env : tenv) x =
+  match Value_scope.find env ~name:x with
+  | Some binding -> Value_scope.Binding.scheme binding
   | None -> raise (Type_error (Printf.sprintf "Unknown variable '%s'" x))
+;;
+
+let lookup (state : infer_state) (env : tenv) x =
+  let scheme = lookup_scheme env x in
+  if contains_generic ~checkpoint:(fun () -> checkpoint state) scheme
+  then instantiate state scheme
+  else scheme
 ;;
 
 let add_mono ?(checkpoint = fun () -> ()) (env : tenv) x ty : tenv =
   if has_recursive_type ~checkpoint ty then ensure_contractive_type ~checkpoint ty;
-  Env.add x ty env
-;;
-
-let should_generalize_binding ?checkpoint (ty : typ) : bool =
-  not (has_recursive_type ?checkpoint ty)
+  Value_scope.add_local env ~name:x ~scheme:ty
 ;;
 
 let add_generalized (state : infer_state) (env : tenv) x ty : tenv =
-  (* bindings whose type contains an explicit recursive type
-     are kept monomorphic.  We therefore skip HM generalization entirely for
-     such bindings and store the checked type as-is. *)
-  if not (should_generalize_binding ~checkpoint:(fun () -> checkpoint state) ty)
-  then (
-    ensure_contractive_type ~checkpoint:(fun () -> checkpoint state) ty;
-    Env.add x ty env)
-  else Env.add x (generalise state ty) env
+  if has_recursive_type ~checkpoint:(fun () -> checkpoint state) ty
+  then ensure_contractive_type ~checkpoint:(fun () -> checkpoint state) ty;
+  Value_scope.add_local env ~name:x ~scheme:(generalise state ty)
 ;;
 
 let add_open_binding
+      ?origin
       (state : infer_state)
       (env : tenv)
       ~(module_name : string)
@@ -1415,12 +1349,94 @@ let add_open_binding
       (ty : typ)
   : tenv
   =
-  match Env.find env name with
+  match Value_scope.find env ~name with
   | Some _ ->
     raise
       (Type_error
          (Printf.sprintf "open %s would shadow existing binding '%s'" module_name name))
-  | None -> add_generalized state env name ty
+  | None ->
+    (match origin with
+     | None -> add_mono ~checkpoint:(fun () -> checkpoint state) env name ty
+     | Some origin ->
+       if has_recursive_type ~checkpoint:(fun () -> checkpoint state) ty
+       then ensure_contractive_type ~checkpoint:(fun () -> checkpoint state) ty;
+       Value_scope.add_imported env ~name ~scheme:ty ~origin)
+;;
+
+let lookup_expression state env types ~span name =
+  let scheme, origin, members =
+    match state.configured with
+    | None ->
+      ( lookup_scheme env name
+      , None
+      , (match state.semantic with
+         | None -> None
+         | Some _ ->
+           Option.bind
+             (Option.bind (Value_scope.find env ~name) ~f:Value_scope.Binding.semantic)
+             ~f:Semantic_binding.members) )
+    | Some configured ->
+      let selected =
+        Configured_resolution.value_with_metadata configured ~env ~name ~span
+        |> alias_result
+      in
+      selected.scheme, selected.origin, selected.members
+  in
+  Option.iter origin ~f:(fun origin ->
+    Hashtbl.set
+      state.configured_annotations
+      ~key:(span_to_key span)
+      ~data:(Value_read origin));
+  let inferred =
+    if contains_generic ~checkpoint:(fun () -> checkpoint state) scheme
+    then instantiate state scheme
+    else scheme
+  in
+  Option.iter state.semantic ~f:(fun frame ->
+    let recorder = Semantic.Frame.recorder frame in
+    let unit = Semantic.Frame.unit frame in
+    match
+      Semantic.authored
+        recorder
+        unit
+        ~role:Value_reference
+        ~span
+        ~checkpoint:state.checkpoint
+      |> Semantic.take_exn
+    with
+    | None -> ()
+    | Some location ->
+      let target =
+        match
+          Option.bind (Value_scope.find env ~name) ~f:Value_scope.Binding.semantic, origin
+        with
+        | Some binding, _ -> Semantic.Target.Binding (Semantic_binding.symbol binding)
+        | None, Some origin ->
+          Configured_module (Configured_lookup.Origin.dependency origin)
+        | None, None -> Unlocated_module_member
+      in
+      let context =
+        Semantic_scope.context_exn frame ~values:env ~types ~checkpoint:state.checkpoint
+      in
+      Semantic.reference
+        recorder
+        unit
+        ~context
+        ~location
+        ~target
+        ~inferred:(Some inferred)
+        ~checkpoint:state.checkpoint
+      |> Semantic.take_exn;
+      (match state.semantic_members, members with
+       | Some table, Some members ->
+         Hashtbl.set table ~key:(span_to_key span) ~data:members
+       | None, _ | Some _, None -> ()));
+  inferred
+;;
+
+let type_lookup state env =
+  Option.map state.configured ~f:(fun configured ->
+    Configured_resolution.type_lookup configured ~env)
 ;;
 
 let with_new_level (state : infer_state) ~(f : unit -> 'a) : 'a =
@@ -1443,6 +1459,9 @@ let rec is_non_expansive (expr : expr) : bool =
     List.for_all fields ~f:(fun (_lbl, expr_node) -> is_non_expansive expr_node.value)
   | EVariant (_tag, exprs) ->
     List.for_all exprs ~f:(fun expr_node -> is_non_expansive expr_node.value)
+  | ETuple components ->
+    List.for_all (Chatml.Chatml_tuple.to_list components) ~f:(fun expr_node ->
+      is_non_expansive expr_node.value)
   | EAnnot (expr_node, _) -> is_non_expansive expr_node.value
   | EPrim1 _
   | EPrim2 _
@@ -1483,15 +1502,18 @@ let restrict_free_vars_to_level ?(checkpoint = fun () -> ()) (max_level : int) (
     | Fun (params, ret) ->
       List.iter params ~f:(aux seen);
       aux seen ret
-    | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> ()
+    | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit | Shape_kind _ -> ()
     | Var ({ contents = Bound t } as tv) ->
       if not (tv_ref_mem tv seen) then aux (tv :: seen) t
     | Con (_n, args) -> List.iter args ~f:(aux seen)
-    | Var ({ contents = Free (name, lvl) } as tv) ->
-      if lvl > max_level then tv := Free (name, max_level)
+    | Var ({ contents = Free ({ level = lvl; _ } as info) } as tv) ->
+      if lvl > max_level then tv := Free { info with level = max_level }
     | Mu (_binder, body) -> aux seen body
     | Rec_var _ -> ()
-    | Ref t | Record t | Variant t | Array t -> aux seen t
+    | Ref t | Record t | Module t | Variant t | Array t -> aux seen t
+    | Field_receiver (kind, row) ->
+      aux seen kind;
+      aux seen row
     | Tuple ts | Variant_payload ts -> List.iter ts ~f:(aux seen)
     | Row (fields, tail) ->
       Env.iter fields ~f:(fun _field ty' -> aux seen ty');
@@ -1500,32 +1522,150 @@ let restrict_free_vars_to_level ?(checkpoint = fun () -> ()) (max_level : int) (
   aux [] ty
 ;;
 
-let rec infer_nonrecursive_binding
-          (state : infer_state)
-          (env : tenv)
-          (types : type_env)
-          (name : string)
-          (rhs : expr node)
+let record_semantic_expression state env types expr inferred =
+  Option.iter state.semantic ~f:(fun frame ->
+    let context =
+      Semantic_scope.context_exn frame ~values:env ~types ~checkpoint:state.checkpoint
+    in
+    Semantic.expression
+      (Semantic.Frame.recorder frame)
+      (Semantic.Frame.unit frame)
+      ~context
+      ~span:expr.span
+      ~inferred
+      ~checkpoint:state.checkpoint
+    |> Semantic.take_exn)
+;;
+
+let record_structural_reference state env types name ~role =
+  Option.iter state.semantic ~f:(fun frame ->
+    Semantic_scope.reference_exn
+      frame
+      ~values:env
+      ~types
+      name
+      ~role
+      ~target:Semantic.Target.Structural_label
+      ~inferred:None
+      ~checkpoint:state.checkpoint)
+;;
+
+let rec check_binding_shape (state : infer_state) (pattern : Binding_pattern.t) ty =
+  checkpoint state;
+  record_span_type state pattern.span ty;
+  match pattern.value with
+  | Name name -> [ name, ty ]
+  | Wildcard -> []
+  | Tuple children ->
+    let patterns = Chatml.Chatml_tuple.to_list children in
+    let components =
+      List.map patterns ~f:(fun _ -> new_var state state.shared.current_lvl)
+    in
+    (try unify state ty (Tuple components) with
+     | Type_error message -> raise (Type_error_with_loc (message, pattern.span)));
+    List.concat_map (List.zip_exn patterns components) ~f:(fun (pattern, ty) ->
+      check_binding_shape state pattern ty)
+
+and project_binding_schemes (state : infer_state) (pattern : Binding_pattern.t) ty =
+  checkpoint state;
+  match pattern.value with
+  | Name name -> [ name, ty ]
+  | Wildcard -> []
+  | Tuple children ->
+    let patterns = Chatml.Chatml_tuple.to_list children in
+    let components =
+      match resolve_bound_type ~checkpoint:(fun () -> checkpoint state) ty with
+      | Tuple components when List.length components = List.length patterns -> components
+      | _ -> failwith "internal: checked tuple binding lost its product shape"
+    in
+    List.concat_map (List.zip_exn patterns components) ~f:(fun (pattern, ty) ->
+      project_binding_schemes state pattern ty)
+
+and add_parameter_bindings state env types pattern ty =
+  let projected = check_binding_shape state pattern ty in
+  let env =
+    List.fold projected ~init:env ~f:(fun env (name, ty) ->
+      add_mono ~checkpoint:(fun () -> checkpoint state) env name ty)
+  in
+  match state.semantic with
+  | None -> env
+  | Some frame ->
+    Semantic_scope.projected_exn
+      frame
+      ~values:env
+      ~types
+      ~pattern
+      ~projected
+      ~kind:Parameter
+      ~checkpoint:state.checkpoint
+
+and infer_nonrecursive_binding
+      (state : infer_state)
+      (env : tenv)
+      (types : type_env)
+      (pattern : Binding_pattern.t)
+      (rhs : expr node)
   : tenv
   =
-  let rhs_ty = with_new_level state ~f:(fun () -> infer_expr state env types rhs) in
-  if is_non_expansive rhs.value
-  then add_generalized state env name rhs_ty
-  else (
-    restrict_free_vars_to_level
-      ~checkpoint:(fun () -> checkpoint state)
-      state.current_lvl
-      rhs_ty;
-    add_mono ~checkpoint:(fun () -> checkpoint state) env name rhs_ty)
+  validate_unique_binders
+    ~what:"binding"
+    (Binding_pattern.binders ~checkpoint:(fun () -> checkpoint state) pattern);
+  let rhs_ty =
+    with_new_level state ~f:(fun () ->
+      let ty = infer_expr state env types rhs in
+      ignore (check_binding_shape state pattern ty : (string * typ) list);
+      ty)
+  in
+  let scheme =
+    if is_non_expansive rhs.value
+    then (
+      if has_recursive_type ~checkpoint:(fun () -> checkpoint state) rhs_ty
+      then ensure_contractive_type ~checkpoint:(fun () -> checkpoint state) rhs_ty;
+      generalise state rhs_ty)
+    else (
+      restrict_free_vars_to_level
+        ~checkpoint:(fun () -> checkpoint state)
+        state.shared.current_lvl
+        rhs_ty;
+      rhs_ty)
+  in
+  let projected = project_binding_schemes state pattern scheme in
+  let env =
+    List.fold projected ~init:env ~f:(fun env (name, ty) ->
+      add_mono ~checkpoint:(fun () -> checkpoint state) env name ty)
+  in
+  match state.semantic with
+  | None -> env
+  | Some frame ->
+    let members =
+      match pattern.value, state.semantic_members with
+      | Binding_pattern.Name _, Some table -> Hashtbl.find table (span_to_key rhs.span)
+      | Name _, None | Wildcard, _ | Tuple _, _ -> None
+    in
+    Semantic_scope.projected_exn
+      ?members
+      frame
+      ~values:env
+      ~types
+      ~pattern
+      ~projected
+      ~kind:Value
+      ~checkpoint:state.checkpoint
 
 and infer_recursive_bindings
       (state : infer_state)
       (env : tenv)
       (types : type_env)
-      (bindings : (string * expr node) list)
+      (bindings : (Syntax_name.t * expr node) list)
   : tenv
   =
-  List.iter bindings ~f:(fun (nm, rhs) ->
+  let bindings =
+    List.map bindings ~f:(fun (name, rhs) -> name, Syntax_name.name name, rhs)
+  in
+  validate_unique_binders
+    ~what:"recursive binding"
+    (List.map bindings ~f:(fun (_, name, rhs) -> name, rhs.span));
+  List.iter bindings ~f:(fun (_, nm, rhs) ->
     if not (is_function_like_expr rhs.value)
     then
       raise
@@ -1534,32 +1674,60 @@ and infer_recursive_bindings
   let binding_types =
     with_new_level state ~f:(fun () ->
       let env_with_placeholders =
-        List.fold bindings ~init:env ~f:(fun env_acc (nm, _) ->
-          add_mono
-            ~checkpoint:(fun () -> checkpoint state)
-            env_acc
-            nm
-            (new_var state state.current_lvl))
+        List.fold bindings ~init:env ~f:(fun env_acc (name, nm, _) ->
+          let scheme = new_var state state.shared.current_lvl in
+          let env_acc =
+            add_mono ~checkpoint:(fun () -> checkpoint state) env_acc nm scheme
+          in
+          match state.semantic with
+          | None -> env_acc
+          | Some frame ->
+            Semantic_scope.named_exn
+              frame
+              ~values:env_acc
+              ~types
+              ~name
+              ~kind:Value
+              ~role:Value_binder
+              ~scheme
+              ~members:None
+              ~checkpoint:state.checkpoint)
       in
-      List.iter bindings ~f:(fun (nm, rhs) ->
-        let placeholder_ty = Env.find_exn env_with_placeholders nm in
+      List.iter bindings ~f:(fun (_, nm, rhs) ->
+        let placeholder_ty = lookup_scheme env_with_placeholders nm in
         let rhs_ty = infer_expr state env_with_placeholders types rhs in
         unify state placeholder_ty rhs_ty);
-      List.map bindings ~f:(fun (nm, _) -> nm, Env.find_exn env_with_placeholders nm))
+      List.map bindings ~f:(fun (_, nm, _) ->
+        let binding =
+          Option.bind
+            (Value_scope.find env_with_placeholders ~name:nm)
+            ~f:Value_scope.Binding.semantic
+        in
+        nm, lookup_scheme env_with_placeholders nm, binding))
   in
-  List.fold binding_types ~init:env ~f:(fun env_acc (nm, ty) ->
-    add_generalized state env_acc nm ty)
+  List.fold binding_types ~init:env ~f:(fun env_acc (nm, ty, binding) ->
+    let env_acc = add_generalized state env_acc nm ty in
+    match state.semantic, binding with
+    | Some frame, Some binding ->
+      Semantic_scope.finish_exn
+        frame
+        ~values:env_acc
+        ~types
+        ~binding
+        ~scheme:(lookup_scheme env_acc nm)
+        ~checkpoint:state.checkpoint
+    | None, _ | Some _, None -> env_acc)
 
 and infer_record_extend
       (state : infer_state)
       (env : tenv)
       (types : type_env)
       (base_expr : expr node)
-      (fields : (string * expr node) list)
+      (fields : (Syntax_name.t * expr node) list)
   : typ
   =
   let base_ty = infer_expr state env types base_expr in
-  let base_row = new_var state state.current_lvl in
+  let base_row = new_var state state.shared.current_lvl in
   unify state base_ty (Record base_row);
   let base_fields, base_tail =
     merge_fields ~checkpoint:(fun () -> checkpoint state) base_row
@@ -1567,7 +1735,8 @@ and infer_record_extend
   let override_fields =
     List.fold fields ~init:Env.empty ~f:(fun acc (lbl, expr) ->
       let ty = infer_expr state env types expr in
-      Env.add lbl ty acc)
+      record_structural_reference state env types lbl ~role:Field_label;
+      Env.add (Syntax_name.name lbl) ty acc)
   in
   let result_fields =
     Env.fold override_fields ~init:base_fields ~f:(fun ~key ~data acc ->
@@ -1609,17 +1778,23 @@ and validate_unique_labels
 
 and validate_unique_record_fields
       (span : Source.span)
-      (fields : (string * expr node) list)
+      (fields : (Syntax_name.t * expr node) list)
   : unit
   =
-  validate_unique_labels ~what:"record field" ~span:(Some span) (List.map fields ~f:fst)
+  validate_unique_labels
+    ~what:"record field"
+    ~span:(Some span)
+    (List.map fields ~f:(fun (name, _) -> Syntax_name.name name))
 
 and validate_unique_record_update_fields
       (span : Source.span)
-      (fields : (string * expr node) list)
+      (fields : (Syntax_name.t * expr node) list)
   : unit
   =
-  validate_unique_labels ~what:"record update" ~span:(Some span) (List.map fields ~f:fst)
+  validate_unique_labels
+    ~what:"record update"
+    ~span:(Some span)
+    (List.map fields ~f:(fun (name, _) -> Syntax_name.name name))
 
 and validate_unique_record_labels_in_pattern (pat : pattern) (span : Source.span option)
   : unit
@@ -1627,11 +1802,41 @@ and validate_unique_record_labels_in_pattern (pat : pattern) (span : Source.span
   let rec loop = function
     | PUnit | PWildcard | PVar _ | PInt _ | PBool _ | PFloat _ | PString _ -> ()
     | PVariant (_tag, subpats) -> List.iter subpats ~f:loop
+    | PTuple patterns -> Chatml.Chatml_tuple.iter patterns ~f:loop
     | PRecord (fields, _is_open) ->
-      validate_unique_labels ~what:"record pattern" ~span (List.map fields ~f:fst);
+      validate_unique_labels
+        ~what:"record pattern"
+        ~span
+        (List.map fields ~f:(fun (name, _) -> Syntax_name.name name));
       List.iter fields ~f:(fun (_lbl, subpat) -> loop subpat)
   in
   loop pat
+
+(* Located nonrecursive/parameter leaves identify the duplicate itself.
+   Recursive declaration names retain their existing RHS location. *)
+and validate_unique_binders ~what binders =
+  let seen = Hash_set.create (module String) in
+  match
+    List.find binders ~f:(fun (name, _span) ->
+      if Hash_set.mem seen name
+      then true
+      else (
+        Hash_set.add seen name;
+        false))
+  with
+  | None -> ()
+  | Some (name, span) ->
+    raise (Type_error_with_loc (Printf.sprintf "Duplicate %s '%s'" what name, span))
+
+and validate_lambda_binders state (expr : expr node) =
+  match expr.value with
+  | ELambda (params, _) | ELambdaSlots (params, _, _) ->
+    validate_unique_binders
+      ~what:"lambda parameter"
+      (List.concat_map
+         params
+         ~f:(Binding_pattern.binders ~checkpoint:(fun () -> checkpoint state)))
+  | _ -> ()
 
 and validate_pattern_binders (pat : pattern) : unit =
   let seen = Hash_set.create (module String) in
@@ -1658,7 +1863,8 @@ and record_field_type ?(checkpoint = fun () -> ()) (row_ty : typ) (label : strin
   =
   checkpoint ();
   match resolve_bound_type ~checkpoint row_ty with
-  | Record row -> record_field_type ~checkpoint row label
+  | Record row | Module row | Field_receiver (_, row) ->
+    record_field_type ~checkpoint row label
   | Row (fields, tail) ->
     (match Env.find fields label with
      | Some ty -> Some ty
@@ -1677,6 +1883,11 @@ and payload_component_types ?checkpoint (payload_ty : typ) : typ list =
   match resolve_bound_type ?checkpoint payload_ty with
   | Variant_payload ts -> ts
   | _ -> raise (Type_error "Invalid variant constructor payload type")
+
+and tuple_component_types ?checkpoint (ty : typ) : typ list option =
+  match resolve_bound_type ?checkpoint ty with
+  | Tuple components -> Some components
+  | _ -> None
 
 and show_missing_variant_case ?checkpoint (tag : string) (payload_ty : typ) : string =
   match payload_component_types ?checkpoint payload_ty with
@@ -1698,10 +1909,20 @@ and pattern_totally_covers_type
      | Unit -> true
      | _ -> false)
   | PWildcard | PVar _ -> true
+  | PTuple patterns ->
+    (match tuple_component_types ~checkpoint expected_ty with
+     | None -> false
+     | Some components ->
+       let patterns = Chatml.Chatml_tuple.to_list patterns in
+       List.length patterns = List.length components
+       && List.for_all2_exn
+            patterns
+            components
+            ~f:(pattern_totally_covers_type ~checkpoint))
   | PRecord (fields, is_open) ->
     let subpatterns_cover_all =
       List.for_all fields ~f:(fun (label, subpat) ->
-        match record_field_type ~checkpoint expected_ty label with
+        match record_field_type ~checkpoint expected_ty (Syntax_name.name label) with
         | Some field_ty -> pattern_totally_covers_type ~checkpoint subpat field_ty
         | None -> false)
     in
@@ -1713,7 +1934,10 @@ and pattern_totally_covers_type
       match resolve_bound_type ~checkpoint expected_ty with
       | Record row ->
         let row_fields, _tail = merge_fields ~checkpoint row in
-        let field_names = List.map fields ~f:fst |> String.Set.of_list in
+        let field_names =
+          List.map fields ~f:(fun (name, _) -> Syntax_name.name name)
+          |> String.Set.of_list
+        in
         Set.equal
           field_names
           (Env.bindings row_fields |> List.map ~f:fst |> String.Set.of_list)
@@ -1739,7 +1963,7 @@ and pattern_fully_covers_variant_case
   =
   checkpoint ();
   match pat with
-  | PVariant (tag', subpats) when String.equal tag tag' ->
+  | PVariant (tag', subpats) when String.equal tag (Syntax_name.name tag') ->
     let payload_tys = payload_component_types ~checkpoint payload_ty in
     List.length subpats = List.length payload_tys
     && List.for_all2_exn subpats payload_tys ~f:(pattern_totally_covers_type ~checkpoint)
@@ -1754,14 +1978,15 @@ and show_pattern_brief (pat : pattern) : string =
   match pat with
   | PUnit -> "()"
   | PWildcard -> "_"
-  | PVar x -> x
+  | PVar x -> Syntax_name.name x
   | PInt i -> Int.to_string i
   | PBool b -> Bool.to_string b
   | PFloat f -> Float.to_string f
   | PString s -> Printf.sprintf "%S" s
-  | PVariant (tag, []) -> Printf.sprintf "`%s" tag
-  | PVariant (tag, _subpats) -> Printf.sprintf "`%s(...)" tag
+  | PVariant (tag, []) -> Printf.sprintf "`%s" (Syntax_name.name tag)
+  | PVariant (tag, _subpats) -> Printf.sprintf "`%s(...)" (Syntax_name.name tag)
   | PRecord _ -> "{...}"
+  | PTuple _ -> "(|...|)"
 
 and simple_pattern_key_of_pattern (pat : pattern) : (string * string) option =
   match pat with
@@ -1772,7 +1997,8 @@ and simple_pattern_key_of_pattern (pat : pattern) : (string * string) option =
     let rendered = Float.to_string f in
     Some ("float:" ^ rendered, rendered)
   | PString s -> Some ("string:" ^ s, Printf.sprintf "%S" s)
-  | PVariant (tag, []) -> Some ("variant:" ^ tag, Printf.sprintf "`%s" tag)
+  | PVariant (tag, []) ->
+    Some ("variant:" ^ Syntax_name.name tag, Printf.sprintf "`%s" (Syntax_name.name tag))
   | _ -> None
 
 and validate_match_case_shapes (cases : (pattern * Source.span) list) : unit =
@@ -1891,15 +2117,19 @@ and validate_typed_match_redundancy
        let closed_tail = is_closed_variant_tail ~checkpoint tail in
        List.iter cases ~f:(fun (pat, pat_span) ->
          (match pat with
-          | PVariant (tag, _subpats) when Hash_set.mem covered_tags tag ->
-            let covered_payload = Map.find_exn payload_by_tag tag in
+          | PVariant (tag, _subpats) when Hash_set.mem covered_tags (Syntax_name.name tag)
+            ->
+            let covered_payload = Map.find_exn payload_by_tag (Syntax_name.name tag) in
             raise
               (Type_error_with_loc
                  ( Printf.sprintf
                      "Redundant match arm '%s': previous arms already cover variant case \
                       '%s'"
                      (show_pattern_brief pat)
-                     (show_missing_variant_case ~checkpoint tag covered_payload)
+                     (show_missing_variant_case
+                        ~checkpoint
+                        (Syntax_name.name tag)
+                        covered_payload)
                  , pat_span ))
           | _ when is_catch_all_pattern pat && closed_tail && all_known_tags_covered () ->
             raise
@@ -1961,9 +2191,21 @@ and validate_match_exhaustiveness
           pattern_totally_covers_type ~checkpoint:poll pat scrut_ty)
       then ()
       else raise (Type_error "Non-exhaustive match on record: add '_' arm")
+    | Tuple _ ->
+      if
+        List.exists patterns ~f:(fun pat ->
+          pattern_totally_covers_type ~checkpoint:poll pat scrut_ty)
+      then ()
+      else
+        raise (Type_error "Non-exhaustive match on tuple: add '_' or a total tuple arm")
     | _ -> raise (Type_error "Non-exhaustive match: add '_' arm"))
 
-and infer_pattern (state : infer_state) (env : tenv) (pat : pattern) (expected_ty : typ)
+and infer_pattern
+      (state : infer_state)
+      (env : tenv)
+      (types : type_env)
+      (pat : pattern)
+      (expected_ty : typ)
   : tenv
   =
   checkpoint state;
@@ -1972,7 +2214,27 @@ and infer_pattern (state : infer_state) (env : tenv) (pat : pattern) (expected_t
     unify state expected_ty Unit;
     env
   | PWildcard -> env
-  | PVar x -> add_mono ~checkpoint:(fun () -> checkpoint state) env x expected_ty
+  | PVar x ->
+    let env =
+      add_mono
+        ~checkpoint:(fun () -> checkpoint state)
+        env
+        (Syntax_name.name x)
+        expected_ty
+    in
+    (match state.semantic with
+     | None -> env
+     | Some frame ->
+       Semantic_scope.named_exn
+         frame
+         ~values:env
+         ~types
+         ~name:x
+         ~kind:Parameter
+         ~role:Value_binder
+         ~scheme:expected_ty
+         ~members:None
+         ~checkpoint:state.checkpoint)
   | PInt _ ->
     unify state expected_ty TInt;
     env
@@ -1985,67 +2247,46 @@ and infer_pattern (state : infer_state) (env : tenv) (pat : pattern) (expected_t
   | PString _ ->
     unify state expected_ty String;
     env
+  | PTuple patterns ->
+    let patterns = Chatml.Chatml_tuple.to_list patterns in
+    let components =
+      List.map patterns ~f:(fun _ -> new_var state state.shared.current_lvl)
+    in
+    unify state expected_ty (Tuple components);
+    List.fold2_exn patterns components ~init:env ~f:(fun env pattern ty ->
+      infer_pattern state env types pattern ty)
   | PRecord (fields, is_open) ->
     let env_after, fields_acc =
       List.fold fields ~init:(env, []) ~f:(fun (env_acc, fields_acc) (lbl, pat) ->
-        let ty = new_var state state.current_lvl in
-        let env_acc' = infer_pattern state env_acc pat ty in
-        env_acc', (lbl, ty) :: fields_acc)
+        let ty = new_var state state.shared.current_lvl in
+        let env_acc' = infer_pattern state env_acc types pat ty in
+        env_acc', (Syntax_name.name lbl, ty) :: fields_acc)
     in
     let fields_env = Env.of_list (List.rev fields_acc) in
-    let tail_row = if is_open then new_var state state.current_lvl else Empty_row in
+    let tail_row =
+      if is_open then new_var state state.shared.current_lvl else Empty_row
+    in
     let record_ty = Record (Row (fields_env, tail_row)) in
     unify state expected_ty record_ty;
+    List.iter fields ~f:(fun (name, _) ->
+      record_structural_reference state env types name ~role:Field_label);
     env_after
   | PVariant (tag, subpats) ->
     let env_after, sub_tys_rev =
       List.fold subpats ~init:(env, []) ~f:(fun (env_acc, tys) sp ->
-        let ty = new_var state state.current_lvl in
-        let env_acc' = infer_pattern state env_acc sp ty in
+        let ty = new_var state state.shared.current_lvl in
+        let env_acc' = infer_pattern state env_acc types sp ty in
         env_acc', ty :: tys)
     in
     let sub_tys = List.rev sub_tys_rev in
     let case_ty = Variant_payload sub_tys in
-    let row_var = new_var state state.current_lvl in
-    let variant_ty = Variant (Row (Env.singleton tag case_ty, row_var)) in
-    unify state expected_ty variant_ty;
-    env_after
-
-and reopen_lambda_param_type (state : infer_state) (ty : typ) : typ =
-  checkpoint state;
-  match resolve_bound_type ~checkpoint:(fun () -> checkpoint state) ty with
-  | Record row -> Record (reopen_lambda_row state row)
-  | Array elt_ty -> Array (reopen_lambda_param_type state elt_ty)
-  | Ref inner_ty -> Ref (reopen_lambda_param_type state inner_ty)
-  | Tuple tys -> Tuple (List.map tys ~f:(reopen_lambda_param_type state))
-  | Variant_payload tys ->
-    Variant_payload (List.map tys ~f:(reopen_lambda_param_type state))
-  | other -> other
-
-and reopen_lambda_param_if_closed_record (state : infer_state) (ty : typ) : typ =
-  match ty with
-  | Var ({ contents = Bound bound_ty } as tv) ->
-    let reopened = reopen_lambda_param_type state bound_ty in
-    tv := Bound reopened;
-    ty
-  | _ -> reopen_lambda_param_type state ty
-
-and reopen_lambda_row (state : infer_state) (row : typ) : typ =
-  checkpoint state;
-  match resolve_bound_type ~checkpoint:(fun () -> checkpoint state) row with
-  | Row _ as full_row ->
-    let merged_fields, _merged_tail =
-      merge_fields ~checkpoint:(fun () -> checkpoint state) full_row
+    let row_var = new_var state state.shared.current_lvl in
+    let variant_ty =
+      Variant (Row (Env.singleton (Syntax_name.name tag) case_ty, row_var))
     in
-    let reopened_fields = Env.map merged_fields ~f:(reopen_lambda_param_type state) in
-    (* Lambda parameters should be row-polymorphic by default: if a helper
-       touches only a subset of record fields, callers should be able to pass
-       larger records.  We therefore rebuild the parameter row with a fresh
-       open tail after inference has discovered the required fields.  This is
-       intentionally biased toward the "state-machine helper" use-case that
-       ChatML scripts rely on heavily. *)
-    Row (reopened_fields, new_var state state.current_lvl)
-  | other -> other
+    unify state expected_ty variant_ty;
+    record_structural_reference state env types tag ~role:Variant_tag;
+    env_after
 
 (** --------------------------------------------------------------------- *)
 (** 10. Inference – expressions                                            *)
@@ -2102,64 +2343,14 @@ and infer_binary_prim
     Boolean
   | BEq | BNeq ->
     unify state lhs_ty rhs_ty;
-    ensure_equality_type ~checkpoint:(fun () -> checkpoint state) lhs_ty;
+    ensure_equality_type state lhs_ty;
     Boolean
 
-and row_tail_equivalent ?checkpoint (lhs : typ) (rhs : typ) : bool =
-  let lhs' = resolve_bound_type ?checkpoint lhs in
-  let rhs' = resolve_bound_type ?checkpoint rhs in
-  (* Phase 6 rule: explicit recursive types stay separate from row tails.
-     Control-flow joins must not preserve a row tail merely because both
-     sides happen to mention the same recursive binder structure. *)
-  phys_equal lhs' rhs'
-  ||
-  match lhs', rhs' with
-  | Empty_row, Empty_row -> true
-  | Var tv_l, Var tv_r -> phys_equal tv_l tv_r
-  | Generic name_l, Generic name_r -> String.equal name_l name_r
-  | Mu _, _ | _, Mu _ | Rec_var _, _ | _, Rec_var _ -> false
-  | _ -> false
-
-and build_row_type (fields : typ Env.t) (tail : typ) : typ =
-  if Env.is_empty fields then tail else Row (fields, tail)
-
-and row_known_fields_subset ~(subset : typ) ~(superset : typ) : bool =
-  let subset_fields, _subset_tail = merge_fields subset in
-  let superset_fields, _superset_tail = merge_fields superset in
-  Env.fold subset_fields ~init:true ~f:(fun ~key ~data:_ acc ->
-    acc
-    &&
-    match Env.find superset_fields key with
-    | Some _ -> true
-    | None -> false)
-
-and join_record_rows (state : infer_state) (lhs : typ) (rhs : typ) : typ =
-  let poll () = checkpoint state in
-  let map_l, tail_l = merge_fields ~checkpoint:poll lhs in
-  let map_r, tail_r = merge_fields ~checkpoint:poll rhs in
-  let common_fields =
-    Env.fold map_l ~init:Env.empty ~f:(fun ~key ~data:lhs_field_ty acc ->
-      match Env.find map_r key with
-      | None -> acc
-      | Some rhs_field_ty -> Env.add key (join_type state lhs_field_ty rhs_field_ty) acc)
-  in
-  let shared_tail =
-    if row_tail_equivalent ~checkpoint:poll tail_l tail_r
-    then resolve_bound_type ~checkpoint:poll tail_l
-    else Empty_row
-  in
-  build_row_type common_fields shared_tail
-
 and join_type (state : infer_state) (lhs : typ) (rhs : typ) : typ =
-  checkpoint state;
-  match
-    ( resolve_bound_type ~checkpoint:(fun () -> checkpoint state) lhs
-    , resolve_bound_type ~checkpoint:(fun () -> checkpoint state) rhs )
-  with
-  | Record row_l, Record row_r -> Record (join_record_rows state row_l row_r)
-  | lhs', rhs' ->
-    unify state lhs' rhs';
-    lhs
+  (* Keep one compatible result type, including the complete physical record
+     shape. A field intersection would unsafely erase exactness constraints. *)
+  unify state lhs rhs;
+  lhs
 
 and infer_expr_against_expected
       (state : infer_state)
@@ -2169,29 +2360,46 @@ and infer_expr_against_expected
       (expected_ty : typ)
   : typ
   =
+  validate_lambda_binders state expr;
   match
     expr.value, resolve_bound_type ~checkpoint:(fun () -> checkpoint state) expected_ty
   with
   | ELambda (params, body), Fun (expected_params, expected_ret)
     when List.length params = List.length expected_params ->
-    with_new_level state ~f:(fun () ->
-      let env_with_params =
-        List.fold2_exn params expected_params ~init:env ~f:(fun env_acc param param_ty ->
-          add_mono ~checkpoint:(fun () -> checkpoint state) env_acc param param_ty)
-      in
-      let body_ty = infer_expr state env_with_params types body in
-      unify state body_ty expected_ret;
-      expected_ty)
+    let result =
+      with_new_level state ~f:(fun () ->
+        let env_with_params =
+          List.fold2_exn
+            params
+            expected_params
+            ~init:env
+            ~f:(fun env_acc param param_ty ->
+              add_parameter_bindings state env_acc types param param_ty)
+        in
+        let body_ty = infer_expr state env_with_params types body in
+        unify state body_ty expected_ret;
+        expected_ty)
+    in
+    record_semantic_expression state env types expr result;
+    result
   | ELambdaSlots (params, _slots, body), Fun (expected_params, expected_ret)
     when List.length params = List.length expected_params ->
-    with_new_level state ~f:(fun () ->
-      let env_with_params =
-        List.fold2_exn params expected_params ~init:env ~f:(fun env_acc param param_ty ->
-          add_mono ~checkpoint:(fun () -> checkpoint state) env_acc param param_ty)
-      in
-      let body_ty = infer_expr state env_with_params types body in
-      unify state body_ty expected_ret;
-      expected_ty)
+    let result =
+      with_new_level state ~f:(fun () ->
+        let env_with_params =
+          List.fold2_exn
+            params
+            expected_params
+            ~init:env
+            ~f:(fun env_acc param param_ty ->
+              add_parameter_bindings state env_acc types param param_ty)
+        in
+        let body_ty = infer_expr state env_with_params types body in
+        unify state body_ty expected_ret;
+        expected_ty)
+    in
+    record_semantic_expression state env types expr result;
+    result
   | ( (ELambda (params, _) | ELambdaSlots (params, _, _))
     , Fun (expected_params, _expected_ret) ) ->
     raise
@@ -2207,6 +2415,7 @@ and infer_expr_against_expected
 
 and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
   checkpoint state;
+  validate_lambda_binders state expr;
   (* We first perform the usual inference work, then — if it succeeds — we
      record the resulting type in [state.span_types].  The resolver consults this
      table to choose an appropriate slot descriptor. *)
@@ -2218,7 +2427,7 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
       | EFloat _ -> TFloat
       | EBool _ -> Boolean
       | EString _ -> String
-      | EVar x -> lookup state env x
+      | EVar x -> lookup_expression state env types ~span:expr.span x
       | EVarLoc _ -> failwith "EVarLoc should not appear before resolver"
       | EPrim1 (prim, arg) -> infer_unary_prim state env types prim arg
       | EPrim2 (prim, lhs, rhs) -> infer_binary_prim state env types prim lhs rhs
@@ -2226,32 +2435,26 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
         with_new_level state ~f:(fun () ->
           let env_with_params, param_tys_rev =
             List.fold params ~init:(env, []) ~f:(fun (env_acc, tys_rev) p ->
-              let t = new_var state state.current_lvl in
-              add_mono ~checkpoint:(fun () -> checkpoint state) env_acc p t, t :: tys_rev)
+              let t = new_var state state.shared.current_lvl in
+              add_parameter_bindings state env_acc types p t, t :: tys_rev)
           in
           let body_ty = infer_expr state env_with_params types body in
-          let param_tys =
-            List.rev param_tys_rev
-            |> List.map ~f:(reopen_lambda_param_if_closed_record state)
-          in
+          let param_tys = List.rev param_tys_rev in
           Fun (param_tys, body_ty))
       | ELambdaSlots (params, _slots, body) ->
         with_new_level state ~f:(fun () ->
           let env_with_params, param_tys_rev =
             List.fold params ~init:(env, []) ~f:(fun (env_acc, tys_rev) p ->
-              let t = new_var state state.current_lvl in
-              add_mono ~checkpoint:(fun () -> checkpoint state) env_acc p t, t :: tys_rev)
+              let t = new_var state state.shared.current_lvl in
+              add_parameter_bindings state env_acc types p t, t :: tys_rev)
           in
           let body_ty = infer_expr state env_with_params types body in
-          let param_tys =
-            List.rev param_tys_rev
-            |> List.map ~f:(reopen_lambda_param_if_closed_record state)
-          in
+          let param_tys = List.rev param_tys_rev in
           Fun (param_tys, body_ty))
       | EApp (fn_expr, arg_exprs) ->
         let fn_ty = infer_expr state env types fn_expr in
         let arg_tys = List.map arg_exprs ~f:(fun arg -> infer_expr state env types arg) in
-        let ret_ty = new_var state state.current_lvl in
+        let ret_ty = new_var state state.shared.current_lvl in
         unify state fn_ty (Fun (arg_tys, ret_ty));
         ret_ty
       | EIf (c, t, e) ->
@@ -2293,22 +2496,65 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
         let row =
           List.fold_right fields ~init:Empty_row ~f:(fun (lbl, expr) acc ->
             let ty = infer_expr state env types expr in
-            Row (Env.singleton lbl ty, acc))
+            record_structural_reference state env types lbl ~role:Field_label;
+            Row (Env.singleton (Syntax_name.name lbl) ty, acc))
         in
         Record row
       | EFieldGet (obj, lbl) ->
         let obj_ty = infer_expr state env types obj in
-        let field_ty = new_var state state.current_lvl in
-        let tail_row = new_var state state.current_lvl in
-        unify state obj_ty (Record (Row (Env.singleton lbl field_ty, tail_row)));
+        let field_ty = new_var state state.shared.current_lvl in
+        let tail_row = new_var state state.shared.current_lvl in
+        unify
+          state
+          obj_ty
+          (Field_receiver
+             ( new_var state state.shared.current_lvl
+             , Row (Env.singleton (Syntax_name.name lbl) field_ty, tail_row) ));
+        Option.iter state.semantic ~f:(fun frame ->
+          let member =
+            Option.bind state.semantic_members ~f:(fun table ->
+              Option.bind
+                (Hashtbl.find table (span_to_key obj.span))
+                ~f:(fun members ->
+                  Semantic_binding.Members.find
+                    members
+                    ~namespace:Value
+                    ~name:(Syntax_name.name lbl)
+                    ~checkpoint:state.checkpoint))
+          in
+          let target =
+            match member with
+            | Some binding -> Semantic.Target.Binding (Semantic_binding.symbol binding)
+            | None ->
+              (match resolve_bound_type ~checkpoint:state.checkpoint obj_ty with
+               | Module _ -> Semantic.Target.Unlocated_module_member
+               | _ -> Structural_label)
+          in
+          Semantic_scope.reference_exn
+            frame
+            ~values:env
+            ~types
+            lbl
+            ~role:Field_label
+            ~target
+            ~inferred:(Some field_ty)
+            ~checkpoint:state.checkpoint;
+          Option.iter (Option.bind member ~f:Semantic_binding.members) ~f:(fun members ->
+            Option.iter state.semantic_members ~f:(fun table ->
+              Hashtbl.set table ~key:(span_to_key expr.span) ~data:members)));
         field_ty
       | EArray elts ->
-        let elt_ty = new_var state state.current_lvl in
+        let elt_ty = new_var state state.shared.current_lvl in
         List.iter elts ~f:(fun e -> unify state (infer_expr state env types e) elt_ty);
         Array elt_ty
+      | ETuple components ->
+        Tuple
+          (List.map
+             (Chatml.Chatml_tuple.to_list components)
+             ~f:(infer_expr state env types))
       | EArrayGet (arr, idx) ->
         unify state (infer_expr state env types idx) TInt;
-        let elt_ty = new_var state state.current_lvl in
+        let elt_ty = new_var state state.shared.current_lvl in
         unify state (infer_expr state env types arr) (Array elt_ty);
         elt_ty
       | EArraySet (arr, idx, v) ->
@@ -2321,23 +2567,44 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
         validate_unique_record_update_fields expr.span fields;
         infer_record_extend state env types base_expr fields
       | EDeref e ->
-        let ty = new_var state state.current_lvl in
+        let ty = new_var state state.shared.current_lvl in
         unify state (Ref ty) (infer_expr state env types e);
         ty
       | ESetRef (lhs, rhs) ->
         let lhs_ty = infer_expr state env types lhs in
         let rhs_ty = infer_expr state env types rhs in
-        unify state (Ref (new_var state state.current_lvl)) lhs_ty;
+        unify state (Ref (new_var state state.shared.current_lvl)) lhs_ty;
         unify state lhs_ty (Ref rhs_ty);
         Unit
       | EVariant (tag, exprs) ->
         let arg_tys = List.map exprs ~f:(fun ex -> infer_expr state env types ex) in
         let case_ty = Variant_payload arg_tys in
-        let row_var = new_var state state.current_lvl in
-        Variant (Row (Env.singleton tag case_ty, row_var))
+        let row_var = new_var state state.shared.current_lvl in
+        record_structural_reference state env types tag ~role:Variant_tag;
+        Variant (Row (Env.singleton (Syntax_name.name tag) case_ty, row_var))
       | EAnnot (rhs, type_expr) ->
+        let semantic =
+          Option.map state.semantic ~f:(fun frame ->
+            let context =
+              Semantic_scope.context_exn
+                frame
+                ~values:env
+                ~types
+                ~checkpoint:state.checkpoint
+            in
+            Semantic_elaboration.annotation_exn
+              frame
+              ~context
+              ~checkpoint:state.checkpoint)
+        in
         let annotated_ty =
-          typ_of_type_expr ~checkpoint:(fun () -> checkpoint state) types type_expr
+          typ_of_type_expr
+            ?semantic
+            ?source:state.source
+            ?lookup:(type_lookup state env)
+            ~checkpoint:(fun () -> checkpoint state)
+            types
+            type_expr
         in
         infer_expr_against_expected state env types rhs annotated_ty
       | EMatch (scrut, cases) ->
@@ -2349,7 +2616,7 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
             try
               validate_unique_record_labels_in_pattern case.pat (Some case.pat_span);
               validate_pattern_binders case.pat;
-              let env_arm = infer_pattern state env case.pat scrut_ty in
+              let env_arm = infer_pattern state env types case.pat scrut_ty in
               let rhs_ty = infer_expr state env_arm types case.rhs in
               Some
                 (match acc with
@@ -2366,7 +2633,7 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
           case_spans;
         (match result_ty with
          | Some ty -> ty
-         | None -> new_var state state.current_lvl)
+         | None -> new_var state state.shared.current_lvl)
       | EMatchSlots (scrut, cases) ->
         let scrut_ty = infer_expr state env types scrut in
         let case_spans = List.map cases ~f:(fun case -> case.pat, case.pat_span) in
@@ -2376,7 +2643,7 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
             try
               validate_unique_record_labels_in_pattern case.pat (Some case.pat_span);
               validate_pattern_binders case.pat;
-              let env_arm = infer_pattern state env case.pat scrut_ty in
+              let env_arm = infer_pattern state env types case.pat scrut_ty in
               let rhs_ty = infer_expr state env_arm types case.rhs in
               Some
                 (match acc with
@@ -2393,11 +2660,19 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
           case_spans;
         (match result_ty with
          | Some ty -> ty
-         | None -> new_var state state.current_lvl)
+         | None -> new_var state state.shared.current_lvl)
     with
     | Type_error msg -> raise (Type_error_with_loc (msg, expr.span))
   in
   record_span_type state expr.span result_ty;
+  record_semantic_expression state env types expr result_ty;
+  Option.iter state.semantic ~f:(fun _ ->
+    match expr.value, state.semantic_members with
+    | EAnnot (rhs, _), Some table ->
+      Option.iter
+        (Hashtbl.find table (span_to_key rhs.span))
+        ~f:(fun members -> Hashtbl.set table ~key:(span_to_key expr.span) ~data:members)
+    | _, None | _, Some _ -> ());
   result_ty
 ;;
 
@@ -2412,71 +2687,629 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
    explicit definitions contribute to a module's exported surface.
    In particular, [open M] imports names for subsequent statements yet does
    not re-export them from the enclosing module. *)
+let signature_engine state : Signature_check.Engine.t =
+  { instantiate = instantiate state
+  ; unify =
+      (fun actual expected ->
+        try
+          unify state actual expected;
+          Ok ()
+        with
+        | Type_error message -> Error message)
+  ; fresh_name = (fun () -> gensym state)
+  ; checkpoint = (fun () -> checkpoint state)
+  }
+;;
+
+let signature_recording state ~semantic_values ~semantic_members ~outer_types =
+  Option.map state.semantic ~f:(fun frame ->
+    let values = Option.value_exn semantic_values in
+    let implementation = Option.value_exn semantic_members in
+    let context =
+      Semantic_scope.context_exn
+        frame
+        ~values
+        ~types:outer_types
+        ~checkpoint:state.checkpoint
+    in
+    { Signature_check.Recording.frame; context; implementation })
+;;
+
+let check_module_signature
+      ?semantic_values
+      ?semantic_members
+      ?lookup
+      state
+      ~values
+      ~types
+      ~outer_types
+      ~signature
+      ~span
+  =
+  Chatml.Chatml_checkpoint.protect state.checkpoint ~f:(fun checkpoint ->
+    let state =
+      { state with
+        checkpoint
+      ; configured =
+          Option.map state.configured ~f:(fun configured ->
+            Configured_resolution.with_checkpoint configured ~checkpoint)
+      }
+    in
+    let recording =
+      signature_recording state ~semantic_values ~semantic_members ~outer_types
+    in
+    Signature_check.check
+      ?recording
+      ?source:state.source
+      ?lookup
+      (signature_engine state)
+      ~values
+      ~types
+      ~outer_types
+      ~signature
+      ~span)
+;;
+
+(* An interface never contributes offset keys to the implementation unit's
+   annotation tables. Both units still borrow the same inference identities. *)
+let check_captured_module_signature
+      ?semantic_values
+      ?semantic_members
+      ?lookup
+      state
+      interface
+      ~values
+      ~types
+      ~outer_types
+  =
+  Chatml.Chatml_checkpoint.protect state.checkpoint ~f:(fun checkpoint ->
+    let state =
+      { state with
+        checkpoint
+      ; configured =
+          Option.map state.configured ~f:(fun configured ->
+            Configured_resolution.with_checkpoint configured ~checkpoint)
+      }
+    in
+    let recording =
+      signature_recording state ~semantic_values ~semantic_members ~outer_types
+    in
+    Signature_check.check_captured
+      interface
+      ?recording
+      ?lookup
+      (signature_engine state)
+      ~values
+      ~types
+      ~outer_types)
+;;
+
+let with_stmt_location (stmt : stmt node) ~f =
+  try f stmt.value with
+  | Type_error message -> raise (Type_error_with_loc (message, stmt.span))
+;;
+
 let rec infer_stmt_with_exports
+          ?span
           (state : infer_state)
           (env : tenv)
           (stmt : stmt)
           (types : type_env)
   : tenv * type_env * string list
   =
-  match stmt with
-  | SLet (x, e) -> infer_nonrecursive_binding state env types x e, types, [ x ]
-  | SLetRec bindings ->
-    infer_recursive_bindings state env types bindings, types, List.map bindings ~f:fst
-  | SType (name, body) ->
-    env, infer_type_decl ~checkpoint:(fun () -> checkpoint state) types name body, []
-  | SExpr e ->
-    ignore (infer_expr state env types e);
-    env, types, []
-  | SModule (mname, stmts) ->
-    let module_placeholder = new_var state state.current_lvl in
-    let mod_env_start =
-      add_mono ~checkpoint:(fun () -> checkpoint state) env mname module_placeholder
-    in
-    let mod_env_final, _mod_types_final, exported_names_rev =
-      List.fold
-        stmts
-        ~init:(mod_env_start, types, [])
-        ~f:(fun (env_acc, types_acc, names_rev) stmt_node ->
-          let env_next, types_next, stmt_exports =
-            infer_stmt_with_exports state env_acc stmt_node.value types_acc
+  let result =
+    match stmt with
+    | SLet (pattern, e) ->
+      let env = infer_nonrecursive_binding state env types pattern e in
+      let names =
+        Binding_pattern.binders ~checkpoint:(fun () -> checkpoint state) pattern
+        |> List.map ~f:fst
+      in
+      let env =
+        List.fold
+          (Binding_pattern.binders ~checkpoint:state.checkpoint pattern)
+          ~init:env
+          ~f:(fun env (name, span) -> Value_scope.with_span env ~name ~span)
+      in
+      env, types, names
+    | SLetRec bindings ->
+      let env = infer_recursive_bindings state env types bindings in
+      let env =
+        List.fold bindings ~init:env ~f:(fun env (name, rhs) ->
+          Value_scope.with_span env ~name:(Syntax_name.name name) ~span:rhs.span)
+      in
+      env, types, List.map bindings ~f:(fun (name, _) -> Syntax_name.name name)
+    | SType declaration ->
+      let semantic =
+        Option.map state.semantic ~f:(fun frame ->
+          let context =
+            Semantic_scope.context_exn
+              frame
+              ~values:env
+              ~types
+              ~checkpoint:state.checkpoint
           in
-          env_next, types_next, List.rev_append stmt_exports names_rev)
-    in
-    let exported_names = List.rev exported_names_rev in
-    let seen = Hash_set.create (module String) in
-    let exports_map =
-      List.fold exported_names ~init:Env.empty ~f:(fun acc name ->
-        if String.equal name mname || Hash_set.mem seen name
-        then acc
-        else (
-          Hash_set.add seen name;
-          match Env.find mod_env_final name with
-          | Some ty -> Env.add name ty acc
-          | None -> acc))
-    in
-    let module_typ = Record (Row (exports_map, Empty_row)) in
-    unify state module_placeholder module_typ;
-    add_generalized state env mname module_typ, types, [ mname ]
-  | SOpen mname ->
-    (match lookup state env mname with
-     | Record row ->
-       let fields, tail = merge_fields ~checkpoint:(fun () -> checkpoint state) row in
-       (match tail with
-        | Empty_row | Var { contents = Free _ } -> ()
-        | _ -> ());
-       ( Env.fold fields ~init:env ~f:(fun ~key ~data acc ->
-           add_open_binding state acc ~module_name:mname key data)
-       , types
-       , [] )
-     | _ -> raise (Type_error (Printf.sprintf "Cannot open non-module '%s'" mname)))
+          Semantic_elaboration.alias_exn
+            frame
+            ~context
+            declaration
+            ~checkpoint:state.checkpoint)
+      in
+      ( env
+      , infer_type_decl
+          ?semantic
+          ?source:state.source
+          ?lookup:(type_lookup state env)
+          ~checkpoint:(fun () -> checkpoint state)
+          types
+          declaration
+      , [] )
+    | SExpr e ->
+      ignore (infer_expr state env types e);
+      env, types, []
+    | SModule { name = authored_mname; signature; body = stmts } ->
+      let mname = Syntax_name.name authored_mname in
+      (* A module declaration is non-recursive: its new name enters scope only
+       after its body has been checked. Functions capture the same lexical scope;
+       a deferred read does not make the module's own binding available. *)
+      let mod_env_final, mod_types_final, exported_names_rev =
+        List.fold
+          stmts
+          ~init:(env, Type_alias.enter_scope types, [])
+          ~f:(fun (env_acc, types_acc, names_rev) stmt_node ->
+            let env_next, types_next, stmt_exports =
+              with_stmt_location stmt_node ~f:(fun stmt ->
+                infer_stmt_with_exports ~span:stmt_node.span state env_acc stmt types_acc)
+            in
+            env_next, types_next, List.rev_append stmt_exports names_rev)
+      in
+      let exported_names = List.rev exported_names_rev in
+      let seen = Hash_set.create (module String) in
+      let exports_map =
+        List.fold exported_names ~init:Env.empty ~f:(fun acc name ->
+          if Hash_set.mem seen name
+          then acc
+          else (
+            Hash_set.add seen name;
+            match Value_scope.find mod_env_final ~name with
+            | Some binding -> Env.add name (Value_scope.Binding.scheme binding) acc
+            | None -> acc))
+      in
+      let type_names, module_names =
+        List.fold stmts ~init:([], []) ~f:(fun (type_names, module_names) stmt ->
+          checkpoint state;
+          match stmt.value with
+          | SType declaration ->
+            Syntax_name.name declaration.name :: type_names, module_names
+          | SModule { name; _ } -> type_names, Syntax_name.name name :: module_names
+          | SLet _ | SLetRec _ | SOpen _ | SExpr _ -> type_names, module_names)
+      in
+      let exports =
+        match
+          Type_alias.exports
+            mod_types_final
+            ~type_names
+            ~module_names
+            ~checkpoint:(fun () -> checkpoint state)
+        with
+        | Ok exports -> exports
+        | Error message -> raise (Type_error message)
+      in
+      let implementation_members =
+        Option.map state.semantic ~f:(fun frame ->
+          Semantic_scope.members_exn
+            frame
+            ~values:mod_env_final
+            ~types:exports
+            ~exports:exports_map
+            ~checkpoint:state.checkpoint)
+      in
+      let exports_map, exports, members =
+        match signature with
+        | None -> exports_map, exports, implementation_members
+        | Some signature ->
+          (match
+             check_module_signature
+               ~semantic_values:env
+               ?semantic_members:implementation_members
+               ?lookup:(type_lookup state env)
+               state
+               ~values:exports_map
+               ~types:exports
+               ~outer_types:types
+               ~signature:signature.value
+               ~span:signature.span
+           with
+           | Error diagnostic -> raise (Type_diagnostic diagnostic)
+           | Ok checked ->
+             Hashtbl.set
+               state.module_visibility
+               ~key:(span_to_key signature.span)
+               ~data:(Signature_check.visibility checked);
+             ( Signature_check.values checked
+             , Signature_check.types checked
+             , Signature_check.members checked ))
+      in
+      let module_typ = Module (Row (exports_map, Empty_row)) in
+      let env = add_generalized state env mname module_typ in
+      let env =
+        match state.semantic with
+        | None -> env
+        | Some frame ->
+          Semantic_scope.named_exn
+            frame
+            ~values:env
+            ~types
+            ~name:authored_mname
+            ~kind:Module
+            ~role:Module_binder
+            ~scheme:(lookup_scheme env mname)
+            ~members
+            ~checkpoint:state.checkpoint
+      in
+      let env =
+        Option.value_map span ~default:env ~f:(fun span ->
+          Value_scope.with_span env ~name:mname ~span)
+      in
+      let semantic_binding =
+        Option.bind (Value_scope.find env ~name:mname) ~f:Value_scope.Binding.semantic
+      in
+      env, Type_alias.add_module ?semantic_binding types ~name:mname ~exports, [ mname ]
+    | SOpen authored_mname ->
+      let mname = Syntax_name.name authored_mname in
+      (* Configured dispatch borrows raw schemes without an ordinary value read.
+       Existing module-kind, type/value collision and merge rules stay here. *)
+      let opened =
+        match state.configured with
+        | None -> Configured_resolution.Opened.Local (lookup_scheme env mname)
+        | Some configured ->
+          let span =
+            match span with
+            | Some span -> span
+            | None ->
+              raise (Type_error "Configured open requires its original source span")
+          in
+          Configured_resolution.open_module configured ~env ~name:mname ~span
+          |> alias_result
+      in
+      let scheme, imported =
+        match opened with
+        | Local scheme -> scheme, None
+        | Configured { scheme; reference; _ } ->
+          let origin = Configured_lookup.Reference.origin reference in
+          let span =
+            Chatml_diagnostic.Site.location (Configured_lookup.Reference.site reference)
+            |> Chatml_source.Location.span
+          in
+          Hashtbl.set
+            state.configured_annotations
+            ~key:(span_to_key span)
+            ~data:(Inert_open origin);
+          scheme, Some origin
+      in
+      let members =
+        match opened with
+        | Configured { members; _ } -> members
+        | Local _ ->
+          Option.bind
+            (Option.bind
+               (Value_scope.find env ~name:mname)
+               ~f:Value_scope.Binding.semantic)
+            ~f:Semantic_binding.members
+      in
+      Option.iter state.semantic ~f:(fun frame ->
+        let target =
+          match
+            ( Option.bind
+                (Value_scope.find env ~name:mname)
+                ~f:Value_scope.Binding.semantic
+            , imported )
+          with
+          | Some binding, _ -> Semantic.Target.Binding (Semantic_binding.symbol binding)
+          | None, Some origin ->
+            Configured_module (Configured_lookup.Origin.dependency origin)
+          | None, None -> Unlocated_module_member
+        in
+        Semantic_scope.reference_exn
+          frame
+          ~values:env
+          ~types
+          authored_mname
+          ~role:Module_reference
+          ~target
+          ~inferred:None
+          ~checkpoint:state.checkpoint);
+      let merge_open () =
+        match scheme with
+        | Module row ->
+          let fields, _tail = merge_fields ~checkpoint:(fun () -> checkpoint state) row in
+          let types =
+            let result =
+              match opened with
+              | Local _ ->
+                Type_alias.open_module types ~name:mname ~checkpoint:state.checkpoint
+              | Configured { types = exports; reference; _ } ->
+                Type_alias.open_exports
+                  types
+                  ~name:mname
+                  ~exports
+                  ~origin:(Configured_lookup.Reference.origin reference)
+                  ~checkpoint:state.checkpoint
+                  ()
+            in
+            match result with
+            | Ok types ->
+              (match state.semantic with
+               | None -> types
+               | Some frame ->
+                 let exports =
+                   match opened with
+                   | Configured { types; _ } -> Some types
+                   | Local _ ->
+                     Type_alias.visible_module
+                       types
+                       ~name:mname
+                       ~checkpoint:state.checkpoint
+                 in
+                 Option.value_map exports ~default:types ~f:(fun exports ->
+                   Semantic_scope.opened_types_exn
+                     frame
+                     types
+                     ~exports
+                     ~checkpoint:state.checkpoint))
+            | Error message -> raise (Type_error message)
+          in
+          ( Env.fold fields ~init:env ~f:(fun ~key ~data acc ->
+              let origin =
+                Option.map imported ~f:(fun origin ->
+                  Configured_lookup.Origin.member origin ~name:key)
+              in
+              let env = add_open_binding ?origin state acc ~module_name:mname key data in
+              let env =
+                match state.semantic, members with
+                | Some frame, Some members ->
+                  (match
+                     Semantic_binding.Members.find
+                       members
+                       ~namespace:Value
+                       ~name:key
+                       ~checkpoint:state.checkpoint
+                   with
+                   | None -> env
+                   | Some binding ->
+                     Semantic_scope.imported_exn
+                       frame
+                       ~values:env
+                       ~types
+                       ~binding
+                       ~checkpoint:state.checkpoint)
+                | None, _ | Some _, None -> env
+              in
+              Option.value_map span ~default:env ~f:(fun span ->
+                Value_scope.with_span env ~name:key ~span))
+          , types
+          , [] )
+        | _ -> raise (Type_error (Printf.sprintf "Cannot open non-module '%s'" mname))
+      in
+      (try merge_open () with
+       | Type_error message as exn ->
+         (match opened with
+          | Local _ -> raise exn
+          | Configured _ ->
+            raise
+              (Type_diagnostic (Configured_resolution.Opened.diagnostic opened ~message))))
+  in
+  Option.iter state.semantic ~f:(fun frame ->
+    Option.iter span ~f:(fun (span : Source.span) ->
+      let after_values, after_types, _ = result in
+      let boundary values types span =
+        let context =
+          Semantic_scope.context_exn frame ~values ~types ~checkpoint:state.checkpoint
+        in
+        Semantic.region
+          (Semantic.Frame.recorder frame)
+          (Semantic.Frame.unit frame)
+          ~context
+          ~span
+          ~checkpoint:state.checkpoint
+        |> Semantic.take_exn
+      in
+      boundary env types { span with right = span.left };
+      boundary after_values after_types { span with left = span.right }));
+  result
 ;;
 
-let infer_stmt (state : infer_state) (env : tenv) (types : type_env) (stmt : stmt)
+let infer_stmt ?span (state : infer_state) (env : tenv) (types : type_env) (stmt : stmt)
   : tenv * type_env
   =
-  let env', types', _exports = infer_stmt_with_exports state env stmt types in
+  let env', types', _exports = infer_stmt_with_exports ?span state env stmt types in
   env', types'
+;;
+
+(* Compiler-only unit adapter reuses the same statement inference/export rules
+   as inline modules, with authentic surface and no importer lexical bindings. *)
+let infer_configured_unit_static state surface (program : program) =
+  let env =
+    init_env_with_static ?semantic:state.semantic ~checkpoint:state.checkpoint surface
+  in
+  let types =
+    init_types_with_static ?semantic:state.semantic ~checkpoint:state.checkpoint surface
+  in
+  let unit_boundary env types ~byte_offset =
+    Option.iter state.semantic ~f:(fun frame ->
+      let recorder = Semantic.Frame.recorder frame in
+      let unit = Semantic.Frame.unit frame in
+      let location =
+        Chatml_source.locate
+          (Semantic.source unit)
+          ~start_byte:byte_offset
+          ~end_byte:byte_offset
+          ~checkpoint:state.checkpoint
+        |> Or_error.ok_exn
+      in
+      let context =
+        Semantic_scope.context_exn frame ~values:env ~types ~checkpoint:state.checkpoint
+      in
+      Semantic.region
+        recorder
+        unit
+        ~context
+        ~span:(Chatml_source.Location.span location)
+        ~checkpoint:state.checkpoint
+      |> Semantic.take_exn)
+  in
+  unit_boundary env types ~byte_offset:0;
+  let env, types, names_rev =
+    List.fold program.stmts ~init:(env, types, []) ~f:(fun (env, types, names_rev) node ->
+      checkpoint state;
+      let env, types, names =
+        with_stmt_location node ~f:(fun statement ->
+          infer_stmt_with_exports ~span:node.span state env statement types)
+      in
+      env, types, List.rev_append names names_rev)
+  in
+  Option.iter state.semantic ~f:(fun frame ->
+    unit_boundary
+      env
+      types
+      ~byte_offset:
+        (Chatml_source.byte_length (Semantic.source (Semantic.Frame.unit frame))));
+  let values =
+    List.fold names_rev ~init:Env.empty ~f:(fun values name ->
+      checkpoint state;
+      Env.add name (lookup_scheme env name) values)
+  in
+  let type_names, module_names =
+    List.fold program.stmts ~init:([], []) ~f:(fun (type_names, module_names) node ->
+      checkpoint state;
+      match node.value with
+      | SType declaration -> Syntax_name.name declaration.name :: type_names, module_names
+      | SModule { name; _ } -> type_names, Syntax_name.name name :: module_names
+      | SLet _ | SLetRec _ | SOpen _ | SExpr _ -> type_names, module_names)
+  in
+  let types =
+    match
+      Type_alias.exports types ~type_names ~module_names ~checkpoint:state.checkpoint
+    with
+    | Ok types -> types
+    | Error message -> raise (Type_error message)
+  in
+  let annotations : checked_program =
+    { source = state.source
+    ; span_types = Hashtbl.copy state.span_types
+    ; module_visibility = Hashtbl.copy state.module_visibility
+    ; configured_annotations = Hashtbl.copy state.configured_annotations
+    }
+  in
+  let exports = Configured_resolution.Public_module.create ~values ~types in
+  let exports =
+    Option.value_map state.semantic ~default:exports ~f:(fun frame ->
+      let members =
+        Semantic_scope.members_exn
+          frame
+          ~values:env
+          ~types
+          ~exports:values
+          ~checkpoint:state.checkpoint
+      in
+      Configured_resolution.Public_module.with_members exports members)
+  in
+  annotations, exports, env
+;;
+
+let infer_configured_unit state surface program =
+  let static =
+    Chatml.Chatml_static_surface.of_runtime_surface surface ~checkpoint:state.checkpoint
+  in
+  let annotations, exports, _ = infer_configured_unit_static state static program in
+  annotations, exports
+;;
+
+(* Shared grouped instantiation for legacy and prepared entry contracts. The
+   lookup callback determines lexical ownership, never the type algorithm. *)
+let check_required_bindings
+      ?(binding_span = fun _ -> None)
+      ?semantic_scope
+      state
+      required_bindings
+      ~lookup_binding
+  =
+  (match List.find_a_dup (List.map required_bindings ~f:fst) ~compare:String.compare with
+   | Some name -> raise (Type_error ("Duplicate required binding '" ^ name ^ "'"))
+   | None -> ());
+  let components =
+    List.map required_bindings ~f:(fun (_, ty) ->
+      typ_of_builtin_ty ~checkpoint:(fun () -> checkpoint state) ty)
+  in
+  let required_roots =
+    match state.semantic with
+    | None -> None
+    | Some frame ->
+      let group =
+        Semantic.stage_group (Semantic.Frame.recorder frame) ~checkpoint:state.checkpoint
+        |> Semantic.take_exn
+      in
+      let roots =
+        List.map components ~f:(fun inferred ->
+          Semantic.stage_root
+            (Semantic.Frame.recorder frame)
+            group
+            inferred
+            ~checkpoint:state.checkpoint
+          |> Semantic.take_exn)
+      in
+      Semantic.commit_group
+        (Semantic.Frame.recorder frame)
+        group
+        ~checkpoint:state.checkpoint
+      |> Semantic.take_exn;
+      Some roots
+  in
+  let required_types = instantiate state (Tuple components) in
+  match required_types with
+  | Tuple types ->
+    let record name root =
+      match state.semantic, semantic_scope with
+      | Some frame, Some scope ->
+        Option.iter
+          (Option.bind (Value_scope.find scope ~name) ~f:Value_scope.Binding.semantic)
+          ~f:(fun binding ->
+            Semantic.host_requirement
+              (Semantic.Frame.recorder frame)
+              (Semantic.Frame.unit frame)
+              ~contract:(Semantic.compiler_contract (Semantic.Frame.recorder frame))
+              ~name
+              ~binding
+              ~required:root
+              ~checkpoint:state.checkpoint
+            |> Semantic.take_exn)
+      | None, _ | Some _, None -> ()
+    in
+    let check name expected =
+      try unify state (lookup_binding name) expected with
+      | Type_error message ->
+        let message = "Invalid entrypoint '" ^ name ^ "': " ^ message in
+        (match binding_span name with
+         | None -> raise (Type_error message)
+         | Some span -> raise (Type_error_with_loc (message, span)))
+    in
+    (match required_roots with
+     | None ->
+       List.iter2_exn required_bindings types ~f:(fun (name, _) expected ->
+         check name expected)
+     | Some roots ->
+       let rec check_recorded bindings types roots =
+         match bindings, types, roots with
+         | [], [], [] -> ()
+         | (name, _) :: bindings, expected :: types, root :: roots ->
+           state.checkpoint ();
+           check name expected;
+           record name root;
+           check_recorded bindings types roots
+         | _ -> assert false
+       in
+       check_recorded required_bindings types roots)
+  | _ -> assert false
 ;;
 
 (** --------------------------------------------------------------------- *)
@@ -2490,8 +3323,9 @@ let infer_stmt (state : infer_state) (env : tenv) (types : type_env) (stmt : stm
     The function allocates a fresh inference state, infers every top-level
     statement in order, and returns either:
 
-    - [Ok checked], where [checked] contains an immutable snapshot of the
-      principal types recorded for each source span; or
+    - [Ok checked], where [checked] owns a copied span table for this unit. Its
+      type values deliberately retain shared inference/weak-cell identities;
+      this is not a deeply immutable semantic snapshot (OCH-127 owns that); or
     - [Error diagnostic], where [diagnostic] identifies the first typing
       error and never permits evaluation to proceed.
 
@@ -2499,49 +3333,74 @@ let infer_stmt (state : infer_state) (env : tenv) (types : type_env) (stmt : stm
     consulted by the resolver in production. *)
 let check_program_with_surface
       ?checkpoint:compiler_checkpoint
+      ?source
       ?(required_bindings : (string * Builtin_spec.ty) list = [])
       (surface : Builtin_surface.surface)
       (prog : program)
   : (checked_program, diagnostic) result
   =
-  let state = create_state ?checkpoint:compiler_checkpoint () in
-  try
-    let env = init_env_with_surface ~checkpoint:(fun () -> checkpoint state) surface in
-    let types : type_env =
-      init_types_with_surface ~checkpoint:(fun () -> checkpoint state) surface
-    in
-    (* Each element of [prog] now carries its own source span.  The current
-       type-checker, however, does not yet make use of that information.  We
-       therefore simply discard the annotation for the time being. *)
-    let final_env, _final_types =
-      List.fold prog.stmts ~init:(env, types) ~f:(fun (env_acc, types_acc) stmt_node ->
-        infer_stmt state env_acc types_acc stmt_node.value)
-    in
-    (* Instantiate the entire contract together: repeated type variables relate
-       bindings such as initial_state and on_event. Checking inferred bindings
-       avoids evaluating initializers or introducing shadowable source wrappers. *)
-    (match
-       List.find_a_dup (List.map required_bindings ~f:fst) ~compare:String.compare
-     with
-     | Some name -> raise (Type_error ("Duplicate required binding '" ^ name ^ "'"))
-     | None -> ());
-    let required_types =
-      Tuple
-        (List.map required_bindings ~f:(fun (_, ty) ->
-           typ_of_builtin_ty ~checkpoint:(fun () -> checkpoint state) ty))
-      |> instantiate state
-    in
-    (match required_types with
-     | Tuple types ->
-       List.iter2_exn required_bindings types ~f:(fun (name, _) expected ->
-         try unify state (lookup state final_env name) expected with
-         | Type_error message ->
-           raise (Type_error ("Invalid entrypoint '" ^ name ^ "': " ^ message)))
-     | _ -> assert false);
-    Ok { span_types = Hashtbl.copy state.span_types }
-  with
-  | Type_error msg -> Error { message = msg; span = None }
-  | Type_error_with_loc (msg, span) -> Error { message = msg; span = Some span }
+  let source_matches =
+    match source with
+    | None -> true
+    | Some source -> String.equal (Chatml_source.contents source) prog.source_text
+  in
+  if not source_matches
+  then Error (Chatml_diagnostic.create "Program does not match captured source bytes")
+  else (
+    let compiler_checkpoint = Option.value compiler_checkpoint ~default:(fun () -> ()) in
+    Chatml.Chatml_checkpoint.protect compiler_checkpoint ~f:(fun compiler_checkpoint ->
+      let state = create_state ~checkpoint:compiler_checkpoint ?source () in
+      try
+        let env =
+          init_env_with_surface ~checkpoint:(fun () -> checkpoint state) surface
+        in
+        let types : type_env =
+          init_types_with_surface ~checkpoint:(fun () -> checkpoint state) surface
+        in
+        let final_env, _final_types =
+          List.fold
+            prog.stmts
+            ~init:(env, types)
+            ~f:(fun (env_acc, types_acc) stmt_node ->
+              with_stmt_location stmt_node ~f:(fun stmt ->
+                infer_stmt ~span:stmt_node.span state env_acc types_acc stmt))
+        in
+        check_required_bindings
+          state
+          required_bindings
+          ~lookup_binding:(lookup state final_env);
+        Ok
+          { source = state.source
+          ; span_types = Hashtbl.copy state.span_types
+          ; module_visibility = Hashtbl.copy state.module_visibility
+          ; configured_annotations = Hashtbl.copy state.configured_annotations
+          }
+      with
+      | Type_diagnostic diagnostic -> Error diagnostic
+      | Type_error msg -> Error (Chatml_diagnostic.create msg)
+      | Type_error_with_loc (msg, span) ->
+        let diagnostic = Chatml_diagnostic.create ~span msg in
+        let diagnostic =
+          match state.source with
+          | None -> diagnostic
+          | Some source ->
+            Chatml.Chatml_owned_source.attach
+              source
+              diagnostic
+              ~checkpoint:state.checkpoint
+        in
+        Error diagnostic))
+;;
+
+(** Captured parser units keep source/AST pairing invariant. Compilation does
+    not evaluate initializers; failures retain their exact captured source. *)
+let check_captured_program_with_surface ?checkpoint ?required_bindings surface unit =
+  check_program_with_surface
+    ?checkpoint
+    ?required_bindings
+    ~source:(Chatml.Chatml_parse.Unit.source unit)
+    surface
+    (Chatml.Chatml_parse.Unit.program unit)
 ;;
 
 let check_program (prog : program) : (checked_program, diagnostic) result =

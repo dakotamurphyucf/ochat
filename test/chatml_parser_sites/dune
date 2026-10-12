@@ -1,0 +1,5 @@
+(library
+ (name chatml_parser_site_tests)
+ (libraries core chatml chatml_typechecker chatml_resolver ochat.chatml_source)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

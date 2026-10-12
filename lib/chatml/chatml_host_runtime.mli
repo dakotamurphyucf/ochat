@@ -220,17 +220,29 @@ val compile_script
 type compilation_stage =
   | Parse
   | Typecheck
+  | Link
 [@@deriving sexp, equal]
 
 (** Original parser/typechecker location and message, plus the legacy rendered
     diagnostic. Spans refer to the exact submitted source, with no path loading. *)
-type compilation_diagnostic =
+type compilation_diagnostic = private
   { stage : compilation_stage
   ; message : string
   ; span : Source.span option
   ; formatted : string
+  ; diagnostic : Chatml_diagnostic.t
   }
-[@@deriving sexp]
+[@@deriving sexp_of]
+
+(** Derive all projections from the canonical failure and render at most16KiB.
+    Captured sites retain their own bytes; optional text is only a legacy unowned
+    adapter. Checkpoints/cancellation propagate; no inventory/control retained. *)
+val compilation_diagnostic
+  :  Chatml_diagnostic.t
+  -> stage:compilation_stage
+  -> source_text:string option
+  -> checkpoint:(unit -> unit)
+  -> compilation_diagnostic
 
 (** Same non-executing compilation as [compile_script], retaining structured
     diagnostic data for validation/authoring consumers. *)
@@ -239,6 +251,16 @@ val compile_script_detailed
   -> ?surface:Builtin_surface.surface
   -> ?required_bindings:(string * Chatml.Chatml_builtin_spec.ty) list
   -> source:string
+  -> unit
+  -> (compiled_script, compilation_diagnostic) result
+
+(** Compile exact captured bytes without executing initializers. Structured
+    failures retain the captured identity/revision; no live source lookup. *)
+val compile_captured_script
+  :  Chatml_source.t
+  -> ?checkpoint:(unit -> unit)
+  -> ?surface:Builtin_surface.surface
+  -> ?required_bindings:(string * Chatml.Chatml_builtin_spec.ty) list
   -> unit
   -> (compiled_script, compilation_diagnostic) result
 
@@ -256,6 +278,16 @@ val instantiate_session
   -> compiled_script
   -> entrypoints:compiled_entrypoints
   -> (session, string) result
+
+(** Same execution and callback contracts, preserving the canonical structured
+    failure until the caller chooses rendering. Cancellation/control exceptions
+    propagate after the existing cleanup. *)
+val instantiate_session_detailed
+  :  ?control:execution_control
+  -> runtime_config
+  -> compiled_script
+  -> entrypoints:compiled_entrypoints
+  -> (session, Chatml_diagnostic.t) result
 
 (** Evaluate a fresh program instance and invoke a task-returning entrypoint
     directly, without initial_state/on_event conventions or lifecycle events.
@@ -285,6 +317,72 @@ val run_entrypoint
   -> arguments:value list
   -> unit
   -> (value, string) result
+
+(** Same execution and callback contracts, preserving the canonical structured
+    failure until the caller chooses rendering. Cancellation/control exceptions
+    propagate after the existing cleanup. *)
+val run_entrypoint_detailed
+  :  ?control:execution_control
+  -> ?limits:execution_limits
+  -> ?prepare_result:
+       (value:value -> local_effects:eff list -> (unit -> unit, string) result)
+  -> runtime_config
+  -> compiled_script
+  -> entrypoint:string
+  -> arguments:value list
+  -> unit
+  -> (value, Chatml_diagnostic.t) result
+
+(** Initialize the linked value dependency closure once for a persistent session.
+    Validate exact static installer metadata and compiled selected names before
+    effects. Reuse the existing session/interpreter/events; companions restrict
+    external exports, while selected local host bindings use private entry scope.
+    Every unit captures [control]; persistent owners supply runner_control inside
+    run_scoped and serialize subsequent events. No partial session on failure.
+    Owned runtime diagnostics and cancellation contracts match detailed legacy
+    APIs. Standard moderator targets use canonical roles; Native custom labels
+    require an explicit three-argument task function and matching grouped state
+    metadata (Contract.Invocation). No runtime inference/alias solving. No
+    filesystem/custody routing or initialization during compilation. *)
+val instantiate_prepared_session_detailed
+  :  runtime_config
+  -> Chatml_linked_program.t
+  -> entrypoints:compiled_entrypoints
+  -> ?control:execution_control
+  -> unit
+  -> (session, Chatml_diagnostic.t) result
+
+(** Native two-argument hook variant. Validate authentic event/state session
+    metadata before any initializer; validate the live installer and instantiate
+    the exact graph once. Invoke its ORIGINAL hook as [hook(event,state)] using
+    the existing session transaction/queue/suspension engine. No generated source
+    or native callback wrapper. Caller serializes the session and owns control
+    lifetime exactly as for instantiate_prepared_session_detailed. *)
+val instantiate_prepared_event_state_session_detailed
+  :  runtime_config
+  -> Chatml_linked_program.t
+  -> entrypoints:compiled_entrypoints
+  -> ?control:execution_control
+  -> unit
+  -> (session, Chatml_diagnostic.t) Result.t
+
+(** Fresh linked instance and compiled selected task entrypoint. Shared operation
+    filtering, task/catch semantics, reservation cleanup and result installation
+    are identical to run_entrypoint_detailed. All initializer work inherits the
+    same control; selected names cannot expand the compiled dependency closure.
+    Contract.Invocation checks declared task-function shape, argument count and
+    registered target kind/role before initializer effects. *)
+val run_prepared_entrypoint_detailed
+  :  runtime_config
+  -> Chatml_linked_program.t
+  -> entrypoint:string
+  -> arguments:value list
+  -> ?control:execution_control
+  -> ?limits:execution_limits
+  -> ?prepare_result:
+       (value:value -> local_effects:eff list -> (unit -> unit, string) result)
+  -> unit
+  -> (value, Chatml_diagnostic.t) result
 
 (** Current durable script state for the session. *)
 val current_state : session -> value
@@ -381,6 +479,21 @@ val handle_event
   -> event:value
   -> (unit, string) result
 
+(** Same execution and callback contracts, preserving the canonical structured
+    failure until the caller chooses rendering. Cancellation/control exceptions
+    propagate after the existing cleanup. *)
+val handle_event_detailed
+  :  ?prepare_commit:prepare_commit
+  -> ?prepare_transaction:prepare_transaction
+  -> ?validate_state:(value -> (unit, string) result)
+  -> ?validate_suspension:(unit -> (unit, string) result)
+  -> ?copy_state:(value -> (value, string) result)
+  -> ?limits:execution_limits
+  -> session
+  -> context:value
+  -> event:value
+  -> (unit, Chatml_diagnostic.t) result
+
 (** Handle the oldest queued event, removing it only in the successful state/
     effects commit. Returns [Ok None] for an empty queue. The prospective
     transaction excludes that head and retains the tail followed by new emits.
@@ -403,6 +516,20 @@ val handle_next_queued_event
   -> copy_event:(value -> (value, string) result)
   -> (unit option, string) result
 
+(** Same execution and callback contracts, preserving the canonical structured
+    failure until the caller chooses rendering. Cancellation/control exceptions
+    propagate after the existing cleanup. *)
+val handle_next_queued_event_detailed
+  :  ?prepare_commit:prepare_commit
+  -> ?prepare_transaction:prepare_transaction
+  -> ?validate_state:(value -> (unit, string) result)
+  -> ?copy_state:(value -> (value, string) result)
+  -> ?limits:execution_limits
+  -> session
+  -> context:value
+  -> copy_event:(value -> (value, string) result)
+  -> (unit option, Chatml_diagnostic.t) result
+
 (** Resume a suspended UI approval request with a host-supplied response. *)
 val resume_ui_request
   :  ?prepare_commit:prepare_commit
@@ -412,6 +539,18 @@ val resume_ui_request
   -> session
   -> response:string
   -> (unit, string) result
+
+(** Same execution and callback contracts, preserving the canonical structured
+    failure until the caller chooses rendering. Cancellation/control exceptions
+    propagate after the existing cleanup. *)
+val resume_ui_request_detailed
+  :  ?prepare_commit:prepare_commit
+  -> ?prepare_transaction:prepare_transaction
+  -> ?validate_state:(value -> (unit, string) result)
+  -> ?limits:execution_limits
+  -> session
+  -> response:string
+  -> (unit, Chatml_diagnostic.t) result
 
 (** Enqueue an internal event for later delivery via the host's internal-event
     replay mechanism. Unlike [Runtime.emit], this is host-driven and does not

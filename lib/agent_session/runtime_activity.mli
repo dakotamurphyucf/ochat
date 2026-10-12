@@ -7,13 +7,17 @@ type t
 exception Closed
 
 (** The host keeps [sw] alive through the runtime's lifetime and joins it before
-    releasing inherited resources. Does not start work or create a new domain. *)
+    releasing inherited resources. Establishes a private activity
+    switch supervised by a daemon on [sw];
+    starts no user callback or initializer and creates no new domain.
+    Creation is cancellable, including before the supervisor enters. *)
 val create : sw:Eio.Switch.t -> t
 
 (** Run under the runtime switch, inheriting the invoking fiber's bindings for
     native borrows/moderation/coordination. Results and original exceptions are
     returned to the caller. A cancelled caller cancels and joins its own activity
-    without cancelling sibling activities. Closing the runtime switch cancels
+    without cancelling sibling activities. Normal closure or cancellation
+    of the runtime switch cancels
     every activity, even when their callers belong to other switches. The
     callback must join its own work and not close the runtime switch itself. *)
 val run : t -> (unit -> 'a) -> 'a

@@ -1,0 +1,1 @@
+include module type of Agent_server.Operator_manifest_grant

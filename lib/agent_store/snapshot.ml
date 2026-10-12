@@ -62,7 +62,7 @@ module Stored = struct
       F.expect_versions
         state
         ~kind:"session.state"
-        ~versions:[ 1; 2; 3; 4; 5; 6; 7; 8; 9 ]
+        ~versions:[ 1; 2; 3; 4; 5; 6; 7; 8; 9; 10 ]
     in
     let state = D.Document.payload state in
     let%bind identity = F.required state "identity" Result.return in
@@ -496,6 +496,256 @@ let fallback_stored ~env ~directory ~max_payload_length ~excluding =
         | Error error -> Error error)
   in
   loop filenames
+;;
+
+let checkpoint_equal left right ~checkpoint =
+  let length = String.length left in
+  if length <> String.length right
+  then false
+  else (
+    let rec loop index =
+      if index = length
+      then true
+      else (
+        checkpoint ();
+        let stop = Int.min length (index + Int.min 4096 (length - index)) in
+        let rec chunk i =
+          if i = stop
+          then loop stop
+          else if Char.equal left.[i] right.[i]
+          then chunk (i + 1)
+          else false
+        in
+        chunk index)
+    in
+    loop 0)
+;;
+
+let first_checkpoint_document snapshot ~limits ~checkpoint =
+  let open Result.Let_syntax in
+  let%bind codec = codec ~limits |> F.store in
+  let%bind document = D.Domain_codec.encode codec (carrier snapshot) |> F.store in
+  let%bind json =
+    D.Encoding.render
+      ~limits
+      ~byte_limit_context:"first checkpoint bounds"
+      ~checkpoint
+      ~f:(fun encoding -> D.Encoding.raw encoding (D.Document.json document))
+    |> F.store
+  in
+  let%bind payload_bytes = D.Json.validate_and_measure ~limits json |> F.store in
+  let overhead = Frame.header_length + Frame.checksum_length in
+  if payload_bytes > Int.max_value - overhead
+  then Error (Store_error.Corrupt "first checkpoint frame size overflow")
+  else Ok (document, payload_bytes + overhead)
+;;
+
+let first_checkpoint_encoding snapshot ~reader ~limits ~checkpoint =
+  let open Result.Let_syntax in
+  let%bind document, frame_bytes =
+    first_checkpoint_document snapshot ~limits ~checkpoint
+  in
+  let%bind () = Retention_reader.charge_bytes reader frame_bytes in
+  Document_record.encode document ~limits ~flags:0 |> Result.map_error ~f:F.record_error
+;;
+
+let complete_first_prefix ~env ~reader ~filename ~observed ~encoded ~checkpoint =
+  let path = Filename.concat (Retention_reader.root reader) filename in
+  let mismatch () = Error (Store_error.Corrupt "first checkpoint prefix changed") in
+  let open Result.Let_syntax in
+  let%bind _ = Retention_reader.kind reader ~path:filename in
+  checkpoint ();
+  try
+    Eio.Path.with_open_out ~create:`Never (eio_path env path) (fun flow ->
+      let stat = Eio.File.stat flow in
+      let%bind () =
+        match stat.kind with
+        | `Regular_file
+          when Int64.equal
+                 (Optint.Int63.to_int64 stat.size)
+                 (Int64.of_int (String.length observed)) -> Ok ()
+        | _ -> mismatch ()
+      in
+      let chunk = Cstruct.create (Int.min 4096 (String.length observed)) in
+      let rec verify index =
+        if index = String.length observed
+        then Ok ()
+        else (
+          checkpoint ();
+          let count = Int.min (Cstruct.length chunk) (String.length observed - index) in
+          let bytes = Cstruct.sub chunk 0 count in
+          let%bind () =
+            match Eio.Flow.read_exact flow bytes with
+            | () -> Ok ()
+            | exception End_of_file -> mismatch ()
+          in
+          let rec equal offset =
+            if offset = count
+            then true
+            else if Char.equal (Cstruct.get_char bytes offset) observed.[index + offset]
+            then equal (offset + 1)
+            else false
+          in
+          if equal 0 then verify (index + count) else mismatch ())
+      in
+      let%bind () = verify 0 in
+      let%bind () =
+        let extra = Cstruct.create 1 in
+        let count =
+          try Eio.Flow.single_read flow extra with
+          | End_of_file -> 0
+        in
+        if count = 0 then Ok () else mismatch ()
+      in
+      checkpoint ();
+      Eio.Flow.copy_string (String.drop_prefix encoded (String.length observed)) flow;
+      Eio.File.sync flow;
+      Durable_file.sync_directory ~env ~path:(Retention_reader.root reader))
+  with
+  | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+    Error (Store_error.of_exn ~operation:"complete first checkpoint" ~path exn)
+;;
+
+let recover_first_checkpoint snapshot ~env ~reader ~max_payload_length ~checkpoint =
+  let open Result.Let_syntax in
+  checkpoint ();
+  let%bind () =
+    if
+      Int64.equal snapshot.transaction_sequence 1L
+      && Int64.equal snapshot.event_sequence 1L
+      && Option.is_some snapshot.transaction_hash
+    then Ok ()
+    else
+      Error (Store_error.Corrupt "first checkpoint requires initial transaction anchors")
+  in
+  let overhead = Frame.header_length + Frame.checksum_length in
+  let%bind max_frame_bytes =
+    if max_payload_length <= 0 || max_payload_length > Int.max_value - overhead
+    then Error (Store_error.Corrupt "first checkpoint payload bound is invalid")
+    else Ok (max_payload_length + overhead)
+  in
+  let directory = Retention_reader.root reader in
+  let installed_filename = filename 1L in
+  let%bind names = Retention_reader.list reader ~directory:"." in
+  let%bind () =
+    List.fold_result names ~init:() ~f:(fun () name ->
+      checkpoint ();
+      if
+        String.equal name installed_filename
+        || String.equal name "CURRENT"
+        || Option.equal String.equal (Durable_file.temporary_target name) (Some "CURRENT")
+      then Ok ()
+      else Error (Store_error.Corrupt "first checkpoint has unrelated inventory"))
+  in
+  let%bind () =
+    if List.mem names "CURRENT" ~equal:String.equal
+    then (
+      let%bind current =
+        Retention_reader.read
+          reader
+          ~path:"CURRENT"
+          ~max_bytes:(String.length installed_filename + 1)
+      in
+      if checkpoint_equal current (installed_filename ^ "\n") ~checkpoint
+      then Ok ()
+      else Error (Store_error.Corrupt "first checkpoint CURRENT conflicts"))
+    else Ok ()
+  in
+  let%bind limits = F.limits ~max_bytes:max_payload_length |> F.store in
+  let%bind encoded = first_checkpoint_encoding snapshot ~reader ~limits ~checkpoint in
+  let%bind observed =
+    if List.mem names installed_filename ~equal:String.equal
+    then
+      Retention_reader.read reader ~path:installed_filename ~max_bytes:max_frame_bytes
+      |> Result.map ~f:Option.some
+    else Ok None
+  in
+  let%bind snapshot, repair_prefix =
+    match observed with
+    | None -> Ok (snapshot, None)
+    | Some bytes ->
+      let%bind frame =
+        Frame.decode ~max_payload_length ~contents:bytes ~offset:0
+        |> Result.map_error ~f:(fun error ->
+          Store_error.Corrupt (Sexp.to_string_hum (Frame.sexp_of_error error)))
+      in
+      (match frame with
+       | Incomplete_tail _ ->
+         if
+           String.length bytes < String.length encoded
+           && checkpoint_equal
+                bytes
+                (String.prefix encoded (String.length bytes))
+                ~checkpoint
+         then Ok (snapshot, Some bytes)
+         else Error (Store_error.Corrupt "first checkpoint has another incomplete prefix")
+       | Complete _ ->
+         let%bind existing = decode_file ~max_payload_length bytes in
+         let render snapshot =
+           let%bind json = encode_value (value snapshot) |> F.store in
+           D.Encoding.render
+             ~limits
+             ~byte_limit_context:"first checkpoint value bounds"
+             ~checkpoint
+             ~f:(fun encoding -> D.Encoding.raw encoding json)
+           |> F.store
+         in
+         let%bind expected = render snapshot in
+         let%bind actual = render existing in
+         checkpoint ();
+         let same = D.Json.equal expected actual in
+         checkpoint ();
+         if same
+         then Ok (existing, None)
+         else
+           Error
+             (Store_error.Corrupt "first checkpoint differs from authenticated creation"))
+  in
+  (* The ordinary installer encodes once more and retains one final read buffer;
+     an existing target also requires verify_existing's full read buffer. Admit
+     those known buffers and the prefix recheck before any mutation. *)
+  let%bind _, frame_bytes = first_checkpoint_document snapshot ~limits ~checkpoint in
+  let%bind () = Retention_reader.charge_bytes reader frame_bytes in
+  let%bind () = Retention_reader.charge_bytes reader frame_bytes in
+  let%bind () =
+    match observed with
+    | None -> Ok ()
+    | Some _ -> Retention_reader.charge_bytes reader frame_bytes
+  in
+  let%bind () =
+    match repair_prefix with
+    | None -> Ok ()
+    | Some bytes -> Retention_reader.charge_bytes reader (String.length bytes)
+  in
+  checkpoint ();
+  let%bind () =
+    match repair_prefix with
+    | None -> Ok ()
+    | Some bytes ->
+      complete_first_prefix
+        ~env
+        ~reader
+        ~filename:installed_filename
+        ~observed:bytes
+        ~encoded
+        ~checkpoint
+  in
+  install ~env ~directory ~max_payload_length snapshot
+;;
+
+let install_first_checkpoint snapshot ~env ~reader ~max_payload_length ~checkpoint =
+  let module Callback = struct
+    exception Raised of exn * Backtrace.t
+  end
+  in
+  let poll () =
+    try checkpoint () with
+    | exn -> raise (Callback.Raised (exn, Backtrace.Exn.most_recent ()))
+  in
+  try
+    recover_first_checkpoint snapshot ~env ~reader ~max_payload_length ~checkpoint:poll
+  with
+  | Callback.Raised (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
 let load_current_stored ~env ~directory ~max_payload_length =

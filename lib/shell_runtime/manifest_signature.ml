@@ -43,17 +43,22 @@ let builtin_versions manifest =
 
 let imported_sources manifest =
   let runtime_sources =
-    List.map manifest.M.payload.runtimes ~f:(fun runtime -> runtime.Chatmd_shell_spec.Shell_spec.source)
+    List.map manifest.M.payload.runtimes ~f:(fun runtime ->
+      runtime.Chatmd_shell_spec.Shell_spec.source)
   in
-  let tool_sources = List.map manifest.payload.tools ~f:(fun tool -> tool.Chatmd_shell_spec.Shell_tool_spec.source) in
+  let tool_sources =
+    List.map manifest.payload.tools ~f:(fun tool ->
+      tool.Chatmd_shell_spec.Shell_tool_spec.source)
+  in
   runtime_sources @ tool_sources
-  |> List.map ~f:(fun source -> source.Chatmd_shell_spec.Source_ref.file, source.source_sha256)
+  |> List.map ~f:(fun source ->
+    source.Chatmd_shell_spec.Source_ref.file, source.source_sha256)
   |> List.dedup_and_sort ~compare:[%compare: string * string]
 ;;
 
 let payload ~manifest ~issuer ~audience ~issued_at_unix ~expires_at_unix =
   { canonical_manifest_sha256 = manifest.M.sha256
-  ; encoding_version = manifest.payload.encoding_version
+  ; encoding_version = M.encoding_version manifest
   ; builtin_versions = builtin_versions manifest
   ; issuer
   ; audience = List.dedup_and_sort audience ~compare:String.compare
@@ -63,10 +68,7 @@ let payload ~manifest ~issuer ~audience ~issued_at_unix ~expires_at_unix =
   }
 ;;
 
-let canonical_payload payload =
-  payload |> jsonaf_of_payload |> Jsonaf.to_string
-;;
-
+let canonical_payload payload = payload |> jsonaf_of_payload |> Jsonaf.to_string
 let error code message = Error { code; message }
 
 let decode_base64 code value =
@@ -77,7 +79,10 @@ let decode_base64 code value =
 let key public_keys key_id =
   List.find public_keys ~f:(fun key -> String.equal key.key_id key_id)
   |> Result.of_option
-       ~error:{ code = "shell.signature_key_missing"; message = "unknown public key: " ^ key_id }
+       ~error:
+         { code = "shell.signature_key_missing"
+         ; message = "unknown public key: " ^ key_id
+         }
 ;;
 
 let expected_payload manifest signed =
@@ -96,10 +101,16 @@ let validate_claims ~now_unix ~audience ~manifest signature =
   then error "shell.signature_audience" "signature audience does not include this runtime"
   else if Int64.(signature.payload.issued_at_unix > now_unix)
   then error "shell.signature_not_yet_valid" "signature issue time is in the future"
-  else if Option.exists signature.payload.expires_at_unix ~f:(fun expiry -> Int64.(expiry < now_unix))
+  else if
+    Option.exists signature.payload.expires_at_unix ~f:(fun expiry ->
+      Int64.(expiry < now_unix))
   then error "shell.signature_expired" "signature has expired"
-  else if not (equal_payload signature.payload (expected_payload manifest signature.payload))
-  then error "shell.signature_payload_mismatch" "manifest, profile version, or imported source digest changed"
+  else if
+    not (equal_payload signature.payload (expected_payload manifest signature.payload))
+  then
+    error
+      "shell.signature_payload_mismatch"
+      "manifest, profile version, or imported source digest changed"
   else Ok ()
 ;;
 
@@ -107,8 +118,12 @@ let verify ~now_unix ~audience ~public_keys ~manifest signature =
   let open Result.Let_syntax in
   let%bind () = validate_claims ~now_unix ~audience ~manifest signature in
   let%bind key = key public_keys signature.key_id in
-  let%bind key_octets = decode_base64 "shell.signature_public_key" key.public_key_base64 in
-  let%bind signature_octets = decode_base64 "shell.signature_encoding" signature.signature_base64 in
+  let%bind key_octets =
+    decode_base64 "shell.signature_public_key" key.public_key_base64
+  in
+  let%bind signature_octets =
+    decode_base64 "shell.signature_encoding" signature.signature_base64
+  in
   let%bind public_key =
     Mirage_crypto_ec.Ed25519.pub_of_octets key_octets
     |> Result.map_error ~f:(fun _ ->
@@ -124,8 +139,18 @@ let verify ~now_unix ~audience ~public_keys ~manifest signature =
 ;;
 
 let load parse ~fs ~path code =
-  try Eio.Path.(fs / path) |> Eio.Path.load |> Jsonaf.of_string |> parse |> Result.return with
-  | exn -> error code (Exn.to_string exn)
+  let open Result.Let_syntax in
+  let%bind contents =
+    try Ok (Eio.Path.(fs / path) |> Eio.Path.load) with
+    | Eio.Io _ as exn -> error code (Exn.to_string exn)
+  in
+  let%bind json =
+    Jsonaf.parse contents
+    |> Result.map_error ~f:(fun message ->
+      { code; message = Error.to_string_hum message })
+  in
+  try Ok (parse json) with
+  | Jsonaf_kernel.Conv.Of_jsonaf_error _ as exn -> error code (Exn.to_string exn)
 ;;
 
 let load_signature ~fs ~path = load t_of_jsonaf ~fs ~path "shell.signature_load_failed"

@@ -20,7 +20,8 @@ module Registry = struct
   type artifact =
     { script_id : string
     ; source_hash : string
-    ; compiled : Runtime.compiled_script
+    ; compiled : Extension_compiler.Program.t
+    ; surface : Builtin_surface.surface
     ; extension :
         (Chatmd_shell_spec.Extension_spec.script * Extension_compiler.definition) option
     }
@@ -50,23 +51,200 @@ module Registry = struct
       ]
   ;;
 
-  let compile_script
+  let compile_script_with
+        ~compile_script
         ?(surface = Builtin_surface.moderator_surface)
         (t : t)
         (script : CM.script)
     : (t * artifact, string) result
     =
+    let open Result.Let_syntax in
+    let%bind () =
+      match script.project_selection with
+      | None -> Ok ()
+      | Some _ ->
+        Error
+          "chatml.missing_program: configured moderator requires captured program custody"
+    in
     let source_hash = source_hash (source_text script) in
-    let key = source_hash ^ "|" ^ surface_key surface in
+    let key =
+      Sexp.to_string
+        [%sexp ((script.id, source_hash, surface_key surface) : string * string * string)]
+    in
     match Map.find t key with
     | Some artifact -> Ok (t, artifact)
     | None ->
-      Runtime.compile_script ~surface ~source:(source_text script) ()
+      compile_script ~surface ~source:(source_text script)
       |> Result.map ~f:(fun compiled ->
         let artifact =
-          { script_id = script.id; source_hash; compiled; extension = None }
+          { script_id = script.id
+          ; source_hash
+          ; compiled = Extension_compiler.Program.Single compiled
+          ; surface = Runtime.compiled_surface compiled
+          ; extension = None
+          }
         in
         Map.set t ~key ~data:artifact, artifact)
+  ;;
+
+  let compile_script ?surface t script =
+    compile_script_with ?surface t script ~compile_script:(fun ~surface ~source ->
+      Runtime.compile_script ~surface ~source ())
+  ;;
+
+  let install_prepared t script ~surface program =
+    let compiled = Extension_compiler.Program.Prepared program in
+    let source_hash =
+      Extension_compiler.Program.source_revision
+        compiled
+        ~single_file_revision:(source_hash (source_text script))
+    in
+    let artifact =
+      { script_id = script.id; source_hash; compiled; surface; extension = None }
+    in
+    let key =
+      "prepared:" ^ Sexp.to_string [%sexp ((script.id, source_hash) : string * string)]
+    in
+    Map.set t ~key ~data:artifact, artifact
+  ;;
+
+  let prepare_script_detailed
+        ?startup
+        t
+        script
+        ~surface
+        ~programs
+        ~capabilities
+        ~env
+        ~checkpoint
+        ~limits
+        ~max_dependency_depth
+    =
+    Moderator_program.compile
+      ?startup
+      programs
+      ~script
+      ~surface
+      ~capabilities
+      ~env
+      ~checkpoint
+      ~limits
+      ~max_dependency_depth
+    |> Result.map ~f:(install_prepared t script ~surface)
+  ;;
+
+  let prepare_script
+        ?(surface = Builtin_surface.moderator_surface)
+        t
+        script
+        ~programs
+        ~capabilities
+        ~env
+        ~checkpoint
+        ~limits
+        ~max_dependency_depth
+    =
+    prepare_script_detailed
+      t
+      script
+      ~surface
+      ~programs
+      ~capabilities
+      ~env
+      ~checkpoint
+      ~limits
+      ~max_dependency_depth
+    |> Result.map_error ~f:(fun error ->
+      error.Chatml_compilation.code ^ ": " ^ error.message)
+  ;;
+
+  let prepare_elements
+        t
+        ?startup
+        ?programs
+        ~surface
+        ~capabilities
+        ~env
+        ~checkpoint
+        ~limits
+        ~max_dependency_depth
+        elements
+    =
+    let map_error (e : Chatml_compilation.error) =
+      [ Chatmd_shell_spec.Diagnostic.error ~code:e.code e.message ]
+    in
+    Startup_compilation.with_context
+      ?startup
+      ~limits
+      ~env
+      ~checkpoint
+      ~map_error
+      ~f:(fun startup ->
+        Startup_compilation.within startup ~map_error ~f:(fun () ->
+          let checkpoint () = Startup_compilation.checkpoint startup in
+          List.fold_result
+            elements
+            ~init:(t, None)
+            ~f:(fun (registry, selected) element ->
+              checkpoint ();
+              match element with
+              | CM.Script script ->
+                let result =
+                  match programs with
+                  | None ->
+                    let open Result.Let_syntax in
+                    let%bind () =
+                      Startup_compilation.admit_text startup (source_text script)
+                      |> Result.map_error ~f:map_error
+                    in
+                    let%bind limits =
+                      Startup_compilation.remaining_limits startup
+                      |> Result.map_error ~f:map_error
+                    in
+                    compile_script_with
+                      ~surface
+                      registry
+                      script
+                      ~compile_script:(fun ~surface ~source ->
+                        Chatml_compilation.compile_with_surface
+                          ~env
+                          ~limits
+                          ~surface
+                          ~required_bindings:[]
+                          ~source
+                          ()
+                        |> Result.map_error ~f:(fun e ->
+                          e.Chatml_compilation.code ^ ": " ^ e.message))
+                    |> Result.map_error ~f:(fun message ->
+                      [ Chatmd_shell_spec.Diagnostic.error
+                          ?source:script.source_ref
+                          ~code:"chatml.legacy_moderator_compile"
+                          message
+                      ])
+                  | Some programs ->
+                    prepare_script_detailed
+                      ~startup
+                      registry
+                      script
+                      ~surface
+                      ~programs
+                      ~capabilities
+                      ~env
+                      ~checkpoint
+                      ~limits
+                      ~max_dependency_depth
+                    |> Result.map_error ~f:(fun error ->
+                      [ Chatmd_shell_spec.Diagnostic.error
+                          ?source:script.source_ref
+                          ~code:error.Chatml_compilation.code
+                          error.message
+                      ])
+                in
+                Result.map result ~f:(fun (registry, artifact) ->
+                  checkpoint ();
+                  registry, Some artifact)
+              | _ -> Ok (registry, selected))))
+      ()
   ;;
 
   let of_elements
@@ -99,14 +277,33 @@ module Registry = struct
       let key =
         "extensibility-v1:" ^ Extension_compiler.definition_fingerprint definition
       in
+      let open Result.Let_syntax in
+      let%map surface =
+        match compiled with
+        | Single program -> Ok (Runtime.compiled_surface program)
+        | Prepared program ->
+          (match
+             Chatml.Chatml_compiler_contract.kind
+               (Chatml_linked_program.static_contract program)
+           with
+           | Standard Moderator_v1 -> Ok Chatml.Chatml_extension_surface.moderator_v1
+           | Standard Delegated_moderator_v1 ->
+             Ok Chatml.Chatml_extension_surface.delegated_moderator_v1
+           | Standard (One_off_v1 | Tool_v1) | Native ->
+             Error "Lifecycle moderator has an incompatible compiled contract")
+      in
       let artifact =
         { script_id = script.id
-        ; source_hash = script.source_sha256
+        ; source_hash =
+            Extension_compiler.Program.source_revision
+              compiled
+              ~single_file_revision:script.source_sha256
         ; compiled
+        ; surface
         ; extension = Some (script, definition)
         }
       in
-      Ok (Map.set t ~key ~data:artifact, Some artifact)
+      Map.set t ~key ~data:artifact, Some artifact
     | _ -> Error "Only one lifecycle moderator may be selected"
   ;;
 
@@ -165,7 +362,7 @@ type pending_ui_request = Runtime.pending_ui_request =
 let invocation_observer t =
   Option.map t.artifact.extension ~f:(fun (script, _) ->
     Agent_protocol.Invocation.
-      { script_id = script.id; source_sha256 = script.source_sha256 })
+      { script_id = script.id; source_sha256 = t.artifact.source_hash })
 ;;
 
 let extension_definition t = Option.map t.artifact.extension ~f:snd
@@ -193,11 +390,22 @@ let run_controlled ?context execution f =
 ;;
 
 let execution_runner ?env ?policy (artifact : Registry.artifact) =
-  match artifact.extension, env with
-  | None, _ -> Ok None
-  | Some _, None ->
+  match artifact.extension, artifact.compiled, env with
+  | None, Single _, _ -> Ok None
+  | None, Prepared _, None ->
+    Error
+      "chatml.execution_host_required: prepared legacy moderator requires an Eio \
+       environment"
+  | Some _, _, None ->
     Error "chatml.execution_host_required: extensibility-v1 requires an Eio environment"
-  | Some (script, _), Some env ->
+  | None, Prepared _, Some env ->
+    let policy =
+      Option.value
+        policy
+        ~default:(Chatml_execution.Bounded Chatml_execution.default_limits)
+    in
+    Ok (Some (Chatml_execution.create_runner ~env ~policy ()))
+  | Some (script, _), _, Some env ->
     let module D = Chatmd_shell_spec.Duration in
     let policy =
       Option.value_or_thunk policy ~default:(fun () ->
@@ -387,12 +595,7 @@ let create
     Option.value_map on_process_run ~default:handlers ~f:(fun on_process_run ->
       { handlers with on_process_run })
   in
-  let config =
-    Runtime.default_runtime_config
-      ~surface:(Runtime.compiled_surface artifact.compiled)
-      ~handlers
-      ()
-  in
+  let config = Runtime.default_runtime_config ~surface:artifact.surface ~handlers () in
   let config =
     match artifact.extension with
     | None -> config
@@ -433,13 +636,9 @@ let create
            ~handlers:
              (Ingress_operations.dynamic_handlers (fun () -> !ingress_transaction))
   in
-  let%bind runtime =
-    run_controlled execution (fun () ->
-      Runtime.instantiate_session ?control config artifact.compiled ~entrypoints)
-  in
-  let%bind overlay, next_overlay_message_id =
+  let%bind () =
     match snapshot with
-    | None -> Ok (Moderation.Overlay.empty, 1)
+    | None -> Ok ()
     | Some (snapshot : Session.Moderator_snapshot.t) ->
       if not (String.equal snapshot.script_id artifact.script_id)
       then
@@ -455,19 +654,35 @@ let create
              "Moderator snapshot source hash %S does not match prompt source hash %S."
              snapshot.script_source_hash
              artifact.source_hash)
-      else (
-        let%bind current_state, queued_internal_events =
-          restored_runtime_values snapshot
-        in
-        let%bind () =
-          Runtime.restore
-            runtime
-            ~state:current_state
-            ~queued_events:queued_internal_events
-            ~halted:snapshot.halted
-        in
-        let%map overlay = overlay_of_persisted snapshot.overlay in
-        overlay, max_overlay_message_id overlay + 1)
+      else Ok ()
+  in
+  let%bind runtime =
+    run_controlled execution (fun () ->
+      match artifact.compiled with
+      | Single program -> Runtime.instantiate_session ?control config program ~entrypoints
+      | Prepared program ->
+        Runtime.instantiate_prepared_session_detailed
+          config
+          program
+          ~entrypoints
+          ?control
+          ()
+        |> Result.map_error ~f:(fun diagnostic -> diagnostic.Chatml_diagnostic.message))
+  in
+  let%bind overlay, next_overlay_message_id =
+    match snapshot with
+    | None -> Ok (Moderation.Overlay.empty, 1)
+    | Some (snapshot : Session.Moderator_snapshot.t) ->
+      let%bind current_state, queued_internal_events = restored_runtime_values snapshot in
+      let%bind () =
+        Runtime.restore
+          runtime
+          ~state:current_state
+          ~queued_events:queued_internal_events
+          ~halted:snapshot.halted
+      in
+      let%map overlay = overlay_of_persisted snapshot.overlay in
+      overlay, max_overlay_message_id overlay + 1
   in
   Ok
     { artifact
@@ -546,29 +761,34 @@ let create_entries
       ()
   =
   let open Result.Let_syntax in
-  let%bind t = create ~artifact ~capabilities ?env ?execution_policy ?on_process_run () in
-  let%bind identity_overlay =
+  let%bind () =
     match snapshot with
-    | None -> Ok Moderation.Identity_overlay.empty
+    | None -> Ok ()
     | Some (snapshot : Session.Moderator_state.Identity_snapshot.t) ->
       if not (String.equal snapshot.script_id artifact.script_id)
       then Error "Moderator identity snapshot script id does not match prompt script id."
       else if not (String.equal snapshot.script_source_hash artifact.source_hash)
       then
         Error "Moderator identity snapshot source hash does not match prompt source hash."
-      else (
-        let%bind state, queued_events =
-          let%bind state = Value_codec.Snapshot.to_value snapshot.current_state in
-          let%map queued =
-            Result.all
-              (List.map snapshot.queued_internal_events ~f:Value_codec.Snapshot.to_value)
-          in
-          state, queued
+      else Ok ()
+  in
+  let%bind t = create ~artifact ~capabilities ?env ?execution_policy ?on_process_run () in
+  let%bind identity_overlay =
+    match snapshot with
+    | None -> Ok Moderation.Identity_overlay.empty
+    | Some (snapshot : Session.Moderator_state.Identity_snapshot.t) ->
+      let%bind state, queued_events =
+        let%bind state = Value_codec.Snapshot.to_value snapshot.current_state in
+        let%map queued =
+          Result.all
+            (List.map snapshot.queued_internal_events ~f:Value_codec.Snapshot.to_value)
         in
-        let%bind () =
-          Runtime.restore t.runtime ~state ~queued_events ~halted:snapshot.halted
-        in
-        identity_overlay_of_snapshot snapshot)
+        state, queued
+      in
+      let%bind () =
+        Runtime.restore t.runtime ~state ~queued_events ~halted:snapshot.halted
+      in
+      identity_overlay_of_snapshot snapshot
   in
   Ok { t with allocator = Some allocator; identity_overlay }
 ;;
@@ -1739,7 +1959,7 @@ let handle_observation_entries
         match invocation.observation, invocation.status with
         | Some { status = Observing; observer }, (Resolved result | Published result)
           when String.equal observer.script_id script.id
-               && String.equal observer.source_sha256 script.source_sha256 -> Ok result
+               && String.equal observer.source_sha256 t.artifact.source_hash -> Ok result
         | _ ->
           Error
             "observation.wrong_owner: requires a claimed outcome for this moderator \

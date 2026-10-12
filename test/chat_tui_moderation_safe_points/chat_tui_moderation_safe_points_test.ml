@@ -176,7 +176,14 @@ let model_job_moderator_script =
 let artifact ?(source = moderator_script) () =
   let surface = Chatml.Chatml_builtin_surface.moderator_surface in
   let script =
-    CM.{ id = "main"; language = "chatml"; kind = "moderator"; source = Inline source }
+    CM.
+      { id = "main"
+      ; language = "chatml"
+      ; project_selection = None
+      ; kind = "moderator"
+      ; source_ref = None
+      ; source = Inline source
+      }
   in
   ok_or_fail (Manager.Registry.compile_script ~surface Manager.Registry.empty script)
   |> snd
@@ -200,7 +207,9 @@ let create_moderator
               CM.
                 { id = "main"
                 ; language = "chatml"
+                ; project_selection = None
                 ; kind = "moderator"
+                ; source_ref = None
                 ; source = Inline (Option.value source ~default:moderator_script)
                 }
             in

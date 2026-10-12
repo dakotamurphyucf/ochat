@@ -1,0 +1,5 @@
+(library
+ (name prompt_dependency_protocol_tests)
+ (libraries core eio_main ochat.agent_protocol ochat.agent_client ochat.agent_server)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

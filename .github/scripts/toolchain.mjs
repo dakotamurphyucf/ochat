@@ -17,6 +17,27 @@ export function cacheKey(fingerprint, read = (name) => fs.readFileSync(name)) {
     hash.update(name).update("\0").update(read(name)).update("\0");
   return `ochat-opam-v1-${hash.digest("hex")}`;
 }
+export function checkRunner(fingerprint) {
+  const supportedImage =
+    (fingerprint.arch === "x64" && fingerprint.image === "ubuntu24") ||
+    (fingerprint.arch === "arm64" && fingerprint.image === "ubuntu24-arm64");
+  if (
+    fingerprint.platform !== "linux" ||
+    !supportedImage ||
+    typeof fingerprint.imageVersion !== "string" ||
+    !fingerprint.imageVersion.trim()
+  )
+    throw new Error(
+      "The dependency cache requires GitHub Ubuntu 24.04 x64 or ARM64 runners; " +
+        `found ${JSON.stringify({
+          platform: fingerprint.platform,
+          arch: fingerprint.arch,
+          image: fingerprint.image,
+          imageVersion: fingerprint.imageVersion,
+        })}`,
+    );
+}
+
 export function checkInstalled(expected, output) {
   const installed = new Map(
     output
@@ -60,14 +81,7 @@ function main() {
       compiler: config.compiler,
       opam: config.opam,
     };
-    if (
-      fingerprint.platform !== "linux" ||
-      fingerprint.image !== "ubuntu24" ||
-      !fingerprint.imageVersion
-    )
-      throw new Error(
-        "The dependency cache is qualified for GitHub ubuntu-24.04 runners only",
-      );
+    checkRunner(fingerprint);
     const key = cacheKey(fingerprint);
     fs.appendFileSync(
       process.env.GITHUB_OUTPUT,

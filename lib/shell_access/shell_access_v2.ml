@@ -2101,6 +2101,49 @@ module Request = struct
 end
 
 module Executor = struct
+  module Code = struct
+    type t =
+      { manifest_sha256 : string
+      ; policy : Policy.t
+      ; reviewer : Approval.reviewer option
+      ; reviewer_with_metadata : Approval.reviewer_with_metadata option
+      ; analyzers : Analyzer.t list
+      ; interceptors : Interceptor.t list
+      ; audit : Audit.t
+      ; check : unit -> (unit, string) result
+      }
+
+    let create
+          ~manifest_sha256
+          ~policy
+          ~reviewer
+          ~reviewer_with_metadata
+          ~analyzers
+          ~interceptors
+          ~audit
+          ~check
+      =
+      { manifest_sha256
+      ; policy
+      ; reviewer
+      ; reviewer_with_metadata
+      ; analyzers
+      ; interceptors
+      ; audit
+      ; check
+      }
+    ;;
+
+    let with_check t ~check =
+      let check () =
+        match t.check () with
+        | Error _ as error -> error
+        | Ok () -> check ()
+      in
+      { t with check }
+    ;;
+  end
+
   type progress =
     { channel : [ `Stdout | `Stderr ]
     ; text : string
@@ -2125,7 +2168,9 @@ module Executor = struct
     ; reviewer : Approval.reviewer option
     ; reviewer_with_metadata : Approval.reviewer_with_metadata option
     ; approval_store : Approval.store
+    ; resource_owner : unit ref
     ; execution_check : unit -> (unit, string) result
+    ; code_check : unit -> (unit, string) result
     ; administrative_check : Context.t -> (unit, string) result
     ; analyzers : Analyzer.t list
     ; interceptors : Interceptor.t list
@@ -2350,7 +2395,9 @@ module Executor = struct
     ; reviewer
     ; reviewer_with_metadata
     ; approval_store
+    ; resource_owner = ref ()
     ; execution_check = (fun () -> Ok ())
+    ; code_check = (fun () -> Ok ())
     ; administrative_check
     ; analyzers
     ; interceptors
@@ -2384,8 +2431,55 @@ module Executor = struct
     }
   ;;
 
-  let check_execution config =
+  let same_resource_owner left right = phys_equal left.resource_owner right.resource_owner
+
+  let code config =
+    Code.create
+      ~manifest_sha256:config.manifest_sha256
+      ~policy:config.policy
+      ~reviewer:config.reviewer
+      ~reviewer_with_metadata:config.reviewer_with_metadata
+      ~analyzers:config.analyzers
+      ~interceptors:config.interceptors
+      ~audit:config.audit
+      ~check:config.code_check
+  ;;
+
+  let manifest_sha256 config = config.manifest_sha256
+
+  let with_code config (code : Code.t) =
+    (* Resource/caller checks belong to the actual supplied config. Only the
+       specialist code check is replaced, so an expired previous code owner is
+       not accidentally required by an independently admitted replacement. *)
+    { config with
+      manifest_sha256 = code.manifest_sha256
+    ; policy = code.policy
+    ; reviewer = code.reviewer
+    ; reviewer_with_metadata = code.reviewer_with_metadata
+    ; analyzers = code.analyzers
+    ; interceptors = code.interceptors
+    ; audit = code.audit
+    ; code_check = code.check
+    }
+  ;;
+
+  let with_execution_check config ~check =
+    let execution_check () =
+      match config.execution_check () with
+      | Error _ as error -> error
+      | Ok () -> check ()
+    in
+    { config with execution_check }
+  ;;
+
+  let execution_allowed config =
     match config.execution_check () with
+    | Error _ as error -> error
+    | Ok () -> config.code_check ()
+  ;;
+
+  let check_execution config =
+    match execution_allowed config with
     | Ok () -> ()
     | Error reason -> raise (Execution_error (Denied reason))
   ;;
@@ -3167,7 +3261,7 @@ module Executor = struct
                              channel
                              ~source:request_source
                              ~sink:response_sink
-                             ~check:(fun () -> Result.is_ok (config.execution_check ()))
+                             ~check:(fun () -> Result.is_ok (execution_allowed config))
                              ~on_activity:(fun () ->
                                last_activity := Eio.Time.now (Eio.Stdenv.clock config.env))
                          with

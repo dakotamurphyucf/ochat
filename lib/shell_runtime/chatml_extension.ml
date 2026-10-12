@@ -37,23 +37,36 @@ type limits =
   ; max_depth : int
   }
 
+type program =
+  | Legacy of R.compiled_script
+  | Prepared of Chatml_linked_program.t
+
 type compiled =
-  { id : string
+  { declaration : S.t
+  ; id : string
   ; kind : S.kind
   ; source : Chatmd_shell_spec.Source_ref.t
   ; source_text : string
   ; source_sha256 : string
-  ; program : R.compiled_script
+  ; program : program
+  ; alternatives : Chatml_linked_program.t String.Map.t
   ; surface : Surface.surface
   ; entrypoint : string
   ; limits : limits
   }
 
+type instance_state =
+  | Pending
+  | Ready of R.session option
+  | Failed
+  | Closed
+
 type instance =
   { compiled : compiled
   ; lifecycle : Chatmd_shell_spec.Shell_spec.lifecycle
   ; config : R.runtime_config
-  ; mutable session : R.session option
+  ; execution : Chatml_execution.runner option
+  ; mutable state : instance_state
   ; mutable snapshot_handler : (Session.Snapshot.t -> (unit, string) result) option
   ; mutex : Eio.Mutex.t
   ; env : Eio_unix.Stdenv.base
@@ -109,6 +122,8 @@ let entrypoint = function
   | Moderator -> "on_event"
 ;;
 
+let default_entrypoint = entrypoint
+
 let wrapper entrypoint =
   sprintf
     "\n\
@@ -117,33 +132,194 @@ let wrapper entrypoint =
     entrypoint
 ;;
 
+let compile_with ~compile_script ~script =
+  match script.S.project_selection with
+  | Some _ ->
+    Error
+      [ error
+          ~source:script.source_ref
+          "shell.chatml_missing_program"
+          "Configured shell script requires captured project preparation"
+      ]
+  | None ->
+    let surface = surface script.S.kind in
+    let source_text = S.source_text script in
+    let entrypoint = entrypoint script.kind in
+    let source = source_text ^ wrapper entrypoint in
+    (match compile_script ~surface ~source with
+     | Ok program ->
+       Ok
+         { declaration = script
+         ; id = script.id
+         ; kind = script.kind
+         ; source = script.source_ref
+         ; source_text
+         ; source_sha256 = script.source_sha256
+         ; program = Legacy program
+         ; alternatives = String.Map.empty
+         ; surface
+         ; entrypoint
+         ; limits = limits_of_script script.limits
+         }
+     | Error message ->
+       Error [ error ~source:script.source_ref "shell.chatml_compile" message ])
+;;
+
 let compile ~script =
-  let surface = surface script.S.kind in
-  let source_text = S.source_text script in
-  let entrypoint = entrypoint script.kind in
-  let source = source_text ^ wrapper entrypoint in
-  match R.compile_script ~surface ~source () with
-  | Ok program ->
-    Ok
-      { id = script.id
-      ; kind = script.kind
-      ; source = script.source_ref
-      ; source_text
-      ; source_sha256 = script.source_sha256
-      ; program
-      ; surface
-      ; entrypoint
-      ; limits = limits_of_script script.limits
-      }
-  | Error message ->
-    Error [ error ~source:script.source_ref "shell.chatml_compile" message ]
+  compile_with
+    ~compile_script:(fun ~surface ~source -> R.compile_script ~surface ~source ())
+    ~script
+;;
+
+let compile_with_limits ~env ~limits ~script =
+  compile_with ~script ~compile_script:(fun ~surface ~source ->
+    Chatml_compilation.compile_with_surface
+      ~limits
+      ~env
+      ~surface
+      ~required_bindings:[]
+      ~source
+      ()
+    |> Result.map_error ~f:(fun failure ->
+      failure.Chatml_compilation.code ^ ": " ^ failure.message))
 ;;
 
 let with_entrypoint compiled entrypoint =
-  let source = compiled.source_text ^ wrapper entrypoint in
-  match R.compile_script ~surface:compiled.surface ~source () with
-  | Ok program -> Ok { compiled with program; entrypoint }
-  | Error message -> Error (error ~source:compiled.source "shell.chatml_compile" message)
+  match compiled.program with
+  | Prepared _ ->
+    if String.equal compiled.entrypoint entrypoint
+    then Ok compiled
+    else (
+      match Map.find compiled.alternatives entrypoint with
+      | Some program -> Ok { compiled with program = Prepared program; entrypoint }
+      | None ->
+        Error
+          (error
+             ~source:compiled.source
+             "shell.chatml_prepared_entrypoint"
+             "The selected entrypoint requires an already compiled captured program"))
+  | Legacy _ ->
+    let source = compiled.source_text ^ wrapper entrypoint in
+    (match R.compile_script ~surface:compiled.surface ~source () with
+     | Ok program -> Ok { compiled with program = Legacy program; entrypoint }
+     | Error message ->
+       Error (error ~source:compiled.source "shell.chatml_compile" message))
+;;
+
+let with_prepared_entrypoints compiled ~alternatives ~checkpoint =
+  let invalid message =
+    Error (error ~source:compiled.source "shell.chatml_entrypoint_set" message)
+  in
+  checkpoint ();
+  match compiled.program, compiled.kind with
+  | Prepared program, S.Shell_matcher
+    when String.equal compiled.entrypoint (default_entrypoint compiled.kind)
+         && Map.is_empty compiled.alternatives ->
+    let open Result.Let_syntax in
+    let%map alternatives =
+      List.fold_result alternatives ~init:String.Map.empty ~f:(fun found alternative ->
+        checkpoint ();
+        if not (S.equal compiled.declaration alternative.declaration)
+        then invalid "Matcher alternative belongs to a different declaration"
+        else if
+          String.equal alternative.entrypoint compiled.entrypoint
+          || Map.mem found alternative.entrypoint
+        then invalid "Duplicate matcher entrypoint"
+        else if not (Map.is_empty alternative.alternatives)
+        then invalid "Matcher alternatives cannot contain another entrypoint set"
+        else (
+          match alternative.program with
+          | Legacy _ -> invalid "Matcher alternative must be a prepared program"
+          | Prepared program ->
+            Ok (Map.set found ~key:alternative.entrypoint ~data:program)))
+    in
+    { compiled with
+      alternatives = Map.set alternatives ~key:compiled.entrypoint ~data:program
+    }
+  | Prepared _, _ | Legacy _, _ ->
+    invalid "Entrypoint alternatives require an unattached default prepared matcher"
+;;
+
+let compiler_contract kind ~entrypoint ~checkpoint =
+  checkpoint ();
+  if String.is_empty entrypoint || String.length entrypoint > 1024
+  then
+    Error
+      (error "shell.chatml_entrypoint" "Shell entrypoint must contain 1 to 1024 bytes")
+  else
+    let module Spec = Chatml.Chatml_builtin_spec in
+    let open Result.Let_syntax in
+    let%map event =
+      match kind with
+      | S.Shell_matcher
+      | Shell_reviewer
+      | Shell_before_interceptor
+      | Shell_effect_analyzer -> Ok Spec.shell_context_ty
+      | Shell_after_interceptor -> Ok Spec.shell_result_ty
+      | Shell_audit_filter -> Ok Spec.shell_audit_ty
+      | Moderator ->
+        Error
+          (error
+             "shell.chatml_kind"
+             "Moderator is a distinct three-argument session role")
+    in
+    let projected =
+      Chatml.Chatml_static_surface.of_runtime_surface (surface kind) ~checkpoint
+    in
+    let state = Spec.TVar "state" in
+    Chatml.Chatml_compiler_contract.for_static_surface
+      projected
+      ~required_bindings:
+        [ "initial_state", state
+        ; entrypoint, Spec.TFun ([ event; state ], Spec.TCon ("task", [ state ]))
+        ]
+;;
+
+let compile_prepared input ~script ~entrypoint ~limits ~max_dependency_depth ~env () =
+  let open Result.Let_syntax in
+  let source_text = S.source_text script in
+  let%bind () =
+    Chatml_compilation.validate_limits limits
+    |> Result.map_error ~f:(fun failure ->
+      [ error ~source:script.S.source_ref failure.code failure.message ])
+  in
+  let%bind digest =
+    Chatml_source.Digest.of_hex script.S.source_sha256
+    |> Result.map_error ~f:(fun _ ->
+      [ error
+          ~source:script.source_ref
+          "shell.chatml_digest"
+          "Invalid declared script digest"
+      ])
+  in
+  let%bind contract =
+    compiler_contract script.kind ~entrypoint ~checkpoint:Eio.Fiber.yield
+    |> Result.map_error ~f:List.return
+  in
+  let%map program =
+    Chatml_compilation.compile_prepared_with_contract
+      input
+      ~contract
+      ~expected_entry:{ contents = source_text; digest }
+      ~limits
+      ~max_dependency_depth
+      ~env
+      ()
+    |> Result.map_error ~f:(fun failure ->
+      [ error ~source:script.source_ref failure.code failure.message ])
+  in
+  { declaration = script
+  ; id = script.id
+  ; kind = script.kind
+  ; source = script.source_ref
+  ; source_text
+  ; source_sha256 = script.source_sha256
+  ; program = Prepared program
+  ; alternatives = String.Map.empty
+  ; surface = surface script.kind
+  ; entrypoint
+  ; limits = limits_of_script script.limits
+  }
 ;;
 
 let expect_string limits name = function
@@ -260,46 +436,158 @@ let operation_names =
   ]
 ;;
 
-let instantiate_session (compiled : compiled) (config : R.runtime_config) =
-  R.instantiate_session
-    config
-    compiled.program
-    ~entrypoints:
-      { initial_state_name = "__ochat_shell_initial_state"
-      ; on_event_name = "__ochat_shell_on_event"
-      }
+let run_controlled execution f =
+  match execution with
+  | None -> f ()
+  | Some execution ->
+    Chatml_execution.run_scoped execution f
+    |> Result.map_error ~f:(fun failure -> failure.Chatml_execution.message)
+    |> Result.join
 ;;
 
-let instantiate ~env ?limits ~lifecycle (compiled : compiled) =
+let instantiate_session (compiled : compiled) (config : R.runtime_config) execution =
+  match compiled.program with
+  | Legacy program ->
+    R.instantiate_session
+      config
+      program
+      ~entrypoints:
+        { initial_state_name = "__ochat_shell_initial_state"
+        ; on_event_name = "__ochat_shell_on_event"
+        }
+  | Prepared program ->
+    let control = Option.map execution ~f:Chatml_execution.runner_control in
+    R.instantiate_prepared_event_state_session_detailed
+      config
+      program
+      ~entrypoints:
+        { initial_state_name = "initial_state"; on_event_name = compiled.entrypoint }
+      ?control
+      ()
+    |> Result.map_error ~f:(fun diagnostic ->
+      Chatml_diagnostic.render
+        diagnostic
+        ~label:"Runtime error"
+        ~checkpoint:Eio.Fiber.yield)
+;;
+
+let prepare_instance ~env ?limits ~lifecycle (compiled : compiled) =
   let limits = Option.value limits ~default:compiled.limits in
   let config =
     R.{ surface = compiled.surface; operations = List.map operation_names ~f:operation }
   in
-  let session =
-    match lifecycle with
-    | Chatmd_shell_spec.Shell_spec.Invocation -> Ok None
-    | Session | Runtime -> Result.map (instantiate_session compiled config) ~f:Option.some
+  let execution =
+    match compiled.program with
+    | Legacy _ -> None
+    | Prepared _ ->
+      Some
+        (Chatml_execution.create_runner
+           ~env
+           ~policy:
+             (Bounded
+                { Chatml_execution.default_limits with
+                  fuel = limits.fuel
+                ; max_tasks = limits.max_tasks
+                ; wall_seconds = limits.wall_time_seconds
+                ; max_value_bytes = limits.max_value_bytes
+                ; max_array_items = limits.max_array_items
+                ; max_depth = limits.max_depth
+                })
+           ())
   in
-  Result.map_error session ~f:(error ~source:compiled.source "shell.chatml_instantiate")
-  |> Result.map ~f:(fun session ->
+  Ok
     { compiled
     ; lifecycle
     ; config
-    ; session
+    ; execution
+    ; state = Pending
     ; snapshot_handler = None
     ; mutex = Eio.Mutex.create ()
     ; env
     ; limits
-    })
+    }
+;;
+
+let unavailable = function
+  | Pending -> "shell ChatML activation is pending"
+  | Failed -> "shell ChatML activation failed"
+  | Closed -> "shell ChatML owner has closed"
+  | Ready _ -> "shell ChatML instance is ready"
+;;
+
+let close instance = instance.state <- Closed
+
+let activate instance =
+  let outcome =
+    Eio.Mutex.use_rw ~protect:false instance.mutex (fun () ->
+      match instance.state with
+      | Ready _ -> Ok (Ok ())
+      | (Failed | Closed) as state -> Ok (Error (unavailable state))
+      | Pending ->
+        (try
+           Eio.Fiber.check ();
+           let session =
+             match instance.lifecycle with
+             | Chatmd_shell_spec.Shell_spec.Invocation -> Ok None
+             | Session | Runtime ->
+               run_controlled instance.execution (fun () ->
+                 instantiate_session instance.compiled instance.config instance.execution)
+               |> Result.map ~f:Option.some
+           in
+           Eio.Fiber.check ();
+           match instance.state, session with
+           | Closed, _ -> Ok (Error (unavailable Closed))
+           | (Pending | Ready _ | Failed), Ok session ->
+             instance.state <- Ready session;
+             Ok (Ok ())
+           | (Pending | Ready _ | Failed), Error message ->
+             instance.state <- Failed;
+             Ok (Error message)
+         with
+         | exn ->
+           let backtrace = Backtrace.Exn.most_recent () in
+           (match instance.state with
+            | Closed -> ()
+            | Pending | Ready _ | Failed -> instance.state <- Failed);
+           Error (exn, backtrace)))
+  in
+  (match outcome with
+   | Ok result -> result
+   | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace)
+  |> Result.map_error ~f:(error ~source:instance.compiled.source "shell.chatml_activate")
+;;
+
+let instantiate ~env ?limits ~lifecycle compiled =
+  Result.bind (prepare_instance ~env ?limits ~lifecycle compiled) ~f:(fun instance ->
+    activate instance
+    |> Result.map ~f:(fun () -> instance)
+    |> Result.map_error ~f:(fun diagnostic ->
+      { diagnostic with D.code = "shell.chatml_instantiate" }))
 ;;
 
 let session instance =
-  match instance.lifecycle, instance.session with
-  | Chatmd_shell_spec.Shell_spec.Invocation, _ ->
-    instantiate_session instance.compiled instance.config
-  | (Session | Runtime), Some session -> Ok session
-  | (Session | Runtime), None -> Error "stateful ChatML extension has no session"
+  match instance.state, instance.lifecycle with
+  | ((Pending | Failed | Closed) as state), _ -> Error (unavailable state)
+  | Ready _, Chatmd_shell_spec.Shell_spec.Invocation ->
+    instantiate_session instance.compiled instance.config instance.execution
+  | Ready (Some session), (Session | Runtime) -> Ok session
+  | Ready None, (Session | Runtime) -> Error "stateful ChatML extension has no session"
 ;;
+
+let snapshot_values ~state ~queued_events ~halted =
+  let module Snapshot = Session.Snapshot in
+  let open Result.Let_syntax in
+  let%bind state = Snapshot.of_value state in
+  let%map queued_events = List.map queued_events ~f:Snapshot.of_value |> Result.all in
+  Snapshot.Record
+    [ "ochat_shell_extension_snapshot", Int 1
+    ; "state", state
+    ; "queued_events", Array queued_events
+    ; "halted", Bool halted
+    ]
+;;
+
+exception Persistence_exception of exn * Backtrace.t
 
 let call_unlocked instance ~context ~event =
   let codec_limits =
@@ -335,9 +623,55 @@ let call_unlocked instance ~context ~event =
           |> Result.map_error ~f:(fun diagnostic ->
             diagnostic.Chatmd_shell_spec.Diagnostic.message)
         in
+        let persistent_handler =
+          match instance.lifecycle with
+          | Invocation -> None
+          | Session | Runtime -> instance.snapshot_handler
+        in
+        let copy_state =
+          match instance.compiled.program, persistent_handler with
+          | Legacy _, None -> None
+          | Prepared _, _ | Legacy _, Some _ ->
+            Some
+              (fun value ->
+                Result.bind (validate_state value) ~f:(fun () ->
+                  Session.Snapshot.of_value value
+                  |> Result.bind ~f:Session.Snapshot.to_value))
+        in
+        let prepare_transaction =
+          Option.map persistent_handler ~f:(fun persist (proposal : R.transaction) ->
+            let open Result.Let_syntax in
+            let%bind () =
+              List.map proposal.queued_events ~f:validate_state
+              |> Result.all
+              |> Result.map ~f:ignore
+            in
+            let%bind snapshot =
+              snapshot_values
+                ~state:proposal.new_state
+                ~queued_events:proposal.queued_events
+                ~halted:proposal.halted
+            in
+            (* Every conversion/budget/cancellation check precedes durable write.
+               Pending asynchronous cancellation cannot split successful persistence
+               from the runtime's immediately following nonyielding installation. *)
+            Eio.Fiber.check ();
+            Option.iter instance.execution ~f:(fun runner ->
+              (Chatml_execution.runner_control runner).diagnostic_checkpoint ());
+            Eio.Cancel.protect (fun () ->
+              let%map () =
+                try persist snapshot with
+                | exn ->
+                  let backtrace = Backtrace.Exn.most_recent () in
+                  raise (Persistence_exception (exn, backtrace))
+              in
+              ignore))
+        in
         Result.bind
           (R.handle_event
              ~prepare_commit
+             ?prepare_transaction
+             ?copy_state
              ~validate_state
              ~limits:runtime_limits
              session
@@ -349,29 +683,26 @@ let call_unlocked instance ~context ~event =
               ~error:"shell ChatML hook committed without an action"))))
 ;;
 
-let snapshot_session session =
-  let module Snapshot = Session.Snapshot in
-  Result.bind
-    (Snapshot.of_value (R.current_state session))
-    ~f:(fun state ->
-      R.queued_events session
-      |> List.map ~f:Snapshot.of_value
-      |> Result.all
-      |> Result.map ~f:(fun queued_events ->
-        Snapshot.Record
-          [ "ochat_shell_extension_snapshot", Int 1
-          ; "state", state
-          ; "queued_events", Array queued_events
-          ; "halted", Bool (R.is_halted session)
-          ]))
+let snapshot_session ?control session =
+  let state = R.current_state session in
+  let queued_events = R.queued_events session in
+  Option.iter control ~f:(fun control ->
+    control.L.check_value state;
+    List.iter queued_events ~f:control.check_value);
+  let result = snapshot_values ~state ~queued_events ~halted:(R.is_halted session) in
+  Option.iter control ~f:(fun control -> control.L.diagnostic_checkpoint ());
+  result
 ;;
 
 let snapshot_unlocked instance =
-  match instance.lifecycle, instance.session with
-  | Chatmd_shell_spec.Shell_spec.Invocation, _ ->
+  match instance.state, instance.lifecycle with
+  | ((Pending | Failed | Closed) as state), _ -> Error (unavailable state)
+  | Ready _, Chatmd_shell_spec.Shell_spec.Invocation ->
     Error "invocation-scoped ChatML extensions are not persistent"
-  | (Session | Runtime), Some session -> snapshot_session session
-  | (Session | Runtime), None -> Error "stateful ChatML extension has no session"
+  | Ready (Some session), (Session | Runtime) ->
+    let control = Option.map instance.execution ~f:Chatml_execution.runner_control in
+    snapshot_session ?control session
+  | Ready None, (Session | Runtime) -> Error "stateful ChatML extension has no session"
 ;;
 
 let snapshot_fields = function
@@ -398,24 +729,14 @@ let decode_snapshot snapshot =
 ;;
 
 let restore_unlocked instance snapshot =
-  match instance.lifecycle, instance.session with
-  | Chatmd_shell_spec.Shell_spec.Invocation, _ ->
+  match instance.state, instance.lifecycle with
+  | ((Pending | Failed | Closed) as state), _ -> Error (unavailable state)
+  | Ready _, Chatmd_shell_spec.Shell_spec.Invocation ->
     Error "invocation-scoped ChatML extensions cannot be restored"
-  | (Session | Runtime), Some session ->
+  | Ready (Some session), (Session | Runtime) ->
     Result.bind (decode_snapshot snapshot) ~f:(fun (state, queued_events, halted) ->
       R.restore session ~state ~queued_events ~halted)
-  | (Session | Runtime), None -> Error "stateful ChatML extension has no session"
-;;
-
-let persist_or_rollback instance before =
-  match instance.snapshot_handler with
-  | None -> Ok ()
-  | Some persist ->
-    Result.bind (snapshot_unlocked instance) ~f:(fun snapshot ->
-      match persist snapshot with
-      | Ok () -> Ok ()
-      | Error message ->
-        Result.bind (restore_unlocked instance before) ~f:(fun () -> Error message))
+  | Ready None, (Session | Runtime) -> Error "stateful ChatML extension has no session"
 ;;
 
 let call instance ~context ~event =
@@ -424,21 +745,42 @@ let call instance ~context ~event =
       Eio.Time.with_timeout_exn
         (Eio.Stdenv.clock instance.env)
         instance.limits.wall_time_seconds
-        (fun () ->
-           let before =
-             Option.bind instance.snapshot_handler ~f:(fun _ ->
-               Result.ok (snapshot_unlocked instance))
-           in
-           Result.bind (call_unlocked instance ~context ~event) ~f:(fun action ->
-             match before with
-             | None -> Ok action
-             | Some before ->
-               Result.map (persist_or_rollback instance before) ~f:(fun () -> action)))
+        (fun () -> call_unlocked instance ~context ~event)
     with
     | Eio.Time.Timeout -> Error "shell ChatML hook timed out"
   in
-  Eio.Mutex.use_rw ~protect:true instance.mutex run
+  let protect =
+    match instance.compiled.program with
+    | Legacy _ -> true
+    | Prepared _ -> false
+  in
+  let outcome =
+    Eio.Mutex.use_rw ~protect instance.mutex (fun () ->
+      (* Host rollback and defensive state copying make these two exceptional
+         paths consistent. Release the lock normally before propagating them;
+         unexpected infrastructure failures still poison it. *)
+      try Ok (run_controlled instance.execution run) with
+      | Persistence_exception (exn, backtrace) -> Error (exn, backtrace)
+      | Eio.Cancel.Cancelled _ as exn -> Error (exn, Backtrace.Exn.most_recent ()))
+  in
+  (match outcome with
+   | Ok result -> result
+   | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace)
   |> Result.map_error ~f:(error ~source:instance.compiled.source "shell.chatml_runtime")
+;;
+
+let source_revision (compiled : compiled) =
+  match compiled.program with
+  | Legacy _ -> compiled.source_sha256
+  | Prepared program ->
+    Chatml_linked_program.prepared program
+    |> Chatml_prepared_program.fingerprint
+    |> Chatml_source.Digest.to_hex
+;;
+
+let matches_script compiled script =
+  S.equal compiled.declaration script
+  && String.equal compiled.entrypoint (entrypoint script.S.kind)
 ;;
 
 let id compiled = compiled.id
@@ -449,16 +791,43 @@ let limits (compiled : compiled) = compiled.limits
 let instance_id instance = instance.compiled.id
 let instance_kind instance = instance.compiled.kind
 let instance_source_sha256 instance = instance.compiled.source_sha256
+let instance_source_revision instance = source_revision instance.compiled
 
 let snapshot instance =
-  Eio.Mutex.use_rw ~protect:true instance.mutex (fun () -> snapshot_unlocked instance)
+  Eio.Mutex.use_rw ~protect:true instance.mutex (fun () ->
+    run_controlled instance.execution (fun () -> snapshot_unlocked instance))
   |> Result.map_error ~f:(error ~source:instance.compiled.source "shell.chatml_snapshot")
 ;;
 
 let restore instance snapshot =
   Eio.Mutex.use_rw ~protect:true instance.mutex (fun () ->
-    restore_unlocked instance snapshot)
+    run_controlled instance.execution (fun () -> restore_unlocked instance snapshot))
   |> Result.map_error ~f:(error ~source:instance.compiled.source "shell.chatml_restore")
 ;;
 
 let set_snapshot_handler instance handler = instance.snapshot_handler <- Some handler
+
+let prepared_hooks (compiled : compiled) ~checkpoint =
+  let fact entrypoint program =
+    checkpoint ();
+    Chatmd_shell_spec.Manifest.Prepared_hook.create
+      ~id:compiled.id
+      ~kind:compiled.kind
+      ~entrypoint
+      ~program_fingerprint:
+        (Chatml_linked_program.prepared program
+         |> Chatml_prepared_program.fingerprint
+         |> Chatml_source.Digest.to_hex)
+      ~checkpoint
+    |> Or_error.ok_exn
+  in
+  match compiled.program with
+  | Legacy _ -> []
+  | Prepared program ->
+    if Map.is_empty compiled.alternatives
+    then [ fact compiled.entrypoint program ]
+    else
+      Map.fold compiled.alternatives ~init:[] ~f:(fun ~key ~data facts ->
+        fact key data :: facts)
+      |> List.rev
+;;

@@ -1,0 +1,66 @@
+open Core
+
+type t
+
+val revision : t -> Prompt_revision.t
+val reference : t -> Chat_response.Background_request.Agent_artifact.t
+
+(** New File selection, under the defining runtime's original source lease.
+    Same remaining cooperative work allowance covers exact reference admission,
+    Scope capture, program/content preparation, final replay and installation.
+    Entry retains only admitted bounded identity; original parent/reference do
+    not escape. The host callback prepares only immutable custody using actual
+    explicitly supplied source grants and original dependency history. It must
+    use capture_child's authentic invocation role; no guessed Initial operation.
+    Content uses the SAME actual Scope. Final Builder capture_entry publication
+    installs and verifies before returning. No initializer/native resource,
+    reservation, job stage, retry or fallback here. Original exceptions retain
+    identity/backtrace after Scope joining. *)
+val file
+  :  parent:Prompt_revision.t
+  -> reference:Prompt.Chat_markdown.Agent_reference.t
+  -> source_lease:Prompt_source_lease.t
+  -> artifact_store:Agent_store.Prompt_artifact_store.t
+  -> compilation:Chatml_compilation.limits
+  -> parser_limits:Prompt.Chat_markdown.Limits.t
+  -> content_limits:Chatmd_prompt_content.Limits.t option
+  -> max_work_steps:int
+  -> preprocess:(string -> string)
+  -> prepare_programs:
+       (Chat_response.Startup_compilation.t
+        -> Prompt_source_owner.Scope.t
+        -> Prompt_source_owner.Capture.t
+        -> (Chatml_prompt_programs.t, Prompt_revision_builder.Diagnostic.t list) Result.t)
+  -> env:Eio_unix.Stdenv.base
+  -> created_at:Agent_protocol.Timestamp.t
+  -> checkpoint:(unit -> unit)
+  -> (t, Agent_protocol.Error.t) Result.t
+
+(** New Captured selection: authentic retained child role under runtime semantic
+    policy, then install/verify its complete immutable artifact. No original
+    lease, current file read, Fetch or source grant is used. The selected child
+    has its own materialized tree/replayed Parsed; original parent untouched.
+    Actual complete role selection and restoration precede installation. *)
+val captured
+  :  parent:Prompt_revision.t
+  -> reference:Prompt.Chat_markdown.Agent_reference.t
+  -> artifact_store:Agent_store.Prompt_artifact_store.t
+  -> policy:Runtime_script_preparation.t
+  -> invocation:Runtime_script_preparation.Invocation.t
+  -> content_limits:Chatmd_prompt_content.Limits.t option
+  -> env:Eio_unix.Stdenv.base
+  -> checkpoint:(unit -> unit)
+  -> (t, Agent_protocol.Error.t) Result.t
+
+(** Recorded reference: strict complete artifact load, exact digest/member,
+    parser/program/content replay under explicit policy; no source selection.
+    Caller has FIRST authenticated the reference against actual saved binding,
+    root invocation and current native services. The reference grants nothing.
+    This path is mandatory on queued retry/recovery before any File branch. *)
+val restore
+  :  artifact_store:Agent_store.Prompt_artifact_store.t
+  -> definition:Prompt_definition.t
+  -> content_limits:Chatmd_prompt_content.Limits.t option
+  -> Chat_response.Background_request.Agent_artifact.t
+  -> checkpoint:(unit -> unit)
+  -> (t, Agent_protocol.Error.t) Result.t

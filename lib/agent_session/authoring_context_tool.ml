@@ -93,6 +93,7 @@ let registration ~host =
     { implementation
     ; implementation_revision
     ; result_contract = Native_output
+    ; source_requirement = Ordinary
     ; authoring_metadata = Some { authoring = None; helper = Some Reference }
     }
 ;;

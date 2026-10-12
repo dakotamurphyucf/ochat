@@ -208,7 +208,7 @@ let%expect_test
                (A.Session_state_document.value restored).conversation.canonical_history)
               .content_revision))
       (String.is_substring json ~substring:"\"evidence\":\"keep\"");
-    [%expect {| version=9 revision=0 unknown=true |}])
+    [%expect {| version=10 revision=0 unknown=true |}])
 ;;
 
 let%expect_test

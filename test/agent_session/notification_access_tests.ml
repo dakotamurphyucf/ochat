@@ -33,6 +33,9 @@ let notices actor =
 
 let jobs env actor current =
   Jobs.create
+    ~prepare_source:(fun ~binding:_ ~owner:_ ~request:_ ~checkpoint ->
+      checkpoint ();
+      Ok None)
     ~env
     ~policy:Background.policy
     ~current_capabilities:(fun () -> !current)

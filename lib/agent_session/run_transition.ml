@@ -120,11 +120,15 @@ let prepare
     P.Run_limits.check_count (List.length previous.owned_work + List.length owned_work)
   in
   let owned = Set.of_list (module P.Run_work) (previous.owned_work @ owned_work) in
+  let completed =
+    List.find work_state.Session_state.moderator_executions ~f:(fun completed ->
+      P.Id.Moderator_execution.equal completed.context.id executing.context.id)
+  in
+  let initial_single_turn =
+    Run_event_scope.is_initial_single_turn previous executing.context
+  in
   let%bind terminal_work =
-    match
-      List.find work_state.Session_state.moderator_executions ~f:(fun completed ->
-        P.Id.Moderator_execution.equal completed.context.id executing.context.id)
-    with
+    match completed with
     | None -> Ok previous.terminal_work
     | Some completed -> Run_callback_evidence.capture previous ~executing ~completed
   in
@@ -136,10 +140,30 @@ let prepare
   let%bind lifecycle, relinquished, owned =
     match action with
     | None ->
-      let lifecycle =
-        match previous.lifecycle with
-        | Admitted -> P.Run.Lifecycle.Active
-        | Active | Waiting _ | Terminal _ -> previous.lifecycle
+      let%bind lifecycle =
+        if initial_single_turn && Set.is_empty owned
+        then (
+          match completed with
+          | Some completed
+            when P.Moderator_execution.equal_context executing.context completed.context
+                 &&
+                 match executing.status, completed.status with
+                 | Running, Completed _ -> true
+                 | _, _ -> false ->
+            (match completed.requests with
+             | None
+             | Some { request_turn = false; request_compaction = false; end_session = _ }
+               -> Ok (P.Run.Lifecycle.Terminal (Completed None))
+             | Some { request_turn = true; _ } | Some { request_compaction = true; _ } ->
+               Error
+                 (conflict
+                    "single-turn startup requires a scoped decision for pending work"))
+          | Some _ | None ->
+            Error (conflict "single-turn startup requires its actual completed callback"))
+        else (
+          match previous.lifecycle with
+          | Admitted -> Ok P.Run.Lifecycle.Active
+          | Active | Waiting _ | Terminal _ -> Ok previous.lifecycle)
       in
       Ok (lifecycle, previous.relinquished_work, Set.to_list owned)
     | Some P.Run_action.Continue ->
@@ -238,7 +262,7 @@ let prepare
       ~terminal_work
       ~now
   in
-  let%map index =
+  let%bind index =
     match action with
     | None -> Run_state.advance index ~run ~intents:[]
     | Some action ->
@@ -259,27 +283,26 @@ let prepare
         | Terminal _ -> Run_intent.consume intent ~operation_id:None
         | Admitted | Active | Waiting _ -> Ok intent
       in
-      let%bind index = Run_state.commit index ~run ~receipt ~intent:(Some intent) in
-      let%bind index =
-        match run.lifecycle with
-        | Admitted | Active | Waiting _ -> Ok index
-        | Terminal terminal ->
-          let%bind terminal_receipt =
-            make_receipt
-              state
-              run
-              ~kind:Terminal
-              ~key:
-                ("run-terminal:"
-                 ^ P.Id.Run.to_string run.id
-                 ^ ":"
-                 ^ Int64.to_string run.revision)
-              ~digest:(digest (P.Run.Terminal.to_json terminal))
-              ~now
-          in
-          Run_state.commit index ~run ~receipt:terminal_receipt ~intent:None
+      Run_state.commit index ~run ~receipt ~intent:(Some intent)
+  in
+  let%map index =
+    match run.lifecycle with
+    | Admitted | Active | Waiting _ -> Ok index
+    | Terminal terminal ->
+      let%bind terminal_receipt =
+        make_receipt
+          state
+          run
+          ~kind:Terminal
+          ~key:
+            ("run-terminal:"
+             ^ P.Id.Run.to_string run.id
+             ^ ":"
+             ^ Int64.to_string run.revision)
+          ~digest:(digest (P.Run.Terminal.to_json terminal))
+          ~now
       in
-      Ok index
+      Run_state.commit index ~run ~receipt:terminal_receipt ~intent:None
   in
   { run; delta = Session_delta.Run_state_changed index }
 ;;
@@ -394,6 +417,120 @@ let settle_operation (state : Session_state.t) ~operation_id ~outcome ~now =
               in
               Run_state.commit index ~run ~receipt ~intent:None))
     in
+    [ Session_delta.Run_state_changed index ]
+;;
+
+let fail_callback
+      (state : Session_state.t)
+      ~scope
+      ~(executing : P.Moderator_execution.t)
+      ~(completed : P.Moderator_execution.t)
+      ~now
+  =
+  let open Result.Let_syntax in
+  let%bind index =
+    Result.of_option state.run_state ~error:(conflict "run index absent")
+  in
+  let%bind previous =
+    Result.of_option
+      (Run_state.find index (Run_scope.run_id scope))
+      ~error:(conflict "callback run absent")
+  in
+  let%bind () =
+    if
+      P.Id.Moderator_execution.equal executing.context.id (Run_scope.execution_id scope)
+      && P.Moderator_execution.equal_context executing.context completed.context
+      && P.Id.Session.equal state.identity.session_id executing.context.session_id
+      && P.Id.Session.equal
+           state.identity.session_id
+           (P.Session_ref.session_id previous.session)
+      && P.Id.Principal.equal previous.principal_id (Run_scope.principal_id scope)
+      && P.Run_source.equal previous.source (Run_scope.source scope)
+      && Int.equal executing.context.generation previous.source.generation
+      && P.Invocation.equal_observer executing.context.source previous.source.observer
+      &&
+      match executing.status with
+      | Running -> true
+      | Completed _ | Failed _ | Interrupted _ -> false
+    then P.Moderator_execution.validate_transition ~previous:(Some executing) completed
+    else Error (conflict "failed callback differs from its actual run scope")
+  in
+  let%bind terminal =
+    match completed.status with
+    | Failed _ -> Ok (P.Run.Terminal.Failed None)
+    | Interrupted _ -> Ok P.Run.Terminal.Interrupted
+    | Running | Completed _ -> Error (conflict "callback has no failed terminal outcome")
+  in
+  match previous.lifecycle with
+  | Terminal _ -> Ok []
+  | Admitted | Active | Waiting _ ->
+    let%bind installed =
+      Run_source_installation.captured
+        (Run_state.installation index)
+        ~generation:state.identity.generation
+    in
+    let%bind () =
+      if
+        P.Run_source.equal previous.source installed
+        && Int64.(Run_scope.revision scope <= previous.revision)
+      then Ok ()
+      else Error (conflict "failed callback source or run custody was replaced")
+    in
+    (* Initial callbacks need not occupy retained-work capacity. Their actual
+       failed moderator receipt is committed alongside this retirement. *)
+    let owned_work = previous.owned_work in
+    let%bind proofs = Run_callback_evidence.capture previous ~executing ~completed in
+    let proven =
+      Set.of_list
+        (module P.Run_work)
+        (List.map proofs ~f:(fun proof -> proof.P.Run_work.Terminal.work))
+    in
+    let%bind terminal_work =
+      List.fold_result owned_work ~init:proofs ~f:(fun proofs work ->
+        if Set.mem proven work
+        then Ok proofs
+        else (
+          let%map proof =
+            P.Run_work.Terminal.create
+              ~work
+              ~outcome:Unconfirmed
+              ~revision:(Int64.succ previous.revision)
+          in
+          proof :: proofs))
+    in
+    let%bind run =
+      rebuild
+        previous
+        ~lifecycle:(Terminal terminal)
+        ~owned_work
+        ~relinquished_work:previous.relinquished_work
+        ~terminal_work
+        ~now
+    in
+    let intents =
+      Run_state.intents index
+      |> List.filter_map ~f:(fun intent ->
+        if
+          P.Id.Run.equal intent.Run_intent.receipt.run_id run.id
+          && Run_intent.Disposition.equal intent.disposition Pending
+        then Some (Run_intent.retire intent)
+        else None)
+    in
+    let%bind index = Run_state.advance index ~run ~intents in
+    let%bind receipt =
+      make_receipt
+        state
+        run
+        ~kind:Terminal
+        ~key:
+          ("run-terminal:"
+           ^ P.Id.Run.to_string run.id
+           ^ ":"
+           ^ Int64.to_string run.revision)
+        ~digest:(digest (P.Run.Terminal.to_json terminal))
+        ~now
+    in
+    let%map index = Run_state.commit index ~run ~receipt ~intent:None in
     [ Session_delta.Run_state_changed index ]
 ;;
 

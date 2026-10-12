@@ -5,12 +5,40 @@
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))
 
+(library
+ (name shell_inspection_cli)
+ (modules shell_inspection_cli)
+ (libraries core eio eio_main io ochat.chat_response ochat.shell_runtime
+  ochat.chatmd_shell_spec ochat.agent_server ochat.agent_session
+  ochat.agent_protocol mirage-crypto-rng.unix)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name managed_completion_cli)
+ (modules managed_completion_cli managed_run_waiter)
+ (private_modules managed_run_waiter)
+ (libraries core eio ochat.agent_protocol ochat.agent_client ochat.agent_session
+  ochat.history_chatmd ochat.document_schema)
+ (preprocess (pps ppx_jane)))
+
+(library
+ (name managed_completion_command)
+ (modules managed_completion_command managed_completion_presentation)
+ (private_modules managed_completion_presentation)
+ (libraries inference_composition frontend_transcript managed_completion_cli core
+  core_unix.command_unix eio eio.unix eio_posix io ochat.agent_protocol
+  ochat.agent_client ochat.agent_server ochat.chat_response ochat.history_chatmd
+  ochat.document_schema ochat.inference_host ochat.provider_runtime_host
+  ochat.history_entry ochat.transcript)
+ (preprocess (pps ppx_jane)))
+
 (executable
  (package ochat)
  (public_name ochat)
  (name main)
  (modules main)
- (libraries inference_composition ochat.provider_runtime_host
+ (libraries inference_composition shell_inspection_cli managed_completion_command ochat.provider_runtime_host
   lwt_eio
   io
   dune_describe
@@ -99,11 +127,25 @@
  (modules key_dump)
  (libraries core eio_main ochat.notty_eio))
 
+(library
+ (name frontend_transcript)
+ (modules frontend_transcript)
+ (libraries core eio eio.unix eio_posix ochat.chat_response ochat.agent_protocol
+  ochat.agent_session ochat.document_schema ochat.history_entry ochat.openai)
+ (preprocess (pps ppx_jane)))
+
+(library
+ (name tui_transcript_export)
+ (modules tui_transcript_export)
+ (libraries core eio eio.unix eio_posix frontend_transcript ochat.chat_tui ochat.agent_client
+  ochat.agent_protocol ochat.agent_session ochat.document_schema ochat.history_chatmd)
+ (preprocess (pps ppx_jane)))
+
 (executable
  (public_name chat-tui)
  (name chat_tui)
  (modules chat_tui)
- (libraries inference_composition ochat.provider_runtime_host
+ (libraries inference_composition frontend_transcript tui_transcript_export ochat.provider_runtime_host
   core
   eio_main
   jsonaf

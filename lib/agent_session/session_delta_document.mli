@@ -18,6 +18,16 @@ val create
   -> state_document:(Session_state.t -> Session_state_document.t)
   -> (t, Document_schema.Error.t) result
 
+(** Structural sizing projection through the ordinary Created atom and delta
+    envelope encoder. The supplied session.state document remains an opaque
+    structural child: this returns only a document, never an admitted delta or
+    native state. Actual persistence must still use [create] and its native
+    validators. This grants no workspace, source or runtime authority. *)
+val project_created
+  :  Document_schema.Document.t
+  -> limits:Document_schema.Limits.t
+  -> (Document_schema.Document.t, Document_schema.Error.t) Result.t
+
 module Transaction_metadata : sig
   (** A timestamp from the validated timestamp type and checked nonnegative
       counters, applied by the transaction owner after admitting the complete

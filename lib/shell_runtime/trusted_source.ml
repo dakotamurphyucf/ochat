@@ -57,35 +57,48 @@ let source_matches entry ?repository_identity ?signer_id source =
 ;;
 
 let requested runtime =
-  let true_ = function S.Set true -> true | Set false | Inherit | Clear -> false in
+  let true_ = function
+    | S.Set true -> true
+    | Set false | Inherit | Clear -> false
+  in
   let capabilities = Option.value_exn runtime.S.capabilities in
   let backends = Option.value_exn runtime.backends in
   let reviewers = Option.value_exn runtime.reviewers in
   let approvals = Option.value_exn runtime.approvals in
   let external_backends =
-    List.exists backends.values ~f:(function S.External _ -> true | _ -> false)
+    List.exists backends.values ~f:(function
+      | S.External _ -> true
+      | _ -> false)
   in
   let executable_hooks =
-    List.exists reviewers.values ~f:(function S.Executable_reviewer _ -> true | _ -> false)
+    List.exists reviewers.values ~f:(function
+      | S.Executable_reviewer _ -> true
+      | _ -> false)
     || List.exists (Option.value_exn runtime.interceptors).values ~f:(fun item ->
-      match item.extension with S.Executable_extension _ -> true | _ -> false)
+      match item.extension with
+      | S.Executable_extension _ -> true
+      | _ -> false)
     || List.exists (Option.value_exn runtime.effect_analysis).analyzers ~f:(fun item ->
-      match item.extension with S.Executable_extension _ -> true | _ -> false)
+      match item.extension with
+      | S.Executable_extension _ -> true
+      | _ -> false)
   in
   let model_reviewers =
-    List.exists reviewers.values ~f:(function S.Model_reviewer _ -> true | _ -> false)
+    List.exists reviewers.values ~f:(function
+      | S.Model_reviewer _ -> true
+      | _ -> false)
   in
   let durable_approvals =
     List.mem approvals.scopes S.Durable_exact ~equal:S.equal_approval_scope
   in
-  true_ capabilities.network,
-  true_ capabilities.child_processes,
-  true_ capabilities.arbitrary_code,
-  true_ capabilities.privilege_change,
-  external_backends,
-  executable_hooks,
-  model_reviewers,
-  durable_approvals
+  ( true_ capabilities.network
+  , true_ capabilities.child_processes
+  , true_ capabilities.arbitrary_code
+  , true_ capabilities.privilege_change
+  , external_backends
+  , executable_hooks
+  , model_reviewers
+  , durable_approvals )
 ;;
 
 let capabilities_allow entry runtime =
@@ -93,14 +106,14 @@ let capabilities_allow entry runtime =
     requested runtime
   in
   let ceiling = entry.capabilities in
-  (not network || ceiling.network)
-  && (not child || ceiling.child_processes)
-  && (not code || ceiling.arbitrary_code)
-  && (not privilege || ceiling.privilege_change)
-  && (not external_backend || ceiling.external_backends)
-  && (not hooks || ceiling.executable_hooks)
-  && (not model || ceiling.model_reviewers)
-  && (not durable || ceiling.durable_approvals)
+  ((not network) || ceiling.network)
+  && ((not child) || ceiling.child_processes)
+  && ((not code) || ceiling.arbitrary_code)
+  && ((not privilege) || ceiling.privilege_change)
+  && ((not external_backend) || ceiling.external_backends)
+  && ((not hooks) || ceiling.executable_hooks)
+  && ((not model) || ceiling.model_reviewers)
+  && ((not durable) || ceiling.durable_approvals)
 ;;
 
 let sources manifest =
@@ -136,28 +149,31 @@ let verify_source policy manifest ?repository_identity ?signer_id source =
     Error
       { code = "shell.trusted_source_mismatch"
       ; source_file = source.file
-      ; message = "source identity, digest, signer, or requested capabilities are not trusted"
+      ; message =
+          "source identity, digest, signer, or requested capabilities are not trusted"
       }
 ;;
 
 let verify_manifest policy ?repository_identity ?signer_id manifest =
-  List.map (sources manifest) ~f:(verify_source policy manifest ?repository_identity ?signer_id)
+  List.map
+    (sources manifest)
+    ~f:(verify_source policy manifest ?repository_identity ?signer_id)
   |> Result.combine_errors
 ;;
 
 let load ~fs ~path =
-  try
-    Eio.Path.(fs / path)
-    |> Eio.Path.load
-    |> Jsonaf.of_string
-    |> policy_of_jsonaf
-    |> Result.return
-  with
-  | exn ->
-    Error
-      [ { code = "shell.trusted_source_load_failed"
-        ; source_file = path
-        ; message = Exn.to_string exn
-        }
-      ]
+  let errors message =
+    [ { code = "shell.trusted_source_load_failed"; source_file = path; message } ]
+  in
+  let open Result.Let_syntax in
+  let%bind contents =
+    try Ok (Eio.Path.(fs / path) |> Eio.Path.load) with
+    | Eio.Io _ as exn -> Error (errors (Exn.to_string exn))
+  in
+  let%bind json =
+    Jsonaf.parse contents
+    |> Result.map_error ~f:(fun message -> errors (Error.to_string_hum message))
+  in
+  try Ok (policy_of_jsonaf json) with
+  | Jsonaf_kernel.Conv.Of_jsonaf_error _ as exn -> Error (errors (Exn.to_string exn))
 ;;

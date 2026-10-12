@@ -1,0 +1,1 @@
+include Agent_server.Operator_manifest_grant

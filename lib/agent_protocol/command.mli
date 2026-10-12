@@ -16,10 +16,13 @@ type t =
   | Server_health of Health.Request.t
   | Prompt_list of Prompt.List_request.t
   | Prompt_get of Prompt.Get_request.t
+  | Prompt_dependencies_status
+  | Prompt_dependencies_update of Prompt_dependency_selection.Update_request.t
   | Workspace_list of Workspace.List_request.t
   | Workspace_get of Workspace.Get_request.t
   | Blob_read of Blob.Read_request.t
   | Session_create of Session.Create_request.t
+  | Session_seed of Session_seed.Request.t
   | Session_list of Session.List_request.t
   | Session_search of Search_query.t
   | Session_search_navigate of Search_navigation.Request.t

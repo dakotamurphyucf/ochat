@@ -13,6 +13,7 @@ let%expect_test "catalog rebuild returns original installed manifest publication
       "<user>hello</user>";
     let definition =
       Agent_session.Prompt_definition.create
+        ~root_invocation:Ui
         ~id:prompt_id
         ~config_name:"manifest-custody"
         ~root_file

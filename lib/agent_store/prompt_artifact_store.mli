@@ -14,6 +14,7 @@ module Artifact : sig
   type t = private
     { revision_id : Agent_protocol.Id.Prompt_revision.t
     ; prompt_definition_id : Agent_protocol.Id.Prompt_definition.t option
+    ; source_receipt : Prompt_source_receipt.t option
     ; canonical_source : string option
     ; root_relative_path : string
     ; root_chatmd : string
@@ -22,6 +23,8 @@ module Artifact : sig
     ; parser_schema_version : int
     ; runtime_schema_version : int
     ; shell_manifest_sha256 : string option
+    ; program_bundle : Prompt_program_bundle.t option
+    ; content_bundle : Prompt_program_bundle.t option
     ; manifest_sha256 : string
     ; manifest_publication : Prompt_manifest_document.Publication.t
     ; created_at : Agent_protocol.Timestamp.t
@@ -31,12 +34,22 @@ module Artifact : sig
       This does not compare or replace original admitted publication digest. *)
   val same_content : t -> t -> bool
 
+  (** Copy a revision without dropping known or unknown manifest metadata or
+      private program and content payloads. The original artifact remains immutable. *)
+  val with_identity
+    :  t
+    -> revision_id:Agent_protocol.Id.Prompt_revision.t
+    -> created_at:Agent_protocol.Timestamp.t
+    -> (t, Store_error.t) result
+
   (** Authors one exact named manifest publication. Its complete inventory is
       limited to 262144 bytes, including metadata and envelope, before IO.
-      This is separate from the capture owner's 256-file and 8 MiB source limits. *)
+      Authored and private program and content payloads share the 256-file/8 MiB inventory
+      limits. Program metadata is included in the complete manifest limit. *)
   val create
     :  revision_id:Agent_protocol.Id.Prompt_revision.t
     -> ?prompt_definition_id:Agent_protocol.Id.Prompt_definition.t
+    -> ?source_receipt:Prompt_source_receipt.t
     -> ?canonical_source:string
     -> ?root_relative_path:string
     -> root_chatmd:string
@@ -44,6 +57,8 @@ module Artifact : sig
     -> parser_schema_version:int
     -> runtime_schema_version:int
     -> ?shell_manifest_sha256:string
+    -> ?program_bundle:Prompt_program_bundle.t
+    -> ?content_bundle:Prompt_program_bundle.t
     -> created_at:Agent_protocol.Timestamp.t
     -> unit
     -> (t, Store_error.t) result
@@ -57,6 +72,23 @@ val create : env:Eio_unix.Stdenv.base -> root:string -> (t, Store_error.t) resul
     its namespace. Missing/non-directory roots fail preserved. Performs no file
     load or authority grant; each [load] still validates its artifact document. *)
 val open_existing : env:Eio_unix.Stdenv.base -> root:string -> (t, Store_error.t) result
+
+(** Remove interrupted [.install-<transaction>] trees under exclusive startup
+    storage ownership, before any artifact publisher is allowed to run. This
+    operation cannot distinguish an active install from an abandoned one; the
+    caller must hold the storage lock and exclude all publishers until return.
+
+    A complete bounded, link-rejecting scan precedes deletion. Installed revisions
+    and unknown names are preserved; no file contents are read. [max_entries]
+    covers directory enumeration and inspections across the complete operation.
+    Returns the number of removed staging roots. Scan failures leave all entries
+    intact; interrupted deletion can be finished by a later exclusive recovery.
+    Callback exceptions and cancellation propagate unchanged. *)
+val discard_interrupted_installs
+  :  t
+  -> max_entries:int
+  -> checkpoint:(unit -> unit)
+  -> (int, Store_error.t) result
 
 (** [install] writes owner-read-only files into an exclusive staging directory,
     flushes files and staging directories, then renames it to the revision ID and
@@ -98,6 +130,19 @@ val verify_materialized_tree : t -> Artifact.t -> (unit, Store_error.t) result
 val verify_tree
   :  root:Eio.Fs.dir_ty Eio.Path.t
   -> Artifact.t
+  -> (unit, Store_error.t) result
+
+(** Verify an already admitted artifact against a borrowed native directory
+    capability. Inventory enumeration and reads share finite entry/byte ceilings
+    derived from the exact artifact paths and content lengths. Unexpected names,
+    links, changed lengths or contents reject before accepting the tree. Caller
+    checkpoints run during enumeration, reads and comparisons; their original
+    failures/cancellation propagate. The owner must serialize writes; this is
+    verification at one boundary, not continuous filesystem isolation. *)
+val verify_tree_with_checkpoint
+  :  root:Eio.Fs.dir_ty Eio.Path.t
+  -> Artifact.t
+  -> checkpoint:(unit -> unit)
   -> (unit, Store_error.t) result
 
 val exists : t -> Agent_protocol.Id.Prompt_revision.t -> bool

@@ -108,15 +108,8 @@ let create_spec connection options =
     ()
 ;;
 
-let create ~sw ~clock ~connection ?(reconnect = None) options =
+let create_with_spec ~sw ~clock ~connection ?(reconnect = None) ~spec ~mode () =
   let open Result.Let_syntax in
-  let%bind _ =
-    Agent_client.Session_handle.initialize
-      connection
-      ~implementation_name:"chat-tui"
-      ~implementation_version:"dev"
-  in
-  let%bind spec = create_spec connection options in
   let shared =
     { mutex = Eio.Mutex.create ()
     ; updates = Eio.Stream.create 1
@@ -131,7 +124,7 @@ let create ~sw ~clock ~connection ?(reconnect = None) options =
       ~connection
       ~reconnect
       ~spec
-      ~mode:options.mode
+      ~mode
       ~on_update:(install_projection shared)
       ~on_status:(install_status shared)
       ~on_error:(install_failure shared)
@@ -143,6 +136,18 @@ let create ~sw ~clock ~connection ?(reconnect = None) options =
   shared.projection <- Some projection;
   publish shared (Projection projection);
   Ok { handle; shared }
+;;
+
+let create ~sw ~clock ~connection ?(reconnect = None) options =
+  let open Result.Let_syntax in
+  let%bind _ =
+    Agent_client.Session_handle.initialize
+      connection
+      ~implementation_name:"chat-tui"
+      ~implementation_version:"dev"
+  in
+  let%bind spec = create_spec connection options in
+  create_with_spec ~sw ~clock ~connection ~reconnect ~spec ~mode:options.mode ()
 ;;
 
 let projection t =
@@ -191,6 +196,7 @@ let stop t ~mode = Agent_client.Reconnect.stop t.handle ~mode
 let respond_permission t = Agent_client.Reconnect.respond_permission t.handle
 let revoke_grant t = Agent_client.Reconnect.revoke_grant t.handle
 let read_audit t = Agent_client.Reconnect.read_audit t.handle
+let read_canonical t = Agent_client.Reconnect.read_canonical t.handle
 let detach t = Agent_client.Reconnect.detach t.handle
 let close t = Agent_client.Reconnect.close t.handle
 let attachment t = Agent_client.Reconnect.attachment t.handle

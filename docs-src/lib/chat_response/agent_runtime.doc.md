@@ -6,6 +6,13 @@ See [agent-core embedding](../../agent-server/embedding.md),
 [session/history behavior](../../agent-server/sessions-and-workspaces.md),
 and [protocol synchronization](../../agent-server/protocol.md).
 
+Declaration inspection (`inspect_resources`) checks captured shell material and
+administrative policy without authorizing execution. Configured hooks use
+`inspect_prepared_shell` to obtain the complete compiled-program identity, including
+imported dependencies and selected entrypoints. Its security result is separate
+from the requested identity so operators can obtain the material to sign; runtime
+activation still requires the complete identity to pass security and grant checks.
+
 ## Public contract
 
 [Interface](../../../lib/chat_response/agent_runtime.mli) · [implementation](../../../lib/chat_response/agent_runtime.ml)
@@ -39,6 +46,9 @@ type t =
       expanded MCP names. Forcing requires the host's secure ID generator.
       Selection never rebuilds tool declarations; invocation policy remains
       the owning service's responsibility. *)
+  ; native_registrations : Native_tool_pool.Registration.t list
+    (** Exact original source associations. Native inheritance filters actual
+        function identity; it never discovers source authority by name or JSON. *)
   ; capabilities : (Tool_capability.t, Tool_capability.error) result Lazy.t
     (** Extension preparation includes source-bound managed capabilities here;
         [functions] continues to contain only actual native implementations. *)
@@ -49,6 +59,10 @@ type t =
   ; shell_admin_policy : Shell_runtime.Admin_policy.t option
   ; shell_security_status : Shell_runtime.Manifest_security.status option
   ; moderator_shell_runtime : string option
+  ; legacy_moderator : Moderator_manager.Registry.artifact option
+    (** Compiled before native activation against this host's actual surface and
+        complete tool pool. Later manager construction consumes this artifact
+        without recompiling or initializing here. Native inheritance clears it. *)
   }
 
 type shell_inspection =
@@ -58,14 +72,76 @@ type shell_inspection =
   ; security_status : Shell_runtime.Manifest_security.status
   }
 
+type resource_inspection =
+  { manifest : Chatmd_shell_spec.Manifest.t
+  ; live_runtimes : Chatmd_shell_spec.Shell_spec.t list
+  ; administrative_policy : Shell_runtime.Admin_policy.t
+  }
+
+(** Complete requested execution identity remains inspectable even if the current
+    signature/trust check rejects. This is neither a manifest grant nor runtime
+    activation; an operator can use the actual canonical identity/signature
+    payload before installing its signature. *)
+type prepared_shell_inspection =
+  { manifest : Chatmd_shell_spec.Manifest.t
+  ; live_runtimes : Chatmd_shell_spec.Shell_spec.t list
+  ; administrative_policy : Shell_runtime.Admin_policy.t
+  ; security_check :
+      ( Shell_runtime.Manifest_security.status
+        , Shell_runtime.Manifest_security.error list )
+        Result.t
+  }
+
+(** Pure declaration preparation shared by source planning and runtime inspection.
+    Returns the actual manifest compiler's transient material so callers can
+    select effective scripts and invocation contracts. Does not consult host
+    policy, acquire source authority, authorize tools or run initializers.
+    Material may contain private declaration data: never persist it in program
+    custody or expose it as public authoring metadata. *)
+val prepare_shell_manifest
+  :  platform:Chatmd_shell_spec.Shell_spec.platform
+  -> prompt_elements:Prompt.Chat_markdown.top_level_elements list
+  -> ( Chatmd_shell_spec.Manifest.t * Chatmd_shell_spec.Manifest_compiler.material
+       , diagnostic list )
+       result
+
 (** [inspect_shell ~env ~platform ~prompt_elements] evaluates requested shell
     declarations against host administrative and trust policy without
-    authorizing a manifest or instantiating any executable runtime. *)
+    authorizing a manifest or instantiating any executable runtime. This legacy
+    text inspection rejects project-selected hooks, whose complete security
+    identity requires [inspect_prepared_shell] and authentic captured programs. *)
 val inspect_shell
   :  env:Eio_unix.Stdenv.base
   -> platform:Chatmd_shell_spec.Shell_spec.platform
   -> prompt_elements:Prompt.Chat_markdown.top_level_elements list
   -> (shell_inspection, diagnostic list) result
+
+(** Resource-only declaration/admin inspection for capture before prepared
+    programs exist. No signature status is asserted for uncompiled dependencies.
+    No initializer, native setup, provider or source acquisition. *)
+val inspect_resources
+  :  env:Eio_unix.Stdenv.base
+  -> platform:Chatmd_shell_spec.Shell_spec.platform
+  -> prompt_elements:Prompt.Chat_markdown.top_level_elements list
+  -> (resource_inspection, diagnostic list) Result.t
+
+(** Prepare through the same authentic Shell_preparation owner as activation,
+    including every custom matcher alternative, without native resource setup,
+    tool authorization or initialization. Supplied captured programs are the only
+    configured source inventory; missing configured custody rejects without text
+    fallback. Projection/serialization share the borrowed startup deadline and
+    exact metadata/input allowances. Security outcome cannot hide the complete
+    requested identity. No original source lookup, provider or process effects. *)
+val inspect_prepared_shell
+  :  ?startup:Startup_compilation.t
+  -> ?programs:Chatml_prompt_programs.Restored.t
+  -> env:Eio_unix.Stdenv.base
+  -> limits:Chatml_compilation.limits
+  -> checkpoint:(unit -> unit)
+  -> platform:Chatmd_shell_spec.Shell_spec.platform
+  -> prompt_elements:Prompt.Chat_markdown.top_level_elements list
+  -> unit
+  -> (prepared_shell_inspection, diagnostic list) Result.t
 
 (** [platform ()] returns the manifest platform for the current host. *)
 val platform : unit -> Chatmd_shell_spec.Shell_spec.platform
@@ -116,9 +192,21 @@ val validate_tool_paths
     manifest authorizer and return no shell registry. All resources remain
     owned by [sw]. [native_service_revision] optionally binds trusted host-service
     policy to resource/capability identity. Hosts restoring those resources must
-    supply the same policy identity; omission preserves legacy fingerprints. *)
+    supply the same policy identity; omission preserves legacy fingerprints.
+    [programs] supplies already restored captured scripts, including configured
+    legacy moderators. Preparation shares one compilation deadline and distinct
+    input allowances; executable activation runs after preparation. [startup]
+    borrows the host's existing preparation context, including time already spent
+    planning/restoring scripts. It requires the same original [compilation_limits]
+    and remains owned by the enclosing [Startup_compilation.with_context]. *)
 val create
   :  ?native_service_revision:string
+  -> ?startup:Startup_compilation.t
+  -> ?agent_source_runner:Tool.Agent_source_runner.t
+  -> ?programs:Chatml_prompt_programs.Restored.t
+  -> ?moderator_surface:Chatml.Chatml_builtin_surface.surface
+  -> ?compilation_limits:Chatml_compilation.limits
+  -> ?checkpoint:(unit -> unit)
   -> sw:Eio.Switch.t
   -> ctx:Eio_unix.Stdenv.base Ctx.t
   -> host:Shell_runtime.Host.t
@@ -175,7 +263,7 @@ val inherit_native
     Unselected registrations are never exposed. Revision and
     result contract participate in capability identity; duplicate supplied names
     are rejected. This does not grant invocation or authoring authority. *)
-type native_registration =
+type native_registration = Native_tool_pool.Registration.t =
   { implementation : Ochat_function.t
   ; implementation_revision : string
   ; result_contract : Tool_capability.result_contract
@@ -183,13 +271,31 @@ type native_registration =
     (** Trusted metadata on this implementation, retained in its capability
         identity and selection. The host still must fulfill the corresponding
         authoring policy before general model-visible exposure. *)
+  ; source_requirement : Native_tool_pool.Source_requirement.t
   }
+
+(** Bound count with a prefix traversal before lookup, polling every visited
+    registration under the caller's shared startup/job checkpoint. Reject foreign
+    native functions and Source without an installed-artifact preparer. Ordinary
+    and Managed bindings need no source selection. Caller must already verify
+    the selected binding/request pins. Exceptions and cancellation keep identity. *)
+val prepare_agent_source
+  :  t
+  -> binding:Tool_capability.binding
+  -> owner:Agent_protocol.Job.launch_owner
+  -> request:Background_request.t
+  -> max_registrations:int
+  -> checkpoint:(unit -> unit)
+  -> (Background_request.Agent_artifact.t option, Agent_protocol.Error.t) Result.t
 
 (** Prepare a definition for an extensibility-aware host. Validates the captured
     declarations, constructs native resources through the same shell authorization
     and resource bindings as [create], then compiles all versioned scripts in an
-    Eio domain against those exact live capabilities. No script initializer or
-    handler runs here. Cross-kind collisions include dynamically expanded native
+    Eio domain against those exact staged native capabilities. Only successful
+    preparation permits native shell-hook initialization and snapshot restore.
+    Versioned script initializers and handlers remain unevaluated; the session
+    owner installs their execution services later. Failed script preparation
+    preserves source diagnostics and leaves staged shell execution revoked. Cross-kind collisions include dynamically expanded native
     tool names. Inherited/generated and authoring declarations still require their
     respective host services and are rejected. Resources remain owned by [sw];
     the caller must release that scope after failed preparation or runtime teardown.
@@ -197,11 +303,32 @@ type native_registration =
     [delegated_moderator] defaults to false; true compiles moderators and their
     managed handlers against the tool-mediated delegated contract. The host still
     must enforce inherited execution authority when constructing the live runtime.
+    [moderator_surface] defaults to the headless legacy surface; UI-capable hosts
+    must supply their actual UI surface. [compilation_limits] and [checkpoint]
+    govern one preparation/preflight deadline and distinct text/graph input
+    allowances across native, managed and legacy roles; activation/execution
+    retains its separate control. [startup] borrows the existing host preparation
+    context with the same original limits, as in [create], without resetting its
+    deadline or input accounting. Original callback failures propagate.
+    Legacy declarations compile in the same preflight and their selected artifact
+    is retained on [native].
+
+    When [programs] is supplied, native hooks and versioned scripts compile from
+    that exact restored custody. Selected matcher entrypoints retain their own
+    contracts, and all native hook project requirements are admitted against the
+    complete staged pool before any hook initializer. Missing graphs reject
+    without falling back to script bodies or current files.
     This internal preparation entrypoint does not enable public feature flags. *)
 val prepare_extensions
   :  ?native_service_revision:string
+  -> ?startup:Startup_compilation.t
+  -> ?agent_source_runner:Tool.Agent_source_runner.t
+  -> ?moderator_surface:Chatml.Chatml_builtin_surface.surface
+  -> ?compilation_limits:Chatml_compilation.limits
+  -> ?checkpoint:(unit -> unit)
   -> ?native_registrations:native_registration list
   -> ?delegated_moderator:bool
+  -> ?programs:Chatml_prompt_programs.Restored.t
   -> sw:Eio.Switch.t
   -> ctx:Eio_unix.Stdenv.base Ctx.t
   -> host:Shell_runtime.Host.t

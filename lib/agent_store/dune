@@ -10,6 +10,7 @@
   document_fields
   lock
   journal_segment
+  journal_initial_creation
   journal
   snapshot
   session_record_document
@@ -58,10 +59,14 @@
   audit_event_document
   audit_evidence_document
   audit_store
+  prompt_program_bundle
+  prompt_source_receipt
   prompt_manifest
   prompt_manifest_document
+  prompt_artifact_staging
   prompt_artifact_store
   migration)
+ (private_modules journal_initial_creation prompt_artifact_staging)
  (libraries ochat.inference
   core
   core_unix

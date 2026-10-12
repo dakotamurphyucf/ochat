@@ -12,6 +12,25 @@ open! Core
     supplies authority. *)
 type t
 
+(** Version of newly authored complete session.state documents. *)
+val current_version : int
+
+(** Raw field projections shared by ordinary storage encoding and prelayout
+    sizing. Trusted component encoders must describe the actual supplied fields.
+    These return only JSON; no generic spec/ workspace becomes an admitted native
+    state, document, lifecycle witness or execution authority. Ordinary [encode]
+    still validates the complete monomorphic native state and final document. *)
+val project_spec
+  :  'workspace Session_state.Spec.fields
+  -> workspace:('workspace -> Jsonaf.t)
+  -> Jsonaf.t
+
+val project_fields
+  :  'spec Session_state.fields
+  -> spec:('spec -> Jsonaf.t)
+  -> limits:Document_schema.Limits.t
+  -> (Jsonaf.t, Agent_protocol.Error.t) Result.t
+
 val authored : Session_state.t -> t
 val value : t -> Session_state.t
 val with_value : t -> Session_state.t -> t
@@ -65,7 +84,12 @@ val adopt
   -> t
   -> (t, Document_schema.Error.t) result
 
-(** Adjacent generic v1 through v9 conversion. The v8 to v9 step wraps each
+(** Adjacent generic v1 through v10 conversion. The v9 to v10 step introduces
+    required spec.root_invocation. Historical absence converts to Ui, the actual
+    previous native root contract; present invalid values reject. Existing unknown
+    fields remain in the original preservation carrier. The native state schema25
+    also rejects Headless claims in an older native schema.
+     The v8 to v9 step wraps each
     original pending entry, preserving its entire raw document, and introduces
     independent pending revision/disposition fields with unknown legacy owner. The v7 to v8 step is
     structural identity: absent run_state is not filled with an invented value. The v5 to v6 step introduces

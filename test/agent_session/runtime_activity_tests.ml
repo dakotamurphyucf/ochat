@@ -166,3 +166,53 @@ let%expect_test
         print_endline "owner request interrupted; caller and cleanup remain usable"));
   [%expect {| owner request interrupted; caller and cleanup remain usable |}]
 ;;
+
+let%test_unit "normal runtime closure cancels and joins a foreign caller activity" =
+  with_temp_directory (fun env _ ->
+    Eio.Switch.run (fun caller_sw ->
+      Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
+        let original = Failure "cancelled activity creation" in
+        Eio.Cancel.sub (fun context ->
+          Eio.Cancel.cancel context original;
+          match Activity.create ~sw:caller_sw with
+          | _ -> assert false
+          | exception Eio.Cancel.Cancelled reason -> assert (phys_equal reason original));
+        let entered, enter = Eio.Promise.create () in
+        let cleaning, start_cleanup = Eio.Promise.create () in
+        let finish_cleanup, finish = Eio.Promise.create () in
+        let cleaned = ref false in
+        let caller = ref None in
+        let activity =
+          Eio.Switch.run (fun owner_sw ->
+            let activity = Activity.create ~sw:owner_sw in
+            caller
+            := Some
+                 (Eio.Fiber.fork_promise ~sw:caller_sw (fun () ->
+                    Activity.with_switch activity (fun ~sw:_ ->
+                      Fun.protect
+                        ~finally:(fun () ->
+                          Eio.Cancel.protect (fun () ->
+                            Eio.Promise.resolve start_cleanup ();
+                            Eio.Promise.await finish_cleanup;
+                            cleaned := true))
+                        (fun () ->
+                           Eio.Promise.resolve enter ();
+                           Eio.Fiber.await_cancel ()))));
+            Eio.Promise.await entered;
+            Eio.Fiber.fork_daemon ~sw:caller_sw (fun () ->
+              Eio.Promise.await cleaning;
+              assert (not !cleaned);
+              Eio.Promise.resolve finish ();
+              `Stop_daemon);
+            activity)
+        in
+        assert !cleaned;
+        (match Eio.Promise.await (Option.value_exn !caller) with
+         | Error (Eio.Cancel.Cancelled _) | Error Activity.Closed -> ()
+         | _ -> failwith "normal owner closure did not stop foreign caller");
+        let ran = ref false in
+        (match Activity.run activity (fun () -> ran := true) with
+         | _ -> assert false
+         | exception Activity.Closed -> ());
+        assert (not !ran))))
+;;

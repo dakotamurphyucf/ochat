@@ -1,0 +1,9 @@
+(copy_files ../chatml_project_build/support.ml)
+(copy_files ../chatml_project_build/support.mli)
+(copy_files ../chatml_project_build/fixtures.ml)
+(copy_files ../chatml_project_build/fixtures.mli)
+(library
+ (name chatml_prompt_programs_tests)
+ (libraries core jsonaf source document_schema chatml_source chatml_prepared_program chatml_program_document chatml_project chatml_catalog chatml_project_build chatml chatmd agent_store chatml_prompt_programs eio eio.unix eio_main expect_test_helpers_core)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

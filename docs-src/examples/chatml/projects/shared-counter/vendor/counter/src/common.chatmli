@@ -1,0 +1,2 @@
+val next : fun() -> int
+val reveal : fun() -> int

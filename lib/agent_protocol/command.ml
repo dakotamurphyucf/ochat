@@ -16,10 +16,13 @@ type t =
   | Server_health of Health.Request.t
   | Prompt_list of Prompt.List_request.t
   | Prompt_get of Prompt.Get_request.t
+  | Prompt_dependencies_status
+  | Prompt_dependencies_update of Prompt_dependency_selection.Update_request.t
   | Workspace_list of Workspace.List_request.t
   | Workspace_get of Workspace.Get_request.t
   | Blob_read of Blob.Read_request.t
   | Session_create of Session.Create_request.t
+  | Session_seed of Session_seed.Request.t
   | Session_list of Session.List_request.t
   | Session_search of Search_query.t
   | Session_search_navigate of Search_navigation.Request.t
@@ -98,10 +101,13 @@ let method_name = function
   | Server_health _ -> "server.health"
   | Prompt_list _ -> "prompt.list"
   | Prompt_get _ -> "prompt.get"
+  | Prompt_dependencies_status -> "prompt.dependencies.status"
+  | Prompt_dependencies_update _ -> "prompt.dependencies.update"
   | Workspace_list _ -> "workspace.list"
   | Workspace_get _ -> "workspace.get"
   | Blob_read _ -> "blob.read"
   | Session_create _ -> "session.create"
+  | Session_seed _ -> "session.seed"
   | Session_list _ -> "session.list"
   | Session_search _ -> "session.search"
   | Session_search_navigate _ -> "session.search.navigate"
@@ -182,10 +188,14 @@ let params = function
   | Server_health request -> Health.Request.to_json request
   | Prompt_list request -> Prompt.List_request.to_json request
   | Prompt_get request -> Prompt.Get_request.to_json request
+  | Prompt_dependencies_status -> Prompt_dependency_selection.Status_request.to_json ()
+  | Prompt_dependencies_update request ->
+    Prompt_dependency_selection.Update_request.to_json request
   | Workspace_list request -> Workspace.List_request.to_json request
   | Workspace_get request -> Workspace.Get_request.to_json request
   | Blob_read request -> Blob.Read_request.to_json request
   | Session_create request -> Session.Create_request.to_json request
+  | Session_seed request -> Session_seed.Request.to_json request
   | Session_list request -> Session.List_request.to_json request
   | Session_search request -> Search_query.to_json request
   | Session_search_navigate request -> Search_navigation.Request.to_json request
@@ -293,10 +303,17 @@ let decoders =
   ; "server.health", map Health.Request.of_json (fun x -> Server_health x)
   ; "prompt.list", map Prompt.List_request.of_json (fun x -> Prompt_list x)
   ; "prompt.get", map Prompt.Get_request.of_json (fun x -> Prompt_get x)
+  ; ( "prompt.dependencies.status"
+    , map Prompt_dependency_selection.Status_request.of_json (fun () ->
+        Prompt_dependencies_status) )
+  ; ( "prompt.dependencies.update"
+    , map Prompt_dependency_selection.Update_request.of_json (fun x ->
+        Prompt_dependencies_update x) )
   ; "workspace.list", map Workspace.List_request.of_json (fun x -> Workspace_list x)
   ; "workspace.get", map Workspace.Get_request.of_json (fun x -> Workspace_get x)
   ; "blob.read", map Blob.Read_request.of_json (fun x -> Blob_read x)
   ; "session.create", map Session.Create_request.of_json (fun x -> Session_create x)
+  ; "session.seed", map Session_seed.Request.of_json (fun x -> Session_seed x)
   ; "session.list", map Session.List_request.of_json (fun x -> Session_list x)
   ; "session.search", map Search_query.of_json (fun x -> Session_search x)
   ; ( "session.search.navigate"

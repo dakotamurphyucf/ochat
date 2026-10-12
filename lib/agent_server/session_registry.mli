@@ -66,6 +66,24 @@ val read_state
   -> Agent_protocol.Id.Session.t
   -> (Agent_session.Session_state.t, Agent_protocol.Error.t) result
 
+(** Startup-only immutable indexed read. Requires no loaded entries, no installed
+    loader or active lifecycle reservations, and a live registry. The supplied
+    entry must equal the actual indexed projection. A read lease excludes owner
+    shutdown through [f], which runs outside the registry mutex; the same startup
+    conditions and exact entry are checked before delivering its result.
+
+    The caller owns the exclusive host/store startup scope, before publishing
+    connections or starting recovery/actors/schedulers. [f] may read this entry's
+    retained files under their existing owner; it must not mutate this registry,
+    install a loader, activate sessions, or retain a borrowed native Handle. No
+    source or runtime authority is conveyed by the entry. Original exceptions and
+    cancellation propagate through protected read-lease cleanup. *)
+val with_indexed_retention_read
+  :  t
+  -> Agent_store.Session_index.Entry.t
+  -> f:(Agent_store.Session_index.Entry.t -> ('a, Agent_protocol.Error.t) Result.t)
+  -> ('a, Agent_protocol.Error.t) Result.t
+
 (** Same immutable authorization/IO boundary as [read_state]. Loaded state and
     transient calls are captured atomically in one mailbox turn; stored reads
     advertise Unavailable rather than inventing empty live-call state. *)
@@ -100,6 +118,21 @@ val is_closing : t -> bool
     the provisional entry before releasing that exclusion; a closed runtime is
     never reinstalled. *)
 val load : t -> Agent_protocol.Id.Session.t -> (entry, Agent_protocol.Error.t) result
+
+(** Retain a loaded entry for one bounded read, lazily reconstructing an indexed
+    session without loading its execution runtime. Wait cancellably for existing
+    per-ID lifecycle admission, then recheck membership and shutdown. The callback
+    runs once on successful load, outside the global mutex, under per-ID exclusion; cancellation
+    or exceptions release that exclusion. Failed cleanup remains an error.
+    Callers must establish authority before admission and revalidate it before
+    disclosure. The callback must not reserve/load/remove this same ID, shut down
+    the registry, or wait for work requiring this ID's lifecycle admission. Do not
+    retain admission across heartbeat waits or execute lifecycle mutations here. *)
+val with_loaded_read
+  :  t
+  -> Agent_protocol.Id.Session.t
+  -> (entry -> ('a, Agent_protocol.Error.t) Result.t)
+  -> ('a, Agent_protocol.Error.t) Result.t
 
 val entries : t -> entry list
 val stats : t -> stats

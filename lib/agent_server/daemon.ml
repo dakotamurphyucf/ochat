@@ -16,6 +16,8 @@ type startup_mode =
 
 type options =
   { startup_mode : startup_mode
+  ; root_invocation :
+      Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
   ; implementation_name : string
   ; implementation_version : string
   ; features : string list
@@ -23,6 +25,8 @@ type options =
   ; protocol_limits : Agent_protocol.Initialize.Limits.t
   ; timing : Agent_protocol.Initialize.Timing.t
   ; factory_limits : Session_factory.limits
+  ; seed_recovery_limits : Session_factory.Seed_recovery_limits.t
+  ; retained_artifact_limits : Retained_job_artifacts.Limits.t
   ; quota_limits : Agent_session.Quota_manager.limits
   ; reviewer_resolver : Catalog_builder.reviewer_resolver option
   ; policy_evaluator_resolver : Catalog_builder.policy_evaluator_resolver option
@@ -32,6 +36,8 @@ type options =
   ; independent_lifetime_policy : string option
   ; chatml_runtime_policy : Chat_response.Runtime_semantics.policy
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
+  ; content_limits : Chatmd_prompt_content.Limits.t option
+  ; script_preparation : Agent_session.Runtime_script_preparation.t option
   ; provider_operator_factory : Provider_operator_port.factory option
   ; oauth_resolver : (string -> Authenticator.bearer_validator option) option
   ; oauth_actor_resolver : (string -> Authenticator.actor_validator option) option
@@ -48,6 +54,8 @@ type t =
   ; store : Agent_store.Session_store.t
   ; blob_store : Agent_store.Blob_store.t
   ; prompts : Agent_session.Prompt_catalog.t
+  ; project_sources : Project_source_host.t
+  ; script_preparation : Agent_session.Runtime_script_preparation.t option
   ; workspaces : Agent_session.Workspace_catalog.t
   ; registry : Session_registry.t
   ; handler : Command_handler.t
@@ -92,11 +100,13 @@ type health_services =
 
 let default_options =
   { startup_mode = Execute
+  ; root_invocation = Ui
   ; implementation_name = "ochat-agent-server"
   ; implementation_version = "dev"
   ; extension_host = Daemon
   ; features =
-      [ "attachments.multi_client"
+      [ "sessions.seed"
+      ; "attachments.multi_client"
       ; "events.durable"
       ; "events.recoverable"
       ; "permissions.configurable"
@@ -156,6 +166,15 @@ let default_options =
           ; max_file_bytes = 64 * 1024 * 1024
           }
       }
+  ; seed_recovery_limits = Session_factory.Seed_recovery_limits.default
+  ; retained_artifact_limits =
+      Retained_job_artifacts.Limits.create
+        ~max_sessions:4096
+        ~max_archives:4096
+        ~max_jobs:65536
+        ~max_work_steps:10_000_000
+      |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+      |> Result.ok_or_failwith
   ; quota_limits =
       { global_running_sessions = 256
       ; per_principal_running_sessions = 64
@@ -188,6 +207,41 @@ let default_options =
   ; independent_lifetime_policy = None
   ; chatml_runtime_policy = Chat_response.Runtime_semantics.default_policy
   ; authoring_validation_host = None
+  ; content_limits =
+      Some
+        (Chatmd_prompt_content.Limits.create
+           ~max_occurrences:1024
+           ~max_parser_inputs:512
+           ~max_input_bytes:(8 * 1024 * 1024)
+           ~max_output_bytes:(8 * 1024 * 1024)
+           ~max_work_steps:10_000_000
+           ~max_nodes:1_000_000
+           ~max_depth:128
+           ~max_payloads:256
+           ~max_payload_bytes:(8 * 1024 * 1024)
+           ~document:Document_schema.Limits.default
+         |> Or_error.ok_exn)
+  ; script_preparation =
+      Some
+        (Agent_session.Runtime_script_preparation.create
+           ~compilation:Chatml_compilation.default_limits
+           ~planning:
+             (Chat_response.Script_contract_plan.Limits.create
+                ~max_programs:(262144 / 100)
+                ~max_metadata_bytes:(8 * 1024 * 1024)
+                ~max_work_steps:10_000_000
+              |> Or_error.ok_exn)
+           ~restoration:
+             (Chatml_prompt_programs.Limits.create
+                ~max_programs:(262144 / 100)
+                ~max_parser_inputs:512
+                ~max_logical_sources:(262144 / 100)
+                ~max_total_input_bytes:(8 * 1024 * 1024)
+                ~project_work_steps:10_000_000
+                ~document:Document_schema.Limits.default
+              |> Or_error.ok_exn)
+           ~max_custody_work_steps:10_000_000
+         |> Or_error.ok_exn)
   ; provider_operator_factory = None
   ; oauth_resolver = None
   ; oauth_actor_resolver = None
@@ -389,6 +443,7 @@ let open_store ~sw ~env config ~process_start_identity =
       ~root
       ~process_start_identity
       ~lock_nonce
+    |> Result.map ~f:(fun store -> store, Prompt_catalog_host.Store_origin.Existing)
   | `Not_found ->
     let root_path = Eio.Path.(Eio.Stdenv.fs env / root) in
     let admissible =
@@ -411,31 +466,104 @@ let open_store ~sw ~env config ~process_start_identity =
         ~server_id:(Agent_protocol.Id.Server.create ())
         ~process_start_identity
         ~lock_nonce
+      |> Result.map ~f:(fun store -> store, Prompt_catalog_host.Store_origin.Created)
   | _ -> Error (Agent_store.Store_error.Corrupt "host root schema is not a regular file")
 ;;
 
-let build_catalog ~env store config reviewer_resolver policy_evaluator_resolver =
+let project_error error =
+  Agent_store.Store_error.Corrupt (Prompt_catalog_host.Error.message error)
+;;
+
+let install_initial_catalog host prepared =
+  let installed = ref false in
+  let cleanup () =
+    Eio.Cancel.protect (fun () ->
+      if !installed
+      then Prompt_catalog_host.retire prepared
+      else
+        ignore
+          (Prompt_catalog_host.discard prepared : Prompt_catalog_publication.certainty))
+  in
+  match
+    let open Result.Let_syntax in
+    let%bind () = Prompt_catalog_host.publish prepared in
+    let%bind () =
+      Eio.Cancel.protect (fun () ->
+        match Prompt_catalog_host.commit prepared with
+        | Ok () ->
+          installed := true;
+          Ok ()
+        | Error error -> Error (Prompt_catalog_host.Error.Publication error))
+    in
+    Ok host
+  with
+  | result ->
+    cleanup ();
+    result
+  | exception exn ->
+    let trace = Stdlib.Printexc.get_raw_backtrace () in
+    (try cleanup () with
+     | _ -> ());
+    Exn.raise_with_original_backtrace exn trace
+;;
+
+let build_catalog
+      ~sw
+      ~env
+      ~content_limits
+      ~root_invocation
+      ~origin
+      store
+      config
+      reviewer_resolver
+      policy_evaluator_resolver
+  =
   let open Result.Let_syntax in
   let%bind built =
-    Catalog_builder.build ?reviewer_resolver ?policy_evaluator_resolver config
+    Catalog_builder.build
+      ~root_invocation
+      ?reviewer_resolver
+      ?policy_evaluator_resolver
+      config
   in
-  let%bind artifact_store =
-    Agent_store.Prompt_artifact_store.create
+  let%bind sources =
+    Project_source_host.open_owned
+      (Option.value
+         config.Config.server.project_sources
+         ~default:Project_source_configuration.local_only)
+      ~sw
+      ~fs:(Eio.Stdenv.fs env)
+      ~data_root:(Agent_store.Session_store.data_root store)
+      ~clock:(Eio.Stdenv.mono_clock env)
+      ~checkpoint:Eio.Fiber.check
+      ()
+    |> Result.map_error ~f:(fun error ->
+      project_error (Prompt_catalog_host.Error.Sources error))
+  in
+  let%bind host =
+    Prompt_catalog_host.create
+      ~sw
       ~env
-      ~root:
-        (Agent_store.Session_store.data_root store
-         |> Agent_store.Data_root.prompt_artifacts_path)
+      ~store
+      ~origin
+      ~sources
+      ~content_limits
+      ~checkpoint:Eio.Fiber.check
+    |> Result.map_error ~f:project_error
   in
-  let prompts = Agent_session.Prompt_catalog.create ~env ~artifact_store in
-  let prepared =
-    Agent_session.Prompt_catalog.prepare
-      prompts
-      ~transaction_id:(fun _ -> Agent_protocol.Id.Transaction.create ())
+  let%bind prepared =
+    Prompt_catalog_host.prepare
+      host
+      ~mode:Build
       ~created_at:(timestamp env)
+      ~checkpoint:Eio.Fiber.check
       built.prompts
+    |> Result.map_error ~f:project_error
   in
-  Agent_session.Prompt_catalog.install prompts prepared;
-  Ok (built, prompts)
+  let%map host =
+    install_initial_catalog host prepared |> Result.map_error ~f:project_error
+  in
+  built, host, sources
 ;;
 
 let implementation options =
@@ -637,15 +765,18 @@ let maintenance_component maintenance =
 
 let config_component config_watcher =
   match Config_watcher.status config_watcher with
-  | false, _ ->
-    component ~message:"configuration watcher is stopped" "configuration" Unhealthy
-  | true, Some diagnostics ->
+  | (Closed | Uncertain), _ ->
+    component
+      ~message:"configuration watcher is closed or publication is uncertain"
+      "configuration"
+      Unhealthy
+  | (Available | Busy), Some diagnostics ->
     component
       ~message:
         (sprintf "last reload failed with %d diagnostics" (List.length diagnostics))
       "configuration"
       Degraded
-  | true, None ->
+  | (Available | Busy), None ->
     component ~message:"configuration watcher is running" "configuration" Healthy
 ;;
 
@@ -744,58 +875,142 @@ let config_watcher
       ~sw
       ~env
       ~config
-      ~prompts
+      ~project_catalog
       ~factory
       ~audit_store
       ~reviewer_resolver
       ~policy_evaluator_resolver
+      ~root_invocation
   =
-  let prepared = ref None in
-  let prepare diff candidate =
+  let prompt_candidate = ref None in
+  let factory_candidate = ref None in
+  let failure candidate error =
+    Config_watcher.Failure.Rejected [ config_build_diagnostic candidate error ]
+  in
+  let prepare operation diff candidate ~checkpoint =
     if diff.Config_diff.server_changed
     then
       Error
-        [ reload_diagnostic
+        (Config_watcher.Failure.Rejected
+           [ reload_diagnostic
+               candidate
+               "config.restart_required"
+               "server listener, storage, durability, retention, or source configuration \
+                changes require restart"
+               "Restart the daemon with the new server configuration."
+           ])
+    else
+      let open Result.Let_syntax in
+      let%bind built =
+        Catalog_builder.build
+          ~root_invocation
+          ?reviewer_resolver
+          ?policy_evaluator_resolver
+          candidate
+        |> Result.map_error ~f:(failure candidate)
+      in
+      let mode =
+        match operation with
+        | Config_watcher.Operation.Reload -> Prompt_catalog_publication.Mode.Build
+        | Update request ->
+          let module Request = Agent_protocol.Prompt_dependency_selection.Update_request
+          in
+          Update
+            { definitions = Request.definitions request
+            ; expected_generation =
+                Agent_protocol.Prompt_dependency_selection.Generation.to_int
+                  (Request.expected_generation request)
+            }
+      in
+      let%bind revisions =
+        Prompt_catalog_host.prepare
+          project_catalog
+          ~mode
+          ~created_at:(timestamp env)
+          ~checkpoint
+          built.prompts
+        |> Result.map_error ~f:(fun error -> failure candidate (project_error error))
+      in
+      prompt_candidate := Some revisions;
+      let%bind result =
+        match operation with
+        | Config_watcher.Operation.Reload ->
+          Ok (Config_watcher.Prepared_result.Reloaded diff)
+        | Update request ->
+          Prompt_dependency_projection.prepared_update revisions ~request ~checkpoint
+          |> Result.map ~f:(fun result ->
+            Config_watcher.Prepared_result.Dependencies_updated result)
+          |> Result.map_error ~f:(fun error ->
+            failure candidate (Agent_store.Store_error.Corrupt error.message))
+      in
+      let%map catalogs =
+        Session_factory.seal_catalogs
+          factory
+          ~workspaces:built.workspaces
+          ~permission_profiles:built.permission_profiles
+          ~manifest_grants:built.manifest_grants
+          ~checkpoint
+        |> Result.map_error ~f:(fun error ->
+          failure
             candidate
-            "config.restart_required"
-            "server listener, storage, durability, retention, or authoring package \
-             changes require restart"
-            "Restart the daemon with the new server configuration."
-        ]
-    else (
-      match
-        Catalog_builder.build ?reviewer_resolver ?policy_evaluator_resolver candidate
-      with
-      | Error error -> Error [ config_build_diagnostic candidate error ]
-      | Ok built ->
-        let prompt_revisions =
-          Agent_session.Prompt_catalog.prepare
-            prompts
-            ~transaction_id:(fun _ -> Agent_protocol.Id.Transaction.create ())
-            ~created_at:(timestamp env)
-            built.prompts
-        in
-        prepared := Some (built, prompt_revisions);
-        Ok ())
+            (Agent_store.Store_error.Corrupt
+               (Sexp.to_string_hum (Session_factory.Catalog_seal.Error.sexp_of_t error))))
+      in
+      factory_candidate := Some catalogs;
+      result
   in
-  let commit _ candidate =
-    let built, prompt_revisions = Option.value_exn !prepared in
-    prepared := None;
-    Session_factory.install_catalogs
-      factory
-      ~workspaces:built.Catalog_builder.workspaces
-      ~permission_profiles:built.permission_profiles
-      ~manifest_grants:built.manifest_grants;
-    Agent_session.Prompt_catalog.install prompts prompt_revisions;
-    ignore candidate
+  let publish _ _ candidate =
+    Prompt_catalog_host.publish (Option.value_exn !prompt_candidate)
+    |> Result.map_error ~f:(fun error -> failure candidate (project_error error))
   in
-  let audit diff =
+  let commit _ _ _ =
+    (* All objects and result carriers already exist. Watcher protects this entire
+       phase and swaps Config immediately after both same-domain pointer commits. *)
+    (match Session_factory.Catalog_seal.commit (Option.value_exn !factory_candidate) with
+     | Ok () -> ()
+     | Error _ -> failwith "reserved factory publication invariant failed");
+    match Prompt_catalog_host.commit (Option.value_exn !prompt_candidate) with
+    | Ok () -> ()
+    | Error _ -> failwith "acknowledged prompt publication invariant failed"
+  in
+  let discard_prepared () =
+    let certainty =
+      match !prompt_candidate with
+      | None -> Prompt_catalog_publication.Rejected
+      | Some candidate -> Prompt_catalog_host.discard candidate
+    in
+    Option.iter !factory_candidate ~f:(fun candidate ->
+      let result =
+        match certainty with
+        | Rejected -> Session_factory.Catalog_seal.abort candidate
+        | Uncertain -> Session_factory.Catalog_seal.mark_uncertain candidate
+      in
+      match result with
+      | Ok () -> ()
+      | Error _ -> failwith "factory discard invariant failed");
+    prompt_candidate := None;
+    factory_candidate := None;
+    match certainty with
+    | Rejected -> Config_watcher.Certainty.Rejected
+    | Uncertain -> Uncertain
+  in
+  let retire () =
+    Option.iter !prompt_candidate ~f:Prompt_catalog_host.retire;
+    prompt_candidate := None;
+    factory_candidate := None
+  in
+  let audit operation diff =
+    let name =
+      match operation with
+      | Config_watcher.Operation.Reload -> "server.configuration.reloaded"
+      | Update _ -> "prompt.dependencies.updated"
+    in
     ignore
       (Agent_store.Audit_store.append
          audit_store
          ~timestamp:(timestamp env)
          ~level:Agent_protocol.Audit.Info
-         ~name:"server.configuration.reloaded"
+         ~name
          ~session_id:None
          ~principal_id:None
          ~payload:
@@ -806,13 +1021,13 @@ let config_watcher
   in
   let watcher =
     Config_watcher.create
+      ~sw
       ~env
       ~path:config.Config.source_file
       ~initial:config
-      ~hooks:{ prepare; commit; audit }
+      ~hooks:{ prepare; publish; commit; discard_prepared; audit; retire }
   in
   if enabled then Config_watcher.run ~sw ~clock:(Eio.Stdenv.clock env) ~every:1. watcher;
-  if not enabled then Config_watcher.close watcher;
   watcher
 ;;
 
@@ -825,6 +1040,8 @@ let compose
       ~home
       ~options
       ~provider_operator
+      ~project_catalog
+      ~project_sources
       store
       built
       prompts
@@ -954,6 +1171,54 @@ let compose
     ; subscriber_queue_capacity = config.server.subscriber_queue_capacity
     }
   in
+  let%bind child_sources =
+    match options.script_preparation with
+    | None -> Ok None
+    | Some _ ->
+      let module Runner = Agent_session.Captured_agent_runner in
+      let module Sources = Agent_session.Prompt_script_preparation in
+      let identity tag =
+        (* These version tags are the actual Daemon host policy implementation.
+           Configuration has already passed bounded administrative admission. *)
+        [%sexp
+          (tag : string)
+        , (options.implementation_name : string)
+        , (options.implementation_version : string)
+        , (config.server.project_sources : Project_source_configuration.t option)]
+        |> Sexp.to_string_mach
+        |> fun contents ->
+        Chatml_source.Digest.of_contents contents ~checkpoint:Eio.Fiber.check
+      in
+      let%bind source =
+        Project_source_host.with_host project_sources ~f:(fun policy _ ->
+          Runner.Source.create
+            ~policy_revision:(identity "ochat.daemon.child-source.v1")
+            ~compilation:(Sources.Policy.compilation policy)
+            ~parser_limits:(Agent_session.Prompt_revision_builder.capture_limits ())
+            ~max_work_steps:(Sources.Policy.max_work_steps policy)
+            ~preprocess:Meta_prompting.Preprocessor.preprocess
+            ~prepare_programs:(fun startup ~invocation scope capture ->
+              Prompt_catalog_host.prepare_child_programs
+                project_catalog
+                ~startup
+                ~invocation
+                ~scope
+                ~capture
+                ~checkpoint:(fun () ->
+                  Chat_response.Startup_compilation.checkpoint startup)))
+        |> Result.map_error ~f:(fun error ->
+          Agent_protocol.Error.invalid_request
+            (Sexp.to_string_hum (Project_source_host.Error.sexp_of_t error)))
+      in
+      let%map source =
+        Result.map_error source ~f:(fun error ->
+          Agent_protocol.Error.invalid_request (Core.Error.to_string_hum error))
+      in
+      Some
+        (Session_factory.Child_source_policy.create
+           ~source
+           ~runtime_policy_revision:(identity "ochat.daemon.child-runtime.v1"))
+  in
   let factory =
     Session_factory.create
       ~sw
@@ -976,6 +1241,9 @@ let compose
       ~independent_lifetime_policy:options.independent_lifetime_policy
       ~chatml_runtime_policy:options.chatml_runtime_policy
       ~authoring_validation_host:options.authoring_validation_host
+      ~script_preparation:options.script_preparation
+      ~content_limits:options.content_limits
+      ~child_sources
       ~durability:(durability config.server)
       ~limits:factory_limits
   in
@@ -996,6 +1264,15 @@ let compose
     if not (equal_startup_mode options.startup_mode Operator_only)
     then Session_lifecycle_service.recover_removals lifecycle_service
     else Ok ()
+  in
+  let%bind () =
+    if equal_startup_mode options.startup_mode Operator_only
+    then Ok ()
+    else
+      Session_factory.reconcile_seed_creations
+        factory
+        ~limits:options.seed_recovery_limits
+        ~checkpoint:Eio.Fiber.check
   in
   let%bind () =
     if equal_startup_mode options.startup_mode On_demand
@@ -1023,23 +1300,24 @@ let compose
            ~factory)
     else None
   in
-  if execute
-  then Session_registry.install_loader registry (Session_factory.recover_session factory);
   Session_registry.install_reader registry (Session_factory.read_session factory);
-  let%bind () =
-    if not execute
-    then Ok ()
-    else (
-      let%bind _ = Session_factory.recover_sessions factory in
-      let%bind () = Session_factory.reconcile_generated_creations factory in
-      let%bind entries =
-        Agent_store.Session_store.list_sessions_checked store
-        |> Result.map_error ~f:protocol_of_store
-      in
-      let pinned_revisions =
-        List.filter_map entries ~f:(fun entry ->
-          entry.Agent_store.Session_index.Entry.session.prompt_revision)
-      in
+  (* No loader, actor, runtime or scheduler exists yet. The exclusive startup
+     Store owner and Indexed-only read leases cover the complete collection.
+     Any incomplete proof skips all deletion; recovery still uses its original
+     diagnostics rather than treating retention failure as ordinary success. *)
+  if execute
+  then (
+    match
+      Retained_job_artifacts.collect
+        ~factory
+        ~entries:indexed_sessions
+        ~authorize:(fun _ -> Ok ())
+        ~request_policy:Chat_response.One_off_request.default_policy
+        ~limits:options.retained_artifact_limits
+        ~checkpoint:Eio.Fiber.check
+    with
+    | Error _ -> ()
+    | Ok protected ->
       ignore
         (Agent_store.Delegation_store.with_artifact_retention
            (Agent_store.Session_store.delegations store)
@@ -1048,10 +1326,21 @@ let compose
            ~max_artifact_entries:factory_limits.delegation_artifact_max_entries
            ~max_artifact_bytes:factory_limits.delegation_artifact_max_bytes
            ~f:(fun generated_revisions ->
-             Agent_session.Prompt_catalog.prune_unreferenced_artifacts
-               prompts
-               ~additional:(generated_revisions @ pinned_revisions))
-         : (int, Agent_store.Store_error.t) result);
+             Prompt_catalog_host.prune
+               project_catalog
+               ~additional:
+                 (generated_revisions @ Retained_job_artifacts.revisions protected)
+               ~checkpoint:Eio.Fiber.check
+             |> Result.map_error ~f:project_error)
+         : (int, Agent_store.Store_error.t) result));
+  if execute
+  then Session_registry.install_loader registry (Session_factory.recover_session factory);
+  let%bind () =
+    if not execute
+    then Ok ()
+    else (
+      let%bind _ = Session_factory.recover_sessions factory in
+      let%bind () = Session_factory.reconcile_generated_creations factory in
       let%bind () = Start_scheduler.seed_recovered ~registry ~queue:start_queue in
       let startup_time = timestamp env in
       let%bind () =
@@ -1122,11 +1411,12 @@ let compose
       ~sw
       ~env
       ~config
-      ~prompts
+      ~project_catalog
       ~factory
       ~audit_store
       ~reviewer_resolver:options.reviewer_resolver
       ~policy_evaluator_resolver:options.policy_evaluator_resolver
+      ~root_invocation:options.root_invocation
   in
   let health_services =
     { health_env = env
@@ -1140,6 +1430,29 @@ let compose
     ; health_config_watcher = config_watcher
     ; health_status_ref = status_ref
     }
+  in
+  let dependency_administration =
+    Dependency_administration.create
+      ~status:(fun () ->
+        let publication, _ = Config_watcher.status config_watcher in
+        Prompt_dependency_projection.status project_catalog ~publication)
+      ~update:(fun request ~checkpoint ->
+        Config_watcher.update_dependencies config_watcher request ~checkpoint
+        |> Result.map_error ~f:(function
+          | Config_watcher.Failure.Rejected _ ->
+            Dependency_administration.Failure.Rejected
+              (Agent_protocol.Error.create
+                 Invalid_state
+                 ~message:"dependency update rejected before publication"
+                 ~retryable:false
+                 ())
+          | Uncertain _ ->
+            Dependency_administration.Failure.Uncertain
+              (Agent_protocol.Error.create
+                 Interrupted
+                 ~message:"dependency publication is uncertain; do not repeat the update"
+                 ~retryable:false
+                 ())))
   in
   let handler =
     Command_handler.create
@@ -1174,10 +1487,13 @@ let compose
       ~server_health:(server_health health_services)
       ~cancel_job:(Job_scheduler.cancel job_scheduler)
       ~create_session:(Session_factory.create_session factory)
+      ~seed_factory:(Some factory)
+      ~seed_recovery_limits:options.seed_recovery_limits
       ~prepare_session_start:(Session_factory.prepare_session_start factory)
       ~workspace_retained:(Session_factory.workspace_retained factory)
       ~prepare_administration:(Session_factory.prepare_administration factory)
       ~provider_operator
+      ~dependency_administration:(Some dependency_administration)
   in
   let admit command =
     if execution_enabled
@@ -1190,6 +1506,8 @@ let compose
       | Server_health _
       | Prompt_list _
       | Prompt_get _
+      | Prompt_dependencies_status
+      | Prompt_dependencies_update _
       | Workspace_list _
       | Workspace_get _
       | Project_create _
@@ -1223,6 +1541,7 @@ let compose
       | Provider_select _
       | Provider_configure_environment _ -> Ok ()
       | Session_create _
+      | Session_seed _
       | Session_get _
       | Session_configuration_get _
       | Session_configuration_update _
@@ -1289,6 +1608,8 @@ let compose
     ; schedule_scheduler
     ; maintenance
     ; config_watcher
+    ; project_sources
+    ; script_preparation = options.script_preparation
     ; factory
     ; selection
     ; start_queue
@@ -1338,12 +1659,33 @@ let start
       Agent_session.Automatic_turn_budget.create options.chatml_runtime_policy
       |> Agent_session.Automatic_turn_budget.validate
   in
-  let%bind store =
+  let%bind store, origin =
     open_store ~sw ~env config.server ~process_start_identity
     |> Result.map_error ~f:protocol_of_store
   in
   let startup_cleanup = Startup_cleanup.create ~sw ~store in
   Startup_cleanup.protect startup_cleanup (fun () ->
+    let%bind () =
+      match options.startup_mode with
+      | Operator_only -> Ok ()
+      | Execute | On_demand ->
+        (* The exclusive store owner exists, but no embedding callback, catalog
+           publication or runtime publisher has been allowed to start yet. *)
+        let%bind artifacts =
+          Agent_store.Prompt_artifact_store.open_existing
+            ~env
+            ~root:
+              (Agent_store.Data_root.prompt_artifacts_path
+                 (Agent_store.Session_store.data_root store))
+          |> Result.map_error ~f:protocol_of_store
+        in
+        Agent_store.Prompt_artifact_store.discard_interrupted_installs
+          artifacts
+          ~max_entries:options.factory_limits.delegation_artifact_max_entries
+          ~checkpoint:Eio.Fiber.check
+        |> Result.map_error ~f:protocol_of_store
+        |> Result.map ~f:ignore
+    in
     let%bind () = before_activation store in
     let%bind provider_operator =
       match options.provider_operator_factory with
@@ -1367,9 +1709,13 @@ let start
            | Some _ -> features @ [ "provider.operator" ])
       }
     in
-    let%bind built, prompts =
+    let%bind built, project_catalog, project_sources =
       build_catalog
+        ~origin
+        ~sw
         ~env
+        ~content_limits:options.content_limits
+        ~root_invocation:options.root_invocation
         store
         config
         options.reviewer_resolver
@@ -1385,13 +1731,19 @@ let start
       ~home
       ~options
       ~provider_operator
+      ~project_catalog
+      ~project_sources
       store
       built
-      prompts)
+      (Prompt_catalog_host.catalog project_catalog))
 ;;
 
 let close_connection t context = Command_handler.close_connection t.handler context
-let reload_config t = Config_watcher.reload t.config_watcher
+
+let reload_config t =
+  Config_watcher.reload t.config_watcher
+  |> Result.map_error ~f:Config_watcher.Failure.diagnostics
+;;
 
 let import_legacy t ~principal ~source_id ~source_path ~legacy request =
   let open Result.Let_syntax in
@@ -1439,10 +1791,11 @@ let shutdown t =
     Permission_scheduler.close t.permission_scheduler;
     Schedule_scheduler.close t.schedule_scheduler;
     Maintenance.close t.maintenance;
-    Config_watcher.close t.config_watcher;
+    Config_watcher.close_and_wait t.config_watcher;
     Start_scheduler.close_and_wait t.start_scheduler;
     shutdown_sessions t;
     Option.iter t.provider_operator ~f:Provider_operator_port.close;
+    Project_source_host.close_and_wait t.project_sources;
     Agent_store.Session_store.close t.store
     |> Result.map_error ~f:protocol_of_store
     |> Result.map ~f:(fun () -> t.status_ref := Stopped)
@@ -1464,4 +1817,55 @@ let select_session t ~principal ~expected =
       Start_scheduler.seed_recovered ~registry:t.registry ~queue:t.start_queue
     in
     entry
+;;
+
+module Shell_inspection_selection = struct
+  type t =
+    | Current
+    | Retained of
+        { revision_id : Agent_protocol.Id.Prompt_revision.t
+        ; invocation : Agent_session.Runtime_script_preparation.Invocation.t
+        }
+end
+
+let inspect_prompt_shell t ~definition_id ~selection ~checkpoint =
+  let module Catalog = Agent_session.Prompt_catalog in
+  let module Preparation = Agent_session.Runtime_script_preparation in
+  let failure message =
+    Error (Agent_protocol.Error.create Invalid_state ~message ~retryable:false ())
+  in
+  checkpoint ();
+  match t.script_preparation, Catalog.find t.prompts definition_id with
+  | None, _ ->
+    failure "complete shell inspection requires the host script preparation policy"
+  | Some _, None -> failure "shell inspection prompt definition is not admitted"
+  | Some policy, Some entry ->
+    let revision =
+      match selection with
+      | Shell_inspection_selection.Current ->
+        (match entry.availability with
+         | Ready revision ->
+           Ok
+             ( revision
+             , Preparation.Invocation.of_root
+                 (Agent_session.Prompt_definition.root_invocation entry.definition) )
+         | Disabled -> failure "shell inspection prompt is disabled"
+         | Unavailable _ ->
+           failure "shell inspection current captured revision is unavailable")
+      | Retained { revision_id; invocation } ->
+        Catalog.restore_revision t.prompts ~definition_id ~revision_id
+        |> Result.map ~f:(fun revision -> revision, invocation)
+        |> Result.map_error ~f:(fun diagnostics ->
+          Agent_protocol.Error.create
+            Invalid_state
+            ~message:
+              (List.map diagnostics ~f:(fun diagnostic ->
+                 diagnostic.Agent_session.Prompt_revision_builder.Diagnostic.message)
+               |> String.concat ~sep:"\n")
+            ~retryable:false
+            ())
+    in
+    Result.bind revision ~f:(fun (revision, invocation) ->
+      checkpoint ();
+      Preparation.inspect_shell policy revision ~env:t.env ~invocation ~checkpoint)
 ;;

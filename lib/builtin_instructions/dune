@@ -1,0 +1,13 @@
+(rule
+ (targets bundled_instructions.ml)
+ (action
+  (with-stdout-to %{targets}
+   (run %{exe:../authoring_sources/embed_documents.exe}
+    chatml %{dep:assets/chatml.md}))))
+
+(library
+ (name builtin_instructions)
+ (public_name ochat.builtin_instructions)
+ (private_modules bundled_instructions)
+ (libraries core digestif)
+ (preprocess (pps ppx_jane)))

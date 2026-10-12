@@ -904,3 +904,75 @@ let%expect_test
       print_endline "read-only and expired owner denied; queued job and session unchanged"));
   [%expect {| read-only and expired owner denied; queued job and session unchanged |}]
 ;;
+
+let%expect_test "unchanged moderator checkpoints publish the actual returned position" =
+  let module A = Agent_session.Session_actor in
+  let module P = Agent_protocol in
+  with_actor_workspace (fun env workspace_instance ->
+    Eio.Switch.run (fun sw ->
+      let initial =
+        actor_state ~workspace_instance ~liveness:Process_bound ~start_immediately:false
+      in
+      let backend =
+        Agent_session.Memory_backend.create ~event_capacity:32 ~initial_state:initial
+      in
+      let actor =
+        A.create
+          ~sw
+          ~clock:(Eio.Stdenv.clock env)
+          ~mailbox_capacity:8
+          ~compaction_env:None
+          ~initial_state:initial
+          ~operation_worker:None
+          ~persistence:(Agent_session.Memory_backend.persistence backend)
+          ~services:
+            { now = (fun () -> timestamp)
+            ; create_attachment_id = P.Id.Attachment.create
+            ; create_reclaim_token = (fun () -> "checkpoint-test")
+            ; job_results = None
+            ; monotonic_now = (fun () -> Mtime.min_stamp)
+            ; schedule_limits = Agent_session.Staged_schedules.default_limits
+            ; notification_limits = Agent_session.Staged_notifications.default_limits
+            ; ingress_limits = Agent_session.Staged_ingress.default_limits
+            ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
+            ; state_committed = (fun _ _ -> ())
+            }
+      in
+      let _, subscriber, snapshot, _ =
+        A.attach_with_snapshot
+          actor
+          ~principal_id:None
+          ~reclaim_token:None
+          ~mode:Read_only
+          ~subscribe:true
+        |> protocol_ok
+      in
+      let subscriber = Option.value_exn subscriber in
+      let previous = ref snapshot.revision in
+      List.iter [ (); () ] ~f:(fun () ->
+        let returned = A.change_moderator actor None |> protocol_ok in
+        assert (Int64.(returned.revision > !previous));
+        previous := returned.revision;
+        let event =
+          Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 1. (fun () ->
+            Agent_session.Subscriber.take subscriber |> Option.value_exn |> protocol_ok)
+        in
+        match event with
+        | Durable event ->
+          (match
+             P.Event.Durable.Payload.of_json ~kind:event.kind event.payload |> protocol_ok
+           with
+           | Session_updated observed ->
+             [%test_eq: int64] returned.revision event.revision;
+             [%test_eq: int64] returned.latest_event_sequence event.sequence;
+             [%test_eq: string]
+               (P.Session.to_json returned |> Jsonaf.to_string)
+               (P.Session.to_json observed |> Jsonaf.to_string);
+             assert (Option.is_none (Agent_session.Memory_backend.state backend).moderator)
+           | _ -> failwith "checkpoint did not publish its public session position")
+        | Recoverable _ -> failwith "checkpoint was not durably published");
+      Agent_session.Subscriber.close subscriber;
+      A.shutdown actor));
+  print_endline "Both unchanged checkpoints publish their committed session positions.";
+  [%expect {| Both unchanged checkpoints publish their committed session positions. |}]
+;;

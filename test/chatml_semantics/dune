@@ -1,0 +1,5 @@
+(library
+ (name chatml_semantics_tests)
+ (libraries core expect_test_helpers_core eio eio.unix eio_main chatml chatml_source chatml_prepared_program chatml_typechecker chatml_graph chatml_semantics chatml_compilation)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

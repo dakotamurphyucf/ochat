@@ -7,18 +7,23 @@
   tool_schema
   extension_spec
   authoring_metadata
+  script_project
   chatmd_script_spec
   feature
   path_expr
   duration
   shell_spec
+  script_reference
   builtin_profile
   shell_tool_spec
   shell_element
+  manifest_prepared_hook
+  manifest_authorization
   manifest
   manifest_defaults
   manifest_merge
   manifest_compiler)
+ (private_modules manifest_prepared_hook manifest_authorization)
  (libraries core digestif jsonaf uutf)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))

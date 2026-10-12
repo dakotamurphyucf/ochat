@@ -41,6 +41,15 @@ val create
   -> unit
   -> (t, Agent_protocol.Error.t) result
 
+(** Submit one complete original stopped seed without attachment or activation.
+    The request owns its idempotency key and already-converted neutral transcript.
+    Connection retains uncertain original commands for ordinary receipt recovery;
+    retry never selects new code or implicitly starts a session. *)
+val seed
+  :  Connection.t
+  -> Agent_protocol.Session_seed.Request.t
+  -> (Agent_protocol.Session_seed.Result.t, Agent_protocol.Error.t) result
+
 val session_id : t -> Agent_protocol.Id.Session.t
 val attachment : t -> Agent_protocol.Session.Attachment.t
 

@@ -255,6 +255,179 @@ let%expect_test "authored delegation identity survives restart and cannot change
 ;;
 
 let%expect_test
+    "shared artifact owners retain separate admission identities and exact digests"
+  =
+  with_temp_directory "ochat-shared-artifact-owners" (fun env root ->
+    Eio.Switch.run (fun sw ->
+      let store = create env sw root in
+      let ledger = S.delegations store in
+      let first = reserve ledger (key "first") (admission ()) |> record in
+      let shared () =
+        { (admission ()) with
+          revision_id = first.admission.revision_id
+        ; manifest_sha256 = first.admission.manifest_sha256
+        }
+      in
+      let second = reserve ledger (key "second") (shared ()) |> record in
+      assert (not (D.Reference.equal (D.reference first) (D.reference second)));
+      let rejected name candidate =
+        assert (
+          Result.is_error
+            (D.reserve
+               ledger
+               ~key:(key name)
+               ~request_sha256:(digest "complete creation request")
+               ~admission:candidate
+               ~max_records
+               ~max_bytes))
+      in
+      rejected
+        "different-manifest"
+        { (shared ()) with manifest_sha256 = digest "changed" };
+      rejected
+        "duplicate-child"
+        { (shared ()) with child_session_id = first.admission.child_session_id };
+      rejected
+        "duplicate-transaction"
+        { (shared ()) with transaction_id = first.admission.transaction_id };
+      let first = D.revoke ledger first Admission_failed |> store_ok in
+      let revoked = reserve ledger (key "revoked") (admission ()) |> record in
+      let _ = D.revoke ledger revoked Admission_failed |> store_ok in
+      rejected
+        "revoked-still-owns"
+        { (admission ()) with
+          revision_id = revoked.admission.revision_id
+        ; manifest_sha256 = digest "changed"
+        };
+      let path =
+        Eio.Path.(
+          Eio.Stdenv.fs env
+          / root
+          / "delegations"
+          / (digest (D.Key.sexp_of_t second.key |> Sexp.to_string_mach) ^ ".frame"))
+      in
+      let bytes = Eio.Path.load path in
+      let document = read_document path in
+      let payload = Schema.Document.payload document in
+      let changed_admission =
+        match Schema.Json.field payload ~name:"admission" with
+        | Value value ->
+          replace_member value "manifest_sha256" (`String (digest "changed"))
+        | Absent | Null -> assert false
+      in
+      rewrite_document
+        path
+        (replace_member
+           (Schema.Document.json document)
+           "payload"
+           (replace_member payload "admission" changed_admission));
+      let decoded = D.find ledger second.key |> store_ok |> Option.value_exn in
+      [%test_eq: string] (digest "changed") decoded.admission.manifest_sha256;
+      let called = ref false in
+      assert (
+        Result.is_error
+          (D.with_records ledger ~max_records ~max_bytes ~f:(fun _ ->
+             called := true;
+             Ok ())));
+      assert (not !called);
+      Eio.Path.save ~create:(`Or_truncate 0o600) path bytes;
+      S.close store |> store_ok;
+      let store = reopen env sw root in
+      let ledger = S.delegations store in
+      [%test_eq: int] 3 (List.length (records ledger));
+      assert (D.equal_record first (D.resolve ledger (D.reference first) |> store_ok));
+      assert (D.equal_record second (D.resolve ledger (D.reference second) |> store_ok));
+      S.close store |> store_ok));
+  print_endline
+    "shared exact manifest; unique child/transaction; conflicting durable owners never \
+     deliver";
+  [%expect
+    {| shared exact manifest; unique child/transaction; conflicting durable owners never deliver |}]
+;;
+
+let%expect_test
+    "released shared artifacts can be recaptured without reviving old admissions"
+  =
+  with_temp_directory "ochat-shared-artifact-epochs" (fun env root ->
+    Eio.Switch.run (fun sw ->
+      let store = create env sw root in
+      let ledger = S.delegations store in
+      let artifacts =
+        A.create
+          ~env
+          ~root:(Agent_store.Data_root.prompt_artifacts_path (S.data_root store))
+        |> store_ok
+      in
+      let revision = P.Id.Prompt_revision.create () in
+      let capture created_at =
+        A.Artifact.create
+          ~revision_id:revision
+          ~root_chatmd:"<developer>unchanged selected child</developer>"
+          ~sources:[]
+          ~parser_schema_version:5
+          ~runtime_schema_version:1
+          ~created_at
+          ()
+        |> store_ok
+      in
+      let original = capture timestamp in
+      A.install artifacts ~transaction_id:(P.Id.Transaction.create ()) original
+      |> store_ok;
+      let candidate artifact =
+        { (admission ()) with
+          revision_id = artifact.A.Artifact.revision_id
+        ; manifest_sha256 = artifact.manifest_sha256
+        ; created_at = artifact.created_at
+        }
+      in
+      let first = reserve ledger (key "first") (candidate original) |> record in
+      let peer = reserve ledger (key "peer") (candidate original) |> record in
+      let first = D.revoke ledger first Admission_failed |> store_ok in
+      let prune protected = A.prune_unreferenced artifacts ~protected in
+      [%test_eq: int] 0 (retention ledger prune |> store_ok);
+      let released = D.find ledger first.key |> store_ok |> Option.value_exn in
+      assert (Option.is_some released.artifact_collection);
+      assert (A.exists artifacts revision);
+      let later = capture (P.Timestamp.add_ms timestamp 1000 |> protocol_ok) in
+      assert (not (String.equal original.manifest_sha256 later.manifest_sha256));
+      let reserve_later () =
+        D.reserve
+          ledger
+          ~key:(key "later")
+          ~request_sha256:(digest "complete creation request")
+          ~admission:(candidate later)
+          ~max_records
+          ~max_bytes
+      in
+      (* A Prepared row has released its claim, but the live peer still owns H1. *)
+      assert (Result.is_error (reserve_later ()));
+      let _ = D.revoke ledger peer Admission_failed |> store_ok in
+      [%test_eq: int] 1 (retention ledger prune |> store_ok);
+      assert (not (A.exists artifacts revision));
+      A.install artifacts ~transaction_id:(P.Id.Transaction.create ()) later |> store_ok;
+      let current = reserve_later () |> store_ok |> record in
+      let replayed = reserve ledger first.key (admission ()) |> record in
+      assert (D.equal_record released replayed);
+      assert (Result.is_error (D.advance ledger replayed Artifact_installed));
+      [%test_eq: int] 0 (retention ledger prune |> store_ok);
+      let loaded = A.load artifacts revision |> store_ok in
+      [%test_eq: string] later.manifest_sha256 loaded.manifest_sha256;
+      S.close store |> store_ok;
+      let store = reopen env sw root in
+      let ledger = S.delegations store in
+      [%test_eq: int] 3 (List.length (records ledger));
+      assert (D.equal_record current (D.resolve ledger (D.reference current) |> store_ok));
+      assert (D.equal_record released (D.resolve ledger (D.reference released) |> store_ok));
+      [%test_eq: int] 0 (retention ledger prune |> store_ok);
+      S.close store |> store_ok));
+  print_endline
+    "shared peer protects Prepared artifact; prune then real recapture changes \
+     timestamp/digest; old admission stays revoked";
+  [%expect
+    {| shared peer protects Prepared artifact; prune then real recapture changes timestamp/digest; old admission stays revoked |}]
+;;
+
+let%expect_test
     "abandoned artifacts retire durably without losing protected source or retry identity"
   =
   with_temp_directory "ochat-abandoned-artifacts" (fun env root ->

@@ -17,13 +17,19 @@ let arguments = function
       "Process.run args must be an array of strings"
 ;;
 
-let execute registry runtime command arguments =
+let execute _registry runtime command arguments =
+  let open Result.Let_syntax in
+  let%bind config =
+    Runtime.executor_config_for_call runtime
+    |> Result.map_error ~f:(fun message ->
+      sprintf "[shell.moderator_scope_unavailable] %s" message)
+  in
   let request =
     Shell_access.Request.command (Shell_access.Command.create command arguments)
   in
   match
     Shell_access.Executor.run
-      (Runtime.executor_config runtime)
+      config
       { request
       ; input = Shell_access.Input.Empty
       ; rationale = Some "ChatML moderator Process.run"
@@ -34,11 +40,10 @@ let execute registry runtime command arguments =
     let executor_error = Runtime_result.error_of_executor executor_error in
     error executor_error.code executor_error.message
   | Ok executor_result ->
-    let manifest = Registry.manifest registry in
     let result =
       Runtime_result.of_executor
         ~runtime_id:(Runtime.id runtime)
-        ~manifest_sha256:manifest.Chatmd_shell_spec.Manifest.sha256
+        ~manifest_sha256:(Shell_access.Executor.manifest_sha256 config)
         executor_result
     in
     Ok (result.stdout ^ result.stderr)

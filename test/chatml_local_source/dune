@@ -1,0 +1,6 @@
+(library
+ (name chatml_local_source_tests)
+ (modules support local_source_test)
+ (libraries core core_unix eio eio.unix eio_main source ochat.chatml_local_source)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

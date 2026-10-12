@@ -96,7 +96,7 @@ let call =
   ]
 ;;
 
-let run ?(standalone = false) env ~config_path ~boundary =
+let run ?(standalone = false) ?provider env ~config_path ~boundary =
   let wrapped =
     Support.Crash_fault_io.wrap
       env
@@ -147,6 +147,7 @@ let run ?(standalone = false) env ~config_path ~boundary =
       Stdlib.Seq.empty
     | _ -> F.fail "provider ran beyond selected crash boundary"
   in
+  let post_stream = Option.value provider ~default:post_stream in
   let options =
     { Agent_server.Daemon.default_options with
       qualify_chatml_extensions = true

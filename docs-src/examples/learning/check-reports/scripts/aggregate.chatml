@@ -1,70 +1,70 @@
-(* The file tool prefixes text with two metadata lines. Keep decoding separate
-   from the workflow so malformed or truncated input fails visibly. *)
+(* Checked_json is a source module selected by this declaration's project.
+   Decode the complete request before constructing any file tasks. *)
+let decode_files input = Checked_json.array(input, Checked_json.string)
+
+let decode_check input =
+  Outcome.bind(Checked_json.field(input, "check", Checked_json.string), fun check ->
+    Outcome.map(Checked_json.field(input, "status", fun value ->
+      Checked_json.validate(Checked_json.string(value),
+        "A check status must be passed or failed.",
+        fun status -> Array.exists(["passed", "failed"], fun expected -> status == expected))),
+      fun status -> {check = check; status = status}))
+
+let decode_report input = Checked_json.array(input, decode_check)
+
+(* read_file prefixes complete text with two metadata lines. A missing line is
+   a protocol failure, not an empty report or a successful partial summary. *)
 let after_line text =
   match String.find(text, "\n") with
   | `Some(index) ->
-      String.slice(text, index + 1, String.length(text) - index - 1)
-  | `None -> fail("Expected a complete read_file response.")
-
-let string_field value name =
-  match Json.get_field(value, name) with
-  | `Some(`String(text)) -> text
-  | _ -> fail("Expected a string field: " ++ name)
-
-let add_failure totals check_name =
-  if Array.exists(totals, fun item -> item.check == check_name) then
-    Array.map(totals, fun item ->
-      if item.check == check_name then
-        { check = check_name; failures = item.failures +. 1.0 }
-      else item)
-  else
-    Array.append(totals, [{ check = check_name; failures = 1.0 }])
-
-let add_report totals report =
-  match report with
-  | `Array(checks) ->
-      Array.fold(checks, totals, fun current item ->
-        match string_field(item, "status") with
-        | "failed" -> add_failure(current, string_field(item, "check"))
-        | "passed" -> current
-        | _ -> fail("A check status must be passed or failed."))
-  | _ -> fail("Expected an array of check results.")
+      `Ok(String.slice(text, index + 1, String.length(text) - index - 1))
+  | `None -> `Error("Expected a complete read_file response.")
 
 let read_report filename =
   let* result = Tool.call("read_file", `Object([
-    { key = "root"; value = `String("reports") },
-    { key = "file"; value = `String(filename) }
+    {key = "root"; value = `String("reports")},
+    {key = "file"; value = `String(filename)}
   ])) in
   match result with
-  | `Ok(`String(text)) ->
-      Task.pure(Json.parse(after_line(after_line(text))))
-  | `Ok(_) -> Task.fail("The file tool returned a non-text result.")
   | `Error(message) -> Task.fail(message)
+  | `Ok(`String(text)) ->
+      (match Outcome.bind(after_line(text), after_line) with
+      | `Error(message) -> Task.fail(message)
+      | `Ok(body) ->
+          (match Outcome.bind(Checked_json.parse(body), decode_report) with
+          | `Error(error) -> Task.fail(Checked_json.describe(error))
+          | `Ok(checks) -> Task.pure(checks)))
+  | `Ok(_) -> Task.fail("The file tool returned a non-text result.")
 
-let rec summarize files index totals =
-  if index == Array.length(files) then Task.pure(totals)
-  else
-    match files[index] with
-    | `String(filename) ->
-        let* report = read_report(filename) in
-        summarize(files, index + 1, add_report(totals, report))
-    | _ -> Task.fail("Expected report filenames.")
+let add_report totals checks =
+  Array.iter(checks, fun item ->
+    if item.status == "failed" then
+      let previous = Option.get_or(Hashtbl.get(totals, item.check), 0.0) in
+      Hashtbl.set(totals, item.check, previous +. 1.0)
+    else ())
 
-(* One-off programs return JSON through main(input). *)
+let summarize files =
+  let totals = Hashtbl.create() in
+  let* ignored = Task.iter_array(files, fun filename ->
+    let* checks = read_report(filename) in
+    let ignored = add_report(totals, checks) in
+    Task.pure(())) in
+  (* Snapshot order is first insertion of a failing check. The local table is
+     neither persistent workflow state nor shared with another invocation. *)
+  Task.pure(`Array(Array.map(Hashtbl.to_array(totals), fun entry -> `Object([
+    {key = "check"; value = `String(entry.key)},
+    {key = "failures"; value = `Number(entry.value)}
+  ]))))
+
 let main input =
-  match input with
-  | `Array(files) ->
-      let* totals = summarize(files, 0, []) in
-      Task.pure(`Array(Array.map(totals, fun item -> `Object([
-        { key = "check"; value = `String(item.check) },
-        { key = "failures"; value = `Number(item.failures) }
-      ]))))
-  | _ -> Task.fail("Expected an array of report filenames.")
+  match decode_files(input) with
+  | `Error(error) -> Task.fail(Checked_json.describe(error))
+  | `Ok(files) -> summarize(files)
 
-(* The reusable tool uses the same program with an explicit tool outcome. *)
 let run ctx input =
-  match Json.get_field(input, "files") with
-  | `Some(files) ->
-      let* summary = main(files) in
+  match Outcome.bind(Checked_json.object_fields(input, ["files"]), fun object ->
+    Checked_json.field(object, "files", decode_files)) with
+  | `Error(error) -> Task.fail(Checked_json.describe(error))
+  | `Ok(files) ->
+      let* summary = summarize(files) in
       Task.pure(`Complete(summary))
-  | `None -> Task.fail("Expected a files field.")

@@ -70,7 +70,7 @@ let capabilities_with_model_executor
 let create_moderator
       ~env
       ~session_id
-      ~elements
+      ~artifact
       ~history
       ~available_tools
       ?(capabilities = Moderation.Capabilities.default)
@@ -80,14 +80,11 @@ let create_moderator
   : (Stream_moderator.moderator option, string) result
   =
   let open Result.Let_syntax in
-  let%bind _, artifact =
-    Moderator_manager.Registry.of_elements Moderator_manager.Registry.empty elements
-  in
   match artifact with
   | None -> Ok None
   | Some artifact ->
     let%bind manager =
-      Moderator_manager.create ~artifact ~capabilities ?on_process_run ()
+      Moderator_manager.create ~env ~artifact ~capabilities ?on_process_run ()
     in
     let moderator =
       Stream_moderator.
@@ -136,7 +133,7 @@ let create_moderator
 let create_moderator_entries
       ~env
       ~session_id
-      ~elements
+      ~artifact
       ~allocator
       ~history
       ~available_tools
@@ -146,14 +143,12 @@ let create_moderator_entries
       ()
   =
   let open Result.Let_syntax in
-  let%bind _, artifact =
-    Moderator_manager.Registry.of_elements Moderator_manager.Registry.empty elements
-  in
   match artifact with
   | None -> Ok None
   | Some artifact ->
     let%bind manager =
       Moderator_manager.create_entries
+        ~env
         ~artifact
         ~capabilities
         ~allocator
@@ -633,7 +628,20 @@ let run_entries
       history
 ;;
 
-let rec run_agent
+type agent_input =
+  | Authored of string
+  | Prepared of
+      { parsed : CM.Parsed.t
+      ; programs : Chatml_prompt_programs.Restored.t option
+      ; document_projection : CM.Document_projection.t option
+      }
+
+let rec run_agent_input
+          ?agent_source_runner
+          ?input_agent_source_runner
+          ?startup
+          ?compilation_limits
+          ?checkpoint
           ?(history_compaction = false)
           ?prompt_dir
           ?session_id
@@ -644,7 +652,7 @@ let rec run_agent
           ?(shell_manifest_authorizer = Shell_runtime.Manifest_authorizer.deny)
           ?(shell_approval_provider = Shell_runtime.Approval_broker.None_available)
           ~(ctx : _ Ctx.t)
-          (prompt_xml : string)
+          input
           (items : CM.content_item list)
   : string
   =
@@ -684,9 +692,22 @@ let rec run_agent
       ; type_ = None
       }
   in
-  (* 2.  Parse the merged document into structured elements. *)
-  let prompt_source = Option.value session_id ~default:"<nested-agent>" in
-  let elements = CM.parse_chat_inputs ~source:prompt_source ~dir prompt_xml in
+  let elements, programs =
+    match input with
+    | Authored prompt_xml ->
+      let source = Option.value session_id ~default:"<nested-agent>" in
+      CM.parse_chat_inputs ~source ~dir prompt_xml, None
+    | Prepared { parsed; programs; document_projection } ->
+      let elements =
+        match document_projection with
+        | None -> CM.Parsed.elements parsed
+        | Some projection ->
+          if not (phys_equal parsed (CM.Document_projection.parsed projection))
+          then invalid_arg "prepared agent document projection belongs to another parser";
+          CM.Document_projection.elements projection
+      in
+      elements, programs
+  in
   (* 3.  Configuration (max_tokens, model, …) *)
   let cfg = Config.of_elements elements in
   let ctx = selected_context ctx cfg in
@@ -712,6 +733,12 @@ let rec run_agent
   in
   let agent_runtime =
     Agent_runtime.create
+      ?agent_source_runner
+      ?startup
+      ?compilation_limits
+      ?checkpoint
+      ?programs
+      ~moderator_surface:Chatml.Chatml_builtin_surface.moderator_surface
       ~sw
       ~ctx
       ~host
@@ -743,8 +770,9 @@ let rec run_agent
   let comp_tools, tool_tbl = Ochat_function.functions tools in
   let tools_req = Tool.convert_tools comp_tools in
   (* 5.  Convert XML ‑> API items and enter the execute loop to handle function calls. *)
-  let init_items =
+  let convert ?agent_source_runner elements =
     Converter.to_items
+      ?agent_source_runner
       ~ctx
       ~run_agent:(fun ?prompt_dir ?session_id ~ctx prompt items ->
         run_agent
@@ -757,8 +785,13 @@ let rec run_agent
           ~ctx
           prompt
           items)
-      (elements @ [ msg ])
+      elements
   in
+  (* Prompt declarations belong to this child; invocation items may belong to
+     its caller. Dynamic items never inherit either declaration inventory. *)
+  let prompt_items = convert ?agent_source_runner elements in
+  let invocation_items = convert ?agent_source_runner:input_agent_source_runner [ msg ] in
+  let init_items = prompt_items @ invocation_items in
   let all_items =
     if has_script elements
     then (
@@ -804,7 +837,7 @@ let rec run_agent
         create_moderator_entries
           ~env:(Ctx.env ctx)
           ~session_id
-          ~elements
+          ~artifact:agent_runtime.legacy_moderator
           ~allocator
           ~history:init_entries
           ~available_tools:tools_req
@@ -872,6 +905,75 @@ let rec run_agent
   in
   (* Child output is semantic text; retained opaque evidence is never lowered. *)
   assistant_text all_items
+
+and run_agent
+      ?history_compaction
+      ?prompt_dir
+      ?session_id
+      ?response_dir
+      ?observer
+      ?source
+      ?parent_call_id
+      ?shell_manifest_authorizer
+      ?shell_approval_provider
+      ~ctx
+      prompt_xml
+      items
+  =
+  run_agent_input
+    ?history_compaction
+    ?prompt_dir
+    ?session_id
+    ?response_dir
+    ?observer
+    ?source
+    ?parent_call_id
+    ?shell_manifest_authorizer
+    ?shell_approval_provider
+    ~ctx
+    (Authored prompt_xml)
+    items
+;;
+
+let run_prepared_agent
+      parsed
+      ?agent_source_runner
+      ?input_agent_source_runner
+      ?startup
+      ?compilation_limits
+      ?checkpoint
+      ?programs
+      ?document_projection
+      ?history_compaction
+      ?prompt_dir
+      ?session_id
+      ?response_dir
+      ?observer
+      ?source
+      ?parent_call_id
+      ?shell_manifest_authorizer
+      ?shell_approval_provider
+      ~ctx
+      items
+  =
+  run_agent_input
+    ?agent_source_runner
+    ?input_agent_source_runner
+    ?startup
+    ?compilation_limits
+    ?checkpoint
+    ?history_compaction
+    ?prompt_dir
+    ?session_id
+    ?response_dir
+    ?observer
+    ?source
+    ?parent_call_id
+    ?shell_manifest_authorizer
+    ?shell_approval_provider
+    ~ctx
+    (Prepared { parsed; programs; document_projection })
+    items
 ;;
 
 (*──────────────────────── 6.  Main driver  ───────────────────────────────*)
@@ -1033,6 +1135,7 @@ and run_completion_stream
   in
   let agent_runtime =
     Agent_runtime.create
+      ~moderator_surface:Chatml.Chatml_builtin_surface.moderator_surface
       ~sw
       ~ctx
       ~host
@@ -1115,7 +1218,7 @@ and run_completion_stream
       create_moderator_entries
         ~env
         ~session_id
-        ~elements
+        ~artifact:agent_runtime.legacy_moderator
         ~allocator
         ~history:input_entries
         ~available_tools:tools

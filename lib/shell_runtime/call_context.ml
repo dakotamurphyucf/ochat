@@ -51,3 +51,19 @@ let prepare_executor config =
   | Some _, Some binding -> binding.prepare_executor config
   | Some _, None -> Error "shell executor adapter scope is unavailable"
 ;;
+
+let prepare_executor_for_call config =
+  let open Result.Let_syntax in
+  let%bind context = current () in
+  let config =
+    match context with
+    | None -> config
+    | Some context ->
+      Shell_access.Executor.with_execution_scope
+        config
+        ~session_id:context.session_id
+        ~approval_store:context.approval_store
+        ~check:context.check
+  in
+  prepare_executor config
+;;

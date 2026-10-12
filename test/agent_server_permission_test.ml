@@ -79,6 +79,7 @@ let initial_state env workspace =
            |> Result.map_error ~f:(fun error ->
              Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
            |> Result.ok_or_failwith)
+      ; root_invocation = Ui
       ; prompt_revision_id = Agent_protocol.Id.Prompt_revision.create ()
       ; workspace_instance
       ; permission_profile = "review"

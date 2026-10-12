@@ -1,47 +1,29 @@
-# chatmd_import_expansion
+# ChatMD import expansion
 
-Imported declarations retain source directory, file and digest identity. Source-relative resolution is not the connected client's cwd.
+Imports retain the declaring source's directory, file, digest and namespace.
+Relative references resolve on the source host through its supplied loader;
+the connected client's working directory does not determine their meaning.
 
-See [agent-core embedding](../../agent-server/embedding.md),
-[session/history behavior](../../agent-server/sessions-and-workspaces.md),
-and [protocol synchronization](../../agent-server/protocol.md).
+`expand` operates on ordinary semantic nodes. `expand_located` uses nodes built
+from exact parser inputs, preserving their ranges through the same expansion
+algorithm. Imported nodes keep their own input and range; reconstructing a
+containing element does not relabel them as bytes from the importer.
 
-## Public contract
+Each `sourced_node` has semantic content, source context and loader identity.
+Its optional range identifies the exact effective parser input. The located
+path retains child provenance even in contexts where imports remain literal.
+The ordinary path keeps its existing lightweight child representation.
 
-[Interface](../../../lib/chatmd/chatmd_import_expansion.mli) · [implementation](../../../lib/chatmd/chatmd_import_expansion.ml)
+Expansion rejects cycles on the active import path, excessive import nesting,
+invalid attributes and duplicate namespace aliases. The owned parser supplies
+bounded reads/parsing and checks combined output depth while traversing actual
+nodes. An import that is replaced adds no output level; an import retained in
+literal assistant content remains an element and counts toward that bound.
 
-The following excerpt is the current callable contract. Eio switches own active
-resources; preserve typed errors/cancellation and the host's authorization
-boundary rather than bypassing the actor from a presentation adapter.
+No loader, native directory or callback escapes into the immutable parser-input
+owner. Later semantic conversion remains responsible for declaration rules.
+Generated definitions keep their separate inert-source admission policy.
 
-```ocaml
-open! Core
-
-(** Recursive ChatMD import expansion with source provenance. *)
-
-type sourced_node =
-  { node : Chatmd_ast.node
-  ; source : Chatmd_shell_spec.Source_ref.t
-  ; source_node : Source_loader.source
-  ; children : sourced_node list option
-  }
-
-(** Legacy attribute accepted when reading previously serialized messages. *)
-val source_attribute : string
-
-(** [expand ~parse ~dir ~file ~source document] recursively replaces import
-    elements with their parsed contents. Imported declarations retain their
-    source file, source directory, digest, and optional namespace. Child
-    provenance survives inline imports in [children]; None inherits the parent.
-    With [canonical_sources], file names are normalized root-relative paths. *)
-val expand
-  :  ?canonical_sources:bool
-  -> parse:(string -> Chatmd_ast.document)
-  -> loader:Source_loader.t
-  -> root_source:Source_loader.source
-  -> dir:Eio.Fs.dir_ty Eio.Path.t
-  -> file:string
-  -> source:string
-  -> Chatmd_ast.document
-  -> sourced_node list
-```
+[Interface](../../../lib/chatmd/chatmd_import_expansion.mli) ·
+[Implementation](../../../lib/chatmd/chatmd_import_expansion.ml) ·
+[Preparation and replay](prompt.doc.md)

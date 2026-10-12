@@ -1,0 +1,16 @@
+(executable
+ (name native_fixture)
+ (modules native_fixture)
+ (foreign_stubs
+  (language c)
+  (names native_fixture_stubs)))
+
+(library
+ (name bounded_process_tests)
+ (modules bounded_process_tests anchor_gate_tests)
+ (inline_tests (deps native_fixture.exe))
+ (foreign_stubs
+  (language c)
+  (names test_limits_stubs))
+ (libraries core core_unix cstruct eio eio.unix eio_main eio_posix ochat.shell_access)
+ (preprocess (pps ppx_jane)))

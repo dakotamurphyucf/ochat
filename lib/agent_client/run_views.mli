@@ -18,7 +18,10 @@ val lookup
   -> (Agent_protocol.Run_query.Outcome.t, Agent_protocol.Error.t) result
 
 (** A read-only observer for the caller's existing subscribed Session_handle.
-    Install the returned nonyielding callback before that handle's initial snapshot.
+    Install the returned nonyielding callback before that handle's initial snapshot,
+    or, when the run ID is learned from admission afterward, install it then feed
+    the handle's actual current projection immediately. The first feed requests a
+    current lookup, including a run that terminated before observer installation.
     It coalesces revision changes into one pending refresh; it does not acquire
     another notification lease, attach, activate a runtime or retry mutations.
     The supplied Switch owns the daemon refresh fiber. On scope closure the

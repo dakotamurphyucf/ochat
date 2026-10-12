@@ -195,7 +195,9 @@ let moderator_artifact () =
     CM.
       { id = "main"
       ; language = "chatml"
+      ; project_selection = None
       ; kind = "moderator"
+      ; source_ref = None
       ; source =
           Inline
             {|
@@ -268,7 +270,9 @@ let%test_unit
           CM.
             { id = "active-owner"
             ; language = "chatml"
+            ; project_selection = None
             ; kind = "moderator"
+            ; source_ref = None
             ; source =
                 Inline
                   {|

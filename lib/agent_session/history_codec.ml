@@ -5,20 +5,7 @@ let invalid message =
   Agent_protocol.Error.create Invalid_state ~message ~retryable:false ()
 ;;
 
-let classification semantic =
-  match Payload.Semantic.view semantic with
-  | Message { role; _ } ->
-    ( (match role with
-       | Payload.Role.System | Developer -> Agent_protocol.History.System
-       | User -> User
-       | Assistant -> Assistant
-       | Tool -> Tool)
-    , Agent_protocol.History.Message )
-  | Call _ -> Assistant, Tool_call
-  | Result _ -> Tool, Tool_output
-  | Reasoning _ -> Assistant, Reasoning
-  | Unknown _ -> Assistant, Other
-;;
+let classification = Agent_protocol.History.classification
 
 let to_canonical ?(provenance = Agent_protocol.History.Canonical) entry =
   let payload = History_entry.payload entry in

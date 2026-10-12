@@ -1,70 +1,79 @@
-(* The caller retains role/session/receipt/cursor state. This tool only observes
-   those exact queries, so a follow-up can deliberately supply a new receipt. *)
-let field input name =
-  match Json.get_field(input, name) with
-  | `Some(value) -> value
-  | `None -> fail("Missing review field: " ++ name)
+(* Validate the complete caller-owned query before constructing any tasks.
+   IDs and cursors remain exact opaque strings; decoding does not grant access. *)
+let decode_reviewer input =
+  Outcome.bind(Checked_json.object_fields(input,
+    ["role", "session_id", "receipt_id", "cursor"]), fun object ->
+    Outcome.bind(Checked_json.field(object, "role", fun value ->
+      Checked_json.validate(Checked_json.string(value),
+        "Expected correctness, documentation or integration.",
+        fun role -> Array.exists(["correctness", "documentation", "integration"], fun expected -> role == expected))),
+      fun role ->
+        Outcome.bind(Checked_json.field(object, "session_id", Checked_json.string), fun session ->
+          Outcome.bind(Checked_json.field(object, "receipt_id", Checked_json.string), fun receipt ->
+            Outcome.map(Checked_json.field(object, "cursor", fun value ->
+              Checked_json.nullable(value, Checked_json.string)), fun cursor ->
+              {role = role; session_id = session; receipt_id = receipt; cursor = cursor})))))
+
+let decode_request input =
+  Outcome.bind(Checked_json.object_fields(input, ["reviewers"]), fun object ->
+    Checked_json.field(object, "reviewers", fun value ->
+      Checked_json.validate(Checked_json.array(value, decode_reviewer),
+        "Expected one to three reviewers.",
+        fun reviewers -> if Array.length(reviewers) < 1 then false else Array.length(reviewers) <= 3)))
+
+let failed_observation message = `Object([
+  {key = "ok"; value = `Bool(false)},
+  {key = "value"; value = `Null},
+  {key = "error"; value = `String(message)}
+])
 
 let observation result =
   match result with
+  | `Error(message) -> failed_observation(message)
   | `Ok(value) ->
-      let decoded =
-        match value with
-        | `String(text) -> Json.parse(text)
-        | other -> other
+      let decoded = match value with
+        | `String(text) -> Checked_json.parse(text)
+        | other -> `Ok(other)
       in
-      `Object([
-        { key = "ok"; value = `Bool(true) },
-        { key = "value"; value = decoded },
-        { key = "error"; value = `Null }
-      ])
-  | `Error(message) ->
-      `Object([
-        { key = "ok"; value = `Bool(false) },
-        { key = "value"; value = `Null },
-        { key = "error"; value = `String(message) }
-      ])
+      (match decoded with
+      | `Error(error) -> failed_observation(Checked_json.describe(error))
+      | `Ok(value) -> `Object([
+          {key = "ok"; value = `Bool(true)},
+          {key = "value"; value = value},
+          {key = "error"; value = `Null}
+        ]))
 
 let collect reviewer =
-  let session_id = field(reviewer, "session_id") in
-  let receipt_id = field(reviewer, "receipt_id") in
   let query = [
-    { key = "session_id"; value = session_id },
-    { key = "receipt_id"; value = receipt_id }
+    {key = "session_id"; value = `String(reviewer.session_id)},
+    {key = "receipt_id"; value = `String(reviewer.receipt_id)}
   ] in
-  let read_query =
-    let bounded = Array.append(query, [{ key = "limit"; value = `Number(16.0) }]) in
-    match field(reviewer, "cursor") with
-    | `Null -> bounded
-    | cursor -> Array.append(bounded, [{ key = "cursor"; value = cursor }])
+  let bounded = Array.append(query, [{key = "limit"; value = `Number(16.0)}]) in
+  let read_query = match reviewer.cursor with
+    | `None -> bounded
+    | `Some(cursor) -> Array.append(bounded, [{key = "cursor"; value = `String(cursor)}])
   in
   let* status = Tool.call("agent_status", `Object([
-    { key = "session_id"; value = session_id }
+    {key = "session_id"; value = `String(reviewer.session_id)}
   ])) in
   let* completion = Tool.call("agent_wait", `Object(Array.append(query, [
-    { key = "timeout_ms"; value = `Number(0.0) }
+    {key = "timeout_ms"; value = `Number(0.0)}
   ]))) in
   let* output = Tool.call("agent_read", `Object(read_query)) in
   Task.pure(`Object([
-    { key = "role"; value = field(reviewer, "role") },
-    { key = "session_id"; value = session_id },
-    { key = "receipt_id"; value = receipt_id },
-    { key = "status"; value = observation(status) },
-    { key = "completion"; value = observation(completion) },
-    { key = "output"; value = observation(output) }
+    {key = "role"; value = `String(reviewer.role)},
+    {key = "session_id"; value = `String(reviewer.session_id)},
+    {key = "receipt_id"; value = `String(reviewer.receipt_id)},
+    {key = "status"; value = observation(status)},
+    {key = "completion"; value = observation(completion)},
+    {key = "output"; value = observation(output)}
   ]))
 
-let rec collect_all reviewers index observations =
-  if index == Array.length(reviewers) then Task.pure(observations)
-  else
-    let* current = collect(reviewers[index]) in
-    collect_all(reviewers, index + 1, Array.append(observations, [current]))
-
 let run ctx input =
-  match field(input, "reviewers") with
-  | `Array(reviewers) ->
-      let* observations = collect_all(reviewers, 0, []) in
+  match decode_request(input) with
+  | `Error(error) -> Task.fail(Checked_json.describe(error))
+  | `Ok(reviewers) ->
+      let* observations = Task.map_array(reviewers, collect) in
       Task.pure(`Complete(`Object([
-        { key = "reviews"; value = `Array(observations) }
+        {key = "reviews"; value = `Array(observations)}
       ])))
-  | _ -> Task.fail("Expected a reviewers array.")

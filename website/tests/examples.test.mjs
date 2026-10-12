@@ -89,6 +89,18 @@ test('catalog enforces explicit file ownership, paths, dependency edges, notices
   reject((e) => e.files.push({ ...e.files[0] }), /Duplicate example file/);
   reject((e) => (e.edges = []), /Undeclared companion/);
   reject((e) => (e.edges[0].reference = 'elsewhere.chatmd'), /dependency edge/);
+  const project = structuredClone(source);
+  project.edges[0].kind = 'project';
+  assert.equal(
+    validateExampleSelection([project], entries, tracked)[0].edges[0].kind,
+    'project',
+  );
+  project.edges[0].reference = 'elsewhere.chatmd';
+  assert.throws(
+    () => validateExampleSelection([project], entries, tracked),
+    /dependency edge/,
+  );
+  reject((e) => (e.edges[0].kind = 'unknown'), /Invalid option/);
   reject((e) => (e.kind = 'illustration'), /Illustration must/);
   assert.throws(
     () => validateExampleSelection([source, source], entries, tracked),

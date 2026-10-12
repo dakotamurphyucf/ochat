@@ -1,0 +1,5 @@
+(library
+ (name chatml_module_scope_tests)
+ (libraries core chatml chatml_typechecker chatml_resolver chatml_builtin_modules)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

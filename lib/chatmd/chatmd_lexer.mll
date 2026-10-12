@@ -53,7 +53,7 @@
 {
 open Core
 open Chatmd_ast
-open Chatmd_parser
+open Chatmd_tokens
 
 (*--------------------------------------------------------------------------*)
 (* Token queue – allows a lexer rule to emit *two* tokens without forcing    *)

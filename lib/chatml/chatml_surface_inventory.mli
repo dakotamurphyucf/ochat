@@ -43,7 +43,9 @@ val standard : unit -> (t list, string) result
     the builtin type algebra's canonical S-expression encoding, not executable
     ChatML type syntax. Variant rows retain explicit constructor argument lists,
     distinguishing a nullary constructor from a unary unit payload. [scheme_format] is
-    [chatml-builtin-sexp-v2]; consumers must select that format explicitly.
+    [chatml-builtin-sexp-v3]; consumers must select that format explicitly.
+    Modules and record/module field receivers have distinct type constructors;
+    they must not be decoded as ordinary record contracts.
     TTuple is an internal aggregate, not arbitrary source tuple syntax. *)
 val to_json : t -> Jsonaf.t
 

@@ -7,6 +7,33 @@ open Core
     generation, parent, deadline and attempt ownership belong to that job. *)
 type t
 
+module Agent_artifact : sig
+  (** Immutable reference to selected child code, not a source grant, native
+      resource, compiled state or reservation. Validated domain types bound the
+      revision ID, digest and exact portable root member. The trusted host must
+      install and verify that artifact, its authentic role and its association
+      with the original native binding before attaching this reference. *)
+  type t
+
+  val create
+    :  revision_id:Agent_protocol.Id.Prompt_revision.t
+    -> manifest_sha256:Chatml_source.Digest.t
+    -> root_relative_path:Source.Portable_path.t
+    -> t
+
+  val revision_id : t -> Agent_protocol.Id.Prompt_revision.t
+  val manifest_sha256 : t -> Chatml_source.Digest.t
+  val root_relative_path : t -> Source.Portable_path.t
+end
+
+(** Trusted attachment to an already admitted Tool request. Reject Script requests
+    and replacement of a selection. Original target, input, budget and permission
+    pins remain unchanged. Structural admission does not prove code/binding or
+    filesystem authority. No new source-mode/default policy is selected here. *)
+val with_agent_artifact : t -> Agent_artifact.t -> (t, Agent_protocol.Error.t) result
+
+val agent_artifact : t -> Agent_artifact.t option
+
 (** Capture exactly one already selected tool, checking its live reference and
     input schema. Managed implementations retain their full revision pin, including
     the dependencies captured by their host registration. Does not execute. *)
@@ -25,6 +52,8 @@ val script
   -> policy:One_off_request.policy
   -> (t, Agent_protocol.Error.t) result
 
+(** A present code reference uses the strict v2 carrier and participates in the
+    fingerprint. Absence retains exact existing v1 encoding and fingerprint. *)
 val to_json : t -> Jsonaf.t
 
 (** Effective stored budget, retained independently of later host defaults. *)

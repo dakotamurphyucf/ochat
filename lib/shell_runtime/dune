@@ -2,6 +2,12 @@
  (name shell_runtime)
  (public_name ochat.shell_runtime)
  (modules
+  activation_gate
+  registry_code_budget
+  registry_footprint_comparison
+  registry_runtime_footprint
+  registry_resource_footprint
+  registry_code_validation
   host
   manifest_authorizer
   manifest_grant_store
@@ -40,6 +46,7 @@
   result
   moderator_process_adapter
   registry)
+ (private_modules activation_gate registry_code_budget registry_footprint_comparison registry_runtime_footprint registry_resource_footprint registry_code_validation)
  (libraries
   core
   eio
@@ -52,6 +59,12 @@
   chatml
   chatml_moderator_runtime
   chatml_host_runtime
+  chatml_compilation
+  chatml_execution
+  chatml_linked_program
+  chatml_prepared_program
+  chatml_source
+  chatml_diagnostic
   ochat.shell_access
   ochat.session
   ochat.bin_prot_utils_eio

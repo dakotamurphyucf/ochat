@@ -19,9 +19,15 @@ module Identity : sig
 end
 
 module Spec : sig
-  type t =
+  type 'workspace fields =
     { protocol : Agent_protocol.Session.Spec.t
     ; prompt_definition_id : Agent_protocol.Id.Prompt_definition.t option
+    ; root_invocation :
+        Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+      (** Schema25. For an authored root, its frozen contract beside the pinned
+          revision. Generated/delegated branches preserve their separate actual
+          contracts and do not use this field to choose child execution.
+          Historical absence converts to Ui, the previous native root contract. *)
     ; prompt_revision_id : Agent_protocol.Id.Prompt_revision.t
     ; configuration_revision : int64
     ; inference_target : (Inference.Selection.t[@sexp.opaque])
@@ -29,13 +35,15 @@ module Spec : sig
           Historical absence converts to explicit Unresolved and grants no
           backend defaults or execution authority. *)
     ; delegation : Agent_store.Delegation_store.Reference.t option [@sexp.option]
-    ; workspace_instance : Workspace_instance.t
+    ; workspace_instance : 'workspace
     ; permission_profile : string
     ; permission_profile_digest : string
     ; runtime_policy : string option
     ; quota_key : Quota_key.t option
     }
   [@@deriving sexp]
+
+  type t = Workspace_instance.t fields [@@deriving sexp]
 end
 
 module Compaction_archive : sig
@@ -131,10 +139,10 @@ module Counters : sig
   [@@deriving sexp]
 end
 
-type t =
+type 'spec fields =
   { schema_version : int
   ; identity : Identity.t
-  ; spec : Spec.t
+  ; spec : 'spec
   ; lifecycle : Lifecycle.t
   ; runtime_initialization : Runtime_initialization.t
   ; pending_initial_start : bool
@@ -181,6 +189,8 @@ type t =
   }
 [@@deriving sexp]
 
+type t = Spec.t fields [@@deriving sexp]
+
 val current_schema_version : int
 
 (** Upgrade supported legacy state before validation/replay. Schema 2 has no
@@ -189,6 +199,17 @@ val current_schema_version : int
     retirements; schema 6 has no event-owned invocations. Unknown versions and
     inconsistent legacy fields fail closed. *)
 val upgrade_schema : t -> (t, Agent_protocol.Error.t) result
+
+(** Shared fresh field/default builder. The explicit desired state is supplied
+    by the actual creation policy. Identity must have a valid typed session ID
+    and nonnegative generation, as for [create]. A generic field value is not a
+    native state or authority; runtime/store admission accepts only [t]. *)
+val create_fields
+  :  identity:Identity.t
+  -> spec:'spec
+  -> desired:Agent_protocol.Session.desired_state
+  -> initial_history:Agent_protocol.History.entry list
+  -> 'spec fields
 
 (** Fresh state with known-empty tracking coverage. The identity must have a
     valid session ID and nonnegative generation.
@@ -219,6 +240,15 @@ val authoring_references
   -> (Chat_response.Authoring_reference_index.t, Agent_protocol.Error.t) result
 
 val summary : t -> Agent_protocol.Session.t
+
+(** Presentation-only projection shared by actual native state and prelayout
+    sizing. A generic workspace supplies only its typed visible instance ID;
+    this grants no workspace/runtime authority and admits no native state. *)
+val summary_fields
+  :  'workspace Spec.fields fields
+  -> workspace:('workspace -> Agent_protocol.Id.Workspace_instance.t)
+  -> Agent_protocol.Session.t
+
 val snapshot : now:Agent_protocol.Timestamp.t -> t -> Agent_protocol.Snapshot.t
 val history_window : Agent_protocol.History.entry list -> Agent_protocol.History.Window.t
 

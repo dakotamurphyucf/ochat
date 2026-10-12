@@ -79,7 +79,7 @@ let raw_state before ~version ~payload =
   |> document_ok
 ;;
 
-let admit state ledger =
+let admit (state : A.Session_state.t) ledger =
   let target =
     match Inference.Selection.view state.A.Session_state.spec.inference_target with
     | Captured target -> target
@@ -129,7 +129,7 @@ let%test_unit
       assert (List.is_empty (L.rows current.inference_ledger));
       assert (Int.equal (L.generation current.inference_ledger) before.identity.generation);
       let encoded = SD.encode decoded ~limits:document_limits |> document_ok in
-      assert (Int.equal (D.Document.version encoded) 9);
+      assert (Int.equal (D.Document.version encoded) 10);
       assert (String.equal original (D.Document.to_string raw));
       let delta =
         D.Document.create
@@ -988,7 +988,7 @@ let%test_unit
               !current
             |> store_ok
           in
-          assert (Int.equal (D.Document.version installed.snapshot.payload) 9);
+          assert (Int.equal (D.Document.version installed.snapshot.payload) 10);
           let opened =
             Store.Snapshot.load_current
               ~env

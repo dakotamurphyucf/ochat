@@ -167,6 +167,7 @@ let%expect_test
     {|
     Handler
     failed checkpoint retired; effect once; escaped commit rejected; next owner admitted
+    +queued moderator cleanup failed: injected job transition failure
     Event
     failed checkpoint retired; effect once; escaped commit rejected; next owner admitted
     |}]

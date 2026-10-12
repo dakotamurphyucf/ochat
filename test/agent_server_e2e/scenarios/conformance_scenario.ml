@@ -4094,6 +4094,55 @@ let test_run_admission env environment =
                  ~key_prefix:("run:" ^ label)))))
 ;;
 
+let test_dependencies env environment =
+  let fixture = fixture env environment "conformance-dependencies" in
+  Eio.Switch.run (fun sw ->
+    with_daemon ~sw env fixture (fun _daemon _health ->
+      with_transport_matrix
+        ~sw
+        env
+        environment
+        fixture
+        (fun unix http stdio_unix stdio_http ->
+           List.iter
+             [ "unix", unix
+             ; "http", http
+             ; "stdio-unix", stdio_unix
+             ; "stdio-http", stdio_http
+             ]
+             ~f:(fun (label, connection) ->
+               ignore (initialize connection : Agent_protocol.Initialize.Response.t);
+               let definition, _ = catalog_ids connection in
+               Dependency_conformance.check
+                 ~definition
+                 ~request:connection.request
+                 ~key_prefix:label))))
+;;
+
+let test_seed env environment =
+  let fixture = fixture env environment "conformance-seed" in
+  Eio.Switch.run (fun sw ->
+    with_daemon ~sw env fixture (fun _daemon _health ->
+      with_transport_matrix
+        ~sw
+        env
+        environment
+        fixture
+        (fun unix http stdio_unix stdio_http ->
+           List.iter
+             [ "unix", unix
+             ; "http", http
+             ; "stdio-unix", stdio_unix
+             ; "stdio-http", stdio_http
+             ]
+             ~f:(fun (label, connection) ->
+               ignore (initialize connection : Agent_protocol.Initialize.Response.t);
+               Seed_conformance.check
+                 ~spec:(session_spec connection)
+                 ~request:connection.request
+                 ~key_prefix:label))))
+;;
+
 let cases =
   [ "conformance.provider-installed", test_provider_installed
   ; "conformance.read-methods", test_read_methods
@@ -4118,6 +4167,8 @@ let cases =
   ; "conformance.history-editing", History_editing.run
   ; "conformance.conversation-search", Conversation_search.run
   ; "conformance.history-deletion", test_history_deletion
+  ; "conformance.dependencies", test_dependencies
+  ; "conformance.seed", test_seed
   ]
 ;;
 
@@ -4137,6 +4188,8 @@ let method_coverage =
   ; "server.health", "conformance.read-methods"
   ; "prompt.list", "conformance.read-methods"
   ; "prompt.get", "conformance.read-methods"
+  ; "prompt.dependencies.status", "conformance.dependencies"
+  ; "prompt.dependencies.update", "conformance.dependencies"
   ; "workspace.list", "conformance.read-methods"
   ; "workspace.get", "conformance.read-methods"
   ; "project.create", "conformance.organization-crud"
@@ -4151,6 +4204,7 @@ let method_coverage =
   ; "collection.delete", "conformance.organization-crud"
   ; "blob.read", "conformance.blob-read"
   ; "session.create", "conformance.session-lifecycle"
+  ; "session.seed", "conformance.seed"
   ; "session.list", "conformance.session-lifecycle"
   ; "session.get", "conformance.session-lifecycle"
   ; "session.update_metadata", "conformance.session-metadata"

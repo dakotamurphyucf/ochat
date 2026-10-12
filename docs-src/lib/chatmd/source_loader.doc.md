@@ -1,6 +1,6 @@
 # source_loader
 
-Host-controlled source loading and provenance. Daemon pinned sources use the captured artifact closure; no arbitrary external filesystem snapshot is implied.
+Host-controlled source loading and provenance. Captured loaders read only their immutable inventory. The retained loader borrows a separately admitted original directory owner; its Eio root is a diagnostic label, with no ambient filesystem fallback.
 
 See [agent-core embedding](../../agent-server/embedding.md),
 [session/history behavior](../../agent-server/sessions-and-workspaces.md),
@@ -50,6 +50,14 @@ val generated_filesystem
   -> sources:(string * string) list
   -> t
 
+(** Add a per-read byte ceiling without replacing an existing ceiling. The
+    callback returns0..8MiB and is evaluated before any read; installing multiple
+    bounds takes their minimum. Observer/agent wrappers preserve it. Callback
+    exceptions propagate unchanged. Both filesystem and captured reads enforce
+    it; captured mode still never falls back to disk. Legacy loaders have no
+    implicit bound. Hosts can supply their current remaining aggregate allowance. *)
+val with_read_limit : t -> max_bytes:(source -> int) -> t
+
 (** [with_observer t ~f] invokes [f] after each successful source read. *)
 val with_observer : t -> f:(source -> string -> unit) -> t
 
@@ -59,8 +67,19 @@ val with_agent_observer : t -> f:(source -> unit) -> t
 
 (** [agent_reference t ~base ~reference] resolves relative agent references at
     their declaration, without a process-cwd fallback. Absolute references remain
-    explicit external dependencies and are not captured. *)
-val agent_reference : t -> base:source -> reference:string -> (string, string) result
+    explicit external dependencies and are not captured.
+
+    [on_member], when supplied, receives the exact loader-relative key from a
+    successful relative-local resolution, before the existing agent observer.
+    Absolute references do not have a queued member. It performs no extra read
+    or resolution and conveys no native authority. Callback exceptions propagate
+    unchanged. Legacy callers may omit it and retain existing return semantics. *)
+val agent_reference
+  :  ?on_member:(string -> unit)
+  -> t
+  -> base:source
+  -> reference:string
+  -> (string, string) result
 
 val root : t -> file:string -> (source, string) result
 val resolve : t -> base:source -> reference:string -> (source, string) result
@@ -70,6 +89,24 @@ val relative_path : source -> string
 val materialized_dir : source -> Eio.Fs.dir_ty Eio.Path.t
 val root_dir : t -> Eio.Fs.dir_ty Eio.Path.t
 
+(** Whether reads are restricted to an immutable supplied inventory, with no
+    filesystem fallback. This is a mode projection, never an execution grant. *)
+val is_captured : t -> bool
+
+(** Pure confined member resolution from an admitted logical declaring-file path.
+    The reference byte ceiling must lie in [0,1024]; admission precedes scanning
+    or concatenation. Reject absolute paths, URL/colon/backslash/control hazards
+    and root escapes. Uses the same lexical normalization as captured loading;
+    no native directory, filesystem I/O or display source context is authority.
+    Individual admitted path primitives scan at most2049 bytes; checkpoints
+    bracket this bounded work and propagate unchanged. *)
+val resolve_member
+  :  Source.Portable_path.t
+  -> reference:string
+  -> max_reference_bytes:int
+  -> checkpoint:(unit -> unit)
+  -> Source.Portable_path.t Core.Or_error.t
+
 (** Resolve a relative extension source without lexical escape, even with the
     legacy filesystem loader. Captured loaders still forbid unknown edges.
     This is not a symlink sandbox; captured artifact verification remains required. *)
@@ -78,4 +115,15 @@ val resolve_within_root : t -> base:source -> reference:string -> (source, strin
 (** Read at most [max_bytes] (0..8 MiB), then notify the capture observer.
     Oversized reads never publish a partial captured dependency. *)
 val read_bounded : max_bytes:int -> t -> source -> (string, string) result
+
+(** Borrowed original-root backend. Labels/context come from [root]; every read
+    uses the admitted retained [owner], descriptor-relative/no-follow. Reject
+    portable member hazards before native work. No filesystem fallback. Caller
+    checkpoints/observers propagate unchanged; expected native errors are loader
+    failures. The host keeps this owner alive until all loader operations join. *)
+val retained_filesystem
+  :  root:Eio.Fs.dir_ty Eio.Path.t
+  -> owner:Chatml_local_source.t
+  -> checkpoint:(unit -> unit)
+  -> t
 ```

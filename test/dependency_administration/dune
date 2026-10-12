@@ -1,0 +1,11 @@
+(copy_files ../../lib/agent_server/dependency_administration.ml)
+(copy_files ../../lib/agent_server/dependency_administration.mli)
+(copy_files ../../lib/agent_server/dependency_update_receipt.ml)
+(copy_files ../../lib/agent_server/dependency_update_receipt.mli)
+
+(library
+ (name dependency_administration_tests)
+ (modules support receipt_tests dependency_administration dependency_update_receipt)
+ (libraries core eio eio_main cstruct digestif ochat.agent_protocol ochat.agent_store)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

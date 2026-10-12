@@ -20,14 +20,17 @@ let child_text =
 
 let state entry = A.state entry.R.actor |> F.protocol_ok
 
-let record daemon =
+let records daemon =
   D.with_records
     (S.delegations (Daemon.store daemon))
     ~max_records:8
     ~max_bytes:1048576
     ~f:(fun records -> Ok records)
   |> F.store_ok
-  |> function
+;;
+
+let record daemon =
+  match records daemon with
   | [ record ] -> record
   | _ -> F.fail "authored creation was lost or duplicated"
 ;;
@@ -120,6 +123,12 @@ let run_child ?(lose_ack = false) env ~root ~boundary ~mode ~recover =
               raise
                 (Core_unix.Unix_error
                    (EIO, "injected authored creation acknowledgement loss", path));
+            if String.equal boundary "artifact-partial"
+            then
+              F.write
+                env
+                (Filename.concat root "partial-artifact")
+                (Filename.dirname path);
             Eio.Flow.copy_string "authored-creation-boundary\n" (Eio.Stdenv.stdout env);
             Eio.Fiber.await_cancel ()))
   in
@@ -218,8 +227,10 @@ let run_child ?(lose_ack = false) env ~root ~boundary ~mode ~recover =
                     Eio.Promise.await child_waiting;
                     let admitted = record daemon in
                     let child =
-                      R.load (Daemon.registry daemon) admitted.admission.child_session_id
-                      |> F.protocol_ok
+                      (* Inspect the already executing child without competing with
+                         its startup lifecycle reservation. *)
+                      R.find (Daemon.registry daemon) admitted.admission.child_session_id
+                      |> Option.value_exn
                     in
                     let child_state = state child in
                     F.require
@@ -283,20 +294,6 @@ let run_child ?(lose_ack = false) env ~root ~boundary ~mode ~recover =
                     H.close handle)
                   else Eio.Fiber.await_cancel ())
                 else (
-                  let admitted = record daemon in
-                  let reference = D.reference admitted in
-                  (match !retained_reference with
-                   | None -> retained_reference := Some reference
-                   | Some expected ->
-                     F.require
-                       (D.Reference.equal expected reference)
-                       "authored identity changed across recovery");
-                  (match admitted.admission.authored_tool with
-                   | Some origin ->
-                     F.require
-                       (String.equal origin.name "researcher")
-                       "wrong authored declaration recovered"
-                   | None -> F.fail "authored admission became generated");
                   let parent_id =
                     F.read env (Filename.concat root "parent-id")
                     |> P.Id.Session.of_string
@@ -341,114 +338,152 @@ let run_child ?(lose_ack = false) env ~root ~boundary ~mode ~recover =
                        [%sexp_of: P.History.entry list]
                        expected
                        parent_state.conversation.canonical_history);
-                  (match admitted.admission.lifetime with
-                   | Invocation_owned { invocation_id } when one_off ->
-                     F.require
-                       (P.Id.Invocation.equal invocation_id invocation.context.id)
-                       "one-off owner changed"
-                   | Owned when not one_off -> ()
-                   | _ -> F.fail "authored lifetime changed");
-                  let installed =
-                    List.mem
-                      [ "child-record"; "linked"; "active" ]
-                      boundary
-                      ~equal:String.equal
-                  in
-                  F.require
-                    (List.length (S.list_sessions (Daemon.store daemon))
-                     = if installed then 2 else 1)
-                    "recovery duplicated or silently created a child";
-                  (match one_off, boundary, admitted.revocation, admitted.stage with
-                   | ( true
-                     , ( "reserved"
-                       | "artifact-partial"
-                       | "artifact-record"
-                       | "snapshot-partial"
-                       | "child-record" )
-                     , Some Admission_failed
-                     , _ ) -> ()
-                   | true, ("linked" | "active"), None, Linked -> ()
-                   | false, ("reserved" | "artifact-partial"), None, Reserved -> ()
-                   | ( false
-                     , ("artifact-record" | "snapshot-partial")
-                     , None
-                     , Artifact_installed ) -> ()
-                   | false, ("child-record" | "linked" | "active"), None, Linked -> ()
-                   | _ ->
-                     raise_s [%sexp "unexpected authored recovery", (admitted : D.record)]);
-                  let transaction =
-                    P.Id.Transaction.to_string admitted.admission.transaction_id
-                  in
-                  List.iter
-                    [ "data/prompt-artifacts/.install-"; "data/sessions/.creating-" ]
-                    ~f:(fun prefix ->
+                  let admitted =
+                    if String.equal boundary "artifact-partial"
+                    then (
                       F.require
-                        (match
-                           Eio.Path.kind
-                             ~follow:false
-                             (F.path env (Filename.concat root (prefix ^ transaction)))
-                         with
+                        (List.is_empty (records daemon))
+                        "partial source capture reserved a child";
+                      F.require
+                        (List.length (S.list_sessions (Daemon.store daemon)) = 1)
+                        "partial source capture created a child";
+                      let staging =
+                        F.read env (Filename.concat root "partial-artifact")
+                      in
+                      F.require
+                        (match Eio.Path.kind ~follow:false (F.path env staging) with
                          | `Not_found -> true
                          | _ -> false)
-                        "recovery retained an incomplete creation directory");
-                  if installed
-                  then (
-                    let child =
-                      R.load (Daemon.registry daemon) admitted.admission.child_session_id
-                      |> F.protocol_ok
-                    in
-                    let rec settled () =
-                      let current = state child in
-                      match current.lifecycle.observed, current.pending_initial_start with
-                      | (Idle | Stopped), false -> current
-                      | Failed error, _ -> raise_s [%sexp (error : P.Error.t)]
-                      | _ ->
-                        Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
-                        settled ()
-                    in
-                    let current = settled () in
-                    F.require
-                      (Option.is_none current.active_operation)
-                      "recovery retained active child operation";
-                    (match
-                       one_off, current.lifecycle.desired, current.lifecycle.observed
-                     with
-                     | true, Stopped, Stopped | false, Running, Idle -> ()
-                     | _ ->
-                       F.fail "incorrect authored child execution lifetime after crash");
-                    let history = current.conversation.canonical_history in
-                    F.require
-                      (List.exists history ~f:(fun entry ->
-                         String.is_substring
-                           (Jsonaf.to_string entry.P.History.payload)
-                           ~substring:"AUTHORED_CRASH_SPECIALIST"))
-                      "pinned authored history was lost";
-                    (match !retained_history with
-                     | None -> retained_history := Some history
+                        "recovery retained partial unreserved source staging";
+                      None)
+                    else Some (record daemon)
+                  in
+                  Option.iter admitted ~f:(fun admitted ->
+                    let reference = D.reference admitted in
+                    (match !retained_reference with
+                     | None -> retained_reference := Some reference
                      | Some expected ->
-                       F.require_equal
-                         "repeated authored recovery changed history"
-                         [%sexp_of: P.History.entry list]
-                         expected
-                         history);
-                    if String.equal boundary "active"
-                    then
+                       F.require
+                         (D.Reference.equal expected reference)
+                         "authored identity changed across recovery");
+                    (match admitted.admission.authored_tool with
+                     | Some origin ->
+                       F.require
+                         (String.equal origin.name "researcher")
+                         "wrong authored declaration recovered"
+                     | None -> F.fail "authored admission became generated");
+                    (match admitted.admission.lifetime with
+                     | Invocation_owned { invocation_id } when one_off ->
+                       F.require
+                         (P.Id.Invocation.equal invocation_id invocation.context.id)
+                         "one-off owner changed"
+                     | Owned when not one_off -> ()
+                     | _ -> F.fail "authored lifetime changed");
+                    let installed =
+                      List.mem
+                        [ "child-record"; "linked"; "active" ]
+                        boundary
+                        ~equal:String.equal
+                    in
+                    F.require
+                      (List.length (S.list_sessions (Daemon.store daemon))
+                       = if installed then 2 else 1)
+                      "recovery duplicated or silently created a child";
+                    (match one_off, boundary, admitted.revocation, admitted.stage with
+                     | ( true
+                       , ( "reserved"
+                         | "artifact-partial"
+                         | "artifact-record"
+                         | "snapshot-partial"
+                         | "child-record" )
+                       , Some Admission_failed
+                       , _ ) -> ()
+                     | true, ("linked" | "active"), None, Linked -> ()
+                     | ( false
+                       , ("reserved" | "artifact-record" | "snapshot-partial")
+                       , None
+                       , Artifact_installed ) -> ()
+                     | false, ("child-record" | "linked" | "active"), None, Linked -> ()
+                     | _ ->
+                       raise_s
+                         [%sexp "unexpected authored recovery", (admitted : D.record)]);
+                    let transaction =
+                      P.Id.Transaction.to_string admitted.admission.transaction_id
+                    in
+                    List.iter
+                      [ "data/prompt-artifacts/.install-"; "data/sessions/.creating-" ]
+                      ~f:(fun prefix ->
+                        F.require
+                          (match
+                             Eio.Path.kind
+                               ~follow:false
+                               (F.path env (Filename.concat root (prefix ^ transaction)))
+                           with
+                           | `Not_found -> true
+                           | _ -> false)
+                          "recovery retained an incomplete creation directory");
+                    if installed
+                    then (
+                      let child =
+                        R.load
+                          (Daemon.registry daemon)
+                          admitted.admission.child_session_id
+                        |> F.protocol_ok
+                      in
+                      let rec settled () =
+                        let current = state child in
+                        match
+                          current.lifecycle.observed, current.pending_initial_start
+                        with
+                        | (Idle | Stopped), false -> current
+                        | Failed error, _ -> raise_s [%sexp (error : P.Error.t)]
+                        | _ ->
+                          Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                          settled ()
+                      in
+                      let current = settled () in
+                      F.require
+                        (Option.is_none current.active_operation)
+                        "recovery retained active child operation";
+                      (match
+                         one_off, current.lifecycle.desired, current.lifecycle.observed
+                       with
+                       | true, Stopped, Stopped | false, Running, Idle -> ()
+                       | _ ->
+                         F.fail "incorrect authored child execution lifetime after crash");
+                      let history = current.conversation.canonical_history in
                       F.require
                         (List.exists history ~f:(fun entry ->
                            String.is_substring
                              (Jsonaf.to_string entry.P.History.payload)
-                             ~substring:"authored-crash-read"))
-                        "crash lost acknowledged private tool output";
-                    if one_off
-                    then (
-                      F.require
-                        (not (Agent_server.Runtime_owner.is_loaded child.runtime))
-                        "ended one-off loaded resources";
-                      let handle = attach current.identity.session_id in
-                      (match H.start handle ~queue_if_limited:false with
-                       | Error { code = Permission_denied; _ } -> ()
-                       | _ -> F.fail "ended one-off was restartable");
-                      H.close handle));
+                             ~substring:"AUTHORED_CRASH_SPECIALIST"))
+                        "pinned authored history was lost";
+                      (match !retained_history with
+                       | None -> retained_history := Some history
+                       | Some expected ->
+                         F.require_equal
+                           "repeated authored recovery changed history"
+                           [%sexp_of: P.History.entry list]
+                           expected
+                           history);
+                      if String.equal boundary "active"
+                      then
+                        F.require
+                          (List.exists history ~f:(fun entry ->
+                             String.is_substring
+                               (Jsonaf.to_string entry.P.History.payload)
+                               ~substring:"authored-crash-read"))
+                          "crash lost acknowledged private tool output";
+                      if one_off
+                      then (
+                        F.require
+                          (not (Agent_server.Runtime_owner.is_loaded child.runtime))
+                          "ended one-off loaded resources";
+                        let handle = attach current.identity.session_id in
+                        (match H.start handle ~queue_if_limited:false with
+                         | Error { code = Permission_denied; _ } -> ()
+                         | _ -> F.fail "ended one-off was restartable");
+                        H.close handle)));
                   F.require (Int.equal !calls 0) "recovery ran a provider")))));
   Eio.Flow.copy_string "authored-creation-recovered\n" (Eio.Stdenv.stdout env)
 ;;

@@ -1,0 +1,8 @@
+(library
+ (name managed_completion_cli_tests)
+ (libraries managed_completion_cli managed_completion_command inference_fixture
+  agent_server_test_support core eio eio_main
+  mirage-crypto-rng.unix ochat.agent_client ochat.agent_protocol ochat.agent_server
+  ochat.document_schema ochat.history_chatmd ochat.chat_response ochat.inference_host)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

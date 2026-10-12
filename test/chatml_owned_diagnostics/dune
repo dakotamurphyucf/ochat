@@ -1,0 +1,16 @@
+(library
+ (name chatml_owned_diagnostic_tests)
+ (libraries
+  core
+  eio_main
+  ochat.chatml_execution
+  source
+  ochat.chatml_source
+  ochat.chatml_diagnostic
+  ochat.chatml
+  ochat.chatml_typechecker
+  ochat.chatml_resolver
+  ochat.chatml_builtin_modules
+  ochat.chatml_host_runtime)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

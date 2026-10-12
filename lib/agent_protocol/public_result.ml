@@ -28,6 +28,8 @@ module Non_history = struct
     | Server_health _
     | Prompt_list _
     | Prompt_get _
+    | Prompt_dependencies_status _
+    | Prompt_dependencies_update _
     | Workspace_list _
     | Workspace_get _
     | Blob_read _
@@ -35,6 +37,7 @@ module Non_history = struct
     | Session_work _
     | Session_search _
     | Session_search_navigate _
+    | Session_seed _
     | Session_list _
     | Session_configuration_get _
     | Session_configuration_update _

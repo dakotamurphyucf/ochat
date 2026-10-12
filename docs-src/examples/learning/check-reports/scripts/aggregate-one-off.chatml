@@ -1,0 +1,60 @@
+(* A self-contained submitted program: run_chatml compiles exactly these bytes,
+   without project loading. The configured tool uses aggregate.chatml instead. *)
+let after_line text =
+  match String.find(text, "\n") with
+  | `Some(index) -> String.slice(text, index + 1, String.length(text) - index - 1)
+  | `None -> fail("Expected a complete read_file response.")
+
+let string_field input name =
+  match Json.get_field(input, name) with
+  | `Some(`String(value)) -> value
+  | _ -> fail("Expected a string field: " ++ name)
+
+let read_report filename =
+  let* result = Tool.call("read_file", `Object([
+    {key = "root"; value = `String("reports")},
+    {key = "file"; value = `String(filename)}
+  ])) in
+  match result with
+  | `Error(message) -> Task.fail(message)
+  | `Ok(`String(text)) ->
+      (match Json.parse_result(after_line(after_line(text))) with
+      | `Ok(`Array(checks)) ->
+          let decoded = Array.map(checks, fun check ->
+            let name = string_field(check, "check") in
+            let status = string_field(check, "status") in
+            if Array.exists(["passed", "failed"], fun expected -> status == expected) then
+              {check = name; status = status}
+            else fail("A check status must be passed or failed.")) in
+          Task.pure(decoded)
+      | `Ok(_) -> Task.fail("Expected an array of check results.")
+      | `Error(error) ->
+          (match error with
+          | `Invalid_syntax(diagnostic) -> Task.fail(diagnostic.message)))
+  | `Ok(_) -> Task.fail("The file tool returned a non-text result.")
+
+let summarize files =
+  let totals = Hashtbl.create() in
+  let* ignored = Task.iter_array(files, fun filename ->
+    let* checks = read_report(filename) in
+    let ignored = Array.iter(checks, fun item ->
+      if item.status == "failed" then
+        let previous = Option.get_or(Hashtbl.get(totals, item.check), 0.0) in
+        Hashtbl.set(totals, item.check, previous +. 1.0)
+      else ()) in
+    Task.pure(())) in
+  Task.pure(`Array(Array.map(Hashtbl.to_array(totals), fun entry -> `Object([
+    {key = "check"; value = `String(entry.key)},
+    {key = "failures"; value = `Number(entry.value)}
+  ]))))
+
+let main input =
+  match input with
+  | `Array(files) ->
+      if Array.for_all(files, fun value ->
+        match value with | `String(_) -> true | _ -> false) then
+        let names = Array.map(files, fun value ->
+          match value with | `String(name) -> name | _ -> fail("Validated filename invariant.")) in
+        summarize(names)
+      else Task.fail("Expected report filenames.")
+  | _ -> Task.fail("Expected an array of report filenames.")

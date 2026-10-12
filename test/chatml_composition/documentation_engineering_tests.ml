@@ -31,7 +31,11 @@ let sources =
   ; "scripts/check-report.chatml", Documentation_program_tests.source
   ; "schemas/check-input.json", Documentation_program_tests.input_schema
   ; "schemas/check-output.json", Documentation_program_tests.output_schema
+  ; ( "chatml.project.json"
+    , [%blob
+        "../../docs-src/examples/applications/guarded-engineering/chatml.project.json"] )
   ]
+  @ Documentation_program_tests.decoder_sources
   @ List.filter Documentation_shell_review_tests.sources ~f:(fun (name, _) ->
     not
       (List.mem [ "agent.chatmd"; "runtimes/inspection.chatmd" ] name ~equal:String.equal))
@@ -180,162 +184,160 @@ let%expect_test
     |}]
 ;;
 
-(* The legacy authored runner has its own transport injection seam. Exercise its
-   real binding with an explicit callback rather than letting an embedded-host
-   model override accidentally fall through to a real provider. *)
+(* The configured model variant uses the same real captured host as the
+   application. Controlled inference distinguishes each actual consumer. *)
 let%expect_test
     "engineering model variant separates policy review from specialist evidence handoff"
   =
-  let module R = Chat_response.Agent_runtime in
-  let module CM = Prompt.Chat_markdown in
-  let ok = function
-    | Ok value -> value
-    | Error diagnostics ->
-      List.map diagnostics ~f:R.diagnostic_to_string
-      |> String.concat ~sep:"\n"
-      |> failwith
+  Mirage_crypto_rng_unix.use_default ();
+  let queued = ref [] in
+  let reviews = ref 0 in
+  let handoffs = ref 0 in
+  let evidence = ref "" in
+  let has_user_text inputs text =
+    List.exists inputs ~f:(function
+      | Openai.Responses.Item.Input_message { role = User; content; _ } ->
+        List.exists content ~f:(function
+          | Openai.Responses.Input_message.Text { text = actual; _ } ->
+            String.equal actual text
+          | Image _ -> false)
+      | Input_message { role = Assistant | System | Developer; _ }
+      | Output_message _
+      | Function_call _
+      | Custom_tool_call _
+      | Function_call_output _
+      | Custom_tool_call_output _
+      | Web_search_call _
+      | File_search_call _
+      | Reasoning _ -> false)
   in
-  Eio_main.run (fun env ->
-    Mirage_crypto_rng_unix.use_default ();
-    let name = temporary_root env |> Eio_posix.Low_level.realpath in
-    let root = Eio.Path.(Eio.Stdenv.fs env / name) in
-    Exn.protect
-      ~finally:(fun () -> Eio.Path.rmtree root)
-      ~f:(fun () ->
-        let save (path, text) =
-          Eio.Path.mkdirs
-            ~exists_ok:true
-            ~perm:0o700
-            Eio.Path.(root / Filename.dirname path);
-          Eio.Path.save ~create:(`Or_truncate 0o600) Eio.Path.(root / path) text
-        in
-        List.iter (sources @ Workflow.workspace_files) ~f:save;
-        Eio.Path.mkdir ~perm:0o700 Eio.Path.(root / "reports");
-        let prompt_elements =
-          CM.parse_chat_inputs ~source:"model-engineer.chatmd" ~dir:root model_engineer
-        in
-        let cache = Chat_response.Cache.create ~max_size:1 () in
-        let reviews = ref 0 in
-        let inference =
-          Inference_fixture.create
-            ~namespace:"engineering-model-review"
-            ~default_model:"gpt-6-astra"
-            ~post_stream:(fun ~sw:_ ~inputs ->
-              Int.incr reviews;
-              let request =
-                `Array (List.map inputs ~f:Openai.Responses.Item.jsonaf_of_t)
-                |> Jsonaf.to_string
-              in
-              assert (String.is_substring request ~substring:"You have no tools");
-              let answer =
-                match !reviews with
-                | 1 -> {|{"decision":"allow_once"}|}
-                | _ -> "malformed decision"
-              in
-              Documentation_agent_team_tests.answer
-                ~id:("review-" ^ Int.to_string !reviews)
-                answer)
-        in
-        let ctx =
-          Inference_fixture.ctx inference ~env ~dir:root ~tool_dir:root ~cache ()
-        in
-        let host =
-          R.host
-            ~env
-            ~workspace:root
-            ~tool_dir:root
-            ~prompt_dir:root
-            ~session_dir:root
-            ~cache_dir:root
-            ~home:root
-            ~session_id:"engineering-model"
-            ~prompt_elements
-          |> ok
-        in
-        let handoffs = ref 0 in
-        let evidence = ref "" in
-        let run_agent ?prompt_dir:_ ?session_id:_ ?observer:_ ~source ~ctx:_ prompt items =
-          let parsed = CM.parse_chat_inputs ~source:"reviewer.chatmd" ~dir:root prompt in
-          assert (
-            not
-              (List.exists parsed ~f:(function
-                 | CM.Tool _ -> true
-                 | _ -> false)));
-          assert (not (String.is_prefix source ~prefix:"shell-model-reviewer:"));
-          Int.incr handoffs;
-          assert (
-            String.is_substring
-              prompt
-              ~substring:"Lantern's engineering evidence reviewer");
-          (match items with
-           | [ CM.Basic { text = Some text; _ } ] -> [%test_eq: string] !evidence text
-           | _ -> failwith "specialist did not receive the supplied evidence");
+  let provider_failure = ref None in
+  let post_stream ~sw:_ ~inputs =
+    try
+      let request = `Array (List.map inputs ~f:Openai.Responses.Item.jsonaf_of_t) in
+      if Documentation_agent_team_tests.contains request "engineering evidence reviewer"
+      then (
+        assert (Documentation_agent_team_tests.contains request "You have no tools");
+        assert (has_user_text inputs !evidence);
+        assert (not (String.is_empty !evidence));
+        Int.incr handoffs;
+        Documentation_agent_team_tests.answer
+          ~id:("specialist-" ^ Int.to_string !handoffs)
           "Proposal: add verification guidance supported by docs/setup.md and the \
-           failing check."
+           failing check.")
+      else if Documentation_agent_team_tests.contains request "approval reviewer"
+      then (
+        assert (Documentation_agent_team_tests.contains request "You have no tools");
+        assert (
+          not
+            (Documentation_agent_team_tests.contains
+               request
+               "engineering evidence reviewer"));
+        Int.incr reviews;
+        let answer =
+          match !reviews with
+          | 1 -> {|{"decision":"allow_once"}|}
+          | 2 -> "malformed decision"
+          | _ -> failwith "unexpected shell reviewer request"
         in
-        Eio.Switch.run (fun sw ->
-          let resources =
-            R.prepare_extensions
-              ~sw
-              ~ctx
-              ~host
-              ~platform:(R.platform ())
-              ~prompt_elements
-              ~manifest_authorizer:Shell_runtime.Manifest_authorizer.assume_authorized
-              ~approval_provider:Shell_runtime.Approval_broker.None_available
-              ~approval_store:(Shell_access.Approval.create_store ())
-              ~run_agent
-              ()
-            |> ok
-          in
-          let runtime = resources.native in
-          let call name input =
-            let tool =
-              List.find_exn runtime.functions ~f:(fun t ->
-                String.equal t.Ochat_function.info.function_.name name)
-            in
-            match tool.run (Jsonaf.to_string input) with
-            | Text text -> text
-            | _ -> failwith "expected text output"
-          in
-          let denied input =
-            let json = call "check_docs" input |> Jsonaf.of_string in
-            [%test_eq: string]
-              "denied"
-              (Jsonaf.member_exn "error" json
-               |> Jsonaf.member_exn "code"
-               |> Jsonaf.string_exn)
-          in
-          denied (arguments [ "--check"; "links"; "--write-report" ]);
-          [%test_eq: int] 0 !reviews;
-          let result =
-            call "check_docs" (arguments [ "--check"; "all"; "--write-report" ])
-            |> Jsonaf.of_string
-            |> Shell_runtime.Result.t_of_jsonaf
-          in
-          assert (
-            Jsonaf.exactly_equal
-              (Jsonaf.of_string Documentation_shell_tests.expected_report)
-              (Jsonaf.of_string result.stdout));
-          evidence
-          := "docs/setup.md\n"
-             ^ Documentation_shell_tests.setup
-             ^ "\nActual checker stdout:\n"
-             ^ result.stdout;
-          let result = call "review_docs" (`Object [ "input", `String !evidence ]) in
-          assert (String.is_prefix result ~prefix:"Proposal:");
-          [%test_eq: int] 1 !handoffs;
-          denied (arguments [ "--check"; "all"; "--write-report" ]);
-          [%test_eq: int] 2 !reviews;
-          assert (
-            Jsonaf.exactly_equal
-              (Jsonaf.of_string Documentation_shell_tests.expected_report)
-              (Jsonaf.of_string (Eio.Path.load Eio.Path.(root / "reports/latest.json"))));
-          print_endline
-            "static policy precedes model review; simulated approval runs real checks";
-          print_endline
-            "tool-free specialist receives exact evidence; malformed model decision \
-             preserves report")));
+        Documentation_agent_team_tests.answer
+          ~id:("review-" ^ Int.to_string !reviews)
+          answer)
+      else if Documentation_agent_team_tests.contains request "model approval"
+      then (
+        let calls = !queued in
+        queued := [];
+        Fixtures.call_events calls)
+      else failwith "unexpected engineering inference consumer"
+    with
+    | exn ->
+      let backtrace = Backtrace.Exn.most_recent () in
+      provider_failure := Some (exn, backtrace);
+      Exn.raise_with_original_backtrace exn backtrace
+  in
+  let sources =
+    List.map sources ~f:(fun (name, source) ->
+      name, if String.equal name "agent.chatmd" then model_engineer else source)
+  in
+  Host.with_host
+    ~durable:false
+    ~sources
+    ~workspace_files:Workflow.workspace_files
+    ~permission_profile:(E.interactive_permission_profile ~authorize_shell_manifest:true)
+    ~daemon_options:
+      { Agent_server.Daemon.default_options with
+        inference_policy =
+          Agent_server_test_support.inference_policy
+            ~default_model:"fixture-model"
+            ~post_stream
+      }
+    (fun env workspace host ->
+       (* This is the exact captured specialist source in the shipped bundle;
+          its tool-free declaration is independent from the shell-review port. *)
+       let reviewer =
+         List.Assoc.find_exn sources ~equal:String.equal "agents/reviewer.chatmd"
+       in
+       let parsed =
+         Prompt.Chat_markdown.parse_chat_inputs
+           ~source:"agents/reviewer.chatmd"
+           ~dir:Eio.Path.(Eio.Stdenv.fs env / Filename.dirname workspace)
+           reviewer
+       in
+       assert (
+         not
+           (List.exists parsed ~f:(function
+              | Prompt.Chat_markdown.Tool _ -> true
+              | _ -> false)));
+       let call id name input =
+         queued := [ id, name, input ];
+         Workflow.send host id "Inspect the actual engineering evidence.";
+         Workflow.finish_call ~timeout:30. env host id;
+         Option.iter !provider_failure ~f:(fun (exn, backtrace) ->
+           Exn.raise_with_original_backtrace exn backtrace);
+         Host.initial_outcome (Host.snapshot host) id
+       in
+       let denied id input =
+         call id "check_docs" input |> ignore;
+         Documentation_shell_review_tests.denied (Host.snapshot host) id
+       in
+       denied "selective" (arguments [ "--check"; "links"; "--write-report" ]);
+       [%test_eq: int] 0 !reviews;
+       [%test_eq: int] 0 !handoffs;
+       call "full" "check_docs" (arguments [ "--check"; "all"; "--write-report" ])
+       |> ignore;
+       let result = shell_result (Host.snapshot host) "full" in
+       assert (Shell_runtime.Result.equal_status result.status (Exited 1));
+       assert (
+         Jsonaf.exactly_equal
+           (Jsonaf.of_string Documentation_shell_tests.expected_report)
+           (Jsonaf.of_string result.stdout));
+       evidence
+       := "docs/setup.md\n"
+          ^ Documentation_shell_tests.setup
+          ^ "\nActual checker stdout:\n"
+          ^ result.stdout;
+       (match
+          call "specialist" "review_docs" (`Object [ "input", `String !evidence ])
+        with
+        | Complete (`String text) -> assert (String.is_prefix text ~prefix:"Proposal:")
+        | other -> raise_s [%sexp (other : P.Invocation.outcome)]);
+       [%test_eq: int] 1 !handoffs;
+       [%test_eq: int] 1 !reviews;
+       let report = Eio.Path.(Eio.Stdenv.fs env / workspace / "reports/latest.json") in
+       let before = Eio.Path.load report in
+       denied "malformed" (arguments [ "--check"; "all"; "--write-report" ]);
+       [%test_eq: int] 2 !reviews;
+       [%test_eq: int] 1 !handoffs;
+       [%test_eq: string] before (Eio.Path.load report);
+       assert (
+         Jsonaf.exactly_equal
+           (Jsonaf.of_string Documentation_shell_tests.expected_report)
+           (Jsonaf.of_string before));
+       print_endline
+         "static policy precedes model review; simulated approval runs real checks";
+       print_endline
+         "tool-free specialist receives exact evidence; malformed model decision \
+          preserves report");
   [%expect
     {|
     static policy precedes model review; simulated approval runs real checks

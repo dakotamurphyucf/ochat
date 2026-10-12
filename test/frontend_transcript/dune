@@ -1,0 +1,7 @@
+(library
+ (name frontend_transcript_tests)
+ (libraries core eio_main frontend_transcript inference_fixture
+  ochat.agent_protocol ochat.agent_session ochat.history_entry
+  mirage-crypto-rng.unix)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

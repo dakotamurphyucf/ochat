@@ -1,4 +1,67 @@
 open Core
+
+module Portable_path = struct
+  type t = string [@@deriving compare, equal, sexp_of]
+
+  let create path =
+    if
+      (not (String.is_empty path))
+      && String.length path <= 1024
+      && Stdlib.String.is_valid_utf_8 path
+      && (not
+            (String.exists path ~f:(function
+               | '\\' | ':' | '\000' | '\r' | '\n' -> true
+               | _ -> false)))
+      && List.for_all (String.split path ~on:'/') ~f:(fun part ->
+        not (String.is_empty part || String.equal part "." || String.equal part ".."))
+    then Ok path
+    else Or_error.error_string "invalid portable relative source path"
+  ;;
+
+  let to_string t = t
+
+  let first_collision paths ~checkpoint =
+    let folded =
+      List.map paths ~f:(fun path ->
+        checkpoint ();
+        path, String.lowercase path)
+      |> List.sort ~compare:(fun (left, folded_left) (right, folded_right) ->
+        checkpoint ();
+        let comparison = String.compare folded_left folded_right in
+        if comparison = 0 then compare left right else comparison)
+    in
+    let rec distinct index = function
+      | [] -> Ok index
+      | (path, folded) :: rest ->
+        checkpoint ();
+        (match Map.find index folded with
+         | Some previous -> Error (previous, path)
+         | None -> distinct (Map.set index ~key:folded ~data:path) rest)
+    in
+    match distinct String.Map.empty folded with
+    | Error pair -> Some pair
+    | Ok index ->
+      let rec inspect = function
+        | [] -> None
+        | (path, folded) :: rest ->
+          checkpoint ();
+          let rec prefixes offset =
+            if offset = String.length folded
+            then inspect rest
+            else if Char.equal folded.[offset] '/'
+            then (
+              checkpoint ();
+              match Map.find index (String.prefix folded offset) with
+              | Some parent -> Some (parent, path)
+              | None -> prefixes (offset + 1))
+            else prefixes (offset + 1)
+          in
+          prefixes 0
+      in
+      inspect folded
+  ;;
+end
+
 (* ----- Source, position and span -------------------------------------------------------------- *)
 
 type t =
@@ -52,3 +115,75 @@ let merge lspan rspan =
       (if lspan.right.offset >= rspan.right.offset then lspan.right else rspan.right)
   }
 ;;
+
+module Position_index = struct
+  (* These arrays are private and mutate only inside [create], before publication. *)
+  type t =
+    { contents : string
+    ; lines : int array
+    ; columns : int array
+    }
+
+  let stride = 4096
+
+  let scan contents ~start_byte ~end_byte ~line ~column ~checkpoint ~record =
+    let length = String.length contents in
+    let rec loop offset line column =
+      if offset mod stride = 0
+      then (
+        checkpoint ();
+        match record with
+        | None -> ()
+        | Some t ->
+          let slot = offset / stride in
+          t.lines.(slot) <- line;
+          t.columns.(slot) <- column);
+      if offset = end_byte
+      then { line; column; offset }
+      else (
+        match String.get contents offset with
+        | '\r' ->
+          if offset + 1 < length && Char.equal (String.get contents (offset + 1)) '\n'
+          then loop (offset + 1) line (column + 1)
+          else loop (offset + 1) (line + 1) 0
+        | '\n' -> loop (offset + 1) (line + 1) 0
+        | _ -> loop (offset + 1) line (column + 1))
+    in
+    loop start_byte line column
+  ;;
+
+  let create contents ~checkpoint =
+    let length = String.length contents in
+    let slots = (length / stride) + 1 in
+    let t =
+      { contents; lines = Array.create ~len:slots 1; columns = Array.create ~len:slots 0 }
+    in
+    let (_ : position) =
+      scan
+        contents
+        ~start_byte:0
+        ~end_byte:length
+        ~line:1
+        ~column:0
+        ~checkpoint
+        ~record:(Some t)
+    in
+    t
+  ;;
+
+  let position t ~byte_offset ~checkpoint =
+    if byte_offset < 0 || byte_offset > String.length t.contents
+    then Or_error.error_string "source byte offset is out of bounds"
+    else (
+      let slot = byte_offset / stride in
+      Ok
+        (scan
+           t.contents
+           ~start_byte:(slot * stride)
+           ~end_byte:byte_offset
+           ~line:t.lines.(slot)
+           ~column:t.columns.(slot)
+           ~checkpoint
+           ~record:None))
+  ;;
+end

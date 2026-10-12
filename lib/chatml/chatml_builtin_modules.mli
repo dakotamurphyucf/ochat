@@ -46,6 +46,15 @@ val add_surface : env -> Builtin_surface.surface -> unit
 (** Alias for {!BuiltinModules.create_env_with_surface}. *)
 val create_env_with_surface : ?control:execution_control -> Builtin_surface.surface -> env
 
+(** Fresh prepared-runtime installation. Poll actual global/module/export walks
+    through diagnostic_checkpoint and charge table/cell/wrapper allocations to
+    the same control. Builtins retain the normal before/after execution checks.
+    Legacy installers keep their existing behavior. No new budget/depth scope. *)
+val create_controlled_env_with_surface
+  :  ?control:execution_control
+  -> Builtin_surface.surface
+  -> env
+
 (** Alias for {!BuiltinModules.add_global_builtins}. *)
 val add_global_builtins : env -> unit
 

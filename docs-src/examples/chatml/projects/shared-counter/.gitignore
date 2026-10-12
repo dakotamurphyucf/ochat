@@ -1,0 +1,5 @@
+# These authored example sources override the repository's generated src/ ignore.
+!src/
+!src/**
+!vendor/counter/src/
+!vendor/counter/src/**

@@ -235,6 +235,7 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
              | _ -> source);
           let definition =
             Agent_session.Prompt_definition.create
+              ~root_invocation:Ui
               ~id:prompt_id
               ~config_name:"extension-runtime"
               ~root_file:(Eio.Path.native_exn Eio.Path.(root / "root.chatmd"))
@@ -554,12 +555,26 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
           in
           (match mode with
            | `One_off_only ->
-             assert (Result.is_error (build B.build));
+             assert (
+               Result.is_error
+                 (build
+                    (B.build
+                       ~agent_source:None
+                       ~startup:None
+                       ~root_invocation:Ui
+                       ~script_preparation:(Some (Fixtures.script_preparation ())))));
              assert (Int.equal !requests 0);
              assert (Int.equal !authorized 0)
            | _ -> ());
           let runtime =
-            build (B.build_with_extensions ~native_registrations:[] ~services)
+            build
+              (B.build_with_extensions
+                 ~agent_source:None
+                 ~startup:None
+                 ~root_invocation:Ui
+                 ~script_preparation:(Some (Fixtures.script_preparation ()))
+                 ~native_registrations:[]
+                 ~services)
             |> protocol_ok
           in
           let owner =
@@ -947,6 +962,65 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
     |}]
 ;;
 
+let assert_bounded_event_admission (runtime : Agent_session.Runtime_builder.t) =
+  let module M = Chat_response.Moderator_manager in
+  let module B = Agent_session.Runtime_builder in
+  let manager = Option.value_exn runtime.moderator_manager in
+  let live_snapshot () =
+    M.identity_snapshot manager |> Result.ok_or_failwith |> B.encode_moderator_snapshot
+  in
+  let before = live_snapshot () in
+  let published_before = runtime.moderator_snapshot () in
+  let prepares = ref 0 in
+  let prepare ~before:previous ~snapshot:_ =
+    Int.incr prepares;
+    (* Preparation runs inside the owner gate; inspect its supplied checkpoint
+       instead of recursively requesting another synchronous manager operation. *)
+    assert (Jsonaf.exactly_equal before (B.encode_moderator_snapshot previous));
+    Ok ()
+  in
+  (* Handwritten wire shape, independent of either snapshot encoder. Each layer
+     contributes an object and an array to JSON depth while staying otherwise valid. *)
+  let deep =
+    List.fold
+      (List.init 128 ~f:Fn.id)
+      ~init:(`Object [ "kind", `String "unit" ])
+      ~f:(fun child _ -> `Object [ "kind", `String "array"; "values", `Array [ child ] ])
+  in
+  assert (Result.is_ok (Chatml.Chatml_value_codec.Snapshot.of_jsonaf deep));
+  (match runtime.enqueue_internal_event ~prepare deep with
+   | Error error ->
+     [%test_eq: Agent_protocol.Error.code] Agent_protocol.Error.Invalid_state error.code;
+     (match Document_schema.Error.t_of_sexp (Sexp.of_string error.message) with
+      | Limit_exceeded _ -> ()
+      | error ->
+        raise_s
+          [%sexp
+            "expected bounded admission rejection", (error : Document_schema.Error.t)])
+   | Ok _ -> failwith "deep raw event was admitted");
+  [%test_eq: int] 0 !prepares;
+  assert (Jsonaf.exactly_equal before (live_snapshot ()));
+  assert (
+    Option.equal Jsonaf.exactly_equal published_before (runtime.moderator_snapshot ()));
+  let ordinary =
+    `Object
+      [ "kind", `String "variant"; "tag", `String "Session_start"; "payload", `Array [] ]
+  in
+  let queued = runtime.enqueue_internal_event ~prepare ordinary |> protocol_ok in
+  [%test_eq: int] 1 !prepares;
+  assert (not (Jsonaf.exactly_equal before (Option.value_exn queued)));
+  assert (Jsonaf.exactly_equal (Option.value_exn queued) (live_snapshot ()));
+  let drained = runtime.drain_internal_events [] |> protocol_ok in
+  [%test_eq: bool] false drained.remaining_events;
+  assert (
+    Jsonaf.exactly_equal (Option.value_exn drained.moderator_snapshot) (live_snapshot ()));
+  let snapshot = M.identity_snapshot manager |> Result.ok_or_failwith in
+  [%test_eq: int] 0 (List.length snapshot.queued_internal_events);
+  match snapshot.current_state with
+  | Session.Snapshot.Int count -> [%test_eq: int] 2 count
+  | _ -> failwith "unexpected startup fixture state after ordinary event"
+;;
+
 let%expect_test "copied runtime wrappers share the successful startup checkpoint" =
   let module B = Agent_session.Runtime_builder in
   with_actor_workspace (fun env workspace_instance ->
@@ -970,6 +1044,7 @@ let on_event : context -> state -> event -> state task =
 </script>|};
       let definition =
         Agent_session.Prompt_definition.create
+          ~root_invocation:Ui
           ~id:prompt_id
           ~config_name:"startup-checkpoint"
           ~root_file:(Eio.Path.native_exn Eio.Path.(root / "root.chatmd"))
@@ -1010,6 +1085,10 @@ let on_event : context -> state -> event -> state task =
       let inference = Inference_ports.create ~config:Chat_response.Config.default () in
       let runtime =
         B.build
+          ~agent_source:None
+          ~startup:None
+          ~root_invocation:Ui
+          ~script_preparation:(Some (Fixtures.script_preparation ()))
           ~sw
           ~env
           ~inference_context:inference.context
@@ -1062,6 +1141,7 @@ let on_event : context -> state -> event -> state task =
             Jsonaf.exactly_equal
             published
             (runtime.start_moderator () |> protocol_ok));
+        assert_bounded_event_admission runtime;
         wrapped.close ();
         [%test_eq: int] 1 !closes)));
   print_endline "real startup replaces both snapshots; repeated startup is stable";

@@ -41,6 +41,11 @@ type kind =
   | Other
 [@@deriving compare, equal, sexp]
 
+(** Classification of the existing neutral semantic payload. No provider DTO
+    lowering or execution occurs. Developer messages project as System while
+    retaining their actual neutral role in the payload. *)
+val classification : History_entry.Payload.Semantic.t -> role * kind
+
 type provenance =
   | Canonical
   | Moderator_inserted

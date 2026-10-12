@@ -106,12 +106,7 @@ let create
   let%bind () = Input.validate input in
   if generation < 0 || Int64.(expected_revision < 0L)
   then Error (Protocol_error.invalid_request "invalid run start generation or revision")
-  else (
-    match mode, input with
-    | Single_turn, Authored_start ->
-      Error (Protocol_error.invalid_request "authored start requires workflow mode")
-    | Single_turn, User_submission _ | Workflow, (Authored_start | User_submission _) ->
-      Ok { session_id; attachment_id; generation; expected_revision; mode; input; key })
+  else Ok { session_id; attachment_id; generation; expected_revision; mode; input; key }
 ;;
 
 let to_json t =

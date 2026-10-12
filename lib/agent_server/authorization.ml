@@ -1,6 +1,8 @@
 open Core
 
 let required_scope = function
+  | Agent_protocol.Command.Prompt_dependencies_status | Prompt_dependencies_update _ ->
+    Some Agent_protocol.Scope.Administer_configuration
   | Agent_protocol.Command.Provider_status _ -> Some Agent_protocol.Scope.Provider_view
   | Provider_select _ -> Some Agent_protocol.Scope.Provider_select
   | Provider_setup _
@@ -21,7 +23,7 @@ let required_scope = function
   | Prompt_list _ | Prompt_get _ -> Some Agent_protocol.Scope.List_prompts
   | Workspace_list _ | Workspace_get _ -> Some List_workspaces
   | Blob_read _ -> Some View_session_transcript
-  | Session_create _ -> Some Create_sessions
+  | Session_create _ | Session_seed _ -> Some Create_sessions
   | Activity_list _
   | Session_work _
   | Session_search _
@@ -125,6 +127,17 @@ let authorize principal command =
            ())
   in
   match command with
+  | Agent_protocol.Command.Session_seed request
+    when match Agent_protocol.Session_seed.Request.code request with
+         | Catalog _ -> false
+         | Retained _ ->
+           not (Agent_protocol.Principal.has_scope principal View_session_transcript) ->
+    Error
+      (Agent_protocol.Error.create
+         Permission_denied
+         ~message:"retained seed requires transcript visibility"
+         ~retryable:false
+         ())
   | Agent_protocol.Command.Session_cancel_pending_input _
   | Session_replace_pending_input _
     when not (Agent_protocol.Principal.has_scope principal View_session_transcript) ->

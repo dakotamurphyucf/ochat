@@ -47,13 +47,7 @@ let validate_limits ~max_payload_length ~max_segment_bytes ~max_segment_frames =
   else Ok ()
 ;;
 
-let write_current ~env path id =
-  Durable_file.replace
-    ~env
-    ~durability:Flush_file_and_directory
-    ~path
-    (Journal_segment.Id.filename id ^ "\n")
-;;
+let write_current = Journal_initial_creation.write_current
 
 let make
       ~env
@@ -76,6 +70,53 @@ let make
   ; current_frames
   }
 ;;
+
+let initial_entry reader ~env ~max_payload_length ~checkpoint =
+  Journal_initial_creation.initial_entry reader ~env ~max_payload_length ~checkpoint
+  |> Result.map
+       ~f:
+         (Option.map ~f:(fun entry ->
+            { segment_id = Journal_segment.Id.first
+            ; offset = entry.Journal_segment.offset
+            ; next_offset = entry.next_offset
+            ; frame = entry.frame
+            }))
+;;
+
+module Initial_creation = struct
+  type nonrec journal = t
+  type t = Journal_initial_creation.t
+
+  let inspect = Journal_initial_creation.inspect
+
+  let entry t =
+    let entry = Journal_initial_creation.entry t in
+    { segment_id = Journal_segment.Id.first
+    ; offset = entry.Journal_segment.offset
+    ; next_offset = entry.next_offset
+    ; frame = entry.frame
+    }
+  ;;
+
+  let open_journal t ~max_segment_bytes ~max_segment_frames ~checkpoint =
+    let open Result.Let_syntax in
+    let max_payload_length = Journal_initial_creation.max_payload_length t in
+    let%bind () =
+      validate_limits ~max_payload_length ~max_segment_bytes ~max_segment_frames
+    in
+    let%map current, current_scan = Journal_initial_creation.repair t ~checkpoint in
+    let directory = Journal_initial_creation.directory t in
+    make
+      ~env:(Journal_initial_creation.env t)
+      ~directory
+      ~max_payload_length
+      ~max_segment_bytes
+      ~max_segment_frames
+      ~current
+      ~current_bytes:current_scan.valid_length
+      ~current_frames:(List.length current_scan.entries)
+  ;;
+end
 
 let create ~env ~directory ~max_payload_length ~max_segment_bytes ~max_segment_frames =
   let open Result.Let_syntax in

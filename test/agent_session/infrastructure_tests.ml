@@ -426,6 +426,7 @@ let%expect_test "pinned prompt revisions restore after live sources disappear" =
       "<developer>pinned-child-marker</developer>";
     let definition =
       Agent_session.Prompt_definition.create
+        ~root_invocation:Ui
         ~id:prompt_id
         ~config_name:"pinned"
         ~root_file

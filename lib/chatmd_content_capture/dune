@@ -1,0 +1,5 @@
+(library
+ (name chatmd_content_capture)
+ (public_name ochat.chatmd_content_capture)
+ (libraries core chatmd chatmd_prompt_content chatml_local_source source builtin_instructions)
+ (preprocess (pps ppx_jane)))

@@ -29,10 +29,63 @@ audit, moderator processes, and management surfaces.
 
 Preparation applies administrative policy to the canonical requested
 manifest. Security verification checks trusted source/signature requirements.
-Authorization grants the exact digest. Instantiation uses Eio to resolve paths,
-load secrets, open stores/audit, compile extensions, fingerprint helpers, and
-select backends. One immutable registry generation is then shared by tool and
-moderator calls.
+Authorization grants the exact digest. Preparation compiles authorized extensions
+without initializing them. Instantiation uses Eio to resolve paths, load secrets,
+open stores/audit, fingerprint helpers, and select backends. One immutable
+registry generation is then shared by tool and moderator calls.
+
+Hosts that must admit additional script contracts before any native hook
+initializer use `Registry.instantiate_prepared_after`. Its callback receives an
+abstract `Registry.Staged.t` containing the actual runtime and tool identities.
+`Chat_response.Shell_tool.prepare` constructs the real functions against that
+view. Those functions, and borrowed executor configurations, reject execution
+until the callback succeeds, every hook activates, and snapshot restore finishes.
+For example, a host can retain a prepared shell function while validating another
+tool; if that tool rejects, invoking the retained function returns
+`shell.tool_inactive` before decoding its input or performing native effects.
+
+Each native hook instance moves from pending to ready once. Activation failure
+is terminal; closing the borrowed switch revokes even previously ready access.
+Callback exceptions and cancellation propagate with their original backtraces.
+The host's switch owns the native handles throughout, including unsuccessful
+preparation: rejection does not close an unrelated caller switch. Initializers
+that completed before a later failure may have external effects; this boundary
+does not roll those effects back. The ordinary registry and standalone runtime
+constructors retain their immediate behavior.
+
+## Fresh specialist code over retained resources
+
+`Registry.rebind_code` accepts a prepared manifest and its exact authorization
+grant, then compares the effective native declarations with the original registry.
+Tool bindings, worker wiring, administrative ceilings, lifecycles and failure
+policies must agree. Hook code and diagnostic provenance may change. A declaration
+digest alone cannot authorize a different compiled dependency graph.
+
+The resulting `Registry.Code_view` borrows the original native resources: path
+bases, loaded secrets and environment, executable workers, selected model services
+and raw audit sinks. It does not reopen those resources. Fresh hook state belongs
+to the new code owner and complete execution manifest; the original state remains
+unchanged. Repeated worker names retain their original occurrence order.
+
+Use `Code_view.with_execution` for each dispatch. Its `Execution.registry` and
+`Execution.prepare_executor` select the admitted code while preserving actual
+caller services. Tool calls, moderator Process calls and executable hook workers
+share `Call_context.prepare_executor_for_call`, so nested processes use the current
+session and approval store/provider. Results identify the manifest actually used.
+An unbound original owner retains its original services.
+
+An execution admission expires when its callback returns. Borrowed configs and
+registries cannot be revived by applying another code view, and both the resource
+owner and code owner must remain live. Join workers before returning their loan.
+Deferred work must enter a new admission using its recorded view and current
+caller services; the code-view primitive does not select or persist queued-job
+source revisions.
+
+The caller's logical work ceiling covers comparison, temporary indexes and code
+construction. Byte comparisons poll in chunks of at most 1024 bytes; temporary
+budgeted comparators do not escape into retained maps. This bounds logical work,
+not CPU instructions, disk use or native process execution. Matcher construction
+is stack-safe; nested matcher execution retains its existing depth limits.
 
 See [the contributor runtime guide](../../guide/chatmd-shell-runtime-internals.md).
 
@@ -51,6 +104,7 @@ confinement. A detached viewer disconnect does not cancel daemon-owned runtimes.
 | `approval_store` | [Interface](../../../lib/shell_runtime/approval_store.mli) | [Implementation](../../../lib/shell_runtime/approval_store.ml) |
 | `audit_replay` | [Interface](../../../lib/shell_runtime/audit_replay.mli) | [Implementation](../../../lib/shell_runtime/audit_replay.ml) |
 | `audit_sink` | [Interface](../../../lib/shell_runtime/audit_sink.mli) | [Implementation](../../../lib/shell_runtime/audit_sink.ml) |
+| `call_context` | [Interface](../../../lib/shell_runtime/call_context.mli) | [Implementation](../../../lib/shell_runtime/call_context.ml) |
 | `chatml_approval_value` | [Interface](../../../lib/shell_runtime/chatml_approval_value.mli) | [Implementation](../../../lib/shell_runtime/chatml_approval_value.ml) |
 | `chatml_audit_value` | [Interface](../../../lib/shell_runtime/chatml_audit_value.mli) | [Implementation](../../../lib/shell_runtime/chatml_audit_value.ml) |
 | `chatml_codec` | [Interface](../../../lib/shell_runtime/chatml_codec.mli) | [Implementation](../../../lib/shell_runtime/chatml_codec.ml) |

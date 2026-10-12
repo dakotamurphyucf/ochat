@@ -1,14 +1,39 @@
 open! Core
 module P = Agent_protocol
 
+module Pending_identity = struct
+  type t =
+    { method_name : string
+    ; idempotency_key : P.Idempotency_key.t option
+    }
+
+  let of_original command params =
+    let idempotency_key =
+      match command with
+      | P.Command.Session_run_start request -> Some request.key
+      | _ ->
+        (match params with
+         | `Object fields ->
+           (match List.Assoc.find fields "idempotency_key" ~equal:String.equal with
+            | Some (`String key) -> P.Idempotency_key.of_string key |> Result.ok
+            | Some _ | None -> None)
+         | _ -> None)
+    in
+    { method_name = P.Command.method_name command; idempotency_key }
+  ;;
+end
+
 type pending_command =
   { command : P.Command.t
   ; byte_count : int
   ; identity : P.Initialize.Response.t option
+  ; recovery_identity : Pending_identity.t
   }
 
 let has_command_receipt = function
-  | P.Command.Session_create _
+  | P.Command.Prompt_dependencies_update _ -> true
+  | P.Command.Session_seed _
+  | Session_create _
   | Session_attach _
   | Session_detach _
   | Session_renew_owner _
@@ -56,6 +81,7 @@ let has_command_receipt = function
   | Server_health _
   | Prompt_list _
   | Prompt_get _
+  | Prompt_dependencies_status
   | Workspace_list _
   | Workspace_get _
   | Blob_read _
@@ -254,7 +280,14 @@ let request t command =
                     submitting"
                  ~retryable:false
                  ())
-          else Ok (Some { command; byte_count; identity = t.initialization }))
+          else
+            Ok
+              (Some
+                 { command
+                 ; byte_count
+                 ; identity = t.initialization
+                 ; recovery_identity = Pending_identity.of_original command params
+                 }))
       in
       Option.iter intent ~f:(fun item -> t.pending <- item :: t.pending);
       let retire () =
@@ -266,7 +299,27 @@ let request t command =
         match Transport.request t.transport command with
         | Error _ as result -> result
         | Ok value ->
-          if
+          let dependency_affinity =
+            match command, value with
+            | ( P.Command.Prompt_dependencies_update request
+              , P.Public.Result.Non_history public ) ->
+              (match P.Public.Result.Non_history.value public with
+               | P.Method_result.Prompt_dependencies_update result ->
+                 P.Prompt_dependency_selection.Update_result.matches_request
+                   result
+                   request
+               | _ -> false)
+            | _, _ -> true
+          in
+          if not dependency_affinity
+          then
+            Error
+              (P.Error.create
+                 Interrupted
+                 ~message:"dependency update response does not match its original request"
+                 ~retryable:false
+                 ())
+          else if
             not
               (String.equal
                  (P.Command.method_name command)
@@ -442,6 +495,7 @@ let request_without_history t command =
   | Error _ as failure -> failure
 ;;
 
+let pending_identity pending = pending.recovery_identity
 let pending_commands t = Eio.Mutex.use_ro t.mutex (fun () -> t.pending)
 
 let adopt_pending t pending =
@@ -510,6 +564,28 @@ let reconcile t pending =
   let%bind result = request_without_history t (Command_receipt query) in
   match result with
   | Command_receipt receipt ->
+    let%bind () =
+      match pending.command, receipt with
+      | ( P.Command.Prompt_dependencies_update request
+        , P.Command_receipt.Committed (Prompt_dependencies_updated result) ) ->
+        if P.Prompt_dependency_selection.Update_result.matches_request result request
+        then Ok ()
+        else
+          Error
+            (P.Error.create
+               Interrupted
+               ~message:"dependency receipt does not match its original request"
+               ~retryable:false
+               ())
+      | P.Command.Prompt_dependencies_update _, P.Command_receipt.Committed _ ->
+        Error
+          (P.Error.create
+             Interrupted
+             ~message:"unexpected committed dependency receipt"
+             ~retryable:false
+             ())
+      | _, _ -> Ok ()
+    in
     (match receipt with
      | Committed _ | Failed _ ->
        Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->

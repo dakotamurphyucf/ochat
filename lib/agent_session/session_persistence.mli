@@ -8,6 +8,13 @@ module Restored : sig
   type t
 
   val authored : Session_state.t -> t
+
+  (** Retain the existing admitted state carrier as a replay basis without an
+      outer snapshot. This is data ownership only, granting no source, lifecycle
+      or execution authority. The actual creation/recovery owner validates its
+      transaction and complete state before constructing this basis. *)
+  val of_state_document : Session_state_document.t -> t
+
   val state : t -> Session_state.t
   val state_document : t -> Session_state_document.t
   val with_state : t -> Session_state.t -> t
@@ -54,6 +61,36 @@ val restored : t -> Restored.t
     owned by [t]; checks must run serially within the same journal/handle lifetime.
     [None] retains the factory's complete preflight fallback. *)
 val retention_preflight : t -> Agent_store.Recovery.Retention_preflight.t option
+
+(** Install a checkpoint of an already-admitted replay basis without a commit
+    writer or actor. Uses the same complete state/outer-snapshot preservation
+    owner as [install_snapshot_at]. Success returns the next preservation basis;
+    failure does not adopt it. Caller owns the directory and excludes journal,
+    lifecycle and snapshot mutation. This operation supplies no receipt or
+    runtime authority and performs no journal pruning or metadata publication. *)
+val install_restored_snapshot_at
+  :  Restored.t
+  -> env:Eio_unix.Stdenv.base
+  -> directory:string
+  -> max_payload_length:int
+  -> transaction_hash:string option
+  -> Session_state.t
+  -> (Restored.t * Agent_store.Snapshot.installed, Agent_store.Store_error.t) result
+
+(** First-checkpoint counterpart for the same authenticated replay basis. The
+    caller supplies its shared reader rooted at the actual snapshot directory and
+    retains the same first-Created/receipt/Handle exclusion. Uses
+    [Snapshot.install_first_checkpoint], preserving its finite accounting,
+    prefix-repair and exception contract. No writer, actor or pruning. *)
+val install_first_restored_snapshot_at
+  :  Restored.t
+  -> env:Eio_unix.Stdenv.base
+  -> reader:Agent_store.Retention_reader.t
+  -> max_payload_length:int
+  -> transaction_hash:string option
+  -> checkpoint:(unit -> unit)
+  -> Session_state.t
+  -> (Restored.t * Agent_store.Snapshot.installed, Agent_store.Store_error.t) result
 
 val install_snapshot_at
   :  t

@@ -1,0 +1,103 @@
+type segment = [ `Field(string) | `Index(int) ]
+type kind =
+  [ `Missing
+  | `Null
+  | `Wrong_shape({expected:string; actual:string})
+  | `Invalid_value(string)
+  | `Invalid_syntax(string)
+  ]
+type error = {path:segment array; kind:kind}
+type 'a checked = [ `Ok('a) | `Error(error) ]
+type 'a nullable = [ `None | `Some('a) ]
+
+let failure : fun(kind) -> error = fun kind -> {path = []; kind = kind}
+
+let wrong_shape : fun(json, string) -> error = fun value expected ->
+  match value with
+  | `Null -> failure(`Null)
+  | other -> failure(`Wrong_shape({expected = expected; actual = Json.tag(other)}))
+
+let prefix_error : fun(error, segment) -> error = fun error segment ->
+  {path = Array.append([segment], error.path); kind = error.kind}
+
+let parse = fun text ->
+  Outcome.map_error(Json.parse_result(text), fun error ->
+    match error with
+    | `Invalid_syntax(diagnostic) ->
+        {path = []; kind = `Invalid_syntax(diagnostic.message)})
+
+let string = fun value ->
+  match value with
+  | `String(text) -> `Ok(text)
+  | other -> `Error(wrong_shape(other, "string"))
+
+let field =
+  fun value name decode ->
+    let result =
+      match value with
+      | `Object(fields) ->
+          (match Json.get_field(value, name) with
+          | `Some(present) -> decode(present)
+          | `None -> `Error(failure(`Missing)))
+      | other -> `Error(wrong_shape(other, "object"))
+    in
+    Outcome.map_error(result, fun error -> prefix_error(error, `Field(name)))
+
+let nullable =
+  fun value decode ->
+    match value with
+    | `Null -> `Ok(`None)
+    | other -> Outcome.map(decode(other), fun decoded -> `Some(decoded))
+
+let array =
+  fun value decode ->
+    match value with
+    | `Array(values) ->
+        let output = Array.make(Array.length(values), `None) in
+        let rec visit index =
+          if index == Array.length(values) then
+            `Ok(Array.map(output, fun slot ->
+              match slot with
+              | `Some(decoded) -> decoded
+              | `None -> fail("Internal checked array completion invariant.")))
+          else
+            match Outcome.map_error(decode(values[index]), fun error -> prefix_error(error, `Index(index))) with
+            | `Error(error) -> `Error(error)
+            | `Ok(decoded) ->
+                output[index] <- `Some(decoded);
+                visit(index + 1)
+        in
+        visit(0)
+    | other -> `Error(wrong_shape(other, "array"))
+
+let object_fields =
+  fun value allowed ->
+    match value with
+    | `Object(fields) ->
+        (match Array.find(fields, fun entry ->
+          Array.for_all(allowed, fun name -> name != entry.key)) with
+        | `None -> `Ok(value)
+        | `Some(entry) ->
+            `Error(prefix_error(failure(`Invalid_value("Unexpected field.")), `Field(entry.key))))
+    | other -> `Error(wrong_shape(other, "object"))
+
+let validate =
+  fun result message predicate ->
+    Outcome.bind(result, fun decoded ->
+      if predicate(decoded) then `Ok(decoded)
+      else `Error(failure(`Invalid_value(message))))
+
+(* Typed segments are authoritative. This rendering is only for display. *)
+let describe = fun error ->
+  let path = Array.fold(error.path, "$", fun path segment ->
+    match segment with
+    | `Field(name) -> path ++ "[" ++ Json.stringify(`String(name)) ++ "]"
+    | `Index(index) -> path ++ "[" ++ to_string(index) ++ "]") in
+  let message = match error.kind with
+    | `Missing -> "Missing value."
+    | `Null -> "Unexpected null."
+    | `Wrong_shape(shape) -> "Expected " ++ shape.expected ++ ", got " ++ shape.actual ++ "."
+    | `Invalid_value(message) -> message
+    | `Invalid_syntax(message) -> message
+  in
+  path ++ ": " ++ message

@@ -39,6 +39,7 @@ valid actor-owned writable attachment before preparing mutations.
 | Operation | Meaning |
 |---|---|
 | Create | Pin prompt/workspace/profile; choose liveness/persistence; optionally start and attach. |
+| Seed | Admit already-converted neutral history into a new stopped identity using exact Catalog or authorized Retained code; attach/start separately. |
 | Start | Set running intent and acquire workspace/quota capacity; may queue. |
 | Attach | Obtain a client view and optional subscription; does not restart a stopped session. |
 | Detach | Remove this attachment; detached session execution continues. |
@@ -226,6 +227,48 @@ Attach/reconnect may return events or a replacement snapshot. Replace the old
 projection coherently, retaining local unsent draft separately. Mid-operation
 snapshots contain bounded active-call summaries (up to 1024 starts, 4096-byte
 invocation summaries), not executable continuations. Terminal events clear them.
+
+### Bounded ChatMD presentation
+
+`History_chatmd.render_bounded` renders admitted neutral entries;
+`Agent_session.Chatmd_export.render_public_bounded` also preserves provenance
+comments and the distinction between Full, Visible and Redacted bodies. Supply
+`History_chatmd.Rendering.Limits` with complete output-byte and rendering-work
+ceilings plus existing `Document_schema.Limits` for JSON. Both APIs use the same
+templates as their existing unbounded counterparts. Host IDs, exact call strings,
+opaque payload JSON and disclosure markup keep their existing byte forms.
+Rendering does not turn a disclosed or partial window into canonical history,
+and rendered markup grants no replay or execution authority.
+
+The renderer admits the complete output before constructing expanded quoting,
+JSON strings or its final buffer. Work counts traversal cells, staged pieces and
+admitted scan/copy bytes; it is not VM fuel or exact heap accounting. Existing
+quoting and JSON libraries run as finite nonpreemptible stages under admitted
+limits, with checkpoints before and after; copying and quote-size scans poll
+bounded chunks. These pure APIs borrow the supplied checkpoint and retain no
+callback. The caller must check cancellation there, for example with
+`Eio.Fiber.check`; original callback failures propagate. No bytes are sent to a
+file or stdout by rendering, so callers can handle an admission failure before
+publishing an incomplete document. See the
+[rendering contract](../../lib/history_chatmd/history_chatmd.mli) and
+[exact-byte examples](../../test/chatmd_bounded_rendering/rendering_tests.ml).
+
+## Explicit native TUI transcript export
+
+`chat-tui --no-config --local -file agent.chatmd --export-file conversation.chatmd`
+exports after normal terminal exit, while the original attached client can still
+read the session. The authored definition stays separate: an output path resolving
+to that definition is rejected. Other existing destinations require confirmation.
+Without `--export-file`, native mode does not overwrite the definition on exit.
+
+Export reads complete, fully disclosed canonical history at one exact revision,
+including the initial conversation and later rewrites. It does not serialize the
+TUI display or copy script declarations into a purported executable definition.
+Revision conflicts, disclosure gaps and interrupted reads fail without replacing
+the destination. Admission permits a 16 MiB JSON document, 64 MiB rendered ChatMD,
+and 268,435,456 rendering work units. The existing atomic export writer publishes
+only complete rendered bytes. Terminal restoration and UI worker shutdown precede
+export; attachment cleanup and host shutdown follow it even if export fails.
 
 ## Restart and recovery
 

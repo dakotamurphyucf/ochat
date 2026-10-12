@@ -235,6 +235,7 @@ let registration ~env ~policy ~services =
     ; implementation_revision =
         Chatmd_shell_spec.Source_ref.digest "ochat.run-chatml.native.v1"
     ; result_contract = Chat_response.Tool_capability.Invocation_v1
+    ; source_requirement = Ordinary
     ; authoring_metadata =
         Some
           Chatmd_shell_spec.Authoring_metadata.

@@ -50,7 +50,7 @@ test('every named evidence upload replaces its previous attempt without masking 
   for (const [job, name] of Object.entries({
     changes: 'ci-selection',
     semantics: 'website-semantic-evidence',
-    framework: 'framework-evidence-${{ matrix.tier }}',
+    framework: 'framework-evidence-${{ matrix.tier }}-${{ matrix.arch }}',
     'deploy-production': 'production-deployment-evidence',
   })) {
     const found = uploads.filter(
@@ -124,7 +124,7 @@ test('public promotion honors the manual-review deferral and rejects incomplete 
   );
 });
 
-test('workflow always detects changes, runs selected checks concurrently, and requires their results', async () => {
+test('workflow skips drafts, runs selected checks concurrently, and requires their results', async () => {
   const workflow = parse(
     await fs.readFile(
       new URL('../../.github/workflows/website.yml', import.meta.url),
@@ -133,6 +133,18 @@ test('workflow always detects changes, runs selected checks concurrently, and re
   );
   for (const trigger of Object.values(workflow.on))
     assert.ok(!trigger || (!trigger.paths && !trigger['paths-ignore']));
+  assert.deepEqual(workflow.on.pull_request.types, [
+    'opened',
+    'synchronize',
+    'reopened',
+    'ready_for_review',
+    'converted_to_draft',
+  ]);
+  assert.deepEqual(workflow.on.push.branches, ['main']);
+  assert.equal(
+    workflow.jobs.changes.if,
+    "github.event_name != 'pull_request' || !github.event.pull_request.draft",
+  );
   for (const name of ['framework', 'semantics', 'website']) {
     assert.equal(workflow.jobs[name].needs, 'changes');
     assert.equal(
@@ -144,10 +156,12 @@ test('workflow always detects changes, runs selected checks concurrently, and re
     'preview',
     'production',
   ]);
-  assert.deepEqual(workflow.jobs.framework.strategy.matrix.tier, [
-    'normal',
-    'e2e',
+  assert.deepEqual(workflow.jobs.framework.strategy.matrix.include, [
+    { tier: 'normal', arch: 'x64', runner: 'ubuntu-24.04' },
+    { tier: 'e2e', arch: 'x64', runner: 'ubuntu-24.04' },
+    { tier: 'git-native', arch: 'arm64', runner: 'ubuntu-24.04-arm' },
   ]);
+  assert.equal(workflow.jobs.framework['runs-on'], '${{ matrix.runner }}');
   const gate = workflow.jobs['release-gate'];
   assert.deepEqual(gate.needs, [
     'changes',
@@ -157,7 +171,10 @@ test('workflow always detects changes, runs selected checks concurrently, and re
     'browser',
     'website-qualification',
   ]);
-  assert.equal(gate.if, 'always()');
+  assert.equal(
+    gate.if,
+    "always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft)",
+  );
   const run = gate.steps.find((step) => step.env?.NEEDS_JSON);
   assert.equal(run.env.NEEDS_JSON, '${{ toJSON(needs) }}');
   assert.equal(run.run, 'node .github/scripts/release-gate.mjs');

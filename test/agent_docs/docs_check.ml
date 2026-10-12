@@ -336,6 +336,20 @@ let () =
     Mirage_crypto_rng_unix.use_default ();
     match Array.to_list (Sys.get_argv ()) with
     | [ _; "--refresh"; root ] -> Docs_inventory.refresh env root
+    | [ _; "--tutorials"; root ] ->
+      let root = Eio_posix.Low_level.realpath root in
+      let scratch = temporary_root env in
+      let cleanup () =
+        Eio.Cancel.protect (fun () ->
+          Eio.Path.rmtree Eio.Path.(Eio.Stdenv.fs env / scratch))
+      in
+      (match Docs_tutorials.run env root scratch with
+       | () -> cleanup ()
+       | exception exn ->
+         let trace = Stdlib.Printexc.get_raw_backtrace () in
+         (try cleanup () with
+          | _ -> ());
+         Exn.raise_with_original_backtrace exn trace)
     | [ _; root; executable; tools_example ] ->
       let root = Eio_posix.Low_level.realpath root in
       let documents =
@@ -377,5 +391,8 @@ let () =
            "Documentation checks passed: %d pages, %d methods; no live provider calls"
            (List.length documents)
            (List.length Agent_protocol.Command.supported_methods))
-    | _ -> failwith "usage: docs_check REPOSITORY EXAMPLE_EXECUTABLE TOOLS_EXAMPLE")
+    | _ ->
+      failwith
+        "usage: docs_check REPOSITORY EXAMPLE_EXECUTABLE TOOLS_EXAMPLE | --tutorials \
+         REPOSITORY")
 ;;

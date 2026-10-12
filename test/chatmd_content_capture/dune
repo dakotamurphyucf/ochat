@@ -1,0 +1,5 @@
+(library
+ (name chatmd_content_capture_tests)
+ (libraries core cstruct eio_main chatmd chatmd_prompt_content chatmd_content_capture chatml_local_source agent_store document_schema expect_test_helpers_core)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

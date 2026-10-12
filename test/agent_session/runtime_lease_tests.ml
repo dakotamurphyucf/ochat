@@ -25,6 +25,7 @@ let runtime ?script_tools ?check_execution ?activity ~close () : Builder.t =
   ; automatic_turn_policy = None
   ; check_execution
   ; ancestor_capabilities = None
+  ; source_lease = Agent_session.Prompt_source_lease.legacy
   ; activity
   ; native_runtime = None
   ; moderator_activation = None

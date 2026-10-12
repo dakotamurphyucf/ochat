@@ -28,11 +28,13 @@
   moderation
   run_operations
   moderator_manager
+  moderator_program
   moderator_invocation
   execution_gate
   tool_call
   response_loop
   shell_tool
+  native_tool_pool
   agent_runtime
   tool
   agent_tool_contract
@@ -51,11 +53,22 @@
   generated_admission
   initial_prompt_history
   authoring_registration
+  script_program
+  prepared_script
+  captured_script
+  startup_compilation
+  script_contract_plan
+  restored_programs
+  retained_selection
+  shell_program
+  shell_preparation
   extension_compiler
   managed_tool_registry
+  managed_code_contract
   one_off_script
   one_off_request
   background_request
+  native_source_registration
   background_job_operations
   background_delivery
   subscription_operations
@@ -68,6 +81,7 @@
   fork_history
   fork
   compact_history)
+ (private_modules managed_code_contract)
  (libraries ochat.history_chatmd ochat.inference_client ochat.inference ochat.inference_runtime ochat.transcript
   ochat.document_schema
   core
@@ -83,6 +97,7 @@
   chatml
   chatml_runtime
   chatml_compilation
+  chatml_prompt_programs
   chatml_execution
   chatml_moderator_runtime
   session

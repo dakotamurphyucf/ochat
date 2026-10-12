@@ -8,6 +8,21 @@ clears absent/empty child collections and transient/terminal caches, so attached
 clients converge after reset without waiting for reconnect. Legacy peers that
 ignore the additive field must explicitly refresh their snapshot.
 
+`Completion_view` observes the existing subscribed handle while waiting for a
+specific admitted operation to finish. It does not own another event reader or
+copy of the session projection. Reader failure, replacement and callback races
+are resolved against that handle before delivering a terminal result.
+
+`Canonical_export.read` retrieves the authorized JSON export of an explicit
+revision through the same handle and validates its authenticated blob. Supply
+`Document_schema.Limits` to bound the download and decoded document. Success
+requires a complete, fully disclosed canonical history, matching session and
+position metadata, and agreement between the snapshot and duplicate history.
+The returned snapshot is suitable for presentation or transcript rendering;
+it does not grant import, edit or execution authority. Restricted public views
+remain available through the ordinary export API. The helper does not change
+the live projection, choose a save path, or detach the handle.
+
 See [embedding](../../agent-server/embedding.md), [protocol](../../agent-server/protocol.md)
 and the [implementation specification](../../design/ochat-agent-server-implementation-spec.md).
 Public interfaces are the exact callable API; the table below is the complete
@@ -18,7 +33,9 @@ resource ownership, return types and cancellation/error behavior.
 |---|---|---|
 | `admin` | [contract](../../../lib/agent_client/admin.mli) | [source](../../../lib/agent_client/admin.ml) |
 | `blob_download` | [contract](../../../lib/agent_client/blob_download.mli) | [source](../../../lib/agent_client/blob_download.ml) |
+| `canonical_export` | [contract](../../../lib/agent_client/canonical_export.mli) | [source](../../../lib/agent_client/canonical_export.ml) |
 | `catalog` | [contract](../../../lib/agent_client/catalog.mli) | [source](../../../lib/agent_client/catalog.ml) |
+| `completion_view` | [contract](../../../lib/agent_client/completion_view.mli) | [source](../../../lib/agent_client/completion_view.ml) |
 | `connection` | [contract](../../../lib/agent_client/connection.mli) | [source](../../../lib/agent_client/connection.ml) |
 | `in_memory` | [contract](../../../lib/agent_client/in_memory.mli) | [source](../../../lib/agent_client/in_memory.ml) |
 | `projection` | [contract](../../../lib/agent_client/projection.mli) | [source](../../../lib/agent_client/projection.ml) |

@@ -33,3 +33,12 @@ val create
   :  Shell_runtime.Registry.t
   -> Chatmd_shell_spec.Shell_tool_spec.t
   -> (Ochat_function.t, error) result
+
+(** Construct the same actual shell function from staged native identities.
+    Validation and source/executable capture are shared with [create]; invocation
+    rejects before input resolution/effects until complete activation, and after
+    failed preparation or switch closure. No placeholder capability is created. *)
+val prepare
+  :  Shell_runtime.Registry.Staged.t
+  -> Chatmd_shell_spec.Shell_tool_spec.t
+  -> (Ochat_function.t, error) result

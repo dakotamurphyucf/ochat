@@ -143,10 +143,13 @@ type t =
   | Server_health of Health.Response.t
   | Prompt_list of Prompt.t Page.t
   | Prompt_get of Prompt.t
+  | Prompt_dependencies_status of Prompt_dependency_selection.Status.t
+  | Prompt_dependencies_update of Prompt_dependency_selection.Update_result.t
   | Workspace_list of Workspace.t Page.t
   | Workspace_get of Workspace.t
   | Blob_read of Blob.Chunk.t
   | Session_create of Create.t
+  | Session_seed of Session_seed.Result.t
   | Session_list of Session_catalog.t Page.t
   | Session_search of Search_page.t
   | Session_search_navigate of Search_navigation.Response.t

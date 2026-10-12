@@ -82,7 +82,7 @@ let validate_identity ~env instance path =
 ;;
 
 let validate_marker ~env instance path =
-  let marker = Filename.concat path Workspace_resolver.ownership_marker in
+  let marker = Filename.concat path Workspace_ownership.marker in
   try
     let marker_path = eio_path env marker in
     let stat = Eio.Path.stat ~follow:false marker_path in

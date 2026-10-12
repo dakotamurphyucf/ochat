@@ -1,0 +1,218 @@
+open! Core
+
+let () = Mirage_crypto_rng_unix.use_default ()
+
+module B = Agent_session.Prompt_revision_builder
+module CM = Prompt.Chat_markdown
+
+let with_directory f =
+  Eio_main.run (fun env ->
+    let name = "ochat-input." ^ Agent_protocol.Id.Transaction.(create () |> to_string) in
+    let root =
+      Eio.Path.(
+        Eio.Stdenv.fs env / (Sys.getenv "TMPDIR" |> Option.value ~default:"/tmp") / name)
+    in
+    Eio.Path.mkdir ~perm:0o700 root;
+    Exn.protect
+      ~f:(fun () -> f env root)
+      ~finally:(fun () -> Eio.Cancel.protect (fun () -> Eio.Path.rmtree root)))
+;;
+
+let definition root =
+  Agent_session.Prompt_definition.create
+    ~root_invocation:Ui
+    ~id:
+      (Agent_protocol.Id.Prompt_definition.of_string "prd_owned_input"
+       |> Result.map_error ~f:(fun error ->
+         Sexp.to_string_hum (Agent_protocol.Error.sexp_of_t error))
+       |> Result.ok_or_failwith)
+    ~config_name:"owned-input"
+    ~root_file:(Eio.Path.native_exn Eio.Path.(root / "root.chatmd"))
+    ~allowed_workspaces:[]
+    ~permission_profile:"interactive"
+    ~runtime_policy:None
+    ~enabled:true
+    ~description:None
+  |> Result.map_error ~f:(fun error ->
+    Sexp.to_string_hum (Agent_store.Store_error.sexp_of_t error))
+  |> Result.ok_or_failwith
+;;
+
+let save root path text =
+  Eio.Path.save ~create:(`Or_truncate 0o600) Eio.Path.(root / path) text
+;;
+
+let capture ?(checkpoint = ignore) env root preprocess =
+  B.capture ~env ~preprocess ~limits:(Input_tests.limits ()) ~checkpoint (definition root)
+  |> Result.map_error ~f:(fun errors ->
+    Sexp.to_string_hum ([%sexp_of: B.Diagnostic.t list] errors))
+  |> Result.ok_or_failwith
+;;
+
+let%test_unit
+    "actual queued Roots preprocess once and retained replay uses captured bytes only"
+  =
+  with_directory (fun env root ->
+    let authored =
+      {|<tool name="first" agent="child.chatmd" local/><tool name="second" agent="child.chatmd" local/>|}
+    in
+    let child = {|<user>child</user><tool name="back" agent="root.chatmd" local/>|} in
+    save root "root.chatmd" authored;
+    save root "child.chatmd" child;
+    let calls = ref 0 in
+    let captured =
+      capture env root (fun text ->
+        incr calls;
+        text ^ "\n")
+    in
+    assert (Int.equal !calls 2);
+    assert (Int.equal (List.length (B.Capture.agents captured)) 1);
+    assert (
+      List.equal
+        (fun (path, contents) (expected_path, expected_contents) ->
+           String.equal path expected_path && String.equal contents expected_contents)
+        (B.Capture.sources captured)
+        [ "child.chatmd", child ]);
+    let polls = ref 0 in
+    ignore (capture ~checkpoint:(fun () -> incr polls) env root Fn.id : B.Capture.t);
+    assert (!polls > 0);
+    let returned = ref false in
+    (match
+       Eio.Cancel.sub (fun context ->
+         let count = ref 0 in
+         ignore
+           (capture
+              ~checkpoint:(fun () ->
+                incr count;
+                if Int.equal !count !polls
+                then Eio.Cancel.cancel context (Input_tests.Interrupted !count))
+              env
+              root
+              Fn.id
+            : B.Capture.t);
+         returned := true)
+     with
+     | () -> assert false
+     | exception Eio.Cancel.Cancelled _ -> ());
+    assert (not !returned);
+    let input = CM.Parsed.root_input (B.Capture.root captured) in
+    let loader =
+      Source_loader.captured_filesystem
+        ~root
+        ~sources:(("root.chatmd", authored) :: B.Capture.sources captured)
+    in
+    Eio.Path.unlink Eio.Path.(root / "root.chatmd");
+    Eio.Path.unlink Eio.Path.(root / "child.chatmd");
+    let parsed =
+      CM.replay_chat_inputs
+        input
+        ~source_loader:loader
+        ~dir:root
+        ~limits:(Input_tests.limits ())
+        ~checkpoint:ignore
+    in
+    assert (Int.equal !calls 2);
+    assert (
+      List.equal
+        (fun left right -> Int.equal (CM.compare_top_level_elements left right) 0)
+        (CM.Parsed.elements parsed)
+        (CM.Parsed.elements (B.Capture.root captured))))
+;;
+
+let%test_unit
+    "joint capture model charges distinct transformed payloads and reuses equal payloads"
+  =
+  with_directory (fun env root ->
+    let authored = {|<tool name="child" agent="child.chatmd" local/>|} in
+    save root "root.chatmd" authored;
+    save root "child.chatmd" "<user>raw</user>";
+    let effective = "<!--" ^ String.make (4 * 1024 * 1024) 'x' ^ "-->" ^ authored in
+    let same = capture env root (fun _ -> effective) in
+    assert (Int.equal (List.length (B.Capture.agents same)) 1);
+    let raw_bytes = String.length authored + String.length "<user>raw</user>" in
+    assert (raw_bytes + String.length effective < 8 * 1024 * 1024);
+    assert (raw_bytes + (2 * String.length effective) > 8 * 1024 * 1024);
+    let calls = ref 0 in
+    (match
+       capture env root (fun _ ->
+         incr calls;
+         if Int.equal !calls 1 then effective else " " ^ effective)
+     with
+     | _ -> assert false
+     | exception Failure _ -> ());
+    assert (Int.equal !calls 2);
+    (* Failure publishes no retained Capture and leaves the source reusable. *)
+    ignore (capture env root Fn.id : B.Capture.t))
+;;
+
+let%test_unit
+    "fresh artifact publication replays exact retained declarations against installed \
+     tree"
+  =
+  with_directory (fun env root ->
+    let prefix = "<!-- retained -->\r\n" in
+    let tag =
+      {|<script id="main" language="chatml" kind="moderator">let initial_state = 0</script>|}
+    in
+    let authored = prefix ^ tag in
+    save root "root.chatmd" authored;
+    let definition = definition root in
+    let store =
+      Agent_store.Prompt_artifact_store.create
+        ~env
+        ~root:(Eio.Path.native_exn Eio.Path.(root / "artifacts"))
+      |> Result.map_error ~f:(fun error ->
+        Sexp.to_string_hum (Agent_store.Store_error.sexp_of_t error))
+      |> Result.ok_or_failwith
+    in
+    let created_at =
+      Agent_protocol.Timestamp.of_string "2026-10-11T12:00:00Z"
+      |> Result.map_error ~f:(fun error ->
+        Sexp.to_string_hum (Agent_protocol.Error.sexp_of_t error))
+      |> Result.ok_or_failwith
+    in
+    let revision =
+      B.build
+        ~env
+        ~artifact_store:store
+        ~transaction_id:(Agent_protocol.Id.Transaction.create ())
+        ~created_at
+        definition
+      |> Result.map_error ~f:(fun errors ->
+        Sexp.to_string_hum ([%sexp_of: B.Diagnostic.t list] errors))
+      |> Result.ok_or_failwith
+    in
+    let artifact = Agent_session.Prompt_revision.artifact revision in
+    assert (String.equal artifact.root_chatmd authored);
+    let reference =
+      match Agent_session.Prompt_revision.elements revision with
+      | [ CM.Script { source_ref = Some reference; _ } ] -> reference
+      | _ -> assert false
+    in
+    assert (Int.equal reference.start_pos.offset (String.length prefix));
+    assert (Int.equal reference.end_pos.offset (String.length authored));
+    assert (
+      String.equal
+        reference.source_dir
+        (Eio.Path.native_exn (Agent_session.Prompt_revision.materialized_tree revision)));
+    Eio.Path.unlink Eio.Path.(root / "root.chatmd");
+    (* Existing raw-only durable restoration remains compatible; exact effective
+       input/range associations are deliberately the206 custody consumer seam. *)
+    let restored =
+      B.restore
+        ~artifact_store:store
+        definition
+        (Agent_session.Prompt_revision.id revision)
+      |> Result.map_error ~f:(fun errors ->
+        Sexp.to_string_hum ([%sexp_of: B.Diagnostic.t list] errors))
+      |> Result.ok_or_failwith
+    in
+    assert (
+      Agent_protocol.Id.Prompt_revision.equal
+        (Agent_session.Prompt_revision.id revision)
+        (Agent_session.Prompt_revision.id restored));
+    match Agent_session.Prompt_revision.elements restored with
+    | [ CM.Script { source = Inline body; _ } ] ->
+      assert (String.equal body "let initial_state = 0")
+    | _ -> assert false)
+;;

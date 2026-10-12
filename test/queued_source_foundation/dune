@@ -1,0 +1,6 @@
+(library
+ (name queued_source_foundation_tests)
+ (modules foundation_tests)
+ (libraries core eio eio.unix eio_main jsonaf chat_response chatml_source ochat.source ochat.ochat_function ochat.chatmd_shell_spec ochat.agent_protocol mirage-crypto-rng.unix)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

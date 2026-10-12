@@ -5,18 +5,32 @@ and both website environments. The Website workflow is the sole production
 publisher. Strict branch protection, administrator enforcement, and the exact
 `main` restriction on the production environment remain in place.
 
+## Draft pull requests
+
+Draft PR events skip all runner jobs, including change detection and the release
+gate. Local validation continues during development. Marking a PR ready for
+review starts normal qualification even without a new commit; converting it back
+to draft cancels an older PR run through the existing concurrency group. A skipped
+draft run is not qualification evidence. Review and passing CI for the final
+revision are still required before merging.
+
+The workflow listens for opened, synchronized, reopened, ready-for-review and
+converted-to-draft PR events. Main pushes, manual validation and scheduled audits
+retain their existing checks. An explicit manual run can validate a draft branch
+when needed. Existing branches must contain this workflow change to adopt it.
+
 ## Coverage
 
 | Job | Required behavior when selected |
 | --- | --- |
-| `changes` | Run policy tests, inspect the complete Git diff, record selection and deployment baseline. This job always runs. |
+| `changes` | Run policy tests, inspect the complete Git diff, record selection and deployment baseline. Runs except on draft PR events. |
 | `framework (normal)` | Run `opam exec -- dune runtest --force`. |
 | `framework (e2e)` | Run `opam exec -- dune build --force @agent-e2e-pr`: daemon smoke, Unix/stdio/HTTP transports, transport conformance, workspaces and multiple clients. |
 | `semantics` | Run the offline documentation checks and retain evidence for this exact revision. |
 | `website (preview)` and `website (production)` | Unit/Astro checks, one build per environment, performance, search, full browser-test discovery and retained build; production packaging checks. |
 | `browser (environment, shard)` | Two shards per environment, two workers each, zero retries; Chromium/Firefox/WebKit tests against that environment's downloaded build. |
 | `website-qualification (environment)` | Merge both shard reports, verify complete disjoint test coverage and exact artifact/revision/run identity; retain the qualified production artifact. |
-| `release-gate` | Always run; require successful detection and every selected job. Accept a skipped job only when detection explicitly marked it unnecessary. |
+| `release-gate` | Run except on draft PR events; require successful detection and every selected job. Accept a skipped job only when detection explicitly marked it unnecessary. |
 | `deploy-production` | Publish a same-run qualified artifact on main when selected, then verify the hosted site. |
 
 Framework commands run through `.github/scripts/framework-tests.mjs`, which
@@ -76,8 +90,8 @@ beyond two shards. The two-worker limit avoids overloading each runner.
 
 ## Change selection and publication
 
-There are no workflow-level path filters. The required check always gets a
-result, including for changes that do not need expensive tests.
+There are no workflow-level path filters. For ready PRs and non-PR events, the
+required gate always runs, including for changes that do not need expensive tests.
 
 | Input | Selection |
 | --- | --- |

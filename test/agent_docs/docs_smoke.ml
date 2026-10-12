@@ -46,6 +46,7 @@ let shell_examples env root =
       S.
         { id
         ; language = "chatml"
+        ; project_selection = None
         ; kind
         ; source = Inline source
         ; source_ref
@@ -90,55 +91,45 @@ let batch env root scratch =
   let load file = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / file) in
   let guide = load "docs-src/cli/chat-completion.md" in
   let copy =
-    Re.Perl.compile_pat "cp ([^ \\n]+) \"\\$OCHAT_BATCH/prompt\\.chatmd\""
+    Re.Perl.compile_pat "cp ([^ \\n]+) \"\\$OCHAT_BATCH/definition\\.chatmd\""
     |> fun pattern -> Re.exec pattern guide
   in
   let template = load (Re.Group.get copy 1) in
-  let messages =
-    Re.all (Re.Perl.compile_pat "<user>[^\\n]*?</user>") guide
-    |> List.map ~f:(fun group -> Re.Group.get group 0)
-  in
-  let first, second =
-    match messages with
-    | [ first; second ] -> first, second
-    | _ -> failwith "batch guide must provide two complete user messages"
+  let first =
+    match Re.all (Re.Perl.compile_pat "<user>[^\\n]*?</user>") guide with
+    | [ first ] -> Re.Group.get first 0
+    | _ -> failwith "batch guide must provide one complete initial user message"
   in
   let dir = Eio.Path.(Eio.Stdenv.fs env / scratch) in
-  Io.save_doc ~dir "batch-prompt.chatmd" (template ^ "\n" ^ first ^ "\n");
-  Io.append_doc ~dir "batch-session.chatmd" (Io.load_doc ~dir "batch-prompt.chatmd");
-  let check expected_users =
-    let nodes =
-      CM.parse_chat_inputs
-        ~source:"batch-session.chatmd"
-        ~dir
-        (Io.load_doc ~dir "batch-session.chatmd")
-    in
-    let users =
-      List.count nodes ~f:(function
-        | CM.User _ -> true
-        | _ -> false)
-    in
-    let configs =
-      List.count nodes ~f:(function
-        | CM.Config _ -> true
-        | _ -> false)
-    in
-    let developers =
-      List.count nodes ~f:(function
-        | CM.Developer _ -> true
-        | _ -> false)
-    in
-    if users <> expected_users || configs <> 1 || developers <> 1
-    then failwith "batch preparation/continuation changed message or template counts";
-    if
-      List.exists nodes ~f:(function
-        | CM.Tool _ | CM.Script _ -> true
-        | _ -> false)
-    then failwith "batch hello example must stay tool-free and script-free"
+  Io.save_doc ~dir "batch-definition.chatmd" (template ^ "\n" ^ first ^ "\n");
+  let nodes =
+    CM.parse_chat_inputs
+      ~source:"batch-definition.chatmd"
+      ~dir
+      (Io.load_doc ~dir "batch-definition.chatmd")
   in
-  check 1;
-  Io.append_doc ~dir "batch-session.chatmd" (second ^ "\n");
-  check 2
+  let users =
+    List.count nodes ~f:(function
+      | CM.User _ -> true
+      | _ -> false)
+  in
+  let configs =
+    List.count nodes ~f:(function
+      | CM.Config _ -> true
+      | _ -> false)
+  in
+  let developers =
+    List.count nodes ~f:(function
+      | CM.Developer _ -> true
+      | _ -> false)
+  in
+  if users <> 1 || configs <> 1 || developers <> 1
+  then failwith "batch separate definition changed initial message/configuration counts";
+  if
+    List.exists nodes ~f:(function
+      | CM.Tool _ | CM.Script _ -> true
+      | _ -> false)
+  then failwith "batch hello definition must stay tool-free and script-free"
 ;;
 
 let shell_actions env root =

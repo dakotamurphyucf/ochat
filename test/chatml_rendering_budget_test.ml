@@ -91,7 +91,7 @@ let%expect_test "a mutated cycle hidden in a deferred task is rejected before re
 let%expect_test "validation pays the same parser allocation budget as parsing" =
   Eio_main.run (fun env ->
     let input = L.VString ("\"" ^ String.make 4096 'x' ^ "\"") in
-    List.iter [ "parse"; "parse_opt"; "validate" ] ~f:(fun operation ->
+    List.iter [ "parse"; "parse_opt"; "parse_result"; "validate" ] ~f:(fun operation ->
       let source =
         "let main input = let ignored = Json." ^ operation ^ "(input) in Task.pure(())"
       in
@@ -111,6 +111,8 @@ let%expect_test "validation pays the same parser allocation budget as parsing" =
     (parse default ok)
     (parse_opt small chatml.allocation_limit)
     (parse_opt default ok)
+    (parse_result small chatml.allocation_limit)
+    (parse_result default ok)
     (validate small chatml.allocation_limit)
     (validate default ok)
     |}]
@@ -118,7 +120,7 @@ let%expect_test "validation pays the same parser allocation budget as parsing" =
 
 let%expect_test "diagnostic previews terminate on cycles and cap aggregate output" =
   let values = [| L.VUnit |] in
-  let task = L.VTask (L.TPure (L.VArray values)) in
+  let task = L.VTask (L.Task.create (L.TPure (L.VArray values))) in
   values.(0) <- task;
   print_endline (B.value_to_debug_string ~max_depth:4 task);
   print_endline (B.value_to_debug_string ~max_nodes:4 ~max_depth:100 task);
@@ -145,7 +147,7 @@ let%expect_test
   Eio_main.run (fun env ->
     let nested = String.make 200 '[' ^ "null" ^ String.make 200 ']' in
     let quoted = Jsonaf.to_string (`String ("\\\"" ^ nested ^ "\"\\")) in
-    List.iter [ "parse"; "parse_opt"; "validate" ] ~f:(fun operation ->
+    List.iter [ "parse"; "parse_opt"; "parse_result"; "validate" ] ~f:(fun operation ->
       let source =
         "let main input = let ignored = Json." ^ operation ^ "(input) in Task.pure(())"
       in
@@ -165,6 +167,9 @@ let%expect_test
     (parse_opt nested chatml.value_limit)
     (parse_opt quoted ok)
     (parse_opt invalid ok)
+    (parse_result nested chatml.value_limit)
+    (parse_result quoted ok)
+    (parse_result invalid ok)
     (validate nested chatml.value_limit)
     (validate quoted ok)
     (validate invalid ok)
@@ -259,4 +264,22 @@ let%expect_test "pretty JSON reserves indentation as well as compact escaping" =
     (stringify ok)
     (pretty chatml.allocation_limit)
     |}]
+;;
+
+let%expect_test "filter_map preflights allocation before invoking callbacks" =
+  Eio_main.run (fun env ->
+    let calls = ref 0 in
+    B.set_print_sink (fun _ -> Int.incr calls);
+    Exn.protect ~finally:B.clear_print_sink ~f:(fun () ->
+      let result =
+        run
+          env
+          ~policy:(X.Bounded { X.default_limits with allocation_bytes = 1024 })
+          {|let main input =
+          let ignored = Array.filter_map(input, fun value ->
+            let ignored = print(value) in `Some(value)) in Task.pure(())|}
+          (L.VArray (Array.create ~len:100 L.VUnit))
+      in
+      print_s [%sexp (outcome result : string), (!calls : int)]));
+  [%expect {| (chatml.allocation_limit 0) |}]
 ;;

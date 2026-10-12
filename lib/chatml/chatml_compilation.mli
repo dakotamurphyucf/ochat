@@ -62,3 +62,147 @@ val compile_with_policy
   -> source:string
   -> unit
   -> (Chatml_host_runtime.compiled_script, error) result
+
+(** Joined, non-executing compilation for an actual legacy custom host surface.
+    Uses the same source/time admission and cooperative cleanup as [compile].
+    Retains that surface in the existing legacy artifact; it is not a static
+    Linked artifact or a grant. Original unexpected exceptions/cancellation and
+    backtraces propagate, rather than being converted to compiler_failed. *)
+val compile_with_surface
+  :  ?limits:limits
+  -> env:Eio_unix.Stdenv.base
+  -> surface:Chatml.Chatml_builtin_surface.surface
+  -> required_bindings:(string * Chatml.Chatml_builtin_spec.ty) list
+  -> source:string
+  -> unit
+  -> (Chatml_host_runtime.compiled_script, error) Result.t
+
+(** Compile one already validated immutable capture through the same bounded
+    domain/policy adapter as [compile]. Check its exact byte length before
+    starting a domain; do not reopen, rewrite or rehash its contents. Successful
+    programs and parser/type failures retain its identity, revision and source.
+    No initializer executes. The capture can cross the joined domain boundary;
+    inference state, checkpoint callbacks and execution authority do not escape.
+    Resource/host failures remain unlocated, and cancellation follows [compile]. *)
+val compile_captured
+  :  Chatml_source.t
+  -> ?limits:limits
+  -> env:Eio_unix.Stdenv.base
+  -> target:target
+  -> unit
+  -> (Chatml_host_runtime.compiled_script, error) result
+
+(** Explicit policy variant of [compile_captured], using the same cooperative
+    cancellation, elapsed-time checks and joined cleanup as [compile_with_policy].
+    This API selects no project, file, bundle or runtime revision on the caller's
+    behalf; the capture owner has already chosen the exact immutable source. *)
+val compile_captured_with_policy
+  :  Chatml_source.t
+  -> policy:policy
+  -> env:Eio_unix.Stdenv.base
+  -> target:target
+  -> unit
+  -> (Chatml_host_runtime.compiled_script, error) result
+
+(** Compile an admitted immutable graph into a separate static-only artifact.
+    Admit total source+metadata bytes before projection/domain creation. Actual
+    selected contract is computed/verified; one budget covers static projection,
+    hashing, all parse/check/companion/entry contract/link stages and diagnostics.
+    No initializer executes, no native builtin implementations cross this graph
+    compiler domain, and no mutable inference data escapes. Depth is explicit
+    positive host policy. Only selected host descriptors are prepared for187;
+    existing text/captured APIs and runtime surface getter remain unchanged. *)
+val compile_prepared
+  :  Chatml_prepared_program.t
+  -> ?limits:limits
+  -> max_dependency_depth:int
+  -> env:Eio_unix.Stdenv.base
+  -> target:target
+  -> unit
+  -> (Chatml_linked_program.t, error) Result.t
+
+val compile_prepared_with_policy
+  :  Chatml_prepared_program.t
+  -> policy:policy
+  -> max_dependency_depth:int
+  -> env:Eio_unix.Stdenv.base
+  -> target:target
+  -> unit
+  -> (Chatml_linked_program.t, error) Result.t
+
+module Entry_expectation : sig
+  (** Comparison constraints from the entry's existing source owner. This is not
+      another source identity, capture or execution authority. *)
+  type t =
+    { contents : string
+    ; digest : Chatml_source.Digest.t
+    }
+end
+
+(** Native/custom graph compilation through the same joined worker. [contract]
+    contains only authentic callback-free static metadata; no runtime installer
+    crosses the domain. Source admission covers Prepared canonical input plus
+    actual canonical contract bytes. Conversion/encoding also has a separate
+    conservative allocation-debit allowance: 32 times the remaining contract
+    input allowance, checked before allocation. This is not heap accounting; a
+    tight canonical limit does not guarantee sufficient conversion allowance.
+    An optional expected original body is
+    checked by exact length, digest and chunked bytes under the SAME elapsed
+    checkpoint before compilation. Additional expected contents count against
+    input admission unless physically the same immutable retained entry string;
+    equal separate strings are not silently deduplicated. Never rewrite/reopen
+    source or initialize it.
+    Compiler and cancellation/error semantics follow compile_prepared. *)
+val compile_prepared_with_contract
+  :  Chatml_prepared_program.t
+  -> contract:Chatml.Chatml_compiler_contract.t
+  -> ?expected_entry:Entry_expectation.t
+  -> ?limits:limits
+  -> max_dependency_depth:int
+  -> env:Eio_unix.Stdenv.base
+  -> unit
+  -> (Chatml_linked_program.t, error) Result.t
+
+val compile_prepared_with_contract_and_policy
+  :  Chatml_prepared_program.t
+  -> contract:Chatml.Chatml_compiler_contract.t
+  -> ?expected_entry:Entry_expectation.t
+  -> policy:policy
+  -> max_dependency_depth:int
+  -> env:Eio_unix.Stdenv.base
+  -> unit
+  -> (Chatml_linked_program.t, error) Result.t
+
+module Analysis_error : sig
+  type t =
+    | Policy of error
+    | Analysis of Chatml_semantics.Error.t
+end
+
+(** Analyze an admitted inventory through the same joined compiler worker.
+    Source/metadata admission precedes domain creation. The fixed standard static
+    contract projection runs under the elapsed policy; the explicit semantic work
+    ledger starts inside [Chatml_semantics.analyze], before fingerprinting,
+    checking, freezing and indexing. Invalid programs return [Ok (Failed _)] with
+    same-run syntax only. No initializer executes. Unexpected compiler exceptions
+    and cancellation escape unchanged after joined cleanup; resource admission
+    failures are typed errors. Neither callbacks nor inference cells escape. *)
+val analyze_prepared
+  :  Chatml_prepared_program.t
+  -> ?limits:limits
+  -> semantic_limits:Chatml_semantics.Limits.t
+  -> max_dependency_depth:int
+  -> env:Eio_unix.Stdenv.base
+  -> target:target
+  -> unit
+  -> (Chatml_semantics.t, Analysis_error.t) Result.t
+
+val analyze_prepared_with_policy
+  :  Chatml_prepared_program.t
+  -> policy:policy
+  -> semantic_limits:Chatml_semantics.Limits.t
+  -> max_dependency_depth:int
+  -> env:Eio_unix.Stdenv.base
+  -> target:target
+  -> unit
+  -> (Chatml_semantics.t, Analysis_error.t) Result.t

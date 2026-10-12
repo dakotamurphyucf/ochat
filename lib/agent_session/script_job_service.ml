@@ -17,6 +17,12 @@ type t =
   { env : Eio_unix.Stdenv.base
   ; policy : Chat_response.One_off_request.policy
   ; current_capabilities : unit -> C.t
+  ; prepare_source :
+      binding:C.binding
+      -> owner:P.Job.launch_owner
+      -> request:B.t
+      -> checkpoint:(unit -> unit)
+      -> (B.Agent_artifact.t option, P.Error.t) Result.t
   ; host : host
   }
 
@@ -35,8 +41,8 @@ and commit_state =
   | Prepared
   | Committed
 
-let create ~env ~policy ~current_capabilities ~host =
-  { env; policy; current_capabilities; host }
+let create ~env ~policy ~current_capabilities ~prepare_source ~host =
+  { env; policy; current_capabilities; prepare_source; host }
 ;;
 
 let with_current_capabilities t current_capabilities = { t with current_capabilities }
@@ -190,6 +196,23 @@ let handlers scope =
               ~input
               ~policy:scope.service.policy
             |> message
+          in
+          let checkpoint () =
+            Eio.Fiber.check ();
+            Option.iter scope.control ~f:(fun control -> control.checkpoint ());
+            Eio.Fiber.check ()
+          in
+          checkpoint ();
+          let%bind artifact =
+            scope.service.prepare_source ~binding ~owner:scope.owner ~request ~checkpoint
+            |> message
+          in
+          checkpoint ();
+          let%bind () = check scope in
+          let%bind request =
+            match artifact with
+            | None -> Ok request
+            | Some artifact -> B.with_agent_artifact request artifact |> message
           in
           stage scope request)
     ; start_script =

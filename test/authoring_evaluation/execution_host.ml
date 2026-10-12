@@ -192,6 +192,7 @@ let with_session
       ?audit
       ?(durable = false)
       ?(replay_job_delivery = false)
+      ?(sequential = false)
       ~env
       ~sources
       ~workspace_files
@@ -258,16 +259,37 @@ let with_session
                 | exception _ -> ())))
       in
       Eio.Switch.run (fun sw ->
-        match replay_job_delivery with
+        match replay_job_delivery || sequential with
         | true ->
           let module D = Agent_server.Daemon in
           let module Support = Agent_server_test_support in
+          let config =
+            Support.config root workspace (Filename.concat root "agent.chatmd")
+          in
+          let config =
+            if sequential
+            then
+              (* These short semantics checks retain per-transaction flushing and
+                 final checkpoint verification. Periodic retention replay is
+                 covered by the storage fixtures, rather than repeated inside
+                 the same ten-second provider/state oracle. *)
+              { config with
+                server =
+                  { config.server with
+                    durability =
+                      { config.server.durability with
+                        snapshot_every_events = 1_000
+                      ; snapshot_every_ms = 60_000
+                      }
+                  }
+              }
+            else config
+          in
           let daemon =
             D.start
               ~sw
               ~env
-              ~config:
-                (Support.config root workspace (Filename.concat root "agent.chatmd"))
+              ~config
               ~tool_dir:root
               ~home:root
               ~process_start_identity:None
@@ -342,7 +364,7 @@ let with_session
                     { connection
                     ; session_id = created.id
                     ; attachment
-                    ; replay_job_delivery = Some replay
+                    ; replay_job_delivery = Option.some_if replay_job_delivery replay
                     }))
         | false ->
           let embedded =
@@ -414,6 +436,7 @@ let run
   with_session
     ?audit
     ?replay_job_delivery
+    ~sequential
     ~env
     ~sources
     ~workspace_files

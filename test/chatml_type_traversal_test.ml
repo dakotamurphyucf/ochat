@@ -1,8 +1,15 @@
 open Core
+module Name = Chatml.Chatml_syntax_name
 module T = Chatml_typechecker
 module L = Chatml.Chatml_lang
 module B = Chatml.Chatml_builtin_spec
+module Syntax = Chatml.Chatml_type_expr
 module S = Chatml.Chatml_builtin_surface
+
+let syntax desc : Syntax.t =
+  let position : Source.position = { line = 1; column = 0; offset = 0 } in
+  { desc; span = { left = position; right = position } }
+;;
 
 let shared_type depth =
   let rec loop remaining ty =
@@ -40,23 +47,39 @@ let%expect_test "inference-owned type inspections and row operations cooperate" 
   let left = T.Record (row "left") in
   let right = T.Record (row "right") in
   cancelled "lookup" (fun state _ ->
-    ignore (T.lookup state (T.Env.singleton "value" ty) "value" : T.typ));
+    ignore
+      (T.lookup state (T.Value_scope.of_schemes (T.Env.singleton "value" ty)) "value"
+       : T.typ));
   cancelled "pattern binding" (fun state _ ->
-    ignore (T.infer_pattern state T.Env.empty (L.PVar "value") ty : T.tenv));
+    ignore
+      (T.infer_pattern
+         state
+         T.Value_scope.empty
+         T.Type_alias.empty
+         (L.PVar (Name.unlocated "value"))
+         ty
+       : T.tenv));
   cancelled "type declaration" (fun state _ ->
     ignore
       (T.infer_stmt
          state
-         T.Env.empty
-         (T.Env.singleton "seed" ty)
-         (L.SType ("alias", L.TEName "seed"))
+         T.Value_scope.empty
+         (Result.ok_or_failwith
+            (T.Type_alias.add_host
+               T.Type_alias.empty
+               ~name:"seed"
+               ~body:ty
+               ~checkpoint:ignore))
+         (L.SType
+            { name = Name.unlocated "alias"
+            ; parameters = []
+            ; body = syntax (Syntax.TEName (Syntax.Name.local "seed"))
+            })
        : T.tenv * T.type_env));
   cancelled "record coverage" (fun state _ ->
     T.validate_match_exhaustiveness state left [ L.PRecord ([], false) ]);
   cancelled "disjoint record join" (fun state _ ->
     ignore (T.join_type state left right : T.typ));
-  cancelled "lambda row reopening" (fun state _ ->
-    ignore (T.reopen_lambda_param_type state left : T.typ));
   [%expect
     {|
     lookup: cancelled
@@ -64,7 +87,6 @@ let%expect_test "inference-owned type inspections and row operations cooperate" 
     type declaration: cancelled
     record coverage: cancelled
     disjoint record join: cancelled
-    lambda row reopening: cancelled
     |}]
 ;;
 
@@ -121,13 +143,15 @@ let%expect_test
   =
   let rec annotation depth =
     match depth with
-    | 0 -> L.TEName "int"
+    | 0 -> syntax (Syntax.TEName (Syntax.Name.local "int"))
     | _ ->
       let nested = annotation (depth - 1) in
-      L.TERecord [ "left", nested; "right", nested ]
+      syntax
+        (Syntax.TERecord [ Name.unlocated "left", nested; Name.unlocated "right", nested ])
   in
   cancelled "annotation" (fun _ poll ->
-    ignore (T.typ_of_type_expr ~checkpoint:poll T.Env.empty (annotation 14) : T.typ));
+    ignore
+      (T.typ_of_type_expr ~checkpoint:poll T.Type_alias.empty (annotation 14) : T.typ));
   List.iter
     [ "type unit_alias = unit\nlet f : unit_alias -> int = fun () -> 1"
     ; "let f : int -> unit -> int = fun x -> x"
@@ -174,7 +198,11 @@ let%expect_test
                      ()
                  in
                  ignore
-                   (T.lookup state (T.Env.singleton "value" (shared_type 16)) "value"
+                   (T.lookup
+                      state
+                      (T.Value_scope.of_schemes
+                         (T.Env.singleton "value" (shared_type 16)))
+                      "value"
                     : T.typ);
                  "completed")))
         (fun () ->

@@ -201,3 +201,76 @@ Reset/rebuild/delete are authorized protocol mutations with revision checks.
 Review preservation flags and archive/remove choices in [the protocol](protocol.md).
 Never delete locks, broad directories or unknown processes as a generic fix for
 contention. [Troubleshooting](troubleshooting.md) lists safer checks.
+
+
+## Explicit dependency selection
+
+Ordinary configuration reload, prompt/import edits and `SIGHUP` rebuild against
+retained dependency selections. They do not authorize a changed Git pin or a
+changed selected dependency source. Use `prompt.dependencies.status` to inspect
+the last installed generation, then `prompt.dependencies.update` with the exact
+actual definition IDs and expected generation to make an explicit update.
+Project paths still come from each script declaration and source access still
+comes from the daemon's administrative grants. Update does not load a separately
+edited configuration file, grant new filesystem/network access or initialize
+ChatML hooks. Existing sessions keep their captured revisions.
+
+```ocaml
+let open Agent_protocol.Prompt_dependency_selection in
+let status = Agent_client.Admin.dependency_selection_status connection in
+(* On Tracked generation + Available, choose actual IDs from prompt.list. *)
+let request = Update_request.create
+  ~definitions:[prompt_definition_id]
+  ~expected_generation:generation
+  ~idempotency_key:key
+in
+(* Pass a validated request to Agent_client.Admin.update_dependencies. *)
+```
+
+The helper never retries. Retain the original command on transport failure or
+cancellation and reconcile its existing command receipt on the same authenticated
+host. A Protected Pending receipt blocks duplicate execution even after restart.
+Missing/invalid historical metadata requires explicit host recovery, never a
+fresh Update or an inferred empty index. If publication is uncertain, the old
+installed catalog remains observable and further publication is blocked until
+host reconciliation or restart. A displayed generation cannot prove whether an
+individual pending command committed; do not replace its key just because status
+changed. A cancellation may follow successful durable publication, so it does
+not imply rollback. See the [protocol contract](protocol.md#explicit-prompt-dependency-updates).
+
+Publication success can include Unavailable target outcomes. Inspect those
+outcomes and the existing prompt summary before assuming a new source was
+adopted. Refresh/rebuild future sessions deliberately; an update does not rewrite
+running or retained sessions.
+
+## Stopped transcript admission
+
+Use `session.seed` when edited or imported neutral history belongs in a new
+conversation. Reuse the existing session identity for ordinary resume. Choose an
+exact available Catalog revision or an authorized Retained authored root and
+a currently permitted configured workspace. Retained code/role/target remains
+immutable, but admission of a new identity still requires current enabled
+definition metadata and matching pinned profile/runtime policy. It grants no
+new source access, and does not copy a former temporary workspace.
+
+Keep the original complete request/key until its outcome is known. The shared
+client retains interrupted seed intents for `Connection.reconcile`; a committed
+receipt returns the original session ID. Do not regenerate a key after a lost
+reply. Protected Pending prevents creation from running again, including across
+restart. The host preserves the actual audited first Created until exact Success,
+then permits ordinary activation and retention. Initial recovery admits only
+verified seed evidence, not arbitrary later transactions or legacy imports.
+
+Seed reconciliation uses one configurable finite profile at startup and receipt
+reads. The default covers 4096 indexed rows/first transactions, 256 MiB of
+conservative frame/read-buffer accounting and 2 million cooperative steps.
+Execute and On-demand hosts reconcile before request service; Operator-only
+still denies new execution. Bound failures or contradictory evidence remain
+unavailable/Pending. These limits are separate from transport/journal ceilings
+and do not describe exact heap use. A large byte-valid seed can still exceed a
+structural or work bound. Inspect the original receipt and host diagnostic rather
+than deleting evidence or treating a pending creation as safely absent.
+
+The successful stopped ID can then be attached and explicitly run. Seeding alone
+performs no provider request, ChatML initializer or transcript conversion.
+See the [complete request contract](protocol.md#seed-a-stopped-conversation).

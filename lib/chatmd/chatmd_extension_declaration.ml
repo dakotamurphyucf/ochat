@@ -205,6 +205,8 @@ let script ~dir ~loader ~source_node ~source ~attributes:raw ~inline_source =
       ; "kind"
       ; "api"
       ; "src"
+      ; "project"
+      ; "environment"
       ; "wall_time"
       ; "fuel"
       ; "max_tasks"
@@ -315,6 +317,7 @@ let script ~dir ~loader ~source_node ~source ~attributes:raw ~inline_source =
         (match path with
          | None -> S.Inline text
          | Some path -> Src { path; source_text = text })
+    ; project_selection = parsed.project_selection
     ; source_sha256 = parsed.source_sha256
     ; source_ref = source
     ; limits = parsed.limits
@@ -489,6 +492,7 @@ let serialize_script (script : Spec.script) =
       ; language = "chatml"
       ; kind = Moderator
       ; source = script.source
+      ; project_selection = script.project_selection
       ; source_ref = script.source_ref
       ; source_sha256 = script.source_sha256
       ; limits = script.limits

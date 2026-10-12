@@ -323,13 +323,54 @@ let%test_unit
         (X.validate_schema { pinned_tool.input_schema with source_text = "false" })))
 ;;
 
-let%test_unit "old moderator binary encoding keeps its original layout" =
-  let script : CM.top_level_elements =
-    Script { id = "main"; language = "chatml"; kind = "moderator"; source = Inline "x" }
-  in
-  let encoded =
-    Bin_prot.Utils.bin_dump ~header:false CM.bin_writer_top_level_elements script
-    |> Bigstring.to_string
-  in
-  assert (String.equal encoded "\012\004main\006chatml\009moderator\000\001x")
+let%test_unit "moderator binary metadata preserves optional source ownership" =
+  with_fixture (fun dir _ ->
+    let authored = {|<script id="main" language="chatml" kind="moderator">x</script>|} in
+    let reference =
+      match parse dir authored with
+      | [ CM.Script { source_ref = Some reference; _ } ] -> reference
+      | _ -> assert false
+    in
+    List.iter [ None; Some reference ] ~f:(fun source_ref ->
+      let script : CM.top_level_elements =
+        Script
+          { id = "main"
+          ; language = "chatml"
+          ; project_selection = None
+          ; kind = "moderator"
+          ; source = Inline "x"
+          ; source_ref
+          }
+      in
+      let encoded =
+        Bin_prot.Utils.bin_dump ~header:false CM.bin_writer_top_level_elements script
+      in
+      let position = ref 0 in
+      let decoded = CM.bin_read_top_level_elements encoded ~pos_ref:position in
+      assert (Int.equal !position (Bigstring.length encoded));
+      match decoded with
+      | CM.Script
+          { id
+          ; language
+          ; kind
+          ; source = Inline body
+          ; project_selection = None
+          ; source_ref = decoded_ref
+          } ->
+        assert (
+          String.equal id "main"
+          && String.equal language "chatml"
+          && String.equal kind "moderator"
+          && String.equal body "x");
+        assert (Option.equal Chatmd_shell_spec.Source_ref.equal source_ref decoded_ref);
+        Option.iter decoded_ref ~f:(fun reference ->
+          assert (String.equal reference.file "root.chatmd");
+          assert (
+            String.equal
+              reference.source_sha256
+              (Chatmd_shell_spec.Source_ref.digest authored));
+          assert (
+            Int.equal reference.start_pos.offset 0
+            && Int.equal reference.end_pos.offset (String.length authored)))
+      | _ -> assert false))
 ;;

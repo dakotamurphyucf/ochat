@@ -110,17 +110,15 @@ let create
                  ~selected:(EC.capabilities prepared)
                  ~source:
                    { script_id = (EC.script prepared).id
-                   ; source_sha256 = (EC.script prepared).source_sha256
+                   ; source_sha256 = EC.source_revision prepared
                    }
                  ~originating:(Some (Managed admission))
                  ~error:Agent_protocol.Error.invalid_request
-                 (fun
-                     ~jobs:job_scope
-                      ~subscriptions:subscription_scope
-                      ~schedules:schedule_scope
-                      ~notifications:notification_scope
-                      ~ingress:ingress_scope
-                    ->
+                 (fun ~jobs:job_scope
+                   ~subscriptions:subscription_scope
+                   ~schedules:schedule_scope
+                   ~notifications:notification_scope
+                   ~ingress:ingress_scope ->
                     let jobs =
                       Option.map job_scope ~f:Script_job_service.moderator_transaction
                     in

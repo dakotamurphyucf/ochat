@@ -51,6 +51,9 @@ module Limits : sig
 
   val default : t
   val max_bytes : t -> int
+  val max_depth : t -> int
+  val max_fields : t -> int
+  val max_nodes : t -> int
 end
 
 module Json : sig
@@ -298,4 +301,59 @@ module Domain_codec : sig
     -> previous:'a Extension_carrier.t
     -> incoming:'a Extension_carrier.t
     -> ('a Extension_carrier.t, Error.t) Result.t
+end
+
+module Encoding : sig
+  module Mode : sig
+    type t =
+      | Measure
+      | Construct
+  end
+
+  module Value : sig
+    type t
+  end
+
+  type t
+
+  val mode : t -> Mode.t
+  val checkpoint : t -> unit
+  val string : t -> string -> (Value.t, Error.t) Result.t
+  val number : t -> int -> (Value.t, Error.t) Result.t
+  val bool : t -> bool -> (Value.t, Error.t) Result.t
+  val null : t -> (Value.t, Error.t) Result.t
+
+  (** Exact2n+2 encoded bytes; expansion admitted before byte-array allocation. *)
+  val hex : t -> string -> (Value.t, Error.t) Result.t
+
+  (** Admit existing immutable JSON into the SAME aggregate node/field/depth/byte
+      accounting; unlike an ordinary scalar this visits every descendant. *)
+  val raw : t -> Json.t -> (Value.t, Error.t) Result.t
+
+  val object_
+    :  t
+    -> (string * (t -> (Value.t, Error.t) Result.t)) list
+    -> (Value.t, Error.t) Result.t
+
+  val array
+    :  t
+    -> 'a list
+    -> f:(t -> 'a -> (Value.t, Error.t) Result.t)
+    -> (Value.t, Error.t) Result.t
+
+  (** Measure entire construction before allocating expanded strings/container
+      lists, then construct under the same ceilings. Scalar encoded lengths use
+      Json.validate_and_measure; this owner only counts structure/punctuation.
+      f is a trusted deterministic encoding program, identical in both passes
+      (except Mode-aware fixed-width keys). No callback/context survives return.
+      Borrowed checkpoint and unexpected exceptions propagate unchanged.
+      byte_limit_context is trusted diagnostic text of at most256 bytes, preserving each
+      domain's established Limit_exceeded payload. Independent caller work quotas
+      must reserve logical encoding work before entering this computation. *)
+  val render
+    :  limits:Limits.t
+    -> byte_limit_context:string
+    -> checkpoint:(unit -> unit)
+    -> f:(t -> (Value.t, Error.t) Result.t)
+    -> (Json.t, Error.t) Result.t
 end

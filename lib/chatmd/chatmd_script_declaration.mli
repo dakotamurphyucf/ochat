@@ -28,3 +28,6 @@ val validate_prompt_registry
 
 (** [serialize script] renders one canonical ChatMD script declaration. *)
 val serialize : Chatmd_shell_spec.Chatmd_script_spec.t -> string
+
+(** Escaped attributes shared by legacy and typed script serializers. *)
+val project_attributes : Chatmd_shell_spec.Script_project.t option -> string list

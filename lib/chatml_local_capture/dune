@@ -1,0 +1,10 @@
+(library
+ (name chatml_local_capture)
+ (public_name ochat.chatml_local_capture)
+ (modules chatml_local_capture chatml_local_capture_budget chatml_local_capture_error
+  chatml_local_capture_catalog chatml_local_capture_acquire)
+ (private_modules chatml_local_capture_budget chatml_local_capture_error
+  chatml_local_capture_catalog chatml_local_capture_acquire)
+ (libraries core eio source chatml_source chatml_prepared_program chatml_project
+  chatml_local_source document_schema chatml_catalog)
+ (preprocess (pps ppx_jane)))

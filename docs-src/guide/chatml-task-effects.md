@@ -2,7 +2,7 @@
 
 Use `Task` to sequence computations and selected host operations. A task is a
 description interpreted by the Ochat runtime; it is not a promise that has already
-started running. The five operations below are available on all four versioned
+started running. The operations below are available on all four versioned
 extensibility surfaces. Host operations still depend on the selected surface,
 installed services and actual tool permissions. See the
 [execution contracts](chatml-authoring-runtime.md) for the required entrypoint.
@@ -12,6 +12,8 @@ installed services and actual tool permissions. See the
 | `Task.pure(value)` | Construct a successful task containing an already evaluated value |
 | `Task.bind(task, next)` | Interpret the first task, then call `next(value)` and interpret its returned task |
 | `Task.map(task, transform)` | Interpret the task, then return the ordinary value from `transform(value)` |
+| `Task.map_array(values, next)` | Defer a sequential traversal; interpret each `next(value)` task and collect its results in a fresh array |
+| `Task.iter_array(values, next)` | Defer a sequential traversal whose callback tasks return unit |
 | `Task.fail(message)` | Construct a task that fails when interpreted; the message is a string |
 | `Task.catch(task, recover)` | On a task failure, call `recover(message)` and interpret its replacement task |
 
@@ -105,3 +107,44 @@ let main input =
      Task.fail("recover")),
     fun message -> Task.pure(`String(!state)))
 ```
+
+
+## Sequential array tasks
+
+`Task.map_array` and `Task.iter_array` defer callbacks until interpretation. At
+that point they take a fresh shallow snapshot of the input array, then call and
+interpret each callback in index order. Changes to the original outer array
+during traversal do not change its remaining inputs; nested mutable payloads
+remain shared. Constructing a task does not snapshot the array. Reusing it takes
+a new snapshot and executes callbacks again, with private result storage for
+each interpretation. Empty input runs no callbacks.
+
+A callback returns a task. `map_array` collects its results in input order;
+`iter_array` requires unit results. Traversal uses linear storage and avoids
+repeated array append. It does not spawn background tasks or introduce parallel
+execution. Host allocation, fuel and cancellation controls still apply.
+
+<!-- ochat-authoring-example: {"id":"task-effects.array-traversal","surface":"one_off_v1","result":"0:20:90:6"} -->
+```ocaml
+let main input =
+  let values = [1, 2, 3] in
+  let calls = ref(0) in
+  let pending = Task.map_array(values, fun n ->
+    calls := !calls + 1;
+    values[1] <- 9;
+    Task.pure(n * 10)) in
+  let before = !calls in
+  let* first = pending in
+  let* second = pending in
+  let* () = Task.iter_array([], fun ignored -> fail("not called")) in
+  Task.pure(`String(to_string(before) ++ ":" ++ to_string(first[1]) ++ ":" ++
+    to_string(second[1]) ++ ":" ++ to_string(!calls)))
+```
+
+The first failing task skips later callbacks. An enclosing `Task.catch` keeps
+its existing transactional rollback rules; it cannot undo already completed
+external effects or arbitrary mutable payload changes. A pure callback error
+exits evaluation just as with `Task.bind`; it is not converted into a failing
+task. Cancellation and exhausted host limits do not enter the recovery callback.
+A host interaction that suspends a callback resumes the same traversal without
+replaying previous callbacks.

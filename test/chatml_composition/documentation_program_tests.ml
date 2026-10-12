@@ -5,6 +5,23 @@ let source =
   [%blob "../../docs-src/examples/learning/check-reports/scripts/aggregate.chatml"]
 ;;
 
+let one_off_source =
+  [%blob
+    "../../docs-src/examples/learning/check-reports/scripts/aggregate-one-off.chatml"]
+;;
+
+let decoder_sources =
+  [ ( "libraries/checked-json/chatml.project.json"
+    , [%blob "../../docs-src/examples/libraries/checked-json/chatml.project.json"] )
+  ; ( "libraries/checked-json/src/checked_json.chatml"
+    , [%blob "../../docs-src/examples/libraries/checked-json/src/checked_json.chatml"] )
+  ; ( "libraries/checked-json/src/checked_json.chatmli"
+    , [%blob "../../docs-src/examples/libraries/checked-json/src/checked_json.chatmli"] )
+  ]
+;;
+
+let project = [%blob "../../docs-src/examples/learning/check-reports/chatml.project.json"]
+
 let program_agent =
   [%blob "../../docs-src/examples/learning/check-reports/program.chatmd"]
 ;;
@@ -24,7 +41,7 @@ let workspace_files =
     , [%blob "../../docs-src/examples/learning/check-reports/reports/report-a.json"] )
   ; ( "reports/report-b.json"
     , [%blob "../../docs-src/examples/learning/check-reports/reports/report-b.json"] )
-  ; "scripts/aggregate.chatml", source
+  ; "scripts/aggregate-one-off.chatml", one_off_source
   ]
 ;;
 
@@ -32,7 +49,10 @@ let input = `Array [ `String "report-a.json"; `String "report-b.json" ]
 
 let request input =
   `Object
-    [ "source", `String source; "input", input; "tools", `Array [ `String "read_file" ] ]
+    [ "source", `String one_off_source
+    ; "input", input
+    ; "tools", `Array [ `String "read_file" ]
+    ]
 ;;
 
 let tool_sources =
@@ -40,7 +60,9 @@ let tool_sources =
   ; "scripts/aggregate.chatml", source
   ; "schemas/input.json", input_schema
   ; "schemas/output.json", output_schema
+  ; "chatml.project.json", project
   ]
+  @ decoder_sources
 ;;
 
 let summary state call_id =
@@ -49,8 +71,78 @@ let summary state call_id =
   | other -> raise_s [%sexp (other : I.outcome)]
 ;;
 
+let%test_unit "each invalid filename position rejects the entire request before reads" =
+  let invalid =
+    List.init 3 ~f:(fun bad_index ->
+      ( Int.to_string bad_index
+      , `Array
+          (List.init 3 ~f:(fun index ->
+             if Int.equal index bad_index then `Null else `String "report-a.json")) ))
+  in
+  let check state =
+    [%test_eq: int] 0 (List.length (native_reads state));
+    List.iter invalid ~f:(fun (id, _) ->
+      match result state id with
+      | Fail error when String.equal error.code "chatml.execution_failed" -> ()
+      | other -> raise_s [%sexp (other : I.outcome)])
+  in
+  with_daemon
+    ~workspace_files
+    ~sources:[ "agent.chatmd", program_agent ]
+    ~calls:(List.map invalid ~f:(fun (id, input) -> id, "run_chatml", request input))
+    check;
+  (* Relax only the test's input schema, so the actual authored decoder rather
+     than schema admission proves this invariant. The shipped schema stays strict. *)
+  let sources =
+    List.map tool_sources ~f:(fun (name, bytes) ->
+      name, if String.equal name "schemas/input.json" then "{}" else bytes)
+  in
+  with_daemon
+    ~workspace_files
+    ~sources
+    ~calls:
+      (List.map invalid ~f:(fun (id, files) ->
+         id, "summarize_checks", `Object [ "files", files ]))
+    check
+;;
+
+let%test_unit "report snapshot order and counts are independent for each invocation" =
+  let workspace_files =
+    ( "reports/first.json"
+    , {|[{"check":"earliest failure","status":"failed"},{"check":"setup instructions","status":"failed"}]|}
+    )
+    :: workspace_files
+  in
+  let input =
+    `Array [ `String "first.json"; `String "report-a.json"; `String "first.json" ]
+  in
+  let expected =
+    Jsonaf.of_string
+      {|[{"check":"earliest failure","failures":2},{"check":"setup instructions","failures":3},{"check":"verification steps","failures":1}]|}
+  in
+  let check state =
+    [%test_eq: int] 6 (List.length (native_reads state));
+    List.iter [ "first"; "again" ] ~f:(fun id ->
+      match result state id with
+      | Complete actual -> assert (Jsonaf.exactly_equal actual expected)
+      | other -> raise_s [%sexp (other : I.outcome)])
+  in
+  with_daemon
+    ~workspace_files
+    ~sources:[ "agent.chatmd", program_agent ]
+    ~calls:(List.map [ "first"; "again" ] ~f:(fun id -> id, "run_chatml", request input))
+    check;
+  with_daemon
+    ~workspace_files
+    ~sources:tool_sources
+    ~calls:
+      (List.map [ "first"; "again" ] ~f:(fun id ->
+         id, "summarize_checks", `Object [ "files", input ]))
+    check
+;;
+
 let%expect_test
-    "public report program and standalone tool execute the same maintained source"
+    "public raw program and configured tool return the same ordered report calculation"
   =
   with_daemon
     ~workspace_files
@@ -74,7 +166,7 @@ let%expect_test
 ;;
 
 let%expect_test
-    "public standalone tool rejects invalid input before reading and retains file \
+    "public configured tool rejects invalid input before reading and retains file \
      boundaries"
   =
   with_daemon

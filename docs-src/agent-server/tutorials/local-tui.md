@@ -117,8 +117,8 @@ chat-tui --no-config --local --session SESSION_ID
 The first three commands read without execution selection, including archived
 records. Export reuses the authorized session blob/download path. The last
 command explicitly selects the exact inspected lifecycle anchor before attaching;
-it preserves saved identity, source and workspace. A stopped session stays stopped,
-and an archived or restore-gated session needs the supported lifecycle Restore
+it preserves saved identity, source and workspace. This explicit interactive resume
+starts a stopped session through normal admission. An archived or restore-gated session needs the supported lifecycle Restore
 and Resume commands first. A gate commit alone does not report running.
 
 Use a detached daemon session when work must outlive the terminal.
@@ -127,7 +127,7 @@ Older file-backed sessions remain available through compatibility flags, without
 explicit `--local`. For example (replace the prompt path):
 
 ```sh
-chat-tui --no-config -file /absolute/path/to/agent.chatmd --new-session
+chat-tui --no-config -file /absolute/path/to/agent.chatmd --session LEGACY_ID
 chat-tui --no-config --list-sessions
 ```
 
@@ -137,6 +137,36 @@ Do not confuse them with daemon session IDs. `--authorize-shell-manifest` withou
 prompt in the native host, use `--local --authorize-shell-manifest` together.
 The flag permits the manifest to load; command approvals and sandbox restrictions
 still apply. See [shell host integration](../../guide/chatmd-shell-host-integration.md).
+
+## Adopt an edited transcript or rebuild code
+
+Keep the definition separate from the exported conversation. To import edits as a
+new conversation:
+
+```sh
+chat-tui --no-config --local -file ./agent.chatmd --import-transcript ./edited.chatmd
+```
+
+The selected definition supplies model, tools and executable code. Only literal
+conversation data is admitted from the transcript; configuration, scripts, imports,
+documents, agents, local images and unsupported opaque export markup reject.
+Presentation IDs are replaced by fresh history IDs; this uses the existing authored
+converter, not lossless provider/runtime restoration. Remote image references stay
+data. See the [CLI reference](../../bin/chat_tui.doc.md#edited-transcript-adoption)
+for bounds and acknowledgment handling.
+
+Ordinary resume keeps captured code. To adopt current definition/project edits in
+an existing stopped session, first export any history you want to keep, then run:
+
+```sh
+chat-tui --no-config --local --export-session ID --out ./before-rebuild.chatmd
+chat-tui --no-config --local -file ./agent.chatmd --rebuild-from-prompt ID
+```
+
+Rebuild retains conversation identity, archives the old generation and resets
+history to current authored defaults. It uses the current captured catalog; remote
+hosts need a catalog refresh first. It does not implicitly update locked Git pins.
+An edited transcript belongs in a new conversation rather than an in-place rebuild.
 
 ## Config precedence
 
@@ -150,7 +180,8 @@ See the [CLI reference](../../bin/chat_tui.doc.md) for exact flags and conflicts
 
 You opened a tool-free agent, observed a completed response, and returned to the
 shell. The local host has stopped; its durable session remains available for
-inspection and explicit resume. If you used a private prompt copy, keep it available
-at its recorded path when resuming. Runtime/provider logs may be separate.
+inspection and explicit resume. Ordinary resume uses captured code even if its original source files have been
+removed; the saved workspace must remain available. Explicit rebuild needs the
+current authored definition. Runtime/provider logs may be separate.
 Next, [give the agent a file tool](../../tutorials/file-tool.md).
 Use the [example catalog](../../examples/README.md) for the complete hello source.

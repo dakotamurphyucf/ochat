@@ -43,7 +43,11 @@ take no mode argument.
 Record role, session_id and receipt_id. Omitting session_id creates another
 instance. Supplying it to the same named wrapper continues that conversation.
 Use collect_reviews with up to three role/session_id/receipt_id/cursor records;
-set cursor to null for a new query. Keep the returned output next_cursor when
+set cursor to null for a new query. The collector's explicit project selects
+`Checked_json` from the bundled `libraries/checked-json` package, including its
+public companion. It fully decodes all records before any lifecycle query and
+uses sequential `Task.map_array` only after validation. Missing cursors and invalid
+later records cannot cause an earlier observation; opaque IDs are never rewritten. Keep the returned output next_cursor when
 continuing the same receipt query. The collector observes status, zero-time wait
 and one bounded read per reviewer. It does not wait for completion or stop work.
 
@@ -56,8 +60,8 @@ the checker. The guarded engineering application covers those steps separately.
 ## Failure and cleanup
 
 Receipt success, failure, cancellation and interruption are distinct. Idle and
-caught_up do not prove success. Per-call lifecycle errors remain in each collector
-observation; cancellation of the collection itself may stop the whole call. A
+caught_up do not prove success. Per-call lifecycle errors and malformed JSON response text remain in each
+collector observation; cancellation of the collection itself may stop the whole call. A
 wait timeout does not cancel a reviewer. Use bounded waits, not a tight poll loop.
 
 Try cancelling a reviewer and inspect its actual terminal state. If it finished

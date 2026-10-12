@@ -14,6 +14,11 @@ let store_ok = function
     raise_s [%sexp "unexpected store error", (error : Agent_store.Store_error.t)]
 ;;
 
+(* Exercise the actual daemon composition policy across runtime fixtures. *)
+let script_preparation () =
+  Option.value_exn Agent_server.Daemon.default_options.script_preparation
+;;
+
 let document_limits = Document_schema.Limits.default
 
 let document_ok = function
@@ -333,6 +338,7 @@ let actor_state ~workspace_instance ~liveness ~start_immediately =
       { protocol
       ; prompt_definition_id = None
       ; delegation = None
+      ; root_invocation = Ui
       ; prompt_revision_id
       ; configuration_revision = 0L
       ; inference_target = inference_selection ()

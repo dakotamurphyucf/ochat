@@ -212,11 +212,11 @@ let create
                        | Standalone { entrypoint; _ } -> entrypoint
                        | Moderator _ -> assert false
                      in
-                     Chatml_execution.run_in_scope
+                     EC.Program.run_in_scope
+                       (EC.program prepared)
                        ?prepare_result
                        ~control
                        ~config
-                       ~program:(EC.program prepared)
                        ~entrypoint
                        ~arguments:[ ABI.context scope; ABI.input scope ]
                        ()

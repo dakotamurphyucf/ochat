@@ -526,7 +526,9 @@ Notes:
 
 ## Persistent sessions (resume / branch / reset / export)
 
-This section describes legacy `Session_store` sessions. For daemon sessions,
+This section describes legacy `Session_store` sessions. New conversations use the
+native host by default; see the [native local tutorial](../agent-server/tutorials/local-tui.md)
+for explicit transcript import, captured resume and current-code rebuild. For daemon sessions,
 use the [connected lifecycle guide](../agent-server/sessions-and-workspaces.md);
 do not mix the IDs, stores, flags or persistence defaults.
 

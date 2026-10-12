@@ -20,6 +20,7 @@ let caps_ok result =
 let source ~root_path ~policy =
   let definition =
     Agent_session.Prompt_definition.create
+      ~root_invocation:Ui
       ~id:prompt_id
       ~config_name:"authored-authority"
       ~root_file:(Eio.Path.native_exn Eio.Path.(root_path / "root.chatmd"))
@@ -67,7 +68,7 @@ let source ~root_path ~policy =
                , policy ))
         ]
   in
-  Source.capture ~parent:parent_revision ~tool_name:"researcher" |> protocol_ok
+  Source.capture ~parent:parent_revision ~tool_name:"researcher" () |> protocol_ok
 ;;
 
 let%expect_test "authored private tools remain scoped across mixed delegation ancestry" =

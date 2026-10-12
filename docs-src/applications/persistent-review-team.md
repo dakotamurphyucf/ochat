@@ -146,11 +146,15 @@ identifiers before calling it.
 ```
 
 The [coordinator script](../examples/applications/persistent-review-team/scripts/coordinator.chatml)
-performs three observations per reviewer: status, a zero-time receipt wait, and a
-read of up to 16 output records. It returns the role and IDs together with
+uses the bundled configured `Checked_json` module to decode the entire request
+before any lifecycle call. Every record requires a recognized role, string
+session/receipt IDs, and a present cursor that is null or a string. These identities
+remain opaque caller-owned values; the decoder does not reinterpret them or grant
+access. `Task.map_array` then performs three sequential observations per reviewer:
+status, a zero-time receipt wait, and a read of up to 16 output records. It returns the role and IDs together with
 `status`, `completion` and `output` observations. Each observation contains `ok`,
-`value` and `error`. A lifecycle-call error is retained in that review's result;
-healthy reviewers can still contribute evidence. Invocation cancellation or a
+`value` and `error`. A lifecycle-call error or malformed JSON response text is retained in that
+individual observation; healthy reviewers can still contribute evidence. Invocation cancellation or a
 script/runtime failure can terminate the whole collection call.
 
 Inspect the completion receipt's terminal status. Success, failure, cancellation
