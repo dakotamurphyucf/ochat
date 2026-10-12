@@ -4,6 +4,22 @@ module P = One_off_request
 module J = Agent_protocol.Json_codec
 module Schema = Chatmd_shell_spec.Tool_schema
 
+module Agent_artifact = struct
+  type t =
+    { revision_id : Agent_protocol.Id.Prompt_revision.t
+    ; manifest_sha256 : Chatml_source.Digest.t
+    ; root_relative_path : Source.Portable_path.t
+    }
+
+  let create ~revision_id ~manifest_sha256 ~root_relative_path =
+    { revision_id; manifest_sha256; root_relative_path }
+  ;;
+
+  let revision_id t = t.revision_id
+  let manifest_sha256 t = t.manifest_sha256
+  let root_relative_path t = t.root_relative_path
+end
+
 type target =
   | Tool_target of string
   | Script_target of
@@ -16,6 +32,7 @@ type t =
   ; input : Jsonaf.t
   ; pins : (string * string) list
   ; policy : P.policy
+  ; agent_artifact : Agent_artifact.t option
   }
 
 type execution =
@@ -33,6 +50,7 @@ type execution =
 
 let invalid message = Error (Agent_protocol.Error.invalid_request message)
 let policy t = t.policy
+let agent_artifact t = t.agent_artifact
 let digest = Chatmd_shell_spec.Source_ref.digest
 let number value = `Number (Int.to_string value)
 let seconds value = Jsonaf.Export.jsonaf_of_float value
@@ -68,13 +86,63 @@ let policy_to_json (policy : P.policy) =
 
 let strict_fields names json =
   let open Result.Let_syntax in
-  let%bind fields = J.fields json in
-  match
-    List.for_all (J.to_alist fields) ~f:(fun (name, _) ->
-      List.mem names name ~equal:String.equal)
-  with
-  | true -> Ok fields
-  | false -> invalid "unknown background request field"
+  (* Admit fixed field count and known keys before the duplicate checker allocates names.
+     Stop after the first excess cell, even for an arbitrarily large input. *)
+  let rec within remaining = function
+    | [] -> true
+    | (name, _) :: rest ->
+      remaining > 0
+      && List.mem names name ~equal:String.equal
+      && within (remaining - 1) rest
+  in
+  let%bind () =
+    match json with
+    | `Object fields when within (List.length names) fields -> Ok ()
+    | `Object _ -> invalid "unknown background request field"
+    | _ -> invalid "expected a JSON object"
+  in
+  J.fields json
+;;
+
+let agent_artifact_to_json t =
+  `Object
+    [ ( "revision_id"
+      , Agent_protocol.Id.Prompt_revision.to_json (Agent_artifact.revision_id t) )
+    ; ( "manifest_sha256"
+      , `String (Chatml_source.Digest.to_hex (Agent_artifact.manifest_sha256 t)) )
+    ; ( "root_relative_path"
+      , `String (Source.Portable_path.to_string (Agent_artifact.root_relative_path t)) )
+    ]
+;;
+
+let agent_artifact_of_json json =
+  let open Result.Let_syntax in
+  let%bind fields =
+    strict_fields [ "revision_id"; "manifest_sha256"; "root_relative_path" ] json
+  in
+  let%bind revision_id =
+    J.required_as fields "revision_id" Agent_protocol.Id.Prompt_revision.of_json
+  in
+  let%bind manifest_sha256 = J.required_as fields "manifest_sha256" J.string in
+  let%bind manifest_sha256 =
+    Chatml_source.Digest.of_hex manifest_sha256
+    |> Result.map_error ~f:(fun _ ->
+      Agent_protocol.Error.invalid_request "invalid selected artifact digest")
+  in
+  let%bind root_relative_path = J.required_as fields "root_relative_path" J.string in
+  let%map root_relative_path =
+    Source.Portable_path.create root_relative_path
+    |> Result.map_error ~f:(fun _ ->
+      Agent_protocol.Error.invalid_request "invalid selected artifact root member")
+  in
+  Agent_artifact.create ~revision_id ~manifest_sha256 ~root_relative_path
+;;
+
+let with_agent_artifact t selected =
+  match t.target, t.agent_artifact with
+  | Tool_target _, None -> Ok { t with agent_artifact = Some selected }
+  | Tool_target _, Some _ -> invalid "background request already selects agent code"
+  | Script_target _, _ -> invalid "background script cannot select agent code"
 ;;
 
 let policy_of_json json =
@@ -175,12 +243,15 @@ let target_to_json = function
 
 let to_json t =
   `Object
-    [ "version", number 1
-    ; "target", target_to_json t.target
-    ; "input", t.input
-    ; "pins", `Object (List.map t.pins ~f:(fun (name, pin) -> name, `String pin))
-    ; "policy", policy_to_json t.policy
-    ]
+    ([ "version", number (if Option.is_some t.agent_artifact then 2 else 1)
+     ; "target", target_to_json t.target
+     ; "input", t.input
+     ; "pins", `Object (List.map t.pins ~f:(fun (name, pin) -> name, `String pin))
+     ; "policy", policy_to_json t.policy
+     ]
+     @ Option.to_list
+         (Option.map t.agent_artifact ~f:(fun artifact ->
+            "agent_artifact", agent_artifact_to_json artifact)))
 ;;
 
 let source = function
@@ -192,6 +263,26 @@ let validate_pin_count (policy : P.policy) pins =
   match List.length pins <= policy.execution.max_array_items with
   | true -> Ok ()
   | false -> invalid "background capability selection exceeds its item limit"
+;;
+
+let pin_fields (policy : P.policy) json =
+  let open Result.Let_syntax in
+  (* Admit count and key bytes before [J.fields] retains duplicate-check keys. *)
+  let rec admit remaining = function
+    | [] -> Ok ()
+    | _ :: _ when remaining <= 0 ->
+      invalid "background capability selection exceeds its item limit"
+    | (name, _) :: rest ->
+      if String.is_empty name || String.length name > 256
+      then invalid "invalid background capability pin"
+      else admit (remaining - 1) rest
+  in
+  let%bind () =
+    match json with
+    | `Object fields -> admit policy.execution.max_array_items fields
+    | _ -> invalid "expected a JSON object"
+  in
+  J.fields json
 ;;
 
 let validate t =
@@ -229,6 +320,7 @@ let tool ~capabilities ~(reference : C.reference) ~input ~policy =
     ; input
     ; pins = [ reference.name, C.permission_fingerprint binding ]
     ; policy
+    ; agent_artifact = None
     }
   in
   let%map () = validate t in
@@ -247,6 +339,7 @@ let script ~prepared ~input ~policy =
     ; input
     ; pins
     ; policy
+    ; agent_artifact = None
     }
   in
   let%map () = validate t in
@@ -257,12 +350,27 @@ let of_json ~policy json =
   let open Result.Let_syntax in
   let%bind () = validate_policy ~ceiling:policy policy in
   let%bind fields =
-    strict_fields [ "version"; "target"; "input"; "pins"; "policy" ] json
+    strict_fields
+      [ "version"; "target"; "input"; "pins"; "policy"; "agent_artifact" ]
+      json
   in
-  let%bind _ = J.required_as fields "version" (J.bounded_int ~min:1 ~max:1) in
+  let%bind version = J.required_as fields "version" (J.bounded_int ~min:1 ~max:2) in
+  let%bind agent_artifact =
+    match version, J.optional fields "agent_artifact" with
+    | 1, None -> Ok None
+    | 2, Some json -> agent_artifact_of_json json |> Result.map ~f:Option.some
+    | 1, Some _ -> invalid "version 1 cannot select agent code"
+    | 2, None -> invalid "version 2 requires selected agent code"
+    | _ -> assert false
+  in
   let%bind stored_policy = J.required_as fields "policy" policy_of_json in
   let%bind () = validate_policy ~ceiling:policy stored_policy in
-  let%bind target = J.required_as fields "target" J.fields in
+  let%bind target =
+    J.required_as
+      fields
+      "target"
+      (strict_fields [ "kind"; "name"; "source"; "compiler_contract" ])
+  in
   let%bind kind = J.required_as target "kind" J.string in
   let%bind target =
     let strict names = strict_fields names (`Object (J.to_alist target)) in
@@ -283,8 +391,7 @@ let of_json ~policy json =
       Script_target { source; compiler_contract }
     | _ -> invalid "unknown background target kind"
   in
-  let%bind pins = J.required_as fields "pins" J.fields in
-  let%bind () = validate_pin_count stored_policy (J.to_alist pins) in
+  let%bind pins = J.required_as fields "pins" (pin_fields stored_policy) in
   let%bind pins =
     List.map (J.to_alist pins) ~f:(fun (name, json) ->
       let%bind pin = J.string json in
@@ -301,7 +408,12 @@ let of_json ~policy json =
     | Script_target _, _ -> Ok ()
   in
   let%bind input = J.required fields "input" in
-  let t = { target; input; pins; policy = stored_policy } in
+  let%bind () =
+    match target, agent_artifact with
+    | Tool_target _, _ | Script_target _, None -> Ok ()
+    | Script_target _, Some _ -> invalid "background script cannot select agent code"
+  in
+  let t = { target; input; pins; policy = stored_policy; agent_artifact } in
   let%map () = validate t in
   t
 ;;
@@ -311,7 +423,13 @@ let fingerprint t =
   |> J.canonical_string
   |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
   |> Result.ok_or_failwith
-  |> fun encoded -> digest ("ochat.background-request.v1\n" ^ encoded)
+  |> fun encoded ->
+  let prefix =
+    if Option.is_some t.agent_artifact
+    then "ochat.background-request.v2\n"
+    else "ochat.background-request.v1\n"
+  in
+  digest (prefix ^ encoded)
 ;;
 
 let rebind_capabilities ~pins ~capabilities:current =
