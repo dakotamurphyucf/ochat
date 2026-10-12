@@ -71,6 +71,12 @@
       --scenario
       crash-matrix
       --case
+      job.persistent-selected-source-recovery)
+     (run
+      %{exe:agent_server_e2e.exe}
+      --scenario
+      crash-matrix
+      --case
       pending.interrupted-root-recovery)
      (run
       %{exe:agent_server_e2e.exe}

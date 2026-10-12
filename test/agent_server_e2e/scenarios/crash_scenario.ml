@@ -133,6 +133,8 @@ let run_child env arguments =
     Crash_notification_host.run env ~config_path ~boundary
   | [ "queued-child"; config_path; boundary ] ->
     Crash_queued_child.run_child env ~config_path ~boundary
+  | [ "queued-persistent"; config_path; boundary ] ->
+    Crash_queued_persistent.run_child env ~config_path ~boundary
   | [ "standalone-notification"; config_path; boundary ] ->
     Crash_notification_host.run ~standalone:true env ~config_path ~boundary
   | [ "ingress"; config_path; recover ] ->
@@ -341,6 +343,7 @@ let cases =
   ; "invocation.admission-publication-no-replay", Crash_invocation_publication.test
   ; "job.committed-intent-launch-once", Crash_queued_launch.test
   ; "job.child-selected-source-recovery", Crash_queued_child.test
+  ; "job.persistent-selected-source-recovery", Crash_queued_persistent.test
   ; "notification.wake-no-replay", Crash_notification_wake.test
   ; "notification.standalone-no-replay", Crash_standalone_notification.test
   ; "ingress.lost-ack-no-replay", Crash_ingress_delivery.test
