@@ -496,11 +496,23 @@ let replace_snapshot manifest binding snapshot snapshots =
     not (snapshot_matches manifest binding candidate))
 ;;
 
-let configure_snapshot_handler host manifest snapshots persist binding =
+let configure_snapshot_handler host manifest mutex snapshots persist binding =
   Chatml_extension.set_snapshot_handler binding.instance (fun state ->
     let snapshot = persisted_snapshot host manifest binding state in
-    let updated = replace_snapshot manifest binding snapshot !snapshots in
-    Result.map (persist updated) ~f:(fun () -> snapshots := updated))
+    let outcome =
+      Eio.Mutex.use_rw ~protect:true mutex (fun () ->
+        (* Different instances have different call locks. Serialize their shared
+           durable list through adoption, while keeping a failed callback from
+           poisoning this publication lock. The instance owner handles rollback. *)
+        try
+          let updated = replace_snapshot manifest binding snapshot !snapshots in
+          Ok (Result.map (persist updated) ~f:(fun () -> snapshots := updated))
+        with
+        | exn -> Error (exn, Backtrace.Exn.most_recent ()))
+    in
+    match outcome with
+    | Ok result -> result
+    | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace)
 ;;
 
 let configure_extension_snapshots
@@ -513,6 +525,7 @@ let configure_extension_snapshots
       persist
   =
   let snapshots = ref initial in
+  let mutex = Eio.Mutex.create () in
   Result.bind
     (List.map extension_bindings ~f:(fun binding ->
        checkpoint ();
@@ -521,7 +534,7 @@ let configure_extension_snapshots
     ~f:(fun _ ->
       Option.iter persist ~f:(fun persist ->
         List.iter extension_bindings ~f:(fun binding ->
-          configure_snapshot_handler host manifest snapshots persist binding));
+          configure_snapshot_handler host manifest mutex snapshots persist binding));
       Ok ())
 ;;
 

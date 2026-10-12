@@ -36,6 +36,7 @@ let fixture
       ?(mutate = Fn.id)
       ?(respond = true)
       ?(extra_runtimes = [])
+      ?(runtimes = fun runtime -> [ runtime ])
       ()
   =
   let action =
@@ -92,7 +93,7 @@ let before ev state = Task.bind(%s, fun ignored -> Task.pure(state+1))|}
   in
   let manifest, material =
     MC.compile_with_material
-      { runtimes = runtime :: extra_runtimes
+      { runtimes = runtimes runtime @ extra_runtimes
       ; tools = [ tool ]
       ; scripts = [ script ]
       ; legacy_tools = []
@@ -179,6 +180,112 @@ let raw config =
 ;;
 
 let stdout config = (raw config |> ok).SA.Executor.stdout
+
+type snapshot_outcome =
+  | Persist
+  | Reject
+  | Raise of exn
+
+let%expect_test "binding snapshots serialize and callback failures preserve both states" =
+  Eio_main.run (fun env ->
+    with_root env (fun root ->
+      let runtimes (runtime : S.t) =
+        let second = S.Runtime_id.of_string ~source:runtime.source "second" |> ok in
+        [ runtime; { runtime with id = second } ]
+      in
+      let prepared, grant, host, _ = fixture env root "shared" ~runtimes () in
+      let persisted = ref [] in
+      let calls = ref 0 in
+      let outcome = ref Persist in
+      let entered, signal_entered = Eio.Promise.create () in
+      let release, signal_release = Eio.Promise.create () in
+      let persist snapshots =
+        Int.incr calls;
+        if Int.equal !calls 1
+        then (
+          Eio.Promise.resolve signal_entered ();
+          Eio.Promise.await release);
+        match !outcome with
+        | Persist ->
+          persisted := snapshots;
+          Ok ()
+        | Reject -> Error "controlled persistence rejection"
+        | Raise exn -> raise exn
+      in
+      let states () =
+        List.map
+          !persisted
+          ~f:(fun (snapshot : Session.Shell_state.Extension_snapshot.t) ->
+            let state =
+              match snapshot.state with
+              | Record fields -> List.Assoc.find_exn fields ~equal:String.equal "state"
+              | Int _ | Float _ | Bool _ | String _ | Unit | Array _ | Variant _ | Tuple _
+                -> failwith "expected actual extension snapshot"
+            in
+            snapshot.runtime_id, state)
+        |> List.sort ~compare:(fun (left, _) (right, _) -> String.compare left right)
+      in
+      Eio.Switch.run (fun sw ->
+        let registry =
+          R.instantiate_prepared
+            ~sw
+            ~host
+            ~grant
+            ~approval_provider:Shell_runtime.Approval_broker.None_available
+            ~persist_extension_snapshots:persist
+            prepared
+          |> ok
+        in
+        let configs =
+          List.map (R.runtimes registry) ~f:Shell_runtime.Runtime.executor_config
+        in
+        let first, second =
+          match configs with
+          | [ first; second ] -> first, second
+          | _ -> failwith "expected two independently stateful bindings"
+        in
+        let a = Eio.Fiber.fork_promise ~sw (fun () -> stdout first) in
+        Eio.Promise.await entered;
+        let attempted, signal_attempted = Eio.Promise.create () in
+        let b =
+          Eio.Fiber.fork_promise ~sw (fun () ->
+            Eio.Promise.resolve signal_attempted ();
+            stdout second)
+        in
+        Eio.Promise.await attempted;
+        (* Exercise this tiny prepared program through its cooperative evaluation
+           checkpoints before releasing the first publisher. The old publisher
+           must fail this bounded schedule; it is not an exhaustive scheduler model. *)
+        for _ = 1 to 256 do
+          Eio.Fiber.yield ()
+        done;
+        let before_release = !calls in
+        Eio.Promise.resolve signal_release ();
+        [%test_eq: string] (Eio.Promise.await_exn a) "shared:0";
+        [%test_eq: string] (Eio.Promise.await_exn b) "shared:0";
+        [%test_eq: int] before_release 1;
+        let committed = states () in
+        [%test_eq: int] (List.length committed) 2;
+        outcome := Reject;
+        assert (Result.is_error (raw first));
+        [%test_eq: (string * Session.Snapshot.t) list] (states ()) committed;
+        let marker = Failure "snapshot callback origin" in
+        let cancelled = Eio.Cancel.Cancelled marker in
+        List.iter [ marker; cancelled ] ~f:(fun expected ->
+          outcome := Raise expected;
+          (* The shell executor maps interceptor exceptions to a typed rejection.
+             Direct ChatML instance tests cover their original exception identity. *)
+          assert (Result.is_error (raw first));
+          [%test_eq: (string * Session.Snapshot.t) list] (states ()) committed);
+        outcome := Persist;
+        [%test_eq: string] (stdout first) "shared:1";
+        [%test_eq: string] (stdout second) "shared:1";
+        [%test_eq: Session.Snapshot.t list] (List.map (states ()) ~f:snd) [ Int 2; Int 2 ])));
+  print_endline
+    "both binding states persist; rejection/throw/cancel preserve state and reuse";
+  [%expect
+    {| both binding states persist; rejection/throw/cancel preserve state and reuse |}]
+;;
 
 let denied config =
   match raw config with

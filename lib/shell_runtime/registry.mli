@@ -126,7 +126,14 @@ val instantiate_prepared_after
     the exact manifest and executable source revision: prepared hook dependencies
     participate, while legacy hooks retain their body digest. Nonmatching saved
     state is ignored and the hook starts with its freshly initialized state.
-    Multiple matching snapshots for one persistent binding reject restoration. *)
+    Multiple matching snapshots for one persistent binding reject restoration.
+    Snapshot publication is serialized across this registry's extension bindings:
+    each callback receives all previously committed binding snapshots. Returned
+    errors and raised exceptions leave the shared list unchanged; callback
+    exceptions retain their original identity and backtrace. Successful persistence
+    precedes the existing nonyielding instance-state installation. A publication
+    callback must not synchronously invoke or await another extension in the same
+    registry: it holds the shared publication lock until it returns. *)
 val instantiate_prepared
   :  sw:Eio.Switch.t
   -> host:Host.t
@@ -241,7 +248,9 @@ end
     services remain. Newly authorized specialist callbacks replace the old
     specialist callbacks. Raw audit sink/sequence/failure/content/secret controls
     are retained. Fresh snapshots use the selected complete manifest and actual
-    graph revisions; parent state is untouched.
+    graph revisions; parent state is untouched. Snapshot publication across fresh
+    bindings follows the same serialization and failure contract as
+    [instantiate_prepared].
 
     [sw] owns fresh instances. The caller completes role/capability/compiler
     preflight before calling, keeps the original native loan alive, and joins
