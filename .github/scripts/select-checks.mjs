@@ -2,6 +2,48 @@ import fs from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { chooseChecks } from "./ci-policy.mjs";
+import {
+  isDocumentationCandidate,
+  isDocumentationOnlyChange,
+} from "./docs-diff.mjs";
+
+const readGit = (args) =>
+  execFileSync("git", args, {
+    encoding: "utf8",
+    maxBuffer: 4 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+// Proof is specific to this pair of revisions. Never reuse the PR/push proof
+// for a different deployment baseline. Missing or unusual blobs remain full CI.
+export function documentationOnlyPaths(base, head, paths, git = readGit) {
+  for (const sha of [base, head])
+    if (!/^[a-f0-9]{40}$/.test(sha) || /^0+$/.test(sha))
+      throw new Error("Unavailable documentation diff revision");
+  const read = (revision, path) => {
+    const entry = git(["ls-tree", "-z", revision, "--", path]);
+    const match = /^100644 blob ([a-f0-9]{40})\t([^\0]+)\0$/.exec(entry);
+    if (!match || match[2] !== path) return undefined;
+    const content = git(["cat-file", "blob", match[1]]);
+    if (content.includes("\0") || content.includes("\ufffd")) return undefined;
+    return content;
+  };
+  return paths.filter((path) => {
+    if (!isDocumentationCandidate(path)) return false;
+    try {
+      const before = read(base, path),
+        after = read(head, path);
+      return (
+        before !== undefined &&
+        after !== undefined &&
+        isDocumentationOnlyChange(path, before, after)
+      );
+    } catch {
+      // A failed/oversized read cannot grant permission to skip tests.
+      return false;
+    }
+  });
+}
 
 export function changedPaths(
   base,
@@ -65,6 +107,8 @@ async function main() {
     }).trimEnd();
   let paths = [],
     pendingPaths = [],
+    documentationPaths = [],
+    pendingDocumentationPaths = [],
     fallback,
     base,
     deployment;
@@ -74,9 +118,11 @@ async function main() {
     if (kind === "pull_request") {
       base = git(["merge-base", event.pull_request.base.sha, head]);
       paths = changedPaths(base, head);
+      documentationPaths = documentationOnlyPaths(base, head, paths);
     } else if (kind === "push") {
       base = event.before;
       paths = changedPaths(base, head);
+      documentationPaths = documentationOnlyPaths(base, head, paths);
       if (ref === "refs/heads/main") {
         const request = async (route) => {
           const response = await fetch(`https://api.github.com${route}`, {
@@ -99,6 +145,11 @@ async function main() {
         );
         git(["merge-base", "--is-ancestor", deployment.revision, head]);
         pendingPaths = changedPaths(deployment.revision, head);
+        pendingDocumentationPaths = documentationOnlyPaths(
+          deployment.revision,
+          head,
+          pendingPaths,
+        );
       }
     } else if (!["workflow_dispatch", "schedule"].includes(kind))
       throw new Error("Unrecognized workflow event");
@@ -111,6 +162,8 @@ async function main() {
     ref,
     paths,
     pendingPaths,
+    documentationPaths,
+    pendingDocumentationPaths,
     fallback,
     mode: event.inputs?.mode || "validate",
   });
@@ -121,6 +174,8 @@ async function main() {
     deployment,
     paths,
     pendingPaths,
+    documentationPaths,
+    pendingDocumentationPaths,
     fallback,
     ...selection,
   };

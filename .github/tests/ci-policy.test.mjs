@@ -12,6 +12,7 @@ import {
 } from "../scripts/ci-policy.mjs";
 import {
   changedPaths,
+  documentationOnlyPaths,
   lastSuccessfulDeployment,
 } from "../scripts/select-checks.mjs";
 
@@ -251,4 +252,157 @@ test("actual gate entry point returns nonzero when framework fails", () => {
     result.stderr.toString(),
     /framework: expected success, got failure/,
   );
+});
+
+test("documentation proofs apply only to their own baseline and never mask mixed runtime changes", () => {
+  const doc = "docs-src/guide/example.md";
+  const input = {
+    event: "push",
+    ref: "refs/heads/main",
+    paths: [doc],
+    documentationPaths: [doc],
+  };
+  const fast = chooseChecks(input);
+  assert.deepEqual(
+    [fast.framework, fast.semantics, fast.website, fast.deploy],
+    [false, true, true, true],
+  );
+  assert.equal(
+    chooseChecks({ ...input, paths: [doc, "lib/runtime.ml"] }).framework,
+    true,
+  );
+  assert.equal(chooseChecks({ ...input, pendingPaths: [doc] }).framework, true);
+  assert.equal(
+    chooseChecks({
+      ...input,
+      pendingPaths: [doc],
+      pendingDocumentationPaths: [doc],
+    }).framework,
+    false,
+  );
+  assert.equal(
+    chooseChecks({ ...input, fallback: "Uncertain history" }).framework,
+    true,
+  );
+  assert.equal(classifyPaths([doc]).framework, true);
+  for (const file of [
+    ".github/scripts/ci-policy.mjs",
+    ".github/scripts/select-checks.mjs",
+    ".github/scripts/docs-diff.mjs",
+    ".github/tests/ci-policy.test.mjs",
+    ".github/tests/docs-diff.test.mjs",
+  ]) {
+    const selected = classifyPaths([file]);
+    assert.deepEqual(
+      [selected.framework, selected.semantics, selected.website],
+      [false, true, true],
+    );
+  }
+  for (const file of [
+    ".github/actions/setup-ochat/action.yml",
+    ".github/scripts/framework-tests.mjs",
+    ".github/ci-toolchain.json",
+    ".github/scripts/future.mjs",
+  ])
+    assert.equal(classifyPaths([file]).framework, true);
+});
+
+test("documentation proof uses exact regular Git blobs and fails closed for moves, modes and read errors", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ochat-doc-proof-"));
+  const git = (args) =>
+    execFileSync("git", args, {
+      cwd: directory,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  const doc = "docs-src/guide/with spaces.md";
+  const file = path.join(directory, doc);
+  const commit = (message) => {
+    git(["add", "."]);
+    git(["commit", "-qm", message]);
+    return git(["rev-parse", "HEAD"]).trim();
+  };
+  try {
+    git(["init", "-q"]);
+    git(["config", "user.email", "fixture@example.invalid"]);
+    git(["config", "user.name", "CI fixture"]);
+    git(["config", "core.fileMode", "true"]);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(
+      file,
+      "# Example\n\nOld prose.\n\n```chatml\nlet x = 1\n```\n",
+    );
+    const base = commit("base");
+    fs.writeFileSync(
+      file,
+      fs.readFileSync(file, "utf8").replace("Old prose.", "New prose."),
+    );
+    const prose = commit("prose");
+    assert.deepEqual(documentationOnlyPaths(base, prose, [doc], git), [doc]);
+    const eventFile = path.join(directory, ".git", "event.json");
+    fs.writeFileSync(
+      eventFile,
+      JSON.stringify({ pull_request: { base: { sha: base } } }),
+    );
+    const selection = spawnSync(
+      process.execPath,
+      [fileURLToPath(new URL("../scripts/select-checks.mjs", import.meta.url))],
+      {
+        cwd: directory,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GITHUB_EVENT_PATH: eventFile,
+          GITHUB_EVENT_NAME: "pull_request",
+          GITHUB_REF: "refs/pull/1/merge",
+          CI_HEAD_SHA: prose,
+          GITHUB_OUTPUT: path.join(directory, ".git", "output"),
+          GITHUB_STEP_SUMMARY: path.join(directory, ".git", "summary"),
+        },
+      },
+    );
+    assert.equal(selection.status, 0, selection.stderr);
+    const report = JSON.parse(
+      fs.readFileSync(
+        path.join(directory, ".ci-evidence/selection.json"),
+        "utf8",
+      ),
+    );
+    assert.deepEqual(
+      [report.framework, report.semantics, report.website],
+      [false, true, true],
+    );
+    assert.deepEqual(report.documentationPaths, [doc]);
+    fs.rmSync(path.join(directory, ".ci-evidence"), { recursive: true });
+    assert.deepEqual(
+      documentationOnlyPaths(base, prose, [doc], () => {
+        throw new Error("read failure");
+      }),
+      [],
+    );
+    fs.chmodSync(file, 0o755);
+    const executable = commit("mode");
+    assert.deepEqual(documentationOnlyPaths(prose, executable, [doc], git), []);
+    fs.chmodSync(file, 0o644);
+    fs.writeFileSync(
+      file,
+      fs.readFileSync(file, "utf8").replace("let x = 1", "let x = 2"),
+    );
+    const code = commit("code");
+    assert.deepEqual(documentationOnlyPaths(base, code, [doc], git), []);
+    fs.renameSync(file, file.replace("with spaces", "moved"));
+    const moved = commit("move");
+    assert.deepEqual(
+      documentationOnlyPaths(code, moved, changedPaths(code, moved, git), git),
+      [],
+    );
+    fs.symlinkSync("moved.md", file);
+    const symlink = commit("symlink");
+    assert.deepEqual(documentationOnlyPaths(base, symlink, [doc], git), []);
+    assert.throws(() =>
+      documentationOnlyPaths("0".repeat(40), prose, [doc], git),
+    );
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });

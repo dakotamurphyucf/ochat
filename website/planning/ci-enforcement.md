@@ -26,7 +26,7 @@ when needed. Existing branches must contain this workflow change to adopt it.
 | `changes` | Run policy tests, inspect the complete Git diff, record selection and deployment baseline. Runs except on draft PR events. |
 | `framework (normal)` | Run `opam exec -- dune runtest --force`. |
 | `framework (e2e)` | Run `opam exec -- dune build --force @agent-e2e-pr`: daemon smoke, Unix/stdio/HTTP transports, transport conformance, workspaces and multiple clients. |
-| `semantics` | Run the offline documentation checks and retain evidence for this exact revision. |
+| `semantics` | Run the offline documentation checks and bundled authoring-source tests; retain evidence for this exact revision. |
 | `website (preview)` and `website (production)` | Unit/Astro checks, one build per environment, performance, search, full browser-test discovery and retained build; production packaging checks. |
 | `browser (environment, shard)` | Two shards per environment, two workers each, zero retries; Chromium/Firefox/WebKit tests against that environment's downloaded build. |
 | `website-qualification (environment)` | Merge both shard reports, verify complete disjoint test coverage and exact artifact/revision/run identity; retain the qualified production artifact. |
@@ -97,8 +97,33 @@ required gate always runs, including for changes that do not need expensive test
 | --- | --- |
 | Immediate `website/planning/*.md`, `website/README.md`, `website/CONTRIBUTING.md` | Maintainer documentation only; expensive jobs may skip. These files are not published website inputs. |
 | Other `website/` files | Both website environments and same-revision semantic evidence. |
-| Runtime, OCaml tests/dependencies, published docs/examples, assets, CI configuration, root files, or other unrecognized repository paths | All validation jobs. |
+| Existing `docs-src/` Markdown outside `examples/`, with a verified prose-only diff | Both website environments, browser checks, and same-revision semantic/authoring evidence. |
+| The six reviewed authoring coverage owners, changing only documentation excerpt/closure hashes | Same documentation qualification; compiler/body/descriptor pins and source changes still require full validation. |
+| The exact CI selection scripts and their tests | Mandatory policy tests plus documentation qualification. Workflow, setup, toolchain and framework runners are not exempt. |
+| Runtime, OCaml tests/dependencies, executable docs/examples, assets, other CI configuration, root files, or other unrecognized repository paths | All validation jobs. |
 | Missing/unreadable Git history, unavailable deployment history, invalid baseline, or unknown event | Conservative full validation. |
+
+The documentation fast path checks both Git blobs, not just filename extensions.
+Only existing regular non-executable text files qualify. Executable examples,
+protected Markdown content, code changes, additions/deletions, mode changes and
+unreadable or uncertain inputs retain full validation. Documentation hash updates
+must leave all other source bytes unchanged and still pass the authoring corpus's
+current-excerpt, closure and compiler-contract checks. Updating hashes is not a
+substitute for reviewing the prose against the implementation.
+
+Selection-policy changes are validated by the mandatory Node policy tests and
+review. The exact allowlist is in `ci-policy.mjs`; it does not include workflow,
+release-gate, dependency setup or framework execution changes. Required job status
+checks, exact-revision artifacts, browser coverage and hosted verification remain
+unchanged. Scheduled/manual audits still request full validation.
+
+A documentation proof applies only to its own pair of revisions. The immediate
+push and the last successful production deployment are checked independently;
+an unshipped runtime change still selects all jobs, even if the latest push is
+only prose. Selection evidence lists the paths proven documentation-only for each
+baseline. This reduces redundant framework work, not the need to check that the
+documentation is correct. It does not promise a fixed CI duration: dependency
+setup, semantic examples and browser checks still take time.
 
 PRs compare the current source revision with the merge base of the PR's base
 revision. Main pushes inspect the entire push range. Git diffs preserve NUL

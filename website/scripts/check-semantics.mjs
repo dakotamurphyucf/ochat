@@ -31,18 +31,24 @@ const run = (cmd, args) =>
     encoding: 'utf8',
     maxBuffer: 32 * 1024 * 1024,
   });
+const duneArgs = [
+  'build',
+  '--force',
+  '@agent-docs-check',
+  '@test/authoring_sources/runtest',
+];
 const report = {
   revision: run('git', ['rev-parse', 'HEAD']).trim(),
   semanticInputsSha256: hash.digest('hex'),
   ocaml: run('ocamlc', ['-version']).trim(),
   dune: run('dune', ['--version']).trim(),
-  command: 'dune build --force @agent-docs-check',
+  command: ['dune', ...duneArgs].join(' '),
   scope:
     'Offline semantic documentation gate; no live provider quality or public hosting claim.',
 };
 await fs.mkdir(path.dirname(output), { recursive: true });
 try {
-  const checked = spawnSync('dune', ['build', '--force', '@agent-docs-check'], {
+  const checked = spawnSync('dune', duneArgs, {
     cwd: root,
     encoding: 'utf8',
     maxBuffer: 32 * 1024 * 1024,
