@@ -93,6 +93,10 @@ end
     or source capability is serialized. Child ports belong to the selected child;
     invocation content retains its caller's port. The explicit prune embedding
     must serialize selection/install/admission; Daemon prunes only pre-recovery.
+    A retained native closure may use its authenticated current service's exact
+    selected code-view declaration. This requires the actual invoking function;
+    saved queued selection wins first. Selected child content and nested tools
+    keep their defining selected revision and do not inherit an enclosing target.
     Persistent precreated specialists require their separate Authored/code-view
     owner and cannot use this ordinary headless implementation. *)
 val bind_installed
@@ -118,6 +122,25 @@ module Source_binding : sig
     -> artifact_store:Agent_store.Prompt_artifact_store.t
     -> source_lease:Prompt_source_lease.t
     -> t
+
+  (** Select installed child code through this genuine borrowed source template.
+      The caller authenticates its original wrapper/request and holds the native
+      resource loan. Recorded selection always restores before source-mode
+      branching; new File reads the original lease and new Captured uses custody.
+      [invocation] is the actual admitted child role, not a permission grant.
+      Install and verify before returning; no job/session/reservation is created.
+      The whole source operation uses the original finite acquisition/runtime
+      policies and borrowed checkpoint. Exceptions retain identity/backtrace. *)
+  val select_child
+    :  t
+    -> script_preparation:Runtime_script_preparation.t
+    -> env:Eio_unix.Stdenv.base
+    -> parent:Prompt_revision.t
+    -> reference:Prompt.Chat_markdown.Agent_reference.t
+    -> invocation:Runtime_script_preparation.Invocation.t
+    -> recorded:Chat_response.Background_request.Agent_artifact.t option
+    -> checkpoint:(unit -> unit)
+    -> (Prompt_child_source.t, Agent_protocol.Error.t) Result.t
 
   (** Bind the exact restored revision before native registration, using its
       constructor's actual shell/content policies and response directory. No

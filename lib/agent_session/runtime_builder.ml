@@ -562,7 +562,12 @@ type authored_resources =
   { source : Authored_agent_source.t
   ; revision : Prompt_revision.t
   ; resources : resources
+  ; agent_source : Captured_agent_runner.Source_binding.t option
+  ; code_authorizer : Prompt_revision.t -> Shell_runtime.Manifest_authorizer.t
   }
+
+let authored_source_binding t = t.agent_source
+let authored_code_authorizer t = t.code_authorizer
 
 let prepare_authored_resources
       ~startup
@@ -632,7 +637,7 @@ let prepare_authored_resources
           ~approval_provider
           ~approval_store
       in
-      { source; revision; resources })
+      { source; revision; resources; agent_source; code_authorizer = manifest_authorizer })
 ;;
 
 let inherit_prepared_resources ~parent_runtime ~inherited_managed ~definition =
@@ -1156,6 +1161,7 @@ type source =
   | Authored_child of
       { revision : Prompt_revision.t
       ; prepared : authored_resources
+      ; code : Authored_code_preparation.t option
       ; authority : Delegation_authority.t
       }
   | Generated of
@@ -1241,20 +1247,35 @@ let build_with_services
   let%bind () =
     match source with
     | Authored _ -> Ok ()
-    | Authored_child { revision; prepared; authority } ->
+    | Authored_child { revision; prepared; code; authority } ->
       let artifact = Prompt_revision.artifact revision in
-      let%bind expected =
-        Authored_agent_source.artifact
-          prepared.source
-          ~revision_id:artifact.revision_id
-          ~created_at:artifact.created_at
-        |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
-      in
       let%bind () =
-        match String.equal expected.manifest_sha256 artifact.manifest_sha256 with
-        | true -> Ok ()
-        | false ->
-          Error (failure "authored runtime source differs from its prepared specialist")
+        match code with
+        | Some code ->
+          Authored_code_preparation.check
+            code
+            ~original:
+              { source = prepared.source
+              ; revision = prepared.revision
+              ; native = prepared.resources.native
+              ; definition = prepared.resources.definition
+              ; managed = prepared.resources.managed
+              ; agent_source = prepared.agent_source
+              ; prepare_persistent_source = None
+              }
+            ~selected:revision
+        | None ->
+          let%bind expected =
+            Authored_agent_source.artifact
+              prepared.source
+              ~revision_id:artifact.revision_id
+              ~created_at:artifact.created_at
+            |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+          in
+          if String.equal expected.manifest_sha256 artifact.manifest_sha256
+          then Ok ()
+          else
+            Error (failure "authored runtime source differs from its prepared specialist")
       in
       let%bind () =
         Agent_store.Prompt_artifact_store.verify_tree
@@ -1290,6 +1311,25 @@ let build_with_services
     match source, extension_services with
     | (Generated { authority; _ } | Authored_child { authority; _ }), Some services ->
       Some (guarded_services authority services)
+    | _, services -> services
+  in
+  let extension_services =
+    match source, extension_services with
+    | Authored_child { code = Some code; _ }, Some services ->
+      Some
+        { services with
+          script_tools =
+            (fun native ->
+              let tools =
+                Script_tool_calls.with_agent_source_code_view
+                  (services.script_tools native)
+                  (Authored_code_preparation.agent_source_code_view code)
+              in
+              Option.value_map
+                (Authored_code_preparation.shell_code_view code)
+                ~default:tools
+                ~f:(Script_tool_calls.with_shell_code_view tools))
+        }
     | _, services -> services
   in
   let%bind extension_services =
@@ -1365,9 +1405,18 @@ let build_with_services
   let declares_one_off = declares_native elements Run_chatml_tool.name in
   let%bind agent_runtime, definition, managed, authoring =
     match source with
-    | Authored_child { prepared; _ } ->
+    | Authored_child { prepared; code; _ } ->
       let resources = prepared.resources in
-      Ok (resources.native, resources.definition, resources.managed, resources.authoring)
+      (match code with
+       | None ->
+         Ok
+           (resources.native, resources.definition, resources.managed, resources.authoring)
+       | Some code ->
+         Ok
+           ( Authored_code_preparation.native code
+           , Authored_code_preparation.definition code
+           , Authored_code_preparation.managed code
+           , resources.authoring ))
     | Generated { definition; parent_runtime; inherited_managed; _ } ->
       let%map resources =
         inherit_prepared_resources
@@ -2159,12 +2208,12 @@ let build_generated
     ~extension_services:(Some services)
 ;;
 
-let build_authored_child ~services ~revision ~prepared ~authority ~history =
+let build_authored_child ~services ~revision ~prepared ~code ~authority ~history =
   build_with_services
     ~startup:None
     ~agent_source:None
     ~native_registrations:[]
-    ~source:(Authored_child { revision; prepared; authority })
+    ~source:(Authored_child { revision; prepared; code; authority })
     ~existing_history:(Some history)
     ~extension_services:(Some services)
 ;;

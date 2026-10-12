@@ -60,6 +60,8 @@ let%expect_test
             ~build:(fun ~parent_revision:_ ~tool_name:_ ~native_registrations:_ ->
               failwith "native setup ran before full graph validation")
             ~services:(fun _ _ -> failwith "graph preflight invoked an agent")
+            ~prepare_source:(fun _ ~implementation:_ ~owner:_ ~request:_ ~checkpoint:_ ->
+              failwith "graph preflight prepared source")
         in
         match result with
         | Error { code = Permission_denied; message; _ } -> print_endline message

@@ -89,7 +89,23 @@ type authored_resources = private
   { source : Authored_agent_source.t
   ; revision : Prompt_revision.t
   ; resources : resources
+  ; agent_source : Captured_agent_runner.Source_binding.t option
+  ; code_authorizer : Prompt_revision.t -> Shell_runtime.Manifest_authorizer.t
   }
+
+(** The actual constructor's original source loan and root-authorized specialist
+    manifest policy. These borrow the same existing resource lifetime. Selected
+    code never derives new authority from its artifact directory, source metadata
+    or a nested private Root. The authorizer checks the selected complete prepared
+    execution identity through the original live grant store and host policy. *)
+val authored_source_binding
+  :  authored_resources
+  -> Captured_agent_runner.Source_binding.t option
+
+val authored_code_authorizer
+  :  authored_resources
+  -> Prompt_revision.t
+  -> Shell_runtime.Manifest_authorizer.t
 
 (** Prepare the named specialist's private resources from its defining parent's
     captured source tree. Retains the authored parser, source-relative paths and
@@ -507,6 +523,13 @@ val build_generated
     history. This path never reconstructs tools or implicitly executes prompt
     content while allocating initial history.
 
+    [code] supplies already preflighted selected code over these exact original
+    private resources. The constructor checks its original/selected affinity,
+    uses its selected moderator/managed handlers and registration preparers, and
+    enters its source/shell views separately at each actual dispatch. None keeps
+    the original specialist identity check and resources for genuine legacy
+    construction; it cannot admit a changed source as the original code.
+
     The specialist's own moderator-handled tools dispatch to its own manager.
     Delegated moderators use the tool-mediated compiler surface: legacy moderator
     scripts, direct Process/Model recipes and implicit ChatMD input loading are
@@ -517,6 +540,7 @@ val build_authored_child
   :  services:extension_services
   -> revision:Prompt_revision.t
   -> prepared:authored_resources
+  -> code:Authored_code_preparation.t option
   -> authority:Delegation_authority.t
   -> history:History_entry.t list
   -> sw:Eio.Switch.t

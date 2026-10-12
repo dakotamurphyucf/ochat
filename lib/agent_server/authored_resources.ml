@@ -100,7 +100,7 @@ type plan =
   ; children : plan list
   }
 
-let prepare t ~sw ~max_depth ~revision ~build ~services =
+let prepare t ~sw ~max_depth ~revision ~build ~services ~prepare_source =
   let module Revision = Agent_session.Prompt_revision in
   let open Result.Let_syntax in
   (* Validate the entire captured graph before native preparation can connect an
@@ -143,11 +143,19 @@ let prepare t ~sw ~max_depth ~revision ~build ~services =
     let%map registrations =
       List.map prepared ~f:(fun prepared ->
         let%bind capabilities = capabilities prepared in
-        Agent_session.Authored_agent_call.registration
-          ~source:prepared.source
-          ~capabilities
-          ~services:(services prepared)
-          ())
+        let%map registration =
+          Agent_session.Authored_agent_call.registration
+            ~source:prepared.source
+            ~capabilities
+            ~services:(services prepared)
+            ()
+        in
+        let source =
+          Chat_response.Native_source_registration.create
+            ~implementation:registration.implementation
+            ~prepare:(prepare_source prepared ~implementation:registration.implementation)
+        in
+        { registration with source_requirement = Source (Some source) })
       |> Result.all
     in
     prepared, registrations

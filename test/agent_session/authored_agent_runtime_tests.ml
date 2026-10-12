@@ -393,6 +393,7 @@ let on_event ctx state event = match event with
               ~services
               ~revision
               ~prepared
+              ~code:None
               ~authority
               ~history:[]
               ~sw

@@ -125,6 +125,23 @@ val load_artifact
   -> reservation:Agent_store.Delegation_store.record
   -> (Agent_store.Prompt_artifact_store.Artifact.t, Agent_protocol.Error.t) result
 
+(** Inspect the exact artifact recorded by a host-owned authored admission.
+    Store.load admits its complete manifest and verifies its materialized tree.
+    Require the recorded revision/manifest, authored origin, supported ordinary
+    parser/runtime versions, and either complete legacy captured metadata or
+    complete current publisher metadata. Mixed metadata rejects.
+
+    This does not authenticate original wrapper/private resources, admit execution,
+    construct resources, run hooks or acquire source authority. The runtime must
+    subsequently authorize its genuine original resources and selected code.
+    Revoked records remain inspectable. The caller validates the session and prompt
+    revision correspondence before using the artifact as a state source. The
+    legacy [load_artifact] contract remains unchanged. *)
+val load_recorded_artifact
+  :  artifact_store:Agent_store.Prompt_artifact_store.t
+  -> reservation:Agent_store.Delegation_store.record
+  -> (Agent_store.Prompt_artifact_store.Artifact.t, Agent_protocol.Error.t) Result.t
+
 (** Exact retained authored closure with this child's selected root. *)
 val authored_sources : t -> Chatmd_source_bundle.t
 

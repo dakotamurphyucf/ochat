@@ -72,6 +72,16 @@ val agent_artifact_for_implementation
     capability, source loan, actor or approval authority. *)
 val with_agent_source_code_view : t -> Agent_source_code_view.t -> t
 
+(** Selected specialist hooks over the same original native functions/resources.
+    Each actual native dispatch enters a NEW borrowed code admission and composes
+    its executor projection after the existing current caller/channel adapter.
+    Neither a creating fiber's scope nor a borrowed execution is retained. The
+    owning resource switch must outlive the code view and all joined dispatch.
+    Requires genuine shell caller services; missing/expired code or caller scope
+    rejects at native entry without running the original specialist code instead.
+    Original callback/cancellation exceptions retain identity. *)
+val with_shell_code_view : t -> Shell_runtime.Registry.Code_view.t -> t
+
 (** Authenticate any saved target first, then check the actual current native
     service, invocation ceiling/binding and actor authorization before projecting
     the invoking function's selected defining context. A different actual native

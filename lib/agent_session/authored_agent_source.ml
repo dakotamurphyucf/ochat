@@ -162,6 +162,37 @@ let load_artifact ~artifact_store ~(reservation : Agent_store.Delegation_store.r
   | _ -> denied "authored artifact differs from its reserved source contract"
 ;;
 
+let load_recorded_artifact
+      ~artifact_store
+      ~(reservation : Agent_store.Delegation_store.record)
+  =
+  let open Result.Let_syntax in
+  let%bind () =
+    match reservation.admission.authored_tool with
+    | Some _ -> Ok ()
+    | None -> denied "authored artifact requires an authored reservation"
+  in
+  let%bind stored =
+    Store.load artifact_store reservation.admission.revision_id |> store_result
+  in
+  let%bind () =
+    if
+      P.Id.Prompt_revision.equal stored.revision_id reservation.admission.revision_id
+      && String.equal stored.manifest_sha256 reservation.admission.manifest_sha256
+    then Ok ()
+    else denied "authored artifact differs from its recorded revision or manifest"
+  in
+  match
+    ( stored.parser_schema_version
+    , stored.runtime_schema_version
+    , stored.prompt_definition_id
+    , stored.canonical_source
+    , stored.shell_manifest_sha256 )
+  with
+  | 5, 1, None, None, None | 5, 1, Some _, Some _, Some _ -> Ok stored
+  | _ -> denied "authored artifact differs from its recorded publisher contract"
+;;
+
 let install_reserved ~delegations ~reservation ~artifact_store ~capability_pins t =
   let module D = Agent_store.Delegation_store in
   let open Result.Let_syntax in

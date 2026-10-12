@@ -69,6 +69,7 @@ type t =
   ; generated_creation_service : Generated_session_request.service option
   ; managed_session_service : Managed_session_service.t option
   ; agent_source_code_view : Agent_source_code_view.t option
+  ; shell_code_view : Shell_runtime.Registry.Code_view.t option
   ; agent_artifact :
       (C.binding
       * Agent_protocol.Id.Invocation.t
@@ -107,7 +108,10 @@ let with_native_services tools ~session_id ~generation f =
     ~f:(fun () ->
       Eio.Fiber.with_binding native_services_key context (fun () ->
         match tools.shell_context with
-        | None -> Shell_runtime.Call_context.without_services f
+        | None ->
+          (match tools.shell_code_view with
+           | None -> Shell_runtime.Call_context.without_services f
+           | Some _ -> failwith "selected shell code requires current caller services")
         | Some services ->
           let check () =
             let open Result.Let_syntax in
@@ -146,23 +150,43 @@ let with_native_services tools ~session_id ~generation f =
             tools.authorize invocation binding
             |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
           in
-          Shell_runtime.Call_context.with_services
-            ~prepare_executor:
-              (Session_management_channel.prepare_executor
-                 ~grants:tools.session_helpers
-                 ~creation:tools.generated_creation_service
-                 ~sessions:tools.managed_session_service
-                 ~authoring:tools.authoring_services)
-            (fun () ->
-               let open Result.Let_syntax in
-               let%map services = services () in
-               { services with
-                 check =
-                   (fun () ->
-                     let%bind () = check () in
-                     services.check ())
-               })
-            f))
+          let enter code =
+            Shell_runtime.Call_context.with_services
+              ~prepare_executor:(fun config ->
+                let open Result.Let_syntax in
+                let%bind config =
+                  Session_management_channel.prepare_executor
+                    ~grants:tools.session_helpers
+                    ~creation:tools.generated_creation_service
+                    ~sessions:tools.managed_session_service
+                    ~authoring:tools.authoring_services
+                    config
+                in
+                match code with
+                | None -> Ok config
+                | Some execution ->
+                  Shell_runtime.Registry.Code_view.Execution.prepare_executor
+                    execution
+                    config)
+              (fun () ->
+                 let open Result.Let_syntax in
+                 let%map services = services () in
+                 { services with
+                   check =
+                     (fun () ->
+                       let%bind () = check () in
+                       services.check ())
+                 })
+              f
+          in
+          (match tools.shell_code_view with
+           | None -> enter None
+           | Some view ->
+             Shell_runtime.Registry.Code_view.with_execution
+               view
+               ~checkpoint:Eio.Fiber.check
+               (fun execution -> enter (Some execution))
+             |> Result.ok_or_failwith)))
 ;;
 
 module Native_services_scope = struct
@@ -281,6 +305,7 @@ let agent_artifact_for_implementation t ~implementation =
 ;;
 
 let with_agent_source_code_view t view = { t with agent_source_code_view = Some view }
+let with_shell_code_view t view = { t with shell_code_view = Some view }
 
 let agent_source_context t ~defining_revision ~implementation =
   let open Result.Let_syntax in
@@ -382,6 +407,7 @@ let create
   ; generated_creation_service = None
   ; managed_session_service = None
   ; agent_source_code_view = None
+  ; shell_code_view = None
   ; agent_artifact = None
   }
 ;;

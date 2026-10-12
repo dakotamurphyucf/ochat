@@ -250,6 +250,75 @@ type invocation_target =
   | Tool_target of Ochat_function.t option
   | Content_target
 
+let select_installed_child
+      installed
+      ~script_preparation
+      ~content_limits
+      ~parent
+      ~reference
+      ~(invocation : Preparation.Invocation.t)
+      ~recorded
+      ~checkpoint
+  =
+  match recorded with
+  | Some recorded ->
+    Prompt_child_source.restore
+      ~artifact_store:installed.Installed.artifact_store
+      ~definition:(Prompt_revision.definition parent)
+      ~content_limits
+      recorded
+      ~checkpoint
+  | None ->
+    (match CM.Agent_reference.source_mode reference with
+     | Captured ->
+       Prompt_child_source.captured
+         ~parent
+         ~reference
+         ~artifact_store:installed.artifact_store
+         ~policy:script_preparation
+         ~invocation
+         ~content_limits
+         ~env:installed.env
+         ~checkpoint
+     | File ->
+       let source = installed.source in
+       let created_at =
+         Eio.Time.now (Eio.Stdenv.clock installed.env)
+         |> Time_ns.Span.of_sec
+         |> Time_ns.of_span_since_epoch
+         |> Agent_protocol.Timestamp.of_time_ns
+       in
+       Prompt_child_source.file
+         ~parent
+         ~reference
+         ~source_lease:installed.source_lease
+         ~artifact_store:installed.artifact_store
+         ~compilation:source.compilation
+         ~parser_limits:source.parser_limits
+         ~content_limits
+         ~max_work_steps:source.max_work_steps
+         ~preprocess:source.preprocess
+         ~prepare_programs:(fun startup scope capture ->
+           source.prepare_programs startup ~invocation scope capture)
+         ~env:installed.env
+         ~created_at
+         ~checkpoint)
+;;
+
+let select_child t installed ~parent ~reference ~invocation ~recorded ~checkpoint =
+  let open Result.Let_syntax in
+  let%bind () = check_domain t in
+  select_installed_child
+    installed
+    ~script_preparation:t.script_preparation
+    ~content_limits:t.content_limits
+    ~parent
+    ~reference
+    ~invocation
+    ~recorded
+    ~checkpoint
+;;
+
 let rec bind_with_checkpoint ?installed t ~revision ~sw ~checkpoint =
   let open Result.Let_syntax in
   let%map parsed, projection, identity = admit_revision t revision ~checkpoint in
@@ -293,6 +362,7 @@ let rec bind_with_checkpoint ?installed t ~revision ~sw ~checkpoint =
                 installed
                 ~parent:revision
                 ~reference
+                ~invocation:Headless
                 ~recorded:None
                 ~checkpoint
             in
@@ -322,53 +392,6 @@ let rec bind_with_checkpoint ?installed t ~revision ~sw ~checkpoint =
   in
   port
 
-and select_child t installed ~parent ~reference ~recorded ~checkpoint =
-  let open Result.Let_syntax in
-  let%bind () = check_domain t in
-  match recorded with
-  | Some recorded ->
-    Prompt_child_source.restore
-      ~artifact_store:installed.Installed.artifact_store
-      ~definition:(Prompt_revision.definition parent)
-      ~content_limits:t.content_limits
-      recorded
-      ~checkpoint
-  | None ->
-    (match CM.Agent_reference.source_mode reference with
-     | Captured ->
-       Prompt_child_source.captured
-         ~parent
-         ~reference
-         ~artifact_store:installed.artifact_store
-         ~policy:t.script_preparation
-         ~invocation:Headless
-         ~content_limits:t.content_limits
-         ~env:installed.env
-         ~checkpoint
-     | File ->
-       let source = installed.source in
-       let created_at =
-         Eio.Time.now (Eio.Stdenv.clock installed.env)
-         |> Time_ns.Span.of_sec
-         |> Time_ns.of_span_since_epoch
-         |> Agent_protocol.Timestamp.of_time_ns
-       in
-       Prompt_child_source.file
-         ~parent
-         ~reference
-         ~source_lease:installed.source_lease
-         ~artifact_store:installed.artifact_store
-         ~compilation:source.compilation
-         ~parser_limits:source.parser_limits
-         ~content_limits:t.content_limits
-         ~max_work_steps:source.max_work_steps
-         ~preprocess:source.preprocess
-         ~prepare_programs:(fun startup scope capture ->
-           source.prepare_programs startup ~invocation:Headless scope capture)
-         ~env:installed.env
-         ~created_at
-         ~checkpoint)
-
 and invoke
       ?installed
       t
@@ -386,7 +409,7 @@ and invoke
   Runtime_activity.with_switch activity (fun ~sw ->
     let env = Chat_response.Ctx.env ctx in
     let checkpoint = Eio.Fiber.check in
-    let run startup ~revision ~compilation_limits ~programs =
+    let run caller startup ~revision ~compilation_limits ~programs =
       let poll () = Startup.checkpoint startup in
       let open Result.Let_syntax in
       let%bind child =
@@ -446,7 +469,7 @@ and invoke
               ~content_limits:t.content_limits
               ~env
               ~checkpoint:poll
-              ~f:run)
+              ~f:(run caller))
           ()
       | Some installed ->
         (* A recorded selection belongs only to this actual tool invocation.
@@ -469,9 +492,38 @@ and invoke
              | Expired -> Error (failure "selected child native invocation has expired")
              | Unbound | Active _ -> Ok None)
         in
-        let%bind reference = reference ~checkpoint in
+        let%bind context =
+          match recorded, target, Script_tool_calls.native_services_scope () with
+          | None, Tool_target (Some implementation), Active services ->
+            Script_tool_calls.agent_source_context
+              services
+              ~defining_revision:parent
+              ~implementation
+          | Some _, _, _
+          | None, (Content_target | Tool_target None), _
+          | None, Tool_target (Some _), (Expired | Unbound) -> Ok None
+        in
+        let%bind parent, caller, reference =
+          match context with
+          | None ->
+            let%map reference = reference ~checkpoint in
+            parent, caller, reference
+          | Some context ->
+            let parent = Agent_source_code_view.Context.revision context in
+            let%map caller =
+              bind_with_checkpoint ~installed t ~revision:parent ~sw ~checkpoint
+            in
+            parent, caller, Agent_source_code_view.Context.reference context
+        in
         let%bind selected =
-          select_child t installed ~parent ~reference ~recorded ~checkpoint
+          select_child
+            t
+            installed
+            ~parent
+            ~reference
+            ~invocation:Headless
+            ~recorded
+            ~checkpoint
         in
         let revision = Prompt_child_source.revision selected in
         Preparation.with_revision
@@ -480,7 +532,7 @@ and invoke
           ~env
           ~invocation:Headless
           ~checkpoint
-          ~f:(run ~revision)
+          ~f:(run caller ~revision)
     in
     runner_result result)
 ;;
@@ -563,5 +615,37 @@ module Source_binding = struct
         ~env
         ~revision
         ~sw)
+  ;;
+
+  let select_child
+        t
+        ~script_preparation
+        ~env
+        ~parent
+        ~reference
+        ~invocation
+        ~recorded
+        ~checkpoint
+    =
+    if not (Int.equal t.domain_id (Stdlib.Domain.self () :> int))
+    then Error (failure "source binding belongs to another Eio domain")
+    else (
+      let installed =
+        Installed.
+          { source = t.source
+          ; artifact_store = t.artifact_store
+          ; source_lease = Prompt_source_lease.borrow t.source_lease
+          ; env
+          }
+      in
+      select_installed_child
+        installed
+        ~script_preparation
+        ~content_limits:t.content_limits
+        ~parent
+        ~reference
+        ~invocation
+        ~recorded
+        ~checkpoint)
   ;;
 end
