@@ -18,6 +18,7 @@
   conversation_search
   blob_download
   session_handle
+  completion_view
   reconnect)
  (libraries core eio base64 digestif ochat.agent_protocol ochat.transcript ochat.document_schema)
  (preprocess
