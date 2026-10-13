@@ -463,3 +463,31 @@ let query_semantics t (request : P.Analysis.Query.Request.t) =
       | Ok _ -> incompatible "query response changed its request"
       | Error _ as failure -> failure))
 ;;
+
+let lexical t (request : P.Assistance.Lexical.Request.t) =
+  with_request_lock t (fun () ->
+    let open Result.Let_syntax in
+    let%bind () = Authoring_connection.require_feature t.endpoint P.Features.lexical in
+    let%bind () = require_current t (P.Assistance.Lexical.Request.context request) in
+    match send t (W.Request.Lexical request) with
+    | Ok (W.Response.Lexical result)
+      when P.Assistance.Lexical.Request.equal
+             (P.Assistance.Lexical.Result.request result)
+             request -> Ok result
+    | Ok _ -> incompatible "lexical response changed request source or view"
+    | Error _ as failure -> failure)
+;;
+
+let assist t (request : P.Assistance.Assistance.Request.t) =
+  with_request_lock t (fun () ->
+    let open Result.Let_syntax in
+    let%bind () = Authoring_connection.require_feature t.endpoint P.Features.assistance in
+    let%bind () = require_current t (P.Assistance.Assistance.Request.context request) in
+    match send t (W.Request.Assistance request) with
+    | Ok (W.Response.Assistance result)
+      when P.Assistance.Assistance.Request.equal
+             (P.Assistance.Assistance.Result.request result)
+             request -> Ok result
+    | Ok _ -> incompatible "assistance response changed request or source"
+    | Error _ as failure -> failure)
+;;

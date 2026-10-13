@@ -251,12 +251,20 @@ valid UTF-8; their constructors and decoders return typed errors for malformed
 text. Captured source bytes, digests and native byte sites remain unchanged.
 The host projection must explicitly escape unrepresentable diagnostic bytes or
 return a typed unavailable fact rather than silently dropping source evidence.
-The protocol also exposes source/context-revision-bound lexical spans and
-syntax, tag, attribute, path and template assistance without requiring an
-analysis stamp. The former uses the shared pure lexical role vocabulary;
-the latter checks actual admitted project and environment facts. Both remain
-distinct from certified semantic query results and can help on incomplete
-source before a whole-file check succeeds.
+The portable `authoring.lexical` method returns byte-exact spans in all 16
+shared highlighter roles, five open-construct issue kinds and a truthful
+reached-EOF or truncated scanned prefix. Its owner distinguishes captured
+ChatML source from ChatMD parser input and authored/effective view digests;
+malformed UTF-8 source bytes remain valid lexical input. `authoring.assistance`
+returns bounded tag, attribute, value, reference, path, template and
+environment suggestions with exact authored replacement ranges. Static
+grammar, genuinely parsed document/project declarations, installed builtin
+assets, selected Build inputs and authorized host roots have distinct evidence
+forms. A parsed environment name can be suggested before selecting a valid
+Build; a declared path is not presented as a verified file. Both methods are
+independently negotiated and unavailable until their actual handlers are
+installed. Neither method certifies semantic facts or requires a successful
+whole-file check.
 `Unavailable` and `Ambiguous` remain distinct from a successful empty result.
 No completion operation invokes prompt preprocessing, scripts, tools, model
 inference, Git/HTTP fetch, install or initializer evaluation.

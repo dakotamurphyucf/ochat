@@ -30,6 +30,12 @@ module Features : sig
   (** Selected separately from source access, and advertised only when the
       corresponding analyze/query or lexical/assistance handlers are installed. *)
   val semantic : string
+
+  (** Lexical scanning and early assistance may be installed independently.
+      Neither feature implies a selected Build or semantic analysis. *)
+  val lexical : string
+
+  val assistance : string
 end
 
 module Encoding : sig
@@ -63,6 +69,8 @@ module Method : sig
     | Analyze
     | Prefix
     | Query
+    | Lexical
+    | Assistance
   [@@deriving compare, equal, sexp_of]
 
   (** Closed stable [authoring.*] method names. A method's presence in this
