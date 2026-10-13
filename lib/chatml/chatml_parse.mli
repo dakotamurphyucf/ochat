@@ -84,6 +84,76 @@ val parse_captured
   -> checkpoint:(unit -> unit)
   -> (Unit.t, diagnostic) result
 
+module Submission : sig
+  (** Admission for one complete REPL submission. Uses the production program
+      grammar and lexer on the exact captured bytes. No statement can be typed or
+      evaluated from this result until [Complete] is returned. Existing batch
+      parser entrypoints keep their current syntax and diagnostic behavior. *)
+
+  module Limits : sig
+    type t
+
+    (** Positive source-byte, token (including physical EOF), and parser/lexer
+        work ceilings; [sites] separately bounds retained identifier metadata.
+        Work includes tokenization of long whitespace/comment/string regions and
+        Menhir incremental transitions. Counts are checked before increment or
+        allocation, and no limit can be reset during this parse. *)
+    val create
+      :  max_source_bytes:int
+      -> max_tokens:int
+      -> max_work_steps:int
+      -> sites:Chatml_syntax_sites.Limits.t
+      -> t Core.Or_error.t
+  end
+
+  module Need_more : sig
+    type reason =
+      | Parser_eof
+      | Comment_eof
+      | String_eof
+    [@@deriving equal, sexp_of]
+
+    type t
+
+    val reason : t -> reason
+
+    (** Zero-width physical EOF location bound to the exact source ID/digest.
+        Parser_eof means the real parser rejected only the real EOF after
+        accepting every preceding token; the lexer cases come from explicit
+        unfinished lexical states. No guessed closing tokens or string-message
+        matching participate. *)
+    val at : t -> Chatml_source.Location.t
+  end
+
+  module Rejection : sig
+    type reason =
+      | Syntax of diagnostic
+      | Source_byte_limit
+      | Token_limit
+      | Work_limit
+      | Sites of Chatml_syntax_sites.Error.t
+
+    type t
+
+    val source : t -> Chatml_source.t
+    val reason : t -> reason
+  end
+
+  type t =
+    | Complete of Unit.t
+    | Need_more of Need_more.t
+    | Rejected of Rejection.t
+
+  (** Parse the whole source once with source-bound identifier sites. [Need_more]
+      is a viable unfinished prefix, not a generic error near EOF; bad tokens or
+      an impossible parser continuation are [Rejected (Syntax ...)]. A complete
+      AST and sites publish together. Rejected/incomplete parses publish neither
+      AST nor site table. Poll [checkpoint] throughout, including long lexical
+      regions and final publication; its exceptions and backtraces escape
+      unchanged. This API performs no typecheck, resolver use or effects. *)
+  val parse : Chatml_source.t -> limits:Limits.t -> checkpoint:(unit -> unit) -> t
+end
+
 (** Render a parser diagnostic using the original source text. *)
 val format_diagnostic : string -> diagnostic -> string
 

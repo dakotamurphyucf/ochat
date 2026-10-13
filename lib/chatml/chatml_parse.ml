@@ -230,6 +230,182 @@ let parse_captured_interface_with_sites source ~limits ~checkpoint =
     { Interface.source; signature; sites = Some sites })
 ;;
 
+module Submission = struct
+  module Limits = struct
+    type t =
+      { max_source_bytes : int
+      ; max_tokens : int
+      ; max_work_steps : int
+      ; sites : Chatml_syntax_sites.Limits.t
+      }
+
+    let create ~max_source_bytes ~max_tokens ~max_work_steps ~sites =
+      if
+        Int.( <= ) max_source_bytes 0
+        || Int.( <= ) max_tokens 0
+        || Int.( <= ) max_work_steps 0
+      then Or_error.error_string "REPL parser limits must be positive"
+      else Ok { max_source_bytes; max_tokens; max_work_steps; sites }
+    ;;
+  end
+
+  module Need_more = struct
+    type reason =
+      | Parser_eof
+      | Comment_eof
+      | String_eof
+    [@@deriving equal, sexp_of]
+
+    type t =
+      { reason : reason
+      ; at : Chatml_source.Location.t
+      }
+
+    let reason t = t.reason
+    let at t = t.at
+  end
+
+  module Rejection = struct
+    type reason =
+      | Syntax of diagnostic
+      | Source_byte_limit
+      | Token_limit
+      | Work_limit
+      | Sites of Chatml_syntax_sites.Error.t
+
+    type t =
+      { source : Chatml_source.t
+      ; reason : reason
+      }
+
+    let source t = t.source
+    let reason t = t.reason
+  end
+
+  type t =
+    | Complete of Unit.t
+    | Need_more of Need_more.t
+    | Rejected of Rejection.t
+
+  exception Stop of Rejection.reason
+  exception Awaiting_input of Need_more.reason
+  exception Invalid_syntax of string
+
+  let parse source ~limits ~checkpoint =
+    let rejected reason = Rejected { Rejection.source; reason } in
+    if Int.( > ) (Chatml_source.byte_length source) limits.Limits.max_source_bytes
+    then rejected Rejection.Source_byte_limit
+    else
+      Chatml_checkpoint.protect checkpoint ~f:(fun checkpoint ->
+        let source_text = Chatml_source.contents source in
+        let work = ref 0 in
+        let charge amount =
+          if Int.( < ) amount 0 || Int.( > ) amount (limits.max_work_steps - !work)
+          then raise (Stop Rejection.Work_limit);
+          let previous = !work in
+          work := previous + amount;
+          if not (Int.equal (previous / 64) (!work / 64)) then checkpoint ()
+        in
+        let poll () =
+          charge 1;
+          checkpoint ()
+        in
+        let at_eof () =
+          let byte = Chatml_source.byte_length source in
+          Chatml_source.locate source ~start_byte:byte ~end_byte:byte ~checkpoint:poll
+          |> Or_error.ok_exn
+        in
+        let next_byte = ref 0 in
+        let lexbuf =
+          Lexing.from_function (fun destination requested ->
+            poll ();
+            let available = String.length source_text - !next_byte in
+            let count = Int.min 4096 (Int.min requested available) in
+            Stdlib.Bytes.blit_string source_text !next_byte destination 0 count;
+            next_byte := !next_byte + count;
+            count)
+        in
+        let tokens = ref 0 in
+        let last_was_eof = ref false in
+        let syntax_message = ref "Syntax error" in
+        let parse (module Sink : Chatml_syntax_sites.Sink) =
+          let module Parser = Chatml_parser.Make (Sink) in
+          let module Interpreter = Parser.MenhirInterpreter in
+          let rec accepts_string state =
+            charge 1;
+            match state with
+            | Interpreter.Shifting _ -> true
+            | Interpreter.AboutToReduce _ -> accepts_string (Interpreter.resume state)
+            | Interpreter.HandlingError _ | Interpreter.Rejected -> false
+            | Interpreter.InputNeeded _ | Interpreter.Accepted _ -> false
+          in
+          let rec drive state =
+            charge 1;
+            match state with
+            | Interpreter.InputNeeded _ ->
+              if Int.( >= ) !tokens limits.max_tokens
+              then raise (Stop Rejection.Token_limit);
+              incr tokens;
+              let token =
+                try Chatml_lexer.token_checked charge lexbuf with
+                | Chatml_lexer.Incomplete Chatml_lexer.Comment_eof ->
+                  raise (Awaiting_input Need_more.Comment_eof)
+                | Chatml_lexer.Incomplete Chatml_lexer.String_eof ->
+                  let position = lexbuf.lex_start_p in
+                  if
+                    accepts_string
+                      (Interpreter.offer state (STRING "", position, position))
+                  then raise (Awaiting_input Need_more.String_eof)
+                  else raise (Invalid_syntax "Syntax error")
+                | Failure message ->
+                  syntax_message := message;
+                  raise (Invalid_syntax message)
+              in
+              (last_was_eof
+               := match token with
+                  | EOF -> true
+                  | _ -> false);
+              drive
+                (Interpreter.offer state (token, lexbuf.lex_start_p, lexbuf.lex_curr_p))
+            | Interpreter.Shifting _ | Interpreter.AboutToReduce _ ->
+              drive (Interpreter.resume state)
+            | Interpreter.Accepted statements -> statements
+            | Interpreter.HandlingError _ | Interpreter.Rejected ->
+              if !last_was_eof
+              then raise (Awaiting_input Need_more.Parser_eof)
+              else raise (Invalid_syntax !syntax_message)
+          in
+          drive (Parser.Incremental.program lexbuf.lex_curr_p)
+        in
+        let classify () =
+          try
+            match
+              Chatml_syntax_sites.collect
+                source
+                ~limits:limits.sites
+                ~checkpoint:poll
+                ~f:parse
+            with
+            | Ok (statements, sites) ->
+              poll ();
+              let program : program = { stmts = statements; source_text } in
+              Complete { Unit.source; program; sites = Some sites }
+            | Error error -> rejected (Rejection.Sites error)
+          with
+          | Awaiting_input reason -> Need_more { Need_more.reason; at = at_eof () }
+          | Failure message | Invalid_syntax message ->
+            let diagnostic =
+              diagnostic_of_lexbuf lexbuf message
+              |> fun diagnostic ->
+              Chatml_owned_source.attach source diagnostic ~checkpoint:poll
+            in
+            rejected (Rejection.Syntax diagnostic)
+        in
+        try classify () with
+        | Stop reason -> rejected reason)
+  ;;
+end
+
 let parse_program_exn (source_text : string) : program =
   match parse_program source_text with
   | Ok prog -> prog
