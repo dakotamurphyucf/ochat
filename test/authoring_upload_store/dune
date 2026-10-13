@@ -1,0 +1,14 @@
+(library
+ (name authoring_upload_store_test)
+ (modules authoring_upload_store_test)
+ (libraries
+  core
+  eio
+  eio_main
+  mirage-crypto-rng.unix
+  ochat.agent_store
+  ochat.agent_protocol
+  ochat.chatml_source)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

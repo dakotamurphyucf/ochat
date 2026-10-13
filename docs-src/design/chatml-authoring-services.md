@@ -308,7 +308,19 @@ a versioned digest of the exact qualified project source, selection and sorted
 member ID/digest/length inventory. `Source.Portable_path` rejects exact,
 ASCII-case and file/directory prefix conflicts within each source namespace.
 Storage/receipt ownership and pure closure validation/publication are separate
-components. Reuse checked blob-store streaming mechanics
+components. The private upload stage records a versioned immutable manifest,
+atomic phase and accepted-offset documents, and numeric member data files under
+the daemon's locked data root. It fsyncs accepted bytes before advancing an
+offset. Recovery discards unacknowledged suffixes, rechecks sealed payloads,
+and rejects missing or conflicting authority rather than guessing that a
+partially written stage was accepted. A manifest without a phase can resume as
+Open only when no member progress or data exists. Expiry first writes a durable
+tombstone; pruning renames the upload directory to a recognizable cleanup
+marker before deleting its records, so an interrupted deletion cannot recreate
+an Open stage. Finite per-principal source reservations and active-count limits,
+plus global metadata, source-byte and record limits, bound claim and tombstone
+retention. The staging store cannot
+publish a bundle or issue a Published receipt. Reuse checked blob-store streaming mechanics
 where appropriate, but do not reuse message-input `Send_messages` scope,
 one-hour temporary retention or `allowed_use` as authoring authority. Local,
 HTTP and stdio clients share the same bundle receipt contract.
@@ -339,7 +351,7 @@ client contract (8);
 OCH-280 analysis, lexical and assistance wire/client contract (5); OCH-281
 bundle wire/client contract (5); OCH-282 document-only context host admission
 (5); OCH-262 HTTP/stdio server adapters (5); OCH-263 authoring bundle
-staging/storage/receipt (5); and OCH-264 pure closure validation/publication
+staging/storage/receipt (8); and OCH-264 pure closure validation/publication
 (5). OCH-261 includes separate live host browse/read and captured source read.
 OCH-133, OCH-134 and OCH-135 retain their own assistance and highlighting
 outcomes. The run/test/trace/REPL implementation belongs to its developer-runtime
