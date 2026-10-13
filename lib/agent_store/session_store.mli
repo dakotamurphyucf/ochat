@@ -35,6 +35,28 @@ module Handle : sig
 
   val session_id : t -> Agent_protocol.Id.Session.t
   val directory : t -> string
+
+  (** Exact live daemon-root layout for a conservative developer-evidence scan.
+      Rechecks this Handle, its original filesystem capability and the bound
+      Blob_store locations; returns a comparison path, not a result-root grant. *)
+  val developer_evidence_directory
+    :  t
+    -> env:Eio_unix.Stdenv.base
+    -> temporary_directory:string
+    -> durable_directory:string
+    -> (string, Store_error.t) result
+
+  (** Hold the issuing daemon's developer-root gate through [f]. This must be
+      called inside the Blob_store retention coordinator, before any reference
+      proof or deletion. A live developer-root owner returns [Ok None], leaving
+      conversation collection deferred. With no owner, new developer claims and
+      leases cannot enter until [f] returns. Rejects stale Handles and recursive
+      entry; preserves callback exceptions and cancellation. *)
+  val with_developer_root_collection
+    :  t
+    -> f:(unit -> ('a, Store_error.t) result)
+    -> ('a option, Store_error.t) result
+
   val snapshot_directory : t -> string
   val journal_directory : t -> string
   val cache_directory : t -> string
@@ -78,6 +100,18 @@ val complete_index_recovery : t -> (unit, Store_error.t) result
 (** [is_closed t] reports whether [close] released the daemon-store lock. *)
 val is_closed : t -> bool
 
+(** Host-only affinity check for joining the existing Blob_store to this
+    daemon-owned data root. Checks the live original daemon lock, the exact
+    Eio filesystem capability and both canonical Data_root blob directories;
+    equal native path strings in different filesystems are insufficient. This
+    returns no new storage handle or authority. *)
+val validate_blob_storage
+  :  t
+  -> env:Eio_unix.Stdenv.base
+  -> temporary_directory:string
+  -> durable_directory:string
+  -> (unit, Store_error.t) result
+
 (** One developer-run document owner under this store's existing daemon lock.
     The physical claim is unique per live Session_store. Every lease serializes
     developer-run I/O, checks the original lock and coordinates with [close],
@@ -87,6 +121,7 @@ module Developer_root : sig
   type owner
 
   val claim : t -> (owner, Store_error.t) result
+  val issued_by : owner -> t -> bool
 
   val with_lease
     :  owner

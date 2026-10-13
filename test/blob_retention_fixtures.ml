@@ -51,7 +51,7 @@ let stage env sw blobs session id value =
   let metadata : Blob.Metadata.t =
     { blob
     ; creating_principal = principal
-    ; target_session = Some job.session_id
+    ; target = Blob.Metadata.Target.Session job.session_id
     ; allowed_use = P.Job_artifact.allowed_use reference
     ; created_at = timestamp
     ; expires_at = None

@@ -13,15 +13,20 @@ val published : t -> Agent_protocol.Id.Blob.t -> bool
     private intents. Candidate files may be absent or partially prepared; complete
     data must match its intent and decode as a completion. A shorter candidate
     partial is not a readable completion and supplies no dependency edges.
-    Other blobs require complete matching metadata/data. Unknown files, unowned
+    Other blobs require complete matching metadata/data. The shared bounded
+    developer namespace is validated through the same Blob_store coordinator
+    and authentic Developer_run_store roots. Until a cross-owner reference proof
+    is available, any developer run document or namespace entry blocks session
+    deletion; a nonempty namespace without the bound Store fails. Unknown files, unowned
     partials, identity/digest/JSON errors and exhausted budgets fail the entire
     scan. Original raw length/digest validation precedes JSON admission. The full
     decoded content must satisfy the shared document depth/field/node profile
     and [max_file_bytes] before recursive reference scanning or completion decoding.
     All file bytes remain charged to the same aggregate reader; no subtree walk
     resets a validation or retention allowance.
-    Caller must retain actor, cache, publisher and storage serialization until
-    combining this graph with every other root and using the result. *)
+    Caller must retain actor, cache, publisher, storage and the issuing
+    Session_store Handle's developer-root gate through combining this graph
+    with every other root and using the result. *)
 val scan
   :  scope:Blob_store.retention
   -> session:Session_store.Handle.t
