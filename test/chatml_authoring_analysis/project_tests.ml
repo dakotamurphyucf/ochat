@@ -188,6 +188,7 @@ let%test_unit
        A.Project_cache.publish
          (A.Project_cache.create ~contexts ~policy:foreign_policy)
          candidate
+         ~occupied_elsewhere:0
          ~checkpoint:ignore
      with
      | Error A.Error.Policy_mismatch -> ()
@@ -206,7 +207,10 @@ let%test_unit
      | exception Interrupted -> ()
      | Error error -> Error.raise_s (A.Error.sexp_of_t error)
      | Ok _ -> failwith "candidate ignored interrupted comparison");
-    let cache = A.Project_cache.publish cache candidate ~checkpoint:ignore |> ok in
+    let cache =
+      A.Project_cache.publish cache candidate ~occupied_elsewhere:0 ~checkpoint:ignore
+      |> ok
+    in
     assert (Option.is_some (A.Project_cache.current cache ~identity:id));
     let version =
       C.version (A.Project_cache.contexts cache) ~identity:id ~source:(S.id fixture.main)
@@ -236,7 +240,9 @@ let%test_unit
      | Error A.Error.Receipt_mismatch -> ()
      | Error error -> Error.raise_s (A.Error.sexp_of_t error)
      | Ok _ -> failwith "old captured receipt analyzed against edited inputs");
-    (match A.Project_cache.publish cache candidate ~checkpoint:ignore with
+    (match
+       A.Project_cache.publish cache candidate ~occupied_elsewhere:0 ~checkpoint:ignore
+     with
      | Error A.Error.Stale_generation -> ()
      | Error error -> Error.raise_s (A.Error.sexp_of_t error)
      | Ok _ -> failwith "stale worker published after edit");
@@ -276,7 +282,9 @@ let%test_unit
     (match A.Checked.status type_checked with
      | Failed _ -> ()
      | Complete _ -> failwith "unknown value unexpectedly typechecked");
-    let cache = A.Project_cache.publish cache next ~checkpoint:ignore |> ok in
+    let cache =
+      A.Project_cache.publish cache next ~occupied_elsewhere:0 ~checkpoint:ignore |> ok
+    in
     let replacement_id =
       C.Identity.create
         ~principal:"analysis-principal"
@@ -347,8 +355,12 @@ let%test_unit "one retained result is a real cross-context capacity bound" =
     let first = candidate first_id in
     let second = candidate second_id in
     let cache = A.Project_cache.create ~contexts ~policy in
-    let cache = A.Project_cache.publish cache first ~checkpoint:ignore |> ok in
-    (match A.Project_cache.publish cache second ~checkpoint:ignore with
+    let cache =
+      A.Project_cache.publish cache first ~occupied_elsewhere:0 ~checkpoint:ignore |> ok
+    in
+    (match
+       A.Project_cache.publish cache second ~occupied_elsewhere:0 ~checkpoint:ignore
+     with
      | Error A.Error.Retention_limit -> ()
      | Error error -> Error.raise_s (A.Error.sexp_of_t error)
      | Ok _ -> failwith "second result exceeded retention cap");
@@ -356,7 +368,9 @@ let%test_unit "one retained result is a real cross-context capacity bound" =
       C.close_context (A.Project_cache.contexts cache) ~identity:first_id |> context_ok
     in
     let cache = A.Project_cache.transition cache ~contexts:remaining in
-    let cache = A.Project_cache.publish cache second ~checkpoint:ignore |> ok in
+    let cache =
+      A.Project_cache.publish cache second ~occupied_elsewhere:0 ~checkpoint:ignore |> ok
+    in
     assert (Option.is_some (A.Project_cache.current cache ~identity:second_id)))
 ;;
 

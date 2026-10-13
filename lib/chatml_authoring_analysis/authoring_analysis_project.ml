@@ -205,6 +205,7 @@ module Project_cache = struct
   ;;
 
   let contexts t = t.contexts
+  let retained_count t = Map.length t.results
 
   let current_key_matches contexts payload =
     let stamp = Project_payload.stamp payload in
@@ -240,13 +241,15 @@ module Project_cache = struct
     | None | Some _ -> None
   ;;
 
-  let publish t candidate ~checkpoint =
+  let publish t candidate ~occupied_elsewhere ~checkpoint =
     let open Result.Let_syntax in
     let payload = Project_candidate.payload candidate in
     let stamp = Project_payload.stamp payload in
     let identity = Project_stamp.identity stamp in
     if not (phys_equal t.policy candidate.policy)
     then Error Error.Policy_mismatch
+    else if occupied_elsewhere < 0
+    then Error Error.Invalid_occupancy
     else (
       let%bind current_inputs =
         Context.inputs t.contexts ~identity ~checkpoint
@@ -283,7 +286,11 @@ module Project_cache = struct
                      (Project_stamp.selected_contract stamp))
       then Error Error.Stale_generation
       else if
-        (not (Map.mem t.results identity)) && Map.length t.results >= t.policy.max_results
+        occupied_elsewhere > t.policy.max_results
+        ||
+        let available = t.policy.max_results - occupied_elsewhere in
+        Map.length t.results > available
+        || ((not (Map.mem t.results identity)) && Map.length t.results >= available)
       then Error Error.Retention_limit
       else (
         let%map contexts =
