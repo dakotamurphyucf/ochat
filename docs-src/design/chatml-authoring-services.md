@@ -35,6 +35,11 @@ and `Connection_context` already bind authenticated actors to transport
 connections. The OChat protocol already has one closed typed command dispatcher
 over direct, HTTP and full-duplex NDJSON stdio paths.
 
+OCH-278 implements the [pure immutable authoring context store](../development/chatml-authoring-context.md).
+It owns exact pending overlay revisions and a bounded current-context source
+ledger. The host authorizes access; OCH-264 owns changed-closure validation;
+OCH-258 owns the single retained semantic result.
+
 `Chatml_project_build.restore` validates an exact captured lock/source inventory
 without filesystem or network access. `compose` owns pure project closure and lock
 generation, but an uploaded raw source manifest still needs a new adapter through
