@@ -477,6 +477,10 @@ outcomes. The run/test/trace/REPL implementation belongs to its developer-runtim
 tickets. Assign estimates before starting each ticket and link completion
 dependencies, including the bundle path into editor save/reload integration.
 
+The [frozen type display](chatml-type-display.md) is a bounded, presentation-only
+view of immutable inferred types. Its text is not a type equality key or a
+source-language annotation.
+
 Each implementation ticket updates affected `docs-src/` contracts and runs
 relevant local checks. Draft PRs can skip CI; final integrated M5 validation
 must run the combined CI gate under OCH-254. Validation includes

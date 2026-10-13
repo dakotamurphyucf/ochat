@@ -1,0 +1,5 @@
+(library
+ (name chatml_type_display_tests)
+ (libraries core expect_test_helpers_core uutf chatml chatml_typechecker chatml_type_display)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
