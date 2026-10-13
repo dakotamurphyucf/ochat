@@ -5,7 +5,7 @@ type conversation = private
   { session_id : Id.Session.t
   ; generation : int
   }
-[@@deriving equal, sexp_of]
+[@@deriving compare, equal, sexp_of]
 
 type developer = private
   { host_id : Id.Server.t
@@ -13,12 +13,12 @@ type developer = private
   ; epoch : int
   ; principal_id : Id.Principal.t
   }
-[@@deriving equal, sexp_of]
+[@@deriving compare, equal, sexp_of]
 
 type t =
   | Conversation of conversation
   | Developer of developer
-[@@deriving equal, sexp_of]
+[@@deriving compare, equal, sexp_of]
 
 (** Revalidate every typed ID and nonnegative revision coordinate at an
     admission boundary. S-expression display is intentionally one-way. *)

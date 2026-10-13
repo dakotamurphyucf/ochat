@@ -37,6 +37,7 @@
   queued_child_tests
   retained_job_artifacts_tests
   background_admission_tests
+  job_capacity_owner_tests
   background_transaction_tests
   background_completion_tests
   background_cleanup_tests
