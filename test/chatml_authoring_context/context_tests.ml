@@ -451,7 +451,7 @@ let%test_unit "refresh replaces identity and analysis key only after explicit di
       store
       ~identity:id
       ~expected:(C.View.generation (C.find store ~identity:id |> Option.value_exn))
-      ~validated_graph:graph
+      ~input_fingerprint:graph
     |> ok
   in
   assert (Option.is_some (C.analysis_key store ~identity:id));
@@ -619,7 +619,7 @@ let%test_unit "document basis admits empty and malformed bytes without a graph" 
        store
        ~identity:second
        ~expected:generation
-       ~validated_graph:(B.prepared (snd (base ())) |> P.fingerprint))
+       ~input_fingerprint:(B.prepared (snd (base ())) |> P.fingerprint))
     ~is_expected:(function
       | C.Error.Unsupported_basis -> true
       | _ -> false);

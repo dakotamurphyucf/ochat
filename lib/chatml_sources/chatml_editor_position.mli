@@ -85,6 +85,10 @@ val source_id : t -> Chatml_source.Id.t
 val source_digest : t -> Chatml_source.Digest.t
 val line_count : t -> int
 
+(** Exact retained line descriptors plus UTF-16 checkpoints. This lets a
+    caller share one index-entry budget across multiple captured revisions. *)
+val index_entry_count : t -> int
+
 (** Lines start at zero. Columns exclude CR, LF and CRLF terminators. Empty
     source has one empty line; a final terminator creates a final empty line,
     whose column zero is EOF. CR and LF independently end a line except that

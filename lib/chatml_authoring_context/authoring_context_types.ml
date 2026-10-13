@@ -237,13 +237,13 @@ module Analysis_key = struct
   type t =
     { identity : Identity.t
     ; generation : Generation.t
-    ; validated_graph : Captured.Digest.t
+    ; input_fingerprint : Captured.Digest.t
     }
   [@@deriving equal, sexp_of]
 
   let identity t = t.identity
   let generation t = t.generation
-  let validated_graph t = t.validated_graph
+  let input_fingerprint t = t.input_fingerprint
 end
 
 module Refresh = struct
