@@ -4,6 +4,10 @@ open! Core
 
 type t
 
+type close_policy =
+  | Retire_unclaimed
+  | Retain_unclaimed
+
 (** Bind the actual daemon-wide capacity ledger and store to one stable
     host/run/principal. Trusted host wiring selects [project_source] and the
     workspace conflict domain from its admitted capture/workspace; neither
@@ -11,9 +15,14 @@ type t
     is derived internally from those bound values and the exact observed
     owner/kind/depth. [now] must be a non-yielding trusted clock sample.
     [max_quarantined] is at least positive [max_active], so every admitted
-    worker has a cleanup slot. *)
+    worker has a cleanup slot. [Retire_unclaimed] is the standalone default.
+    A higher root owner with an unresolved selected Store handoff uses
+    [Retain_unclaimed]: the worker still cancels, joins and reconciles physical
+    claims, while that owner alone retires unclaimed capacity after exact
+    selected settlement. *)
 val create
-  :  sw:Eio.Switch.t
+  :  ?close_policy:close_policy
+  -> sw:Eio.Switch.t
   -> store:Agent_store.Developer_run_store.t
   -> initial:Agent_store.Developer_run_store.handle
   -> capacity:Job_capacity.t
@@ -22,6 +31,7 @@ val create
   -> now:(unit -> Agent_protocol.Timestamp.t)
   -> max_active:int
   -> max_quarantined:int
+  -> unit
   -> (t, Agent_protocol.Error.t) result
 
 (** The physical issuer whose active child-proof is accepted by native

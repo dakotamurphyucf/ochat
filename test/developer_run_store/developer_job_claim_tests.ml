@@ -38,6 +38,7 @@ let worker ?(now = fun () -> timestamp) ~sw ~store ~handle ~capacity () =
     ~now
     ~max_active:1
     ~max_quarantined:2
+    ()
   |> F.ok
 ;;
 
@@ -65,7 +66,7 @@ let select_root ?(retry_policy = P.Job.Never) handle initial owner capture id =
     |> F.run_ok
   in
   let observed =
-    R.commit_and_settle handle prepared (Selected.handoff ())
+    R.commit_and_settle handle ~admit:(fun () -> true) prepared (Selected.handoff ())
     |> F.run_ok
     |> Selected.installed
   in
@@ -89,6 +90,102 @@ let terminal_state claim status =
        | Cancelled
        | Interrupted _ -> None)
   }
+;;
+
+let%test_unit
+    "owner-managed worker close retains uncertain selected capacity until settlement"
+  =
+  F.with_root (fun _env sw _root _session store ->
+    let owner = F.owner 0 in
+    let capture = F.digest "selected-capacity-close" in
+    let handle, initial = F.admit store owner capture in
+    let capacity = capacity () in
+    let key =
+      Agent_server.Job_capacity.Key.developer
+        ~owner
+        ~project_source
+        ~workspace_conflict_domain:"developer-test"
+        ~kind:P.Job.Async_tool
+        ~nested_depth:0
+      |> F.ok
+    in
+    let selected =
+      Selected.job
+        owner
+        capture
+        ~id:(Selected.job_id "job_uncertain_selected_capacity")
+        ~parent:P.Developer_job.Launch.Run_root
+    in
+    let host_job = P.Host_job.of_developer selected |> F.ok in
+    let reservation =
+      Agent_server.Job_capacity.reserve_host_job capacity key ~job:host_job
+      |> F.ok
+      |> Option.value_exn
+    in
+    let prepared =
+      R.prepare_root_selected
+        handle
+        ~expected:initial
+        ~phase:R.Checkpoint.Active
+        ~selected:[ selected ]
+      |> F.run_ok
+    in
+    let calls = ref 0 in
+    let original = Failure "capacity handoff interrupted" in
+    let handoff =
+      R.Handoff.create ~settle:(function
+        | R.Settlement.Installed _ ->
+          incr calls;
+          if Int.equal !calls 1
+          then raise original
+          else Agent_server.Job_capacity.publish reservation
+        | Absent -> Agent_server.Job_capacity.abort reservation
+        | Prewrite_conflict | Diverged -> ())
+    in
+    (match R.commit_and_settle handle prepared handoff ~admit:(fun () -> true) with
+     | exception actual -> assert (phys_equal actual original)
+     | Ok _ | Error _ -> failwith "handoff exception was erased");
+    let worker =
+      Worker.create
+        ~close_policy:Retain_unclaimed
+        ~sw
+        ~store
+        ~initial:handle
+        ~capacity
+        ~project_source
+        ~workspace_conflict_domain:"developer-test"
+        ~now:(fun () -> timestamp)
+        ~max_active:1
+        ~max_quarantined:2
+        ()
+      |> F.ok
+    in
+    Worker.close_and_wait worker |> F.ok;
+    let competing =
+      Selected.job
+        owner
+        capture
+        ~id:(Selected.job_id "job_competing_selected_capacity")
+        ~parent:P.Developer_job.Launch.Run_root
+      |> P.Host_job.of_developer
+      |> F.ok
+    in
+    (match Agent_server.Job_capacity.try_acquire_host_job capacity key ~job:competing with
+     | Ok None -> ()
+     | Ok (Some _) | Error _ ->
+       failwith "closed worker released an unresolved root reservation");
+    (match R.reconcile_and_settle handle prepared handoff |> F.run_ok with
+     | R.Settlement.Installed _ -> ()
+     | Absent | Prewrite_conflict | Diverged ->
+       failwith "selected capacity did not settle as installed");
+    assert (Int.equal !calls 2);
+    Agent_server.Job_capacity.close_developer_run capacity ~owner;
+    let lease =
+      Agent_server.Job_capacity.try_acquire_host_job capacity key ~job:competing
+      |> F.ok
+      |> Option.value_exn
+    in
+    Agent_server.Job_capacity.release lease)
 ;;
 
 let%test_unit "durable claim precedes one callback and cannot enter twice" =
@@ -256,7 +353,7 @@ let%test_unit
         R.prepare_root_selected handle ~expected ~phase:R.Checkpoint.Active ~selected:[]
         |> F.run_ok
       in
-      R.commit_and_settle handle prepared (Selected.handoff ())
+      R.commit_and_settle handle ~admit:(fun () -> true) prepared (Selected.handoff ())
       |> F.run_ok
       |> Selected.installed
     in

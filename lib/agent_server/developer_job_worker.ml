@@ -5,6 +5,10 @@ module Scope = Agent_session.Developer_job_scope
 
 let ( let* ) value f = Result.bind value ~f
 
+type close_policy =
+  | Retire_unclaimed
+  | Retain_unclaimed
+
 type quarantined =
   | Unentered_claim of unentered_claim
   | Claim of
@@ -66,6 +70,7 @@ type t =
   ; now : unit -> P.Timestamp.t
   ; max_quarantined : int
   ; max_active : int
+  ; close_policy : close_policy
   ; domain_id : int
   ; mutable current : Store.handle
   ; mutable quarantined : quarantined ref list
@@ -599,11 +604,15 @@ let close_and_wait t =
     match scope_close with
     | Error error -> Error error
     | Ok () ->
-      Job_capacity.close_developer_run t.capacity ~owner:(Store.owner t.current);
+      (match t.close_policy with
+       | Retire_unclaimed ->
+         Job_capacity.close_developer_run t.capacity ~owner:(Store.owner t.current)
+       | Retain_unclaimed -> ());
       reconcile_quarantined t)
 ;;
 
 let create
+      ?(close_policy = Retire_unclaimed)
       ~sw
       ~store
       ~initial
@@ -613,6 +622,7 @@ let create
       ~now
       ~max_active
       ~max_quarantined
+      ()
   =
   if
     max_active <= 0
@@ -633,6 +643,7 @@ let create
         ; now
         ; max_quarantined
         ; max_active
+        ; close_policy
         ; domain_id = (Stdlib.Domain.self () :> int)
         ; current = initial
         ; quarantined = []
@@ -644,6 +655,8 @@ let create
       Eio.Switch.check sw;
       Eio.Switch.on_release sw (fun () ->
         Eio.Cancel.protect (fun () ->
-          ignore (close_and_wait t : (unit, P.Error.t) result)));
+          match close_and_wait t with
+          | Ok () -> ()
+          | Error _ -> failwith "developer job worker shutdown is incomplete"));
       Ok t)
 ;;

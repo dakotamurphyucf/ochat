@@ -223,9 +223,10 @@ type reconciliation =
   | Diverged
 
 module Settlement = struct
-  type t = reconciliation =
+  type t =
     | Installed of Installed.t
     | Absent
+    | Prewrite_conflict
     | Diverged
 end
 
@@ -247,6 +248,13 @@ type pending =
   | Claim of Prepared.t
   | Transition of Prepared.t
 
+type run_claim_record =
+  { token : unit ref
+  ; handle_token : unit ref
+  ; domain : int
+  ; mutable released : bool
+  }
+
 type t =
   { root_owner : Root.owner
   ; host_id : P.Id.Server.t
@@ -255,7 +263,11 @@ type t =
   ; checkpoint : unit -> unit
   ; token : unit ref
   ; pending : (Id.t, pending) Hashtbl.t
-  ; mutable closed : bool
+  ; run_lifecycle_mutex : Stdlib.Mutex.t
+  ; run_claims : (Id.t, run_claim_record) Hashtbl.t
+  ; admissions_in_flight : (Id.t, unit) Hashtbl.t
+  ; closing : bool Atomic.t
+  ; closed : bool Atomic.t
   }
 
 type handle =
@@ -265,11 +277,20 @@ type handle =
   ; token : unit ref
   }
 
+type store = t
+
+let with_run_lifecycle t f =
+  Stdlib.Mutex.lock t.run_lifecycle_mutex;
+  Exn.protect ~f ~finally:(fun () -> Stdlib.Mutex.unlock t.run_lifecycle_mutex)
+;;
+
+let pending_mem t run_id = with_run_lifecycle t (fun () -> Hashtbl.mem t.pending run_id)
 let ( let* ) result f = Result.bind result ~f
 let store result = Result.map_error result ~f:(fun error -> Error.Store error)
 let corrupt message = Error (Error.Store (Store_error.Corrupt message))
 
 exception Work_limit
+exception Selected_admission_revoked
 
 let directory_name = "developer-runs"
 let basename id = "run_" ^ Id.to_string id ^ ".json"
@@ -337,16 +358,69 @@ let observation (t : t) ~owner ~bytes document =
 
 let valid_handle handle =
   let t = handle.store in
-  if t.closed then Error Error.Closed else Ok t
+  if Atomic.get t.closed || Atomic.get t.closing then Error Error.Closed else Ok t
 ;;
 
+module Run_claim = struct
+  type nonrec t =
+    { store : t
+    ; run_id : Id.t
+    ; record : run_claim_record
+    }
+
+  let acquire ~(store : store) ~(handle : handle) =
+    if not (phys_equal handle.store store && phys_equal handle.store.token store.token)
+    then Error Error.Foreign_or_stale
+    else
+      with_run_lifecycle store (fun () ->
+        let run_id = handle.owner.run_id in
+        if Atomic.get store.closed || Atomic.get store.closing
+        then Error Error.Closed
+        else if
+          Hashtbl.mem store.run_claims run_id
+          || Hashtbl.mem store.admissions_in_flight run_id
+          || Hashtbl.mem store.pending run_id
+        then Error Error.Conflict
+        else (
+          let record =
+            { token = ref ()
+            ; handle_token = handle.token
+            ; domain = (Stdlib.Domain.self () :> int)
+            ; released = false
+            }
+          in
+          Hashtbl.set store.run_claims ~key:run_id ~data:record;
+          Ok { store; run_id; record }))
+  ;;
+
+  let release t =
+    with_run_lifecycle t.store (fun () ->
+      if not (Int.equal t.record.domain (Stdlib.Domain.self () :> int))
+      then Error Error.Foreign_or_stale
+      else if t.record.released
+      then Ok ()
+      else (
+        match Hashtbl.find t.store.run_claims t.run_id with
+        | Some record when phys_equal record.token t.record.token ->
+          if Hashtbl.mem t.store.pending t.run_id
+          then Error Error.Conflict
+          else (
+            Hashtbl.remove t.store.run_claims t.run_id;
+            t.record.released <- true;
+            Ok ())
+        | Some _ | None -> Error Error.Foreign_or_stale))
+  ;;
+end
+
 let with_lease t f =
-  if t.closed
+  if Atomic.get t.closed || Atomic.get t.closing
   then Error Error.Closed
   else (
     try
       Root.with_lease t.root_owner ~f:(fun ~env ~root ->
-        if t.closed then Error Error.Closed else f ~env ~root)
+        if Atomic.get t.closed || Atomic.get t.closing
+        then Error Error.Closed
+        else f ~env ~root)
       |> store
       |> Result.bind ~f:Fn.id
     with
@@ -565,9 +639,19 @@ let scan t ~poll =
 
 let close_and_wait t =
   let* () = Root.check_not_active t.root_owner |> store in
+  let* () =
+    with_run_lifecycle t (fun () ->
+      if
+        (not (Hashtbl.is_empty t.run_claims))
+        || not (Hashtbl.is_empty t.admissions_in_flight)
+      then Error Error.Conflict
+      else (
+        Atomic.set t.closing true;
+        Ok ()))
+  in
   Eio.Cancel.protect (fun () ->
     Root.release t.root_owner;
-    t.closed <- true;
+    Atomic.set t.closed true;
     Ok ())
 ;;
 
@@ -606,7 +690,11 @@ let open_or_create session_store ~sw ~limits ~checkpoint =
             ; checkpoint
             ; token = ref ()
             ; pending = Hashtbl.create (module Id)
-            ; closed = false
+            ; run_lifecycle_mutex = Stdlib.Mutex.create ()
+            ; run_claims = Hashtbl.create (module Id)
+            ; admissions_in_flight = Hashtbl.create (module Id)
+            ; closing = Atomic.make false
+            ; closed = Atomic.make false
             })
         |> store
         |> Result.bind ~f:(Result.map_error ~f:(fun error -> Error.Store error))
@@ -621,7 +709,9 @@ let open_or_create session_store ~sw ~limits ~checkpoint =
       in
       let* _count = recovered in
       Eio.Switch.on_release sw (fun () ->
-        ignore (close_and_wait t : (unit, Error.t) result));
+        match close_and_wait t with
+        | Ok () -> ()
+        | Error _ -> failwith "developer run store shutdown is incomplete");
       keep := true;
       Ok t)
 ;;
@@ -691,112 +781,127 @@ let admit_epoch t ~owner ~capture_fingerprint ~previous =
     then Ok ()
     else Error Error.Foreign_or_stale
   in
-  with_lease t (fun ~env:_ ~root:_ ->
-    let* () =
-      if Hashtbl.mem t.pending owner.run_id then Error Error.Conflict else Ok ()
-    in
-    let poll = work t t.checkpoint in
-    let* existing = read t ~poll owner.run_id in
-    let* bytes, document =
-      match existing with
-      | None ->
-        let* () = if Option.is_some previous then Error Error.Conflict else Ok () in
-        let* count = scan t ~poll in
-        let* () =
-          if count < t.limits.max_runs then Ok () else Error Error.Limit_exceeded
-        in
-        let document = Doc.create ~owner ~capture_fingerprint in
-        poll ();
-        let* bytes =
-          Doc.to_bytes
-            document
-            ~poll
-            ~limits:t.limits.document
-            ~max_epochs:t.limits.max_epochs_per_run
-            ~max_jobs:t.limits.max_jobs_per_run
-            ~max_invocations:t.limits.max_invocations_per_run
-            ~max_job_payload_bytes:t.limits.max_job_payload_bytes
-          |> store
-        in
-        poll ();
-        let* () =
-          Durable_file.replace_in
-            ~directory:t.directory
-            ~durability:Flush_file_and_directory
-            ~basename:(basename owner.run_id)
-            bytes
-          |> store
-        in
-        Ok (bytes, document)
-      | Some (bytes, document) ->
-        let current = List.last_exn (Doc.epochs document) in
-        let* () =
-          if
-            P.Id.Server.equal (Doc.host_id document) owner.host_id
-            && P.Id.Principal.equal (Doc.principal_id document) owner.principal_id
-          then Ok ()
-          else Error Error.Foreign_or_stale
-        in
-        if Doc.epoch_number current = owner.epoch
-        then
-          if Chatml_source.Digest.equal (Doc.epoch_capture current) capture_fingerprint
-          then Ok (bytes, document)
-          else Error Error.Conflict
-        else
-          let* () =
-            match previous with
-            | None -> Error Error.Conflict
-            | Some (expected : Observation.t) ->
+  let* () =
+    with_run_lifecycle t (fun () ->
+      if Atomic.get t.closed || Atomic.get t.closing
+      then Error Error.Closed
+      else if
+        Hashtbl.mem t.run_claims owner.run_id
+        || Hashtbl.mem t.admissions_in_flight owner.run_id
+      then Error Error.Conflict
+      else (
+        Hashtbl.set t.admissions_in_flight ~key:owner.run_id ~data:();
+        Ok ()))
+  in
+  Exn.protect
+    ~finally:(fun () ->
+      with_run_lifecycle t (fun () -> Hashtbl.remove t.admissions_in_flight owner.run_id))
+    ~f:(fun () ->
+      with_lease t (fun ~env:_ ~root:_ ->
+        let* () = if pending_mem t owner.run_id then Error Error.Conflict else Ok () in
+        let poll = work t t.checkpoint in
+        let* existing = read t ~poll owner.run_id in
+        let* bytes, document =
+          match existing with
+          | None ->
+            let* () = if Option.is_some previous then Error Error.Conflict else Ok () in
+            let* count = scan t ~poll in
+            let* () =
+              if count < t.limits.max_runs then Ok () else Error Error.Limit_exceeded
+            in
+            let document = Doc.create ~owner ~capture_fingerprint in
+            poll ();
+            let* bytes =
+              Doc.to_bytes
+                document
+                ~poll
+                ~limits:t.limits.document
+                ~max_epochs:t.limits.max_epochs_per_run
+                ~max_jobs:t.limits.max_jobs_per_run
+                ~max_invocations:t.limits.max_invocations_per_run
+                ~max_job_payload_bytes:t.limits.max_job_payload_bytes
+              |> store
+            in
+            poll ();
+            let* () =
+              Durable_file.replace_in
+                ~directory:t.directory
+                ~durability:Flush_file_and_directory
+                ~basename:(basename owner.run_id)
+                bytes
+              |> store
+            in
+            Ok (bytes, document)
+          | Some (bytes, document) ->
+            let current = List.last_exn (Doc.epochs document) in
+            let* () =
               if
-                phys_equal expected.store_token t.token
-                && String.equal expected.document_bytes bytes
-                && Int64.equal expected.document_revision (Doc.revision document)
-                && P.Id.Developer_run.equal expected.owner.run_id owner.run_id
-                && P.Id.Principal.equal expected.owner.principal_id owner.principal_id
-                && P.Id.Server.equal expected.owner.host_id owner.host_id
-                && expected.owner.epoch = Doc.epoch_number current
+                P.Id.Server.equal (Doc.host_id document) owner.host_id
+                && P.Id.Principal.equal (Doc.principal_id document) owner.principal_id
               then Ok ()
+              else Error Error.Foreign_or_stale
+            in
+            if Doc.epoch_number current = owner.epoch
+            then
+              if
+                Chatml_source.Digest.equal (Doc.epoch_capture current) capture_fingerprint
+              then Ok (bytes, document)
               else Error Error.Conflict
-          in
-          let* () =
-            if List.length (Doc.epochs document) >= t.limits.max_epochs_per_run
-            then Error Error.Limit_exceeded
-            else Ok ()
-          in
-          let* next =
-            Doc.append_epoch
-              document
-              ~owner
-              ~capture_fingerprint
-              ~max_epochs:t.limits.max_epochs_per_run
-            |> store
-          in
-          poll ();
-          let* after =
-            Doc.to_bytes
-              next
-              ~poll
-              ~limits:t.limits.document
-              ~max_epochs:t.limits.max_epochs_per_run
-              ~max_jobs:t.limits.max_jobs_per_run
-              ~max_invocations:t.limits.max_invocations_per_run
-              ~max_job_payload_bytes:t.limits.max_job_payload_bytes
-            |> store
-          in
-          poll ();
-          let* () =
-            Durable_file.replace_in
-              ~directory:t.directory
-              ~durability:Flush_file_and_directory
-              ~basename:(basename owner.run_id)
-              after
-            |> store
-          in
-          Ok (after, next)
-    in
-    let handle = { store = t; owner; capture_fingerprint; token = ref () } in
-    let* observed = observation t ~owner ~bytes document in
-    Ok (handle, observed))
+            else
+              let* () =
+                match previous with
+                | None -> Error Error.Conflict
+                | Some (expected : Observation.t) ->
+                  if
+                    phys_equal expected.store_token t.token
+                    && String.equal expected.document_bytes bytes
+                    && Int64.equal expected.document_revision (Doc.revision document)
+                    && P.Id.Developer_run.equal expected.owner.run_id owner.run_id
+                    && P.Id.Principal.equal expected.owner.principal_id owner.principal_id
+                    && P.Id.Server.equal expected.owner.host_id owner.host_id
+                    && expected.owner.epoch = Doc.epoch_number current
+                  then Ok ()
+                  else Error Error.Conflict
+              in
+              let* () =
+                if List.length (Doc.epochs document) >= t.limits.max_epochs_per_run
+                then Error Error.Limit_exceeded
+                else Ok ()
+              in
+              let* next =
+                Doc.append_epoch
+                  document
+                  ~owner
+                  ~capture_fingerprint
+                  ~max_epochs:t.limits.max_epochs_per_run
+                |> store
+              in
+              poll ();
+              let* after =
+                Doc.to_bytes
+                  next
+                  ~poll
+                  ~limits:t.limits.document
+                  ~max_epochs:t.limits.max_epochs_per_run
+                  ~max_jobs:t.limits.max_jobs_per_run
+                  ~max_invocations:t.limits.max_invocations_per_run
+                  ~max_job_payload_bytes:t.limits.max_job_payload_bytes
+                |> store
+              in
+              poll ();
+              let* () =
+                Durable_file.replace_in
+                  ~directory:t.directory
+                  ~durability:Flush_file_and_directory
+                  ~basename:(basename owner.run_id)
+                  after
+                |> store
+              in
+              Ok (after, next)
+        in
+        let handle = { store = t; owner; capture_fingerprint; token = ref () } in
+        let* observed = observation t ~owner ~bytes document in
+        Ok (handle, observed)))
 ;;
 
 let prepare_checkpoint handle ~expected ~phase =
@@ -1165,9 +1270,7 @@ let installed t prepared =
   Ok Installed.{ observation = observed }
 ;;
 
-let no_pending t run_id =
-  if Hashtbl.mem t.pending run_id then Error Error.Conflict else Ok ()
-;;
+let no_pending t run_id = if pending_mem t run_id then Error Error.Conflict else Ok ()
 
 let bind_handoff t handle prepared handoff =
   if not (prepared_for handle prepared)
@@ -1190,53 +1293,85 @@ let bind_handoff t handle prepared handoff =
     | Some settled -> Ok (Some settled)
     | None ->
       let run_id = handle.owner.run_id in
-      (match Hashtbl.find t.pending run_id with
-       | None ->
-         Hashtbl.set t.pending ~key:run_id ~data:(Selected { prepared; handoff });
-         Ok None
-       | Some (Selected pending)
-         when phys_equal pending.prepared.token prepared.token
-              && phys_equal pending.handoff handoff -> Ok None
-       | Some (Selected _ | Claim _ | Transition _) -> Error Error.Conflict)
+      with_run_lifecycle t (fun () ->
+        match Hashtbl.find t.pending run_id with
+        | None ->
+          Hashtbl.set t.pending ~key:run_id ~data:(Selected { prepared; handoff });
+          Ok None
+        | Some (Selected pending)
+          when phys_equal pending.prepared.token prepared.token
+               && phys_equal pending.handoff handoff -> Ok None
+        | Some (Selected _ | Claim _ | Transition _) -> Error Error.Conflict)
 ;;
 
-let settle t handle handoff value =
-  Eio.Cancel.protect (fun () -> handoff.Handoff.settle value);
-  handoff.settled <- Some value;
-  (match value with
-   | Settlement.Installed _ | Absent -> Hashtbl.remove t.pending handle.owner.run_id
-   | Diverged -> ());
-  value
+let settle t handle prepared handoff value =
+  let exact_pending () =
+    match Hashtbl.find t.pending handle.owner.run_id with
+    | Some (Selected pending) ->
+      phys_equal pending.prepared.token prepared.Prepared.token
+      && phys_equal pending.handoff handoff
+    | None | Some (Claim _ | Transition _) -> false
+  in
+  if not (with_run_lifecycle t exact_pending)
+  then Error Error.Conflict
+  else (
+    Eio.Cancel.protect (fun () -> handoff.Handoff.settle value);
+    handoff.settled <- Some value;
+    let still_owned =
+      with_run_lifecycle t (fun () ->
+        if exact_pending ()
+        then (
+          (match value with
+           | Settlement.Installed _ | Absent | Prewrite_conflict ->
+             Hashtbl.remove t.pending handle.owner.run_id
+           | Diverged -> ());
+          true)
+        else false)
+    in
+    if still_owned then Ok value else Error Error.Conflict)
 ;;
 
 let classify_prepared t handle prepared ~poll =
   let* existing = read t ~poll handle.owner.run_id in
   match existing with
   | Some (bytes, _) when String.equal bytes prepared.Prepared.after_bytes ->
-    Result.map (installed t prepared) ~f:(fun installed -> Settlement.Installed installed)
+    if prepared.write_attempted
+    then
+      Result.map (installed t prepared) ~f:(fun installed ->
+        Settlement.Installed installed)
+    else Ok Settlement.Prewrite_conflict
   | Some (bytes, _) when String.equal bytes prepared.before_bytes -> Ok Settlement.Absent
-  | None | Some _ -> Ok Settlement.Diverged
+  | None | Some _ ->
+    Ok (if prepared.write_attempted then Settlement.Diverged else Prewrite_conflict)
 ;;
 
-let install_prepared t handle prepared ~poll =
+let install_prepared ?(admit = fun () -> true) t handle prepared ~poll =
   let* existing = read t ~poll handle.owner.run_id in
   match existing with
   | Some (bytes, _) when String.equal bytes prepared.Prepared.after_bytes ->
-    Result.map (installed t prepared) ~f:(fun installed -> Settlement.Installed installed)
+    if prepared.write_attempted
+    then
+      Result.map (installed t prepared) ~f:(fun installed ->
+        Settlement.Installed installed)
+    else Ok Settlement.Prewrite_conflict
   | Some (bytes, _) when String.equal bytes prepared.before_bytes ->
     poll ();
-    prepared.write_attempted <- true;
     let* () =
       Durable_file.replace_in
         ~directory:t.directory
         ~durability:Flush_file_and_directory
         ~basename:(basename handle.owner.run_id)
+        ~before_rename:(fun () ->
+          if admit ()
+          then prepared.write_attempted <- true
+          else raise Selected_admission_revoked)
         prepared.after_bytes
       |> store
     in
     poll ();
     Result.map (installed t prepared) ~f:(fun installed -> Settlement.Installed installed)
-  | None | Some _ -> Ok Settlement.Diverged
+  | None | Some _ ->
+    Ok (if prepared.write_attempted then Settlement.Diverged else Prewrite_conflict)
 ;;
 
 let reconcile_and_settle handle prepared handoff =
@@ -1248,10 +1383,10 @@ let reconcile_and_settle handle prepared handoff =
     | None ->
       let poll = work t t.checkpoint in
       let* value = classify_prepared t handle prepared ~poll in
-      Ok (settle t handle handoff value))
+      settle t handle prepared handoff value)
 ;;
 
-let commit_and_settle handle prepared handoff =
+let commit_and_settle handle prepared handoff ~admit =
   let* t = valid_handle handle in
   with_lease t (fun ~env:_ ~root:_ ->
     let* settled = bind_handoff t handle prepared handoff in
@@ -1259,20 +1394,31 @@ let commit_and_settle handle prepared handoff =
     | Some value -> Ok value
     | None ->
       let poll = work t t.checkpoint in
-      (match install_prepared t handle prepared ~poll with
-       | Ok value -> Ok (settle t handle handoff value)
+      (match install_prepared ~admit t handle prepared ~poll with
+       | Ok value -> settle t handle prepared handoff value
        | Error original ->
          (match
             Eio.Cancel.protect (fun () -> classify_prepared t handle prepared ~poll)
           with
-          | Ok value -> Ok (settle t handle handoff value)
+          | Ok value -> settle t handle prepared handoff value
           | Error _ -> Error original)
+       | exception Selected_admission_revoked ->
+         (match
+            Eio.Cancel.protect (fun () -> classify_prepared t handle prepared ~poll)
+          with
+          | Ok value ->
+            let* _settled = settle t handle prepared handoff value in
+            Error Error.Foreign_or_stale
+          | Error original -> Error original)
        | exception exn ->
          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
          (try
             Eio.Cancel.protect (fun () ->
               match classify_prepared t handle prepared ~poll with
-              | Ok value -> ignore (settle t handle handoff value : Settlement.t)
+              | Ok value ->
+                ignore
+                  (settle t handle prepared handoff value
+                   : (Settlement.t, Error.t) result)
               | Error _ -> ())
           with
           | _ -> ());
@@ -1290,12 +1436,13 @@ let bind_claim t handle prepared =
          Ok ()
        | Unsettled ->
          let run_id = handle.owner.run_id in
-         (match Hashtbl.find t.pending run_id with
-          | None ->
-            Hashtbl.set t.pending ~key:run_id ~data:(Claim prepared);
-            Ok ()
-          | Some (Claim pending) when phys_equal pending.token prepared.token -> Ok ()
-          | Some (Selected _ | Claim _ | Transition _) -> Error Error.Conflict))
+         with_run_lifecycle t (fun () ->
+           match Hashtbl.find t.pending run_id with
+           | None ->
+             Hashtbl.set t.pending ~key:run_id ~data:(Claim prepared);
+             Ok ()
+           | Some (Claim pending) when phys_equal pending.token prepared.token -> Ok ()
+           | Some (Selected _ | Claim _ | Transition _) -> Error Error.Conflict))
     | ( ( Foundation_checkpoint
         | Developer_dispatch
         | Selected_transaction
@@ -1319,6 +1466,7 @@ let settle_worker_prepared t handle (prepared : Prepared.t) settlement =
       Prepared.Claim_prewrite_conflict
     | Settlement.Installed _ -> Prepared.Claim_installed
     | Absent -> Claim_absent
+    | Prewrite_conflict -> Claim_prewrite_conflict
     | Diverged when not prepared.write_attempted -> Claim_prewrite_conflict
     | Diverged -> Claim_diverged
   in
@@ -1339,12 +1487,13 @@ let settle_worker_prepared t handle (prepared : Prepared.t) settlement =
       , (Foundation_checkpoint | Developer_dispatch | Selected_transaction) ) -> false
   in
   if retire
-  then (
-    match Hashtbl.find t.pending handle.owner.run_id with
-    | Some (Claim pending | Transition pending)
-      when phys_equal pending.token prepared.token ->
-      Hashtbl.remove t.pending handle.owner.run_id
-    | None | Some (Selected _) | Some (Claim _ | Transition _) -> ());
+  then
+    with_run_lifecycle t (fun () ->
+      match Hashtbl.find t.pending handle.owner.run_id with
+      | Some (Claim pending | Transition pending)
+        when phys_equal pending.token prepared.token ->
+        Hashtbl.remove t.pending handle.owner.run_id
+      | None | Some (Selected _) | Some (Claim _ | Transition _) -> ());
   match status with
   | Claim_prewrite_conflict -> Error Error.Prewrite_conflict
   | Unsettled | Claim_installed | Claim_absent | Claim_diverged -> Ok ()
@@ -1427,13 +1576,14 @@ let bind_claimed_transition t handle prepared =
        | Claim_installed | Claim_diverged | Claim_prewrite_conflict -> Ok ()
        | Unsettled | Claim_absent ->
          let run_id = handle.owner.run_id in
-         (match Hashtbl.find t.pending run_id with
-          | None ->
-            Hashtbl.set t.pending ~key:run_id ~data:(Transition prepared);
-            Ok ()
-          | Some (Transition pending) when phys_equal pending.token prepared.token ->
-            Ok ()
-          | Some (Selected _ | Claim _ | Transition _) -> Error Error.Conflict))
+         with_run_lifecycle t (fun () ->
+           match Hashtbl.find t.pending run_id with
+           | None ->
+             Hashtbl.set t.pending ~key:run_id ~data:(Transition prepared);
+             Ok ()
+           | Some (Transition pending) when phys_equal pending.token prepared.token ->
+             Ok ()
+           | Some (Selected _ | Claim _ | Transition _) -> Error Error.Conflict))
     | Foundation_checkpoint | Developer_dispatch | Selected_transaction | Worker_claim ->
       Error Error.Conflict)
 ;;
