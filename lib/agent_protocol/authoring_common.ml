@@ -7,6 +7,7 @@ let str value = `String value
 
 module Features = struct
   let core = "authoring.core.v1"
+  let bundle = "authoring.bundle.v1"
 end
 
 module Encoding = struct
@@ -41,6 +42,10 @@ module Method = struct
     | Document_version
     | Document_replace
     | Document_close
+    | Bundle_begin
+    | Bundle_chunk
+    | Bundle_commit
+    | Bundle_status
   [@@deriving compare, equal, sexp_of]
 
   let to_string = function
@@ -56,6 +61,10 @@ module Method = struct
     | Document_version -> "authoring.document.version"
     | Document_replace -> "authoring.document.replace"
     | Document_close -> "authoring.document.close"
+    | Bundle_begin -> "authoring.bundle.begin"
+    | Bundle_chunk -> "authoring.bundle.chunk"
+    | Bundle_commit -> "authoring.bundle.commit"
+    | Bundle_status -> "authoring.bundle.status"
   ;;
 
   let all =
@@ -71,6 +80,10 @@ module Method = struct
     ; Document_version
     ; Document_replace
     ; Document_close
+    ; Bundle_begin
+    ; Bundle_chunk
+    ; Bundle_commit
+    ; Bundle_status
     ]
   ;;
 
@@ -284,6 +297,18 @@ module Capabilities = struct
   let create ~methods ~encodings ~limits =
     let unique_methods = List.dedup_and_sort methods ~compare:String.compare in
     let unique_encodings = List.dedup_and_sort encodings ~compare:Encoding.compare in
+    let has_core_method =
+      List.exists methods ~f:(fun name ->
+        match Method.of_string name with
+        | Ok
+            ( Method.Capabilities
+            | Method.Bundle_begin
+            | Method.Bundle_chunk
+            | Method.Bundle_commit
+            | Method.Bundle_status ) -> false
+        | Ok _ -> true
+        | Error _ -> false)
+    in
     if
       List.length methods <> List.length unique_methods
       || List.length encodings <> List.length unique_encodings
@@ -298,7 +323,7 @@ module Capabilities = struct
                 | _ -> false)))
       || (not
             (List.mem methods (Method.to_string Method.Capabilities) ~equal:String.equal))
-      || List.is_empty encodings
+      || (has_core_method && List.is_empty encodings)
     then C.invalid "invalid authoring capabilities"
     else Ok { methods = unique_methods; encodings = unique_encodings; limits }
   ;;

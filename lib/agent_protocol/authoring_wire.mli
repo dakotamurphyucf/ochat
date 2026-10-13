@@ -16,6 +16,10 @@ module Request : sig
     | Document_version of Authoring_context.Document.Version_request.t
     | Document_replace of Authoring_context.Document.Replace_request.t
     | Document_close of Authoring_context.Document.Close_request.t
+    | Bundle_begin of Authoring_bundle.Bundle.Begin.request
+    | Bundle_chunk of Authoring_bundle.Bundle.Chunk.request
+    | Bundle_commit of Authoring_bundle.Bundle.Commit.request
+    | Bundle_status of Authoring_bundle.Bundle.Status.request
   [@@deriving sexp_of]
 
   val method_name : t -> string
@@ -38,6 +42,10 @@ module Response : sig
     | Document_version of Authoring_context.Document.Version.t
     | Document_replace of Authoring_context.Document.Result.t
     | Document_close of Authoring_context.Document.Result.t
+    | Bundle_begin of Authoring_bundle.Bundle.Begin.response
+    | Bundle_chunk of Authoring_bundle.Bundle.Chunk.response
+    | Bundle_commit of Authoring_bundle.Bundle.Commit.response
+    | Bundle_status of Authoring_bundle.Bundle.Status.t
   [@@deriving sexp_of]
 
   val method_name : t -> string

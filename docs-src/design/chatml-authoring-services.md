@@ -296,8 +296,19 @@ idempotency key; repeated accepted chunks with identical bytes are no-ops,
 while conflicting bytes fail. An incomplete or cancelled upload publishes
 nothing. After a lost HTTP/stdio commit reply, the client queries status
 instead of blindly repeating publication.
+If the begin reply is lost, it repeats the exact begin key, manifest and optional
+parent context to recover the upload ID; status only reconciles a known ID.
+The portable bundle client requires the separately selected
+`authoring.bundle.v1` feature, which does not require `authoring.core.v1`.
+Wire receipts echo authenticated host/principal comparison coordinates and
+the upload ID. A pending commit is distinct from a Published receipt; only
+OCH-264's complete closure validation may publish graph, compiler-contract,
+environment, manifest identity and finite expiry. The manifest fingerprint is
+a versioned digest of the exact qualified project source, selection and sorted
+member ID/digest/length inventory. `Source.Portable_path` rejects exact,
+ASCII-case and file/directory prefix conflicts within each source namespace.
 Storage/receipt ownership and pure closure validation/publication are separate
-five-point implementation slices. Reuse checked blob-store streaming mechanics
+components. Reuse checked blob-store streaming mechanics
 where appropriate, but do not reuse message-input `Send_messages` scope,
 one-hour temporary retention or `allowed_use` as authoring authority. Local,
 HTTP and stdio clients share the same bundle receipt contract.

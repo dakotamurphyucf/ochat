@@ -137,6 +137,8 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_client/activity_views.mli` | [contract](../../lib/agent_client/activity_views.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_client/admin.mli` | [contract](../../lib/agent_client/admin.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_client/authoring.mli` | [contract](../../lib/agent_client/authoring.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
+| `lib/agent_client/authoring_bundle.mli` | [contract](../../lib/agent_client/authoring_bundle.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
+| `lib/agent_client/authoring_connection.mli` | [contract](../../lib/agent_client/authoring_connection.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_client/blob_download.mli` | [contract](../../lib/agent_client/blob_download.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_client/canonical_export.mli` | [contract](../../lib/agent_client/canonical_export.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_client/catalog.mli` | [contract](../../lib/agent_client/catalog.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
@@ -158,6 +160,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_protocol/activity_query.mli` | [contract](../../lib/agent_protocol/activity_query.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/audit.mli` | [contract](../../lib/agent_protocol/audit.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/authoring.mli` | [contract](../../lib/agent_protocol/authoring.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
+| `lib/agent_protocol/authoring_bundle.mli` | [contract](../../lib/agent_protocol/authoring_bundle.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_protocol/authoring_codec.mli` | [contract](../../lib/agent_protocol/authoring_codec.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_protocol/authoring_common.mli` | [contract](../../lib/agent_protocol/authoring_common.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_protocol/authoring_context.mli` | [contract](../../lib/agent_protocol/authoring_context.mli) | [integration](../guide/authoring-context-tool.md) | Public interface + current host guide. |
@@ -773,6 +776,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chatmd/chatmd_attributes.mli` | [contract](../../lib/chatmd/chatmd_attributes.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_document_occurrence.mli` | [contract](../../lib/chatmd/chatmd_document_occurrence.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_extension_declaration.mli` | [contract](../../lib/chatmd/chatmd_extension_declaration.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chatmd/chatmd_extraction_map.mli` | [contract](../../lib/chatmd/chatmd_extraction_map.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_import_expansion.mli` | [contract](../../lib/chatmd/chatmd_import_expansion.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_located_ast.mli` | [contract](../../lib/chatmd/chatmd_located_ast.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_moderator_runtime_declaration.mli` | [contract](../../lib/chatmd/chatmd_moderator_runtime_declaration.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
@@ -1061,6 +1065,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../development/chatmd-content-custody.md) | `docs-src/development/chatmd-content-custody.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/chatml-authoring-context.md) | `docs-src/development/chatml-authoring-context.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/chatml-authoring-source-host.md) | `docs-src/development/chatml-authoring-source-host.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../development/chatml-developer-capture.md) | `docs-src/development/chatml-developer-capture.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/chatml-extensibility-handoff.md) | `docs-src/development/chatml-extensibility-handoff.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/chatml-program-custody.md) | `docs-src/development/chatml-program-custody.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/chatml-repl-submission.md) | `docs-src/development/chatml-repl-submission.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |

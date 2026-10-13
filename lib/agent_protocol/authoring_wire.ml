@@ -2,6 +2,7 @@ open! Core
 module C = Authoring_codec
 module A = Authoring_common
 module X = Authoring_context
+module B = Authoring_bundle.Bundle
 
 let map decode wrap json = Result.map (decode json) ~f:wrap
 
@@ -29,6 +30,10 @@ module Request = struct
     | Document_version of X.Document.Version_request.t
     | Document_replace of X.Document.Replace_request.t
     | Document_close of X.Document.Close_request.t
+    | Bundle_begin of B.Begin.request
+    | Bundle_chunk of B.Chunk.request
+    | Bundle_commit of B.Commit.request
+    | Bundle_status of B.Status.request
   [@@deriving sexp_of]
 
   let method_name = function
@@ -44,6 +49,10 @@ module Request = struct
     | Document_version _ -> A.Method.to_string A.Method.Document_version
     | Document_replace _ -> A.Method.to_string A.Method.Document_replace
     | Document_close _ -> A.Method.to_string A.Method.Document_close
+    | Bundle_begin _ -> A.Method.to_string A.Method.Bundle_begin
+    | Bundle_chunk _ -> A.Method.to_string A.Method.Bundle_chunk
+    | Bundle_commit _ -> A.Method.to_string A.Method.Bundle_commit
+    | Bundle_status _ -> A.Method.to_string A.Method.Bundle_status
   ;;
 
   let params = function
@@ -58,6 +67,10 @@ module Request = struct
     | Document_version request -> X.Document.Version_request.to_json request
     | Document_replace request -> X.Document.Replace_request.to_json request
     | Document_close request -> X.Document.Close_request.to_json request
+    | Bundle_begin request -> B.Begin.request_to_json request
+    | Bundle_chunk request -> B.Chunk.request_to_json request
+    | Bundle_commit request -> B.Commit.request_to_json request
+    | Bundle_status request -> B.Status.request_to_json request
   ;;
 
   let decoders =
@@ -83,6 +96,10 @@ module Request = struct
       , map X.Document.Replace_request.of_json (fun x -> Document_replace x) )
     ; ( "authoring.document.close"
       , map X.Document.Close_request.of_json (fun x -> Document_close x) )
+    ; "authoring.bundle.begin", map B.Begin.request_of_json (fun x -> Bundle_begin x)
+    ; "authoring.bundle.chunk", map B.Chunk.request_of_json (fun x -> Bundle_chunk x)
+    ; "authoring.bundle.commit", map B.Commit.request_of_json (fun x -> Bundle_commit x)
+    ; "authoring.bundle.status", map B.Status.request_of_json (fun x -> Bundle_status x)
     ]
   ;;
 
@@ -109,6 +126,10 @@ module Response = struct
     | Document_version of X.Document.Version.t
     | Document_replace of X.Document.Result.t
     | Document_close of X.Document.Result.t
+    | Bundle_begin of B.Begin.response
+    | Bundle_chunk of B.Chunk.response
+    | Bundle_commit of B.Commit.response
+    | Bundle_status of B.Status.t
   [@@deriving sexp_of]
 
   let method_name = function
@@ -124,6 +145,10 @@ module Response = struct
     | Document_version _ -> A.Method.to_string A.Method.Document_version
     | Document_replace _ -> A.Method.to_string A.Method.Document_replace
     | Document_close _ -> A.Method.to_string A.Method.Document_close
+    | Bundle_begin _ -> A.Method.to_string A.Method.Bundle_begin
+    | Bundle_chunk _ -> A.Method.to_string A.Method.Bundle_chunk
+    | Bundle_commit _ -> A.Method.to_string A.Method.Bundle_commit
+    | Bundle_status _ -> A.Method.to_string A.Method.Bundle_status
   ;;
 
   let to_json = function
@@ -137,6 +162,10 @@ module Response = struct
     | Source_read value -> X.Source_read.Read_result.to_json value
     | Document_version value -> X.Document.Version.to_json value
     | Document_replace value | Document_close value -> X.Document.Result.to_json value
+    | Bundle_begin value -> B.Begin.response_to_json value
+    | Bundle_chunk value -> B.Chunk.response_to_json value
+    | Bundle_commit value -> B.Commit.response_to_json value
+    | Bundle_status value -> B.Status.to_json value
   ;;
 
   let decoders =
@@ -160,6 +189,10 @@ module Response = struct
       , map X.Document.Result.of_json (fun x -> Document_replace x) )
     ; ( "authoring.document.close"
       , map X.Document.Result.of_json (fun x -> Document_close x) )
+    ; "authoring.bundle.begin", map B.Begin.response_of_json (fun x -> Bundle_begin x)
+    ; "authoring.bundle.chunk", map B.Chunk.response_of_json (fun x -> Bundle_chunk x)
+    ; "authoring.bundle.commit", map B.Commit.response_of_json (fun x -> Bundle_commit x)
+    ; "authoring.bundle.status", map B.Status.of_json (fun x -> Bundle_status x)
     ]
   ;;
 

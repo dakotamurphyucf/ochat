@@ -19,9 +19,13 @@
 module Features : sig
   (** Initialization advertises [core] only after a host installs the
       source/context handlers. Codecs and {!Command.supported_methods} alone
-      do not make any method available. Later analysis and bundle features
+      do not make any method available. Bundle and later analysis features
       are selected separately only after their handlers are installed. *)
   val core : string
+
+  (** Separately negotiated immutable upload access. An upload-only principal
+      need not select [core] or open a source context. *)
+  val bundle : string
 end
 
 module Encoding : sig
@@ -48,6 +52,10 @@ module Method : sig
     | Document_version
     | Document_replace
     | Document_close
+    | Bundle_begin
+    | Bundle_chunk
+    | Bundle_commit
+    | Bundle_status
   [@@deriving compare, equal, sexp_of]
 
   (** Closed stable [authoring.*] method names. A method's presence in this
@@ -126,9 +134,12 @@ module Limits : sig
 end
 
 module Capabilities : sig
-  (** Actual installed handler methods, selected encodings and policy bounds.
+  (** Actual installed handler methods, selected position encodings and policy
+      bounds. [encodings] is empty for an upload-only principal with no source
+      position service; it never advertises an unavailable editor conversion.
       A codec may know a method that is absent here. [authoring.capabilities]
-      itself requires the selected [Features.core] initialization feature. *)
+      requires selected [Features.core] or [Features.bundle], according to the
+      installed handler and authenticated principal. *)
   type t = private
     { methods : string list
     ; encodings : Encoding.t list

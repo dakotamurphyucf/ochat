@@ -4,10 +4,8 @@ module W = P.Wire
 module Id = Agent_protocol.Id
 
 type t =
-  { connection : Connection.t
-  ; initialization : Agent_protocol.Initialize.Response.t
+  { endpoint : Authoring_connection.t
   ; host : Id.Server.t
-  ; capabilities : P.Capabilities.t
   ; contexts : (Id.Authoring_context.t, P.Context.t) Hashtbl.t
   ; seen_contexts : Id.Authoring_context.t Hash_set.t
   ; mutex : Eio.Mutex.t
@@ -47,85 +45,22 @@ let stale message =
   Error (Agent_protocol.Error.create Conflict ~message ~retryable:false ())
 ;;
 
-let require_connection t =
-  match Connection.initialization t.connection with
-  | Some response when phys_equal response t.initialization -> Ok ()
-  | Some _ -> incompatible "authoring connection was initialized again"
-  | None -> incompatible "authoring connection is no longer initialized"
-;;
-
-let require_method t request =
-  let method_name = W.Request.method_name request in
-  match P.Method.of_string method_name with
-  | Error _ -> incompatible "unknown authoring client method"
-  | Ok method_ ->
-    if P.Capabilities.supports t.capabilities method_
-    then Ok ()
-    else incompatible ("authoring method is not advertised: " ^ method_name)
-;;
-
-let send_raw connection request =
-  let method_name = W.Request.method_name request in
-  match
-    Connection.request_without_history
-      connection
-      (Agent_protocol.Command.Authoring request)
-  with
-  | Error _ as failure -> failure
-  | Ok (Agent_protocol.Method_result.Authoring response)
-    when String.equal (W.Response.method_name response) method_name -> Ok response
-  | Ok _ -> incompatible ("unexpected authoring result for " ^ method_name)
-;;
-
-let send t request =
-  let open Result.Let_syntax in
-  let%bind () = require_connection t in
-  let%bind () = require_method t request in
-  let%bind response = send_raw t.connection request in
-  let%bind () = require_connection t in
-  Ok response
-;;
+let require_connection t = Authoring_connection.require_current t.endpoint
+let send t request = Authoring_connection.send t.endpoint request
 
 let create connection =
   let open Result.Let_syntax in
-  let%bind initialization =
-    match Connection.initialization connection with
-    | Some response -> Ok response
-    | None -> incompatible "authoring requires a successful initialization"
-  in
-  let%bind () =
-    if List.mem initialization.enabled_features P.Features.core ~equal:String.equal
-    then Ok ()
-    else incompatible "authoring core feature was not selected"
-  in
-  let%bind capabilities =
-    match send_raw connection W.Request.Capabilities with
-    | Ok (W.Response.Capabilities capabilities) -> Ok capabilities
-    | Ok _ -> incompatible "unexpected authoring capabilities result"
-    | Error _ as failure -> failure
-  in
-  let%bind () =
-    match Connection.initialization connection with
-    | Some response when phys_equal response initialization -> Ok ()
-    | _ -> incompatible "authoring connection changed during capability negotiation"
-  in
-  let%bind () =
-    if P.Capabilities.supports capabilities P.Method.Capabilities
-    then Ok ()
-    else incompatible "authoring capabilities omits its own method"
-  in
+  let%bind endpoint = Authoring_connection.create connection ~feature:P.Features.core in
   Ok
-    { connection
-    ; initialization
-    ; host = initialization.server_id
-    ; capabilities
+    { endpoint
+    ; host = Authoring_connection.host endpoint
     ; contexts = Hashtbl.create (module Id.Authoring_context)
     ; seen_contexts = Hash_set.create (module Id.Authoring_context)
     ; mutex = Eio.Mutex.create ()
     }
 ;;
 
-let capabilities t = t.capabilities
+let capabilities t = Authoring_connection.capabilities t.endpoint
 
 let is_current_context t (expected : P.Context.Expected.t) =
   Eio.Mutex.use_ro t.mutex (fun () ->

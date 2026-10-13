@@ -93,6 +93,7 @@
   authoring_document
   authoring_source_read
   authoring_context
+  authoring_bundle
   authoring_wire
   authoring
   command
@@ -107,6 +108,6 @@
   stream_error
   inference_query)
  (private_modules protocol_error extension_codec projection_codec authoring_codec)
- (libraries uri ochat.inference core jsonaf base64 digestif mirage-crypto-rng uutf ochat.history_entry ochat.document_schema ochat.transcript ochat.chatml_source ochat.chatml_editor_position)
+ (libraries uri ochat.inference core jsonaf base64 digestif mirage-crypto-rng uutf ochat.history_entry ochat.document_schema ochat.transcript ochat.chatml_source ochat.chatml_editor_position ochat.source)
  (preprocess
   (pps ppx_jane)))
