@@ -978,8 +978,10 @@ let begin_response t upload =
 let begin_upload t ~principal ~request ~now ~checkpoint =
   use_gate t (fun () ->
     let checkpoint = work t.limits checkpoint in
+    checkpoint ();
     let* () = ensure_consistent t ~checkpoint in
     checkpoint ();
+    let now = now () in
     let request : B.Begin.request = request in
     let identity = key principal request.idempotency_key in
     match Hashtbl.find t.begin_keys identity with
@@ -1076,8 +1078,10 @@ let find_member_index upload source =
 let chunk t ~principal ~request ~now ~checkpoint =
   use_gate t (fun () ->
     let checkpoint = work t.limits checkpoint in
+    checkpoint ();
     let* () = ensure_consistent t ~checkpoint in
     checkpoint ();
+    let now = now () in
     let request : B.Chunk.request = request in
     let* upload = find_owned t principal request.upload_id in
     if expired now (phase_deadline upload)
@@ -1187,8 +1191,10 @@ let save_phase t upload phase bytes =
 let claim_commit t ~principal ~request ~now ~checkpoint =
   use_gate t (fun () ->
     let checkpoint = work t.limits checkpoint in
+    checkpoint ();
     let* () = ensure_consistent t ~checkpoint in
     checkpoint ();
+    let now = now () in
     let request : B.Commit.request = request in
     let* upload = find_owned t principal request.upload_id in
     if expired now (phase_deadline upload)
@@ -1264,7 +1270,10 @@ let claim_commit t ~principal ~request ~now ~checkpoint =
 let snapshot t (sealed : sealed) ~now ~checkpoint =
   use_gate t (fun () ->
     let checkpoint = work t.limits checkpoint in
+    checkpoint ();
     let* () = ensure_consistent t ~checkpoint in
+    checkpoint ();
+    let now = now () in
     if not (phys_equal sealed.token t.token)
     then Error Error.Closed
     else (
@@ -1289,8 +1298,10 @@ let snapshot t (sealed : sealed) ~now ~checkpoint =
 let status t ~principal ~upload_id ~now ~checkpoint =
   use_gate t (fun () ->
     let checkpoint = work t.limits checkpoint in
+    checkpoint ();
     let* () = ensure_consistent t ~checkpoint in
     checkpoint ();
+    let now = now () in
     let* upload = find_owned t principal upload_id in
     if expired now (phase_deadline upload)
     then Ok Status.Expired
@@ -1362,8 +1373,10 @@ let tombstone t upload ~now ~checkpoint =
 let cancel t ~principal ~upload_id ~now ~checkpoint =
   use_gate t (fun () ->
     let checkpoint = work t.limits checkpoint in
+    checkpoint ();
     let* () = ensure_consistent t ~checkpoint in
     checkpoint ();
+    let now = now () in
     let* upload = find_owned t principal upload_id in
     tombstone t upload ~now ~checkpoint)
 ;;
@@ -1406,7 +1419,10 @@ let prune_one t upload ~checkpoint =
 let prune t ~now ~protected_uploads ~checkpoint =
   use_gate t (fun () ->
     let checkpoint = work t.limits checkpoint in
+    checkpoint ();
     let* () = ensure_consistent t ~checkpoint in
+    checkpoint ();
+    let now = now () in
     if
       List.length (List.take protected_uploads (t.limits.max_idempotency_records + 1))
       > t.limits.max_idempotency_records
