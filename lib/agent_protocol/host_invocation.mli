@@ -39,3 +39,11 @@ val validate : t -> (unit, Error.t) result
 val dispatch : t -> (t, Error.t) result
 val resolve : t -> Invocation.outcome -> (t, Error.t) result
 val cancel : t -> reason:string -> (t, Error.t) result
+
+(** Persist only the developer arm in the daemon-owned run document. This
+    version-one value encoding rejects conversation records, unknown fields and
+    Published status; developer invocations have no provider publication. Decode
+    reconstructs through validated pure transitions and grants no authority. *)
+val developer_to_json : t -> (Jsonaf.t, Error.t) result
+
+val developer_of_json : Jsonaf.t -> (t, Error.t) result

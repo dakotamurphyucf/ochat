@@ -9,6 +9,7 @@
   authoring_upload_files
   authoring_upload_store
   developer_run_document
+  developer_run_transition
   developer_run_store
   frame
   document_record
@@ -76,7 +77,8 @@
   prompt_artifact_staging
   authoring_upload_document
   authoring_upload_files
-  developer_run_document)
+  developer_run_document
+  developer_run_transition)
  (libraries ochat.inference
   core
   core_unix

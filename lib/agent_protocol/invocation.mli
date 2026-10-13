@@ -59,6 +59,14 @@ type status =
   | Published of outcome
 [@@deriving equal, sexp]
 
+(** Shared value codecs for developer-only invocation persistence. They do not
+    encode a conversation context or grant transition authority. *)
+val origin_to_json : origin -> Jsonaf.t
+
+val origin_of_json : Jsonaf.t -> (origin, Error.t) result
+val status_to_json : status -> Jsonaf.t
+val status_of_json : Jsonaf.t -> (status, Error.t) result
+
 type call_kind =
   | Function
   | Custom

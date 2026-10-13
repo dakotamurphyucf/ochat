@@ -934,6 +934,8 @@ let origin_to_json origin =
     (fst (List.find_exn origin_values ~f:(fun (_, value) -> equal_origin value origin)))
 ;;
 
+let origin_of_json = Json_codec.enum ~name:"invocation origin" origin_values
+
 let work_to_json = function
   | Job id -> `Object [ "type", `String "job"; "id", Id.Job.to_json id ]
   | Subscription id ->
@@ -1156,12 +1158,7 @@ let context_of_json ~version json =
       "generation"
       (Json_codec.bounded_int ~min:0 ~max:Int.max_value)
   in
-  let%bind origin =
-    Json_codec.required_as
-      fields
-      "origin"
-      (Json_codec.enum ~name:"invocation origin" origin_values)
-  in
+  let%bind origin = Json_codec.required_as fields "origin" origin_of_json in
   let%bind provider_call_id =
     Json_codec.optional_as fields "provider_call_id" Json_codec.string
   in

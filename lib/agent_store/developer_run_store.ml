@@ -84,23 +84,6 @@ module Error = struct
   [@@deriving sexp_of]
 end
 
-type t =
-  { root_owner : Root.owner
-  ; host_id : P.Id.Server.t
-  ; directory : Eio.Fs.dir_ty Eio.Path.t
-  ; limits : Limits.t
-  ; checkpoint : unit -> unit
-  ; token : unit ref
-  ; mutable closed : bool
-  }
-
-type handle =
-  { store : t
-  ; owner : P.Execution_owner.developer
-  ; capture_fingerprint : Chatml_source.Digest.t
-  ; token : unit ref
-  }
-
 module Checkpoint = struct
   type phase =
     | Active
@@ -128,12 +111,51 @@ module Observation = struct
     ; document_bytes : string
     ; document_revision : int64
     ; checkpoint : Checkpoint.t
+    ; document : Doc.t
     }
 
   let checkpoint t = t.checkpoint
 end
 
+module Invocation_observation = struct
+  type t =
+    { revision : int
+    ; value : P.Host_invocation.t
+    }
+
+  let revision t = t.revision
+  let value t = t.value
+end
+
+module Invocation_lookup = struct
+  type t =
+    { observation : Observation.t
+    ; id : P.Id.Invocation.t
+    ; prior : Invocation_observation.t option
+    }
+
+  let prior t = t.prior
+end
+
+let find_invocation observation id =
+  let prior =
+    Option.map (Doc.find_invocation observation.Observation.document id) ~f:(fun entry ->
+      Invocation_observation.
+        { revision = Doc.Invocation_entry.revision entry
+        ; value = Doc.Invocation_entry.value entry
+        })
+  in
+  { Invocation_lookup.observation; id; prior }
+;;
+
+let find_job observation id = Doc.find_job observation.Observation.document id
+
 module Prepared = struct
+  type kind =
+    | Foundation_checkpoint
+    | Developer_dispatch
+    | Selected_transaction
+
   type t =
     { store_token : unit ref
     ; handle_token : unit ref
@@ -141,6 +163,8 @@ module Prepared = struct
     ; before_bytes : string
     ; after_bytes : string
     ; after_document : Doc.t
+    ; token : unit ref
+    ; kind : kind
     }
 end
 
@@ -154,6 +178,46 @@ type reconciliation =
   | Installed of Installed.t
   | Absent
   | Diverged
+
+module Settlement = struct
+  type t = reconciliation =
+    | Installed of Installed.t
+    | Absent
+    | Diverged
+end
+
+module Handoff = struct
+  type t =
+    { settle : Settlement.t -> unit
+    ; mutable bound : unit ref option
+    ; mutable settled : Settlement.t option
+    }
+
+  let create ~settle = { settle; bound = None; settled = None }
+end
+
+type pending =
+  { prepared : Prepared.t
+  ; handoff : Handoff.t
+  }
+
+type t =
+  { root_owner : Root.owner
+  ; host_id : P.Id.Server.t
+  ; directory : Eio.Fs.dir_ty Eio.Path.t
+  ; limits : Limits.t
+  ; checkpoint : unit -> unit
+  ; token : unit ref
+  ; pending : (Id.t, pending) Hashtbl.t
+  ; mutable closed : bool
+  }
+
+type handle =
+  { store : t
+  ; owner : P.Execution_owner.developer
+  ; capture_fingerprint : Chatml_source.Digest.t
+  ; token : unit ref
+  }
 
 let ( let* ) result f = Result.bind result ~f
 let store result = Result.map_error result ~f:(fun error -> Error.Store error)
@@ -219,6 +283,7 @@ let observation (t : t) ~owner ~bytes document =
     ; document_bytes = bytes
     ; document_revision = Doc.revision document
     ; checkpoint
+    ; document
     }
   in
   Ok observed
@@ -261,7 +326,14 @@ let read t ~poll id =
   | Ok bytes ->
     poll ();
     let* document =
-      Doc.of_bytes bytes ~limits:t.limits.document ~max_epochs:t.limits.max_epochs_per_run
+      Doc.of_bytes
+        bytes
+        ~poll
+        ~limits:t.limits.document
+        ~max_epochs:t.limits.max_epochs_per_run
+        ~max_jobs:t.limits.max_jobs_per_run
+        ~max_invocations:t.limits.max_invocations_per_run
+        ~max_job_payload_bytes:t.limits.max_job_payload_bytes
       |> store
     in
     poll ();
@@ -310,8 +382,12 @@ let scan t ~poll =
       let* document =
         Doc.of_bytes
           bytes
+          ~poll
           ~limits:t.limits.document
           ~max_epochs:t.limits.max_epochs_per_run
+          ~max_jobs:t.limits.max_jobs_per_run
+          ~max_invocations:t.limits.max_invocations_per_run
+          ~max_job_payload_bytes:t.limits.max_job_payload_bytes
         |> store
       in
       poll ();
@@ -372,6 +448,7 @@ let open_or_create session_store ~sw ~limits ~checkpoint =
             ; limits
             ; checkpoint
             ; token = ref ()
+            ; pending = Hashtbl.create (module Id)
             ; closed = false
             })
         |> store
@@ -433,6 +510,9 @@ let admit_epoch t ~owner ~capture_fingerprint ~previous =
     else Error Error.Foreign_or_stale
   in
   with_lease t (fun ~env:_ ~root:_ ->
+    let* () =
+      if Hashtbl.mem t.pending owner.run_id then Error Error.Conflict else Ok ()
+    in
     let poll = work t t.checkpoint in
     let* existing = read t ~poll owner.run_id in
     let* bytes, document =
@@ -448,8 +528,12 @@ let admit_epoch t ~owner ~capture_fingerprint ~previous =
         let* bytes =
           Doc.to_bytes
             document
+            ~poll
             ~limits:t.limits.document
             ~max_epochs:t.limits.max_epochs_per_run
+            ~max_jobs:t.limits.max_jobs_per_run
+            ~max_invocations:t.limits.max_invocations_per_run
+            ~max_job_payload_bytes:t.limits.max_job_payload_bytes
           |> store
         in
         poll ();
@@ -509,8 +593,12 @@ let admit_epoch t ~owner ~capture_fingerprint ~previous =
           let* after =
             Doc.to_bytes
               next
+              ~poll
               ~limits:t.limits.document
               ~max_epochs:t.limits.max_epochs_per_run
+              ~max_jobs:t.limits.max_jobs_per_run
+              ~max_invocations:t.limits.max_invocations_per_run
+              ~max_job_payload_bytes:t.limits.max_job_payload_bytes
             |> store
           in
           poll ();
@@ -561,8 +649,12 @@ let prepare_checkpoint handle ~expected ~phase =
         let* after_bytes =
           Doc.to_bytes
             next
+            ~poll
             ~limits:t.limits.document
             ~max_epochs:t.limits.max_epochs_per_run
+            ~max_jobs:t.limits.max_jobs_per_run
+            ~max_invocations:t.limits.max_invocations_per_run
+            ~max_job_payload_bytes:t.limits.max_job_payload_bytes
           |> store
         in
         poll ();
@@ -574,7 +666,125 @@ let prepare_checkpoint handle ~expected ~phase =
             ; before_bytes
             ; after_bytes
             ; after_document = next
+            ; token = ref ()
+            ; kind = Foundation_checkpoint
             })
+;;
+
+let prepare_change handle ~expected ~kind ~f =
+  let* t = valid_handle handle in
+  with_lease t (fun ~env:_ ~root:_ ->
+    let poll = work t t.checkpoint in
+    let* existing = read t ~poll handle.owner.run_id in
+    match existing with
+    | None -> Error Error.Foreign_or_stale
+    | Some (before_bytes, document) ->
+      if not (same_observation t handle expected before_bytes document)
+      then Error Error.Conflict
+      else
+        let* () =
+          match List.last (Doc.epochs document) with
+          | Some epoch
+            when Int.equal (Doc.epoch_number epoch) handle.owner.epoch
+                 &&
+                 match Doc.epoch_phase epoch with
+                 | `Active -> true
+                 | `Interrupted | `Closed -> false -> Ok ()
+          | None | Some _ -> Error Error.Foreign_or_stale
+        in
+        let* next = f t document ~poll in
+        poll ();
+        let* after_bytes =
+          Doc.to_bytes
+            next
+            ~poll
+            ~limits:t.limits.document
+            ~max_epochs:t.limits.max_epochs_per_run
+            ~max_jobs:t.limits.max_jobs_per_run
+            ~max_invocations:t.limits.max_invocations_per_run
+            ~max_job_payload_bytes:t.limits.max_job_payload_bytes
+          |> store
+        in
+        poll ();
+        Ok
+          Prepared.
+            { store_token = t.token
+            ; handle_token = handle.token
+            ; owner = handle.owner
+            ; before_bytes
+            ; after_bytes
+            ; after_document = next
+            ; token = ref ()
+            ; kind
+            })
+;;
+
+let matching_lookup expected lookup id =
+  phys_equal lookup.Invocation_lookup.observation expected
+  && P.Id.Invocation.equal lookup.id id
+;;
+
+let transition t handle ~poll =
+  Developer_run_transition.create
+    ~owner:handle.owner
+    ~capture_fingerprint:handle.capture_fingerprint
+    ~max_jobs:t.limits.max_jobs_per_run
+    ~max_invocations:t.limits.max_invocations_per_run
+    ~max_selected:t.limits.max_selected_per_commit
+    ~max_job_payload_bytes:t.limits.max_job_payload_bytes
+    ~limits:t.limits.document
+    ~poll
+;;
+
+let transition_result result =
+  Result.map_error result ~f:(function
+    | Developer_run_transition.Error.Conflict -> Error.Conflict
+    | Limit_exceeded -> Error.Limit_exceeded
+    | Store error -> Error.Store error)
+;;
+
+let observed_lookup lookup =
+  Option.map lookup.Invocation_lookup.prior ~f:(fun prior ->
+    Invocation_observation.revision prior, Invocation_observation.value prior)
+;;
+
+let prepare_dispatch handle ~expected ~lookup ~dispatched =
+  let context = P.Host_invocation.context dispatched in
+  if not (matching_lookup expected lookup context.id)
+  then Error Error.Conflict
+  else
+    prepare_change handle ~expected ~kind:Developer_dispatch ~f:(fun t document ~poll ->
+      Developer_run_transition.dispatch
+        (transition t handle ~poll)
+        document
+        ~observed:(observed_lookup lookup)
+        ~dispatched
+      |> transition_result)
+;;
+
+let prepare_root_selected handle ~expected ~phase ~selected =
+  prepare_change handle ~expected ~kind:Selected_transaction ~f:(fun t document ~poll ->
+    Developer_run_transition.root_selected
+      (transition t handle ~poll)
+      document
+      ~phase:(phase_to_doc phase)
+      ~selected
+    |> transition_result)
+;;
+
+let prepare_terminal_selected handle ~expected ~lookup ~terminal ~selected =
+  let context = P.Host_invocation.context terminal in
+  if not (matching_lookup expected lookup context.id)
+  then Error Error.Conflict
+  else
+    prepare_change handle ~expected ~kind:Selected_transaction ~f:(fun t document ~poll ->
+      Developer_run_transition.terminal_selected
+        (transition t handle ~poll)
+        document
+        ~observed:(observed_lookup lookup)
+        ~terminal
+        ~selected
+      |> transition_result)
 ;;
 
 let prepared_for handle prepared =
@@ -594,12 +804,127 @@ let installed t prepared =
   Ok Installed.{ observation = observed }
 ;;
 
+let no_pending t run_id =
+  if Hashtbl.mem t.pending run_id then Error Error.Conflict else Ok ()
+;;
+
+let bind_handoff t handle prepared handoff =
+  if not (prepared_for handle prepared)
+  then Error Error.Foreign_or_stale
+  else
+    let* () =
+      match handoff.Handoff.bound with
+      | None ->
+        handoff.bound <- Some prepared.token;
+        Ok ()
+      | Some token when phys_equal token prepared.token -> Ok ()
+      | Some _ -> Error Error.Foreign_or_stale
+    in
+    match handoff.settled with
+    | Some settled -> Ok (Some settled)
+    | None ->
+      let run_id = handle.owner.run_id in
+      (match Hashtbl.find t.pending run_id with
+       | None ->
+         Hashtbl.set t.pending ~key:run_id ~data:{ prepared; handoff };
+         Ok None
+       | Some pending
+         when phys_equal pending.prepared.token prepared.token
+              && phys_equal pending.handoff handoff -> Ok None
+       | Some _ -> Error Error.Conflict)
+;;
+
+let settle t handle handoff value =
+  Eio.Cancel.protect (fun () -> handoff.Handoff.settle value);
+  handoff.settled <- Some value;
+  (match value with
+   | Settlement.Installed _ | Absent -> Hashtbl.remove t.pending handle.owner.run_id
+   | Diverged -> ());
+  value
+;;
+
+let classify_prepared t handle prepared ~poll =
+  let* existing = read t ~poll handle.owner.run_id in
+  match existing with
+  | Some (bytes, _) when String.equal bytes prepared.Prepared.after_bytes ->
+    Result.map (installed t prepared) ~f:(fun installed -> Settlement.Installed installed)
+  | Some (bytes, _) when String.equal bytes prepared.before_bytes -> Ok Settlement.Absent
+  | None | Some _ -> Ok Settlement.Diverged
+;;
+
+let reconcile_and_settle handle prepared handoff =
+  let* t = valid_handle handle in
+  with_lease t (fun ~env:_ ~root:_ ->
+    let* settled = bind_handoff t handle prepared handoff in
+    match settled with
+    | Some value -> Ok value
+    | None ->
+      let poll = work t t.checkpoint in
+      let* value = classify_prepared t handle prepared ~poll in
+      Ok (settle t handle handoff value))
+;;
+
+let commit_and_settle handle prepared handoff =
+  let* t = valid_handle handle in
+  with_lease t (fun ~env:_ ~root:_ ->
+    let* settled = bind_handoff t handle prepared handoff in
+    match settled with
+    | Some value -> Ok value
+    | None ->
+      let poll = work t t.checkpoint in
+      let commit_once () =
+        let* existing = read t ~poll handle.owner.run_id in
+        match existing with
+        | Some (bytes, _) when String.equal bytes prepared.after_bytes ->
+          Result.map (installed t prepared) ~f:(fun installed ->
+            Settlement.Installed installed)
+        | Some (bytes, _) when String.equal bytes prepared.before_bytes ->
+          poll ();
+          let* () =
+            Durable_file.replace_in
+              ~directory:t.directory
+              ~durability:Flush_file_and_directory
+              ~basename:(basename handle.owner.run_id)
+              prepared.after_bytes
+            |> store
+          in
+          poll ();
+          Result.map (installed t prepared) ~f:(fun installed ->
+            Settlement.Installed installed)
+        | None | Some _ -> Ok Settlement.Diverged
+      in
+      (match commit_once () with
+       | Ok value -> Ok (settle t handle handoff value)
+       | Error original ->
+         (match
+            Eio.Cancel.protect (fun () -> classify_prepared t handle prepared ~poll)
+          with
+          | Ok value -> Ok (settle t handle handoff value)
+          | Error _ -> Error original)
+       | exception exn ->
+         let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+         (try
+            Eio.Cancel.protect (fun () ->
+              match classify_prepared t handle prepared ~poll with
+              | Ok value -> ignore (settle t handle handoff value : Settlement.t)
+              | Error _ -> ())
+          with
+          | _ -> ());
+         Stdlib.Printexc.raise_with_backtrace exn backtrace))
+;;
+
 let commit handle prepared =
   let* t = valid_handle handle in
   if not (prepared_for handle prepared)
   then Error Error.Foreign_or_stale
+  else if
+    match prepared.kind with
+    | Foundation_checkpoint -> false
+    | Developer_dispatch | Selected_transaction -> true
+  then Error Error.Conflict
   else
     with_lease t (fun ~env:_ ~root:_ ->
+      let* () = no_pending t handle.owner.run_id in
       let poll = work t t.checkpoint in
       let* existing = read t ~poll handle.owner.run_id in
       match existing with
@@ -624,8 +949,14 @@ let reconcile handle prepared =
   let* t = valid_handle handle in
   if not (prepared_for handle prepared)
   then Error Error.Foreign_or_stale
+  else if
+    match prepared.kind with
+    | Foundation_checkpoint -> false
+    | Developer_dispatch | Selected_transaction -> true
+  then Error Error.Conflict
   else
     with_lease t (fun ~env:_ ~root:_ ->
+      let* () = no_pending t handle.owner.run_id in
       let poll = work t t.checkpoint in
       let* existing = read t ~poll handle.owner.run_id in
       match existing with
