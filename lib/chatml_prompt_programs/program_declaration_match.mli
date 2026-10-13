@@ -6,8 +6,8 @@ open Core
     graph restore, compiler admission or native authority. *)
 type t
 
-val original : t -> Program_binding.t
-val current : t -> Program_binding.t
+val original : t -> Chatml_prompt_binding.t
+val current : t -> Chatml_prompt_binding.t
 val compiler_contract : t -> Chatml_source.Digest.t
 val declaration : t -> Prompt.Chat_markdown.Declaration.t
 

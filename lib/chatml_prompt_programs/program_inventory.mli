@@ -1,7 +1,7 @@
 open Core
 module Captured = Chatml_source
 module Revision = Program_source_revision
-module Binding = Program_binding
+module Binding = Chatml_prompt_binding
 module Storage = Agent_store.Prompt_program_bundle
 
 module Input : sig

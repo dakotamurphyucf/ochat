@@ -3,5 +3,5 @@
  (public_name ochat.chatml_authoring_bundle_document)
  (modules chatml_authoring_bundle_document authoring_bundle_document_inputs)
  (private_modules authoring_bundle_document_inputs)
- (libraries core eio agent_protocol chatmd chatmd_source_input chatml_authoring_bundle_project chatml_prompt_programs chatml_project_build chatml_source chatml source)
+ (libraries core eio agent_protocol chatmd chatmd_source_input chatml_authoring_bundle_project chatml_prompt_binding chatml_project_build chatml_source chatml source)
  (preprocess (pps ppx_jane)))

@@ -10,7 +10,7 @@ module Program = struct
 
   type t =
     { key : string
-    ; binding : Program_binding.t
+    ; binding : Chatml_prompt_binding.t
     ; compiler_contract : Captured.Digest.t
     ; input : input
     }
