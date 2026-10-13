@@ -545,7 +545,7 @@ let implementation_sources =
   ; ( "lib/chatml_semantics/chatml_semantic_query.ml"
     , "2a8b718f84bee6caf8ba9b0f8268eda73fab087ec16a5e70fa5b99b9ea0e78f0" )
   ; ( "lib/chatml_semantics/chatml_semantic_snapshot.ml"
-    , "ee7467f7546774b8a5dce71779d9af0b957110c5369f25f79477dd6e48ed8d90" )
+    , "343fef2b5374fc4fe059a22831abb3db65f7bc2937e166d67db80a172265e4a7" )
   ; ( "lib/chatml_semantics/chatml_semantics.ml"
     , "72fa76851ebc603db4fcb269c06f52520e46cc876f24f3e28bab35e8b97a74c4" )
   ]

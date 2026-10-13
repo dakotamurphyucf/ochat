@@ -4,7 +4,7 @@ open Core
     Raw or malformed documents have lexical/syntax assistance but no invented
     project graph. This adapter uses the real Parsed declaration and extraction
     map plus the shared ChatML checked compiler; it does not parse, fetch,
-    preprocess, execute initializers or grant source/host authority. OCH-262
+    preprocess, execute initializers or grant source/host authority. The service host
     owns the sole mutable context ledger, actor/currentness checks, serialized
     publication and bounded joined request lifetime. *)
 
@@ -103,6 +103,10 @@ module Script : sig
     -> (admission, Error.t) Result.t
 
   val document_stamp : t -> Document_stamp.t
+
+  (** Exact full compiled entry capture to which this Script's genuine
+      extraction map was bound. A host must still authorize its custody. *)
+  val selected_source : t -> Chatml_source.t
 end
 
 module Candidate : sig
@@ -124,7 +128,7 @@ module Candidate : sig
 end
 
 module Document_cache : sig
-  (** Pure current-result map only; it owns no second context ledger. OCH-262
+  (** Pure current-result map only; it owns no second context ledger. The service host
       atomically applies Project_cache.transition and this transition to its
       one host-owned ledger under the same gate. At most one selected-script
       result is retained per current Document context. *)
@@ -171,7 +175,20 @@ module Projection : sig
   val related : t -> (Chatml_diagnostic.Related.t * site) list
   val sites_truncated : t -> bool
 
-  (** Decorate only OCH-301's already admitted bounded primary/related sites;
+  (** Project one exact FULL compiled location through this Script's already
+      bound extraction map. Other captured sources return None. The caller may
+      first prove a provisional prefix's byte-for-byte relation to this full
+      capture and rebuild its range on the full owner, but must retain the
+      original prefix location as the public native site. An exact authored
+      wire range still requires separate custody of the authored parser input.
+      No suffix/path guess, parse, source fetch or unbounded site traversal. *)
+  val of_location
+    :  Script.t
+    -> Chatml_source.Location.t
+    -> checkpoint:(unit -> unit)
+    -> (Prompt.Chat_markdown.Declaration.Extraction.projection option, Error.t) Result.t
+
+  (** Decorate only [Chatml_authoring_analysis]'s already admitted bounded primary/related sites;
       preserve its exact byte/UTF-16 outcomes and truncation flag. The public
       parser-owned extraction map may yield exact inline provenance, unresolved
       external member/digest, or approximate declaration context. It never

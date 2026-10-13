@@ -6,6 +6,11 @@ module Identity = Chatml_semantic_identity
 
 module Symbol_id : sig
   type t [@@deriving equal, sexp_of]
+
+  (** Actual snapshot-local index. Call [symbol] on the owning Snapshot first;
+      this integer is stable only within that one snapshot incarnation and is
+      never a cross-snapshot identity or authorization token. *)
+  val index : t -> int
 end
 
 module Namespace : sig
@@ -80,6 +85,7 @@ module Binding : sig
   type t
 
   val symbol : t -> Symbol_id.t
+  val name : t -> string
   val scheme : t -> Frozen.Id.t option
   val values : t -> t list fact
   val types : t -> t list fact

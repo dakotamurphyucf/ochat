@@ -154,6 +154,7 @@ module Writer = struct
   type t =
     { session : session
     ; buffer : Buffer.t
+    ; max_bytes : int
     ; mutable bytes : int
     ; checkpoint : unit -> unit
     }
@@ -161,7 +162,8 @@ module Writer = struct
   let reserve writer length =
     let limits = writer.session.limits in
     if
-      length > limits.max_text_bytes - writer.bytes
+      length > writer.max_bytes - writer.bytes
+      || length > limits.max_text_bytes - writer.bytes
       || length > limits.max_output_bytes - writer.session.output_bytes - writer.bytes
     then raise (Stop Byte_limit)
     else writer.bytes <- writer.bytes + length
@@ -201,15 +203,18 @@ module Writer = struct
         else emit_hex_byte writer byte)
   ;;
 
-  let create session ~checkpoint =
+  let create session ~max_bytes ~checkpoint =
     { session
     ; buffer =
         Buffer.create
           (Int.min
              128
              (Int.min
-                session.limits.max_text_bytes
-                (session.limits.max_output_bytes - session.output_bytes)))
+                max_bytes
+                (Int.min
+                   session.limits.max_text_bytes
+                   (session.limits.max_output_bytes - session.output_bytes))))
+    ; max_bytes
     ; bytes = 0
     ; checkpoint
     }
@@ -225,7 +230,8 @@ module Writer = struct
     let marker = "..." in
     let text =
       if
-        String.length marker <= writer.session.limits.max_text_bytes - writer.bytes
+        String.length marker <= writer.max_bytes - writer.bytes
+        && String.length marker <= writer.session.limits.max_text_bytes - writer.bytes
         && String.length marker
            <= writer.session.limits.max_output_bytes
               - writer.session.output_bytes

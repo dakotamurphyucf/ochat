@@ -22,6 +22,10 @@ end
 module Snapshot : sig
   module Symbol_id : sig
     type t [@@deriving equal, sexp_of]
+
+    (** Actual snapshot-local coordinate; validate owner with [symbol] before
+        publishing it under a host Snapshot_id. Never compare across snapshots. *)
+    val index : t -> int
   end
 
   module Namespace : sig
@@ -96,6 +100,7 @@ module Snapshot : sig
     type t
 
     val symbol : t -> Symbol_id.t
+    val name : t -> string
     val scheme : t -> Frozen.Id.t option
     val values : t -> t list fact
     val types : t -> t list fact

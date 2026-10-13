@@ -74,6 +74,19 @@ third-party parser steps remain indivisible. The fixed host contract projection 
 the joined adapter is covered by its elapsed policy before the analysis work ledger
 begins. Snapshots retain no inference cells, recorder callbacks or execution state.
 
+`Chatml_authoring_query` projects those immutable facts into portable semantic
+query payloads. It checks actual snapshot or provisional identity against the
+request capture and exact source ID, digest and byte length. The host separately
+owns authorization, current context and snapshot incarnation. The producer uses
+one aggregate work, item, member-edge and label ledger, plus a shared frozen-type
+display session. It reserves the bounded top-level candidate/module page before
+spending remaining items on optional nested public members; omitted members
+retain a truncated page flag. It validates a finished payload against the wire
+envelope before returning it. Same-run partial results expose parser syntax
+only. A provisional prefix keeps its own native source; an exact byte-prefix
+witness can relate it to a separately admitted full capture for ChatMD authored
+projection without relabelling the compiler site.
+
 The public interface lives in `lib/chatml_semantics/chatml_semantics.mli`; private
 modules own publication, budgets, query traversal and partial results. Behavioral
 evidence in `test/chatml_semantics` covers public/implementation views, late shared
