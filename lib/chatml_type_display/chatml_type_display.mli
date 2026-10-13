@@ -52,7 +52,10 @@ module Completeness : sig
 end
 
 module Error : sig
-  type t = Foreign_root [@@deriving sexp_of]
+  type t =
+    | Foreign_root
+    | Invalid_max_bytes
+  [@@deriving sexp_of]
 end
 
 type t
@@ -82,6 +85,14 @@ module Session : sig
       Internal Row/Payload/Shape nodes are not alleged source value types.
       Escaping arbitrary invalid UTF-8/control label bytes yields valid UTF-8.
 
+      Optional [max_bytes] further restricts THIS render to the caller's
+      current remaining aggregate output allowance. The effective cap is the
+      minimum of this value, per-item text capacity and session output space.
+      Zero returns typed Truncated Byte_limit with empty text; a negative value
+      returns Invalid_max_bytes. Omitting it retains the original session
+      behavior. The session still charges actual returned bytes and all work;
+      the caller can debit those bytes from its own combined result budget.
+
       A cap returns Truncated with the first violated reason. If even an ASCII
       truncation marker would exceed the remaining byte budget, text may be
       empty; it is never Complete. Traversal is stack-safe with a bounded
@@ -90,6 +101,7 @@ module Session : sig
       exceptions retain identity/backtrace, with no callback stored. *)
   val render
     :  session
+    -> ?max_bytes:int
     -> Frozen.t
     -> root:Frozen.Id.t
     -> kind:Kind.t

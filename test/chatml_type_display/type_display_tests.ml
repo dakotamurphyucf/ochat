@@ -222,7 +222,41 @@ let%test_unit "each independent traversal ceiling reports its own reason" =
     let output = render ~limits snapshot root in
     [%test_result: bool]
       (Display.Completeness.equal (Display.completeness output) (Truncated reason))
-      ~expect:true)
+      ~expect:true);
+  let session = Display.Session.create ~limits:(display_limit ()) in
+  let render_with_cap cap =
+    Display.Session.render
+      session
+      ~max_bytes:cap
+      snapshot
+      ~root
+      ~kind:Display.Kind.Type
+      ~checkpoint:(fun () -> ())
+  in
+  let expect_render cap =
+    match render_with_cap cap with
+    | Ok output -> output
+    | Error error -> failwith (Sexp.to_string (Display.Error.sexp_of_t error))
+  in
+  [%test_result: bool]
+    (match render_with_cap (-1) with
+     | Error Display.Error.Invalid_max_bytes -> true
+     | Error Display.Error.Foreign_root | Ok _ -> false)
+    ~expect:true;
+  let zero = expect_render 0 in
+  [%test_result: bool]
+    (Display.Completeness.equal (Display.completeness zero) (Truncated Byte_limit)
+     && String.is_empty (Display.text zero))
+    ~expect:true;
+  let capped = expect_render 2 in
+  [%test_result: bool] (String.length (Display.text capped) <= 2) ~expect:true;
+  [%test_result: bool]
+    (Display.Completeness.equal (Display.completeness capped) (Truncated Byte_limit))
+    ~expect:true;
+  let uncapped = expect_render 4096 in
+  [%test_result: bool]
+    (Display.Completeness.equal (Display.completeness uncapped) Complete)
+    ~expect:true
 ;;
 
 let%test_unit "generated finite trees obey complete and truncated display invariants" =

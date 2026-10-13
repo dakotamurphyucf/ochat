@@ -153,6 +153,7 @@ module Script = struct
     | Unavailable of Unavailable.t
 
   let document_stamp t = t.stamp
+  let selected_source t = t.entry_source
 
   let assess inputs ~parsed ~script_id ~selection ~max_membership_work_steps ~checkpoint =
     let open Result.Let_syntax in

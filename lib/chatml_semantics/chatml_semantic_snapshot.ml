@@ -22,6 +22,7 @@ module Symbol_id = struct
   ;;
 
   let sexp_of_t t = [%sexp (t.index : int)]
+  let index t = t.index
 end
 
 module Namespace = struct
@@ -100,6 +101,7 @@ module Binding = struct
     }
 
   let symbol t = t.symbol
+  let name t = t.name
   let scheme t = t.scheme
   let values t = t.values
   let types t = t.types
