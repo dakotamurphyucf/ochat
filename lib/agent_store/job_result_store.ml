@@ -1,25 +1,6 @@
 open Core
-
-let with_owner mutex f =
-  let outcome =
-    Eio.Mutex.use_rw ~protect:true mutex (fun () ->
-      try Ok (f ()) with
-      | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
-  in
-  match outcome with
-  | Ok value -> value
-  | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
-;;
-
 module P = Agent_protocol
 module Artifact = P.Job_artifact
-
-type phase =
-  | Allocated
-  | Prepared of Blob_store.Handle.t
-  | Attempted
-  | Retained
-  | Discarded
 
 type prepared =
   { store : Blob_store.t
@@ -29,8 +10,7 @@ type prepared =
   ; reference : Artifact.t
   ; completion : P.Completion.t
   ; content : string
-  ; mutex : Eio.Mutex.t
-  ; mutable phase : phase
+  ; phase : Blob_store.Handle.t Result_publication_phase.t
   }
 
 let reference prepared = prepared.reference
@@ -103,33 +83,23 @@ let allocate store ~env ~session ~job ~creating_principal ~now ~max_bytes comple
   ; reference
   ; completion
   ; content
-  ; mutex = Eio.Mutex.create ()
-  ; phase = Allocated
+  ; phase = Result_publication_phase.create ()
   }
 ;;
 
 let ensure_prepared prepared ~sw =
-  with_owner prepared.mutex (fun () ->
-    match prepared.phase with
-    | Retained | Discarded -> Error (Store_error.Corrupt "result preparation has ended")
-    | (Allocated | Prepared _ | Attempted) as phase ->
-      let open Result.Let_syntax in
-      let%bind () =
-        Job_result_intent.save ~env:prepared.env ~session:prepared.session prepared.intent
-      in
-      let content = prepared.content in
-      let%map handle =
-        Blob_store.ensure_staged_content
-          prepared.store
-          ~sw
-          prepared.session
-          ~stage:(Job_result_intent.stage prepared.intent)
-          content
-      in
-      (match phase with
-       | Allocated | Prepared _ -> prepared.phase <- Prepared handle
-       | Attempted -> ()
-       | Retained | Discarded -> assert false))
+  Result_publication_phase.ensure_prepared prepared.phase ~stage:(fun () ->
+    let open Result.Let_syntax in
+    let%bind () =
+      Job_result_intent.save ~env:prepared.env ~session:prepared.session prepared.intent
+    in
+    let content = prepared.content in
+    Blob_store.ensure_staged_content
+      prepared.store
+      ~sw
+      prepared.session
+      ~stage:(Job_result_intent.stage prepared.intent)
+      content)
 ;;
 
 let prepare store ~env ~sw ~session ~job ~creating_principal ~now ~max_bytes completion =
@@ -142,59 +112,20 @@ let prepare store ~env ~sw ~session ~job ~creating_principal ~now ~max_bytes com
 ;;
 
 let commit prepared ~persist =
-  with_owner prepared.mutex (fun () ->
-    match prepared.phase with
-    | Retained | Discarded ->
-      Error
-        (P.Error.create
-           Already_resolved
-           ~message:"result artifact preparation has ended"
-           ~retryable:false
-           ())
-    | Allocated ->
-      Error
-        (P.Error.create
-           Invalid_state
-           ~message:"result bytes are not prepared"
-           ~retryable:true
-           ())
-    | Prepared _ | Attempted ->
-      prepared.phase <- Attempted;
-      let open Result.Let_syntax in
-      let%map result = persist prepared.reference in
-      prepared.phase <- Retained;
-      (* Publication already succeeded. A failed marker cleanup leaves an intent
-         for reconciliation; it cannot turn success into another publication. *)
-      ignore
-        (Job_result_intent.remove
-           ~env:prepared.env
-           ~session:prepared.session
-           prepared.intent
-         : (unit, Store_error.t) result);
-      result)
+  Result_publication_phase.commit
+    prepared.phase
+    ~persist:(fun () -> persist prepared.reference)
+    ~cleanup:(fun () ->
+      Job_result_intent.remove ~env:prepared.env ~session:prepared.session prepared.intent)
 ;;
 
 let discard prepared =
-  with_owner prepared.mutex (fun () ->
-    match prepared.phase with
-    | Retained -> Error (Store_error.Corrupt "cannot discard a retained result artifact")
-    | Allocated | Attempted ->
-      Error
-        (Store_error.Corrupt
-           "result artifact requires durable reference reconciliation before discard")
-    | Discarded -> Ok ()
-    | Prepared handle ->
-      let open Result.Let_syntax in
-      let%bind () =
-        Blob_store.discard_unreferenced prepared.store prepared.session handle
-      in
-      let%map () =
-        Job_result_intent.remove
-          ~env:prepared.env
-          ~session:prepared.session
-          prepared.intent
-      in
-      prepared.phase <- Discarded)
+  Result_publication_phase.discard prepared.phase ~discard:(fun handle ->
+    let open Result.Let_syntax in
+    let%bind () =
+      Blob_store.discard_unreferenced prepared.store prepared.session handle
+    in
+    Job_result_intent.remove ~env:prepared.env ~session:prepared.session prepared.intent)
 ;;
 
 let load store ~sw ~session ~max_bytes reference =
@@ -259,7 +190,7 @@ module Publisher = struct
     ; principal : P.Id.Principal.t
     ; inline_bytes : int
     ; max_bytes : int
-    ; mutex : Eio.Mutex.t
+    ; lock : Result_publication_lock.t
     ; mutable pending : prepared list
     }
 
@@ -280,9 +211,18 @@ module Publisher = struct
         ; principal
         ; inline_bytes
         ; max_bytes
-        ; mutex = Eio.Mutex.create ()
+        ; lock = Result_publication_lock.create ()
         ; pending = []
         }
+  ;;
+
+  let reentrant_publisher () =
+    Error
+      (P.Error.create
+         Invalid_state
+         ~message:"recursive result publisher"
+         ~retryable:false
+         ())
   ;;
 
   let prune t jobs =
@@ -321,7 +261,7 @@ module Publisher = struct
   ;;
 
   let publish t ?(storage = Storage.Automatic) ~jobs ~job ~now completion ~persist =
-    with_owner t.mutex (fun () ->
+    Result_publication_lock.with_owner t.lock ~on_reentry:reentrant_publisher (fun () ->
       let open Result.Let_syntax in
       prune t jobs;
       let%bind () = check_completion t completion in
@@ -369,7 +309,7 @@ module Publisher = struct
   ;;
 
   let pending_completion t ~(job : P.Job.t) =
-    Eio.Mutex.use_ro t.mutex (fun () ->
+    Result_publication_lock.with_read t.lock (fun () ->
       match job.status with
       | Running | Waiting_completion _ ->
         List.find_map t.pending ~f:(fun prepared ->
@@ -386,7 +326,7 @@ module Publisher = struct
   ;;
 
   let restore t ~jobs ~generation ~max_count ~max_total_bytes =
-    with_owner t.mutex (fun () ->
+    Result_publication_lock.with_owner t.lock ~on_reentry:reentrant_publisher (fun () ->
       let open Result.Let_syntax in
       let invalid message = Error (P.Error.invalid_request message) in
       let%bind () =
@@ -487,8 +427,7 @@ module Publisher = struct
               ; reference
               ; completion
               ; content
-              ; mutex = Eio.Mutex.create ()
-              ; phase = Attempted
+              ; phase = Result_publication_phase.restored_attempted ()
               }
             in
             Ok ((job, prepared, metadata.created_at) :: restored))
@@ -645,13 +584,9 @@ module Publisher = struct
   ;;
 
   let collect t ~jobs ~generation ~limits ~with_roots =
-    let outcome =
-      with_owner t.mutex (fun () ->
-        try Ok (collect_locked t ~jobs ~generation ~limits ~with_roots) with
-        | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
-    in
-    match outcome with
-    | Ok result -> result
-    | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+    Result_publication_lock.with_owner
+      t.lock
+      ~on_reentry:(fun () -> Error (Store_error.Corrupt "recursive result publisher"))
+      (fun () -> collect_locked t ~jobs ~generation ~limits ~with_roots)
   ;;
 end
