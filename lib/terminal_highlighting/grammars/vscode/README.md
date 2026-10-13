@@ -10,7 +10,7 @@ These grammars are copied from Microsoft Visual Studio Code release `1.96.4`:
 - `typescript.json`: `extensions/typescript-basics/syntaxes/TypeScript.tmLanguage.json`
 - `typescript-react.json`: `extensions/typescript-basics/syntaxes/TypeScriptReact.tmLanguage.json`
 
-Run `sh lib/chat_tui/grammars/vscode/update.sh` to download the pinned files.
+Run `sh lib/terminal_highlighting/grammars/vscode/update.sh` to download the pinned files.
 Review the resulting diff before committing an update.
 
 VS Code package metadata is not consumed. JSX and TSX are registered as
