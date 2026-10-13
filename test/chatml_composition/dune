@@ -39,7 +39,8 @@
 (rule
  (alias agent-authoring-qualification)
  (targets authoring_qualification.output)
- (deps authoring_qualification.expected)
+ ; Target-producing rules are cached even with --force; qualification must run.
+ (deps authoring_qualification.expected (universe))
  (action
   (progn
    (with-stdout-to authoring_qualification.output
