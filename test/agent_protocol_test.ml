@@ -721,6 +721,10 @@ let architecture_methods =
   ; "authoring.document.version"
   ; "authoring.document.replace"
   ; "authoring.document.close"
+  ; "authoring.bundle.begin"
+  ; "authoring.bundle.chunk"
+  ; "authoring.bundle.commit"
+  ; "authoring.bundle.status"
   ]
 ;;
 
@@ -736,7 +740,7 @@ let%expect_test "every architecture method has request and result dispatch" =
           (List.equal String.equal expected (normalize Method_result.supported_methods)
            : bool)
       }];
-  [%expect {| ((method_count 94) (requests true) (results true)) |}]
+  [%expect {| ((method_count 98) (requests true) (results true)) |}]
 ;;
 
 let%expect_test "history deletion requires stable ID, revision and idempotency" =

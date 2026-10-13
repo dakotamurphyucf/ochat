@@ -107,7 +107,9 @@ let create
     List.filter features ~f:(fun feature ->
       (* OCH261 installs codecs only. OCH262 must advertise this after handler
          admission and authorization are installed together. *)
-      (not (String.equal feature Agent_protocol.Authoring.Features.core))
+      (not
+         (String.equal feature Agent_protocol.Authoring.Features.core
+          || String.equal feature Agent_protocol.Authoring.Features.bundle))
       && (Option.is_some seed_factory || not (String.equal feature "sessions.seed")))
   in
   let initialize ~principal request =

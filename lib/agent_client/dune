@@ -13,7 +13,9 @@
   in_memory
   ingress
   inference_views
+  authoring_connection
   authoring
+  authoring_bundle
   activity_views
   run_views
   conversation_search
@@ -23,5 +25,6 @@
   canonical_export
   reconnect)
  (libraries core eio base64 digestif ochat.agent_protocol ochat.transcript ochat.document_schema)
+ (private_modules authoring_connection)
  (preprocess
   (pps ppx_jane)))
