@@ -61,9 +61,29 @@ let manifest ?(script_bytes = script_bytes) () =
     P.Authoring.Context.Selection.create ~target:(Entry "main") ~environment:None
     |> protocol_ok
   in
+  let route =
+    B.Manifest.Route.create
+      ~declaration:root
+      ~origin:Chatml_project.Lock.Catalog.Local
+      ~dependencies:[]
+    |> protocol_ok
+  in
+  let generated_lock =
+    Chatml_source.Id.create ~package_namespace:"pkg" ~relative_path:"generated.lock"
+    |> Or_error.ok_exn
+  in
+  let project =
+    B.Manifest.Project.create
+      ~root_source:root
+      ~selection
+      ~entry:Declared
+      ~source_members:[ root; script ]
+      ~routes:[ route ]
+      ~mode:(Compose { selected_previous_lock = None; generated_lock })
+    |> protocol_ok
+  in
   B.Manifest.create
-    ~project_source:root
-    ~selection
+    ~basis:(Project project)
     ~members:[ member root root_bytes; member script script_bytes ]
   |> protocol_ok
 ;;
@@ -460,8 +480,47 @@ let%expect_test "recovery distinguishes interrupted begin, append, and prune" =
        | Error Store.Error.Missing_or_foreign -> true
        | _ -> false);
     Store.close_and_wait recovered |> upload_ok);
-  printf "partial begin, suffix and prune recover; lost phase fails closed\n";
-  [%expect {| partial begin, suffix and prune recover; lost phase fails closed |}]
+  with_root "ochat-authoring-upload-draft-version" (fun env sw root_handle lock ->
+    let store = open_store env sw root_handle lock in
+    let upload_id =
+      Store.begin_upload
+        store
+        ~principal
+        ~request:(begin_request ())
+        ~now:(fun () -> start)
+        ~checkpoint:Fn.id
+      |> upload_ok
+      |> B.Begin.upload_id
+    in
+    Store.close_and_wait store |> upload_ok;
+    let phase = phase_file env root_handle upload_id in
+    let current = Eio.Path.load phase in
+    check
+      "current private stage schema is v2"
+      (String.is_substring current ~substring:"\"schema_version\":2");
+    let obsolete =
+      String.substr_replace_first
+        current
+        ~pattern:"\"schema_version\":2"
+        ~with_:"\"schema_version\":1"
+    in
+    Eio.Path.save ~create:`Never phase obsolete;
+    check
+      "unreleased old draft stage is rejected without replay"
+      (match
+         Store.open_or_create
+           ~env
+           ~sw
+           ~data_root:root_handle
+           ~daemon_lock:lock
+           ~host_id:server_id
+           ~limits:(limits ())
+           ~checkpoint:Fn.id
+       with
+       | Error (Store.Error.Storage (Agent_store.Store_error.Corrupt _)) -> true
+       | _ -> false));
+  printf "partial begin, suffix and prune recover; old draft fails closed\n";
+  [%expect {| partial begin, suffix and prune recover; old draft fails closed |}]
 ;;
 
 let%expect_test "protected sealed claim retains source through expiry maintenance" =

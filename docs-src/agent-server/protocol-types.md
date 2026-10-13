@@ -1327,32 +1327,162 @@ module Bundle : sig
   end
 
   module Manifest : sig
-    (** Canonical complete member inventory, including the exact qualified root
-        project source. [selection] names its entry and environment. The root
-        source must occur exactly once. IDs are distinct; exact, ASCII-case
-        and file-versus-directory prefix collisions within one namespace are
-        rejected using [Source.Portable_path.first_collision]. Source bytes are
-        never inferred from paths. Canonical order is by typed Source.Id comparison.
-        Construction bounds member count and aggregate declared bytes before
-        retaining the inventory; host policy may impose lower ceilings. *)
+    module Route : sig
+      type t [@@deriving equal]
+
+      (** Owner-local selected dependency associations. Git origin is routing
+          intent, never an acquisition grant. Actual declaration and prior-lock
+          coherence belongs to the captured Project gate. *)
+      val create
+        :  declaration:Chatml_source.Id.t
+        -> origin:Chatml_project.Lock.Catalog.origin
+        -> dependencies:Chatml_project.Lock.Dependency_selection.t list
+        -> (t, Error.t) result
+
+      val declaration : t -> Chatml_source.Id.t
+      val origin : t -> Chatml_project.Lock.Catalog.origin
+      val dependencies : t -> Chatml_project.Lock.Dependency_selection.t list
+    end
+
+    module Project : sig
+      module Captured_entry : sig
+        type delivery =
+          | Uploaded_member
+          | Derived_script
+        [@@deriving equal, sexp_of]
+
+        type t [@@deriving equal]
+
+        val create
+          :  source:Authoring_common.Source.t
+          -> delivery:delivery
+          -> (t, Error.t) result
+
+        val source : t -> Authoring_common.Source.t
+        val delivery : t -> delivery
+      end
+
+      type entry =
+        | Declared
+        | Captured of Captured_entry.t
+
+      type mode =
+        | Exact_lock of Chatml_source.Id.t
+        | Compose of
+            { selected_previous_lock : Authoring_common.Source.t option
+            ; generated_lock : Chatml_source.Id.t
+            }
+
+      type t [@@deriving equal]
+
+      val create
+        :  root_source:Chatml_source.Id.t
+        -> selection:Authoring_context.Context.Selection.t
+        -> entry:entry
+        -> source_members:Chatml_source.Id.t list
+        -> routes:Route.t list
+        -> mode:mode
+        -> (t, Error.t) result
+
+      val root_source : t -> Chatml_source.Id.t
+      val selection : t -> Authoring_context.Context.Selection.t
+      val entry : t -> entry
+      val source_members : t -> Chatml_source.Id.t list
+      val routes : t -> Route.t list
+      val mode : t -> mode
+    end
+
+    module Document_member : sig
+      type t [@@deriving equal]
+
+      val create
+        :  source:Chatml_source.Id.t
+        -> member:Source.Portable_path.t
+        -> (t, Error.t) result
+
+      val source : t -> Chatml_source.Id.t
+      val member : t -> Source.Portable_path.t
+    end
+
+    module Script : sig
+      module Selector : sig
+        type t [@@deriving equal]
+
+        (** Exact uploaded document owner/range and expected extracted body.
+            No parser Binding or read authority is constructed here. *)
+        val create
+          :  registration_source:Chatml_source.Id.t
+          -> declaration_source:Chatml_source.Id.t
+          -> start_byte:int
+          -> end_byte:int
+          -> script_id:string
+          -> body_digest:Chatml_source.Digest.t
+          -> body_byte_length:int
+          -> (t, Error.t) result
+
+        val registration_source : t -> Chatml_source.Id.t
+        val declaration_source : t -> Chatml_source.Id.t
+        val start_byte : t -> int
+        val end_byte : t -> int
+        val script_id : t -> string
+        val body_digest : t -> Chatml_source.Digest.t
+        val body_byte_length : t -> int
+      end
+
+      type choice =
+        | Source_only
+        | Selected_project of Project.t
+
+      type t [@@deriving equal]
+
+      val create : selector:Selector.t -> choice:choice -> (t, Error.t) result
+      val selector : t -> Selector.t
+      val choice : t -> choice
+    end
+
+    module Chatmd_document : sig
+      type t [@@deriving equal]
+
+      (** [root_source] and both owner sources of every script selector must be
+          present in [document_members]. Exact byte-range admission follows
+          when the enclosing manifest supplies their immutable metadata. *)
+      val create
+        :  root_source:Chatml_source.Id.t
+        -> document_members:Document_member.t list
+        -> scripts:Script.t list
+        -> (t, Error.t) result
+
+      val root_source : t -> Chatml_source.Id.t
+      val document_members : t -> Document_member.t list
+      val scripts : t -> Script.t list
+    end
+
+    type basis =
+      | Project of Project.t
+      | Chatmd_document of Chatmd_document.t
+    [@@deriving equal]
+
     type t [@@deriving equal, sexp_of]
 
-    val create
-      :  project_source:Chatml_source.Id.t
-      -> selection:Authoring_context.Context.Selection.t
-      -> members:Member.t list
-      -> (t, Error.t) result
+    (** One canonical immutable inventory. Nested Project subsets can share
+        only this single qualified ID/digest/length record. Project root and
+        selected exact lock must occur in its subset. Top-level Project cannot
+        use Derived_script; nested derived entry must match the enclosing script
+        body digest/length and cannot collide with an uploaded member. Repeated
+        derived IDs require exact same revision metadata. Decoder performs the
+        same validation. Metadata never grants custody or execution.
 
-    val project_source : t -> Chatml_source.Id.t
-    val selection : t -> Authoring_context.Context.Selection.t
+        Fixed wire ceilings: <=1024 members, <=32MiB/member, <=512MiB total,
+        <=4MiB manifest JSON; <=256 document members/scripts and <=4096 total
+        nested metadata nodes. One aggregate admission ledger covers the whole
+        manifest, not a renewed allowance per script. ChatMD document members
+        obey <=1MiB each and <=8MiB jointly. The canonical v2 fingerprint
+        includes tag, all basis fields and typed-sorted full member inventory. *)
+    val create : basis:basis -> members:Member.t list -> (t, Error.t) result
+
+    val basis : t -> basis
     val members : t -> Member.t list
-
-    (** Digest of a canonical versioned encoding containing the qualified
-        project source, exact target/optional environment and every sorted
-        member's qualified ID, digest and byte length. Never a proof that any
-        source body was received or compiled. *)
     val fingerprint : t -> Chatml_source.Digest.t
-
     val to_json : t -> Jsonaf.t
     val of_json : Jsonaf.t -> (t, Error.t) result
   end
@@ -1460,9 +1590,67 @@ module Bundle : sig
   end
 
   module Receipt : sig
-    (** An immutable publication projection. Constructing/decoding this data
-        does not mint the OCH-264 validated-closure proof or grant read/run
-        authority. Only the proof-gated host publisher may expose Published. *)
+    module Project : sig
+      type t [@@deriving equal]
+
+      (** Exact admitted Prepared input identity; not semantic check success or
+          an execution grant. The selected lock is the validated Build's lock. *)
+      val create
+        :  root_source:Chatml_source.Id.t
+        -> entry_source:Chatml_source.Id.t
+        -> selected_lock:Chatml_source.Id.t
+        -> input_fingerprint:Chatml_source.Digest.t
+        -> compiler_contract:Chatml_source.Digest.t
+        -> environment:string
+        -> (t, Error.t) result
+
+      val root_source : t -> Chatml_source.Id.t
+      val entry_source : t -> Chatml_source.Id.t
+      val selected_lock : t -> Chatml_source.Id.t
+      val input_fingerprint : t -> Chatml_source.Digest.t
+      val compiler_contract : t -> Chatml_source.Digest.t
+      val environment : t -> string
+    end
+
+    module Script : sig
+      (** Source-only is deliberately graph-free. Selected Project records
+          remain separate per script even if source IDs and bytes overlap. *)
+      type result =
+        | Source_only of
+            { selector : Manifest.Script.Selector.t
+            ; body_digest : Chatml_source.Digest.t
+            }
+        | Selected_project of
+            { selector : Manifest.Script.Selector.t
+            ; body_digest : Chatml_source.Digest.t
+            ; project : Project.t
+            }
+      [@@deriving equal]
+    end
+
+    module Chatmd_document : sig
+      type t [@@deriving equal]
+
+      val create
+        :  root_source:Chatml_source.Id.t
+        -> closure_fingerprint:Chatml_source.Digest.t
+        -> scripts:Script.result list
+        -> (t, Error.t) result
+
+      val root_source : t -> Chatml_source.Id.t
+      val closure_fingerprint : t -> Chatml_source.Digest.t
+      val scripts : t -> Script.result list
+    end
+
+    type basis =
+      | Project of Project.t
+      | Chatmd_document of Chatmd_document.t
+    [@@deriving equal]
+
+    (** Constructing/decoding this DTO does not mint a validated-closure proof.
+        Only the proof-gated publisher may expose Published. Shared owner/upload,
+        manifest fingerprint and expiry apply to both bases. No document accessor
+        invents a Project graph. Script results are bounded, canonical and unique. *)
     type t [@@deriving equal, sexp_of]
 
     val create
@@ -1470,10 +1658,7 @@ module Bundle : sig
       -> upload_id:Id.Authoring_upload.t
       -> bundle_id:Id.Authoring_bundle.t
       -> manifest_fingerprint:Chatml_source.Digest.t
-      -> project_source:Chatml_source.Id.t
-      -> graph:Chatml_source.Digest.t
-      -> compiler_contract:Chatml_source.Digest.t
-      -> environment:string
+      -> basis:basis
       -> expires_at:Timestamp.t
       -> (t, Error.t) result
 
@@ -1481,10 +1666,7 @@ module Bundle : sig
     val upload_id : t -> Id.Authoring_upload.t
     val bundle_id : t -> Id.Authoring_bundle.t
     val manifest_fingerprint : t -> Chatml_source.Digest.t
-    val project_source : t -> Chatml_source.Id.t
-    val graph : t -> Chatml_source.Digest.t
-    val compiler_contract : t -> Chatml_source.Digest.t
-    val environment : t -> string
+    val basis : t -> basis
     val expires_at : t -> Timestamp.t
     val to_json : t -> Jsonaf.t
     val of_json : Jsonaf.t -> (t, Error.t) result
@@ -1578,6 +1760,373 @@ module Bundle : sig
     val response_to_json : response -> Jsonaf.t
     val response_of_json : Jsonaf.t -> (response, Error.t) result
   end
+end
+```
+
+## authoring_bundle_basis
+
+[implementation](../../lib/agent_protocol/authoring_bundle_basis.ml) · [interface](../../lib/agent_protocol/authoring_bundle_basis.mli)
+
+```ocaml
+module A = Authoring_common
+module Context = Authoring_context.Context
+module Captured = Chatml_source
+module Project = Chatml_project
+module Path = Source.Portable_path
+
+module Route : sig
+  type t
+
+  val create
+    :  declaration:Captured.Id.t
+    -> origin:Project.Lock.Catalog.origin
+    -> dependencies:Project.Lock.Dependency_selection.t list
+    -> (t, Error.t) result
+
+  val declaration : t -> Captured.Id.t
+  val origin : t -> Project.Lock.Catalog.origin
+  val dependencies : t -> Project.Lock.Dependency_selection.t list
+  val equal : t -> t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Project_basis : sig
+  module Captured_entry : sig
+    type delivery =
+      | Uploaded_member
+      | Derived_script
+    [@@deriving equal, sexp_of]
+
+    type t
+
+    val create : source:A.Source.t -> delivery:delivery -> (t, Error.t) result
+    val source : t -> A.Source.t
+    val delivery : t -> delivery
+    val equal : t -> t -> bool
+  end
+
+  type entry =
+    | Declared
+    | Captured of Captured_entry.t
+
+  type mode =
+    | Exact_lock of Captured.Id.t
+    | Compose of
+        { selected_previous_lock : A.Source.t option
+        ; generated_lock : Captured.Id.t
+        }
+
+  type t
+
+  val create
+    :  root_source:Captured.Id.t
+    -> selection:Context.Selection.t
+    -> entry:entry
+    -> source_members:Captured.Id.t list
+    -> routes:Route.t list
+    -> mode:mode
+    -> (t, Error.t) result
+
+  val root_source : t -> Captured.Id.t
+  val selection : t -> Context.Selection.t
+  val entry : t -> entry
+  val source_members : t -> Captured.Id.t list
+  val routes : t -> Route.t list
+  val mode : t -> mode
+  val equal : t -> t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Document_member : sig
+  type t
+
+  val create : source:Captured.Id.t -> member:Path.t -> (t, Error.t) result
+  val source : t -> Captured.Id.t
+  val member : t -> Path.t
+  val equal : t -> t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Script : sig
+  module Selector : sig
+    type t
+
+    val create
+      :  registration_source:Captured.Id.t
+      -> declaration_source:Captured.Id.t
+      -> start_byte:int
+      -> end_byte:int
+      -> script_id:string
+      -> body_digest:Captured.Digest.t
+      -> body_byte_length:int
+      -> (t, Error.t) result
+
+    val registration_source : t -> Captured.Id.t
+    val declaration_source : t -> Captured.Id.t
+    val start_byte : t -> int
+    val end_byte : t -> int
+    val script_id : t -> string
+    val body_digest : t -> Captured.Digest.t
+    val body_byte_length : t -> int
+    val key_compare : t -> t -> int
+    val equal : t -> t -> bool
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  type choice =
+    | Source_only
+    | Selected_project of Project_basis.t
+
+  type t
+
+  val create : selector:Selector.t -> choice:choice -> (t, Error.t) result
+  val selector : t -> Selector.t
+  val choice : t -> choice
+  val equal : t -> t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Chatmd_document : sig
+  type t
+
+  val create
+    :  root_source:Captured.Id.t
+    -> document_members:Document_member.t list
+    -> scripts:Script.t list
+    -> (t, Error.t) result
+
+  val root_source : t -> Captured.Id.t
+  val document_members : t -> Document_member.t list
+  val scripts : t -> Script.t list
+  val equal : t -> t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+type t =
+  | Project of Project_basis.t
+  | Chatmd_document of Chatmd_document.t
+
+val equal : t -> t -> bool
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+
+(** One whole-manifest preflight; [member_sources] is already bounded by the
+    enclosing wire count/bytes. Reject missing or conflicting references,
+    including dependency targets outside their Project subset or without a
+    selected owner route, and conflicting
+    derived/uploaded identities, before canonical JSON.
+    No source-body or host authority validation happens here. *)
+val validate_inventory : t -> member_sources:A.Source.t list -> (unit, Error.t) result
+```
+
+## authoring_bundle_basis_common
+
+[implementation](../../lib/agent_protocol/authoring_bundle_basis_common.ml) · [interface](../../lib/agent_protocol/authoring_bundle_basis_common.mli)
+
+```ocaml
+(** Private bounded primitives shared by the tagged project/document basis and
+    the single-inventory validator. These helpers convey syntax, never custody. *)
+
+module A = Authoring_common
+module C = Authoring_codec
+module Context = Authoring_context.Context
+module Captured = Chatml_source
+module Project = Chatml_project
+module Path = Source.Portable_path
+
+val ( let* ) : ('a, 'error) result -> ('a -> ('b, 'error) result) -> ('b, 'error) result
+val obj : (string * Jsonaf.t) list -> Jsonaf.t
+val str : string -> Jsonaf.t
+val invalid : string -> ('a, Error.t) result
+val bounded_count : max:int -> 'a list -> bool
+val fields : Jsonaf.t -> string list -> (Json_codec.fields, Error.t) result
+
+val required
+  :  Json_codec.fields
+  -> string
+  -> (Jsonaf.t -> ('a, Error.t) result)
+  -> ('a, Error.t) result
+
+val optional
+  :  Json_codec.fields
+  -> string
+  -> (Jsonaf.t -> ('a, Error.t) result)
+  -> ('a option, Error.t) result
+
+val path_json : Path.t -> Jsonaf.t
+val path_of_json : Jsonaf.t -> (Path.t, Error.t) result
+val immutable_source : A.Source.t -> (unit, Error.t) result
+val origin_equal : Project.Lock.Catalog.origin -> Project.Lock.Catalog.origin -> bool
+val origin_to_json : Project.Lock.Catalog.origin -> Jsonaf.t
+val origin_of_json : Jsonaf.t -> (Project.Lock.Catalog.origin, Error.t) result
+```
+
+## authoring_bundle_basis_document
+
+[implementation](../../lib/agent_protocol/authoring_bundle_basis_document.ml) · [interface](../../lib/agent_protocol/authoring_bundle_basis_document.mli)
+
+```ocaml
+(** Private typed basis constructors; canonical syntax is not source custody. *)
+module A = Authoring_common
+
+module Context = Authoring_context.Context
+module Captured = Chatml_source
+module Project = Chatml_project
+module Path = Source.Portable_path
+module Project_basis = Authoring_bundle_basis_project.Project_basis
+
+module Document_member : sig
+  type t
+
+  val create : source:Captured.Id.t -> member:Path.t -> (t, Error.t) result
+  val source : t -> Captured.Id.t
+  val member : t -> Path.t
+  val equal : t -> t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Script : sig
+  module Selector : sig
+    type t
+
+    val create
+      :  registration_source:Captured.Id.t
+      -> declaration_source:Captured.Id.t
+      -> start_byte:int
+      -> end_byte:int
+      -> script_id:string
+      -> body_digest:Captured.Digest.t
+      -> body_byte_length:int
+      -> (t, Error.t) result
+
+    val registration_source : t -> Captured.Id.t
+    val declaration_source : t -> Captured.Id.t
+    val start_byte : t -> int
+    val end_byte : t -> int
+    val script_id : t -> string
+    val body_digest : t -> Captured.Digest.t
+    val body_byte_length : t -> int
+    val key_compare : t -> t -> int
+    val equal : t -> t -> bool
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  type choice =
+    | Source_only
+    | Selected_project of Project_basis.t
+
+  type t
+
+  val create : selector:Selector.t -> choice:choice -> (t, Error.t) result
+  val selector : t -> Selector.t
+  val choice : t -> choice
+  val equal : t -> t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Chatmd_document : sig
+  type t
+
+  val create
+    :  root_source:Captured.Id.t
+    -> document_members:Document_member.t list
+    -> scripts:Script.t list
+    -> (t, Error.t) result
+
+  val root_source : t -> Captured.Id.t
+  val document_members : t -> Document_member.t list
+  val scripts : t -> Script.t list
+  val equal : t -> t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+```
+
+## authoring_bundle_basis_project
+
+[implementation](../../lib/agent_protocol/authoring_bundle_basis_project.ml) · [interface](../../lib/agent_protocol/authoring_bundle_basis_project.mli)
+
+```ocaml
+(** Private typed basis constructors; canonical syntax is not source custody. *)
+module A = Authoring_common
+
+module Context = Authoring_context.Context
+module Captured = Chatml_source
+module Project = Chatml_project
+module Path = Source.Portable_path
+
+module Route : sig
+  type t
+
+  val create
+    :  declaration:Captured.Id.t
+    -> origin:Project.Lock.Catalog.origin
+    -> dependencies:Project.Lock.Dependency_selection.t list
+    -> (t, Error.t) result
+
+  val declaration : t -> Captured.Id.t
+  val origin : t -> Project.Lock.Catalog.origin
+  val dependencies : t -> Project.Lock.Dependency_selection.t list
+  val equal : t -> t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Project_basis : sig
+  module Captured_entry : sig
+    type delivery =
+      | Uploaded_member
+      | Derived_script
+    [@@deriving equal, sexp_of]
+
+    type t
+
+    val create : source:A.Source.t -> delivery:delivery -> (t, Error.t) result
+    val source : t -> A.Source.t
+    val delivery : t -> delivery
+    val equal : t -> t -> bool
+  end
+
+  type entry =
+    | Declared
+    | Captured of Captured_entry.t
+
+  type mode =
+    | Exact_lock of Captured.Id.t
+    | Compose of
+        { selected_previous_lock : A.Source.t option
+        ; generated_lock : Captured.Id.t
+        }
+
+  type t
+
+  val create
+    :  root_source:Captured.Id.t
+    -> selection:Context.Selection.t
+    -> entry:entry
+    -> source_members:Captured.Id.t list
+    -> routes:Route.t list
+    -> mode:mode
+    -> (t, Error.t) result
+
+  val root_source : t -> Captured.Id.t
+  val selection : t -> Context.Selection.t
+  val entry : t -> entry
+  val source_members : t -> Captured.Id.t list
+  val routes : t -> Route.t list
+  val mode : t -> mode
+  val equal : t -> t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
 end
 ```
 

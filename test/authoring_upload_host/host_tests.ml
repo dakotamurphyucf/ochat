@@ -61,9 +61,29 @@ let manifest ?(script_bytes = script_bytes) () =
     P.Authoring.Context.Selection.create ~target:(Entry "main") ~environment:None
     |> protocol_ok
   in
+  let route =
+    B.Manifest.Route.create
+      ~declaration:root
+      ~origin:Chatml_project.Lock.Catalog.Local
+      ~dependencies:[]
+    |> protocol_ok
+  in
+  let generated_lock =
+    Chatml_source.Id.create ~package_namespace:"pkg" ~relative_path:"generated.lock"
+    |> Or_error.ok_exn
+  in
+  let project =
+    B.Manifest.Project.create
+      ~root_source:root
+      ~selection
+      ~entry:Declared
+      ~source_members:[ root; script ]
+      ~routes:[ route ]
+      ~mode:(Compose { selected_previous_lock = None; generated_lock })
+    |> protocol_ok
+  in
   B.Manifest.create
-    ~project_source:root
-    ~selection
+    ~basis:(Project project)
     ~members:[ member root root_bytes; member script script_bytes ]
   |> protocol_ok
 ;;

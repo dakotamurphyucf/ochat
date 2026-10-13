@@ -26,13 +26,22 @@ val begin_upload
 
 val upload_chunk
   :  t
+  -> expected_manifest:B.Manifest.t
   -> B.Chunk.request
   -> (B.Chunk.response, Agent_protocol.Error.t) result
 
-val commit : t -> B.Commit.request -> (B.Commit.response, Agent_protocol.Error.t) result
+val commit
+  :  t
+  -> expected_manifest:B.Manifest.t
+  -> B.Commit.request
+  -> (B.Commit.response, Agent_protocol.Error.t) result
 
 (** Read-only reconciliation for a known upload ID after a lost chunk/commit
     reply; it does not retry a mutation, extend retention or infer publication.
     A lost begin reply has no upload ID: retry [begin_upload] with the exact
     same idempotency key, manifest and optional parent context. *)
-val status : t -> B.Status.request -> (B.Status.t, Agent_protocol.Error.t) result
+val status
+  :  t
+  -> expected_manifest:B.Manifest.t
+  -> B.Status.request
+  -> (B.Status.t, Agent_protocol.Error.t) result
