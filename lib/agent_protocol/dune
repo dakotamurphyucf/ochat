@@ -5,6 +5,7 @@
   protocol_error
   error
   id
+  execution_owner
   version
   timestamp
   json_codec
@@ -40,6 +41,7 @@
   job_artifact
   job_result_reference
   invocation
+  host_invocation
   completion_contract
   completion_projection
   moderator_execution
