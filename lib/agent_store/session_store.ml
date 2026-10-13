@@ -212,6 +212,8 @@ type t =
   ; delegations : Delegation_store.t
   ; organizations : Organization_store.t
   ; projection_updates : Session_projection_update.t
+  ; developer_root_gate : Eio.Mutex.t
+  ; mutable developer_root_owner : unit ref option
   ; mutable index_was_rebuilt : bool
   ; mutable closed : bool
   }
@@ -233,6 +235,94 @@ let delegations t = t.delegations
 let organizations t = t.organizations
 let index_was_rebuilt t = t.index_was_rebuilt
 let is_closed t = t.closed
+let developer_root_scopes : t list Eio.Fiber.key = Eio.Fiber.create_key ()
+
+let with_developer_root_gate store ~protect f =
+  let stack = Option.value (Eio.Fiber.get developer_root_scopes) ~default:[] in
+  if List.exists stack ~f:(phys_equal store)
+  then Error (Store_error.Corrupt "recursive developer root lease or self-close")
+  else (
+    let outcome =
+      Eio.Mutex.use_rw ~protect store.developer_root_gate (fun () ->
+        match Eio.Fiber.with_binding developer_root_scopes (store :: stack) f with
+        | value -> `Returned value
+        | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ()))
+    in
+    match outcome with
+    | `Returned value -> Ok value
+    | `Raised (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace)
+;;
+
+module Developer_root = struct
+  type owner =
+    { store : t
+    ; token : unit ref
+    ; mutable released : bool
+    }
+
+  let valid_lock store =
+    Lock.is_live store.daemon_lock
+    && String.equal (Lock.path store.daemon_lock) (Data_root.daemon_lock_path store.root)
+    && Agent_protocol.Id.Server.equal
+         (Lock.owner store.daemon_lock).server_id
+         store.server_id
+  ;;
+
+  let check store =
+    if store.closed || not (valid_lock store)
+    then Error (Store_error.Corrupt "developer run root has no live daemon owner")
+    else Ok ()
+  ;;
+
+  let claim store =
+    with_developer_root_gate store ~protect:false (fun () ->
+      let open Result.Let_syntax in
+      let%bind () = check store in
+      match store.developer_root_owner with
+      | Some _ -> Error (Store_error.Corrupt "developer run root is already claimed")
+      | None ->
+        let token = ref () in
+        store.developer_root_owner <- Some token;
+        Ok { store; token; released = false })
+    |> Result.bind ~f:Fn.id
+  ;;
+
+  let with_lease owner ~f =
+    let store = owner.store in
+    with_developer_root_gate store ~protect:false (fun () ->
+      let open Result.Let_syntax in
+      let%bind () = check store in
+      let%bind () =
+        match store.developer_root_owner with
+        | Some token when phys_equal token owner.token && not owner.released -> Ok ()
+        | _ -> Error (Store_error.Corrupt "developer run root claim is stale")
+      in
+      Ok (f ~env:store.env ~root:store.root))
+    |> Result.bind ~f:Fn.id
+  ;;
+
+  let check_not_active owner =
+    let stack = Option.value (Eio.Fiber.get developer_root_scopes) ~default:[] in
+    if List.exists stack ~f:(phys_equal owner.store)
+    then Error (Store_error.Corrupt "cannot close an active developer root lease")
+    else Ok ()
+  ;;
+
+  let release owner =
+    let store = owner.store in
+    match
+      with_developer_root_gate store ~protect:true (fun () ->
+        (match store.developer_root_owner with
+         | Some token when phys_equal token owner.token ->
+           store.developer_root_owner <- None
+         | _ -> ());
+        owner.released <- true)
+    with
+    | Ok () -> ()
+    | Error _ -> invalid_arg "cannot release an active developer root lease"
+  ;;
+end
+
 let eio_path t path = Eio.Path.(Eio.Stdenv.fs t.env / path)
 
 let check_writable t =
@@ -586,6 +676,8 @@ let make ~env ~root ~server_id ~daemon_lock ~organizations (index, index_was_reb
   ; index
   ; projection_updates =
       Session_projection_update.create ~env ~marker_path:(recovery_marker_path root) ()
+  ; developer_root_gate = Eio.Mutex.create ()
+  ; developer_root_owner = None
   ; index_was_rebuilt
   ; closed = false
   ; delegations = Delegation_store.create ~env ~data_root:root
@@ -675,11 +767,13 @@ let open_existing ~env ~sw ~root ~process_start_identity ~lock_nonce =
 ;;
 
 let close t =
-  if t.closed
-  then Ok ()
-  else (
-    Organization_store.close t.organizations;
-    Result.map (Lock.release ~env:t.env t.daemon_lock) ~f:(fun () -> t.closed <- true))
+  with_developer_root_gate t ~protect:true (fun () ->
+    if t.closed
+    then Ok ()
+    else (
+      Organization_store.close t.organizations;
+      Result.map (Lock.release ~env:t.env t.daemon_lock) ~f:(fun () -> t.closed <- true)))
+  |> Result.bind ~f:Fn.id
 ;;
 
 let metadata_document carrier =

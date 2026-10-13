@@ -1,0 +1,7 @@
+(library
+ (name developer_run_store_tests)
+ (modules developer_run_store_tests)
+ (libraries core core_unix eio eio_main jsonaf mirage-crypto-rng.unix ochat.agent_store ochat.agent_protocol ochat.chatml_source ochat.document_schema)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
