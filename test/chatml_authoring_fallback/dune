@@ -1,0 +1,14 @@
+(copy_files ../chatml_project_build/support.ml)
+(copy_files ../chatml_project_build/fixtures.ml)
+
+(library
+ (name chatml_authoring_fallback_tests)
+ (modules support fixtures fallback_tests)
+ (libraries core eio eio.unix eio_main expect_test_helpers_core source jsonaf
+  document_schema chatmd ochat.chatmd_source_input ochat.chatmd_shell_spec
+  chatml chatml_source chatml_diagnostic chatml_prepared_program chatml_project
+  chatml_catalog chatml_project_build chatml_compilation chatml_authoring_context
+  ochat.chatmd_authoring_analysis ochat.chatml_authoring_fallback
+  ochat.chatmd_authoring_fallback ochat.agent_protocol)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

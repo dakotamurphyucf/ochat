@@ -273,7 +273,24 @@ module Chat_markdown : sig
       type error =
         | Stale_script_source
         | Invalid_compiler_location
+        | Invalid_authored_point
       [@@deriving sexp_of]
+
+      module Authored_point : sig
+        type unavailable =
+          | Degraded_map
+          | External_body
+          | Effective_only
+          | Foreign_input
+          | Query_work_limit
+          | Unmapped_or_ambiguous
+        [@@deriving sexp_of]
+
+        type t =
+          | Exact_compiled_byte of int
+          | Unavailable of unavailable
+        [@@deriving sexp_of]
+      end
 
       (** The actual parser-owned declaration supplies the map. The caller
           authenticates Parsed membership and its capture/overlay revision, then
@@ -300,6 +317,16 @@ module Chat_markdown : sig
         -> Chatml_source.Location.t
         -> checkpoint:(unit -> unit)
         -> (projection, error) Result.t
+
+      (** Inverse exact authored byte point on this bound declaration only;
+          unavailable/ambiguity remains typed. See
+          {!Chatmd_extraction_map.authored_point}. *)
+      val authored_point
+        :  bound
+        -> input:Chatmd_parser_input.t
+        -> authored_byte:int
+        -> checkpoint:(unit -> unit)
+        -> (Authored_point.t, error) Result.t
     end
   end
 

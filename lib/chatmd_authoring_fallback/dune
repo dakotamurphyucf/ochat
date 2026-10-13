@@ -1,0 +1,7 @@
+(library
+ (name chatmd_authoring_fallback)
+ (public_name ochat.chatmd_authoring_fallback)
+ (libraries core chatml_source chatml_prepared_program chatml_authoring_context
+  ochat.chatmd_source_input ochat.chatmd ochat.chatmd_authoring_analysis
+  ochat.chatml_authoring_fallback)
+ (preprocess (pps ppx_jane)))

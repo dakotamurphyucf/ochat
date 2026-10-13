@@ -243,6 +243,23 @@ module Error = struct
   type t =
     | Stale_script_source
     | Invalid_compiler_location
+    | Invalid_authored_point
+  [@@deriving sexp_of]
+end
+
+module Authored_point = struct
+  type unavailable =
+    | Degraded_map
+    | External_body
+    | Effective_only
+    | Foreign_input
+    | Query_work_limit
+    | Unmapped_or_ambiguous
+  [@@deriving sexp_of]
+
+  type t =
+    | Exact_compiled_byte of int
+    | Unavailable of unavailable
   [@@deriving sexp_of]
 end
 
@@ -276,6 +293,87 @@ let bind t ~compiled_source ~checkpoint =
 ;;
 
 exception Query_limit
+
+let authored_point bound ~input ~authored_byte ~checkpoint =
+  let module Point = Authored_point in
+  if authored_byte < 0 || authored_byte > Chatmd_parser_input.authored_byte_length input
+  then Error Error.Invalid_authored_point
+  else (
+    let map = bound.map in
+    let remaining = ref map.query_work_limit in
+    let poll () =
+      if !remaining <= 0 then raise Query_limit;
+      decr remaining;
+      checkpoint ()
+    in
+    try
+      poll ();
+      match map.kind with
+      | Degraded -> Ok (Point.Unavailable Degraded_map)
+      | External _ -> Ok (Point.Unavailable External_body)
+      | Inline segments ->
+        let seen_input = ref false in
+        let candidate = ref None in
+        let ambiguous = ref false in
+        List.iter segments ~f:(fun segment ->
+          poll ();
+          match segment.origin with
+          | Unmapped -> ()
+          | Exact { input = owner; start_byte } when phys_equal owner input ->
+            seen_input := true;
+            let end_byte = start_byte + (segment.output_end - segment.output_start) in
+            if start_byte <= authored_byte && authored_byte <= end_byte
+            then (
+              let compiled = segment.output_start + (authored_byte - start_byte) in
+              match !candidate with
+              | None -> candidate := Some compiled
+              | Some existing ->
+                if not (Int.equal existing compiled) then ambiguous := true)
+          | Exact _ -> ());
+        (match !seen_input, !candidate with
+         | false, _ -> Ok (Point.Unavailable Foreign_input)
+         | true, None -> Ok (Point.Unavailable Unmapped_or_ambiguous)
+         | true, Some compiled when !ambiguous ->
+           Ok (Point.Unavailable Unmapped_or_ambiguous)
+         | true, Some compiled ->
+           let boundary_safe = ref true in
+           let has_left = ref false in
+           let has_right = ref false in
+           let in_segment = ref false in
+           List.iter segments ~f:(fun segment ->
+             poll ();
+             if Int.equal segment.output_end compiled then has_left := true;
+             if Int.equal segment.output_start compiled then has_right := true;
+             if segment.output_start < compiled && compiled < segment.output_end
+             then in_segment := true;
+             if
+               Int.equal segment.output_start compiled
+               || Int.equal segment.output_end compiled
+             then (
+               match segment.origin with
+               | Unmapped -> boundary_safe := false
+               | Exact { input = owner; start_byte } ->
+                 let source_byte = start_byte + (compiled - segment.output_start) in
+                 if not (phys_equal owner input && Int.equal source_byte authored_byte)
+                 then boundary_safe := false));
+           if
+             (not !in_segment)
+             && ((compiled > 0 && not !has_left)
+                 || (compiled < String.length map.body && not !has_right))
+           then boundary_safe := false;
+           if not !boundary_safe
+           then Ok (Point.Unavailable Unmapped_or_ambiguous)
+           else if
+             not
+               (Chatmd_parser_input.authored_matches
+                  input
+                  (Chatmd_parser_input.effective input)
+                  ~checkpoint:poll)
+           then Ok (Point.Unavailable Effective_only)
+           else Ok (Point.Exact_compiled_byte compiled))
+    with
+    | Query_limit -> Ok (Point.Unavailable Query_work_limit))
+;;
 
 let project_raw bound location ~checkpoint =
   let map = bound.map in

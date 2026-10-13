@@ -1,0 +1,7 @@
+(library
+ (name chatml_authoring_fallback)
+ (public_name ochat.chatml_authoring_fallback)
+ (private_modules fallback_model fallback_selected fallback_projection)
+ (libraries core chatml_source chatml_prepared_program chatml_project_build chatml
+  ochat.language_highlighting ochat.agent_protocol)
+ (preprocess (pps ppx_jane)))

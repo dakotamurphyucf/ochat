@@ -107,6 +107,26 @@ module Script : sig
   (** Exact full compiled entry capture to which this Script's genuine
       extraction map was bound. A host must still authorize its custody. *)
   val selected_source : t -> Chatml_source.t
+
+  (** Actual selected Prepared closure retained by this admitted Script.
+      Comparison evidence only; no source/host grant. *)
+  val selected_prepared : t -> Chatml_prepared_program.t
+
+  (** Parser-owned root input of this selected declaration's admitted Parsed.
+      Used only for exact current editable-document association. *)
+  val root_input : t -> Chatmd_parser_input.t
+
+  (** Forward exact authored cursor lookup through this Script's already bound
+      parser extraction map. Host authenticates the current editable input and
+      document generation separately. *)
+  val authored_point
+    :  t
+    -> input:Chatmd_parser_input.t
+    -> authored_byte:int
+    -> checkpoint:(unit -> unit)
+    -> ( Prompt.Chat_markdown.Declaration.Extraction.Authored_point.t
+         , Prompt.Chat_markdown.Declaration.Extraction.error )
+         Result.t
 end
 
 module Candidate : sig

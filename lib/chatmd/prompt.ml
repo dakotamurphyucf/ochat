@@ -1568,7 +1568,24 @@ module Chat_markdown = struct
       type error = Chatmd_extraction_map.Error.t =
         | Stale_script_source
         | Invalid_compiler_location
+        | Invalid_authored_point
       [@@deriving sexp_of]
+
+      module Authored_point = struct
+        type unavailable = Chatmd_extraction_map.Authored_point.unavailable =
+          | Degraded_map
+          | External_body
+          | Effective_only
+          | Foreign_input
+          | Query_work_limit
+          | Unmapped_or_ambiguous
+        [@@deriving sexp_of]
+
+        type t = Chatmd_extraction_map.Authored_point.t =
+          | Exact_compiled_byte of int
+          | Unavailable of unavailable
+        [@@deriving sexp_of]
+      end
 
       let bind declaration ~compiled_source ~checkpoint =
         Chatmd_extraction_map.bind declaration.extraction_map ~compiled_source ~checkpoint
@@ -1581,6 +1598,10 @@ module Chat_markdown = struct
           | External_origin { member; body_digest; start_byte; end_byte } ->
             External_origin { member; body_digest; start_byte; end_byte }
           | Approximate_declaration range -> Approximate_declaration range)
+      ;;
+
+      let authored_point bound ~input ~authored_byte ~checkpoint =
+        Chatmd_extraction_map.authored_point bound ~input ~authored_byte ~checkpoint
       ;;
     end
 

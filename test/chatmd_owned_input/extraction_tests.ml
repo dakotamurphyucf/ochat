@@ -86,6 +86,30 @@ let assert_approximate projection declaration =
   | E.Exact_inline _ | E.External_origin _ -> assert false
 ;;
 
+let inverse bound input authored_byte =
+  match E.authored_point bound ~input ~authored_byte ~checkpoint:ignore with
+  | Ok point -> point
+  | Error _ -> assert false
+;;
+
+let assert_inverse_exact bound input authored_byte expected_compiled =
+  match inverse bound input authored_byte with
+  | E.Authored_point.Exact_compiled_byte actual ->
+    assert (Int.equal actual expected_compiled)
+  | Unavailable _ -> assert false
+;;
+
+let assert_inverse_unavailable bound input authored_byte expected =
+  match inverse bound input authored_byte with
+  | E.Authored_point.Unavailable actual ->
+    assert (
+      Sexp.equal
+        (E.Authored_point.sexp_of_unavailable actual)
+        (E.Authored_point.sexp_of_unavailable expected))
+  | Exact_compiled_byte actual ->
+    failwithf "expected unavailable authored point, got compiled %d" actual ()
+;;
+
 let%test_unit "inline identity, Unicode bytes, CRLF and ambiguous RAW gap" =
   let body = "é\r\nleft RAW|right|RAW" in
   let root = "<script id=\"s\" language=\"chatml\" kind=\"tool\">" ^ body ^ "</script>" in
@@ -121,7 +145,22 @@ let%test_unit "inline identity, Unicode bytes, CRLF and ambiguous RAW gap" =
     (project declaration bound ~start_byte:14 ~end_byte:14)
     input
     (content_start + 18)
-    (content_start + 18)
+    (content_start + 18);
+  assert_inverse_exact bound input (content_start + 1) 1;
+  assert_inverse_exact bound input (content_start + 5) 5;
+  assert_inverse_exact bound input (content_start + 8) 8;
+  assert_inverse_unavailable
+    bound
+    input
+    (content_start + 9)
+    E.Authored_point.Unmapped_or_ambiguous;
+  assert_inverse_unavailable
+    bound
+    input
+    (content_start + 13)
+    E.Authored_point.Unmapped_or_ambiguous;
+  assert_inverse_exact bound input (content_start + 14) 10;
+  assert_inverse_exact bound input (content_start + 18) 14
 ;;
 
 let%test_unit "small generated plain/RAW sequences agree with authored-byte oracle" =
@@ -204,6 +243,21 @@ let%test_unit "small generated plain/RAW sequences agree with authored-byte orac
         | None, Ok (E.Approximate_declaration _) -> ()
         | _ -> assert false
       done
+    done;
+    for authored = 0 to String.length authored_body do
+      let matching_compiled =
+        List.filter
+          (List.init (count + 1) ~f:Fn.id)
+          ~f:(fun compiled ->
+            (Int.equal compiled 0 || Int.equal (origins.(compiled - 1) + 1) authored)
+            && (Int.equal compiled count || Int.equal origins.(compiled) authored))
+      in
+      let actual = inverse bound input (String.length prefix + authored) in
+      match matching_compiled, actual with
+      | [ expected ], E.Authored_point.Exact_compiled_byte compiled ->
+        assert (Int.equal expected compiled)
+      | [], E.Authored_point.Unavailable Unmapped_or_ambiguous -> ()
+      | _ -> assert false
     done)
 ;;
 
@@ -251,6 +305,11 @@ let%test_unit "generated child serialization and external src are not forged inl
   assert_approximate (project n n_bound ~start_byte:1 ~end_byte:2) n;
   let e = declaration parsed "e" in
   let e_bound = bound e in
+  assert_inverse_unavailable
+    e_bound
+    (CM.Parsed.root_input parsed)
+    0
+    E.Authored_point.External_body;
   match project e e_bound ~start_byte:0 ~end_byte:4 with
   | E.External_origin { member; body_digest; start_byte; end_byte } ->
     assert (String.equal member "code.chatml");
@@ -294,7 +353,14 @@ let%test_unit "transformed effective root cannot claim an authored exact site" =
   assert (String.equal (CM.Declaration.script_body declaration) "y");
   assert_approximate
     (project declaration (bound declaration) ~start_byte:0 ~end_byte:1)
-    declaration
+    declaration;
+  let input = CM.Parsed.root_input parsed in
+  let content_start = String.substr_index_exn authored ~pattern:">x<" + 1 in
+  assert_inverse_unavailable
+    (bound declaration)
+    input
+    content_start
+    E.Authored_point.Effective_only
 ;;
 
 let%test_unit "one shared map byte cap degrades later declarations without changing body" =
@@ -348,6 +414,17 @@ let%test_unit "binding, projection and long RAW scans preserve cancellation iden
   (match
      E.project_raw (bound declaration) location ~checkpoint:(fun () ->
        raise exception_value)
+   with
+   | _ -> assert false
+   | exception actual -> assert (phys_equal actual exception_value));
+  let input = CM.Parsed.root_input parsed in
+  let body_start = String.substr_index_exn (Input.authored input) ~pattern:">x<" + 1 in
+  (match
+     E.authored_point
+       (bound declaration)
+       ~input
+       ~authored_byte:body_start
+       ~checkpoint:(fun () -> raise exception_value)
    with
    | _ -> assert false
    | exception actual -> assert (phys_equal actual exception_value));
