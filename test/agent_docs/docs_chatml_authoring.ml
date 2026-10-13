@@ -176,7 +176,7 @@ let metadata_exn line =
   id, target, also_run, expectation
 ;;
 
-let examples_exn text =
+let examples_exn ?(require_all_fences = true) text =
   let rec take_code id reversed = function
     | [] -> fail id "unclosed code fence"
     | "```" :: rest -> String.concat ~sep:"\n" (List.rev reversed), rest
@@ -191,8 +191,12 @@ let examples_exn text =
          let source, rest = take_code id [] rest in
          scan ({ id; target; also_run; expectation; source } :: reversed) rest
        | _ -> fail id "metadata must immediately precede an ocaml code fence")
-    | line :: _ when String.is_prefix line ~prefix:"```" ->
-      fail "metadata" "every code fence in this reference must have example metadata"
+    | line :: rest when String.is_prefix line ~prefix:"```" ->
+      if require_all_fences
+      then fail "metadata" "every code fence in this reference must have example metadata"
+      else (
+        let _, rest = take_code "unchecked reference fragment" [] rest in
+        scan reversed rest)
     | _ :: rest -> scan reversed rest
   in
   let examples = scan [] (String.split_lines text) in
@@ -376,6 +380,13 @@ let run env root =
         let path = String.chop_prefix_exn file ~prefix:"docs-src/" in
         check_topic_coverage corpus ~path ~text;
         examples_exn text)
+    (* The full language specification also contains grammar fragments and
+       internal OCaml types. Only its explicitly marked runnable examples are
+       executed; the authoring guides above still require every fence to run. *)
+    @ examples_exn
+        ~require_all_fences:false
+        (Eio.Path.load
+           Eio.Path.(Eio.Stdenv.fs env / root / "docs-src/guide/chatml-language-spec.md"))
   in
   (match
      List.find_a_dup

@@ -49,7 +49,7 @@ ChatML is intentionally **not** trying to be:
 - a full general-purpose application language
 - a rich module language
 - a type-class / trait / ad-hoc-overloading language
-- a full algebraic-datatype / type-parameter language
+- nominal algebraic datatypes or generalized algebraic datatypes (GADTs)
 - a high-performance numerical language
 
 The implementation is intentionally biased toward:
@@ -86,18 +86,19 @@ The surface language supports:
 
 - first-class functions
 - local and recursive bindings
-- top-level named type declarations
+- named type declarations at the top level and inside modules
 - checked binding annotations
 - structural records
+- immutable heterogeneous tuples
 - polymorphic variants
 - arrays
 - refs
 - pattern matching
-- simple modules
+- modules with optional checked interfaces
 
 ChatML now has a deliberately small user-facing type surface:
 
-- top-level `type` declarations,
+- top-level and module-local `type` declarations,
 - binding annotations on `let`, `let rec`, and `let ... in`,
 - explicit recursive types introduced through those declarations.
 
@@ -146,6 +147,7 @@ Source expressions include forms such as:
 - `ELetIn`
 - `ELetRec`
 - `EMatch`
+- `ETuple`
 
 Resolved expressions include:
 
@@ -155,6 +157,7 @@ Resolved expressions include:
 - `RELetBlock`
 - `RELetRec`
 - `REMatch`
+- `RETuple`
 
 This phase split is deliberate:
 
@@ -195,6 +198,7 @@ bytes so a deferred failure can select its defining source.
 - value restriction
 - row-polymorphic records
 - row-polymorphic variants
+- tuple arity, element typing, and irrefutable destructuring
 - match checking
 - builtin type import
 
@@ -309,13 +313,18 @@ still enter the AST as ordinary variable references.
 
 ### 4.2 Literals
 
-Supported literal forms:
+Primitive literal forms:
 
 - integers: `0`, `1`, `42`
 - floats: `1.0`, `3.14`
 - booleans: `true`, `false`
 - strings: `"hello"`
 - unit: `()`
+
+Composite values include tuples `(|1, "one"|)`, records `{ x = 1 }`,
+arrays `[1, 2]`, and variants such as `` `Some(1) ``. Integer literals are
+decimal; float literals require digits on both sides of the decimal point.
+There are no exponent, hexadecimal, or numeric-separator literal forms.
 
 ### 4.3 Comments
 
@@ -329,14 +338,16 @@ Nested comments are supported by the lexer.
 
 ### 4.4 Strings
 
-Strings support at least:
+Strings recognize these escape sequences:
 
 - `\n`
 - `\t`
 - `\\`
 - `\"`
 
-Strings may span multiple lines.
+Strings may span multiple lines; LF, CR, and CRLF line breaks normalize to `\n`.
+Other backslash sequences are preserved literally, rather than interpreted as
+additional escapes. String lengths, indexes, and slices count bytes.
 
 ### 4.5 Whitespace
 
@@ -352,8 +363,9 @@ A ChatML program is a sequence of top-level statements.
 
 Top-level statement forms:
 
-- `type t = type_expr`
+- `type t = type_expr` and parameterized aliases such as `type 'a box = { value : 'a }`
 - `let x = expr`
+- tuple destructuring such as `let (|x, y|) = expr`
 - `let x : type_expr = expr`
 - `let f a b = expr`
 - `let f () = expr`
@@ -387,6 +399,8 @@ let x = 1
 let name = "Alice"
 let inc n = n + 1
 let thunk () = 42
+let (|count, label|) = (|7, "seven"|)
+let (|first, _|) : int * bool = (|1, true|)
 ```
 
 Properties:
@@ -395,6 +409,10 @@ Properties:
 - the new binding is then added to the current environment
 - later top-level lets may shadow earlier ones
 - already-created closures still observe the lexical binding they captured
+- binders may be names, `_`, or nested tuples of those binders; literals,
+  record patterns, and variant patterns are reserved for `match`
+- a destructured RHS runs once; its named leaves enter scope together, and
+  duplicate names within one binding are rejected
 
 ### 6.2 Recursive top-level `let rec`
 
@@ -431,6 +449,7 @@ Examples:
 type expr = [ `Int(int) | `Add(expr, expr) ]
 type 'a tree = [ `Leaf('a) | `Branch('a tree, 'a tree) ]
 type ('a, 'e) outcome = [ `Ok('a) | `Error('e) ]
+type status = [ `Pending | `Done ]
 type task = { name : string; attempts : int; status : status }
 ```
 
@@ -441,7 +460,7 @@ Properties:
 - they are allowed at the top level and inside module bodies
 - later statements may refer to earlier type declarations
 - module bodies may refer to earlier top-level type declarations
-- local module type declarations are exported unless an inline signature hides them
+- type declarations within a module are exported unless an inline signature hides them
 - qualified names such as `Data.t` and `Outer.Inner.t` select public type aliases
 - `open` brings public type and nested module names into the lexical type namespace
 - type declarations are alias-like, not nominal runtime entities
@@ -451,6 +470,8 @@ Parameterized aliases are applied using postfix syntax: `int tree` or
 an alias; it is not a general tuple type. Parameter names are scoped to their
 declaration. Expansion uses the declaration's lexical type namespace, with no
 runtime type objects. Duplicate/free parameters and wrong arities are errors.
+A type name cannot be declared twice in the same scope; an inner module may
+shadow an outer alias without changing previously defined aliases.
 Zero-parameter names such as `type task = ...` remain legal alongside the unary
 builtin `task` constructor; builtin constructors cannot be redefined with parameters.
 
@@ -531,8 +552,11 @@ The legacy text compiler does not discover companion files or configured sources
 Explicit host project preparation captures Local directories and full-pin Git
 catalogs under admitted host authority, then supplies immutable inputs to these
 prepared/linked APIs. See the [working shared-counter project](../examples/chatml/projects/shared-counter/README.md).
-The graph compiler itself performs no discovery or native reads. Bundle custody
-and automatic ChatMD host routing have separate host owners.
+The graph compiler itself performs no discovery or native reads. In ChatMD,
+each script can select its own `project` and `environment`; the host prepares
+and captures that selection for the script. Existing sessions resume their
+captured code, while an explicit rebuild adopts file edits. See
+[configured ChatML projects](chatmd-authoring-definitions.md#attach-chatml-moderation).
 
 ### 6.5 `open`
 
@@ -597,6 +621,8 @@ Anonymous functions:
 ```ocaml
 fun x -> x
 fun x y -> x
+fun (|x, y|) -> x + y
+fun _ -> 42
 fun () -> 42
 ```
 
@@ -622,12 +648,20 @@ let rec eval : expr -> int =
   fun e -> ...
 ```
 
-Zero-argument annotated functions use `unit -> t`:
+Use explicit function types when argument count matters:
 
 ```ocaml
-let finish_action : unit -> string =
-  fun () -> "done"
+let finish_action : fun() -> string = fun () -> "done"
+let accept_unit : fun(unit) -> string = fun value -> "done"
+let add_pair : fun(int * int) -> int = fun (|x, y|) -> x + y
 ```
+
+These are called as `finish_action()`, `accept_unit(())`, and
+`add_pair((|2, 3|))`. A tuple parameter consumes one argument; `_` consumes one
+argument without binding a name. Duplicate names anywhere within a parameter
+list are rejected. The legacy annotation `unit -> string` also describes a
+zero-argument function; `fun(unit) -> string` explicitly preserves one unit
+argument.
 
 ### 7.4 Function application
 
@@ -647,6 +681,8 @@ choose(true)(1)
 ```
 
 There is no whitespace application syntax such as `f x`.
+`f(a, b)` supplies two arguments, while `f((|a, b|))` supplies one tuple argument.
+Parentheses alone do not construct tuples: `(a, b)` is not a tuple expression.
 
 ### 7.5 Local `let ... in`
 
@@ -655,6 +691,7 @@ Examples:
 ```ocaml
 let x = 1 in x + 1
 let x : int = 1 in x + 1
+let (|x, y|) = (|2, 3|) in x + y
 let f y = y in f(3)
 let rec loop n = ... in loop(10)
 let* x = task1 in task2
@@ -673,6 +710,8 @@ Properties:
   are introduced through binding forms
 - `let*` and `let+` are task-composition forms that desugar to `Task.bind`
   and `Task.map`
+- task-let binders currently accept a single name or `()` only; to destructure
+  a task result, use `let* pair = task in let (|x, y|) = pair in ...`
 
 ### 7.6 Conditionals
 
@@ -682,35 +721,28 @@ if cond then a else b
 
 Rules:
 
-- condition must have type `bool`
-- both branches must have the same type for non-record results
-- record-valued branches are combined using a conservative **join**
+- the condition must have type `bool`
+- branch results must unify to one compatible type
+- record results must have matching field sets and compatible field types;
+  there is no implicit conversion to a smaller common record
 
-For records, ChatML keeps only the fields that are guaranteed on **every**
-branch. This avoids unsoundly concluding that a field exists just because one
-branch adds it with copy-update.
+For example, this is rejected even though both records contain `x`:
 
-Example:
+```ocaml
+if true then { x = 1 } else { x = 2; y = 3 }
+```
+
+A helper that sometimes updates a field and sometimes returns its input imposes
+that field's type on the input:
 
 ```ocaml
 let maybe_set_running b st =
   if b then st else { st with running = true }
 ```
 
-The result of `maybe_set_running` is **not** treated as definitely having a
-`running` field, because the `then` branch returns `st` unchanged.
-
-By contrast:
-
-```ocaml
-let set_running st running =
-  { st with running = running }
-
-let ensure_running b st =
-  if b then set_running(st, true) else set_running(st, false)
-```
-
-does guarantee `running` on every path, so the joined result keeps that field.
+Here `st` must already contain `running : bool`, and any extra input fields are
+retained. Unconditional copy-update can still add fields or change their types;
+see [record result compatibility](#1051-control-flow-joins-for-records).
 
 ### 7.7 Sequencing
 
@@ -841,6 +873,35 @@ Properties:
 
 ---
 
+### 7.13 Tuples
+
+Tuples are immutable, ordered groups of at least two values, which may have
+different types. Use `(|` and `|)` around comma-separated elements:
+
+<!-- ochat-authoring-example: {"id":"reference.tuple-bindings","surface":"one_off_v1","result":"seven:10"} -->
+```ocaml
+let pair : int * string = (|7, "seven"|)
+let (|count, label|) = pair
+let add (|a, b|) step = a + b + step
+let main input =
+  Task.pure(`String(label ++ ":" ++ to_string(add((|count, 2|), 1))))
+```
+
+The example returns the JSON string `"seven:10"`. Tuple elements evaluate
+left-to-right. Extract them with `let` destructuring, function parameters, or
+`match`; tuples do not use array indexing or named field projection.
+
+`(|1, "one", true|)` is a triple; `(|(|1, "one"|), true|)` is a pair containing
+a pair. These shapes are distinct. Empty and one-element tuples do not exist;
+`()` remains unit. A tuple cannot replace its elements, but arrays and refs
+stored inside it retain their normal mutability and are shared, not copied.
+
+Variant argument lists remain distinct: `` `Pair(a, b) `` has two payload
+arguments, whereas `` `Pair((|a, b|)) `` has one tuple payload. See
+[tuple patterns](#97-tuple-patterns) and [product types](#102-composite-types).
+
+---
+
 ## 8. Operators
 
 Operators are built into the core AST. They are not looked up from the
@@ -920,6 +981,7 @@ Rejected:
 - arrays
 - refs
 - functions
+- modules
 - tasks
 
 Examples:
@@ -932,7 +994,7 @@ Examples:
 
 Implementation note:
 
-- runtime equality for records/variants is structural
+- runtime equality for tuples/records/variants is structural
 - runtime equality for arrays/refs/closures/modules/builtins is by identity
 - the typechecker now rejects the most problematic unsupported cases
 
@@ -968,6 +1030,7 @@ ChatML supports:
 - boolean literal patterns
 - float literal patterns
 - string literal patterns
+- tuple patterns: `(|p1, p2, ...|)`, including nested tuples
 - variant patterns:
   - `` `Tag ``
   - `` `Tag(p1, ..., pn) ``
@@ -1017,12 +1080,12 @@ The typechecker performs:
 
 The result type of a `match` follows the same rule as `if`:
 
-- non-record arm results must unify to the same type
-- record-valued arm results are combined using the same conservative join
-  used for `if`
+- all arm results must unify to one compatible type
+- record-valued arm results require matching shapes and compatible field types
+- tuple-valued arm results require the same arity and compatible element types
 
-So if one arm adds a record field and another arm does not guarantee it, the
-overall `match` result type does not retain that field.
+Use explicit variant tags when different arms intentionally return different
+shapes. Ordinary record-taking helpers still accept extra fields.
 
 Exhaustiveness is strongest for:
 
@@ -1036,6 +1099,7 @@ It is conservative for:
 - floats
 - strings
 - records
+- tuples with refutable element patterns
 - open variants
 
 ### 9.6 Variant narrowing by match
@@ -1057,6 +1121,29 @@ This is intentional.
 
 ---
 
+### 9.7 Tuple patterns
+
+Tuple patterns match exact arity and order. Each element may use a literal,
+variant, record, wildcard, variable, or another tuple pattern:
+
+<!-- ochat-authoring-example: {"id":"reference.tuple-match","surface":"one_off_v1","result":"seven"} -->
+```ocaml
+let describe pair =
+  match pair with
+  | (|0, _|) -> "zero"
+  | (|_, name|) -> name
+let main input = Task.pure(`String(describe((|7, "seven"|))))
+```
+
+Coverage is conservative: include a total tuple pattern, as in the second arm,
+or a wildcard/binder fallback. The checker does not combine separate refutable
+tuple arms into a proof covering every combination of their elements.
+
+Unlike match patterns, tuple binders in `let` and function parameters contain
+only names, `_`, and nested tuples. They cannot fail a literal or tag test.
+
+---
+
 ## 10. Type system
 
 ChatML uses Hindley–Milner style inference with extensions for:
@@ -1066,12 +1153,12 @@ ChatML uses Hindley–Milner style inference with extensions for:
 - row-polymorphic records
 - row-polymorphic variants
 
-Unlike earlier versions, ChatML now has a small explicit type surface for:
+ChatML has a small explicit type surface for:
 
-- top-level named type declarations
+- named type declarations at the top level and inside modules
 - checked binding annotations
 
-Ordinary HM inference variables are acyclic again. Recursive types are not
+Ordinary HM inference variables are acyclic. Recursive types are not
 inferred accidentally from ordinary unification; they are introduced only
 through explicit checked declarations.
 
@@ -1091,6 +1178,8 @@ through explicit checked declarations.
 - record types
 - variant types
 - tuple types
+- task types
+- module interfaces, distinct from record types
 
 Tuple values and match patterns use `(|first, second, ...|)`, with at least two
 elements. Products are ordered and may be heterogeneous. Flat triples and nested
@@ -1131,7 +1220,9 @@ The current user-facing type-expression syntax supports:
   - `bool`
   - `string`
   - `unit`
-- previously declared type names
+- previously declared type names and qualified aliases such as `Catalog.id`
+- scoped alias parameters and applications such as `int box` or `(int, string) outcome`
+- product types such as `int * string` or `(int * string) * bool`
 - exact nary function types:
   - `fun() -> int` (zero arguments)
   - `fun(unit) -> int` (one unit argument)
@@ -1171,8 +1262,10 @@ Current user-facing omissions are intentional:
 - no mutual recursive type declarations
 
 The parser accepts postfix constructors and multi-argument alias applications.
-The checker enforces each declaration's arity. Parameters such as `'a` are only
-available within the declaration that binds them. Builtin unary constructors are:
+The checker enforces each declaration's arity. Alias parameters such as `'a` are
+scoped to their declaration; `val` specifications in signatures instead quantify
+their parameters universally. Ordinary `let` annotations cannot introduce free
+type parameters. Builtin unary constructors are:
 
 - `array`
 - `task`
@@ -1248,87 +1341,48 @@ This can be used on:
 {name = "A"; age = 1}
 ```
 
-Important implementation detail:
-
-- lambda parameters discovered to be record-shaped are reopened to open rows
-- this heuristic is intentionally biased toward record-heavy scripting and
-  state-machine helpers
-- variants are not reopened by the same heuristic
+Field projection and open record patterns infer requirements for the fields
+they use. Extra fields are accepted and retain their types. Exact record
+annotations and closed patterns remain exact; function inference does not
+reopen them into wider shapes.
 
 ### 10.5.1 Control-flow joins for records
 
-Record copy-update can widen a record result:
+Record copy-update can add a field or replace a field with a new type while
+preserving unmentioned fields. The original record remains unchanged:
 
+<!-- ochat-authoring-example: {"id":"reference.record-copy","surface":"one_off_v1","result":true} -->
 ```ocaml
-let with_timeout cfg ms =
-  { cfg with timeout_ms = ms }
+let enable cfg = { cfg with enabled = true }
+let original = { enabled = 1; name = "worker" }
+let updated = enable(original)
+let main input =
+  Task.pure(`Bool(if original.enabled == 1 then updated.enabled else false))
 ```
 
-This gives `with_timeout` the expected shape:
+An explicit annotation on `updated` must agree with the resulting shape and
+field types. It cannot require `enabled : int` after this update.
 
-```text
-{ ...r } -> int -> { timeout_ms : int; ...r }
-```
+Control-flow joins unify full result types; they do not discard fields to find
+a smaller shared shape. Both arms must agree on field sets and field types:
 
-However, `if` and `match` do **not** preserve fields that appear on only some
-paths. Instead, they compute a conservative join that keeps only fields
-guaranteed on every branch.
-
-This means ChatML no longer relies on branch-shape heuristics. If a field
-should be available after control flow, make that field explicit on every
-returned branch.
-
-Recommended patterns:
-
-- ensure initialization helpers return the same shape on all paths
-- make field updates explicit on every branch
-
-
-#### Explicit field-update example
-
-Instead of:
-
+<!-- ochat-authoring-example: {"id":"reference.branch-shape-rejected","surface":"one_off_v1","stage":"typecheck","contains":"Row does not contain label","span":true} -->
 ```ocaml
-let step st ev =
-  match ev with
-  | `Start ->
-    if st.idx >= length(st.tasks) then st
-    else set_status({ st with running = true }, status_witness(1))
-
-  | `Tick ->
-    if st.running == false then st
-    else ...
+let choose flag = if flag then { x = 1 } else { x = 2; y = 3 }
+let main input = Task.pure(`Null)
 ```
 
-prefer:
+This is rejected. Construct a common record shape on both paths, or use variants
+such as `` `Plain({x = 1}) `` and `` `Detailed({x = 2; y = 3}) `` to express
+intentional alternatives. Conditional updates of an unknown input record must
+also preserve a compatible result: the `maybe_set_running` helper in
+[conditionals](#76-conditionals) requires `running : bool` in its input.
 
-```ocaml
-let set_running st running =
-  { st with running = running }
-
-let step st ev =
-  match ev with
-  | `Start ->
-    if st.idx >= length(st.tasks) then set_running(st, false)
-    else set_status(set_running(st, true), status_witness(1))
-
-  | `Tick ->
-    if st.running == false then set_running(st, false)
-    else
-      let st = set_running(st, true) in
-      ...
-```
-
-Why this works:
-
-- every returned branch now explicitly produces a state with `running`
-- the conservative join can therefore keep `running`
-- no branch-shape heuristic is required
-
-One-sentence summary:
-
-> if a record field must exist after `if` or `match`, make sure every branch
-> returns a record that explicitly contains that field.
+For the narrow case where an exact result annotation constrains a generic
+shape-changing helper, an explicit input shape may be necessary. For example,
+annotating `{r with enabled = true}` as exactly `{enabled : bool}` does not make
+one inferred helper accept both an absent `enabled` field and every possible
+previous type of that field. Spell out the intended input type when it matters.
 
 ### 10.6 Variants and row polymorphism
 
@@ -1397,6 +1451,7 @@ The runtime supports:
 - strings
 - variants
 - records
+- tuples
 - arrays
 - refs
 - closures
@@ -1580,10 +1635,22 @@ A builtin surface may contribute:
 - builtin modules installed as `VModule` values (with a distinct module type),
 - builtin type aliases injected into the initial type environment.
 
-The current implementation exposes two standard assembled surfaces:
+The generic builtin-surface API exposes these standard assembled surfaces:
 
 - `core_surface`
 - `moderator_surface`
+- `ui_moderator_surface` (an explicit interactive extension)
+
+Ochat also uses versioned authoring contracts: `one_off_v1`, `tool_v1`,
+`moderator_v1`, and `delegated_moderator_v1`. These select different entrypoints
+and capability modules; they are not synonyms for the generic surfaces. See
+section 13.2.2.2.
+
+The signatures below are explanatory reference notation, not source declarations
+to paste into a program. An arrow chain lists the arguments of one fixed-arity
+call: use `Task.bind(task, callback)`, not partial application. Nullary helpers
+such as `Option.none` are called with `()`. Names such as `hashtbl('a)` below
+abbreviate a structural representation; they are not installed type aliases.
 
 Arithmetic, string concatenation, comparison, and equality operators remain
 language primitives rather than runtime-installed builtins.
@@ -1602,6 +1669,7 @@ record_keys : { ...r } -> string array
 variant_tag : [ ...r ] -> string
 swap_ref : ref('a) -> 'a -> 'a
 fail : string -> 'a
+hash_md5 : string -> string
 ```
 
 Notes:
@@ -1610,10 +1678,15 @@ Notes:
 - to_string returns that representation.
 - length works on arrays only.
 - array_copy is a shallow copy of the array container.
-- record_keys explicitly supports ordinary records and module values; for a signed module it returns only public runtime member names, not type names.
+- record_keys returns names in sorted order and explicitly supports ordinary records and module values; for a signed module it returns only public runtime member names, not type names.
 - variant_tag returns only the constructor/tag name, not the payload.
-- swap_ref r v stores v into r and returns the old contents.
-- fail raises a runtime failure and is polymorphic in its result position.
+- `swap_ref(r, v)` stores `v` into `r` and returns the old contents.
+- fail raises an immediate runtime failure and is polymorphic in its result position.
+- hash_md5 returns the lowercase hexadecimal MD5 digest of the string bytes. It is a legacy checksum helper, not a secure signature or collision-resistant identity.
+
+`print` is present in the generic core surface. It is deliberately omitted from
+one-off, standalone-tool, delegated-moderator and shell-hook authoring surfaces;
+use the selected host's diagnostic operations instead.
 
 ### 13.2 Builtin surfaces
 
@@ -1624,6 +1697,7 @@ Notes:
 - the global builtins listed above,
 - builtin modules:
   - `Task`
+  - `Outcome`
   - `String`
   - `Array`
   - `Json`
@@ -1673,21 +1747,59 @@ This surface is intended for interactive hosts that support host-local
 notifications and live approval pause/resume behavior. The default
 `moderator_surface` remains non-UI.
 
+#### 13.2.2.2 Versioned Ochat authoring surfaces
+
+| Contract | Entrypoint and available host facilities |
+|---|---|
+| `one_off_v1` | `main(input)` returns `json task`. Core computation without `print`, plus `Log`, selected `Tool.call`, and `Job`. |
+| `tool_v1` | `run(context, input)` returns `tool_outcome task`; adds the typed invocation context, outcomes and capability aliases. |
+| `moderator_v1` | `initial_state` and `on_event(context, state, event)` share one state type; adds typed invocation, run, job, subscription, notification, ingress and scheduling operations to the ordinary moderator surface. |
+| `delegated_moderator_v1` | The same moderator entrypoint contract, with inherited tool authority; excludes `print`, `Model` and `Process`. |
+
+These contracts statically check their required entrypoints. Compilation does not
+install a host service or grant execution authority. Each tool call still needs
+actual selected capabilities, schema validation and current invocation admission.
+On versioned surfaces `Tool.spawn` aliases transactional `Job.start_tool`; on the
+generic moderator surface it retains the legacy external asynchronous handler.
+Versioned `Runtime.emit` and `Schedule.after_ms` accept JSON, which the host wraps
+as `Internal_event(payload)`, rather than accepting arbitrary native event values.
+See [authoring runtime](chatml-authoring-runtime.md),
+[owned background work](chatml-authoring-background.md),
+[invocation context](chatml-invocation-context.md), and
+[model/process/runtime control](chatml-runtime-control.md) for the complete host
+contracts. Shell-hook surfaces are separate and do not inherit moderator modules.
+
 ### 13.2.3 `Task` module
 
-The `Task` builtin module provides the core task combinators used by the
-moderator-runtime embedding:
+The `Task` builtin module provides the core task combinators used by
+computation and moderator hosts:
 
 ```ocaml
 Task.pure  : 'a -> 'a task
 Task.bind  : 'a task -> ('a -> 'b task) -> 'b task
 Task.map   : 'a task -> ('a -> 'b) -> 'b task
+Task.map_array : 'a array -> ('a -> 'b task) -> 'b array task
+Task.iter_array : 'a array -> ('a -> unit task) -> unit task
 Task.fail  : string -> 'a task
 Task.catch : 'a task -> (string -> 'a task) -> 'a task
 ```
 
 These functions construct and compose task values. They do not themselves
-perform host-side effects.
+perform host-side effects. Their arguments still evaluate eagerly. Reusing a
+task interprets it again, rather than memoizing its result. `map_array` and `iter_array` defer their callbacks until
+interpretation, then execute each callback task sequentially from left to right.
+Each interpretation first takes a fresh shallow snapshot of the input array;
+mutable payloads remain shared. `map_array` returns a fresh array, while
+`iter_array` requires unit results. Failure stops later callbacks; suspended UI
+work resumes the same traversal without replaying completed callbacks.
+
+`Task.fail` constructs deferred failure; global `fail` fails immediately.
+`Task.catch` handles failure while interpreting the protected task, not failure
+that happened eagerly while constructing its argument. A pure evaluation failure
+in a bind/map callback also exits that interpreter invocation rather than being converted to `Task.fail`; return a failing task for
+recoverable workflow errors. Catch restores staged local effects, emitted events and end-session requests, but cannot undo completed
+external operations or arbitrary ref/array mutations. Host cancellation and bounded-execution control failures bypass `Task.catch`. See
+[task composition and effects](chatml-task-effects.md).
 
 ### 13.2.4 `String` module (updated)
 
@@ -1697,7 +1809,7 @@ Exports:
 
 #### Basic operations
 
-- `String.length : string -> int`
+- `String.length : string -> int` (byte count)
 - `String.is_empty : string -> bool`
 - `String.concat : string -> string -> string`
 
@@ -1720,12 +1832,16 @@ Notes:
 - `String.to_upper : string -> string`
 - `String.to_lower : string -> string`
 
+Strings contain bytes. Case conversion affects ASCII letters; slicing and search
+do not operate on Unicode grapheme boundaries. `trim` strips ASCII whitespace at
+the ends. See [string operations](chatml-strings.md).
+
 #### Slicing, search, and split
 
 - `String.slice : string -> int -> int -> string`  
-  `slice(s, start, len)` returns the substring of length `len` starting at `start`. Raises on invalid bounds.
-- `String.find : string -> string -> [ \`None | \`Some(int) ]`  
-  Finds the first occurrence of the pattern and returns its starting index.
+  `slice(s, start, len)` copies `len` bytes starting at zero-based byte offset `start`; the third argument is a length, not an ending offset. An empty slice at the byte length is valid; invalid bounds fail.
+- ``String.find : string -> string -> [ `None | `Some(int) ]``
+  Finds the first occurrence of the literal pattern and returns its starting byte offset; an empty pattern returns `` `Some(0) ``.
 - `String.split : string -> string -> string array`  
   Splits on a non-empty separator string; raises if the separator is empty.
 - `String.replace_all : string -> string -> string -> string`  
@@ -1781,8 +1897,17 @@ These functions accept ChatML functions/closures as arguments. They execute thos
 - `Array.fold : 'a array -> 'b -> ('b -> 'a -> 'b) -> 'b`  
   Left fold in index order.
 - `Array.filter : 'a array -> ('a -> bool) -> 'a array`
+- ``Array.filter_map : 'a array -> ('a -> [ `None | `Some('b) ]) -> 'b array``
+  Visits every input in order, skips `None`, and returns the `Some` payloads in a fresh shallow array.
 - `Array.exists : 'a array -> ('a -> bool) -> bool`
 - `Array.for_all : 'a array -> ('a -> bool) -> bool`
+
+`exists`, `for_all`, `find` and `find_map` stop as soon as their answer is known.
+For empty arrays, `exists` is false, `for_all` is true, and searches return `None`.
+Eager `Array` callbacks do not interpret returned tasks; use `Task.map_array` or
+`Task.iter_array` for sequential effectful work. Copies share contained refs,
+arrays and other mutable payloads. `Array.make` and `fill` reuse one supplied
+value; `init` evaluates its callback separately for each slot.
 
 #### Option-returning search helpers
 
@@ -1793,32 +1918,39 @@ These use the standard option encoding as variants:
 
 Exports:
 
-- `Array.find : 'a array -> ('a -> bool) -> [ \`None | \`Some('a) ]`  
-  Returns the first element satisfying the predicate, or `\`None`.
-- `Array.find_map : 'a array -> ('a -> [ \`None | \`Some('b) ]) -> [ \`None | \`Some('b) ]`  
-  Applies the mapping function left-to-right and returns the first `\`Some(...)` result, or `\`None`.
+- ``Array.find : 'a array -> ('a -> bool) -> [ `None | `Some('a) ]``
+  Returns the first element satisfying the predicate, or `` `None ``.
+- ``Array.find_map : 'a array -> ('a -> [ `None | `Some('b) ]) -> [ `None | `Some('b) ]``
+  Applies the mapping function left-to-right and returns the first `` `Some(...)` `` result, or `` `None ``.
 
 ### 13.2.6 `Option` module
-This module uses the convention that option values are represented as variants:
 
-```ocaml
-`None
-`Some(x)
+Optional values use `` `None `` and `` `Some(value) ``. Outcomes use
+`` `Ok(value) `` and `` `Error(error) ``; neither requires a new runtime type.
+The following `option(a)` and `outcome(a, e)` names abbreviate these variants
+in the reference signatures, not installed source aliases.
+
+```text
+Option.none : unit -> option('a)
+Option.some : 'a -> option('a)
+Option.is_none : option('a) -> bool
+Option.is_some : option('a) -> bool
+Option.map : option('a) -> ('a -> 'b) -> option('b)
+Option.bind : option('a) -> ('a -> option('b)) -> option('b)
+Option.get_or : option('a) -> 'a -> 'a
+
+Outcome.map : outcome('a, 'e) -> ('a -> 'b) -> outcome('b, 'e)
+Outcome.bind : outcome('a, 'e) -> ('a -> outcome('b, 'e)) -> outcome('b, 'e)
+Outcome.map_error : outcome('a, 'e) -> ('e -> 'f) -> outcome('a, 'f)
 ```
 
-Exports:
-
-```ocaml
-Option.none : unit -> [ \None | `Some('a) ]`
-Option.some : 'a -> [ \None | `Some('a) ]`
-Option.is_none : [ \None | `Some('a) ] -> bool`
-Option.is_some : [ \None | `Some('a) ] -> bool`
-Option.get_or : [ \None | `Some('a) ] -> 'a -> 'a`
-```
-
-Notes:
-
-- This is a convenience module; users can also directly construct and match on `None and `Some(...).
+These operations run immediately. `Option.map`/`bind` call their callback only
+for `Some`; `Outcome.map`/`bind` only for `Ok`, and `map_error` only for `Error`.
+The unselected branch is preserved without calling the callback. Callbacks are
+not exception handlers: their failures propagate rather than becoming `None`
+or `Error`. `get_or` is an ordinary strict call, so its default argument is
+evaluated even when the option contains a value. See
+[arrays and optional values](chatml-collections.md).
 
 ### 13.2.7 `Hashtbl` module (string-keyed)
 This is a small builtin hashtable-like abstraction with string keys. It is implemented using existing runtime values (refs + arrays of entries) and is intended for scripting convenience, not high performance.
@@ -1828,15 +1960,18 @@ Exports (conceptual types):
 ```ocaml
 Hashtbl.create : unit -> hashtbl('a)
 Hashtbl.set : hashtbl('a) -> string -> 'a -> unit
-Hashtbl.get : hashtbl('a) -> string -> [ \None | `Some('a) ]`
+Hashtbl.get : hashtbl('a) -> string -> [ `None | `Some('a) ]
 Hashtbl.mem : hashtbl('a) -> string -> bool
 Hashtbl.remove : hashtbl('a) -> string -> unit
+Hashtbl.to_array : hashtbl('a) -> { key : string; value : 'a } array
 ```
 
 Notes:
 
 - The key type is always string.
-- Hashtbl.get returns an option-like variant (\None/`Some`).
+- Hashtbl.get returns `` `None `` or `` `Some(value) ``.
+- `to_array` returns a fresh shallow array of fresh entry records in insertion order. Replacing a value retains its key's position; removing and reinserting a key moves it to the end. Entry payloads remain shared. Malformed entries or duplicate keys fail.
+- The table is structurally represented as a ref containing an array of `{key; value}` records; prefer the module operations over forging that representation.
 - Current representation is optimized for simplicity rather than asymptotic performance.
 
 
@@ -1862,68 +1997,78 @@ json =
   | `Array(json array)
   | `Object({ key : string; value : json } array)
   ]
-(Internally this is introduced using an explicit recursive binder in the builtin type schemes; users do not write the binder directly.)
 ```
+
+Internally the builtin scheme uses a recursive binder. The source alias `json`
+is already installed; it does not require a user declaration.
   
 Exports:
 #### Text conversion:
 
-- Json.parse : string -> json
+- `Json.parse : string -> json`
 Parses JSON text into a `json` value. Raises a runtime failure on invalid JSON input.
-- Json.parse_opt : string -> [ \None | `Some(json) ]
-Like parse, but returns `None` instead of raising on parse errors.
-- Json.stringify : json -> string
+- ``Json.parse_opt : string -> [ `None | `Some(json) ]``
+Like parse, but returns `` `None `` instead of raising on parse errors.
+- ``Json.parse_result : string -> [ `Ok(json) | `Error([ `Invalid_syntax({ message : string }) ]) ]``
+Returns either the parsed JSON or a typed syntax diagnostic. It does not validate
+an application schema or an expected object shape. Use pattern matching or
+`Outcome` composition for typed failures; see [JSON decoding](chatml-json.md).
+- `Json.stringify : json -> string`
 Produces a compact JSON string representation.
 Finite numeric values use valid JSON number syntax, including whole-valued
 floats (`1.0` becomes `1`). Non-finite values cannot be exported as JSON. Numeric
 spelling is not preserved when JSON passes through ChatML's float representation.
-- Json.pretty : json -> string
+- `Json.pretty : json -> string`
 Produces a human-readable formatted JSON representation.
-- Json.validate : string -> bool
+- `Json.validate : string -> bool`
 Returns true iff the string parses as JSON.
 Introspection and shape-safe accessors:
 
-- Json.tag : json -> string
+- `Json.tag : json -> string`
 Returns one of "Null", "Bool", "Number", "String", "Array", "Object".
 
-- Json.as_bool : json -> [ \None | `Some(bool) ]`
+- ``Json.as_bool : json -> [ `None | `Some(bool) ]``
 
-- Json.as_number : json -> [ \None | `Some(float) ]`
+- ``Json.as_number : json -> [ `None | `Some(float) ]``
 
-- Json.as_string : json -> [ \None | `Some(string) ]`
+- ``Json.as_string : json -> [ `None | `Some(string) ]``
 
-- Json.as_array : json -> [ \None | `Some(json array) ]`
+- ``Json.as_array : json -> [ `None | `Some(json array) ]``
 
-- Json.as_object : json -> [ \None | `Some({ key : string; value : json } array) ]`
+- ``Json.as_object : json -> [ `None | `Some({ key : string; value : json } array) ]``
 
 Object helpers:
 
-- Json.object_keys : json -> string array
+- `Json.object_keys : json -> string array`
 Returns an array of keys when given an object; returns an empty array on non-object values.
-- Json.get_field : json -> string -> [ \None | `Some(json) ]
+- ``Json.get_field : json -> string -> [ `None | `Some(json) ]``
 If the first argument is an object and the key exists, returns
-`Some(value); otherwise `None`.
+`` `Some(value) ``; otherwise `` `None ``.
 
 Path lookup:
 
-- Json.get_path : json -> string array -> [ \None | `Some(json) ]`
+- ``Json.get_path : json -> string array -> [ `None | `Some(json) ]``
 Traverses the JSON value using a path of string segments:
 when the current value is an object, segments are treated as field names;
-when the current value is an array, segments are interpreted as integer indices (in decimal).
-Returns \None` if traversal fails at any point.
+when the current value is an array, segments are parsed as in-bounds integer
+indices. Use nonnegative decimal index text.
+Returns `` `None `` if traversal fails at any point.
 Pure object update helpers:
 
-- Json.set_field : json -> string -> json -> json
+- `Json.set_field : json -> string -> json -> json`
 Returns an updated object with the given field set to the new value.
 Raises a runtime failure if the first argument is not an object.
-- Json.remove_field : json -> string -> json
+- `Json.remove_field : json -> string -> json`
 Returns an updated object with all entries for the given key removed.
 Raises a runtime failure if the first argument is not an object.
 
 Notes:
-- Json.parse/Json.stringify/Json.pretty are backed by Jsonaf.
-- JSON numbers are surfaced as float in ChatML. Parsing converts Jsonaf’s numeric token text to float; stringifying renders the float back to JSON numeric text.
-- Option results use the standard variant encoding: `None and `Some(x).
+- `Json.parse`, `Json.stringify`, and `Json.pretty` are backed by Jsonaf.
+- JSON numbers are surfaced as float in ChatML. Parsing converts Jsonaf’s numeric token text to float; stringifying renders the float back to JSON numeric text. Large integers can lose precision. `validate` checks syntax only, not an application schema or lossless numeric conversion.
+- Object entries are ordered and may contain duplicate keys. `get_field` selects the first match; `set_field` replaces that match and drops later duplicates, or appends a missing key. `remove_field` removes every match.
+- `as_array` and `as_object` return the original mutable payloads. Object updates copy only the outer container; unchanged nested values remain shared.
+- An empty path returns the original value in `Some`. Paths do not split dotted strings or decode JSON Pointer escapes.
+- Option results use the standard variant encoding: `` `None `` and `` `Some(x) ``.
 
 
 ### 13.3 Interaction with open and shadowing
@@ -1984,27 +2129,39 @@ Tool.spawn        : string -> json -> string task
 ```
 
 `Tool.call` is interpreted as an external synchronous operation.
-`Tool.spawn` is interpreted as an external asynchronous operation.
+`Tool.spawn` uses an external asynchronous callback on the generic moderator
+surface. On extensibility-v1 surfaces it stages transactional `Job.start_tool`
+intent: actual execution begins only after the owning commit. Its returned
+string is a job ID, not the eventual output.
 
 #### 13.4.4 `Model`
 
 ```ocaml
 Model.call  : string -> json -> [ `Ok(json) | `Refused(string) | `Error(string) ] task
 Model.spawn : string -> json -> string task
+Model.call_text : string -> string -> [ `Ok(json) | `Refused(string) | `Error(string) ] task
+Model.call_json : string -> json -> [ `Ok(json) | `Refused(string) | `Error(string) ] task
+Model.spawn_text : string -> string -> string task
 ```
 
 `Model.spawn` starts a host-managed background job and returns a stable job id.
-When that job completes (success or failure), the host reinjects a moderator internal
-event so scripts can react. The v1 completion event tags are:
+The legacy conversation embedding reinjects a moderator internal event when a
+job completes. Its completion event tags are:
 
 - `Model_job_succeeded(job_id, recipe_name, result_json)`
 - `Model_job_failed(job_id, recipe_name, message)`
 
-The initial implementation may track spawned jobs in memory only; in that case,
-in-flight jobs are not durably persisted across process restarts.
+Those completion tags belong to the legacy conversation embedding. The durable
+session host records session-owned model jobs through its job service and follows
+its retained completion contract. Do not infer restart or cancellation guarantees
+from the generic callback or the string result type.
 
 The string argument is a host-defined recipe name, not an unrestricted raw
-provider/model identifier.
+provider/model identifier. `call_json` aliases `call`; the text helpers wrap
+their input as JSON strings and do not unwrap successful JSON results. Returned
+`Refused` or `Error` variants are values, not task failures; a missing recipe or
+failed operation can instead fail the task. Model callbacks may perform external
+work before commit, which rollback cannot undo.
 
 #### 13.4.5 `Process`
 
@@ -2013,7 +2170,10 @@ Process.run : string -> string array -> string task
 ```
 
 `Process.run` is a host-managed external operation. Hosts may reject or omit
-this capability entirely.
+this capability entirely. The standard shell adapter waits for completion and
+returns stdout followed by stderr, without a separator; the result is not a job
+ID. Structured argv, current shell permissions and the configured backend still
+apply. A completed command cannot be undone by task rollback.
 
 #### 13.4.6 `Schedule`
 
@@ -2022,7 +2182,9 @@ Schedule.after_ms : int -> 'e -> string task
 Schedule.cancel   : string -> unit task
 ```
 
-The event payload of `Schedule.after_ms` remains a raw ChatML value.
+The generic `Schedule.after_ms` accepts a raw ChatML event value. The versioned
+moderator operation accepts JSON and delivers `Internal_event(payload)` instead.
+A negative delay fails. Timers and their retention depend on the installed host.
 
 #### 13.4.7 `Runtime`
 
@@ -2037,14 +2199,15 @@ Runtime.end_session        : string -> unit task
 successful task completion.
 
 `Runtime.request_turn()` requests that the host run **one more ordinary model turn**
-after the current turn completes. In v1 it is only valid in phases:
+after the current turn completes. The current default registry permits it in:
 
 - `turn_end`
 - `internal_event`
+- `tool_observed`
+- `tool_invoked`
 
-The internal `extensibility-v1` moderator surface also permits this request in
-`tool_observed` and `tool_invoked`. Qualified daemon hosts persist the request with
-the observation or handler result before scheduling it. Background handler requests
+The last two phases are used by the versioned moderator surface. Qualified
+daemon hosts persist the request with the observation or handler result before scheduling it. Background handler requests
 wait for their owning job to complete; cancelled or interrupted jobs discard them.
 Handler and observation requests retain independent disposition, and an applied
 request is not replayed on restart. General feature availability remains gated on
@@ -2091,7 +2254,12 @@ surface syntax.
 
 ```ocaml
 type t = type_expr
+type 'a box = { value : 'a }
+type ('a, 'e) outcome = [ `Ok('a) | `Error('e) ]
 let x = expr
+let (|x, y|) = expr
+let (|x, y|) : int * string = expr
+let f (|x, y|) step = expr
 let x : type_expr = expr
 let f x y = expr
 let f () = expr
@@ -2103,7 +2271,7 @@ open M
 expr
 ```
 
-Signature items are `type t = type_expr`, `val name : type_expr` (optionally
+Signature items are transparent `type` declarations (including parameters), `val name : type_expr` (optionally
 followed by `where equality('a)` constraints joined with `and`) and
 `module M : sig signature_items end`. Optional `;;` separates statements and
 signature items; a single `;` remains an expression separator.
@@ -2118,11 +2286,13 @@ true
 "x"
 x
 fun x -> expr
+fun (|x, y|) -> expr
 fun () -> expr
 f(x)
 if c then t else e
 while c do body done
 let x = e1 in e2
+let (|x, y|) = e1 in e2
 let x : t = e1 in e2
 let rec f x = e1 in e2
 let* x = e1 in e2
@@ -2140,6 +2310,8 @@ r := v
 e1; e2
 `Tag
 `Tag(e1, e2)
+(|e1, e2|)
+(|e1, (|e2, e3|)|)
 ```
 
 ### 14.3 Operators
@@ -2185,6 +2357,7 @@ true
 "x"
 `Tag
 `Tag(p1, p2)
+(|p1, p2|)
 { field = pat }
 { field = pat; _ }
 ```
@@ -2198,6 +2371,16 @@ bool
 string
 unit
 expr
+Catalog.id
+int box
+(int, string) outcome
+int * string
+(int * string) * bool
+fun() -> int
+fun(unit) -> int
+fun(int * string) -> bool
+fun(int, string) -> bool
+fun(int) -> fun(int) -> int
 expr -> int
 unit -> string
 state task
@@ -2335,7 +2518,6 @@ ChatML currently does **not** provide:
 - selective imports
 - abstract signature types, module type declarations or functors
 - ambient project discovery for submitted source strings
-- automatic ChatMD routing of configured source graphs
 - layout-sensitive syntax
 - Unicode identifiers
 - full ML-style match usefulness analysis
@@ -2361,9 +2543,11 @@ nested-module members.
 
 ### 18.2 Records get stronger row ergonomics than variants
 
-Record-heavy scripting is a primary use case, so lambda parameters that
-become record-shaped are reopened to open rows. Variants do not get the
-same reopening heuristic.
+Record projection and open patterns infer the fields a helper requires,
+allowing extra fields at call sites. Exact annotations and closed patterns stay
+exact. Variants use their own row constraints and may narrow through matches;
+neither mechanism grants implicit conversion between incompatible branch
+results.
 
 ### 18.3 Builtins remain a host-side facility
 
@@ -2377,6 +2561,8 @@ complete user-facing type-annotation mechanism.
 For the current language, the most ergonomic and robust style is:
 
 - use records for script state
+- use tuples for small positional groups or multiple results; use records when
+  field names make the meaning clearer
 - declare explicit recursive record/variant types when a script's data model
   is genuinely recursive
 - annotate recursive helper functions against those declared types
@@ -2532,12 +2718,13 @@ fun st ev ->
       if t.attempts >= 3 then
         let st = set_status(st, `Done) in
         let st = { st with idx = st.idx + 1 } in
-        if st.idx < length(st.tasks) then set_status(set_running(st, true), status_witness(1)) else st
+        if st.idx < length(st.tasks) then set_status(set_running(st, true), status_witness(1))
+        else set_running(st, false)
       else st
 
   | `Fail(msg) ->
-    let st = set_status(st, `Error(msg)) in
-    set_running(st, false)
+    if st.idx >= length(st.tasks) then set_running(st, false)
+    else set_running(set_status(st, `Error(msg)), false)
 
   | `Stop ->
     set_running(st, false)
@@ -2641,10 +2828,14 @@ print("result=" ++ to_string(eval(program)))
 
 ### 20.9 BFS program
 
+This example expects a square adjacency matrix and valid start/goal indices.
+The helper illustrates tuple matching; as an ordinary function, both of its
+arguments are evaluated before it runs.
+
 ```ocaml
 let and_ a b =
-  match `Tup(a, b) with
-  | `Tup(true, true) -> true
+  match (|a, b|) with
+  | (|true, true|) -> true
   | _ -> false
 
 module Graph = struct
@@ -2655,11 +2846,11 @@ module Graph = struct
     let n = length(g) in
 
     (* distances initialized to -1 (unvisited) *)
-    let dist = [-1, -1, -1, -1, -1, -1] in
+    let dist = Array.make(n, -1) in
     dist[start] <- 0;
 
     (* simple fixed-size queue of nodes *)
-    let q = [0, 0, 0, 0, 0, 0] in
+    let q = Array.make(n, 0) in
     let head = ref(0) in
     let tail = ref(0) in
 
@@ -2726,7 +2917,7 @@ let rec map_numbers : json -> json =
     let i = ref(0) in
     while !i < length(out) do
       let e = out[!i] in
-      (* e : { key : string; value : Json.t } *)
+      (* e : { key : string; value : json } *)
       out[!i] <- { key = e.key; value = map_numbers(e.value) };
       i := !i + 1
     done;
@@ -2741,10 +2932,42 @@ print("out: " ++ Json.stringify(j2))
 print("pretty:\n" ++ Json.pretty(j2))
 ```
 
+### 20.11 Tuple results behind a checked module interface
+
+A transparent generic alias can name a product without changing its shape.
+A signature selects public members; an omitted helper remains private.
+The exact function type below takes two arguments and returns one pair.
+
+<!-- ochat-authoring-example: {"id":"reference.tuple-interface","surface":"one_off_v1","result":"count=7"} -->
+```ocaml
+module Labeled : sig
+  type 'a t = string * 'a
+  val make : fun(string, 'a) -> 'a t
+end = struct
+  type 'a t = string * 'a
+  let separator = "="
+  let make label value = (|label ++ separator, value|)
+end
+
+let pair : int Labeled.t = Labeled.make("count", 7)
+let (|label, value|) = pair
+let main input = Task.pure(`String(label ++ to_string(value)))
+```
+
+Type members are transparent aliases, not runtime fields. Generic signature
+aliases must agree with their implementation for every parameter substitution.
+For host JSON output, explicitly construct a `Json` value as above; tuples do
+not implicitly become JSON arrays. Their session snapshot encoding is a separate
+persistence format.
+
+---
+
 ## 21. Task values and moderator-runtime embedding
 
 This section documents the current implementation of ChatML task values and
-the host-side moderator runtime.
+the generic host-side moderator runtime. The unversioned moderator contract
+and its legacy events are distinct from the statically checked Ochat
+extensibility-v1 contracts summarized in section 13.2.2.2.
 
 ### 21.1 Task values in the core runtime
 
@@ -2759,9 +2982,15 @@ with the internal task representation:
 
 ```ocaml
 type task =
+  { site : Chatml_diagnostic.Site.t option
+  ; step : task_step
+  }
+
+and task_step =
   | TPure of value
   | TBind of task * value
   | TMap of task * value
+  | TArray of Chatml_task_array_mode.t * value array * value
   | TFail of string
   | TCatch of task * value
   | TPerform of eff
@@ -2769,7 +2998,9 @@ type task =
 ```
 
 The ChatML evaluator does not interpret these task nodes directly. It
-constructs and propagates them as values. Interpretation happens only in
+constructs and propagates them as values. Each task retains its optional
+construction site for owned diagnostics; array traversal state belongs to one
+interpretation, not to the reusable task description. Interpretation happens only in
 host code, such as the moderator runtime.
 
 ### 21.2 Surface type convention
@@ -2804,6 +3035,8 @@ The builtin `Task` module currently exports:
 Task.pure  : 'a -> 'a task
 Task.bind  : 'a task -> ('a -> 'b task) -> 'b task
 Task.map   : 'a task -> ('a -> 'b) -> 'b task
+Task.map_array : 'a array -> ('a -> 'b task) -> 'b array task
+Task.iter_array : 'a array -> ('a -> unit task) -> unit task
 Task.fail  : string -> 'a task
 Task.catch : 'a task -> (string -> 'a task) -> 'a task
 ```
@@ -2815,7 +3048,16 @@ let* x = t1 in t2
 let+ x = t1 in t2
 ```
 
-desugaring to `Task.bind` and `Task.map` respectively.
+desugaring to `Task.bind` and `Task.map` respectively. `let*` continues with
+a task; `let+` computes a plain result value. Discarding a task does not interpret
+it. Array task traversal is sequential and takes a fresh shallow input snapshot
+at interpretation time, as described in section 13.2.3.
+
+`Task.catch` handles deferred task/operation failures. It does not catch an eager
+`fail(...)` while constructing the protected argument, static errors, host
+cancellation or bounded-execution control failures. Pure callback evaluation failures
+are not automatically converted to recoverable `Task.fail` values. Returned `Error`/`Refused` values
+do not automatically fail a task.
 
 ### 21.4 Host-side function application
 
@@ -2879,9 +3121,15 @@ initial_state : state
 on_event : context -> state -> event -> state task
 ```
 
-At present, the runtime validates entrypoints dynamically by name and
-callability when instantiating a session. It does not yet enforce the full
-entrypoint type contract statically.
+This unversioned generic API checks entrypoint presence and callability when
+instantiating the session; hosts may also supply `required_bindings` to
+`compile_script` for static checks. Ochat's versioned `moderator_v1` and
+`delegated_moderator_v1` compiler contracts also statically require the
+`initial_state`/three-argument `on_event` state agreement and typed moderator
+event/result contract. They have additional typed invocation, job, subscription
+and internal events. Do not use this legacy event example as the complete
+versioned event inventory; see [invocation context](chatml-invocation-context.md)
+and [background work](chatml-authoring-background.md).
 
 ### 21.6 Structural runtime aliases exposed to moderator scripts
 
@@ -2924,22 +3172,74 @@ type context =
 These aliases are compile-time conveniences layered on top of ordinary
 structural record/variant typing.
 
+The following signature blocks use `option('a)` as reference shorthand for
+`` [ `None | `Some('a) ] ``, not as an installed source type alias. These helpers
+run immediately; they do not request host effects.
+
 The moderator surface also installs an `Item` builtin module:
 
 ```ocaml
 Item.create : string -> json -> item
 Item.id : item -> string
 Item.value : item -> json
-Item.kind : item -> string option
-Item.role : item -> string option
+Item.kind : item -> option(string)
+Item.role : item -> option(string)
 Item.text_parts : item -> string array
+Item.text : item -> option(string)
 Item.input_text_message : string -> string -> string -> item
 Item.output_text_message : string -> string -> item
+Item.user_text : string -> string -> item
+Item.assistant_text : string -> string -> item
+Item.system_text : string -> string -> item
+Item.notice : string -> string -> item
+Item.is_user : item -> bool
+Item.is_assistant : item -> bool
+Item.is_system : item -> bool
+Item.is_tool_call : item -> bool
+Item.is_tool_result : item -> bool
 ```
 
 `Item.kind` inspects the serialized OpenAI response item `"type"` field when
 present. `Item.role` and `Item.text_parts` provide convenient access to common
 message-like item shapes without forcing scripts to hand-author raw JSON.
+`Item.text` selects the first recognized text part or returns `None`. Message
+constructors take a host item ID first; `input_text_message` additionally takes
+a role before its text. `is_system` recognizes both system and developer roles.
+`notice` builds a host notice shape, not an automatic transcript insertion.
+
+`Tool_call` provides exact-name and shape-safe argument inspection:
+
+```text
+Tool_call.arg : tool_call -> string -> option(json)
+Tool_call.arg_string : tool_call -> string -> option(string)
+Tool_call.arg_bool : tool_call -> string -> option(bool)
+Tool_call.arg_array : tool_call -> string -> option(json array)
+Tool_call.is_named : tool_call -> string -> bool
+Tool_call.is_one_of : tool_call -> string array -> bool
+```
+
+Typed accessors return `None` for missing fields or the wrong JSON kind.
+`Context` selects from the supplied context's item and tool inventories:
+
+```text
+Context.last_item : context -> option(item)
+Context.last_user_item : context -> option(item)
+Context.last_assistant_item : context -> option(item)
+Context.last_system_item : context -> option(item)
+Context.last_tool_call : context -> option(item)
+Context.last_tool_result : context -> option(item)
+Context.find_item : context -> string -> option(item)
+Context.items_since_last_user_turn : context -> item array
+Context.items_since_last_assistant_turn : context -> item array
+Context.items_by_role : context -> string -> item array
+Context.find_tool : context -> string -> option(tool_desc)
+Context.has_tool : context -> string -> bool
+```
+
+The `items_since_*` helpers include the latest matching item, or return all
+items when none matches. `last_system_item` accepts system or developer roles;
+`items_by_role` uses exact role equality. A tool description's presence does
+not authorize execution. See [moderator helpers](chatml-moderator-runtime.md).
 
 The `Turn` module exposes item-oriented mutation helpers:
 
@@ -2948,6 +3248,8 @@ Turn.prepend_system : string -> unit task
 Turn.append_item : item -> unit task
 Turn.replace_item : string -> item -> unit task
 Turn.delete_item : string -> unit task
+Turn.replace_or_append : option(string) -> item -> unit task
+Turn.append_notice : string -> unit task
 Turn.halt : string -> unit task
 ```
 
@@ -2970,7 +3272,9 @@ or:
 <script language="chatml" kind="moderator" id="main" src="moderator.chatml" />
 ```
 
-the host treats that script as the prompt's single v1 moderation program.
+the legacy prompt-loading path treats that unversioned script as its single
+moderation program. A versioned authored moderator uses the compiler contract
+and selected captured program instead.
 
 Integration rules:
 
@@ -3036,7 +3340,8 @@ The concrete set of supported operation names is host-defined.
 
 ### 21.9 Host-side moderator runtime
 
-The current host runtime lives in `chatml_moderator_runtime.ml`. It
+The generic implementation lives in `chatml_host_runtime.ml`;
+`chatml_moderator_runtime.ml` is its compatibility facade. It
 supports:
 
 - compile once:
@@ -3076,6 +3381,7 @@ The moderator runtime interprets task effects through an operation registry:
 ```ocaml
 type op_kind =
   | Local_transactional
+  | Local_transactional_with_result of { rollback : value list -> unit }
   | External_sync
   | External_async
   | Diagnostic
@@ -3087,6 +3393,12 @@ Each operation definition provides:
 - its runtime kind,
 - a phase check,
 - and a host callback.
+
+`Local_transactional_with_result` records a provisional reservation result with
+its operation arguments and can release discarded reservations during
+`Task.catch`. It must not start external work before the owning commit; rollback
+only releases provisional resources. Hosts still own whole-transaction failure
+and cancellation cleanup.
 
 The runtime also ships with a standard default registry constructor:
 
@@ -3135,10 +3447,16 @@ The moderator runtime currently buffers:
 
 On successful completion of the returned task:
 
-- the new script state is persisted,
+- the new script state is installed as committed runtime state,
 - local transactional effects are committed in execution order,
 - buffered emitted events are appended to the session queue,
 - a pending end-session request halts the session.
+
+In-memory runtime commit alone is not a disk durability guarantee. A durable host
+validates and persists the prospective state/effects/queue through the borrowed
+`prepare_transaction` boundary before the infallible runtime/host installers.
+Concrete host persistence, owned-job publication and acknowledgement rules
+remain separate from task construction.
 
 If execution suspends on `Approval.ask_text` or `Approval.ask_choice`:
 
@@ -3160,8 +3478,13 @@ On task failure:
 `TCatch` restores the local transactional buffers before running the handler
 task.
 
-This rollback rule is what lets the host keep canonical history and persisted
-moderator state unchanged after a failed moderation task.
+Rollback covers these staged local buffers, not completed tool/model/process
+operations, diagnostic output or arbitrary ref/array mutations. A generic host
+using mutable script state must supply an appropriate `copy_state` boundary; the
+default generic callback returns the original value rather than deep-copying it.
+The integrated durable host validates/copies data-shaped state and commits through
+its persistence owner. A callback failure before commit does not imply that
+previously admitted external work never happened.
 
 ### 21.12 Overlay and tool moderation semantics
 
@@ -3250,8 +3573,11 @@ allow_all_phases
 require_phases
 ```
 
-but the default assembled operation set currently uses permissive
-`allow_all_phases` checks unless the host overrides them.
+Most generic default operations use `allow_all_phases`, but
+`Runtime.request_turn` explicitly requires one of `turn_end`, `internal_event`,
+`tool_observed` or `tool_invoked`. Host-specific operation sets can impose
+additional phase, capability, schema and lifetime restrictions. A builtin's
+availability during compilation is not permission to execute it in every phase.
 
 ### 21.16 No-script fallback
 
