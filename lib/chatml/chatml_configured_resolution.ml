@@ -25,6 +25,12 @@ module Public_module = struct
   let types t = t.types
   let members t = t.members
   let with_members t members = { t with members = Some members }
+
+  let with_value_scheme t value_scheme =
+    match value_scheme with
+    | Inferred.Module (Inferred.Row (_, Inferred.Empty_row)) -> Ok { t with value_scheme }
+    | _ -> Error `Invalid_module_scheme
+  ;;
 end
 
 module Annotation = struct

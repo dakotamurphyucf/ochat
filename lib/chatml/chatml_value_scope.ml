@@ -76,3 +76,48 @@ let with_semantic_exn t ~name ~binding ~context =
     ; semantic_context = Some context
     }
 ;;
+
+type scope = t
+
+module Roots = struct
+  type t =
+    { original : scope
+    ; rows : (string * Binding.t) list
+    ; schemes : Chatml_inferred_type.typ list
+    }
+
+  let capture original ~max_bindings ~checkpoint =
+    if max_bindings < 0 || Map.length original.bindings > max_bindings
+    then Error `Binding_limit
+    else (
+      let rows, schemes =
+        Map.fold original.bindings ~init:([], []) ~f:(fun ~key ~data (rows, schemes) ->
+          checkpoint ();
+          (key, data) :: rows, data.Binding.scheme :: schemes)
+      in
+      checkpoint ();
+      Ok { original; rows; schemes })
+  ;;
+
+  let schemes t = t.schemes
+
+  let names t ~checkpoint =
+    List.map t.rows ~f:(fun (name, _) ->
+      checkpoint ();
+      name)
+  ;;
+
+  let count t = Map.length t.original.bindings
+
+  let with_schemes t schemes ~checkpoint =
+    let rec replace rows schemes bindings =
+      checkpoint ();
+      match rows, schemes with
+      | [], [] -> Ok { t.original with bindings }
+      | (name, binding) :: rows, scheme :: schemes ->
+        replace rows schemes (Map.set bindings ~key:name ~data:{ binding with scheme })
+      | _ -> Error `Wrong_root_count
+    in
+    replace t.rows schemes String.Map.empty
+  ;;
+end

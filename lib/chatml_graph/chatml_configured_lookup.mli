@@ -197,6 +197,17 @@ module Repl_scope : sig
     -> checkpoint:(unit -> unit)
     -> (context, Error.t) Result.t
 
+  (** Validate a pure statement before typing even if it has no configured
+      reference. Requires this epoch's exact current context/source revision and
+      Prepared fingerprint. Revocation, newer admission and foreign epochs fail
+      closed; the last checkpoint is followed by currentness revalidation.
+      This is compiler affinity, not runtime or file authority. *)
+  val validate_context
+    :  t
+    -> context
+    -> checkpoint:(unit -> unit)
+    -> (unit, Error.t) Result.t
+
   (** The REPL require adapter must call this before selecting a checked module
       or recording a dependency. Validate the event against this live private
       epoch, the exact CURRENT derived lookup/source ID/digest, use owner/phase,
