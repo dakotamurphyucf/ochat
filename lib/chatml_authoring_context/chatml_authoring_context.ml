@@ -677,7 +677,7 @@ let document_inputs t ~identity ~checkpoint =
       }
 ;;
 
-let note_analysis t ~identity ~expected ~validated_graph =
+let note_analysis t ~identity ~expected ~input_fingerprint =
   let open Result.Let_syntax in
   let%bind context =
     Map.find t.contexts identity |> Result.of_option ~error:Error.Unknown_context
@@ -691,7 +691,7 @@ let note_analysis t ~identity ~expected ~validated_graph =
   then Error Error.Stale_generation
   else (
     let analysis_key =
-      { Analysis_key.identity; generation = expected; validated_graph }
+      { Analysis_key.identity; generation = expected; input_fingerprint }
     in
     Ok
       { t with

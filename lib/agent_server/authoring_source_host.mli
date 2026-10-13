@@ -160,6 +160,14 @@ module Context : sig
 
   val root : t -> Root.t
 
+  (** Currentness check for pinned project captures, overlays and
+      cached analysis. Reuse the original actor plus current request actor and
+      every explicitly selected root's existing policy; do not read, recapture
+      or infer a grant from the context ID. The handler checks before serving
+      and after yielding work. An async handler separately bounds its request
+      lifetime until that final check. *)
+  val check_current : t -> actor:Operator_authorization.t -> (unit, Error.t) Result.t
+
   (** Select only a member of the already granted root. [project] is a validated
       portable project declaration member, [selection] is the existing project
       selector, and [contract] is the host's authentic static contract, never a

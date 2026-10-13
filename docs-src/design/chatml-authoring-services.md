@@ -168,13 +168,32 @@ before validating a captured-only graph. These routes describe a virtual
 captured closure. They do not prove that an authored Local directory resolves
 to a native host directory, and cannot authorize later filesystem reads.
 
-Initially retain at most the latest immutable analysis result per context under
-an explicit byte bound. Replace it on graph, overlay, environment or host-policy
-change. A multi-entry cache needs measured justification. Source count, total
-bytes, metadata, parser depth/tokens, graph work, query work/results and
-publication bytes have finite host ceilings charged across each complete request,
-not reset per file. Cancellation is cooperative and joined; no domain or source
-borrow is abandoned. Errors distinguish unauthorized, missing source,
+The project analysis core checks an OCH-294 overlay receipt against the same
+OCH-278 context inputs, including exact captured source bytes and the old lock,
+before handing its completed Build to `Chatml_compilation.analyze_prepared`.
+It checks the returned compiler identity against the prepared input fingerprint,
+required and selected contract, and environment. Failed checks retain same-run
+syntax and diagnostics, not certified facts. Native primary and related
+diagnostic sites keep their exact captured byte owners when editor-position
+conversion is unavailable. Projection separately caps top-level diagnostics,
+all primary/related sites, distinct captured revisions, total indexed source
+bytes and actual line/checkpoint entries. It marks omitted site projections and
+omitted diagnostics explicitly while retaining the native diagnostic.
+
+The pure project cache retains at most one latest result per current context and
+evicts on edit, close, refresh, or invalid generation. A candidate produced by a
+joined worker can publish only against current source revisions, prepared
+identity, environment, contract, and the same policy. The host must serialize
+context transitions and publication, reauthorize current access, and join work
+before releasing borrowed resources; this host gate belongs to the service
+adapter. The OCH-278 analysis key records the validated captured input
+fingerprint for both complete and failed checks; only a Complete snapshot carries
+certified semantic graph facts. Result retention is bounded by context count and
+compiler/semantic source, fact, edge, label, and work limits, not by an asserted OCaml heap-byte
+estimate. Source count, total bytes, metadata, parser depth/tokens, graph work,
+query work/results and publication bytes have finite host ceilings charged
+across each complete request, not reset per file. Cancellation is cooperative
+and joined; no domain or source borrow is abandoned. Errors distinguish unauthorized, missing source,
 incompatible environment, invalid position, stale revision, unavailable fact,
 truncation/work limit, cancelled and disconnected states.
 
@@ -385,7 +404,8 @@ OCH-132 and OCH-136 remain **unestimated tracking parents** so their complete
 acceptance is not accidentally narrowed or double-counted. The concrete children
 are: OCH-277 host read-grant/capture adapter (5) and OCH-278 pure immutable
 context/overlay lifecycle (5), under unestimated tracking parent OCH-257;
-OCH-256 pure position bridge (3); OCH-258 checker/diagnostic projection (5);
+OCH-256 pure position bridge (3); OCH-258 tracking parent for OCH-301 project
+analysis/checker/cache and OCH-302 selected ChatMD-script analysis;
 OCH-259 parser-owned ChatMD extraction mapping (5); OCH-260 compiler-owned
 provisional prefix assistance (5); OCH-261 common/source/context protocol and
 client contract (8);
