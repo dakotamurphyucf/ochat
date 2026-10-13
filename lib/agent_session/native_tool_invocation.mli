@@ -52,6 +52,23 @@ type borrowed
     so Session-only services cannot fall back to an unrelated operation. *)
 type owned_borrowed
 
+(** Expiring borrow of a physically selected developer invocation. Its issuer
+    and direct-parent proof come from the stable selected executor, not an
+    equal run ID. This separate scope never falls back to a conversation or
+    legacy no-child owner. *)
+type selected_borrowed
+
+val borrow_selected : unit -> (selected_borrowed, Agent_protocol.Error.t) result
+val selected_borrowed_issuer : selected_borrowed -> Developer_invocation_owner.Selected.t
+
+val selected_borrowed_parent
+  :  selected_borrowed
+  -> Developer_invocation_owner.Selected.active
+
+val selected_borrowed_capabilities
+  :  selected_borrowed
+  -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result
+
 val borrow_owned : unit -> (owned_borrowed, Agent_protocol.Error.t) result
 val owned_borrowed_invocation : owned_borrowed -> Agent_protocol.Host_invocation.t
 val owned_borrowed_execution_context : owned_borrowed -> Chatml_execution.context
@@ -205,6 +222,76 @@ type owned_managed_dispatch =
           -> ('a, Agent_protocol.Invocation.outcome) result)
       -> ('a, Agent_protocol.Invocation.outcome) result
   }
+
+(** A managed selected callback receives a stage operation for the current
+    physical native terminal only. It returns IDs admitted through the shared
+    capacity ledger, and both this operation and the selected borrow expire
+    with the callback. The result continuation names the exact subset that
+    survives alongside its canonical outcome. *)
+type selected_managed_dispatch =
+  { definition : Chat_response.Managed_tool_registry.t
+  ; current : unit -> Chat_response.Tool_capability.t
+  ; run :
+      'a.
+      Chat_response.Managed_tool_registry.owned_execution
+      -> selected_borrowed
+      -> effect_entry:(unit -> (unit, Agent_protocol.Error.t) result)
+      -> stage_background:
+           (request:Chat_response.Background_request.t
+            -> checkpoint:(unit -> unit)
+            -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result)
+      -> (validate_work:(Agent_protocol.Invocation.work -> (unit, string) result)
+          -> outcome:Agent_protocol.Invocation.outcome
+          -> selected_jobs:Agent_protocol.Id.Job.t list
+          -> ('a, Agent_protocol.Invocation.outcome) result)
+      -> ('a, Agent_protocol.Invocation.outcome) result
+  }
+
+(** Trusted selected dispatch specialization of the common Function/Custom/
+    managed policy. The host passes one exact physically scoped dispatch bridge
+    and seal continuation from a registered native terminal. [effect_entry]
+    checks fresh root/current-parent authority at the actual handler entry,
+    including after a managed handler's own yields. Failure never silently
+    selects provisional work; Pending requires the scope's exact Job ID. *)
+val run_owned_selected
+  :  owner:Developer_invocation_owner.Selected.t
+  -> parent:Developer_invocation_owner.Selected.parent
+  -> dispatch:Developer_invocation_owner.Selected.dispatch_storage
+  -> frozen:(unit -> (Agent_protocol.Invocation.outcome * 'selection) option)
+  -> enter_callback:
+       (dispatched:Agent_protocol.Host_invocation.t
+        -> (unit
+            -> ( Agent_protocol.Invocation.outcome * 'selection option
+                 , Agent_protocol.Error.t )
+                 result)
+        -> ( Agent_protocol.Invocation.outcome * 'selection option
+             , Agent_protocol.Error.t )
+             result)
+  -> managed:selected_managed_dispatch option
+  -> registry:(unit -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result)
+  -> reference:Chat_response.Tool_capability.reference
+  -> invocation:Agent_protocol.Host_invocation.t
+  -> authorize:
+       (Agent_protocol.Host_invocation.t
+        -> Chat_response.Tool_capability.binding
+        -> (unit, Agent_protocol.Error.t) result)
+  -> prepare_output:
+       (Openai.Responses.Tool_output.Output.t
+        -> (Jsonaf.t, Agent_protocol.Error.t) result)
+  -> effect_entry:
+       (Chat_response.Tool_capability.binding -> (unit, Agent_protocol.Error.t) result)
+  -> stage_background:
+       (Chat_response.Tool_capability.binding
+        -> request:Chat_response.Background_request.t
+        -> checkpoint:(unit -> unit)
+        -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result)
+  -> seal:
+       (Agent_protocol.Invocation.outcome
+        -> selected_jobs:Agent_protocol.Id.Job.t list
+        -> ('selection option, Agent_protocol.Error.t) result)
+  -> ( 'selection Developer_invocation_owner.Selected.Completion.t
+       , Agent_protocol.Error.t )
+       result
 
 (** Developer calls enter the same native/managed admission kernel as
     [run_scoped_with_managed]. [owner] is trusted host wiring: it supplies the

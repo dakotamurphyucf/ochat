@@ -14,13 +14,14 @@ let checked failure f =
   | exception _ -> Error failure
 ;;
 
-type managed_target =
+type 'a managed_target =
   { prepared : Chat_response.Extension_compiler.t
   ; run :
       (validate_work:(I.work -> (unit, string) result)
        -> outcome:I.outcome
-       -> (I.outcome, I.outcome) result)
-      -> (I.outcome, I.outcome) result
+       -> selected_jobs:Agent_protocol.Id.Job.t list
+       -> ('a, I.outcome) result)
+      -> ('a, I.outcome) result
   }
 
 let run_policy
@@ -40,6 +41,7 @@ let run_policy
       ~with_native_admission
       ~authorize
       ~prepare_output
+      ~complete
   =
   execute ~invocation (fun ~dispatched ->
     let call : H.context = context dispatched in
@@ -109,7 +111,7 @@ let run_policy
         let%bind () = check_halted () in
         let%bind binding, selected = resolve () in
         let%bind target = target binding selected in
-        let validate_output ~validate_work output =
+        let validate_output ~validate_work ~selected_jobs output =
           let%bind value =
             checked
               (fail
@@ -139,7 +141,7 @@ let run_policy
                         (Agent_protocol.Error.invalid_request
                            "expected disclosed native outcome text")))
           in
-          let%map () =
+          let%bind () =
             checked
               (fail "invocation.invalid_output" "The tool returned an invalid result.")
               (fun () ->
@@ -154,7 +156,11 @@ let run_policy
                        "disclosed managed result does not match its schema")
                  | _ -> Ok ())
           in
-          outcome
+          complete outcome ~selected_jobs
+          |> Result.map_error ~f:(fun _ ->
+            fail
+              "invocation.selection_failed"
+              "The validated tool outcome could not be selected.")
         in
         match target with
         | `Native implementation ->
@@ -197,13 +203,14 @@ let run_policy
           validate_output
             ~validate_work:(fun _ ->
               Error "native pending work requires an ownership validator")
+            ~selected_jobs:[]
             output
         | `Managed managed ->
           let%bind () = check_halted () in
           let%bind result =
             checked (fail "invocation.handler_failed" "Tool execution failed.") (fun () ->
               Ok
-                (managed.run (fun ~validate_work ~outcome ->
+                (managed.run (fun ~validate_work ~outcome ~selected_jobs ->
                    let%bind () =
                      checked
                        (fail
@@ -213,15 +220,16 @@ let run_policy
                    in
                    validate_output
                      ~validate_work
+                     ~selected_jobs
                      (Openai.Responses.Tool_output.Output.Text
                         (Jsonaf.to_string (I.outcome_to_json outcome))))))
           in
           result)
     in
     match Option.bind (preparation dispatched) ~f:Stream_invocation.rejection_outcome with
-    | Some outcome -> Ok outcome
+    | Some outcome -> complete outcome ~selected_jobs:[]
     | None ->
-      Ok
-        (match execute_native () with
-         | Ok outcome | Error outcome -> outcome))
+      (match execute_native () with
+       | Ok value -> Ok value
+       | Error outcome -> complete outcome ~selected_jobs:[]))
 ;;
