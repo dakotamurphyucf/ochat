@@ -192,3 +192,131 @@ let cancel t ~reason =
          ~retryable:false
          ())
 ;;
+
+let optional name value encode =
+  Option.to_list (Option.map value ~f:(fun item -> name, encode item))
+;;
+
+let developer_to_json value =
+  let open Result.Let_syntax in
+  let%bind () = validate value in
+  match value with
+  | Conversation _ ->
+    Error (Error.invalid_request "conversation invocation is not a developer record")
+  | Developer { context; status } ->
+    (match context.owner, status with
+     | Execution_owner.Developer owner, (I.Admitted | Dispatching | Resolved _) ->
+       Ok
+         (`Object
+             ([ "schema_version", `Number "1"
+              ; "id", Id.Invocation.to_json context.id
+              ; "host_id", Id.Server.to_json owner.host_id
+              ; "run_id", Id.Developer_run.to_json owner.run_id
+              ; "epoch", `Number (Int.to_string owner.epoch)
+              ; "principal_id", Id.Principal.to_json owner.principal_id
+              ; "origin", I.origin_to_json context.origin
+              ; "tool_name", `String context.tool_name
+              ; "implementation_revision", `String context.implementation_revision
+              ; "capability_fingerprint", `String context.capability_fingerprint
+              ; "input", context.input
+              ; "created_at", Timestamp.to_json context.created_at
+              ; "status", I.status_to_json status
+              ]
+              @ optional
+                  "parent_invocation"
+                  context.parent_invocation
+                  Id.Invocation.to_json
+              @ optional "parent_job" context.parent_job Id.Job.to_json
+              @ optional "deadline" context.deadline Timestamp.to_json))
+     | Execution_owner.Conversation _, _ ->
+       Error (Error.invalid_request "developer invocation has a conversation owner")
+     | Execution_owner.Developer _, Published _ ->
+       Error (Error.invalid_request "developer invocation cannot be published"))
+;;
+
+let developer_of_json json =
+  let open Result.Let_syntax in
+  let%bind fields = Json_codec.fields json in
+  let%bind () =
+    Extension_codec.closed
+      fields
+      [ "schema_version"
+      ; "id"
+      ; "host_id"
+      ; "run_id"
+      ; "epoch"
+      ; "principal_id"
+      ; "origin"
+      ; "parent_invocation"
+      ; "parent_job"
+      ; "tool_name"
+      ; "implementation_revision"
+      ; "capability_fingerprint"
+      ; "input"
+      ; "created_at"
+      ; "deadline"
+      ; "status"
+      ]
+  in
+  let%bind _version =
+    Json_codec.required_as fields "schema_version" (Json_codec.bounded_int ~min:1 ~max:1)
+  in
+  let%bind id = Json_codec.required_as fields "id" Id.Invocation.of_json in
+  let%bind host_id = Json_codec.required_as fields "host_id" Id.Server.of_json in
+  let%bind run_id = Json_codec.required_as fields "run_id" Id.Developer_run.of_json in
+  let%bind epoch =
+    Json_codec.required_as
+      fields
+      "epoch"
+      (Json_codec.bounded_int ~min:0 ~max:Int.max_value)
+  in
+  let%bind principal_id =
+    Json_codec.required_as fields "principal_id" Id.Principal.of_json
+  in
+  let%bind owner = Execution_owner.developer ~host_id ~run_id ~epoch ~principal_id in
+  let%bind origin = Json_codec.required_as fields "origin" I.origin_of_json in
+  let%bind parent_invocation =
+    Json_codec.optional_as fields "parent_invocation" Id.Invocation.of_json
+  in
+  let%bind parent_job = Json_codec.optional_as fields "parent_job" Id.Job.of_json in
+  let%bind tool_name = Json_codec.required_as fields "tool_name" Json_codec.string in
+  let%bind implementation_revision =
+    Json_codec.required_as fields "implementation_revision" Json_codec.string
+  in
+  let%bind capability_fingerprint =
+    Json_codec.required_as fields "capability_fingerprint" Json_codec.string
+  in
+  let%bind input = Json_codec.required fields "input" in
+  let%bind created_at = Json_codec.required_as fields "created_at" Timestamp.of_json in
+  let%bind deadline = Json_codec.optional_as fields "deadline" Timestamp.of_json in
+  let%bind status = Json_codec.required_as fields "status" I.status_of_json in
+  let context =
+    { id
+    ; owner
+    ; origin
+    ; parent_invocation
+    ; parent_job
+    ; tool_name
+    ; implementation_revision
+    ; capability_fingerprint
+    ; input
+    ; created_at
+    ; deadline
+    }
+  in
+  let%bind admitted = create_developer context in
+  let%bind value =
+    match status with
+    | I.Admitted -> Ok admitted
+    | Dispatching -> dispatch admitted
+    | Resolved outcome ->
+      let%bind dispatched = dispatch admitted in
+      resolve dispatched outcome
+    | Published _ ->
+      Error (Error.invalid_request "developer invocation cannot be published")
+  in
+  let%bind canonical = developer_to_json value in
+  if Jsonaf.exactly_equal json canonical
+  then Ok value
+  else Error (Error.invalid_request "noncanonical developer invocation record")
+;;

@@ -59,6 +59,32 @@ module Observation : sig
   val checkpoint : t -> Checkpoint.t
 end
 
+module Invocation_observation : sig
+  type t
+
+  val revision : t -> int
+  val value : t -> Agent_protocol.Host_invocation.t
+end
+
+module Invocation_lookup : sig
+  type t
+
+  val prior : t -> Invocation_observation.t option
+end
+
+(** Exact lookup tokens are tied to an immutable Observation, including an
+    observed absence. Neither a numeric revision nor an ID alone is a CAS
+    proof. Reads disclose only lower-store data, not service authority. *)
+val find_invocation
+  :  Observation.t
+  -> Agent_protocol.Id.Invocation.t
+  -> Invocation_lookup.t
+
+val find_job
+  :  Observation.t
+  -> Agent_protocol.Id.Job.t
+  -> Agent_protocol.Developer_job.t option
+
 module Prepared : sig
   type t
 
@@ -131,20 +157,107 @@ val prepare_checkpoint
   -> phase:Checkpoint.phase
   -> (Prepared.t, Error.t) result
 
-(** One serialized writer commits a prepared exact document by atomic replace
-    and file/directory sync. An Error or cancellation may occur after durability;
-    neither permits capacity publication or blind abort until [reconcile]. The
-    original cancellation/exception identity is preserved. A later actor must
-    serialize its publication handoff so a later mutation cannot race it. *)
+(** First native CAS may install Dispatching directly from observed absence;
+    there is no synthetic persisted Admitted step. If Admitted is already
+    present, exact context and entry revision must match. Terminal or already
+    Dispatching records reject. The higher actor must confirm durability before
+    any callback effect. *)
+val prepare_dispatch
+  :  handle
+  -> expected:Observation.t
+  -> lookup:Invocation_lookup.t
+  -> dispatched:Agent_protocol.Host_invocation.t
+  -> (Prepared.t, Error.t) result
+
+(** Atomically advance this run checkpoint with newly selected Run_root jobs
+    from a direct run action, so none has a claimed parent job. A worker may
+    later launch from the run scope with a real parent job; that requires the
+    separate physical worker-claim path, not this root-action entrypoint. This
+    lower layer validates owner/capture/epoch/launch and immutable new queued
+    shape; a live root scope and policy belong to the actor. *)
+val prepare_root_selected
+  :  handle
+  -> expected:Observation.t
+  -> phase:Checkpoint.phase
+  -> selected:Agent_protocol.Developer_job.t list
+  -> (Prepared.t, Error.t) result
+
+(** One CAS changes the exact Dispatching invocation to terminal and appends
+    only its newly selected child jobs. Native active-parent proof remains an
+    actor responsibility. Empty selected preserves the old no-child behavior. *)
+val prepare_terminal_selected
+  :  handle
+  -> expected:Observation.t
+  -> lookup:Invocation_lookup.t
+  -> terminal:Agent_protocol.Host_invocation.t
+  -> selected:Agent_protocol.Developer_job.t list
+  -> (Prepared.t, Error.t) result
+
+(** Foundation checkpoint-only commit. A developer dispatch or selected-job
+    Prepared is rejected; it must use [commit_and_settle]. One serialized writer
+    replaces the exact document and syncs file/directory before acknowledgement.
+    An Error or cancellation may occur after durability, so [reconcile] checks
+    authority before a caller interprets that outcome. The original
+    cancellation/exception identity is preserved. *)
 val commit : handle -> Prepared.t -> (Installed.t, Error.t) result
 
-(** Sync the owned parent directory, then compare the bounded authoritative
+(** Foundation checkpoint-only reconciliation; a dispatch or selected-job
+    Prepared is rejected. Sync the owned parent directory, then compare the
+    bounded authoritative
     file with the prepared exact before/after bytes and revision. An Installed
     response therefore confirms the observed rename is durable even if the
     original replacement was interrupted during directory sync. Diverged means
     another authoritative state exists and requires explicit recovery. *)
 val reconcile : handle -> Prepared.t -> (reconciliation, Error.t) result
 
+module Settlement : sig
+  type t = reconciliation =
+    | Installed of Installed.t
+    | Absent
+    | Diverged
+end
+
+module Handoff : sig
+  type t
+
+  (** Trusted host adapter over the exact provisional shared-capacity
+      reservations for one prepared transaction. The callback must be
+      idempotent, acquire only the capacity mutex and never re-enter this
+      store. First use binds this token physically to one Prepared value. *)
+  val create : settle:(Settlement.t -> unit) -> t
+end
+
+(** One daemon-root lease covers bounded compare/replace, file+directory
+    durability, exact reconciliation and protected capacity settlement. The
+    settlement callback may repeat until it succeeds; a successful settlement
+    is recorded once and a repeat of the same pair returns that historical
+    outcome without writing or calling it again. Native/application effects do
+    not repeat. Installed publishes, exact Absent aborts and Diverged quarantines.
+    Unknown I/O retains the bounded pending pair; a later mutation/reset for
+    the same run is rejected until reconciliation. Unexpected exception or
+    cancellation preserves its original identity after protected bookkeeping.
+    On process restart the host rebuilds capacity from durable selected jobs. *)
+val commit_and_settle
+  :  handle
+  -> Prepared.t
+  -> Handoff.t
+  -> (Settlement.t, Error.t) result
+
+(** One bounded read/settlement attempt under the same lease, no replay loop.
+    Only the retained physical pair is accepted. A known successful settlement
+    releases the pending barrier; divergence remains quarantined. *)
+val reconcile_and_settle
+  :  handle
+  -> Prepared.t
+  -> Handoff.t
+  -> (Settlement.t, Error.t) result
+
 (** Stop admission, join owned operations and invalidate all handles. No runtime
-    callback is replayed by closing. *)
+    callback is replayed by closing. A physically pending handoff belongs to
+    this store lifetime and cannot be acknowledged after close; its exact
+    durable document remains for fresh recovery. The host actor must retire
+    this run's unclaimed reservations and reconcile durable rows in the same
+    daemon-wide capacity ledger before admitting work on a reopened store.
+    Claimed worker leases remain charged until their actual cleanup. This
+    storage operation itself makes no capacity-recovery claim. *)
 val close_and_wait : t -> (unit, Error.t) result

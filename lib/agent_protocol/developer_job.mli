@@ -15,8 +15,9 @@ module Launch : sig
 
   (** [parent_job] names the exact creating attempt, if any. A run-root launch
       need not fabricate a native invocation. The optional attempt and depth
-      must be nonnegative. These are comparison coordinates; the actor proves a
-      live run scope or active invocation separately. *)
+      must be nonnegative. The recorded ancestry alone cannot derive the live
+      scheduler depth. These are comparison coordinates; the actor proves the
+      live run scope or active invocation and depth separately. *)
   val create
     :  parent:parent
     -> parent_job:(Id.Job.t * int) option
@@ -102,3 +103,10 @@ val payload : t -> Jsonaf.t
 val retry_policy : t -> Job.retry_policy
 val created_at : t -> Timestamp.t
 val state : t -> State.t
+
+(** Version-one developer-only record codec. It preserves the exact immutable
+    launch/owner/capture/payload/retry fields and validated state. Neither a
+    decoded record nor a result descriptor grants execution or disclosure. *)
+val to_json : t -> Jsonaf.t
+
+val of_json : Jsonaf.t -> (t, Protocol_error.t) result

@@ -187,7 +187,7 @@ let features =
 
 let implementation_sources =
   [ ( "lib/agent_protocol/invocation.ml"
-    , "0abdfc864f0bd694bf88e898a6a24680fd30c4371d9bee361077f9f12d96cc9c" )
+    , "4d5abb95474bcdef6c360b666a3b57d2203a7b378193df5c49266897acac4981" )
   ; ( "lib/agent_session/session_management_channel.ml"
     , "500d45a8cbe760a50bc256df47255dc6fa5e1305f74a543d49c9c2e02e36de51" )
   ; ( "lib/agent_server/session_helper_policy.ml"
