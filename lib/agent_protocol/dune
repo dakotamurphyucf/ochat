@@ -98,6 +98,16 @@
   authoring_source_read
   authoring_context
   authoring_bundle
+  authoring_analysis_location
+  authoring_analysis_capture
+  authoring_analysis_facts_core
+  authoring_analysis_result
+  authoring_analysis_prefix
+  authoring_analysis_core
+  authoring_analysis_query_base
+  authoring_analysis_query_facts
+  authoring_analysis_query
+  authoring_analysis
   authoring_wire
   authoring
   command
@@ -111,7 +121,20 @@
   public
   stream_error
   inference_query)
- (private_modules protocol_error extension_codec projection_codec authoring_codec)
+ (private_modules
+  protocol_error
+  extension_codec
+  projection_codec
+  authoring_codec
+  authoring_analysis_location
+  authoring_analysis_capture
+  authoring_analysis_facts_core
+  authoring_analysis_result
+  authoring_analysis_prefix
+  authoring_analysis_core
+  authoring_analysis_query_base
+  authoring_analysis_query_facts
+  authoring_analysis_query)
  (libraries uri ochat.inference core jsonaf base64 digestif mirage-crypto-rng uutf ochat.history_entry ochat.document_schema ochat.transcript ochat.chatml_source ochat.chatml_editor_position ochat.source)
  (preprocess
   (pps ppx_jane)))

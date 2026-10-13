@@ -20,6 +20,20 @@ let require_current t =
   | None -> incompatible "authoring connection is no longer initialized"
 ;;
 
+let require_feature t feature =
+  let open Result.Let_syntax in
+  let%bind () = require_current t in
+  if List.mem t.initialization.enabled_features feature ~equal:String.equal
+  then Ok ()
+  else
+    Error
+      (P.Error.create
+         Incompatible_protocol
+         ~message:"authoring feature was not selected"
+         ~retryable:false
+         ())
+;;
+
 let capabilities t = t.capabilities
 let host t = t.initialization.server_id
 let principal t = t.initialization.principal.id

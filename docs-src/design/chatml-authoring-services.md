@@ -199,13 +199,40 @@ truncation/work limit, cancelled and disconnected states.
 
 ## Queries and incomplete input
 
-`authoring.analyze` uses the captured project graph and
+`authoring.analysis` uses the captured project graph and
 `Chatml_compilation.analyze_prepared`; it never builds a second checker or
 resolver. Complete snapshots support diagnostics, visible-symbol completion,
 hover/type, signature and definition/navigation. Exact selected host signatures,
 module scopes, exports and source owners determine results. A failed whole-file
 check exposes only same-run parsed syntax and diagnostics, with no certified
 semantic facts for any unit in the failed graph.
+The portable semantic wire contract has a separate request selector and
+host-produced capture. A project request selects the current project context;
+a document request selects an actual parser-assigned script ID. The client need
+not invent a checked graph or compiler contract before analysis. A selected
+script capture records the current document revision, parser/declaration input
+fingerprints and declaration range, extracted script revision, selected graph,
+environment and contracts. Raw document input returns typed semantic
+`Unavailable` until a real selected script has been admitted. Complete,
+Failed and Unavailable are distinct; a query identifies one snapshot and
+current context, and a provisional prefix has its own source identity.
+Semantic DTOs preserve native compiler sites and optional exact or approximate
+ChatMD projections. They expose bounded type/signature display text from actual
+selected bindings and explicit empty, unavailable, ambiguous and truncated
+states, without exporting mutable inference graphs. The protocol/client layer
+defines `authoring.semantic.v1` and checks selected feature, installed method
+and response affinity; the host analysis/query handlers remain separate work.
+The typed methods are `authoring.analysis` (current context and project or
+selected-script selector → Complete, Failed or Unavailable),
+`authoring.prefix` (exact source/cursor → provisional prefix or typed
+unavailability), and `authoring.query` (certified, provisional or syntax-only
+evidence and one query kind → bounded, source-owned facts). Codec support alone
+does not advertise an installed handler; capabilities list actual methods.
+Semantic wire labels, messages, names and environment identifiers require
+valid UTF-8; their constructors and decoders return typed errors for malformed
+text. Captured source bytes, digests and native byte sites remain unchanged.
+The host projection must explicitly escape unrepresentable diagnostic bytes or
+return a typed unavailable fact rather than silently dropping source evidence.
 The protocol also exposes source/context-revision-bound lexical spans and
 syntax, tag, attribute, path and template assistance without requiring an
 analysis stamp. The former uses the shared pure lexical role vocabulary;
@@ -404,12 +431,15 @@ OCH-132 and OCH-136 remain **unestimated tracking parents** so their complete
 acceptance is not accidentally narrowed or double-counted. The concrete children
 are: OCH-277 host read-grant/capture adapter (5) and OCH-278 pure immutable
 context/overlay lifecycle (5), under unestimated tracking parent OCH-257;
-OCH-256 pure position bridge (3); OCH-258 tracking parent for OCH-301 project
-analysis/checker/cache and OCH-302 selected ChatMD-script analysis;
+OCH-256 pure position bridge (3); OCH-258 unestimated checker projection
+parent with OCH-301 project analysis core (8) and OCH-302 selected ChatMD
+script adapter (5);
 OCH-259 parser-owned ChatMD extraction mapping (5); OCH-260 compiler-owned
 provisional prefix assistance (5); OCH-261 common/source/context protocol and
 client contract (8);
-OCH-280 analysis, lexical and assistance wire/client contract (5); OCH-281
+OCH-280 unestimated analysis/assistance tracking parent, split after concrete
+interface review into OCH-299 semantic wire/client contract (8) and OCH-300
+lexical/assistance wire/client contract (8); OCH-281
 bundle wire/client contract (5); OCH-282 document-only context host admission
 (5); OCH-262 HTTP/stdio server adapters (5); OCH-263 authoring bundle
 staging/storage/receipt (8); and OCH-264 as an unestimated tracking parent for

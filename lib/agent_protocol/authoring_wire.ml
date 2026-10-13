@@ -3,6 +3,7 @@ module C = Authoring_codec
 module A = Authoring_common
 module X = Authoring_context
 module B = Authoring_bundle.Bundle
+module S = Authoring_analysis
 
 let map decode wrap json = Result.map (decode json) ~f:wrap
 
@@ -34,6 +35,9 @@ module Request = struct
     | Bundle_chunk of B.Chunk.request
     | Bundle_commit of B.Commit.request
     | Bundle_status of B.Status.request
+    | Analyze of S.Analyze.Request.t
+    | Prefix of S.Prefix.Request.t
+    | Query of S.Query.Request.t
   [@@deriving sexp_of]
 
   let method_name = function
@@ -53,6 +57,9 @@ module Request = struct
     | Bundle_chunk _ -> A.Method.to_string A.Method.Bundle_chunk
     | Bundle_commit _ -> A.Method.to_string A.Method.Bundle_commit
     | Bundle_status _ -> A.Method.to_string A.Method.Bundle_status
+    | Analyze _ -> A.Method.to_string A.Method.Analyze
+    | Prefix _ -> A.Method.to_string A.Method.Prefix
+    | Query _ -> A.Method.to_string A.Method.Query
   ;;
 
   let params = function
@@ -71,6 +78,9 @@ module Request = struct
     | Bundle_chunk request -> B.Chunk.request_to_json request
     | Bundle_commit request -> B.Commit.request_to_json request
     | Bundle_status request -> B.Status.request_to_json request
+    | Analyze request -> S.Analyze.Request.to_json request
+    | Prefix request -> S.Prefix.Request.to_json request
+    | Query request -> S.Query.Request.to_json request
   ;;
 
   let decoders =
@@ -100,6 +110,9 @@ module Request = struct
     ; "authoring.bundle.chunk", map B.Chunk.request_of_json (fun x -> Bundle_chunk x)
     ; "authoring.bundle.commit", map B.Commit.request_of_json (fun x -> Bundle_commit x)
     ; "authoring.bundle.status", map B.Status.request_of_json (fun x -> Bundle_status x)
+    ; "authoring.analysis", map S.Analyze.Request.of_json (fun x -> Analyze x)
+    ; "authoring.prefix", map S.Prefix.Request.of_json (fun x -> Prefix x)
+    ; "authoring.query", map S.Query.Request.of_json (fun x -> Query x)
     ]
   ;;
 
@@ -130,6 +143,9 @@ module Response = struct
     | Bundle_chunk of B.Chunk.response
     | Bundle_commit of B.Commit.response
     | Bundle_status of B.Status.t
+    | Analyze of S.Analyze.t
+    | Prefix of S.Prefix.t
+    | Query of S.Query.t
   [@@deriving sexp_of]
 
   let method_name = function
@@ -149,6 +165,9 @@ module Response = struct
     | Bundle_chunk _ -> A.Method.to_string A.Method.Bundle_chunk
     | Bundle_commit _ -> A.Method.to_string A.Method.Bundle_commit
     | Bundle_status _ -> A.Method.to_string A.Method.Bundle_status
+    | Analyze _ -> A.Method.to_string A.Method.Analyze
+    | Prefix _ -> A.Method.to_string A.Method.Prefix
+    | Query _ -> A.Method.to_string A.Method.Query
   ;;
 
   let to_json = function
@@ -166,6 +185,9 @@ module Response = struct
     | Bundle_chunk value -> B.Chunk.response_to_json value
     | Bundle_commit value -> B.Commit.response_to_json value
     | Bundle_status value -> B.Status.to_json value
+    | Analyze value -> S.Analyze.to_json value
+    | Prefix value -> S.Prefix.to_json value
+    | Query value -> S.Query.to_json value
   ;;
 
   let decoders =
@@ -193,6 +215,9 @@ module Response = struct
     ; "authoring.bundle.chunk", map B.Chunk.response_of_json (fun x -> Bundle_chunk x)
     ; "authoring.bundle.commit", map B.Commit.response_of_json (fun x -> Bundle_commit x)
     ; "authoring.bundle.status", map B.Status.of_json (fun x -> Bundle_status x)
+    ; "authoring.analysis", map S.Analyze.of_json (fun x -> Analyze x)
+    ; "authoring.prefix", map S.Prefix.of_json (fun x -> Prefix x)
+    ; "authoring.query", map S.Query.of_json (fun x -> Query x)
     ]
   ;;
 

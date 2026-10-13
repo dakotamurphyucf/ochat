@@ -267,7 +267,7 @@ let%expect_test "client binds source, document transitions and initialization" =
         ~selected_version:version
         ~implementation
         ~server_id:host
-        ~enabled_features:[ A.Features.core ]
+        ~enabled_features:[ A.Features.core; A.Features.semantic ]
         ~extensions:None
         ~principal
         ~limits:
@@ -293,7 +293,7 @@ let%expect_test "client binds source, document transitions and initialization" =
         ~implementation
         ~protocol_min:version
         ~protocol_max:version
-        ~features:[ A.Features.core ]
+        ~features:[ A.Features.core; A.Features.semantic ]
         ~event_encodings:[ Json ]
         ~max_inbound_event_bytes:1024
         ()
@@ -319,11 +319,15 @@ let%expect_test "client binds source, document transitions and initialization" =
           ; "authoring.document.version"
           ; "authoring.document.replace"
           ; "authoring.document.close"
+          ; "authoring.analysis"
+          ; "authoring.prefix"
+          ; "authoring.query"
           ]
         ~encodings:[ A.Encoding.Utf8_bytes ]
         ~limits
       |> ok
     in
+    let advertised_capabilities = ref capabilities in
     let foreign =
       source
         (Chatml_source.Id.create
@@ -351,6 +355,9 @@ let%expect_test "client binds source, document transitions and initialization" =
     let version_reply = ref None in
     let replace_reply = ref None in
     let close_reply = ref None in
+    let analysis_reply = ref None in
+    let prefix_reply = ref None in
+    let query_reply = ref None in
     let cancel_read = ref None in
     let return response =
       P.Public.Result.Non_history
@@ -368,7 +375,7 @@ let%expect_test "client binds source, document transitions and initialization" =
                |> ok)
             |> Result.return
           | P.Command.Authoring W.Request.Capabilities ->
-            return (W.Response.Capabilities capabilities)
+            return (W.Response.Capabilities !advertised_capabilities)
           | P.Command.Authoring (W.Request.Context_open _) ->
             return (W.Response.Context_open !open_view)
           | P.Command.Authoring (W.Request.Context_refresh _) ->
@@ -379,6 +386,12 @@ let%expect_test "client binds source, document transitions and initialization" =
             return (W.Response.Document_replace (Option.value_exn !replace_reply))
           | P.Command.Authoring (W.Request.Document_close _) ->
             return (W.Response.Document_close (Option.value_exn !close_reply))
+          | P.Command.Authoring (W.Request.Analyze _) ->
+            return (W.Response.Analyze (Option.value_exn !analysis_reply))
+          | P.Command.Authoring (W.Request.Prefix _) ->
+            return (W.Response.Prefix (Option.value_exn !prefix_reply))
+          | P.Command.Authoring (W.Request.Query _) ->
+            return (W.Response.Query (Option.value_exn !query_reply))
           | P.Command.Authoring (W.Request.Source_read _) ->
             Option.iter !cancel_read ~f:(fun (context, marker) ->
               Eio.Cancel.cancel context marker;
@@ -412,6 +425,108 @@ let%expect_test "client binds source, document transitions and initialization" =
     open_view := context;
     let opened = Agent_client.Authoring.open_context client open_request |> ok in
     let expected = A.Context.Expected.of_view opened in
+    let module S = A.Analysis in
+    let analyze_request =
+      S.Analyze.Request.create ~context:expected ~target:S.Target.project |> ok
+    in
+    analysis_reply
+    := Some
+         (S.Analyze.unavailable
+            ~context:expected
+            ~target:S.Target.project
+            ~reason:S.Analyze.Document_basis
+          |> ok);
+    assert (Result.is_ok (Agent_client.Authoring.analyze client analyze_request));
+    analysis_reply
+    := Some
+         (S.Analyze.unavailable
+            ~context:expected
+            ~target:(S.Target.selected_script "other" |> ok)
+            ~reason:S.Analyze.No_selected_script
+          |> ok);
+    assert (Result.is_error (Agent_client.Authoring.analyze client analyze_request));
+    let prefix_request =
+      S.Prefix.Request.create
+        ~context:expected
+        ~target:S.Target.project
+        ~source:base
+        ~cursor_byte:3
+      |> ok
+    in
+    prefix_reply
+    := Some
+         (S.Prefix.unavailable
+            ~context:expected
+            ~target:S.Target.project
+            ~source:base
+            ~cursor_byte:3
+            ~reason:S.Prefix.No_complete_statement
+          |> ok);
+    assert (Result.is_ok (Agent_client.Authoring.analyze_prefix client prefix_request));
+    prefix_reply
+    := Some
+         (S.Prefix.unavailable
+            ~context:expected
+            ~target:S.Target.project
+            ~source:base
+            ~cursor_byte:2
+            ~reason:S.Prefix.No_complete_statement
+          |> ok);
+    assert (Result.is_error (Agent_client.Authoring.analyze_prefix client prefix_request));
+    let stamp =
+      S.Target.script_stamp
+        ~document_source:base
+        ~parser_root_fingerprint:fingerprint
+        ~script_id:"selected"
+        ~declaration_input_fingerprint:fingerprint
+        ~declaration_input_byte_length:100
+        ~declaration_start_byte:0
+        ~declaration_end_byte:4
+        ~selected_script_source:base
+      |> ok
+    in
+    let capture =
+      S.Capture.create
+        ~context:expected
+        ~target:(S.Target.Script_input stamp)
+        ~input_fingerprint:fingerprint
+        ~environment:"default"
+        ~required_contract:fingerprint
+        ~selected_contract:fingerprint
+      |> ok
+    in
+    let query_request =
+      S.Query.Request.create
+        ~evidence:(S.Query.Syntax_only capture)
+        ~source:base
+        ~byte_offset:1
+        ~kind:S.Query.Syntax_at
+        ~max_items:1
+      |> ok
+    in
+    query_reply
+    := Some
+         (S.Query.create
+            ~request:query_request
+            ~payload:(S.Query.Syntax_result (S.Query.Unavailable S.Query.No_syntax))
+          |> ok);
+    assert (Result.is_ok (Agent_client.Authoring.query_semantics client query_request));
+    let changed_query_request =
+      S.Query.Request.create
+        ~evidence:(S.Query.Syntax_only capture)
+        ~source:base
+        ~byte_offset:2
+        ~kind:S.Query.Syntax_at
+        ~max_items:1
+      |> ok
+    in
+    query_reply
+    := Some
+         (S.Query.create
+            ~request:changed_query_request
+            ~payload:(S.Query.Syntax_result (S.Query.Unavailable S.Query.No_syntax))
+          |> ok);
+    assert (Result.is_error (Agent_client.Authoring.query_semantics client query_request));
     let version_request =
       A.Document.Version_request.create ~context:expected ~source_id:base_id |> ok
     in
@@ -609,13 +724,48 @@ let%expect_test "client binds source, document transitions and initialization" =
     cancel_read := None;
     print_s
       [%sexp (Agent_client.Authoring.is_current_context client cancel_expected : bool)];
-    current_initialization := { initialization with enabled_features = [] };
-    let without_authoring = { request with features = [] } in
+    current_initialization
+    := { initialization with enabled_features = [ A.Features.core ] };
+    let without_semantic = { request with features = [ A.Features.core ] } in
     ignore
       (Agent_client.Connection.request
          connection
-         (P.Command.Protocol_initialize without_authoring)
+         (P.Command.Protocol_initialize without_semantic)
        |> ok);
+    open_view := context;
+    let core_client = Agent_client.Authoring.create connection |> ok in
+    let core_context =
+      Agent_client.Authoring.open_context core_client open_request |> ok
+    in
+    let core_request =
+      A.Analysis.Analyze.Request.create
+        ~context:(A.Context.Expected.of_view core_context)
+        ~target:A.Analysis.Target.project
+      |> ok
+    in
+    assert (Result.is_error (Agent_client.Authoring.analyze core_client core_request));
+    current_initialization := initialization;
+    advertised_capabilities
+    := A.Capabilities.create
+         ~methods:[ "authoring.capabilities"; "authoring.context.open" ]
+         ~encodings:[ A.Encoding.Utf8_bytes ]
+         ~limits
+       |> ok;
+    ignore
+      (Agent_client.Connection.request connection (P.Command.Protocol_initialize request)
+       |> ok);
+    let no_method_client = Agent_client.Authoring.create connection |> ok in
+    let no_method_context =
+      Agent_client.Authoring.open_context no_method_client open_request |> ok
+    in
+    let no_method_request =
+      A.Analysis.Analyze.Request.create
+        ~context:(A.Context.Expected.of_view no_method_context)
+        ~target:A.Analysis.Target.project
+      |> ok
+    in
+    assert (
+      Result.is_error (Agent_client.Authoring.analyze no_method_client no_method_request));
     print_s [%sexp (Agent_client.Authoring.is_current_context client expected : bool)];
     print_s
       [%sexp

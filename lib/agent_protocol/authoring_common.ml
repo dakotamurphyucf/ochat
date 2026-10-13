@@ -8,6 +8,7 @@ let str value = `String value
 module Features = struct
   let core = "authoring.core.v1"
   let bundle = "authoring.bundle.v1"
+  let semantic = "authoring.semantic.v1"
 end
 
 module Encoding = struct
@@ -46,6 +47,9 @@ module Method = struct
     | Bundle_chunk
     | Bundle_commit
     | Bundle_status
+    | Analyze
+    | Prefix
+    | Query
   [@@deriving compare, equal, sexp_of]
 
   let to_string = function
@@ -65,6 +69,9 @@ module Method = struct
     | Bundle_chunk -> "authoring.bundle.chunk"
     | Bundle_commit -> "authoring.bundle.commit"
     | Bundle_status -> "authoring.bundle.status"
+    | Analyze -> "authoring.analysis"
+    | Prefix -> "authoring.prefix"
+    | Query -> "authoring.query"
   ;;
 
   let all =
@@ -84,6 +91,9 @@ module Method = struct
     ; Bundle_chunk
     ; Bundle_commit
     ; Bundle_status
+    ; Analyze
+    ; Prefix
+    ; Query
     ]
   ;;
 
