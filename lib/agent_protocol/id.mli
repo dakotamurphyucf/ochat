@@ -59,3 +59,13 @@ module Blob : S
 module Idempotency_record : S
 module Project : S
 module Collection : S
+
+(** Authoring coordinates are separate from conversation/run/job identities.
+    They are never authority by possession; every use is reauthorized against
+    the authenticated principal, host and connection lease. *)
+module Authoring_root : S
+
+module Authoring_context : S
+module Authoring_analysis : S
+module Authoring_upload : S
+module Authoring_bundle : S

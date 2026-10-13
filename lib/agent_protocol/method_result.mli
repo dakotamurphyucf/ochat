@@ -210,6 +210,7 @@ type t =
   | Schedule_create of Schedule.Mutation_response.t
   | Schedule_cancel of Schedule.Mutation_response.t
   | Ingress_submit of Ingress.Acknowledgement.t
+  | Authoring of (Authoring_wire.Response.t[@sexp.opaque])
 [@@deriving sexp]
 
 (** [method_name t] returns the request method associated with [t]. *)
@@ -223,5 +224,6 @@ val to_json : t -> Jsonaf.t
 (** [of_json ~method_ json] decodes the successful result for [method_]. *)
 val of_json : method_:string -> Jsonaf.t -> (t, Error.t) result
 
-(** [supported_methods] contains every method with a typed success decoder. *)
+(** [supported_methods] is the typed success-codec inventory, not a host
+    capability or installed handler list. *)
 val supported_methods : string list

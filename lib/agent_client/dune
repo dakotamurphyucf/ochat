@@ -13,6 +13,7 @@
   in_memory
   ingress
   inference_views
+  authoring
   activity_views
   run_views
   conversation_search

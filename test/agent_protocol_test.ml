@@ -624,6 +624,8 @@ let%expect_test "permission codecs preserve legacy owners and reject ambiguous o
   [%expect {| invalid_request |}]
 ;;
 
+(* Codec inventory includes authoring core DTOs before host handlers are
+   installed; initialize feature selection is tested separately. *)
 let architecture_methods =
   [ "command.receipt"
   ; "provider.setup"
@@ -707,6 +709,18 @@ let architecture_methods =
   ; "schedule.create"
   ; "schedule.cancel"
   ; "ingress.submit"
+  ; "authoring.capabilities"
+  ; "authoring.roots"
+  ; "authoring.host.list"
+  ; "authoring.host.read"
+  ; "authoring.context.open"
+  ; "authoring.context.refresh"
+  ; "authoring.context.close"
+  ; "authoring.source.list"
+  ; "authoring.source.read"
+  ; "authoring.document.version"
+  ; "authoring.document.replace"
+  ; "authoring.document.close"
   ]
 ;;
 
@@ -722,7 +736,7 @@ let%expect_test "every architecture method has request and result dispatch" =
           (List.equal String.equal expected (normalize Method_result.supported_methods)
            : bool)
       }];
-  [%expect {| ((method_count 82) (requests true) (results true)) |}]
+  [%expect {| ((method_count 94) (requests true) (results true)) |}]
 ;;
 
 let%expect_test "history deletion requires stable ID, revision and idempotency" =
