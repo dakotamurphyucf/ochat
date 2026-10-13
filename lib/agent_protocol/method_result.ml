@@ -467,6 +467,7 @@ type t =
   | Schedule_create of Schedule.Mutation_response.t
   | Schedule_cancel of Schedule.Mutation_response.t
   | Ingress_submit of Ingress.Acknowledgement.t
+  | Authoring of (Authoring_wire.Response.t[@sexp.opaque])
 [@@deriving sexp]
 
 let method_name = function
@@ -552,6 +553,7 @@ let method_name = function
   | Schedule_create _ -> "schedule.create"
   | Schedule_cancel _ -> "schedule.cancel"
   | Ingress_submit _ -> "ingress.submit"
+  | Authoring response -> Authoring_wire.Response.method_name response
 ;;
 
 let to_json = function
@@ -640,6 +642,7 @@ let to_json = function
   | Schedule_list value -> Page.to_json Schedule.to_json value
   | Schedule_get value -> Schedule.to_json value
   | Ingress_submit value -> Ingress.Acknowledgement.to_json value
+  | Authoring response -> Authoring_wire.Response.to_json response
   | Schedule_create value | Schedule_cancel value ->
     Schedule.Mutation_response.to_json value
 ;;
@@ -789,6 +792,13 @@ let decoders =
   ; "schedule.cancel", map Schedule.Mutation_response.of_json (fun x -> Schedule_cancel x)
   ; "ingress.submit", map Ingress.Acknowledgement.of_json (fun x -> Ingress_submit x)
   ]
+  @ List.map Authoring_wire.Response.supported_methods ~f:(fun method_ ->
+    ( method_
+    , fun json ->
+        map
+          (Authoring_wire.Response.of_method_and_json ~method_)
+          (fun response -> Authoring response)
+          json ))
 ;;
 
 let of_json ~method_ json =

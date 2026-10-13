@@ -275,7 +275,7 @@ let implementation_sources =
   ; ( "lib/agent_session/administration.ml"
     , "00ae2dcdef80bd0552e6a7dded2e3872ed547b82b2ee85297ca5eb7d3ccd9f8a" )
   ; ( "lib/agent_server/command_handler.ml"
-    , "11c24e2362b32b3d0ada6e76c8c6ca54e922591cff8a6bcb0f595ee8174e75fc" )
+    , "60093147c4dea9ea7349e8293ed9f8280e89c5a3ab32394c5214ca5c080d5069" )
   ; ( "lib/agent_server/runtime_owner.ml"
     , "7431f8254c524a641f3ce86633cd812481b938ba3b6e35bf1e31d01059cd7d66" )
   ; ( "lib/agent_session/managed_submission_tracking.ml"

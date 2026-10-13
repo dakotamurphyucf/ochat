@@ -83,6 +83,7 @@ type t =
   | Schedule_create of Schedule.Create_request.t
   | Schedule_cancel of Schedule.Cancel_request.t
   | Ingress_submit of Ingress.Submit_request.t
+  | Authoring of (Authoring_wire.Request.t[@sexp.opaque])
 [@@deriving sexp]
 
 let method_name = function
@@ -168,6 +169,7 @@ let method_name = function
   | Schedule_create _ -> "schedule.create"
   | Schedule_cancel _ -> "schedule.cancel"
   | Ingress_submit _ -> "ingress.submit"
+  | Authoring request -> Authoring_wire.Request.method_name request
 ;;
 
 let params = function
@@ -258,6 +260,7 @@ let params = function
   | Schedule_create request -> Schedule.Create_request.to_json request
   | Schedule_cancel request -> Schedule.Cancel_request.to_json request
   | Ingress_submit request -> Ingress.Submit_request.to_json request
+  | Authoring request -> Authoring_wire.Request.params request
 ;;
 
 let method_not_found method_ =
@@ -413,6 +416,13 @@ let decoders =
   ; "schedule.cancel", map Schedule.Cancel_request.of_json (fun x -> Schedule_cancel x)
   ; "ingress.submit", map Ingress.Submit_request.of_json (fun x -> Ingress_submit x)
   ]
+  @ List.map Authoring_wire.Request.supported_methods ~f:(fun method_ ->
+    ( method_
+    , fun params ->
+        map
+          (fun params -> Authoring_wire.Request.of_method_and_params ~method_ ~params)
+          (fun request -> Authoring request)
+          params ))
 ;;
 
 let of_method_and_params ~method_ ~params =

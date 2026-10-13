@@ -212,6 +212,631 @@ module Read_request : sig
 end
 ```
 
+## authoring
+
+[JSON codec](../../lib/agent_protocol/authoring.ml) · [interface](../../lib/agent_protocol/authoring.mli)
+
+```ocaml
+(** Thin public facade for the portable authoring wire contracts. DTO modules
+    are split by ownership so codecs do not become one monolithic component. *)
+
+module Features = Authoring_common.Features
+module Encoding = Authoring_common.Encoding
+module Method = Authoring_common.Method
+module Failure = Authoring_common.Failure
+module Limits = Authoring_common.Limits
+module Capabilities = Authoring_common.Capabilities
+module Source = Authoring_common.Source
+module Position = Authoring_common.Position
+module Site = Authoring_common.Site
+module Context = Authoring_context.Context
+module Document = Authoring_context.Document
+module Source_read = Authoring_context.Source_read
+module Wire = Authoring_wire
+```
+
+## authoring_codec
+
+[JSON codec](../../lib/agent_protocol/authoring_codec.ml) · [interface](../../lib/agent_protocol/authoring_codec.mli)
+
+```ocaml
+(** Internal strict, bounded primitives shared by the authoring DTO codecs. *)
+
+(** Largest exact integer shared with common JSON clients. Constructors and
+    decoders keep all revision/generation counters within this bound. *)
+val maximum_wire_integer : int
+
+val invalid : string -> ('a, Error.t) result
+val fields : allowed:string list -> Jsonaf.t -> (Json_codec.fields, Error.t) result
+val required : Json_codec.fields -> string -> (Jsonaf.t, Error.t) result
+
+val required_as
+  :  Json_codec.fields
+  -> string
+  -> (Jsonaf.t -> ('a, Error.t) result)
+  -> ('a, Error.t) result
+
+val optional_as
+  :  Json_codec.fields
+  -> string
+  -> (Jsonaf.t -> ('a, Error.t) result)
+  -> ('a option, Error.t) result
+
+val string : max_bytes:int -> Jsonaf.t -> (string, Error.t) result
+val nonnegative : Jsonaf.t -> (int, Error.t) result
+val positive : Jsonaf.t -> (int, Error.t) result
+val integer : int -> Jsonaf.t
+val boolean : bool -> Jsonaf.t
+
+val list
+  :  max_items:int
+  -> (Jsonaf.t -> ('a, Error.t) result)
+  -> Jsonaf.t
+  -> ('a list, Error.t) result
+
+val array : ('a -> Jsonaf.t) -> 'a list -> Jsonaf.t
+val optional_field : string -> 'a option -> ('a -> Jsonaf.t) -> (string * Jsonaf.t) list
+
+(** Source IDs encode the arbitrary-byte package namespace as bounded base64;
+    the portable relative member remains a UTF-8 JSON string. *)
+val source_id : Jsonaf.t -> (Chatml_source.Id.t, Error.t) result
+
+val validate_source_id : Chatml_source.Id.t -> (unit, Error.t) result
+val source_id_json : Chatml_source.Id.t -> Jsonaf.t
+val digest : Jsonaf.t -> (Chatml_source.Digest.t, Error.t) result
+val digest_json : Chatml_source.Digest.t -> Jsonaf.t
+val portable_member : Jsonaf.t -> (string, Error.t) result
+val portable_member_string : string -> (string, Error.t) result
+val utf8_text : max_bytes:int -> Jsonaf.t -> (string, Error.t) result
+val bytes_base64 : max_bytes:int -> Jsonaf.t -> (string, Error.t) result
+val bytes_base64_json : string -> Jsonaf.t
+```
+
+## authoring_common
+
+[JSON codec](../../lib/agent_protocol/authoring_common.ml) · [interface](../../lib/agent_protocol/authoring_common.mli)
+
+```ocaml
+(** Versioned, transport-neutral authoring DTOs. All identities and source sites
+    are comparison coordinates, never read, write, analysis or execution grants.
+    The host reauthorizes the authenticated actor on every method, including
+    cached reads. Codecs validate bounded wire values before domain admission.
+    Every optional field in this family uses absence for [None] and a concrete
+    value for [Some]; explicit JSON null is invalid, including response fields.
+    Unknown and duplicate object fields are invalid. Integers must be exact
+    bounded JSON integers, never floats or exponent notation.
+    Method failures use the existing typed protocol error channel:
+    [Permission_denied] for unauthorized access, [Lease_stale] for a lost
+    context lease, [Conflict] for stale source/context revisions,
+    [Invalid_request] with a bounded position-reason tag for invalid editor
+    coordinates, [Resource_limit] for work/admission ceilings and [Interrupted]
+    for cancellation. These wire codes do not reveal whether a denied source
+    exists. Later semantic queries return unavailable facts as typed results
+    rather than protocol errors.
+    This module has no compiler, Eio, filesystem, runtime or UI dependency. *)
+
+module Features : sig
+  (** Initialization advertises [core] only after a host installs the
+      source/context handlers. Codecs and {!Command.supported_methods} alone
+      do not make any method available. Later analysis and bundle features
+      are selected separately only after their handlers are installed. *)
+  val core : string
+end
+
+module Encoding : sig
+  type t = Chatml_editor_position.Encoding.t =
+    | Utf8_bytes
+    | Utf16_units
+  [@@deriving compare, equal, sexp_of]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+end
+
+module Method : sig
+  type t =
+    | Capabilities
+    | Roots
+    | Host_list
+    | Host_read
+    | Context_open
+    | Context_refresh
+    | Context_close
+    | Source_list
+    | Source_read
+    | Document_version
+    | Document_replace
+    | Document_close
+  [@@deriving compare, equal, sexp_of]
+
+  (** Closed stable [authoring.*] method names. A method's presence in this
+      enumeration or the decoder does not advertise an installed handler. *)
+  val to_string : t -> string
+
+  val of_string : string -> (t, Error.t) Result.t
+end
+
+module Failure : sig
+  (** Bounded authoring-specific reasons in [Protocol_error.data]. The ordinary
+      protocol code remains authoritative; malformed or mismatched detail
+      decodes as [Other] instead of changing that code's meaning. No path,
+      source existence, supplied bytes or private host policy is exposed. *)
+  type invalid_position =
+    | Invalid_utf8
+    | Out_of_bounds
+    | Inside_scalar
+    | Inside_surrogate
+    | Inside_crlf
+    | Foreign_source
+  [@@deriving compare, equal, sexp_of]
+
+  type reason =
+    | Unauthorized
+    | Context_lease_stale
+    | Stale_context
+    | Stale_source
+    | Invalid_position of invalid_position
+    | Source_unavailable
+    | Environment_unavailable
+    | Work_limit
+    | Cancelled
+    | Other
+  [@@deriving compare, equal, sexp_of]
+
+  (** [attach] admits only reason/code pairs defined by this protocol family.
+      [classify] never string-matches messages. Server code may create an
+      ordinary error when no more specific safe detail applies. *)
+  val attach : Error.t -> reason -> (Error.t, Error.t) Result.t
+
+  val classify : Error.t -> reason
+end
+
+module Limits : sig
+  (** Largest exact JSON counter admitted for generations and editor revisions. *)
+  val maximum_wire_integer : int
+
+  (** Actual per-host method limits, not claims about OCaml heap or wall time.
+      [max_request_bytes] is also bounded by the generic initialize limit.
+      Constructors check positivity, representable integer bounds and local
+      cross-field consistency. They do not prove a host can honor a limit;
+      the handler selects ceilings at initialization and checks each request
+      against them and its current principal quota before allocation. *)
+  type t = private
+    { max_sources : int
+    ; max_source_bytes : int
+    ; max_context_source_bytes : int
+    ; max_request_bytes : int
+    ; max_result_bytes : int
+    ; max_path_candidates : int
+    }
+  [@@deriving sexp_of]
+
+  val create
+    :  max_sources:int
+    -> max_source_bytes:int
+    -> max_context_source_bytes:int
+    -> max_request_bytes:int
+    -> max_result_bytes:int
+    -> max_path_candidates:int
+    -> (t, Error.t) Result.t
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+end
+
+module Capabilities : sig
+  (** Actual installed handler methods, selected encodings and policy bounds.
+      A codec may know a method that is absent here. [authoring.capabilities]
+      itself requires the selected [Features.core] initialization feature. *)
+  type t = private
+    { methods : string list
+    ; encodings : Encoding.t list
+    ; limits : Limits.t
+    }
+  [@@deriving sexp_of]
+
+  val create
+    :  methods:string list
+    -> encodings:Encoding.t list
+    -> limits:Limits.t
+    -> (t, Error.t) Result.t
+
+  (** Unknown future [authoring.*] method names are retained but do not make
+      an older client callable; [supports] tests only its typed known methods. *)
+  val supports : t -> Method.t -> bool
+
+  val supports_encoding : t -> Encoding.t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+end
+
+module Source : sig
+  (** Exact captured source revision. Optional [editor_revision] is absent for
+      host/bundle base bytes and present as a positive monotonically increasing
+      client revision for an open overlay. Wire [null] is invalid: absence and
+      a value are the only admitted states. Byte length is nonnegative and
+      digest is SHA-256; neither claims that the bytes are currently readable. *)
+  type t [@@deriving equal, sexp_of]
+
+  val create
+    :  id:Chatml_source.Id.t
+    -> digest:Chatml_source.Digest.t
+    -> byte_length:int
+    -> editor_revision:int option
+    -> (t, Error.t) Result.t
+
+  val id : t -> Chatml_source.Id.t
+  val digest : t -> Chatml_source.Digest.t
+  val byte_length : t -> int
+  val editor_revision : t -> int option
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+end
+
+module Position : sig
+  (** Zero-based coordinates. Construction rejects negatives; applying a
+      position to a source additionally validates CRLF, scalar, surrogate and
+      EOF boundaries with {!Chatml_editor_position}. *)
+  type t = Chatml_editor_position.Position.t
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+end
+
+module Site : sig
+  (** Exact source owner plus ordered half-open editor coordinates in one
+      explicit encoding. A site is accepted for a query only after the service
+      matches its source ID, digest, byte length and editor revision to the
+      current context and projects through the captured position index. An
+      [Approximate] site denotes declaration-level attribution, never an exact
+      embedded byte map; OCH-259 owns that provenance projection. *)
+  type precision =
+    | Exact
+    | Approximate
+  [@@deriving compare, equal, sexp_of]
+
+  type t [@@deriving sexp_of]
+
+  val create
+    :  source:Source.t
+    -> encoding:Encoding.t
+    -> start:Position.t
+    -> finish:Position.t
+    -> precision:precision
+    -> (t, Error.t) Result.t
+
+  val source : t -> Source.t
+  val encoding : t -> Encoding.t
+  val start : t -> Position.t
+  val finish : t -> Position.t
+  val precision : t -> precision
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+end
+```
+
+## authoring_context
+
+[JSON codec](../../lib/agent_protocol/authoring_context.ml) · [interface](../../lib/agent_protocol/authoring_context.mli)
+
+```ocaml
+(** Compatibility umbrella for the three cohesive authoring core DTO families. *)
+module Context = Authoring_context_core.Context
+
+module Document = Authoring_document.Document
+module Source_read = Authoring_source_read.Source_read
+```
+
+## authoring_context_core
+
+[JSON codec](../../lib/agent_protocol/authoring_context_core.ml) · [interface](../../lib/agent_protocol/authoring_context_core.mli)
+
+```ocaml
+open Authoring_common
+
+module Context : sig
+  module Selection : sig
+    type target =
+      | Entry of string
+      | Library
+    [@@deriving equal, sexp_of]
+
+    (** [environment] absent selects the declared default; explicit JSON null
+        is rejected. Names are bounded, nonempty, exact bytes. *)
+    type t = private
+      { target : target
+      ; environment : string option
+      }
+    [@@deriving equal, sexp_of]
+
+    val create : target:target -> environment:string option -> (t, Error.t) Result.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  type origin =
+    | Host_project of
+        { root : Id.Authoring_root.t
+        ; dependency_roots : Id.Authoring_root.t list
+        ; project_member : string
+        ; selection : Selection.t
+        }
+    | Uploaded_project of Id.Authoring_bundle.t
+    | Host_document of
+        { root : Id.Authoring_root.t
+        ; source : Source.t
+        ; default_environment : string option
+        }
+    | Supplied_document of
+        { source : Source.t
+        ; default_environment : string option
+        }
+  [@@deriving equal, sexp_of]
+
+  module Open_request : sig
+    (** [Supplied_document] transports exact bytes by base64 and requires an
+        independent document-admission grant. It creates a captured base
+        source, not a host file or uploaded project. Other origins have no
+        supplied content. No project graph/check success is required for either
+        document-only origin. *)
+    type t = private
+      | Host_project of
+          { root : Id.Authoring_root.t
+          ; dependency_roots : Id.Authoring_root.t list
+          ; project_member : string
+          ; selection : Selection.t
+          }
+      | Uploaded_project of Id.Authoring_bundle.t
+      | Host_document of
+          { root : Id.Authoring_root.t
+          ; member : string
+          ; default_environment : string option
+          }
+      | Supplied_document of
+          { member : string
+          ; default_environment : string option
+          ; contents : string
+          }
+    [@@deriving sexp_of]
+
+    val create_host_project
+      :  root:Id.Authoring_root.t
+      -> dependency_roots:Id.Authoring_root.t list
+      -> project_member:string
+      -> selection:Selection.t
+      -> (t, Error.t) Result.t
+
+    val create_uploaded_project : Id.Authoring_bundle.t -> t
+
+    val create_host_document
+      :  root:Id.Authoring_root.t
+      -> member:string
+      -> default_environment:string option
+      -> (t, Error.t) Result.t
+
+    val create_supplied_document
+      :  member:string
+      -> default_environment:string option
+      -> contents:string
+      -> (t, Error.t) Result.t
+
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  type static_selection =
+    { environment : string
+    ; compiler_contract : Chatml_source.Digest.t
+    }
+  [@@deriving equal, sexp_of]
+
+  (** A document-only static selection is host-admitted from an actual
+      immutable catalog/compiler contract, never client-provided signatures.
+      Absence still permits lexical and basic declaration syntax help; paths,
+      templates and script references require separate source/catalog grants. *)
+
+  type basis =
+    | Project of
+        { base_graph : Chatml_source.Digest.t
+        ; selection : static_selection
+        }
+    | Document of
+        { source : Source.t
+        ; selection : static_selection option
+        }
+  [@@deriving equal, sexp_of]
+
+  (** One connection-scoped context view. The host and nonce are selected by
+      the server; [id] alone is not a transferable capability. Generation is
+      nonnegative and advances on each edit/close. A document basis can be
+      admitted without a successful project build; optional static selection
+      exists only after the host authenticates that environment. It is not a
+      certified analysis or a synthetic project graph. [origin] records the
+      admitted base capture; [basis] reflects the current overlay revision.
+      Host-document refresh may replace the base source revision under the same
+      authorized root/member locator. A supplied document keeps its original
+      base capture until a new context is opened. Generation is bounded by
+      {!Authoring_common.Limits.maximum_wire_integer}.
+      The host, not this DTO constructor, mints the fingerprint from exact
+      custody/selection/source identity. *)
+  type t [@@deriving sexp_of]
+
+  val create
+    :  id:Id.Authoring_context.t
+    -> host:Id.Server.t
+    -> origin:origin
+    -> generation:int
+    -> basis:basis
+    -> basis_fingerprint:Chatml_source.Digest.t
+    -> editable_sources:Source.t list
+    -> (t, Error.t) Result.t
+
+  val id : t -> Id.Authoring_context.t
+  val host : t -> Id.Server.t
+  val origin : t -> origin
+  val generation : t -> int
+  val basis : t -> basis
+  val basis_fingerprint : t -> Chatml_source.Digest.t
+  val editable_sources : t -> Source.t list
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+
+  type view = t
+
+  module Expected : sig
+    (** CAS input for operations on one current context generation. A stale
+        response cannot be applied after another document changes. *)
+    type t = private
+      { context_id : Id.Authoring_context.t
+      ; host : Id.Server.t
+      ; generation : int
+      ; basis_fingerprint : Chatml_source.Digest.t
+      }
+    [@@deriving equal, sexp_of]
+
+    val of_view : view -> t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Refresh_request : sig
+    type policy =
+      | Reject_open_documents
+      | Discard_open_documents
+    [@@deriving equal, sexp_of]
+
+    type t = private
+      { expected : Expected.t
+      ; policy : policy
+      }
+    [@@deriving sexp_of]
+
+    val create : expected:Expected.t -> policy:policy -> t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Close_request : sig
+    type t = private { expected : Expected.t } [@@deriving sexp_of]
+
+    val create : expected:Expected.t -> t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Close_result : sig
+    (** Final generation of a closed context; no active view is returned. *)
+    type t = private
+      { id : Id.Authoring_context.t
+      ; host : Id.Server.t
+      ; generation : int
+      }
+    [@@deriving sexp_of]
+
+    val create
+      :  id:Id.Authoring_context.t
+      -> host:Id.Server.t
+      -> generation:int
+      -> (t, Error.t) Result.t
+
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+end
+```
+
+## authoring_document
+
+[JSON codec](../../lib/agent_protocol/authoring_document.ml) · [interface](../../lib/agent_protocol/authoring_document.mli)
+
+```ocaml
+open Authoring_common
+module Context = Authoring_context_core.Context
+
+module Document : sig
+  module Version : sig
+    (** Source CAS receipt: exact source revision and whole context generation.
+        [overlay_open] distinguishes a base version after a close. The last
+        accepted editor revision remains in the CAS even after closing an
+        overlay, so a later replacement cannot reuse it. *)
+    type t [@@deriving sexp_of]
+
+    val create
+      :  context:Context.Expected.t
+      -> source:Source.t
+      -> last_editor_revision:int option
+      -> overlay_open:bool
+      -> (t, Error.t) Result.t
+
+    val context : t -> Context.Expected.t
+    val source : t -> Source.t
+    val last_editor_revision : t -> int option
+    val overlay_open : t -> bool
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Version_request : sig
+    (** Read current source CAS after any context edit. The server authorizes
+        and resolves the source under this context; a caller cannot assert a
+        fresh version using a source digest. *)
+    type t = private
+      { context : Context.Expected.t
+      ; source_id : Chatml_source.Id.t
+      }
+    [@@deriving sexp_of]
+
+    val create
+      :  context:Context.Expected.t
+      -> source_id:Chatml_source.Id.t
+      -> (t, Error.t) Result.t
+
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Replace_request : sig
+    (** Full exact UTF-8 text only. Arbitrary byte content uses bundle chunks;
+        this method never repairs invalid UTF-8 or writes a host file. *)
+    type t = private
+      { expected : Version.t
+      ; next_editor_revision : int
+      ; contents : string
+      }
+    [@@deriving sexp_of]
+
+    val create
+      :  expected:Version.t
+      -> next_editor_revision:int
+      -> contents:string
+      -> (t, Error.t) Result.t
+
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Close_request : sig
+    type t = private { expected : Version.t } [@@deriving sexp_of]
+
+    val create : expected:Version.t -> t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Result : sig
+    type t = private
+      { context : Context.t
+      ; version : Version.t
+      }
+    [@@deriving sexp_of]
+
+    val create : context:Context.t -> version:Version.t -> (t, Error.t) Core.Result.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Core.Result.t
+  end
+end
+```
+
 ## authoring_guidance
 
 [JSON codec](../../lib/agent_protocol/authoring_guidance.ml) · [interface](../../lib/agent_protocol/authoring_guidance.mli)
@@ -377,6 +1002,235 @@ val matches_response : t -> Jsonaf.t -> bool
 
 val matches_output : t -> Jsonaf.t -> bool
 val scope_for : session_id:Id.Session.t -> generation:int -> string
+```
+
+## authoring_source_read
+
+[JSON codec](../../lib/agent_protocol/authoring_source_read.ml) · [interface](../../lib/agent_protocol/authoring_source_read.mli)
+
+```ocaml
+open Authoring_common
+module Context = Authoring_context_core.Context
+
+module Source_read : sig
+  (** Host-root IDs are connection-local candidates, not path grants. Host
+      browse/read observes a granted root afresh; context inventory/read uses
+      exact captured effective bytes at a generation, including an open
+      overlay. Only explicit context refresh reobserves host bytes for that
+      context. Path strings are validated portable members. *)
+  module Root : sig
+    type t = private
+      { id : Id.Authoring_root.t
+      ; display_name : string
+      }
+    [@@deriving sexp_of]
+
+    val create : id:Id.Authoring_root.t -> display_name:string -> (t, Error.t) Result.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Roots_result : sig
+    (** Authorized roots available to this connection at the time of read.
+        A subsequent open reauthorizes the chosen root. *)
+    type t = private { roots : Root.t list } [@@deriving sexp_of]
+
+    val create : roots:Root.t list -> (t, Error.t) Result.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Host_list_request : sig
+    type t = private
+      { root : Id.Authoring_root.t
+      ; directory : string option
+      }
+    [@@deriving sexp_of]
+
+    val create
+      :  root:Id.Authoring_root.t
+      -> directory:string option
+      -> (t, Error.t) Result.t
+
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Host_list_result : sig
+    (** Complete bounded nonrecursive candidates from one granted root.
+        Entries do not prove file type or grant a subsequent read. If native
+        enumeration exceeds its cap, the whole request fails Resource_limit. *)
+    type t = private
+      { root : Id.Authoring_root.t
+      ; members : string list
+      }
+    [@@deriving sexp_of]
+
+    val create : root:Id.Authoring_root.t -> members:string list -> (t, Error.t) Result.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Host_read_request : sig
+    type t = private
+      { root : Id.Authoring_root.t
+      ; member : string
+      }
+    [@@deriving sexp_of]
+
+    val create : root:Id.Authoring_root.t -> member:string -> (t, Error.t) Result.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Host_read_result : sig
+    (** New read observation with host-constructed Source ID/digest/length.
+        Content is exact base64 bytes and does not mutate any open context. *)
+    type t [@@deriving sexp_of]
+
+    val create
+      :  root:Id.Authoring_root.t
+      -> member:string
+      -> source:Source.t
+      -> contents:string
+      -> (t, Error.t) Result.t
+
+    val root : t -> Id.Authoring_root.t
+    val member : t -> string
+    val source : t -> Source.t
+    val contents : t -> string
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module List_request : sig
+    type t = private
+      { context : Context.Expected.t
+      ; package_namespace : string option
+      ; directory : string option
+      }
+    [@@deriving sexp_of]
+
+    val create
+      :  context:Context.Expected.t
+      -> package_namespace:string option
+      -> directory:string option
+      -> (t, Error.t) Result.t
+
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Read_request : sig
+    type t = private
+      { context : Context.Expected.t
+      ; source_id : Chatml_source.Id.t
+      }
+    [@@deriving sexp_of]
+
+    val create
+      :  context:Context.Expected.t
+      -> source_id:Chatml_source.Id.t
+      -> (t, Error.t) Result.t
+
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module List_result : sig
+    (** A finite authorized inventory prefix sorted by full Source ID.
+        [omitted] is the number of
+        further entries in this exact observed manifest; [truncated] iff it
+        is positive. A changed context requires a fresh list. *)
+    type t [@@deriving sexp_of]
+
+    val create
+      :  context:Context.Expected.t
+      -> sources:Source.t list
+      -> omitted:int
+      -> (t, Error.t) Result.t
+
+    val context : t -> Context.Expected.t
+    val sources : t -> Source.t list
+    val omitted : t -> int
+    val truncated : t -> bool
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Read_result : sig
+    type t [@@deriving sexp_of]
+
+    (** Wire contents are base64 of exact source bytes. Source ID/digest/length
+        must match decoded bytes before this value is admitted. The context
+        echo lets a client reject a response from a superseded generation. *)
+    val create
+      :  context:Context.Expected.t
+      -> source:Source.t
+      -> contents:string
+      -> (t, Error.t) Result.t
+
+    val context : t -> Context.Expected.t
+    val source : t -> Source.t
+    val contents : t -> string
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+end
+```
+
+## authoring_wire
+
+[JSON codec](../../lib/agent_protocol/authoring_wire.ml) · [interface](../../lib/agent_protocol/authoring_wire.mli)
+
+```ocaml
+(** Closed, portable dispatch for the authoring core method family. The sum
+    constructors keep each request and result tied to its method-specific DTO;
+    accepted syntax alone does not advertise an installed server handler. *)
+
+module Request : sig
+  type t =
+    | Capabilities
+    | Roots
+    | Host_list of Authoring_context.Source_read.Host_list_request.t
+    | Host_read of Authoring_context.Source_read.Host_read_request.t
+    | Context_open of Authoring_context.Context.Open_request.t
+    | Context_refresh of Authoring_context.Context.Refresh_request.t
+    | Context_close of Authoring_context.Context.Close_request.t
+    | Source_list of Authoring_context.Source_read.List_request.t
+    | Source_read of Authoring_context.Source_read.Read_request.t
+    | Document_version of Authoring_context.Document.Version_request.t
+    | Document_replace of Authoring_context.Document.Replace_request.t
+    | Document_close of Authoring_context.Document.Close_request.t
+  [@@deriving sexp_of]
+
+  val method_name : t -> string
+  val params : t -> Jsonaf.t
+  val of_method_and_params : method_:string -> params:Jsonaf.t -> (t, Error.t) result
+  val supported_methods : string list
+end
+
+module Response : sig
+  type t =
+    | Capabilities of Authoring_common.Capabilities.t
+    | Roots of Authoring_context.Source_read.Roots_result.t
+    | Host_list of Authoring_context.Source_read.Host_list_result.t
+    | Host_read of Authoring_context.Source_read.Host_read_result.t
+    | Context_open of Authoring_context.Context.t
+    | Context_refresh of Authoring_context.Context.t
+    | Context_close of Authoring_context.Context.Close_result.t
+    | Source_list of Authoring_context.Source_read.List_result.t
+    | Source_read of Authoring_context.Source_read.Read_result.t
+    | Document_version of Authoring_context.Document.Version.t
+    | Document_replace of Authoring_context.Document.Result.t
+    | Document_close of Authoring_context.Document.Result.t
+  [@@deriving sexp_of]
+
+  val method_name : t -> string
+  val to_json : t -> Jsonaf.t
+  val of_method_and_json : method_:string -> Jsonaf.t -> (t, Error.t) result
+  val supported_methods : string list
+end
 ```
 
 ## blob
@@ -566,6 +1420,7 @@ type t =
   | Schedule_create of Schedule.Create_request.t
   | Schedule_cancel of Schedule.Cancel_request.t
   | Ingress_submit of Ingress.Submit_request.t
+  | Authoring of (Authoring_wire.Request.t[@sexp.opaque])
 [@@deriving sexp]
 
 (** [method_name t] returns the stable protocol method. *)
@@ -577,7 +1432,9 @@ val params : t -> Jsonaf.t
 (** [of_method_and_params ~method_ ~params] performs closed typed dispatch. *)
 val of_method_and_params : method_:string -> params:Jsonaf.t -> (t, Error.t) result
 
-(** [supported_methods] contains every method accepted by the closed dispatcher. *)
+(** [supported_methods] is the codec inventory: every method accepted by this
+    typed decoder. It does not assert that a server has installed or advertised
+    a handler for the method. *)
 val supported_methods : string list
 ```
 
@@ -1645,6 +2502,16 @@ module Blob : S
 module Idempotency_record : S
 module Project : S
 module Collection : S
+
+(** Authoring coordinates are separate from conversation/run/job identities.
+    They are never authority by possession; every use is reauthorized against
+    the authenticated principal, host and connection lease. *)
+module Authoring_root : S
+
+module Authoring_context : S
+module Authoring_analysis : S
+module Authoring_upload : S
+module Authoring_bundle : S
 ```
 
 ## idempotency_key
@@ -2968,6 +3835,7 @@ type t =
   | Schedule_create of Schedule.Mutation_response.t
   | Schedule_cancel of Schedule.Mutation_response.t
   | Ingress_submit of Ingress.Acknowledgement.t
+  | Authoring of (Authoring_wire.Response.t[@sexp.opaque])
 [@@deriving sexp]
 
 (** [method_name t] returns the request method associated with [t]. *)
@@ -2981,7 +3849,8 @@ val to_json : t -> Jsonaf.t
 (** [of_json ~method_ json] decodes the successful result for [method_]. *)
 val of_json : method_:string -> Jsonaf.t -> (t, Error.t) result
 
-(** [supported_methods] contains every method with a typed success decoder. *)
+(** [supported_methods] is the typed success-codec inventory, not a host
+    capability or installed handler list. *)
 val supported_methods : string list
 ```
 

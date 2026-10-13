@@ -92,7 +92,8 @@ module Non_history = struct
     | Schedule_create _
     | Schedule_cancel _
     | Command_receipt _
-    | Ingress_submit _ -> Ok value
+    | Ingress_submit _
+    | Authoring _ -> Ok value
   ;;
 
   let value t = t

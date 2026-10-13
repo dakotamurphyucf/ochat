@@ -87,6 +87,14 @@
   snapshot
   envelope
   event
+  authoring_codec
+  authoring_common
+  authoring_context_core
+  authoring_document
+  authoring_source_read
+  authoring_context
+  authoring_wire
+  authoring
   command
   method_result
   projection_codec
@@ -98,7 +106,7 @@
   public
   stream_error
   inference_query)
- (private_modules protocol_error extension_codec projection_codec)
- (libraries uri ochat.inference core jsonaf base64 digestif mirage-crypto-rng uutf ochat.history_entry ochat.document_schema ochat.transcript)
+ (private_modules protocol_error extension_codec projection_codec authoring_codec)
+ (libraries uri ochat.inference core jsonaf base64 digestif mirage-crypto-rng uutf ochat.history_entry ochat.document_schema ochat.transcript ochat.chatml_source ochat.chatml_editor_position)
  (preprocess
   (pps ppx_jane)))

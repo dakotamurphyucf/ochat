@@ -57,8 +57,9 @@ retention and wire contract cannot stand in for authoring upload.
 
 Implement one local typed authoring service with additive `authoring.*` methods
 on the existing versioned OChat request envelope. The same validated domain
-requests serve direct callers, daemon HTTP and stdio. Advertise method support,
-limits and position encodings during protocol initialization. An optional LSP
+requests serve direct callers, daemon HTTP and stdio. Initialization selects
+an authoring feature only when handlers are installed; the capability method
+then reports actual methods, limits and position encodings. An optional LSP
 adapter may translate into this service later; M5 and the neutral desktop editor
 do not depend on a second LSP lifecycle.
 
@@ -73,7 +74,22 @@ workspace ID or upload receipt is never sufficient authority by itself. The host
 reauthorizes every request, including a cache hit or rebound uploaded bundle.
 
 Host browsing and path completion stay available: a read grant permits bounded
-manifest and content reads from admitted roots, using their actual source owner.
+live manifest and content reads from admitted roots, using their actual source
+owner. These reads are fresh observations; reading an immutable context source
+instead returns its pinned captured or overlay bytes. A standalone or malformed
+ChatMD document can open a document-only context from an authorized host member
+or bounded client-supplied bytes without preparing a project graph. The host
+mints its authentic source owner. Optional static environment selection comes
+from an admitted host catalog; its absence still permits lexical and basic
+markup assistance. Project-level path/template/script references need their
+separate source/catalog authorization and may be unavailable in a document-only
+context.
+An explicit context refresh captures the current authorized host-document
+member again; its stable root/member locator stays bound to the connection,
+while the captured base source digest may change. A supplied document's base
+capture stays immutable until a new context is opened. Context generations and
+editor revisions are exact JSON integers up to 2^53−1; mutation receipts
+advance generation and remain bound to the current source owner.
 Path candidates are selected from that host manifest, project declarations and
 the uploaded bundle's own inventory. A denied root, missing dependency or
 unavailable environment returns an explicit failure; the service does not search
@@ -145,6 +161,12 @@ hover/type, signature and definition/navigation. Exact selected host signatures,
 module scopes, exports and source owners determine results. A failed whole-file
 check exposes only same-run parsed syntax and diagnostics, with no certified
 semantic facts for any unit in the failed graph.
+The protocol also exposes source/context-revision-bound lexical spans and
+syntax, tag, attribute, path and template assistance without requiring an
+analysis stamp. The former uses the shared pure lexical role vocabulary;
+the latter checks actual admitted project and environment facts. Both remain
+distinct from certified semantic query results and can help on incomplete
+source before a whole-file check succeeds.
 `Unavailable` and `Ambiguous` remain distinct from a successful empty result.
 No completion operation invokes prompt preprocessing, scripts, tools, model
 inference, Git/HTTP fetch, install or initializer evaluation.
@@ -266,10 +288,14 @@ source manifest and documented retention expiry. It does not expose the staged
 files as a writable project resolver.
 
 Use `authoring.bundle.begin/chunk/commit/status` over the common typed protocol.
-Staging is bound to principal, host, context, intended origin and per-principal/
-global storage quotas. An incomplete or cancelled upload publishes nothing.
-Commit is idempotent under an explicit key; after a lost HTTP/stdio reply the
-client queries status rather than retrying a possibly completed publication.
+Staging is bound to the authenticated principal, host incarnation, intended
+origin and per-principal/global storage quotas. A client may attach a current
+authoring context for provenance, but an upload-only client does not need a host
+source-read grant or an existing context. Begin and commit each use an explicit
+idempotency key; repeated accepted chunks with identical bytes are no-ops,
+while conflicting bytes fail. An incomplete or cancelled upload publishes
+nothing. After a lost HTTP/stdio commit reply, the client queries status
+instead of blindly repeating publication.
 Storage/receipt ownership and pure closure validation/publication are separate
 five-point implementation slices. Reuse checked blob-store streaming mechanics
 where appropriate, but do not reuse message-input `Send_messages` scope,
@@ -297,10 +323,14 @@ are: OCH-277 host read-grant/capture adapter (5) and OCH-278 pure immutable
 context/overlay lifecycle (5), under unestimated tracking parent OCH-257;
 OCH-256 pure position bridge (3); OCH-258 checker/diagnostic projection (5);
 OCH-259 parser-owned ChatMD extraction mapping (5); OCH-260 compiler-owned
-provisional prefix assistance (5); OCH-261 typed protocol/client contract (5);
-OCH-262 HTTP/stdio server adapters (5); OCH-263 authoring bundle
+provisional prefix assistance (5); OCH-261 common/source/context protocol and
+client contract (8);
+OCH-280 analysis, lexical and assistance wire/client contract (5); OCH-281
+bundle wire/client contract (5); OCH-282 document-only context host admission
+(5); OCH-262 HTTP/stdio server adapters (5); OCH-263 authoring bundle
 staging/storage/receipt (5); and OCH-264 pure closure validation/publication
-(5). OCH-133, OCH-134 and OCH-135 retain their own assistance and highlighting
+(5). OCH-261 includes separate live host browse/read and captured source read.
+OCH-133, OCH-134 and OCH-135 retain their own assistance and highlighting
 outcomes. The run/test/trace/REPL implementation belongs to its developer-runtime
 tickets. Assign estimates before starting each ticket and link completion
 dependencies, including the bundle path into editor save/reload integration.

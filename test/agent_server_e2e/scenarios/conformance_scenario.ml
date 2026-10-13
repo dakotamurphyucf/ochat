@@ -4259,7 +4259,13 @@ let method_coverage =
 ;;
 
 let require_complete_method_coverage () =
-  let expected = String.Set.of_list Agent_protocol.Command.supported_methods in
+  (* The authoring core has closed wire codecs but no installed server handler
+     until OCH-262; conformance covers callable methods only. *)
+  let expected =
+    Set.diff
+      (String.Set.of_list Agent_protocol.Command.supported_methods)
+      (String.Set.of_list Agent_protocol.Authoring.Wire.Request.supported_methods)
+  in
   let covered = String.Set.of_list (List.map method_coverage ~f:fst) in
   let missing = Set.diff expected covered |> Set.to_list in
   let unknown = Set.diff covered expected |> Set.to_list in

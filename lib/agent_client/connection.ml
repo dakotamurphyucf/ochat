@@ -112,7 +112,8 @@ let has_command_receipt = function
   | Schedule_get _
   | Provider_status _
   | Provider_login_challenge _
-  | Ingress_submit _ -> false
+  | Ingress_submit _
+  | Authoring _ -> false
 ;;
 
 let admission_binding command =
