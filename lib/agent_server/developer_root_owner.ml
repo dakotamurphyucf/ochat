@@ -63,9 +63,18 @@ type call =
   }
 
 type admission =
-  { call : call
+  { mutable call : call
   ; mutable claim : Store.Run_claim.t option
   ; mutable worker : Developer_job_worker.t option
+  ; mutable recovery : Store.Recovery.t option
+  ; actor : Operator_authorization.t
+  ; capture : Chatml_developer_capture.t
+  ; registry : Chat_response.Tool_capability.t
+  ; selected : Chat_response.Tool_capability.t
+  ; job_policy : Chat_response.One_off_request.policy
+  ; handle : Store.handle
+  ; workspace_conflict_domain : string
+  ; mutable running : bool
   }
 
 type registry =
@@ -1266,6 +1275,19 @@ module Registry = struct
         Ok ()
     in
     let* () =
+      match admission.recovery with
+      | None -> Ok ()
+      | Some recovery when Store.Recovery.is_finished recovery ->
+        admission.recovery <- None;
+        Ok ()
+      | Some recovery ->
+        let* () =
+          Store.Recovery.abort_clean recovery |> Result.map_error ~f:error_of_store
+        in
+        admission.recovery <- None;
+        Ok ()
+    in
+    let* () =
       match admission.claim with
       | None -> Ok ()
       | Some claim ->
@@ -1365,6 +1387,182 @@ module Registry = struct
     t
   ;;
 
+  let verify_admission t (admission : admission) =
+    let owner = Store.owner admission.handle in
+    let principal = Operator_authorization.principal admission.actor in
+    if
+      P.Id.Principal.equal principal.id owner.principal_id
+      && Operator_authorization.is_current admission.actor
+      && Chatml_source.Digest.equal
+           (Chatml_developer_capture.fingerprint admission.capture)
+           (Store.capture_fingerprint admission.handle)
+      && (not (String.is_empty admission.workspace_conflict_domain))
+      && not t.closed
+    then selected_within ~registry:admission.registry admission.selected
+    else invalid "developer root actor or capture does not match"
+  ;;
+
+  let publish_admission t (admission : admission) =
+    let handle = admission.handle in
+    let owner = Store.owner handle in
+    let* token =
+      match admission.claim with
+      | Some token -> Ok token
+      | None -> invalid "developer root physical claim is missing"
+    in
+    let* () =
+      match admission.recovery with
+      | Some recovery when Store.Recovery.is_finished recovery -> Ok ()
+      | None | Some _ -> invalid "developer terminal recovery is unfinished"
+    in
+    let* active = Store.is_latest_active handle |> Result.map_error ~f:error_of_store in
+    let* () = verify_admission t admission in
+    let* () = if active then Ok () else invalid "developer root admission expired" in
+    let* terminals =
+      Terminal_queue.create ~max_native_occupancy:t.limits.max_native_occupancy
+      |> Result.map_error ~f:error_of_terminal_queue
+    in
+    let project_source = project_source admission.capture in
+    let* worker =
+      Developer_job_worker.create
+        ~close_policy:Retain_unclaimed
+        ~sw:t.switch
+        ~store:t.store
+        ~initial:handle
+        ~capacity:t.capacity
+        ~project_source
+        ~workspace_conflict_domain:admission.workspace_conflict_domain
+        ~now:t.now
+        ~max_active:t.limits.max_active_workers
+        ~max_quarantined:t.limits.max_quarantined_workers
+        ()
+    in
+    admission.worker <- Some worker;
+    let* () = verify_admission t admission in
+    let run =
+      { registry = t
+      ; actor = admission.actor
+      ; capture = admission.capture
+      ; owner
+      ; handle
+      ; run_claim = token
+      ; worker
+      ; project_source
+      ; workspace_conflict_domain = admission.workspace_conflict_domain
+      ; job_policy = admission.job_policy
+      ; selected = admission.selected
+      ; selection_revision = 0
+      ; state = Live
+      ; root_call = None
+      ; active = None
+      ; native_calls = Hashtbl.create (module P.Id.Invocation)
+      ; unresolved_native = []
+      ; terminals
+      ; pending = None
+      ; reconciling = false
+      }
+    in
+    Hashtbl.set t.owners ~key:owner.run_id ~data:(Owned run);
+    Ok run
+  ;;
+
+  let drive_recovery t (admission : admission) ~recover =
+    let run_id = (Store.owner admission.handle).run_id in
+    let call = admission.call in
+    let outcome =
+      match
+        Eio.Cancel.sub (fun cancel ->
+          call.cancel <- Some cancel;
+          Eio.Fiber.with_binding admission_key t (fun () ->
+            let* () = verify_admission t admission in
+            let* recovery =
+              match admission.recovery with
+              | Some recovery -> Ok recovery
+              | None ->
+                let* claim =
+                  match admission.claim with
+                  | Some claim -> Ok claim
+                  | None ->
+                    let* claim =
+                      Store.Run_claim.acquire ~store:t.store ~handle:admission.handle
+                      |> Result.map_error ~f:error_of_store
+                    in
+                    admission.claim <- Some claim;
+                    Ok claim
+                in
+                let* recovery =
+                  Store.Recovery.open_ ~claim ~handle:admission.handle
+                  |> Result.map_error ~f:error_of_store
+                in
+                admission.recovery <- Some recovery;
+                Ok recovery
+            in
+            let* () = recover recovery in
+            publish_admission t admission))
+      with
+      | value -> `Returned value
+      | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
+    in
+    let cleanup =
+      match outcome with
+      | `Returned (Ok _) -> `Returned (Ok ())
+      | `Returned (Error _) | `Raised _ ->
+        (match Eio.Cancel.protect (fun () -> cleanup_admission t run_id admission) with
+         | value -> `Returned value
+         | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ()))
+    in
+    call.cancel <- None;
+    admission.running <- false;
+    Eio.Promise.resolve call.finish ();
+    match outcome, cleanup with
+    | `Returned (Ok run), _ -> Ok run
+    | `Returned (Error original), `Returned (Ok ()) -> Error original
+    | `Returned (Error _), `Returned (Error cleanup) -> Error cleanup
+    | `Returned (Error _), `Raised (exn, backtrace) ->
+      Exn.raise_with_original_backtrace exn backtrace
+    | `Raised (exn, backtrace), _ -> Exn.raise_with_original_backtrace exn backtrace
+  ;;
+
+  let admit_with_recovery
+        t
+        ~actor
+        ~capture
+        ~registry
+        ~selected
+        ~job_policy
+        ~handle
+        ~workspace_conflict_domain
+        ~recover
+    =
+    if t.closed || not (same_domain t)
+    then invalid "developer root registry is closed or foreign"
+    else (
+      let run_id = (Store.owner handle).run_id in
+      if
+        Hashtbl.mem t.owners run_id || Hashtbl.length t.owners >= t.limits.max_active_runs
+      then invalid "developer run owner slot is unavailable"
+      else (
+        let finished, finish = Eio.Promise.create () in
+        let call = { cancel = None; finished; finish } in
+        let admission =
+          { call
+          ; claim = None
+          ; worker = None
+          ; recovery = None
+          ; actor
+          ; capture
+          ; registry
+          ; selected
+          ; job_policy
+          ; handle
+          ; workspace_conflict_domain
+          ; running = true
+          }
+        in
+        Hashtbl.set t.owners ~key:run_id ~data:(Admitting admission);
+        drive_recovery t admission ~recover))
+  ;;
+
   let admit
         t
         ~actor
@@ -1375,118 +1573,40 @@ module Registry = struct
         ~handle
         ~workspace_conflict_domain
     =
+    admit_with_recovery
+      t
+      ~actor
+      ~capture
+      ~registry
+      ~selected
+      ~job_policy
+      ~handle
+      ~workspace_conflict_domain
+      ~recover:(fun recovery ->
+        let* view =
+          Store.Recovery.observe recovery |> Result.map_error ~f:error_of_store
+        in
+        if List.is_empty (Store.Recovery.View.candidates view)
+        then Store.Recovery.finish recovery |> Result.map_error ~f:error_of_store
+        else invalid "abandoned developer job requires terminal recovery")
+  ;;
+
+  let resume_recovery t ~actor ~handle ~recover =
     if t.closed || not (same_domain t)
     then invalid "developer root registry is closed or foreign"
     else (
-      let owner = Store.owner handle in
-      let run_id = owner.run_id in
-      if
-        Hashtbl.mem t.owners run_id || Hashtbl.length t.owners >= t.limits.max_active_runs
-      then invalid "developer run owner slot is unavailable"
-      else (
+      let run_id = (Store.owner handle).run_id in
+      match Hashtbl.find t.owners run_id with
+      | Some (Admitting admission)
+        when (not admission.running)
+             && phys_equal admission.actor actor
+             && phys_equal admission.handle handle
+             && Option.is_some admission.recovery ->
         let finished, finish = Eio.Promise.create () in
-        let call = { cancel = None; finished; finish } in
-        let admission = { call; claim = None; worker = None } in
-        Hashtbl.set t.owners ~key:run_id ~data:(Admitting admission);
-        let retained = ref false in
-        let perform () =
-          Eio.Cancel.sub (fun cancel ->
-            call.cancel <- Some cancel;
-            Eio.Fiber.with_binding admission_key t (fun () ->
-              let* token =
-                Store.Run_claim.acquire ~store:t.store ~handle
-                |> Result.map_error ~f:error_of_store
-              in
-              admission.claim <- Some token;
-              let principal = Operator_authorization.principal actor in
-              let* () =
-                if
-                  P.Id.Principal.equal principal.id owner.principal_id
-                  && Operator_authorization.is_current actor
-                  && Chatml_source.Digest.equal
-                       (Chatml_developer_capture.fingerprint capture)
-                       (Store.capture_fingerprint handle)
-                  && not (String.is_empty workspace_conflict_domain)
-                then Ok ()
-                else invalid "developer root actor or capture does not match"
-              in
-              let* () = selected_within ~registry selected in
-              let project_source = project_source capture in
-              let* worker =
-                Developer_job_worker.create
-                  ~close_policy:Retain_unclaimed
-                  ~sw:t.switch
-                  ~store:t.store
-                  ~initial:handle
-                  ~capacity:t.capacity
-                  ~project_source
-                  ~workspace_conflict_domain
-                  ~now:t.now
-                  ~max_active:t.limits.max_active_workers
-                  ~max_quarantined:t.limits.max_quarantined_workers
-                  ()
-              in
-              admission.worker <- Some worker;
-              let* active =
-                Store.is_latest_active handle |> Result.map_error ~f:error_of_store
-              in
-              let* terminals =
-                Terminal_queue.create ~max_native_occupancy:t.limits.max_native_occupancy
-                |> Result.map_error ~f:error_of_terminal_queue
-              in
-              let* () =
-                if active && (not t.closed) && Operator_authorization.is_current actor
-                then Ok ()
-                else invalid "developer root admission expired"
-              in
-              let run =
-                { registry = t
-                ; actor
-                ; capture
-                ; owner
-                ; handle
-                ; run_claim = token
-                ; worker
-                ; project_source
-                ; workspace_conflict_domain
-                ; job_policy
-                ; selected
-                ; selection_revision = 0
-                ; state = Live
-                ; root_call = None
-                ; active = None
-                ; native_calls = Hashtbl.create (module P.Id.Invocation)
-                ; unresolved_native = []
-                ; terminals
-                ; pending = None
-                ; reconciling = false
-                }
-              in
-              Hashtbl.set t.owners ~key:run_id ~data:(Owned run);
-              retained := true;
-              Ok run))
-        in
-        let outcome =
-          match perform () with
-          | value -> `Returned value
-          | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
-        in
-        let cleanup =
-          if !retained
-          then `Returned (Ok ())
-          else (
-            match Eio.Cancel.protect (fun () -> cleanup_admission t run_id admission) with
-            | value -> `Returned value
-            | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ()))
-        in
-        call.cancel <- None;
-        Eio.Promise.resolve finish ();
-        match outcome, cleanup with
-        | `Returned (Ok run), _ -> Ok run
-        | `Returned (Error original), `Returned (Ok ()) -> Error original
-        | `Returned (Error _), `Returned (Error cleanup) -> Error cleanup
-        | `Returned (Error _), `Raised (exn, backtrace) ->
-          Exn.raise_with_original_backtrace exn backtrace
-        | `Raised (exn, backtrace), _ -> Exn.raise_with_original_backtrace exn backtrace))
+        admission.call <- { cancel = None; finished; finish };
+        admission.running <- true;
+        drive_recovery t admission ~recover
+      | None | Some (Owned _) | Some (Admitting _) ->
+        invalid "developer terminal recovery does not belong to this actor")
   ;;
 end

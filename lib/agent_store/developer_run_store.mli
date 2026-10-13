@@ -58,7 +58,8 @@ module Run_claim : sig
 
   (** Non-yielding release of this exact issuer token after host-owned actions,
       workers and uncertain handoffs are joined/reconciled. A pending Store
-      transaction for the run rejects release. Repeated release is harmless;
+      transaction, open recovery window, in-flight normal Store operation or
+      unsettled issued worker Claim for the run rejects release. Repeated release is harmless;
       the shared Store and unrelated runs stay open. *)
   val release : t -> (unit, Error.t) result
 end
@@ -181,6 +182,122 @@ type reconciliation =
   | Installed of Installed.t
   | Absent
   | Diverged
+
+(** Terminal bookkeeping for attempts whose process-local worker Claim was lost
+    at restart. This is available only during the issuing run's exclusive
+    startup window, before its normal worker or native dispatch is exposed.
+    It never mints a Claim, enters an effect, chooses a retry, or selects child
+    jobs. A current-epoch attempt receives the same terminal-only restriction
+    as a historical interrupted attempt. Waiting_completion is an already
+    ended dependency state and is deliberately outside this window. *)
+module Recovery : sig
+  type t
+
+  module Candidate : sig
+    type t
+
+    (** Exact persisted Running or Waiting_permission job, including its
+        original host/run/principal/epoch/capture/attempt identity. The owner
+        is never replaced by the current startup handle's epoch. *)
+    val job : t -> Agent_protocol.Developer_job.t
+  end
+
+  module View : sig
+    type t
+
+    (** One bounded, source-of-truth document observation. A Candidate is tied
+        to this observation and cannot be fabricated from a job DTO. *)
+    val observation : t -> Observation.t
+
+    val candidates : t -> Candidate.t list
+  end
+
+  module Pending : sig
+    type t
+
+    val job : t -> Agent_protocol.Developer_job.t
+    val after : t -> Agent_protocol.Developer_job.State.t
+  end
+
+  (** Open once for the exact live Run_claim and handle before any worker/native
+      activity under that claim. The Store's run-lifecycle gate marks ordinary
+      claim/dispatch preparation and effect entry before they can yield, tracks
+      outstanding issued Claims until their exact terminal settlement, and
+      excludes opening while such work or a pending Store write exists. Opening
+      also excludes later ordinary preparation, commit and Claim entry until
+      [finish] or [abort_clean]. The gate never waits on I/O while locked. A
+      second/late opening, foreign handle/domain or released claim rejects.
+      Run_claim.release rejects throughout an open window, even before a
+      Pending is selected. *)
+  val open_ : claim:Run_claim.t -> handle:handle -> (t, Error.t) result
+
+  (** Read one bounded current document and return only abandoned physically
+      claimed attempts. Each visit and publication is charged to Store work and
+      document limits. A fresh View is required after a successful terminal
+      commit or a document revision change. No result disclosure follows. *)
+  val observe : t -> (View.t, Error.t) result
+
+  (** Reserve an exact terminal-only transition before result bytes or private
+      intent are written. The Candidate and View must be from the same exact
+      observation, still current at the Store read. [after] must be terminal,
+      preserve job attempt/start and contain no retry or child selection. The
+      existing pure transition and document encoder produce the one Prepared
+      CAS; a mismatch rejects without writing. A retained Pending must be
+      settled before any different selection is prepared. *)
+  val prepare_terminal
+    :  t
+    -> view:View.t
+    -> candidate:Candidate.t
+    -> after:Agent_protocol.Developer_job.State.t
+    -> (Pending.t, Error.t) result
+
+  (** A retained exact preparation is reported after an uncertain write or
+      cancellation. Higher result publication reuses/reconciles it and its
+      private selected intent; it must not select replacement bytes. Successful
+      installation clears the window's Pending. Proven Absent retains it until
+      a retry or [reprepare_same]; Diverged/unknown retains it and forbids a
+      different preparation. *)
+  val pending : t -> Pending.t option
+
+  (** Use the same Store writer, pending barrier, file/directory durability and
+      exact reconciliation as ordinary claimed terminal transitions. [admit]
+      is a non-yielding host check immediately before the replace; it must
+      confirm the original actor/selection authority for a successful result,
+      or the physical owner's right to truthful terminal cleanup. A revoked
+      actor after prior I/O cannot publish a new success. Errors/cancellation
+      preserve the Pending and original exception/backtrace. *)
+  val commit_terminal
+    :  t
+    -> Pending.t
+    -> admit:(unit -> bool)
+    -> (Installed.t, Error.t) result
+
+  val reconcile_terminal : t -> Pending.t -> (reconciliation, Error.t) result
+
+  (** After exact reconciliation proves the prior Pending absent, reobserve
+      the document and prepare ONLY its same original job/attempt and terminal
+      [after] (including identical selected result reference). This handles an
+      unrelated revision advancing the file without allowing a new selection.
+      Conflict, divergent or uncertain evidence leaves the old Pending in
+      custody. A proven same-revision absence may instead retry its Prepared. *)
+  val reprepare_same : t -> Pending.t -> (Pending.t, Error.t) result
+
+  (** Complete the one-shot startup window only after no Pending remains and a
+      fresh bounded read finds no Running/Waiting_permission attempt in any
+      retained epoch. A successful close enables normal claims under this
+      Run_claim. No callback may enter a worker between the final read and
+      closing the window. *)
+  val finish : t -> (unit, Error.t) result
+
+  (** Non-authorizing lifecycle observation for the owning startup adapter. *)
+  val is_finished : t -> bool
+
+  (** Release a window only when no terminal was prepared or attempted and no
+      selected custody was retained. This supports ordinary validation failure
+      before publication. It never discards uncertain Store work; otherwise
+      the physical claim remains quarantined for retry/restart. *)
+  val abort_clean : t -> (unit, Error.t) result
+end
 
 (** Open one singleton facade for this physical Session_store under its existing
     daemon lock. The implementation checks the lock remains live and belongs to
@@ -421,7 +538,11 @@ val prepare_unentered_claim_cleanup
 (** A first-commit CAS mismatch before any write returns [Prewrite_conflict]
     and retires only this pending token. An attempted write never takes that
     path, even if a later observation diverges. *)
-val commit_claimed_transition : handle -> Prepared.t -> (Installed.t, Error.t) result
+val commit_claimed_transition
+  :  ?admit:(unit -> bool)
+  -> handle
+  -> Prepared.t
+  -> (Installed.t, Error.t) result
 
 val reconcile_claimed_transition
   :  handle
