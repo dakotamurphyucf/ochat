@@ -25,6 +25,21 @@ including EOF. Unsupported gaps are unavailable, not nearest-neighbor guesses.
 Configured module availability is separate from lexical values and type aliases;
 availability alone proves neither checking nor initialization.
 
+`Chatml_editor_position` converts editor line/column pairs against one immutable
+`Chatml_source` capture. Lines are zero based. A byte column counts exact UTF-8
+source bytes; a UTF-16 column counts code units, so a supplementary scalar takes
+two units. CR, LF and CRLF delimit lines without normalization. The position
+inside CRLF, the middle of a valid UTF-8 scalar and the middle of a UTF-16
+surrogate pair are rejected. EOF is the end of the last line; a trailing line
+break creates an empty final line. Malformed UTF-8 leaves byte conversion
+available and makes UTF-16 conversion unavailable with a typed error; it does
+not change compiler source admission. Converting to a compiler span uses
+`Chatml_source.locate`, and a span from another source ID or digest is rejected
+even if its byte offsets fit. The on-demand index has a caller-selected entry
+limit and does not load files or confer authority. An editor range itself holds
+only coordinates, so the service must qualify incoming ranges with the intended
+capture ID and digest before applying them to an index.
+
 An invalid program returns `Failed`, whose partial result contains only diagnostics
 and syntax tables from units parsed in that same attempt. A failed parser has no
 recovery tree. No provisional inferred type, export, lexical context or dependency
