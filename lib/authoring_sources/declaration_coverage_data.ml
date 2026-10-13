@@ -6,6 +6,8 @@ let features =
     , "Closed tags, attributes, comments and RAW boundaries"
     , [ "lib/chatmd/chatmd_ast.ml"
       ; "lib/chatmd/chatmd_lexer.mll"
+      ; "lib/chatmd/chatmd_tag_scope.ml"
+      ; "lib/chatmd_shell_spec/shell_element.ml"
       ; "lib/chatmd/chatmd_parser_engine.mly"
       ; "lib/chatmd/chatmd_parser.ml"
       ; "lib/chatmd/chatmd_parser_builder.ml"
@@ -13,7 +15,10 @@ let features =
       ; "lib/chatmd/chatmd_tokens.ml"
       ]
     , "chatmd.definitions"
-    , [ "chatmd.literal-resource-text"; "test/chatmd_parser_test.ml" ] )
+    , [ "chatmd.literal-resource-text"
+      ; "test/chatmd_parser_test.ml"
+      ; "test/chatmd_authoring_schema/schema_tests.ml"
+      ] )
   ; ( "sources.capture"
     , "Captured imports, relative sources, namespaces and bounded expansion"
     , [ "lib/chatmd/prompt.ml"
@@ -62,6 +67,7 @@ let features =
     , "Exact inherited references, two-stage narrowing and no implementation replacement"
     , [ "lib/chat_response/generated_admission.ml"
       ; "lib/chatmd/prompt.ml"
+      ; "lib/chatmd/chatmd_declaration_schema.ml"
       ; "lib/chatmd/chatmd_attributes.ml"
       ]
     , "chatmd.definitions"
@@ -73,6 +79,7 @@ let features =
     , "Single extension lifecycle moderator and generated surface restrictions"
     , [ "lib/chatmd/prompt.ml"
       ; "lib/chatmd/chatmd_extension_declaration.ml"
+      ; "lib/chatmd/chatmd_declaration_schema.ml"
       ; "lib/chat_response/generated_admission.ml"
       ]
     , "chatmd.definitions"
@@ -81,6 +88,8 @@ let features =
     , "Inline/source exclusivity, explicit kind/API, limits and script identities"
     , [ "lib/chatmd/chatmd_script_declaration.ml"
       ; "lib/chatmd/chatmd_extension_declaration.ml"
+      ; "lib/chatmd/chatmd_declaration_schema.ml"
+      ; "lib/chatmd_shell_spec/chatmd_script_spec.ml"
       ; "lib/chatmd/chatmd_attributes.ml"
       ; "lib/chatmd_shell_spec/duration.ml"
       ]
@@ -90,6 +99,7 @@ let features =
     , "Standalone and moderator tool bindings and declaration registry checks"
     , [ "lib/chatmd/prompt.ml"
       ; "lib/chatmd/chatmd_extension_declaration.ml"
+      ; "lib/chatmd/chatmd_declaration_schema.ml"
       ; "lib/chatmd_shell_spec/extension_spec.ml"
       ; "lib/chatmd/chatmd_attributes.ml"
       ]
@@ -104,12 +114,16 @@ let features =
     , [ "test/tool_schema_test.ml"; "test/chatml_composition/standalone_tests.ml" ] )
   ; ( "tools.uses"
     , "Exact standalone dependencies, duplicate/cycle checks and moderator exclusion"
-    , [ "lib/chatmd/prompt.ml"; "lib/chatmd/chatmd_extension_declaration.ml" ]
+    , [ "lib/chatmd/prompt.ml"
+      ; "lib/chatmd/chatmd_extension_declaration.ml"
+      ; "lib/chatmd/chatmd_declaration_schema.ml"
+      ]
     , "chatmd.declarations.schemas"
     , [ "test/chatmd_extension_test.ml"; "test/managed_tool_registry_test.ml" ] )
   ; ( "authoring.policy"
     , "Auto/manual/preload declarations and inherited authority boundaries"
     , [ "lib/chatmd/chatmd_extension_declaration.ml"
+      ; "lib/chatmd/chatmd_declaration_schema.ml"
       ; "lib/chatmd_shell_spec/extension_spec.ml"
       ; "lib/chat_response/authoring_policy.ml"
       ; "lib/chatmd/chatmd_attributes.ml"
@@ -119,6 +133,7 @@ let features =
   ; ( "authoring.help"
     , "Explicit package/task/topic/helper metadata without new authority"
     , [ "lib/chatmd/chatmd_extension_declaration.ml"
+      ; "lib/chatmd/chatmd_declaration_schema.ml"
       ; "lib/chatmd_shell_spec/authoring_metadata.ml"
       ; "lib/chat_response/authoring_policy.ml"
       ; "lib/chatmd/chatmd_attributes.ml"
@@ -154,6 +169,9 @@ let features =
   ; ( "tools.shell_binding"
     , "Named shell runtimes, explicit modes and centralized process authority"
     , [ "lib/chatmd/chatmd_shell_declaration.ml"
+      ; "lib/chatmd/chatmd_shell_schema.ml"
+      ; "lib/chatmd/chatmd_moderator_runtime_declaration.ml"
+      ; "lib/chatmd/chatmd_declaration_schema.ml"
       ; "lib/chatmd_shell_spec/shell_tool_spec.ml"
       ; "lib/chatmd_shell_spec/manifest_compiler.ml"
       ; "lib/chat_response/shell_tool.ml"
@@ -161,6 +179,7 @@ let features =
     , "chatmd.capabilities"
     , [ "test/agent_docs/docs_chatmd_capabilities.ml"
       ; "test/chatmd_shell_parser_test.ml"
+      ; "test/chatmd_authoring_schema/schema_tests.ml"
       ; "test/chat_response_shell_tool_test.ml"
       ; "test/shell_activation/activation_tests.ml"
       ; "test/chatml_native_hooks/shell_tests.ml"
@@ -219,27 +238,35 @@ let implementation_sources =
     , "8c422ff1ad004059d86a2160219fb2a5d493899dbf780d6f77ba7c2f52548add" )
   ; ( "lib/chat_response/initial_prompt_history.ml"
     , "daf50b9c9a5337b562b5d78c8f37b12033aba72f561491f506443095e694fed9" )
+  ; ( "lib/chatmd/chatmd_tag_scope.ml"
+    , "9b1b69944fdd20fd5cc71a840eb6b37f78a2d057f18b0c3a33958acbab088c55" )
+  ; ( "lib/chatmd/chatmd_declaration_schema.ml"
+    , "ed46b7e39e2dbb92d6df7e238a0984b7807e34adaad343bfdbda70a901315be2" )
+  ; ( "lib/chatmd/chatmd_shell_schema.ml"
+    , "f48e38afc50260ddc3061215fb69addeb982eb42360224d8fc232e48fa6b5199" )
+  ; ( "lib/chatmd/chatmd_moderator_runtime_declaration.ml"
+    , "7ffa64b5169faa139c636757d80ddea7f09d525f4f94668cab33819c7f6997a6" )
   ; ( "lib/chatmd/chatmd_ast.ml"
-    , "1e23a862fcee8b5df7a410d62477b83cfb25bdd2b9a5ce67c9ce05ff50e2ccc9" )
+    , "0a6ce1ca5b5a0eaeffb1e4a847b643dffc3b86690fc74efe65c6e0586933ae55" )
   ; ( "lib/chatmd/chatmd_attributes.ml"
     , "778ffad3961edb8e13c2a82d94fd8f83517833cb8aae4135728627e7b6a428b6" )
   ; ( "lib/chatmd/chatmd_extension_declaration.ml"
-    , "6e3f72f794c0123b44a11f900216ffb809f3df57bb69fd6d136eced9df3a3030" )
+    , "295fe15c00bc2abfd922e86ba899b094d772e65de712d213a9dcd1222f9626f0" )
   ; ( "lib/chatmd/chatmd_extraction_map.ml"
     , "4d436aef1dca4fdff470e060a17de1ed6ac08d091e913a5cdc9f01d2ca24bd03" )
   ; ( "lib/chatmd/chatmd_import_expansion.ml"
     , "8df0daffef119d3ba6ec7c9bdcec5a8076e75867ac64e56754713f5e300a1184" )
   ; ( "lib/chatmd/chatmd_lexer.mll"
-    , "5d49a44ca80f240345db030bd485b803a2e74f19eeb6a1397a4b87b46019ecac" )
+    , "645ee2d07487f13444b1c534e6c449624deaa5f7dce9cb2d417c14e6ae8bf045" )
   ; ( "lib/chatmd/chatmd_parser_engine.mly"
     , "94e9fb5543628175f53c2810536459a191fa21ec82312288a8ca0404b9487b78" )
   ; ( "lib/chatmd/chatmd_script_declaration.ml"
-    , "a124fc7bdcb24e6cb7f6ca193a8c282da9b039c79fa64741baa2634bbd57cf93" )
+    , "c956aec536fb11a0897375828e561c6a32afd63d0efef11c87132b0985f46dd6" )
   ; "lib/source.ml", "6c18a151df64c7489a2fcb745e5f23e54c754696d0bd4b27c53505846317299b"
   ; ( "lib/chatmd/chatmd_source_bundle.ml"
     , "c3e0f8f89c8538ddcec98873739455a673b0e6e894282c21c96046c096bb6ae5" )
   ; ( "lib/chatmd/prompt.ml"
-    , "e755d3454cafa130b1b32c082dfb08d791d04d4e476a644b55d90f60a83a2f0b" )
+    , "a9c815a70ff94b0b461782215fbfcc9f25de17372d207e19ab8c8e32c7730ce5" )
   ; ( "lib/chatmd/source_loader.ml"
     , "202688ce4248d9042c4d865f45f5909a593506d5f1c269c5db0419d9c3d4b85e" )
   ; ( "lib/chatmd_shell_spec/authoring_metadata.ml"
@@ -265,17 +292,21 @@ let implementation_sources =
   ; ( "lib/chat_response/tool.ml"
     , "657426462708a739d3549d54ecb94671fdebecf7f25881632e0928c8644a0214" )
   ; ( "lib/chatmd/chatmd_read_file_declaration.ml"
-    , "f604a8e767cae51c15b31eb0d8a266d9ea1efd429f77cbb7b068940d38a2768e" )
+    , "446e56ceec98db2b0eeabed3b6f86e37127d71c03fb0594380b3daba9ba78eba" )
   ; ( "lib/chatmd/chatmd_read_file_spec.ml"
     , "9864c1077c135be35f6109c537a75447199131899e3cfbec70ac4c00012c8f63" )
   ; ( "lib/chatmd/chatmd_shell_declaration.ml"
-    , "2b5d331094c7abf2b61f5aa537cc836dae313f80fa9bef7575ea7ad23c61027a" )
+    , "f47b4ff0c3f2ec7cb494e576df9e6c3313683995a42cd05e2a54f4c3f6ff93cc" )
   ; ( "lib/chatmd_shell_spec/manifest_compiler.ml"
     , "f10c82f13dc06b2b821adf2306ab6117ed19aa613e1ee8ec96ea9bfc7747bf1e" )
   ; ( "lib/chatmd_shell_spec/path_expr.ml"
     , "c64b5c5033c352628fb8fc89b13fb382ee965b999c29293eb0e8f9df220ce97a" )
+  ; ( "lib/chatmd_shell_spec/chatmd_script_spec.ml"
+    , "ca8508039cb59b0ea897f07b400bf0dd1d81ba19cecb1c28c0dd725968839a5b" )
+  ; ( "lib/chatmd_shell_spec/shell_element.ml"
+    , "76b1afa4036446a644dd4d4e1c04f6ce35e43240bc42d33b43678cd0f7e9f71f" )
   ; ( "lib/chatmd_shell_spec/shell_tool_spec.ml"
-    , "85214971617bee329014f225c9374c0c9202130be66309c84d54c23944ed73c4" )
+    , "6b4ef1c95060cb600baa51d813502519a6fd4bac47c5716ad84de326555c324b" )
   ; "lib/functions.ml", "05c5428d7870e3fe9711a3f3239ae1e0919c86fa5022c4ea5c7944559d7d2eb2"
   ; ( "lib/mcp/mcp_tool.ml"
     , "f9e69c49231b625fb479a77182b606113ae9369dce8df1c67c99c3eaddfdac49" )

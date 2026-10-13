@@ -106,6 +106,32 @@ type t =
   }
 [@@deriving sexp, compare, equal, hash, bin_io, jsonaf]
 
+(** Finite source spellings consumed by the declaration parser and projected
+    to authoring suggestions without reconstructing typed variants. *)
+module Enum : sig
+  val verification : (string * verification_mode) list
+  val stdin : (string * stdin_mode) list
+  val rationale : (string * rationale_mode) list
+  val result : (string * result_format) list
+  val stream : (string * stream_mode) list
+  val nonzero : (string * nonzero) list
+end
+
+(** Source spelling classification used by mode compatibility and mode
+    lowering; [names] is the same finite accepted set for authoring. *)
+module Source_mode : sig
+  type t =
+    | Fixed
+    | Structured
+    | Chain
+    | Raw
+    | Script
+  [@@deriving equal]
+
+  val names : string list
+  val of_string : string -> t option
+end
+
 (** [parse_compact_attributes ~source attributes] converts attributes already
     parsed by the ChatMD parser into a compact or childless shell tool. It
     rejects duplicate, unknown, and mode-incompatible attributes.

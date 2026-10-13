@@ -105,6 +105,44 @@ type t =
   }
 [@@deriving sexp, compare, equal, hash, bin_io, jsonaf]
 
+module Enum = struct
+  let verification = [ "sha256", Verify_sha256 ]
+  let stdin = [ "none", No_stdin; "optional", Optional_stdin; "required", Required_stdin ]
+
+  let rationale =
+    [ "none", No_rationale
+    ; "optional", Optional_rationale
+    ; "required", Required_rationale
+    ]
+  ;;
+
+  let result = [ "combined", Combined; "stdout", Stdout; "structured", Structured_result ]
+  let stream = [ "finalized", Finalized; "sanitized", Sanitized ]
+  let nonzero = [ "result", Result; "error", Error ]
+end
+
+module Source_mode = struct
+  type t =
+    | Fixed
+    | Structured
+    | Chain
+    | Raw
+    | Script
+  [@@deriving equal]
+
+  let spellings =
+    [ "fixed", Fixed
+    ; "structured", Structured
+    ; "chain", Chain
+    ; "raw", Raw
+    ; "script", Script
+    ]
+  ;;
+
+  let names = List.map spellings ~f:fst
+  let of_string value = List.Assoc.find spellings value ~equal:String.equal
+end
+
 exception Parse_error of Diagnostic.t
 
 let fail source code message =
@@ -164,10 +202,10 @@ let common_attributes =
 ;;
 
 let mode_attributes = function
-  | "fixed" -> [ "command"; "executable_ref" ]
-  | "structured" | "chain" -> []
-  | "raw" -> [ "executable"; "arguments_before_script" ]
-  | "script" ->
+  | Some Source_mode.Fixed -> [ "command"; "executable_ref" ]
+  | Some Structured | Some Chain | None -> []
+  | Some Raw -> [ "executable"; "arguments_before_script" ]
+  | Some Script ->
     [ "script"
     ; "interpreter"
     ; "executable"
@@ -175,10 +213,9 @@ let mode_attributes = function
     ; "verification"
     ; "max_source_bytes"
     ]
-  | _ -> []
 ;;
 
-let reject_mode_incompatible source attributes mode =
+let reject_mode_incompatible source attributes mode ~mode_name =
   let allowed = Set.union common_attributes (String.Set.of_list (mode_attributes mode)) in
   List.iter attributes ~f:(fun (name, _) ->
     if not (Set.mem allowed name)
@@ -186,7 +223,7 @@ let reject_mode_incompatible source attributes mode =
       fail
         source
         "shell.tool_mode_attribute"
-        (sprintf "attribute %s is not valid for %s mode" name mode))
+        (sprintf "attribute %s is not valid for %s mode" name mode_name))
 ;;
 
 let find attributes name = List.Assoc.find attributes name ~equal:String.equal
@@ -284,7 +321,7 @@ let script_mode source attributes =
       source
       "verification"
       (Option.value (find attributes "verification") ~default:"sha256")
-      [ "sha256", Verify_sha256 ]
+      Enum.verification
   in
   let max_source_bytes =
     Option.value_map
@@ -293,21 +330,15 @@ let script_mode source attributes =
       ~f:(positive_int source "max_source_bytes")
   in
   Script_file
-    { script
-    ; interpreter
-    ; executable
-    ; fixed_arguments
-    ; verification
-    ; max_source_bytes
-    }
+    { script; interpreter; executable; fixed_arguments; verification; max_source_bytes }
 ;;
 
 let parse_mode source attributes mode long_command model_arguments =
   match mode with
-  | "fixed" -> fixed_mode source attributes long_command model_arguments
-  | "structured" -> Structured
-  | "chain" -> Chain
-  | "raw" ->
+  | Source_mode.Fixed -> fixed_mode source attributes long_command model_arguments
+  | Structured -> Structured
+  | Chain -> Chain
+  | Raw ->
     Raw
       { executable = parse_path source (require source attributes "executable")
       ; arguments_before_script =
@@ -316,8 +347,7 @@ let parse_mode source attributes mode long_command model_arguments =
             ~default:[ "-c" ]
             ~f:(string_list source "arguments_before_script")
       }
-  | "script" -> script_mode source attributes
-  | value -> fail source "shell.tool_invalid_mode" ("invalid shell tool mode: " ^ value)
+  | Script -> script_mode source attributes
 ;;
 
 let parse_common source attributes mode =
@@ -326,7 +356,7 @@ let parse_common source attributes mode =
       source
       "stdin"
       (Option.value (find attributes "stdin") ~default:"none")
-      [ "none", No_stdin; "optional", Optional_stdin; "required", Required_stdin ]
+      Enum.stdin
   in
   let rationale =
     enum
@@ -334,11 +364,8 @@ let parse_common source attributes mode =
       "rationale"
       (Option.value
          (find attributes "rationale")
-         ~default:(if String.equal mode "fixed" then "none" else "optional"))
-      [ "none", No_rationale
-      ; "optional", Optional_rationale
-      ; "required", Required_rationale
-      ]
+         ~default:(if Source_mode.equal mode Fixed then "none" else "optional"))
+      Enum.rationale
   in
   stdin, rationale
 ;;
@@ -349,21 +376,21 @@ let parse_output source attributes =
       source
       "result"
       (Option.value (find attributes "result") ~default:"combined")
-      [ "combined", Combined; "stdout", Stdout; "structured", Structured_result ]
+      Enum.result
   in
   let stream =
     enum
       source
       "stream"
       (Option.value (find attributes "stream") ~default:"finalized")
-      [ "finalized", Finalized; "sanitized", Sanitized ]
+      Enum.stream
   in
   let nonzero =
     enum
       source
       "nonzero"
       (Option.value (find attributes "nonzero") ~default:"result")
-      [ "result", Result; "error", Error ]
+      Enum.nonzero
   in
   result, stream, nonzero
 ;;
@@ -375,12 +402,19 @@ let parse_exn ~source ~command ~arguments attributes =
   if not (String.equal type_ "shell")
   then fail source "shell.tool_invalid_type" "tool type must be shell";
   let mode_name = Option.value (find attributes "mode") ~default:"fixed" in
-  reject_mode_incompatible source attributes mode_name;
-  if (not (String.equal mode_name "fixed")) && Option.is_some command
+  let selected_mode = Source_mode.of_string mode_name in
+  reject_mode_incompatible source attributes selected_mode ~mode_name;
+  let mode =
+    match selected_mode with
+    | Some mode -> mode
+    | None ->
+      fail source "shell.tool_invalid_mode" ("invalid shell tool mode: " ^ mode_name)
+  in
+  if (not (Source_mode.equal mode Fixed)) && Option.is_some command
   then fail source "shell.tool_mode_child" "command child is valid only for fixed mode";
-  if (not (String.equal mode_name "fixed")) && Option.is_some arguments
+  if (not (Source_mode.equal mode Fixed)) && Option.is_some arguments
   then fail source "shell.tool_mode_child" "arguments child is valid only for fixed mode";
-  let stdin, rationale = parse_common source attributes mode_name in
+  let stdin, rationale = parse_common source attributes mode in
   let result, stream, nonzero = parse_output source attributes in
   { name = require source attributes "name"
   ; description = find attributes "description"
@@ -389,7 +423,7 @@ let parse_exn ~source ~command ~arguments attributes =
       parse_mode
         source
         attributes
-        mode_name
+        mode
         command
         (Option.value arguments ~default:default_arguments)
   ; stdin

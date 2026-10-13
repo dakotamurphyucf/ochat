@@ -2,7 +2,7 @@
  (name chatmd_source_input)
  (public_name ochat.chatmd_source_input)
  (wrapped false)
- (modules chatmd_ast chatmd_parser_input)
+ (modules chatmd_ast chatmd_parser_input chatmd_tag_scope)
  (libraries core digestif source chatml_source ochat.chatmd_shell_spec)
  (preprocess (pps ppx_jane)))
 
@@ -24,6 +24,8 @@
   chatmd_lexer
   chatmd_parser
   chatmd_attributes
+  chatmd_shell_schema
+  chatmd_declaration_schema
   chatmd_import_expansion
   chatmd_script_declaration
   chatmd_extension_declaration

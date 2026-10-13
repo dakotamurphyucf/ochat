@@ -167,20 +167,9 @@ let parse
         ~source:source_ref
         ~path:[ "script" ]
         ~allowed:
-          [ "id"
-          ; "language"
-          ; "kind"
-          ; "src"
-          ; "project"
-          ; "environment"
-          ; "wall_time"
-          ; "fuel"
-          ; "max_tasks"
-          ; "max_value"
-          ; "max_output"
-          ; "max_array_items"
-          ; "max_depth"
-          ]
+          (Chatmd_declaration_schema.attributes
+             Chatmd_declaration_schema.Family.Script_legacy
+           |> Chatmd_declaration_schema.Attribute_names.names)
         attributes
       |> attribute
     in

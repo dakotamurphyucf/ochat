@@ -63,17 +63,13 @@ open Chatmd_tokens
 
 type state =
   { mutable pending_token : Chatmd_parser.token option
-  ; mutable depth : int
-  ; mutable structured_scope_depths : int list
-  ; mutable extension_scope_depths : int list
+  ; mutable scope : Chatmd_tag_scope.t
   ; scratch : Buffer.t
   }
 
 let create_state () =
   { pending_token = None
-  ; depth = 0
-  ; structured_scope_depths = []
-  ; extension_scope_depths = []
+  ; scope = Chatmd_tag_scope.root
   ; scratch = Buffer.create 256
   }
 
@@ -90,56 +86,30 @@ let lexeme_text lexbuf text =
 (* Helpers                                                                  *)
 (*--------------------------------------------------------------------------*)
 
-let is_structured_scope state = not (List.is_empty state.structured_scope_depths)
-
 let tag_of_string_in_state state name =
-  match tag_of_string_opt name with
-  | Some (Shell_element _) when not (is_structured_scope state) -> None
-  | Some Uses when List.is_empty state.extension_scope_depths -> None
-  | Some (Authoring_context | Authoring_help) when state.depth <> 0 -> None
-  | tag -> tag
+  Chatmd_tag_scope.recognize state.scope ~name
 
 let is_recognised state name = Option.is_some (tag_of_string_in_state state name)
 
 let tag_of_string_exn state name =
   Option.value_exn (tag_of_string_in_state state name)
 
-let is_shell_tool attrs =
-  List.Assoc.find attrs "type" ~equal:String.equal
-  |> Option.value_map ~default:false ~f:(Option.value_map ~default:false ~f:(String.equal "shell"))
-
-let is_read_file_tool attrs =
-  List.Assoc.find attrs "name" ~equal:String.equal
-  |> Option.value_map ~default:false ~f:(Option.value_map ~default:false ~f:(fun name ->
-    String.equal name "read_file" || String.equal name "get_contents"))
-
-let is_extension_tool attrs =
-  List.exists attrs ~f:(function
-    | "type", Some ("moderator" | "chatml") -> true
-    | _ -> false)
-
-let is_structured_root tag attrs =
-  match tag with
-  | Shell_access -> true
-  | Tool -> is_shell_tool attrs || is_read_file_tool attrs || is_extension_tool attrs
-  | _ -> false
-
 let enter_element state tag attrs =
-  state.depth <- state.depth + 1;
-  if tag_equal tag Tool && is_extension_tool attrs
-  then state.extension_scope_depths <- state.depth :: state.extension_scope_depths;
-  if is_structured_root tag attrs
-  then state.structured_scope_depths <- state.depth :: state.structured_scope_depths
+  state.scope <-
+    (match
+       Chatmd_tag_scope.enter
+         state.scope
+         ~tag
+         ~attributes:attrs
+         ~max_depth:Int.max_value
+         ~checkpoint:(fun () -> ())
+     with
+     | Ok scope -> scope
+     | Error Chatmd_tag_scope.Error.Depth_limit ->
+       failwith "ChatMD lexical scope depth exhausted")
 
 let leave_element state =
-  (match state.extension_scope_depths with
-   | depth :: rest when Int.equal depth state.depth -> state.extension_scope_depths <- rest
-   | _ -> ());
-  (match state.structured_scope_depths with
-   | depth :: rest when Int.equal depth state.depth ->
-     state.structured_scope_depths <- rest
-   | _ -> ());
-  state.depth <- Int.max 0 (state.depth - 1)
+  state.scope <- Chatmd_tag_scope.leave state.scope
 
 (* Parse attribute list contained in the raw string *)
 (* ------------------------------------------------------------------ *)

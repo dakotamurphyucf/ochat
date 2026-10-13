@@ -287,6 +287,27 @@ fails parse/type/dependency checking, only syntax assistance remains. Whole-file
 diagnostics are authoritative. Root review accepted this narrow authoring behavior;
 any change to build grammar or import precedence needs renewed review.
 
+The ChatMD authoring schema now derives tag spelling and strict lexical
+placement from the same AST vocabulary and scope state used by the batch lexer.
+Script/tool family routing and exhaustive declaration attribute sets are shared
+with their existing validators; nested shell names require the actual typed
+ancestor chain, since `path`, `arg` and matchers have different meanings under
+different parents. Permissive legacy declarations expose **Helpful** names,
+which never claim to reject other attributes. Unconditional finite values use
+the parser's typed spelling maps; comma-separated approval scopes identify
+allowed tokens rather than pretending each token is an entire valid value.
+Sibling-dependent lifecycle/protocol values remain unavailable until a precise
+branch is known. An unfinished
+declaration retains conditional family choices: for example a `read_file` tool
+prefix may still become a command, agent, inherited or extension declaration.
+Closed invalid script discriminators and duplicate strict attributes are
+reported as authoring-malformed prefixes without changing batch acceptance.
+The schema caps one authoring query at 128 completed attributes, 4096 bytes per
+name or value and 65536 bytes total; exceeding it yields no attribute
+candidates and does not reject the underlying document. The later tolerant
+cursor and suggestion producer consume this schema; neither is installed by
+this source-only step.
+
 The OCH-260 implementation recognizes outer `program_stmts` reductions from the
 existing ChatML parser. It retains one latest completed statement or `;;`
 boundary at or before the requested cursor while reading the actual source;
@@ -472,8 +493,10 @@ staging/storage/receipt (8); and OCH-264 as an unestimated tracking parent for
 OCH-294 captured project closure validation, OCH-295 tagged ChatMD and project
 upload basis, and OCH-296 durable proof-gated publication. OCH-261 includes
 separate live host browse/read and captured source read.
-OCH-133, OCH-134 and OCH-135 retain their own assistance and highlighting
-outcomes. The run/test/trace/REPL implementation belongs to its developer-runtime
+The shared ChatMD validator schema supplies declaration metadata to later
+tolerant-cursor and seven-category suggestion work. Semantic assistance and
+highlighter assets retain their own implementation boundaries. The
+run/test/trace/REPL implementation belongs to its developer-runtime
 tickets. Assign estimates before starting each ticket and link completion
 dependencies, including the bundle path into editor save/reload integration.
 
