@@ -204,6 +204,38 @@ val decode
 
 val source : t -> Chatml_source.t
 
+(** Read-only names from the same retained decoded declaration; no Build or
+    environment resolution. The receiver is the public project [t]. *)
+module Environment_names : sig
+  module Error = Chatml_project_declaration.Environment_names.Error
+
+  val list
+    :  t
+    -> max_names:int
+    -> checkpoint:(unit -> unit)
+    -> (string list, Error.t) Result.t
+end
+
+module Declared_paths : sig
+  type role = Chatml_project_declaration.Declared_paths.role =
+    | Source_directory
+    | Module_implementation
+    | Module_interface
+    | Entry_source
+    | Local_dependency_project
+  [@@deriving equal, sexp_of]
+
+  module Error = Chatml_project_declaration.Declared_paths.Error
+
+  val contains
+    :  t
+    -> role:role
+    -> member:Source.Portable_path.t
+    -> max_entries:int
+    -> checkpoint:(unit -> unit)
+    -> (bool, Error.t) Result.t
+end
+
 (** Already validated root context of the exact decoded declaration. Reuses its
     immutable whole-source location and empty JSON field path without rescanning. *)
 val declared_at : t -> Declared_at.t
