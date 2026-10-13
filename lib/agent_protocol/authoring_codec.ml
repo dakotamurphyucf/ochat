@@ -6,48 +6,88 @@ let maximum_wire_integer = 9_007_199_254_740_991
 let maximum_depth = 32
 let maximum_nodes = 100_000
 
-let within_wire_budget json =
-  let remaining_bytes = ref maximum_wire_bytes in
-  let remaining_nodes = ref maximum_nodes in
-  let charge count =
-    if count > !remaining_bytes
-    then false
+module Budget = struct
+  type t =
+    { mutable remaining_bytes : int
+    ; mutable remaining_nodes : int
+    }
+
+  let create ~max_bytes =
+    if max_bytes <= 0 || max_bytes > maximum_wire_bytes
+    then invalid "invalid authoring JSON budget"
+    else Ok { remaining_bytes = max_bytes; remaining_nodes = maximum_nodes }
+  ;;
+
+  let reserve t ~bytes ~nodes =
+    if bytes < 0 || nodes < 0 || bytes > t.remaining_bytes || nodes > t.remaining_nodes
+    then invalid "authoring JSON exceeds structural limits"
     else (
-      remaining_bytes := !remaining_bytes - count;
-      true)
-  in
-  let charge_string value =
-    charge 2
-    && String.for_all value ~f:(fun char ->
-      let code = Char.to_int char in
-      charge
-        (if code < 0x20
-         then 6
-         else if Char.equal char '"' || Char.equal char '\\'
-         then 2
-         else 1))
-  in
-  let rec walk depth json =
-    if depth > maximum_depth || !remaining_nodes = 0
-    then false
-    else (
-      decr remaining_nodes;
-      match json with
-      | `Null | `True | `False -> charge 5
-      | `Number value -> charge (String.length value + 2)
-      | `String value -> charge_string value
-      | `Array values ->
-        charge (2 + List.length values) && List.for_all values ~f:(walk (depth + 1))
-      | `Object fields ->
-        charge 2
-        && List.for_all fields ~f:(fun (name, value) ->
-          charge_string name && charge 2 && walk (depth + 1) value))
-  in
-  walk 1 json
+      t.remaining_bytes <- t.remaining_bytes - bytes;
+      t.remaining_nodes <- t.remaining_nodes - nodes;
+      Ok ())
+  ;;
+
+  let charge_json t ~parent_depth json =
+    let charge bytes =
+      if bytes > t.remaining_bytes
+      then false
+      else (
+        t.remaining_bytes <- t.remaining_bytes - bytes;
+        true)
+    in
+    let charge_string value =
+      charge 2
+      && String.for_all value ~f:(fun char ->
+        let code = Char.to_int char in
+        charge
+          (if code < 0x20
+           then 6
+           else if Char.equal char '"' || Char.equal char '\\'
+           then 2
+           else 1))
+    in
+    let rec walk depth json =
+      if depth > maximum_depth || t.remaining_nodes = 0
+      then false
+      else (
+        t.remaining_nodes <- t.remaining_nodes - 1;
+        match json with
+        | `Null | `True | `False -> charge 5
+        | `Number value -> charge (String.length value + 2)
+        | `String value -> charge_string value
+        | `Array values ->
+          charge 2
+          && List.for_all values ~f:(fun value -> charge 1 && walk (depth + 1) value)
+        | `Object fields ->
+          charge 2
+          && List.for_all fields ~f:(fun (name, value) ->
+            charge_string name && charge 2 && walk (depth + 1) value))
+    in
+    if parent_depth >= 0 && walk (parent_depth + 1) json
+    then Ok ()
+    else invalid "authoring JSON exceeds structural limits"
+  ;;
+end
+
+let encoded_size_opt ~max_bytes json =
+  match Budget.create ~max_bytes with
+  | Error _ -> None
+  | Ok budget ->
+    (match Budget.charge_json budget ~parent_depth:0 json with
+     | Error _ -> None
+     | Ok () -> Some (max_bytes - budget.remaining_bytes))
 ;;
 
+let encoded_size ~max_bytes json =
+  match encoded_size_opt ~max_bytes json with
+  | Some bytes -> Ok bytes
+  | None -> invalid "authoring JSON exceeds structural limits"
+;;
+
+let admit_json ~max_bytes json = Result.map (encoded_size ~max_bytes json) ~f:ignore
+
 let fields ~allowed json =
-  if not (within_wire_budget json)
+  if Option.is_none (encoded_size_opt ~max_bytes:maximum_wire_bytes json)
   then invalid "authoring JSON exceeds structural limits"
   else (
     match json with

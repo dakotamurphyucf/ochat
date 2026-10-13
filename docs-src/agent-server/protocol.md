@@ -46,9 +46,9 @@ Request type names identify the complete field schema there. All mutations
 require applicable actor state and authorization, not merely passing JSON
 validation.
 
-The `authoring.*` entries below are typed codec contracts for OCH-261 and
-OCH-281. No server handler or `authoring.core.v1`/`authoring.bundle.v1` feature
-is installed yet; these methods currently return `method_not_found`.
+The `authoring.*` entries below are typed codec contracts. No server handler or
+authoring feature is installed yet; these methods currently return
+`method_not_found`.
 Upload-only principals can negotiate the bundle feature without a source
 context once the host installs its independent upload grant and handlers.
 
@@ -148,6 +148,9 @@ context once the host installs its independent upload grant and handlers.
 | `authoring.document.version` | `Authoring.Document.Version_request` | Pending authoring handler | Current source/context CAS version; currently unavailable. |
 | `authoring.document.replace` | `Authoring.Document.Replace_request` | Pending authoring handler | Full validated UTF-8 overlay replacement; currently unavailable. |
 | `authoring.document.close` | `Authoring.Document.Close_request` | Pending authoring handler | Revert an overlay with retained editor revision; currently unavailable. |
+| `authoring.analysis` | `Authoring.Analysis.Analyze.Request` | Pending authoring handler | Current project or selected ChatMD script analysis; Complete, Failed, or typed Unavailable result; currently unavailable. |
+| `authoring.prefix` | `Authoring.Analysis.Prefix.Request` | Pending authoring handler | Exact source-bound provisional prefix evidence, distinct from a complete check; currently unavailable. |
+| `authoring.query` | `Authoring.Analysis.Query.Request` | Pending authoring handler | Bounded hover, completion, signature, and source navigation over admitted analysis evidence; currently unavailable. |
 | `authoring.bundle.begin` | `Authoring.Bundle.Begin.request` | Pending independent upload handler | Qualified immutable manifest, optional parent provenance and explicit begin idempotency; currently unavailable. |
 | `authoring.bundle.chunk` | `Authoring.Bundle.Chunk.request` | Pending independent upload handler | Bounded exact binary member chunk with replay-safe offset; currently unavailable. |
 | `authoring.bundle.commit` | `Authoring.Bundle.Commit.request` | Pending independent upload handler | Seal complete upload under explicit idempotency; acceptance may precede closure publication; currently unavailable. |

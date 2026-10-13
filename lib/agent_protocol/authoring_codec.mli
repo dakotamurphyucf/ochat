@@ -4,6 +4,30 @@
     decoders keep all revision/generation counters within this bound. *)
 val maximum_wire_integer : int
 
+(** Conservative escaped-JSON byte, node and depth preflight over an already parsed
+    value, before family-specific decoding. The new analysis/assistance family
+    uses the smaller of its fixed limit and the negotiated result limit; the
+    host checks request/result sizes against its current capability as well.
+    This does not replace constructors' pre-allocation count/label budgets. *)
+val admit_json : max_bytes:int -> Jsonaf.t -> (unit, Error.t) result
+
+(** Conservative escaped-wire upper bound, with the same node/depth checks as
+    [admit_json]. Callers can debit many bounded DTO pieces before forming a
+    whole response; punctuation overcount is allowed and fails closed. *)
+val encoded_size : max_bytes:int -> Jsonaf.t -> (int, Error.t) result
+
+(** A single conservative budget for DTO pieces. [reserve] accounts for the
+    fixed enclosing objects, arrays and punctuation before any large response
+    is assembled. [charge_json] counts bytes and nodes across all pieces and
+    checks their depth at the position they occupy in the complete JSON tree. *)
+module Budget : sig
+  type t
+
+  val create : max_bytes:int -> (t, Error.t) result
+  val reserve : t -> bytes:int -> nodes:int -> (unit, Error.t) result
+  val charge_json : t -> parent_depth:int -> Jsonaf.t -> (unit, Error.t) result
+end
+
 val invalid : string -> ('a, Error.t) result
 val fields : allowed:string list -> Jsonaf.t -> (Json_codec.fields, Error.t) result
 val required : Json_codec.fields -> string -> (Jsonaf.t, Error.t) result

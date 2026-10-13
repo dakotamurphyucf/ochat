@@ -356,3 +356,110 @@ let close_document t (request : P.Document.Close_request.t) =
        | Ok _ -> incompatible "unexpected authoring document close"
        | Error _ as failure -> failure)
 ;;
+
+let current_target t expected target =
+  match Hashtbl.find t.contexts expected.P.Context.Expected.context_id with
+  | None -> false
+  | Some view ->
+    (match target, P.Context.basis view with
+     | P.Analysis.Target.Project_input, P.Context.Project _ -> true
+     | P.Analysis.Target.Script_input stamp, P.Context.Document { source; _ } ->
+       P.Source.equal source (P.Analysis.Target.document_source stamp)
+     | _ -> false)
+;;
+
+let selected_target_matches selector resolved =
+  P.Analysis.Target.equal_selector selector (P.Analysis.Target.selector resolved)
+;;
+
+let require_semantic t =
+  Authoring_connection.require_feature t.endpoint P.Features.semantic
+;;
+
+let analyze t (request : P.Analysis.Analyze.Request.t) =
+  with_request_lock t (fun () ->
+    let open Result.Let_syntax in
+    let expected = P.Analysis.Analyze.Request.context request in
+    let selector = P.Analysis.Analyze.Request.target request in
+    let%bind () = require_semantic t in
+    let%bind () = require_current t expected in
+    match send t (W.Request.Analyze request) with
+    | Ok (W.Response.Analyze result) ->
+      let valid =
+        match result with
+        | P.Analysis.Analyze.Complete { capture; _ }
+        | P.Analysis.Analyze.Failed { capture; _ } ->
+          P.Context.Expected.equal (P.Analysis.Capture.context capture) expected
+          && selected_target_matches selector (P.Analysis.Capture.target capture)
+          && current_target t expected (P.Analysis.Capture.target capture)
+        | P.Analysis.Analyze.Unavailable { context; target; _ } ->
+          P.Context.Expected.equal context expected
+          && P.Analysis.Target.equal_selector target selector
+      in
+      if valid then Ok result else incompatible "analysis response changed its target"
+    | Ok _ -> incompatible "unexpected authoring analysis result"
+    | Error _ as failure -> failure)
+;;
+
+let analyze_prefix t (request : P.Analysis.Prefix.Request.t) =
+  with_request_lock t (fun () ->
+    let open Result.Let_syntax in
+    let expected = P.Analysis.Prefix.Request.context request in
+    let selector = P.Analysis.Prefix.Request.target request in
+    let source = P.Analysis.Prefix.Request.source request in
+    let cursor_byte = P.Analysis.Prefix.Request.cursor_byte request in
+    let%bind () = require_semantic t in
+    let%bind () = require_current t expected in
+    match send t (W.Request.Prefix request) with
+    | Ok (W.Response.Prefix result) ->
+      let valid =
+        match result with
+        | P.Analysis.Prefix.Provisional prefix ->
+          let capture = P.Analysis.Prefix.capture prefix in
+          P.Context.Expected.equal (P.Analysis.Capture.context capture) expected
+          && selected_target_matches selector (P.Analysis.Capture.target capture)
+          && current_target t expected (P.Analysis.Capture.target capture)
+          && P.Source.equal (P.Analysis.Prefix.full_source prefix) source
+          && Int.equal (P.Analysis.Prefix.cursor_byte prefix) cursor_byte
+        | P.Analysis.Prefix.Unavailable result ->
+          P.Context.Expected.equal result.context expected
+          && P.Analysis.Target.equal_selector result.target selector
+          && P.Source.equal result.source source
+          && Int.equal result.cursor_byte cursor_byte
+      in
+      if valid then Ok result else incompatible "prefix response changed its target"
+    | Ok _ -> incompatible "unexpected authoring prefix result"
+    | Error _ as failure -> failure)
+;;
+
+let query_context = function
+  | P.Analysis.Query.Certified { capture; _ } | P.Analysis.Query.Syntax_only capture ->
+    P.Analysis.Capture.context capture
+  | P.Analysis.Query.Provisional prefix ->
+    P.Analysis.Capture.context (P.Analysis.Prefix.capture prefix)
+;;
+
+let query_target = function
+  | P.Analysis.Query.Certified { capture; _ } | P.Analysis.Query.Syntax_only capture ->
+    P.Analysis.Capture.target capture
+  | P.Analysis.Query.Provisional prefix ->
+    P.Analysis.Capture.target (P.Analysis.Prefix.capture prefix)
+;;
+
+let query_semantics t (request : P.Analysis.Query.Request.t) =
+  with_request_lock t (fun () ->
+    let open Result.Let_syntax in
+    let evidence = P.Analysis.Query.Request.evidence request in
+    let expected = query_context evidence in
+    let%bind () = require_semantic t in
+    let%bind () = require_current t expected in
+    if not (current_target t expected (query_target evidence))
+    then incompatible "query evidence is not current for this context"
+    else (
+      match send t (W.Request.Query request) with
+      | Ok (W.Response.Query result)
+        when P.Analysis.Query.Request.equal (P.Analysis.Query.request result) request ->
+        Ok result
+      | Ok _ -> incompatible "query response changed its request"
+      | Error _ as failure -> failure))
+;;

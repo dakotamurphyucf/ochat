@@ -78,6 +78,24 @@ val close_document
   -> P.Document.Close_request.t
   -> (P.Document.Result.t, Agent_protocol.Error.t) result
 
+(** Each semantic call requires selected [Features.semantic], the installed
+    method, and the same live context generation before and after transport.
+    Analyze's [Unavailable] is a typed successful result, not a failed check. *)
+val analyze
+  :  t
+  -> P.Analysis.Analyze.Request.t
+  -> (P.Analysis.Analyze.t, Agent_protocol.Error.t) result
+
+val analyze_prefix
+  :  t
+  -> P.Analysis.Prefix.Request.t
+  -> (P.Analysis.Prefix.t, Agent_protocol.Error.t) result
+
+val query_semantics
+  :  t
+  -> P.Analysis.Query.Request.t
+  -> (P.Analysis.Query.t, Agent_protocol.Error.t) result
+
 (** Reconnect creates a new authoring context. A caller must reauthorize its
     origin and resend a complete overlay set explicitly against fresh CAS
     values. No context ID or document version survives it. *)
