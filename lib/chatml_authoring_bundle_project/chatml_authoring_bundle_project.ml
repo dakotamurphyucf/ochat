@@ -36,6 +36,7 @@ module Error = struct
     | Input_limit
     | Accounting_overflow
     | Attempt_closed
+    | Attempt_busy
     | Builder of Build.Error.t
     | Project_declaration of Project.Error.t
 
@@ -62,6 +63,10 @@ module Validated = struct
 end
 
 exception Work_exhausted
+exception Input_exhausted
+exception Invalid_stage_input
+exception Expired_stage
+exception Concurrent_stage
 
 let error problem = Error (Error.create problem)
 
@@ -82,12 +87,15 @@ module Attempt = struct
     ; limits : Limits.t
     ; mutable work_left : int
     ; mutable input_left : int
-    ; mutable closed : bool
+    ; closed : bool Atomic.t
+    ; active : bool Atomic.t
+    ; creator_domain : int
     }
 
   let manifest_fingerprint t = Bundle.Manifest.fingerprint t.manifest
 
   let tick t ~checkpoint =
+    if Atomic.get t.closed then raise Expired_stage;
     if t.work_left <= 0 then raise Work_exhausted;
     t.work_left <- t.work_left - 1;
     checkpoint ()
@@ -115,7 +123,9 @@ module Attempt = struct
       ; limits
       ; work_left = limits.Limits.max_work_steps
       ; input_left = limits.max_retained_input_bytes
-      ; closed = false
+      ; closed = Atomic.make false
+      ; active = Atomic.make false
+      ; creator_domain = (Stdlib.Domain.self () :> int)
       }
     in
     let open Result.Let_syntax in
@@ -171,22 +181,134 @@ module Attempt = struct
     | Work_exhausted -> error Work_limit
   ;;
 
-  let with_open t ~f =
-    if t.closed
-    then error Attempt_closed
+  let with_open t ~(error_of_problem : Error.problem -> 'error) ~f =
+    if not (Int.equal t.creator_domain (Stdlib.Domain.self () :> int))
+    then (
+      Atomic.set t.closed true;
+      Error (error_of_problem Attempt_busy))
+    else if Atomic.get t.closed
+    then Error (error_of_problem Attempt_closed)
+    else if not (Atomic.compare_and_set t.active false true)
+    then (
+      Atomic.set t.closed true;
+      Error (error_of_problem Attempt_busy))
+    else if Atomic.get t.closed
+    then (
+      Atomic.set t.active false;
+      Error (error_of_problem Attempt_closed))
     else (
       let result =
         try f () with
-        | Work_exhausted -> error Work_limit
+        | Work_exhausted -> Error (error_of_problem Work_limit)
+        | Input_exhausted -> Error (error_of_problem Input_limit)
+        | Invalid_stage_input -> Error (error_of_problem Accounting_overflow)
         | exn ->
           let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-          t.closed <- true;
+          Atomic.set t.closed true;
+          Atomic.set t.active false;
           Stdlib.Printexc.raise_with_backtrace exn backtrace
       in
+      let invalidated_during_call = Atomic.get t.closed in
       (match result with
        | Ok _ -> ()
-       | Error _ -> t.closed <- true);
+       | Error _ -> Atomic.set t.closed true);
+      let result =
+        if invalidated_during_call && Result.is_ok result
+        then Error (error_of_problem Attempt_closed)
+        else result
+      in
+      Atomic.set t.active false;
       result)
+  ;;
+
+  module Stage = struct
+    type attempt = t
+
+    type t =
+      { owner : attempt
+      ; checkpoint_callback : unit -> unit
+      ; live : bool Atomic.t
+      ; in_use : bool Atomic.t
+      }
+
+    let with_live stage ~f =
+      let owner = stage.owner in
+      if not (Int.equal owner.creator_domain (Stdlib.Domain.self () :> int))
+      then (
+        Atomic.set owner.closed true;
+        raise Concurrent_stage);
+      if
+        (not (Atomic.get stage.live))
+        || (not (Atomic.get owner.active))
+        || Atomic.get owner.closed
+      then (
+        Atomic.set owner.closed true;
+        raise Expired_stage);
+      if not (Atomic.compare_and_set stage.in_use false true)
+      then (
+        Atomic.set owner.closed true;
+        raise Concurrent_stage);
+      Exn.protect
+        ~f:(fun () ->
+          try
+            if
+              (not (Atomic.get stage.live))
+              || (not (Atomic.get owner.active))
+              || Atomic.get owner.closed
+            then raise Expired_stage;
+            let value = f () in
+            if
+              (not (Atomic.get stage.live))
+              || (not (Atomic.get owner.active))
+              || Atomic.get owner.closed
+            then raise Expired_stage;
+            value
+          with
+          | exn ->
+            let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+            Atomic.set owner.closed true;
+            Stdlib.Printexc.raise_with_backtrace exn backtrace)
+        ~finally:(fun () -> Atomic.set stage.in_use false)
+    ;;
+
+    let checkpoint stage =
+      with_live stage ~f:(fun () ->
+        tick stage.owner ~checkpoint:stage.checkpoint_callback)
+    ;;
+
+    let debit_input stage ~bytes =
+      with_live stage ~f:(fun () ->
+        if bytes < 0 then raise Invalid_stage_input;
+        if bytes > stage.owner.input_left then raise Input_exhausted;
+        stage.owner.input_left <- stage.owner.input_left - bytes)
+    ;;
+
+    let source stage id =
+      with_live stage ~f:(fun () ->
+        tick stage.owner ~checkpoint:stage.checkpoint_callback;
+        Map.find stage.owner.sources id)
+    ;;
+  end
+
+  type 'stage_error stage_failure =
+    | Stage_error of 'stage_error
+    | Budget_error of Error.t
+
+  let run_stage t ~checkpoint ~f =
+    with_open
+      t
+      ~error_of_problem:(fun problem -> Budget_error (Error.create problem))
+      ~f:(fun () ->
+        let stage : Stage.t =
+          { owner = t
+          ; checkpoint_callback = checkpoint
+          ; live = Atomic.make true
+          ; in_use = Atomic.make false
+          }
+        in
+        Exn.protect
+          ~f:(fun () -> Result.map_error (f stage) ~f:(fun error -> Stage_error error))
+          ~finally:(fun () -> Atomic.set stage.live false))
   ;;
 
   let find_source t id ~checkpoint =
@@ -271,130 +393,141 @@ module Attempt = struct
   ;;
 
   let validate_project t project ~derived_entry ~previous ~contract ~checkpoint =
-    with_open t ~f:(fun () ->
-      let open Result.Let_syntax in
-      tick t ~checkpoint;
-      let%bind sources, entry, extra =
-        selected_inputs t project ~derived_entry ~checkpoint
-      in
-      let captured_inputs =
-        Option.value_map extra ~default:sources ~f:(fun source -> source :: sources)
-      in
-      let mode = Bundle.Manifest.Project.mode project in
-      let%bind build, expected_sources =
-        match mode with
-        | Exact_lock lock_id ->
-          let%bind () =
-            match previous with
-            | None -> Ok ()
-            | Some _ -> error Unexpected_previous_build
-          in
-          let%bind lock_source = find_source t lock_id ~checkpoint in
-          let other_sources =
-            List.filter sources ~f:(fun source ->
-              tick t ~checkpoint;
-              not (Captured.Id.equal lock_id (Captured.id source)))
-          in
-          let other_sources =
-            Option.value_map extra ~default:other_sources ~f:(fun source ->
-              source :: other_sources)
-          in
-          let%bind limits = remaining_build_limits t in
-          let%map build =
-            Build.restore lock_source ~sources:other_sources ~contract ~limits ~checkpoint
-            |> Result.map_error ~f:(fun problem -> Error.create (Builder problem))
-          in
-          build, captured_inputs
-        | Compose { selected_previous_lock; generated_lock } ->
-          let%bind previous =
-            exact_previous t selected_previous_lock previous ~checkpoint
-          in
-          let routes =
-            List.map (Bundle.Manifest.Project.routes project) ~f:(fun route ->
-              tick t ~checkpoint;
-              Build.Effective.Route.create
-                ~declaration:(Bundle.Manifest.Route.declaration route)
-                ~origin:(Bundle.Manifest.Route.origin route)
-                ~dependencies:(Bundle.Manifest.Route.dependencies route))
-          in
-          let%bind limits = remaining_build_limits t in
-          let%map build =
-            Build.Effective.compose
-              ~root_project:(Bundle.Manifest.Project.root_source project)
-              ~selection:(selection_request (Bundle.Manifest.Project.selection project))
-              ~entry
-              ~sources
-              ~routes
-              ~previous
-              ~lock_id:generated_lock
-              ~contract
-              ~limits
-              ~checkpoint
-            |> Result.map_error ~f:(fun problem -> Error.create (Builder problem))
-          in
-          build, Build.lock_source build :: captured_inputs
-      in
-      let%bind () = debit_build t build in
-      let%bind root_source =
-        find_source t (Bundle.Manifest.Project.root_source project) ~checkpoint
-      in
-      let%bind () =
-        Result_check.reconcile
-          project
-          build
-          ~root_source
-          ~expected_sources
-          ~document:t.limits.document
-          ~checkpoint:(fun () -> tick t ~checkpoint)
-        |> Result.map_error ~f:(function
-          | Result_check.Declaration problem -> Error.create (Project_declaration problem)
-          | Mismatch -> Error.create Result_mismatch)
-      in
-      let expected_lock =
-        match mode with
-        | Exact_lock id -> id
-        | Compose { generated_lock; _ } -> generated_lock
-      in
-      if not (Captured.Id.equal expected_lock (Captured.id (Build.lock_source build)))
-      then error Result_mismatch
-      else
-        Ok
-          { Validated.manifest_fingerprint = Bundle.Manifest.fingerprint t.manifest
-          ; root_source = Bundle.Manifest.Project.root_source project
-          ; build
-          ; input_fingerprint = Prepared.fingerprint (Build.prepared build)
-          ; selected_input_sources = captured_inputs
-          })
+    let open Result.Let_syntax in
+    tick t ~checkpoint;
+    let%bind sources, entry, extra =
+      selected_inputs t project ~derived_entry ~checkpoint
+    in
+    let captured_inputs =
+      Option.value_map extra ~default:sources ~f:(fun source -> source :: sources)
+    in
+    let mode = Bundle.Manifest.Project.mode project in
+    let%bind build, expected_sources =
+      match mode with
+      | Exact_lock lock_id ->
+        let%bind () =
+          match previous with
+          | None -> Ok ()
+          | Some _ -> error Unexpected_previous_build
+        in
+        let%bind lock_source = find_source t lock_id ~checkpoint in
+        let other_sources =
+          List.filter sources ~f:(fun source ->
+            tick t ~checkpoint;
+            not (Captured.Id.equal lock_id (Captured.id source)))
+        in
+        let other_sources =
+          Option.value_map extra ~default:other_sources ~f:(fun source ->
+            source :: other_sources)
+        in
+        let%bind limits = remaining_build_limits t in
+        let%map build =
+          Build.restore lock_source ~sources:other_sources ~contract ~limits ~checkpoint
+          |> Result.map_error ~f:(fun problem -> Error.create (Builder problem))
+        in
+        build, captured_inputs
+      | Compose { selected_previous_lock; generated_lock } ->
+        let%bind previous =
+          exact_previous t selected_previous_lock previous ~checkpoint
+        in
+        let routes =
+          List.map (Bundle.Manifest.Project.routes project) ~f:(fun route ->
+            tick t ~checkpoint;
+            Build.Effective.Route.create
+              ~declaration:(Bundle.Manifest.Route.declaration route)
+              ~origin:(Bundle.Manifest.Route.origin route)
+              ~dependencies:(Bundle.Manifest.Route.dependencies route))
+        in
+        let%bind limits = remaining_build_limits t in
+        let%map build =
+          Build.Effective.compose
+            ~root_project:(Bundle.Manifest.Project.root_source project)
+            ~selection:(selection_request (Bundle.Manifest.Project.selection project))
+            ~entry
+            ~sources
+            ~routes
+            ~previous
+            ~lock_id:generated_lock
+            ~contract
+            ~limits
+            ~checkpoint
+          |> Result.map_error ~f:(fun problem -> Error.create (Builder problem))
+        in
+        build, Build.lock_source build :: captured_inputs
+    in
+    let%bind () = debit_build t build in
+    let%bind root_source =
+      find_source t (Bundle.Manifest.Project.root_source project) ~checkpoint
+    in
+    let%bind () =
+      Result_check.reconcile
+        project
+        build
+        ~root_source
+        ~expected_sources
+        ~document:t.limits.document
+        ~checkpoint:(fun () -> tick t ~checkpoint)
+      |> Result.map_error ~f:(function
+        | Result_check.Declaration problem -> Error.create (Project_declaration problem)
+        | Mismatch -> Error.create Result_mismatch)
+    in
+    let expected_lock =
+      match mode with
+      | Exact_lock id -> id
+      | Compose { generated_lock; _ } -> generated_lock
+    in
+    if not (Captured.Id.equal expected_lock (Captured.id (Build.lock_source build)))
+    then error Result_mismatch
+    else
+      Ok
+        { Validated.manifest_fingerprint = Bundle.Manifest.fingerprint t.manifest
+        ; root_source = Bundle.Manifest.Project.root_source project
+        ; build
+        ; input_fingerprint = Prepared.fingerprint (Build.prepared build)
+        ; selected_input_sources = captured_inputs
+        }
   ;;
 
   let validate_top_project t ~previous ~contract ~checkpoint =
-    with_open t ~f:(fun () ->
-      match Bundle.Manifest.basis t.manifest with
-      | Project project ->
-        validate_project t project ~derived_entry:None ~previous ~contract ~checkpoint
-      | Chatmd_document _ -> error Wrong_project_basis)
+    with_open
+      t
+      ~error_of_problem:(fun problem -> Error.create problem)
+      ~f:(fun () ->
+        match Bundle.Manifest.basis t.manifest with
+        | Project project ->
+          validate_project t project ~derived_entry:None ~previous ~contract ~checkpoint
+        | Chatmd_document _ -> error Wrong_project_basis)
   ;;
 
   let validate_selected_script t ~selector ~derived_entry ~previous ~contract ~checkpoint =
-    with_open t ~f:(fun () ->
-      match Bundle.Manifest.basis t.manifest with
-      | Project _ -> error Wrong_project_basis
-      | Chatmd_document document ->
-        let rec find = function
-          | [] -> error Missing_selected_script
-          | script :: rest ->
-            tick t ~checkpoint;
-            if
-              Bundle.Manifest.Script.Selector.equal
-                selector
-                (Bundle.Manifest.Script.selector script)
-            then (
-              match Bundle.Manifest.Script.choice script with
-              | Source_only -> error Wrong_project_basis
-              | Selected_project project ->
-                validate_project t project ~derived_entry ~previous ~contract ~checkpoint)
-            else find rest
-        in
-        find (Bundle.Manifest.Chatmd_document.scripts document))
+    with_open
+      t
+      ~error_of_problem:(fun problem -> Error.create problem)
+      ~f:(fun () ->
+        match Bundle.Manifest.basis t.manifest with
+        | Project _ -> error Wrong_project_basis
+        | Chatmd_document document ->
+          let rec find = function
+            | [] -> error Missing_selected_script
+            | script :: rest ->
+              tick t ~checkpoint;
+              if
+                Bundle.Manifest.Script.Selector.equal
+                  selector
+                  (Bundle.Manifest.Script.selector script)
+              then (
+                match Bundle.Manifest.Script.choice script with
+                | Source_only -> error Wrong_project_basis
+                | Selected_project project ->
+                  validate_project
+                    t
+                    project
+                    ~derived_entry
+                    ~previous
+                    ~contract
+                    ~checkpoint)
+              else find rest
+          in
+          find (Bundle.Manifest.Chatmd_document.scripts document))
   ;;
 end

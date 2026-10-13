@@ -14,6 +14,7 @@ type t
 
 val create
   :  ?limits:limits
+  -> ?checkpoint:(unit -> unit)
   -> root_file:string
   -> sources:(string * string) list
   -> unit

@@ -24,7 +24,21 @@ let fingerprint t = t.fingerprint
 let loader t ~root = Source_loader.generated_filesystem ~root ~sources:t.sources
 let valid_path path = Result.is_ok (Source.Portable_path.create path)
 
-let create ?(limits = default_limits) ~root_file ~sources () =
+let digest_bounded contents ~checkpoint =
+  let context = ref (Digestif.SHA256.init ()) in
+  let offset = ref 0 in
+  while !offset < String.length contents do
+    checkpoint ();
+    let len = Int.min 4096 (String.length contents - !offset) in
+    context := Digestif.SHA256.feed_string !context ~off:!offset ~len contents;
+    offset := !offset + len
+  done;
+  checkpoint ();
+  Digestif.SHA256.(to_hex (get !context))
+;;
+
+let create ?(limits = default_limits) ?(checkpoint = ignore) ~root_file ~sources () =
+  checkpoint ();
   let open Result.Let_syntax in
   let%bind () =
     if
@@ -46,6 +60,7 @@ let create ?(limits = default_limits) ~root_file ~sources () =
       sources
       ~init:(Ok (0, String.Set.empty))
       ~f:(fun acc (path, text) ->
+        checkpoint ();
         let%bind bytes, seen = acc in
         let key = String.lowercase path in
         if not (valid_path path)
@@ -64,6 +79,7 @@ let create ?(limits = default_limits) ~root_file ~sources () =
     then Error "generated bundle is missing its root source"
     else if
       List.exists sources ~f:(fun (path, _) ->
+        checkpoint ();
         let parts = String.split path ~on:'/' in
         let rec check prefix = function
           | [] | [ _ ] -> false
@@ -80,14 +96,13 @@ let create ?(limits = default_limits) ~root_file ~sources () =
     [%sexp
       ("ochat.generated-sources.v1" : string)
     , (root_file : string)
-    , (List.map sources ~f:(fun (path, text) ->
-         path, Chatmd_shell_spec.Source_ref.digest text)
+    , (List.map sources ~f:(fun (path, text) -> path, digest_bounded text ~checkpoint)
        : (string * string) list)
     , (limits.max_source_bytes : int)
     , (limits.max_bundle_bytes : int)
     , (limits.max_files : int)]
     |> Sexp.to_string
-    |> Chatmd_shell_spec.Source_ref.digest
+    |> fun encoded -> digest_bounded encoded ~checkpoint
   in
   Ok { root_file; sources; limits; fingerprint }
 ;;
