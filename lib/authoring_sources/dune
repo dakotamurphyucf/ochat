@@ -40,6 +40,8 @@
     lib/chatml/chatml_value_scope.ml %{dep:../chatml/chatml_value_scope.ml}
     lib/chatml/chatml_configured_resolution.ml %{dep:../chatml/chatml_configured_resolution.ml}
     lib/chatml/chatml_configured_check.ml %{dep:../chatml/chatml_configured_check.ml}
+    lib/chatml/chatml_repl_type_roots.ml %{dep:../chatml/chatml_repl_type_roots.ml}
+    lib/chatml/chatml_repl_typing.ml %{dep:../chatml/chatml_repl_typing.ml}
     lib/chatml/chatml_static_surface.ml %{dep:../chatml/chatml_static_surface.ml}
     lib/chatml/chatml_compiler_contract.ml %{dep:../chatml/chatml_compiler_contract.ml}
     lib/chatml/chatml_module_reference.ml %{dep:../chatml/chatml_module_reference.ml}
