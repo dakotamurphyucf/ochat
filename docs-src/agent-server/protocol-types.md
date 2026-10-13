@@ -3251,6 +3251,11 @@ val retry_policy : t -> Job.retry_policy
 val created_at : t -> Timestamp.t
 val state : t -> State.t
 
+(** Exact immutable claim identity, excluding mutable lifecycle state. The
+    comparison includes owner/capture/ID, launch, kind, payload, retry policy
+    and creation timestamp. It grants no authority by itself. *)
+val same_immutable : t -> t -> bool
+
 (** Version-one developer-only record codec. It preserves the exact immutable
     launch/owner/capture/payload/retry fields and validated state. Neither a
     decoded record nor a result descriptor grants execution or disclosure. *)

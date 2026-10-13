@@ -44,3 +44,24 @@ val terminal_selected
   -> terminal:Agent_protocol.Host_invocation.t
   -> selected:Agent_protocol.Developer_job.t list
   -> (Developer_run_document.t, Error.t) result
+
+(** Exact queued attempt -> Running, due at trusted [now]. The caller already
+    bound [observed] to the current document and acquired shared capacity. *)
+val claim
+  :  t
+  -> Developer_run_document.t
+  -> observed:Agent_protocol.Developer_job.t
+  -> now:Agent_protocol.Timestamp.t
+  -> (Developer_run_document.t, Error.t) result
+
+(** State-only transition for an exact physically claimed job. The caller
+    proves its live Claim and a fresh document observation. [current_epoch]
+    selects ordinary active-scope transitions or old-epoch terminal-only
+    bookkeeping. No result custody or native effect is granted. *)
+val claimed_transition
+  :  t
+  -> Developer_run_document.t
+  -> claimed:Agent_protocol.Developer_job.t
+  -> after:Agent_protocol.Developer_job.State.t
+  -> current_epoch:bool
+  -> (Developer_run_document.t, Error.t) result
