@@ -8,6 +8,8 @@
   authoring_upload_document
   authoring_upload_files
   authoring_upload_store
+  developer_run_document
+  developer_run_store
   frame
   document_record
   document_fields
@@ -73,7 +75,8 @@
   journal_initial_creation
   prompt_artifact_staging
   authoring_upload_document
-  authoring_upload_files)
+  authoring_upload_files
+  developer_run_document)
  (libraries ochat.inference
   core
   core_unix
@@ -81,6 +84,7 @@
   bin_prot
   digestif
   ochat.document_schema
+  ochat.chatml_source
   eio
   eio.unix
   ochat.agent_protocol)
