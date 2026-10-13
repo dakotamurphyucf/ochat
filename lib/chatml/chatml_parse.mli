@@ -32,6 +32,28 @@ type site_error =
   | Syntax of diagnostic
   | Sites of Chatml_syntax_sites.Error.t
 
+module Top_level_prefix : sig
+  (** Witnessed by reductions of the existing outer [program_stmts] grammar
+      while parsing actual implementation bytes. Nested module statements and
+      companion signatures do not establish a prefix. *)
+  type t
+
+  type error = Invalid_cursor
+
+  (** Keep only the latest completed top-level end at or before [cursor_byte].
+      Parse/lex failures after that boundary preserve it. Every scanned input
+      chunk, token and completed reduction polls [checkpoint]; its exceptions
+      propagate unchanged. No recovery tokens or alternate grammar are used. *)
+  val find
+    :  Chatml_source.t
+    -> cursor_byte:int
+    -> checkpoint:(unit -> unit)
+    -> (t option, error) result
+
+  val full_source : t -> Chatml_source.t
+  val end_byte : t -> int
+end
+
 (** Parse the exact captured bytes with invocation-owned token coordinates on
     formerly unlocated name nodes. Bounds cover metadata only. Failed parsing or
     collection publishes no partial unit; checkpoints escape unchanged. *)

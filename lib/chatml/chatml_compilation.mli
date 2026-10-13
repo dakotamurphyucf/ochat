@@ -206,3 +206,33 @@ val analyze_prepared_with_policy
   -> target:target
   -> unit
   -> (Chatml_semantics.t, Analysis_error.t) Result.t
+
+(** Authoring-only joined analysis of one parser-confirmed implementation
+    prefix in the exact admitted graph. The immutable result is explicitly
+    Provisional or semantic Unavailable; it cannot be executed or passed as a
+    complete checked snapshot. Full [analyze_prepared] diagnostics remain
+    authoritative. Incomplete companions return Unavailable. One bounded
+    semantic work ledger covers prefix discovery and publication. *)
+val analyze_prepared_prefix_with_policy
+  :  Chatml_prepared_program.t
+  -> source:Chatml_source.Id.t
+  -> cursor_byte:int
+  -> policy:policy
+  -> semantic_limits:Chatml_semantics.Limits.t
+  -> max_dependency_depth:int
+  -> env:Eio_unix.Stdenv.base
+  -> target:target
+  -> unit
+  -> (Chatml_semantics.Prefix.t, Analysis_error.t) Result.t
+
+val analyze_prepared_prefix
+  :  Chatml_prepared_program.t
+  -> source:Chatml_source.Id.t
+  -> cursor_byte:int
+  -> ?limits:limits
+  -> semantic_limits:Chatml_semantics.Limits.t
+  -> max_dependency_depth:int
+  -> env:Eio_unix.Stdenv.base
+  -> target:target
+  -> unit
+  -> (Chatml_semantics.Prefix.t, Analysis_error.t) Result.t

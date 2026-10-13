@@ -56,15 +56,33 @@ let interface_entrypoint token lexbuf =
   | Parser.Error -> raise Parser_failure
 ;;
 
-let parse_with entrypoint source_text ~checkpoint =
+let parse_with
+      ?(poll_tokens = 64)
+      ?(chunked_input = false)
+      entrypoint
+      source_text
+      ~checkpoint
+  =
   Chatml_checkpoint.protect checkpoint ~f:(fun checkpoint ->
-    let lexbuf = Lexing.from_string source_text in
+    let lexbuf =
+      if not chunked_input
+      then Lexing.from_string source_text
+      else (
+        let next = ref 0 in
+        Lexing.from_function (fun destination requested ->
+          checkpoint ();
+          let available = String.length source_text - !next in
+          let count = Int.min 4096 (Int.min requested available) in
+          Stdlib.Bytes.blit_string source_text !next destination 0 count;
+          next := !next + count;
+          count))
+    in
     let remaining = ref 0 in
     let token lexbuf =
       decr remaining;
       if !remaining <= 0
       then (
-        remaining := 64;
+        remaining := poll_tokens;
         checkpoint ());
       try Chatml_lexer.token lexbuf with
       | Failure message -> raise (Lexer_failure message)
@@ -77,6 +95,58 @@ let parse_with entrypoint source_text ~checkpoint =
     | Parser_failure -> Error (diagnostic_of_lexbuf lexbuf "Syntax error")
     | Lexer_failure message -> Error (diagnostic_of_lexbuf lexbuf message))
 ;;
+
+module Top_level_prefix = struct
+  type t =
+    { full_source : Chatml_source.t
+    ; end_byte : int
+    }
+
+  type error = Invalid_cursor
+
+  let full_source t = t.full_source
+  let end_byte t = t.end_byte
+
+  let find source ~cursor_byte ~checkpoint =
+    Chatml_checkpoint.protect checkpoint ~f:(fun checkpoint ->
+      checkpoint ();
+      if cursor_byte < 0 || cursor_byte > Chatml_source.byte_length source
+      then Error Invalid_cursor
+      else (
+        let latest = ref None in
+        let module Sink = struct
+          let enabled = false
+          let add _ ~name:_ ~span:_ = assert false
+
+          let completed_program_statement ~end_byte =
+            checkpoint ();
+            if end_byte <= cursor_byte then latest := Some end_byte
+          ;;
+
+          let completed_program_separator ~end_byte =
+            checkpoint ();
+            if end_byte <= cursor_byte && Option.is_some !latest
+            then latest := Some end_byte
+          ;;
+        end
+        in
+        let module Prefix_parser = Chatml_parser.Make (Sink) in
+        let entrypoint token lexbuf =
+          try Prefix_parser.program token lexbuf with
+          | Prefix_parser.Error -> raise Parser_failure
+        in
+        ignore
+          (parse_with
+             ~poll_tokens:1
+             ~chunked_input:true
+             entrypoint
+             (Chatml_source.contents source)
+             ~checkpoint
+           : (Chatml_lang.stmt_node list, diagnostic) result);
+        checkpoint ();
+        Ok (Option.map !latest ~f:(fun end_byte -> { full_source = source; end_byte }))))
+  ;;
+end
 
 let parse_program_with_checkpoint source_text ~checkpoint =
   parse_with program_entrypoint source_text ~checkpoint

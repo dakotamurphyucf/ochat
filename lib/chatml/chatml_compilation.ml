@@ -475,3 +475,61 @@ let analyze_prepared
     ~target
     ()
 ;;
+
+let analyze_prepared_prefix_with_policy
+      input
+      ~source
+      ~cursor_byte
+      ~policy
+      ~semantic_limits
+      ~max_dependency_depth
+      ~env
+      ~target
+      ()
+  =
+  run_worker
+    ~map_policy_error:(fun error -> Analysis_error.Policy error)
+    ~exception_policy:Preserve_unexpected
+    ~input_bytes:
+      (Chatml_prepared_program.Accounting.input_bytes
+         (Chatml_prepared_program.accounting input))
+    ~policy
+    ~env
+    ~prepare:(fun ~checkpoint ->
+      Ok
+        ( input
+        , Chatml.Chatml_compiler_contract.for_target (static_target target) ~checkpoint ))
+    ~compile:(fun (input, contract) ~checkpoint ->
+      Chatml_semantics.analyze_prefix
+        input
+        ~source
+        ~cursor_byte
+        ~contract
+        ~max_dependency_depth
+        ~limits:semantic_limits
+        ~checkpoint
+      |> Result.map_error ~f:(fun error -> Analysis_error.Analysis error))
+;;
+
+let analyze_prepared_prefix
+      input
+      ~source
+      ~cursor_byte
+      ?(limits = default_limits)
+      ~semantic_limits
+      ~max_dependency_depth
+      ~env
+      ~target
+      ()
+  =
+  analyze_prepared_prefix_with_policy
+    input
+    ~source
+    ~cursor_byte
+    ~policy:(Bounded limits)
+    ~semantic_limits
+    ~max_dependency_depth
+    ~env
+    ~target
+    ()
+;;

@@ -87,6 +87,27 @@ val check
   -> checkpoint:(unit -> unit)
   -> (t, Failure.t) Result.t
 
+module Provisional : sig
+  (** Authoring-only result. This distinct opaque type cannot enter the linked
+      program compiler. No resolved program or executable entrypoint is exposed. *)
+  type t
+
+  (** Same admitted graph/parser/checker/companion/recorder as [check]; omits
+      only final entrypoint requirements. Compiler-private callers must freeze
+      and label the result Provisional before leaving the compiler domain. *)
+  val check
+    :  ?recording:Recorder.Limits.t
+    -> Prepared.t
+    -> contract:Contract.t
+    -> max_dependency_depth:int
+    -> checkpoint:(unit -> unit)
+    -> (t, Failure.t) Result.t
+
+  val graph : t -> Graph.t
+  val semantic_facts : t -> Recorder.Settled.t option
+  val parsed : t -> Parsed.t list
+end
+
 val graph : t -> Graph.t
 val entry : t -> Unit.t
 val checked : t -> Prepared.Module_id.t -> Unit.t option

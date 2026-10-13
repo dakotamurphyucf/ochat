@@ -89,7 +89,11 @@ let checked t id = Session.checked t.units id
 let semantic_facts t = t.semantic_facts
 let parsed t = t.parsed
 
-let check_invocation ?recorder prepared ~contract ~max_dependency_depth ~checkpoint =
+type mode =
+  | Executable
+  | Provisional
+
+let check_invocation ?recorder mode prepared ~contract ~max_dependency_depth ~checkpoint =
   let failure ?invalidity kind diagnostic =
     Error { Failure.kind; diagnostic; invalidity; parsed = [] }
   in
@@ -239,7 +243,10 @@ let check_invocation ?recorder prepared ~contract ~max_dependency_depth ~checkpo
              | Admission -> remember Admission diagnostic)
         in
         let%bind entrypoints =
-          if Prepared.Module_id.equal entry_id (Session.Unit.id node)
+          if
+            match mode with
+            | Executable -> Prepared.Module_id.equal entry_id (Session.Unit.id node)
+            | Provisional -> false
           then
             Check.check_entrypoints
               engine
@@ -274,14 +281,20 @@ let check_invocation ?recorder prepared ~contract ~max_dependency_depth ~checkpo
       Ok { units; semantic_facts; parsed = parsed () })
 ;;
 
-let check ?recording prepared ~contract ~max_dependency_depth ~checkpoint =
+let check_mode mode ?recording prepared ~contract ~max_dependency_depth ~checkpoint =
   match recording with
-  | None -> check_invocation prepared ~contract ~max_dependency_depth ~checkpoint
+  | None -> check_invocation mode prepared ~contract ~max_dependency_depth ~checkpoint
   | Some limits ->
     let recorder = Recorder.create prepared ~limits in
     (match
        Recorder.with_recording recorder ~checkpoint ~f:(fun ~checkpoint ->
-         check_invocation ~recorder prepared ~contract ~max_dependency_depth ~checkpoint)
+         check_invocation
+           ~recorder
+           mode
+           prepared
+           ~contract
+           ~max_dependency_depth
+           ~checkpoint)
      with
      | Ok result -> result
      | Error error ->
@@ -293,3 +306,20 @@ let check ?recording prepared ~contract ~max_dependency_depth ~checkpoint =
          ; parsed = []
          })
 ;;
+
+let check ?recording prepared ~contract ~max_dependency_depth ~checkpoint =
+  check_mode Executable ?recording prepared ~contract ~max_dependency_depth ~checkpoint
+;;
+
+module Provisional = struct
+  type nonrec t = { checked : t }
+
+  let check ?recording prepared ~contract ~max_dependency_depth ~checkpoint =
+    check_mode Provisional ?recording prepared ~contract ~max_dependency_depth ~checkpoint
+    |> Result.map ~f:(fun checked -> { checked })
+  ;;
+
+  let graph t = graph t.checked
+  let semantic_facts t = semantic_facts t.checked
+  let parsed t = parsed t.checked
+end
