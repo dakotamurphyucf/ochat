@@ -340,6 +340,10 @@ scope, capture provenance, validation, and remaining release boundaries.
 ## Release qualification and recovery
 
 Use `npm run check:semantics` for the actual offline Ochat documentation gate.
+It also checks native tool/reference contract snapshots and their executable
+examples through the `native_contract_tests.ml` inline-test partition. Reviewed
+reference updates must keep these aggregate snapshots in sync; API hashes should
+change only when the native API contract changes.
 The CI workflow runs this prerequisite before preview and production website
 jobs and has no input path filters. Its final gate rejects failed, skipped and
 cancelled prerequisites. Actual clean GitHub execution and strict main protection are verified in
