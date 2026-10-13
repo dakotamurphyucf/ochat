@@ -61,6 +61,7 @@
   start_scheduler
   job_capacity
   developer_job_worker
+  developer_terminal_queue
   developer_root_owner
   job_scheduler
   permission_review_service

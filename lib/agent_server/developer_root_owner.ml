@@ -3,11 +3,14 @@ module P = Agent_protocol
 module Store = Agent_store.Developer_run_store
 module Capability = Chat_response.Tool_capability
 module Request = Chat_response.Background_request
+module Terminal_queue = Developer_terminal_queue
+module H = P.Host_invocation
 
 module Limits = struct
   type t =
     { max_active_runs : int
     ; max_staged_jobs : int
+    ; max_native_occupancy : int
     ; max_active_workers : int
     ; max_quarantined_workers : int
     }
@@ -15,21 +18,30 @@ module Limits = struct
   let create
         ~max_active_runs
         ~max_staged_jobs
+        ~max_native_occupancy
         ~max_active_workers
         ~max_quarantined_workers
     =
     if
       max_active_runs <= 0
       || max_staged_jobs <= 0
+      || max_native_occupancy <= 0
       || max_active_workers <= 0
       || max_quarantined_workers < max_active_workers
       || max_active_runs > 4096
       || max_staged_jobs > 16384
+      || max_native_occupancy > 16384
       || max_active_workers > 16384
       || max_quarantined_workers > 16384
     then Or_error.error_string "invalid developer root owner limits"
     else
-      Ok { max_active_runs; max_staged_jobs; max_active_workers; max_quarantined_workers }
+      Ok
+        { max_active_runs
+        ; max_staged_jobs
+        ; max_native_occupancy
+        ; max_active_workers
+        ; max_quarantined_workers
+        }
   ;;
 end
 
@@ -87,6 +99,9 @@ and t =
   ; mutable state : state
   ; mutable root_call : call option
   ; mutable active : action option
+  ; native_calls : (P.Id.Invocation.t, native_registration) Hashtbl.t
+  ; mutable unresolved_native : native_registration list
+  ; terminals : terminal_intent Terminal_queue.t
   ; mutable pending : pending option
   ; mutable reconciling : bool
   }
@@ -98,7 +113,9 @@ and action =
   ; mutable stage_in_flight : int
   ; mutable sealed : selection option
   ; mutable live : bool
+  ; mutable queued : bool
   ; call : call
+  ; terminal_slot : terminal_intent Terminal_queue.callback
   }
 
 and selection =
@@ -111,18 +128,61 @@ and current =
   { issuer : t
   ; selected : Capability.t
   ; selection_revision : int
+  ; terminal_witness : Terminal_queue.witness
   }
 
 and pending =
   { prepared : Store.Prepared.t
   ; handoff : Store.Handoff.t
-  ; action : action
+  ; drain : terminal_intent Terminal_queue.drain
   }
+
+and native_registration =
+  { call : call
+  ; invocation : H.t
+  ; terminal_slot : terminal_intent Terminal_queue.callback
+  ; mutable scope : native_scope option
+  }
+
+and native_scope =
+  { issuer : t
+  ; registration : native_registration
+  ; action : action
+  ; mutable dispatched : H.t option
+  ; mutable callback_complete : bool
+  ; mutable bracket_exited : bool
+  ; mutable sealed : native_selection option
+  ; mutable submitted : bool
+  }
+
+and native_selection =
+  { scope : native_scope
+  ; selection : selection
+  ; outcome : P.Invocation.outcome
+  }
+
+and terminal_intent =
+  { plan : terminal_plan
+  ; mutable settlement : Store.Settlement.t option
+  }
+
+and terminal_plan =
+  | Root_terminal of
+      { action : action
+      ; selection : selection
+      ; phase : Store.Checkpoint.phase
+      }
+  | Native_terminal of
+      { scope : native_scope
+      ; terminal : H.t
+      ; selected : native_selection option
+      }
 
 type run = t
 
 let action_key : action Eio.Fiber.key = Eio.Fiber.create_key ()
 let root_call_key : t Eio.Fiber.key = Eio.Fiber.create_key ()
+let native_call_key : t Eio.Fiber.key = Eio.Fiber.create_key ()
 let admission_key : registry Eio.Fiber.key = Eio.Fiber.create_key ()
 let invalid message = Error (P.Error.invalid_request message)
 let ( let* ) result f = Result.bind result ~f
@@ -139,6 +199,23 @@ let error_of_store error =
     | Store _ -> P.Error.Persistence_error, "developer run store is unavailable", true
   in
   P.Error.create code ~message ~retryable ()
+;;
+
+let error_of_terminal_queue = function
+  | Terminal_queue.Error.Closed | Stale ->
+    P.Error.invalid_request "developer terminal scope is closed or stale"
+  | Busy ->
+    P.Error.create
+      P.Error.Conflict
+      ~message:"developer terminal settlement is active"
+      ~retryable:true
+      ()
+  | Limit_exceeded ->
+    P.Error.create
+      P.Error.Resource_limit
+      ~message:"developer native invocation occupancy is full"
+      ~retryable:false
+      ()
 ;;
 
 let selected_within ~registry selected =
@@ -165,6 +242,7 @@ let check_current_local t (witness : current) ~allow_pending =
     || t.registry.closed
     || (not (Int.equal witness.selection_revision t.selection_revision))
     || (not (phys_equal witness.selected t.selected))
+    || (not (Terminal_queue.check_effect_witness t.terminals witness.terminal_witness))
     || ((not allow_pending) && Option.is_some t.pending)
     || t.reconciling
     || (not (Operator_authorization.is_current t.actor))
@@ -186,10 +264,17 @@ let current t =
     if not active
     then invalid "developer run epoch is not active"
     else (
-      let witness =
-        { issuer = t; selected = t.selected; selection_revision = t.selection_revision }
-      in
-      Result.map (check_effect_now t witness) ~f:(fun () -> witness))
+      match Terminal_queue.effect_witness t.terminals with
+      | None -> invalid "developer terminal settlement excludes effects"
+      | Some terminal_witness ->
+        let witness =
+          { issuer = t
+          ; selected = t.selected
+          ; selection_revision = t.selection_revision
+          ; terminal_witness
+          }
+        in
+        Result.map (check_effect_now t witness) ~f:(fun () -> witness))
 ;;
 
 module Current = struct
@@ -221,7 +306,7 @@ let same_action_fiber action =
 module Action = struct
   type nonrec t = action
 
-  let stage_background t ~request ~checkpoint =
+  let stage_background_with_launch t ~launch ~request ~checkpoint =
     let issuer = t.issuer in
     if (not (same_domain issuer.registry)) || (not (same_action_fiber t)) || not t.live
     then invalid "developer root action is not live in this scope"
@@ -242,17 +327,24 @@ module Action = struct
       Exn.protect
         ~finally:(fun () -> t.stage_in_flight <- t.stage_in_flight - 1)
         ~f:(fun () ->
+          let* current_witness = current issuer in
+          let* () =
+            if phys_equal current_witness.selected t.snapshot.selected
+            then Ok ()
+            else invalid "developer action selection changed"
+          in
           let* prepared =
             Agent_session.Developer_root_job_admission.background
               ~owner:issuer.owner
               ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
+              ~launch
               ~selected:t.snapshot.selected
               ~policy:issuer.job_policy
               ~request
               ~created_at:(issuer.registry.now ())
               ~checkpoint
           in
-          let* () = check_effect_now issuer t.snapshot in
+          let* () = check_effect_now issuer current_witness in
           if (not t.live) || Option.is_some t.sealed
           then invalid "developer root action changed during job preparation"
           else (
@@ -279,6 +371,16 @@ module Action = struct
             | Some reservation ->
               Hashtbl.set t.staged ~key:id ~data:{ job; reservation };
               Ok id)))
+  ;;
+
+  let stage_background (t : t) ~request ~checkpoint =
+    let* launch =
+      P.Developer_job.Launch.create
+        ~parent:P.Developer_job.Launch.Run_root
+        ~parent_job:None
+        ~nested_depth:0
+    in
+    stage_background_with_launch t ~launch ~request ~checkpoint
   ;;
 
   let seal t ~selected =
@@ -347,117 +449,286 @@ let settle_staged action selection = function
   | Prewrite_conflict | Diverged -> ()
 ;;
 
+let intent_action intent =
+  match intent.plan with
+  | Root_terminal { action; _ } -> action
+  | Native_terminal { scope; _ } -> scope.action
+;;
+
+let intent_jobs intent =
+  match intent.plan with
+  | Root_terminal { selection; _ } -> selection.jobs
+  | Native_terminal { selected = None; _ } -> []
+  | Native_terminal { selected = Some selected; _ } -> selected.selection.jobs
+;;
+
+let settle_intent intent settlement =
+  match intent.plan with
+  | Root_terminal { action; selection; _ } ->
+    (match settlement with
+     | Store.Settlement.Absent when not (List.is_empty selection.jobs) -> ()
+     | Installed _ | Absent | Prewrite_conflict | Diverged ->
+       settle_staged action selection settlement)
+  | Native_terminal { scope; selected; _ } ->
+    (match selected, settlement with
+     | Some selected, Store.Settlement.Installed _ ->
+       settle_staged scope.action selected.selection settlement
+     | None, Installed _ -> abort_staged scope.action
+     | None, Absent -> ()
+     | Some _, Absent | _, (Prewrite_conflict | Diverged) -> ())
+;;
+
+type absent_disposition =
+  | Retire_empty_root
+  | Retain_selected_root
+  | Reprepare_native
+
+let absent_disposition intent =
+  match intent.plan with
+  | Root_terminal { selection; _ } ->
+    if List.is_empty selection.jobs then Retire_empty_root else Retain_selected_root
+  | Native_terminal _ -> Reprepare_native
+;;
+
 let same_pending t pending =
   Option.value_map t.pending ~default:false ~f:(fun current ->
     phys_equal current.prepared pending.prepared
     && phys_equal current.handoff pending.handoff
-    && phys_equal current.action pending.action)
+    && Terminal_queue.same_head current.drain pending.drain)
 ;;
 
-let reconcile_selected t pending =
-  let* settlement =
-    Store.reconcile_and_settle t.handle pending.prepared pending.handoff
-    |> Result.map_error ~f:error_of_store
+let publication_allowed t intent =
+  let action = intent_action intent in
+  let snapshot = action.snapshot in
+  let terminal_only =
+    match intent.plan with
+    | Native_terminal _ -> List.is_empty (intent_jobs intent)
+    | Root_terminal _ -> false
   in
-  if not (same_pending t pending)
+  same_domain t.registry
+  && phys_equal snapshot.issuer t
+  && (terminal_only
+      || (Int.equal snapshot.selection_revision t.selection_revision
+          && phys_equal snapshot.selected t.selected
+          && Operator_authorization.is_current t.actor))
+  (* Quarantine excludes fresh effects, not exact frozen terminal bookkeeping.
+     The Store guard still checks this Prepared/Handoff and live authority. *)
+  && (match t.state with
+      | Live | Closing | Quarantined -> true
+      | Closed -> false)
+  &&
+  match intent.plan with
+  | Root_terminal { phase = Store.Checkpoint.Active; _ } -> true
+  | Root_terminal { phase = Interrupted | Closed; _ } ->
+    not (Terminal_queue.has_native_occupancy t.terminals)
+  | Native_terminal _ -> true
+;;
+
+let prepare_intent t intent expected =
+  match intent.plan with
+  | Root_terminal { phase; selection; _ } ->
+    Store.prepare_root_selected t.handle ~expected ~phase ~selected:selection.jobs
+  | Native_terminal { terminal; _ } ->
+    let id = (H.context terminal).id in
+    let lookup = Store.find_invocation expected id in
+    Store.prepare_terminal_selected
+      t.handle
+      ~expected
+      ~lookup
+      ~terminal
+      ~selected:(intent_jobs intent)
+;;
+
+let settled_revision intent =
+  match intent.settlement with
+  | Some (Store.Settlement.Installed installed) ->
+    (match intent.plan with
+     | Root_terminal _ -> Ok 0
+     | Native_terminal { terminal; _ } ->
+       let observation = Store.Installed.observation installed in
+       let lookup = Store.find_invocation observation (H.context terminal).id in
+       (match Store.Invocation_lookup.prior lookup with
+        | Some entry -> Ok (Store.Invocation_observation.revision entry)
+        | None -> invalid "installed native terminal is missing"))
+  | Some Absent | Some Prewrite_conflict | Some Diverged | None ->
+    invalid "developer terminal intent has no durable result"
+;;
+
+let retain_drain t drain =
+  Terminal_queue.retain t.terminals drain |> Result.map_error ~f:error_of_terminal_queue
+;;
+
+let restore_live_after_retention t =
+  if
+    (match t.state with
+     | Quarantined -> true
+     | Live | Closing | Closed -> false)
+    && Option.is_none t.pending
+    && List.is_empty t.unresolved_native
+    && Option.is_some (Terminal_queue.effect_witness t.terminals)
+  then t.state <- Live
+;;
+
+let settle_drain t drain =
+  let* () =
+    Terminal_queue.settle t.terminals drain |> Result.map_error ~f:error_of_terminal_queue
+  in
+  restore_live_after_retention t;
+  Ok ()
+;;
+
+let with_retained_head t drain f =
+  let retain () = ignore (retain_drain t drain : (unit, P.Error.t) result) in
+  match f () with
+  | Ok _ as result -> result
+  | Error _ as result ->
+    Eio.Cancel.protect retain;
+    result
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    Eio.Cancel.protect retain;
+    Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let rec process_head t drain remaining =
+  let intent = Terminal_queue.payload drain in
+  if remaining <= 0
   then
-    Error
-      (P.Error.create
-         P.Error.Conflict
-         ~message:"developer root reconciliation result is stale"
-         ~retryable:true
-         ())
-  else (
-    (match settlement with
-     | Store.Settlement.Installed _ | Absent | Prewrite_conflict -> t.pending <- None
-     | Diverged -> t.state <- Quarantined);
-    Ok settlement)
+    let* () = retain_drain t drain in
+    invalid "developer terminal transaction changed repeatedly"
+  else
+    let* expected = Store.observe t.handle |> Result.map_error ~f:error_of_store in
+    let* prepared =
+      prepare_intent t intent expected |> Result.map_error ~f:error_of_store
+    in
+    let handoff = Store.Handoff.create ~settle:(settle_intent intent) in
+    let pending = { prepared; handoff; drain } in
+    t.pending <- Some pending;
+    let admit () = same_pending t pending && publication_allowed t intent in
+    let result =
+      match Store.commit_and_settle t.handle prepared handoff ~admit with
+      | value -> `Returned value
+      | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
+    in
+    let finish settlement =
+      match settlement with
+      | Store.Settlement.Installed _ ->
+        t.pending <- None;
+        intent.settlement <- Some settlement;
+        settle_drain t drain
+      | Absent ->
+        t.pending <- None;
+        (match absent_disposition intent with
+         | Retire_empty_root ->
+           intent.settlement <- Some settlement;
+           settle_drain t drain
+         | Retain_selected_root ->
+           let* () = retain_drain t drain in
+           invalid "selected root checkpoint was not admitted"
+         | Reprepare_native -> process_head t drain (remaining - 1))
+      | Prewrite_conflict ->
+        t.pending <- None;
+        process_head t drain (remaining - 1)
+      | Diverged ->
+        t.state <- Quarantined;
+        let* () = retain_drain t drain in
+        invalid "developer terminal transaction remains quarantined"
+    in
+    match result with
+    | `Returned (Ok settlement) -> finish settlement
+    | `Returned (Error original) ->
+      (match Store.reconcile_and_settle t.handle prepared handoff with
+       | Ok settlement ->
+         (match finish settlement with
+          | Ok () -> Ok ()
+          | Error _ -> Error (error_of_store original))
+       | Error _ ->
+         let* () = retain_drain t drain in
+         Error (error_of_store original))
+    | `Raised (exn, backtrace) ->
+      Eio.Cancel.protect (fun () ->
+        ignore (retain_drain t drain : (unit, P.Error.t) result));
+      Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let drain_terminals t =
+  let rec loop remaining =
+    if remaining <= 0
+    then invalid "developer terminal drain exceeded its occupancy bound"
+    else (
+      match Terminal_queue.take_head t.terminals with
+      | Error error -> Error (error_of_terminal_queue error)
+      | Ok None -> Ok ()
+      | Ok (Some drain) ->
+        let* () =
+          with_retained_head t drain (fun () ->
+            match t.pending with
+            | None -> process_head t drain 3
+            | Some pending when Terminal_queue.same_head pending.drain drain ->
+              (match
+                 Store.reconcile_and_settle t.handle pending.prepared pending.handoff
+               with
+               | Error error ->
+                 let* () = retain_drain t drain in
+                 Error (error_of_store error)
+               | Ok settlement ->
+                 (* Exact retained reconciliation has the same classification as
+                  a fresh commit; there is no callback or application replay. *)
+                 (match settlement with
+                  | Installed _ ->
+                    t.pending <- None;
+                    let intent = Terminal_queue.payload drain in
+                    intent.settlement <- Some settlement;
+                    settle_drain t drain
+                  | Absent ->
+                    t.pending <- None;
+                    let intent = Terminal_queue.payload drain in
+                    (match absent_disposition intent with
+                     | Retire_empty_root ->
+                       intent.settlement <- Some settlement;
+                       settle_drain t drain
+                     | Retain_selected_root ->
+                       let* () = retain_drain t drain in
+                       invalid "selected root checkpoint was not admitted"
+                     | Reprepare_native -> process_head t drain 3)
+                  | Prewrite_conflict ->
+                    t.pending <- None;
+                    process_head t drain 3
+                  | Diverged ->
+                    t.state <- Quarantined;
+                    let* () = retain_drain t drain in
+                    invalid "developer terminal transaction remains quarantined"))
+            | Some _ ->
+              let* () = retain_drain t drain in
+              invalid "developer terminal pending owner is mismatched")
+        in
+        loop (remaining - 1))
+  in
+  loop (t.registry.limits.max_native_occupancy + 2)
 ;;
 
 let reconcile_pending t =
   if not (same_domain t.registry)
   then invalid "developer root owner belongs to another domain"
-  else if Option.is_some t.root_call
-  then invalid "developer root action is still active"
+  else if Option.is_some t.root_call || not (Hashtbl.is_empty t.native_calls)
+  then invalid "developer callback is still active"
   else if t.reconciling
   then
     Error
       (P.Error.create
          P.Error.Conflict
-         ~message:"developer root reconciliation is already active"
+         ~message:"developer terminal reconciliation is already active"
          ~retryable:true
          ())
   else (
-    match t.pending with
-    | None -> Ok ()
-    | Some pending ->
-      t.reconciling <- true;
-      Exn.protect
-        ~finally:(fun () -> t.reconciling <- false)
-        ~f:(fun () ->
-          let* settlement = reconcile_selected t pending in
-          match settlement with
-          | Store.Settlement.Installed _ | Absent -> Ok ()
-          | Prewrite_conflict ->
-            abort_staged pending.action;
-            Ok ()
-          | Diverged -> invalid "developer root transaction remains quarantined"))
-;;
-
-let selected_transaction t action selection ~phase =
-  let rec attempt remaining =
-    if remaining <= 0
-    then invalid "developer root selected transaction changed repeatedly"
-    else
-      let* expected = Store.observe t.handle |> Result.map_error ~f:error_of_store in
-      let* prepared =
-        Store.prepare_root_selected t.handle ~expected ~phase ~selected:selection.jobs
-        |> Result.map_error ~f:error_of_store
-      in
-      let handoff = Store.Handoff.create ~settle:(settle_staged action selection) in
-      t.pending <- Some { prepared; handoff; action };
-      let admit () =
-        let exact_pending =
-          Option.value_map t.pending ~default:false ~f:(fun pending ->
-            phys_equal pending.prepared prepared
-            && phys_equal pending.handoff handoff
-            && phys_equal pending.action action)
-        in
-        if not exact_pending
-        then false
-        else (
-          match check_current_local t action.snapshot ~allow_pending:true with
-          | Error _ -> false
-          | Ok () ->
-            (match phase with
-             | Store.Checkpoint.Active -> ()
-             | Interrupted | Closed -> t.state <- Closing);
-            true)
-      in
-      let result =
-        Store.commit_and_settle t.handle prepared handoff ~admit
-        |> Result.map_error ~f:error_of_store
-      in
-      match result with
-      | Ok (Store.Settlement.Installed _) ->
-        t.pending <- None;
-        Ok ()
-      | Ok Absent ->
-        t.pending <- None;
-        invalid "developer root selection was not committed"
-      | Ok Prewrite_conflict ->
-        t.pending <- None;
-        attempt (remaining - 1)
-      | Ok Diverged ->
-        t.state <- Quarantined;
-        invalid "developer root transaction remains quarantined"
-      | Error original ->
-        (match reconcile_selected t { prepared; handoff; action } with
-         | Ok (Store.Settlement.Installed _) -> Ok ()
-         | Ok Prewrite_conflict -> attempt (remaining - 1)
-         | Ok Absent | Ok Diverged | Error _ -> Error original)
-  in
-  attempt 3
+    t.reconciling <- true;
+    Exn.protect
+      ~finally:(fun () -> t.reconciling <- false)
+      ~f:(fun () ->
+        let* () = drain_terminals t in
+        if List.is_empty t.unresolved_native
+        then Ok ()
+        else invalid "native dispatch remains physically unresolved"))
 ;;
 
 let with_root_action t ~phase f =
@@ -465,7 +736,11 @@ let with_root_action t ~phase f =
   then invalid "developer root owner belongs to another domain"
   else if Option.is_some t.root_call || Option.is_some t.pending || t.reconciling
   then invalid "developer root action is already active or unresolved"
-  else (
+  else
+    let* terminal_slot =
+      Terminal_queue.reserve t.terminals ~kind:Root
+      |> Result.map_error ~f:error_of_terminal_queue
+    in
     let finished, finish = Eio.Promise.create () in
     let call = { cancel = None; finished; finish } in
     t.root_call <- Some call;
@@ -475,7 +750,8 @@ let with_root_action t ~phase f =
           if phys_equal action.call call
           then (
             action.live <- false;
-            if Option.is_none t.pending then abort_staged action));
+            if not action.queued then abort_staged action));
+        ignore (Terminal_queue.abandon t.terminals terminal_slot : (unit, _) result);
         call.cancel <- None;
         t.active <- None;
         t.root_call <- None;
@@ -492,7 +768,9 @@ let with_root_action t ~phase f =
               ; stage_in_flight = 0
               ; sealed = None
               ; live = true
+              ; queued = false
               ; call
+              ; terminal_slot
               }
             in
             t.active <- Some action;
@@ -510,15 +788,404 @@ let with_root_action t ~phase f =
               || action.stage_in_flight > 0
             then invalid "developer root action returned a foreign selection"
             else
-              let* () = check_effect_now t snapshot in
+              let* latest = current t in
+              let* () =
+                if phys_equal latest.selected snapshot.selected
+                then Ok ()
+                else invalid "developer root selection changed during callback"
+              in
               let* () =
                 match phase, selection.jobs with
                 | Store.Checkpoint.Active, _ | (Interrupted | Closed), [] -> Ok ()
                 | (Interrupted | Closed), _ :: _ ->
                   invalid "closed developer epoch cannot select queued jobs"
               in
-              Result.map (selected_transaction t action selection ~phase) ~f:(fun () ->
-                value)))))
+              let* () =
+                match phase with
+                | Store.Checkpoint.Active -> Ok ()
+                | Interrupted | Closed ->
+                  if Terminal_queue.has_native_occupancy t.terminals
+                  then invalid "native invocations must finish before the epoch closes"
+                  else Ok ()
+              in
+              let intent =
+                { plan = Root_terminal { action; selection; phase }; settlement = None }
+              in
+              let* () =
+                Terminal_queue.complete t.terminals terminal_slot ~intent
+                |> Result.map_error ~f:error_of_terminal_queue
+              in
+              action.queued <- true;
+              let* () = drain_terminals t in
+              let* _ = settled_revision intent in
+              Ok value)))
+;;
+
+module Native_terminal = struct
+  type nonrec t = native_scope
+
+  module Selection = struct
+    type nonrec t = native_selection
+
+    let jobs t = t.selection.jobs
+  end
+
+  let stage_background (t : t) ~request ~checkpoint =
+    let context = H.context t.registration.invocation in
+    let* launch =
+      P.Developer_job.Launch.create
+        ~parent:(P.Developer_job.Launch.Invocation context.id)
+        ~parent_job:None
+        ~nested_depth:0
+    in
+    Action.stage_background_with_launch t.action ~launch ~request ~checkpoint
+  ;;
+
+  let seal (t : t) ~outcome ~selected =
+    let* () =
+      match outcome with
+      | P.Invocation.Pending (P.Invocation.Job id, _) ->
+        if List.exists selected ~f:(P.Id.Job.equal id)
+        then Ok ()
+        else invalid "pending native job is not selected"
+      | Pending (P.Invocation.Subscription _, _) ->
+        invalid "developer native subscription work is unsupported"
+      | (Fail _ | Cancelled _) when not (List.is_empty selected) ->
+        invalid "failed native invocation cannot select new jobs"
+      | Complete _ | Fail _ | Cancelled _ -> Ok ()
+    in
+    let* selection = Action.seal t.action ~selected in
+    let frozen = { scope = t; selection; outcome } in
+    t.sealed <- Some frozen;
+    Ok frozen
+  ;;
+
+  let validate_selection (t : t) outcome selected ~retained =
+    match t.sealed, selected with
+    | Some frozen, Some selected
+      when phys_equal frozen selected && P.Invocation.equal_outcome outcome frozen.outcome
+      -> Ok ()
+    | None, None ->
+      (match outcome with
+       | P.Invocation.Pending _ -> invalid "unowned pending work cannot be resolved"
+       | Complete _ when retained ->
+         invalid "unsealed interrupted native callback cannot report success"
+       | Complete _ | Fail _ | Cancelled _ -> Ok ())
+    | Some _, None | None, Some _ | Some _, Some _ ->
+      invalid "native terminal selection is foreign or changed"
+  ;;
+
+  let submit (t : t) ~terminal ~(selected : Selection.t option) =
+    let issuer = t.issuer in
+    let context = H.context t.registration.invocation in
+    let terminal_context = H.context terminal in
+    let dispatched = t.dispatched in
+    let* () =
+      if
+        (not (same_domain issuer.registry))
+        || t.submitted
+        || (not t.callback_complete)
+        || (not (H.equal_context context terminal_context))
+        || not
+             (Option.value_map dispatched ~default:false ~f:(fun dispatched ->
+                H.equal_context (H.context dispatched) terminal_context
+                && P.Invocation.equal_status (H.status dispatched) Dispatching))
+      then invalid "native terminal is not this scope's dispatched invocation"
+      else Ok ()
+    in
+    let* outcome =
+      match H.outcome terminal, H.status terminal with
+      | Some outcome, P.Invocation.Resolved _ -> Ok outcome
+      | _ -> invalid "native terminal must be resolved"
+    in
+    let* () = validate_selection t outcome selected ~retained:false in
+    let intent =
+      { plan = Native_terminal { scope = t; terminal; selected }; settlement = None }
+    in
+    let* () =
+      Terminal_queue.complete issuer.terminals t.registration.terminal_slot ~intent
+      |> Result.map_error ~f:error_of_terminal_queue
+    in
+    t.submitted <- true;
+    t.action.queued <- true;
+    let* () = drain_terminals issuer in
+    settled_revision intent
+  ;;
+
+  let resolve_retained (t : t) ~terminal =
+    let issuer = t.issuer in
+    let registration = t.registration in
+    if
+      (not (same_domain issuer.registry))
+      || t.submitted
+      || (not t.bracket_exited)
+      || issuer.reconciling
+      || not
+           (List.exists issuer.unresolved_native ~f:(fun current ->
+              phys_equal current registration))
+    then invalid "native terminal recovery has no retained physical scope"
+    else (
+      issuer.reconciling <- true;
+      Exn.protect
+        ~finally:(fun () -> issuer.reconciling <- false)
+        ~f:(fun () ->
+          let* () = H.validate terminal in
+          let context = H.context registration.invocation in
+          let* outcome =
+            if H.equal_context context (H.context terminal)
+            then (
+              match H.outcome terminal, H.status terminal with
+              | Some outcome, P.Invocation.Resolved _ -> Ok outcome
+              | _ -> invalid "retained native terminal must be resolved")
+            else invalid "retained native terminal belongs to another invocation"
+          in
+          let selected = t.sealed in
+          let* () = validate_selection t outcome selected ~retained:true in
+          let* observed =
+            Store.observe issuer.handle |> Result.map_error ~f:error_of_store
+          in
+          let prior =
+            Store.find_invocation observed context.id |> Store.Invocation_lookup.prior
+          in
+          let* () =
+            match prior with
+            | Some prior ->
+              let actual = Store.Invocation_observation.value prior in
+              if
+                H.equal_context (H.context actual) context
+                && P.Invocation.equal_status (H.status actual) Dispatching
+              then Ok ()
+              else invalid "retained native dispatch changed durably"
+            | None -> invalid "retained native dispatch is not durable"
+          in
+          let intent =
+            { plan = Native_terminal { scope = t; terminal; selected }
+            ; settlement = None
+            }
+          in
+          let* () =
+            Terminal_queue.complete issuer.terminals registration.terminal_slot ~intent
+            |> Result.map_error ~f:error_of_terminal_queue
+          in
+          t.submitted <- true;
+          t.action.queued <- true;
+          issuer.unresolved_native
+          <- List.filter issuer.unresolved_native ~f:(fun current ->
+               not (phys_equal current registration));
+          let* () = drain_terminals issuer in
+          settled_revision intent))
+  ;;
+
+  let abandon_retained_without_dispatch (t : t) =
+    let issuer = t.issuer in
+    let registration = t.registration in
+    if
+      (not (same_domain issuer.registry))
+      || t.submitted
+      || (not t.bracket_exited)
+      || Option.is_some t.dispatched
+      || t.callback_complete
+      || Option.is_some t.sealed
+      || (not (Hashtbl.is_empty t.action.staged))
+      || issuer.reconciling
+      || not
+           (List.exists issuer.unresolved_native ~f:(fun current ->
+              phys_equal current registration))
+    then invalid "native scope has no unentered retained dispatch proof"
+    else (
+      issuer.reconciling <- true;
+      Exn.protect
+        ~finally:(fun () -> issuer.reconciling <- false)
+        ~f:(fun () ->
+          let context = H.context registration.invocation in
+          let* observed =
+            Store.observe issuer.handle |> Result.map_error ~f:error_of_store
+          in
+          let prior =
+            Store.find_invocation observed context.id |> Store.Invocation_lookup.prior
+          in
+          let* () =
+            match prior with
+            | None -> Ok ()
+            | Some prior ->
+              let actual = Store.Invocation_observation.value prior in
+              if
+                H.equal_context (H.context actual) context
+                && P.Invocation.equal_status (H.status actual) Admitted
+              then Ok ()
+              else invalid "native scope has a durable dispatch or terminal"
+          in
+          let* () =
+            Terminal_queue.abandon issuer.terminals registration.terminal_slot
+            |> Result.map_error ~f:error_of_terminal_queue
+          in
+          issuer.unresolved_native
+          <- List.filter issuer.unresolved_native ~f:(fun current ->
+               not (phys_equal current registration));
+          restore_live_after_retention issuer;
+          Ok ()))
+  ;;
+end
+
+let with_native_registration t ~invocation f =
+  if not (same_domain t.registry)
+  then invalid "developer native owner belongs to another domain"
+  else if Option.is_some t.pending || t.reconciling
+  then invalid "developer terminal settlement is unresolved"
+  else (
+    let context = H.context invocation in
+    let* () = H.validate invocation in
+    let* () =
+      if
+        P.Invocation.equal_status (H.status invocation) Admitted
+        && P.Execution_owner.equal context.owner (P.Execution_owner.Developer t.owner)
+        && Option.is_none context.parent_invocation
+        && Option.is_none context.parent_job
+        && not (Hashtbl.mem t.native_calls context.id)
+      then Ok ()
+      else invalid "native terminal registration requires a fresh root invocation"
+    in
+    let* terminal_slot =
+      Terminal_queue.reserve t.terminals ~kind:Native
+      |> Result.map_error ~f:error_of_terminal_queue
+    in
+    let finished, finish = Eio.Promise.create () in
+    let call = { cancel = None; finished; finish } in
+    let registration = { call; invocation; terminal_slot; scope = None } in
+    Hashtbl.set t.native_calls ~key:context.id ~data:registration;
+    let outcome =
+      match
+        Eio.Cancel.sub (fun cancel ->
+          call.cancel <- Some cancel;
+          Eio.Fiber.with_binding native_call_key t (fun () ->
+            let* snapshot = current t in
+            let action =
+              { issuer = t
+              ; snapshot
+              ; staged = Hashtbl.create (module P.Id.Job)
+              ; stage_in_flight = 0
+              ; sealed = None
+              ; live = false
+              ; queued = false
+              ; call
+              ; terminal_slot
+              }
+            in
+            let scope =
+              { issuer = t
+              ; registration
+              ; action
+              ; dispatched = None
+              ; callback_complete = false
+              ; bracket_exited = false
+              ; sealed = None
+              ; submitted = false
+              }
+            in
+            registration.scope <- Some scope;
+            f ~scope))
+      with
+      | value -> `Returned value
+      | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
+    in
+    Eio.Cancel.protect (fun () ->
+      Option.iter registration.scope ~f:(fun scope -> scope.action.live <- false);
+      let submitted =
+        Option.value_map registration.scope ~default:false ~f:(fun scope ->
+          scope.submitted)
+      in
+      if not submitted
+      then (
+        let durable_or_unknown =
+          match registration.scope with
+          | Some scope when Option.is_some scope.dispatched -> true
+          | None ->
+            (* The scope was never constructed or handed to the callback, so
+               this registration could not have initiated dispatch. There is
+               no escaped token requiring durable recovery. *)
+            false
+          | Some _ ->
+            (match Store.observe t.handle with
+             | Error _ | (exception _) -> true
+             | Ok observed ->
+               (match
+                  Store.Invocation_lookup.prior
+                    (Store.find_invocation observed context.id)
+                with
+                | None -> false
+                | Some prior ->
+                  (match H.status (Store.Invocation_observation.value prior) with
+                   | P.Invocation.Admitted -> false
+                   | Dispatching | Resolved _ | Published _ -> true)))
+        in
+        if durable_or_unknown
+        then (
+          t.state <- Quarantined;
+          t.unresolved_native <- registration :: t.unresolved_native)
+        else (
+          Option.iter registration.scope ~f:(fun scope -> abort_staged scope.action);
+          ignore (Terminal_queue.abandon t.terminals terminal_slot : (unit, _) result)));
+      (match Hashtbl.find t.native_calls context.id with
+       | Some current when phys_equal current registration ->
+         Hashtbl.remove t.native_calls context.id
+       | None | Some _ -> ());
+      Option.iter registration.scope ~f:(fun scope -> scope.bracket_exited <- true);
+      call.cancel <- None;
+      Eio.Promise.resolve finish ());
+    match outcome with
+    | `Returned value -> value
+    | `Raised (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace)
+;;
+
+let with_native_callback (scope : native_scope) ~dispatched f =
+  let issuer = scope.issuer in
+  if not (same_domain issuer.registry)
+  then invalid "native callback belongs to another domain"
+  else if scope.submitted || Option.is_some scope.dispatched
+  then invalid "native callback already entered"
+  else (
+    let context = H.context scope.registration.invocation in
+    let* () =
+      if
+        H.equal_context context (H.context dispatched)
+        && P.Invocation.equal_status (H.status dispatched) Dispatching
+      then Ok ()
+      else invalid "native callback requires its exact dispatched record"
+    in
+    let* observed = Store.observe issuer.handle |> Result.map_error ~f:error_of_store in
+    let lookup = Store.find_invocation observed context.id in
+    let* () =
+      match Store.Invocation_lookup.prior lookup with
+      | Some prior
+        when P.Invocation.equal_status
+               (H.status (Store.Invocation_observation.value prior))
+               Dispatching
+             && H.equal_context
+                  (H.context (Store.Invocation_observation.value prior))
+                  context -> Ok ()
+      | None | Some _ -> invalid "native callback dispatch is not durable"
+    in
+    let* latest = current issuer in
+    let* () =
+      if phys_equal latest.selected scope.action.snapshot.selected
+      then Ok ()
+      else invalid "native callback selection changed"
+    in
+    scope.dispatched <- Some dispatched;
+    scope.action.live <- true;
+    let outcome =
+      match
+        Eio.Switch.run (fun sw ->
+          Eio.Fiber.with_binding action_key scope.action (fun () -> f ~sw))
+      with
+      | value -> `Returned value
+      | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
+    in
+    scope.action.live <- false;
+    scope.callback_complete <- true;
+    match outcome with
+    | `Returned value -> value
+    | `Raised (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace)
 ;;
 
 let close_owner t =
@@ -527,22 +1194,27 @@ let close_owner t =
   else if
     Option.value_map (Eio.Fiber.get root_call_key) ~default:false ~f:(fun current ->
       phys_equal current t)
+    || Option.value_map (Eio.Fiber.get native_call_key) ~default:false ~f:(fun current ->
+      phys_equal current t)
   then invalid "developer root action cannot close its own owner"
   else (
     match t.state with
     | Closed -> Ok ()
     | Live | Closing | Quarantined ->
       t.state <- Closing;
+      let* () =
+        Terminal_queue.begin_close t.terminals
+        |> Result.map_error ~f:error_of_terminal_queue
+      in
       let root_call = t.root_call in
+      let native_calls = Hashtbl.data t.native_calls |> List.map ~f:(fun r -> r.call) in
       Eio.Cancel.protect (fun () ->
         Option.iter root_call ~f:(fun call ->
-          Option.iter call.cancel ~f:(fun cancel -> Eio.Cancel.cancel cancel Exit);
-          Eio.Promise.await call.finished));
-      let pending_result =
-        match reconcile_pending t with
-        | value -> `Returned value
-        | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
-      in
+          Option.iter call.cancel ~f:(fun cancel -> Eio.Cancel.cancel cancel Exit));
+        List.iter native_calls ~f:(fun call ->
+          Option.iter call.cancel ~f:(fun cancel -> Eio.Cancel.cancel cancel Exit));
+        Option.iter root_call ~f:(fun call -> Eio.Promise.await call.finished);
+        List.iter native_calls ~f:(fun call -> Eio.Promise.await call.finished));
       let worker_result =
         match
           Eio.Cancel.protect (fun () -> Developer_job_worker.close_and_wait t.worker)
@@ -550,12 +1222,22 @@ let close_owner t =
         | value -> `Returned value
         | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
       in
+      let pending_result =
+        match reconcile_pending t with
+        | value -> `Returned value
+        | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
+      in
       let* () =
-        match pending_result, worker_result with
+        match worker_result, pending_result with
         | `Returned (Ok ()), `Returned (Ok ()) -> Ok ()
         | `Raised (exn, backtrace), _ | _, `Raised (exn, backtrace) ->
           Exn.raise_with_original_backtrace exn backtrace
         | `Returned (Error error), _ | _, `Returned (Error error) -> Error error
+      in
+      let* () =
+        if Terminal_queue.is_empty t.terminals && List.is_empty t.unresolved_native
+        then Ok ()
+        else invalid "developer terminal custody remains unresolved"
       in
       Job_capacity.close_developer_run t.registry.capacity ~owner:t.owner;
       let* () =
@@ -606,6 +1288,10 @@ module Registry = struct
         phys_equal current t)
       || Option.value_map (Eio.Fiber.get root_call_key) ~default:false ~f:(fun current ->
         phys_equal current.registry t)
+      || Option.value_map
+           (Eio.Fiber.get native_call_key)
+           ~default:false
+           ~f:(fun current -> phys_equal current.registry t)
     then invalid "developer root admission cannot close its own registry"
     else (
       t.closed <- true;
@@ -744,6 +1430,10 @@ module Registry = struct
               let* active =
                 Store.is_latest_active handle |> Result.map_error ~f:error_of_store
               in
+              let* terminals =
+                Terminal_queue.create ~max_native_occupancy:t.limits.max_native_occupancy
+                |> Result.map_error ~f:error_of_terminal_queue
+              in
               let* () =
                 if active && (not t.closed) && Operator_authorization.is_current actor
                 then Ok ()
@@ -765,6 +1455,9 @@ module Registry = struct
                 ; state = Live
                 ; root_call = None
                 ; active = None
+                ; native_calls = Hashtbl.create (module P.Id.Invocation)
+                ; unresolved_native = []
+                ; terminals
                 ; pending = None
                 ; reconciling = false
                 }

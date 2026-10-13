@@ -14,11 +14,14 @@ module Limits : sig
   type t
 
   (** Positive finite bounds for one active root callback, provisional jobs,
-      and worker/quarantine scopes. The Store's one-pending-per-run barrier,
-      document/selection limits and shared Job_capacity limits remain binding. *)
+      active PLUS completed/retained native terminal scopes, and
+      worker/quarantine scopes. One root terminal intent occupies a separate
+      fixed slot. The Store's one-pending-per-run barrier, document/selection
+      limits and shared Job_capacity limits remain binding. *)
   val create
     :  max_active_runs:int
     -> max_staged_jobs:int
+    -> max_native_occupancy:int
     -> max_active_workers:int
     -> max_quarantined_workers:int
     -> t Or_error.t
@@ -113,6 +116,86 @@ module Action : sig
     -> (Selection.t, Agent_protocol.Error.t) result
 end
 
+module Native_terminal : sig
+  type t
+
+  module Selection : sig
+    type t
+
+    (** Exact immutable jobs sealed by one physically registered native
+        terminal scope. IDs alone are data, not publication authority. *)
+    val jobs : t -> Agent_protocol.Developer_job.t list
+  end
+
+  (** This scope is terminal custody, not native-effect permission. The later
+      shared invocation policy must durably Dispatch and independently prove
+      its selected binding, permission and live parent before a handler runs.
+      This actor owns the original principal/capture and shared capacity.
+      Until that policy adapter is wired, a staged job may name only this exact
+      invocation as launch parent and no claimed parent job. *)
+  val stage_background
+    :  t
+    -> request:Chat_response.Background_request.t
+    -> checkpoint:(unit -> unit)
+    -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result
+
+  (** One-shot seal of this scope's own staged IDs after the callback's
+      canonical outcome is known. [submit] compares this exact outcome with
+      the resolved terminal record. Nonempty selection stays paired with that
+      outcome, including Complete and Pending, through settlement/recovery. *)
+  val seal
+    :  t
+    -> outcome:Agent_protocol.Invocation.outcome
+    -> selected:Agent_protocol.Id.Job.t list
+    -> (Selection.t, Agent_protocol.Error.t) result
+
+  (** Submit the exact resolved terminal of this scope's durable Dispatching
+      invocation with its physically sealed selection into the ONE root/native
+      terminal queue. [None] is for a callback that never returned a sealed
+      success; provisional work is aborted and no child job is published.
+      This may return typed persistence uncertainty while retaining the exact
+      immutable intent/reservations. Even an empty native terminal is retained
+      across a proven absent write and reprepared from the same frozen outcome;
+      only an empty root checkpoint may retire as absent. Repeating the caller
+      action cannot replay its callback. Successful return is the durable
+      invocation revision. *)
+  val submit
+    :  t
+    -> terminal:Agent_protocol.Host_invocation.t
+    -> selected:Selection.t option
+    -> (int, Agent_protocol.Error.t) result
+
+  (** Trusted terminal-only recovery for the exact physically retained scope
+      after its registration bracket has exited without submission. Reread its
+      durable Dispatching record and validate the supplied canonical Resolved
+      transition against that exact context; no callback or effect is entered.
+      If [seal] already froze an outcome/selection, recovery must preserve that
+      pair exactly, including nonempty Complete or Pending selections. Without
+      a seal, only a caller-produced Fail or Cancelled terminal may be saved;
+      Complete and Pending would invent a successful result or orphan work.
+      An uncertain write retains the same frozen intent for later bounded
+      reconciliation. This does not authorize arbitrary status rewriting: the
+      shared native-policy actor owns the truthful terminal reason and invokes
+      this method under its protected failure bookkeeping. Terminal-only native
+      bookkeeping with no selected jobs may finish after principal/selection
+      revocation under the exact Store owner, epoch and Dispatching proof;
+      nonempty work publication still needs current authorization. *)
+  val resolve_retained
+    :  t
+    -> terminal:Agent_protocol.Host_invocation.t
+    -> (int, Agent_protocol.Error.t) result
+
+  (** Release an exact retained registration only after proving that dispatch
+      never happened. The bracket must have exited before callback entry or
+      sealing, and this physical scope must have no staged reservations.
+      Reobservation accepts only an absent record or its original Admitted
+      record; Dispatching, Resolved and uncertain reads retain the slot/claim.
+      No await occurs after this proof and before retiring the exact queue
+      slot. The shared native adapter must join dispatch admission inside the
+      bracket, so a legitimate dispatch cannot start after it exits. *)
+  val abandon_retained_without_dispatch : t -> (unit, Agent_protocol.Error.t) result
+end
+
 val owner : t -> Agent_protocol.Execution_owner.developer
 val capture : t -> Chatml_developer_capture.t
 
@@ -125,7 +208,9 @@ val current : t -> (Current.t, Agent_protocol.Error.t) result
 (** Final nonyielding check after another operation's yielding parent/permission
     read and immediately before a real host effect. It compares the physical
     witness to this owner, actor currentness, epoch/selection revision and open
-    lifetime. No Eio operation, Store read or host callback occurs here. The
+    lifetime. A queued/draining/retained terminal intent excludes new effects;
+    after known settlement a fresh witness can be issued to a still-live
+    parent. No Eio operation, Store read or host callback occurs here. The
     effect caller must perform no await between this check and effect entry.
     Native callers combine it with exact parent and deadline checks. *)
 val check_effect_now : t -> Current.t -> (unit, Agent_protocol.Error.t) result
@@ -144,9 +229,15 @@ val narrow_selection : t -> names:string list -> (unit, Agent_protocol.Error.t) 
     exception or cancellation aborts provisional capacity and never replays the
     callback. On success, persist [phase] plus exact selected jobs in one
     Developer_run_store.prepare_root_selected transaction and settle under one
-    Store handoff: Installed publishes selected and aborts unselected; Absent
-    aborts all; Diverged/unknown retains finite quarantined ownership. A
+    Store handoff: Installed publishes selected and aborts unselected; a
+    nonempty Absent retains the exact intent/reservations for bounded
+    reprepare, while an empty Absent aborts provisional work;
+    Diverged/unknown retains finite quarantined ownership. A
     settlement callback may repeat idempotently, but the action/effects do not.
+    Root and native terminals share one bounded FIFO/drain slot; no terminal
+    lock is held across the callback, so it may synchronously invoke a native
+    child. An Interrupted/Closed phase rejects while any native callback or
+    retained native intent exists, before changing the epoch beneath it.
     A nonempty selection requires [phase = Active]; closing or interrupting an
     epoch cannot admit fresh queued work. This writes a checkpoint phase, not a
     user-visible outcome/receipt. The run service owns action idempotency and
@@ -159,21 +250,57 @@ val with_root_action
       -> ('a * Selection.t, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
 
-(** One bounded exact reconciliation of physically retained handoffs. No root
-    callback reruns. Unknown/divergent state keeps the run quarantined and
+(** Reserve one native occupancy slot BEFORE the first yielding dispatch read.
+    This scope only owns bounded callback/terminal custody; the shared native
+    policy and physical live-parent checks remain necessary before effects.
+    Nested callbacks do not hold the terminal drain lock. A returned uncertain
+    callback keeps its occupancy, preventing replacement calls from growing
+    the retained queue. If initial admission fails before any scope is built
+    or exposed, its private slot is abandoned directly because this bracket
+    could not dispatch. An exposed scope is abandoned only after proving it
+    never dispatched; an unsubmitted durable or uncertain Dispatching record keeps
+    its occupancy and run claim. The native policy integration must resolve
+    success, failure, cancellation and unexpected exception into a canonical
+    terminal and call [Native_terminal.submit] under protected bookkeeping
+    before this bracket exits. If that resolution itself fails or is cancelled,
+    the trusted actor may use [Native_terminal.resolve_retained] with the exact
+    physical scope after the bracket exits. No terminal outcome is invented
+    from a partial callback. *)
+val with_native_registration
+  :  t
+  -> invocation:Agent_protocol.Host_invocation.t
+  -> (scope:Native_terminal.t -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
+
+(** Enter this registered callback only after the shared invocation adapter
+    durably saved its exact Dispatching record. The child switch joins before
+    the resulting outcome/selection can be submitted. No policy admission or
+    terminal CAS is performed by this bracket itself. *)
+val with_native_callback
+  :  Native_terminal.t
+  -> dispatched:Agent_protocol.Host_invocation.t
+  -> (sw:Eio.Switch.t -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
+
+(** One bounded pass over the physically retained root/native terminal head
+    and later immutable intents. No callback reruns. Unknown/divergent state
+    keeps the run quarantined and
     blocks new actions/mutations until trusted recovery resolves it. This
-    requires the issuing Eio domain and no active root callback, including
+    requires the issuing Eio domain and no active root/native callback or
+    terminal drainer, including
     when there is currently no pending handoff. Only one public reconciliation
     may be in flight for this owner: a second returns a retryable Conflict
     before waiting for Store I/O, so a retained old result cannot clear a newer
-    root action's pending transaction. Recovery excludes new effects and root
-    actions. Close during recovery returns an error and retains the physical
+    root/native pending transaction. Recovery excludes new effects and root or
+    native actions. Close during recovery returns an error and retains the physical
     claim/capacity while it still cancels and joins workers; the caller may
     retry close after recovery finishes. *)
 val reconcile_pending : t -> (unit, Agent_protocol.Error.t) result
 
-(** Exclude admission, cancel/join root actions and worker children, reconcile
-    pending handoffs, retire only this run's unclaimed capacity, then release
+(** Exclude admission, cancel/join root and native callbacks and worker
+    children BEFORE draining the pending handoff and bounded terminal queue, so
+    newly published queued jobs cannot start through this owner. Then retire
+    only this run's unclaimed capacity, then release
     Store.Run_claim. The daemon-owned Store remains open for unrelated runs. A
     self-close rejects before revocation. If quarantine is unresolved, remain
     closed with the claim and permits retained; a same-run replacement cannot
