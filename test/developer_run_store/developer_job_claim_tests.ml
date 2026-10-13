@@ -92,6 +92,35 @@ let terminal_state claim status =
   }
 ;;
 
+let selected_artifact ~claim ~proposed ~ensure_attempted ~acknowledge_installed =
+  let completion =
+    match proposed.P.Developer_job.State.result with
+    | Some (P.Developer_job.Result_value.Inline completion) -> completion
+    | Some (Artifact _) | None -> failwith "expected inline terminal completion"
+  in
+  let content = P.Completion.to_json completion |> Jsonaf.to_string in
+  let blob =
+    P.Blob.Metadata.create
+      ~id:(P.Id.Blob.create ())
+      ~kind:File
+      ~media_type:"application/vnd.ochat.job-result+json"
+      ~byte_length:(Int64.of_int (String.length content))
+      ~digest:Digestif.SHA256.(digest_string content |> to_hex)
+      ()
+    |> F.ok
+  in
+  let after =
+    { proposed with
+      result =
+        Some
+          (P.Developer_job.Result_value.Artifact
+             { outcome = P.Stored_completion.Succeeded; blob })
+    }
+  in
+  Worker.Selected.create ~claim ~proposed ~after ~ensure_attempted ~acknowledge_installed
+  |> F.ok
+;;
+
 let%test_unit
     "owner-managed worker close retains uncertain selected capacity until settlement"
   =
@@ -259,6 +288,262 @@ let%test_unit "durable claim precedes one callback and cannot enter twice" =
               incr callback_count;
               Ok (P.Developer_job.state completed))));
     assert (Int.equal !callback_count 1);
+    Worker.close_and_wait worker |> F.ok)
+;;
+
+let%test_unit "selected result retains one claim until exact preparation and Store settle"
+  =
+  F.with_root (fun _env sw _root _session store ->
+    let owner = F.owner 0 in
+    let capture = F.digest "worker selected result handoff" in
+    let handle, initial = F.admit store owner capture in
+    let id = Selected.job_id "job_selected_result_handoff" in
+    let _, selected = select_root handle initial owner capture id in
+    let capacity = capacity () in
+    let worker = worker ~sw ~store ~handle ~capacity () in
+    let callback_count = ref 0 in
+    let selection_count = ref 0 in
+    let prepare_count = ref 0 in
+    let acknowledge_count = ref 0 in
+    let cleanup_sentinel = Failure "selected cleanup after recovery" in
+    let first =
+      Worker.with_claimed_attempt
+        worker
+        ~expected:selected
+        ~lookup:(R.find_job_exact selected id)
+        ~select:(fun ~claim ~proposed ->
+          incr selection_count;
+          Ok
+            (Some
+               (selected_artifact
+                  ~claim
+                  ~proposed
+                  ~ensure_attempted:(fun () ->
+                    incr prepare_count;
+                    if Int.equal !prepare_count 1
+                    then Error (P.Error.invalid_request "stage not ready")
+                    else Ok ())
+                  ~acknowledge_installed:(fun _ ->
+                    incr acknowledge_count;
+                    raise cleanup_sentinel))))
+        (fun ~active ~sw:_ ->
+           incr callback_count;
+           Ok (terminal_state (Scope.claim active) P.Job.Succeeded))
+    in
+    assert (Result.is_error first);
+    assert (Int.equal !callback_count 1);
+    assert (Int.equal !selection_count 1);
+    assert (Int.equal !prepare_count 1);
+    assert (Int.equal !acknowledge_count 0);
+    let running = R.find_job (R.observe handle |> F.run_ok) id |> Option.value_exn in
+    assert (
+      match (P.Developer_job.state running).status with
+      | P.Job.Running -> true
+      | _ -> false);
+    let key =
+      Agent_server.Job_capacity.Key.developer
+        ~owner
+        ~project_source
+        ~workspace_conflict_domain:"developer-test"
+        ~kind:P.Job.Async_tool
+        ~nested_depth:0
+      |> F.ok
+    in
+    assert (Option.is_none (Agent_server.Job_capacity.try_acquire capacity key |> F.ok));
+    let observed_cleanup =
+      match Worker.reconcile_quarantined worker with
+      | exception exn -> phys_equal exn cleanup_sentinel
+      | Ok () | Error _ -> false
+    in
+    assert observed_cleanup;
+    Worker.reconcile_quarantined worker |> F.ok;
+    assert (Int.equal !callback_count 1);
+    assert (Int.equal !selection_count 1);
+    assert (Int.equal !prepare_count 2);
+    assert (Int.equal !acknowledge_count 1);
+    let persisted = R.find_job (R.observe handle |> F.run_ok) id |> Option.value_exn in
+    assert (
+      match
+        (P.Developer_job.state persisted).status, (P.Developer_job.state persisted).result
+      with
+      | P.Job.Succeeded, Some (P.Developer_job.Result_value.Artifact _) -> true
+      | _ -> false);
+    let released =
+      Agent_server.Job_capacity.try_acquire capacity key |> F.ok |> Option.value_exn
+    in
+    Agent_server.Job_capacity.release released;
+    Worker.close_and_wait worker |> F.ok)
+;;
+
+let%test_unit
+    "installed selected cleanup exception preserves terminal and retires capacity"
+  =
+  F.with_root (fun _env sw _root _session store ->
+    let owner = F.owner 0 in
+    let capture = F.digest "worker selected cleanup exception" in
+    let handle, initial = F.admit store owner capture in
+    let id = Selected.job_id "job_selected_cleanup_exception" in
+    let _, selected = select_root handle initial owner capture id in
+    let capacity = capacity () in
+    let worker = worker ~sw ~store ~handle ~capacity () in
+    let cleanup_sentinel = Failure "selected cleanup after install" in
+    let callback_count = ref 0 in
+    let acknowledge_count = ref 0 in
+    let observed_cleanup =
+      match
+        Worker.with_claimed_attempt
+          worker
+          ~expected:selected
+          ~lookup:(R.find_job_exact selected id)
+          ~select:(fun ~claim ~proposed ->
+            Ok
+              (Some
+                 (selected_artifact
+                    ~claim
+                    ~proposed
+                    ~ensure_attempted:(fun () -> Ok ())
+                    ~acknowledge_installed:(fun _ ->
+                      incr acknowledge_count;
+                      raise cleanup_sentinel))))
+          (fun ~active ~sw:_ ->
+             incr callback_count;
+             Ok (terminal_state (Scope.claim active) P.Job.Succeeded))
+      with
+      | exception exn -> phys_equal exn cleanup_sentinel
+      | Ok _ | Error _ -> false
+    in
+    assert observed_cleanup;
+    assert (Int.equal !callback_count 1);
+    assert (Int.equal !acknowledge_count 1);
+    let persisted = R.find_job (R.observe handle |> F.run_ok) id |> Option.value_exn in
+    assert (
+      match
+        (P.Developer_job.state persisted).status, (P.Developer_job.state persisted).result
+      with
+      | P.Job.Succeeded, Some (P.Developer_job.Result_value.Artifact _) -> true
+      | _ -> false);
+    Worker.reconcile_quarantined worker |> F.ok;
+    assert (Int.equal !acknowledge_count 1);
+    let key =
+      Agent_server.Job_capacity.Key.developer
+        ~owner
+        ~project_source
+        ~workspace_conflict_domain:"developer-test"
+        ~kind:P.Job.Async_tool
+        ~nested_depth:0
+      |> F.ok
+    in
+    let released =
+      Agent_server.Job_capacity.try_acquire capacity key |> F.ok |> Option.value_exn
+    in
+    Agent_server.Job_capacity.release released;
+    Worker.close_and_wait worker |> F.ok)
+;;
+
+let%test_unit "child-switch failure cannot select a successful result" =
+  F.with_root (fun _env sw _root _session store ->
+    let owner = F.owner 0 in
+    let capture = F.digest "worker result child join" in
+    let handle, initial = F.admit store owner capture in
+    let id = Selected.job_id "job_result_child_join" in
+    let _, selected = select_root handle initial owner capture id in
+    let worker = worker ~sw ~store ~handle ~capacity:(capacity ()) () in
+    let callback_count = ref 0 in
+    let selection_count = ref 0 in
+    let sentinel = Failure "child failed before terminal selection" in
+    let propagated =
+      match
+        Worker.with_claimed_attempt
+          worker
+          ~expected:selected
+          ~lookup:(R.find_job_exact selected id)
+          ~select:(fun ~claim:_ ~proposed:_ ->
+            incr selection_count;
+            Ok None)
+          (fun ~active ~sw ->
+             incr callback_count;
+             Eio.Fiber.fork ~sw (fun () ->
+               Eio.Fiber.yield ();
+               raise sentinel);
+             Ok (terminal_state (Scope.claim active) P.Job.Succeeded))
+      with
+      | exception actual -> phys_equal actual sentinel
+      | Ok _ | Error _ -> false
+    in
+    assert propagated;
+    assert (Int.equal !callback_count 1);
+    assert (Int.equal !selection_count 0);
+    let persisted = R.find_job (R.observe handle |> F.run_ok) id |> Option.value_exn in
+    assert (
+      match (P.Developer_job.state persisted).status with
+      | P.Job.Failed _ -> true
+      | _ -> false);
+    Worker.close_and_wait worker |> F.ok)
+;;
+
+let%test_unit "selected handoff rejects another physical claim" =
+  F.with_root (fun _env sw _root _session store ->
+    let owner = F.owner 0 in
+    let capture = F.digest "worker result claim affinity" in
+    let handle, initial = F.admit store owner capture in
+    let first_id = Selected.job_id "job_result_claim_first" in
+    let second_id = Selected.job_id "job_result_claim_second" in
+    let root_job id =
+      Selected.job owner capture ~id ~parent:P.Developer_job.Launch.Run_root
+    in
+    let prepared =
+      R.prepare_root_selected
+        handle
+        ~expected:initial
+        ~phase:R.Checkpoint.Active
+        ~selected:[ root_job first_id; root_job second_id ]
+      |> F.run_ok
+    in
+    let observed =
+      R.commit_and_settle handle ~admit:(fun () -> true) prepared (Selected.handoff ())
+      |> F.run_ok
+      |> Selected.installed
+    in
+    let worker = worker ~sw ~store ~handle ~capacity:(capacity ()) () in
+    let prior_claim = ref None in
+    ignore
+      (Worker.with_claimed_attempt
+         worker
+         ~expected:observed
+         ~lookup:(R.find_job_exact observed first_id)
+         (fun ~active ~sw:_ ->
+            let claim = Scope.claim active in
+            prior_claim := Some claim;
+            Ok (terminal_state claim P.Job.Succeeded))
+       |> F.ok);
+    let current = R.observe handle |> F.run_ok in
+    let selection_count = ref 0 in
+    let result =
+      Worker.with_claimed_attempt
+        worker
+        ~expected:current
+        ~lookup:(R.find_job_exact current second_id)
+        ~select:(fun ~claim:_ ~proposed ->
+          incr selection_count;
+          Ok
+            (Some
+               (selected_artifact
+                  ~claim:(Option.value_exn !prior_claim)
+                  ~proposed
+                  ~ensure_attempted:(fun () -> failwith "foreign selection staged")
+                  ~acknowledge_installed:(fun _ ->
+                    failwith "foreign selection acknowledged"))))
+        (fun ~active ~sw:_ -> Ok (terminal_state (Scope.claim active) P.Job.Succeeded))
+    in
+    assert (Result.is_error result);
+    assert (Int.equal !selection_count 1);
+    let second =
+      R.find_job (R.observe handle |> F.run_ok) second_id |> Option.value_exn
+    in
+    assert (
+      match (P.Developer_job.state second).status with
+      | P.Job.Failed error -> P.Error.equal_code error.code P.Error.Invalid_request
+      | _ -> false);
     Worker.close_and_wait worker |> F.ok)
 ;;
 
@@ -520,11 +805,15 @@ let%test_unit "invalid callback attempts and start times become durable failure"
       let _, selected = select_root handle initial owner capture id in
       let worker = worker ~sw ~store ~handle ~capacity:(capacity ()) () in
       let called = ref 0 in
+      let selected_count = ref 0 in
       let result =
         Worker.with_claimed_attempt
           worker
           ~expected:selected
           ~lookup:(R.find_job_exact selected id)
+          ~select:(fun ~claim:_ ~proposed:_ ->
+            incr selected_count;
+            Ok None)
           (fun ~active ~sw:_ ->
              incr called;
              let proposed = terminal_state (Scope.claim active) P.Job.Succeeded in
@@ -543,6 +832,7 @@ let%test_unit "invalid callback attempts and start times become durable failure"
         | P.Job.Failed error -> P.Error.equal_code error.code P.Error.Invalid_state
         | _ -> false);
       assert (Int.equal !called 1);
+      assert (Int.equal !selected_count 0);
       Worker.close_and_wait worker |> F.ok))
 ;;
 
@@ -715,6 +1005,9 @@ let%test_unit "terminal rename exception keeps exact Prepared and callback runs 
       let capacity = capacity () in
       let worker = worker ~sw ~store ~handle ~capacity () in
       let callback_count = ref 0 in
+      let selection_count = ref 0 in
+      let prepare_count = ref 0 in
+      let acknowledge_count = ref 0 in
       let observed_exception =
         try
           ignore
@@ -722,6 +1015,19 @@ let%test_unit "terminal rename exception keeps exact Prepared and callback runs 
                worker
                ~expected:selected
                ~lookup:(R.find_job_exact selected id)
+               ~select:(fun ~claim ~proposed ->
+                 incr selection_count;
+                 Ok
+                   (Some
+                      (selected_artifact
+                         ~claim
+                         ~proposed
+                         ~ensure_attempted:(fun () ->
+                           incr prepare_count;
+                           Ok ())
+                         ~acknowledge_installed:(fun _ ->
+                           incr acknowledge_count;
+                           Ok ()))))
                (fun ~active ~sw:_ ->
                   incr callback_count;
                   armed := true;
@@ -733,6 +1039,9 @@ let%test_unit "terminal rename exception keeps exact Prepared and callback runs 
       in
       assert observed_exception;
       assert (Int.equal !callback_count 1);
+      assert (Int.equal !selection_count 1);
+      assert (Int.equal !prepare_count 1);
+      assert (Int.equal !acknowledge_count 0);
       let current = R.observe handle |> F.run_ok in
       assert (
         match R.find_job current id with
@@ -743,6 +1052,8 @@ let%test_unit "terminal rename exception keeps exact Prepared and callback runs 
         | None -> false);
       Worker.reconcile_quarantined worker |> F.ok;
       assert (Int.equal !callback_count 1);
+      assert (Int.equal !selection_count 1);
+      assert (Int.equal !acknowledge_count 1);
       Worker.close_and_wait worker |> F.ok;
       R.close_and_wait store |> F.run_ok;
       F.store_ok (Agent_store.Session_store.close session)))
@@ -775,6 +1086,8 @@ let%test_unit "terminal rename cancellation retains exact Prepared and original 
       let _, selected = select_root handle initial owner capture id in
       let worker = worker ~sw ~store ~handle ~capacity:(capacity ()) () in
       let callback_count = ref 0 in
+      let selection_count = ref 0 in
+      let acknowledge_count = ref 0 in
       let propagated =
         try
           Eio.Cancel.sub (fun context ->
@@ -784,6 +1097,17 @@ let%test_unit "terminal rename cancellation retains exact Prepared and original 
                  worker
                  ~expected:selected
                  ~lookup:(R.find_job_exact selected id)
+                 ~select:(fun ~claim ~proposed ->
+                   incr selection_count;
+                   Ok
+                     (Some
+                        (selected_artifact
+                           ~claim
+                           ~proposed
+                           ~ensure_attempted:(fun () -> Ok ())
+                           ~acknowledge_installed:(fun _ ->
+                             incr acknowledge_count;
+                             Ok ()))))
                  (fun ~active ~sw:_ ->
                     incr callback_count;
                     armed := true;
@@ -795,7 +1119,9 @@ let%test_unit "terminal rename cancellation retains exact Prepared and original 
       in
       assert propagated;
       assert (Int.equal !callback_count 1);
+      assert (Int.equal !selection_count 1);
       Worker.reconcile_quarantined worker |> F.ok;
+      assert (Int.equal !acknowledge_count 1);
       let persisted = R.find_job (R.observe handle |> F.run_ok) id |> Option.value_exn in
       assert (
         match (P.Developer_job.state persisted).status with

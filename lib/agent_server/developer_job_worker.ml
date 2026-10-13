@@ -2,8 +2,14 @@ open! Core
 module P = Agent_protocol
 module Store = Agent_store.Developer_run_store
 module Scope = Agent_session.Developer_job_scope
+module Selected = Developer_job_selected
 
 let ( let* ) value f = Result.bind value ~f
+
+type terminal =
+  { after : P.Developer_job.State.t
+  ; selected : Selected.t option
+  }
 
 type close_policy =
   | Retire_unclaimed
@@ -24,7 +30,7 @@ type quarantined =
       }
   | Live_claim of
       { claim : Store.Claim.t
-      ; after : P.Developer_job.State.t
+      ; terminal : terminal
       ; lease : Job_capacity.lease
       ; handle : Store.handle
       }
@@ -32,7 +38,7 @@ type quarantined =
 and transition_retry =
   | Entered of
       { claim : Store.Claim.t
-      ; after : P.Developer_job.State.t
+      ; terminal : terminal
       ; revoked_after : P.Developer_job.State.t
       }
   | Unentered of Store.Claim.t
@@ -44,14 +50,24 @@ and unentered_claim =
   }
 
 type finalization =
-  | Final of Store.Observation.t
+  | Final of Store.Installed.t
   | Pending of quarantined
+
+type acknowledgement =
+  | Mismatch
+  | Acknowledged
+  | Unexpected of exn * Stdlib.Printexc.raw_backtrace
+
+type reconciliation =
+  | Unresolved of quarantined ref
+  | Settled
+  | Settled_with_exception of exn * Stdlib.Printexc.raw_backtrace
 
 type lease_stage =
   | Capacity_only
   | Claim_prepared of Store.Prepared.t
   | Claim_issued of Store.Prepared.t
-  | Callback_finished of Store.Claim.t * P.Developer_job.State.t
+  | Callback_finished of Store.Claim.t * terminal
   | Terminal_prepared of Store.Prepared.t * transition_retry
   | Retained
 
@@ -122,8 +138,8 @@ let close_lease_stage t ~handle ~lease stage =
   | Capacity_only -> Job_capacity.release lease
   | Claim_prepared prepared | Claim_issued prepared ->
     t.quarantined <- ref (Claim { prepared; lease; handle }) :: t.quarantined
-  | Callback_finished (claim, after) ->
-    t.quarantined <- ref (Live_claim { claim; after; lease; handle }) :: t.quarantined
+  | Callback_finished (claim, terminal) ->
+    t.quarantined <- ref (Live_claim { claim; terminal; lease; handle }) :: t.quarantined
   | Terminal_prepared (prepared, retry) ->
     t.quarantined <- ref (Transition { prepared; lease; handle; retry }) :: t.quarantined
   | Retained -> ()
@@ -148,20 +164,21 @@ let with_owned_lease t ~handle lease f =
 let rec settle_transition
           ~handle
           ~claim
-          ~after
+          ~terminal
           ~revoked_after
           ~lease
           ~attempts
           ~on_prepared
           ~on_stale
   =
-  let retry = Entered { claim; after; revoked_after } in
+  let after = terminal.after in
+  let retry = Entered { claim; terminal; revoked_after } in
   let retry_stale () =
     on_stale ();
     settle_transition
       ~handle
       ~claim
-      ~after
+      ~terminal
       ~revoked_after
       ~lease
       ~attempts:(attempts - 1)
@@ -169,10 +186,10 @@ let rec settle_transition
       ~on_stale
   in
   if attempts <= 0
-  then Ok (Pending (Live_claim { claim; after; lease; handle }))
+  then Ok (Pending (Live_claim { claim; terminal; lease; handle }))
   else (
     match Store.observe handle with
-    | Error _ -> Ok (Pending (Live_claim { claim; after; lease; handle }))
+    | Error _ -> Ok (Pending (Live_claim { claim; terminal; lease; handle }))
     | Ok expected ->
       (match
          Store.prepare_claimed_transition handle ~expected ~claim ~after ~revoked_after
@@ -181,25 +198,24 @@ let rec settle_transition
          settle_transition
            ~handle
            ~claim
-           ~after
+           ~terminal
            ~revoked_after
            ~lease
            ~attempts:(attempts - 1)
            ~on_prepared
            ~on_stale
-       | Error _ -> Ok (Pending (Live_claim { claim; after; lease; handle }))
+       | Error _ -> Ok (Pending (Live_claim { claim; terminal; lease; handle }))
        | Ok prepared ->
          on_prepared prepared;
          (match Store.commit_claimed_transition handle prepared with
-          | Ok installed -> Ok (Final (Store.Installed.observation installed))
+          | Ok installed -> Ok (Final installed)
           | Error Store.Error.Prewrite_conflict -> retry_stale ()
           | Error _ ->
             (match Store.reconcile_claimed_transition handle prepared with
-             | Ok (Store.Installed installed) ->
-               Ok (Final (Store.Installed.observation installed))
+             | Ok (Store.Installed installed) -> Ok (Final installed)
              | Ok Store.Absent ->
                (match Store.commit_claimed_transition handle prepared with
-                | Ok installed -> Ok (Final (Store.Installed.observation installed))
+                | Ok installed -> Ok (Final installed)
                 | Error Store.Error.Prewrite_conflict -> retry_stale ()
                 | Error _ -> Ok (Pending (Transition { prepared; lease; handle; retry })))
              | Error Store.Error.Prewrite_conflict -> retry_stale ()
@@ -279,7 +295,44 @@ let normalize_callback_state t ~claim proposed =
   else proposed, None
 ;;
 
-let with_claimed_attempt t ~expected ~lookup f =
+let selected_matches_claim selected ~claim ~proposed =
+  phys_equal (Selected.claim selected) claim
+  && Selected.same_state (Selected.proposed selected) proposed
+;;
+
+let selected_matches_installed selected installed =
+  let claim = Selected.claim selected in
+  let original = Store.Claim.job claim in
+  match
+    Store.find_job (Store.Installed.observation installed) (P.Developer_job.id original)
+  with
+  | None -> false
+  | Some installed_job ->
+    P.Developer_job.same_immutable original installed_job
+    && Selected.same_state (P.Developer_job.state installed_job) (Selected.after selected)
+;;
+
+let acknowledge_selected terminal installed =
+  match terminal.selected with
+  | None -> Acknowledged
+  | Some selected when not (selected_matches_installed selected installed) -> Mismatch
+  | Some selected ->
+    (* A typed cleanup error leaves the marker for retention. An unexpected
+       exception remains observable after the installed claim is retired. *)
+    (match
+       Eio.Cancel.protect (fun () -> Selected.acknowledge_installed selected installed)
+     with
+     | Ok () | Error _ -> Acknowledged
+     | exception exn -> Unexpected (exn, Stdlib.Printexc.get_raw_backtrace ()))
+;;
+
+let ensure_selected terminal =
+  match terminal.selected with
+  | None -> Ok ()
+  | Some selected -> Selected.ensure_attempted selected
+;;
+
+let with_claimed_attempt t ~expected ~lookup ?select f =
   if t.closed || not (same_domain t)
   then invalid "developer job worker is closed or on a foreign domain"
   else if t.reconciling
@@ -363,26 +416,35 @@ let with_claimed_attempt t ~expected ~lookup f =
                   | Ok (Store.Claimed claimed) ->
                     let claim = Store.Claimed.claim claimed in
                     stage := Claim_issued prepared;
-                    let finish after =
-                      let revoked_after = revoked_after t claim after in
-                      stage := Callback_finished (claim, after);
+                    let finish terminal =
+                      let revoked_after = revoked_after t claim terminal.after in
+                      stage := Callback_finished (claim, terminal);
+                      let* () = ensure_selected terminal in
                       match
                         settle_transition
                           ~handle
                           ~claim
-                          ~after
+                          ~terminal
                           ~revoked_after
                           ~lease
                           ~attempts:3
                           ~on_prepared:(fun prepared ->
                             stage
                             := Terminal_prepared
-                                 (prepared, Entered { claim; after; revoked_after }))
-                          ~on_stale:(fun () -> stage := Callback_finished (claim, after))
+                                 (prepared, Entered { claim; terminal; revoked_after }))
+                          ~on_stale:(fun () ->
+                            stage := Callback_finished (claim, terminal))
                       with
-                      | Ok (Final observed) ->
-                        stage := Capacity_only;
-                        Ok observed
+                      | Ok (Final installed) ->
+                        (match acknowledge_selected terminal installed with
+                         | Acknowledged ->
+                           stage := Capacity_only;
+                           Ok (Store.Installed.observation installed)
+                         | Mismatch ->
+                           invalid "installed developer result differs from selection"
+                         | Unexpected (exn, backtrace) ->
+                           stage := Capacity_only;
+                           Stdlib.Printexc.raise_with_backtrace exn backtrace)
                       | Ok (Pending pending) ->
                         let* () = quarantine t pending in
                         stage := Retained;
@@ -415,7 +477,10 @@ let with_claimed_attempt t ~expected ~lookup f =
                           try
                             Eio.Cancel.protect (fun () ->
                               ignore
-                                (finish (terminal_state t claim status)
+                                (finish
+                                   { after = terminal_state t claim status
+                                   ; selected = None
+                                   }
                                  : (_, P.Error.t) result))
                           with
                           | _ -> ());
@@ -427,24 +492,101 @@ let with_claimed_attempt t ~expected ~lookup f =
                        stage
                        := Callback_finished
                             ( claim
-                            , terminal_state
-                                t
-                                claim
-                                (P.Job.Interrupted "completion check interrupted") );
+                            , { after =
+                                  terminal_state
+                                    t
+                                    claim
+                                    (P.Job.Interrupted "completion check interrupted")
+                              ; selected = None
+                              } );
                        let after, contract_error =
                          normalize_callback_state t ~claim proposed
                        in
-                       stage := Callback_finished (claim, after);
-                       let* observed = finish after in
                        (match contract_error with
-                        | Some error -> Error error
+                        | Some error ->
+                          let* _ = finish { after; selected = None } in
+                          Error error
                         | None ->
-                          Ok
-                            (Store.find_job
-                               observed
-                               (P.Developer_job.id (Store.Claim.job claim))))
+                          let selection =
+                            match select with
+                            | None -> Ok None
+                            | Some select ->
+                              (match select ~claim ~proposed:after with
+                               | result -> result
+                               | exception exn ->
+                                 let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+                                 let status =
+                                   match exn with
+                                   | Eio.Cancel.Cancelled _ -> P.Job.Cancelled
+                                   | _ ->
+                                     P.Job.Failed
+                                       (P.Error.create
+                                          P.Error.Internal_error
+                                          ~message:"developer result selection failed"
+                                          ~retryable:false
+                                          ())
+                                 in
+                                 (try
+                                    Eio.Cancel.protect (fun () ->
+                                      ignore
+                                        (finish
+                                           { after = terminal_state t claim status
+                                           ; selected = None
+                                           }
+                                         : (_, P.Error.t) result))
+                                  with
+                                  | _ -> ());
+                                 Stdlib.Printexc.raise_with_backtrace exn backtrace)
+                          in
+                          (match selection with
+                           | Error error ->
+                             let* _ =
+                               finish
+                                 { after = terminal_state t claim (P.Job.Failed error)
+                                 ; selected = None
+                                 }
+                             in
+                             Error error
+                           | Ok selected ->
+                             let valid =
+                               Option.value_map selected ~default:true ~f:(fun selected ->
+                                 selected_matches_claim selected ~claim ~proposed:after)
+                             in
+                             if not valid
+                             then (
+                               let error =
+                                 P.Error.invalid_request
+                                   "selected result belongs to another claimed completion"
+                               in
+                               let* _ =
+                                 finish
+                                   { after = terminal_state t claim (P.Job.Failed error)
+                                   ; selected = None
+                                   }
+                               in
+                               Error error)
+                             else (
+                               let terminal =
+                                 { after =
+                                     Option.value_map
+                                       selected
+                                       ~default:after
+                                       ~f:Selected.after
+                                 ; selected
+                                 }
+                               in
+                               let* observed = finish terminal in
+                               Ok
+                                 (Store.find_job
+                                    observed
+                                    (P.Developer_job.id (Store.Claim.job claim))))))
                      | Ok (Error error) ->
-                       let* _ = finish (terminal_state t claim (P.Job.Failed error)) in
+                       let* _ =
+                         finish
+                           { after = terminal_state t claim (P.Job.Failed error)
+                           ; selected = None
+                           }
+                       in
                        Error error))))
 ;;
 
@@ -478,36 +620,62 @@ let settle_unentered t ~handle ~claim ~lease =
      | Ok prepared -> Transition { prepared; lease; handle; retry = Unentered claim })
 ;;
 
-let retry_entered t slot ~handle ~claim ~after ~revoked_after ~lease =
-  match
-    settle_transition
-      ~handle
-      ~claim
-      ~after
-      ~revoked_after
-      ~lease
-      ~attempts:3
-      ~on_prepared:(fun prepared ->
-        slot
-        := Transition
-             { prepared; lease; handle; retry = Entered { claim; after; revoked_after } })
-      ~on_stale:(fun () -> slot := Live_claim { claim; after; lease; handle })
-  with
-  | Ok (Final _) ->
+let settle_installed slot ~lease ~retry installed =
+  let acknowledgement =
+    match retry with
+    | Entered { terminal; _ } -> acknowledge_selected terminal installed
+    | Unentered _ -> Acknowledged
+  in
+  match acknowledgement with
+  | Mismatch -> Unresolved slot
+  | Acknowledged ->
     Job_capacity.release lease;
-    None
-  | Ok (Pending next) ->
-    slot := next;
-    Some slot
-  | Error _ -> Some slot
+    Settled
+  | Unexpected (exn, backtrace) ->
+    Job_capacity.release lease;
+    Settled_with_exception (exn, backtrace)
+;;
+
+let retry_entered t slot ~handle ~claim ~terminal ~revoked_after ~lease =
+  match ensure_selected terminal with
+  | Error _ -> Unresolved slot
+  | Ok () ->
+    (match
+       settle_transition
+         ~handle
+         ~claim
+         ~terminal
+         ~revoked_after
+         ~lease
+         ~attempts:3
+         ~on_prepared:(fun prepared ->
+           slot
+           := Transition
+                { prepared
+                ; lease
+                ; handle
+                ; retry = Entered { claim; terminal; revoked_after }
+                })
+         ~on_stale:(fun () -> slot := Live_claim { claim; terminal; lease; handle })
+     with
+     | Ok (Final installed) ->
+       settle_installed
+         slot
+         ~lease
+         ~retry:(Entered { claim; terminal; revoked_after })
+         installed
+     | Error _ -> Unresolved slot
+     | Ok (Pending next) ->
+       slot := next;
+       Unresolved slot)
 ;;
 
 let retry_transition t slot ~handle ~lease = function
-  | Entered { claim; after; revoked_after } ->
-    retry_entered t slot ~handle ~claim ~after ~revoked_after ~lease
+  | Entered { claim; terminal; revoked_after } ->
+    retry_entered t slot ~handle ~claim ~terminal ~revoked_after ~lease
   | Unentered claim ->
     slot := settle_unentered t ~handle ~claim ~lease;
-    Some slot
+    Unresolved slot
 ;;
 
 let reconcile_entry t slot =
@@ -516,37 +684,41 @@ let reconcile_entry t slot =
     (match Store.reconcile_job_claim handle prepared with
      | Ok Store.Claim_absent | Error Store.Error.Prewrite_conflict ->
        Job_capacity.release lease;
-       None
+       Settled
      | Ok (Store.Claimed claimed) ->
        slot := settle_unentered t ~handle ~claim:(Store.Claimed.claim claimed) ~lease;
-       Some slot
-     | Ok Store.Claim_diverged | Error _ -> Some slot)
+       Unresolved slot
+     | Ok Store.Claim_diverged | Error _ -> Unresolved slot)
   | Unentered_claim { claim; lease; handle } ->
     slot := settle_unentered t ~handle ~claim ~lease;
-    Some slot
+    Unresolved slot
   | Transition { prepared; lease; handle; retry } ->
     (match Store.reconcile_claimed_transition handle prepared with
-     | Ok (Store.Installed _) ->
-       Job_capacity.release lease;
-       None
+     | Ok (Store.Installed installed) -> settle_installed slot ~lease ~retry installed
      | Ok Store.Absent ->
-       (match Store.commit_claimed_transition handle prepared with
-        | Ok _ ->
-          Job_capacity.release lease;
-          None
-        | Error Store.Error.Prewrite_conflict ->
-          retry_transition t slot ~handle ~lease retry
-        | Error _ -> Some slot)
+       let prepared_ready =
+         match retry with
+         | Entered { terminal; _ } -> Result.is_ok (ensure_selected terminal)
+         | Unentered _ -> true
+       in
+       if not prepared_ready
+       then Unresolved slot
+       else (
+         match Store.commit_claimed_transition handle prepared with
+         | Ok installed -> settle_installed slot ~lease ~retry installed
+         | Error Store.Error.Prewrite_conflict ->
+           retry_transition t slot ~handle ~lease retry
+         | Error _ -> Unresolved slot)
      | Error Store.Error.Prewrite_conflict -> retry_transition t slot ~handle ~lease retry
-     | Ok Store.Diverged | Error _ -> Some slot)
-  | Live_claim { claim; after; lease; handle } ->
+     | Ok Store.Diverged | Error _ -> Unresolved slot)
+  | Live_claim { claim; terminal; lease; handle } ->
     retry_entered
       t
       slot
       ~handle
       ~claim
-      ~after
-      ~revoked_after:(revoked_after t claim after)
+      ~terminal
+      ~revoked_after:(revoked_after t claim terminal.after)
       ~lease
 ;;
 
@@ -566,11 +738,15 @@ let reconcile_quarantined t =
           | [] -> unresolved := []
           | slot :: rest ->
             unresolved := slot :: rest;
-            (match reconcile_entry t slot with
-             | None -> ()
-             | Some slot -> settled := slot :: !settled);
+            let result = reconcile_entry t slot in
+            (match result with
+             | Unresolved slot -> settled := slot :: !settled
+             | Settled | Settled_with_exception _ -> ());
             unresolved := rest;
-            run rest
+            (match result with
+             | Settled_with_exception (exn, backtrace) ->
+               Stdlib.Printexc.raise_with_backtrace exn backtrace
+             | Settled | Unresolved _ -> run rest)
         in
         let remaining =
           match run batch with
