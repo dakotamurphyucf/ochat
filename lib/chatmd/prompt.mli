@@ -558,6 +558,38 @@ module Chat_markdown : sig
     ; parsed_agents : (string * Parsed.t) list
     }
 
+  module Generated : sig
+    type error =
+      | Invalid_source
+      | Source_unavailable
+      | Invalid_document
+      | Parser_limit
+    [@@deriving sexp_of]
+
+    type receipt
+
+    val parsed : receipt -> parsed_bundle
+
+    (** Unique exact portable members actually read by the captured loader,
+        sorted for deterministic closure comparison. Not a source grant. *)
+    val read_members : receipt -> string list
+
+    (** Checked generated admission reuses the existing captured-only parser,
+        import expansion and conversion. [before_read] runs through the loader's
+        pre-read limit hook with the exact retained member length, before parser
+        input copying; callback exceptions propagate unchanged. [checkpoint]
+        replaces the generated path's hardcoded caller poll, while the owned
+        parser still performs Eio cancellation checks and fixed read/token/depth
+        caps. Known source, syntax, declaration and limit failures use coarse
+        typed codes; unexpected and callback exceptions are never reclassified. *)
+    val parse_source_bundle
+      :  dir:Eio.Fs.dir_ty Eio.Path.t
+      -> Chatmd_source_bundle.t
+      -> checkpoint:(unit -> unit)
+      -> before_read:(member:string -> byte_length:int -> unit)
+      -> (receipt, error) Result.t
+  end
+
   (** Recheck the parsed declaration registry, including IDs, handler kinds,
       dependency cycles and authoring declaration uniqueness. No source reads,
       preprocessing, compilation or evaluation. Returns the same elements;

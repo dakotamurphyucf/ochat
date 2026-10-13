@@ -101,7 +101,11 @@ val prefix
     decoding is introduced. The strict lexer may use a no-op callback under
     its existing parser admission; the authoring scanner charges this work to
     its bounded scan. *)
-val complete_exn : string -> checkpoint:(unit -> unit) -> Chatmd_ast.attribute list
+val complete_exn
+  :  ?error_exn:(string -> exn)
+  -> string
+  -> checkpoint:(unit -> unit)
+  -> Chatmd_ast.attribute list
 
 (** The same completed scan with absolute raw byte ranges for the shared
     highlighter/cursor scanner. Malformed quotes return a typed error so a

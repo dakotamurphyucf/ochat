@@ -33,6 +33,24 @@ val generated_filesystem
   -> sources:(string * string) list
   -> t
 
+module Generated_error : sig
+  type t =
+    | Invalid_reference
+    | Source_unavailable
+
+  (** Recognizes only the private checked-generated-loader failure constructor.
+      Arbitrary caller/checkpoint exceptions are not classified by message. *)
+  val of_exn : exn -> t option
+end
+
+(** Same captured-only generated loader, with typed failures at its own
+    resolution/read boundary. Only the checked generated parser uses this mode;
+    existing Result-returning loader APIs retain their historical behavior. *)
+val generated_filesystem_checked
+  :  root:Eio.Fs.dir_ty Eio.Path.t
+  -> sources:(string * string) list
+  -> t
+
 (** Add a per-read byte ceiling without replacing an existing ceiling. The
     callback returns0..8MiB and is evaluated before any read; installing multiple
     bounds takes their minimum. Observer/agent wrappers preserve it. Callback
