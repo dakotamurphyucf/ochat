@@ -39,6 +39,11 @@ OCH-277 implements the [host-only source read/capture adapter](../development/ch
 over configured external roots, current operator policy and the existing local
 project preparation path. It is not yet a protocol method or an overlay service.
 
+OCH-278 implements the [pure immutable authoring context store](../development/chatml-authoring-context.md).
+It owns exact pending overlay revisions and a bounded current-context source
+ledger. The host authorizes access; OCH-264 owns changed-closure validation;
+OCH-258 owns the single retained semantic result.
+
 `Chatml_project_build.restore` validates an exact captured lock/source inventory
 without filesystem or network access. `compose` owns pure project closure and lock
 generation, but an uploaded raw source manifest still needs a new adapter through

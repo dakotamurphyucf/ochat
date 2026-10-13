@@ -1,0 +1,7 @@
+(library
+ (name chatml_authoring_context)
+ (public_name ochat.chatml_authoring_context)
+ (modules authoring_context_types chatml_authoring_context)
+ (private_modules authoring_context_types)
+ (libraries core ochat.chatml_project_build ochat.chatml_prepared_program ochat.chatml_source)
+ (preprocess (pps ppx_jane)))
