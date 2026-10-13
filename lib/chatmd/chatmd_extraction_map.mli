@@ -83,8 +83,44 @@ module Error : sig
   type t =
     | Stale_script_source
     | Invalid_compiler_location
+    | Invalid_authored_point
   [@@deriving sexp_of]
 end
+
+module Authored_point : sig
+  type unavailable =
+    | Degraded_map
+    | External_body
+    | Effective_only
+    | Foreign_input
+    | Query_work_limit
+    | Unmapped_or_ambiguous
+  [@@deriving sexp_of]
+
+  type t =
+    | Exact_compiled_byte of int
+    | Unavailable of unavailable
+  [@@deriving sexp_of]
+end
+
+(** Reverse point lookup within this SAME bound parser-owned extraction map.
+    Accept a validated authored byte cursor, including EOF, only when the
+    supplied input is the exact parser input of a unique identity segment and
+    its authored/effective bytes match exactly. Equal adjacent identity
+    segments may meet at one compiled byte; a boundary touching an unmapped or
+    foreign segment is unavailable. Duplicate output origins mapping the same
+    authored point to different compiled bytes are ambiguous. Transformed,
+    external, degraded and work-exhausted maps return typed Unavailable, never
+    a guessed text search. Out-of-bounds returns Invalid_authored_point.
+    Scans at most the map's finite query-work allowance and polls checkpoint;
+    cancellation/unexpected exceptions keep their identity. This is coordinate
+    evidence only: caller authenticates current parser input/source custody. *)
+val authored_point
+  :  bound
+  -> input:Chatmd_parser_input.t
+  -> authored_byte:int
+  -> checkpoint:(unit -> unit)
+  -> (Authored_point.t, Error.t) Result.t
 
 (** Verify full compiled source ID/digest/bytes against the emitted script body.
     The caller must also authenticate this declaration and revision through the

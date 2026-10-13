@@ -267,6 +267,26 @@ matching full capture, byte-for-byte prefix proof allows its genuine ChatMD
 extraction map to add authored provenance without replacing that native site.
 Failed input exposes only parsed syntax sites; lexical or selected-contract
 fallback belongs to assistance and is labelled separately.
+The [ChatML fallback producer](../../lib/chatml_authoring_fallback/chatml_authoring_fallback.mli)
+uses bounded captured-byte lexical spans for keyword and delimiter templates.
+When the host supplies a separately admitted selected Build, it compares the
+actual compiler contract fingerprint with both the Prepared closure and its
+required environment before suggesting names from that one static surface.
+These selected-catalog references are possible even when checking the source
+fails, but they are not visible-binding or type facts. No selected Build yields
+lexical templates alone; a failed expected catalog admission is reported as
+catalog unavailable, not as a certified empty set. Every result, including an
+empty or unavailable one, must fit the encoded response-byte cap.
+
+For an inline ChatMD script, the thin
+[selected-script adapter](../../lib/chatmd_authoring_fallback/chatmd_authoring_fallback.mli)
+requires the current authored document capture and the genuine parser-bound
+[extraction map](../../lib/chatmd/chatmd_extraction_map.mli). A cursor maps to
+compiled bytes only at one exact authored identity point, and the full token
+replacement must project back to an exact range in that same current authored
+input. RAW gaps, transformed input, external bodies and ambiguous boundaries
+return source-map unavailability; no path or matching text supplies a map.
+These producers do not install protocol handlers or grant source custody.
 The portable `authoring.lexical` method returns byte-exact spans in all 16
 shared highlighter roles, five open-construct issue kinds and a truthful
 reached-EOF or truncated scanned prefix. Its owner distinguishes captured

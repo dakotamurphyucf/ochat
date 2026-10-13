@@ -38,6 +38,7 @@ module Projection_receipt = struct
   type error = Extraction.error =
     | Stale_script_source
     | Invalid_compiler_location
+    | Invalid_authored_point
   [@@deriving sexp_of]
 
   let project t location ~checkpoint =

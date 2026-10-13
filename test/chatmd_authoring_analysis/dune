@@ -30,6 +30,10 @@
   chatml_semantics
   chatml_compilation
   chatml_authoring_analysis
-  chatmd_authoring_analysis)
+  chatmd_authoring_analysis
+  agent_protocol
+  chatml_authoring_fallback
+  chatmd_authoring_fallback
+  language_highlighting)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))
