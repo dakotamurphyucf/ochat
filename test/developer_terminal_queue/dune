@@ -1,0 +1,7 @@
+(library
+ (name developer_terminal_queue_test_suite)
+ (modules terminal_queue_tests)
+ (libraries core ochat.agent_server)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane)))

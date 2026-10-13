@@ -11,6 +11,7 @@ end
 let background
       ~owner
       ~capture_fingerprint
+      ~launch
       ~selected
       ~policy
       ~request
@@ -23,12 +24,6 @@ let background
   checkpoint ();
   let%bind () = B.validate_capabilities request ~capabilities:selected in
   checkpoint ();
-  let%bind launch =
-    P.Developer_job.Launch.create
-      ~parent:P.Developer_job.Launch.Run_root
-      ~parent_job:None
-      ~nested_depth:0
-  in
   let state : P.Developer_job.State.t =
     { status = P.Job.Queued
     ; attempt = 0

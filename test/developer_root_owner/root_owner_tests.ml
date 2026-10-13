@@ -60,16 +60,16 @@ let store_limits () =
     ~max_runs:3
     ~max_epochs_per_run:3
     ~max_jobs_per_run:4
-    ~max_invocations_per_run:4
+    ~max_invocations_per_run:5
     ~max_selected_per_commit:2
     ~max_job_payload_bytes:1024
-    ~max_document_bytes:4096
+    ~max_document_bytes:8192
     ~max_recovery_entries:16
     ~max_recovery_bytes:16384
     ~max_work_steps:200
     ~document:
       (Document_schema.Limits.create
-         ~max_bytes:4096
+         ~max_bytes:8192
          ~max_depth:16
          ~max_fields:256
          ~max_nodes:512
@@ -141,8 +141,17 @@ let%test_unit
       |> ok
     in
     let actor_current = ref true in
+    let checks_after_callback = ref None in
     let actor =
-      Operator_authorization.guarded ~principal ~is_current:(fun () -> !actor_current)
+      Operator_authorization.guarded ~principal ~is_current:(fun () ->
+        !actor_current
+        &&
+        match !checks_after_callback with
+        | None -> true
+        | Some 0 -> false
+        | Some remaining ->
+          checks_after_callback := Some (remaining - 1);
+          true)
     in
     let registry =
       Chat_response.Tool_capability.create
@@ -155,13 +164,13 @@ let%test_unit
       O.Limits.create
         ~max_active_runs:2
         ~max_staged_jobs:2
+        ~max_native_occupancy:2
         ~max_active_workers:1
         ~max_quarantined_workers:2
       |> or_error
     in
-    let owner_registry =
-      O.Registry.create ~sw ~store ~capacity:(capacity ()) ~now ~limits
-    in
+    let capacity = capacity () in
+    let owner_registry = O.Registry.create ~sw ~store ~capacity ~now ~limits in
     let admit () =
       O.Registry.admit
         owner_registry
@@ -285,6 +294,45 @@ let%test_unit
     let current = R.observe handle |> ok in
     assert (Option.is_none (R.find_job current (Option.value_exn !revoked_job)));
     assert (Int64.equal (R.Checkpoint.revision (R.Observation.checkpoint current)) 2L);
+    actor_current := true;
+    let absent_job = ref None in
+    let callback_count = ref 0 in
+    assert (
+      Result.is_error
+        (O.with_root_action run ~phase:R.Checkpoint.Active (fun ~action ~sw:_ ->
+           incr callback_count;
+           let id = O.Action.stage_background action ~request ~checkpoint:ignore |> ok in
+           absent_job := Some id;
+           let selection = O.Action.seal action ~selected:[ id ] |> ok in
+           checks_after_callback := Some 1;
+           Ok ((), selection))));
+    assert (Int.equal !callback_count 1);
+    let absent_job = Option.value_exn !absent_job in
+    assert (Option.is_none (R.find_job (R.observe handle |> ok) absent_job));
+    let project_source =
+      let prepared = C.prepared captured in
+      match Chatml_prepared_program.provenance prepared with
+      | Project { declaration; lock = _ } -> declaration
+      | Implicit -> Chatml_prepared_program.entry prepared
+    in
+    let key =
+      Agent_server.Job_capacity.Key.developer
+        ~owner:run_owner
+        ~project_source
+        ~workspace_conflict_domain:"root-owner-test"
+        ~kind:P.Job.Async_tool
+        ~nested_depth:0
+      |> ok
+    in
+    (match Agent_server.Job_capacity.try_acquire capacity key with
+     | Ok None -> ()
+     | Ok (Some _) | Error _ ->
+       failwith "absent selected root intent released staged capacity");
+    checks_after_callback := None;
+    O.reconcile_pending run |> ok;
+    assert (Option.is_some (R.find_job (R.observe handle |> ok) absent_job));
+    assert (Int.equal !callback_count 1);
+    let before_next = R.observe handle |> ok in
     O.close_and_wait run |> ok;
     ignore
       (O.with_root_action other_run ~phase:R.Checkpoint.Active (fun ~action ~sw:_ ->
@@ -298,7 +346,7 @@ let%test_unit
         store
         ~owner:next_owner
         ~capture_fingerprint:(C.fingerprint captured)
-        ~previous:(Some current)
+        ~previous:(Some before_next)
       |> ok
     in
     let next_run =
@@ -356,6 +404,7 @@ let%test_unit
       O.Limits.create
         ~max_active_runs:2
         ~max_staged_jobs:2
+        ~max_native_occupancy:2
         ~max_active_workers:1
         ~max_quarantined_workers:2
       |> or_error
@@ -468,6 +517,7 @@ let%test_unit "uncertain root handoff retains capacity through owner close" =
          O.Limits.create
            ~max_active_runs:1
            ~max_staged_jobs:1
+           ~max_native_occupancy:2
            ~max_active_workers:1
            ~max_quarantined_workers:2
          |> or_error
@@ -567,4 +617,391 @@ let%test_unit "uncertain root handoff retains capacity through owner close" =
        in
        Agent_server.Job_capacity.release released;
        O.Registry.close_and_wait registry |> ok)
+;;
+
+let%test_unit "nested native terminal settles before its live root resumes" =
+  let pause_next_read = ref false in
+  let fail_next_read = ref false in
+  let fail_before_native_rename = ref false in
+  let rename_armed = ref false in
+  let sync_blocked = ref false in
+  let parent_sync_blocked = ref false in
+  let read_failure = Failure "transient native cleanup observation failed" in
+  let read_reached = ref None in
+  let read_release = ref None in
+  let checkpoint () =
+    if !fail_next_read
+    then (
+      fail_next_read := false;
+      raise read_failure)
+    else if !pause_next_read
+    then (
+      pause_next_read := false;
+      Eio.Promise.resolve (Option.value_exn !read_reached) ();
+      Eio.Promise.await (Option.value_exn !read_release))
+  in
+  with_store
+    ~checkpoint
+    ~wrap_env:(fun env ->
+      F.fault_after_authority_rename_env
+        ~before_rename:(fun () ->
+          if !fail_before_native_rename
+          then
+            raise
+              (Core_unix.Unix_error (EIO, "injected pre-rename failure", "native terminal")))
+        env
+        ~rename_armed
+        ~sync_blocked
+        ~parent_sync_blocked)
+    (fun env sw store ->
+       let captured = capture () in
+       let run_owner = owner "dvr_nested_native" 0 in
+       let handle, initial =
+         R.admit_epoch
+           store
+           ~owner:run_owner
+           ~capture_fingerprint:(C.fingerprint captured)
+           ~previous:None
+         |> ok
+       in
+       let actor_current = ref true in
+       let actor =
+         Operator_authorization.guarded ~principal ~is_current:(fun () -> !actor_current)
+       in
+       let selected =
+         Chat_response.Tool_capability.create
+           ~owner:"root-owner-test"
+           ~resource_fingerprint:Digestif.SHA256.(digest_string "fixture" |> to_hex)
+           []
+         |> ok
+       in
+       let prepared_script =
+         Chat_response.One_off_script.prepare_in_domain
+           ~env
+           ~capabilities:selected
+           ~tools:[]
+           ~source:"let main input = Task.pure(input)"
+           ()
+         |> ok
+       in
+       let request =
+         Chat_response.Background_request.script
+           ~prepared:prepared_script
+           ~input:`Null
+           ~policy:Chat_response.One_off_request.default_policy
+         |> ok
+       in
+       let limits =
+         O.Limits.create
+           ~max_active_runs:1
+           ~max_staged_jobs:2
+           ~max_native_occupancy:2
+           ~max_active_workers:1
+           ~max_quarantined_workers:2
+         |> or_error
+       in
+       let owner_registry =
+         O.Registry.create ~sw ~store ~capacity:(capacity ()) ~now ~limits
+       in
+       let run =
+         O.Registry.admit
+           owner_registry
+           ~actor
+           ~capture:captured
+           ~registry:selected
+           ~selected
+           ~job_policy:Chat_response.One_off_request.default_policy
+           ~handle
+           ~workspace_conflict_domain:"root-owner-test"
+         |> ok
+       in
+       let admitted name =
+         let id = P.Id.Invocation.of_string name |> ok in
+         P.Host_invocation.create_developer
+           { id
+           ; owner = P.Execution_owner.Developer run_owner
+           ; origin = P.Invocation.Script
+           ; parent_invocation = None
+           ; parent_job = None
+           ; tool_name = "nested.test"
+           ; implementation_revision = "v1"
+           ; capability_fingerprint = "test-capability"
+           ; input = `Null
+           ; created_at = now ()
+           ; deadline = None
+           }
+         |> ok
+       in
+       let admit_dispatch name =
+         let invocation = admitted name in
+         let id = (P.Host_invocation.context invocation).id in
+         let dispatched = P.Host_invocation.dispatch invocation |> ok in
+         let expected = R.observe handle |> ok in
+         let lookup = R.find_invocation expected id in
+         let dispatch = R.prepare_dispatch handle ~expected ~lookup ~dispatched |> ok in
+         let installed =
+           R.commit_and_settle
+             handle
+             dispatch
+             (R.Handoff.create ~settle:(fun _ -> ()))
+             ~admit:(fun () -> true)
+           |> ok
+         in
+         (match installed with
+          | R.Settlement.Installed _ -> ()
+          | Absent | Prewrite_conflict | Diverged -> failwith "dispatch did not install");
+         invocation, dispatched
+       in
+       ignore (initial : R.Observation.t);
+       let invocation, dispatched = admit_dispatch "inv_nested_native" in
+       let child = ref None in
+       let callbacks = ref 0 in
+       O.with_root_action run ~phase:R.Checkpoint.Active (fun ~action ~sw:_ ->
+         let old = O.current run |> ok in
+         O.with_native_registration run ~invocation (fun ~scope ->
+           assert (
+             Result.is_error
+               (O.with_native_registration run ~invocation (fun ~scope:_ -> Ok ())));
+           let selection =
+             O.with_native_callback scope ~dispatched (fun ~sw:_ ->
+               incr callbacks;
+               let id =
+                 O.Native_terminal.stage_background scope ~request ~checkpoint:ignore
+                 |> ok
+               in
+               child := Some id;
+               O.Native_terminal.seal
+                 scope
+                 ~outcome:(P.Invocation.Complete `Null)
+                 ~selected:[ id ])
+             |> ok
+           in
+           let terminal =
+             P.Host_invocation.resolve dispatched (P.Invocation.Complete `Null) |> ok
+           in
+           assert (
+             Result.is_error (O.Native_terminal.submit scope ~terminal ~selected:None));
+           let revision =
+             O.Native_terminal.submit scope ~terminal ~selected:(Some selection) |> ok
+           in
+           assert (Int.equal revision 2);
+           Ok ())
+         |> ok;
+         assert (Result.is_error (O.check_effect_now run old));
+         ignore (O.current run |> ok : O.Current.t);
+         let selection = O.Action.seal action ~selected:[] |> ok in
+         Ok ((), selection))
+       |> ok;
+       assert (Int.equal !callbacks 1);
+       let observed = R.observe handle |> ok in
+       assert (Option.is_some (R.find_job observed (Option.value_exn !child)));
+       let first, first_dispatched = admit_dispatch "inv_terminal_first" in
+       let second, second_dispatched = admit_dispatch "inv_terminal_second" in
+       let terminal invocation dispatched =
+         let selection =
+           O.with_native_callback invocation ~dispatched (fun ~sw:_ ->
+             incr callbacks;
+             O.Native_terminal.seal
+               invocation
+               ~outcome:(P.Invocation.Complete `Null)
+               ~selected:[])
+           |> ok
+         in
+         let resolved =
+           P.Host_invocation.resolve dispatched (P.Invocation.Complete `Null) |> ok
+         in
+         selection, resolved
+       in
+       O.with_root_action run ~phase:R.Checkpoint.Active (fun ~action ~sw ->
+         let second_ready, second_ready_u = Eio.Promise.create () in
+         let second_go, second_go_u = Eio.Promise.create () in
+         let second_done, second_done_u = Eio.Promise.create () in
+         Eio.Fiber.fork ~sw (fun () ->
+           let result =
+             O.with_native_registration run ~invocation:second (fun ~scope ->
+               let selected, resolved = terminal scope second_dispatched in
+               Eio.Promise.resolve second_ready_u ();
+               Eio.Promise.await second_go;
+               let submitted =
+                 O.Native_terminal.submit
+                   scope
+                   ~terminal:resolved
+                   ~selected:(Some selected)
+               in
+               Eio.Promise.resolve second_done_u submitted;
+               Ok ())
+           in
+           assert (Result.is_ok result));
+         Eio.Promise.await second_ready;
+         let first_done, first_done_u = Eio.Promise.create () in
+         let reached, reached_u = Eio.Promise.create () in
+         let release, release_u = Eio.Promise.create () in
+         read_reached := Some reached_u;
+         read_release := Some release;
+         Eio.Fiber.fork ~sw (fun () ->
+           let result =
+             O.with_native_registration run ~invocation:first (fun ~scope ->
+               let selected, resolved = terminal scope first_dispatched in
+               pause_next_read := true;
+               let submitted =
+                 O.Native_terminal.submit
+                   scope
+                   ~terminal:resolved
+                   ~selected:(Some selected)
+               in
+               Eio.Promise.resolve first_done_u submitted;
+               Ok ())
+           in
+           assert (Result.is_ok result));
+         Eio.Promise.await reached;
+         Eio.Promise.resolve second_go_u ();
+         assert (Result.is_error (Eio.Promise.await second_done));
+         Eio.Promise.resolve release_u ();
+         ignore (Eio.Promise.await first_done |> ok : int);
+         let selection = O.Action.seal action ~selected:[] |> ok in
+         Ok ((), selection))
+       |> ok;
+       assert (Int.equal !callbacks 3);
+       let observed = R.observe handle |> ok in
+       List.iter [ first; second ] ~f:(fun admitted ->
+         let id = (P.Host_invocation.context admitted).id in
+         let prior =
+           R.find_invocation observed id |> R.Invocation_lookup.prior |> Option.value_exn
+         in
+         assert (
+           P.Invocation.equal_status
+             (P.Host_invocation.status (R.Invocation_observation.value prior))
+             (Resolved (Complete `Null))));
+       let sealed_invocation, sealed_dispatch = admit_dispatch "inv_retained_sealed" in
+       let sealed_scope = ref None in
+       let failure = Failure "interrupted after sealing" in
+       (match
+          O.with_native_registration run ~invocation:sealed_invocation (fun ~scope ->
+            sealed_scope := Some scope;
+            ignore
+              (O.with_native_callback scope ~dispatched:sealed_dispatch (fun ~sw:_ ->
+                 let id =
+                   O.Native_terminal.stage_background scope ~request ~checkpoint:ignore
+                   |> ok
+                 in
+                 child := Some id;
+                 O.Native_terminal.seal
+                   scope
+                   ~outcome:(P.Invocation.Complete `Null)
+                   ~selected:[ id ])
+               |> ok
+               : O.Native_terminal.Selection.t);
+            raise failure)
+        with
+        | exception actual -> assert (phys_equal actual failure)
+        | Ok _ | Error _ -> failwith "native exception identity was lost");
+       let sealed_scope = Option.value_exn !sealed_scope in
+       let cancelled =
+         P.Host_invocation.cancel sealed_dispatch ~reason:"interrupted" |> ok
+       in
+       assert (
+         Result.is_error
+           (O.Native_terminal.resolve_retained sealed_scope ~terminal:cancelled));
+       let complete =
+         P.Host_invocation.resolve sealed_dispatch (P.Invocation.Complete `Null) |> ok
+       in
+       actor_current := false;
+       assert (
+         Result.is_error
+           (O.Native_terminal.resolve_retained sealed_scope ~terminal:complete));
+       assert (
+         Option.is_none (R.find_job (R.observe handle |> ok) (Option.value_exn !child)));
+       actor_current := true;
+       O.reconcile_pending run |> ok;
+       assert (
+         Option.is_some (R.find_job (R.observe handle |> ok) (Option.value_exn !child)));
+       ignore (O.current run |> ok : O.Current.t);
+       let entered_without_scope = ref false in
+       fail_next_read := true;
+       (match
+          O.with_native_registration
+            run
+            ~invocation:(admitted "inv_no_scope")
+            (fun ~scope:_ ->
+               entered_without_scope := true;
+               Ok ())
+        with
+        | exception exn when phys_equal exn read_failure -> ()
+        | Ok () | Error _ -> failwith "initial native read failure was lost");
+       assert (not !entered_without_scope);
+       O.with_native_registration
+         run
+         ~invocation:(admitted "inv_no_scope")
+         (fun ~scope:_ -> Ok ())
+       |> ok;
+       ignore (O.current run |> ok : O.Current.t);
+       let absent_scope = ref None in
+       assert (
+         Result.is_error
+           (O.with_native_registration
+              run
+              ~invocation:(admitted "inv_retained_absent")
+              (fun ~scope ->
+                 absent_scope := Some scope;
+                 fail_next_read := true;
+                 Error (P.Error.invalid_request "abort before dispatch"))));
+       assert (Result.is_error (O.current run));
+       O.Native_terminal.abandon_retained_without_dispatch
+         (Option.value_exn !absent_scope)
+       |> ok;
+       ignore (O.current run |> ok : O.Current.t);
+       let unsealed_invocation, unsealed_dispatch =
+         admit_dispatch "inv_retained_unsealed"
+       in
+       let unsealed_scope = ref None in
+       let reason = Failure "cancel before native callback" in
+       (match
+          Eio.Cancel.sub (fun cancel ->
+            O.with_native_registration run ~invocation:unsealed_invocation (fun ~scope ->
+              unsealed_scope := Some scope;
+              Eio.Cancel.cancel cancel reason;
+              Eio.Fiber.check ();
+              Ok ()))
+        with
+        | exception Eio.Cancel.Cancelled actual -> assert (phys_equal actual reason)
+        | Ok () | Error _ -> failwith "native cancellation identity was lost");
+       let unsealed_scope = Option.value_exn !unsealed_scope in
+       assert (Result.is_error (O.current run));
+       assert (
+         Result.is_error
+           (O.Native_terminal.abandon_retained_without_dispatch unsealed_scope));
+       assert (Result.is_error (O.close_and_wait run));
+       let cancelled =
+         P.Host_invocation.cancel unsealed_dispatch ~reason:"interrupted" |> ok
+       in
+       actor_current := false;
+       fail_before_native_rename := true;
+       assert (
+         Result.is_error
+           (O.Native_terminal.resolve_retained unsealed_scope ~terminal:cancelled));
+       let observed = R.observe handle |> ok in
+       let prior =
+         R.find_invocation observed (P.Host_invocation.context cancelled).id
+         |> R.Invocation_lookup.prior
+         |> Option.value_exn
+       in
+       assert (
+         P.Invocation.equal_status
+           (P.Host_invocation.status (R.Invocation_observation.value prior))
+           Dispatching);
+       assert (Result.is_error (O.close_and_wait run));
+       fail_before_native_rename := false;
+       O.reconcile_pending run |> ok;
+       let observed = R.observe handle |> ok in
+       let prior =
+         R.find_invocation observed (P.Host_invocation.context cancelled).id
+         |> R.Invocation_lookup.prior
+         |> Option.value_exn
+       in
+       assert (
+         P.Invocation.equal_status
+           (P.Host_invocation.status (R.Invocation_observation.value prior))
+           (P.Host_invocation.status cancelled));
+       O.close_and_wait run |> ok;
+       O.Registry.close_and_wait owner_registry |> ok)
 ;;
