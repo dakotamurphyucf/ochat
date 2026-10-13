@@ -78,6 +78,27 @@ val complete_index_recovery : t -> (unit, Store_error.t) result
 (** [is_closed t] reports whether [close] released the daemon-store lock. *)
 val is_closed : t -> bool
 
+(** One developer-run document owner under this store's existing daemon lock.
+    The physical claim is unique per live Session_store. Every lease serializes
+    developer-run I/O, checks the original lock and coordinates with [close],
+    which waits for an active lease before releasing the daemon lock. A claim
+    grants storage access only; it does not authenticate a run or principal. *)
+module Developer_root : sig
+  type owner
+
+  val claim : t -> (owner, Store_error.t) result
+
+  val with_lease
+    :  owner
+    -> f:(env:Eio_unix.Stdenv.base -> root:Data_root.t -> 'a)
+    -> ('a, Store_error.t) result
+
+  (** Reject a same-fiber close before mutating the claimant. *)
+  val check_not_active : owner -> (unit, Store_error.t) result
+
+  val release : owner -> unit
+end
+
 (** [check_writable t] creates and removes an exclusive Eio-owned probe file
     beneath the data root. *)
 val check_writable : t -> (unit, Store_error.t) result

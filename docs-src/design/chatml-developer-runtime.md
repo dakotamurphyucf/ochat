@@ -1,6 +1,6 @@
 # ChatML developer run/test and REPL design
 
-Status: M5 design v1, 2026-10-13. The REPL language decisions in §4.3 are accepted. The owner-neutral native admission foundation, compiler-side REPL typing transaction and incremental module registry described below are implemented; the developer run/REPL actor services and remaining interfaces are proposed contracts for review. OCH-130 owns the research; OCH-137, OCH-138 and their implementation children own delivery.
+Status: M5 design v1, 2026-10-13. The REPL language decisions in §4.3 are accepted. The owner-neutral native admission, durable developer run checkpoint foundation, compiler-side REPL typing transaction and incremental module registry described below are implemented; the developer run/REPL actor services and remaining interfaces are proposed contracts for review. OCH-130 owns the research; OCH-137, OCH-138 and their implementation children own delivery.
 
 The [authoring service design](chatml-authoring-services.md) owns source context,
 overlay and immutable upload contracts used here. Implementation and validation
@@ -25,6 +25,12 @@ OCH-287 gives a developer invocation its own [owner coordinate](../../lib/agent_
 The [developer invocation actor](../../lib/agent_session/developer_invocation_owner.mli) accepts a trusted callback that verifies the actual OCH-265 admitted capture fingerprint, owner and current authority. Its durable compare-and-set ledger records Dispatching before effects, then a single resolved/cancelled outcome. After reads, dispatch saves and permission waits, the actor and [shared native policy](../../lib/agent_session/native_tool_invocation.mli) recheck currentness, deadline, direct-parent proof and exact selected implementation before an effect. A successful currentness callback may yield, so the final parent/deadline check uses a non-yielding clock sample. A child borrow can narrow its parent's selection; each child resolution intersects that admitted ceiling with the current host registry by exact capability ID and fingerprint. Revocation or replacement never falls back to a same-name tool. Root and child paths have different typed entrypoints; an expired or foreign parent proof cannot become a root claim.
 
 This foundation preserves the existing conversation admission path and its Function/Custom routing. Developer native calls accept either an object-input function or a string-input custom registration through the same schema and permission checks; a managed standalone handler still requires a function call. It does not install a developer run host, persist run receipts, schedule jobs or authorize a live provider. A developer permission subject has only `Approve_once` and `Deny` until a separately owned durable grant policy exists. Terminal bookkeeping uses the original ledger authority even after execution authority is revoked; a failed terminal save reports uncertainty and leaves the durable Dispatching evidence for recovery, never replaying a possible partial effect. The shared job foundation first distinguishes conversation and developer records and charges them through one capacity ledger. Its developer run bucket is stable across epochs, so a worker claimed before reset remains charged until its actual cleanup; exact owner and attempt still distinguish reservations. The later job tickets will join the existing scheduler and result custody to this owner. OCH-266 will wire the admitted capture, authorization and run lifecycle to both foundations.
+
+### 1.2 Durable run checkpoint foundation
+
+OCH-297 adds the [developer run store](../../lib/agent_store/developer_run_store.mli) beneath the real [daemon-owned Session_store](../../lib/agent_store/session_store.mli). A physical root claim and serialized lease use the existing daemon lock; session-store close waits for an in-flight developer operation before releasing it. The additive `developer-runs/` directory has one bounded versioned authority document per run. Its final layout includes invocation and job arrays, initially empty until OCH-298 implements their typed transitions. Older roots without this directory start empty; there is no intermediate milestone schema or synthetic conversation handle.
+
+The foundation persists durable host/run/principal identity, exact admitted capture fingerprint and ordered epoch checkpoints. A reset interrupts the prior epoch; an old handle cannot reactivate it. A prepared checkpoint carries exact observed before and candidate after bytes, so failed or cancelled writes are reconciled against the authoritative file before any higher actor decides what happened. The store syncs its owned directory before a retry or reconciliation treats a visible rename as durable; opening also syncs the daemon root so an existing subtree created by an interrupted attempt is not mistaken for a durable entry. A normal epoch/run quota rejection is typed `Limit_exceeded`, while a malformed over-limit document on disk fails recovery. Bounded recovery rejects linked, malformed, foreign-host and unknown authority files. A recognized unfinished atomic-writer temporary is not a committed run. This store does not authenticate a principal or grant execution; OCH-298 must bind live authorization and its actor-owned selected jobs to the same document transaction, with no separate job writer.
 
 ## 2. Captured input, check and run
 
@@ -169,10 +175,12 @@ The implementation tickets are these nonoverlapping, independently verifiable ou
 | OCH-287 | OCH-137 | Owner-neutral native invocation, developer actor ledger and shared admission policy | 8 | OCH-265 capture identity |
 | OCH-288 | OCH-137 | Coordination parent for shared developer job scheduling and result custody | — | OCH-287 |
 | OCH-289 | OCH-288 | Owner-tagged job domain and one shared capacity ledger | 5 | OCH-287 |
-| OCH-290 | OCH-288 | Durable developer job owner, run lineage and atomic staging | 8 | OCH-289 |
-| OCH-291 | OCH-288 | Developer result custody, disclosure and artifact lifecycle | 8 | OCH-290 |
-| OCH-292 | OCH-288 | Shared script job adapter for selected host operations | 5 | OCH-289 and OCH-290 |
-| OCH-293 | OCH-288 | One scheduler for conversation and developer jobs | 8 | OCH-290, OCH-291 and OCH-292 |
+| OCH-290 | OCH-288 | Coordination parent for durable run owner and atomic staging | — | OCH-289 |
+| OCH-297 | OCH-290 | Durable daemon-owned run checkpoint and final document foundation | 5 | OCH-289 |
+| OCH-298 | OCH-290 | Atomic selected job and invocation actor transitions | 8 | OCH-297 |
+| OCH-291 | OCH-288 | Developer result custody, disclosure and artifact lifecycle | 8 | OCH-298 |
+| OCH-292 | OCH-288 | Shared script job adapter for selected host operations | 5 | OCH-289 and OCH-298 |
+| OCH-293 | OCH-288 | One scheduler for conversation and developer jobs | 8 | OCH-298, OCH-291 and OCH-292 |
 | OCH-266 | OCH-137 | Developer run lifecycle, live host admission, cancellation and receipt integration | 8 | OCH-265, OCH-287 and OCH-288 |
 | OCH-267 | OCH-137 | Portable HTTP/stdio run service, bounded inspection and authoring bundle upload/run integration | 5 | OCH-266 and OCH-129 bundle custody |
 | OCH-268 | OCH-138 | Extract/bound shared type-graph copy from `Type_probe`, preserving probe behavior | 3 | OCH-127 correctness audit |

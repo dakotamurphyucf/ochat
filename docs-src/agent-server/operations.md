@@ -85,6 +85,15 @@ blobs/exports, idempotency records and security/audit state. One process owns it
 Session writers serialize commits/checkpoints so snapshot state and transaction
 identity cannot be paired across a racing mutation.
 
+The developer-run checkpoint foundation has an additive `developer-runs/`
+subtree under the same daemon lock. It stores a bounded, versioned run document
+and exact epoch checkpoints; an older root without that subtree starts empty.
+Recovery rejects malformed or foreign-host documents and does not treat an
+interrupted atomic-writer temporary file as an admitted run. The current
+foundation does not itself admit execution or publish jobs. See the
+[developer runtime design](../design/chatml-developer-runtime.md) for the
+remaining actor and service contracts.
+
 `each` synchronizes accepted transactions before acknowledgement. `interval`
 groups synchronization by its configured interval. `unsafe_buffered` explicitly
 allows loss after process/host failure. Do not apply the strongest mode's durability
