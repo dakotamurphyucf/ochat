@@ -81,6 +81,10 @@ module Run = Make (struct
     let prefix = "run"
   end)
 
+module Developer_run = Make (struct
+    let prefix = "dvr"
+  end)
+
 module Attachment = Make (struct
     let prefix = "att"
   end)

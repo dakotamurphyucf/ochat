@@ -177,6 +177,7 @@
     lib/agent_session/managed_submission_tracking.ml %{dep:../agent_session/managed_submission_tracking.ml}
     lib/agent_session/managed_wait_tool.ml %{dep:../agent_session/managed_wait_tool.ml}
     lib/agent_session/native_tool_invocation.ml %{dep:../agent_session/native_tool_invocation.ml}
+    lib/agent_session/native_tool_policy.ml %{dep:../agent_session/native_tool_policy.ml}
     lib/agent_session/one_off_execution.ml %{dep:../agent_session/one_off_execution.ml}
     lib/agent_session/run_chatml_tool.ml %{dep:../agent_session/run_chatml_tool.ml}
     lib/agent_session/script_tool_calls.ml %{dep:../agent_session/script_tool_calls.ml}

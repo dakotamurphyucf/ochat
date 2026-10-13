@@ -148,8 +148,11 @@
   observation_follow_up
   stream_invocation
   native_tool_dispatch
+  native_tool_policy
   fork_tool_dispatch
   native_tool_invocation
+  host_permission_subject
+  developer_invocation_owner
   authoring_reference_scope
   native_tool_moderation
   script_tool_calls
@@ -195,7 +198,7 @@
   start_queue
   inference_ledger)
  (private_modules workspace_ownership authored_native_contract pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles
-  prompt_project_baseline_record prompt_project_baseline_document)
+  prompt_project_baseline_record prompt_project_baseline_document native_tool_policy)
  (libraries ochat.inference_client ochat.inference_runtime ochat.inference ochat.history_chatmd ochat.transcript
   core
   core_unix
@@ -208,6 +211,7 @@
   ochat.chatmd_content_capture
   ochat.chatmd_prompt_content
   ochat.chatml_local_source
+  ochat.chatml_source
   ochat.chatml_project_prepare
   ochat.chatml_local_roots
   ochat.chatml_git_host

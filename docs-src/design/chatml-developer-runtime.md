@@ -1,6 +1,6 @@
 # ChatML developer run/test and REPL design
 
-Status: M5 design v1, 2026-10-13. The REPL language decisions in §4.3 are accepted; service and implementation interfaces below are proposed contracts for review. This document is not evidence that the services exist yet. OCH-130 owns the research; OCH-137, OCH-138 and their implementation children own delivery.
+Status: M5 design v1, 2026-10-13. The REPL language decisions in §4.3 are accepted. OCH-287 implements the owner-neutral native admission foundation described below; the developer run/REPL services and remaining interfaces are proposed contracts for review. OCH-130 owns the research; OCH-137, OCH-138 and their implementation children own delivery.
 
 The [authoring service design](chatml-authoring-services.md) owns source context,
 overlay and immutable upload contracts used here. Implementation and validation
@@ -17,6 +17,14 @@ The existing compiler already accepts exact immutable [captured sources](../../l
 OCH-265 implements the [immutable developer capture and deterministic fixture check/test core](../development/chatml-developer-capture.md). It is not yet a hosted run service or live capability admission.
 
 The current one-off host prepares selected source and tools, revalidates live bindings after waits and runs under a borrowed native scope ([one-off script](../../lib/chat_response/one_off_script.mli), [execution](../../lib/agent_session/one_off_execution.ml)). The [script job service](../../lib/agent_session/script_job_service.mli) and [job protocol](../../lib/agent_protocol/job.mli) provide bounded staging, selection, status, permission waits and cancellation for actor-owned work. Their current launch owner is an invocation or moderator event. Developer execution needs its own authenticated owner and run record while reusing those underlying controls; it must not mutate an unrelated production conversation or disguise a developer run as `Agent_protocol.Run`.
+
+### 1.1 Owner-neutral native admission foundation
+
+OCH-287 gives a developer invocation its own [owner coordinate](../../lib/agent_protocol/execution_owner.mli) and [host invocation record](../../lib/agent_protocol/host_invocation.mli). A conversation record is held whole, preserving its existing routing, provider/history and publication metadata. A developer record uses a dedicated validated `Id.Developer_run`, durable host ID, principal and run epoch, with no synthetic Session ID. The later host bridge creates the developer run ID before capture admission and gives `Chatml_developer_test.Run_id` its string form; the protocol layer does not depend upward on the capture implementation. These coordinates are comparisons, not execution authority. The durable server ID may survive a process restart, so liveness also requires the physical issuer and the host's current authenticated capture/epoch check.
+
+The [developer invocation actor](../../lib/agent_session/developer_invocation_owner.mli) accepts a trusted callback that verifies the actual OCH-265 admitted capture fingerprint, owner and current authority. Its durable compare-and-set ledger records Dispatching before effects, then a single resolved/cancelled outcome. After reads, dispatch saves and permission waits, the actor and [shared native policy](../../lib/agent_session/native_tool_invocation.mli) recheck currentness, deadline, direct-parent proof and exact selected implementation before an effect. A successful currentness callback may yield, so the final parent/deadline check uses a non-yielding clock sample. A child borrow can narrow its parent's selection; each child resolution intersects that admitted ceiling with the current host registry by exact capability ID and fingerprint. Revocation or replacement never falls back to a same-name tool. Root and child paths have different typed entrypoints; an expired or foreign parent proof cannot become a root claim.
+
+This foundation preserves the existing conversation admission path and its Function/Custom routing. Developer native calls accept either an object-input function or a string-input custom registration through the same schema and permission checks; a managed standalone handler still requires a function call. It does not install a developer run host, persist run receipts, schedule jobs or authorize a live provider. A developer permission subject has only `Approve_once` and `Deny` until a separately owned durable grant policy exists. Terminal bookkeeping uses the original ledger authority even after execution authority is revoked; a failed terminal save reports uncertainty and leaves the durable Dispatching evidence for recovery, never replaying a possible partial effect. OCH-288 will join the existing job scheduler and result custody to this owner, and OCH-266 will wire the admitted capture, authorization and run lifecycle to both foundations.
 
 ## 2. Captured input, check and run
 
@@ -158,7 +166,9 @@ The implementation tickets are these nonoverlapping, independently verifiable ou
 | Ticket | Parent | Outcome | Points | Primary dependency |
 | --- | --- | --- | ---: | --- |
 | OCH-265 | OCH-137 | Immutable capture/check and deterministic fixture runner | 5 | OCH-129 identity and OCH-130 decisions |
-| OCH-266 | OCH-137 | Developer execution owner, live admission and shared job/cancel integration | 8 | OCH-85, OCH-126, OCH-265 |
+| OCH-287 | OCH-137 | Owner-neutral native invocation, developer actor ledger and shared admission policy | 8 | OCH-265 capture identity |
+| OCH-288 | OCH-137 | Shared scheduler, owned job lineage and result custody for developer execution | 8 | OCH-287 |
+| OCH-266 | OCH-137 | Developer run lifecycle, live host admission, cancellation and receipt integration | 8 | OCH-265, OCH-287 and OCH-288 |
 | OCH-267 | OCH-137 | Portable HTTP/stdio run service, bounded inspection and authoring bundle upload/run integration | 5 | OCH-266 and OCH-129 bundle custody |
 | OCH-268 | OCH-138 | Extract/bound shared type-graph copy from `Type_probe`, preserving probe behavior | 3 | OCH-127 correctness audit |
 | OCH-283 | OCH-138 | Bounded production-grammar whole-submission Complete/Need_more/Rejected admission | 3 | OCH-268 |
