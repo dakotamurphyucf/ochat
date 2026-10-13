@@ -142,7 +142,10 @@ module Publisher : sig
 
   (** The completion already selected for this still-current attempt, including
       failed intent/upload writes. Retrying a waiting parent must not recalculate
-      a different outcome while the original publication is pending. *)
+      a different outcome while the original publication is pending. A call
+      from this publisher's own persist/collection callback (or a child fiber
+      inheriting that callback scope) raises [Invalid_argument] before waiting
+      on its own lock; independent fibers serialize normally. *)
   val pending_completion
     :  t
     -> job:Agent_protocol.Job.t

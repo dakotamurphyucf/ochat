@@ -52,6 +52,8 @@
   blob_retention
   retention_reader
   job_result_intent
+  result_publication_lock
+  result_publication_phase
   job_result_store
   transaction
   commit_writer
@@ -80,7 +82,9 @@
   authoring_upload_files
   developer_run_document
   developer_run_transition
-  blob_developer_namespace)
+  blob_developer_namespace
+  result_publication_lock
+  result_publication_phase)
  (libraries ochat.inference
   core
   core_unix
