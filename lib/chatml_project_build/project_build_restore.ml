@@ -129,7 +129,12 @@ let catalog_input budget ~limits ~declared_at receipt sources selected =
       source :: captures)
   in
   let%map catalog =
-    Catalog_restore.create budget ~project ~request ~sources:(List.rev captures)
+    Catalog_restore.create
+      budget
+      ~project
+      ~request
+      ~captured_entry:None
+      ~sources:(List.rev captures)
   in
   (* Each decoded catalog is reconstructed once. No restored input asserts a
      native acquisition identity; aliases refer to these unique declarations. *)

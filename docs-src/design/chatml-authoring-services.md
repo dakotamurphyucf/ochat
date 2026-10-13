@@ -504,6 +504,25 @@ grant. Constructors and decoders reject inconsistent subsets, repeated derived
 source IDs with conflicting revisions, ambiguous paths, and out-of-range script
 selectors. Client replies are checked against the request's tagged manifest;
 these structural checks do not replace the host's captured-source validation.
+The pure `Chatml_authoring_bundle_project` adapter admits one exact uploaded
+manifest/source snapshot into a bounded Project validation attempt. A top-level
+Project must account for the entire uploaded inventory; nested script Projects
+select only their explicit qualified subsets from the same indexed snapshot.
+An exact captured lock is restored unchanged. Composition binds a separately
+admitted previous Build to the manifest's full prior-lock source revision, or
+uses the existing Local-only gate without one. It reuses the project builder's
+route, catalog, selection and compiler-contract checks. A captured Library entry
+can be a planned catalog member or a standalone source: the existing catalog
+planner makes that distinction from actual selected captures, and only the
+matching standalone entry is excluded from catalog inputs. The adapter compares
+the resulting Build's root, entry, selected environment (including declaration
+defaults), routes and complete source revisions against the manifest. One
+attempt owns the full snapshot index and aggregate work/input allowance across
+all selected Projects; a failed or interrupted validation cannot be retried on
+that attempt. The returned immutable value is captured-closure evidence, not
+a sealed-upload claim, native provenance or execution permission. ChatMD
+authored-script membership and final document inventory coverage remain with
+the document adapter, and publication still binds a live sealed store claim.
 Storage/receipt ownership and pure closure validation/publication are separate
 components. The private upload stage records a versioned immutable manifest,
 atomic phase and accepted-offset documents, and numeric member data files under

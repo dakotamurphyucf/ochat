@@ -11,7 +11,7 @@ let directory_key directory =
   | Relative path -> Source.Portable_path.to_string path
 ;;
 
-let create budget ~project ~request ~sources =
+let create budget ~project ~request ~captured_entry ~sources =
   let checkpoint () = Budget.checkpoint budget in
   let catalog result =
     Result.map_error result ~f:(fun error -> Model.Error.create (Catalog error))
@@ -51,5 +51,40 @@ let create budget ~project ~request ~sources =
          | Some observation -> observation :: observations))
   in
   let%bind plan = Catalog.Plan.create discovery ~observations ~checkpoint |> catalog in
+  let%bind sources =
+    match captured_entry with
+    | None -> Ok sources
+    | Some entry ->
+      let entry_id = Captured.id entry in
+      let matching =
+        List.filter sources ~f:(fun source ->
+          checkpoint ();
+          Budget.compare_id budget (Captured.id source) entry_id = 0)
+      in
+      (match matching with
+       | [] -> Ok sources
+       | [ candidate ] ->
+         if not (Budget.equal_source budget candidate entry)
+         then Error (Model.Error.create (Duplicate_capture entry_id))
+         else (
+           let is_declaration =
+             Budget.compare_id budget entry_id (Captured.id (Project.source project)) = 0
+           in
+           let is_planned =
+             List.exists (Catalog.Plan.members plan) ~f:(fun member ->
+               checkpoint ();
+               String.equal
+                 (Source.Portable_path.to_string (Catalog.Plan.Member.path member))
+                 (Captured.Id.relative_path entry_id))
+           in
+           if is_declaration || is_planned
+           then Ok sources
+           else
+             Ok
+               (List.filter sources ~f:(fun source ->
+                  checkpoint ();
+                  Budget.compare_id budget (Captured.id source) entry_id <> 0)))
+       | _ :: _ :: _ -> Error (Model.Error.create (Duplicate_capture entry_id)))
+  in
   Catalog.create plan ~sources ~checkpoint |> catalog
 ;;

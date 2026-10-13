@@ -180,20 +180,73 @@ let%test_unit "captured Library entry retains standalone or member ownership" =
     Fixtures.compose ~entry:(Captured (Fixtures.main overlap_fixture)) overlap_fixture
     |> Support.ok
   in
+  let same_namespace_entry =
+    Support.capture ~namespace:"root" "standalone.chatml" "let initial = 1"
+  in
+  let same_namespace =
+    Fixtures.compose ~entry:(Captured same_namespace_entry) overlap_fixture |> Support.ok
+  in
   List.iter
-    [ standalone, contract; overlap, Fixtures.contract overlap_fixture ]
+    [ standalone, contract
+    ; overlap, Fixtures.contract overlap_fixture
+    ; same_namespace, Fixtures.contract overlap_fixture
+    ]
     ~f:(fun (previous, contract) ->
       let old_entry =
         List.find_exn (Support.without_lock previous) ~f:(fun source ->
           S.Id.equal (S.id source) (R.entry (B.prepared previous)))
       in
       let entry_id = S.id old_entry in
+      let uploaded =
+        B.Effective.compose
+          ~root_project:(P.Lock.root (B.lock previous))
+          ~selection:(Library { environment = None })
+          ~entry:(Captured old_entry)
+          ~sources:(Support.without_lock previous)
+          ~routes:(routes previous)
+          ~previous:None
+          ~lock_id:
+            (Support.id
+               ~namespace:(S.Id.package_namespace (P.Lock.root (B.lock previous)))
+               "uploaded.lock.json")
+          ~contract
+          ~limits:(Support.limits ())
+          ~checkpoint:ignore
+        |> Support.ok
+      in
+      List.iter (Support.without_lock previous) ~f:(fun expected ->
+        let actual =
+          R.find_source (B.prepared uploaded) (S.id expected) |> Option.value_exn
+        in
+        Support.assert_same_source expected actual);
       let edited_entry =
         Support.capture
           ~namespace:(S.Id.package_namespace entry_id)
           (S.Id.relative_path entry_id)
           (S.contents old_entry ^ "\nlet revision = 1")
       in
+      let mismatched_upload =
+        B.Effective.compose
+          ~root_project:(P.Lock.root (B.lock previous))
+          ~selection:(Library { environment = None })
+          ~entry:(Captured old_entry)
+          ~sources:
+            (List.map (Support.without_lock previous) ~f:(fun source ->
+               if S.Id.equal (S.id source) entry_id then edited_entry else source))
+          ~routes:(routes previous)
+          ~previous:None
+          ~lock_id:
+            (Support.id
+               ~namespace:(S.Id.package_namespace (P.Lock.root (B.lock previous)))
+               "uploaded.lock.json")
+          ~contract
+          ~limits:(Support.limits ())
+          ~checkpoint:ignore
+        |> Support.reject
+      in
+      (match B.Error.problem mismatched_upload with
+       | Duplicate_capture id -> assert (S.Id.equal id entry_id)
+       | _ -> failwith "changed uploaded entry revision was hidden by planner");
       let effective_sources =
         R.sources (B.prepared previous)
         |> List.map ~f:(fun source ->
