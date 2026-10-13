@@ -116,6 +116,10 @@ val delegated_invocation_dependencies
     to this implementation, not to the calling script's tool selection. *)
 type execution
 
+(** Same admission checks as [execution], with an owner-neutral invocation.
+    The conversation API and its consumers retain their original exact type. *)
+type owned_execution
+
 (** Checks live captured authority, exact caller selection and dispatched source
     identity. This performs no authorization or execution; the owning dispatcher
     must repeat admission after any permission wait. *)
@@ -130,3 +134,23 @@ val admit
 val prepared : execution -> Extension_compiler.t
 val binding : execution -> Tool_capability.binding
 val invocation : execution -> Agent_protocol.Invocation.t
+
+(** Exact developer/owned admission. No provider-history or Session ID is
+    synthesized. The implementation shares the binding, revision, selection,
+    source and live-registry validation used by [admit]. *)
+val admit_owned
+  :  t
+  -> current:Tool_capability.t
+  -> selected:Tool_capability.t
+  -> reference:Tool_capability.reference
+  -> invocation:Agent_protocol.Host_invocation.t
+  -> (owned_execution, Tool_capability.error) result
+
+val owned_prepared : owned_execution -> Extension_compiler.t
+val owned_binding : owned_execution -> Tool_capability.binding
+val owned_invocation : owned_execution -> Agent_protocol.Host_invocation.t
+
+val delegated_owned_invocation_dependencies
+  :  delegation
+  -> Agent_protocol.Host_invocation.t
+  -> (Tool_capability.t, Tool_capability.error) result

@@ -88,6 +88,7 @@
   authored_agent_registration_tests
   managed_submission_recovery_tests
   delivery_ownership_tests
+  developer_invocation_tests
   delivery_wake_tests
   notification_transaction_tests
   notification_access_tests

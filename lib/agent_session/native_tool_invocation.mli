@@ -8,6 +8,16 @@ type executor =
       -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
   -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
 
+(** The same actor-backed transition contract over the owner-neutral record.
+    The developer implementation is [Developer_invocation_owner.with_invocation];
+    conversation callers keep their existing [executor] adapter. *)
+type owned_executor =
+  invocation:Agent_protocol.Host_invocation.t
+  -> (active:Developer_invocation_owner.active
+      -> dispatched:Agent_protocol.Host_invocation.t
+      -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
+  -> (Agent_protocol.Host_invocation.t, Agent_protocol.Error.t) result
+
 (** Actor-owned handoff whose commit atomically saves moderator state and result.
     It has no provider-history or general session mutation capability. *)
 type moderator_executor =
@@ -36,6 +46,31 @@ val current_scope : unit -> scope
     verified capability ceiling. It provides admission/result persistence and
     narrowing, without foreground history, moderator ownership or a policy bypass. *)
 type borrowed
+
+(** A developer/owner-neutral borrow never projects as a conversation borrow.
+    The old [current_scope]/[borrow] report Expired in an active developer scope
+    so Session-only services cannot fall back to an unrelated operation. *)
+type owned_borrowed
+
+val borrow_owned : unit -> (owned_borrowed, Agent_protocol.Error.t) result
+val owned_borrowed_invocation : owned_borrowed -> Agent_protocol.Host_invocation.t
+val owned_borrowed_execution_context : owned_borrowed -> Chatml_execution.context
+
+val owned_borrowed_capabilities
+  :  owned_borrowed
+  -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result
+
+val require_owned_native_admission
+  :  owned_borrowed
+  -> binding:Chat_response.Tool_capability.binding
+  -> (unit, Agent_protocol.Error.t) result
+
+val select_owned_tools
+  :  owned_borrowed
+  -> names:string list
+  -> (owned_borrowed, Agent_protocol.Error.t) result
+
+val execute_owned_borrowed : owned_borrowed -> owned_executor
 
 (** Fails outside an active native callback, including a fiber whose inherited
     binding has expired. Never falls back to a different foreground operation. *)
@@ -157,6 +192,59 @@ type managed_dispatch =
           -> ('a, Agent_protocol.Invocation.outcome) result)
       -> ('a, Agent_protocol.Invocation.outcome) result
   }
+
+type owned_managed_dispatch =
+  { definition : Chat_response.Managed_tool_registry.t
+  ; current : unit -> Chat_response.Tool_capability.t
+  ; run :
+      'a.
+      Chat_response.Managed_tool_registry.owned_execution
+      -> owned_borrowed
+      -> (validate_work:(Agent_protocol.Invocation.work -> (unit, string) result)
+          -> outcome:Agent_protocol.Invocation.outcome
+          -> ('a, Agent_protocol.Invocation.outcome) result)
+      -> ('a, Agent_protocol.Invocation.outcome) result
+  }
+
+(** Developer calls enter the same native/managed admission kernel as
+    [run_scoped_with_managed]. [owner] is trusted host wiring: it supplies the
+    persisted actor executor, original ceiling, current selected registry and
+    authenticated currentness check. Selection, schema, policy, post-wait
+    re-resolution, exact physical native admission, disclosure and output/work
+    validation happen once in the shared kernel. The authorizer may wait, but
+    must use a developer permission subject bound to this exact invocation;
+    no Session attachment or grant is inferred from its ID. *)
+val run_owned_root
+  :  owner:Developer_invocation_owner.t
+  -> managed:owned_managed_dispatch option
+  -> reference:Chat_response.Tool_capability.reference
+  -> invocation:Agent_protocol.Host_invocation.t
+  -> authorize:
+       (Agent_protocol.Host_invocation.t
+        -> Chat_response.Tool_capability.binding
+        -> (unit, Agent_protocol.Error.t) result)
+  -> prepare_output:
+       (Openai.Responses.Tool_output.Output.t
+        -> (Jsonaf.t, Agent_protocol.Error.t) result)
+  -> (Agent_protocol.Host_invocation.t, Agent_protocol.Error.t) result
+
+(** A direct child of this exact active owned borrow. The implementation derives
+    its opaque [Child active] parent proof from [parent]; it cannot substitute a
+    Root claim or use another invocation with matching owner coordinates. The
+    borrow expires with its creating callback across inherited fibers/domains. *)
+val run_owned_child
+  :  parent:owned_borrowed
+  -> managed:owned_managed_dispatch option
+  -> reference:Chat_response.Tool_capability.reference
+  -> invocation:Agent_protocol.Host_invocation.t
+  -> authorize:
+       (Agent_protocol.Host_invocation.t
+        -> Chat_response.Tool_capability.binding
+        -> (unit, Agent_protocol.Error.t) result)
+  -> prepare_output:
+       (Openai.Responses.Tool_output.Output.t
+        -> (Jsonaf.t, Agent_protocol.Error.t) result)
+  -> (Agent_protocol.Host_invocation.t, Agent_protocol.Error.t) result
 
 (** Common owned dispatch with managed targets installed. Performs capability,
     schema and policy checks and repeats managed admission after authorization.
