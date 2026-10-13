@@ -65,13 +65,19 @@ type state =
   { mutable pending_token : Chatmd_parser.token option
   ; mutable scope : Chatmd_tag_scope.t
   ; scratch : Buffer.t
+  ; error_exn : string -> exn
+  ; on_limit : unit -> unit
   }
 
-let create_state () =
+let create_state ~error_exn ~on_limit () =
   { pending_token = None
   ; scope = Chatmd_tag_scope.root
   ; scratch = Buffer.create 256
+  ; error_exn
+  ; on_limit
   }
+
+let fail state message = raise (state.error_exn message)
 
 let text_fragment ~text ~start_byte ~end_byte =
   TEXT (Chatmd_parser_builder.Text_fragment.create ~text ~start_byte ~end_byte)
@@ -106,7 +112,8 @@ let enter_element state tag attrs =
      with
      | Ok scope -> scope
      | Error Chatmd_tag_scope.Error.Depth_limit ->
-       failwith "ChatMD lexical scope depth exhausted")
+       state.on_limit ();
+       fail state "ChatMD lexical scope depth exhausted")
 
 let leave_element state =
   state.scope <- Chatmd_tag_scope.leave state.scope
@@ -119,12 +126,15 @@ let leave_element state =
 (* Decode a handful of HTML entities that are common in prompts.  We do *not*
    attempt full entity decoding – just the basics so authors can write
    `&amp;`, `&lt;`, … without having them arrive verbatim in the runtime. *)
-let parse_attrs s =
-  Chatmd_attribute_lex.complete_exn s ~checkpoint:(fun () -> ())
+let parse_attrs state s =
+  Chatmd_attribute_lex.complete_exn
+    ~error_exn:state.error_exn
+    s
+    ~checkpoint:(fun () -> ())
 
 (* Take a raw tag like "<msg role=\"user\">" or "<img src=.../>" and
    return (tagName, attrs, self_closing)  – *without* the surrounding <>. *)
-let dissect (raw : string) : string * attribute list * bool =
+let dissect state (raw : string) : string * attribute list * bool =
   let len = String.length raw in
   let self_closing =
     if len >= 2 then Char.equal raw.[len - 2] '/' else false
@@ -145,7 +155,7 @@ let dissect (raw : string) : string * attribute list * bool =
   | Some index ->
     let name = String.prefix body index in
     let attrs_str = String.drop_prefix body (index + 1) in
-    name, parse_attrs attrs_str, self_closing
+    name, parse_attrs state attrs_str, self_closing
   | None -> body, [], self_closing
 
 (* The buffer into which we accumulate the raw text of an unknown tag *)
@@ -206,11 +216,11 @@ rule token_inner state = parse
 
  
 
-  | "<!--"                     { comment lexbuf; token_inner state lexbuf }
+  | "<!--"                     { comment state lexbuf; token_inner state lexbuf }
 
   (* self‐closing recognised tag, e.g. <img .../>                     *)
   | '<' ['a'-'z''A'-'Z''_'] [^'>' ]* "/>" as raw_tag {
-      let name, attrs, _ = dissect raw_tag in
+      let name, attrs, _ = dissect state raw_tag in
       if is_recognised state name then
         let tag = tag_of_string_exn state name in
         SELF (tag, attrs)
@@ -220,7 +230,7 @@ rule token_inner state = parse
 
   (* normal start tag                                                 *)
   | '<' ['a'-'z''A'-'Z''_'] [^'>' ]* '>' as raw_tag {
-      let name, attrs, _ = dissect raw_tag in
+      let name, attrs, _ = dissect state raw_tag in
       if is_recognised state name then
         let tag = tag_of_string_exn state name in
         enter_element state tag attrs;
@@ -275,8 +285,9 @@ rule token_inner state = parse
 
   | _ as c {
       let p = Lexing.lexeme_start_p lexbuf in
-      failwithf "Unexpected char %c at %d:%d" c p.pos_lnum
-        (p.pos_cnum - p.pos_bol) ()
+      fail state
+        (sprintf "Unexpected char %c at %d:%d" c p.pos_lnum
+           (p.pos_cnum - p.pos_bol))
     }
 
 (*--------------------------------------------------------------------------*)
@@ -303,7 +314,7 @@ and skip_unknown state name depth start_byte = parse
 
   | '<' ['a'-'z''A'-'Z''_'] [^'>' ]* '>' as raw_tag {
       Buffer.add_string state.scratch raw_tag;
-      let open_name, _, self = dissect raw_tag in
+      let open_name, _, self = dissect state raw_tag in
       let depth = if (not self) && String.equal open_name name then depth + 1 else depth in
       skip_unknown state name depth start_byte lexbuf
     }
@@ -312,7 +323,7 @@ and skip_unknown state name depth start_byte = parse
 
   | [^ '<' ]+ as chunk { Buffer.add_string state.scratch chunk; skip_unknown state name depth start_byte lexbuf }
 
-  | eof { failwithf "Unterminated unknown tag <%s>" name () }
+  | eof { fail state (sprintf "Unterminated unknown tag <%s>" name) }
 
 and raw_block state start_byte = parse
   (* Terminating delimiter *)
@@ -331,12 +342,12 @@ and raw_block state start_byte = parse
       raw_block state start_byte lexbuf
     }
 
-  | eof { failwith "Unterminated raw block RAW| ... |RAW" }
+  | eof { fail state "Unterminated raw block RAW| ... |RAW" }
 
-and comment = parse
+and comment state = parse
   | "-->" { () }
-  | eof    { failwith "Unterminated <!-- comment-->" }
-  | _      { comment lexbuf }
+  | eof    { fail state "Unterminated <!-- comment-->" }
+  | _      { comment state lexbuf }
 
 
 (* 
@@ -356,8 +367,8 @@ and comment = parse
     tokens in succession can do so transparently.  Apart from this tiny
     buffer, the function is stateless and re-entrant. *)
 {
-let create () =
-  let state = create_state () in
+let create ?(error_exn = fun message -> Failure message) ?(on_limit = ignore) () =
+  let state = create_state ~error_exn ~on_limit () in
   fun lexbuf ->
   match state.pending_token with
   | Some tok ->

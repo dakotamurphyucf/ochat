@@ -11,6 +11,7 @@ type t =
   { root : Eio.Fs.dir_ty Eio.Path.t
   ; confined : bool
   ; generated : bool
+  ; generated_checked : bool
   ; retained : (Chatml_local_source.t * (unit -> unit)) option
   ; captured : string String.Map.t option
   ; read_limit : (source -> int) option
@@ -22,6 +23,7 @@ let filesystem ~root =
   { root
   ; confined = false
   ; generated = false
+  ; generated_checked = false
   ; retained = None
   ; captured = None
   ; read_limit = None
@@ -42,6 +44,28 @@ let captured_filesystem ~root ~sources =
 
 let generated_filesystem ~root ~sources =
   { (captured_filesystem ~root ~sources) with generated = true }
+;;
+
+module Generated_error = struct
+  type t =
+    | Invalid_reference
+    | Source_unavailable
+
+  exception Raised of t
+
+  let of_exn = function
+    | Raised error -> Some error
+    | _ -> None
+  ;;
+end
+
+let generated_filesystem_checked ~root ~sources =
+  { (generated_filesystem ~root ~sources) with generated_checked = true }
+;;
+
+let checked_result t ~problem = function
+  | Error _ when t.generated_checked -> raise (Generated_error.Raised problem)
+  | result -> result
 ;;
 
 let portable_reference reference =
@@ -114,25 +138,26 @@ let make_source ~file_name ~relative_path ~directory ~path =
 ;;
 
 let root t ~file =
-  if
-    (t.generated && not (portable_reference file))
-    || (t.confined && (Filename.is_absolute file || Result.is_error (normalize file)))
-  then Error "source reference escapes its root"
-  else (
-    let relative_path =
-      if Filename.is_absolute file
-      then Filename.basename file
-      else unconfined_relative file
-    in
-    Ok
-      (make_source
-         ~file_name:file
-         ~relative_path
-         ~directory:
-           (if String.equal (Filename.dirname relative_path) "."
-            then t.root
-            else Eio.Path.(t.root / Filename.dirname relative_path))
-         ~path:Eio.Path.(t.root / file)))
+  (if
+     (t.generated && not (portable_reference file))
+     || (t.confined && (Filename.is_absolute file || Result.is_error (normalize file)))
+   then Error "source reference escapes its root"
+   else (
+     let relative_path =
+       if Filename.is_absolute file
+       then Filename.basename file
+       else unconfined_relative file
+     in
+     Ok
+       (make_source
+          ~file_name:file
+          ~relative_path
+          ~directory:
+            (if String.equal (Filename.dirname relative_path) "."
+             then t.root
+             else Eio.Path.(t.root / Filename.dirname relative_path))
+          ~path:Eio.Path.(t.root / file))))
+  |> checked_result t ~problem:Generated_error.Invalid_reference
 ;;
 
 let relative_reference base reference =
@@ -165,6 +190,7 @@ let resolve t ~base ~reference =
         (if t.generated
          then Eio.Path.(t.root / relative_path)
          else Eio.Path.(base.directory / reference)))
+  |> checked_result t ~problem:Generated_error.Invalid_reference
 ;;
 
 let read_legacy_unbounded t source =
@@ -229,36 +255,38 @@ let read_legacy_bounded ~max_bytes t source =
 ;;
 
 let read_bounded ~max_bytes t source =
-  match t.retained with
-  | None -> read_legacy_bounded ~max_bytes t source
-  | Some (owner, checkpoint) ->
-    let max_bytes =
-      Option.value_map t.read_limit ~default:max_bytes ~f:(fun bound ->
-        Int.min max_bytes (bound source))
-    in
-    if max_bytes < 0 || max_bytes > 8 * 1024 * 1024
-    then Error "invalid source read bound"
-    else (
-      checkpoint ();
-      match Source.Portable_path.create source.relative_path with
-      | Error _ -> Error "source member is not a portable relative path"
-      | Ok member ->
-        (match Chatml_local_source.read owner ~member ~max_bytes ~checkpoint with
-         | Error error ->
-           Error (Sexp.to_string_hum (Chatml_local_source.Error.sexp_of_t error))
-         | Ok contents ->
-           checkpoint ();
-           Option.iter t.observer ~f:(fun observe -> observe source contents);
-           Ok contents))
+  (match t.retained with
+   | None -> read_legacy_bounded ~max_bytes t source
+   | Some (owner, checkpoint) ->
+     let max_bytes =
+       Option.value_map t.read_limit ~default:max_bytes ~f:(fun bound ->
+         Int.min max_bytes (bound source))
+     in
+     if max_bytes < 0 || max_bytes > 8 * 1024 * 1024
+     then Error "invalid source read bound"
+     else (
+       checkpoint ();
+       match Source.Portable_path.create source.relative_path with
+       | Error _ -> Error "source member is not a portable relative path"
+       | Ok member ->
+         (match Chatml_local_source.read owner ~member ~max_bytes ~checkpoint with
+          | Error error ->
+            Error (Sexp.to_string_hum (Chatml_local_source.Error.sexp_of_t error))
+          | Ok contents ->
+            checkpoint ();
+            Option.iter t.observer ~f:(fun observe -> observe source contents);
+            Ok contents)))
+  |> checked_result t ~problem:Generated_error.Source_unavailable
 ;;
 
 let read t source =
-  match t.read_limit with
-  | None ->
-    (match t.retained with
-     | None -> read_legacy_unbounded t source
-     | Some _ -> read_bounded ~max_bytes:(8 * 1024 * 1024) t source)
-  | Some _ -> read_bounded ~max_bytes:(8 * 1024 * 1024) t source
+  (match t.read_limit with
+   | None ->
+     (match t.retained with
+      | None -> read_legacy_unbounded t source
+      | Some _ -> read_bounded ~max_bytes:(8 * 1024 * 1024) t source)
+   | Some _ -> read_bounded ~max_bytes:(8 * 1024 * 1024) t source)
+  |> checked_result t ~problem:Generated_error.Source_unavailable
 ;;
 
 let resolve_within_root t ~base ~reference =

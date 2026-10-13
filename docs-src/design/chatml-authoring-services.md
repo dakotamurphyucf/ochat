@@ -520,9 +520,28 @@ defaults), routes and complete source revisions against the manifest. One
 attempt owns the full snapshot index and aggregate work/input allowance across
 all selected Projects; a failed or interrupted validation cannot be retried on
 that attempt. The returned immutable value is captured-closure evidence, not
-a sealed-upload claim, native provenance or execution permission. ChatMD
-authored-script membership and final document inventory coverage remain with
-the document adapter, and publication still binds a live sealed store claim.
+a sealed-upload claim, native provenance or execution permission.
+
+The captured ChatMD document adapter maps each explicit portable document
+member to its exact qualified uploaded source, then runs the existing generated
+source-bundle parser over those bytes. Its checked path reports known invalid
+source, syntax/declaration, missing source and parser-limit failures as typed
+outcomes while preserving cancellation and unexpected exceptions. The parser's
+read members and actual `Parsed.declarations`/`Binding` determine the complete
+script set, registration and declaring input, byte range, extracted body and
+external `src` origin; manifest selectors cannot invent declarations. A
+`Source_only` script has no authored project and yields no fabricated graph.
+Each selected Project must resolve from the declaration's actual portable input
+to an explicit document member, match the authored environment and use a
+separately supplied authentic compiler contract/previous Build. Its selected
+entry is tied to the parser body by the wire selector and Project validator;
+an uploaded external entry must also be the exact external document member,
+even if another member has identical bytes. Every mapped document member must
+be parser-read or a genuinely selected Project root, and the union of document
+members and selected Project subsets must equal the uploaded snapshot. A
+borrowed parser stage and all selected Builds debit one fail-closed Attempt
+ledger. This remains in-memory closure evidence; publication still binds an
+authenticated live sealed store claim.
 Storage/receipt ownership and pure closure validation/publication are separate
 components. The private upload stage records a versioned immutable manifest,
 atomic phase and accepted-offset documents, and numeric member data files under

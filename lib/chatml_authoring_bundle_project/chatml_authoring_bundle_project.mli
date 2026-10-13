@@ -36,6 +36,7 @@ module Error : sig
     | Input_limit
     | Accounting_overflow
     | Attempt_closed
+    | Attempt_busy
     | Builder of Build.Error.t
     | Project_declaration of Chatml_project.Error.t
 
@@ -63,6 +64,42 @@ module Attempt : sig
       It retains a typed index of the full exact snapshot once, so per-script
       validation does not rescan the whole upload. No checkpoint is retained. *)
   type t
+
+  module Stage : sig
+    type t
+
+    (** Borrowed only during [run_stage]. Every operation checks that the token
+        is still live and consumes the same attempt ledger as Project validation.
+        [checkpoint] consumes one work step, then invokes the callback supplied
+        to [run_stage]. Its exception and backtrace propagate unchanged. *)
+    val checkpoint : t -> unit
+
+    (** Charge retained parser/conversion input before copying it. Negative
+        counts and exhausted allowance become [Budget_error]. *)
+    val debit_input : t -> bytes:int -> unit
+
+    (** Exact already-admitted source lookup; consumes one work step. No source
+        acquisition or authority is implied by a successful lookup. *)
+    val source : t -> Captured.Id.t -> Captured.t option
+  end
+
+  type 'stage_error stage_failure =
+    | Stage_error of 'stage_error
+    | Budget_error of Error.t
+
+  (** Borrow the one mutable budget for parser/conversion work. Rejects concurrent
+      or reentrant use and revokes the Stage token when the callback returns or
+      raises. A callback error, budget error or exception closes the attempt;
+      no phase may refill its allowance. Only the module's own budget exceptions
+      become [Budget_error]. Cancellation and other callback exceptions retain
+      their original identity/backtrace. The token must not escape the callback;
+      attempts to use an escaped token raise without a budget debit and
+      permanently invalidate the owning attempt. *)
+  val run_stage
+    :  t
+    -> checkpoint:(unit -> unit)
+    -> f:(Stage.t -> ('a, 'stage_error) result)
+    -> ('a, 'stage_error stage_failure) result
 
   (** Validate one exact duplicate-free source per manifest member, with no
       surplus source, using qualified ID, computed digest and byte length. A

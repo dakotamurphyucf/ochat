@@ -291,19 +291,21 @@ let prefix ~source ~start_byte ~end_byte ~checkpoint =
   else Ok (scan source ~start_byte ~end_byte ~checkpoint ~prefix:true)
 ;;
 
-let complete_exn source ~checkpoint =
+let complete_exn ?(error_exn = fun message -> Failure message) source ~checkpoint =
   match
     scan source ~start_byte:0 ~end_byte:(String.length source) ~checkpoint ~prefix:false
   with
   | result -> List.map (Prefix.completed result) ~f:Attribute.decoded
   | exception
       Malformed (Error.Unterminated_quote { name; content_start_byte; expected_quote }) ->
-    failwithf
-      "Unterminated quoted attribute value for %s starting at offset %d (expected %c)"
-      name
-      content_start_byte
-      expected_quote
-      ()
+    raise
+      (error_exn
+         (sprintf
+            "Unterminated quoted attribute value for %s starting at offset %d (expected \
+             %c)"
+            name
+            content_start_byte
+            expected_quote))
   | exception Malformed Error.Invalid_range -> assert false
 ;;
 

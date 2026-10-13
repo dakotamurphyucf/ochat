@@ -379,7 +379,15 @@ module Chat_markdown = struct
   ;;
 
   (* Build a msg record from the attributes on <msg>. *)
-  let attr_to_msg ~source_context attr (content : chat_message_content option) : msg =
+  let attr_to_msg
+        ~error_exn
+        ~find_required
+        ~source_context
+        attr
+        (content : chat_message_content option)
+    : msg
+    =
+    let fail message = raise (error_exn message) in
     let history_id_attribute = "ochat-history-id" in
     let history_id_values =
       List.filter_map attr ~f:(fun (name, value) ->
@@ -391,8 +399,8 @@ module Chat_markdown = struct
       | [ encoded ] ->
         (match History_entry.Id.of_string encoded with
          | Ok id -> Some id
-         | Error error -> failwith (sprintf "Invalid %s: %s" history_id_attribute error))
-      | _ -> failwith (sprintf "Duplicate %s attribute" history_id_attribute)
+         | Error error -> fail (sprintf "Invalid %s: %s" history_id_attribute error))
+      | _ -> fail (sprintf "Duplicate %s attribute" history_id_attribute)
     in
     let hash_tbl = Hashtbl.create (module String) in
     List.iter attr ~f:(fun (attr_name, value) ->
@@ -402,12 +410,12 @@ module Chat_markdown = struct
       match Hashtbl.mem hash_tbl "function_call" with
       | false -> None, content
       | true ->
-        let name = Hashtbl.find_exn hash_tbl "function_name" in
+        let name = find_required hash_tbl "function_name" in
         let arguments =
           match content with
           | Some (Text t) -> t
           | _ ->
-            failwith
+            fail
               "Expected function_call to be raw text arguments; found structured content."
         in
         Some { name; arguments }, content
@@ -419,20 +427,19 @@ module Chat_markdown = struct
       | None ->
         if Hashtbl.mem hash_tbl "tool_call"
         then (
-          let name = Hashtbl.find_exn hash_tbl "function_name" in
-          let id = Hashtbl.find_exn hash_tbl "tool_call_id" in
+          let name = find_required hash_tbl "function_name" in
+          let id = find_required hash_tbl "tool_call_id" in
           let arguments =
             match content_opt with
             | Some (Text t) -> t
             | Some (Items _) -> ""
             | _ ->
-              failwith
-                "Expected tool_call to be raw text arguments or structured content."
+              fail "Expected tool_call to be raw text arguments or structured content."
           in
           Some { id; function_ = { name; arguments } }, content_opt)
         else None, content_opt
     in
-    { role = Hashtbl.find_exn hash_tbl "role"
+    { role = find_required hash_tbl "role"
     ; type_ = Hashtbl.find hash_tbl "type"
     ; name = Hashtbl.find hash_tbl "name"
     ; id = Hashtbl.find hash_tbl "id" (* NEW *)
@@ -632,14 +639,15 @@ module Chat_markdown = struct
     }
   ;;
 
-  let script_error diagnostics =
+  let script_error ~error_exn diagnostics =
     diagnostics
     |> List.map ~f:Chatmd_shell_spec.Diagnostic.to_string
     |> String.concat ~sep:"\n"
-    |> failwith
+    |> fun message -> raise (error_exn message)
   ;;
 
   let parse_script
+        ~error_exn
         ~dir
         ~loader
         ~source_node
@@ -664,7 +672,7 @@ module Chat_markdown = struct
           ~inline_source
       with
       | Ok script -> Extension_script script
-      | Error diagnostics -> script_error diagnostics)
+      | Error diagnostics -> script_error ~error_exn diagnostics)
     else (
       match
         Chatmd_script_declaration.parse
@@ -676,7 +684,7 @@ module Chat_markdown = struct
           ~attributes:attrs
           ~inline_source
       with
-      | Error diagnostics -> script_error diagnostics
+      | Error diagnostics -> script_error ~error_exn diagnostics
       | Ok script ->
         (match script.kind with
          | Script_spec.Moderator -> Script (legacy_script script)
@@ -728,7 +736,7 @@ module Chat_markdown = struct
   ;;
 
   (* Convert AST nodes into internal chat elements before exposing top-level values. *)
-  let resolve_owned_agent loader ~base ~reference ~is_local =
+  let resolve_owned_agent ~error_exn loader ~base ~reference ~is_local =
     if not is_local
     then reference, None
     else (
@@ -736,32 +744,37 @@ module Chat_markdown = struct
       let resolved =
         Source_loader.agent_reference loader ~base ~reference ~on_member:(fun key ->
           queued_key := Some key)
-        |> Result.ok_or_failwith
+        |> Result.map_error ~f:(fun message -> raise (error_exn message))
+        |> Result.ok_exn
       in
       resolved, !queued_key)
   ;;
 
-  let agent_source_mode attrs =
+  let agent_source_mode ~error_exn attrs =
     match List.filter attrs ~f:(fun (name, _) -> String.equal name "source_mode") with
     | [] | [ (_, Some "file") ] -> Agent_reference.Source_mode.File
     | [ (_, Some "captured") ] -> Captured
-    | _ -> failwith "Agent source_mode must be file or captured, specified once."
+    | _ -> raise (error_exn "Agent source_mode must be file or captured, specified once.")
   ;;
 
-  let check_agent_source_mode ~owned ~local source_mode =
+  let check_agent_source_mode ~error_exn ~owned ~local source_mode =
     match source_mode with
     | Agent_reference.Source_mode.File -> ()
     | Captured ->
-      if not owned then failwith "captured source_mode requires owned prompt preparation";
-      if not local then failwith "captured source_mode requires a local agent reference"
+      if not owned
+      then raise (error_exn "captured source_mode requires owned prompt preparation");
+      if not local
+      then raise (error_exn "captured source_mode requires a local agent reference")
   ;;
 
-  let owned_agent_range = function
+  let owned_agent_range ~error_exn = function
     | Some range -> range
-    | None -> failwith "Owned agent declaration lacks its parser range"
+    | None -> raise (error_exn "Owned agent declaration lacks its parser range")
   ;;
 
   let parse_chat_element
+        ?(error_exn = fun message -> Failure message)
+        ?(find_required = Hashtbl.find_exn)
         ?(owned_documents = false)
         ?(on_document = fun _ ~items:_ -> ())
         ?(on_agent = ignore)
@@ -772,6 +785,7 @@ module Chat_markdown = struct
         ~preserve_child_sources
         sourced
     =
+    let fail message = raise (error_exn message) in
     let converted =
       tree
         ~preserve_child_sources
@@ -805,7 +819,8 @@ module Chat_markdown = struct
                 List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"")
               in
               let content_opt = parse_msg_children children in
-              Message (attr_to_msg ~source_context attr content_opt)
+              Message
+                (attr_to_msg ~error_exn ~find_required ~source_context attr content_opt)
             | Element (Developer, attrs, _) ->
               let attr =
                 List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"")
@@ -813,7 +828,8 @@ module Chat_markdown = struct
               let content_opt = parse_msg_children children in
               let role_attr = "role", "developer" in
               let attrs = role_attr :: attr in
-              Developer_msg (attr_to_msg ~source_context attrs content_opt)
+              Developer_msg
+                (attr_to_msg ~error_exn ~find_required ~source_context attrs content_opt)
             | Element (System, attrs, _) ->
               let attr =
                 List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"")
@@ -821,7 +837,8 @@ module Chat_markdown = struct
               let content_opt = parse_msg_children children in
               let role_attr = "role", "system" in
               let attrs = role_attr :: attr in
-              System_msg (attr_to_msg ~source_context attrs content_opt)
+              System_msg
+                (attr_to_msg ~error_exn ~find_required ~source_context attrs content_opt)
             | Element (User, attrs, _) ->
               let attr =
                 List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"")
@@ -829,7 +846,8 @@ module Chat_markdown = struct
               let content_opt = parse_msg_children children in
               let role_attr = "role", "user" in
               let attrs = role_attr :: attr in
-              User_msg (attr_to_msg ~source_context attrs content_opt)
+              User_msg
+                (attr_to_msg ~error_exn ~find_required ~source_context attrs content_opt)
             | Element (Assistant, attrs, _) ->
               let attr =
                 List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"")
@@ -837,7 +855,8 @@ module Chat_markdown = struct
               let content_opt = parse_msg_children children in
               let role_attr = "role", "assistant" in
               let attrs = role_attr :: attr in
-              Assistant_msg (attr_to_msg ~source_context attrs content_opt)
+              Assistant_msg
+                (attr_to_msg ~error_exn ~find_required ~source_context attrs content_opt)
             | Element (Tool_call, attrs, _) ->
               let attr =
                 List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"")
@@ -846,7 +865,8 @@ module Chat_markdown = struct
               let role_attr = "role", "assistant" in
               let tool_call_attr = "tool_call", "true" in
               let attrs = role_attr :: tool_call_attr :: attr in
-              Tool_call_msg (attr_to_msg ~source_context attrs content_opt)
+              Tool_call_msg
+                (attr_to_msg ~error_exn ~find_required ~source_context attrs content_opt)
             | Element (Tool_response, attrs, _) ->
               let attr =
                 List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"")
@@ -854,7 +874,8 @@ module Chat_markdown = struct
               let content_opt = parse_msg_children children in
               let role_attr = "role", "tool" in
               let attrs = role_attr :: attr in
-              Tool_response_msg (attr_to_msg ~source_context attrs content_opt)
+              Tool_response_msg
+                (attr_to_msg ~error_exn ~find_required ~source_context attrs content_opt)
             | Element (Img, attrs, _) ->
               let attr =
                 List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"")
@@ -879,13 +900,13 @@ module Chat_markdown = struct
                   ~src:url
                   ~local
                   ~capture:(Hashtbl.mem tbl "capture")
-                |> Or_error.ok_exn
+                |> Result.map_error ~f:(fun error -> fail (Error.to_string_hum error))
+                |> Result.ok_exn
               in
               if
                 (not owned_documents)
                 && not (Document_occurrence.Selection.equal selection Dynamic)
-              then
-                failwith "captured and builtin documents require owned prompt preparation";
+              then fail "captured and builtin documents require owned prompt preparation";
               let source =
                 if owned_documents
                 then
@@ -906,12 +927,18 @@ module Chat_markdown = struct
               in
               let tbl = attr_table attr in
               let max_tokens =
-                Option.map (Hashtbl.find tbl "max_tokens") ~f:Int.of_string
+                Option.map (Hashtbl.find tbl "max_tokens") ~f:(fun value ->
+                  match Int.of_string_opt value with
+                  | Some parsed -> parsed
+                  | None -> fail "invalid config max_tokens")
               in
               let model = Hashtbl.find tbl "model" in
               let reasoning_effort = Hashtbl.find tbl "reasoning_effort" in
               let temperature =
-                Option.map (Hashtbl.find tbl "temperature") ~f:Float.of_string
+                Option.map (Hashtbl.find tbl "temperature") ~f:(fun value ->
+                  match Float.of_string_opt value with
+                  | Some parsed -> parsed
+                  | None -> fail "invalid config temperature")
               in
               let show_tool_call = Hashtbl.mem tbl "show_tool_call" in
               let id = Hashtbl.find tbl "id" in
@@ -948,6 +975,7 @@ module Chat_markdown = struct
               in
               let value =
                 parse_script
+                  ~error_exn
                   ~dir
                   ~loader
                   ~source_node
@@ -996,8 +1024,8 @@ module Chat_markdown = struct
                 | [ encoded ] ->
                   (match History_entry.Id.of_string encoded with
                    | Ok id -> Some id
-                   | Error error -> failwith ("Invalid ochat-history-id: " ^ error))
-                | _ -> failwith "Duplicate ochat-history-id attribute"
+                   | Error error -> fail ("Invalid ochat-history-id: " ^ error))
+                | _ -> fail "Duplicate ochat-history-id attribute"
               in
               let source_context =
                 Option.first_some
@@ -1009,7 +1037,11 @@ module Chat_markdown = struct
               in
               let tbl = Hashtbl.create (module String) in
               List.iter attr ~f:(fun (n, v) -> Hashtbl.set tbl ~key:n ~data:v);
-              let id = Hashtbl.find_exn tbl "id" in
+              let id =
+                match Hashtbl.find tbl "id" with
+                | Some id -> id
+                | None -> fail "reasoning element requires id"
+              in
               let status = Hashtbl.find tbl "status" in
               let summaries =
                 List.filter_map children ~f:(function
@@ -1027,7 +1059,7 @@ module Chat_markdown = struct
                 ; source_context
                 }
             | Element (Agent, attrs, __bin_read_content_item__) ->
-              let source_mode = agent_source_mode attrs in
+              let source_mode = agent_source_mode ~error_exn attrs in
               let attr =
                 List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"")
               in
@@ -1040,14 +1072,16 @@ module Chat_markdown = struct
                 List.exists attr ~f:(fun (nm, _) -> String.(nm = "local"))
               in
               check_agent_source_mode
+                ~error_exn
                 ~owned:owned_documents
                 ~local:agent_is_local
                 source_mode;
               if owned_documents
               then (
-                let range = owned_agent_range range in
+                let range = owned_agent_range ~error_exn range in
                 let agent_url, queued_key =
                   resolve_owned_agent
+                    ~error_exn
                     loader
                     ~base:actual_source_node
                     ~reference:agent_url
@@ -1063,7 +1097,8 @@ module Chat_markdown = struct
                       loader
                       ~base:source_node
                       ~reference:agent_url
-                    |> Result.ok_or_failwith
+                    |> Result.map_error ~f:fail
+                    |> Result.ok_exn
                   else agent_url
                 in
                 Agent (agent_url, agent_is_local, children))
@@ -1078,11 +1113,11 @@ module Chat_markdown = struct
               in
               let command = Hashtbl.find tbl "command" in
               let agent = Hashtbl.find tbl "agent" in
-              let source_mode = agent_source_mode attrs in
+              let source_mode = agent_source_mode ~error_exn attrs in
               if
                 Option.is_none agent
                 && List.exists attrs ~f:(fun (name, _) -> String.equal name "source_mode")
-              then failwith "source_mode is only supported on agent declarations";
+              then fail "source_mode is only supported on agent declarations";
               let mcp_server = Hashtbl.find tbl "mcp_server" in
               let description = Hashtbl.find tbl "description" in
               let is_local = Hashtbl.mem tbl "local" in
@@ -1095,7 +1130,7 @@ module Chat_markdown = struct
                 | [ (_, Some "persistent") ] -> Some (Some Persistent)
                 | [ (_, Some "optional") ] -> Some (Some Optional)
                 | _ ->
-                  failwith
+                  fail
                     "Tool persistence must be one_off, persistent or optional, specified \
                      once."
               in
@@ -1109,7 +1144,7 @@ module Chat_markdown = struct
                with
                | None, _, _, _, _, _ -> ()
                | Some _, Some _, None, None, None, None -> ()
-               | _ -> failwith "Tool persistence is only supported on agent declarations.");
+               | _ -> fail "Tool persistence is only supported on agent declarations.");
               let family =
                 Chatmd_declaration_schema.family_of_complete
                   ~tag:Ast.Tool
@@ -1133,12 +1168,12 @@ module Chat_markdown = struct
                 let attributes =
                   match allowed with
                   | Ok value -> value
-                  | Error d -> script_error [ d ]
+                  | Error d -> script_error ~error_exn [ d ]
                 in
                 let inherited =
                   match Chatmd_attributes.required attributes "name" with
                   | Ok value -> value
-                  | Error d -> script_error [ d ]
+                  | Error d -> script_error ~error_exn [ d ]
                 in
                 if
                   String.is_empty inherited
@@ -1148,13 +1183,13 @@ module Chat_markdown = struct
                           | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '-' | ':' | '.'
                             -> true
                           | _ -> false))
-                then failwith "invalid inherited tool name";
+                then fail "invalid inherited tool name";
                 (match node with
                  | Ast.Element (_, _, children)
                    when List.for_all children ~f:(function
                           | Ast.Text text -> String.for_all text ~f:Char.is_whitespace
                           | _ -> false) -> ()
-                 | _ -> failwith "inherited tool references cannot have children");
+                 | _ -> fail "inherited tool references cannot have children");
                 Tool (Inherited inherited))
               else if
                 Chatmd_declaration_schema.Family.equal
@@ -1169,7 +1204,7 @@ module Chat_markdown = struct
                     node
                 with
                 | Ok tool -> Tool (Extension tool)
-                | Error diagnostics -> script_error diagnostics)
+                | Error diagnostics -> script_error ~error_exn diagnostics)
               else if
                 Chatmd_declaration_schema.Family.equal
                   family
@@ -1178,37 +1213,38 @@ module Chat_markdown = struct
                 match Chatmd_shell_declaration.parse_tool ~source:source_ref node with
                 | Ok tool -> Tool (Shell tool)
                 | Error diagnostics ->
-                  failwith
+                  fail
                     (String.concat
                        ~sep:"; "
                        (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string)))
               else (
                 match command, agent, mcp_server with
                 | Some _, Some _, _ | Some _, _, Some _ | _, Some _, Some _ ->
-                  failwith
+                  fail
                     "<tool> cannot combine 'command', 'agent' and 'mcp_server' \
                      attributes."
                 | Some cmd, None, None ->
-                  if String.is_empty name then failwith "Tool name cannot be empty.";
+                  if String.is_empty name then fail "Tool name cannot be empty.";
                   let cmd = String.strip cmd in
-                  if String.is_empty cmd then failwith "Tool command cannot be empty.";
+                  if String.is_empty cmd then fail "Tool command cannot be empty.";
                   let description = Option.map description ~f:String.strip in
                   Tool (Custom { name; description; command = cmd; source = source_ref })
                 | None, Some agent_url, None ->
                   check_agent_source_mode
+                    ~error_exn
                     ~owned:owned_documents
                     ~local:is_local
                     source_mode;
-                  if String.is_empty name then failwith "Tool name cannot be empty.";
+                  if String.is_empty name then fail "Tool name cannot be empty.";
                   let agent_url = String.strip agent_url in
-                  if String.is_empty agent_url
-                  then failwith "Tool agent URL cannot be empty.";
+                  if String.is_empty agent_url then fail "Tool agent URL cannot be empty.";
                   let description = Option.map description ~f:String.strip in
                   if owned_documents
                   then (
-                    let range = owned_agent_range range in
+                    let range = owned_agent_range ~error_exn range in
                     let agent, queued_key =
                       resolve_owned_agent
+                        ~error_exn
                         loader
                         ~base:actual_source_node
                         ~reference:agent_url
@@ -1229,7 +1265,8 @@ module Chat_markdown = struct
                           loader
                           ~base:source_node
                           ~reference:agent_url
-                        |> Result.ok_or_failwith
+                        |> Result.map_error ~f:fail
+                        |> Result.ok_exn
                       else agent_url
                     in
                     let specification = { name; description; agent; is_local } in
@@ -1239,7 +1276,7 @@ module Chat_markdown = struct
                 | None, None, Some mcp_uri ->
                   let mcp_uri = String.strip mcp_uri in
                   if String.is_empty mcp_uri
-                  then failwith "Tool mcp_server URI cannot be empty.";
+                  then fail "Tool mcp_server URI cannot be empty.";
                   let description = Option.map description ~f:String.strip in
                   let strict = Hashtbl.mem tbl "strict" in
                   let client_id_env = Hashtbl.find tbl "client_id_env" in
@@ -1273,7 +1310,7 @@ module Chat_markdown = struct
                        })
                 | None, None, None ->
                   if String.is_empty name
-                  then failwith "Tool name cannot be empty."
+                  then fail "Tool name cannot be empty."
                   else if
                     Chatmd_declaration_schema.Family.equal
                       family
@@ -1282,7 +1319,7 @@ module Chat_markdown = struct
                     match Chatmd_read_file_declaration.parse ~source:source_ref node with
                     | Ok specification -> Tool (Read_file specification)
                     | Error diagnostics ->
-                      failwith
+                      fail
                         (String.concat
                            ~sep:"; "
                            (List.map
@@ -1293,7 +1330,7 @@ module Chat_markdown = struct
               (match Chatmd_shell_declaration.parse_runtime ~source:source_ref node with
                | Ok runtime -> Shell_runtime runtime
                | Error diagnostics ->
-                 failwith
+                 fail
                    (String.concat
                       ~sep:"; "
                       (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string)))
@@ -1303,7 +1340,7 @@ module Chat_markdown = struct
                with
                | Ok moderator -> Moderator_runtime moderator
                | Error diagnostics ->
-                 failwith
+                 fail
                    (String.concat
                       ~sep:"; "
                       (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string)))
@@ -1312,13 +1349,13 @@ module Chat_markdown = struct
                  Chatmd_extension_declaration.authoring_help ~source:source_ref node
                with
                | Ok help -> Authoring_help help
-               | Error diagnostics -> script_error diagnostics)
+               | Error diagnostics -> script_error ~error_exn diagnostics)
             | Element (Authoring_context, _, _) ->
               (match
                  Chatmd_extension_declaration.authoring_context ~source:source_ref node
                with
                | Ok config -> Authoring_context config
-               | Error diagnostics -> script_error diagnostics)
+               | Error diagnostics -> script_error ~error_exn diagnostics)
             | Element (Uses, _, _) | Element (Shell_element _, _, _) -> Text ""
             | Element (Import, attrs, _) ->
               let attr_to_string (n, v) =
@@ -1394,7 +1431,10 @@ module Chat_markdown = struct
     List.filter_map elts ~f:(to_top_level ?on_agent)
   ;;
 
-  let validate_scripts (elements : top_level_elements list) =
+  let validate_scripts
+        ?(error_exn = fun message -> Failure message)
+        (elements : top_level_elements list)
+    =
     let moderators, shell_scripts =
       List.fold elements ~init:([], []) ~f:(fun (moderators, shell_scripts) -> function
         | Script script -> script :: moderators, shell_scripts
@@ -1413,7 +1453,7 @@ module Chat_markdown = struct
         | _ -> None)
     in
     let error source code message =
-      script_error [ Chatmd_shell_spec.Diagnostic.error ~source ~code message ]
+      script_error ~error_exn [ Chatmd_shell_spec.Diagnostic.error ~source ~code message ]
     in
     let extension_moderators =
       List.filter extension_scripts ~f:(fun script ->
@@ -1427,7 +1467,7 @@ module Chat_markdown = struct
        Chatmd_script_declaration.validate_prompt_registry ~moderator_ids shell_scripts
      with
      | Ok () -> ()
-     | Error diagnostics -> script_error diagnostics);
+     | Error diagnostics -> script_error ~error_exn diagnostics);
     let all_ids =
       List.map moderators ~f:(fun script -> script.id)
       @ List.map shell_scripts ~f:(fun script -> script.Script_spec.id)
@@ -1437,6 +1477,7 @@ module Chat_markdown = struct
      | None -> ()
      | Some id ->
        script_error
+         ~error_exn
          [ Chatmd_shell_spec.Diagnostic.error
              ~code:"chatmd.duplicate_script"
              ("duplicate script id: " ^ id)
@@ -1525,7 +1566,7 @@ module Chat_markdown = struct
     elements
   ;;
 
-  let validate_declarations = validate_scripts
+  let validate_declarations elements = validate_scripts elements
 
   module Limits = Chatmd_owned_parser.Limits
 
@@ -2013,6 +2054,8 @@ module Chat_markdown = struct
   ;;
 
   let parse_owned
+        ~error_exn
+        ~find_required
         ~parse_document
         ~canonical_sources
         ~validate_input
@@ -2078,6 +2121,8 @@ module Chat_markdown = struct
         checkpoint ();
         let converted, extraction_map =
           parse_chat_element
+            ~error_exn
+            ~find_required
             ~owned_documents:true
             ~on_agent
             ~checkpoint
@@ -2100,7 +2145,7 @@ module Chat_markdown = struct
           ~f:(fun declaration -> declarations := declaration :: !declarations);
         converted)
     in
-    let elements = of_chat_elements ~on_agent converted |> validate_scripts in
+    let elements = of_chat_elements ~on_agent converted |> validate_scripts ~error_exn in
     checkpoint ();
     let result : Parsed.t =
       { elements
@@ -2142,6 +2187,8 @@ module Chat_markdown = struct
         ~effective
     in
     parse_owned
+      ~error_exn:(fun message -> Failure message)
+      ~find_required:Hashtbl.find_exn
       ~parse_document:(fun owner ~check_token input ->
         Chatmd_owned_parser.parse owner ~check_token input)
       ~canonical_sources:false
@@ -2214,6 +2261,8 @@ module Chat_markdown = struct
     in
     let parsed =
       parse_owned
+        ~error_exn:(fun message -> Failure message)
+        ~find_required:Hashtbl.find_exn
         ~parse_document:(fun owner ~check_token input ->
           Chatmd_owned_parser.parse_result owner ~check_token input
           |> Result.ok_or_failwith)
@@ -2257,6 +2306,8 @@ module Chat_markdown = struct
            Chatmd_owned_parser.checkpoint owner))
     then failwith "owned ChatMD replay authored input differs from capture";
     parse_owned
+      ~error_exn:(fun message -> Failure message)
+      ~find_required:Hashtbl.find_exn
       ~parse_document:(fun owner ~check_token input ->
         Chatmd_owned_parser.parse owner ~check_token input)
       ~canonical_sources:false
@@ -2337,100 +2388,221 @@ module Chat_markdown = struct
     ; parsed_agents : (string * Parsed.t) list
     }
 
+  module Generated = struct
+    type error =
+      | Invalid_source
+      | Source_unavailable
+      | Invalid_document
+      | Parser_limit
+    [@@deriving sexp_of]
+
+    exception Rejected of error
+
+    type receipt =
+      { parsed : parsed_bundle
+      ; read_members : string list
+      }
+
+    let parsed t = t.parsed
+    let read_members t = t.read_members
+
+    let parse_bundle ~checked ~dir bundle ~checkpoint ~before_read =
+      let reject problem message =
+        if checked then raise (Rejected problem) else failwith message
+      in
+      let reads = ref 0
+      and bytes = ref 0
+      and tokens = ref 0 in
+      let queued = Queue.create ()
+      and seen = Hash_set.create (module String)
+      and read_members = Hash_set.create (module String) in
+      let source_lengths =
+        if checked
+        then
+          Some
+            (Chatmd_source_bundle.sources bundle
+             |> List.map ~f:(fun (member, text) ->
+               checkpoint ();
+               member, String.length text)
+             |> String.Map.of_alist_exn)
+        else None
+      in
+      let loader =
+        if checked
+        then
+          Source_loader.generated_filesystem_checked
+            ~root:dir
+            ~sources:(Chatmd_source_bundle.sources bundle)
+        else Chatmd_source_bundle.loader bundle ~root:dir
+      in
+      let loader =
+        match source_lengths with
+        | None -> loader
+        | Some source_lengths ->
+          Source_loader.with_read_limit loader ~max_bytes:(fun source ->
+            let member = Source_loader.relative_path source in
+            match Map.find source_lengths member with
+            | None -> 0
+            | Some byte_length ->
+              if !reads >= 1024 || byte_length > (8 * 1024 * 1024) - !bytes
+              then raise (Rejected Parser_limit);
+              before_read ~member ~byte_length;
+              incr reads;
+              bytes := !bytes + byte_length;
+              byte_length)
+      in
+      let loader =
+        loader
+        |> Source_loader.with_observer ~f:(fun source text ->
+          if not checked
+          then (
+            incr reads;
+            if !reads > 1024 || String.length text > (8 * 1024 * 1024) - !bytes
+            then failwith "generated source expansion limit exceeded";
+            bytes := !bytes + String.length text);
+          Hash_set.add read_members (Source_loader.relative_path source))
+        |> Source_loader.with_agent_observer ~f:(fun source ->
+          Queue.enqueue queued (Source_loader.relative_path source))
+      in
+      let validate_input content =
+        let offset = ref 0 in
+        while !offset < String.length content do
+          checkpoint ();
+          offset := !offset + Int.min 4096 (String.length content - !offset)
+        done;
+        if not (Stdlib.String.is_valid_utf_8 content)
+        then reject Invalid_source "generated ChatMD source must be valid UTF-8";
+        match Meta_prompting.Preprocessor.validate_inert content with
+        | Ok () -> ()
+        | Error error -> reject Invalid_source error
+      in
+      let check_token _ =
+        incr tokens;
+        if !tokens > 100_000
+        then reject Parser_limit "generated source token limit exceeded"
+      in
+      let validate_document document =
+        let rec check = function
+          | Ast.Text _ -> ()
+          | Ast.Element (tag, attrs, children) ->
+            let has name = List.exists attrs ~f:(fun (key, _) -> String.equal key name) in
+            if
+              (Ast.tag_equal tag Ast.Agent || (Ast.tag_equal tag Ast.Tool && has "agent"))
+              && not (has "local")
+            then
+              reject
+                Invalid_document
+                "generated agent definitions must use bundled local sources";
+            List.iter children ~f:check
+        in
+        List.iter document ~f:check
+      in
+      let limits =
+        Limits.create
+          ~max_input_bytes:(8 * 1024 * 1024)
+          ~max_parse_calls:1024
+          ~max_tokens:100_000
+          ~max_depth:128
+        |> Or_error.ok_exn
+      in
+      let parse_file file =
+        Hash_set.add seen file;
+        let source = Source_loader.root loader ~file |> Result.ok_or_failwith in
+        let content =
+          Source_loader.read_bounded
+            ~max_bytes:(Chatmd_source_bundle.limits bundle).max_source_bytes
+            loader
+            source
+          |> Result.ok_or_failwith
+        in
+        let owner =
+          if checked
+          then
+            Chatmd_owned_parser.create
+              ~on_limit:(fun () -> raise (Rejected Parser_limit))
+              ~lexer_error_exn:(fun _ -> Rejected Invalid_document)
+              limits
+              ~checkpoint
+          else Chatmd_owned_parser.create limits ~checkpoint
+        in
+        let root_input =
+          Chatmd_owned_parser.input
+            owner
+            ~role:Root
+            ~path:(Source_loader.relative_path source)
+            ~authored:content
+            ~effective:content
+        in
+        parse_owned
+          ~error_exn:(fun message ->
+            if checked then Rejected Invalid_document else Failure message)
+          ~find_required:(fun table key ->
+            if checked
+            then (
+              match Hashtbl.find table key with
+              | Some value -> value
+              | None -> raise (Rejected Invalid_document))
+            else Hashtbl.find_exn table key)
+          ~parse_document:(fun owner ~check_token input ->
+            if checked
+            then (
+              match Chatmd_owned_parser.parse_result owner ~check_token input with
+              | Ok document -> document
+              | Error _ -> raise (Rejected Invalid_document))
+            else Chatmd_owned_parser.parse owner ~check_token input)
+          ~canonical_sources:true
+          ~validate_input
+          ~validate_document
+          ~check_token
+          ~owner
+          ~source_file:file
+          ~root_input
+          ~source_loader:loader
+          ~dir
+      in
+      let parsed_root = parse_file (Chatmd_source_bundle.root_file bundle) in
+      let agents = ref [] in
+      while not (Queue.is_empty queued) do
+        let file = Queue.dequeue_exn queued in
+        if not (Hash_set.mem seen file)
+        then (
+          let elements = parse_file file in
+          agents := (file, elements) :: !agents)
+      done;
+      let parsed_agents = List.rev !agents in
+      { parsed =
+          { root = Parsed.elements parsed_root
+          ; agents =
+              List.map parsed_agents ~f:(fun (path, parsed) ->
+                path, Parsed.elements parsed)
+          ; parsed_root
+          ; parsed_agents
+          }
+      ; read_members = Hash_set.to_list read_members |> List.sort ~compare:String.compare
+      }
+    ;;
+
+    let parse_source_bundle ~dir bundle ~checkpoint ~before_read =
+      try Ok (parse_bundle ~checked:true ~dir bundle ~checkpoint ~before_read) with
+      | Rejected error -> Error error
+      | exn ->
+        (match Source_loader.Generated_error.of_exn exn with
+         | Some Invalid_reference -> Error Invalid_source
+         | Some Source_unavailable -> Error Source_unavailable
+         | None ->
+           let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+           Stdlib.Printexc.raise_with_backtrace exn backtrace)
+    ;;
+  end
+
   let parse_source_bundle ~dir bundle =
-    let reads = ref 0
-    and bytes = ref 0
-    and tokens = ref 0 in
-    let queued = Queue.create ()
-    and seen = Hash_set.create (module String) in
-    let loader =
-      Chatmd_source_bundle.loader bundle ~root:dir
-      |> Source_loader.with_observer ~f:(fun _ text ->
-        incr reads;
-        if !reads > 1024 || String.length text > (8 * 1024 * 1024) - !bytes
-        then failwith "generated source expansion limit exceeded";
-        bytes := !bytes + String.length text)
-      |> Source_loader.with_agent_observer ~f:(fun source ->
-        Queue.enqueue queued (Source_loader.relative_path source))
-    in
-    let validate_input content =
-      if not (Stdlib.String.is_valid_utf_8 content)
-      then failwith "generated ChatMD source must be valid UTF-8";
-      Meta_prompting.Preprocessor.validate_inert content |> Result.ok_or_failwith
-    in
-    let check_token _ =
-      incr tokens;
-      if !tokens > 100_000 then failwith "generated source token limit exceeded"
-    in
-    let validate_document document =
-      let rec check = function
-        | Ast.Text _ -> ()
-        | Ast.Element (tag, attrs, children) ->
-          let has name = List.exists attrs ~f:(fun (key, _) -> String.equal key name) in
-          if
-            (Ast.tag_equal tag Ast.Agent || (Ast.tag_equal tag Ast.Tool && has "agent"))
-            && not (has "local")
-          then failwith "generated agent definitions must use bundled local sources";
-          List.iter children ~f:check
-      in
-      List.iter document ~f:check
-    in
-    let limits =
-      Limits.create
-        ~max_input_bytes:(8 * 1024 * 1024)
-        ~max_parse_calls:1024
-        ~max_tokens:100_000
-        ~max_depth:128
-      |> Or_error.ok_exn
-    in
-    let parse_file file =
-      Hash_set.add seen file;
-      let source = Source_loader.root loader ~file |> Result.ok_or_failwith in
-      let content =
-        Source_loader.read_bounded
-          ~max_bytes:(Chatmd_source_bundle.limits bundle).max_source_bytes
-          loader
-          source
-        |> Result.ok_or_failwith
-      in
-      let owner = Chatmd_owned_parser.create limits ~checkpoint:Eio.Fiber.check in
-      let root_input =
-        Chatmd_owned_parser.input
-          owner
-          ~role:Root
-          ~path:(Source_loader.relative_path source)
-          ~authored:content
-          ~effective:content
-      in
-      parse_owned
-        ~parse_document:(fun owner ~check_token input ->
-          Chatmd_owned_parser.parse owner ~check_token input)
-        ~canonical_sources:true
-        ~validate_input
-        ~validate_document
-        ~check_token
-        ~owner
-        ~source_file:file
-        ~root_input
-        ~source_loader:loader
-        ~dir
-    in
-    let parsed_root = parse_file (Chatmd_source_bundle.root_file bundle) in
-    let agents = ref [] in
-    while not (Queue.is_empty queued) do
-      let file = Queue.dequeue_exn queued in
-      if not (Hash_set.mem seen file)
-      then (
-        let elements = parse_file file in
-        agents := (file, elements) :: !agents)
-    done;
-    let parsed_agents = List.rev !agents in
-    { root = Parsed.elements parsed_root
-    ; agents =
-        List.map parsed_agents ~f:(fun (path, parsed) -> path, Parsed.elements parsed)
-    ; parsed_root
-    ; parsed_agents
-    }
+    Generated.parse_bundle
+      ~checked:false
+      ~dir
+      bundle
+      ~checkpoint:Eio.Fiber.check
+      ~before_read:(fun ~member:_ ~byte_length:_ -> ())
+    |> Generated.parsed
   ;;
 end
 

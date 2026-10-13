@@ -258,20 +258,20 @@ let implementation_sources =
   ; ( "lib/chatmd/chatmd_import_expansion.ml"
     , "8df0daffef119d3ba6ec7c9bdcec5a8076e75867ac64e56754713f5e300a1184" )
   ; ( "lib/chatmd/chatmd_attribute_lex.ml"
-    , "3c827aec4ebc3bea56fe41ca0f15ac15f9d7f4f80a1ead78cc7720043187ee3f" )
+    , "95457bf7123c4b17d73c50b01d3dec72f3f6818697a6c25327444411d2b2b521" )
   ; ( "lib/chatmd/chatmd_lexer.mll"
-    , "1088d495cbfe0fd60d4828e38dc5c2f93abc91be3172eb68855b836e8aef4683" )
+    , "132074f0406a61bbeafdcf35d88dc484949f56553ed41718d3c7188ddcb23735" )
   ; ( "lib/chatmd/chatmd_parser_engine.mly"
     , "94e9fb5543628175f53c2810536459a191fa21ec82312288a8ca0404b9487b78" )
   ; ( "lib/chatmd/chatmd_script_declaration.ml"
     , "c956aec536fb11a0897375828e561c6a32afd63d0efef11c87132b0985f46dd6" )
   ; "lib/source.ml", "6c18a151df64c7489a2fcb745e5f23e54c754696d0bd4b27c53505846317299b"
   ; ( "lib/chatmd/chatmd_source_bundle.ml"
-    , "c3e0f8f89c8538ddcec98873739455a673b0e6e894282c21c96046c096bb6ae5" )
+    , "5bd5d602cee857ede7d25645a6e7fc970bd82943b5eac30526faab98d069f4e1" )
   ; ( "lib/chatmd/prompt.ml"
-    , "8ea43ea7e5315a387634b176ea1f5cf3163ad627ca515871881e7ec915dc5f5c" )
+    , "d9c44de288d9eabf52f0affd031a42fc2752afe0ca11a1776d70dae450950500" )
   ; ( "lib/chatmd/source_loader.ml"
-    , "202688ce4248d9042c4d865f45f5909a593506d5f1c269c5db0419d9c3d4b85e" )
+    , "38fa617fd25ff9226fd6a88f57cd999633fe355cc1fde82e82afcb16c76fd0f3" )
   ; ( "lib/chatmd_shell_spec/authoring_metadata.ml"
     , "8fa283f545896b7efbaab8bcf17a3ab7549d61c04873403c94961fc4ca0b789d" )
   ; ( "lib/chatmd_shell_spec/duration.ml"
@@ -324,7 +324,7 @@ let implementation_sources =
   ; ( "lib/chatmd/chatmd_parser_input.ml"
     , "ff5449579e75dad66338700683d56b373ee9baedbb6433214e21af5a4df1ab57" )
   ; ( "lib/chatmd/chatmd_owned_parser.ml"
-    , "765e87e3b3efcd6a47b76e9456bc16190f8c8ec0d801a97a8d27dadbc53e7660" )
+    , "54814044e438ec34474351f6e0c7f8e4c926626013089c6c8183b2ac0717cf2b" )
   ; ( "lib/agent_session/prompt_revision_builder.ml"
     , "551619e5c32ff8e639cdc93640f83578df9dd24745a005a006bc5438c0422665" )
   ; ( "lib/agent_session/prompt_script_sources.ml"

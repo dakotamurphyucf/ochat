@@ -42,16 +42,30 @@ type t =
   ; mutable input_revisions : int
   ; mutable inputs : Chatmd_parser_input.t Map.M(Input_key).t
   ; poll : unit -> unit
+  ; on_limit : unit -> unit
+  ; lexer_error_exn : string -> exn
   }
 
-let create limits ~checkpoint =
+let create
+      ?(on_limit = ignore)
+      ?(lexer_error_exn = fun message -> Failure message)
+      limits
+      ~checkpoint
+  =
   { limits
   ; calls = 0
   ; tokens = 0
   ; input_revisions = 0
   ; inputs = Map.empty (module Input_key)
   ; poll = checkpoint
+  ; on_limit = (fun () -> on_limit ())
+  ; lexer_error_exn
   }
+;;
+
+let limit t message =
+  t.on_limit ();
+  failwith message
 ;;
 
 let limits t = t.limits
@@ -73,13 +87,13 @@ let check_expansion t ~depth node =
   | Chatmd_ast.Text _ -> ()
   | Element (_, _, _) ->
     if depth >= t.limits.depth
-    then failwith "owned ChatMD expanded markup nesting limit exceeded"
+    then limit t "owned ChatMD expanded markup nesting limit exceeded"
 ;;
 
 let next_parse t =
   checkpoint t;
   if t.calls >= t.limits.parse_calls
-  then failwith "owned ChatMD source expansion limit exceeded (parse calls)"
+  then limit t "owned ChatMD source expansion limit exceeded (parse calls)"
 ;;
 
 let input t ~role ~path ~authored ~effective =
@@ -87,7 +101,7 @@ let input t ~role ~path ~authored ~effective =
   if
     String.length authored > t.limits.input_bytes
     || String.length effective > t.limits.input_bytes
-  then failwith "owned ChatMD input byte limit exceeded";
+  then limit t "owned ChatMD input byte limit exceeded";
   let key = role, path in
   let previous = Map.find t.inputs key in
   checkpoint t;
@@ -99,7 +113,7 @@ let input t ~role ~path ~authored ~effective =
            checkpoint t) -> input
   | Some _ | None ->
     if t.input_revisions >= t.limits.parse_calls
-    then failwith "owned ChatMD source expansion limit exceeded (input revisions)";
+    then limit t "owned ChatMD source expansion limit exceeded (input revisions)";
     let input =
       Chatmd_parser_input.create
         ~role
@@ -148,18 +162,18 @@ let parse_worker t ?(check_token = ignore) input =
     end)
   in
   let module Parser = Chatmd_parser_engine.Make (Builder) in
-  let next = Chatmd_lexer.create () in
+  let next = Chatmd_lexer.create ~error_exn:t.lexer_error_exn ~on_limit:t.on_limit () in
   let depth = ref 0 in
   let token lexbuf =
     poll ();
-    if t.tokens >= t.limits.tokens then failwith "owned ChatMD token limit exceeded";
+    if t.tokens >= t.limits.tokens then limit t "owned ChatMD token limit exceeded";
     t.tokens <- t.tokens + 1;
     let token = next lexbuf in
     (match token with
      | Chatmd_tokens.START _ -> incr depth
      | END _ -> decr depth
      | SELF _ | TEXT _ | EOF -> ());
-    if !depth > t.limits.depth then failwith "owned ChatMD markup nesting limit exceeded";
+    if !depth > t.limits.depth then limit t "owned ChatMD markup nesting limit exceeded";
     call (fun () -> check_token token);
     token
   in
@@ -175,9 +189,7 @@ let parse_worker t ?(check_token = ignore) input =
         next_byte := !next_byte + count;
         count)
     in
-    let document =
-      Parser.document token lexbuf
-    in
+    let document = Parser.document token lexbuf in
     poll ();
     Ok document
   with

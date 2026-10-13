@@ -319,6 +319,71 @@ let%test_unit "nested Project subsets share one snapshot and one aggregate allow
      |> Option.value_exn)
 ;;
 
+let%test_unit "borrowed parser stage is one fail-closed attempt" =
+  let document = Support.capture ~namespace:"docs" "entry.chatmd" "body" in
+  let upload = document_manifest ~document ~scripts:[] ~project_sources:[] in
+  let fresh () = admit upload [ document ] |> adapter_ok in
+  let nested = fresh () in
+  (match
+     A.Attempt.run_stage nested ~checkpoint:ignore ~f:(fun stage ->
+       A.Attempt.Stage.checkpoint stage;
+       (match A.Attempt.run_stage nested ~checkpoint:ignore ~f:(fun _ -> Ok ()) with
+        | Error (Budget_error problem) ->
+          (match A.Error.problem problem with
+           | Attempt_busy -> ()
+           | _ -> failwith "wrong nested stage failure")
+        | Ok _ | Error _ -> failwith "nested stage was admitted");
+       Ok ())
+   with
+   | Error (Budget_error problem) ->
+     (match A.Error.problem problem with
+      | Attempt_closed -> ()
+      | _ -> failwith "caught nested rejection did not close attempt")
+   | Ok _ | Error _ -> failwith "caught nested rejection published stage");
+  let exhausted = fresh () in
+  (match
+     A.Attempt.run_stage exhausted ~checkpoint:ignore ~f:(fun stage ->
+       (match A.Attempt.Stage.debit_input stage ~bytes:Int.max_value with
+        | exception _ -> ()
+        | () -> failwith "oversized parser debit was admitted");
+       Ok ())
+   with
+   | Error (Budget_error problem) ->
+     (match A.Error.problem problem with
+      | Attempt_closed -> ()
+      | _ -> failwith "caught budget failure did not close attempt")
+   | Ok _ | Error _ -> failwith "caught budget failure published stage");
+  let escaped = fresh () in
+  let borrowed =
+    A.Attempt.run_stage escaped ~checkpoint:ignore ~f:(fun stage -> Ok stage)
+    |> function
+    | Ok stage -> stage
+    | Error _ -> failwith "borrowed stage failed"
+  in
+  (match A.Attempt.Stage.checkpoint borrowed with
+   | exception _ -> ()
+   | () -> failwith "escaped stage remained live");
+  (match A.Attempt.run_stage escaped ~checkpoint:ignore ~f:(fun _ -> Ok ()) with
+   | Error (Budget_error problem) ->
+     (match A.Error.problem problem with
+      | Attempt_closed -> ()
+      | _ -> failwith "escaped stage did not close owner")
+   | Ok _ | Error _ -> failwith "escaped stage allowed budget reset");
+  let exception Interrupted of unit ref in
+  let identity = ref () in
+  let cancelled = fresh () in
+  match
+    A.Attempt.run_stage
+      cancelled
+      ~checkpoint:(fun () -> raise (Interrupted identity))
+      ~f:(fun stage ->
+        A.Attempt.Stage.checkpoint stage;
+        Ok ())
+  with
+  | exception Interrupted actual -> assert (phys_equal identity actual)
+  | Ok _ | Error _ -> failwith "stage cancellation identity lost"
+;;
+
 let%test_unit "exact-lock default selection and pinned previous revision are checked" =
   let original = Gate_tests.compose (Gate_tests.git 'a') Initial_prepare |> Support.ok in
   let sources = Support.without_lock original in
