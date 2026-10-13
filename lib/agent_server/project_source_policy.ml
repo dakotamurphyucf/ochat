@@ -6,6 +6,7 @@ module Project = Chatml_project_prepare
 
 let kib = 1_024
 let mib = kib * kib
+let max_project_request_bytes = 65_536
 
 let document =
   Document_schema.Limits.create
@@ -73,11 +74,17 @@ let custody_limits t = t.custody
 module Configured = struct
   type t =
     { source_preparation : Sources.Policy.t
+    ; project_policy : Project.Policy.t
+    ; project_limits : Project.Limits.t
+    ; max_project_request_bytes : int
     ; git_probe_limits : Shell_access.Bounded_process.Limits.t option
     ; git_store_limits : Git.Store_limits.t
     }
 
   let source_preparation t = t.source_preparation
+  let project_policy t = t.project_policy
+  let project_limits t = t.project_limits
+  let max_project_request_bytes t = t.max_project_request_bytes
   let git_probe_limits t = t.git_probe_limits
   let git_store_limits t = t.git_store_limits
 end
@@ -185,7 +192,7 @@ let configure t configuration =
       ~root_limits:roots
       ~max_grants:Configuration.maximum_git_grants
       ~max_grant_bytes:Configuration.maximum_authority_bytes
-      ~max_request_bytes:65_536
+      ~max_request_bytes:max_project_request_bytes
       ~max_path_components:64
       ~max_input_bytes:(8 * mib)
       ~max_work_steps:t.max_semantic_work_steps
@@ -219,5 +226,11 @@ let configure t configuration =
       ~max_path_bytes:4_096
       ~max_work_steps:100_000
   in
-  { Configured.source_preparation; git_probe_limits; git_store_limits }
+  { Configured.source_preparation
+  ; project_policy = policy
+  ; project_limits = limits
+  ; max_project_request_bytes
+  ; git_probe_limits
+  ; git_store_limits
+  }
 ;;

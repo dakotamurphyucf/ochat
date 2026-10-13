@@ -22,6 +22,12 @@ module Policy : sig
     -> git_native:Git.Limits.t
     -> composition:Build.Limits.t
     -> t
+
+  (** Read-only projections of the exact selected stage ceilings. Host adapters
+      may narrow them but must not reconstruct a second profile. *)
+  val root_limits : t -> Roots.Limits.t
+
+  val local_limits : t -> Chatml_local_capture.Limits.t
 end
 
 module Publication : sig
