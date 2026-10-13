@@ -103,6 +103,7 @@ and t =
   ; project_source : Chatml_source.Id.t
   ; workspace_conflict_domain : string
   ; job_policy : Chat_response.One_off_request.policy
+  ; native_ceiling : Capability.t
   ; mutable selected : Capability.t
   ; mutable selection_revision : int
   ; mutable state : state
@@ -112,6 +113,8 @@ and t =
   ; mutable unresolved_native : native_registration list
   ; terminals : terminal_intent Terminal_queue.t
   ; mutable pending : pending option
+  ; mutable dispatch_owner : native_scope option
+  ; mutable effect_revision : int
   ; mutable reconciling : bool
   }
 
@@ -137,6 +140,7 @@ and current =
   { issuer : t
   ; selected : Capability.t
   ; selection_revision : int
+  ; effect_revision : int
   ; terminal_witness : Terminal_queue.witness
   }
 
@@ -162,7 +166,18 @@ and native_scope =
   ; mutable bracket_exited : bool
   ; mutable sealed : native_selection option
   ; mutable submitted : bool
+  ; mutable dispatch_state : dispatch_state
+  ; mutable remembered_terminal : H.t option
   }
+
+and dispatch_state =
+  | No_attempt
+  | Dispatch_pending of
+      { prepared : Store.Prepared.t
+      ; handoff : Store.Handoff.t
+      ; dispatched : H.t
+      }
+  | Dispatch_installed of H.t * int
 
 and native_selection =
   { scope : native_scope
@@ -243,6 +258,9 @@ let project_source capture =
 
 let owner t = t.owner
 let capture t = t.capture
+let native_ceiling t = t.native_ceiling
+let native_selected t = t.selected
+let native_now t = t.registry.now ()
 
 let check_current_local t (witness : current) ~allow_pending =
   if
@@ -250,9 +268,11 @@ let check_current_local t (witness : current) ~allow_pending =
     || (not (same_domain t.registry))
     || t.registry.closed
     || (not (Int.equal witness.selection_revision t.selection_revision))
+    || (not (Int.equal witness.effect_revision t.effect_revision))
     || (not (phys_equal witness.selected t.selected))
     || (not (Terminal_queue.check_effect_witness t.terminals witness.terminal_witness))
     || ((not allow_pending) && Option.is_some t.pending)
+    || Option.is_some t.dispatch_owner
     || t.reconciling
     || (not (Operator_authorization.is_current t.actor))
     ||
@@ -280,6 +300,7 @@ let current t =
           { issuer = t
           ; selected = t.selected
           ; selection_revision = t.selection_revision
+          ; effect_revision = t.effect_revision
           ; terminal_witness
           }
         in
@@ -573,6 +594,7 @@ let restore_live_after_retention t =
      | Quarantined -> true
      | Live | Closing | Closed -> false)
     && Option.is_none t.pending
+    && Option.is_none t.dispatch_owner
     && List.is_empty t.unresolved_native
     && Option.is_some (Terminal_queue.effect_witness t.terminals)
   then t.state <- Live
@@ -601,7 +623,11 @@ let with_retained_head t drain f =
 
 let rec process_head t drain remaining =
   let intent = Terminal_queue.payload drain in
-  if remaining <= 0
+  if Option.is_some t.dispatch_owner
+  then
+    let* () = retain_drain t drain in
+    invalid "developer dispatch blocks terminal preparation"
+  else if remaining <= 0
   then
     let* () = retain_drain t drain in
     invalid "developer terminal transaction changed repeatedly"
@@ -662,7 +688,9 @@ let rec process_head t drain remaining =
 
 let drain_terminals t =
   let rec loop remaining =
-    if remaining <= 0
+    if Option.is_some t.dispatch_owner
+    then invalid "developer dispatch blocks terminal drain"
+    else if remaining <= 0
     then invalid "developer terminal drain exceeded its occupancy bound"
     else (
       match Terminal_queue.take_head t.terminals with
@@ -716,34 +744,14 @@ let drain_terminals t =
   loop (t.registry.limits.max_native_occupancy + 2)
 ;;
 
-let reconcile_pending t =
-  if not (same_domain t.registry)
-  then invalid "developer root owner belongs to another domain"
-  else if Option.is_some t.root_call || not (Hashtbl.is_empty t.native_calls)
-  then invalid "developer callback is still active"
-  else if t.reconciling
-  then
-    Error
-      (P.Error.create
-         P.Error.Conflict
-         ~message:"developer terminal reconciliation is already active"
-         ~retryable:true
-         ())
-  else (
-    t.reconciling <- true;
-    Exn.protect
-      ~finally:(fun () -> t.reconciling <- false)
-      ~f:(fun () ->
-        let* () = drain_terminals t in
-        if List.is_empty t.unresolved_native
-        then Ok ()
-        else invalid "native dispatch remains physically unresolved"))
-;;
-
 let with_root_action t ~phase f =
   if not (same_domain t.registry)
   then invalid "developer root owner belongs to another domain"
-  else if Option.is_some t.root_call || Option.is_some t.pending || t.reconciling
+  else if
+    Option.is_some t.root_call
+    || Option.is_some t.pending
+    || Option.is_some t.dispatch_owner
+    || t.reconciling
   then invalid "developer root action is already active or unresolved"
   else
     let* terminal_slot =
@@ -833,11 +841,214 @@ let with_root_action t ~phase f =
 module Native_terminal = struct
   type nonrec t = native_scope
 
+  type dispatch_reconciliation =
+    | Installed of H.t * int
+    | Absent
+    | Uncertain
+
   module Selection = struct
     type nonrec t = native_selection
 
     let jobs t = t.selection.jobs
   end
+
+  let callback_complete (t : t) = t.callback_complete
+
+  let sealed (t : t) =
+    Option.map t.sealed ~f:(fun (selected : native_selection) ->
+      selected.outcome, selected)
+  ;;
+
+  let dispatch_revision observed id =
+    match Store.Invocation_lookup.prior (Store.find_invocation observed id) with
+    | Some prior -> Ok (Store.Invocation_observation.revision prior)
+    | None -> invalid "installed developer dispatch is missing"
+  ;;
+
+  let read_dispatch (t : t) id =
+    let issuer = t.issuer in
+    let expected = H.context t.registration.invocation in
+    if
+      (not (same_domain issuer.registry))
+      || t.bracket_exited
+      || t.submitted
+      || not (P.Id.Invocation.equal id expected.id)
+    then invalid "native dispatch read is outside its physical scope"
+    else
+      let* observed = Store.observe issuer.handle |> Result.map_error ~f:error_of_store in
+      Ok
+        (Option.map
+           (Store.Invocation_lookup.prior (Store.find_invocation observed id))
+           ~f:(fun prior ->
+             ( Store.Invocation_observation.revision prior
+             , Store.Invocation_observation.value prior )))
+  ;;
+
+  let dispatch_allowed (t : t) =
+    let issuer = t.issuer in
+    let snapshot = t.action.snapshot in
+    Option.value_map issuer.dispatch_owner ~default:false ~f:(phys_equal t)
+    && Option.is_none issuer.pending
+    && (match issuer.state with
+        | Live -> true
+        | Closing | Quarantined | Closed -> false)
+    && (not issuer.registry.closed)
+    && Operator_authorization.is_current issuer.actor
+    && Int.equal snapshot.selection_revision issuer.selection_revision
+    && phys_equal snapshot.selected issuer.selected
+    && Terminal_queue.check_effect_witness issuer.terminals snapshot.terminal_witness
+  ;;
+
+  let mark_installed (t : t) dispatched installed =
+    let issuer = t.issuer in
+    match issuer.dispatch_owner with
+    | Some current when phys_equal current t ->
+      let observed = Store.Installed.observation installed in
+      let* revision = dispatch_revision observed (H.context dispatched).id in
+      t.dispatch_state <- Dispatch_installed (dispatched, revision);
+      issuer.dispatch_owner <- None;
+      Ok revision
+    | None | Some _ ->
+      issuer.state <- Quarantined;
+      invalid "installed native dispatch lost its physical writer ownership"
+  ;;
+
+  let absent (t : t) =
+    t.dispatch_state <- No_attempt;
+    (match t.issuer.dispatch_owner with
+     | Some current when phys_equal current t -> t.issuer.dispatch_owner <- None
+     | None | Some _ -> ());
+    Ok Absent
+  ;;
+
+  let save_dispatch (t : t) ~expected_revision ~dispatched =
+    let issuer = t.issuer in
+    let original = t.registration.invocation in
+    if
+      (not (same_domain issuer.registry))
+      || t.bracket_exited
+      || t.submitted
+      || Option.is_some issuer.dispatch_owner
+      || Option.is_some issuer.pending
+      || issuer.reconciling
+      || (not (phys_equal t.action.snapshot.issuer issuer))
+      || (not (H.equal_context (H.context original) (H.context dispatched)))
+      || not (P.Invocation.equal_status (H.status dispatched) Dispatching)
+    then invalid "native dispatch cannot enter this physical scope"
+    else
+      let* () = check_current_local issuer t.action.snapshot ~allow_pending:false in
+      if Int.equal issuer.effect_revision Int.max_value
+      then invalid "developer effect generation is exhausted"
+      else (
+        issuer.dispatch_owner <- Some t;
+        issuer.effect_revision <- issuer.effect_revision + 1;
+        let* observed =
+          Store.observe issuer.handle |> Result.map_error ~f:error_of_store
+        in
+        let lookup = Store.find_invocation observed (H.context dispatched).id in
+        let actual_revision =
+          Option.map
+            (Store.Invocation_lookup.prior lookup)
+            ~f:Store.Invocation_observation.revision
+        in
+        let* () =
+          if Option.equal Int.equal actual_revision expected_revision
+          then Ok ()
+          else invalid "developer dispatch prior revision changed"
+        in
+        let* prepared =
+          Store.prepare_dispatch issuer.handle ~expected:observed ~lookup ~dispatched
+          |> Result.map_error ~f:error_of_store
+        in
+        let handoff = Store.Handoff.create ~settle:(fun _ -> ()) in
+        t.dispatch_state <- Dispatch_pending { prepared; handoff; dispatched };
+        match
+          Store.commit_and_settle issuer.handle prepared handoff ~admit:(fun () ->
+            dispatch_allowed t)
+        with
+        | Ok (Store.Settlement.Installed installed) ->
+          mark_installed t dispatched installed
+        | Ok (Absent | Prewrite_conflict) ->
+          let* _ = absent t in
+          invalid "developer dispatch was not installed"
+        | Ok Diverged ->
+          issuer.state <- Quarantined;
+          invalid "developer dispatch is divergent"
+        | Error error -> Error (error_of_store error))
+  ;;
+
+  let reconcile_dispatch (t : t) =
+    let issuer = t.issuer in
+    if
+      (not (same_domain issuer.registry)) || (not t.bracket_exited) || t.callback_complete
+    then invalid "native dispatch recovery requires an exited unentered bracket"
+    else (
+      match t.dispatch_state with
+      | Dispatch_installed (dispatched, revision) -> Ok (Installed (dispatched, revision))
+      | No_attempt ->
+        let* observed =
+          Store.observe issuer.handle |> Result.map_error ~f:error_of_store
+        in
+        (match
+           Store.Invocation_lookup.prior
+             (Store.find_invocation observed (H.context t.registration.invocation).id)
+         with
+         | None -> absent t
+         | Some prior ->
+           (match H.status (Store.Invocation_observation.value prior) with
+            | Admitted -> absent t
+            | Dispatching | Resolved _ | Published _ ->
+              invalid "unowned durable dispatch cannot be adopted"))
+      | Dispatch_pending { prepared; handoff; dispatched } ->
+        (match Store.reconcile_and_settle issuer.handle prepared handoff with
+         | Error error -> Error (error_of_store error)
+         | Ok (Store.Settlement.Installed installed_value) ->
+           let* revision = mark_installed t dispatched installed_value in
+           Ok (Installed (dispatched, revision))
+         | Ok (Absent | Prewrite_conflict) -> absent t
+         | Ok Diverged ->
+           issuer.state <- Quarantined;
+           Ok Uncertain))
+  ;;
+
+  let retained (t : t) =
+    let issuer = t.issuer in
+    if (not (same_domain issuer.registry)) || not t.bracket_exited
+    then invalid "native retention requires an exited same-domain bracket"
+    else
+      Ok
+        (List.exists issuer.unresolved_native ~f:(fun current ->
+           phys_equal current t.registration))
+  ;;
+
+  let remember_terminal (t : t) terminal =
+    let context = H.context t.registration.invocation in
+    let* () = H.validate terminal in
+    if not (H.equal_context context (H.context terminal))
+    then invalid "native terminal belongs to another physical scope"
+    else (
+      match t.remembered_terminal with
+      | None ->
+        t.remembered_terminal <- Some terminal;
+        Ok ()
+      | Some prior
+        when H.equal_context (H.context prior) (H.context terminal)
+             && P.Invocation.equal_status (H.status prior) (H.status terminal)
+             && Option.equal
+                  P.Invocation.equal_outcome
+                  (H.outcome prior)
+                  (H.outcome terminal) -> Ok ()
+      | Some _ -> invalid "native terminal changed after physical retention")
+  ;;
+
+  let remember_failure (t : t) ~terminal =
+    if Option.is_some t.sealed
+    then invalid "pre-entry failure cannot replace a sealed native outcome"
+    else (
+      match H.outcome terminal, H.status terminal with
+      | Some (Fail _ | Cancelled _), Resolved _ -> remember_terminal t terminal
+      | _ -> invalid "pre-entry native terminal is not a failure")
+  ;;
 
   let stage_background (t : t) ~request ~checkpoint =
     let context = H.context t.registration.invocation in
@@ -908,6 +1119,7 @@ module Native_terminal = struct
       | _ -> invalid "native terminal must be resolved"
     in
     let* () = validate_selection t outcome selected ~retained:false in
+    let* () = remember_terminal t terminal in
     let intent =
       { plan = Native_terminal { scope = t; terminal; selected }; settlement = None }
     in
@@ -921,71 +1133,85 @@ module Native_terminal = struct
     settled_revision intent
   ;;
 
-  let resolve_retained (t : t) ~terminal =
+  let with_recovery_slot issuer ~owned f =
+    if owned
+    then
+      if issuer.reconciling then f () else invalid "native recovery lost its owner slot"
+    else if issuer.reconciling
+    then invalid "native recovery is already active"
+    else (
+      issuer.reconciling <- true;
+      Exn.protect ~finally:(fun () -> issuer.reconciling <- false) ~f)
+  ;;
+
+  let resolve_retained_internal (t : t) ~terminal ~owned =
     let issuer = t.issuer in
     let registration = t.registration in
     if
       (not (same_domain issuer.registry))
       || t.submitted
       || (not t.bracket_exited)
-      || issuer.reconciling
+      || (issuer.reconciling && not owned)
       || not
            (List.exists issuer.unresolved_native ~f:(fun current ->
               phys_equal current registration))
     then invalid "native terminal recovery has no retained physical scope"
-    else (
-      issuer.reconciling <- true;
-      Exn.protect
-        ~finally:(fun () -> issuer.reconciling <- false)
-        ~f:(fun () ->
-          let* () = H.validate terminal in
-          let context = H.context registration.invocation in
-          let* outcome =
-            if H.equal_context context (H.context terminal)
-            then (
-              match H.outcome terminal, H.status terminal with
-              | Some outcome, P.Invocation.Resolved _ -> Ok outcome
-              | _ -> invalid "retained native terminal must be resolved")
-            else invalid "retained native terminal belongs to another invocation"
-          in
-          let selected = t.sealed in
-          let* () = validate_selection t outcome selected ~retained:true in
-          let* observed =
-            Store.observe issuer.handle |> Result.map_error ~f:error_of_store
-          in
-          let prior =
-            Store.find_invocation observed context.id |> Store.Invocation_lookup.prior
-          in
-          let* () =
-            match prior with
-            | Some prior ->
-              let actual = Store.Invocation_observation.value prior in
-              if
-                H.equal_context (H.context actual) context
-                && P.Invocation.equal_status (H.status actual) Dispatching
-              then Ok ()
-              else invalid "retained native dispatch changed durably"
-            | None -> invalid "retained native dispatch is not durable"
-          in
-          let intent =
-            { plan = Native_terminal { scope = t; terminal; selected }
-            ; settlement = None
-            }
-          in
-          let* () =
-            Terminal_queue.complete issuer.terminals registration.terminal_slot ~intent
-            |> Result.map_error ~f:error_of_terminal_queue
-          in
-          t.submitted <- true;
-          t.action.queued <- true;
-          issuer.unresolved_native
-          <- List.filter issuer.unresolved_native ~f:(fun current ->
-               not (phys_equal current registration));
-          let* () = drain_terminals issuer in
-          settled_revision intent))
+    else
+      with_recovery_slot issuer ~owned (fun () ->
+        let* () = H.validate terminal in
+        let context = H.context registration.invocation in
+        let* outcome =
+          if H.equal_context context (H.context terminal)
+          then (
+            match H.outcome terminal, H.status terminal with
+            | Some outcome, P.Invocation.Resolved _ -> Ok outcome
+            | _ -> invalid "retained native terminal must be resolved")
+          else invalid "retained native terminal belongs to another invocation"
+        in
+        let selected = t.sealed in
+        let* () = validate_selection t outcome selected ~retained:true in
+        let* observed =
+          Store.observe issuer.handle |> Result.map_error ~f:error_of_store
+        in
+        let prior =
+          Store.find_invocation observed context.id |> Store.Invocation_lookup.prior
+        in
+        let* () =
+          match prior with
+          | Some prior ->
+            let actual = Store.Invocation_observation.value prior in
+            if
+              H.equal_context (H.context actual) context
+              && P.Invocation.equal_status (H.status actual) Dispatching
+            then Ok ()
+            else invalid "retained native dispatch changed durably"
+          | None -> invalid "retained native dispatch is not durable"
+        in
+        let intent =
+          { plan = Native_terminal { scope = t; terminal; selected }; settlement = None }
+        in
+        let* () =
+          Terminal_queue.complete issuer.terminals registration.terminal_slot ~intent
+          |> Result.map_error ~f:error_of_terminal_queue
+        in
+        t.submitted <- true;
+        t.action.queued <- true;
+        issuer.unresolved_native
+        <- List.filter issuer.unresolved_native ~f:(fun current ->
+             not (phys_equal current registration));
+        let* () = drain_terminals issuer in
+        settled_revision intent)
   ;;
 
-  let abandon_retained_without_dispatch (t : t) =
+  let resolve_retained t ~terminal = resolve_retained_internal t ~terminal ~owned:false
+
+  let resolve_remembered (t : t) =
+    match t.remembered_terminal with
+    | None -> invalid "native scope has no remembered terminal"
+    | Some terminal -> resolve_retained t ~terminal
+  ;;
+
+  let abandon_retained_without_dispatch_internal (t : t) ~owned =
     let issuer = t.issuer in
     let registration = t.registration in
     if
@@ -996,50 +1222,114 @@ module Native_terminal = struct
       || t.callback_complete
       || Option.is_some t.sealed
       || (not (Hashtbl.is_empty t.action.staged))
-      || issuer.reconciling
+      || (issuer.reconciling && not owned)
       || not
            (List.exists issuer.unresolved_native ~f:(fun current ->
               phys_equal current registration))
     then invalid "native scope has no unentered retained dispatch proof"
-    else (
-      issuer.reconciling <- true;
-      Exn.protect
-        ~finally:(fun () -> issuer.reconciling <- false)
-        ~f:(fun () ->
-          let context = H.context registration.invocation in
-          let* observed =
-            Store.observe issuer.handle |> Result.map_error ~f:error_of_store
-          in
-          let prior =
-            Store.find_invocation observed context.id |> Store.Invocation_lookup.prior
-          in
-          let* () =
-            match prior with
-            | None -> Ok ()
-            | Some prior ->
-              let actual = Store.Invocation_observation.value prior in
-              if
-                H.equal_context (H.context actual) context
-                && P.Invocation.equal_status (H.status actual) Admitted
-              then Ok ()
-              else invalid "native scope has a durable dispatch or terminal"
-          in
-          let* () =
-            Terminal_queue.abandon issuer.terminals registration.terminal_slot
-            |> Result.map_error ~f:error_of_terminal_queue
-          in
-          issuer.unresolved_native
-          <- List.filter issuer.unresolved_native ~f:(fun current ->
-               not (phys_equal current registration));
-          restore_live_after_retention issuer;
-          Ok ()))
+    else
+      with_recovery_slot issuer ~owned (fun () ->
+        let context = H.context registration.invocation in
+        let* observed =
+          Store.observe issuer.handle |> Result.map_error ~f:error_of_store
+        in
+        let prior =
+          Store.find_invocation observed context.id |> Store.Invocation_lookup.prior
+        in
+        let* () =
+          match prior with
+          | None -> Ok ()
+          | Some prior ->
+            let actual = Store.Invocation_observation.value prior in
+            if
+              H.equal_context (H.context actual) context
+              && P.Invocation.equal_status (H.status actual) Admitted
+            then Ok ()
+            else invalid "native scope has a durable dispatch or terminal"
+        in
+        let* () =
+          Terminal_queue.abandon issuer.terminals registration.terminal_slot
+          |> Result.map_error ~f:error_of_terminal_queue
+        in
+        issuer.unresolved_native
+        <- List.filter issuer.unresolved_native ~f:(fun current ->
+             not (phys_equal current registration));
+        restore_live_after_retention issuer;
+        Ok ())
+  ;;
+
+  let abandon_retained_without_dispatch t =
+    abandon_retained_without_dispatch_internal t ~owned:false
   ;;
 end
+
+let reconcile_pending t =
+  if not (same_domain t.registry)
+  then invalid "developer root owner belongs to another domain"
+  else if Option.is_some t.root_call || not (Hashtbl.is_empty t.native_calls)
+  then invalid "developer callback is still active"
+  else if t.reconciling
+  then
+    Error
+      (P.Error.create
+         P.Error.Conflict
+         ~message:"developer terminal reconciliation is already active"
+         ~retryable:true
+         ())
+  else (
+    t.reconciling <- true;
+    Exn.protect
+      ~finally:(fun () -> t.reconciling <- false)
+      ~f:(fun () ->
+        let* () =
+          List.fold_result t.unresolved_native ~init:() ~f:(fun () scope_registration ->
+            match scope_registration.scope with
+            | None -> invalid "retained native registration has no physical scope"
+            | Some scope ->
+              if (not scope.bracket_exited) || scope.submitted
+              then invalid "retained native callback has not joined"
+              else if scope.callback_complete
+              then (
+                match scope.remembered_terminal with
+                | Some terminal ->
+                  Native_terminal.resolve_retained_internal scope ~terminal ~owned:true
+                  |> Result.map ~f:ignore
+                | None ->
+                  invalid "completed native callback has no canonical terminal plan")
+              else
+                let* dispatch = Native_terminal.reconcile_dispatch scope in
+                (match dispatch with
+                 | Native_terminal.Absent ->
+                   Native_terminal.abandon_retained_without_dispatch_internal
+                     scope
+                     ~owned:true
+                 | Installed _ ->
+                   (match scope.remembered_terminal with
+                    | Some terminal ->
+                      Native_terminal.resolve_retained_internal
+                        scope
+                        ~terminal
+                        ~owned:true
+                      |> Result.map ~f:ignore
+                    | None ->
+                      invalid "retained native dispatch has no truthful terminal plan")
+                 | Uncertain -> invalid "native dispatch remains uncertain"))
+        in
+        let* () =
+          if Option.is_none t.dispatch_owner
+          then Ok ()
+          else invalid "native dispatch still owns the Store writer"
+        in
+        let* () = drain_terminals t in
+        if List.is_empty t.unresolved_native
+        then Ok ()
+        else invalid "native terminal remains physically unresolved"))
+;;
 
 let with_native_registration t ~invocation f =
   if not (same_domain t.registry)
   then invalid "developer native owner belongs to another domain"
-  else if Option.is_some t.pending || t.reconciling
+  else if Option.is_some t.pending || Option.is_some t.dispatch_owner || t.reconciling
   then invalid "developer terminal settlement is unresolved"
   else (
     let context = H.context invocation in
@@ -1048,7 +1338,6 @@ let with_native_registration t ~invocation f =
       if
         P.Invocation.equal_status (H.status invocation) Admitted
         && P.Execution_owner.equal context.owner (P.Execution_owner.Developer t.owner)
-        && Option.is_none context.parent_invocation
         && Option.is_none context.parent_job
         && not (Hashtbl.mem t.native_calls context.id)
       then Ok ()
@@ -1089,6 +1378,8 @@ let with_native_registration t ~invocation f =
               ; bracket_exited = false
               ; sealed = None
               ; submitted = false
+              ; dispatch_state = No_attempt
+              ; remembered_terminal = None
               }
             in
             registration.scope <- Some scope;
@@ -1107,6 +1398,10 @@ let with_native_registration t ~invocation f =
       then (
         let durable_or_unknown =
           match registration.scope with
+          | Some scope
+            when Option.value_map t.dispatch_owner ~default:false ~f:(phys_equal scope) ->
+            true
+          | Some scope when Option.is_some scope.remembered_terminal -> true
           | Some scope when Option.is_some scope.dispatched -> true
           | None ->
             (* The scope was never constructed or handed to the callback, so
@@ -1450,6 +1745,7 @@ module Registry = struct
       ; project_source
       ; workspace_conflict_domain = admission.workspace_conflict_domain
       ; job_policy = admission.job_policy
+      ; native_ceiling = admission.selected
       ; selected = admission.selected
       ; selection_revision = 0
       ; state = Live
@@ -1459,6 +1755,8 @@ module Registry = struct
       ; unresolved_native = []
       ; terminals
       ; pending = None
+      ; dispatch_owner = None
+      ; effect_revision = 0
       ; reconciling = false
       }
     in

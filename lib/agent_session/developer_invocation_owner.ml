@@ -14,7 +14,7 @@ type storage =
       -> (int, E.t) result
   }
 
-type t =
+type identity =
   { owner : O.developer
   ; capture_fingerprint : Chatml_source.Digest.t
   ; ceiling : C.t
@@ -24,11 +24,15 @@ type t =
       -> capture_fingerprint:Chatml_source.Digest.t
       -> (unit, E.t) result
   ; now : unit -> Agent_protocol.Timestamp.t
+  }
+
+type t =
+  { identity : identity
   ; storage : storage
   }
 
 type active =
-  { issuer : t
+  { issuer : identity
   ; context : H.context
   ; domain_id : int
   ; live : bool Atomic.t
@@ -60,19 +64,26 @@ let create
   let%bind () = O.validate (O.Developer owner) in
   let%bind () = current ~owner ~capture_fingerprint in
   let%map () = validate_selection ~ceiling (selected ()) in
-  { owner; capture_fingerprint; ceiling; selected; current; now; storage }
+  { identity = { owner; capture_fingerprint; ceiling; selected; current; now }; storage }
 ;;
 
-let owner t = t.owner
-let capture_fingerprint t = t.capture_fingerprint
-let ceiling t = t.ceiling
+let owner t = t.identity.owner
+let capture_fingerprint t = t.identity.capture_fingerprint
+let ceiling t = t.identity.ceiling
 
-let selected t =
-  let selected = t.selected () in
-  Result.map (validate_selection ~ceiling:t.ceiling selected) ~f:(fun () -> selected)
+let selected_identity identity =
+  let selected = identity.selected () in
+  Result.map (validate_selection ~ceiling:identity.ceiling selected) ~f:(fun () ->
+    selected)
 ;;
 
-let current t = t.current ~owner:t.owner ~capture_fingerprint:t.capture_fingerprint
+let selected t = selected_identity t.identity
+
+let current_identity t =
+  t.current ~owner:t.owner ~capture_fingerprint:t.capture_fingerprint
+;;
+
+let current t = current_identity t.identity
 
 let same_owner t context =
   match context.H.owner with
@@ -115,7 +126,17 @@ let valid_parent t ~parent (context : H.context) =
   | Child _, None -> invalid "developer child invocation requires its direct parent"
 ;;
 
-let check_invocation t ~parent invocation =
+let check_parent_now t ~parent invocation =
+  let open Result.Let_syntax in
+  let context = H.context invocation in
+  let%bind () = valid_parent t ~parent context in
+  match context.deadline with
+  | Some deadline when Agent_protocol.Timestamp.compare deadline (t.now ()) <= 0 ->
+    invalid "developer invocation deadline has expired"
+  | Some _ | None -> Ok ()
+;;
+
+let check_invocation_identity t ~parent invocation =
   let open Result.Let_syntax in
   let%bind () = H.validate invocation in
   let context = H.context invocation in
@@ -124,20 +145,17 @@ let check_invocation t ~parent invocation =
     then Ok ()
     else invalid "developer invocation has foreign owner"
   in
-  let%bind () = current t in
-  let%bind () = valid_parent t ~parent context in
-  let%bind () =
-    match context.deadline with
-    | Some deadline when Agent_protocol.Timestamp.compare deadline (t.now ()) <= 0 ->
-      invalid "developer invocation deadline has expired"
-    | Some _ | None -> Ok ()
-  in
-  Ok ()
+  let%bind () = current_identity t in
+  check_parent_now t ~parent invocation
+;;
+
+let check_invocation t ~parent invocation =
+  check_invocation_identity t.identity ~parent invocation
 ;;
 
 let validate_initial t ~parent invocation =
   let open Result.Let_syntax in
-  let%bind () = check_invocation t ~parent invocation in
+  let%bind () = check_invocation_identity t ~parent invocation in
   let%bind () =
     if I.equal_status (H.status invocation) I.Admitted
     then Ok ()
@@ -175,6 +193,51 @@ let exception_outcome =
     }
 ;;
 
+type 'a callback_result =
+  | Returned of 'a
+  | Failed of E.t
+  | Raised of exn * Stdlib.Printexc.raw_backtrace
+
+let run_callback identity ~parent ~context ~dispatched callback =
+  let active =
+    { issuer = identity
+    ; context
+    ; domain_id = (Stdlib.Domain.self () :> int)
+    ; live = Atomic.make true
+    }
+  in
+  Exn.protect
+    ~finally:(fun () -> Atomic.set active.live false)
+    ~f:(fun () ->
+      match
+        let open Result.Let_syntax in
+        let%bind () = check_invocation_identity identity ~parent dispatched in
+        callback ~active ~dispatched
+      with
+      | Ok value -> Returned value
+      | Error error -> Failed error
+      | exception exn -> Raised (exn, Stdlib.Printexc.get_raw_backtrace ()))
+;;
+
+let resolve_or_fail dispatched outcome =
+  match H.resolve dispatched outcome with
+  | Ok terminal -> terminal
+  | Error _ ->
+    (match H.resolve dispatched exception_outcome with
+     | Ok terminal -> terminal
+     | Error _ -> failwith "validated dispatched invocation cannot resolve")
+;;
+
+let terminal_for_error dispatched = function
+  | Returned outcome -> resolve_or_fail dispatched outcome
+  | Failed error -> resolve_or_fail dispatched (failure_outcome error)
+  | Raised (Eio.Cancel.Cancelled _, _) ->
+    (match H.cancel dispatched ~reason:"cancelled" with
+     | Ok terminal -> terminal
+     | Error _ -> failwith "validated dispatched invocation cannot cancel")
+  | Raised _ -> resolve_or_fail dispatched exception_outcome
+;;
+
 let saved_revision previous next =
   let valid =
     next > 0
@@ -193,11 +256,11 @@ let save t ~id ~expected_revision after =
   saved_revision expected_revision revision
 ;;
 
-let with_invocation t ~parent ~invocation callback =
+let prepare_dispatch t ~parent ~invocation ~read =
   let open Result.Let_syntax in
   let%bind context = validate_initial t ~parent invocation in
-  let%bind existing = t.storage.read context.id in
-  let%bind () = check_invocation t ~parent invocation in
+  let%bind existing = read context.id in
+  let%bind () = check_invocation_identity t ~parent invocation in
   let%bind expected_revision =
     match existing with
     | None -> Ok None
@@ -211,37 +274,19 @@ let with_invocation t ~parent ~invocation callback =
         | Dispatching -> Error (interrupted "developer invocation is already dispatching")
         | Resolved _ | Published _ -> invalid "developer invocation is already terminal")
   in
-  let%bind () = check_invocation t ~parent invocation in
+  let%bind () = check_invocation_identity t ~parent invocation in
   let%bind dispatched = H.dispatch invocation in
+  Ok (context, expected_revision, dispatched)
+;;
+
+let with_invocation t ~parent ~invocation callback =
+  let open Result.Let_syntax in
+  let%bind context, expected_revision, dispatched =
+    prepare_dispatch t.identity ~parent ~invocation ~read:t.storage.read
+  in
   let%bind dispatch_revision = save t ~id:context.id ~expected_revision dispatched in
-  let active =
-    { issuer = t
-    ; context
-    ; domain_id = (Stdlib.Domain.self () :> int)
-    ; live = Atomic.make true
-    }
-  in
-  let callback_result =
-    Exn.protect
-      ~finally:(fun () -> Atomic.set active.live false)
-      ~f:(fun () ->
-        match
-          let%bind () = check_invocation t ~parent dispatched in
-          callback ~active ~dispatched
-        with
-        | Ok outcome -> `Outcome outcome
-        | Error error -> `Outcome (failure_outcome error)
-        | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ()))
-  in
-  let terminal =
-    match callback_result with
-    | `Outcome outcome ->
-      (match H.resolve dispatched outcome with
-       | Ok _ as success -> success
-       | Error _ -> H.resolve dispatched exception_outcome)
-    | `Raised (Eio.Cancel.Cancelled _, _) -> H.cancel dispatched ~reason:"cancelled"
-    | `Raised _ -> H.resolve dispatched exception_outcome
-  in
+  let callback_result = run_callback t.identity ~parent ~context ~dispatched callback in
+  let terminal = Ok (terminal_for_error dispatched callback_result) in
   let final =
     Result.bind terminal ~f:(fun after ->
       match
@@ -253,6 +298,217 @@ let with_invocation t ~parent ~invocation callback =
       | exception _ -> Error (persistence_uncertain context))
   in
   match callback_result with
-  | `Raised (exn, backtrace) -> Stdlib.Printexc.raise_with_backtrace exn backtrace
-  | `Outcome _ -> final
+  | Raised (exn, backtrace) -> Stdlib.Printexc.raise_with_backtrace exn backtrace
+  | Returned _ | Failed _ -> final
 ;;
+
+module Selected = struct
+  type nonrec t = identity
+  type nonrec active = active
+
+  type nonrec parent = parent =
+    | Root
+    | Child of active
+
+  type dispatch_storage =
+    { read : Agent_protocol.Id.Invocation.t -> ((int * H.t) option, E.t) result
+    ; save_dispatch : expected_revision:int option -> dispatched:H.t -> (int, E.t) result
+    }
+
+  type cause =
+    | Cause_normal
+    | Cause_typed_error of E.t
+    | Cause_raised of exn * Stdlib.Printexc.raw_backtrace
+
+  type dispatch =
+    | Awaiting_reconciliation
+    | Installed of int
+
+  type 'selection completion =
+    { dispatch : dispatch
+    ; terminal : H.t
+    ; selected : 'selection option
+    ; cause : cause
+    ; context : H.context
+    }
+
+  let create ~owner ~capture_fingerprint ~ceiling ~selected ~current ~now =
+    let open Result.Let_syntax in
+    let%bind () = O.validate (O.Developer owner) in
+    let%bind () = current ~owner ~capture_fingerprint in
+    let%map () = validate_selection ~ceiling (selected ()) in
+    { owner; capture_fingerprint; ceiling; selected; current; now }
+  ;;
+
+  let ceiling t = t.ceiling
+  let same_issuer = phys_equal
+  let selected = selected_identity
+  let check_invocation = check_invocation_identity
+  let check_parent_now = check_parent_now
+
+  let terminal_for_cause dispatched = function
+    | Cause_normal -> resolve_or_fail dispatched exception_outcome
+    | Cause_typed_error error -> resolve_or_fail dispatched (failure_outcome error)
+    | Cause_raised (Eio.Cancel.Cancelled _, _) ->
+      (match H.cancel dispatched ~reason:"cancelled" with
+       | Ok terminal -> terminal
+       | Error _ -> failwith "validated dispatched invocation cannot cancel")
+    | Cause_raised _ -> resolve_or_fail dispatched exception_outcome
+  ;;
+
+  let completion ~dispatch ~dispatched ~selected ~cause ~frozen =
+    let open Result.Let_syntax in
+    let outcome, selected =
+      match frozen with
+      | Some (outcome, selected) -> outcome, Some selected
+      | None ->
+        (match cause with
+         | Cause_normal -> exception_outcome, selected
+         | Cause_typed_error error -> failure_outcome error, None
+         | Cause_raised (Eio.Cancel.Cancelled _, _) -> I.Cancelled "cancelled", None
+         | Cause_raised _ -> exception_outcome, None)
+    in
+    let%map terminal =
+      match frozen, cause with
+      | Some _, _ -> H.resolve dispatched outcome
+      | None, Cause_raised (Eio.Cancel.Cancelled _, _) ->
+        Ok (terminal_for_cause dispatched cause)
+      | None, _ -> Ok (resolve_or_fail dispatched outcome)
+    in
+    { dispatch; terminal; selected; cause; context = H.context dispatched }
+  ;;
+
+  let with_invocation t ~parent ~invocation ~dispatch ~frozen callback =
+    let open Result.Let_syntax in
+    let%bind context, expected_revision, dispatched =
+      prepare_dispatch t ~parent ~invocation ~read:dispatch.read
+    in
+    let saved =
+      match dispatch.save_dispatch ~expected_revision ~dispatched with
+      | Ok revision ->
+        (match saved_revision expected_revision revision with
+         | Ok revision -> `Installed revision
+         | Error error -> `Unknown (Cause_typed_error error))
+      | Error error -> `Unknown (Cause_typed_error error)
+      | exception exn ->
+        `Unknown (Cause_raised (exn, Stdlib.Printexc.get_raw_backtrace ()))
+    in
+    match saved with
+    | `Unknown cause ->
+      completion
+        ~dispatch:Awaiting_reconciliation
+        ~dispatched
+        ~selected:None
+        ~cause
+        ~frozen:None
+    | `Installed revision ->
+      let callback_result = run_callback t ~parent ~context ~dispatched callback in
+      (match callback_result with
+       | Returned (outcome, selected) ->
+         (match frozen () with
+          | Some (frozen_outcome, frozen_selected)
+            when (not (I.equal_outcome outcome frozen_outcome))
+                 || not
+                      (Option.value_map
+                         selected
+                         ~default:false
+                         ~f:(phys_equal frozen_selected)) ->
+            completion
+              ~dispatch:(Installed revision)
+              ~dispatched
+              ~selected:None
+              ~cause:
+                (Cause_typed_error
+                   (E.invalid_request
+                      "selected native outcome changed after physical sealing"))
+              ~frozen:(Some (frozen_outcome, frozen_selected))
+          | Some _ | None ->
+            let%map terminal =
+              match selected with
+              | Some _ -> H.resolve dispatched outcome
+              | None -> Ok (resolve_or_fail dispatched outcome)
+            in
+            { dispatch = Installed revision
+            ; terminal
+            ; selected
+            ; cause = Cause_normal
+            ; context
+            })
+       | Failed error ->
+         let frozen = frozen () in
+         completion
+           ~dispatch:(Installed revision)
+           ~dispatched
+           ~selected:None
+           ~cause:(Cause_typed_error error)
+           ~frozen
+       | Raised (exn, backtrace) ->
+         let frozen = frozen () in
+         completion
+           ~dispatch:(Installed revision)
+           ~dispatched
+           ~selected:None
+           ~cause:(Cause_raised (exn, backtrace))
+           ~frozen)
+  ;;
+
+  module Completion = struct
+    type 'selection t = 'selection completion
+
+    type nonrec dispatch = dispatch =
+      | Awaiting_reconciliation
+      | Installed of int
+
+    type settlement =
+      | Terminal_saved of int
+      | Recovered_terminal_saved of
+          { dispatch_revision : int
+          ; terminal_revision : int
+          }
+      | Dispatch_absent
+      | Uncertain of E.t
+
+    let dispatch t = t.dispatch
+    let terminal t = t.terminal
+    let selected t = t.selected
+
+    let finish t ~settlement =
+      let settled =
+        match t.dispatch, settlement with
+        | Installed dispatch_revision, Terminal_saved terminal_revision
+          when Result.is_ok (saved_revision (Some dispatch_revision) terminal_revision) ->
+          Ok t.terminal
+        | ( (Awaiting_reconciliation | Installed _)
+          , Recovered_terminal_saved { dispatch_revision; terminal_revision } )
+          when Result.is_ok (saved_revision None dispatch_revision)
+               && Result.is_ok (saved_revision (Some dispatch_revision) terminal_revision)
+               &&
+               match t.dispatch with
+               | Awaiting_reconciliation -> true
+               | Installed known -> Int.equal known dispatch_revision -> Ok t.terminal
+        | Awaiting_reconciliation, Dispatch_absent ->
+          Error
+            (E.create
+               Persistence_error
+               ~message:"developer invocation dispatch was not installed"
+               ~retryable:false
+               ())
+        | ( (Awaiting_reconciliation | Installed _)
+          , (Terminal_saved _ | Recovered_terminal_saved _ | Dispatch_absent | Uncertain _)
+          ) -> Error (persistence_uncertain t.context)
+      in
+      match t.cause with
+      | Cause_raised (exn, backtrace) ->
+        Stdlib.Printexc.raise_with_backtrace exn backtrace
+      | Cause_typed_error error ->
+        (match t.dispatch, settlement with
+         | Awaiting_reconciliation, Dispatch_absent -> Error error
+         | ( (Awaiting_reconciliation | Installed _)
+           , ( Terminal_saved _
+             | Recovered_terminal_saved _
+             | Dispatch_absent
+             | Uncertain _ ) ) -> settled)
+      | Cause_normal -> settled
+    ;;
+  end
+end

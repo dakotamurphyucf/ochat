@@ -239,9 +239,9 @@ let implementation_sources =
   ; ( "lib/agent_session/managed_wait_tool.ml"
     , "2482da27415b0f542bbf5e2fa61bf97de70fb047790cb6ee5100ced465b43708" )
   ; ( "lib/agent_session/native_tool_invocation.ml"
-    , "611424cea6837b13535af0f03d480537a0f6b0996772523479d9bbc063e6f2d6" )
+    , "a32d819272072466deb79b9d8d9655a14b0f32458aba413daa901ced04a95bd4" )
   ; ( "lib/agent_session/native_tool_policy.ml"
-    , "b1b5e1022ea681f7ebf88cfade4058693afb27c99d2a018b9d82c6c388bcef54" )
+    , "c3ab2528769b5737c2b4cc22edb01e01c75222ee42520aaa12527414437463fc" )
   ; ( "lib/agent_session/one_off_execution.ml"
     , "946bf1eb9dc6c2da12f46d94f973a9ec7a4c11873b6ffab1424dedaeed8c6e7a" )
   ; ( "lib/agent_session/run_chatml_tool.ml"

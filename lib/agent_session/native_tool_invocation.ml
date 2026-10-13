@@ -58,6 +58,17 @@ type owned_borrowed =
   ; runtime_context : Chat_response.Runtime_request_scope.t option
   }
 
+type selected_borrowed =
+  { invocation : H.t
+  ; issuer : D.Selected.t
+  ; parent_claim : D.Selected.active
+  ; active : bool Atomic.t
+  ; domain_id : int
+  ; ceiling : C.t option
+  ; execution_context : Chatml_execution.context
+  ; runtime_context : Chat_response.Runtime_request_scope.t option
+  }
+
 type managed_dispatch =
   { definition : Managed.t
   ; current : unit -> C.t
@@ -84,8 +95,28 @@ type owned_managed_dispatch =
       -> ('a, I.outcome) result
   }
 
+type selected_managed_dispatch =
+  { definition : Managed.t
+  ; current : unit -> C.t
+  ; run :
+      'a.
+      Managed.owned_execution
+      -> selected_borrowed
+      -> effect_entry:(unit -> (unit, Agent_protocol.Error.t) result)
+      -> stage_background:
+           (request:Chat_response.Background_request.t
+            -> checkpoint:(unit -> unit)
+            -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result)
+      -> (validate_work:(I.work -> (unit, string) result)
+          -> outcome:I.outcome
+          -> selected_jobs:Agent_protocol.Id.Job.t list
+          -> ('a, I.outcome) result)
+      -> ('a, I.outcome) result
+  }
+
 let scope_key : borrowed Eio.Fiber.key = Eio.Fiber.create_key ()
 let owned_scope_key : owned_borrowed Eio.Fiber.key = Eio.Fiber.create_key ()
+let selected_scope_key : selected_borrowed Eio.Fiber.key = Eio.Fiber.create_key ()
 
 type native_admission =
   { invocation_context : I.context
@@ -106,9 +137,9 @@ let owned_native_admission_key : owned_native_admission Eio.Fiber.key =
 ;;
 
 let current_scope () =
-  match Eio.Fiber.get owned_scope_key with
-  | Some _ -> Expired
-  | None ->
+  match Eio.Fiber.get owned_scope_key, Eio.Fiber.get selected_scope_key with
+  | Some _, _ | _, Some _ -> Expired
+  | None, None ->
     (match Eio.Fiber.get scope_key with
      | None -> Unbound
      | Some scope ->
@@ -118,13 +149,17 @@ let current_scope () =
 ;;
 
 let borrow () =
-  match Eio.Fiber.get owned_scope_key, Eio.Fiber.get scope_key with
-  | Some _, _ ->
+  match
+    ( Eio.Fiber.get owned_scope_key
+    , Eio.Fiber.get selected_scope_key
+    , Eio.Fiber.get scope_key )
+  with
+  | Some _, _, _ | _, Some _, _ ->
     Error
       (Agent_protocol.Error.invalid_request
          "conversation invocation scope is unavailable")
-  | None, Some scope when Atomic.get scope.active -> Ok scope
-  | None, (None | Some _) ->
+  | None, None, Some scope when Atomic.get scope.active -> Ok scope
+  | None, None, (None | Some _) ->
     Error (Agent_protocol.Error.invalid_request "native invocation scope is not active")
 ;;
 
@@ -194,6 +229,31 @@ let borrow_owned () =
   | Some _ | None ->
     Error
       (Agent_protocol.Error.invalid_request "owned native invocation scope is not active")
+;;
+
+let selected_active (scope : selected_borrowed) =
+  Atomic.get scope.active && Int.equal scope.domain_id (Stdlib.Domain.self () :> int)
+;;
+
+let borrow_selected () =
+  match Eio.Fiber.get selected_scope_key with
+  | Some scope when selected_active scope -> Ok scope
+  | Some _ | None ->
+    Error
+      (Agent_protocol.Error.invalid_request
+         "selected developer native invocation scope is not active")
+;;
+
+let selected_borrowed_issuer (scope : selected_borrowed) = scope.issuer
+let selected_borrowed_parent (scope : selected_borrowed) = scope.parent_claim
+
+let selected_borrowed_capabilities (scope : selected_borrowed) =
+  match selected_active scope, scope.ceiling with
+  | true, Some selected -> Ok selected
+  | _ ->
+    Error
+      (Agent_protocol.Error.invalid_request
+         "selected developer borrow has no live verified capabilities")
 ;;
 
 let owned_borrowed_invocation (scope : owned_borrowed) = scope.invocation
@@ -301,6 +361,41 @@ let with_owned_scope
     ~f:(fun () ->
       Chat_response.Runtime_request_scope.with_context runtime_context (fun () ->
         Eio.Fiber.with_binding owned_scope_key scope f))
+;;
+
+let with_selected_scope
+      ?ceiling
+      ?execution_context
+      ?runtime_context
+      ~issuer
+      ~parent_claim
+      invocation
+      f
+  =
+  let execution_context =
+    Chatml_execution.capture_context ?inherited:execution_context ()
+  in
+  let runtime_context =
+    Option.value_or_thunk
+      runtime_context
+      ~default:Chat_response.Runtime_request_scope.capture
+  in
+  let scope =
+    { invocation
+    ; issuer
+    ; parent_claim
+    ; active = Atomic.make true
+    ; domain_id = (Stdlib.Domain.self () :> int)
+    ; ceiling
+    ; execution_context
+    ; runtime_context
+    }
+  in
+  Exn.protect
+    ~finally:(fun () -> Atomic.set scope.active false)
+    ~f:(fun () ->
+      Chat_response.Runtime_request_scope.with_context runtime_context (fun () ->
+        Eio.Fiber.with_binding selected_scope_key scope f))
 ;;
 
 let select_tools (scope : borrowed) ~names =
@@ -621,6 +716,48 @@ let with_owned_managed_scope execution f =
     (fun () -> Result.bind (borrow_owned ()) ~f)
 ;;
 
+let with_selected_managed_scope execution f =
+  let open Result.Let_syntax in
+  let%bind scope = borrow_selected () in
+  let%bind selected = selected_borrowed_capabilities scope in
+  let reference = C.reference (Managed.owned_binding execution) in
+  let%bind () =
+    if
+      H.equal_context
+        (H.context scope.invocation)
+        (H.context (Managed.owned_invocation execution))
+      && I.equal_status
+           (H.status scope.invocation)
+           (H.status (Managed.owned_invocation execution))
+    then
+      C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint
+      |> Result.map ~f:ignore
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.invalid_request error.C.message)
+    else
+      Error
+        (Agent_protocol.Error.invalid_request
+           "selected managed admission belongs to another invocation")
+  in
+  let prepared = Managed.owned_prepared execution in
+  let%bind () =
+    match (Chat_response.Extension_compiler.declaration prepared).implementation with
+    | Standalone _ -> Ok ()
+    | Moderator _ ->
+      Error
+        (Agent_protocol.Error.invalid_request
+           "developer selected managed invocation requires a standalone handler")
+  in
+  with_selected_scope
+    ~ceiling:(Chat_response.Extension_compiler.capabilities prepared)
+    ~issuer:scope.issuer
+    ~parent_claim:scope.parent_claim
+    ~execution_context:scope.execution_context
+    ~runtime_context:scope.runtime_context
+    scope.invocation
+    (fun () -> Result.bind (borrow_selected ()) ~f)
+;;
+
 let with_dispatched_scope ~execute ?moderator_execute ~selected ~invocation f =
   let open Result.Let_syntax in
   let%bind () = I.validate invocation in
@@ -698,7 +835,37 @@ let with_owned_selected_capabilities selected f =
       f
 ;;
 
-type managed_target = Native_tool_policy.managed_target
+let with_developer_selected_capabilities selected f =
+  let failure =
+    fail
+      "invocation.unselected_tool"
+      "Native dispatch would widen its selected developer borrow."
+  in
+  match Eio.Fiber.get selected_scope_key with
+  | None -> Error failure
+  | Some scope ->
+    let open Result.Let_syntax in
+    let%bind () =
+      checked failure (fun () ->
+        let%bind ceiling = selected_borrowed_capabilities scope in
+        List.fold (C.references selected) ~init:(Ok ()) ~f:(fun result reference ->
+          let%bind () = result in
+          C.resolve ceiling ~id:reference.id ~fingerprint:reference.fingerprint
+          |> Result.map_error ~f:(fun error ->
+            Agent_protocol.Error.invalid_request error.C.message)
+          |> Result.map ~f:ignore))
+    in
+    with_selected_scope
+      ~ceiling:selected
+      ~issuer:scope.issuer
+      ~parent_claim:scope.parent_claim
+      ~execution_context:scope.execution_context
+      ~runtime_context:scope.runtime_context
+      scope.invocation
+      f
+;;
+
+type 'a managed_target = 'a Native_tool_policy.managed_target
 
 let conversation_context invocation =
   match H.of_conversation invocation with
@@ -732,12 +899,14 @@ let conversation_managed_target
          (fun continuation ->
            match
              with_managed_scope execution (fun borrowed ->
-               Ok (service.run execution borrowed continuation))
+               Ok
+                 (service.run execution borrowed (fun ~validate_work ~outcome ->
+                    continuation ~validate_work ~outcome ~selected_jobs:[])))
            with
            | Ok result -> result
            | Error _ -> Error (fail "invocation.handler_failed" "Tool execution failed."))
      }
-     : managed_target))
+     : I.outcome managed_target))
 ;;
 
 let owned_managed_target
@@ -758,12 +927,47 @@ let owned_managed_target
          (fun continuation ->
            match
              with_owned_managed_scope execution (fun borrowed ->
-               Ok (service.run execution borrowed continuation))
+               Ok
+                 (service.run execution borrowed (fun ~validate_work ~outcome ->
+                    continuation ~validate_work ~outcome ~selected_jobs:[])))
            with
            | Ok result -> result
            | Error _ -> Error (fail "invocation.handler_failed" "Tool execution failed."))
      }
-     : managed_target))
+     : I.outcome managed_target))
+;;
+
+let selected_managed_target
+      (service : selected_managed_dispatch)
+      ~reference
+      ~selected
+      ~dispatched
+      ~effect_entry
+      ~stage_background
+  =
+  Managed.admit_owned
+    service.definition
+    ~current:(service.current ())
+    ~selected
+    ~reference
+    ~invocation:dispatched
+  |> Result.map ~f:(fun execution ->
+    { Native_tool_policy.prepared = Managed.owned_prepared execution
+    ; run =
+        (fun continuation ->
+          match
+            with_selected_managed_scope execution (fun borrowed ->
+              Ok
+                (service.run
+                   execution
+                   borrowed
+                   ~effect_entry
+                   ~stage_background
+                   continuation))
+          with
+          | Ok result -> result
+          | Error _ -> Error (fail "invocation.handler_failed" "Tool execution failed."))
+    })
 ;;
 
 let run_with_native
@@ -816,6 +1020,7 @@ let run_with_native
     ~with_native_admission
     ~authorize
     ~prepare_output
+    ~complete:(fun outcome ~selected_jobs:_ -> Ok outcome)
 ;;
 
 let run_owned
@@ -863,6 +1068,7 @@ let run_owned
     ~with_native_admission:with_owned_native_admission
     ~authorize
     ~prepare_output
+    ~complete:(fun outcome ~selected_jobs:_ -> Ok outcome)
 ;;
 
 let run_owned_root ~owner ~managed ~reference ~invocation ~authorize ~prepare_output =
@@ -931,6 +1137,112 @@ let run_owned_child ~parent ~managed ~reference ~invocation ~authorize ~prepare_
     ~invocation
     ~authorize
     ~prepare_output
+;;
+
+let run_owned_selected
+      ~owner
+      ~parent
+      ~dispatch
+      ~frozen
+      ~enter_callback
+      ~(managed : selected_managed_dispatch option)
+      ~registry
+      ~(reference : C.reference)
+      ~invocation
+      ~authorize
+      ~prepare_output
+      ~effect_entry
+      ~stage_background
+      ~seal
+  =
+  let execute ~invocation f =
+    D.Selected.with_invocation
+      owner
+      ~parent
+      ~invocation
+      ~dispatch
+      ~frozen
+      (fun ~active ~dispatched ->
+         enter_callback ~dispatched (fun () ->
+           with_selected_scope
+             ~ceiling:(D.Selected.ceiling owner)
+             ~issuer:owner
+             ~parent_claim:active
+             dispatched
+             (fun () -> f ~dispatched)))
+  in
+  let managed_revision binding =
+    match C.implementation binding, managed with
+    | Managed _, Some service -> Managed.execution_revision service.definition binding
+    | Native _, _ | Managed _, None -> Ok reference.implementation_revision
+  in
+  let managed_admit =
+    Option.map managed ~f:(fun service binding selected dispatched ->
+      selected_managed_target
+        service
+        ~reference
+        ~selected
+        ~dispatched
+        ~effect_entry:(fun () -> effect_entry binding)
+        ~stage_background:(fun ~request ~checkpoint ->
+          stage_background binding ~request ~checkpoint))
+  in
+  let check_halted () =
+    match D.Selected.check_invocation owner ~parent invocation with
+    | Ok () -> Ok ()
+    | Error _ -> Error (fail "invocation.run_ended" "The developer run is unavailable.")
+  in
+  let complete outcome ~selected_jobs =
+    match outcome with
+    | (I.Fail _ | Cancelled _) when List.is_empty selected_jobs -> Ok (outcome, None)
+    | I.Fail _ | Cancelled _ ->
+      Error
+        (Agent_protocol.Error.invalid_request
+           "failed native invocation cannot select new jobs")
+    | Complete _ | Pending _ ->
+      let open Result.Let_syntax in
+      let%bind selected = seal outcome ~selected_jobs in
+      (match outcome, selected with
+       | Pending _, None ->
+         Error
+           (Agent_protocol.Error.invalid_request
+              "pending native job was not selected by this physical scope")
+       | (Complete _ | Pending _), (None | Some _) -> Ok (outcome, selected)
+       | (Fail _ | Cancelled _), _ ->
+         Error (Agent_protocol.Error.invalid_request "invalid selected outcome"))
+  in
+  Native_tool_policy.run_policy
+    ~run_native:None
+    ~on_progress:None
+    ~managed_revision
+    ~managed_admit
+    ~execute
+    ~registry:(fun () ->
+      registry ()
+      |> Result.map_error ~f:(fun _ ->
+        C.
+          { code = "capability.invalid_selection"
+          ; message = "developer selection widened"
+          }))
+    ~reference
+    ~invocation
+    ~check_halted
+    ~context:H.context
+    ~kind_matches:(fun _ binding ->
+      match (C.descriptor binding).type_ with
+      | "function" | "custom" -> true
+      | _ -> false)
+    ~preparation:(fun _ -> None)
+    ~with_selected:with_developer_selected_capabilities
+    ~with_native_admission:(fun dispatched binding f ->
+      with_owned_native_admission dispatched binding (fun () ->
+        match effect_entry binding with
+        | Ok () -> f ()
+        | Error _ ->
+          Error (fail "invocation.run_ended" "The developer run is unavailable.")))
+    ~authorize
+    ~prepare_output
+    ~complete
 ;;
 
 let run_scoped_with_managed = run_with_native ~run_native:None

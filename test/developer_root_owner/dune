@@ -4,13 +4,15 @@
 
 (library
  (name developer_root_owner_test_suite)
- (modules support fixtures root_owner_tests recovery_tests)
+ (modules support fixtures root_owner_tests recovery_tests native_executor_tests)
  (libraries
   core
   digestif
   eio
   eio_main
   jsonaf
+  ochat_function
+  ochat.chatmd
   mirage-crypto-rng.unix
   source
   chatml_source
