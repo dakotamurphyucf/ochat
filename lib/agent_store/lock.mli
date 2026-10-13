@@ -15,6 +15,12 @@ type t
 val owner : t -> owner
 val path : t -> string
 
+(** Whether this local handle has neither completed [release] nor had its
+    switch-owned descriptor closed. This is a lifecycle check, not an
+    independent proof of kernel lock ownership; the host must keep the handle
+    alive while dependent stores operate. *)
+val is_live : t -> bool
+
 (** [acquire] obtains a nonblocking exclusive kernel lock. Stale metadata is
     overwritten only after the kernel grants ownership. *)
 val acquire

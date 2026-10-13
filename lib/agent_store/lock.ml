@@ -19,6 +19,15 @@ type t =
 
 let owner t = t.owner
 let path t = t.path
+
+let is_live t =
+  (not t.released)
+  && Option.value_map
+       (Eio_unix.Resource.fd_opt t.file)
+       ~default:false
+       ~f:Eio_unix.Fd.is_open
+;;
+
 let eio_path env path = Eio.Path.(Eio.Stdenv.fs env / path)
 
 let timestamp env =
