@@ -197,6 +197,24 @@ and joined; no domain or source borrow is abandoned. Errors distinguish unauthor
 incompatible environment, invalid position, stale revision, unavailable fact,
 truncation/work limit, cancelled and disconnected states.
 
+The selected ChatMD-script adapter accepts a real parser-retained declaration
+from a current document context. It compares the parser root's authored bytes
+with that document revision, bounds declaration and input membership checks,
+and binds the parser's extraction map to the exact entry source of a separately
+host-admitted per-script Build. Its stamp records the document generation,
+actual declaring parser input and range, selected source digest, prepared input
+fingerprint, environment, and contracts. A missing selection, incomplete parse,
+dynamic-only source, or absent validated project produces semantic
+`Unavailable`; it does not manufacture a document graph. The adapter reuses the
+same checked compiler and bounded native-site projection as project analysis.
+Inline sites can retain parser-owned authored ranges, external sources retain
+member/digest provenance pending host custody, and effective-only or generated
+text remains approximate. Its pure document result map and the project result
+map use one policy and a shared aggregate retention count. The service host
+must serialize both maps with its context ledger and reauthorize actor, parser
+selection, source custody, and currentness before publishing or exposing either
+result; these host handlers remain separate work.
+
 ## Queries and incomplete input
 
 `authoring.analysis` uses the captured project graph and
