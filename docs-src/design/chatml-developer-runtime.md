@@ -14,6 +14,8 @@ Developer checks, test runs, live runs and a stateful REPL need explicit source,
 
 The existing compiler already accepts exact immutable [captured sources](../../lib/chatml_sources/chatml_source.mli) and [prepared graphs](../../lib/chatml_sources/chatml_prepared_program.mli). The graph fingerprint includes selected compiler contract, environment, entry, provenance, source IDs/digests and scope metadata. [Compilation](../../lib/chatml/chatml_compilation.mli) runs in a joined, cancellable Eio domain without executing initializers. A content digest identifies bytes, not an authorized writer or a capability.
 
+OCH-265 implements the [immutable developer capture and deterministic fixture check/test core](../development/chatml-developer-capture.md). It is not yet a hosted run service or live capability admission.
+
 The current one-off host prepares selected source and tools, revalidates live bindings after waits and runs under a borrowed native scope ([one-off script](../../lib/chat_response/one_off_script.mli), [execution](../../lib/agent_session/one_off_execution.ml)). The [script job service](../../lib/agent_session/script_job_service.mli) and [job protocol](../../lib/agent_protocol/job.mli) provide bounded staging, selection, status, permission waits and cancellation for actor-owned work. Their current launch owner is an invocation or moderator event. Developer execution needs its own authenticated owner and run record while reusing those underlying controls; it must not mutate an unrelated production conversation or disguise a developer run as `Agent_protocol.Run`.
 
 ## 2. Captured input, check and run

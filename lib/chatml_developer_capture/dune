@@ -1,0 +1,13 @@
+(library
+ (name chatml_developer_capture)
+ (public_name ochat.chatml_developer_capture)
+ (libraries
+  core
+  chatml
+  chatml_source
+  chatml_prepared_program
+  chatml_project_build
+  chatml_authoring_context
+  chatmd_shell_spec)
+ (preprocess
+  (pps ppx_jane)))
