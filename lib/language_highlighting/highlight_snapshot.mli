@@ -179,6 +179,119 @@ val scan_chatmd
   -> checkpoint:(unit -> unit)
   -> (t, Error.t) Result.t
 
+module Cursor : sig
+  module Raw_slice : sig
+    (** An exact, owner-bound half-open authored-byte slice. Unlike a highlight
+        [Range.t], the replacement prefix may be empty at EOF or a delimiter.
+        It is not a UTF-16 coordinate or a parsed attribute value. Its bounded
+        contents are retained once during cursor construction; repeated
+        [contents] calls do not copy or rescan source bytes. *)
+    type t
+
+    val owner : t -> Source_owner.t
+    val start_byte : t -> int
+    val end_byte : t -> int
+    val contents : t -> string
+  end
+
+  module Completed_attribute : sig
+    type t
+
+    (** Exact raw spelling and the strict lexer's decoded pair are separate.
+        The raw value includes surrounding quotes when quoted; [None] means a
+        flag attribute. Duplicate names remain in source order. *)
+    val raw_name : t -> Raw_slice.t
+
+    val raw_value : t -> Raw_slice.t option
+    val decoded : t -> Chatmd_ast.attribute
+  end
+
+  module Value_state : sig
+    type t
+
+    val quote : t -> Chatmd_attribute_lex.Quote.t option
+    val trailing_matching_quote_escape : t -> bool
+    val open_entity : t -> bool
+  end
+
+  module Kind : sig
+    type t =
+      | Tag_name of { closing : bool }
+      | Attribute_name of { tag : Chatmd_ast.tag }
+      | Attribute_value of
+          { tag : Chatmd_ast.tag
+          ; attribute : string
+          ; value_state : Value_state.t
+          }
+      | Text
+      | Script_body
+      | Opaque
+  end
+
+  type t
+
+  (** This owner is always the actual Authored view of the admitted input,
+      including its identity and digest. The cursor is between bytes in
+      [0, authored_byte_length]. [raw_prefix] ends exactly at [cursor_byte] and
+      is the current name/value spelling to replace; it may be zero width.
+      For a quoted current value it starts AFTER the opening quote, so applying
+      a suggestion cannot erase that delimiter. If the cursor is after a
+      completed name and whitespace, after [=] but before a value, or after a
+      closed quote, the prefix is zero width; [uncertain_discriminator] is true
+      for the first two states and false after the closed quote.
+      Text, script-body and opaque contexts use a zero-width prefix.
+      [scope] is the last certain lexical scope before this construct, not a
+      successful parse or declaration-validation result. *)
+  val owner : t -> Source_owner.t
+
+  val cursor_byte : t -> int
+  val raw_prefix : t -> Raw_slice.t
+  val kind : t -> Kind.t
+  val scope : t -> Chatmd_tag_scope.t
+
+  (** Only lexically completed attributes before the cursor. Values follow
+      the shared strict decoder; raw slices remain available independently.
+      A partial current attribute is excluded. *)
+  val completed_attributes : t -> Completed_attribute.t list
+
+  (** True when an unfinished name/value, quote, escape, or entity could still
+      change a discriminator, or an earlier malformed official fragment makes
+      scope untrustworthy. Pass this to the schema's prefix classifier with
+      the decoded completed attributes; never treat raw spelling as certified
+      decoded metadata. [Opaque] is never a valid suggestion scope. *)
+  val uncertain_discriminator : t -> bool
+
+  module Unavailable : sig
+    type t =
+      | Invalid_cursor
+      | Beyond_scanned_prefix of
+          { next_byte : int
+          ; reason : Status.reason
+          }
+    [@@deriving equal, sexp_of]
+  end
+
+  type result =
+    | Available of t
+    | Unavailable of Unavailable.t
+end
+
+(** Reuse the bounded ChatMD highlighter's scanner and budget on the exact
+    Authored prefix through [cursor_byte]. No second XML parser, synthetic
+    closing text, source loading or semantic claim. Unknown tag lexemes stay
+    TEXT and do not enter official scope; a known child after an unknown opener
+    is still recognized. RAW/comment/script or mismatched contexts remain
+    visibly lexical/opaque. Self-closing tags never enter scope. Invalid UTF-8
+    remains byte-exact. If limits stop scanning before the cursor, return typed
+    [Beyond_scanned_prefix]; callback failures and cancellation propagate.
+    Source and identity admission errors match [scan_chatmd]. *)
+val scan_chatmd_cursor
+  :  Chatmd_parser_input.t
+  -> cursor_byte:int
+  -> limits:Limits.t
+  -> checkpoint:(unit -> unit)
+  -> (Cursor.result, Error.t) Result.t
+
 (** Verify that [span] was emitted by this very snapshot. Snapshot identity is
     deliberate here: equal source bytes/revisions scanned under a different
     budget do not make another snapshot's span a member of this result. *)

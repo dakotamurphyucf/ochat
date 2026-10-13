@@ -634,3 +634,410 @@ let%test_unit
         in
         assert (List.equal String.equal rows (reference_lines source))))
 ;;
+
+let cursor_view ?(work = 100_000) source cursor_byte =
+  Highlight.scan_chatmd_cursor
+    (chatmd_input ~authored:source ~effective:source)
+    ~cursor_byte
+    ~limits:(limits ~work ())
+    ~checkpoint:ignore
+  |> Result.ok
+  |> Option.value_exn
+;;
+
+let cursor_summary = function
+  | Highlight.Cursor.Unavailable unavailable ->
+    Sexp.to_string_hum (Highlight.Cursor.Unavailable.sexp_of_t unavailable)
+  | Available cursor ->
+    let module C = Highlight.Cursor in
+    let kind =
+      match C.kind cursor with
+      | Tag_name { closing } -> if closing then "closing-tag" else "opening-tag"
+      | Attribute_name { tag } ->
+        "attribute-name:" ^ Sexp.to_string (Chatmd_ast.sexp_of_tag tag)
+      | Attribute_value { tag; attribute; value_state } ->
+        sprintf
+          "attribute-value:%s:%s:%s:%b:%b"
+          (Sexp.to_string (Chatmd_ast.sexp_of_tag tag))
+          attribute
+          (Option.value_map
+             (C.Value_state.quote value_state)
+             ~default:"unquoted"
+             ~f:(fun quote -> Sexp.to_string (Chatmd_attribute_lex.Quote.sexp_of_t quote)))
+          (C.Value_state.trailing_matching_quote_escape value_state)
+          (C.Value_state.open_entity value_state)
+      | Text -> "text"
+      | Script_body -> "script-body"
+      | Opaque -> "opaque"
+    in
+    let attributes =
+      C.completed_attributes cursor
+      |> List.map ~f:(fun attribute -> C.Completed_attribute.decoded attribute)
+    in
+    sprintf
+      "%s prefix=%S uncertain=%b attrs=%s"
+      kind
+      (C.Raw_slice.contents (C.raw_prefix cursor))
+      (C.uncertain_discriminator cursor)
+      (Sexp.to_string ([%sexp_of: Chatmd_ast.attribute list] attributes))
+;;
+
+let%expect_test "ChatMD cursor retains raw prefix and only completed strict attributes" =
+  [ "<"
+  ; "</"
+  ; "<script "
+  ; "<script kind"
+  ; "<script kind "
+  ; "<script kind="
+  ; "<script kind=\"ext"
+  ; "<script kind=\"ext\""
+  ; "<script kind=\"ext\" foo"
+  ; "<script kind=\"a\\\"b\" type=\"x\" kind='other' "
+  ; "<script kind=\"a&amp;\" "
+  ; "<script kind=\""
+  ; "<script language=\"chatml\">"
+  ; "<script>abc"
+  ; "<script>abc</scr"
+  ; "<script>abc</script "
+  ; "<script>RAW|</scr"
+  ; "<script>abc</script>"
+  ; "<unknown><script "
+  ; "<unknown></unknown><doc "
+  ; "<developer></script><doc "
+  ; "<shell_access/><command "
+  ; "<developer><!--"
+  ; "<script kind=\"x&am"
+  ; "<script kind=\"x>y"
+  ; "<script kind=\"x>y\">more<doc "
+  ; "<script kind=\"x\\"
+  ; "<script kind=\"x\\q\""
+  ; "<script kind=unquoted&"
+  ; "<msg x=a\" y=\">"
+  ; "<msg x=a\" y=\"><tool na"
+  ]
+  |> List.iter ~f:(fun source ->
+    printf
+      "%S => %s\n"
+      source
+      (cursor_summary (cursor_view source (String.length source))));
+  [%expect
+    {|
+    "<" => opening-tag prefix="" uncertain=true attrs=()
+    "</" => closing-tag prefix="" uncertain=true attrs=()
+    "<script " => attribute-name:Script prefix="" uncertain=false attrs=()
+    "<script kind" => attribute-name:Script prefix="kind" uncertain=true attrs=()
+    "<script kind " => attribute-name:Script prefix="" uncertain=true attrs=()
+    "<script kind=" => attribute-value:Script:kind:unquoted:false:false prefix="" uncertain=true attrs=()
+    "<script kind=\"ext" => attribute-value:Script:kind:Double:false:false prefix="ext" uncertain=true attrs=()
+    "<script kind=\"ext\"" => attribute-name:Script prefix="" uncertain=false attrs=((kind(ext)))
+    "<script kind=\"ext\" foo" => attribute-name:Script prefix="foo" uncertain=true attrs=((kind(ext)))
+    "<script kind=\"a\\\"b\" type=\"x\" kind='other' " => attribute-name:Script prefix="" uncertain=false attrs=((kind("a\\\"b"))(type(x))(kind(other)))
+    "<script kind=\"a&amp;\" " => attribute-name:Script prefix="" uncertain=false attrs=((kind(a&)))
+    "<script kind=\"" => attribute-value:Script:kind:Double:false:false prefix="" uncertain=true attrs=()
+    "<script language=\"chatml\">" => script-body prefix="" uncertain=false attrs=()
+    "<script>abc" => script-body prefix="" uncertain=false attrs=()
+    "<script>abc</scr" => closing-tag prefix="scr" uncertain=true attrs=()
+    "<script>abc</script " => opaque prefix="" uncertain=false attrs=()
+    "<script>RAW|</scr" => opaque prefix="" uncertain=false attrs=()
+    "<script>abc</script>" => text prefix="" uncertain=false attrs=()
+    "<unknown><script " => attribute-name:Script prefix="" uncertain=false attrs=()
+    "<unknown></unknown><doc " => attribute-name:Doc prefix="" uncertain=false attrs=()
+    "<developer></script><doc " => opaque prefix="" uncertain=true attrs=()
+    "<shell_access/><command " => text prefix="" uncertain=false attrs=()
+    "<developer><!--" => opaque prefix="" uncertain=false attrs=()
+    "<script kind=\"x&am" => attribute-value:Script:kind:Double:false:true prefix="x&am" uncertain=true attrs=()
+    "<script kind=\"x>y" => opaque prefix="" uncertain=false attrs=()
+    "<script kind=\"x>y\">more<doc " => opaque prefix="" uncertain=true attrs=()
+    "<script kind=\"x\\" => attribute-value:Script:kind:Double:true:false prefix="x\\" uncertain=true attrs=()
+    "<script kind=\"x\\q\"" => attribute-name:Script prefix="" uncertain=false attrs=((kind("x\\q")))
+    "<script kind=unquoted&" => attribute-value:Script:kind:unquoted:false:false prefix="unquoted&" uncertain=true attrs=()
+    "<msg x=a\" y=\">" => opaque prefix="" uncertain=true attrs=()
+    "<msg x=a\" y=\"><tool na" => opaque prefix="" uncertain=true attrs=()
+    |}]
+;;
+
+let attribute_equal (left_name, left_value) (right_name, right_value) =
+  String.equal left_name right_name && Option.equal String.equal left_value right_value
+;;
+
+let%expect_test "shared strict attribute spellings and every admitted byte prefix agree" =
+  let fragments =
+    [ {| a="x&amp;y" b='one\'two' flag|}
+    ; {| a=left&amp;right b="&nosuch;&amp;"|}
+    ; {| a="x\q" b="x\"y"|}
+    ; {| ignored!name=ok a="&&&&&&&&"|}
+    ]
+  in
+  List.iter fragments ~f:(fun source ->
+    let full = Chatmd_attribute_lex.complete_exn source ~checkpoint:ignore in
+    let with_ranges =
+      Chatmd_attribute_lex.complete_with_ranges
+        ~source
+        ~start_byte:0
+        ~end_byte:(String.length source)
+        ~checkpoint:ignore
+      |> Result.ok
+      |> Option.value_exn
+      |> List.map ~f:Chatmd_attribute_lex.Attribute.decoded
+    in
+    assert (List.equal attribute_equal full with_ranges);
+    for end_byte = 0 to String.length source do
+      let prefix =
+        Chatmd_attribute_lex.prefix ~source ~start_byte:0 ~end_byte ~checkpoint:ignore
+        |> Result.ok
+        |> Option.value_exn
+      in
+      let completed =
+        Chatmd_attribute_lex.Prefix.completed prefix
+        |> List.map ~f:Chatmd_attribute_lex.Attribute.decoded
+      in
+      assert (
+        List.equal attribute_equal completed (List.take full (List.length completed)))
+    done);
+  print_s
+    [%sexp
+      (Chatmd_attribute_lex.complete_exn
+         {| a="x&amp;y" b='one\'two' flag|}
+         ~checkpoint:ignore
+       : Chatmd_ast.attribute list)];
+  [%expect {| ((a (x&y)) (b ("one\\'two")) (flag ())) |}]
+;;
+
+let%expect_test "bounded malformed attribute prefixes remain tolerant and source-bound" =
+  let alphabet = [| '='; ' '; '"'; '\\'; '&'; ';'; '<'; '>' |] in
+  let examples = ref 0 in
+  let check_slice source owner slice =
+    let module C = Highlight.Cursor in
+    let start_byte = C.Raw_slice.start_byte slice in
+    let end_byte = C.Raw_slice.end_byte slice in
+    assert (start_byte >= 0 && end_byte >= start_byte && end_byte <= String.length source);
+    assert (Highlight.Source_owner.equal owner (C.Raw_slice.owner slice));
+    assert (
+      String.equal
+        (C.Raw_slice.contents slice)
+        (String.sub source ~pos:start_byte ~len:(end_byte - start_byte)))
+  in
+  let check source =
+    let input = chatmd_input ~authored:source ~effective:source in
+    let snapshot =
+      Highlight.scan_chatmd input ~view:Authored ~limits:(limits ()) ~checkpoint:ignore
+      |> Result.ok
+      |> Option.value_exn
+    in
+    List.iter (Highlight.spans snapshot) ~f:(fun span ->
+      let range = Highlight.Span.range span in
+      assert (
+        Highlight.Source_owner.equal
+          (Highlight.source_owner snapshot)
+          (Highlight.Range.owner range));
+      assert (Highlight.Range.start_byte range >= 0);
+      assert (Highlight.Range.end_byte range <= String.length source));
+    for cursor_byte = 0 to String.length source do
+      match
+        Highlight.scan_chatmd_cursor
+          input
+          ~cursor_byte
+          ~limits:(limits ())
+          ~checkpoint:ignore
+        |> Result.ok
+        |> Option.value_exn
+      with
+      | Highlight.Cursor.Unavailable _ ->
+        failwith "tiny admitted ChatMD prefix unexpectedly unavailable"
+      | Available cursor ->
+        let module C = Highlight.Cursor in
+        let owner = C.owner cursor in
+        assert (Highlight.Source_owner.equal owner (Highlight.source_owner snapshot));
+        check_slice source owner (C.raw_prefix cursor);
+        (match C.kind cursor with
+         | Text | Script_body | Opaque ->
+           assert (Int.equal (C.Raw_slice.start_byte (C.raw_prefix cursor)) cursor_byte);
+           assert (List.is_empty (C.completed_attributes cursor))
+         | Tag_name _ | Attribute_name _ | Attribute_value _ -> ());
+        List.iter (C.completed_attributes cursor) ~f:(fun attribute ->
+          check_slice source owner (C.Completed_attribute.raw_name attribute);
+          Option.iter
+            (C.Completed_attribute.raw_value attribute)
+            ~f:(check_slice source owner))
+    done;
+    Int.incr examples
+  in
+  check "<msg x=a\" y=\">";
+  for
+    code = 0
+    to (Array.length alphabet * Array.length alphabet * Array.length alphabet) - 1
+  do
+    let a = alphabet.(code mod Array.length alphabet) in
+    let b = alphabet.(code / Array.length alphabet mod Array.length alphabet) in
+    let c = alphabet.(code / (Array.length alphabet * Array.length alphabet)) in
+    check (sprintf "<msg x=%c%c%c>" a b c)
+  done;
+  let callback = Failure "attribute-callback" in
+  let caught =
+    try
+      ignore
+        (Chatmd_attribute_lex.complete_with_ranges
+           ~source:{| x="v"|}
+           ~start_byte:0
+           ~end_byte:6
+           ~checkpoint:(fun () -> raise callback));
+      false
+    with
+    | exn -> phys_equal exn callback
+  in
+  print_s [%sexp ((!examples, caught) : int * bool)];
+  [%expect {| (513 true) |}]
+;;
+
+let%expect_test "cursor owner, invalid cursor, work bound, and callback identity" =
+  let source = "<script kind=\"extension\" " in
+  let input = chatmd_input ~authored:source ~effective:source in
+  let snapshot =
+    Highlight.scan_chatmd input ~view:Authored ~limits:(limits ()) ~checkpoint:ignore
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let available =
+    Highlight.scan_chatmd_cursor
+      input
+      ~cursor_byte:(String.length source)
+      ~limits:(limits ())
+      ~checkpoint:ignore
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let owner_matches =
+    match available with
+    | Highlight.Cursor.Available cursor ->
+      let module C = Highlight.Cursor in
+      let exact_attribute =
+        match C.completed_attributes cursor with
+        | [ attribute ] ->
+          let raw_name = C.Completed_attribute.raw_name attribute in
+          let raw_value = C.Completed_attribute.raw_value attribute |> Option.value_exn in
+          String.equal (C.Raw_slice.contents raw_name) "kind"
+          && String.equal (C.Raw_slice.contents raw_value) "\"extension\""
+          && List.for_all [ raw_name; raw_value ] ~f:(fun slice ->
+            Highlight.Source_owner.equal (C.Raw_slice.owner slice) (C.owner cursor)
+            && String.equal
+                 (C.Raw_slice.contents slice)
+                 (String.sub
+                    source
+                    ~pos:(C.Raw_slice.start_byte slice)
+                    ~len:(C.Raw_slice.end_byte slice - C.Raw_slice.start_byte slice)))
+        | _ -> false
+      in
+      exact_attribute
+      && Highlight.Source_owner.equal (C.owner cursor) (Highlight.source_owner snapshot)
+      && Highlight.Source_owner.equal
+           (C.Raw_slice.owner (C.raw_prefix cursor))
+           (C.owner cursor)
+    | Unavailable _ -> false
+  in
+  let invalid = cursor_view source (String.length source + 1) in
+  let small_work = cursor_view ~work:1 source (String.length source) in
+  let cancellation = Failure "cursor-cancel" in
+  let caught =
+    try
+      ignore
+        (Highlight.scan_chatmd_cursor
+           input
+           ~cursor_byte:(String.length source)
+           ~limits:(limits ())
+           ~checkpoint:(fun () -> raise cancellation));
+      false
+    with
+    | exn -> phys_equal exn cancellation
+  in
+  let malformed_bytes = "\255<doc " in
+  let invalid_utf8_is_byte_exact =
+    match cursor_view malformed_bytes (String.length malformed_bytes) with
+    | Highlight.Cursor.Available cursor ->
+      (match Highlight.Cursor.kind cursor with
+       | Attribute_name { tag } -> Chatmd_ast.tag_equal tag Doc
+       | Tag_name _ | Attribute_value _ | Text | Script_body | Opaque -> false)
+    | Unavailable _ -> false
+  in
+  let long_source = String.make 5000 'x' in
+  let callbacks = ref 0 in
+  let midscan_caught =
+    try
+      ignore
+        (Highlight.scan_chatmd_cursor
+           (chatmd_input ~authored:long_source ~effective:long_source)
+           ~cursor_byte:(String.length long_source)
+           ~limits:(limits ())
+           ~checkpoint:(fun () ->
+             Int.incr callbacks;
+             if Int.equal !callbacks 2 then raise cancellation));
+      false
+    with
+    | exn -> phys_equal exn cancellation
+  in
+  print_s
+    [%sexp
+      ((owner_matches, caught, invalid_utf8_is_byte_exact, midscan_caught)
+       : bool * bool * bool * bool)];
+  print_s [%sexp ((cursor_summary invalid, cursor_summary small_work) : string * string)];
+  [%expect
+    {|
+    (true true true true)
+    (Invalid_cursor "(Beyond_scanned_prefix (next_byte 0) (reason Work_limit))")
+    |}]
+;;
+
+let strict_lexer_recognizes_self source =
+  let next = Chatmd_lexer.create () in
+  let lexbuf = Lexing.from_string source in
+  let rec loop remaining =
+    if remaining <= 0
+    then failwith "lexer token bound"
+    else (
+      match next lexbuf with
+      | Chatmd_tokens.SELF _ -> true
+      | EOF -> false
+      | _ -> loop (remaining - 1))
+  in
+  loop 32
+;;
+
+let%expect_test "cursor official tag scope agrees with strict lexer tokens" =
+  [ "", "doc"
+  ; "", "command"
+  ; "<shell_access>", "command"
+  ; "<tool type=\"shell\">", "command"
+  ; "<tool>", "command"
+  ; "<tool type=\"moderator\">", "uses"
+  ; "<tool>", "uses"
+  ; "<developer>", "authoring_context"
+  ; "", "authoring_context"
+  ; "<unknown>", "doc"
+  ]
+  |> List.iter ~f:(fun (base, name) ->
+    let strict = strict_lexer_recognizes_self (base ^ "<" ^ name ^ "/>") in
+    let source = base ^ "<" ^ name ^ " " in
+    let cursor = cursor_view source (String.length source) in
+    let context =
+      match cursor with
+      | Highlight.Cursor.Available cursor ->
+        (match Highlight.Cursor.kind cursor with
+         | Attribute_name _ -> true
+         | Tag_name _ | Attribute_value _ | Text | Script_body | Opaque -> false)
+      | Unavailable _ -> false
+    in
+    assert (Bool.equal strict context);
+    printf "%S %S => %b\n" base name context);
+  [%expect
+    {|
+    "" "doc" => true
+    "" "command" => false
+    "<shell_access>" "command" => true
+    "<tool type=\"shell\">" "command" => true
+    "<tool>" "command" => false
+    "<tool type=\"moderator\">" "uses" => true
+    "<tool>" "uses" => false
+    "<developer>" "authoring_context" => false
+    "" "authoring_context" => true
+    "<unknown>" "doc" => true
+    |}]
+;;

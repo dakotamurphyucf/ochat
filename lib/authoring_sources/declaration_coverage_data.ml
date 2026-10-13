@@ -5,6 +5,7 @@ let features =
   [ ( "markup.syntax"
     , "Closed tags, attributes, comments and RAW boundaries"
     , [ "lib/chatmd/chatmd_ast.ml"
+      ; "lib/chatmd/chatmd_attribute_lex.ml"
       ; "lib/chatmd/chatmd_lexer.mll"
       ; "lib/chatmd/chatmd_tag_scope.ml"
       ; "lib/chatmd_shell_spec/shell_element.ml"
@@ -256,8 +257,10 @@ let implementation_sources =
     , "4d436aef1dca4fdff470e060a17de1ed6ac08d091e913a5cdc9f01d2ca24bd03" )
   ; ( "lib/chatmd/chatmd_import_expansion.ml"
     , "8df0daffef119d3ba6ec7c9bdcec5a8076e75867ac64e56754713f5e300a1184" )
+  ; ( "lib/chatmd/chatmd_attribute_lex.ml"
+    , "3c827aec4ebc3bea56fe41ca0f15ac15f9d7f4f80a1ead78cc7720043187ee3f" )
   ; ( "lib/chatmd/chatmd_lexer.mll"
-    , "645ee2d07487f13444b1c534e6c449624deaa5f7dce9cb2d417c14e6ae8bf045" )
+    , "1088d495cbfe0fd60d4828e38dc5c2f93abc91be3172eb68855b836e8aef4683" )
   ; ( "lib/chatmd/chatmd_parser_engine.mly"
     , "94e9fb5543628175f53c2810536459a191fa21ec82312288a8ca0404b9487b78" )
   ; ( "lib/chatmd/chatmd_script_declaration.ml"
