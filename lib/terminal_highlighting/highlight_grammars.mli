@@ -136,12 +136,11 @@ val add_markdown : Highlight_tm_loader.registry -> unit Or_error.t
     [add_html reg] adds two related grammars to [reg]:
     {ul
     {- [text.html.basic], a small built-in grammar with basic
-       tag/attribute/entity/comment rules, or a vendored grammar from
-       [lib/terminal_highlighting/grammars/html.tmLanguage.json] when present;}
+       tag/attribute/entity/comment rules;}
     {- [text.html.derivative], a thin shim that simply includes
        [text.html.basic], keeping Markdown grammars that refer to
        [text.html.derivative] working.}}
 
-    @return [Ok ()] on success, or [Error _] if both the vendored and built-in
-    HTML grammars fail to load. *)
+    @return [Ok ()] on success, or [Error _] if an embedded HTML grammar
+    cannot be parsed or converted. *)
 val add_html : Highlight_tm_loader.registry -> unit Or_error.t
