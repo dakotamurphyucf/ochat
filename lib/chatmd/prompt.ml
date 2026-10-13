@@ -649,9 +649,9 @@ module Chat_markdown = struct
         ~on_external_source
     =
     if
-      List.exists attrs ~f:(function
-        | "api", _ | "kind", Some "tool" -> true
-        | _ -> false)
+      Chatmd_declaration_schema.Family.equal
+        (Chatmd_declaration_schema.family_of_complete ~tag:Ast.Script ~attributes:attrs)
+        Chatmd_declaration_schema.Family.Script_extension
     then (
       match
         Chatmd_extension_declaration.script
@@ -1110,23 +1110,24 @@ module Chat_markdown = struct
                | None, _, _, _, _, _ -> ()
                | Some _, Some _, None, None, None, None -> ()
                | _ -> failwith "Tool persistence is only supported on agent declarations.");
-              let is_shell =
-                Option.value_map
-                  (Hashtbl.find tbl "type")
-                  ~default:false
-                  ~f:(String.equal "shell")
-                || Hashtbl.mem tbl "runtime"
+              let family =
+                Chatmd_declaration_schema.family_of_complete
+                  ~tag:Ast.Tool
+                  ~attributes:attrs
               in
               if
-                List.exists attrs ~f:(function
-                  | "type", Some "inherited" -> true
-                  | _ -> false)
+                Chatmd_declaration_schema.Family.equal
+                  family
+                  Chatmd_declaration_schema.Family.Tool_inherited
               then (
                 let allowed =
                   Chatmd_attributes.create
                     ~source:source_ref
                     ~path:[ "tool" ]
-                    ~allowed:[ "name"; "type" ]
+                    ~allowed:
+                      (Chatmd_declaration_schema.attributes
+                         Chatmd_declaration_schema.Family.Tool_inherited
+                       |> Chatmd_declaration_schema.Attribute_names.names)
                     attrs
                 in
                 let attributes =
@@ -1156,9 +1157,9 @@ module Chat_markdown = struct
                  | _ -> failwith "inherited tool references cannot have children");
                 Tool (Inherited inherited))
               else if
-                List.exists attrs ~f:(function
-                  | "type", Some ("moderator" | "chatml") -> true
-                  | _ -> false)
+                Chatmd_declaration_schema.Family.equal
+                  family
+                  Chatmd_declaration_schema.Family.Tool_extension
               then (
                 match
                   Chatmd_extension_declaration.tool
@@ -1169,7 +1170,10 @@ module Chat_markdown = struct
                 with
                 | Ok tool -> Tool (Extension tool)
                 | Error diagnostics -> script_error diagnostics)
-              else if is_shell
+              else if
+                Chatmd_declaration_schema.Family.equal
+                  family
+                  Chatmd_declaration_schema.Family.Tool_shell
               then (
                 match Chatmd_shell_declaration.parse_tool ~source:source_ref node with
                 | Ok tool -> Tool (Shell tool)
@@ -1271,7 +1275,9 @@ module Chat_markdown = struct
                   if String.is_empty name
                   then failwith "Tool name cannot be empty."
                   else if
-                    String.equal name "read_file" || String.equal name "get_contents"
+                    Chatmd_declaration_schema.Family.equal
+                      family
+                      Chatmd_declaration_schema.Family.Tool_read_file
                   then (
                     match Chatmd_read_file_declaration.parse ~source:source_ref node with
                     | Ok specification -> Tool (Read_file specification)

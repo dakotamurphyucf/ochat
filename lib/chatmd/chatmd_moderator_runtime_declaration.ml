@@ -24,7 +24,10 @@ let parse ~source = function
         Chatmd_attributes.create
           ~source
           ~path:[ "moderator_runtime" ]
-          ~allowed:[ "shell_runtime" ]
+          ~allowed:
+            (Chatmd_declaration_schema.attributes
+               (Chatmd_declaration_schema.Family.Plain_tag Chatmd_ast.Moderator_runtime)
+             |> Chatmd_declaration_schema.Attribute_names.names)
           attributes
       with
       | Error diagnostic -> Error [ diagnostic ]
