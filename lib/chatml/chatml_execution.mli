@@ -19,6 +19,10 @@ type limits =
         alone do not add a level. Must be positive. *)
   }
 
+(** The validator used by [Bounded] execution admission. Hosts can reject an
+    invalid policy before creating a run receipt without copying its checks. *)
+val valid_limits : limits -> bool
+
 (** Chosen by the host, never by submitted source. [Unrestricted] adds no new
     budget and cannot remove inherited ceilings or grant operation/tool authority.
     [Bounded] accepts host-selected limits without fixed policy ceilings. *)
