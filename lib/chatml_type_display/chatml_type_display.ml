@@ -14,7 +14,10 @@ module Kind = struct
 end
 
 module Error = struct
-  type t = Foreign_root [@@deriving sexp_of]
+  type t =
+    | Foreign_root
+    | Invalid_max_bytes
+  [@@deriving sexp_of]
 end
 
 type t =
@@ -48,11 +51,20 @@ module Session = struct
     | Fields of (string * Frozen.Id.t) list * int * bool
     | Variant_fields of (string * Frozen.Id.t list) list * int * bool
 
-  let render session graph ~root ~kind ~checkpoint =
-    if Option.is_none (Frozen.find graph root)
+  let render session ?max_bytes graph ~root ~kind ~checkpoint =
+    if Option.value_map max_bytes ~default:false ~f:(fun value -> value < 0)
+    then Error Error.Invalid_max_bytes
+    else if Option.is_none (Frozen.find graph root)
     then Error Error.Foreign_root
+    else if Option.value_map max_bytes ~default:false ~f:(Int.equal 0)
+    then Ok { kind; completeness = Truncated Byte_limit; text = "" }
     else (
-      let writer = Budget.Writer.create session ~checkpoint in
+      let writer =
+        Budget.Writer.create
+          session
+          ~max_bytes:(Option.value max_bytes ~default:Int.max_value)
+          ~checkpoint
+      in
       let result =
         try
           let scan = anchors session graph root ~checkpoint in

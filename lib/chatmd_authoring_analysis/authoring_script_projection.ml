@@ -25,26 +25,60 @@ module Projection = struct
   let related t = t.related
   let sites_truncated t = t.sites_truncated
 
+  let equal_string left right ~checkpoint =
+    let length = String.length left in
+    if not (Int.equal length (String.length right))
+    then false
+    else (
+      let offset = ref 0 in
+      let same = ref true in
+      while !same && !offset < length do
+        checkpoint ();
+        same := Char.equal left.[!offset] right.[!offset];
+        Int.incr offset
+      done;
+      !same)
+  ;;
+
+  let equal_id left right ~checkpoint =
+    equal_string
+      (Captured.Id.package_namespace left)
+      (Captured.Id.package_namespace right)
+      ~checkpoint
+    && equal_string
+         (Captured.Id.relative_path left)
+         (Captured.Id.relative_path right)
+         ~checkpoint
+  ;;
+
+  let of_location script location ~checkpoint =
+    checkpoint ();
+    let selected_source = Admission.Script.selected_source script in
+    if
+      not
+        (equal_id
+           (Captured.Location.source location)
+           (Captured.id selected_source)
+           ~checkpoint)
+    then Ok None
+    else if
+      not
+        (Captured.Digest.equal
+           (Captured.Location.source_digest location)
+           (Captured.digest selected_source))
+    then Error Error.Script_body_mismatch
+    else
+      Markdown.Declaration.Extraction.project_raw script.extraction location ~checkpoint
+      |> Result.map_error ~f:(fun error -> Error.Projection error)
+      |> Result.map ~f:Option.some
+  ;;
+
   let of_diagnostic candidate projected ~checkpoint =
     let script = candidate.Cache.Candidate.script in
-    let selected_source = script.Admission.Script.entry_source in
     let project_site native =
-      checkpoint ();
       let site = Analysis.Site_projection.native native in
-      let source = Diagnostic.Site.source site in
-      if
-        Captured.Id.equal (Captured.id source) (Captured.id selected_source)
-        && Captured.Digest.equal
-             (Captured.digest source)
-             (Captured.digest selected_source)
-      then
-        Markdown.Declaration.Extraction.project_raw
-          script.extraction
-          (Diagnostic.Site.location site)
-          ~checkpoint
-        |> Result.map_error ~f:(fun error -> Error.Projection error)
-        |> Result.map ~f:(fun authored -> { native; authored = Some authored })
-      else Ok { native; authored = None }
+      of_location script (Diagnostic.Site.location site) ~checkpoint
+      |> Result.map ~f:(fun authored -> { native; authored })
     in
     let open Result.Let_syntax in
     let%bind primary =

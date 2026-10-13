@@ -251,6 +251,22 @@ valid UTF-8; their constructors and decoders return typed errors for malformed
 text. Captured source bytes, digests and native byte sites remain unchanged.
 The host projection must explicitly escape unrepresentable diagnostic bytes or
 return a typed unavailable fact rather than silently dropping source evidence.
+
+The semantic query producer reads only a matching immutable Complete snapshot,
+an actual compiler provisional prefix, or same-run Partial syntax. It compares
+the capture's input fingerprint, selected environment and contracts and the
+request's exact captured source revision before projecting facts. A numeric
+symbol ID is scoped to its snapshot; the producer validates its owner before
+serializing it. Candidate and configured-module root slots are reserved before
+expanding optional public members, so a tight aggregate result cap still shows
+later root candidates with truthful nested-page truncation. A single bounded
+work, item, member-edge and label ledger covers the request, and the final
+payload must pass the portable query envelope constructor. An actual
+provisional source remains the native site. Where the host also admits the
+matching full capture, byte-for-byte prefix proof allows its genuine ChatMD
+extraction map to add authored provenance without replacing that native site.
+Failed input exposes only parsed syntax sites; lexical or selected-contract
+fallback belongs to assistance and is labelled separately.
 The portable `authoring.lexical` method returns byte-exact spans in all 16
 shared highlighter roles, five open-construct issue kinds and a truthful
 reached-EOF or truncated scanned prefix. Its owner distinguishes captured

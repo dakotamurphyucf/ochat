@@ -60,7 +60,7 @@ end
 module Writer : sig
   type t
 
-  val create : session -> checkpoint:(unit -> unit) -> t
+  val create : session -> max_bytes:int -> checkpoint:(unit -> unit) -> t
   val emit : t -> string -> unit
   val escape_label : t -> string -> unit
   val finish : t -> string
