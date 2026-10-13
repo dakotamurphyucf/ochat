@@ -31,16 +31,28 @@ module Id : sig
       IDs carry a private immutable owner witness; find rejects foreign IDs.
       IDs are obtained from roots/children of the same snapshot. *)
   type t [@@deriving equal, sexp_of]
+
+  (** The actual snapshot-local coordinate, stable only under the immutable
+      snapshot's owner witness. This integer is not a type equality key or
+      authority: [find] still rejects a foreign owner's ID first. It permits
+      bounded index-based cycle/identity accounting without parsing sexps. *)
+  val index : t -> int
 end
 
 module Quantifier_id : sig
   (** One quantified variable in one explicit Input_group. *)
   type t [@@deriving equal, sexp_of]
+
+  (** Snapshot-local coordinate for display disambiguation, not authority. *)
+  val index : t -> int
 end
 
 module Recursive_binder_id : sig
   (** Lexical binder identity; recursive source spelling is a display label. *)
   type t [@@deriving equal, sexp_of]
+
+  (** Snapshot-local coordinate for display disambiguation, not authority. *)
+  val index : t -> int
 end
 
 module Node : sig
