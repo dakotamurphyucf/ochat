@@ -24,6 +24,8 @@ module Policy : sig
     -> max_position_index_entries:int
     -> max_projection_source_bytes:int
     -> t Or_error.t
+
+  val max_results : t -> int
 end
 
 module Error : sig
@@ -34,6 +36,7 @@ module Error : sig
     | Result_identity_mismatch
     | Stale_generation
     | Policy_mismatch
+    | Invalid_occupancy
     | Retention_limit
 
   (** Finite, source/path-free error code. Native compiler details remain in the
@@ -123,6 +126,7 @@ module Project_cache : sig
 
   val create : contexts:Chatml_authoring_context.t -> policy:Policy.t -> t
   val contexts : t -> Chatml_authoring_context.t
+  val retained_count : t -> int
 
   (** Apply an already authorized OCH-278 transition. Evict payloads whose
       context identity/generation/analysis key vanished or changed. Edit, close,
@@ -133,10 +137,14 @@ module Project_cache : sig
       including source revisions, input fingerprint, environment and contract;
       then call Context.note_analysis and retain one result. Candidate must use
       this cache's exact Policy instance. An intervening edit/close publishes
-      nothing. This and [transition] use the same host mutation gate. *)
+      nothing. [occupied_elsewhere] is the current Document_cache retained
+      count from the SAME serialized host gate; the sum cannot exceed the
+      shared policy's max_results. A negative count rejects. This and
+      [transition] use the same host mutation gate. *)
   val publish
     :  t
     -> Project_candidate.t
+    -> occupied_elsewhere:int
     -> checkpoint:(unit -> unit)
     -> (t, Error.t) Result.t
 

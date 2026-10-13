@@ -57,6 +57,8 @@ module Policy = struct
           ; max_projection_source_bytes
           }
   ;;
+
+  let max_results t = t.max_results
 end
 
 module Error = struct
@@ -67,6 +69,7 @@ module Error = struct
     | Result_identity_mismatch
     | Stale_generation
     | Policy_mismatch
+    | Invalid_occupancy
     | Retention_limit
 
   let sexp_of_t = function
@@ -77,6 +80,7 @@ module Error = struct
     | Result_identity_mismatch -> Sexp.Atom "result_identity_mismatch"
     | Stale_generation -> Sexp.Atom "stale_generation"
     | Policy_mismatch -> Sexp.Atom "policy_mismatch"
+    | Invalid_occupancy -> Sexp.Atom "invalid_occupancy"
     | Retention_limit -> Sexp.Atom "retention_limit"
   ;;
 end
