@@ -790,3 +790,49 @@ let%test_unit "document overlay and static selection conserve independent charge
       (C.Document.View.static_graph
          (C.find_document store ~identity:fresh |> Option.value_exn)))
 ;;
+
+let%test_unit "validated overlay binds the exact context generation and edited bytes" =
+  let fixture, base = base () in
+  let id = identity "effective" in
+  let store =
+    C.create ~limits:(limits base ~contexts:1 ~extra_bytes:128 ~open_documents:1)
+    |> admit ~identity:id ~base ~editable:[ S.id fixture.main ]
+  in
+  let store =
+    C.replace
+      store
+      ~expected:(version store id (S.id fixture.main))
+      ~next_revision:(revision 1)
+      ~contents:"let main = 27"
+      ~checkpoint:ignore
+    |> ok
+  in
+  let inputs = C.inputs store ~identity:id ~checkpoint:ignore |> ok in
+  let result =
+    Chatml_authoring_effective.validate_overlay
+      inputs
+      ~lock_id:(Support.id ~namespace:"root" "effective.lock.json")
+      ~contract:(Fixtures.contract fixture)
+      ~limits:(Support.limits ())
+      ~checkpoint:ignore
+    |> Support.ok
+  in
+  assert (C.Identity.equal (Chatml_authoring_effective.Overlay.identity result) id);
+  assert (
+    C.Generation.equal
+      (Chatml_authoring_effective.Overlay.generation result)
+      (C.Inputs.generation inputs));
+  let actual = Chatml_authoring_effective.Overlay.build result in
+  let source =
+    List.find_exn
+      (P.sources (B.prepared actual))
+      ~f:(fun source -> S.Id.equal (S.id source) (S.id fixture.main))
+  in
+  [%test_eq: string] (S.contents source) "let main = 27";
+  assert (
+    not
+      (S.Digest.equal
+         (P.fingerprint (B.prepared actual))
+         (P.fingerprint (B.prepared base))));
+  assert (Option.is_none (C.analysis_key store ~identity:id))
+;;

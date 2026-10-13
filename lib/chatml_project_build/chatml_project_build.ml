@@ -128,6 +128,47 @@ let restore lock_source ~sources ~contract ~limits ~checkpoint =
   |> Result.map ~f:(fun (assembly, accounting) -> { assembly; accounting })
 ;;
 
+module Effective = struct
+  module Route = Project_build_effective.Route
+
+  let compose
+        ~root_project
+        ~selection
+        ~entry
+        ~sources
+        ~routes
+        ~previous
+        ~lock_id
+        ~contract
+        ~limits
+        ~checkpoint
+    =
+    Project_build_effective.compose
+      ~root_project
+      ~selection
+      ~entry
+      ~sources
+      ~routes
+      ~previous:(Option.map previous ~f:(fun build -> build.assembly))
+      ~lock_id
+      ~contract
+      ~limits
+      ~checkpoint
+    |> Result.map ~f:(fun (assembly, accounting) -> { assembly; accounting })
+  ;;
+
+  let recompose previous ~sources ~lock_id ~contract ~limits ~checkpoint =
+    Project_build_effective.recompose
+      previous.assembly
+      ~sources
+      ~lock_id
+      ~contract
+      ~limits
+      ~checkpoint
+    |> Result.map ~f:(fun (assembly, accounting) -> { assembly; accounting })
+  ;;
+end
+
 let recompose t ~contract ~lock_id ~limits ~checkpoint =
   Budget.run limits ~checkpoint ~f:(fun budget ->
     let module Lock = Chatml_project.Lock in
