@@ -2,11 +2,11 @@ open! Core
 module Store = Agent_store.Authoring_upload_store
 module Bundle = Agent_protocol.Authoring_bundle.Bundle
 
-(** Runtime-only facade for the private durable upload stage. The authenticated
+(** Runtime-only facade for the private durable upload stage and publisher. The authenticated
     actor, current upload grant, optional parent provenance, and wall clock come
     from the host, never from a bundle request. The store owns the durable state
-    machine; this facade does not publish a source bundle or install a protocol
-    handler. *)
+    machine; this facade validates captured closure and gates publication but
+    does not install a protocol handler. *)
 type t
 
 module Upload_policy : sig
@@ -25,6 +25,50 @@ module Upload_policy : sig
          (Operator_authorization.t
           -> Agent_protocol.Authoring_context.Context.Expected.t
           -> bool)
+    -> t
+end
+
+module Publication_policy : sig
+  type t
+
+  module Selected : sig
+    type t
+
+    val create
+      :  environment:string
+      -> contract:Chatml.Chatml_compiler_contract.t
+      -> previous:Chatml_project_build.t option
+      -> t Core.Or_error.t
+
+    val environment : t -> string
+    val contract : t -> Chatml.Chatml_compiler_contract.t
+    val previous : t -> Chatml_project_build.t option
+  end
+
+  (** [select] must be non-yielding, bounded and read already admitted current
+      host state. It must not reload a catalog, read the filesystem or wait for
+      another operation: the marker's final admission invokes it immediately
+      before the durable rename, after yielding preparation. *)
+  val create
+    :  select:
+         (Operator_authorization.t
+          -> Bundle.Manifest.t
+          -> Bundle.Manifest.Script.Selector.t option
+          -> Selected.t option)
+    -> t
+end
+
+module Publication : sig
+  type t
+
+  (** Optional for upload-only hosts. The directory is an inert display root
+      for the captured generated ChatMD parser, not a source acquisition path.
+      The host selects actual current contracts and previous Builds through
+      [policy] before any captured-only validation. *)
+  val create
+    :  policy:Publication_policy.t
+    -> limits:Chatml_authoring_bundle_project.Limits.t
+    -> document_dir:Eio.Fs.dir_ty Eio.Path.t
     -> t
 end
 
@@ -50,6 +94,9 @@ module Error : sig
     | Foreign_domain
     | Closed
     | Busy
+    | Selection_unavailable
+    | Invalid_closure
+    | Resource_limit
     | Store of Store_code.t
 
   (** Finite, path-free diagnostic projection. Foreign and missing upload IDs
@@ -67,7 +114,8 @@ end
     Closing the facade also closes the transferred store, so it cannot be shared
     with another facade or used afterward. *)
 val create
-  :  Store.t
+  :  ?publication:Publication.t
+  -> Store.t
   -> sw:Eio.Switch.t
   -> clock:_ Eio.Time.clock
   -> upload_policy:Upload_policy.t
@@ -79,9 +127,11 @@ val create
     checkpoint repeats those checks both before and after the caller's
     checkpoint, which may itself yield, during store work. The store samples
     trusted time only after reaching its own gate and completing any recovery,
-    so waiting behind another operation cannot reuse an earlier timestamp. This
-    is an operation-admission timestamp; work may complete after its deadline,
-    with no implicit second expiry check after I/O. A revoked
+    so waiting behind another operation cannot reuse an earlier timestamp.
+    Ordinary stage operations use this admission timestamp; publication and
+    published-capture borrowing additionally sample fresh time after their
+    yielding preparation, immediately before marker rename or read admission.
+    A revoked
     request has no successful reply, even if an already durable mutation must
     later be reconciled by an authorized retry/status. Optional parent
     provenance is checked at begin against current context authority; the
@@ -111,9 +161,22 @@ val claim_commit
   -> checkpoint:(unit -> unit)
   -> (Store.Claim_result.t, Error.t) result
 
-(** This returns the store's Open/Ready/Rejected/Expired stage view. A
-    proof-gated publisher may extend the wire status to Validating/Published after an authentic
-    validated closure; this facade never manufactures those states. *)
+(** Current host policy is selected before validation and checked again after
+    waits, before Store admission, and at guarded checkpoints inside its gate.
+    Validation uses only the authenticated sealed snapshot and genuine
+    captured-only Project/ChatMD adapters. A failed closure is durably rejected
+    with a coarse path-free reason before any intent; loss of selection or grant
+    never causes a false rejection or publication. Upload-only hosts return
+    Selection_unavailable. *)
+val publish
+  :  t
+  -> actor:Operator_authorization.t
+  -> sealed:Store.sealed
+  -> checkpoint:(unit -> unit)
+  -> (Bundle.Receipt.t, Error.t) result
+
+(** This returns the Store's exact Open/Ready/Validating/Published/Rejected/
+    Expired state. The facade never manufactures a receipt. *)
 val status
   :  t
   -> actor:Operator_authorization.t

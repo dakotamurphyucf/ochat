@@ -2,6 +2,7 @@ open! Core
 module Store = Agent_store.Authoring_upload_store
 module Bundle = Agent_protocol.Authoring_bundle.Bundle
 module Actor = Operator_authorization
+module Validation = Authoring_upload_validation
 
 module Upload_policy = struct
   type t =
@@ -11,6 +12,21 @@ module Upload_policy = struct
     }
 
   let create ~authorize_upload ~authorize_parent = { authorize_upload; authorize_parent }
+end
+
+module Publication_policy = struct
+  module Selected = Validation.Selected
+  include Validation.Policy
+end
+
+module Publication = struct
+  type t =
+    { policy : Publication_policy.t
+    ; limits : Chatml_authoring_bundle_project.Limits.t
+    ; document_dir : Eio.Fs.dir_ty Eio.Path.t
+    }
+
+  let create ~policy ~limits ~document_dir = { policy; limits; document_dir }
 end
 
 module Error = struct
@@ -35,6 +51,9 @@ module Error = struct
     | Foreign_domain
     | Closed
     | Busy
+    | Selection_unavailable
+    | Invalid_closure
+    | Resource_limit
     | Store of Store_code.t
   [@@deriving sexp_of]
 
@@ -58,6 +77,7 @@ type t =
   ; store : Store.t
   ; now : unit -> Agent_protocol.Timestamp.t
   ; upload_policy : Upload_policy.t
+  ; publication : Publication.t option
   ; gate : Eio.Mutex.t
   ; mutable active_cancel : Eio.Cancel.t option
   ; mutable closed : bool
@@ -166,7 +186,7 @@ let close_and_wait t =
       | `Raised (exn, backtrace) -> Stdlib.Printexc.raise_with_backtrace exn backtrace))
 ;;
 
-let create store ~sw ~clock ~upload_policy =
+let create ?publication store ~sw ~clock ~upload_policy =
   Eio.Switch.check sw;
   let now () =
     Eio.Time.now clock
@@ -179,6 +199,7 @@ let create store ~sw ~clock ~upload_policy =
     ; store
     ; now
     ; upload_policy
+    ; publication
     ; gate = Eio.Mutex.create ()
     ; active_cancel = None
     ; closed = false
@@ -209,6 +230,92 @@ let chunk t ~actor ~request ~checkpoint =
 let claim_commit t ~actor ~request ~checkpoint =
   with_request t ~actor ~parent:None ~checkpoint (fun ~principal ~now ~checkpoint ->
     Store.claim_commit t.store ~principal ~request ~now ~checkpoint)
+;;
+
+let publish t ~actor ~sealed ~checkpoint =
+  match t.publication with
+  | None -> Error Error.Selection_unavailable
+  | Some publication ->
+    with_request t ~actor ~parent:None ~checkpoint (fun ~principal ~now ~checkpoint ->
+      let snapshot = Store.snapshot t.store ~principal sealed ~now ~checkpoint in
+      match snapshot with
+      | Error _ as error -> error
+      | Ok snapshot ->
+        let manifest = Store.Snapshot.manifest snapshot in
+        let selection =
+          Validation.admit publication.policy ~actor ~manifest ~checkpoint
+        in
+        (match selection with
+         | Error (Unavailable | Invalid_closure | Resource_limit) ->
+           raise (Revoked Error.Selection_unavailable)
+         | Ok selection ->
+           let selected_checkpoint () =
+             checkpoint ();
+             if
+               not
+                 (Validation.check_current
+                    selection
+                    ~policy:publication.policy
+                    ~actor
+                    ~checkpoint)
+             then raise (Revoked Error.Selection_unavailable)
+           in
+           let validated =
+             Validation.validate
+               selection
+               ~snapshot
+               ~document_dir:publication.document_dir
+               ~limits:publication.limits
+               ~checkpoint
+           in
+           selected_checkpoint ();
+           (match validated with
+            | Error Unavailable -> raise (Revoked Error.Selection_unavailable)
+            | Error ((Invalid_closure | Resource_limit) as problem) ->
+              let reason =
+                match problem with
+                | Invalid_closure -> Bundle.Rejection.Invalid_closure
+                | Resource_limit -> Bundle.Rejection.Resource_limit
+                | Unavailable -> assert false
+              in
+              (match
+                 Store.reject
+                   t.store
+                   ~principal
+                   sealed
+                   ~reason
+                   ~now
+                   ~checkpoint:selected_checkpoint
+               with
+               | Error _ as error -> error
+               | Ok () ->
+                 raise
+                   (Revoked
+                      (match problem with
+                       | Invalid_closure -> Error.Invalid_closure
+                       | Resource_limit -> Error.Resource_limit
+                       | Unavailable -> assert false)))
+            | Ok proof ->
+              let final_admission () =
+                check_or_raise t actor None;
+                if
+                  not
+                    (Validation.check_current
+                       selection
+                       ~policy:publication.policy
+                       ~actor
+                       ~checkpoint:Fn.id)
+                then raise (Revoked Error.Selection_unavailable)
+              in
+              Store.publish
+                t.store
+                ~principal
+                sealed
+                ~snapshot
+                ~proof
+                ~now
+                ~checkpoint:selected_checkpoint
+                ~final_admission)))
 ;;
 
 let status t ~actor ~(request : Bundle.Status.request) ~checkpoint =

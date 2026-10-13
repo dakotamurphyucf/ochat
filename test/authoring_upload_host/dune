@@ -9,6 +9,7 @@
   mirage-crypto-rng.unix
   ochat.agent_server
   ochat.agent_store
+  authoring_upload_store_test
   ochat.agent_protocol
   ochat.operator_authorization
   ochat.chatml_source
