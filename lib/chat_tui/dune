@@ -11,6 +11,7 @@
   highlight_grammar_discovery
   highlight_grammars
   highlight_registry
+  highlight_source_code
   renderer_highlight_engine
   live_scroll_trace
   markdown_fences
@@ -94,7 +95,12 @@
  (libraries ochat.inference_host ochat.inference_client ochat.inference_runtime ochat.inference ochat.history_chatmd ochat.transcript ochat.document_schema
   core
   ochat.terminal_highlighting
+  ochat.terminal_source_highlighting
+  ochat.language_highlighting
+  ochat.chatmd_source_input
+  ochat.chatml_source
   uuseg
+  uutf
   jsonaf
   textmate-language
   openai

@@ -12,6 +12,8 @@
  (preprocess (pps ppx_jane ppx_blob))
  (preprocessor_deps
   grammars/ocaml.json
+  grammars/chatml.json
+  grammars/chatmd.json
   grammars/vscode/python.json
   grammars/vscode/python-regexp.json
   grammars/vscode/rust.json

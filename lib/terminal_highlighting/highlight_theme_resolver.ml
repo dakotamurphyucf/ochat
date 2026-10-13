@@ -24,6 +24,7 @@ let create_with_limits ~theme ~max_entries ~max_key_bytes =
 ;;
 
 let create ~theme = create_with_limits ~theme ~max_entries:4096 ~max_key_bytes:262_144
+let theme t = t.theme
 
 let digits value =
   let rec loop value count =

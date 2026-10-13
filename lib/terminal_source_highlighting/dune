@@ -1,0 +1,5 @@
+(library
+ (name terminal_source_highlighting)
+ (public_name ochat.terminal_source_highlighting)
+ (libraries core notty ochat.language_highlighting ochat.terminal_highlighting)
+ (preprocess (pps ppx_jane)))

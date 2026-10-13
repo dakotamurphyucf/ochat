@@ -260,6 +260,7 @@ module Runtime : sig
     :  hi_engine:Highlight_tm_engine.t
     -> theme_generation:int
     -> grammar_generation:int
+    -> ?source_grammar_baseline:Highlight_registry.Baseline.t
     -> ?is_cancelled:(unit -> bool)
     -> ?code_cache:Code_cache.t
     -> ?highlight_cache:Highlight_cache.t
@@ -271,6 +272,7 @@ module Runtime : sig
   val hi_engine : t -> Highlight_tm_engine.t
   val theme_generation : t -> int
   val grammar_generation : t -> int
+  val source_grammar_baseline : t -> Highlight_registry.Baseline.t option
   val is_cancelled : t -> unit -> bool
   val code_cache : t -> Code_cache.t option
   val highlight_cache : t -> Highlight_cache.t option

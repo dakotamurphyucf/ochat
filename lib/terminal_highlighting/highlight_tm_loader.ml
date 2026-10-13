@@ -51,6 +51,8 @@ let find_grammar_by_lang_tag (t : registry) (lang : string) : TmLanguage.grammar
   let lower = String.lowercase lang in
   let candidates : string list =
     match lower with
+    | "chatml" | "chatmli" -> [ "ChatML"; "source.chatml"; "chatml"; "chatmli" ]
+    | "chatmd" -> [ "ChatMD"; "text.chatmd"; "chatmd" ]
     | "ocaml" | "ml" | "mli" -> [ "OCaml"; "source.ocaml"; "ml"; "mli" ]
     | "python" | "py" | "pyw" | "pyi" ->
       [ "Python"; "source.python"; "python"; "py"; "pyw"; "pyi" ]
@@ -77,7 +79,7 @@ let find_grammar_by_lang_tag (t : registry) (lang : string) : TmLanguage.grammar
       ; "md"
       ; "gfm"
       ]
-    | "chatmd" | "xml" -> [ "html"; "source.html" ]
+    | "xml" -> [ "html"; "source.html" ]
     | other -> [ other; "source." ^ other ]
   in
   let rec try_find = function
