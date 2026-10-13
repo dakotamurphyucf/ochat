@@ -1016,6 +1016,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../development/chatmd-content-custody.md) | `docs-src/development/chatmd-content-custody.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/chatml-extensibility-handoff.md) | `docs-src/development/chatml-extensibility-handoff.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/chatml-program-custody.md) | `docs-src/development/chatml-program-custody.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../development/chatml-repl-submission.md) | `docs-src/development/chatml-repl-submission.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/chatml-semantic-queries.md) | `docs-src/development/chatml-semantic-queries.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/chatml-source-preparation.md) | `docs-src/development/chatml-source-preparation.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../development/code-documentation-audit.md) | `docs-src/development/code-documentation-audit.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |

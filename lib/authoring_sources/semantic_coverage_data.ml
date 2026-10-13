@@ -16,12 +16,18 @@ let features =
     , "Recognized/literal escapes, UTF-8 bytes and physical newlines"
     , [ "lib/chatml/chatml_lexer.mll" ]
     , "chatml.evaluation"
-    , [ "evaluation.literal-escapes"; "test/agent_docs/docs_chatml_authoring.ml" ] )
+    , [ "evaluation.literal-escapes"
+      ; "test/agent_docs/docs_chatml_authoring.ml"
+      ; "test/chatml_repl_parse/submission_tests.ml"
+      ] )
   ; ( "lex.comments"
     , "Nested comments, quote delimiters and source positions"
     , [ "lib/chatml/chatml_lexer.mll" ]
     , "chatml.evaluation"
-    , [ "language.source-and-precedence"; "test/agent_docs/docs_chatml_authoring.ml" ] )
+    , [ "language.source-and-precedence"
+      ; "test/agent_docs/docs_chatml_authoring.ml"
+      ; "test/chatml_repl_parse/submission_tests.ml"
+      ] )
   ; ( "syntax.precedence"
     , "Explicit operator precedence and parser conflict boundaries"
     , [ "lib/chatml/chatml_parser.mly" ]
@@ -367,6 +373,7 @@ let features =
       ; "test/chatml_owned_diagnostics/ownership_tests.ml"
       ; "test/chatml_owned_diagnostics/checkpoint_tests.ml"
       ; "test/chatml_parser_sites/site_tests.ml"
+      ; "test/chatml_repl_parse/submission_tests.ml"
       ] )
   ; ( "stdlib.collection_composition"
     , "Ordered bounded collection callbacks and shallow table snapshots"
@@ -473,7 +480,7 @@ let implementation_sources =
   ; ( "lib/chatml/chatml_lang.ml"
     , "f8d63210438cadd286834a77bb62eaa371cc4f94aea08751aa84a87bc49333f0" )
   ; ( "lib/chatml/chatml_lexer.mll"
-    , "380fbb57b697b380ecfeab15af38daeb7b33bc01b3702b04aa37c862d2a28a4a" )
+    , "0b666167c99bbbb55c5e01fb6b03ae5f0d0d74005fb13107ba1cdb5735ef1b1c" )
   ; ( "lib/chatml/chatml_parser.mly"
     , "d55a90c703f9da2124e4f9252186f83e0c977c41c93a347c88ce7c7ce04254f6" )
   ; ( "lib/chatml/chatml_resolver.ml"
@@ -485,7 +492,7 @@ let implementation_sources =
   ; ( "lib/chatml/chatml_value_codec.ml"
     , "34d04d5b6b6a3e15a4cbdf75cf1a380c3eeb593045620893ba11c05b15d02eb7" )
   ; ( "lib/chatml/chatml_parse.ml"
-    , "5b81dc57ed50a4efe36a209b86dd85c6346baaff6bc4018cec76cb395263b4a1" )
+    , "7aa781bf17feaa851c580ca80273b9386395d633410158792353db5a4a51126c" )
   ; ( "lib/chatml/chatml_owned_source.ml"
     , "84b3a946d19d92a4530ec9a13f2ec0fe72adaad9790ec167f085372ddf26feeb" )
   ; ( "lib/chatml/chatml_checkpoint.ml"

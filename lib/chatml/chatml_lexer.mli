@@ -23,3 +23,15 @@
          aux [] ]}
  *)
 val token : Lexing.lexbuf -> Chatml_tokens.token
+
+(** Typed incomplete lexical states for the bounded submission path. The
+    ordinary [token] entrypoint retains its historical [Failure] behavior. *)
+type incomplete =
+  | Comment_eof
+  | String_eof
+
+exception Incomplete of incomplete
+
+(** [charge] is called for skipped lexemes and each consumed comment/string
+    segment; its exceptions propagate unchanged. *)
+val token_checked : (int -> unit) -> Lexing.lexbuf -> Chatml_tokens.token
