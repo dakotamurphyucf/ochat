@@ -95,6 +95,11 @@ let with_source_context f =
 
 let%test_unit "authoring context captures a local project and reads only its grant" =
   with_source_context (fun env _ context allowed denied _ _ _ _ ->
+    Authoring.Context.check_current context ~actor:allowed |> authoring_ok;
+    (match Authoring.Context.check_current context ~actor:denied with
+     | Error Authoring.Error.Unauthorized -> ()
+     | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+     | Ok () -> failwith "foreign actor reused pinned project capture");
     let capture =
       Authoring.Context.capture
         context
@@ -131,12 +136,17 @@ let%test_unit "authoring context captures a local project and reads only its gra
          ~checkpoint:ignore
        |> authoring_ok)
       "let main = 1\n";
-    match
-      Authoring.Context.read_member context ~actor:denied ~member:main ~checkpoint:ignore
-    with
-    | Error Authoring.Error.Unauthorized -> ()
+    (match
+       Authoring.Context.read_member context ~actor:denied ~member:main ~checkpoint:ignore
+     with
+     | Error Authoring.Error.Unauthorized -> ()
+     | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+     | Ok _ -> failwith "foreign actor read admitted");
+    Authoring.Context.close_and_wait context;
+    match Authoring.Context.check_current context ~actor:allowed with
+    | Error Authoring.Error.Closed -> ()
     | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
-    | Ok _ -> failwith "foreign actor read admitted")
+    | Ok () -> failwith "closed project context reused cached analysis")
 ;;
 
 let%test_unit "host document captures exact bytes without project preparation" =

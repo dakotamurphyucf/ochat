@@ -84,6 +84,19 @@ let reference_positions contents =
 let check_reference contents =
   let source = capture contents in
   let editor = index source in
+  let exact_entries = Editor.index_entry_count editor in
+  assert (exact_entries >= Editor.line_count editor);
+  [%test_eq: int]
+    (Editor.create source ~max_index_entries:exact_entries ~checkpoint
+     |> editor_ok
+     |> Editor.index_entry_count)
+    exact_entries;
+  if exact_entries > 1
+  then
+    [%test_eq: Editor.Error.t]
+      (Editor.create source ~max_index_entries:(exact_entries - 1) ~checkpoint
+       |> editor_error)
+      Editor.Error.Index_limit_exceeded;
   let points = reference_positions contents in
   List.iter points ~f:(fun point ->
     List.iter

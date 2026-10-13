@@ -190,7 +190,10 @@ module Analysis_key : sig
 
   val identity : t -> Identity.t
   val generation : t -> Generation.t
-  val validated_graph : t -> Chatml_source.Digest.t
+
+  (* Validated captured Prepared input, independent of whether compiler
+      analysis completed. This is a comparison key, not certified semantics. *)
+  val input_fingerprint : t -> Chatml_source.Digest.t
 end
 
 type t
@@ -372,7 +375,7 @@ val document_inputs
   -> (Document.Inputs.t, Error.t) Result.t
 
 (** Project-only: a document basis returns [Unsupported_basis]. Record only
-    the key of a separately validated and published OCH-258 result.
+    the Prepared input key of a separately validated and published OCH-258 result.
     The host must compare OCH-264's complete closure receipt and result identity
     before calling. This cannot certify an arbitrary digest or store a payload.
     Exactly one current key exists per context; a newer publication replaces it. *)
@@ -380,7 +383,7 @@ val note_analysis
   :  t
   -> identity:Identity.t
   -> expected:Generation.t
-  -> validated_graph:Chatml_source.Digest.t
+  -> input_fingerprint:Chatml_source.Digest.t
   -> (t, Error.t) Result.t
 
 (** Remove one context and its source charge. The host first cancels/joins its

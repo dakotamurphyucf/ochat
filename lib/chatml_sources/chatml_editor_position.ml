@@ -84,11 +84,13 @@ type t =
   { source : Chatml_source.t
   ; lines : line array
   ; invalid_utf8 : int option
+  ; index_entry_count : int
   }
 
 let source_id t = Chatml_source.id t.source
 let source_digest t = Chatml_source.digest t.source
 let line_count t = Array.length t.lines
+let index_entry_count t = t.index_entry_count
 let stride = 4096
 
 (* A complete scalar is admitted only in its shortest UTF-8 form, outside the
@@ -275,21 +277,22 @@ let create source ~max_index_entries ~checkpoint =
     let%bind raw_lines, invalid_utf8 =
       scan_lines contents ~max_index_entries ~checkpoint
     in
-    let%bind lines =
+    let%bind lines, index_entry_count =
       match invalid_utf8 with
       | Some _ ->
         Ok
-          (Array.map raw_lines ~f:(fun raw ->
-             checkpoint ();
-             { start_byte = raw.start_byte
-             ; end_byte = raw.end_byte
-             ; utf16_length = 0
-             ; checkpoints = [||]
-             }))
+          ( Array.map raw_lines ~f:(fun raw ->
+              checkpoint ();
+              { start_byte = raw.start_byte
+              ; end_byte = raw.end_byte
+              ; utf16_length = 0
+              ; checkpoints = [||]
+              })
+          , Array.length raw_lines )
       | None ->
         let rec build index used reversed =
           if Int.equal index (Array.length raw_lines)
-          then Ok (Array.of_list (List.rev reversed))
+          then Ok (Array.of_list (List.rev reversed), used)
           else (
             let%bind line, used =
               build_line contents raw_lines.(index) ~used ~max_index_entries ~checkpoint
@@ -299,7 +302,7 @@ let create source ~max_index_entries ~checkpoint =
         build 0 (Array.length raw_lines) []
     in
     checkpoint ();
-    Ok { source; lines; invalid_utf8 })
+    Ok { source; lines; invalid_utf8; index_entry_count })
 ;;
 
 let line_at t line =
