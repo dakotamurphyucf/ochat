@@ -24,7 +24,8 @@ when needed. Existing branches must contain this workflow change to adopt it.
 | Job | Required behavior when selected |
 | --- | --- |
 | `changes` | Run policy tests, inspect the complete Git diff, record selection and deployment baseline. Runs except on draft PR events. |
-| `framework (normal, x64)` | Run `opam exec -- dune runtest --force -j 2`. |
+| `framework-plan` | Discover every normal Dune alias owner and assign its nonrecursive alias to exactly one of eight groups. Bind the plan to tracked source and workflow run. |
+| `framework (normal, shard, x64)` | Run the assigned `@@directory/runtest` aliases with `--force -j 2`; all eight groups are required. Together these select the normal suite. |
 | `framework (e2e, x64)` | Run `opam exec -- dune build --force -j 2 @agent-e2e-pr`: daemon smoke, Unix/stdio/HTTP transports, transport conformance, workspaces and multiple clients. |
 | `framework (git-native, arm64)` | Run the ChatML Git host, bounded-process and private-storage test aliases with `-j 2` on the native ARM64 runner. |
 | `semantics` | Run the offline documentation checks and bundled authoring-source tests; retain evidence for this exact revision. |
@@ -41,8 +42,41 @@ for Git-native. Setup and evidence collection have additional job headroom:
 90 minutes for normal/Git-native and 60 for E2E. These are upper bounds, not
 expected durations. Individual test deadlines remain in force. Failures,
 timeouts, cancellations, missing selections and unexpected skips cannot satisfy
-the gate. The three framework tiers run independently; a failure does not cancel
+the gate. The framework jobs run independently; a failure does not cancel
 evidence from the other tiers.
+
+### Normal test groups
+
+The normal suite runs on eight standard Linux x64 runners. Each uses two Dune
+workers. E2E, native ARM64, semantic and website checks retain their existing
+coverage. At peak, this workflow can use roughly fifteen concurrent runners;
+other repositories and PRs share the account's concurrency allowance.
+
+The planner audits tracked Dune definitions, including `bin/`, `lib/` and legacy
+`test/dune`. It discovers directories with inline tests, test/cram stanzas or an
+explicit `runtest` alias. Each direct alias is assigned once using measured test
+CPU costs from `.github/framework-test-weights.json`; new owners are included
+automatically with a default scheduling weight. Weights affect balance, never
+coverage. A directory's tests remain together, so the largest directory still
+limits the speedup. This is not a claim that underlying shared build actions run
+exactly once across machines.
+
+Unsupported source traversal and normal aliases that recursively include or
+cross into another directory fail planning. This prevents silently omitted or
+overlapping directory selections. Dune still controls execution, dependencies,
+sandboxing, test partitions and expected-output comparisons. Ordinary local
+`dune runtest` is unchanged; complete workflow qualification stays explicit.
+
+Each normal job verifies the downloaded plan against its checkout and reports
+the exact aliases it executed. After all jobs pass, `release-gate` checks eight
+distinct successful reports against the same revision, source digest, plan and
+workflow run. The gate downloads only small summary artifacts; full diagnostic
+logs and traces remain available separately. Missing, duplicate, stale or
+partial evidence fails the gate.
+Successful reports from earlier attempts of the same run remain usable when
+rerunning failed jobs. Each normal group provisions the pinned Git fixture,
+preserving the unsharded suite’s environment even for indirect consumers of
+shared Git test support. The separate ARM64 native job still builds and tests it.
 
 Load, soak, live-provider, and manual-terminal tiers remain separate. These jobs
 receive no model credentials and make no paid model requests. Website jobs start
@@ -203,10 +237,20 @@ test evidence. Missing caches rebuild normally. The compiler-only upstream cache
 can help bootstrap a miss or a cold audit without reusing project dependencies.
 
 Dune's content-addressed compilation cache is separate and uses copy storage.
-It is scoped to the same toolchain and test tier. `_build` is never restored;
+Restoration prefers the same shard, then the same tier, then compatible objects
+from another tier. Every fallback retains the complete dependency key, including
+native CPU compatibility. Each shard saves under its own revision key to avoid
+concurrent writers competing for one immutable cache entry. `_build` is never restored;
 all selected test aliases use `--force`. A cold audit disables this cache.
 GitHub's cache scope restrictions remain in effect; do not move cache saving
 into a privileged `pull_request_target` workflow.
+
+Toolchain evidence records separate dependency-contract and CPU-target digests
+to help explain misses. PR-created caches cannot seed unrelated PRs or `main`;
+successful default-branch runs establish the broadly reusable cache scope.
+Missing or incompatible caches rebuild normally. This design does not transfer
+a complete build directory or assume that one runner's native binaries can run
+on every other runner. The first run after changing the setup contract is cold.
 
 The disposable runner disables automatic Git maintenance before opam setup.
 This avoids a repository-copy race with a disappearing `maintenance.lock` during

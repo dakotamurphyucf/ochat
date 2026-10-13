@@ -110,7 +110,7 @@ process.exitCode = Number(process.env.FAKE_DUNE_EXIT);
       normal: [],
       "git-native": ["@test/chatml_git_host/runtest", "@test/bounded_process/runtest", "@test/private_storage/runtest"],
     }[tier];
-    assert.deepEqual(invocation, [tier === "normal" ? "runtest" : "build", "--force", "-j", "2", ...aliases, "--display=verbose", `--trace-file=${path.join(directory, ".ci-evidence", `${tier}-dune-trace.json`)}`]);
+    assert.deepEqual(invocation, [tier === "normal" ? "runtest" : "build", "--force", "-j", "2", ...aliases, "--root=.", "--display=verbose", `--trace-file=${path.join(directory, ".ci-evidence", `${tier}-dune-trace.json`)}`]);
     assert.equal(fs.readFileSync(path.join(directory, ".ci-evidence", `${tier}-dune.log`), "utf8"), "fake dune build log\n");
     const progress = output.split("\n").filter((line) => line.startsWith('{"frameworkProgress":')).map((line) => JSON.parse(line));
     if (tier === "e2e") {

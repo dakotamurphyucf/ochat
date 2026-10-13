@@ -105,14 +105,18 @@ export function requireSelectedJobs(needs) {
   const decisions = [];
   for (const name of [
     "semantics",
+    "framework-plan",
     "framework",
     "website",
     "browser",
     "website-qualification",
   ]) {
-    const selection = ["browser", "website-qualification"].includes(name)
-      ? "website"
-      : name;
+    const selection =
+      name === "framework-plan"
+        ? "framework"
+        : ["browser", "website-qualification"].includes(name)
+          ? "website"
+          : name;
     const selected = needs.changes.outputs?.[selection];
     if (!["true", "false"].includes(selected))
       throw new Error(`Missing or invalid selection for ${name}`);

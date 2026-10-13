@@ -50,7 +50,8 @@ test('every named evidence upload replaces its previous attempt without masking 
   for (const [job, name] of Object.entries({
     changes: 'ci-selection',
     semantics: 'website-semantic-evidence',
-    framework: 'framework-evidence-${{ matrix.tier }}-${{ matrix.arch }}',
+    framework:
+      "${{ matrix.tier == 'normal' && format('framework-evidence-normal-{0}-x64', matrix.shard) || format('framework-evidence-{0}-{1}', matrix.tier, matrix.arch) }}",
     'deploy-production': 'production-deployment-evidence',
   })) {
     const found = uploads.filter(
@@ -145,19 +146,39 @@ test('workflow skips drafts, runs selected checks concurrently, and requires the
     workflow.jobs.changes.if,
     "github.event_name != 'pull_request' || !github.event.pull_request.draft",
   );
-  for (const name of ['framework', 'semantics', 'website']) {
+  for (const name of ['semantics', 'website']) {
     assert.equal(workflow.jobs[name].needs, 'changes');
     assert.equal(
       workflow.jobs[name].if,
       `needs.changes.outputs.${name} == 'true'`,
     );
   }
+  assert.equal(workflow.jobs['framework-plan'].needs, 'changes');
+  assert.equal(
+    workflow.jobs['framework-plan'].if,
+    "needs.changes.outputs.framework == 'true'",
+  );
+  assert.deepEqual(workflow.jobs.framework.needs, [
+    'changes',
+    'framework-plan',
+  ]);
+  assert.equal(
+    workflow.jobs.framework.if,
+    "needs.changes.outputs.framework == 'true'",
+  );
+  assert.equal(workflow.jobs.framework.strategy['max-parallel'], 10);
+  assert.equal(workflow.jobs.framework.strategy['fail-fast'], false);
   assert.deepEqual(workflow.jobs.website.strategy.matrix.environment, [
     'preview',
     'production',
   ]);
   assert.deepEqual(workflow.jobs.framework.strategy.matrix.include, [
-    { tier: 'normal', arch: 'x64', runner: 'ubuntu-24.04' },
+    ...Array.from({ length: 8 }, (_, index) => ({
+      tier: 'normal',
+      shard: index + 1,
+      arch: 'x64',
+      runner: 'ubuntu-24.04',
+    })),
     { tier: 'e2e', arch: 'x64', runner: 'ubuntu-24.04' },
     { tier: 'git-native', arch: 'arm64', runner: 'ubuntu-24.04-arm' },
   ]);
@@ -166,6 +187,7 @@ test('workflow skips drafts, runs selected checks concurrently, and requires the
   assert.deepEqual(gate.needs, [
     'changes',
     'semantics',
+    'framework-plan',
     'framework',
     'website',
     'browser',
@@ -178,6 +200,46 @@ test('workflow skips drafts, runs selected checks concurrently, and requires the
   const run = gate.steps.find((step) => step.env?.NEEDS_JSON);
   assert.equal(run.env.NEEDS_JSON, '${{ toJSON(needs) }}');
   assert.equal(run.run, 'node .github/scripts/release-gate.mjs');
+  const framework = workflow.jobs.framework;
+  const nativeFixture = framework.steps.find(
+    (step) => step.run === 'bash .github/scripts/provision-git-host.sh',
+  );
+  assert.ok(
+    nativeFixture,
+    'Normal and native groups require the pinned Git fixture',
+  );
+  assert.equal(nativeFixture.if, "matrix.tier != 'e2e'");
+  const summaryUploads = framework.steps.filter(
+    (step) =>
+      step.uses === 'actions/upload-artifact@v4' &&
+      step.with.name === 'framework-summary-normal-${{ matrix.shard }}-x64',
+  );
+  assert.equal(summaryUploads.length, 1);
+  assert.equal(summaryUploads[0].if, "always() && matrix.tier == 'normal'");
+  assert.equal(summaryUploads[0].with.path, '.ci-evidence/normal-shard.json');
+  assert.equal(summaryUploads[0].with['if-no-files-found'], 'error');
+  const summaryDownloads = gate.steps.filter(
+    (step) =>
+      step.uses === 'actions/download-artifact@v4' &&
+      step.with.pattern === 'framework-summary-normal-*-x64',
+  );
+  assert.equal(summaryDownloads.length, 1);
+  assert.equal(
+    summaryDownloads[0].if,
+    "needs.changes.outputs.framework == 'true'",
+  );
+  assert.equal(summaryDownloads[0].with.path, '.ci-evidence/normal-shards');
+  assert.notEqual(summaryDownloads[0].with['merge-multiple'], true);
+  assert.ok(
+    !gate.steps.some(
+      (step) => step.with?.pattern === 'framework-evidence-normal-*-x64',
+    ),
+  );
+  const coverage = gate.steps.find(
+    (step) => step.run === 'node .github/scripts/framework-qualification.mjs',
+  );
+  assert.ok(coverage, 'Gate must qualify all normal shard summaries');
+  assert.equal(coverage.if, "needs.changes.outputs.framework == 'true'");
   assert.ok(
     workflow.jobs.changes.steps.some(
       (step) => step.run === 'node --test .github/tests/*.test.mjs',

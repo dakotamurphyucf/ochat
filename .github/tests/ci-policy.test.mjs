@@ -126,8 +126,14 @@ test("gate accepts only successful selected jobs and explicitly unnecessary skip
     }
     for (const name of ["browser", "website-qualification"])
       needs[name] = { result: needs.website.result };
-    assert.equal(requireSelectedJobs(needs).length, 5);
-    for (const name of [...names, "browser", "website-qualification"])
+    needs["framework-plan"] = { result: needs.framework.result };
+    assert.equal(requireSelectedJobs(needs).length, 6);
+    for (const name of [
+      ...names,
+      "framework-plan",
+      "browser",
+      "website-qualification",
+    ])
       for (const status of [
         "failure",
         "cancelled",
@@ -234,6 +240,7 @@ test("actual gate entry point returns nonzero when framework fails", () => {
       outputs: { framework: "true", semantics: "true", website: "true" },
     },
     framework: { result: "failure" },
+    "framework-plan": { result: "success" },
     semantics: { result: "success" },
     website: { result: "success" },
   };
