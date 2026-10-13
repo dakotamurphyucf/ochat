@@ -1,2 +1,11 @@
 ; Website tooling and scratch research are not part of the OCaml project build.
 (dirs :standard \ website scratch)
+
+; Complete offline workflow matrices are explicit local/release qualification.
+; Keep this alias separate from runtest and the required agent-e2e-pr subset.
+(alias
+ (name agent-qualification)
+ (deps
+  (alias_rec agent-helper-qualification)
+  (alias_rec agent-managed-qualification)
+  (alias_rec agent-authoring-qualification)))

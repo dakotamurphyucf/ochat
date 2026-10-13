@@ -165,3 +165,78 @@ let%expect_test "ASCII proof retains high-byte validation and byte-error precede
   print_endline "all ASCII admits; malformed high bytes preserve byte-first rejection";
   [%expect {| all ASCII admits; malformed high bytes preserve byte-first rejection |}]
 ;;
+
+let%expect_test "validation preserves first error and nested paths" =
+  let malformed = String.of_char (Char.of_int_exn 255) in
+  let cases =
+    [ ( "root bytes before child depth"
+      , `Array [ `Null ]
+      , 1
+      , 1
+      , 10
+      , 10
+      , Error.Limit_exceeded "bytes" )
+    ; ( "child depth before child nodes"
+      , `Array [ `Null ]
+      , 20
+      , 1
+      , 10
+      , 1
+      , Error.Limit_exceeded "depth" )
+    ; ( "child nodes before child bytes"
+      , `Array [ `Null ]
+      , 2
+      , 4
+      , 10
+      , 1
+      , Error.Limit_exceeded "nodes" )
+    ; ( "invalid key before field bound"
+      , `Object [ "a", `Null; malformed, `Null ]
+      , 100
+      , 4
+      , 1
+      , 10
+      , Error.Invalid_field { path = [ malformed ]; reason = "invalid UTF-8 object key" }
+      )
+    ; ( "duplicate before invalid value"
+      , `Object [ "a", `Null; "a", `Number "01" ]
+      , 100
+      , 4
+      , 10
+      , 10
+      , Error.Duplicate_key [ "a" ] )
+    ; ( "nested number path"
+      , `Object [ "outer", `Array [ `Object [ "inner", `Number "01" ] ] ]
+      , 100
+      , 4
+      , 10
+      , 10
+      , Error.Invalid_field
+          { path = [ "outer"; "0"; "inner" ]; reason = "invalid JSON number" } )
+    ]
+  in
+  List.iter
+    cases
+    ~f:(fun (label, json, max_bytes, max_depth, max_fields, max_nodes, error) ->
+      let limits =
+        Limits.create ~max_bytes ~max_depth ~max_fields ~max_nodes
+        |> Result.map_error ~f:(fun error -> Sexp.to_string_hum (Error.sexp_of_t error))
+        |> Result.ok_or_failwith
+      in
+      require
+        [%here]
+        (Result.equal
+           Int.equal
+           Error.equal
+           (Json.validate_and_measure ~limits json)
+           (Error error));
+      print_endline label);
+  [%expect
+    {|
+    root bytes before child depth
+    child depth before child nodes
+    child nodes before child bytes
+    invalid key before field bound
+    duplicate before invalid value
+    nested number path |}]
+;;

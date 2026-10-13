@@ -1,5 +1,6 @@
 (library
  (name chatml_composition_test)
+ (modules (:standard \ authoring_qualification))
  (libraries ochat.operator_authorization
   core core_unix eio eio_main mirage-crypto-rng.unix inference_fixture agent_server_test_support
   ochat.agent_protocol ochat.agent_client ochat.agent_server ochat.agent_transport_socket
@@ -29,6 +30,24 @@
   (glob_files_rec ../chatml_extensibility_fixtures/x11-authoring-repair/*))
  (preprocess
   (pps ppx_jane ppx_blob ppx_expect)))
+
+(executable
+ (name authoring_qualification)
+ (modules authoring_qualification)
+ (libraries core chatml_composition_test))
+
+(rule
+ (alias agent-authoring-qualification)
+ ; Keep temporary output out of @all; explicit qualification always reruns.
+ ; no-infer requires both input dependencies to be declared explicitly.
+ (deps authoring_qualification.expected authoring_qualification.exe
+  (universe) (sandbox always))
+ (action
+  (no-infer
+   (progn
+    (with-stdout-to authoring_qualification.output
+     (run %{exe:authoring_qualification.exe}))
+    (diff authoring_qualification.expected authoring_qualification.output)))))
 
 ; Documentation edits can change reviewed native-reference closure digests.
 ; Keep their contract snapshots and executable examples in the docs-only gate.

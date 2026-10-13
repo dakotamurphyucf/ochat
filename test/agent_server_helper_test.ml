@@ -90,7 +90,7 @@ let function_call name arguments =
   |> Stdlib.List.to_seq
 ;;
 
-let run env helper ~native_watch =
+let run env helper ~native_watch ~smoke =
   Mirage_crypto_rng_unix.use_default ();
   let watched_session = ref None in
   let last_observed_state = ref None in
@@ -743,250 +743,977 @@ let run env helper ~native_watch =
         in
         bridge ~name sw daemon client owner
       in
-      let parent_id, child_id, receipt, authored, foreign_id, moderator_hash =
-        with_daemon (fun sw daemon client ->
-          let parent, _ = create_session ~start_immediately:true client.connection in
-          await (fun () -> Option.is_none (state daemon parent.id).active_operation);
-          let entry = R.load (D.registry daemon) parent.id |> protocol_ok in
-          Agent_server.Runtime_owner.with_background_runtime entry.runtime (fun runtime ->
-            let native = Option.value_exn runtime.native_runtime in
-            let registry =
-              Lazy.force native.capabilities
-              |> Result.map_error ~f:(fun error ->
-                error.Chat_response.Tool_capability.message)
-              |> Result.ok_or_failwith
-            in
-            List.iter
-              [ "agent_create"
-              ; "agent_send"
-              ; "agent_read"
-              ; "agent_status"
-              ; "agent_wait"
-              ; "agent_stop"
-              ; "ochat_authoring_context"
-              ; "ochat_validate"
-              ]
-              ~f:(fun name ->
-                let present =
-                  Result.is_ok (Chat_response.Tool_capability.find registry ~name)
-                in
-                [%test_eq: bool]
-                  (native_watch
-                   && List.mem
-                        [ "agent_read"; "agent_wait"; "agent_status" ]
-                        name
-                        ~equal:String.equal)
-                  present);
-            Ok ())
-          |> protocol_ok;
-          let create_envelope =
-            `Object
-              [ "version", `Number "1"
-              ; "operation", `String "create"
-              ; "arguments", child_request
-              ]
+      let check_parent_capabilities daemon parent =
+        let entry = R.load (D.registry daemon) parent |> protocol_ok in
+        Agent_server.Runtime_owner.with_background_runtime entry.runtime (fun runtime ->
+          let native = Option.value_exn runtime.native_runtime in
+          let registry =
+            Lazy.force native.capabilities
+            |> Result.map_error ~f:(fun error ->
+              error.Chat_response.Tool_capability.message)
+            |> Result.ok_or_failwith
           in
           List.iter
-            [ "bad_helper_digest"
-            ; "bad_helper_environment"
-            ; "bad_helper_arguments"
-            ; "bad_helper_roots"
+            [ "agent_create"
+            ; "agent_send"
+            ; "agent_read"
+            ; "agent_status"
+            ; "agent_wait"
+            ; "agent_stop"
+            ; "ochat_authoring_context"
+            ; "ochat_validate"
             ]
             ~f:(fun name ->
-              let before =
-                List.length (Agent_store.Session_store.list_sessions (D.store daemon))
+              let present =
+                Result.is_ok (Chat_response.Tool_capability.find registry ~name)
               in
-              (match
-                 invoke_status
-                   sw
-                   daemon
-                   client
-                   parent.id
-                   name
-                   (`Object [ "stdin", `String (Jsonaf.to_string create_envelope) ])
-               with
-               | Published (Complete (`String source)) ->
-                 let error = Jsonaf.of_string source |> field "error" in
-                 [%test_eq: string] "denied" (text error "code");
-                 [%test_eq: string]
-                   "command denied: session helper execution differs from its operator \
-                    grant"
-                   (text error "message")
-               | status ->
-                 raise_s
-                   [%sexp
-                     "unsafe helper was not rejected", (status : P.Invocation.status)]);
-              [%test_eq: int]
-                before
-                (List.length (Agent_store.Session_store.list_sessions (D.store daemon))));
-          let created =
-            let creation_started = Eio.Time.now (Eio.Stdenv.clock env) in
-            let job_id =
-              match
-                invoke_status sw daemon client parent.id "manage_agent" create_envelope
-              with
-              | Published (Pending (Job job, _)) -> job
-              | status ->
-                raise_s
-                  [%sexp "expected asynchronous helper", (status : P.Invocation.status)]
-            in
-            await (fun () ->
-              let current = state daemon parent.id in
-              List.iter current.jobs ~f:(fun job ->
-                match job.status with
-                | Failed _ | Cancelled | Interrupted _ ->
-                  let elapsed = Eio.Time.now (Eio.Stdenv.clock env) -. creation_started in
-                  raise_s
-                    [%sexp
-                      "asynchronous helper failed", (elapsed : float), (job : P.Job.t)]
-                | _ -> ());
-              Option.is_none current.active_operation
-              && List.exists current.deliveries ~f:(fun delivery ->
-                match
-                  delivery.context.work, delivery.status, delivery.wake_disposition
-                with
-                | Some (Job id), Committed _, Some (Accepted_wake _) ->
-                  P.Id.Job.equal id job_id
-                | _ -> false));
-            let job =
-              List.find_exn (state daemon parent.id).jobs ~f:(fun job ->
-                P.Id.Job.equal job.id job_id)
-            in
-            match P.Job.terminal_completion job |> protocol_ok with
-            | Some (Succeeded value) -> value
-            | completion ->
-              raise_s [%sexp "helper job failed", (completion : P.Completion.t option)]
+              [%test_eq: bool]
+                (native_watch
+                 && List.mem
+                      [ "agent_read"; "agent_wait"; "agent_status" ]
+                      name
+                      ~equal:String.equal)
+                present);
+          Ok ())
+        |> protocol_ok
+      in
+      let child_release = ref None in
+      let smoke_fixture sw daemon client : Helper_smoke_fixture.t =
+        let with_child_handle child f =
+          let handle =
+            H.attach
+              ~sw
+              ~clock:(Eio.Stdenv.clock env)
+              ~connection:client.connection
+              ~session_id:child
+              ~mode:Read_write
+              ~subscribe:false
+              ()
+            |> protocol_ok
           in
-          let one_off_replay =
-            invoke
-              sw
-              daemon
-              client
-              parent.id
-              "run_chatml"
-              (`Object
-                  [ ( "source"
-                    , `String
-                        {|let main input =
+          Exn.protect ~finally:(fun () -> H.close handle) ~f:(fun () -> f handle)
+        in
+        { create_parent =
+            (fun ~key ->
+              create_session ~start_immediately:true ~key client.connection
+              |> fst
+              |> fun (summary : P.Session.t) -> summary.id)
+        ; state = state daemon
+        ; invoke = invoke_status sw daemon client
+        ; bridge = (fun ~name -> bridge ~name sw daemon client)
+        ; start_watch = start_watch sw daemon client
+        ; await_timer = await_timer daemon
+        ; await_watch = (fun ~require_wake -> await_watch ~require_wake daemon)
+        ; check_watches = check_watch_notifications daemon
+        ; check_capabilities = check_parent_capabilities daemon
+        ; check_child_tools = check_child_tools daemon
+        ; await
+        ; pause_child =
+            (fun () ->
+              let paused, release = Eio.Promise.create () in
+              child_pause := Some paused;
+              child_release := Some release)
+        ; release_child =
+            (fun () ->
+              child_pause := None;
+              Eio.Promise.resolve (Option.value_exn !child_release) ();
+              child_release := None)
+        ; request_private_read =
+            (fun () -> child_tool := Some (`Object [ "file", `String private_file ]))
+        ; child_calls = (fun () -> !child_calls)
+        ; session_count =
+            (fun () ->
+              List.length (Agent_store.Session_store.list_sessions (D.store daemon)))
+        ; start_child =
+            (fun child ->
+              with_child_handle child (fun handle ->
+                H.start handle ~queue_if_limited:false |> Result.map ~f:ignore))
+        ; stop_child =
+            (fun child ->
+              with_child_handle child (fun handle ->
+                H.stop handle ~mode:Graceful |> protocol_ok |> ignore))
+        ; child_request
+        }
+      in
+      if smoke
+      then (
+        let retained =
+          with_daemon (fun sw daemon client ->
+            Helper_smoke_fixture.initial (smoke_fixture sw daemon client))
+        in
+        child_pause := None;
+        child_release := None;
+        with_daemon (fun sw daemon client ->
+          Helper_smoke_fixture.recover (smoke_fixture sw daemon client) retained);
+        with_daemon
+          ~grants:
+            [ grant "session_bridge" [ Create; Send; Read; Status; Wait; Stop ]
+            ; grant "session_view" [ Read; Status; Wait; Send ]
+            ]
+          (fun sw daemon client ->
+             let fixture = smoke_fixture sw daemon client in
+             if
+               P.Session.equal_desired_state
+                 (fixture.state retained.parent).lifecycle.desired
+                 Stopped
+             then fixture.start_child retained.parent |> protocol_ok;
+             Helper_smoke_fixture.revoked fixture retained);
+        print_endline
+          "real helper smoke: scoped grants, child receipts, private/foreign denial, \
+           watcher restart without resubmission and revoked activation PASS")
+      else (
+        let parent_id, child_id, receipt, authored, foreign_id, moderator_hash =
+          with_daemon (fun sw daemon client ->
+            let parent, _ = create_session ~start_immediately:true client.connection in
+            await (fun () -> Option.is_none (state daemon parent.id).active_operation);
+            check_parent_capabilities daemon parent.id;
+            (* Grant denials, reference pages and validation are independent
+             permission probes. Keep their full transcripts in the same probe
+             parent so lifecycle commits and recovery do not repeatedly admit
+             them. Both parents use the same configured prompt, workspace,
+             principal, capabilities and daemon-wide helper grants. *)
+            let probe, _ =
+              create_session
+                ~start_immediately:true
+                ~key:"reference-validation-parent"
+                client.connection
+            in
+            await (fun () -> Option.is_none (state daemon probe.id).active_operation);
+            let create_envelope =
+              `Object
+                [ "version", `Number "1"
+                ; "operation", `String "create"
+                ; "arguments", child_request
+                ]
+            in
+            List.iter
+              [ "bad_helper_digest"
+              ; "bad_helper_environment"
+              ; "bad_helper_arguments"
+              ; "bad_helper_roots"
+              ]
+              ~f:(fun name ->
+                let before =
+                  List.length (Agent_store.Session_store.list_sessions (D.store daemon))
+                in
+                (match
+                   invoke_status
+                     sw
+                     daemon
+                     client
+                     probe.id
+                     name
+                     (`Object [ "stdin", `String (Jsonaf.to_string create_envelope) ])
+                 with
+                 | Published (Complete (`String source)) ->
+                   let error = Jsonaf.of_string source |> field "error" in
+                   [%test_eq: string] "denied" (text error "code");
+                   [%test_eq: string]
+                     "command denied: session helper execution differs from its operator \
+                      grant"
+                     (text error "message")
+                 | status ->
+                   raise_s
+                     [%sexp
+                       "unsafe helper was not rejected", (status : P.Invocation.status)]);
+                [%test_eq: int]
+                  before
+                  (List.length (Agent_store.Session_store.list_sessions (D.store daemon))));
+            let created =
+              let creation_started = Eio.Time.now (Eio.Stdenv.clock env) in
+              let job_id =
+                match
+                  invoke_status sw daemon client parent.id "manage_agent" create_envelope
+                with
+                | Published (Pending (Job job, _)) -> job
+                | status ->
+                  raise_s
+                    [%sexp "expected asynchronous helper", (status : P.Invocation.status)]
+              in
+              await (fun () ->
+                let current = state daemon parent.id in
+                List.iter current.jobs ~f:(fun job ->
+                  match job.status with
+                  | Failed _ | Cancelled | Interrupted _ ->
+                    let elapsed =
+                      Eio.Time.now (Eio.Stdenv.clock env) -. creation_started
+                    in
+                    raise_s
+                      [%sexp
+                        "asynchronous helper failed", (elapsed : float), (job : P.Job.t)]
+                  | _ -> ());
+                Option.is_none current.active_operation
+                && List.exists current.deliveries ~f:(fun delivery ->
+                  match
+                    delivery.context.work, delivery.status, delivery.wake_disposition
+                  with
+                  | Some (Job id), Committed _, Some (Accepted_wake _) ->
+                    P.Id.Job.equal id job_id
+                  | _ -> false));
+              let job =
+                List.find_exn (state daemon parent.id).jobs ~f:(fun job ->
+                  P.Id.Job.equal job.id job_id)
+              in
+              match P.Job.terminal_completion job |> protocol_ok with
+              | Some (Succeeded value) -> value
+              | completion ->
+                raise_s [%sexp "helper job failed", (completion : P.Completion.t option)]
+            in
+            let one_off_replay =
+              invoke
+                sw
+                daemon
+                client
+                parent.id
+                "run_chatml"
+                (`Object
+                    [ ( "source"
+                      , `String
+                          {|let main input =
   let* result = Tool.call("session_bridge", input) in
   match result with
   | `Ok(value) -> Task.pure(value)
   | `Error(code) -> Task.fail(code)|}
-                    )
-                  ; ( "input"
-                    , `Object [ "stdin", `String (Jsonaf.to_string create_envelope) ] )
-                  ; "tools", `Array [ `String "session_bridge"; `String "read_file" ]
-                  ])
-            |> Jsonaf.of_string
-            |> P.Invocation.outcome_of_json
-            |> protocol_ok
-            |> complete
-          in
-          let child = id created in
-          assert (P.Id.Session.equal child (id one_off_replay));
-          check_child_tools daemon child;
-          (* Reference pages and validation are independent permission probes.
-             Keep their complete outputs in a separate parent so later lifecycle
-             commits do not repeatedly validate unrelated reference transcripts.
-             This uses the same prompt, capabilities, helper process and grants. *)
-          let probe, _ =
-            create_session
-              ~start_immediately:true
-              ~key:"reference-validation-parent"
-              client.connection
-          in
-          await (fun () -> Option.is_none (state daemon probe.id).active_operation);
-          let docs_request =
-            `Object
-              [ "version", `Number "1"
-              ; "operation", `String "topic"
-              ; "task", `String "child_agent"
-              ; "topic_id", `String "reference.tools"
-              ; "query", `Null
-              ; "features", `Null
-              ; "cursor", `Null
-              ; "max_tokens", `Null
-              ]
-          in
-          let reference =
-            bridge sw daemon client probe.id "reference" docs_request |> complete
-          in
-          let selected = Jsonaf.member_exn "items" reference |> Jsonaf.list_exn in
-          assert (
-            List.exists selected ~f:(fun item ->
-              String.equal (text item "name") "session_bridge"));
-          assert (
-            not
-              (List.exists selected ~f:(fun item ->
-                 List.mem
-                   [ "ochat_authoring_context"; "ochat_validate"; "agent_create" ]
-                   (text item "name")
-                   ~equal:String.equal)));
-          let page_request operation task topic cursor =
-            `Object
-              [ "version", `Number "1"
-              ; "operation", `String operation
-              ; "task", task
-              ; "topic_id", topic
-              ; "cursor", cursor
-              ; "query", `Null
-              ; "features", `Null
-              ; "max_tokens", `Number "6000"
-              ]
-          in
-          let page =
-            page_request
-              "topic"
-              (`String "moderator_tool")
-              (`String "runtime.jobs.shell-example")
-              `Null
-            |> bridge sw daemon client probe.id "reference"
-            |> complete
-          in
-          let cursor = field "next_cursor" page in
-          (match cursor with
-           | `String _ -> ()
-           | _ -> failwith "expected paged helper reference");
-          let next =
-            page_request "continue" `Null `Null cursor
-            |> bridge sw daemon client probe.id "reference"
-            |> complete
-          in
-          assert (not (List.is_empty (field "items" next |> Jsonaf.list_exn)));
-          assert (not (Jsonaf.exactly_equal (field "items" page) (field "items" next)));
-          let validation_request =
-            `Object
-              [ "version", `Number "1"
-              ; "target", `String "one_off_script"
-              ; ( "source"
-                , `String
-                    "let never = fail(\"must not execute\")\n\
-                     let main input = Task.pure(input)" )
-              ; "tools", `Array []
-              ]
-          in
-          let calls_before = !child_calls in
-          let report =
-            bridge sw daemon client probe.id "validate" validation_request |> complete
-          in
-          assert (Jsonaf.exactly_equal (field "valid" report) `True);
-          [%test_eq: int] calls_before !child_calls;
-          List.iter
-            [ "reference", docs_request; "validate", validation_request ]
-            ~f:(fun (operation, arguments) ->
-              match
-                bridge ~name:"session_view" sw daemon client probe.id operation arguments
-              with
-              | P.Invocation.Fail error ->
-                [%test_eq: string] "agent.management.denied" error.code
-              | _ -> failwith "ungranted authoring operation was accepted");
-          let probe_handle = Hashtbl.find_exn client.invocation_handles probe.id in
-          H.stop probe_handle ~mode:Graceful |> protocol_ok |> ignore;
-          await (fun () ->
-            let current = state daemon probe.id in
-            P.Session.equal_desired_state current.lifecycle.desired Stopped
-            && (match current.lifecycle.observed with
-                | Stopped -> true
+                      )
+                    ; ( "input"
+                      , `Object [ "stdin", `String (Jsonaf.to_string create_envelope) ] )
+                    ; "tools", `Array [ `String "session_bridge"; `String "read_file" ]
+                    ])
+              |> Jsonaf.of_string
+              |> P.Invocation.outcome_of_json
+              |> protocol_ok
+              |> complete
+            in
+            let child = id created in
+            assert (P.Id.Session.equal child (id one_off_replay));
+            check_child_tools daemon child;
+            let docs_request =
+              `Object
+                [ "version", `Number "1"
+                ; "operation", `String "topic"
+                ; "task", `String "child_agent"
+                ; "topic_id", `String "reference.tools"
+                ; "query", `Null
+                ; "features", `Null
+                ; "cursor", `Null
+                ; "max_tokens", `Null
+                ]
+            in
+            let reference =
+              bridge sw daemon client probe.id "reference" docs_request |> complete
+            in
+            let selected = Jsonaf.member_exn "items" reference |> Jsonaf.list_exn in
+            assert (
+              List.exists selected ~f:(fun item ->
+                String.equal (text item "name") "session_bridge"));
+            assert (
+              not
+                (List.exists selected ~f:(fun item ->
+                   List.mem
+                     [ "ochat_authoring_context"; "ochat_validate"; "agent_create" ]
+                     (text item "name")
+                     ~equal:String.equal)));
+            let page_request operation task topic cursor =
+              `Object
+                [ "version", `Number "1"
+                ; "operation", `String operation
+                ; "task", task
+                ; "topic_id", topic
+                ; "cursor", cursor
+                ; "query", `Null
+                ; "features", `Null
+                ; "max_tokens", `Number "6000"
+                ]
+            in
+            let page =
+              page_request
+                "topic"
+                (`String "moderator_tool")
+                (`String "runtime.jobs.shell-example")
+                `Null
+              |> bridge sw daemon client probe.id "reference"
+              |> complete
+            in
+            let cursor = field "next_cursor" page in
+            (match cursor with
+             | `String _ -> ()
+             | _ -> failwith "expected paged helper reference");
+            let next =
+              page_request "continue" `Null `Null cursor
+              |> bridge sw daemon client probe.id "reference"
+              |> complete
+            in
+            assert (not (List.is_empty (field "items" next |> Jsonaf.list_exn)));
+            assert (not (Jsonaf.exactly_equal (field "items" page) (field "items" next)));
+            let validation_request =
+              `Object
+                [ "version", `Number "1"
+                ; "target", `String "one_off_script"
+                ; ( "source"
+                  , `String
+                      "let never = fail(\"must not execute\")\n\
+                       let main input = Task.pure(input)" )
+                ; "tools", `Array []
+                ]
+            in
+            let calls_before = !child_calls in
+            let report =
+              bridge sw daemon client probe.id "validate" validation_request |> complete
+            in
+            assert (Jsonaf.exactly_equal (field "valid" report) `True);
+            [%test_eq: int] calls_before !child_calls;
+            List.iter
+              [ "reference", docs_request; "validate", validation_request ]
+              ~f:(fun (operation, arguments) ->
+                match
+                  bridge
+                    ~name:"session_view"
+                    sw
+                    daemon
+                    client
+                    probe.id
+                    operation
+                    arguments
+                with
+                | P.Invocation.Fail error ->
+                  [%test_eq: string] "agent.management.denied" error.code
+                | _ -> failwith "ungranted authoring operation was accepted");
+            let probe_handle = Hashtbl.find_exn client.invocation_handles probe.id in
+            H.stop probe_handle ~mode:Graceful |> protocol_ok |> ignore;
+            await (fun () ->
+              let current = state daemon probe.id in
+              P.Session.equal_desired_state current.lifecycle.desired Stopped
+              && (match current.lifecycle.observed with
+                  | Stopped -> true
+                  | Queued_for_slot
+                  | Starting
+                  | Recovering
+                  | Idle
+                  | Running_turn _
+                  | Compacting _
+                  | Waiting_for_permission _
+                  | Stopping
+                  | Failed _ -> false)
+              && Option.is_none current.active_operation);
+            print_endline
+              "confined helper reference and non-executing validation work without \
+               native authoring tools";
+            [%test_eq: string]
+              (text created "session_id")
+              (bridge sw daemon client parent.id "create" child_request
+               |> complete
+               |> fun value -> text value "session_id");
+            let target = [ "session_id", P.Id.Session.to_json child ] in
+            ignore
+              (bridge
+                 ~name:"session_view"
+                 sw
+                 daemon
+                 client
+                 parent.id
+                 "status"
+                 (`Object target)
+               |> complete);
+            (match
+               bridge
+                 ~name:"session_view"
+                 sw
+                 daemon
+                 client
+                 parent.id
+                 "send"
+                 (`Object
+                     (target
+                      @ [ "message", `String "denied"
+                        ; "idempotency_key", `String "view-denied"
+                        ]))
+             with
+             | Fail error -> [%test_eq: string] "agent.management.denied" error.code
+             | _ -> failwith "readonly helper gained send authority");
+            await (fun () -> Option.is_none (state daemon child).active_operation);
+            let paused, release = Eio.Promise.create () in
+            child_pause := Some paused;
+            child_tool := Some (`Object [ "file", `String private_file ]);
+            let sent =
+              bridge
+                sw
+                daemon
+                client
+                parent.id
+                "send"
+                (`Object
+                    (target
+                     @ [ "message", `String "answer now"
+                       ; "idempotency_key", `String "helper-message"
+                       ]))
+              |> complete
+            in
+            let receipt = text sent "receipt_id" in
+            let query = target @ [ "receipt_id", `String receipt ] in
+            let subscription_id = start_watch sw daemon client parent.id query in
+            await_timer daemon parent.id subscription_id;
+            assert (Option.is_some (state daemon child).active_operation);
+            child_pause := None;
+            Eio.Promise.resolve release ();
+            (match await_watch daemon parent.id subscription_id with
+             | Succeeded page ->
+               assert (
+                 String.is_substring
+                   (Jsonaf.to_string page)
+                   ~substring:"persisted helper answer")
+             | result -> raise_s [%sexp "watch failed", (result : P.Completion.t)]);
+            let waited =
+              bridge
+                sw
+                daemon
+                client
+                parent.id
+                "wait"
+                (`Object (query @ [ "timeout_ms", `Number "10000" ]))
+              |> complete
+            in
+            [%test_eq: string] "receipt_terminal" (text waited "reason");
+            assert (Option.is_none !child_tool);
+            let child_results =
+              (state daemon child).invocations
+              |> List.filter_map ~f:(fun invocation ->
+                match invocation.status with
+                | Published (Complete value)
+                  when String.equal invocation.context.tool_name "read_file" ->
+                  Some (Jsonaf.to_string value)
+                | _ -> None)
+            in
+            (match
+               List.exists child_results ~f:(fun value ->
+                 String.is_substring value ~substring:"outside the configured read roots")
+             with
+             | true -> ()
+             | false ->
+               raise_s
+                 [%sexp
+                   "missing inherited file denial"
+                 , (child_results : string list)
+                 , ((state daemon child).invocations : P.Invocation.t list)]);
+            assert (
+              List.for_all child_results ~f:(fun value ->
+                not
+                  (String.is_substring value ~substring:"HELPER_PRIVATE_FIXTURE_CONTENT")));
+            let output =
+              bridge sw daemon client parent.id "read" (`Object query)
+              |> complete
+              |> Jsonaf.to_string
+            in
+            assert (String.is_substring output ~substring:"persisted helper answer");
+            let snapshot =
+              bridge sw daemon client parent.id "read" (`Object target) |> complete
+            in
+            assert (Jsonaf.bool_exn (field "caught_up" snapshot));
+            let cursor_query = target @ [ "cursor", field "next_cursor" snapshot ] in
+            let cursor_started = Eio.Time.now (Eio.Stdenv.clock env) in
+            let cursor_steps = ref [] in
+            let cursor_step name =
+              cursor_steps
+              := (name, Eio.Time.now (Eio.Stdenv.clock env) -. cursor_started)
+                 :: !cursor_steps
+            in
+            let cursor_watch = start_watch sw daemon client parent.id cursor_query in
+            await_timer daemon parent.id cursor_watch;
+            cursor_step "watch armed";
+            let calls_before_cancel = !child_calls in
+            (* Freeze elapsed time before creating the cancellation target, so its
+             timer stays scheduled through cancellation. Keep wall-driven job
+             dispatch running throughout this barrier. *)
+            let cancelled_watch, cancelled_timer =
+              freeze_elapsed := true;
+              Exn.protect
+                ~finally:(fun () -> freeze_elapsed := false)
+                ~f:(fun () ->
+                  let watch = start_watch sw daemon client parent.id cursor_query in
+                  await_timer daemon parent.id watch;
+                  let timer =
+                    (watch_subscription daemon parent.id watch).timer_id
+                    |> Option.value_exn
+                  in
+                  let schedule =
+                    List.find_exn (state daemon parent.id).schedules ~f:(fun schedule ->
+                      P.Id.Schedule.equal schedule.id timer)
+                  in
+                  (match schedule.status with
+                   | Scheduled -> ()
+                   | status ->
+                     raise_s
+                       [%sexp
+                         "cancellation barrier requires a scheduled timer"
+                       , (timer : P.Id.Schedule.t)
+                       , (status : P.Schedule.status)]);
+                  [%test_eq: string]
+                    "cancelled"
+                    (cancel_watch sw daemon client parent.id watch);
+                  watch, timer)
+            in
+            (* The cancellation acknowledgement has already committed the terminal;
+             let elapsed timer time progress while awaiting its notification. *)
+            (match await_watch daemon parent.id cancelled_watch with
+             | Cancelled _ -> ()
+             | result ->
+               raise_s [%sexp "watch cancellation failed", (result : P.Completion.t)]);
+            cursor_step "cancellation tool returned";
+            let cancelled_result =
+              (watch_subscription daemon parent.id cancelled_watch).result
+            in
+            let timer =
+              List.find_exn (state daemon parent.id).schedules ~f:(fun timer ->
+                P.Id.Schedule.equal timer.id cancelled_timer)
+            in
+            (match timer.status with
+             | Cancelled -> ()
+             | _ ->
+               raise_s
+                 [%sexp
+                   "watch cancellation did not cancel its pending timer"
+                 , (timer : P.Schedule.t)
+                 , (watch_subscription daemon parent.id cancelled_watch
+                    : P.Subscription.t)]);
+            (* Cross the cancelled timer's old due point, then let the real
+             scheduler deliver the other watch below. Late work must not replace
+             cancellation or publish a second notification. *)
+            advance_wall
+              (P.Timestamp.to_time_ns timer.next_due_at
+               |> Time_ns.to_span_since_epoch
+               |> Time_ns.Span.to_sec
+               |> fun due -> due +. 0.001);
+            advance_mono
+              (((P.Timestamp.diff_ns timer.next_due_at timer.created_at |> Int64.to_float)
+                /. 1_000_000_000.)
+               +. 0.001);
+            [%test_eq: int] calls_before_cancel !child_calls;
+            cursor_step "second watch cancelled";
+            assert (
+              P.Session.equal_desired_state (state daemon child).lifecycle.desired Running);
+            ignore
+              (bridge
+                 sw
+                 daemon
+                 client
+                 parent.id
+                 "send"
+                 (`Object
+                     (target
+                      @ [ "message", `String "future output"
+                        ; "idempotency_key", `String "cursor-message"
+                        ]))
+               |> complete);
+            cursor_step "future output sent";
+            (match await_watch daemon parent.id cursor_watch with
+             | Succeeded page ->
+               assert (
+                 String.is_substring
+                   (Jsonaf.to_string page)
+                   ~substring:"persisted helper answer");
+               assert (
+                 not
+                   (String.equal (text page "next_cursor") (text snapshot "next_cursor")))
+             | result ->
+               raise_s
+                 [%sexp
+                   "cursor watch failed"
+                 , (result : P.Completion.t)
+                 , (List.rev !cursor_steps : (string * float) list)]);
+            assert (
+              Option.equal
+                P.Completion.equal
+                cancelled_result
+                (watch_subscription daemon parent.id cancelled_watch).result);
+            let delivered_result =
+              (watch_subscription daemon parent.id cursor_watch).result
+            in
+            [%test_eq: string]
+              "delivered"
+              (cancel_watch sw daemon client parent.id cursor_watch);
+            assert (
+              Option.equal
+                P.Completion.equal
+                delivered_result
+                (watch_subscription daemon parent.id cursor_watch).result);
+            check_watch_notifications daemon parent.id;
+            let foreign, _ =
+              create_session
+                ~start_immediately:true
+                ~key:"foreign-parent"
+                client.connection
+            in
+            assert (not (P.Id.Session.equal parent.id foreign.id));
+            (match bridge sw daemon client foreign.id "status" (`Object target) with
+             | Fail _ -> ()
+             | _ -> failwith "foreign parent accessed helper-created child");
+            let foreign_watch = start_watch sw daemon client foreign.id query in
+            (* An immediate denial may be delivered before this foreground ends;
+             its retained error/history matters here, not another model turn. *)
+            (match await_watch ~require_wake:false daemon foreign.id foreign_watch with
+             | Failed error -> [%test_eq: string] "agent.management.denied" error.code
+             | result ->
+               raise_s
+                 [%sexp
+                   "foreign response watcher was not denied", (result : P.Completion.t)]);
+            let failed_result =
+              (watch_subscription daemon foreign.id foreign_watch).result
+            in
+            [%test_eq: string]
+              "failed"
+              (cancel_watch sw daemon client foreign.id foreign_watch);
+            assert (
+              Option.equal
+                P.Completion.equal
+                failed_result
+                (watch_subscription daemon foreign.id foreign_watch).result);
+            check_watch_notifications daemon foreign.id;
+            ignore
+              (bridge
+                 sw
+                 daemon
+                 client
+                 parent.id
+                 "stop"
+                 (`Object
+                     (target
+                      @ [ "mode", `String "graceful"
+                        ; "idempotency_key", `String "helper-stop"
+                        ]))
+               |> complete);
+            check_notification daemon parent.id child;
+            check_watch_notifications daemon parent.id;
+            let named args =
+              match invoke_status sw daemon client parent.id "specialist" args with
+              | Published (Complete value) -> value
+              | status ->
+                raise_s
+                  [%sexp
+                    "authored helper named call failed", (status : P.Invocation.status)]
+            in
+            let authored =
+              Agent_server_authored_helper_fixture.before_restart
+                ~state:(state daemon)
+                ~named
+                ~bridge:(authored_bridge sw daemon client parent.id foreign.id)
+            in
+            parent.id, child, receipt, authored, foreign.id, checkpoint daemon child 1)
+        in
+        Eio.Path.save
+          ~create:(`Or_truncate 0o600)
+          (path (Filename.concat root "authored-helper.chatmd"))
+          "<config model=\"gpt-6-astra\"/>\n\
+           <developer>Edited live authored specialist.</developer>";
+        let restart_started = ref 0. in
+        let restart_steps = ref [] in
+        let restart_step name =
+          restart_steps
+          := (name, Eio.Time.now (Eio.Stdenv.clock env) -. !restart_started)
+             :: !restart_steps
+        in
+        let cursor_watch, receipt_watch =
+          with_daemon (fun sw daemon client ->
+            let handle =
+              H.attach
+                ~sw
+                ~clock:(Eio.Stdenv.clock env)
+                ~connection:client.connection
+                ~session_id:parent_id
+                ~mode:Read_write
+                ~subscribe:false
+                ()
+              |> protocol_ok
+            in
+            H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
+            H.close handle;
+            let before = !child_calls in
+            Agent_server_authored_helper_fixture.after_restart
+              ~state:(state daemon)
+              ~bridge:(authored_bridge sw daemon client parent_id foreign_id)
+              authored;
+            [%test_eq: int] before !child_calls;
+            let target = [ "session_id", P.Id.Session.to_json child_id ] in
+            [%test_eq: string] moderator_hash (checkpoint daemon child_id 1);
+            let replay =
+              bridge sw daemon client parent_id "create" child_request |> complete
+            in
+            assert (P.Id.Session.equal child_id (id replay));
+            let output =
+              bridge
+                sw
+                daemon
+                client
+                parent_id
+                "read"
+                (`Object (target @ [ "receipt_id", `String receipt ]))
+              |> complete
+              |> Jsonaf.to_string
+            in
+            assert (String.is_substring output ~substring:"persisted helper answer");
+            check_notification daemon parent_id child_id;
+            check_watch_notifications daemon parent_id;
+            let child_handle =
+              H.attach
+                ~sw
+                ~clock:(Eio.Stdenv.clock env)
+                ~connection:client.connection
+                ~session_id:child_id
+                ~mode:Read_write
+                ~subscribe:false
+                ()
+              |> protocol_ok
+            in
+            H.start child_handle ~queue_if_limited:false |> protocol_ok |> ignore;
+            await (fun () -> Option.is_none (state daemon child_id).active_operation);
+            check_child_tools daemon child_id;
+            let snapshot =
+              bridge sw daemon client parent_id "read" (`Object target) |> complete
+            in
+            assert (Jsonaf.bool_exn (field "caught_up" snapshot));
+            child_tool := Some (`Object [ "file", `String report_file ]);
+            let resumed =
+              bridge
+                sw
+                daemon
+                client
+                parent_id
+                "send"
+                (`Object
+                    (target
+                     @ [ "message", `String "X05 resumed report"
+                       ; "idempotency_key", `String "x05-resumed"
+                       ]))
+              |> complete
+            in
+            let resumed_query = target @ [ "receipt_id", field "receipt_id" resumed ] in
+            let waited =
+              bridge
+                sw
+                daemon
+                client
+                parent_id
+                "wait"
+                (`Object (resumed_query @ [ "timeout_ms", `Number "10000" ]))
+              |> complete
+            in
+            [%test_eq: string] "receipt_terminal" (text waited "reason");
+            let resumed_page =
+              bridge sw daemon client parent_id "read" (`Object resumed_query) |> complete
+            in
+            assert (
+              String.is_substring
+                (Jsonaf.to_string resumed_page)
+                ~substring:"persisted helper answer after restart");
+            let new_output =
+              bridge
+                sw
+                daemon
+                client
+                parent_id
+                "read"
+                (`Object (target @ [ "cursor", field "next_cursor" snapshot ]))
+              |> complete
+            in
+            assert (
+              String.is_substring
+                (Jsonaf.to_string new_output)
+                ~substring:"persisted helper answer after restart");
+            [%test_eq: string] moderator_hash (checkpoint daemon child_id 2);
+            assert (
+              List.exists (state daemon child_id).invocations ~f:(fun invocation ->
+                match invocation.status with
+                | Published (Complete value)
+                  when String.equal invocation.context.tool_name "read_file" ->
+                  String.is_substring
+                    (Jsonaf.to_string value)
+                    ~substring:"X05_REPORT_DATA"
+                | _ -> false));
+            let old_output =
+              bridge
+                sw
+                daemon
+                client
+                parent_id
+                "read"
+                (`Object (target @ [ "receipt_id", `String receipt ]))
+              |> complete
+            in
+            assert (
+              not
+                (String.is_substring
+                   (Jsonaf.to_string old_output)
+                   ~substring:"persisted helper answer after restart"));
+            print_endline
+              "generated moderator state and receipt-scoped exchanges survive daemon \
+               restart";
+            let snapshot = new_output in
+            let paused, _release = Eio.Promise.create () in
+            child_pause := Some paused;
+            let sent =
+              bridge
+                sw
+                daemon
+                client
+                parent_id
+                "send"
+                (`Object
+                    (target
+                     @ [ "message", `String "interrupted by restart"
+                       ; "idempotency_key", `String "restart-message"
+                       ]))
+              |> complete
+            in
+            restart_started := Eio.Time.now (Eio.Stdenv.clock env);
+            let receipt_watch =
+              start_watch
+                sw
+                daemon
+                client
+                parent_id
+                (target @ [ "receipt_id", field "receipt_id" sent ])
+            in
+            await_timer daemon parent_id receipt_watch;
+            restart_step "receipt watch armed";
+            let cursor_watch =
+              start_watch
+                sw
+                daemon
+                client
+                parent_id
+                (target @ [ "cursor", field "next_cursor" snapshot ])
+            in
+            await_timer daemon parent_id cursor_watch;
+            restart_step "cursor watch armed";
+            assert (Option.is_some (state daemon child_id).active_operation);
+            H.close child_handle;
+            cursor_watch, receipt_watch)
+        in
+        restart_step "previous daemon shut down";
+        child_pause := None;
+        with_daemon (fun sw daemon client ->
+          restart_step "next daemon started";
+          let step name f =
+            let started = Eio.Time.now (Eio.Stdenv.clock env) in
+            let started_cpu = Stdlib.Sys.time () in
+            let started_mono = Eio.Time.Mono.now mono_clock in
+            let started_wall = Eio.Time.now clock in
+            let dump_last_observed (current : Agent_session.Session_state.t) =
+              let bounded text = String.prefix text 512 in
+              let failure (error : P.Error.t) =
+                [%sexp
+                  (error.code : P.Error.code)
+                , (bounded error.message : string)
+                , (error.retryable : bool)]
+              in
+              let completion = function
+                | P.Completion.Succeeded _ -> [%sexp "succeeded"]
+                | Failed error ->
+                  [%sexp
+                    "failed"
+                  , (bounded error.code : string)
+                  , (bounded error.message : string)]
+                | Cancelled reason -> [%sexp "cancelled", (bounded reason : string)]
+                | Expired -> [%sexp "expired"]
+              in
+              let failures =
+                List.filter_map current.moderator_executions ~f:(fun receipt ->
+                  let status =
+                    match receipt.status with
+                    | Completed _ -> None
+                    | Running -> Some [%sexp "running"]
+                    | Interrupted reason ->
+                      Some [%sexp "interrupted", (bounded reason : string)]
+                    | Failed error ->
+                      Some
+                        [%sexp
+                          "failed"
+                        , (bounded error.code : string)
+                        , (bounded error.message : string)]
+                  in
+                  Option.map status ~f:(fun status ->
+                    [%sexp
+                      (receipt.context.id : P.Id.Moderator_execution.t)
+                    , (receipt.context.phase : P.Moderator_execution.phase)
+                    , (status : Sexp.t)]))
+                |> fun values -> List.take values 8
+              in
+              let subscriptions =
+                List.filter_map current.subscriptions ~f:(fun subscription ->
+                  if
+                    P.Id.Subscription.equal subscription.context.id cursor_watch
+                    || P.Id.Subscription.equal subscription.context.id receipt_watch
+                  then
+                    Some
+                      [%sexp
+                        (subscription.context.id : P.Id.Subscription.t)
+                      , (subscription.epoch : int)
+                      , (subscription.timer_id : P.Id.Schedule.t option)
+                      , (subscription.job_id : P.Id.Job.t option)
+                      , (Option.map subscription.result ~f:completion : Sexp.t option)]
+                  else None)
+              in
+              let jobs =
+                List.map current.jobs ~f:(fun job ->
+                  let status =
+                    match job.status with
+                    | Failed error -> [%sexp "failed", (failure error : Sexp.t)]
+                    | Interrupted reason ->
+                      [%sexp "interrupted", (bounded reason : string)]
+                    | Waiting_completion _ -> [%sexp "waiting_completion"]
+                    | Waiting_permission _ -> [%sexp "waiting_permission"]
+                    | Queued | Running | Succeeded | Cancelled ->
+                      [%sexp (job.status : P.Job.status)]
+                  in
+                  let terminal =
+                    match P.Job.terminal_completion job with
+                    | Ok value -> Option.map value ~f:completion
+                    | Error error ->
+                      Some [%sexp "terminal unavailable", (failure error : Sexp.t)]
+                  in
+                  [%sexp
+                    (job.id : P.Id.Job.t)
+                  , (status : Sexp.t)
+                  , (terminal : Sexp.t option)
+                  , (job.delivery : P.Job.delivery)])
+                |> fun values -> List.take values 24
+              in
+              let active_operation =
+                Option.map current.active_operation ~f:(fun operation ->
+                  let status =
+                    match operation.state with
+                    | Failed error -> [%sexp "failed", (failure error : Sexp.t)]
+                    | Interrupted { reason; retryable } ->
+                      [%sexp "interrupted", (bounded reason : string), (retryable : bool)]
+                    | Starting | Running | Cancelling | Completed | Cancelled ->
+                      [%sexp (operation.state : P.Operation.state)]
+                  in
+                  [%sexp (operation.id : P.Id.Operation.t), (status : Sexp.t)])
+              in
+              let queued =
+                match Agent_session.Moderator_checkpoint.decode current.moderator with
+                | Error error -> [%sexp "invalid checkpoint", (failure error : Sexp.t)]
+                | Ok None -> [%sexp "no checkpoint"]
+                | Ok (Some snapshot) ->
+                  let head =
+                    Option.map (List.hd snapshot.queued_internal_events) ~f:(function
+                      | Session.Snapshot.Variant (tag, _) -> bounded tag
+                      | Unit
+                      | Bool _
+                      | Int _
+                      | Float _
+                      | String _
+                      | Array _
+                      | Record _
+                      | Tuple _ -> "non-variant")
+                  in
+                  [%sexp
+                    (List.length snapshot.queued_internal_events : int)
+                  , (head : string option)
+                  , (snapshot.halted : bool)]
+              in
+              let observed =
+                match current.lifecycle.observed with
+                | Failed error -> [%sexp "failed", (failure error : Sexp.t)]
+                | Stopped
                 | Queued_for_slot
                 | Starting
                 | Recovering
@@ -994,358 +1721,125 @@ let run env helper ~native_watch =
                 | Running_turn _
                 | Compacting _
                 | Waiting_for_permission _
-                | Stopping
-                | Failed _ -> false)
-            && Option.is_none current.active_operation);
-          print_endline
-            "confined helper reference and non-executing validation work without native \
-             authoring tools";
-          [%test_eq: string]
-            (text created "session_id")
-            (bridge sw daemon client parent.id "create" child_request
-             |> complete
-             |> fun value -> text value "session_id");
-          let target = [ "session_id", P.Id.Session.to_json child ] in
-          ignore
-            (bridge
-               ~name:"session_view"
-               sw
-               daemon
-               client
-               parent.id
-               "status"
-               (`Object target)
-             |> complete);
-          (match
-             bridge
-               ~name:"session_view"
-               sw
-               daemon
-               client
-               parent.id
-               "send"
-               (`Object
-                   (target
-                    @ [ "message", `String "denied"
-                      ; "idempotency_key", `String "view-denied"
-                      ]))
-           with
-           | Fail error -> [%test_eq: string] "agent.management.denied" error.code
-           | _ -> failwith "readonly helper gained send authority");
-          await (fun () -> Option.is_none (state daemon child).active_operation);
-          let paused, release = Eio.Promise.create () in
-          child_pause := Some paused;
-          child_tool := Some (`Object [ "file", `String private_file ]);
-          let sent =
-            bridge
-              sw
-              daemon
-              client
-              parent.id
-              "send"
-              (`Object
-                  (target
-                   @ [ "message", `String "answer now"
-                     ; "idempotency_key", `String "helper-message"
-                     ]))
-            |> complete
-          in
-          let receipt = text sent "receipt_id" in
-          let query = target @ [ "receipt_id", `String receipt ] in
-          let subscription_id = start_watch sw daemon client parent.id query in
-          await_timer daemon parent.id subscription_id;
-          assert (Option.is_some (state daemon child).active_operation);
-          child_pause := None;
-          Eio.Promise.resolve release ();
-          (match await_watch daemon parent.id subscription_id with
-           | Succeeded page ->
-             assert (
-               String.is_substring
-                 (Jsonaf.to_string page)
-                 ~substring:"persisted helper answer")
-           | result -> raise_s [%sexp "watch failed", (result : P.Completion.t)]);
-          let waited =
-            bridge
-              sw
-              daemon
-              client
-              parent.id
-              "wait"
-              (`Object (query @ [ "timeout_ms", `Number "10000" ]))
-            |> complete
-          in
-          [%test_eq: string] "receipt_terminal" (text waited "reason");
-          assert (Option.is_none !child_tool);
-          let child_results =
-            (state daemon child).invocations
-            |> List.filter_map ~f:(fun invocation ->
-              match invocation.status with
-              | Published (Complete value)
-                when String.equal invocation.context.tool_name "read_file" ->
-                Some (Jsonaf.to_string value)
-              | _ -> None)
-          in
-          (match
-             List.exists child_results ~f:(fun value ->
-               String.is_substring value ~substring:"outside the configured read roots")
-           with
-           | true -> ()
-           | false ->
-             raise_s
-               [%sexp
-                 "missing inherited file denial"
-               , (child_results : string list)
-               , ((state daemon child).invocations : P.Invocation.t list)]);
-          assert (
-            List.for_all child_results ~f:(fun value ->
-              not (String.is_substring value ~substring:"HELPER_PRIVATE_FIXTURE_CONTENT")));
-          let output =
-            bridge sw daemon client parent.id "read" (`Object query)
-            |> complete
-            |> Jsonaf.to_string
-          in
-          assert (String.is_substring output ~substring:"persisted helper answer");
-          let snapshot =
-            bridge sw daemon client parent.id "read" (`Object target) |> complete
-          in
-          assert (Jsonaf.bool_exn (field "caught_up" snapshot));
-          let cursor_query = target @ [ "cursor", field "next_cursor" snapshot ] in
-          let cursor_started = Eio.Time.now (Eio.Stdenv.clock env) in
-          let cursor_steps = ref [] in
-          let cursor_step name =
-            cursor_steps
-            := (name, Eio.Time.now (Eio.Stdenv.clock env) -. cursor_started)
-               :: !cursor_steps
-          in
-          let cursor_watch = start_watch sw daemon client parent.id cursor_query in
-          await_timer daemon parent.id cursor_watch;
-          cursor_step "watch armed";
-          let calls_before_cancel = !child_calls in
-          (* Freeze elapsed time before creating the cancellation target, so its
-             timer stays scheduled through cancellation. Keep wall-driven job
-             dispatch running throughout this barrier. *)
-          let cancelled_watch, cancelled_timer =
-            freeze_elapsed := true;
+                | Stopping ->
+                  [%sexp (current.lifecycle.observed : P.Session.observed_state)]
+              in
+              Eio.traceln
+                "%s"
+                (Sexp.to_string_hum
+                   [%sexp
+                     (name : string)
+                   , (native_watch : bool)
+                   , (current.lifecycle.desired : P.Session.desired_state)
+                   , (observed : Sexp.t)
+                   , (current.halted : bool)
+                   , (active_operation : Sexp.t option)
+                   , (Option.map current.failure ~f:failure : Sexp.t option)
+                   , (queued : Sexp.t)
+                   , (subscriptions : Sexp.t list)
+                   , (failures : Sexp.t list)
+                   , (List.rev !restart_steps : (string * float) list)
+                   , ( "real seconds"
+                     , (Eio.Time.now (Eio.Stdenv.clock env) -. started : float) )
+                   , ("CPU seconds", (Stdlib.Sys.time () -. started_cpu : float))
+                   , ( "logical Mono seconds"
+                     , (Mtime.span started_mono (Eio.Time.Mono.now mono_clock)
+                        |> Mtime.Span.to_float_ns
+                        |> fun ns -> ns /. 1_000_000_000.
+                        : float) )
+                   , ("logical wall seconds", (Eio.Time.now clock -. started_wall : float))
+                   , (jobs : Sexp.t list)])
+            in
+            watched_session := Some parent_id;
+            last_observed_state := None;
             Exn.protect
-              ~finally:(fun () -> freeze_elapsed := false)
+              ~finally:(fun () ->
+                watched_session := None;
+                last_observed_state := None)
               ~f:(fun () ->
-                let watch = start_watch sw daemon client parent.id cursor_query in
-                await_timer daemon parent.id watch;
-                let timer =
-                  (watch_subscription daemon parent.id watch).timer_id |> Option.value_exn
-                in
-                let schedule =
-                  List.find_exn (state daemon parent.id).schedules ~f:(fun schedule ->
-                    P.Id.Schedule.equal schedule.id timer)
-                in
-                (match schedule.status with
-                 | Scheduled -> ()
-                 | status ->
-                   raise_s
-                     [%sexp
-                       "cancellation barrier requires a scheduled timer"
-                     , (timer : P.Id.Schedule.t)
-                     , (status : P.Schedule.status)]);
-                [%test_eq: string]
-                  "cancelled"
-                  (cancel_watch sw daemon client parent.id watch);
-                watch, timer)
+                (* Pinned Eio.Time.with_timeout is this timer-first Fiber.first.
+                 Log only the immutable last observation before cancellation
+                 joins: protected cleanup may otherwise prevent a timeout dump.
+                 This is cached state, not a fresh read at the deadline. *)
+                match
+                  Eio.Fiber.first
+                    (fun () ->
+                       (* Observe recovered callback commits, including validation
+                        of the retained transcript. A paired control consumed the
+                        former ten-second budget in CPU work before committing;
+                        keep headroom without changing logical watch deadlines. *)
+                       Eio.Time.sleep (Eio.Stdenv.clock env) 30.;
+                       (match !last_observed_state with
+                        | Some current -> dump_last_observed current
+                        | None ->
+                          Eio.traceln
+                            "%s"
+                            (Sexp.to_string_hum
+                               [%sexp
+                                 (name : string)
+                               , "no parent state observed before deadline"]));
+                       Error `Timeout)
+                    (fun () -> Ok (f ()))
+                with
+                | Ok result -> result
+                | Error `Timeout ->
+                  raise_s
+                    [%sexp
+                      (name : string)
+                    , "helper restart step timed out; last observed state logged at \
+                       deadline"])
           in
-          (* The cancellation acknowledgement has already committed the terminal;
-             let elapsed timer time progress while awaiting its notification. *)
-          (match await_watch daemon parent.id cancelled_watch with
-           | Cancelled _ -> ()
-           | result ->
-             raise_s [%sexp "watch cancellation failed", (result : P.Completion.t)]);
-          cursor_step "cancellation tool returned";
-          let cancelled_result =
-            (watch_subscription daemon parent.id cancelled_watch).result
-          in
-          let timer =
-            List.find_exn (state daemon parent.id).schedules ~f:(fun timer ->
-              P.Id.Schedule.equal timer.id cancelled_timer)
-          in
-          (match timer.status with
-           | Cancelled -> ()
-           | _ ->
-             raise_s
-               [%sexp
-                 "watch cancellation did not cancel its pending timer"
-               , (timer : P.Schedule.t)
-               , (watch_subscription daemon parent.id cancelled_watch : P.Subscription.t)]);
-          (* Cross the cancelled timer's old due point, then let the real
-             scheduler deliver the other watch below. Late work must not replace
-             cancellation or publish a second notification. *)
-          advance_wall
-            (P.Timestamp.to_time_ns timer.next_due_at
-             |> Time_ns.to_span_since_epoch
-             |> Time_ns.Span.to_sec
-             |> fun due -> due +. 0.001);
-          advance_mono
-            (((P.Timestamp.diff_ns timer.next_due_at timer.created_at |> Int64.to_float)
-              /. 1_000_000_000.)
-             +. 0.001);
-          [%test_eq: int] calls_before_cancel !child_calls;
-          cursor_step "second watch cancelled";
+          let before_calls = !child_calls in
           assert (
-            P.Session.equal_desired_state (state daemon child).lifecycle.desired Running);
-          ignore
-            (bridge
-               sw
-               daemon
-               client
-               parent.id
-               "send"
-               (`Object
-                   (target
-                    @ [ "message", `String "future output"
-                      ; "idempotency_key", `String "cursor-message"
-                      ]))
-             |> complete);
-          cursor_step "future output sent";
-          (match await_watch daemon parent.id cursor_watch with
-           | Succeeded page ->
-             assert (
-               String.is_substring
-                 (Jsonaf.to_string page)
-                 ~substring:"persisted helper answer");
-             assert (
-               not (String.equal (text page "next_cursor") (text snapshot "next_cursor")))
+            P.Session.equal_desired_state
+              (state daemon parent_id).lifecycle.desired
+              Running);
+          (* Both recovered completions request a turn. The automatic follow-up
+           budget may suppress a wake; it must never suppress their messages. *)
+          (match
+             step "cursor completion" (fun () ->
+               await_watch ~require_wake:false daemon parent_id cursor_watch)
+           with
+           | Failed error -> [%test_eq: string] "agent.read.cursor_expired" error.code
            | result ->
+             restart_step "cursor completion";
              raise_s
                [%sexp
-                 "cursor watch failed"
+                 "expired cursor was not reported"
                , (result : P.Completion.t)
-               , (List.rev !cursor_steps : (string * float) list)]);
-          assert (
-            Option.equal
-              P.Completion.equal
-              cancelled_result
-              (watch_subscription daemon parent.id cancelled_watch).result);
-          let delivered_result =
-            (watch_subscription daemon parent.id cursor_watch).result
-          in
-          [%test_eq: string]
-            "delivered"
-            (cancel_watch sw daemon client parent.id cursor_watch);
-          assert (
-            Option.equal
-              P.Completion.equal
-              delivered_result
-              (watch_subscription daemon parent.id cursor_watch).result);
-          check_watch_notifications daemon parent.id;
-          let foreign, _ =
-            create_session ~start_immediately:true ~key:"foreign-parent" client.connection
-          in
-          assert (not (P.Id.Session.equal parent.id foreign.id));
-          (match bridge sw daemon client foreign.id "status" (`Object target) with
-           | Fail _ -> ()
-           | _ -> failwith "foreign parent accessed helper-created child");
-          let foreign_watch = start_watch sw daemon client foreign.id query in
-          (* An immediate denial may be delivered before this foreground ends;
-             its retained error/history matters here, not another model turn. *)
-          (match await_watch ~require_wake:false daemon foreign.id foreign_watch with
-           | Failed error -> [%test_eq: string] "agent.management.denied" error.code
+               , (List.rev !restart_steps : (string * float) list)]);
+          (match
+             step "receipt completion" (fun () ->
+               await_watch ~require_wake:false daemon parent_id receipt_watch)
+           with
+           | Failed error -> [%test_eq: string] "watcher.target_failed" error.code
            | result ->
+             restart_step "receipt completion";
              raise_s
                [%sexp
-                 "foreign response watcher was not denied", (result : P.Completion.t)]);
-          let failed_result =
-            (watch_subscription daemon foreign.id foreign_watch).result
-          in
-          [%test_eq: string]
-            "failed"
-            (cancel_watch sw daemon client foreign.id foreign_watch);
-          assert (
-            Option.equal
-              P.Completion.equal
-              failed_result
-              (watch_subscription daemon foreign.id foreign_watch).result);
-          check_watch_notifications daemon foreign.id;
-          ignore
-            (bridge
-               sw
-               daemon
-               client
-               parent.id
-               "stop"
-               (`Object
-                   (target
-                    @ [ "mode", `String "graceful"
-                      ; "idempotency_key", `String "helper-stop"
-                      ]))
-             |> complete);
-          check_notification daemon parent.id child;
-          check_watch_notifications daemon parent.id;
-          let named args =
-            match invoke_status sw daemon client parent.id "specialist" args with
-            | Published (Complete value) -> value
-            | status ->
-              raise_s
-                [%sexp
-                  "authored helper named call failed", (status : P.Invocation.status)]
-          in
-          let authored =
-            Agent_server_authored_helper_fixture.before_restart
-              ~state:(state daemon)
-              ~named
-              ~bridge:(authored_bridge sw daemon client parent.id foreign.id)
-          in
-          parent.id, child, receipt, authored, foreign.id, checkpoint daemon child 1)
-      in
-      Eio.Path.save
-        ~create:(`Or_truncate 0o600)
-        (path (Filename.concat root "authored-helper.chatmd"))
-        "<config model=\"gpt-6-astra\"/>\n\
-         <developer>Edited live authored specialist.</developer>";
-      let restart_started = ref 0. in
-      let restart_steps = ref [] in
-      let restart_step name =
-        restart_steps
-        := (name, Eio.Time.now (Eio.Stdenv.clock env) -. !restart_started)
-           :: !restart_steps
-      in
-      let cursor_watch, receipt_watch =
-        with_daemon (fun sw daemon client ->
-          let handle =
-            H.attach
-              ~sw
-              ~clock:(Eio.Stdenv.clock env)
-              ~connection:client.connection
-              ~session_id:parent_id
-              ~mode:Read_write
-              ~subscribe:false
-              ()
-            |> protocol_ok
-          in
-          H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
-          H.close handle;
-          let before = !child_calls in
-          Agent_server_authored_helper_fixture.after_restart
-            ~state:(state daemon)
-            ~bridge:(authored_bridge sw daemon client parent_id foreign_id)
-            authored;
-          [%test_eq: int] before !child_calls;
-          let target = [ "session_id", P.Id.Session.to_json child_id ] in
-          [%test_eq: string] moderator_hash (checkpoint daemon child_id 1);
-          let replay =
-            bridge sw daemon client parent_id "create" child_request |> complete
-          in
-          assert (P.Id.Session.equal child_id (id replay));
-          let output =
-            bridge
-              sw
-              daemon
-              client
-              parent_id
-              "read"
-              (`Object (target @ [ "receipt_id", `String receipt ]))
-            |> complete
-            |> Jsonaf.to_string
-          in
-          assert (String.is_substring output ~substring:"persisted helper answer");
+                 "interrupted receipt was not reported"
+               , (result : P.Completion.t)
+               , (List.rev !restart_steps : (string * float) list)]);
+          [%test_eq: int] before_calls !child_calls;
           check_notification daemon parent_id child_id;
           check_watch_notifications daemon parent_id;
+          let pending_jobs () =
+            List.filter (state daemon parent_id).jobs ~f:(fun job ->
+              match job.status, job.delivery with
+              | ( (Succeeded | Failed _ | Cancelled | Interrupted _)
+                , (Delivered _ | Discarded _ | Not_required) ) -> false
+              | _ -> true)
+          in
+          (match
+             Eio.Time.with_timeout (Eio.Stdenv.clock env) 3. (fun () ->
+               await (fun () -> List.is_empty (pending_jobs ()));
+               Ok ())
+           with
+           | Ok () -> ()
+           | Error _ ->
+             raise_s
+               [%sexp
+                 "watch recovery left pending jobs", (pending_jobs () : P.Job.t list)]);
           let child_handle =
             H.attach
               ~sw
@@ -1357,453 +1851,75 @@ let run env helper ~native_watch =
               ()
             |> protocol_ok
           in
-          H.start child_handle ~queue_if_limited:false |> protocol_ok |> ignore;
-          await (fun () -> Option.is_none (state daemon child_id).active_operation);
-          check_child_tools daemon child_id;
-          let snapshot =
-            bridge sw daemon client parent_id "read" (`Object target) |> complete
-          in
-          assert (Jsonaf.bool_exn (field "caught_up" snapshot));
-          child_tool := Some (`Object [ "file", `String report_file ]);
-          let resumed =
-            bridge
-              sw
-              daemon
-              client
-              parent_id
-              "send"
-              (`Object
-                  (target
-                   @ [ "message", `String "X05 resumed report"
-                     ; "idempotency_key", `String "x05-resumed"
-                     ]))
-            |> complete
-          in
-          let resumed_query = target @ [ "receipt_id", field "receipt_id" resumed ] in
-          let waited =
-            bridge
-              sw
-              daemon
-              client
-              parent_id
-              "wait"
-              (`Object (resumed_query @ [ "timeout_ms", `Number "10000" ]))
-            |> complete
-          in
-          [%test_eq: string] "receipt_terminal" (text waited "reason");
-          let resumed_page =
-            bridge sw daemon client parent_id "read" (`Object resumed_query) |> complete
-          in
-          assert (
-            String.is_substring
-              (Jsonaf.to_string resumed_page)
-              ~substring:"persisted helper answer after restart");
-          let new_output =
-            bridge
-              sw
-              daemon
-              client
-              parent_id
-              "read"
-              (`Object (target @ [ "cursor", field "next_cursor" snapshot ]))
-            |> complete
-          in
-          assert (
-            String.is_substring
-              (Jsonaf.to_string new_output)
-              ~substring:"persisted helper answer after restart");
-          [%test_eq: string] moderator_hash (checkpoint daemon child_id 2);
-          assert (
-            List.exists (state daemon child_id).invocations ~f:(fun invocation ->
-              match invocation.status with
-              | Published (Complete value)
-                when String.equal invocation.context.tool_name "read_file" ->
-                String.is_substring (Jsonaf.to_string value) ~substring:"X05_REPORT_DATA"
-              | _ -> false));
-          let old_output =
-            bridge
-              sw
-              daemon
-              client
-              parent_id
-              "read"
-              (`Object (target @ [ "receipt_id", `String receipt ]))
-            |> complete
-          in
-          assert (
-            not
-              (String.is_substring
-                 (Jsonaf.to_string old_output)
-                 ~substring:"persisted helper answer after restart"));
-          print_endline
-            "generated moderator state and receipt-scoped exchanges survive daemon \
-             restart";
-          let snapshot = new_output in
-          let paused, _release = Eio.Promise.create () in
-          child_pause := Some paused;
-          let sent =
-            bridge
-              sw
-              daemon
-              client
-              parent_id
-              "send"
-              (`Object
-                  (target
-                   @ [ "message", `String "interrupted by restart"
-                     ; "idempotency_key", `String "restart-message"
-                     ]))
-            |> complete
-          in
-          restart_started := Eio.Time.now (Eio.Stdenv.clock env);
-          let receipt_watch =
-            start_watch
-              sw
-              daemon
-              client
-              parent_id
-              (target @ [ "receipt_id", field "receipt_id" sent ])
-          in
-          await_timer daemon parent_id receipt_watch;
-          restart_step "receipt watch armed";
-          let cursor_watch =
-            start_watch
-              sw
-              daemon
-              client
-              parent_id
-              (target @ [ "cursor", field "next_cursor" snapshot ])
-          in
-          await_timer daemon parent_id cursor_watch;
-          restart_step "cursor watch armed";
-          assert (Option.is_some (state daemon child_id).active_operation);
-          H.close child_handle;
-          cursor_watch, receipt_watch)
-      in
-      restart_step "previous daemon shut down";
-      child_pause := None;
-      with_daemon (fun sw daemon client ->
-        restart_step "next daemon started";
-        let step name f =
-          let started = Eio.Time.now (Eio.Stdenv.clock env) in
-          let started_cpu = Stdlib.Sys.time () in
-          let started_mono = Eio.Time.Mono.now mono_clock in
-          let started_wall = Eio.Time.now clock in
-          let dump_last_observed (current : Agent_session.Session_state.t) =
-            let bounded text = String.prefix text 512 in
-            let failure (error : P.Error.t) =
-              [%sexp
-                (error.code : P.Error.code)
-              , (bounded error.message : string)
-              , (error.retryable : bool)]
-            in
-            let completion = function
-              | P.Completion.Succeeded _ -> [%sexp "succeeded"]
-              | Failed error ->
-                [%sexp
-                  "failed"
-                , (bounded error.code : string)
-                , (bounded error.message : string)]
-              | Cancelled reason -> [%sexp "cancelled", (bounded reason : string)]
-              | Expired -> [%sexp "expired"]
-            in
-            let failures =
-              List.filter_map current.moderator_executions ~f:(fun receipt ->
-                let status =
-                  match receipt.status with
-                  | Completed _ -> None
-                  | Running -> Some [%sexp "running"]
-                  | Interrupted reason ->
-                    Some [%sexp "interrupted", (bounded reason : string)]
-                  | Failed error ->
-                    Some
-                      [%sexp
-                        "failed"
-                      , (bounded error.code : string)
-                      , (bounded error.message : string)]
-                in
-                Option.map status ~f:(fun status ->
-                  [%sexp
-                    (receipt.context.id : P.Id.Moderator_execution.t)
-                  , (receipt.context.phase : P.Moderator_execution.phase)
-                  , (status : Sexp.t)]))
-              |> fun values -> List.take values 8
-            in
-            let subscriptions =
-              List.filter_map current.subscriptions ~f:(fun subscription ->
-                if
-                  P.Id.Subscription.equal subscription.context.id cursor_watch
-                  || P.Id.Subscription.equal subscription.context.id receipt_watch
-                then
-                  Some
-                    [%sexp
-                      (subscription.context.id : P.Id.Subscription.t)
-                    , (subscription.epoch : int)
-                    , (subscription.timer_id : P.Id.Schedule.t option)
-                    , (subscription.job_id : P.Id.Job.t option)
-                    , (Option.map subscription.result ~f:completion : Sexp.t option)]
-                else None)
-            in
-            let jobs =
-              List.map current.jobs ~f:(fun job ->
-                let status =
-                  match job.status with
-                  | Failed error -> [%sexp "failed", (failure error : Sexp.t)]
-                  | Interrupted reason -> [%sexp "interrupted", (bounded reason : string)]
-                  | Waiting_completion _ -> [%sexp "waiting_completion"]
-                  | Waiting_permission _ -> [%sexp "waiting_permission"]
-                  | Queued | Running | Succeeded | Cancelled ->
-                    [%sexp (job.status : P.Job.status)]
-                in
-                let terminal =
-                  match P.Job.terminal_completion job with
-                  | Ok value -> Option.map value ~f:completion
-                  | Error error ->
-                    Some [%sexp "terminal unavailable", (failure error : Sexp.t)]
-                in
-                [%sexp
-                  (job.id : P.Id.Job.t)
-                , (status : Sexp.t)
-                , (terminal : Sexp.t option)
-                , (job.delivery : P.Job.delivery)])
-              |> fun values -> List.take values 24
-            in
-            let active_operation =
-              Option.map current.active_operation ~f:(fun operation ->
-                let status =
-                  match operation.state with
-                  | Failed error -> [%sexp "failed", (failure error : Sexp.t)]
-                  | Interrupted { reason; retryable } ->
-                    [%sexp "interrupted", (bounded reason : string), (retryable : bool)]
-                  | Starting | Running | Cancelling | Completed | Cancelled ->
-                    [%sexp (operation.state : P.Operation.state)]
-                in
-                [%sexp (operation.id : P.Id.Operation.t), (status : Sexp.t)])
-            in
-            let queued =
-              match Agent_session.Moderator_checkpoint.decode current.moderator with
-              | Error error -> [%sexp "invalid checkpoint", (failure error : Sexp.t)]
-              | Ok None -> [%sexp "no checkpoint"]
-              | Ok (Some snapshot) ->
-                let head =
-                  Option.map (List.hd snapshot.queued_internal_events) ~f:(function
-                    | Session.Snapshot.Variant (tag, _) -> bounded tag
-                    | Unit
-                    | Bool _
-                    | Int _
-                    | Float _
-                    | String _
-                    | Array _
-                    | Record _
-                    | Tuple _ -> "non-variant")
-                in
-                [%sexp
-                  (List.length snapshot.queued_internal_events : int)
-                , (head : string option)
-                , (snapshot.halted : bool)]
-            in
-            let observed =
-              match current.lifecycle.observed with
-              | Failed error -> [%sexp "failed", (failure error : Sexp.t)]
-              | Stopped
-              | Queued_for_slot
-              | Starting
-              | Recovering
-              | Idle
-              | Running_turn _
-              | Compacting _
-              | Waiting_for_permission _
-              | Stopping ->
-                [%sexp (current.lifecycle.observed : P.Session.observed_state)]
-            in
-            Eio.traceln
-              "%s"
-              (Sexp.to_string_hum
-                 [%sexp
-                   (name : string)
-                 , (native_watch : bool)
-                 , (current.lifecycle.desired : P.Session.desired_state)
-                 , (observed : Sexp.t)
-                 , (current.halted : bool)
-                 , (active_operation : Sexp.t option)
-                 , (Option.map current.failure ~f:failure : Sexp.t option)
-                 , (queued : Sexp.t)
-                 , (subscriptions : Sexp.t list)
-                 , (failures : Sexp.t list)
-                 , (List.rev !restart_steps : (string * float) list)
-                 , ( "real seconds"
-                   , (Eio.Time.now (Eio.Stdenv.clock env) -. started : float) )
-                 , ("CPU seconds", (Stdlib.Sys.time () -. started_cpu : float))
-                 , ( "logical Mono seconds"
-                   , (Mtime.span started_mono (Eio.Time.Mono.now mono_clock)
-                      |> Mtime.Span.to_float_ns
-                      |> fun ns -> ns /. 1_000_000_000.
-                      : float) )
-                 , ("logical wall seconds", (Eio.Time.now clock -. started_wall : float))
-                 , (jobs : Sexp.t list)])
-          in
-          watched_session := Some parent_id;
-          last_observed_state := None;
-          Exn.protect
-            ~finally:(fun () ->
-              watched_session := None;
-              last_observed_state := None)
-            ~f:(fun () ->
-              (* Pinned Eio.Time.with_timeout is this timer-first Fiber.first.
-                 Log only the immutable last observation before cancellation
-                 joins: protected cleanup may otherwise prevent a timeout dump.
-                 This is cached state, not a fresh read at the deadline. *)
-              match
-                Eio.Fiber.first
-                  (fun () ->
-                     (* Observe recovered callback commits, including validation
-                        of the retained transcript. A paired control consumed the
-                        former ten-second budget in CPU work before committing;
-                        keep headroom without changing logical watch deadlines. *)
-                     Eio.Time.sleep (Eio.Stdenv.clock env) 30.;
-                     (match !last_observed_state with
-                      | Some current -> dump_last_observed current
-                      | None ->
-                        Eio.traceln
-                          "%s"
-                          (Sexp.to_string_hum
-                             [%sexp
-                               (name : string), "no parent state observed before deadline"]));
-                     Error `Timeout)
-                  (fun () -> Ok (f ()))
-              with
-              | Ok result -> result
-              | Error `Timeout ->
-                raise_s
-                  [%sexp
-                    (name : string)
-                  , "helper restart step timed out; last observed state logged at \
-                     deadline"])
-        in
-        let before_calls = !child_calls in
-        assert (
-          P.Session.equal_desired_state (state daemon parent_id).lifecycle.desired Running);
-        (* Both recovered completions request a turn. The automatic follow-up
-           budget may suppress a wake; it must never suppress their messages. *)
-        (match
-           step "cursor completion" (fun () ->
-             await_watch ~require_wake:false daemon parent_id cursor_watch)
-         with
-         | Failed error -> [%test_eq: string] "agent.read.cursor_expired" error.code
-         | result ->
-           restart_step "cursor completion";
-           raise_s
-             [%sexp
-               "expired cursor was not reported"
-             , (result : P.Completion.t)
-             , (List.rev !restart_steps : (string * float) list)]);
-        (match
-           step "receipt completion" (fun () ->
-             await_watch ~require_wake:false daemon parent_id receipt_watch)
-         with
-         | Failed error -> [%test_eq: string] "watcher.target_failed" error.code
-         | result ->
-           restart_step "receipt completion";
-           raise_s
-             [%sexp
-               "interrupted receipt was not reported"
-             , (result : P.Completion.t)
-             , (List.rev !restart_steps : (string * float) list)]);
-        [%test_eq: int] before_calls !child_calls;
-        check_notification daemon parent_id child_id;
-        check_watch_notifications daemon parent_id;
-        let pending_jobs () =
-          List.filter (state daemon parent_id).jobs ~f:(fun job ->
-            match job.status, job.delivery with
-            | ( (Succeeded | Failed _ | Cancelled | Interrupted _)
-              , (Delivered _ | Discarded _ | Not_required) ) -> false
-            | _ -> true)
-        in
-        (match
-           Eio.Time.with_timeout (Eio.Stdenv.clock env) 3. (fun () ->
-             await (fun () -> List.is_empty (pending_jobs ()));
-             Ok ())
-         with
-         | Ok () -> ()
-         | Error _ ->
-           raise_s
-             [%sexp "watch recovery left pending jobs", (pending_jobs () : P.Job.t list)]);
-        let child_handle =
-          H.attach
-            ~sw
-            ~clock:(Eio.Stdenv.clock env)
-            ~connection:client.connection
-            ~session_id:child_id
-            ~mode:Read_write
-            ~subscribe:false
-            ()
-          |> protocol_ok
-        in
-        step "stop child" (fun () ->
-          H.stop child_handle ~mode:Graceful |> protocol_ok |> ignore);
-        H.close child_handle);
-      with_daemon
-        ~grants:
-          [ grant "session_bridge" [ Create; Send; Read; Status; Wait; Stop ]
-          ; grant "session_view" [ Read; Status; Wait; Send ]
-          ]
-        (fun sw daemon client ->
-           let handle =
-             H.attach
-               ~sw
-               ~clock:(Eio.Stdenv.clock env)
-               ~connection:client.connection
-               ~session_id:parent_id
-               ~mode:Read_write
-               ~subscribe:false
-               ()
-             |> protocol_ok
-           in
-           H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
-           H.close handle;
-           (* Stored status/history remain readable; reactivating the old resource
+          step "stop child" (fun () ->
+            H.stop child_handle ~mode:Graceful |> protocol_ok |> ignore);
+          H.close child_handle);
+        with_daemon
+          ~grants:
+            [ grant "session_bridge" [ Create; Send; Read; Status; Wait; Stop ]
+            ; grant "session_view" [ Read; Status; Wait; Send ]
+            ]
+          (fun sw daemon client ->
+             let handle =
+               H.attach
+                 ~sw
+                 ~clock:(Eio.Stdenv.clock env)
+                 ~connection:client.connection
+                 ~session_id:parent_id
+                 ~mode:Read_write
+                 ~subscribe:false
+                 ()
+               |> protocol_ok
+             in
+             H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
+             H.close handle;
+             (* Stored status/history remain readable; reactivating the old resource
              binding must fail before any child provider/tool execution. *)
-           ignore
-             (bridge
-                sw
-                daemon
-                client
-                parent_id
-                "status"
-                (`Object [ "session_id", P.Id.Session.to_json child_id ])
-              |> complete);
-           let before = !child_calls in
-           let child_handle =
-             H.attach
-               ~sw
-               ~clock:(Eio.Stdenv.clock env)
-               ~connection:client.connection
-               ~session_id:child_id
-               ~mode:Read_write
-               ~subscribe:false
-               ()
-             |> protocol_ok
-           in
-           (match H.start child_handle ~queue_if_limited:false with
-            | Error _ -> ()
-            | Ok _ -> await (fun () -> Option.is_some (state daemon child_id).failure));
-           H.close child_handle;
-           [%test_eq: int] before !child_calls);
-      print_endline
-        "real shell helper lifecycle without native registrations, scoped grants, \
-         foreign denial and restart PASS")
+             ignore
+               (bridge
+                  sw
+                  daemon
+                  client
+                  parent_id
+                  "status"
+                  (`Object [ "session_id", P.Id.Session.to_json child_id ])
+                |> complete);
+             let before = !child_calls in
+             let child_handle =
+               H.attach
+                 ~sw
+                 ~clock:(Eio.Stdenv.clock env)
+                 ~connection:client.connection
+                 ~session_id:child_id
+                 ~mode:Read_write
+                 ~subscribe:false
+                 ()
+               |> protocol_ok
+             in
+             (match H.start child_handle ~queue_if_limited:false with
+              | Error _ -> ()
+              | Ok _ -> await (fun () -> Option.is_some (state daemon child_id).failure));
+             H.close child_handle;
+             [%test_eq: int] before !child_calls);
+        print_endline
+          "real shell helper lifecycle without native registrations, scoped grants, \
+           foreign denial and restart PASS"))
 ;;
 
 let () =
   let args = Sys.get_argv () in
-  let variants =
+  let variants, smoke =
     match Array.to_list args with
-    | [ _; _ ] -> [ false; true ]
-    | [ _; _; "native" ] -> [ true ]
-    | [ _; _; "helper" ] -> [ false ]
-    | _ -> failwith "Usage: agent_server_helper_test HELPER [native|helper]"
+    | [ _; _ ] -> [ false; true ], false
+    | [ _; _; "native" ] -> [ true ], false
+    | [ _; _; "helper" ] -> [ false ], false
+    | [ _; _; "native-smoke" ] -> [ true ], true
+    | [ _; _; "helper-smoke" ] -> [ false ], true
+    | _ ->
+      failwith
+        "Usage: agent_server_helper_test HELPER [native|helper|native-smoke|helper-smoke]"
   in
   Eio_main.run (fun env ->
     List.iter variants ~f:(fun native_watch ->
-      run env (Caml_unix.realpath args.(1)) ~native_watch))
+      run env (Caml_unix.realpath args.(1)) ~native_watch ~smoke))
 ;;

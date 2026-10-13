@@ -32,7 +32,7 @@
  (preprocess (pps ppx_jane)))
 
 (rule
- (alias runtest)
+ (alias agent-authoring-qualification)
  (action (run %{exe:evaluate.exe} --check)))
 
 (executable

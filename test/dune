@@ -951,7 +951,7 @@
 (executable
  (name agent_server_helper_test)
  (modules agent_server_helper_test agent_server_authored_helper_fixture)
- (libraries agent_server_test_support core core_unix eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (libraries helper_smoke_fixture agent_server_test_support core core_unix eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
  (preprocessor_deps
   (glob_files chatml_extensibility_fixtures/x07-helper-session/*)
   (glob_files chatml_extensibility_fixtures/x07-helper-session/bundle/*)
@@ -960,9 +960,9 @@
  (preprocess
   (pps ppx_jane ppx_blob)))
 
-; Distinct actions let Dune schedule both complete variants independently.
+; Complete variants remain explicit qualification; grouped smoke rules run in CI.
 (rule
- (alias runtest)
+ (alias agent-helper-qualification)
  (action
   (run
    %{exe:agent_server_helper_test.exe}
@@ -970,7 +970,7 @@
    helper)))
 
 (rule
- (alias runtest)
+ (alias agent-helper-qualification)
  (action
   (run
    %{exe:agent_server_helper_test.exe}

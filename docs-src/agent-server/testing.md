@@ -74,6 +74,36 @@ crash qualification. Use the affected aliases or `@agent-e2e-safe` for that wide
 matrix. Read [the alias definitions](../../test/agent_server_e2e/dune) before
 selecting a larger tier.
 
+### Complete offline workflow qualification
+
+The normal suite keeps focused helper, native watcher, stdio/HTTP session,
+compaction and child-isolation regressions. Longer workflow matrices are explicit
+qualification commands, outside both `runtest` and `@agent-e2e-pr`:
+
+```sh
+dune build --force -j 2 @agent-helper-qualification
+dune build --force -j 2 @agent-managed-qualification
+dune build --force -j 2 @agent-authoring-qualification
+# Run all three:
+dune build --force -j 2 @agent-qualification
+```
+
+| Qualification | Additional coverage |
+|---|---|
+| Helper | Complete helper and native watcher workflows, including multiple daemon lifetimes, operator grants, pagination, cancellation, retained-source recovery and revoked grants. |
+| Managed sessions | Complete stdio managed-send and HTTP authored-pending workflows, including transport lifetimes, timeout and restart combinations. |
+| Authoring | Full installed-reference compaction in root and child sessions, the complete documentation-lab reviewer workflow, and all 24 offline task/policy evaluation combinations. |
+
+Run the relevant qualification locally when changing those workflows, and run
+the aggregate for release qualification. These commands use offline providers;
+they require no model credentials. They are not scheduled or invoked by ordinary
+GitHub CI. Passing the required PR checks does not mean these broader matrices
+ran. Keep their results with the reviewed revision when reporting qualification.
+
+The focused tests retain real execution and permission boundaries. Broader tests
+must not be deleted merely to shorten the normal suite, and adding a focused test
+does not imply that it covers every combination in its qualification counterpart.
+
 The docs check covers local inline links and heading anchors throughout
 `docs-src`, the promoted `Readme.md`, and `DEVELOPMENT.md`, plus
 local HTML image targets. Heading extraction handles ATX/Setext headings,

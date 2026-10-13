@@ -110,8 +110,20 @@ let summary_events () =
     ]
 ;;
 
-let exercise with_session =
-  let stage = ref Initial_prepare in
+module Retrieval_scope = struct
+  type t =
+    | Full_package
+    | Selected_topic
+  [@@deriving equal, sexp]
+end
+
+let exercise ?(scope = Retrieval_scope.Full_package) with_session =
+  let stage =
+    ref
+      (match scope with
+       | Full_package -> Initial_prepare
+       | Selected_topic -> Initial_example)
+  in
   let compacting = ref false in
   let summary_requests = ref 0 in
   let request_number = ref 0 in
@@ -149,7 +161,10 @@ let exercise with_session =
     ~calls:
       [ ( !pending
         , "ochat_authoring_context"
-        , Q.request ~task:"background_workflow" ~max_tokens:1500 "prepare" )
+        , match scope with
+          | Full_package ->
+            Q.request ~task:"background_workflow" ~max_tokens:1500 "prepare"
+          | Selected_topic -> example )
       ]
     ~request_counts:(fun () -> !initial_count, !final_count)
     ~auxiliary_response:(fun inputs ->
@@ -355,7 +370,9 @@ let exercise with_session =
     ~settle:(fun env entry -> wait_idle env entry)
     (fun (state : State.t) ->
        assert (equal_stage !stage Finished);
-       assert (!partial_pages > 2);
+       (match scope with
+        | Full_package -> assert (!partial_pages > 2)
+        | Selected_topic -> ());
        assert (List.is_empty state.jobs);
        assert (List.is_empty state.deliveries);
        assert (Option.is_none state.moderator);
@@ -380,8 +397,13 @@ let exercise with_session =
            delivered
            (Option.is_some (model_invocation state id).authoring_reference));
        print_endline
-         "paginated background package -> persisted compaction -> manual pointer -> \
-          fresh retrieval -> moderator validation -> executed completion parser")
+         (match scope with
+          | Full_package ->
+            "paginated background package -> persisted compaction -> manual pointer -> \
+             fresh retrieval -> moderator validation -> executed completion parser"
+          | Selected_topic ->
+            "selected background contract -> persisted compaction -> manual pointer -> \
+             fresh retrieval -> moderator validation -> executed completion parser"))
 ;;
 
 let with_root
@@ -409,9 +431,10 @@ let with_root
 ;;
 
 let%expect_test
-    "X10 real background retrieval survives compaction through fresh query and authoring"
+    "selected background contract survives real root compaction and executes after \
+     refresh"
   =
-  exercise with_root;
+  exercise ~scope:Selected_topic with_root;
   [%expect
-    {| paginated background package -> persisted compaction -> manual pointer -> fresh retrieval -> moderator validation -> executed completion parser |}]
+    {| selected background contract -> persisted compaction -> manual pointer -> fresh retrieval -> moderator validation -> executed completion parser |}]
 ;;

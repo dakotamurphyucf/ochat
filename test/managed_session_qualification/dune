@@ -1,0 +1,16 @@
+(executable
+ (name main)
+ (modules main managed_send authored_pending)
+ (libraries agent_server_test_support agent_server_wire_fixture core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (preprocess (pps ppx_jane)))
+
+(rule
+ (alias agent-managed-qualification)
+ ; No inferred targets: ordinary @all builds must not run qualification.
+ ; Declare inputs explicitly because no-infer also disables dependency inference.
+ (deps expected.output main.exe (universe) (sandbox always))
+ (action
+  (no-infer
+   (progn
+    (with-stdout-to output.actual (run %{exe:main.exe}))
+    (diff expected.output output.actual)))))

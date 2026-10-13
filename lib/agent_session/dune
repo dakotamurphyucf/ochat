@@ -61,6 +61,8 @@
   persistence_codec
   session_state_presence
   session_state_document
+  session_decode_evidence
+  session_state_decode_evidence
   session_delta_document
   durable_event_document
   model_job_target

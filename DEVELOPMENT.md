@@ -620,6 +620,15 @@ when the changed inputs require them. Normal tests use `opam exec -- dune runtes
 `opam exec -- dune build --force @agent-e2e-pr`. Live-provider, load, soak and
 manual-terminal tiers remain separate.
 
+Complete helper/native watcher, managed-session and authoring workflow matrices
+also run explicitly, outside ordinary CI: `opam exec -- dune build --force -j 2
+@agent-qualification`. Select `@agent-helper-qualification`,
+`@agent-managed-qualification` or `@agent-authoring-qualification` for affected
+workflows. Normal tests retain focused runtime/transport/security regressions;
+the full matrices remain available for local change and release qualification.
+See [test tiers](docs-src/agent-server/testing.md#complete-offline-workflow-qualification)
+for the coverage split. A green PR does not certify the explicit matrices.
+
 Linux CI installs the committed `ochat.opam.locked` dependency set and verifies
 restored dependencies before testing. Update the lock and `.github/ci-toolchain.json`
 when changing `ochat.opam`/`dune-project` or source pins. The CI lock targets Linux;

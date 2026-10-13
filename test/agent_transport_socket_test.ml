@@ -312,6 +312,10 @@ let%expect_test "socket path preparation rejects live listeners and removes stal
         in
         let public_parent = Filename.concat root "public" in
         Eio.Path.mkdir ~perm:0o755 Eio.Path.(Eio.Stdenv.fs env / public_parent);
+        (* mkdir respects umask; this rejection needs an actually public parent. *)
+        Eio.Process.run
+          (Eio.Stdenv.process_mgr env)
+          [ "/bin/chmod"; "755"; public_parent ];
         let insecure_rejected =
           Agent_transport_socket.Server.prepare_path
             ~env
