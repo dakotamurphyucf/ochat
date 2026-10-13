@@ -54,7 +54,7 @@
 (library
  (name chatml_typechecker)
  (public_name ochat.chatml_typechecker)
- (modules chatml_typechecker chatml_type_snapshot chatml_semantic_binding chatml_semantic_recorder chatml_semantic_elaboration chatml_semantic_scope chatml_semantic_host chatml_inferred_type chatml_type_alias chatml_type_validity chatml_type_graph_copy chatml_type_graph_copy_tests chatml_type_probe chatml_type_scheme chatml_signature_check chatml_alias_equivalence chatml_value_scope chatml_configured_resolution)
+ (modules chatml_typechecker chatml_type_snapshot chatml_semantic_binding chatml_semantic_recorder chatml_semantic_elaboration chatml_semantic_scope chatml_semantic_host chatml_inferred_type chatml_type_alias chatml_type_validity chatml_type_graph_copy chatml_type_graph_copy_tests chatml_type_probe chatml_type_scheme chatml_signature_check chatml_alias_equivalence chatml_value_scope chatml_configured_resolution chatml_repl_type_roots)
  (private_modules chatml_type_graph_copy chatml_type_graph_copy_tests)
  (libraries core chatml chatml_graph)
  (preprocess
@@ -130,4 +130,11 @@
  (public_name ochat.chatml_configured_check)
  (modules chatml_configured_check)
  (libraries core chatml chatml_typechecker chatml_graph)
+ (preprocess (pps ppx_jane)))
+
+(library
+ (name chatml_repl_typing)
+ (public_name ochat.chatml_repl_typing)
+ (modules chatml_repl_typing)
+ (libraries core chatml chatml_source chatml_prepared_program chatml_graph chatml_typechecker chatml_configured_check)
  (preprocess (pps ppx_jane)))

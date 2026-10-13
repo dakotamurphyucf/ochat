@@ -51,3 +51,35 @@ val with_semantic_exn
   -> binding:Chatml_semantic_binding.t
   -> context:Chatml_semantic_recorder.Context.t
   -> t
+
+type scope = t
+
+module Roots : sig
+  (** Ordered active bindings and their exact provenance/semantic metadata for
+      one detached graph-copy operation. Superseded bindings are not roots.
+      [capture] checks the binding count before traversing the map and polls
+      each item. The snapshot retains raw schemes only inside the compiler. *)
+  type t
+
+  val capture
+    :  scope
+    -> max_bindings:int
+    -> checkpoint:(unit -> unit)
+    -> (t, [ `Binding_limit ]) Result.t
+
+  val schemes : t -> Chatml_inferred_type.typ list
+
+  (* Same exact order as [schemes], with bounded caller polling. *)
+  val names : t -> checkpoint:(unit -> unit) -> string list
+  val count : t -> int
+
+  (** Replace exactly the captured scheme vector in its original order while
+      preserving names, origins, source spans and semantic member metadata.
+      The caller supplies all schemes from ONE sharing-preserving graph copy.
+      Wrong cardinality rejects atomically; no original binding is mutated. *)
+  val with_schemes
+    :  t
+    -> Chatml_inferred_type.typ list
+    -> checkpoint:(unit -> unit)
+    -> (scope, [ `Wrong_root_count ]) Result.t
+end

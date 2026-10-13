@@ -404,59 +404,71 @@ module Repl_scope = struct
         Ok context))
   ;;
 
-  let validate_reference t ~context reference ~checkpoint =
-    checkpoint ();
+  let context_error t context =
     if t.epoch.closed
     then Error Error.Closed
     else (
       match context.repl with
       | None -> Error Error.Foreign_context
-      | Some (epoch, token) ->
+      | Some (epoch, _) ->
         if not (phys_equal epoch.witness t.epoch.witness)
+        then Error Error.Foreign_context
+        else if
+          not (Captured.Digest.equal context.input_fingerprint (input_fingerprint t))
         then Error Error.Foreign_context
         else if not (current context)
         then Error Error.Stale_context
-        else (
-          let use_source, use_digest = Reference.use_source reference in
-          let same_reference =
-            match reference.use_repl with
+        else Ok ())
+  ;;
+
+  let validate_context t context ~checkpoint =
+    let open Result.Let_syntax in
+    checkpoint ();
+    let%bind () = context_error t context in
+    checkpoint ();
+    context_error t context
+  ;;
+
+  let validate_reference t ~context reference ~checkpoint =
+    let open Result.Let_syntax in
+    let%bind () = validate_context t context ~checkpoint in
+    match context.repl with
+    | None -> Error Error.Foreign_context
+    | Some (epoch, token) ->
+      let use_source, use_digest = Reference.use_source reference in
+      let same_reference =
+        match reference.use_repl with
+        | None -> false
+        | Some (owner_epoch, owner_token) ->
+          phys_equal owner_epoch.witness t.epoch.witness
+          && phys_equal owner_token token
+          && Prepared.Module_id.equal (Reference.owner reference) context.owner
+          && Captured.Id.equal use_source (Captured.id context.source)
+          && Captured.Digest.equal use_digest (Captured.digest context.source)
+          && Phase.equal (Reference.phase reference) context.phase
+          && Captured.Digest.equal
+               (Reference.input_fingerprint reference)
+               context.input_fingerprint
+          && Captured.Id.equal
+               (Captured.id (Diagnostic.Site.source reference.site))
+               (Captured.id context.source)
+          && Captured.Digest.equal
+               (Captured.digest (Diagnostic.Site.source reference.site))
+               (Captured.digest context.source)
+          && (match reference.origin.repl_epoch with
+              | Some origin_epoch -> phys_equal origin_epoch.witness t.epoch.witness
+              | None -> false)
+          &&
+            (match Map.find context.bindings (Reference.name reference) with
             | None -> false
-            | Some (owner_epoch, owner_token) ->
-              phys_equal owner_epoch.witness t.epoch.witness
-              && phys_equal owner_token token
-              && Prepared.Module_id.equal (Reference.owner reference) context.owner
-              && Captured.Id.equal use_source (Captured.id context.source)
-              && Captured.Digest.equal use_digest (Captured.digest context.source)
-              && Phase.equal (Reference.phase reference) context.phase
-              && Captured.Digest.equal
-                   (Reference.input_fingerprint reference)
-                   context.input_fingerprint
-              && Captured.Id.equal
-                   (Captured.id (Diagnostic.Site.source reference.site))
-                   (Captured.id context.source)
-              && Captured.Digest.equal
-                   (Captured.digest (Diagnostic.Site.source reference.site))
-                   (Captured.digest context.source)
-              && (match reference.origin.repl_epoch with
-                  | Some origin_epoch -> phys_equal origin_epoch.witness t.epoch.witness
-                  | None -> false)
-              &&
-                (match Map.find context.bindings (Reference.name reference) with
-                | None -> false
-                | Some binding ->
-                  Prepared.Module_id.equal
-                    binding.dependency
-                    (Reference.dependency reference))
-          in
-          if not same_reference
-          then Error Error.Foreign_reference
-          else (
-            checkpoint ();
-            if t.epoch.closed
-            then Error Error.Closed
-            else if not (current context)
-            then Error Error.Stale_context
-            else Ok ())))
+            | Some binding ->
+              Prepared.Module_id.equal binding.dependency (Reference.dependency reference))
+      in
+      if not same_reference
+      then Error Error.Foreign_reference
+      else (
+        checkpoint ();
+        context_error t context)
   ;;
 
   let revoke t =
