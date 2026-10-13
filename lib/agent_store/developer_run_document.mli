@@ -55,6 +55,17 @@ val append_selected
   -> max_job_payload_bytes:int
   -> (t, Store_error.t) result
 
+(** Replace only the state of an existing exact job/attempt, preserving every
+    immutable field and advancing the document revision. The owning Store
+    decides whether the lifecycle transition is authorized. *)
+val set_job_state
+  :  t
+  -> poll:(unit -> unit)
+  -> id:Agent_protocol.Id.Job.t
+  -> expected_attempt:int
+  -> after:Agent_protocol.Developer_job.State.t
+  -> (t, Store_error.t) result
+
 val append_epoch
   :  t
   -> owner:Agent_protocol.Execution_owner.developer

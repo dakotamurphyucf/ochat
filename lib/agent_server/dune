@@ -60,6 +60,7 @@
   session_capacity
   start_scheduler
   job_capacity
+  developer_job_worker
   job_scheduler
   permission_review_service
   permission_scheduler

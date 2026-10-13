@@ -229,3 +229,124 @@ let terminal_selected t document ~observed ~terminal ~selected =
     in
     if List.is_empty selected then Ok next else append_selected t next selected
 ;;
+
+let claim t document ~observed ~now =
+  let id = P.Developer_job.id observed in
+  match Doc.find_job document id with
+  | None -> Error Error.Conflict
+  | Some prior when not (P.Developer_job.same_immutable prior observed) ->
+    Error Error.Conflict
+  | Some prior ->
+    let state = P.Developer_job.state prior in
+    if
+      (not (Int.equal state.attempt (P.Developer_job.state observed).attempt))
+      || state.attempt = Int.max_value
+      || (not (P.Execution_owner.equal_developer (P.Developer_job.owner prior) t.owner))
+      ||
+      match state.status with
+      | P.Job.Queued -> false
+      | Running
+      | Waiting_permission _
+      | Waiting_completion _
+      | Succeeded
+      | Failed _
+      | Cancelled
+      | Interrupted _ -> true
+    then Error Error.Conflict
+    else if
+      Option.value_map state.next_run_at ~default:false ~f:(fun due ->
+        P.Timestamp.compare now due < 0)
+    then Error Error.Conflict
+    else (
+      let after : P.Developer_job.State.t =
+        { status = P.Job.Running
+        ; attempt = state.attempt + 1
+        ; started_at = Some now
+        ; next_run_at = None
+        ; completed_at = None
+        ; result = None
+        ; retry_failure = None
+        }
+      in
+      let* _ =
+        P.Developer_job.with_state prior after
+        |> Result.map_error ~f:(fun _ -> Error.Conflict)
+      in
+      Doc.set_job_state document ~poll:t.poll ~id ~expected_attempt:state.attempt ~after
+      |> store)
+;;
+
+let terminal_status = function
+  | P.Job.Succeeded | Failed _ | Cancelled | Interrupted _ -> true
+  | Queued | Running | Waiting_permission _ | Waiting_completion _ -> false
+;;
+
+let legal_claimed_transition ~current_epoch before after =
+  let old_status = before.P.Developer_job.State.status in
+  let new_status = after.P.Developer_job.State.status in
+  if not current_epoch
+  then (
+    match old_status with
+    | P.Job.Running | Waiting_permission _ -> terminal_status new_status
+    | Queued | Waiting_completion _ | Succeeded | Failed _ | Cancelled | Interrupted _ ->
+      false)
+  else (
+    match old_status, new_status with
+    | Running, Waiting_permission _ | Waiting_permission _, Running -> true
+    | (Running | Waiting_permission _), (Queued | Waiting_completion _) -> true
+    | (Running | Waiting_permission _), (Succeeded | Failed _ | Cancelled | Interrupted _)
+      -> true
+    | ( (Queued | Waiting_completion _ | Succeeded | Failed _ | Cancelled | Interrupted _)
+      , _ ) -> false
+    | Running, Running | Waiting_permission _, Waiting_permission _ -> false)
+;;
+
+let claimed_transition
+      t
+      document
+      ~claimed
+      ~(after : P.Developer_job.State.t)
+      ~current_epoch
+  =
+  let id = P.Developer_job.id claimed in
+  match Doc.find_job document id with
+  | None -> Error Error.Conflict
+  | Some prior when not (P.Developer_job.same_immutable prior claimed) ->
+    Error Error.Conflict
+  | Some prior ->
+    let before = P.Developer_job.state prior in
+    let issued = P.Developer_job.state claimed in
+    if
+      (not (P.Execution_owner.equal_developer (P.Developer_job.owner prior) t.owner))
+      || (not (Int.equal before.attempt issued.attempt))
+      || (not (Int.equal after.attempt issued.attempt))
+      || (not (legal_claimed_transition ~current_epoch before after))
+      || (not
+            (Option.equal
+               (fun left right -> Int.equal (P.Timestamp.compare left right) 0)
+               before.started_at
+               issued.started_at))
+      ||
+      match after.status with
+      | P.Job.Queued -> Option.is_some after.started_at
+      | Running
+      | Waiting_permission _
+      | Waiting_completion _
+      | Succeeded
+      | Failed _
+      | Cancelled
+      | Interrupted _ ->
+        not
+          (Option.equal
+             (fun left right -> Int.equal (P.Timestamp.compare left right) 0)
+             after.started_at
+             issued.started_at)
+    then Error Error.Conflict
+    else
+      let* _ =
+        P.Developer_job.with_state prior after
+        |> Result.map_error ~f:(fun _ -> Error.Conflict)
+      in
+      Doc.set_job_state document ~poll:t.poll ~id ~expected_attempt:before.attempt ~after
+      |> store
+;;
