@@ -1,0 +1,5 @@
+(library
+ (name language_highlighting_tests)
+ (libraries core notty uutf ochat.language_highlighting ochat.chatml_source ochat.chatmd_source_input ochat.chatml ochat.terminal_highlighting ochat.terminal_source_highlighting chat_tui)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

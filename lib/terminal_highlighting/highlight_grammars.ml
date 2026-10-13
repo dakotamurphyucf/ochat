@@ -1,6 +1,8 @@
 open Core
 
 let ocaml_tm_json = [%blob "grammars/ocaml.json"]
+let chatml_tm_json = [%blob "grammars/chatml.json"]
+let chatmd_tm_json = [%blob "grammars/chatmd.json"]
 let markdown_tm_json = [%blob "grammars/markdown.tmLanguage.json"]
 let python_tm_json = [%blob "grammars/vscode/python.json"]
 let python_regexp_tm_json = [%blob "grammars/vscode/python-regexp.json"]
@@ -17,6 +19,13 @@ let add_embedded_grammar (reg : Highlight_tm_loader.registry) contents : unit Or
 ;;
 
 let add_ocaml reg = add_embedded_grammar reg ocaml_tm_json
+let add_chatml reg = add_embedded_grammar reg chatml_tm_json
+
+let add_chatmd reg =
+  let open Or_error.Let_syntax in
+  let%bind () = add_chatml reg in
+  add_embedded_grammar reg chatmd_tm_json
+;;
 
 let add_python reg =
   let open Or_error.Let_syntax in

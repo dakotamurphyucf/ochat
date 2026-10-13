@@ -19,6 +19,7 @@ end
 
 type resources =
   { registry : Highlight_tm_loader.registry
+  ; baseline : Highlight_registry.Baseline.t
   ; engine : Highlight_tm_engine.t
   ; code_cache : Job.Code_cache.t
   ; highlight_cache : Job.Highlight_cache.t
@@ -34,7 +35,7 @@ type t =
 
 let build ~config ~code_cache_capacity =
   let open Or_error.Let_syntax in
-  let registry = Highlight_registry.create () in
+  let registry, baseline = Highlight_registry.create_with_baseline () in
   let%map () =
     List.fold_result config.Config.custom_grammars ~init:() ~f:(fun () source ->
       Highlight_tm_loader.add_grammar_jsonaf registry (Source.json source)
@@ -46,6 +47,7 @@ let build ~config ~code_cache_capacity =
     |> Highlight_tm_engine.with_registry ~registry
   in
   { registry
+  ; baseline
   ; engine
   ; code_cache = Job.Code_cache.create ~capacity:code_cache_capacity
   ; highlight_cache = Job.Highlight_cache.create ~capacity:code_cache_capacity
@@ -77,6 +79,7 @@ let render t ?is_cancelled job =
       ~hi_engine:resources.engine
       ~theme_generation:(theme_generation t)
       ~grammar_generation:(grammar_generation t)
+      ~source_grammar_baseline:resources.baseline
       ?is_cancelled
       ~code_cache:resources.code_cache
       ~highlight_cache:resources.highlight_cache
@@ -88,6 +91,13 @@ let render t ?is_cancelled job =
 ;;
 
 module For_testing = struct
+  let uses_bundled_source t language =
+    Highlight_registry.Baseline.uses_bundled_grammar
+      t.resources.baseline
+      t.resources.engine
+      ~language
+  ;;
+
   let has_language t language =
     Highlight_tm_loader.find_grammar_by_lang_tag t.resources.registry language
     |> Option.is_some

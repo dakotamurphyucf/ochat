@@ -70,6 +70,14 @@ type scoped_span =
     ]} *)
 val create : theme:Highlight_theme.t -> t
 
+(** The active immutable theme, including after {!with_theme}. *)
+val theme : t -> Highlight_theme.t
+
+(** Whether this engine borrows this exact frontend registry. A custom
+    registry can change grammar precedence; callers may use this to keep
+    explicit grammar selection on the TextMate path. *)
+val uses_registry : t -> registry:Highlight_tm_loader.registry -> bool
+
 (** [with_theme t ~theme] returns a highlighter using [theme] with a new empty
     resolver cache. Useful for switching palettes without retaining previous
     theme lookups. *)

@@ -99,6 +99,23 @@ let%test_unit "a custom grammar in one runtime does not leak to another" =
   assert (not (Runtime.For_testing.has_language bundled_runtime "worker-private"))
 ;;
 
+let%test_unit "worker keeps per-language bundled source ownership through rebuild" =
+  let runtime = runtime ~custom_grammars:[ grammar ] 12 in
+  assert (Runtime.For_testing.uses_bundled_source runtime `Chatml);
+  assert (Runtime.For_testing.uses_bundled_source runtime `Chatmd);
+  let replacement =
+    {|{"name":"ChatML","scopeName":"source.chatml","patterns":[]}|}
+    |> Jsonaf.parse
+    |> Or_error.ok_exn
+    |> Source.create ~name:"chatml-override.json"
+    |> Or_error.ok_exn
+  in
+  Runtime.rebuild runtime ~config:(config ~custom_grammars:[ grammar; replacement ] 13)
+  |> Or_error.ok_exn;
+  assert (not (Runtime.For_testing.uses_bundled_source runtime `Chatml));
+  assert (Runtime.For_testing.uses_bundled_source runtime `Chatmd)
+;;
+
 let%test_unit "rebuild atomically replaces registry generation and cache" =
   let runtime = runtime 9 in
   ignore (Runtime.render runtime (job 9) : Job.result);

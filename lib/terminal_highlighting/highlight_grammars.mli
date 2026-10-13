@@ -21,6 +21,18 @@ open Core
     be parsed or converted. *)
 val add_ocaml : Highlight_tm_loader.registry -> unit Or_error.t
 
+(** Add the selected ChatML lexical grammar (scope [source.chatml], filetypes
+    [.chatml] and [.chatmli]). It follows ChatML spelling, not OCaml's syntax,
+    and makes no claim about successful parsing or inferred semantics. Embedded
+    bytes are available without a source checkout. *)
+val add_chatml : Highlight_tm_loader.registry -> unit Or_error.t
+
+(** Add ChatMD (scope [text.chatmd], filetype [.chatmd]) and its ChatML include.
+    An inline script is embedded as ChatML only when its opening tag explicitly
+    selects [language="chatml"]; other script bodies keep a generic script scope.
+    TextMate scopes are display hints, not parser-certified source maps. *)
+val add_chatmd : Highlight_tm_loader.registry -> unit Or_error.t
+
 (** [add_python reg] adds the bundled VS Code Python grammar and its regular
     expression companion grammar (scope names ["source.python"] and
     ["source.regexp.python"]) to [reg].

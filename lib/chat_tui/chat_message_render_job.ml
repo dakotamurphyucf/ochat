@@ -504,6 +504,7 @@ module Runtime = struct
     { hi_engine : Highlight_tm_engine.t
     ; theme_generation : int
     ; grammar_generation : int
+    ; source_grammar_baseline : Highlight_registry.Baseline.t option
     ; is_cancelled : unit -> bool
     ; code_cache : Code_cache.t option
     ; highlight_cache : Highlight_cache.t option
@@ -515,6 +516,7 @@ module Runtime = struct
         ~hi_engine
         ~theme_generation
         ~grammar_generation
+        ?source_grammar_baseline
         ?(is_cancelled = fun () -> false)
         ?code_cache
         ?highlight_cache
@@ -525,6 +527,7 @@ module Runtime = struct
     { hi_engine
     ; theme_generation
     ; grammar_generation
+    ; source_grammar_baseline
     ; is_cancelled
     ; code_cache
     ; highlight_cache
@@ -536,6 +539,7 @@ module Runtime = struct
   let hi_engine t = t.hi_engine
   let theme_generation t = t.theme_generation
   let grammar_generation t = t.grammar_generation
+  let source_grammar_baseline t = t.source_grammar_baseline
   let is_cancelled t = t.is_cancelled
   let code_cache t = t.code_cache
   let highlight_cache t = t.highlight_cache
