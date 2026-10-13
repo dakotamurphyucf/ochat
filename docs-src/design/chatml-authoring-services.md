@@ -156,6 +156,18 @@ does not require upload transport for local overlay analysis, and never fetches
 missing dependencies. Only its validated result reaches compiler analysis or
 separate execution admission.
 
+The captured project composer requires explicit owner-local dependency routes:
+each selected authored dependency name maps to one exact qualified captured
+project declaration. It checks those associations against the decoded project,
+selected environment, namespace and existing project selection gate. For an
+overlay, routes come from the previously admitted lock and the old lock source
+must remain exact; the entire effective generation is recomposed under one
+bounded budget. A prior Build is coherence evidence, not a live read or Git
+grant. A standalone upload binds its routes in the durable tagged manifest
+before validating a captured-only graph. These routes describe a virtual
+captured closure. They do not prove that an authored Local directory resolves
+to a native host directory, and cannot authorize later filesystem reads.
+
 Initially retain at most the latest immutable analysis result per context under
 an explicit byte bound. Replace it on graph, overlay, environment or host-policy
 change. A multi-entry cache needs measured justification. Source count, total
@@ -316,9 +328,10 @@ The portable bundle client requires the separately selected
 `authoring.bundle.v1` feature, which does not require `authoring.core.v1`.
 Wire receipts echo authenticated host/principal comparison coordinates and
 the upload ID. A pending commit is distinct from a Published receipt; only
-OCH-264's complete closure validation may publish graph, compiler-contract,
-environment, manifest identity and finite expiry. The manifest fingerprint is
-a versioned digest of the exact qualified project source, selection and sorted
+OCH-296's proof-gated owner may publish a validated graph, compiler-contract,
+environment, manifest identity and finite expiry. The tagged manifest
+fingerprint binds its explicit Project or ChatMD document basis, captured root
+and selection, exact owner-local project routes when applicable, and sorted
 member ID/digest/length inventory. `Source.Portable_path` rejects exact,
 ASCII-case and file/directory prefix conflicts within each source namespace.
 Storage/receipt ownership and pure closure validation/publication are separate
@@ -379,8 +392,10 @@ client contract (8);
 OCH-280 analysis, lexical and assistance wire/client contract (5); OCH-281
 bundle wire/client contract (5); OCH-282 document-only context host admission
 (5); OCH-262 HTTP/stdio server adapters (5); OCH-263 authoring bundle
-staging/storage/receipt (8); and OCH-264 pure closure validation/publication
-(5). OCH-261 includes separate live host browse/read and captured source read.
+staging/storage/receipt (8); and OCH-264 as an unestimated tracking parent for
+OCH-294 captured project closure validation, OCH-295 tagged ChatMD and project
+upload basis, and OCH-296 durable proof-gated publication. OCH-261 includes
+separate live host browse/read and captured source read.
 OCH-133, OCH-134 and OCH-135 retain their own assistance and highlighting
 outcomes. The run/test/trace/REPL implementation belongs to its developer-runtime
 tickets. Assign estimates before starting each ticket and link completion

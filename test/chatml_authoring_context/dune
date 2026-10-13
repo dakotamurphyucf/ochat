@@ -4,6 +4,6 @@
 (library
  (name chatml_authoring_context_tests)
  (modules support fixtures context_tests)
- (libraries core jsonaf source chatml_source chatml_prepared_program document_schema chatml_project chatml_catalog chatml_project_build chatml chatml_authoring_context expect_test_helpers_core)
+ (libraries core jsonaf source chatml_source chatml_prepared_program document_schema chatml_project chatml_catalog chatml_project_build chatml chatml_authoring_context chatml_authoring_effective expect_test_helpers_core)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))
