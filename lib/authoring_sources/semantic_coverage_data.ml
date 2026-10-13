@@ -241,7 +241,7 @@ let features =
       ; "test/chatml_module_scope/type_scope_tests.ml"
       ] )
   ; ( "scope.configured_dependencies"
-    , "Source-owned configured checking and entry-rooted value dependency selection"
+    , "Source-owned configured checking, REPL lookup provenance and entry-rooted value dependency selection"
     , [ "lib/chatml_graph/chatml_configured_lookup.ml"
       ; "lib/chatml_graph/chatml_dependency_graph.ml"
       ; "lib/chatml_graph/chatml_dependency_session.ml"
@@ -274,6 +274,7 @@ let features =
       ]
     , "chatml.inference"
     , [ "test/chatml_graph/configured_checker_tests.ml"
+      ; "test/chatml_graph/repl_scope_tests.ml"
       ; "test/chatml_linked/linkage_tests.ml"
       ; "test/chatml_linked/inference_tests.ml"
       ; "test/chatml_linked/contract_tests.ml"
@@ -428,7 +429,7 @@ let implementation_sources =
   ; ( "lib/chatml/chatml_table_snapshot.ml"
     , "e303927cdb84dba6c6616dc1b48b672cd1d6a74b741ac37b0f3b979576398a92" )
   ; ( "lib/chatml_graph/chatml_configured_lookup.ml"
-    , "c34afbab927cd26ce0ca4fca9062c12786e6b04bfa3e50a520223294105c7934" )
+    , "bd089d5dba0cae1e8df2ab759228f88c9f3aa523da3dd38682c9976a3bc9e3f5" )
   ; ( "lib/chatml_graph/chatml_dependency_graph.ml"
     , "61b968e8bb38885385f1779628ca7d11cc76c621491ca957cc3fc4d93c755e0f" )
   ; ( "lib/chatml_graph/chatml_dependency_session.ml"
