@@ -15,6 +15,13 @@ module Read_policy = struct
   let deny_all = { authorize = (fun _ ~root_index:_ -> false) }
 end
 
+module Document_policy = struct
+  type t = { authorize : Actor.t -> bool }
+
+  let create ~authorize = { authorize }
+  let deny_all = { authorize = (fun _ -> false) }
+end
+
 module Limits = struct
   type t =
     { max_contexts : int
@@ -71,6 +78,7 @@ module Error = struct
     | Root of Roots.Error.t
     | Local of Local.Error.t
     | Project of Project.Error.t
+    | Source_capture of Core.Error.t
 
   let sexp_of_t = function
     | Unauthorized -> Sexp.Atom "Unauthorized"
@@ -86,6 +94,7 @@ module Error = struct
     | Root error -> [%sexp "Root", (Roots.Error.code error : Roots.Error.code)]
     | Local error -> [%sexp "Local", (error : Local.Error.t)]
     | Project _ -> Sexp.Atom "Project"
+    | Source_capture _ -> Sexp.Atom "Source_capture"
   ;;
 end
 
@@ -116,10 +125,21 @@ module Entry = struct
   let member t = t.member
 end
 
+module Document_capture = struct
+  type t = { source : Captured.t }
+
+  let source t = t.source
+end
+
+type grant =
+  | Roots of Root.t list
+  | Supplied
+
 type t =
   { domain : int
   ; source_host : Sources.t
   ; read_policy : Read_policy.t
+  ; document_policy : Document_policy.t
   ; limits : Limits.t
   ; identity : unit ref
   ; mutable closed : bool
@@ -133,17 +153,29 @@ type t =
 and context =
   { host : t
   ; original_actor : Actor.t
-  ; root : Root.t
-  ; dependency_roots : Root.t list
-  ; project : Path.t
-  ; selection : Chatml_project.Selection.request
-  ; contract : Chatml.Chatml_compiler_contract.t
+  ; grant : grant
   ; mutable closed : bool
   ; mutable busy : bool
   ; mutable attempts : int
   ; mutable read_bytes : int
   ; mutable cancel : Eio.Cancel.t option
   ; idle : Eio.Condition.t
+  }
+
+type project_context =
+  { common : context
+  ; root : Root.t
+  ; dependency_roots : Root.t list
+  ; project : Path.t
+  ; selection : Chatml_project.Selection.request
+  ; contract : Chatml.Chatml_compiler_contract.t
+  }
+
+type document_context =
+  { common : context
+  ; root : Root.t option
+  ; member : Path.t
+  ; source_id : Captured.Id.t
   }
 
 type host = t
@@ -238,12 +270,13 @@ let close_all_and_wait host =
   ignore (Eio.Switch.try_remove_hook host.release_hook : bool)
 ;;
 
-let create source_host ~sw ~read_policy ~limits =
+let create source_host ~sw ~read_policy ~document_policy ~limits =
   Eio.Switch.check sw;
   let host =
     { domain = domain ()
     ; source_host
     ; read_policy
+    ; document_policy
     ; limits
     ; identity = ref ()
     ; closed = false
@@ -304,124 +337,214 @@ let roots host ~actor ~checkpoint =
                 |> Result.map ~f:(fun () -> selected))))))
 ;;
 
-module Context = struct
-  type t = context
+let check_all context actor =
+  let open Result.Let_syntax in
+  let%bind () = check_host context.host in
+  let%bind () = if context.closed then Error Error.Closed else Ok () in
+  let%bind () =
+    if (not (Actor.is_current context.original_actor)) || not (Actor.is_current actor)
+    then Error Error.Expired_actor
+    else if not (same_principal context.original_actor actor)
+    then Error Error.Unauthorized
+    else Ok ()
+  in
+  match context.grant with
+  | Roots roots ->
+    List.fold_result roots ~init:() ~f:(fun () root ->
+      let%bind () = check_root context.host ~actor:context.original_actor root in
+      check_root context.host ~actor root)
+  | Supplied ->
+    if
+      context.host.document_policy.authorize context.original_actor
+      && context.host.document_policy.authorize actor
+    then Ok ()
+    else Error Error.Unauthorized
+;;
 
-  let root t = t.root
+let make_context host ~actor ~grant =
+  let open Result.Let_syntax in
+  let%bind () = check_host host in
+  let context =
+    { host
+    ; original_actor = actor
+    ; grant
+    ; closed = false
+    ; busy = false
+    ; attempts = 0
+    ; read_bytes = 0
+    ; cancel = None
+    ; idle = Eio.Condition.create ()
+    }
+  in
+  let%bind () = check_all context actor in
+  if List.length host.contexts >= host.limits.max_contexts
+  then Error Error.Context_limit
+  else (
+    host.contexts <- context :: host.contexts;
+    Ok context)
+;;
 
-  let check_all t actor =
-    let open Result.Let_syntax in
-    let%bind () = check_host t.host in
-    let%bind () = if t.closed then Error Error.Closed else Ok () in
-    let%bind () = check_root t.host ~actor:t.original_actor t.root in
-    let%bind () =
-      if same_principal t.original_actor actor && Actor.is_current actor
-      then Ok ()
-      else if not (Actor.is_current actor)
-      then Error Error.Expired_actor
-      else Error Error.Unauthorized
+exception Revoked of Error.t
+
+let with_operation context ~actor f =
+  let open Result.Let_syntax in
+  let%bind () = check_all context actor in
+  if context.busy
+  then Error Error.Busy
+  else if context.attempts >= context.host.limits.max_context_requests
+  then Error Error.Result_limit
+  else (
+    context.attempts <- context.attempts + 1;
+    context.busy <- true;
+    let poll checkpoint () =
+      (match check_all context actor with
+       | Ok () -> ()
+       | Error error -> raise (Revoked error));
+      checkpoint ();
+      match check_all context actor with
+      | Ok () -> ()
+      | Error error -> raise (Revoked error)
     in
-    List.fold_result (t.root :: t.dependency_roots) ~init:() ~f:(fun () root ->
-      check_root t.host ~actor root)
-  ;;
+    try
+      Exn.protect
+        ~finally:(fun () ->
+          context.cancel <- None;
+          context.busy <- false;
+          Eio.Condition.broadcast context.idle)
+        ~f:(fun () ->
+          with_active (Source_context context) (fun () ->
+            Eio.Cancel.sub (fun cancel ->
+              context.cancel <- Some cancel;
+              let result = f (poll : (unit -> unit) -> unit -> unit) in
+              match check_all context actor with
+              | Ok () -> result
+              | Error error -> Error error)))
+    with
+    | Revoked error -> Error error)
+;;
+
+let selected_anchors all selected =
+  Result.all
+    (List.map selected ~f:(fun root ->
+       match List.nth all root.Root.index with
+       | None -> Error Error.Foreign_root
+       | Some pair -> Ok pair))
+;;
+
+let with_local_root context root ~actor ~checkpoint f =
+  with_operation context ~actor (fun poll ->
+    let poll = poll checkpoint in
+    Sources.with_authoring
+      context.host.source_host
+      ~f:(fun ~roots ~policy ~limits:_ ~max_request_bytes:_ ->
+        let open Result.Let_syntax in
+        poll ();
+        let%bind selected = selected_anchors roots [ root ] in
+        let prefix, anchor = List.hd_exn selected in
+        Roots.with_anchors
+          [ anchor ]
+          ~limits:(Project.Policy.root_limits policy)
+          ~checkpoint:poll
+          ~f:(fun roots ->
+            match Roots.resolve roots ~base:None ~locator:prefix ~checkpoint:poll with
+            | Error error -> Error (Error.Root error)
+            | Ok cursor -> f (Roots.Cursor.owner cursor) ~policy ~poll)
+        |> Result.map_error ~f:(function
+          | `Roots error -> Error.Root error
+          | `Callback error -> error))
+    |> Result.map_error ~f:(fun error -> Error.Sources error)
+    |> Result.bind ~f:Fn.id)
+;;
+
+let list_directory_on_root context root ~actor ~directory ~checkpoint =
+  with_local_root context root ~actor ~checkpoint (fun owner ~policy ~poll ->
+    let maximum =
+      Int.min
+        context.host.limits.max_browse_entries
+        (Chatml_local_capture.Limits.directory_entries
+           (Project.Policy.local_limits policy))
+    in
+    let entries =
+      Local.fold_directory
+        owner
+        ~directory
+        ~max_entries:maximum
+        ~init:[]
+        ~checkpoint:poll
+        ~f:(fun reversed ~name ->
+          let member =
+            match directory with
+            | None -> name
+            | Some directory -> Path.to_string directory ^ "/" ^ name
+          in
+          match Path.create member with
+          | Error _ -> Ok reversed
+          | Ok member -> Ok ({ Entry.member } :: reversed))
+    in
+    let open Result.Let_syntax in
+    let%map entries, _ =
+      Result.map_error entries ~f:(function
+        | `Filesystem error -> Error.Local error
+        | `Callback error -> error)
+    in
+    List.sort (List.rev entries) ~compare:(fun a b -> Path.compare a.member b.member))
+;;
+
+let read_local context owner ~policy ~member ~poll =
+  let remaining = context.host.limits.max_context_read_bytes - context.read_bytes in
+  if remaining <= 0
+  then Error Error.Result_limit
+  else (
+    let maximum =
+      Int.min
+        (Int.min context.host.limits.max_read_bytes remaining)
+        (Chatml_local_capture.Limits.source_bytes (Project.Policy.local_limits policy))
+    in
+    let open Result.Let_syntax in
+    let%map contents =
+      Local.read owner ~member ~max_bytes:maximum ~checkpoint:poll
+      |> Result.map_error ~f:(fun error -> Error.Local error)
+    in
+    context.read_bytes <- context.read_bytes + String.length contents;
+    contents)
+;;
+
+let read_member_on_root context root ~actor ~member ~checkpoint =
+  with_local_root context root ~actor ~checkpoint (fun owner ~policy ~poll ->
+    read_local context owner ~policy ~member ~poll)
+;;
+
+module Context = struct
+  type t = project_context
+
+  let root (t : t) = t.root
 
   let open_root host ~actor ~root ~dependency_roots ~project ~selection ~contract =
     let open Result.Let_syntax in
-    let%bind () = check_host host in
-    let%bind () = check_root host ~actor root in
     let selected = root :: dependency_roots in
     let rec validate count seen = function
       | [] -> Ok ()
       | candidate :: rest ->
         if count >= Project_source_configuration.maximum_external_roots
         then Error Error.Result_limit
-        else (
-          let%bind () = check_root host ~actor candidate in
-          if Set.mem seen candidate.Root.index
-          then Error Error.Foreign_root
-          else validate (count + 1) (Set.add seen candidate.index) rest)
+        else if Set.mem seen candidate.Root.index
+        then Error Error.Foreign_root
+        else validate (count + 1) (Set.add seen candidate.index) rest
     in
     let%bind () = validate 0 Int.Set.empty selected in
-    if List.length host.contexts >= host.limits.max_contexts
-    then Error Error.Context_limit
-    else (
-      let context =
-        { host
-        ; original_actor = actor
-        ; root
-        ; dependency_roots
-        ; project
-        ; selection
-        ; contract
-        ; closed = false
-        ; busy = false
-        ; attempts = 0
-        ; read_bytes = 0
-        ; cancel = None
-        ; idle = Eio.Condition.create ()
-        }
-      in
-      host.contexts <- context :: host.contexts;
-      Ok context)
+    let%map common = make_context host ~actor ~grant:(Roots selected) in
+    { common; root; dependency_roots; project; selection; contract }
   ;;
 
-  exception Revoked of Error.t
-
-  let with_operation t ~actor f =
-    let open Result.Let_syntax in
-    let%bind () = check_all t actor in
-    if t.busy
-    then Error Error.Busy
-    else if t.attempts >= t.host.limits.max_context_requests
-    then Error Error.Result_limit
-    else (
-      t.attempts <- t.attempts + 1;
-      t.busy <- true;
-      let poll checkpoint () =
-        (match check_all t actor with
-         | Ok () -> ()
-         | Error error -> raise (Revoked error));
-        checkpoint ();
-        match check_all t actor with
-        | Ok () -> ()
-        | Error error -> raise (Revoked error)
-      in
-      try
-        Exn.protect
-          ~finally:(fun () ->
-            t.cancel <- None;
-            t.busy <- false;
-            Eio.Condition.broadcast t.idle)
-          ~f:(fun () ->
-            with_active (Source_context t) (fun () ->
-              Eio.Cancel.sub (fun cancel ->
-                t.cancel <- Some cancel;
-                let result = f (poll : (unit -> unit) -> unit -> unit) in
-                match check_all t actor with
-                | Ok () -> result
-                | Error error -> Error error)))
-      with
-      | Revoked error -> Error error)
-  ;;
-
-  let selected_anchors all t =
-    let select root =
-      match List.nth all root.Root.index with
-      | None -> Error Error.Foreign_root
-      | Some pair -> Ok pair
-    in
-    Result.all (List.map (t.root :: t.dependency_roots) ~f:select)
-  ;;
-
-  let capture t ~actor ~clock ~checkpoint =
-    with_operation t ~actor (fun poll ->
+  let capture (t : t) ~actor ~clock ~checkpoint =
+    with_operation t.common ~actor (fun poll ->
       let poll = poll checkpoint in
       Sources.with_authoring
-        t.host.source_host
+        t.common.host.source_host
         ~f:(fun ~roots ~policy ~limits ~max_request_bytes ->
           let open Result.Let_syntax in
           poll ();
-          let%bind selected = selected_anchors roots t in
+          let%bind selected = selected_anchors roots (t.root :: t.dependency_roots) in
           let root_prefix, _ = List.hd_exn selected in
           let anchors = List.map selected ~f:snd in
           let%bind source_host =
@@ -466,7 +589,9 @@ module Context = struct
             | _ -> Error Error.Unsupported_source_selection
           in
           let capture = { Capture.build } in
-          if List.length (Capture.sources capture) > t.host.limits.max_manifest_entries
+          if
+            List.length (Capture.sources capture)
+            > t.common.host.limits.max_manifest_entries
           then Error Error.Result_limit
           else (
             poll ();
@@ -475,87 +600,126 @@ module Context = struct
       |> Result.bind ~f:Fn.id)
   ;;
 
-  let with_local_root t ~actor ~checkpoint f =
-    with_operation t ~actor (fun poll ->
-      let poll = poll checkpoint in
-      Sources.with_authoring
-        t.host.source_host
-        ~f:(fun ~roots ~policy ~limits:_ ~max_request_bytes:_ ->
-          let open Result.Let_syntax in
-          poll ();
-          let%bind selected = selected_anchors roots t in
-          let prefix, anchor = List.hd_exn selected in
-          Roots.with_anchors
-            [ anchor ]
-            ~limits:(Project.Policy.root_limits policy)
+  let list_directory (t : t) ~actor ~directory ~checkpoint =
+    list_directory_on_root t.common t.root ~actor ~directory ~checkpoint
+  ;;
+
+  let read_member (t : t) ~actor ~member ~checkpoint =
+    read_member_on_root t.common t.root ~actor ~member ~checkpoint
+  ;;
+
+  let close_and_wait (t : t) = close_context_and_wait t.common
+end
+
+module Document_context = struct
+  type t = document_context
+
+  module Origin = struct
+    type t =
+      | Host_member
+      | Supplied
+    [@@deriving equal, sexp_of]
+  end
+
+  let origin t = if Option.is_some t.root then Origin.Host_member else Origin.Supplied
+  let source_id t = t.source_id
+  let check_current t ~actor = check_all t.common actor
+
+  let mint_source_id member =
+    let nonce = Agent_protocol.Id.Transaction.(create () |> to_string) in
+    Captured.Id.create
+      ~package_namespace:("@ochat.authoring.document." ^ nonce)
+      ~relative_path:(Path.to_string member)
+    |> Result.map_error ~f:(fun error -> Error.Source_capture error)
+  ;;
+
+  let close_failed common f =
+    match f () with
+    | Ok capture -> Ok capture
+    | Error error ->
+      close_context_and_wait common;
+      Error error
+    | exception exn ->
+      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      close_context_and_wait common;
+      Exn.raise_with_original_backtrace exn backtrace
+  ;;
+
+  let capture_host t ~actor ~checkpoint =
+    match t.root with
+    | None -> Error Error.Unsupported_source_selection
+    | Some root ->
+      with_local_root t.common root ~actor ~checkpoint (fun owner ~policy ~poll ->
+        let open Result.Let_syntax in
+        let%bind contents = read_local t.common owner ~policy ~member:t.member ~poll in
+        let%map source =
+          Captured.create
+            t.source_id
+            ~contents
+            ~expected_digest:None
+            ~max_bytes:(Some t.common.host.limits.max_read_bytes)
             ~checkpoint:poll
-            ~f:(fun roots ->
-              match Roots.resolve roots ~base:None ~locator:prefix ~checkpoint:poll with
-              | Error error -> Error (Error.Root error)
-              | Ok cursor -> f (Roots.Cursor.owner cursor) ~policy ~poll)
-          |> Result.map_error ~f:(function
-            | `Roots error -> Error.Root error
-            | `Callback error -> error))
-      |> Result.map_error ~f:(fun error -> Error.Sources error)
-      |> Result.bind ~f:Fn.id)
+          |> Result.map_error ~f:(fun error -> Error.Source_capture error)
+        in
+        { Document_capture.source })
+  ;;
+
+  let open_host host ~actor ~root ~member ~checkpoint =
+    let open Result.Let_syntax in
+    let%bind source_id = mint_source_id member in
+    let%bind common = make_context host ~actor ~grant:(Roots [ root ]) in
+    let document = { common; root = Some root; member; source_id } in
+    let%map capture =
+      close_failed common (fun () -> capture_host document ~actor ~checkpoint)
+    in
+    document, capture
+  ;;
+
+  let open_supplied host ~actor ~member ~contents ~checkpoint =
+    let open Result.Let_syntax in
+    let%bind source_id = mint_source_id member in
+    let%bind common = make_context host ~actor ~grant:Supplied in
+    let document = { common; root = None; member; source_id } in
+    let%map capture =
+      close_failed common (fun () ->
+        with_operation common ~actor (fun poll ->
+          let poll = poll checkpoint in
+          let bytes = String.length contents in
+          if
+            bytes > host.limits.max_read_bytes
+            || bytes > host.limits.max_context_read_bytes
+          then Error Error.Result_limit
+          else (
+            let%map source =
+              Captured.create
+                source_id
+                ~contents
+                ~expected_digest:None
+                ~max_bytes:(Some host.limits.max_read_bytes)
+                ~checkpoint:poll
+              |> Result.map_error ~f:(fun error -> Error.Source_capture error)
+            in
+            common.read_bytes <- bytes;
+            { Document_capture.source })))
+    in
+    document, capture
+  ;;
+
+  let refresh t ~actor ~checkpoint =
+    let open Result.Let_syntax in
+    let%bind () = check_current t ~actor in
+    capture_host t ~actor ~checkpoint
   ;;
 
   let list_directory t ~actor ~directory ~checkpoint =
-    with_local_root t ~actor ~checkpoint (fun owner ~policy ~poll ->
-      let maximum =
-        Int.min
-          t.host.limits.max_browse_entries
-          (Chatml_local_capture.Limits.directory_entries
-             (Project.Policy.local_limits policy))
-      in
-      let entries =
-        Local.fold_directory
-          owner
-          ~directory
-          ~max_entries:maximum
-          ~init:[]
-          ~checkpoint:poll
-          ~f:(fun reversed ~name ->
-            let member =
-              match directory with
-              | None -> name
-              | Some directory -> Path.to_string directory ^ "/" ^ name
-            in
-            match Path.create member with
-            | Error _ -> Ok reversed
-            | Ok member -> Ok ({ Entry.member } :: reversed))
-      in
-      let open Result.Let_syntax in
-      let%map entries, _ =
-        Result.map_error entries ~f:(function
-          | `Filesystem error -> Error.Local error
-          | `Callback error -> error)
-      in
-      List.sort (List.rev entries) ~compare:(fun a b -> Path.compare a.member b.member))
+    let open Result.Let_syntax in
+    let%bind () = check_current t ~actor in
+    match t.root with
+    | None -> Error Error.Unsupported_source_selection
+    | Some root -> list_directory_on_root t.common root ~actor ~directory ~checkpoint
   ;;
 
-  let read_member t ~actor ~member ~checkpoint =
-    with_local_root t ~actor ~checkpoint (fun owner ~policy ~poll ->
-      let remaining = t.host.limits.max_context_read_bytes - t.read_bytes in
-      if remaining <= 0
-      then Error Error.Result_limit
-      else (
-        let maximum =
-          Int.min
-            (Int.min t.host.limits.max_read_bytes remaining)
-            (Chatml_local_capture.Limits.source_bytes
-               (Project.Policy.local_limits policy))
-        in
-        let open Result.Let_syntax in
-        let%map contents =
-          Local.read owner ~member ~max_bytes:maximum ~checkpoint:poll
-          |> Result.map_error ~f:(fun error -> Error.Local error)
-        in
-        t.read_bytes <- t.read_bytes + String.length contents;
-        contents))
-  ;;
-
-  let close_and_wait t = close_context_and_wait t
+  let close_and_wait t = close_context_and_wait t.common
 end
 
 let close_and_wait = close_all_and_wait

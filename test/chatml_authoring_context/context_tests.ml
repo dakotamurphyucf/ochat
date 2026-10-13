@@ -539,3 +539,254 @@ let%expect_test "one overlay lifecycle" =
     ((generation 2) (open_documents 0) (contents "let main = 0"))
     |}]
 ;;
+
+let document_source contents =
+  S.create
+    (Support.id ~namespace:"document" "draft.chatmd")
+    ~contents
+    ~expected_digest:None
+    ~max_bytes:None
+    ~checkpoint:ignore
+  |> Support.ok
+;;
+
+let document_limits ~total =
+  C.Limits.create
+    ~max_contexts:2
+    ~max_sources:8
+    ~max_open_documents:1
+    ~max_document_bytes:64
+    ~max_effective_input_bytes:4096
+    ~max_context_source_bytes:(Int.min total 4096)
+    ~max_total_source_bytes:total
+  |> Or_error.ok_exn
+;;
+
+let%test_unit "document basis admits empty and malformed bytes without a graph" =
+  let empty = document_source "" in
+  let malformed = document_source "\255unfinished `chatml" in
+  let first = identity "document-empty" in
+  let second = identity "document-malformed" in
+  let store = C.create ~limits:(document_limits ~total:128) in
+  expect_error
+    (C.admit_document
+       store
+       ~identity:first
+       ~base:empty
+       ~requested_environment:(Some "")
+       ~checkpoint:ignore)
+    ~is_expected:(function
+    | C.Error.Invalid_requested_environment -> true
+    | _ -> false);
+  let store =
+    C.admit_document
+      store
+      ~identity:first
+      ~base:empty
+      ~requested_environment:None
+      ~checkpoint:ignore
+    |> ok
+  in
+  let store =
+    C.admit_document
+      store
+      ~identity:second
+      ~base:malformed
+      ~requested_environment:(Some "desired")
+      ~checkpoint:ignore
+    |> ok
+  in
+  [%test_eq: int] (C.context_count store) 2;
+  [%test_eq: int] (C.charged_source_bytes store) (S.byte_length malformed);
+  assert (Option.is_none (C.find store ~identity:first));
+  assert (Option.is_none (C.analysis_key store ~identity:second));
+  [%test_eq: string]
+    (C.document_inputs store ~identity:second ~checkpoint:ignore
+     |> ok
+     |> C.Document.Inputs.source
+     |> S.contents)
+    (S.contents malformed);
+  let generation =
+    C.find_document store ~identity:second
+    |> Option.value_exn
+    |> C.Document.View.generation
+  in
+  expect_error (C.inputs store ~identity:second ~checkpoint:ignore) ~is_expected:(function
+    | C.Error.Unsupported_basis -> true
+    | _ -> false);
+  expect_error
+    (C.note_analysis
+       store
+       ~identity:second
+       ~expected:generation
+       ~validated_graph:(B.prepared (snd (base ())) |> P.fingerprint))
+    ~is_expected:(function
+      | C.Error.Unsupported_basis -> true
+      | _ -> false);
+  let token = version store second (S.id malformed) in
+  let store =
+    C.replace
+      store
+      ~expected:token
+      ~next_revision:(revision 1)
+      ~contents:"new"
+      ~checkpoint:ignore
+    |> ok
+  in
+  [%test_eq: string]
+    (C.document_inputs store ~identity:second ~checkpoint:ignore
+     |> ok
+     |> C.Document.Inputs.source
+     |> S.contents)
+    "new";
+  let store =
+    C.close_document store ~expected:(version store second (S.id malformed)) |> ok
+  in
+  [%test_eq: string]
+    (C.document_inputs store ~identity:second ~checkpoint:ignore
+     |> ok
+     |> C.Document.Inputs.source
+     |> S.contents)
+    (S.contents malformed);
+  [%test_eq: int] (C.charged_source_bytes store) (S.byte_length malformed)
+;;
+
+let%test_unit "document overlay and static selection conserve independent charges" =
+  let _, build = base () in
+  let prepared = B.prepared build in
+  let source_bytes = P.accounting prepared |> P.Accounting.source_bytes in
+  let input_bytes = P.accounting prepared |> P.Accounting.input_bytes in
+  let source_count = P.accounting prepared |> P.Accounting.source_count in
+  let doc = document_source "text" in
+  let id = identity "document-static" in
+  let requested = P.environment prepared |> P.Environment.name in
+  let limits =
+    C.Limits.create
+      ~max_contexts:1
+      ~max_sources:(source_count + 1)
+      ~max_open_documents:1
+      ~max_document_bytes:64
+      ~max_effective_input_bytes:(input_bytes + 3)
+      ~max_context_source_bytes:(source_bytes + 7)
+      ~max_total_source_bytes:(source_bytes + 7)
+    |> Or_error.ok_exn
+  in
+  let store =
+    C.create ~limits
+    |> fun store ->
+    C.admit_document
+      store
+      ~identity:id
+      ~base:doc
+      ~requested_environment:(Some requested)
+      ~checkpoint:ignore
+    |> ok
+  in
+  let view store = C.find_document store ~identity:id |> Option.value_exn in
+  let check store ~generation ~selected_bytes ~overlay_bytes ~static =
+    let view = view store in
+    let expected_charge =
+      S.byte_length doc + overlay_bytes + if static then source_bytes else 0
+    in
+    let expected_effective = selected_bytes + if static then input_bytes else 0 in
+    [%test_eq: int] (C.Document.View.generation view |> C.Generation.to_int) generation;
+    [%test_eq: int] (C.Document.View.charged_source_bytes view) expected_charge;
+    [%test_eq: int] (C.charged_source_bytes store) expected_charge;
+    [%test_eq: int]
+      (C.Document.View.open_document_count view)
+      (if overlay_bytes > 0 then 1 else 0);
+    [%test_eq: int]
+      (S.byte_length
+         (C.document_inputs store ~identity:id ~checkpoint:ignore
+          |> ok
+          |> C.Document.Inputs.source))
+      selected_bytes;
+    [%test_eq: int]
+      (C.document_inputs store ~identity:id ~checkpoint:ignore
+       |> ok
+       |> C.Document.Inputs.effective_input_bytes)
+      expected_effective;
+    assert (Bool.equal (Option.is_some (C.Document.View.static_graph view)) static);
+    assert (expected_effective <= input_bytes + 3)
+  in
+  check store ~generation:0 ~selected_bytes:4 ~overlay_bytes:0 ~static:false;
+  let store =
+    C.replace
+      store
+      ~expected:(version store id (S.id doc))
+      ~next_revision:(revision 1)
+      ~contents:"abcd"
+      ~checkpoint:ignore
+    |> ok
+  in
+  check store ~generation:1 ~selected_bytes:4 ~overlay_bytes:4 ~static:false;
+  expect_error
+    (C.attach_document_static
+       store
+       ~identity:id
+       ~expected:(C.Document.View.generation (view store))
+       ~build
+       ~checkpoint:ignore)
+    ~is_expected:(function
+      | C.Error.Limit_exceeded -> true
+      | _ -> false);
+  check store ~generation:1 ~selected_bytes:4 ~overlay_bytes:4 ~static:false;
+  let store =
+    C.replace
+      store
+      ~expected:(version store id (S.id doc))
+      ~next_revision:(revision 2)
+      ~contents:"abc"
+      ~checkpoint:ignore
+    |> ok
+  in
+  check store ~generation:2 ~selected_bytes:3 ~overlay_bytes:3 ~static:false;
+  let store =
+    C.attach_document_static
+      store
+      ~identity:id
+      ~expected:(C.Document.View.generation (view store))
+      ~build
+      ~checkpoint:ignore
+    |> ok
+  in
+  check store ~generation:3 ~selected_bytes:3 ~overlay_bytes:3 ~static:true;
+  assert (Option.is_none (C.analysis_key store ~identity:id));
+  expect_error
+    (C.replace
+       store
+       ~expected:(version store id (S.id doc))
+       ~next_revision:(revision 3)
+       ~contents:"abcd"
+       ~checkpoint:ignore)
+    ~is_expected:(function
+      | C.Error.Limit_exceeded -> true
+      | _ -> false);
+  check store ~generation:3 ~selected_bytes:3 ~overlay_bytes:3 ~static:true;
+  let store =
+    C.detach_document_static
+      store
+      ~identity:id
+      ~expected:(C.Document.View.generation (view store))
+    |> ok
+  in
+  check store ~generation:4 ~selected_bytes:3 ~overlay_bytes:3 ~static:false;
+  let fresh = identity "document-static-refreshed" in
+  let store =
+    C.refresh_document
+      store
+      ~identity:id
+      ~expected:(C.Document.View.generation (view store))
+      ~new_identity:fresh
+      ~base:doc
+      ~policy:Discard_open_documents
+      ~checkpoint:ignore
+    |> ok
+  in
+  assert (Option.is_none (C.find_document store ~identity:id));
+  [%test_eq: int] (C.charged_source_bytes store) (S.byte_length doc);
+  assert (
+    Option.is_none
+      (C.Document.View.static_graph
+         (C.find_document store ~identity:fresh |> Option.value_exn)))
+;;

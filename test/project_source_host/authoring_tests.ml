@@ -55,7 +55,14 @@ let with_source_context f =
           ~max_context_read_bytes:2048
         |> Or_error.ok_exn
       in
-      let host = Authoring.create sources ~sw ~read_policy:policy ~limits in
+      let host =
+        Authoring.create
+          sources
+          ~sw
+          ~read_policy:policy
+          ~document_policy:Authoring.Document_policy.deny_all
+          ~limits
+      in
       let root = Authoring.roots host ~actor:allowed ~checkpoint:ignore |> authoring_ok in
       [%test_eq: int] (List.length root) 1;
       [%test_eq: int]
@@ -130,6 +137,229 @@ let%test_unit "authoring context captures a local project and reads only its gra
     | Error Authoring.Error.Unauthorized -> ()
     | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
     | Ok _ -> failwith "foreign actor read admitted")
+;;
+
+let%test_unit "host document captures exact bytes without project preparation" =
+  with_source_context (fun _ root _ allowed denied _ host _ root_path ->
+    Eio.Path.save
+      ~create:(`Or_truncate 0o600)
+      Eio.Path.(root_path / "draft.chatmd")
+      "\255unfinished `chatml";
+    let member = Path.create "draft.chatmd" |> Or_error.ok_exn in
+    let context, captured =
+      Authoring.Document_context.open_host
+        host
+        ~actor:allowed
+        ~root
+        ~member
+        ~checkpoint:ignore
+      |> authoring_ok
+    in
+    Exn.protect
+      ~finally:(fun () -> Authoring.Document_context.close_and_wait context)
+      ~f:(fun () ->
+        [%test_eq: string]
+          (Authoring.Document_capture.source captured |> Captured.contents)
+          "\255unfinished `chatml";
+        assert (
+          Captured.Id.equal
+            (Authoring.Document_context.source_id context)
+            (Authoring.Document_capture.source captured |> Captured.id));
+        (match
+           Authoring.Document_context.refresh context ~actor:denied ~checkpoint:ignore
+         with
+         | Error Authoring.Error.Unauthorized -> ()
+         | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+         | Ok _ -> failwith "foreign actor refreshed document");
+        Eio.Path.save
+          ~create:(`Or_truncate 0o600)
+          Eio.Path.(root_path / "draft.chatmd")
+          "";
+        let refreshed =
+          Authoring.Document_context.refresh context ~actor:allowed ~checkpoint:ignore
+          |> authoring_ok
+        in
+        [%test_eq: string]
+          (Authoring.Document_capture.source refreshed |> Captured.contents)
+          "";
+        [%test_eq: string]
+          (Authoring.Document_capture.source captured |> Captured.contents)
+          "\255unfinished `chatml"))
+;;
+
+let%test_unit "supplied document needs its own actor policy and no read root" =
+  with_source_context (fun _ _ _ allowed denied sources _ _ _ ->
+    Eio.Switch.run (fun sw ->
+      let limits =
+        Authoring.Limits.create
+          ~max_contexts:1
+          ~max_context_requests:3
+          ~max_manifest_entries:2
+          ~max_browse_entries:2
+          ~max_read_bytes:16
+          ~max_context_read_bytes:16
+        |> Or_error.ok_exn
+      in
+      let denied_host =
+        Authoring.create
+          sources
+          ~sw
+          ~read_policy:Authoring.Read_policy.deny_all
+          ~document_policy:Authoring.Document_policy.deny_all
+          ~limits
+      in
+      let member = Path.create "scratch.chatmd" |> Or_error.ok_exn in
+      (match
+         Authoring.Document_context.open_supplied
+           denied_host
+           ~actor:allowed
+           ~member
+           ~contents:""
+           ~checkpoint:ignore
+       with
+       | Error Authoring.Error.Unauthorized -> ()
+       | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+       | Ok _ -> failwith "denied supplied document admitted");
+      Authoring.close_and_wait denied_host;
+      let policy =
+        Authoring.Document_policy.create ~authorize:(fun actor ->
+          P.Id.Principal.equal
+            (Operator_authorization.principal actor).id
+            (Operator_authorization.principal allowed).id)
+      in
+      let host =
+        Authoring.create
+          sources
+          ~sw
+          ~read_policy:Authoring.Read_policy.deny_all
+          ~document_policy:policy
+          ~limits
+      in
+      let context, captured =
+        Authoring.Document_context.open_supplied
+          host
+          ~actor:allowed
+          ~member
+          ~contents:"\255broken"
+          ~checkpoint:ignore
+        |> authoring_ok
+      in
+      [%test_eq: string]
+        (Authoring.Document_capture.source captured |> Captured.contents)
+        "\255broken";
+      ignore
+        (Authoring.Document_context.check_current context ~actor:allowed |> authoring_ok
+         : unit);
+      (match Authoring.Document_context.check_current context ~actor:denied with
+       | Error Authoring.Error.Unauthorized -> ()
+       | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+       | Ok () -> failwith "foreign actor read pinned document bytes");
+      (match Authoring.Document_context.origin context with
+       | Authoring.Document_context.Origin.Supplied -> ()
+       | Host_member -> failwith "supplied document gained root origin");
+      (match
+         Authoring.Document_context.list_directory
+           context
+           ~actor:allowed
+           ~directory:None
+           ~checkpoint:ignore
+       with
+       | Error Authoring.Error.Unsupported_source_selection -> ()
+       | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+       | Ok _ -> failwith "supplied document browsed host root");
+      (match
+         Authoring.Document_context.refresh context ~actor:allowed ~checkpoint:ignore
+       with
+       | Error Authoring.Error.Unsupported_source_selection -> ()
+       | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+       | Ok _ -> failwith "supplied document refreshed from host");
+      (match
+         Authoring.Document_context.refresh context ~actor:denied ~checkpoint:ignore
+       with
+       | Error Authoring.Error.Unauthorized -> ()
+       | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+       | Ok _ -> failwith "foreign actor observed supplied origin");
+      (match
+         Authoring.Document_context.open_supplied
+           host
+           ~actor:denied
+           ~member
+           ~contents:""
+           ~checkpoint:ignore
+       with
+       | Error Authoring.Error.Unauthorized -> ()
+       | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+       | Ok _ -> failwith "foreign actor supplied bytes");
+      Authoring.Document_context.close_and_wait context;
+      (match Authoring.Document_context.check_current context ~actor:allowed with
+       | Error Authoring.Error.Closed -> ()
+       | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+       | Ok () -> failwith "closed context read pinned document bytes");
+      let current = ref true in
+      let original =
+        Operator_authorization.guarded
+          ~principal:(Operator_authorization.principal allowed)
+          ~is_current:(fun () -> !current)
+      in
+      let retained, _ =
+        Authoring.Document_context.open_supplied
+          host
+          ~actor:original
+          ~member
+          ~contents:""
+          ~checkpoint:ignore
+        |> authoring_ok
+      in
+      current := false;
+      (match Authoring.Document_context.check_current retained ~actor:allowed with
+       | Error Authoring.Error.Expired_actor -> ()
+       | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+       | Ok () -> failwith "expired original actor read pinned document bytes");
+      Authoring.Document_context.close_and_wait retained;
+      Authoring.close_and_wait host))
+;;
+
+let%test_unit "nested project work cannot close active document context" =
+  with_source_context (fun _ root project allowed _ _ host _ _ ->
+    let member = Path.create "main.chatml" |> Or_error.ok_exn in
+    let document, _ =
+      Authoring.Document_context.open_host
+        host
+        ~actor:allowed
+        ~root
+        ~member
+        ~checkpoint:ignore
+      |> authoring_ok
+    in
+    Exn.protect
+      ~finally:(fun () -> Authoring.Document_context.close_and_wait document)
+      ~f:(fun () ->
+        let entered = ref false in
+        let refreshed =
+          Authoring.Document_context.refresh
+            document
+            ~actor:allowed
+            ~checkpoint:(fun () ->
+              if not !entered
+              then (
+                entered := true;
+                ignore
+                  (Authoring.Context.read_member
+                     project
+                     ~actor:allowed
+                     ~member
+                     ~checkpoint:(fun () ->
+                       match Authoring.Document_context.close_and_wait document with
+                       | exception Invalid_argument _ -> ()
+                       | () -> failwith "nested close self-joined")
+                   |> authoring_ok
+                   : string)))
+          |> authoring_ok
+        in
+        assert !entered;
+        [%test_eq: string]
+          (Authoring.Document_capture.source refreshed |> Captured.contents)
+          "let main = 1\n"))
 ;;
 
 let%test_unit "same-context reentry rejects Busy before a second source borrow" =
@@ -239,7 +469,14 @@ let%test_unit "host switch release closes retained contexts" =
           Authoring.Read_policy.create ~authorize:(fun _ ~root_index ->
             Int.equal root_index 0)
         in
-        let host = Authoring.create sources ~sw ~read_policy:policy ~limits in
+        let host =
+          Authoring.create
+            sources
+            ~sw
+            ~read_policy:policy
+            ~document_policy:Authoring.Document_policy.deny_all
+            ~limits
+        in
         let root =
           Authoring.roots host ~actor:allowed ~checkpoint:ignore
           |> authoring_ok
@@ -287,7 +524,14 @@ let%test_unit "root enumeration rechecks grant before publication" =
           ~max_context_read_bytes:1024
         |> Or_error.ok_exn
       in
-      let host = Authoring.create sources ~sw ~read_policy:policy ~limits in
+      let host =
+        Authoring.create
+          sources
+          ~sw
+          ~read_policy:policy
+          ~document_policy:Authoring.Document_policy.deny_all
+          ~limits
+      in
       match Authoring.roots host ~actor:allowed ~checkpoint:ignore with
       | Error Authoring.Error.Unauthorized -> ()
       | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
@@ -312,7 +556,14 @@ let%test_unit "operator policy exception preserves identity" =
           ~max_context_read_bytes:1024
         |> Or_error.ok_exn
       in
-      let host = Authoring.create sources ~sw ~read_policy:policy ~limits in
+      let host =
+        Authoring.create
+          sources
+          ~sw
+          ~read_policy:policy
+          ~document_policy:Authoring.Document_policy.deny_all
+          ~limits
+      in
       match Authoring.roots host ~actor:allowed ~checkpoint:ignore with
       | exception Policy_raised -> ()
       | exception exn -> raise exn
@@ -354,7 +605,14 @@ let%test_unit "host close cancels and joins a yielding root enumeration" =
       let policy =
         Authoring.Read_policy.create ~authorize:(fun _ ~root_index:_ -> true)
       in
-      let host = Authoring.create sources ~sw ~read_policy:policy ~limits in
+      let host =
+        Authoring.create
+          sources
+          ~sw
+          ~read_policy:policy
+          ~document_policy:Authoring.Document_policy.deny_all
+          ~limits
+      in
       let entered, resolve_entered = Eio.Promise.create () in
       let worker =
         Eio.Fiber.fork_promise ~sw (fun () ->
@@ -397,7 +655,14 @@ let%test_unit "root enumeration cannot self-close its host" =
       let policy =
         Authoring.Read_policy.create ~authorize:(fun _ ~root_index:_ -> true)
       in
-      let host = Authoring.create sources ~sw ~read_policy:policy ~limits in
+      let host =
+        Authoring.create
+          sources
+          ~sw
+          ~read_policy:policy
+          ~document_policy:Authoring.Document_policy.deny_all
+          ~limits
+      in
       let checked = ref false in
       let checkpoint () =
         if not !checked
@@ -433,7 +698,14 @@ let%test_unit "nested source contexts cannot hide an outer self-join" =
         Authoring.Read_policy.create ~authorize:(fun _ ~root_index ->
           Int.equal root_index 0)
       in
-      let host = Authoring.create sources ~sw ~read_policy:policy ~limits in
+      let host =
+        Authoring.create
+          sources
+          ~sw
+          ~read_policy:policy
+          ~document_policy:Authoring.Document_policy.deny_all
+          ~limits
+      in
       let root =
         Authoring.roots host ~actor:allowed ~checkpoint:ignore
         |> authoring_ok
@@ -492,7 +764,7 @@ let%test_unit "nested source contexts cannot hide an outer self-join" =
 
 let%test_unit "owner switch release joins externally switched source work" =
   with_source_context (fun env _ _ allowed _ sources _ _ _ ->
-    List.iter [ `Roots; `Capture ] ~f:(fun mode ->
+    List.iter [ `Roots; `Capture; `Document_open ] ~f:(fun mode ->
       Eio.Switch.run (fun caller_sw ->
         let worker =
           Eio.Switch.run (fun owner_sw ->
@@ -510,12 +782,23 @@ let%test_unit "owner switch release joins externally switched source work" =
               Authoring.Read_policy.create ~authorize:(fun _ ~root_index ->
                 Int.equal root_index 0)
             in
+            let document_policy =
+              match mode with
+              | `Document_open ->
+                Authoring.Document_policy.create ~authorize:(fun _ -> true)
+              | `Roots | `Capture -> Authoring.Document_policy.deny_all
+            in
             let host =
-              Authoring.create sources ~sw:owner_sw ~read_policy:policy ~limits
+              Authoring.create
+                sources
+                ~sw:owner_sw
+                ~read_policy:policy
+                ~document_policy
+                ~limits
             in
             let context =
               match mode with
-              | `Roots -> None
+              | `Roots | `Document_open -> None
               | `Capture ->
                 let root =
                   Authoring.roots host ~actor:allowed ~checkpoint:ignore
@@ -558,15 +841,32 @@ let%test_unit "owner switch release joins externally switched source work" =
                           ~clock:env#mono_clock
                           ~checkpoint
                         : (Authoring.Capture.t, Authoring.Error.t) Result.t)
+                   | `Document_open, None ->
+                     let member = Path.create "draft.chatmd" |> Or_error.ok_exn in
+                     ignore
+                       (Authoring.Document_context.open_supplied
+                          host
+                          ~actor:allowed
+                          ~member
+                          ~contents:"draft"
+                          ~checkpoint
+                        : ( Authoring.Document_context.t * Authoring.Document_capture.t
+                            , Authoring.Error.t )
+                            Result.t)
                    | _ -> failwith "invalid lifecycle case");
                   false
                 with
                 | Eio.Cancel.Cancelled _ -> true)
             in
             Eio.Promise.await entered;
-            worker)
+            worker, host)
         in
-        assert (Eio.Promise.await_exn worker))))
+        let worker, host = worker in
+        assert (Eio.Promise.await_exn worker);
+        match Authoring.roots host ~actor:allowed ~checkpoint:ignore with
+        | Error Authoring.Error.Closed -> ()
+        | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+        | Ok _ -> failwith "switch-released host admitted more work")))
 ;;
 
 let%test_unit "grant identity, actor lifetime and read budgets fail closed" =
@@ -587,7 +887,14 @@ let%test_unit "grant identity, actor lifetime and read budgets fail closed" =
         Authoring.Read_policy.create ~authorize:(fun _ ~root_index ->
           Int.equal root_index 0)
       in
-      let host = Authoring.create sources ~sw ~read_policy:policy ~limits in
+      let host =
+        Authoring.create
+          sources
+          ~sw
+          ~read_policy:policy
+          ~document_policy:Authoring.Document_policy.deny_all
+          ~limits
+      in
       let root =
         Authoring.roots host ~actor:allowed ~checkpoint:ignore
         |> authoring_ok
