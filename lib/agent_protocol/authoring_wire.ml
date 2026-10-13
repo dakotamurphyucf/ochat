@@ -4,6 +4,7 @@ module A = Authoring_common
 module X = Authoring_context
 module B = Authoring_bundle.Bundle
 module S = Authoring_analysis
+module H = Authoring_assistance
 
 let map decode wrap json = Result.map (decode json) ~f:wrap
 
@@ -38,6 +39,8 @@ module Request = struct
     | Analyze of S.Analyze.Request.t
     | Prefix of S.Prefix.Request.t
     | Query of S.Query.Request.t
+    | Lexical of H.Lexical.Request.t
+    | Assistance of H.Assistance.Request.t
   [@@deriving sexp_of]
 
   let method_name = function
@@ -60,6 +63,8 @@ module Request = struct
     | Analyze _ -> A.Method.to_string A.Method.Analyze
     | Prefix _ -> A.Method.to_string A.Method.Prefix
     | Query _ -> A.Method.to_string A.Method.Query
+    | Lexical _ -> A.Method.to_string A.Method.Lexical
+    | Assistance _ -> A.Method.to_string A.Method.Assistance
   ;;
 
   let params = function
@@ -81,6 +86,8 @@ module Request = struct
     | Analyze request -> S.Analyze.Request.to_json request
     | Prefix request -> S.Prefix.Request.to_json request
     | Query request -> S.Query.Request.to_json request
+    | Lexical request -> H.Lexical.Request.to_json request
+    | Assistance request -> H.Assistance.Request.to_json request
   ;;
 
   let decoders =
@@ -113,6 +120,8 @@ module Request = struct
     ; "authoring.analysis", map S.Analyze.Request.of_json (fun x -> Analyze x)
     ; "authoring.prefix", map S.Prefix.Request.of_json (fun x -> Prefix x)
     ; "authoring.query", map S.Query.Request.of_json (fun x -> Query x)
+    ; "authoring.lexical", map H.Lexical.Request.of_json (fun x -> Lexical x)
+    ; "authoring.assistance", map H.Assistance.Request.of_json (fun x -> Assistance x)
     ]
   ;;
 
@@ -146,6 +155,8 @@ module Response = struct
     | Analyze of S.Analyze.t
     | Prefix of S.Prefix.t
     | Query of S.Query.t
+    | Lexical of H.Lexical.Result.t
+    | Assistance of H.Assistance.Result.t
   [@@deriving sexp_of]
 
   let method_name = function
@@ -168,6 +179,8 @@ module Response = struct
     | Analyze _ -> A.Method.to_string A.Method.Analyze
     | Prefix _ -> A.Method.to_string A.Method.Prefix
     | Query _ -> A.Method.to_string A.Method.Query
+    | Lexical _ -> A.Method.to_string A.Method.Lexical
+    | Assistance _ -> A.Method.to_string A.Method.Assistance
   ;;
 
   let to_json = function
@@ -188,6 +201,8 @@ module Response = struct
     | Analyze value -> S.Analyze.to_json value
     | Prefix value -> S.Prefix.to_json value
     | Query value -> S.Query.to_json value
+    | Lexical value -> H.Lexical.Result.to_json value
+    | Assistance value -> H.Assistance.Result.to_json value
   ;;
 
   let decoders =
@@ -218,6 +233,8 @@ module Response = struct
     ; "authoring.analysis", map S.Analyze.of_json (fun x -> Analyze x)
     ; "authoring.prefix", map S.Prefix.of_json (fun x -> Prefix x)
     ; "authoring.query", map S.Query.of_json (fun x -> Query x)
+    ; "authoring.lexical", map H.Lexical.Result.of_json (fun x -> Lexical x)
+    ; "authoring.assistance", map H.Assistance.Result.of_json (fun x -> Assistance x)
     ]
   ;;
 

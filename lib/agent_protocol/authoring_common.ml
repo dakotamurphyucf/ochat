@@ -9,6 +9,8 @@ module Features = struct
   let core = "authoring.core.v1"
   let bundle = "authoring.bundle.v1"
   let semantic = "authoring.semantic.v1"
+  let lexical = "authoring.lexical.v1"
+  let assistance = "authoring.assistance.v1"
 end
 
 module Encoding = struct
@@ -50,6 +52,8 @@ module Method = struct
     | Analyze
     | Prefix
     | Query
+    | Lexical
+    | Assistance
   [@@deriving compare, equal, sexp_of]
 
   let to_string = function
@@ -72,6 +76,8 @@ module Method = struct
     | Analyze -> "authoring.analysis"
     | Prefix -> "authoring.prefix"
     | Query -> "authoring.query"
+    | Lexical -> "authoring.lexical"
+    | Assistance -> "authoring.assistance"
   ;;
 
   let all =
@@ -94,6 +100,8 @@ module Method = struct
     ; Analyze
     ; Prefix
     ; Query
+    ; Lexical
+    ; Assistance
     ]
   ;;
 

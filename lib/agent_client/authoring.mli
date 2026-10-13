@@ -96,6 +96,20 @@ val query_semantics
   -> P.Analysis.Query.Request.t
   -> (P.Analysis.Query.t, Agent_protocol.Error.t) result
 
+(** Each call requires its own installed lexical or assistance feature and
+    advertised method. The client rejects a wrong context/source/view, or a
+    result published after the connection observed a newer generation. Invalid
+    UTF-8 source bytes do not prevent lexical scan results. *)
+val lexical
+  :  t
+  -> P.Assistance.Lexical.Request.t
+  -> (P.Assistance.Lexical.Result.t, Agent_protocol.Error.t) result
+
+val assist
+  :  t
+  -> P.Assistance.Assistance.Request.t
+  -> (P.Assistance.Assistance.Result.t, Agent_protocol.Error.t) result
+
 (** Reconnect creates a new authoring context. A caller must reauthorize its
     origin and resend a complete overlay set explicitly against fresh CAS
     values. No context ID or document version survives it. *)
