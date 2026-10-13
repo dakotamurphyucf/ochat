@@ -31,11 +31,12 @@ let with_store ?(wrap_env = Fn.id) f =
       in
       let first = session "ses_job_artifact_first"
       and second = session "ses_job_artifact_second" in
+      let data_root = Agent_store.Session_store.data_root sessions in
       let open_blobs () =
         Blob.create
           ~env
-          ~temporary_directory:(Filename.concat directory "temporary")
-          ~durable_directory:(Filename.concat directory "durable")
+          ~temporary_directory:(Agent_store.Data_root.temporary_blobs_path data_root)
+          ~durable_directory:(Agent_store.Data_root.durable_blobs_path data_root)
           ~max_upload_bytes:100_000L
         |> store_ok
       in

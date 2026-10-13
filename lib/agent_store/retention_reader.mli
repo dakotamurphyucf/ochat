@@ -24,10 +24,21 @@ val create_at
 
 val root : t -> string
 
+(** Physical Eio filesystem affinity for host-root rebinding. A borrowed reader
+    never gains authority over an unrelated host root. *)
+val uses_filesystem : t -> env:Eio_unix.Stdenv.base -> bool
+
 (** Remaining bytes in this reader's existing shared invocation allowance.
     Serialized owner operations may admit a fixed header's declared remainder
     before allocating it, then charge each actual chunk through [charge_bytes]. *)
 val remaining_bytes : t -> int
+
+(** Narrow a borrowed scan without resetting its parent allowance. Every later
+    entry and byte charge must fit both the new local ceiling and the original
+    shared reader; exhausted attempts debit no budget for the failed charge.
+    The returned reader retains the same filesystem authority and root. Nesting
+    beyond eight scopes is rejected before any budget changes. *)
+val with_local_limits : t -> max_entries:int -> max_bytes:int -> (t, Store_error.t) result
 
 (** Charge serialized in-memory roots against the same aggregate byte allowance
     as filesystem reads. Negative sizes and exhausted budgets fail the attempt. *)

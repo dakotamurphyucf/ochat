@@ -3,6 +3,8 @@ open Core
 type budget =
   { mutable remaining_entries : int
   ; mutable remaining_bytes : int
+  ; parent : budget option
+  ; depth : int
   }
 
 type authority =
@@ -53,7 +55,12 @@ let create ~env ~root ~max_entries ~max_bytes =
     Ok
       { authority = Host env
       ; root
-      ; budget = { remaining_entries = max_entries; remaining_bytes = max_bytes }
+      ; budget =
+          { remaining_entries = max_entries
+          ; remaining_bytes = max_bytes
+          ; parent = None
+          ; depth = 0
+          }
       }
 ;;
 
@@ -68,18 +75,64 @@ let create_at ~root ~max_entries ~max_bytes =
       Ok
         { authority = Borrowed root
         ; root = native
-        ; budget = { remaining_entries = max_entries; remaining_bytes = max_bytes }
+        ; budget =
+            { remaining_entries = max_entries
+            ; remaining_bytes = max_bytes
+            ; parent = None
+            ; depth = 0
+            }
         }
 ;;
 
 let root t = t.root
-let remaining_bytes t = t.budget.remaining_bytes
+
+let uses_filesystem t ~env =
+  match t.authority with
+  | Host owner ->
+    let owner_fs, owner_prefix = Eio.Stdenv.fs owner in
+    let candidate_fs, candidate_prefix = Eio.Stdenv.fs env in
+    phys_equal owner_fs candidate_fs && String.equal owner_prefix candidate_prefix
+  | Borrowed _ -> false
+;;
+
+let rec budget_remaining_bytes budget =
+  match budget.parent with
+  | None -> budget.remaining_bytes
+  | Some parent -> Int.min budget.remaining_bytes (budget_remaining_bytes parent)
+;;
+
+let remaining_bytes t = budget_remaining_bytes t.budget
+
+let with_local_limits t ~max_entries ~max_bytes =
+  if max_entries < 0 || max_bytes < 0 || t.budget.depth >= 8
+  then corrupt "invalid nested retention limits"
+  else
+    Ok
+      { t with
+        budget =
+          { remaining_entries = max_entries
+          ; remaining_bytes = max_bytes
+          ; parent = Some t.budget
+          ; depth = t.budget.depth + 1
+          }
+      }
+;;
+
+let rec can_charge_bytes budget bytes =
+  bytes <= budget.remaining_bytes
+  && Option.for_all budget.parent ~f:(fun parent -> can_charge_bytes parent bytes)
+;;
+
+let rec debit_bytes budget bytes =
+  budget.remaining_bytes <- budget.remaining_bytes - bytes;
+  Option.iter budget.parent ~f:(fun parent -> debit_bytes parent bytes)
+;;
 
 let charge_bytes t bytes =
-  match bytes >= 0 && bytes <= t.budget.remaining_bytes with
+  match bytes >= 0 && can_charge_bytes t.budget bytes with
   | false -> corrupt "retention scan exceeded its byte budget"
   | true ->
-    t.budget.remaining_bytes <- t.budget.remaining_bytes - bytes;
+    debit_bytes t.budget bytes;
     Ok ()
 ;;
 
@@ -96,11 +149,20 @@ let at_root t ~root =
     else corrupt "invalid retention scan root"
 ;;
 
+let rec can_charge_entry budget =
+  budget.remaining_entries > 0 && Option.for_all budget.parent ~f:can_charge_entry
+;;
+
+let rec debit_entry budget =
+  budget.remaining_entries <- budget.remaining_entries - 1;
+  Option.iter budget.parent ~f:debit_entry
+;;
+
 let charge_entry t =
-  match t.budget.remaining_entries > 0 with
+  match can_charge_entry t.budget with
   | false -> corrupt "retention scan exceeded its entry budget"
   | true ->
-    t.budget.remaining_entries <- t.budget.remaining_entries - 1;
+    debit_entry t.budget;
     Ok ()
 ;;
 
@@ -188,7 +250,7 @@ let read_with_checkpoint t ~path:relative ~max_bytes ~checkpoint =
         | _ -> corrupt "retention root is not a regular file"
       in
       let size = (Eio.Path.stat ~follow:false file).size |> Optint.Int63.to_int64 in
-      let limit = Int.min max_bytes t.budget.remaining_bytes in
+      let limit = Int.min max_bytes (remaining_bytes t) in
       let%bind () =
         match limit >= 0 && Int64.(size >= zero && size <= of_int limit) with
         | true -> Ok ()
@@ -216,7 +278,7 @@ let read_with_checkpoint t ~path:relative ~max_bytes ~checkpoint =
           | count when count > remaining ->
             corrupt "retention root grew beyond its byte budget"
           | count ->
-            t.budget.remaining_bytes <- t.budget.remaining_bytes - count;
+            let%bind () = charge_bytes t count in
             Buffer.add_string buffer (Cstruct.to_string (Cstruct.sub chunk 0 count));
             loop ()
         in

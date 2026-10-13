@@ -226,7 +226,78 @@ val admit_epoch
 val owner : handle -> Agent_protocol.Execution_owner.developer
 val capture_fingerprint : handle -> Chatml_source.Digest.t
 val issued_by : t -> handle -> bool
+val is_closed : t -> bool
+
+(** Physical issuer comparison for host wiring of the one shared blob
+    coordinator. IDs, root paths and host labels do not substitute for this. *)
+val issued_by_session_store : t -> Session_store.t -> bool
+
 val observe : handle -> (Observation.t, Error.t) result
+
+(** Storage custody for an existing developer run. This is not a worker claim,
+    execution grant, current-epoch assertion or result-disclosure grant. A run
+    root deliberately covers every retained epoch of that run. *)
+module Result_root : sig
+  type t
+
+  (** Read the exact authority document through the issuing live Store before
+      minting a root. An old-epoch handle is valid when its original epoch and
+      capture still occur in that document; latest/Active is not required. *)
+  val of_handle : handle -> (t, Error.t) result
+
+  (** Select only an already persisted run. Missing is distinct from corrupt;
+      this operation cannot admit a new epoch or create a run file. *)
+  val find_existing
+    :  store
+    -> Agent_protocol.Id.Developer_run.t
+    -> (t option, Error.t) result
+
+  (** Return all existing roots in stable run-ID order. The same bounded,
+      checkpointed recovery scan validates every name, regular file, document,
+      host/run/principal identity and aggregate entry/byte/work limit before
+      returning any root. No callback runs under the daemon-root lease. *)
+  val existing : store -> (t list, Error.t) result
+
+  (** The same complete validated scan during shared blob retention, borrowing
+      the caller's Retention_reader allowance for every run-directory entry and
+      document byte as well as this Store's own recovery/work ceilings. The
+      reader is rebound only to this Store's leased developer-runs directory;
+      it never authorizes a caller-selected path. No root escapes on partial
+      error, and no callback runs while leased. *)
+  val existing_for_retention
+    :  store
+    -> reader:Retention_reader.t
+    -> (t list, Error.t) result
+
+  val host_id : t -> Agent_protocol.Id.Server.t
+  val run_id : t -> Agent_protocol.Id.Developer_run.t
+  val principal_id : t -> Agent_protocol.Id.Principal.t
+
+  (** Physical issuer check against the bound Store; coordinates alone are
+      insufficient even when another Store names the same native directory. *)
+  val issued_by : store -> t -> bool
+
+  (** Borrow the issuing physical daemon root only while [f] runs. Every borrow
+      rechecks store lifetime, original lock and exact persisted run identity;
+      it never tests whether the run's newest epoch is Active. The callback must
+      not reenter this Store or close it, and must not retain [Data_root.t] as
+      authority. Blob_store enters its shared coordinator before this lease;
+      no Developer_run_store method may call Blob_store while leased. The
+      callback's exception, cancellation and backtrace propagate unchanged. *)
+  val with_lease
+    :  t
+    -> f:(root:Data_root.t -> ('a, Store_error.t) result)
+    -> ('a, Store_error.t) result
+
+  (** Retention borrow with the same root/lifetime checks. Its document
+      revalidation charges the enclosing reader as well as Store recovery
+      limits before [f] sees the root; no hidden fresh budget is used. *)
+  val with_retention_lease
+    :  t
+    -> reader:Retention_reader.t
+    -> f:(root:Data_root.t -> ('a, Store_error.t) result)
+    -> ('a, Store_error.t) result
+end
 
 (** Read the authoritative latest epoch/phase under the daemon writer. This is
     an epoch-lifecycle check, not permission to execute a job. *)

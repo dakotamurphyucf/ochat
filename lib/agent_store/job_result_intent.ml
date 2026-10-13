@@ -179,9 +179,11 @@ let protects_temporary ~env ~data_root (metadata : Blob_store.Metadata.t) =
     P.Blob.Metadata.of_json (P.Blob.Metadata.to_json metadata.blob)
     |> Result.map_error ~f:(fun failure -> Store_error.Corrupt failure.P.Error.message)
   in
-  match metadata.target_session with
-  | None -> Ok false
-  | Some session_id ->
+  match metadata.target with
+  | Blob_store.Metadata.Target.Unassigned -> Ok false
+  | Developer _ ->
+    Error (Store_error.Corrupt "developer blob cannot use session intent protection")
+  | Session session_id ->
     let%bind session_id =
       P.Id.Session.of_json (P.Id.Session.to_json session_id)
       |> Result.map_error ~f:(fun failure -> Store_error.Corrupt failure.P.Error.message)

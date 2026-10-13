@@ -94,6 +94,16 @@ let%expect_test "bounded roots preserve framed references and expose incomplete 
            limited
            ~path:(Filename.concat "journal" (Segment.Id.filename Segment.Id.first))
            ~max_bytes:4096));
+    let shared = R.create ~env ~root ~max_entries:4 ~max_bytes:3 |> store_ok in
+    let local = R.with_local_limits shared ~max_entries:2 ~max_bytes:2 |> store_ok in
+    R.charge_bytes local 2 |> store_ok;
+    [%test_eq: int] 1 (R.remaining_bytes shared);
+    assert (Result.is_error (R.charge_bytes local 1));
+    [%test_eq: int] 1 (R.remaining_bytes shared);
+    let sibling = R.with_local_limits shared ~max_entries:2 ~max_bytes:3 |> store_ok in
+    assert (Result.is_error (R.charge_bytes sibling 2));
+    R.charge_bytes sibling 1 |> store_ok;
+    [%test_eq: int] 0 (R.remaining_bytes shared);
     let truncated =
       Segment.scan_contents ~max_payload_length:4096 (String.drop_suffix journal_bytes 3)
       |> store_ok

@@ -45,6 +45,7 @@
   blob_metadata
   blob_metadata_document
   blob_stage_documents
+  blob_developer_namespace
   job_result_intent_document
   blob_store
   blob_reference_scan
@@ -78,7 +79,8 @@
   authoring_upload_document
   authoring_upload_files
   developer_run_document
-  developer_run_transition)
+  developer_run_transition
+  blob_developer_namespace)
  (libraries ochat.inference
   core
   core_unix

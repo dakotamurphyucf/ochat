@@ -43,7 +43,7 @@ let json_media_type value =
   String.equal value "application/json" || String.is_suffix value ~suffix:"+json"
 ;;
 
-let files reader directory =
+let files reader directory ~allow_developer_namespace =
   let open Result.Let_syntax in
   let%bind names = Retention_reader.list reader ~directory in
   let grouped = Hashtbl.create (module Id) in
@@ -57,9 +57,12 @@ let files reader directory =
   in
   let%map () =
     List.fold_result names ~init:() ~f:(fun () name ->
-      match temporary name with
-      | true -> Ok ()
-      | false ->
+      match
+        allow_developer_namespace && String.equal name "developer-runs", temporary name
+      with
+      | true, _ -> Ok ()
+      | false, true -> Ok ()
+      | false, false ->
         let%bind base, suffix =
           List.find_map [ ".sexp"; ".blob"; ".part" ] ~f:(fun suffix ->
             Option.map (String.chop_suffix name ~suffix) ~f:(fun base -> base, suffix))
@@ -88,13 +91,14 @@ let scan ~scope ~session ~reader ~intents ~max_file_bytes =
     Document_fields.limits ~max_bytes:max_file_bytes |> Document_fields.store
   in
   let%bind temporary_reader = Retention_reader.at_root reader ~root:temporary_root in
-  let%bind reserved_root = Blob_store.retention_reserved_directory scope in
-  let%bind reserved_reader = Retention_reader.at_root reader ~root:reserved_root in
-  let%bind reserved = Retention_reader.list reserved_reader ~directory:"." in
+  let%bind developer_presence =
+    Blob_store.validate_developer_retention scope ~session ~reader
+  in
   let%bind () =
-    match reserved with
-    | [] -> Ok ()
-    | _ -> corrupt "unknown global durable blob consumers prevent retention proof"
+    match developer_presence with
+    | Blob_store.No_developer_evidence -> Ok ()
+    | Has_developer_evidence ->
+      corrupt "developer evidence needs cross-owner reference proof before deletion"
   in
   let owned = Hashtbl.create (module Id) in
   let%bind () =
@@ -124,7 +128,7 @@ let scan ~scope ~session ~reader ~intents ~max_file_bytes =
       Blob_reference_scan.feed ~ignore:id scanner text);
     Hashtbl.set edges ~key:id ~data:(Blob_reference_scan.references scanner));
   let scan_directory reader directory ~temporary =
-    let%bind groups = files reader directory in
+    let%bind groups = files reader directory ~allow_developer_namespace:temporary in
     List.fold_result groups ~init:() ~f:(fun () (id, suffixes) ->
       if temporary then Hash_set.add temporary_ids id;
       Blob_reference_scan.reset scanner;
@@ -179,10 +183,13 @@ let scan ~scope ~session ~reader ~intents ~max_file_bytes =
         match
           Id.equal stored_metadata.blob.id id
           && Bool.equal stored_metadata.durable (not temporary)
-          && (temporary
-              || Option.exists
-                   stored_metadata.target_session
-                   ~f:(P.Id.Session.equal (Session_store.Handle.session_id session)))
+          &&
+          match stored_metadata.target with
+          | Metadata.Target.Developer _ -> false
+          | Unassigned -> temporary
+          | Session target ->
+            temporary
+            || P.Id.Session.equal target (Session_store.Handle.session_id session)
         with
         | false -> corrupt "retained blob location or identity differs from metadata"
         | true ->

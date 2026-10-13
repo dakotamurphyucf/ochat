@@ -581,10 +581,59 @@ type claim_reconciliation =
   | Claim_absent
   | Claim_diverged
 
-let scan t ~poll =
+let scan_documents t ~poll ~reader =
   poll ();
   let* () = Durable_file.sync_directory_in ~directory:t.directory |> store in
   poll ();
+  let* names =
+    Retention_reader.list_with_checkpoint reader ~directory:"." ~checkpoint:poll |> store
+  in
+  let* _, documents =
+    List.fold_result names ~init:(0, []) ~f:(fun (count, documents) name ->
+      poll ();
+      match run_id_of_name name with
+      | Some id ->
+        let* () =
+          if count >= t.limits.max_runs then Error Error.Limit_exceeded else Ok ()
+        in
+        let* bytes =
+          Retention_reader.read_with_checkpoint
+            reader
+            ~path:name
+            ~max_bytes:t.limits.max_document_bytes
+            ~checkpoint:poll
+          |> store
+        in
+        let* document =
+          Doc.of_bytes
+            bytes
+            ~poll
+            ~limits:t.limits.document
+            ~max_epochs:t.limits.max_epochs_per_run
+            ~max_jobs:t.limits.max_jobs_per_run
+            ~max_invocations:t.limits.max_invocations_per_run
+            ~max_job_payload_bytes:t.limits.max_job_payload_bytes
+          |> store
+        in
+        poll ();
+        if
+          Id.equal id (Doc.run_id document)
+          && P.Id.Server.equal t.host_id (Doc.host_id document)
+        then Ok (count + 1, (id, document) :: documents)
+        else corrupt "developer run authority file has another run ID"
+      | None ->
+        (match Durable_file.temporary_target name with
+         | Some target when Option.is_some (run_id_of_name target) ->
+           let* kind = Retention_reader.kind reader ~path:name |> store in
+           (match kind with
+            | `File -> Ok (count, documents)
+            | `Directory -> corrupt "developer run temporary is a directory")
+         | Some _ | None -> corrupt "unknown developer run authority file"))
+  in
+  Ok (List.rev documents)
+;;
+
+let scan t ~poll =
   let* reader =
     Retention_reader.create_at
       ~root:t.directory
@@ -592,49 +641,8 @@ let scan t ~poll =
       ~max_bytes:t.limits.max_recovery_bytes
     |> store
   in
-  let* names =
-    Retention_reader.list_with_checkpoint reader ~directory:"." ~checkpoint:poll |> store
-  in
-  List.fold_result names ~init:0 ~f:(fun count name ->
-    poll ();
-    match run_id_of_name name with
-    | Some id ->
-      let* () =
-        if count >= t.limits.max_runs then Error Error.Limit_exceeded else Ok ()
-      in
-      let* bytes =
-        Retention_reader.read_with_checkpoint
-          reader
-          ~path:name
-          ~max_bytes:t.limits.max_document_bytes
-          ~checkpoint:poll
-        |> store
-      in
-      let* document =
-        Doc.of_bytes
-          bytes
-          ~poll
-          ~limits:t.limits.document
-          ~max_epochs:t.limits.max_epochs_per_run
-          ~max_jobs:t.limits.max_jobs_per_run
-          ~max_invocations:t.limits.max_invocations_per_run
-          ~max_job_payload_bytes:t.limits.max_job_payload_bytes
-        |> store
-      in
-      poll ();
-      if
-        Id.equal id (Doc.run_id document)
-        && P.Id.Server.equal t.host_id (Doc.host_id document)
-      then Ok (count + 1)
-      else corrupt "developer run authority file has another run ID"
-    | None ->
-      (match Durable_file.temporary_target name with
-       | Some target when Option.is_some (run_id_of_name target) ->
-         let* kind = Retention_reader.kind reader ~path:name |> store in
-         (match kind with
-          | `File -> Ok count
-          | `Directory -> corrupt "developer run temporary is a directory")
-       | Some _ | None -> corrupt "unknown developer run authority file"))
+  let* documents = scan_documents t ~poll ~reader in
+  Ok (List.length documents)
 ;;
 
 let close_and_wait t =
@@ -722,6 +730,9 @@ let issued_by t handle =
   phys_equal t handle.store && phys_equal t.token handle.store.token
 ;;
 
+let issued_by_session_store t session_store = Root.issued_by t.root_owner session_store
+let is_closed t = Atomic.get t.closed || Atomic.get t.closing
+
 let is_latest_active handle =
   let* t = valid_handle handle in
   with_lease t (fun ~env:_ ~root:_ ->
@@ -760,6 +771,166 @@ let observe handle =
       then Ok observed
       else Error Error.Foreign_or_stale)
 ;;
+
+module Result_root = struct
+  type nonrec t =
+    { issuer : store
+    ; store_token : unit ref
+    ; host_id : P.Id.Server.t
+    ; run_id : Id.t
+    ; principal_id : P.Id.Principal.t
+    ; epoch : (int * Chatml_source.Digest.t) option
+    }
+
+  let make issuer document ~epoch =
+    { issuer
+    ; store_token = issuer.token
+    ; host_id = Doc.host_id document
+    ; run_id = Doc.run_id document
+    ; principal_id = Doc.principal_id document
+    ; epoch
+    }
+  ;;
+
+  let host_id t = t.host_id
+  let run_id t = t.run_id
+  let principal_id t = t.principal_id
+
+  let issued_by issuer t =
+    phys_equal issuer t.issuer && phys_equal issuer.token t.store_token
+  ;;
+
+  let of_handle handle =
+    let* issuer = valid_handle handle in
+    let* observed = observe handle in
+    Ok
+      (make
+         issuer
+         observed.Observation.document
+         ~epoch:(Some (handle.owner.epoch, handle.capture_fingerprint)))
+  ;;
+
+  let find_existing issuer run_id =
+    with_lease issuer (fun ~env:_ ~root:_ ->
+      let poll = work issuer issuer.checkpoint in
+      let* found = read issuer ~poll run_id in
+      match found with
+      | None -> Ok None
+      | Some (_, document) ->
+        if P.Id.Server.equal issuer.host_id (Doc.host_id document)
+        then Ok (Some (make issuer document ~epoch:None))
+        else corrupt "developer result root host differs from daemon owner")
+  ;;
+
+  let existing issuer =
+    with_lease issuer (fun ~env:_ ~root:_ ->
+      let poll = work issuer issuer.checkpoint in
+      let* reader =
+        Retention_reader.create_at
+          ~root:issuer.directory
+          ~max_entries:issuer.limits.max_recovery_entries
+          ~max_bytes:issuer.limits.max_recovery_bytes
+        |> store
+      in
+      let* documents = scan_documents issuer ~poll ~reader in
+      Ok (List.map documents ~f:(fun (_, document) -> make issuer document ~epoch:None)))
+  ;;
+
+  let shared_reader issuer ~env reader =
+    let open Result.Let_syntax in
+    let%bind () =
+      if Retention_reader.uses_filesystem reader ~env
+      then Ok ()
+      else Error (Store_error.Corrupt "retention reader has another filesystem owner")
+    in
+    let%bind reader =
+      Retention_reader.with_local_limits
+        reader
+        ~max_entries:issuer.limits.max_recovery_entries
+        ~max_bytes:issuer.limits.max_recovery_bytes
+    in
+    Retention_reader.at_root reader ~root:(Eio.Path.native_exn issuer.directory)
+  ;;
+
+  let existing_for_retention issuer ~reader =
+    with_lease issuer (fun ~env ~root:_ ->
+      let poll = work issuer issuer.checkpoint in
+      let* reader = shared_reader issuer ~env reader |> store in
+      let* documents = scan_documents issuer ~poll ~reader in
+      Ok (List.map documents ~f:(fun (_, document) -> make issuer document ~epoch:None)))
+  ;;
+
+  let storage_error = function
+    | Error.Store error -> error
+    | Limit_exceeded ->
+      Store_error.Admission_capacity
+        (Document_schema.Error.Limit_exceeded "developer result root")
+    | Conflict ->
+      Store_error.Corrupt "developer result root conflicts with a pending write"
+    | Prewrite_conflict ->
+      Store_error.Corrupt "developer result root changed before write"
+    | Foreign_or_stale -> Store_error.Corrupt "developer result root is foreign or stale"
+    | Closed -> Store_error.Corrupt "developer result root Store is closed"
+  ;;
+
+  let matches t document =
+    P.Id.Server.equal t.host_id (Doc.host_id document)
+    && Id.equal t.run_id (Doc.run_id document)
+    && P.Id.Principal.equal t.principal_id (Doc.principal_id document)
+    &&
+    match t.epoch with
+    | None -> true
+    | Some (number, fingerprint) ->
+      List.exists (Doc.epochs document) ~f:(fun epoch ->
+        Int.equal number (Doc.epoch_number epoch)
+        && Chatml_source.Digest.equal fingerprint (Doc.epoch_capture epoch))
+  ;;
+
+  let with_borrow t ~reader ~f =
+    if not (issued_by t.issuer t)
+    then Error (Store_error.Corrupt "developer result root has another physical issuer")
+    else
+      with_lease t.issuer (fun ~env ~root ->
+        let poll = work t.issuer t.issuer.checkpoint in
+        let* document =
+          match reader with
+          | None ->
+            let* found = read t.issuer ~poll t.run_id in
+            (match found with
+             | None -> Error Error.Foreign_or_stale
+             | Some (_, document) -> Ok document)
+          | Some reader ->
+            let* reader = shared_reader t.issuer ~env reader |> store in
+            let* () =
+              Durable_file.sync_directory_in ~directory:t.issuer.directory |> store
+            in
+            let* bytes =
+              Retention_reader.read_with_checkpoint
+                reader
+                ~path:(basename t.run_id)
+                ~max_bytes:t.issuer.limits.max_document_bytes
+                ~checkpoint:poll
+              |> store
+            in
+            Doc.of_bytes
+              bytes
+              ~poll
+              ~limits:t.issuer.limits.document
+              ~max_epochs:t.issuer.limits.max_epochs_per_run
+              ~max_jobs:t.issuer.limits.max_jobs_per_run
+              ~max_invocations:t.issuer.limits.max_invocations_per_run
+              ~max_job_payload_bytes:t.issuer.limits.max_job_payload_bytes
+            |> store
+        in
+        if matches t document
+        then f ~root |> Result.map_error ~f:(fun error -> Error.Store error)
+        else Error Error.Foreign_or_stale)
+      |> Result.map_error ~f:storage_error
+  ;;
+
+  let with_lease t ~f = with_borrow t ~reader:None ~f
+  let with_retention_lease t ~reader ~f = with_borrow t ~reader:(Some reader) ~f
+end
 
 let same_observation (t : t) (handle : handle) (expected : Observation.t) bytes document =
   phys_equal expected.Observation.store_token t.token
