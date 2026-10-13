@@ -352,6 +352,29 @@ facts beyond its inspected prefix. The separate suggestion producer consumes
 this cursor and schema; cursor output alone certifies no declaration or
 semantic fact.
 
+The pure ChatMD assistance producer now uses that exact authored cursor for
+seven portable suggestion kinds: tag, attribute, finite value, reference,
+path, template and environment. Static markup help remains available on an
+incomplete document without a selected project. A successful current parse
+supplies local and imported script IDs with each declaration's own captured
+source; a separately selected tool registry supplies comparison-only tool
+references. Environment names come from the captured decoded project map even
+when Build selection fails. Installed instruction IDs come from the reviewed
+embedded asset table, not a directory scan. Project source paths, decoded
+project members, admitted host listings and selected closure members retain
+distinct evidence. A closure candidate requires a qualified selected member
+and a host-projected route from the current authored base; matching a path
+suffix across package namespaces does not establish a valid edit or read
+authority. Declared project fields are shown as declarations, never verified
+files. Attribute edits preserve strict decoder semantics by encoding entities
+in the current quote context; when an exact value cannot be represented,
+the producer withholds that item with typed truncation. It also withholds
+prefix replacement in the middle of a token, where the retained suffix could
+otherwise duplicate text. One bounded work ledger covers capture checks,
+cursor scanning and emitted candidates. The host still authenticates the
+actor, capture, root and selected metadata before returning this DTO; the
+pure library does not install a handler or fetch source files.
+
 The OCH-260 implementation recognizes outer `program_stmts` reductions from the
 existing ChatML parser. It retains one latest completed statement or `;;`
 boundary at or before the requested cursor while reading the actual source;

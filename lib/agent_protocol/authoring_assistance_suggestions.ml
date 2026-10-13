@@ -92,6 +92,47 @@ module Assistance = struct
     ;;
   end
 
+  module Selected_tool = struct
+    type t =
+      { capability_id : Id.Capability.t
+      ; binding_fingerprint : Digest.t
+      ; selected_registry_fingerprint : Digest.t
+      }
+    [@@deriving sexp_of]
+
+    let create ~capability_id ~binding_fingerprint ~selected_registry_fingerprint =
+      let* _ = Id.Capability.of_json (Id.Capability.to_json capability_id) in
+      Ok { capability_id; binding_fingerprint; selected_registry_fingerprint }
+    ;;
+
+    let capability_id t = t.capability_id
+    let binding_fingerprint t = t.binding_fingerprint
+    let selected_registry_fingerprint t = t.selected_registry_fingerprint
+
+    let to_json t =
+      obj
+        [ "capability_id", Id.Capability.to_json t.capability_id
+        ; "binding_fingerprint", C.digest_json t.binding_fingerprint
+        ; "selected_registry_fingerprint", C.digest_json t.selected_registry_fingerprint
+        ]
+    ;;
+
+    let of_json json =
+      let* fields =
+        C.fields
+          ~allowed:
+            [ "capability_id"; "binding_fingerprint"; "selected_registry_fingerprint" ]
+          json
+      in
+      let* capability_id = field fields "capability_id" Id.Capability.of_json in
+      let* binding_fingerprint = field fields "binding_fingerprint" C.digest in
+      let* selected_registry_fingerprint =
+        field fields "selected_registry_fingerprint" C.digest
+      in
+      create ~capability_id ~binding_fingerprint ~selected_registry_fingerprint
+    ;;
+  end
+
   module Range = Authoring_analysis.Byte_range
 
   module Suggestion = struct
@@ -114,6 +155,7 @@ module Assistance = struct
           ; sha256 : Digest.t
           }
       | Selected_catalog of Selected_catalog.t
+      | Selected_tool of Selected_tool.t
       | Host_root of Id.Authoring_root.t
     [@@deriving sexp_of]
 
@@ -128,7 +170,7 @@ module Assistance = struct
     let allowed kind evidence =
       match kind, evidence with
       | (Tag | Attribute | Value), (Lexical | Parsed_document _)
-      | Reference, (Parsed_document _ | Selected_catalog _)
+      | Reference, (Parsed_document _ | Selected_catalog _ | Selected_tool _)
       | Path, (Parsed_project _ | Selected_catalog _ | Host_root _)
       | Template, (Lexical | Parsed_document _ | Installed_builtin _)
       | Environment, (Parsed_project _ | Selected_catalog _) -> true
@@ -215,13 +257,17 @@ module Assistance = struct
       | Selected_catalog selected ->
         obj
           [ "kind", str "selected_catalog"; "catalog", Selected_catalog.to_json selected ]
+      | Selected_tool selected ->
+        obj [ "kind", str "selected_tool"; "tool", Selected_tool.to_json selected ]
       | Host_root root ->
         obj [ "kind", str "host_root"; "root", Id.Authoring_root.to_json root ]
     ;;
 
     let evidence_of_json json =
       let* fields =
-        C.fields ~allowed:[ "kind"; "source"; "id"; "sha256"; "catalog"; "root" ] json
+        C.fields
+          ~allowed:[ "kind"; "source"; "id"; "sha256"; "catalog"; "tool"; "root" ]
+          json
       in
       let* kind = field fields "kind" (C.string ~max_bytes:24) in
       match kind with
@@ -244,6 +290,10 @@ module Assistance = struct
         let* fields = C.fields ~allowed:[ "kind"; "catalog" ] json in
         let* value = field fields "catalog" Selected_catalog.of_json in
         Ok (Selected_catalog value)
+      | "selected_tool" ->
+        let* fields = C.fields ~allowed:[ "kind"; "tool" ] json in
+        let* value = field fields "tool" Selected_tool.of_json in
+        Ok (Selected_tool value)
       | "host_root" ->
         let* fields = C.fields ~allowed:[ "kind"; "root" ] json in
         let* root = field fields "root" Id.Authoring_root.of_json in
@@ -285,6 +335,7 @@ module Assistance = struct
       | Item_limit
       | Work_limit
       | Result_bytes
+      | Unrepresentable_text
     [@@deriving compare, equal, sexp_of]
 
     type t =
@@ -303,7 +354,8 @@ module Assistance = struct
                 (match reason with
                  | Item_limit -> "item_limit"
                  | Work_limit -> "work_limit"
-                 | Result_bytes -> "result_bytes") )
+                 | Result_bytes -> "result_bytes"
+                 | Unrepresentable_text -> "unrepresentable_text") )
           ]
       | Unavailable reason ->
         obj
@@ -330,6 +382,7 @@ module Assistance = struct
          | "item_limit" -> Ok (Truncated Item_limit)
          | "work_limit" -> Ok (Truncated Work_limit)
          | "result_bytes" -> Ok (Truncated Result_bytes)
+         | "unrepresentable_text" -> Ok (Truncated Unrepresentable_text)
          | _ -> C.invalid "unknown assistance truncation reason")
       | "unavailable" ->
         let* reason = field fields "reason" (C.string ~max_bytes:24) in
@@ -362,6 +415,17 @@ module Assistance = struct
         ]
     ;;
 
+    let valid_owner ~request item =
+      let range = Suggestion.replace item in
+      Source.equal (Range.source range) (Request.source request)
+      && Range.start_byte range <= Request.cursor_byte request
+      && Request.cursor_byte request <= Range.end_byte range
+    ;;
+
+    let item_text_bytes item =
+      String.length (Suggestion.label item) + String.length (Suggestion.insert_text item)
+    ;;
+
     let preflight ~request ~items ~status =
       let* budget = C.Budget.create ~max_bytes:Limits.max_result_bytes in
       let* () =
@@ -390,27 +454,112 @@ module Assistance = struct
         | Status.Unavailable _ -> not (List.is_empty items)
         | _ -> false
       then C.invalid "unavailable assistance cannot have suggestions"
-      else if
-        not
-          (List.for_all items ~f:(fun item ->
-             let range = Suggestion.replace item in
-             Source.equal (Range.source range) (Request.source request)
-             && Range.start_byte range <= Request.cursor_byte request
-             && Request.cursor_byte request <= Range.end_byte range))
+      else if not (List.for_all items ~f:(valid_owner ~request))
       then C.invalid "assistance replacement differs from authored request"
       else
         let* _ =
           List.fold items ~init:(Ok Limits.max_label_bytes) ~f:(fun remaining item ->
             let* remaining = remaining in
-            let label = String.length (Suggestion.label item) in
-            let insert = String.length (Suggestion.insert_text item) in
-            if label > remaining || insert > remaining - label
+            let bytes = item_text_bytes item in
+            if bytes > remaining
             then C.invalid "assistance label bytes exceed aggregate limit"
-            else Ok (remaining - label - insert))
+            else Ok (remaining - bytes))
         in
         let* () = preflight ~request ~items ~status in
         Ok { request; items; status }
     ;;
+
+    let create_result = create
+
+    module Builder = struct
+      type completed = t
+
+      type t =
+        { request : Request.t
+        ; budget : C.Budget.t
+        ; mutable items_rev : Suggestion.t list
+        ; mutable count : int
+        ; mutable remaining_text_bytes : int
+        ; mutable full : Status.truncation option
+        }
+
+      type addition =
+        | Added
+        | Full of Status.truncation
+
+      let create ~request =
+        let* budget = C.Budget.create ~max_bytes:Limits.max_result_bytes in
+        (* Source_map_unavailable is the longest finite status spelling. It
+           has the same object shape/node count as every other non-Complete
+           status, so this reserves their worst envelope exactly once. *)
+        let* () =
+          C.Budget.charge_json
+            budget
+            ~parent_depth:0
+            (obj
+               [ "request", Request.to_json request
+               ; "items", `Array []
+               ; ( "status"
+                 , Status.to_json (Status.Unavailable Status.Source_map_unavailable) )
+               ])
+        in
+        Ok
+          { request
+          ; budget
+          ; items_rev = []
+          ; count = 0
+          ; remaining_text_bytes = Limits.max_label_bytes
+          ; full = None
+          }
+      ;;
+
+      let add t item =
+        if not (valid_owner ~request:t.request item)
+        then C.invalid "assistance replacement differs from authored request"
+        else (
+          match t.full with
+          | Some reason -> Ok (Full reason)
+          | None ->
+            let bytes = item_text_bytes item in
+            if t.count >= Request.max_items t.request || t.count >= Limits.max_suggestions
+            then (
+              t.full <- Some Status.Item_limit;
+              Ok (Full Status.Item_limit))
+            else if bytes > t.remaining_text_bytes
+            then (
+              t.full <- Some Status.Result_bytes;
+              Ok (Full Status.Result_bytes))
+            else (
+              let admitted =
+                let* () = C.Budget.reserve t.budget ~bytes:1 ~nodes:0 in
+                C.Budget.charge_json t.budget ~parent_depth:2 (Suggestion.to_json item)
+              in
+              match admitted with
+              | Error _ ->
+                (* A constructed suggestion has fixed JSON shape/depth; only
+                 finite bytes or nodes can exhaust this shared budget. *)
+                t.full <- Some Status.Result_bytes;
+                Ok (Full Status.Result_bytes)
+              | Ok () ->
+                t.items_rev <- item :: t.items_rev;
+                t.count <- t.count + 1;
+                t.remaining_text_bytes <- t.remaining_text_bytes - bytes;
+                Ok Added))
+      ;;
+
+      let finish t ~status =
+        match t.full, status with
+        | Some _, Status.Unavailable _ ->
+          C.invalid "unavailable assistance cannot follow full result builder"
+        | _ ->
+          let status =
+            match t.full with
+            | Some reason -> Status.Truncated reason
+            | None -> status
+          in
+          create_result ~request:t.request ~items:(List.rev t.items_rev) ~status
+      ;;
+    end
 
     let of_json json =
       let* () = C.admit_json ~max_bytes:Limits.max_result_bytes json in

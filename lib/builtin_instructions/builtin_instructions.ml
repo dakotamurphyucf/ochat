@@ -36,6 +36,13 @@ module Error = struct
   type t = Unknown_id of Id.t [@@deriving equal, sexp_of]
 end
 
+module Enumeration_error = struct
+  type t =
+    | Invalid_limit
+    | Too_many
+  [@@deriving equal, sexp_of]
+end
+
 let chatml =
   let contents =
     List.Assoc.find_exn Bundled_instructions.documents "chatml" ~equal:String.equal
@@ -47,6 +54,23 @@ let chatml =
   }
 ;;
 
+let installed = [ chatml ]
+
+let installed_ids ~max_items ~checkpoint =
+  checkpoint ();
+  if max_items <= 0
+  then Error Enumeration_error.Invalid_limit
+  else if List.length installed > max_items
+  then Error Enumeration_error.Too_many
+  else
+    Ok
+      (List.map installed ~f:(fun asset ->
+         checkpoint ();
+         Asset.id asset))
+;;
+
 let find id =
-  if Id.equal id (Asset.id chatml) then Ok chatml else Error (Error.Unknown_id id)
+  match List.find installed ~f:(fun asset -> Id.equal id (Asset.id asset)) with
+  | Some asset -> Ok asset
+  | None -> Error (Error.Unknown_id id)
 ;;

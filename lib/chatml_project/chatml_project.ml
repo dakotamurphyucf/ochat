@@ -14,6 +14,27 @@ module Namespace = Chatml_project_namespace
 type t = Chatml_project_declaration.t
 
 let source = Chatml_project_declaration.source
+
+module Environment_names = struct
+  module Error = Chatml_project_declaration.Environment_names.Error
+
+  let list = Chatml_project_declaration.Environment_names.list
+end
+
+module Declared_paths = struct
+  type role = Chatml_project_declaration.Declared_paths.role =
+    | Source_directory
+    | Module_implementation
+    | Module_interface
+    | Entry_source
+    | Local_dependency_project
+  [@@deriving equal, sexp_of]
+
+  module Error = Chatml_project_declaration.Declared_paths.Error
+
+  let contains = Chatml_project_declaration.Declared_paths.contains
+end
+
 let declared_at = Chatml_project_declaration.declared_at
 let namespace = Chatml_project_declaration.namespace
 let source_dirs = Chatml_project_declaration.source_dirs
