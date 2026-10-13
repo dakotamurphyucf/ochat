@@ -39,6 +39,42 @@ val create
     separately checked by the host at each effect boundary. *)
 val issuer : t -> Agent_session.Developer_job_scope.t
 
+(** A terminal result selected by trusted host code after the worker callback
+    and its children have joined. This is a retention token, not a Store writer
+    or result-read grant. Its [ensure_attempted] closure owns one already frozen
+    result preparation; retrying it must use the same outcome, reference, intent
+    and bytes, and must never invoke the job handler or select another result.
+    It must durably establish the intent and matching staged data, then move the
+    publisher token to non-discardable attempted custody before returning. Thus
+    a following Store CAS can never precede publisher attempt protection.
+    Construction is pure. [after] must preserve [proposed]'s terminal status,
+    attempt, timestamps and retry fields; it may only replace a validated
+    inline result with an artifact descriptor of the same outcome. The worker
+    checks this token's physical Claim against its own before retaining it,
+    then owns its invocation and lifetime. Byte/digest matching remains the
+    publisher's responsibility. [acknowledge_installed] receives only an actual
+    Store-issued Installed receipt whose job/attempt/result the worker matched
+    to [after]. It can retire the exact intent best-effort: a typed cleanup
+    error leaves the marker for retention, while an unexpected exception
+    propagates with its original backtrace after the installed claim and
+    capacity are settled. Neither can turn a durable Store installation into
+    a failed job or release an unproved claim. *)
+module Selected : sig
+  type t
+
+  val create
+    :  claim:Agent_store.Developer_run_store.Claim.t
+    -> proposed:Agent_protocol.Developer_job.State.t
+    -> after:Agent_protocol.Developer_job.State.t
+    -> ensure_attempted:(unit -> (unit, Agent_protocol.Error.t) result)
+    -> acknowledge_installed:
+         (Agent_store.Developer_run_store.Installed.t
+          -> (unit, Agent_protocol.Error.t) result)
+    -> (t, Agent_protocol.Error.t) result
+
+  val after : t -> Agent_protocol.Developer_job.State.t
+end
+
 (** Project exact [lookup] through Host_job.of_developer, then acquire from
     Job_capacity.try_acquire_host_job in the SAME shared capacity ledger as
     conversation jobs. Recheck the exact job/attempt after lease acquisition;
@@ -63,11 +99,34 @@ val issuer : t -> Agent_session.Developer_job_scope.t
     It never reruns [f]. Uncertain persistence uses exact Prepared
     reconciliation, not a blind retry; unresolved state quarantines the lease.
     A returned artifact descriptor must already have separate result-custody
-    proof at the higher actor boundary. *)
+    proof at the higher actor boundary. [select], when supplied, runs exactly
+    once after successful callback/child join and valid normalization, before result
+    publication I/O. It can only freeze a Selected token or decline selection;
+    it must not start an effect, write an intent, stage bytes, or call Store.
+    Callback/child failures never select a successful result. A selection error
+    follows the ordinary Failed path before anything is selected.
+
+    Once Selected exists, the worker records it with the real Claim and capacity
+    before calling [ensure_attempted]. Any error, cancellation, or uncertain write
+    retains that exact token in the existing quarantine; it cannot turn into a
+    new Failed/Interrupted result. If no Store Prepared exists, retry exact
+    preparation before the existing [settle_transition]. If a Store Prepared
+    was already attempted, reconcile it first: Installed acknowledges the
+    selection; proven Absent may re-ensure the same preparation before retry.
+    This ordering also applies during bounded reconciliation/close.
+    Existing terminal-state epoch behavior preserves the chosen terminal while
+    Store validates the original Claim and permits only old-epoch terminal
+    bookkeeping. Only an exact Installed receipt can trigger best-effort intent
+    retirement. An unresolved selection retains capacity and blocks fresh
+    admission. The selector cannot invoke the terminal continuation twice. *)
 val with_claimed_attempt
   :  t
   -> expected:Agent_store.Developer_run_store.Observation.t
   -> lookup:Agent_store.Developer_run_store.Job_lookup.t
+  -> ?select:
+       (claim:Agent_store.Developer_run_store.Claim.t
+        -> proposed:Agent_protocol.Developer_job.State.t
+        -> (Selected.t option, Agent_protocol.Error.t) result)
   -> (active:Agent_session.Developer_job_scope.active
       -> sw:Eio.Switch.t
       -> (Agent_protocol.Developer_job.State.t, Agent_protocol.Error.t) result)
