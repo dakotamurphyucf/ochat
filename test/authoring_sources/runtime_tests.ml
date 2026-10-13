@@ -76,6 +76,6 @@ let%expect_test "runtime coverage follows the selected surface and detects stale
     (delegated_moderator_v1/runtime/timers.lifecycle)
     delegated_moderator_v1/runtime/timers.lifecycle: compiler contract changed; review documentation coverage
     delegated_moderator_v1/runtime/timers.lifecycle: topic changed; review documentation coverage
-    (21 66 57)
+    (21 66 59)
     |}]
 ;;

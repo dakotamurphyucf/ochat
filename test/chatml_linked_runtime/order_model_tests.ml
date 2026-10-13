@@ -2,6 +2,10 @@ open Core
 module B = Chatml.Chatml_builtin_spec
 module Surface = Chatml.Chatml_builtin_surface
 module Runtime = Chatml_linked_runtime
+module Graph = Chatml_dependency_graph
+module Linked = Chatml_linked_program
+module P = Chatml_prepared_program
+module S = Chatml_source
 
 (* Independent bounded DFS model, driven by integer adjacency, not emitted graph
    nodes/order or resolver annotations. Node numbers only point backwards; unused
@@ -18,6 +22,18 @@ let expected dependencies root =
   in
   visit root;
   List.rev !completed
+;;
+
+let expected_for_roots dependencies ~checked roots =
+  let seen = Hash_set.create (module Int) in
+  let rec visit node =
+    if not (Hash_set.mem seen node)
+    then (
+      Hash_set.add seen node;
+      List.iter (List.nth_exn dependencies node) ~f:visit)
+  in
+  List.iter roots ~f:visit;
+  List.filter checked ~f:(Hash_set.mem seen)
 ;;
 
 let%test_unit "initialization follows actual reachable DAGs under inventory permutations" =
@@ -63,5 +79,42 @@ let%test_unit "initialization follows actual reachable DAGs under inventory perm
           |> ignore;
           [%test_eq: string list]
             (List.rev !log)
-            (List.map (expected dependencies root) ~f:name)))
+            (List.map (expected dependencies root) ~f:name);
+          let graph = Linked.graph program in
+          let checked = expected dependencies root in
+          [%test_eq: string list]
+            (Support.paths (Graph.nodes graph))
+            (List.map checked ~f:path);
+          List.iter
+            [ []
+            ; [ root ]
+            ; List.take checked 1
+            ; List.rev (List.take checked 2)
+            ; List.rev checked
+            ]
+            ~f:(fun roots ->
+              let root_ids =
+                List.map roots ~f:(fun node ->
+                  let source_id =
+                    S.Id.create
+                      ~package_namespace:"linked-test"
+                      ~relative_path:(path node)
+                    |> Or_error.ok_exn
+                  in
+                  P.Module_id.of_implementation source_id)
+              in
+              let actual =
+                Graph.runtime_order_for_roots
+                  ~input_fingerprint:(Graph.input_fingerprint graph)
+                  ~checked_order:(Graph.nodes graph)
+                  ~edges:(Graph.edges graph)
+                  ~roots:root_ids
+                  ~checkpoint:(fun () -> ())
+                |> function
+                | Ok ids -> Support.paths ids
+                | Error diagnostic -> failwith diagnostic.Chatml_diagnostic.message
+              in
+              [%test_eq: string list]
+                actual
+                (List.map (expected_for_roots dependencies ~checked roots) ~f:path))))
 ;;

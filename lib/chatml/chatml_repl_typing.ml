@@ -83,6 +83,11 @@ type t =
   ; mutable closed : bool
   }
 
+type typing_owner = t
+
+let prepared t = t.prepared
+let contract t = t.contract
+
 module Submission = struct
   type ready = ready0
 
@@ -143,7 +148,16 @@ module Candidate = struct
   let statement t = t.statement
   let checked t = t.checked
   let frozen_types t = t.frozen_types
+  let input_fingerprint t = Session.Roots.input_fingerprint t.modules
   let new_checked_dependencies t = t.new_checked_dependencies
+
+  let checked_dependency_order t ~checkpoint =
+    List.map (Session.Roots.checked_in_order t.modules) ~f:(fun (id, _) ->
+      checkpoint ();
+      id)
+  ;;
+
+  let dependency_edges t = Session.Roots.edges t.modules
   let direct_references t = t.direct_references
 end
 
@@ -177,6 +191,12 @@ module Reservation = struct
     | Finalized of Published.t
 
   type t = { mutable state : state }
+
+  let pending_for t ~owner =
+    match t.state with
+    | Pending pending -> phys_equal pending.owner owner
+    | Finalized _ -> false
+  ;;
 end
 
 let with_activity t ~f =
@@ -493,7 +513,19 @@ let check_candidate t candidate =
   then Error Error.Stale_candidate
   else if not (Option.exists t.candidate_witness ~f:(phys_equal candidate.witness))
   then Error Error.Stale_candidate
+  else if
+    candidate.ready.aborted
+    || not (Option.exists t.current ~f:(phys_equal candidate.ready))
+  then Error Error.Stale_candidate
   else Ok ()
+;;
+
+let validate_candidate t candidate =
+  if t.busy || t.reservation_open
+  then Error Error.Busy_executing
+  else if t.closed
+  then Error Error.Closed
+  else check_candidate t candidate
 ;;
 
 let discard_candidate t candidate =

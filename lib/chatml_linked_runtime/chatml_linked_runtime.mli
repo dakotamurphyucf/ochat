@@ -73,3 +73,7 @@ val entry_env : t -> Lang.env
 val binding : t -> name:string -> Lang.value option
 
 val entry_source : t -> Chatml_source.t
+
+(** Incremental, epoch-owned REPL module registry; ordinary [instantiate]
+    retains its fresh selected-entry behavior. *)
+module Repl_modules : module type of Chatml_repl_modules
