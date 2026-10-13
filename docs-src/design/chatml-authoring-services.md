@@ -158,6 +158,32 @@ fails parse/type/dependency checking, only syntax assistance remains. Whole-file
 diagnostics are authoritative. Root review accepted this narrow authoring behavior;
 any change to build grammar or import precedence needs renewed review.
 
+The OCH-260 implementation recognizes outer `program_stmts` reductions from the
+existing ChatML parser. It retains one latest completed statement or `;;`
+boundary at or before the requested cursor while reading the actual source;
+an incomplete later statement, nested module body, or failing lexer cannot
+create a made-up prefix. It copies exactly those leading bytes into a distinct
+captured revision, then runs one ordinary parse and configured graph check over
+that revision. Its opaque checked result cannot enter the linked compiler.
+The published frozen snapshot carries a `Provisional` wrapper with the full
+graph fingerprint, original source digest, selected source ID and prefix end.
+Its locations use the *prefix* digest, so a full-document point cannot query
+it. A private complete-analysis constructor prevents a caller from relabeling
+that snapshot `Complete`. The full-document check still owns diagnostics.
+
+This first bounded mode supports implementation sources. Incomplete `.chatmli`
+companions and non-program sources truthfully return semantic `Unavailable`,
+leaving keyword, delimiter, authentic host-name and ChatMD markup assistance
+to the syntax path; complete companions use ordinary full-graph analysis. A
+prefix with a type, dependency, companion or rebase failure publishes no
+semantic facts. A selected catalog implementation outside the checked entry
+closure is also `Unavailable`, so another source's successful check cannot
+stand in for the selected file. Input bytes are admitted before the parser pass, and one
+semantic work ledger covers input chunks, tokens, completed reductions,
+source revision, graph/checker, recording, freezing and publication. It keeps
+one boundary and at most one prefix graph per request. Cancellation discards
+that attempt without changing any full-document result.
+
 For embedded ChatML, extraction must publish a parser-owned map from each body
 byte interval to an exact ChatMD input interval or mark it unmappable. Compose
 this with imported-input provenance. External `src` errors point to the external

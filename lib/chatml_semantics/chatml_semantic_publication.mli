@@ -19,3 +19,14 @@ val publish
   -> budget:Budget.t
   -> checkpoint:(unit -> unit)
   -> Snapshot.t
+
+(** Same frozen publication over an opaque authoring-only checked result. This
+    never produces a linked artifact or host requirement. *)
+val publish_provisional
+  :  Prepared.t
+  -> Driver.Provisional.t
+  -> identity:Identity.t
+  -> limits:Limits.t
+  -> budget:Budget.t
+  -> checkpoint:(unit -> unit)
+  -> Snapshot.t
