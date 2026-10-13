@@ -20,6 +20,89 @@ end
 
 type t
 
+(** Physical storage root for a result. The developer constructor retains an
+    opaque, live-Store-issued witness; IDs and native paths cannot construct it.
+    This only identifies custody, not a job/attempt or read disclosure. *)
+module Result_root : sig
+  type t
+
+  val conversation : Session_store.Handle.t -> t
+  val developer : Developer_run_store.Result_root.t -> t
+
+  (** Comparison data for constructing a stage; [target] is never a grant. *)
+  val target : t -> Metadata.Target.t
+end
+
+(** Bind the one daemon-owned developer Store to this store's shared coordinator.
+    The real Session_store must physically issue [runs] and validate this
+    Blob_store's exact Eio filesystem capability and Data_root directories;
+    equal native path strings cannot prove affinity. Every facade made by
+    [with_max_upload_bytes] shares the binding. Binding the same Store again is
+    idempotent. After an orderly Developer_run_store close, a new Store under
+    the SAME still-live Session_store may replace it while the coordinator is
+    quiescent; a different Session_store requires a new Blob_store. A nonempty
+    developer namespace without a live matching binding fails retention proof.
+    This is host wiring, not a run, job or result grant. *)
+val bind_developer_runs
+  :  t
+  -> session_store:Session_store.t
+  -> Developer_run_store.t
+  -> (unit, Store_error.t) result
+
+(** A result-open observation bound to its original storage root. Every later
+    result operation reborrows and revalidates that root; callers cannot pass
+    this token to the unscoped [load_verified]/[read_range] functions. *)
+module Result_read : sig
+  type t
+
+  (** Last validated observation for display only, never read authority. *)
+  val metadata : t -> Metadata.t
+end
+
+val open_result
+  :  t
+  -> Result_root.t
+  -> Agent_protocol.Id.Blob.t
+  -> (Result_read.t, Store_error.t) result
+
+val load_result_verified
+  :  t
+  -> sw:Eio.Switch.t
+  -> Result_read.t
+  -> max_bytes:int
+  -> (string, Store_error.t) result
+
+val read_result_range
+  :  t
+  -> sw:Eio.Switch.t
+  -> Result_read.t
+  -> offset:int64
+  -> max_bytes:int
+  -> (string, Store_error.t) result
+
+(** The same selected stage and bytes use the existing staged-write engine and
+    coordinator for both custody forms. The stage target must equal the root;
+    the caller owns a durable private preparation intent before a write. A
+    developer stage is kept in its bounded typed temporary namespace, separate
+    from ordinary session uploads. No root or stage alone proves a job result. *)
+val ensure_result_staged_content
+  :  t
+  -> sw:Eio.Switch.t
+  -> Result_root.t
+  -> stage:Blob_stage_documents.t
+  -> string
+  -> (Result_read.t, Store_error.t) result
+
+(** Recover exact staged bytes without repair or publication. Missing or short
+    partial data returns None; mismatched metadata, root or content fails. *)
+val load_result_staged_content
+  :  t
+  -> sw:Eio.Switch.t
+  -> Result_root.t
+  -> metadata:Metadata.t
+  -> max_bytes:int
+  -> (string option, Store_error.t) result
+
 val create
   :  env:Eio_unix.Stdenv.base
   -> temporary_directory:string
@@ -35,13 +118,61 @@ val with_max_upload_bytes : t -> max_upload_bytes:int64 -> (t, Store_error.t) re
 
 type retention
 
+(** Presence of developer evidence after validating the recognized namespace
+    and all authentic run documents. This is not a reference or deletion proof.
+    A conversation collector must hold the original Session_store Handle's
+    developer-root gate through this check and the final deletion, excluding
+    a new developer Store claim while an empty result is used. *)
+type developer_retention_presence =
+  | No_developer_evidence
+  | Has_developer_evidence
+[@@deriving sexp_of]
+
+(** With a live bound Store, validate both recognized developer namespaces
+    against every existing, bounded, authentic run root, charging run-document
+    enumeration and all blob-file work to the same reader allowance as the
+    enclosing conversation collection. Without one, verify the original live
+    Session_store Handle and exact Data_root, then detect any developer
+    authority entry conservatively. Unknown directories,
+    linked/corrupt files, foreign metadata, incomplete unprovable stages and
+    exhausted budgets reject the whole proof. Even a run document with no blob
+    files returns [Has_developer_evidence], because its contents may reference
+    conversation blobs. Complete developer blobs remain conservatively retained:
+    this operation does not authorize deletion or infer publication/disclosure.
+    A closed prior binding uses the issuing Handle's exact live Data_root to
+    detect unbound evidence rather than borrowing a stale run issuer. It runs
+    inside [with_retention] and must not call another public Blob_store
+    operation. *)
+val validate_developer_retention
+  :  retention
+  -> session:Session_store.Handle.t
+  -> reader:Retention_reader.t
+  -> (developer_retention_presence, Store_error.t) result
+
+(** Borrow an exact result root during one retention scan without acquiring the
+    Blob_store coordinator again. For developer roots the daemon-root lease
+    remains held throughout [f], including bounded reader I/O; callbacks may
+    not reenter Blob_store or Developer_run_store. The paths are comparison
+    locations under the borrowed root, never standalone authority. *)
+val with_result_retention_root
+  :  retention
+  -> Result_root.t
+  -> reader:Retention_reader.t
+  -> f:
+       (durable_directory:string
+        -> temporary_directory:string
+        -> ('a, Store_error.t) result)
+  -> ('a, Store_error.t) result
+
 (** Hold the shared storage coordinator through f, deferring with Ok None when
     any upload or read is active. New uploads, reads, adoption, staged writes and
     expiry wait until f returns. Ordinary readers run concurrently without holding
     the mutex across network backpressure. Uploads release their activity on
     finish, abort or switch cleanup; reads release it on every return/cancellation.
     Acquire runtime owner, actor, publisher and response-cache locks first, in
-    that order when the host supplies all four.
+    that order when the host supplies all four. A developer result operation
+    acquires this coordinator before Developer_run_store's daemon-root lease;
+    no current Developer_run_store path enters Blob_store while leased.
     The callback must not reenter public store operations, await actors or use the
     token concurrently. Establish all retained roots before deletion. The token
     expires on callback exit, including exceptions; this supplies serialization,
@@ -59,8 +190,9 @@ val retention_directories
   -> Session_store.Handle.t
   -> (string * string, Store_error.t) result
 
-(** The reserved global durable directory. No current writer installs blobs here;
-    nonempty contents must reject retention proof until a consumer is defined. *)
+(** The global durable root used only by the recognized developer namespace.
+    This path alone proves no ownership; use [validate_developer_retention]
+    under the same token before accepting any nonempty contents. *)
 val retention_reserved_directory : retention -> (string, Store_error.t) result
 
 (** Remove an unreferenced host-owned stage under a live retention scope.

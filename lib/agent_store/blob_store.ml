@@ -5,6 +5,7 @@ type coordination =
   { mutex : Eio.Mutex.t
   ; mutable active_uploads : int
   ; mutable active_reads : int
+  ; mutable developer_binding : (Session_store.t * Developer_run_store.t) option
   }
 
 type t =
@@ -16,6 +17,37 @@ type t =
   }
 
 type store = t
+
+module Result_root = struct
+  type t =
+    | Conversation of Session_store.Handle.t
+    | Developer of Developer_run_store.Result_root.t
+
+  let conversation session = Conversation session
+  let developer root = Developer root
+
+  let target = function
+    | Conversation session ->
+      Metadata.Target.Session (Session_store.Handle.session_id session)
+    | Developer root ->
+      Metadata.Target.Developer
+        { host_id = Developer_run_store.Result_root.host_id root
+        ; run_id = Developer_run_store.Result_root.run_id root
+        ; principal_id = Developer_run_store.Result_root.principal_id root
+        }
+  ;;
+end
+
+module Result_read = struct
+  type t =
+    { root : Result_root.t
+    ; id : Agent_protocol.Id.Blob.t
+    ; metadata : Metadata.t
+    ; coordination : coordination
+    }
+
+  let metadata t = t.metadata
+end
 
 module Handle = struct
   module Location = struct
@@ -96,7 +128,7 @@ module Upload = struct
     { store : store
     ; id : Agent_protocol.Id.Blob.t
     ; creating_principal : Agent_protocol.Id.Principal.t
-    ; target_session : Agent_protocol.Id.Session.t option
+    ; target : Metadata.Target.t
     ; kind : Agent_protocol.Blob.kind
     ; media_type : string
     ; display_name : string option
@@ -142,7 +174,11 @@ let create ~env ~temporary_directory ~durable_directory ~max_upload_bytes =
         ; durable_directory
         ; max_upload_bytes
         ; coordination =
-            { mutex = Eio.Mutex.create (); active_uploads = 0; active_reads = 0 }
+            { mutex = Eio.Mutex.create ()
+            ; active_uploads = 0
+            ; active_reads = 0
+            ; developer_binding = None
+            }
         }
     with
     | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
@@ -161,10 +197,11 @@ let blob_name id suffix = Agent_protocol.Id.Blob.to_string id ^ suffix
 
 let begin_upload
       store
+      ~temporary_directory
       ~sw
       ~id
       ~creating_principal
-      ~target_session
+      ~target
       ~kind
       ~media_type
       ~display_name
@@ -172,9 +209,9 @@ let begin_upload
       ~created_at
       ~expires_at
   =
-  let partial_path = Filename.concat store.temporary_directory (blob_name id ".part") in
-  let final_path = Filename.concat store.temporary_directory (blob_name id ".blob") in
-  let metadata_path = Filename.concat store.temporary_directory (blob_name id ".sexp") in
+  let partial_path = Filename.concat temporary_directory (blob_name id ".part") in
+  let final_path = Filename.concat temporary_directory (blob_name id ".blob") in
+  let metadata_path = Filename.concat temporary_directory (blob_name id ".sexp") in
   try
     let flow =
       Eio.Path.open_out ~sw ~create:(`Exclusive 0o600) (eio_path store partial_path)
@@ -184,7 +221,7 @@ let begin_upload
         { store
         ; id
         ; creating_principal
-        ; target_session
+        ; target
         ; kind
         ; media_type
         ; display_name
@@ -277,7 +314,7 @@ let finish ?publication upload ~expected_digest =
         Metadata.
           { blob
           ; creating_principal = upload.creating_principal
-          ; target_session = upload.target_session
+          ; target = upload.target
           ; allowed_use = upload.allowed_use
           ; created_at = upload.created_at
           ; expires_at = upload.expires_at
@@ -368,7 +405,10 @@ let open_temporary store id =
   let open Result.Let_syntax in
   let%bind document = load_metadata store metadata_path in
   let metadata = Blob_metadata_document.value document in
-  if Agent_protocol.Id.Blob.compare metadata.blob.id id <> 0 || metadata.durable
+  if
+    Agent_protocol.Id.Blob.compare metadata.blob.id id <> 0
+    || metadata.durable
+    || Option.is_some (Metadata.Target.developer metadata.target)
   then Error (Store_error.Corrupt "temporary blob metadata identity is invalid")
   else if not (Eio.Path.is_file (eio_path store data_path))
   then Error (Store_error.Missing data_path)
@@ -385,12 +425,11 @@ let open_session store session id =
   if Agent_protocol.Id.Blob.compare metadata.blob.id id <> 0 || not metadata.durable
   then Error (Store_error.Corrupt "session blob metadata identity is invalid")
   else if
-    not
-      (Option.exists metadata.target_session ~f:(fun target ->
-         Agent_protocol.Id.Session.compare
-           target
-           (Session_store.Handle.session_id session)
-         = 0))
+    match metadata.target with
+    | Metadata.Target.Session target ->
+      not
+        (Agent_protocol.Id.Session.equal target (Session_store.Handle.session_id session))
+    | Unassigned | Developer _ -> true
   then Error (Store_error.Corrupt "session blob target identity is invalid")
   else if not (Eio.Path.is_file (eio_path store data_path))
   then Error (Store_error.Missing data_path)
@@ -465,13 +504,15 @@ let adopt store session handle =
   let open Result.Let_syntax in
   let%bind _ = Handle.metadata_checked handle in
   let session_id = Session_store.Handle.session_id session in
-  match (Handle.metadata handle).target_session with
-  | Some id when not (Agent_protocol.Id.Session.equal id session_id) ->
+  match (Handle.metadata handle).target with
+  | Metadata.Target.Session id when not (Agent_protocol.Id.Session.equal id session_id) ->
     Error (Store_error.Corrupt "blob is bound to another target session")
+  | Metadata.Target.Developer _ ->
+    Error (Store_error.Corrupt "developer blob cannot enter session adoption")
   | target ->
     (match (Handle.metadata handle).durable, target with
-     | true, Some _ -> Ok handle
-     | true, None -> Error (Store_error.Corrupt "durable blob has no target session")
+     | true, Metadata.Target.Session _ -> Ok handle
+     | true, _ -> Error (Store_error.Corrupt "durable blob has no target session")
      | false, _ ->
        Eio.Cancel.protect (fun () ->
          let open Result.Let_syntax in
@@ -486,7 +527,7 @@ let adopt store session handle =
          in
          let metadata =
            { (Handle.metadata handle) with
-             target_session = Some session_id
+             target = Metadata.Target.Session session_id
            ; durable = true
            }
          in
@@ -667,25 +708,27 @@ let load_verified store ~sw handle ~max_bytes =
          (Store_error.Corrupt "blob content does not match its recorded length and digest"))
 ;;
 
-let load_staged_content store ~sw session ~(metadata : Metadata.t) ~max_bytes =
+let load_staged_content_at
+      store
+      ~sw
+      ~directory
+      ~temporary_directory
+      ~target
+      ~(metadata : Metadata.t)
+      ~max_bytes
+  =
   let invalid message = Error (Store_error.Corrupt message) in
   let open Result.Let_syntax in
   let%bind document = Blob_metadata_document.create metadata |> Document_fields.store in
   let%bind () =
-    match
-      (not metadata.durable)
-      && Option.exists
-           metadata.target_session
-           ~f:(Agent_protocol.Id.Session.equal (Session_store.Handle.session_id session))
-    with
+    match (not metadata.durable) && Metadata.Target.equal metadata.target target with
     | true -> Ok ()
     | false -> invalid "staged result belongs to another session"
   in
-  let directory = Filename.concat (Session_store.Handle.directory session) "blobs" in
   let locations =
     [ directory, ".blob", false
-    ; store.temporary_directory, ".blob", false
-    ; store.temporary_directory, ".part", true
+    ; temporary_directory, ".blob", false
+    ; temporary_directory, ".part", true
     ]
   in
   let rec read = function
@@ -717,11 +760,19 @@ let load_staged_content store ~sw session ~(metadata : Metadata.t) ~max_bytes =
   | exn -> Error (Store_error.of_exn ~operation:"load staged result" ~path:directory exn)
 ;;
 
-let ensure_staged_content store ~sw session ~stage content =
-  let document = Blob_stage_documents.temporary stage in
-  let metadata = Blob_metadata_document.value document in
-  let session_id = Session_store.Handle.session_id session in
-  let invalid message = Error (Store_error.Corrupt message) in
+let load_staged_content store ~sw session ~metadata ~max_bytes =
+  load_staged_content_at
+    store
+    ~sw
+    ~directory:(Filename.concat (Session_store.Handle.directory session) "blobs")
+    ~temporary_directory:store.temporary_directory
+    ~target:(Metadata.Target.Session (Session_store.Handle.session_id session))
+    ~metadata
+    ~max_bytes
+;;
+
+let validate_staged_content store ~target ~stage content =
+  let metadata = Blob_metadata_document.value (Blob_stage_documents.temporary stage) in
   let open Result.Let_syntax in
   let%bind _ =
     Agent_protocol.Blob.Metadata.of_json
@@ -729,26 +780,35 @@ let ensure_staged_content store ~sw session ~stage content =
     |> Result.map_error ~f:(fun error ->
       Store_error.Corrupt error.Agent_protocol.Error.message)
   in
-  let%bind () =
-    match
-      (not metadata.durable)
-      && Option.exists
-           metadata.target_session
-           ~f:(Agent_protocol.Id.Session.equal session_id)
-      && Int64.equal metadata.blob.byte_length (Int64.of_int (String.length content))
-      && Int64.(metadata.blob.byte_length <= store.max_upload_bytes)
-      && String.equal
-           metadata.blob.digest
-           Digestif.SHA256.(digest_string content |> to_hex)
-    with
-    | true -> Ok ()
-    | false -> invalid "staged blob content differs from its owned metadata"
-  in
-  let directory = Filename.concat (Session_store.Handle.directory session) "blobs" in
+  if
+    (not metadata.durable)
+    && Metadata.Target.equal metadata.target target
+    && Int64.equal metadata.blob.byte_length (Int64.of_int (String.length content))
+    && Int64.(metadata.blob.byte_length <= store.max_upload_bytes)
+    && String.equal metadata.blob.digest Digestif.SHA256.(digest_string content |> to_hex)
+  then Ok ()
+  else Error (Store_error.Corrupt "staged blob content differs from its owned metadata")
+;;
+
+let ensure_staged_content_at
+      store
+      ~sw
+      ~directory
+      ~parent_directory
+      ~temporary_directory
+      ~target
+      ~stage
+      content
+  =
+  let document = Blob_stage_documents.temporary stage in
+  let metadata = Blob_metadata_document.value document in
+  let invalid message = Error (Store_error.Corrupt message) in
+  let open Result.Let_syntax in
+  let%bind () = validate_staged_content store ~target ~stage content in
   let name suffix = blob_name metadata.blob.id suffix in
-  let temporary_data = Filename.concat store.temporary_directory (name ".blob") in
-  let temporary_metadata = Filename.concat store.temporary_directory (name ".sexp") in
-  let partial = Filename.concat store.temporary_directory (name ".part") in
+  let temporary_data = Filename.concat temporary_directory (name ".blob") in
+  let temporary_metadata = Filename.concat temporary_directory (name ".sexp") in
+  let partial = Filename.concat temporary_directory (name ".part") in
   let final_data = Filename.concat directory (name ".blob") in
   let final_metadata = Filename.concat directory (name ".sexp") in
   let verify path expected ~partial =
@@ -782,13 +842,10 @@ let ensure_staged_content store ~sw session ~stage content =
   Eio.Cancel.protect (fun () ->
     try
       let%bind () =
-        List.fold_result
-          [ directory; store.temporary_directory ]
-          ~init:()
-          ~f:(fun () path ->
-            match Eio.Path.kind ~follow:false (eio_path store path) with
-            | `Directory | `Not_found -> Ok ()
-            | _ -> invalid "staged blob directory is not a regular directory")
+        List.fold_result [ directory; temporary_directory ] ~init:() ~f:(fun () path ->
+          match Eio.Path.kind ~follow:false (eio_path store path) with
+          | `Directory | `Not_found -> Ok ()
+          | _ -> invalid "staged blob directory is not a regular directory")
       in
       let%bind _ =
         inspect
@@ -813,7 +870,8 @@ let ensure_staged_content store ~sw session ~stage content =
               ~sw
               ~id:metadata.blob.id
               ~creating_principal:metadata.creating_principal
-              ~target_session:metadata.target_session
+              ~target:metadata.target
+              ~temporary_directory
               ~kind:metadata.blob.kind
               ~media_type:metadata.blob.media_type
               ~display_name:metadata.blob.display_name
@@ -834,11 +892,7 @@ let ensure_staged_content store ~sw session ~stage content =
               ())
       in
       Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 (eio_path store directory);
-      let%bind () =
-        Durable_file.sync_directory
-          ~env:store.env
-          ~path:(Session_store.Handle.directory session)
-      in
+      let%bind () = Durable_file.sync_directory ~env:store.env ~path:parent_directory in
       (match has_final with
        | true -> ()
        | false ->
@@ -855,9 +909,7 @@ let ensure_staged_content store ~sw session ~stage content =
         | `Not_found -> ()
         | `Regular_file -> Eio.Path.unlink (eio_path store path)
         | _ -> failwith "staged blob cleanup encountered a non-file");
-      let%map () =
-        Durable_file.sync_directory ~env:store.env ~path:store.temporary_directory
-      in
+      let%map () = Durable_file.sync_directory ~env:store.env ~path:temporary_directory in
       Handle.create
         (Blob_stage_documents.durable stage)
         ~data_path:final_data
@@ -866,6 +918,19 @@ let ensure_staged_content store ~sw session ~stage content =
     | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
     | exn ->
       Error (Store_error.of_exn ~operation:"resume staged blob" ~path:final_data exn))
+;;
+
+let ensure_staged_content store ~sw session ~stage content =
+  let session_root = Session_store.Handle.directory session in
+  ensure_staged_content_at
+    store
+    ~sw
+    ~directory:(Filename.concat session_root "blobs")
+    ~parent_directory:session_root
+    ~temporary_directory:store.temporary_directory
+    ~target:(Metadata.Target.Session (Session_store.Handle.session_id session))
+    ~stage
+    content
 ;;
 
 let discard_unreferenced store session handle =
@@ -877,8 +942,8 @@ let discard_unreferenced store session handle =
   let metadata_path = Filename.concat directory (blob_name id ".sexp") in
   let open Result.Let_syntax in
   let%bind () =
-    match (Handle.metadata handle).target_session with
-    | Some target
+    match (Handle.metadata handle).target with
+    | Metadata.Target.Session target
       when Agent_protocol.Id.Session.equal
              target
              (Session_store.Handle.session_id session) -> Ok ()
@@ -933,7 +998,9 @@ let prepare_cleanup store ~protect ~now filename =
   let metadata = Blob_metadata_document.value document in
   let%bind () =
     if
-      (not metadata.durable) && String.equal filename (blob_name metadata.blob.id ".sexp")
+      (not metadata.durable)
+      && Option.is_none (Metadata.Target.developer metadata.target)
+      && String.equal filename (blob_name metadata.blob.id ".sexp")
     then Ok ()
     else Error (Store_error.Corrupt "temporary expiry metadata identity mismatch")
   in
@@ -1027,9 +1094,12 @@ let discard_staged_unreferenced retention ~reader session ~stage =
     match
       String.equal (Retention_reader.root reader) session_root
       && (not metadata.durable)
-      && Option.exists
-           metadata.target_session
-           ~f:(Agent_protocol.Id.Session.equal (Session_store.Handle.session_id session))
+      && (match metadata.target with
+          | Metadata.Target.Session target ->
+            Agent_protocol.Id.Session.equal
+              target
+              (Session_store.Handle.session_id session)
+          | Unassigned | Developer _ -> false)
       && Int64.(metadata.blob.byte_length <= of_int Int.max_value)
     with
     | true -> Ok ()
@@ -1206,10 +1276,15 @@ let begin_upload
       match
         begin_upload
           store
+          ~temporary_directory:store.temporary_directory
           ~sw
           ~id
           ~creating_principal
-          ~target_session
+          ~target:
+            (Option.value_map
+               target_session
+               ~default:Metadata.Target.Unassigned
+               ~f:(fun id -> Metadata.Target.Session id))
           ~kind
           ~media_type
           ~display_name
@@ -1293,4 +1368,480 @@ let discard_unreferenced store session handle =
 
 let cleanup_expired ?protect store ~now =
   coordinated store (fun () -> cleanup_expired ?protect store ~now)
+;;
+
+let bind_developer_runs store ~session_store runs =
+  coordinated store (fun () ->
+    let open Result.Let_syntax in
+    let%bind () =
+      Session_store.validate_blob_storage
+        session_store
+        ~env:store.env
+        ~temporary_directory:store.temporary_directory
+        ~durable_directory:store.durable_directory
+    in
+    let%bind () =
+      if
+        Developer_run_store.issued_by_session_store runs session_store
+        && not (Developer_run_store.is_closed runs)
+      then Ok ()
+      else
+        Error (Store_error.Corrupt "developer Store has another or closed daemon owner")
+    in
+    let%bind _ =
+      Developer_run_store.Result_root.existing runs
+      |> Result.map_error ~f:(function
+        | Developer_run_store.Error.Store error -> error
+        | Limit_exceeded ->
+          Store_error.Admission_capacity
+            (Document_schema.Error.Limit_exceeded "developer run recovery")
+        | _ -> Store_error.Corrupt "developer run recovery rejected blob binding")
+    in
+    match store.coordination.developer_binding with
+    | Some (owner, current) when phys_equal owner session_store && phys_equal current runs
+      -> Ok ()
+    | Some (owner, current)
+      when phys_equal owner session_store
+           && Developer_run_store.is_closed current
+           && store.coordination.active_reads = 0
+           && store.coordination.active_uploads = 0 ->
+      (* The new live Store holds the same Session_store's exclusive developer
+         root claim, so the prior issuer has released that root even if its
+         close is between release and the final closed flag. *)
+      store.coordination.developer_binding <- Some (session_store, runs);
+      Ok ()
+    | None
+      when store.coordination.active_reads = 0 && store.coordination.active_uploads = 0 ->
+      store.coordination.developer_binding <- Some (session_store, runs);
+      Ok ()
+    | Some _ | None ->
+      Error (Store_error.Corrupt "developer blob binding is active or has another owner"))
+;;
+
+let checked_directory store path =
+  match Eio.Path.kind ~follow:false (eio_path store path) with
+  | `Directory -> Ok ()
+  | `Not_found -> Error (Store_error.Missing path)
+  | _ -> Error (Store_error.Corrupt "result directory is linked or invalid")
+;;
+
+let checked_or_missing_directory store path =
+  match Eio.Path.kind ~follow:false (eio_path store path) with
+  | `Directory | `Not_found -> Ok ()
+  | _ -> Error (Store_error.Corrupt "result directory is linked or invalid")
+;;
+
+let ensure_child_directory store ~parent ~name =
+  let path = Filename.concat parent name in
+  try
+    let open Result.Let_syntax in
+    let%bind () = checked_directory store parent in
+    let%bind () =
+      match Eio.Path.kind ~follow:false (eio_path store path) with
+      | `Directory -> Ok ()
+      | `Not_found ->
+        Eio.Path.mkdir ~perm:0o700 (eio_path store path);
+        Durable_file.sync_directory ~env:store.env ~path:parent
+      | _ -> Error (Store_error.Corrupt "result directory is linked or invalid")
+    in
+    let%map () = checked_directory store path in
+    path
+  with
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+  | exn -> Error (Store_error.of_exn ~operation:"create result directory" ~path exn)
+;;
+
+let result_directories store root ~create =
+  let open Result.Let_syntax in
+  match root with
+  | Result_root.Conversation session ->
+    Ok
+      ( Filename.concat (Session_store.Handle.directory session) "blobs"
+      , Session_store.Handle.directory session
+      , store.temporary_directory )
+  | Developer developer ->
+    let name =
+      Agent_protocol.Id.Developer_run.to_string
+        (Developer_run_store.Result_root.run_id developer)
+    in
+    let parent = Filename.concat store.durable_directory "developer-runs" in
+    let temporary_parent = Filename.concat store.temporary_directory "developer-runs" in
+    let%bind () =
+      if create
+      then (
+        let%bind _ =
+          ensure_child_directory
+            store
+            ~parent:store.durable_directory
+            ~name:"developer-runs"
+        in
+        let%bind _ =
+          ensure_child_directory
+            store
+            ~parent:store.temporary_directory
+            ~name:"developer-runs"
+        in
+        Ok ())
+      else (
+        let%bind () = checked_or_missing_directory store parent in
+        checked_or_missing_directory store temporary_parent)
+    in
+    let%bind directory =
+      if create
+      then ensure_child_directory store ~parent ~name
+      else (
+        let path = Filename.concat parent name in
+        Result.map (checked_or_missing_directory store path) ~f:(fun () -> path))
+    in
+    let%map temporary =
+      if create
+      then ensure_child_directory store ~parent:temporary_parent ~name
+      else (
+        let path = Filename.concat temporary_parent name in
+        Result.map (checked_or_missing_directory store path) ~f:(fun () -> path))
+    in
+    directory, parent, temporary
+;;
+
+let with_result_root store root ~reader ~create ~f =
+  match root with
+  | Result_root.Conversation _ ->
+    let open Result.Let_syntax in
+    let%bind directory, parent_directory, temporary_directory =
+      result_directories store root ~create
+    in
+    f ~directory ~parent_directory ~temporary_directory
+  | Developer developer ->
+    (match store.coordination.developer_binding with
+     | None -> Error (Store_error.Corrupt "developer blob root is not bound")
+     | Some (_, runs) when not (Developer_run_store.Result_root.issued_by runs developer)
+       -> Error (Store_error.Corrupt "developer blob root has another Store issuer")
+     | Some _ ->
+       let borrow =
+         match reader with
+         | None -> Developer_run_store.Result_root.with_lease developer
+         | Some reader ->
+           Developer_run_store.Result_root.with_retention_lease developer ~reader
+       in
+       borrow ~f:(fun ~root:data_root ->
+         if
+           not
+             (String.equal
+                store.durable_directory
+                (Data_root.durable_blobs_path data_root)
+              && String.equal
+                   store.temporary_directory
+                   (Data_root.temporary_blobs_path data_root))
+         then
+           Error (Store_error.Corrupt "developer blob root differs from bound data root")
+         else
+           let open Result.Let_syntax in
+           let%bind directory, parent_directory, temporary_directory =
+             result_directories store root ~create
+           in
+           f ~directory ~parent_directory ~temporary_directory))
+;;
+
+let open_result_at store root id ~directory =
+  let open Result.Let_syntax in
+  let metadata_path = Filename.concat directory (blob_name id ".sexp") in
+  let data_path = Filename.concat directory (blob_name id ".blob") in
+  let%bind document = load_metadata store metadata_path in
+  let metadata = Blob_metadata_document.value document in
+  let%bind () =
+    if
+      Agent_protocol.Id.Blob.equal metadata.blob.id id
+      && metadata.durable
+      && Metadata.Target.equal metadata.target (Result_root.target root)
+    then Ok ()
+    else Error (Store_error.Corrupt "result blob has another root or metadata target")
+  in
+  let%bind () =
+    match Eio.Path.kind ~follow:false (eio_path store data_path) with
+    | `Regular_file -> Ok ()
+    | `Not_found -> Error (Store_error.Missing data_path)
+    | _ -> Error (Store_error.Corrupt "result blob data is linked or invalid")
+  in
+  Ok (Handle.create document ~data_path ~metadata_path)
+;;
+
+let open_result store root id =
+  reading store (fun () ->
+    with_result_root
+      store
+      root
+      ~reader:None
+      ~create:false
+      ~f:(fun ~directory ~parent_directory:_ ~temporary_directory:_ ->
+        let open Result.Let_syntax in
+        let%bind handle = open_result_at store root id ~directory in
+        let%map result_metadata = Handle.metadata_checked handle in
+        Result_read.
+          { root; id; metadata = result_metadata; coordination = store.coordination }))
+;;
+
+let with_result_read store read ~f =
+  if not (phys_equal store.coordination read.Result_read.coordination)
+  then Error (Store_error.Corrupt "result read belongs to another blob coordinator")
+  else
+    reading store (fun () ->
+      with_result_root
+        store
+        read.root
+        ~reader:None
+        ~create:false
+        ~f:(fun ~directory ~parent_directory:_ ~temporary_directory:_ ->
+          let open Result.Let_syntax in
+          let%bind handle = open_result_at store read.root read.id ~directory in
+          let%bind metadata = Handle.metadata_checked handle in
+          if Metadata.equal metadata read.metadata
+          then f handle
+          else Error (Store_error.Corrupt "result metadata changed since checked open")))
+;;
+
+let load_result_verified store ~sw read ~max_bytes =
+  if max_bytes <= 0 || Int64.(of_int max_bytes > store.max_upload_bytes)
+  then Error (Store_error.Corrupt "result read limit exceeds storage policy")
+  else
+    with_result_read store read ~f:(fun handle ->
+      load_verified store ~sw handle ~max_bytes)
+;;
+
+let read_result_range store ~sw read ~offset ~max_bytes =
+  with_result_read store read ~f:(fun handle ->
+    let open Result.Let_syntax in
+    let%bind () =
+      if max_bytes > 0 && Int64.(offset >= zero)
+      then Ok ()
+      else Error (Store_error.Corrupt "invalid result range")
+    in
+    let%bind content_length =
+      let byte_length = (Handle.metadata handle).blob.byte_length in
+      if Int64.(byte_length < zero || byte_length > store.max_upload_bytes)
+      then Error (Store_error.Corrupt "result exceeds storage read policy")
+      else (
+        match Int64.to_int byte_length with
+        | Some length -> Ok (Int.max 1 length)
+        | None -> Error (Store_error.Corrupt "result cannot fit bounded read"))
+    in
+    let%bind complete = load_verified store ~sw handle ~max_bytes:content_length in
+    let length = String.length complete in
+    if Int64.(offset > of_int length)
+    then Error (Store_error.Corrupt "result range starts beyond content")
+    else (
+      let start = Int64.to_int_exn offset in
+      Ok (String.sub complete ~pos:start ~len:(Int.min max_bytes (length - start)))))
+;;
+
+let ensure_result_staged_content store ~sw root ~stage content =
+  coordinated store (fun () ->
+    let open Result.Let_syntax in
+    let%bind () =
+      validate_staged_content store ~target:(Result_root.target root) ~stage content
+    in
+    with_result_root
+      store
+      root
+      ~reader:None
+      ~create:true
+      ~f:(fun ~directory ~parent_directory ~temporary_directory ->
+        let open Result.Let_syntax in
+        let%bind handle =
+          ensure_staged_content_at
+            store
+            ~sw
+            ~directory
+            ~parent_directory
+            ~temporary_directory
+            ~target:(Result_root.target root)
+            ~stage
+            content
+        in
+        let%map result_metadata = Handle.metadata_checked handle in
+        Result_read.
+          { root
+          ; id = result_metadata.blob.id
+          ; metadata = result_metadata
+          ; coordination = store.coordination
+          }))
+;;
+
+let load_result_staged_content store ~sw root ~metadata ~max_bytes =
+  reading store (fun () ->
+    with_result_root
+      store
+      root
+      ~reader:None
+      ~create:false
+      ~f:(fun ~directory ~parent_directory:_ ~temporary_directory ->
+        load_staged_content_at
+          store
+          ~sw
+          ~directory
+          ~temporary_directory
+          ~target:(Result_root.target root)
+          ~metadata
+          ~max_bytes))
+;;
+
+let with_result_retention_root retention root ~reader ~f =
+  if not retention.active
+  then Error (Store_error.Corrupt "blob retention scope has ended")
+  else
+    with_result_root
+      retention.store
+      root
+      ~reader:(Some reader)
+      ~create:false
+      ~f:(fun ~directory ~parent_directory:_ ~temporary_directory ->
+        f ~durable_directory:directory ~temporary_directory)
+;;
+
+type developer_retention_presence =
+  | No_developer_evidence
+  | Has_developer_evidence
+[@@deriving sexp_of]
+
+let validate_developer_retention retention ~session ~reader =
+  let open Result.Let_syntax in
+  if not retention.active
+  then Error (Store_error.Corrupt "blob retention scope has ended")
+  else (
+    let store = retention.store in
+    let%bind durable_reader =
+      Retention_reader.at_root reader ~root:store.durable_directory
+    in
+    let%bind durable_entries = Retention_reader.list durable_reader ~directory:"." in
+    let%bind () =
+      match durable_entries with
+      | [] | [ "developer-runs" ] -> Ok ()
+      | _ -> Error (Store_error.Corrupt "unknown global durable blob consumer")
+    in
+    let durable_namespace = Filename.concat store.durable_directory "developer-runs" in
+    let temporary_namespace =
+      Filename.concat store.temporary_directory "developer-runs"
+    in
+    let present path =
+      match Eio.Path.kind ~follow:false (eio_path store path) with
+      | `Not_found -> Ok false
+      | `Directory -> Ok true
+      | _ -> Error (Store_error.Corrupt "developer blob namespace is linked or invalid")
+    in
+    let%bind durable_present = present durable_namespace in
+    let%bind temporary_present = present temporary_namespace in
+    let%bind durable_ids =
+      if durable_present
+      then Blob_developer_namespace.run_ids ~reader ~directory:durable_namespace
+      else Ok []
+    in
+    let%bind temporary_ids =
+      if temporary_present
+      then Blob_developer_namespace.run_ids ~reader ~directory:temporary_namespace
+      else Ok []
+    in
+    let ids =
+      List.dedup_and_sort
+        (durable_ids @ temporary_ids)
+        ~compare:Agent_protocol.Id.Developer_run.compare
+    in
+    let live_binding =
+      match store.coordination.developer_binding with
+      | Some (_, runs) when not (Developer_run_store.is_closed runs) -> Some runs
+      | Some _ | None -> None
+    in
+    match live_binding with
+    | None ->
+      if durable_present || temporary_present
+      then Error (Store_error.Corrupt "developer blobs lack the live daemon Store")
+      else if
+        not
+          (String.equal
+             (Retention_reader.root reader)
+             (Session_store.Handle.directory session)
+           && Retention_reader.uses_filesystem reader ~env:store.env)
+      then Error (Store_error.Corrupt "unbound developer scan has another session root")
+      else (
+        let%bind authority_directory =
+          Session_store.Handle.developer_evidence_directory
+            session
+            ~env:store.env
+            ~temporary_directory:store.temporary_directory
+            ~durable_directory:store.durable_directory
+        in
+        let%bind present =
+          try
+            match Eio.Path.kind ~follow:false (eio_path store authority_directory) with
+            | `Not_found -> Ok false
+            | `Directory -> Ok true
+            | _ -> Error (Store_error.Corrupt "developer authority directory is invalid")
+          with
+          | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+          | exn ->
+            Error
+              (Store_error.of_exn
+                 ~operation:"inspect developer authority directory"
+                 ~path:authority_directory
+                 exn)
+        in
+        if not present
+        then Ok No_developer_evidence
+        else (
+          let%bind authority_reader =
+            Retention_reader.at_root reader ~root:authority_directory
+          in
+          let%map entries = Retention_reader.list authority_reader ~directory:"." in
+          if List.is_empty entries then No_developer_evidence else Has_developer_evidence))
+    | Some runs ->
+      let%bind roots =
+        Developer_run_store.Result_root.existing_for_retention runs ~reader
+        |> Result.map_error ~f:(function
+          | Developer_run_store.Error.Store error -> error
+          | Limit_exceeded ->
+            Store_error.Admission_capacity
+              (Document_schema.Error.Limit_exceeded "developer root retention")
+          | _ -> Store_error.Corrupt "developer root retention rejected Store recovery")
+      in
+      let by_id = Hashtbl.create (module Agent_protocol.Id.Developer_run) in
+      List.iter roots ~f:(fun root ->
+        Hashtbl.set by_id ~key:(Developer_run_store.Result_root.run_id root) ~data:root);
+      let%map () =
+        List.fold_result ids ~init:() ~f:(fun () id ->
+          match Hashtbl.find by_id id with
+          | None -> Error (Store_error.Corrupt "developer blob run lacks Store authority")
+          | Some developer ->
+            let root = Result_root.developer developer in
+            with_result_retention_root
+              retention
+              root
+              ~reader
+              ~f:(fun ~durable_directory ~temporary_directory ->
+                let target =
+                  match Result_root.target root with
+                  | Metadata.Target.Developer target -> target
+                  | Unassigned | Session _ -> assert false
+                in
+                let%bind () =
+                  if List.mem durable_ids id ~equal:Agent_protocol.Id.Developer_run.equal
+                  then
+                    Blob_developer_namespace.validate_run
+                      ~reader
+                      ~directory:durable_directory
+                      ~target
+                      ~durable:true
+                      ~max_blob_bytes:store.max_upload_bytes
+                  else Ok ()
+                in
+                if List.mem temporary_ids id ~equal:Agent_protocol.Id.Developer_run.equal
+                then
+                  Blob_developer_namespace.validate_run
+                    ~reader
+                    ~directory:temporary_directory
+                    ~target
+                    ~durable:false
+                    ~max_blob_bytes:store.max_upload_bytes
+                else Ok ()))
+      in
+      if List.is_empty roots && List.is_empty ids
+      then No_developer_evidence
+      else Has_developer_evidence)
 ;;

@@ -28,8 +28,8 @@ let of_publications ~temporary_bytes ~durable_bytes =
   let%bind durable = M.of_document original_durable in
   let value = M.value temporary in
   let%bind () =
-    if value.durable || Option.is_none value.target_session
-    then F.invalid "stage" "temporary publication needs a session and durable=false"
+    if value.durable || Blob_metadata.Target.equal value.target Unassigned
+    then F.invalid "stage" "temporary publication needs an owner and durable=false"
     else if not (Blob_metadata.equal { value with durable = true } (M.value durable))
     then F.invalid "stage" "metadata publications differ beyond durable flag"
     else Ok ()

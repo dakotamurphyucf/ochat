@@ -53,15 +53,12 @@ let blob_shape =
        ~f:(fun key -> key, D.Shape.value))
 ;;
 
-let decode json =
+let decode_common json ~target =
   let open Result.Let_syntax in
   let%bind blob = F.required json "blob" blob_of_json in
   let%bind creating_principal =
     F.required json "creating_principal" (fun json ->
       P.Id.Principal.of_json json |> F.protocol)
-  in
-  let%bind target_session =
-    optional json "target_session" (fun json -> P.Id.Session.of_json json |> F.protocol)
   in
   let%bind allowed_use = F.required json "allowed_use" F.string in
   let%bind created_at =
@@ -73,24 +70,60 @@ let decode json =
   let%bind durable = F.required json "durable" F.boolean in
   if String.is_empty allowed_use || String.mem allowed_use '\000'
   then F.invalid "allowed_use" "must be nonempty and contain no NUL"
-  else if durable && Option.is_none target_session
-  then F.invalid "target_session" "durable blob must have an owning session"
+  else if durable && Blob_metadata.Target.equal target Unassigned
+  then F.invalid "target" "durable blob must have an owner"
   else if Option.exists expires_at ~f:(fun at -> P.Timestamp.compare at created_at < 0)
   then F.invalid "expires_at" "expiry precedes creation"
   else
     Ok
       Blob_metadata.
-        { blob
-        ; creating_principal
-        ; target_session
-        ; allowed_use
-        ; created_at
-        ; expires_at
-        ; durable
-        }
+        { blob; creating_principal; target; allowed_use; created_at; expires_at; durable }
 ;;
 
-let encode (value : Blob_metadata.t) =
+let decode_v1 json =
+  let open Result.Let_syntax in
+  let%bind session =
+    optional json "target_session" (fun json -> P.Id.Session.of_json json |> F.protocol)
+  in
+  decode_common
+    json
+    ~target:
+      (Option.value_map session ~default:Blob_metadata.Target.Unassigned ~f:(fun id ->
+         Blob_metadata.Target.Session id))
+;;
+
+let decode_v2 json =
+  let open Result.Let_syntax in
+  let%bind kind = F.required json "target_kind" F.string in
+  let%bind () =
+    if String.equal kind "developer"
+    then Ok ()
+    else F.invalid "target_kind" "expected developer"
+  in
+  let%bind () =
+    match D.Json.field json ~name:"target_session" with
+    | Absent -> Ok ()
+    | Null | Value _ -> F.invalid "target_session" "developer blob cannot name a session"
+  in
+  let%bind developer =
+    F.required json "target_developer" (fun json ->
+      let%bind host_id =
+        F.required json "host_id" (fun json -> P.Id.Server.of_json json |> F.protocol)
+      in
+      let%bind run_id =
+        F.required json "run_id" (fun json ->
+          P.Id.Developer_run.of_json json |> F.protocol)
+      in
+      let%map principal_id =
+        F.required json "principal_id" (fun json ->
+          P.Id.Principal.of_json json |> F.protocol)
+      in
+      Blob_metadata.Target.{ host_id; run_id; principal_id })
+  in
+  decode_common json ~target:(Blob_metadata.Target.Developer developer)
+;;
+
+let encode_common (value : Blob_metadata.t) target_fields =
   Ok
     (`Object
         ([ "blob", blob_to_json value.blob
@@ -99,12 +132,34 @@ let encode (value : Blob_metadata.t) =
          ; "created_at", P.Timestamp.to_json value.created_at
          ; ("durable", if value.durable then `True else `False)
          ]
-         @ Option.to_list
-             (Option.map value.target_session ~f:(fun id ->
-                "target_session", P.Id.Session.to_json id))
+         @ target_fields
          @ Option.to_list
              (Option.map value.expires_at ~f:(fun at ->
                 "expires_at", P.Timestamp.to_json at))))
+;;
+
+let encode_v1 value =
+  match value.Blob_metadata.target with
+  | Blob_metadata.Target.Developer _ ->
+    F.invalid "target" "developer target requires version two"
+  | Unassigned -> encode_common value []
+  | Session id -> encode_common value [ "target_session", P.Id.Session.to_json id ]
+;;
+
+let encode_v2 value =
+  match value.Blob_metadata.target with
+  | Blob_metadata.Target.Developer { host_id; run_id; principal_id } ->
+    encode_common
+      value
+      [ "target_kind", `String "developer"
+      ; ( "target_developer"
+        , `Object
+            [ "host_id", P.Id.Server.to_json host_id
+            ; "run_id", P.Id.Developer_run.to_json run_id
+            ; "principal_id", P.Id.Principal.to_json principal_id
+            ] )
+      ]
+  | Unassigned | Session _ -> F.invalid "target" "version two requires developer target"
 ;;
 
 let limits =
@@ -113,7 +168,7 @@ let limits =
   |> Result.ok_or_failwith
 ;;
 
-let codec =
+let v1_codec =
   D.Domain_codec.create
     ~limits
     ~kind:"store.blob_metadata"
@@ -129,8 +184,36 @@ let codec =
          ; "durable", D.Shape.value
          ])
     ~supported_semantics:[]
-    ~decode
-    ~encode
+    ~decode:decode_v1
+    ~encode:encode_v1
+  |> Result.map_error ~f:(fun error -> Sexp.to_string_hum (D.Error.sexp_of_t error))
+  |> Result.ok_or_failwith
+;;
+
+let v2_codec =
+  D.Domain_codec.create
+    ~limits
+    ~kind:"store.blob_metadata"
+    ~version:2
+    ~shape:
+      (F.shape
+         [ "blob", blob_shape
+         ; "creating_principal", D.Shape.value
+         ; "target_kind", D.Shape.value
+         ; ( "target_developer"
+           , F.shape
+               [ "host_id", D.Shape.value
+               ; "run_id", D.Shape.value
+               ; "principal_id", D.Shape.value
+               ] )
+         ; "allowed_use", D.Shape.value
+         ; "created_at", D.Shape.value
+         ; "expires_at", D.Shape.value
+         ; "durable", D.Shape.value
+         ])
+    ~supported_semantics:[]
+    ~decode:decode_v2
+    ~encode:encode_v2
   |> Result.map_error ~f:(fun error -> Sexp.to_string_hum (D.Error.sexp_of_t error))
   |> Result.ok_or_failwith
 ;;
@@ -139,11 +222,30 @@ let value = D.Extension_carrier.value
 
 let of_document document =
   let open Result.Let_syntax in
-  let%bind document = F.upgrade document ~limits ~kind:"store.blob_metadata" in
-  D.Domain_codec.decode codec document
+  let%bind () =
+    F.expect_versions document ~kind:"store.blob_metadata" ~versions:[ 1; 2 ]
+  in
+  match D.Document.version document with
+  | 1 -> D.Domain_codec.decode v1_codec document
+  | 2 -> D.Domain_codec.decode v2_codec document
+  | _ -> assert false
 ;;
 
-let to_document value = D.Domain_codec.encode codec value
+let to_document value =
+  let version =
+    match D.Extension_carrier.template value with
+    | Some document -> D.Document.version document
+    | None ->
+      (match (D.Extension_carrier.value value).Blob_metadata.target with
+       | Developer _ -> 2
+       | Unassigned | Session _ -> 1)
+  in
+  match version with
+  | 1 -> D.Domain_codec.encode v1_codec value
+  | 2 -> D.Domain_codec.encode v2_codec value
+  | _ -> F.invalid "version" "unsupported blob metadata version"
+;;
+
 let of_bytes bytes = Result.bind (D.Document.decode ~limits bytes) ~f:of_document
 let to_bytes value = Result.map (to_document value) ~f:D.Document.to_string
 
@@ -161,7 +263,9 @@ let with_value t value =
 
 let stored_blob_id document =
   let open Result.Let_syntax in
-  let%bind () = F.expect_versions document ~kind:"store.blob_metadata" ~versions:[ 1 ] in
+  let%bind () =
+    F.expect_versions document ~kind:"store.blob_metadata" ~versions:[ 1; 2 ]
+  in
   F.required (D.Document.payload document) "blob" (fun blob ->
     F.required blob "id" (fun id -> P.Id.Blob.of_json id |> F.protocol))
 ;;

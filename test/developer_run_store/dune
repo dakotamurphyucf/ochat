@@ -1,6 +1,6 @@
 (library
  (name developer_run_store_test_suite)
- (modules developer_run_store_tests developer_run_selected_tests developer_job_claim_tests)
+ (modules developer_run_store_tests developer_run_selected_tests developer_job_claim_tests developer_blob_custody_tests)
  (libraries core core_unix eio eio_main jsonaf mirage-crypto-rng.unix ochat.agent_store ochat.agent_protocol ochat.agent_session ochat.agent_server ochat.chatml_source ochat.document_schema)
  (inline_tests)
  (preprocess

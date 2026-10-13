@@ -17,3 +17,7 @@ val durable : t -> Blob_metadata_document.t
 val temporary_bytes : t -> string
 val durable_bytes : t -> string
 val equal : t -> t -> bool
+
+(** A stage's temporary and durable publications have the same explicit owner
+    target and exact original document fields; only [durable] differs. The
+    released conversation version-one stage encoding is unchanged. *)

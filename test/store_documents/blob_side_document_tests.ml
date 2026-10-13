@@ -19,6 +19,41 @@ let field json name =
   | Absent -> failwith ("absent " ^ name)
 ;;
 
+let%expect_test "developer metadata is explicit version two, never an absent session" =
+  let original = S.Blob_metadata_document.of_bytes fixture |> checked in
+  let value = S.Blob_metadata_document.value original in
+  let id decode text =
+    match decode text with
+    | Ok value -> value
+    | Error error -> raise_s [%sexp (error : P.Error.t)]
+  in
+  let target =
+    S.Blob_metadata.Target.Developer
+      { host_id = id P.Id.Server.of_string "srv_blob_side_document"
+      ; run_id = id P.Id.Developer_run.of_string "dvr_blob_side_document"
+      ; principal_id = value.creating_principal
+      }
+  in
+  let authored = S.Blob_metadata_document.create { value with target } |> checked in
+  let bytes = S.Blob_metadata_document.to_bytes authored |> checked in
+  let reopened = S.Blob_metadata_document.of_bytes bytes |> checked in
+  let document = S.Blob_metadata_document.to_document reopened |> checked in
+  [%test_eq: int] 2 (D.Document.version document);
+  assert (
+    S.Blob_metadata.Target.equal target (S.Blob_metadata_document.value reopened).target);
+  assert (
+    not
+      (S.Blob_metadata.Target.equal
+         target
+         (S.Blob_metadata_document.value original).target));
+  assert (
+    match D.Json.field (D.Document.payload document) ~name:"target_session" with
+    | Absent -> true
+    | Null | Value _ -> false);
+  print_endline "version one conversation and tagged developer target stayed distinct";
+  [%expect {|version one conversation and tagged developer target stayed distinct|}]
+;;
+
 let%expect_test "metadata phase edits preserve nested unknowns and optional absence" =
   let metadata = S.Blob_metadata_document.of_bytes fixture |> checked in
   let stage = S.Blob_stage_documents.create metadata |> checked in
@@ -135,7 +170,7 @@ let%expect_test
   let value = S.Blob_metadata_document.value metadata in
   let reference =
     P.Job_artifact.create
-      ~session_id:(Option.value_exn value.target_session)
+      ~session_id:(Option.value_exn (S.Blob_metadata.Target.session_id value.target))
       ~job_id:
         (P.Id.Job.of_string "job_private_named"
          |> Result.map_error ~f:(fun e -> e.P.Error.message)
