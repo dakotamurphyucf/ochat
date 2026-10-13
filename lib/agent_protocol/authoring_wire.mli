@@ -1,4 +1,4 @@
-(** Closed, portable dispatch for the authoring core method family. The sum
+(** Closed, portable dispatch for the authoring method family. The sum
     constructors keep each request and result tied to its method-specific DTO;
     accepted syntax alone does not advertise an installed server handler. *)
 
@@ -23,6 +23,8 @@ module Request : sig
     | Analyze of Authoring_analysis.Analyze.Request.t
     | Prefix of Authoring_analysis.Prefix.Request.t
     | Query of Authoring_analysis.Query.Request.t
+    | Lexical of Authoring_assistance.Lexical.Request.t
+    | Assistance of Authoring_assistance.Assistance.Request.t
   [@@deriving sexp_of]
 
   val method_name : t -> string
@@ -52,6 +54,8 @@ module Response : sig
     | Analyze of Authoring_analysis.Analyze.t
     | Prefix of Authoring_analysis.Prefix.t
     | Query of Authoring_analysis.Query.t
+    | Lexical of Authoring_assistance.Lexical.Result.t
+    | Assistance of Authoring_assistance.Assistance.Result.t
   [@@deriving sexp_of]
 
   val method_name : t -> string

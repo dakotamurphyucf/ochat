@@ -161,6 +161,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_protocol/audit.mli` | [contract](../../lib/agent_protocol/audit.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/authoring.mli` | [contract](../../lib/agent_protocol/authoring.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_protocol/authoring_analysis.mli` | [contract](../../lib/agent_protocol/authoring_analysis.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
+| `lib/agent_protocol/authoring_assistance.mli` | [contract](../../lib/agent_protocol/authoring_assistance.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_protocol/authoring_bundle.mli` | [contract](../../lib/agent_protocol/authoring_bundle.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_protocol/authoring_codec.mli` | [contract](../../lib/agent_protocol/authoring_codec.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_protocol/authoring_common.mli` | [contract](../../lib/agent_protocol/authoring_common.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |

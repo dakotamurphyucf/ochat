@@ -267,7 +267,12 @@ let%expect_test "client binds source, document transitions and initialization" =
         ~selected_version:version
         ~implementation
         ~server_id:host
-        ~enabled_features:[ A.Features.core; A.Features.semantic ]
+        ~enabled_features:
+          [ A.Features.core
+          ; A.Features.semantic
+          ; A.Features.lexical
+          ; A.Features.assistance
+          ]
         ~extensions:None
         ~principal
         ~limits:
@@ -293,7 +298,12 @@ let%expect_test "client binds source, document transitions and initialization" =
         ~implementation
         ~protocol_min:version
         ~protocol_max:version
-        ~features:[ A.Features.core; A.Features.semantic ]
+        ~features:
+          [ A.Features.core
+          ; A.Features.semantic
+          ; A.Features.lexical
+          ; A.Features.assistance
+          ]
         ~event_encodings:[ Json ]
         ~max_inbound_event_bytes:1024
         ()
@@ -322,6 +332,8 @@ let%expect_test "client binds source, document transitions and initialization" =
           ; "authoring.analysis"
           ; "authoring.prefix"
           ; "authoring.query"
+          ; "authoring.lexical"
+          ; "authoring.assistance"
           ]
         ~encodings:[ A.Encoding.Utf8_bytes ]
         ~limits
@@ -358,6 +370,8 @@ let%expect_test "client binds source, document transitions and initialization" =
     let analysis_reply = ref None in
     let prefix_reply = ref None in
     let query_reply = ref None in
+    let lexical_reply = ref None in
+    let assistance_reply = ref None in
     let cancel_read = ref None in
     let return response =
       P.Public.Result.Non_history
@@ -392,6 +406,10 @@ let%expect_test "client binds source, document transitions and initialization" =
             return (W.Response.Prefix (Option.value_exn !prefix_reply))
           | P.Command.Authoring (W.Request.Query _) ->
             return (W.Response.Query (Option.value_exn !query_reply))
+          | P.Command.Authoring (W.Request.Lexical _) ->
+            return (W.Response.Lexical (Option.value_exn !lexical_reply))
+          | P.Command.Authoring (W.Request.Assistance _) ->
+            return (W.Response.Assistance (Option.value_exn !assistance_reply))
           | P.Command.Authoring (W.Request.Source_read _) ->
             Option.iter !cancel_read ~f:(fun (context, marker) ->
               Eio.Cancel.cancel context marker;
@@ -527,6 +545,83 @@ let%expect_test "client binds source, document transitions and initialization" =
             ~payload:(S.Query.Syntax_result (S.Query.Unavailable S.Query.No_syntax))
           |> ok);
     assert (Result.is_error (Agent_client.Authoring.query_semantics client query_request));
+    let module H = A.Assistance in
+    let lexical_request =
+      H.Lexical.Request.create ~context:expected ~source:base ~view:Chatmd_authored |> ok
+    in
+    let lexical_owner =
+      H.Lexical.Owner.chatmd
+        ~captured_source:base
+        ~input_identity:fingerprint
+        ~view:Authored
+        ~view_sha256:(A.Source.digest base)
+        ~view_byte_length:(A.Source.byte_length base)
+      |> ok
+    in
+    lexical_reply
+    := Some
+         (H.Lexical.Result.create
+            ~request:lexical_request
+            ~owner:lexical_owner
+            ~spans:[]
+            ~issues:[]
+            ~status:Reached_eof
+          |> ok);
+    assert (Result.is_ok (Agent_client.Authoring.lexical client lexical_request));
+    let changed_lexical_request =
+      H.Lexical.Request.create ~context:expected ~source:base ~view:Chatmd_effective |> ok
+    in
+    let changed_lexical_owner =
+      H.Lexical.Owner.chatmd
+        ~captured_source:base
+        ~input_identity:fingerprint
+        ~view:Effective
+        ~view_sha256:fingerprint
+        ~view_byte_length:(A.Source.byte_length base)
+      |> ok
+    in
+    lexical_reply
+    := Some
+         (H.Lexical.Result.create
+            ~request:changed_lexical_request
+            ~owner:changed_lexical_owner
+            ~spans:[]
+            ~issues:[]
+            ~status:Reached_eof
+          |> ok);
+    assert (Result.is_error (Agent_client.Authoring.lexical client lexical_request));
+    let assistance_request =
+      H.Assistance.Request.create
+        ~context:expected
+        ~source:base
+        ~cursor_byte:1
+        ~max_items:1
+      |> ok
+    in
+    assistance_reply
+    := Some
+         (H.Assistance.Result.create
+            ~request:assistance_request
+            ~items:[]
+            ~status:(Unavailable No_local_context)
+          |> ok);
+    assert (Result.is_ok (Agent_client.Authoring.assist client assistance_request));
+    let changed_assistance_request =
+      H.Assistance.Request.create
+        ~context:expected
+        ~source:base
+        ~cursor_byte:2
+        ~max_items:1
+      |> ok
+    in
+    assistance_reply
+    := Some
+         (H.Assistance.Result.create
+            ~request:changed_assistance_request
+            ~items:[]
+            ~status:(Unavailable No_local_context)
+          |> ok);
+    assert (Result.is_error (Agent_client.Authoring.assist client assistance_request));
     let version_request =
       A.Document.Version_request.create ~context:expected ~source_id:base_id |> ok
     in
@@ -744,6 +839,20 @@ let%expect_test "client binds source, document transitions and initialization" =
       |> ok
     in
     assert (Result.is_error (Agent_client.Authoring.analyze core_client core_request));
+    let core_expected = A.Context.Expected.of_view core_context in
+    let core_lexical =
+      H.Lexical.Request.create ~context:core_expected ~source:base ~view:Chatml |> ok
+    in
+    let core_assistance =
+      H.Assistance.Request.create
+        ~context:core_expected
+        ~source:base
+        ~cursor_byte:1
+        ~max_items:1
+      |> ok
+    in
+    assert (Result.is_error (Agent_client.Authoring.lexical core_client core_lexical));
+    assert (Result.is_error (Agent_client.Authoring.assist core_client core_assistance));
     current_initialization := initialization;
     advertised_capabilities
     := A.Capabilities.create

@@ -108,6 +108,10 @@
   authoring_analysis_query_facts
   authoring_analysis_query
   authoring_analysis
+  authoring_assistance_base
+  authoring_assistance_lexical
+  authoring_assistance_suggestions
+  authoring_assistance
   authoring_wire
   authoring
   command
@@ -134,7 +138,10 @@
   authoring_analysis_core
   authoring_analysis_query_base
   authoring_analysis_query_facts
-  authoring_analysis_query)
+  authoring_analysis_query
+  authoring_assistance_base
+  authoring_assistance_lexical
+  authoring_assistance_suggestions)
  (libraries uri ochat.inference core jsonaf base64 digestif mirage-crypto-rng uutf ochat.history_entry ochat.document_schema ochat.transcript ochat.chatml_source ochat.chatml_editor_position ochat.source)
  (preprocess
   (pps ppx_jane)))
