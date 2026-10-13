@@ -132,6 +132,7 @@
     lib/chat_response/generated_admission.ml %{dep:../chat_response/generated_admission.ml}
     lib/chat_response/initial_prompt_history.ml %{dep:../chat_response/initial_prompt_history.ml}
     lib/chatmd/chatmd_ast.ml %{dep:../chatmd/chatmd_ast.ml}
+    lib/chatmd/chatmd_attribute_lex.ml %{dep:../chatmd/chatmd_attribute_lex.ml}
     lib/chatmd/chatmd_tag_scope.ml %{dep:../chatmd/chatmd_tag_scope.ml}
     lib/chatmd/chatmd_declaration_schema.ml %{dep:../chatmd/chatmd_declaration_schema.ml}
     lib/chatmd/chatmd_shell_schema.ml %{dep:../chatmd/chatmd_shell_schema.ml}
