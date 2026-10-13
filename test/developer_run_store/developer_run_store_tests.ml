@@ -27,6 +27,7 @@ let with_temp_directory name f =
 
 let fault_after_authority_rename_env
       ?(after_rename = fun () -> ())
+      ?(before_rename = fun () -> ())
       env
       ~rename_armed
       ~sync_blocked
@@ -63,6 +64,7 @@ let fault_after_authority_rename_env
       ;;
 
       let rename directory source destination target =
+        if String.is_suffix target ~suffix:".json" then before_rename ();
         if !rename_armed && String.is_suffix target ~suffix:".json"
         then (
           rename_armed := false;
