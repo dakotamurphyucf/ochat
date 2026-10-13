@@ -14,6 +14,7 @@ import {
   changedPaths,
   documentationOnlyPaths,
   lastSuccessfulDeployment,
+  reuseReferenceQualification,
 } from "../scripts/select-checks.mjs";
 
 test("only explicit maintainer documents avoid qualification; runtime, examples and unknown files run full checks", () => {
@@ -404,5 +405,337 @@ test("documentation proof uses exact regular Git blobs and fails closed for move
     );
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+function referenceReuseFixture() {
+  const repository = "dakotamurphyucf/ochat";
+  const source = "cd1e516922171cd159fb36e9de4c0eff5921992a";
+  const base = "5988e9bffadf5a59e39777ac46a20458b8a206a3";
+  const head = "e".repeat(40);
+  const branch = "docs/chatml-reference-audit-20261012";
+  const runId = 38332579027;
+  const names = [
+    "framework (normal, x64, ubuntu-24.04)",
+    "framework (e2e, x64, ubuntu-24.04)",
+    "framework (git-native, arm64, ubuntu-24.04-arm)",
+    "release-gate",
+  ];
+  const input = {
+    repository,
+    kind: "pull_request",
+    ref: "refs/pull/112/merge",
+    head,
+    mode: "validate",
+    event: {
+      repository: { full_name: repository },
+      pull_request: {
+        number: 112,
+        base: { ref: "main", repo: { full_name: repository } },
+        head: { ref: branch, sha: head, repo: { full_name: repository } },
+      },
+    },
+    selection: chooseChecks({
+      event: "pull_request",
+      paths: ["docs-src/guide/chatml-language-spec.md"],
+    }),
+  };
+  const repo = { url: `https://api.github.com/repos/${repository}` };
+  const run = {
+    id: runId,
+    run_attempt: 1,
+    head_sha: source,
+    head_branch: branch,
+    status: "completed",
+    conclusion: "success",
+    event: "pull_request",
+    path: ".github/workflows/website.yml",
+    repository: { full_name: repository },
+    head_repository: { full_name: repository },
+    pull_requests: [
+      {
+        number: 112,
+        base: { ref: "main", repo },
+        head: { ref: branch, sha: head, repo },
+      },
+    ],
+  };
+  const jobs = {
+    total_count: names.length,
+    jobs: names.map((name) => ({
+      name,
+      run_id: runId,
+      run_attempt: 1,
+      head_sha: source,
+      status: "completed",
+      conclusion: "success",
+    })),
+  };
+  const paths = [
+    ".github/scripts/select-checks.mjs",
+    ".github/tests/ci-policy.test.mjs",
+  ];
+  const calls = [];
+  const request = async (route) => {
+    calls.push(route);
+    if (route === `/repos/${repository}/actions/runs/${runId}`) return run;
+    assert.equal(
+      route,
+      `/repos/${repository}/actions/runs/${runId}/attempts/1/jobs?per_page=100`,
+    );
+    return jobs;
+  };
+  const git = (args) => {
+    if (args[0] === "diff") {
+      assert.deepEqual(args, [
+        "diff",
+        "--name-only",
+        "--no-renames",
+        "-z",
+        source,
+        head,
+        "--",
+      ]);
+      return paths.map((name) => `${name}\0`).join("");
+    }
+    assert.equal(args[0], "ls-tree");
+    assert.ok([source, head].includes(args[2]));
+    return `100644 blob ${"a".repeat(40)}\t${args[4]}\0`;
+  };
+  return { input, run, jobs, paths, calls, request, git, base };
+}
+
+test("PR112 reuses only the pinned successful attempt over the same complete tree", async () => {
+  for (const main of [false, true]) {
+    const f = referenceReuseFixture();
+    if (main) {
+      // GitHub drops a run's PR association after merge. Its run/job SHAs remain.
+      f.run.pull_requests = [];
+      f.input.kind = "push";
+      f.input.ref = "refs/heads/main";
+      f.input.event = {
+        repository: f.input.event.repository,
+        before: f.base,
+        after: f.input.head,
+      };
+      f.input.selection = chooseChecks({
+        event: "push",
+        ref: f.input.ref,
+        paths: ["docs-src/guide/chatml-language-spec.md"],
+        pendingPaths: ["lib/previously-unshipped.ml"],
+      });
+    }
+    const original = structuredClone(f.input.selection);
+    const result = await reuseReferenceQualification(f.input, f.request, f.git);
+    assert.equal(result.framework, false);
+    for (const key of ["semantics", "website", "deploy", "cold"])
+      assert.equal(result[key], original[key]);
+    assert.deepEqual(
+      f.input.selection,
+      original,
+      "original selection is immutable",
+    );
+    assert.equal(result.qualificationReuse.reused, true);
+    assert.equal(result.qualificationReuse.sourceRun, 38332579027);
+    assert.equal(result.qualificationReuse.sourceAttempt, 1);
+    assert.deepEqual(result.qualificationReuse.paths, f.paths);
+    assert.equal(result.qualificationReuse.jobs.length, 4);
+    assert.match(result.reasons.at(-1), /PR112 run 38332579027 attempt 1/);
+    assert.equal(f.calls.length, 2);
+  }
+});
+
+test("one-off reuse never applies to other events, repositories, cold or uncertain selection", async () => {
+  const cases = [
+    (f) => {
+      f.input.repository = "other/ochat";
+    },
+    (f) => {
+      f.input.event.repository.full_name = "other/ochat";
+    },
+    (f) => {
+      f.input.event.pull_request.number = 113;
+    },
+    (f) => {
+      f.input.event.pull_request.head.ref = "another-branch";
+    },
+    (f) => {
+      f.input.event.pull_request.head.repo.full_name = "fork/ochat";
+    },
+    (f) => {
+      f.input.event.pull_request.head.sha = "f".repeat(40);
+    },
+    (f) => {
+      f.input.event.pull_request.base.ref = "release";
+    },
+    (f) => {
+      f.input.event.pull_request.base.repo.full_name = "fork/ochat";
+    },
+    (f) => {
+      f.input.ref = "refs/pull/113/merge";
+    },
+    (f) => {
+      f.input.kind = "workflow_dispatch";
+    },
+    (f) => {
+      f.input.kind = "schedule";
+    },
+    (f) => {
+      f.input.selection.cold = true;
+    },
+    (f) => {
+      f.input.mode = "cold";
+    },
+    (f) => {
+      f.input.fallback = "failed baseline proof";
+    },
+    (f) => {
+      f.input.kind = "push";
+      f.input.ref = "refs/heads/main";
+      f.input.event.before = "f".repeat(40);
+      f.input.event.after = f.input.head;
+    },
+    (f) => {
+      f.input.kind = "push";
+      f.input.ref = "refs/heads/main";
+      f.input.event.before = f.base;
+      f.input.event.after = "f".repeat(40);
+    },
+    (f) => {
+      f.input.kind = "push";
+      f.input.ref = "refs/heads/other";
+      f.input.event.before = f.base;
+      f.input.event.after = f.input.head;
+    },
+  ];
+  for (const change of cases) {
+    const f = referenceReuseFixture();
+    change(f);
+    const result = await reuseReferenceQualification(f.input, f.request, f.git);
+    assert.strictEqual(result, f.input.selection);
+    assert.equal(result.framework, true);
+    assert.equal(f.calls.length, 0);
+  }
+});
+
+test("qualification run and exact job inventory mismatches keep full existing checks", async () => {
+  const cases = [
+    (f) => {
+      f.run.id++;
+    },
+    (f) => {
+      f.run.head_sha = "f".repeat(40);
+    },
+    (f) => {
+      f.run.repository.full_name = "other/ochat";
+    },
+    (f) => {
+      f.run.head_repository.full_name = "fork/ochat";
+    },
+    (f) => {
+      f.run.event = "push";
+    },
+    (f) => {
+      f.run.path = ".github/workflows/other.yml";
+    },
+    (f) => {
+      f.run.run_attempt = 2;
+    },
+    (f) => {
+      f.run.status = "in_progress";
+    },
+    (f) => {
+      f.run.conclusion = "failure";
+    },
+    (f) => {
+      f.run.head_branch = "other";
+    },
+    (f) => {
+      f.jobs.jobs[0].conclusion = "skipped";
+    },
+    (f) => {
+      f.jobs.jobs[0].status = "in_progress";
+    },
+    (f) => {
+      f.jobs.jobs[0].run_attempt = 2;
+    },
+    (f) => {
+      f.jobs.jobs[0].run_id++;
+    },
+    (f) => {
+      f.jobs.jobs[0].head_sha = "f".repeat(40);
+    },
+    (f) => {
+      f.jobs.jobs.pop();
+      f.jobs.total_count--;
+    },
+    (f) => {
+      f.jobs.jobs.push({ ...f.jobs.jobs[0] });
+      f.jobs.total_count++;
+    },
+    (f) => {
+      f.jobs.total_count++;
+    },
+    (f) => {
+      f.jobs.total_count = 101;
+    },
+  ];
+  for (const change of cases) {
+    const f = referenceReuseFixture();
+    change(f);
+    const result = await reuseReferenceQualification(f.input, f.request, f.git);
+    assert.deepEqual(
+      { ...result, qualificationReuse: undefined },
+      { ...f.input.selection, qualificationReuse: undefined },
+    );
+    assert.equal(result.qualificationReuse.reused, false);
+    assert.ok(result.qualificationReuse.reason);
+  }
+});
+
+test("full tree mismatch, missing regular blobs and request or Git errors cannot grant reuse", async () => {
+  for (const path of [
+    "docs-src/guide/chatml-language-spec.md",
+    "lib/runtime.ml",
+    ".github/workflows/website.yml",
+    "ochat.opam",
+    "unknown.txt",
+  ]) {
+    const f = referenceReuseFixture();
+    f.paths.push(path);
+    const result = await reuseReferenceQualification(f.input, f.request, f.git);
+    assert.equal(result.framework, true);
+    assert.equal(result.qualificationReuse.reused, false);
+    assert.equal(f.calls.length, 0);
+  }
+  for (const git of [
+    () => {
+      throw new Error("missing source tree");
+    },
+    (args) =>
+      args[0] === "diff"
+        ? ".github/scripts/select-checks.mjs\0"
+        : "120000 blob " +
+          "a".repeat(40) +
+          "\t.github/scripts/select-checks.mjs\0",
+  ]) {
+    const f = referenceReuseFixture();
+    const result = await reuseReferenceQualification(f.input, f.request, git);
+    assert.equal(result.framework, true);
+    assert.equal(result.qualificationReuse.reused, false);
+  }
+  for (const failedCall of [1, 2]) {
+    const f = referenceReuseFixture();
+    let calls = 0;
+    const result = await reuseReferenceQualification(
+      f.input,
+      async (route) => {
+        if (++calls === failedCall) throw new Error("public API unavailable");
+        return f.request(route);
+      },
+      f.git,
+    );
+    assert.equal(result.framework, true);
+    assert.equal(result.qualificationReuse.reason, "public API unavailable");
   }
 });

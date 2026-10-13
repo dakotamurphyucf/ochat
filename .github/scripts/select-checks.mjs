@@ -92,6 +92,167 @@ export async function lastSuccessfulDeployment(repository, request) {
   );
 }
 
+// One-off reuse for the already qualified PR112 tree, including its squash
+// onto the exact current main baseline. This is not an ancestry exemption.
+const referenceQualification = Object.freeze({
+  repository: "dakotamurphyucf/ochat",
+  run: 38332579027,
+  attempt: 1,
+  head: "cd1e516922171cd159fb36e9de4c0eff5921992a",
+  base: "5988e9bffadf5a59e39777ac46a20458b8a206a3",
+  branch: "docs/chatml-reference-audit-20261012",
+});
+const reusedJobs = [
+  "framework (normal, x64, ubuntu-24.04)",
+  "framework (e2e, x64, ubuntu-24.04)",
+  "framework (git-native, arm64, ubuntu-24.04-arm)",
+  "release-gate",
+];
+const reusePolicyFiles = new Set([
+  ".github/scripts/select-checks.mjs",
+  ".github/tests/ci-policy.test.mjs",
+]);
+
+const requestPublicQualification = async (route) => {
+  const response = await fetch(`https://api.github.com${route}`, {
+    headers: {
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+    redirect: "error",
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!response.ok)
+    throw new Error(`Qualification lookup returned HTTP ${response.status}`);
+  return response.json();
+};
+
+// Borrowed request/git adapters admit only this fixed proof. Any uncertainty
+// retains the original selection; semantic, website and deploy decisions stay
+// independent, including their separate last-deployment baseline proof.
+export async function reuseReferenceQualification(
+  { repository, kind, ref, event, head, selection, fallback, mode },
+  request = requestPublicQualification,
+  git = readGit,
+) {
+  const proof = referenceQualification;
+  const pr = event.pull_request;
+  const currentPullRequest =
+    kind === "pull_request" &&
+    ref === "refs/pull/112/merge" &&
+    pr?.number === 112 &&
+    pr.base?.ref === "main" &&
+    pr.base?.repo?.full_name === proof.repository &&
+    pr.head?.ref === proof.branch &&
+    pr.head?.repo?.full_name === proof.repository &&
+    pr.head?.sha === head;
+  const currentMainPush =
+    kind === "push" &&
+    ref === "refs/heads/main" &&
+    event.before === proof.base &&
+    event.after === head;
+  if (
+    repository !== proof.repository ||
+    event.repository?.full_name !== proof.repository ||
+    !(currentPullRequest || currentMainPush) ||
+    fallback !== undefined ||
+    selection.cold ||
+    mode !== "validate" ||
+    !selection.framework
+  )
+    return selection;
+  const evidence = {
+    sourceRun: proof.run,
+    sourceAttempt: proof.attempt,
+    sourceRevision: proof.head,
+    sourceUrl: `https://github.com/${proof.repository}/actions/runs/${proof.run}/attempts/${proof.attempt}`,
+    reused: false,
+  };
+  try {
+    const paths = changedPaths(proof.head, head, git);
+    if (paths.some((path) => !reusePolicyFiles.has(path)))
+      throw new Error(
+        "Qualified tree differs outside the two tested policy files",
+      );
+    for (const path of paths)
+      for (const revision of [proof.head, head]) {
+        const entry = git(["ls-tree", "-z", revision, "--", path]);
+        const match = /^100644 blob ([a-f0-9]{40})\t([^\0]+)\0$/.exec(entry);
+        if (!match || match[2] !== path)
+          throw new Error(
+            "Qualification policy files must remain regular blobs",
+          );
+      }
+    const route = `/repos/${proof.repository}/actions/runs/${proof.run}`;
+    const run = await request(route);
+    // pull_requests is a mutable association: its SHA changes when the PR
+    // advances and the array can disappear after merge. The fixed run identity,
+    // immutable head_sha and pinned attempt's job.head_sha certify source code.
+    if (
+      run.id !== proof.run ||
+      run.run_attempt !== proof.attempt ||
+      run.head_sha !== proof.head ||
+      run.status !== "completed" ||
+      run.conclusion !== "success" ||
+      run.event !== "pull_request" ||
+      run.path !== ".github/workflows/website.yml" ||
+      run.repository?.full_name !== proof.repository ||
+      run.head_repository?.full_name !== proof.repository ||
+      run.head_branch !== proof.branch
+    )
+      throw new Error(
+        "Source qualification run metadata does not match the pinned proof",
+      );
+    const result = await request(
+      `${route}/attempts/${proof.attempt}/jobs?per_page=100`,
+    );
+    if (
+      !Array.isArray(result.jobs) ||
+      !Number.isInteger(result.total_count) ||
+      result.total_count !== result.jobs.length ||
+      result.total_count > 100
+    )
+      throw new Error("Source qualification job inventory is incomplete");
+    for (const name of reusedJobs) {
+      const matching = result.jobs.filter((job) => job.name === name);
+      if (
+        matching.length !== 1 ||
+        matching[0].run_id !== proof.run ||
+        matching[0].run_attempt !== proof.attempt ||
+        matching[0].head_sha !== proof.head ||
+        matching[0].status !== "completed" ||
+        matching[0].conclusion !== "success"
+      )
+        throw new Error(`Source qualification job is not successful: ${name}`);
+    }
+    return {
+      ...selection,
+      framework: false,
+      qualificationReuse: {
+        ...evidence,
+        reused: true,
+        paths,
+        jobs: [...reusedJobs],
+      },
+      reasons: [
+        ...selection.reasons,
+        `Framework qualification reused from PR112 run ${proof.run} attempt ${proof.attempt}; exact tree differs only in mandatory-tested selection policy`,
+      ],
+    };
+  } catch (error) {
+    return {
+      ...selection,
+      qualificationReuse: {
+        ...evidence,
+        reason:
+          error instanceof Error
+            ? error.message.split("\n")[0]
+            : "Qualification proof failed",
+      },
+    };
+  }
+}
+
 async function main() {
   const event = JSON.parse(
     fs.readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"),
@@ -157,13 +318,23 @@ async function main() {
     // Never convert lookup, shallow-history, or diff errors into permission to skip.
     fallback = error.message.split("\n")[0];
   }
-  const selection = chooseChecks({
+  const originalSelection = chooseChecks({
     event: kind,
     ref,
     paths,
     pendingPaths,
     documentationPaths,
     pendingDocumentationPaths,
+    fallback,
+    mode: event.inputs?.mode || "validate",
+  });
+  const selection = await reuseReferenceQualification({
+    repository: process.env.GITHUB_REPOSITORY,
+    kind,
+    ref,
+    event,
+    head,
+    selection: originalSelection,
     fallback,
     mode: event.inputs?.mode || "validate",
   });
