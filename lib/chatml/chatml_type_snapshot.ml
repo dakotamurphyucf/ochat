@@ -41,6 +41,8 @@ module Id = struct
     phys_equal left.owner right.owner && Int.equal left.index right.index
   ;;
 
+  let index t = t.index
+
   let sexp_of_t t = [%sexp (t.index : int)]
 end
 
