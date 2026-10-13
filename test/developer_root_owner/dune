@@ -4,7 +4,7 @@
 
 (library
  (name developer_root_owner_test_suite)
- (modules support fixtures root_owner_tests)
+ (modules support fixtures root_owner_tests recovery_tests)
  (libraries
   core
   digestif

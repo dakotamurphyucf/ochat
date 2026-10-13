@@ -248,11 +248,19 @@ type pending =
   | Claim of Prepared.t
   | Transition of Prepared.t
 
+type recovery_phase =
+  | Recovery_unopened
+  | Recovery_open of unit ref
+  | Recovery_finished
+  | Recovery_aborted
+
 type run_claim_record =
   { token : unit ref
   ; handle_token : unit ref
   ; domain : int
   ; mutable released : bool
+  ; mutable normal_started : bool
+  ; mutable recovery : recovery_phase
   }
 
 type t =
@@ -265,6 +273,8 @@ type t =
   ; pending : (Id.t, pending) Hashtbl.t
   ; run_lifecycle_mutex : Stdlib.Mutex.t
   ; run_claims : (Id.t, run_claim_record) Hashtbl.t
+  ; normal_operations : (Id.t, int) Hashtbl.t
+  ; issued_claims : (Id.t, claim_data list) Hashtbl.t
   ; admissions_in_flight : (Id.t, unit) Hashtbl.t
   ; closing : bool Atomic.t
   ; closed : bool Atomic.t
@@ -286,6 +296,32 @@ let with_run_lifecycle t f =
 
 let pending_mem t run_id = with_run_lifecycle t (fun () -> Hashtbl.mem t.pending run_id)
 let ( let* ) result f = Result.bind result ~f
+
+let enter_normal t run_id =
+  with_run_lifecycle t (fun () ->
+    match Hashtbl.find t.run_claims run_id with
+    | Some { recovery = Recovery_open _; _ } -> Error Error.Conflict
+    | None | Some _ ->
+      Option.iter (Hashtbl.find t.run_claims run_id) ~f:(fun claim ->
+        claim.normal_started <- true);
+      let count = Option.value (Hashtbl.find t.normal_operations run_id) ~default:0 in
+      if Int.equal count Int.max_value
+      then Error Error.Limit_exceeded
+      else (
+        Hashtbl.set t.normal_operations ~key:run_id ~data:(count + 1);
+        Ok ()))
+;;
+
+let with_normal t run_id f =
+  let* () = enter_normal t run_id in
+  Exn.protect ~f ~finally:(fun () ->
+    with_run_lifecycle t (fun () ->
+      match Hashtbl.find t.normal_operations run_id with
+      | Some count when count > 1 ->
+        Hashtbl.set t.normal_operations ~key:run_id ~data:(count - 1)
+      | Some _ | None -> Hashtbl.remove t.normal_operations run_id))
+;;
+
 let store result = Result.map_error result ~f:(fun error -> Error.Store error)
 let corrupt message = Error (Error.Store (Store_error.Corrupt message))
 
@@ -380,6 +416,8 @@ module Run_claim = struct
           Hashtbl.mem store.run_claims run_id
           || Hashtbl.mem store.admissions_in_flight run_id
           || Hashtbl.mem store.pending run_id
+          || Hashtbl.mem store.normal_operations run_id
+          || Hashtbl.mem store.issued_claims run_id
         then Error Error.Conflict
         else (
           let record =
@@ -387,6 +425,8 @@ module Run_claim = struct
             ; handle_token = handle.token
             ; domain = (Stdlib.Domain.self () :> int)
             ; released = false
+            ; normal_started = false
+            ; recovery = Recovery_unopened
             }
           in
           Hashtbl.set store.run_claims ~key:run_id ~data:record;
@@ -402,7 +442,14 @@ module Run_claim = struct
       else (
         match Hashtbl.find t.store.run_claims t.run_id with
         | Some record when phys_equal record.token t.record.token ->
-          if Hashtbl.mem t.store.pending t.run_id
+          if
+            Hashtbl.mem t.store.pending t.run_id
+            || Hashtbl.mem t.store.normal_operations t.run_id
+            || Hashtbl.mem t.store.issued_claims t.run_id
+            ||
+            match t.record.recovery with
+            | Recovery_open _ -> true
+            | Recovery_unopened | Recovery_finished | Recovery_aborted -> false
           then Error Error.Conflict
           else (
             Hashtbl.remove t.store.run_claims t.run_id;
@@ -425,6 +472,10 @@ let with_lease t f =
       |> Result.bind ~f:Fn.id
     with
     | Work_limit -> Error Error.Limit_exceeded)
+;;
+
+let with_normal_lease t handle f =
+  with_normal t handle.owner.run_id (fun () -> with_lease t f)
 ;;
 
 let read t ~poll id =
@@ -538,7 +589,7 @@ module Claim = struct
       | Some domain -> not (Int.equal domain (Stdlib.Domain.self () :> int))
     then Error Error.Foreign_or_stale
     else
-      with_lease t (fun ~env:_ ~root:_ ->
+      with_normal_lease t handle (fun ~env:_ ~root:_ ->
         let poll = work t t.checkpoint in
         let* current = claim_current_under_lease t ~poll ~for_entry:true claim in
         if current && admit ()
@@ -700,6 +751,8 @@ let open_or_create session_store ~sw ~limits ~checkpoint =
             ; pending = Hashtbl.create (module Id)
             ; run_lifecycle_mutex = Stdlib.Mutex.create ()
             ; run_claims = Hashtbl.create (module Id)
+            ; normal_operations = Hashtbl.create (module Id)
+            ; issued_claims = Hashtbl.create (module Id)
             ; admissions_in_flight = Hashtbl.create (module Id)
             ; closing = Atomic.make false
             ; closed = Atomic.make false
@@ -755,21 +808,25 @@ let is_latest_active handle =
 
 let capture_fingerprint handle = handle.capture_fingerprint
 
+let observe_with_poll t handle ~poll =
+  let* read = read t ~poll handle.owner.run_id in
+  match read with
+  | None -> Error Error.Foreign_or_stale
+  | Some (bytes, document) ->
+    let* observed = observation t ~owner:handle.owner ~bytes document in
+    if
+      Chatml_source.Digest.equal
+        (Checkpoint.capture_fingerprint observed.checkpoint)
+        handle.capture_fingerprint
+    then Ok observed
+    else Error Error.Foreign_or_stale
+;;
+
 let observe handle =
   let* t = valid_handle handle in
   with_lease t (fun ~env:_ ~root:_ ->
     let poll = work t t.checkpoint in
-    let* read = read t ~poll handle.owner.run_id in
-    match read with
-    | None -> Error Error.Foreign_or_stale
-    | Some (bytes, document) ->
-      let* observed = observation t ~owner:handle.owner ~bytes document in
-      if
-        Chatml_source.Digest.equal
-          (Checkpoint.capture_fingerprint observed.checkpoint)
-          handle.capture_fingerprint
-      then Ok observed
-      else Error Error.Foreign_or_stale)
+    observe_with_poll t handle ~poll)
 ;;
 
 module Result_root = struct
@@ -1077,7 +1134,7 @@ let admit_epoch t ~owner ~capture_fingerprint ~previous =
 
 let prepare_checkpoint handle ~expected ~phase =
   let* t = valid_handle handle in
-  with_lease t (fun ~env:_ ~root:_ ->
+  with_normal_lease t handle (fun ~env:_ ~root:_ ->
     let poll = work t t.checkpoint in
     let* existing = read t ~poll handle.owner.run_id in
     match existing with
@@ -1134,7 +1191,7 @@ let prepare_checkpoint handle ~expected ~phase =
 
 let prepare_change handle ~expected ~kind ~f =
   let* t = valid_handle handle in
-  with_lease t (fun ~env:_ ~root:_ ->
+  with_normal_lease t handle (fun ~env:_ ~root:_ ->
     let poll = work t t.checkpoint in
     let* existing = read t ~poll handle.owner.run_id in
     match existing with
@@ -1314,7 +1371,7 @@ let prepare_claimed_transition_internal
     | Some domain -> not (Int.equal domain (Stdlib.Domain.self () :> int))
   then Error Error.Foreign_or_stale
   else
-    with_lease t (fun ~env:_ ~root:_ ->
+    with_normal_lease t handle (fun ~env:_ ~root:_ ->
       let poll = work t t.checkpoint in
       let* existing = read t ~poll handle.owner.run_id in
       match existing with
@@ -1369,7 +1426,7 @@ let prepare_claimed_transition_internal
               ; after_document = next
               ; token = ref ()
               ; kind = Claimed_transition
-              ; claim_data = None
+              ; claim_data = Some claim
               ; claim_status = Unsettled
               ; write_attempted = false
               })
@@ -1547,7 +1604,7 @@ let install_prepared ?(admit = fun () -> true) t handle prepared ~poll =
 
 let reconcile_and_settle handle prepared handoff =
   let* t = valid_handle handle in
-  with_lease t (fun ~env:_ ~root:_ ->
+  with_normal_lease t handle (fun ~env:_ ~root:_ ->
     let* settled = bind_handoff t handle prepared handoff in
     match settled with
     | Some value -> Ok value
@@ -1559,7 +1616,7 @@ let reconcile_and_settle handle prepared handoff =
 
 let commit_and_settle handle prepared handoff ~admit =
   let* t = valid_handle handle in
-  with_lease t (fun ~env:_ ~root:_ ->
+  with_normal_lease t handle (fun ~env:_ ~root:_ ->
     let* settled = bind_handoff t handle prepared handoff in
     match settled with
     | Some value -> Ok value
@@ -1657,14 +1714,52 @@ let settle_worker_prepared t handle (prepared : Prepared.t) settlement =
     | ( Claim_prewrite_conflict
       , (Foundation_checkpoint | Developer_dispatch | Selected_transaction) ) -> false
   in
-  if retire
-  then
-    with_run_lifecycle t (fun () ->
-      match Hashtbl.find t.pending handle.owner.run_id with
+  with_run_lifecycle t (fun () ->
+    let run_id = handle.owner.run_id in
+    (match status, prepared.kind, prepared.claim_data with
+     | Claim_installed, Worker_claim, Some claim ->
+       let current = Option.value (Hashtbl.find t.issued_claims run_id) ~default:[] in
+       if
+         not
+           (List.exists current ~f:(fun prior ->
+              phys_equal prior.entry_state claim.entry_state))
+       then Hashtbl.set t.issued_claims ~key:run_id ~data:(claim :: current)
+     | Claim_installed, Claimed_transition, Some claim ->
+       let id = P.Developer_job.id claim.job in
+       (match Doc.find_job prepared.after_document id with
+        | Some job ->
+          (match (P.Developer_job.state job).status with
+           | Running | Waiting_permission _ -> ()
+           | Queued
+           | Waiting_completion _
+           | Succeeded
+           | Failed _
+           | Cancelled
+           | Interrupted _ ->
+             let current =
+               Option.value (Hashtbl.find t.issued_claims run_id) ~default:[]
+             in
+             let remaining =
+               List.filter current ~f:(fun prior ->
+                 not (phys_equal prior.entry_state claim.entry_state))
+             in
+             if List.is_empty remaining
+             then Hashtbl.remove t.issued_claims run_id
+             else Hashtbl.set t.issued_claims ~key:run_id ~data:remaining)
+        | None -> ())
+     | ( ( Unsettled
+         | Claim_absent
+         | Claim_diverged
+         | Claim_prewrite_conflict
+         | Claim_installed )
+       , _
+       , _ ) -> ());
+    if retire
+    then (
+      match Hashtbl.find t.pending run_id with
       | Some (Claim pending | Transition pending)
-        when phys_equal pending.token prepared.token ->
-        Hashtbl.remove t.pending handle.owner.run_id
-      | None | Some (Selected _) | Some (Claim _ | Transition _) -> ());
+        when phys_equal pending.token prepared.token -> Hashtbl.remove t.pending run_id
+      | None | Some (Selected _) | Some (Claim _ | Transition _) -> ()));
   match status with
   | Claim_prewrite_conflict -> Error Error.Prewrite_conflict
   | Unsettled | Claim_installed | Claim_absent | Claim_diverged -> Ok ()
@@ -1683,7 +1778,7 @@ let claim_result t prepared =
 
 let reconcile_job_claim handle prepared =
   let* t = valid_handle handle in
-  with_lease t (fun ~env:_ ~root:_ ->
+  with_normal_lease t handle (fun ~env:_ ~root:_ ->
     let* () = bind_claim t handle prepared in
     match prepared.claim_status with
     | Claim_installed | Claim_absent | Claim_diverged | Claim_prewrite_conflict ->
@@ -1697,7 +1792,7 @@ let reconcile_job_claim handle prepared =
 
 let commit_job_claim handle prepared =
   let* t = valid_handle handle in
-  with_lease t (fun ~env:_ ~root:_ ->
+  with_normal_lease t handle (fun ~env:_ ~root:_ ->
     let* () = bind_claim t handle prepared in
     let result () =
       let* value = claim_result t prepared in
@@ -1775,9 +1870,9 @@ let claimed_transition_reconciliation t prepared =
   | Unsettled -> Error Error.Conflict
 ;;
 
-let reconcile_claimed_transition handle prepared =
+let reconcile_claimed_transition_using borrow handle prepared =
   let* t = valid_handle handle in
-  with_lease t (fun ~env:_ ~root:_ ->
+  borrow t handle (fun ~env:_ ~root:_ ->
     let* () = bind_claimed_transition t handle prepared in
     match prepared.claim_status with
     | Claim_installed | Claim_diverged | Claim_prewrite_conflict ->
@@ -1789,16 +1884,20 @@ let reconcile_claimed_transition handle prepared =
       claimed_transition_reconciliation t prepared)
 ;;
 
-let commit_claimed_transition handle prepared =
+let reconcile_claimed_transition handle prepared =
+  reconcile_claimed_transition_using with_normal_lease handle prepared
+;;
+
+let commit_claimed_transition_using borrow ~admit handle prepared =
   let* t = valid_handle handle in
-  with_lease t (fun ~env:_ ~root:_ ->
+  borrow t handle (fun ~env:_ ~root:_ ->
     let* () = bind_claimed_transition t handle prepared in
     match prepared.claim_status with
     | Claim_installed | Claim_diverged | Claim_prewrite_conflict ->
       claimed_transition_result t prepared
     | Unsettled | Claim_absent ->
       let poll = work t t.checkpoint in
-      (match install_prepared t handle prepared ~poll with
+      (match install_prepared ~admit t handle prepared ~poll with
        | Ok settlement ->
          let* () = settle_worker_prepared t handle prepared settlement in
          claimed_transition_result t prepared
@@ -1812,6 +1911,14 @@ let commit_claimed_transition handle prepared =
                : (unit, Error.t) result)
           | Error _ -> ());
          Error original
+       | exception Selected_admission_revoked ->
+         (match
+            Eio.Cancel.protect (fun () -> classify_prepared t handle prepared ~poll)
+          with
+          | Ok settlement ->
+            let* () = settle_worker_prepared t handle prepared settlement in
+            Error Error.Foreign_or_stale
+          | Error original -> Error original)
        | exception exn ->
          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
          (try
@@ -1827,6 +1934,10 @@ let commit_claimed_transition handle prepared =
          Stdlib.Printexc.raise_with_backtrace exn backtrace))
 ;;
 
+let commit_claimed_transition ?(admit = fun () -> true) handle prepared =
+  commit_claimed_transition_using with_normal_lease ~admit handle prepared
+;;
+
 let commit handle prepared =
   let* t = valid_handle handle in
   if not (prepared_for handle prepared)
@@ -1838,7 +1949,7 @@ let commit handle prepared =
       true
   then Error Error.Conflict
   else
-    with_lease t (fun ~env:_ ~root:_ ->
+    with_normal_lease t handle (fun ~env:_ ~root:_ ->
       let* () = no_pending t handle.owner.run_id in
       let poll = work t t.checkpoint in
       let* existing = read t ~poll handle.owner.run_id in
@@ -1871,7 +1982,7 @@ let reconcile handle prepared =
       true
   then Error Error.Conflict
   else
-    with_lease t (fun ~env:_ ~root:_ ->
+    with_normal_lease t handle (fun ~env:_ ~root:_ ->
       let* () = no_pending t handle.owner.run_id in
       let poll = work t t.checkpoint in
       let* existing = read t ~poll handle.owner.run_id in
@@ -1882,3 +1993,389 @@ let reconcile handle prepared =
       | Some (bytes, _) when String.equal bytes prepared.before_bytes -> Ok Absent
       | Some _ -> Ok Diverged)
 ;;
+
+module Recovery = struct
+  module Candidate = struct
+    type t =
+      { view_token : unit ref
+      ; job : P.Developer_job.t
+      }
+
+    let job t = t.job
+  end
+
+  module View = struct
+    type t =
+      { token : unit ref
+      ; window_token : unit ref
+      ; observation : Observation.t
+      ; candidates : Candidate.t list
+      }
+
+    let observation t = t.observation
+    let candidates t = t.candidates
+  end
+
+  module Pending = struct
+    type t =
+      { job : P.Developer_job.t
+      ; after : P.Developer_job.State.t
+      ; prepared : Prepared.t
+      ; mutable can_reprepare : bool
+      }
+
+    let job t = t.job
+    let after t = t.after
+  end
+
+  type t =
+    { store : store
+    ; handle : handle
+    ; claim : Run_claim.t
+    ; token : unit ref
+    ; mutable pending : Pending.t option
+    ; mutable ever_prepared : bool
+    ; mutable busy : bool
+    }
+
+  let open_ ~claim ~(handle : handle) =
+    let store = claim.Run_claim.store in
+    with_run_lifecycle store (fun () ->
+      if Atomic.get store.closed || Atomic.get store.closing
+      then Error Error.Closed
+      else if
+        (not (phys_equal handle.store store))
+        || (not (phys_equal handle.token claim.record.handle_token))
+        || claim.record.released
+        || not (Int.equal claim.record.domain (Stdlib.Domain.self () :> int))
+      then Error Error.Foreign_or_stale
+      else (
+        match Hashtbl.find store.run_claims claim.run_id, claim.record.recovery with
+        | Some record, Recovery_unopened
+          when phys_equal record.token claim.record.token
+               && (not record.normal_started)
+               && (not (Hashtbl.mem store.normal_operations claim.run_id))
+               && (not (Hashtbl.mem store.issued_claims claim.run_id))
+               && not (Hashtbl.mem store.pending claim.run_id) ->
+          let token = ref () in
+          record.recovery <- Recovery_open token;
+          Ok
+            { store
+            ; handle
+            ; claim
+            ; token
+            ; pending = None
+            ; ever_prepared = false
+            ; busy = false
+            }
+        | None, _
+        | ( Some _
+          , (Recovery_unopened | Recovery_open _ | Recovery_finished | Recovery_aborted) )
+          -> Error Error.Conflict))
+  ;;
+
+  let valid t =
+    with_run_lifecycle t.store (fun () ->
+      if Atomic.get t.store.closed || Atomic.get t.store.closing
+      then Error Error.Closed
+      else if not (Int.equal t.claim.record.domain (Stdlib.Domain.self () :> int))
+      then Error Error.Foreign_or_stale
+      else (
+        match Hashtbl.find t.store.run_claims t.claim.run_id with
+        | Some record when phys_equal record.token t.claim.record.token ->
+          (match record.recovery with
+           | Recovery_open token when phys_equal token t.token -> Ok ()
+           | Recovery_unopened | Recovery_open _ | Recovery_finished | Recovery_aborted ->
+             Error Error.Foreign_or_stale)
+        | Some _ | None -> Error Error.Foreign_or_stale))
+  ;;
+
+  let with_operation t f =
+    try
+      let* () = valid t in
+      if t.busy
+      then Error Error.Conflict
+      else (
+        t.busy <- true;
+        Exn.protect
+          ~f:(fun () ->
+            let* () = valid t in
+            f ())
+          ~finally:(fun () -> t.busy <- false))
+    with
+    | Work_limit -> Error Error.Limit_exceeded
+  ;;
+
+  let read_view t ~poll =
+    let* observation =
+      with_lease t.store (fun ~env:_ ~root:_ -> observe_with_poll t.store t.handle ~poll)
+    in
+    let token = ref () in
+    let* candidates =
+      List.fold_result (Doc.jobs observation.document) ~init:[] ~f:(fun acc job ->
+        poll ();
+        match (P.Developer_job.state job).status with
+        | Running | Waiting_permission _ ->
+          let owner = P.Developer_job.owner job in
+          let* epoch = find_epoch observation.document ~owner in
+          if
+            Chatml_source.Digest.equal
+              (Doc.epoch_capture epoch)
+              (P.Developer_job.capture_fingerprint job)
+          then (
+            let candidate : Candidate.t = { view_token = token; job } in
+            Ok (candidate :: acc))
+          else Error Error.Foreign_or_stale
+        | Queued | Waiting_completion _ | Succeeded | Failed _ | Cancelled | Interrupted _
+          -> Ok acc)
+    in
+    let* () = valid t in
+    let view : View.t =
+      { token; window_token = t.token; observation; candidates = List.rev candidates }
+    in
+    Ok view
+  ;;
+
+  let observe t =
+    with_operation t (fun () ->
+      let poll = work t.store t.store.checkpoint in
+      read_view t ~poll)
+  ;;
+
+  let build_pending t ~view ~candidate ~after =
+    if
+      (not (phys_equal view.View.window_token t.token))
+      || not (phys_equal candidate.Candidate.view_token view.View.token)
+    then Error Error.Foreign_or_stale
+    else (
+      match after.P.Developer_job.State.status with
+      | Queued | Running | Waiting_permission _ | Waiting_completion _ ->
+        Error Error.Conflict
+      | Succeeded | Failed _ | Cancelled | Interrupted _ ->
+        if Option.is_some after.retry_failure
+        then Error Error.Conflict
+        else
+          with_lease t.store (fun ~env:_ ~root:_ ->
+            let poll = work t.store t.store.checkpoint in
+            let* current = read t.store ~poll t.claim.run_id in
+            match current with
+            | None -> Error Error.Foreign_or_stale
+            | Some (before_bytes, document) ->
+              if
+                not
+                  (same_observation
+                     t.store
+                     t.handle
+                     view.observation
+                     before_bytes
+                     document)
+              then Error Error.Conflict
+              else (
+                let job = candidate.job in
+                let owner = P.Developer_job.owner job in
+                let* epoch = find_epoch document ~owner in
+                let* () =
+                  if
+                    Chatml_source.Digest.equal
+                      (Doc.epoch_capture epoch)
+                      (P.Developer_job.capture_fingerprint job)
+                    && Option.value_map
+                         (Doc.find_job document (P.Developer_job.id job))
+                         ~default:false
+                         ~f:(fun current ->
+                           P.Developer_job.same_immutable current job
+                           && Int.equal
+                                (P.Developer_job.state current).attempt
+                                (P.Developer_job.state job).attempt)
+                  then Ok ()
+                  else Error Error.Foreign_or_stale
+                in
+                let transition =
+                  Developer_run_transition.create
+                    ~owner
+                    ~capture_fingerprint:(Doc.epoch_capture epoch)
+                    ~max_jobs:t.store.limits.max_jobs_per_run
+                    ~max_invocations:t.store.limits.max_invocations_per_run
+                    ~max_selected:t.store.limits.max_selected_per_commit
+                    ~max_job_payload_bytes:t.store.limits.max_job_payload_bytes
+                    ~limits:t.store.limits.document
+                    ~poll
+                in
+                let* next =
+                  Developer_run_transition.claimed_transition
+                    transition
+                    document
+                    ~claimed:job
+                    ~after
+                    ~current_epoch:false
+                  |> transition_result
+                in
+                poll ();
+                let* after_bytes =
+                  Doc.to_bytes
+                    next
+                    ~poll
+                    ~limits:t.store.limits.document
+                    ~max_epochs:t.store.limits.max_epochs_per_run
+                    ~max_jobs:t.store.limits.max_jobs_per_run
+                    ~max_invocations:t.store.limits.max_invocations_per_run
+                    ~max_job_payload_bytes:t.store.limits.max_job_payload_bytes
+                  |> store
+                in
+                let* () = valid t in
+                let prepared =
+                  Prepared.
+                    { store_token = t.store.token
+                    ; handle_token = t.handle.token
+                    ; owner = t.handle.owner
+                    ; before_bytes
+                    ; after_bytes
+                    ; after_document = next
+                    ; token = ref ()
+                    ; kind = Claimed_transition
+                    ; claim_data = None
+                    ; claim_status = Unsettled
+                    ; write_attempted = false
+                    }
+                in
+                let pending : Pending.t =
+                  { job; after; prepared; can_reprepare = false }
+                in
+                Ok pending)))
+  ;;
+
+  let prepare_terminal t ~view ~candidate ~after =
+    with_operation t (fun () ->
+      match t.pending with
+      | Some _ -> Error Error.Conflict
+      | None ->
+        let* pending = build_pending t ~view ~candidate ~after in
+        t.pending <- Some pending;
+        t.ever_prepared <- true;
+        Ok pending)
+  ;;
+
+  let pending t = t.pending
+
+  let same_pending t pending =
+    Option.value_map t.pending ~default:false ~f:(fun current ->
+      phys_equal current pending)
+  ;;
+
+  let reconcile_terminal t pending =
+    with_operation t (fun () ->
+      if not (same_pending t pending)
+      then Error Error.Foreign_or_stale
+      else (
+        match
+          reconcile_claimed_transition_using
+            (fun store _handle f -> with_lease store f)
+            t.handle
+            pending.prepared
+        with
+        | Ok outcome ->
+          (match outcome with
+           | Installed _ -> t.pending <- None
+           | Absent -> pending.can_reprepare <- true
+           | Diverged -> ());
+          Ok outcome
+        | Error Error.Prewrite_conflict when not pending.prepared.write_attempted ->
+          pending.can_reprepare <- true;
+          Error Error.Prewrite_conflict
+        | Error error -> Error error))
+  ;;
+
+  let commit_terminal t pending ~admit =
+    with_operation t (fun () ->
+      if not (same_pending t pending)
+      then Error Error.Foreign_or_stale
+      else
+        let* installed =
+          commit_claimed_transition_using
+            (fun store _handle f -> with_lease store f)
+            ~admit
+            t.handle
+            pending.prepared
+        in
+        t.pending <- None;
+        Ok installed)
+  ;;
+
+  let reprepare_same t pending =
+    with_operation t (fun () ->
+      if not (same_pending t pending && pending.can_reprepare)
+      then Error Error.Conflict
+      else (
+        let poll = work t.store t.store.checkpoint in
+        let* view = read_view t ~poll in
+        let candidate =
+          List.find view.candidates ~f:(fun candidate ->
+            poll ();
+            P.Id.Job.equal
+              (P.Developer_job.id candidate.job)
+              (P.Developer_job.id pending.job)
+            && P.Developer_job.same_immutable candidate.job pending.job
+            && Int.equal
+                 (P.Developer_job.state candidate.job).attempt
+                 (P.Developer_job.state pending.job).attempt)
+        in
+        match candidate with
+        | None -> Error Error.Conflict
+        | Some candidate ->
+          let* next = build_pending t ~view ~candidate ~after:pending.after in
+          let* () =
+            with_run_lifecycle t.store (fun () ->
+              match Hashtbl.find t.store.pending t.claim.run_id with
+              | Some (Transition old) when phys_equal old.token pending.prepared.token ->
+                Hashtbl.remove t.store.pending t.claim.run_id;
+                Ok ()
+              | None -> Ok ()
+              | Some (Selected _ | Claim _ | Transition _) -> Error Error.Conflict)
+          in
+          t.pending <- Some next;
+          Ok next))
+  ;;
+
+  let finish t =
+    with_operation t (fun () ->
+      if Option.is_some t.pending
+      then Error Error.Conflict
+      else (
+        let poll = work t.store t.store.checkpoint in
+        let* view = read_view t ~poll in
+        if not (List.is_empty view.candidates)
+        then Error Error.Conflict
+        else
+          with_run_lifecycle t.store (fun () ->
+            match t.claim.record.recovery with
+            | Recovery_open token when phys_equal token t.token ->
+              t.claim.record.recovery <- Recovery_finished;
+              Ok ()
+            | Recovery_unopened | Recovery_open _ | Recovery_finished | Recovery_aborted
+              -> Error Error.Foreign_or_stale)))
+  ;;
+
+  let is_finished t =
+    with_run_lifecycle t.store (fun () ->
+      match Hashtbl.find t.store.run_claims t.claim.run_id with
+      | Some record when phys_equal record.token t.claim.record.token ->
+        (match record.recovery with
+         | Recovery_finished -> true
+         | Recovery_unopened | Recovery_open _ | Recovery_aborted -> false)
+      | Some _ | None -> false)
+  ;;
+
+  let abort_clean t =
+    with_operation t (fun () ->
+      if t.ever_prepared || Option.is_some t.pending
+      then Error Error.Conflict
+      else
+        with_run_lifecycle t.store (fun () ->
+          match t.claim.record.recovery with
+          | Recovery_open token when phys_equal token t.token ->
+            t.claim.record.recovery <- Recovery_aborted;
+            Ok ()
+          | Recovery_unopened | Recovery_open _ | Recovery_finished | Recovery_aborted ->
+            Error Error.Foreign_or_stale))
+  ;;
+end

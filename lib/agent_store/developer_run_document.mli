@@ -31,6 +31,7 @@ val epoch_revision : epoch -> int64
 val find_invocation : t -> Agent_protocol.Id.Invocation.t -> Invocation_entry.t option
 val invocation_count : t -> int
 val find_job : t -> Agent_protocol.Id.Job.t -> Agent_protocol.Developer_job.t option
+val jobs : t -> Agent_protocol.Developer_job.t list
 val job_count : t -> int
 
 (** Pure validated mutations. Each call advances the document revision; callers
