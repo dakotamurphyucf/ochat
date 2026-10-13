@@ -64,6 +64,7 @@
   developer_job_worker
   developer_terminal_queue
   developer_root_owner
+  developer_native_executor
   job_scheduler
   permission_review_service
   permission_scheduler

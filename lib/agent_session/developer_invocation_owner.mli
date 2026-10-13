@@ -99,3 +99,121 @@ val with_invocation
       -> dispatched:Agent_protocol.Host_invocation.t
       -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
   -> (Agent_protocol.Host_invocation.t, Agent_protocol.Error.t) result
+
+(** Selected developer invocation ledger over a physically registered native
+    scope. This shares the validation, Dispatching and failure kernel above,
+    while its exact dispatch writer is supplied per invocation by the host. No
+    copied owner coordinate or stand-alone callback constitutes that writer. *)
+module Selected : sig
+  type t
+  type active
+
+  type parent =
+    | Root
+    | Child of active
+
+  type 'selection completion
+
+  type dispatch_storage =
+    { read :
+        Agent_protocol.Id.Invocation.t
+        -> ( (int * Agent_protocol.Host_invocation.t) option
+             , Agent_protocol.Error.t )
+             result
+    ; save_dispatch :
+        expected_revision:int option
+        -> dispatched:Agent_protocol.Host_invocation.t
+        -> (int, Agent_protocol.Error.t) result
+    }
+
+  (** Host-only construction. The server binds these values to one actual
+      retained root, capture and current actor. [now] is nonyielding. *)
+  val create
+    :  owner:Agent_protocol.Execution_owner.developer
+    -> capture_fingerprint:Chatml_source.Digest.t
+    -> ceiling:Chat_response.Tool_capability.t
+    -> selected:(unit -> Chat_response.Tool_capability.t)
+    -> current:
+         (owner:Agent_protocol.Execution_owner.developer
+          -> capture_fingerprint:Chatml_source.Digest.t
+          -> (unit, Agent_protocol.Error.t) result)
+    -> now:(unit -> Agent_protocol.Timestamp.t)
+    -> (t, Agent_protocol.Error.t) result
+
+  val selected : t -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result
+  val ceiling : t -> Chat_response.Tool_capability.t
+  val same_issuer : t -> t -> bool
+
+  val check_invocation
+    :  t
+    -> parent:parent
+    -> Agent_protocol.Host_invocation.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Nonyielding physical issuer, same-domain live direct parent and deadline
+      check. The host calls this after any yielding current/permission read and
+      together with its own nonyielding root effect witness immediately before
+      effect entry. It does not replace authenticated [check_invocation]. *)
+  val check_parent_now
+    :  t
+    -> parent:parent
+    -> Agent_protocol.Host_invocation.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** [dispatch] belongs to the exact host native scope. The shared kernel
+      admits a matching prior, saves Dispatching, and never calls [f] unless
+      durability is acknowledged. After a save begins, errors, exceptions and
+      cancellation are captured in an immutable completion; the host retains
+      that completion's terminal on the physical scope before the bracket can
+      exit. A failed/uncertain save never triggers handler retry after recovery.
+      [frozen] reads the issuing scope's already sealed outcome/selection without
+      yielding. Once sealed, even a later exception or child-join failure cannot
+      replace Complete/Pending plus jobs with Fail/None. The original exception
+      remains available for rethrow after terminal bookkeeping. *)
+  val with_invocation
+    :  t
+    -> parent:parent
+    -> invocation:Agent_protocol.Host_invocation.t
+    -> dispatch:dispatch_storage
+    -> frozen:(unit -> (Agent_protocol.Invocation.outcome * 'selection) option)
+    -> (active:active
+        -> dispatched:Agent_protocol.Host_invocation.t
+        -> ( Agent_protocol.Invocation.outcome * 'selection option
+             , Agent_protocol.Error.t )
+             result)
+    -> ('selection completion, Agent_protocol.Error.t) result
+
+  module Completion : sig
+    type 'selection t = 'selection completion
+
+    type dispatch =
+      | Awaiting_reconciliation
+      | Installed of int
+
+    type settlement =
+      | Terminal_saved of int
+      | Recovered_terminal_saved of
+          { dispatch_revision : int
+          ; terminal_revision : int
+          }
+      | Dispatch_absent
+      | Uncertain of Agent_protocol.Error.t
+
+    val dispatch : _ t -> dispatch
+    val terminal : _ t -> Agent_protocol.Host_invocation.t
+    val selected : 'selection t -> 'selection option
+
+    (** Called after protected native submission or exact retained recovery.
+        A directly saved terminal revision must follow the known dispatch
+        revision. Retained recovery reports both revisions from the same
+        physical host scope; this DTO checks their order, while that scope is
+        responsible for proving actual durability.
+        An original unexpected exception/cancellation is re-raised with its
+        original backtrace, even when persistence is uncertain. A callback
+        typed Error follows the existing durable Fail-record behavior. *)
+    val finish
+      :  'selection t
+      -> settlement:settlement
+      -> (Agent_protocol.Host_invocation.t, Agent_protocol.Error.t) result
+  end
+end

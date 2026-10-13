@@ -168,6 +168,58 @@ module Native_terminal : sig
     val jobs : t -> Agent_protocol.Developer_job.t list
   end
 
+  (** Exact physically registered Dispatching bridge for the shared developer
+      invocation kernel. Both operations verify this scope's invocation and
+      owner; the issuer retains the one Store Prepared/Handoff pair on [t].
+      Neither method grants native effect authority. *)
+  val read_dispatch
+    :  t
+    -> Agent_protocol.Id.Invocation.t
+    -> ((int * Agent_protocol.Host_invocation.t) option, Agent_protocol.Error.t) result
+
+  val save_dispatch
+    :  t
+    -> expected_revision:int option
+    -> dispatched:Agent_protocol.Host_invocation.t
+    -> (int, Agent_protocol.Error.t) result
+
+  type dispatch_reconciliation =
+    | Installed of Agent_protocol.Host_invocation.t * int
+    | Absent
+    | Uncertain
+
+  (** Only after the native registration bracket exits. Installed is evidence
+      for truthful Fail/Cancelled bookkeeping, never permission to start a
+      callback after an uncertain save. Absent proves no dispatch; Unknown
+      retains the scope, run claim and one Store pending barrier. *)
+  val reconcile_dispatch : t -> (dispatch_reconciliation, Agent_protocol.Error.t) result
+
+  (** Whether the exited bracket still owns this exact physical registration.
+      A false result means ordinary bracket cleanup already retired an
+      unentered, conclusively absent dispatch. This does not prove absence;
+      callers must first use [reconcile_dispatch]. *)
+  val retained : t -> (bool, Agent_protocol.Error.t) result
+
+  val callback_complete : t -> bool
+
+  (** Return the already frozen canonical pair, if any. A late exception may
+      not replace it with Fail/None. *)
+  val sealed : t -> (Agent_protocol.Invocation.outcome * Selection.t) option
+
+  (** Attach one immutable pre-entry Fail/Cancelled terminal to this physical
+      scope before an uncertain dispatch can outlive the caller's stack. *)
+  val remember_failure
+    :  t
+    -> terminal:Agent_protocol.Host_invocation.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Resolve that exact retained terminal after the bracket exits and
+      Dispatching is known durable through [save_dispatch] or reconciliation.
+      Ordinary completed callbacks also attach their canonical terminal before
+      the first yielding submission, so same-owner recovery never invents a
+      replacement outcome or selection. *)
+  val resolve_remembered : t -> (int, Agent_protocol.Error.t) result
+
   (** This scope is terminal custody, not native-effect permission. The later
       shared invocation policy must durably Dispatch and independently prove
       its selected binding, permission and live parent before a handler runs.
@@ -239,6 +291,12 @@ end
 
 val owner : t -> Agent_protocol.Execution_owner.developer
 val capture : t -> Chatml_developer_capture.t
+
+(** Read-only authentic data retained by the physical run owner. *)
+val native_ceiling : t -> Chat_response.Tool_capability.t
+
+val native_selected : t -> Chat_response.Tool_capability.t
+val native_now : t -> Agent_protocol.Timestamp.t
 
 (** Read actual latest Active epoch through the Store, then recheck original
     actor, same-domain physical lifetime and selected registry without yielding.
@@ -333,9 +391,13 @@ val with_native_callback
     may be in flight for this owner: a second returns a retryable Conflict
     before waiting for Store I/O, so a retained old result cannot clear a newer
     root/native pending transaction. Recovery excludes new effects and root or
-    native actions. Close during recovery returns an error and retains the physical
-    claim/capacity while it still cancels and joins workers; the caller may
-    retry close after recovery finishes. *)
+    native actions. The same bounded pass also reconciles exited, physically
+    retained native Dispatching scopes: a proven absent unentered scope is
+    retired, while an installed dispatch uses its attached exact terminal and
+    sealed selection without rerunning the handler. Unknown custody stays
+    quarantined. Close uses this operation after joining callbacks and workers;
+    close during an active recovery returns an error and retains physical
+    claim/capacity. *)
 val reconcile_pending : t -> (unit, Agent_protocol.Error.t) result
 
 (** Exclude admission, cancel/join root and native callbacks and worker
