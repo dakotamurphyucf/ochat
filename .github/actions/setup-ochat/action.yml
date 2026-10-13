@@ -7,6 +7,9 @@ inputs:
   tier:
     description: Semantic, normal, E2E or native Git compilation cache namespace
     required: true
+  shard:
+    description: Optional normal-test shard compilation cache preference
+    default: ""
 runs:
   using: composite
   steps:
@@ -69,8 +72,11 @@ runs:
       uses: actions/cache@v4
       with:
         path: ~/.cache/dune
-        key: dune-${{ steps.key.outputs.key }}-${{ inputs.tier }}-${{ github.sha }}
-        restore-keys: dune-${{ steps.key.outputs.key }}-${{ inputs.tier }}-
+        key: ${{ steps.key.outputs.compilation-cache-prefix }}${{ inputs.tier }}-${{ inputs.shard }}-${{ github.sha }}
+        restore-keys: |
+          ${{ steps.key.outputs.compilation-cache-prefix }}${{ inputs.tier }}-${{ inputs.shard }}-
+          ${{ steps.key.outputs.compilation-cache-prefix }}${{ inputs.tier }}-
+          ${{ steps.key.outputs.compilation-cache-prefix }}
     - name: Configure compilation cache
       shell: bash
       env:

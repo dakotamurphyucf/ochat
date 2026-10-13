@@ -4,6 +4,7 @@ import fs from "node:fs";
 import { createHash } from "node:crypto";
 import {
   cacheKey,
+  describeCacheIdentity,
   keyInputs,
   checkInstalled,
   checkRunner,
@@ -117,4 +118,47 @@ test("runner admission accepts exact Ubuntu 24.04 image/architecture pairs witho
       },
     );
   }
+});
+
+test("cache diagnostics explain native and dependency identity without changing the exact key", () => {
+  const fingerprint = {
+    platform: "linux",
+    arch: "x64",
+    image: "ubuntu24",
+    imageVersion: "20261004.327.1",
+    gcc: "13.3.0",
+    cpuTarget: "-march=x86-64-v3 -mavx2 [enabled]",
+    compiler: "5.3.0",
+    opam: "2.5.2",
+  };
+  const read = (name) => `original ${name}`;
+  const identity = describeCacheIdentity(fingerprint, read);
+  assert.equal(identity.key, cacheKey(fingerprint, read));
+  assert.equal(identity.compilationCachePrefix, `dune-${identity.key}-`);
+  assert.equal(identity.imageVersion, fingerprint.imageVersion);
+  assert.equal(identity.gcc, fingerprint.gcc);
+  assert.equal(
+    identity.cpuTargetSha256,
+    createHash("sha256").update(fingerprint.cpuTarget).digest("hex"),
+  );
+  assert.equal(Object.hasOwn(identity, "cpuTarget"), false);
+  const changedCpu = describeCacheIdentity(
+    { ...fingerprint, cpuTarget: "other CPU" },
+    read,
+  );
+  assert.notEqual(changedCpu.key, identity.key);
+  assert.notEqual(changedCpu.cpuTargetSha256, identity.cpuTargetSha256);
+  assert.equal(
+    changedCpu.dependencyContractSha256,
+    identity.dependencyContractSha256,
+  );
+  const changedContract = describeCacheIdentity(fingerprint, (name) =>
+    name === keyInputs[0] ? "changed dependency" : read(name),
+  );
+  assert.notEqual(changedContract.key, identity.key);
+  assert.notEqual(
+    changedContract.dependencyContractSha256,
+    identity.dependencyContractSha256,
+  );
+  assert.equal(changedContract.cpuTargetSha256, identity.cpuTargetSha256);
 });

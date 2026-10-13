@@ -96,14 +96,66 @@ jobs:
             website/.release/ochat.opam.locked
             website/.release/toolchain.json
             website/.release/toolchain-key.json
-  framework:
+  framework-plan:
     needs: changes
+    if: needs.changes.outputs.framework == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: website/.nvmrc
+      - name: Discover and partition all normal test aliases
+        run: node .github/scripts/framework-plan.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: framework-plan
+          path: .ci-evidence/framework-plan.json
+          include-hidden-files: true
+          if-no-files-found: error
+          overwrite: true
+  framework:
+    needs: [changes, framework-plan]
     if: needs.changes.outputs.framework == 'true'
     strategy:
       fail-fast: false
+      max-parallel: 10
       matrix:
         include:
           - tier: normal
+            shard: 1
+            arch: x64
+            runner: ubuntu-24.04
+          - tier: normal
+            shard: 2
+            arch: x64
+            runner: ubuntu-24.04
+          - tier: normal
+            shard: 3
+            arch: x64
+            runner: ubuntu-24.04
+          - tier: normal
+            shard: 4
+            arch: x64
+            runner: ubuntu-24.04
+          - tier: normal
+            shard: 5
+            arch: x64
+            runner: ubuntu-24.04
+          - tier: normal
+            shard: 6
+            arch: x64
+            runner: ubuntu-24.04
+          - tier: normal
+            shard: 7
+            arch: x64
+            runner: ubuntu-24.04
+          - tier: normal
+            shard: 8
             arch: x64
             runner: ubuntu-24.04
           - tier: e2e
@@ -128,16 +180,35 @@ jobs:
         with:
           cold: ${{ needs.changes.outputs.cold }}
           tier: ${{ matrix.tier }}
+          shard: ${{ matrix.shard }}
+      - uses: actions/download-artifact@v4
+        if: matrix.tier == 'normal'
+        with:
+          name: framework-plan
+          path: .ci-evidence
+      - id: shard-plan
+        name: Validate normal shard and select native fixture
+        if: matrix.tier == 'normal'
+        run: node .github/scripts/framework-plan.mjs inspect ${{ matrix.shard }}
       - name: Provision pinned Git candidate for real native qualification
-        if: matrix.tier != 'e2e'
+        if: matrix.tier == 'git-native' || steps.shard-plan.outputs.native-git == 'true'
         timeout-minutes: 20
         run: bash .github/scripts/provision-git-host.sh
       - name: Run framework tests
-        run: opam exec -- node .github/scripts/framework-tests.mjs ${{ matrix.tier }}
+        run: opam exec -- node .github/scripts/framework-tests.mjs ${{ matrix.tier }} ${{ matrix.shard }}
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.tier == 'normal'
+        with:
+          name: framework-summary-normal-${{ matrix.shard }}-x64
+          path: .ci-evidence/normal-shard.json
+          include-hidden-files: true
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: framework-evidence-${{ matrix.tier }}-${{ matrix.arch }}
+          name: ${{ matrix.tier == 'normal' && format('framework-evidence-normal-{0}-x64', matrix.shard) || format('framework-evidence-{0}-{1}', matrix.tier, matrix.arch) }}
           overwrite: true
           include-hidden-files: true
           retention-days: 90
@@ -322,7 +393,7 @@ jobs:
           overwrite: true
   release-gate:
     if: always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
-    needs: [changes, semantics, framework, website, browser, website-qualification]
+    needs: [changes, semantics, framework-plan, framework, website, browser, website-qualification]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -337,6 +408,19 @@ jobs:
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: node .github/scripts/release-gate.mjs
+      - uses: actions/download-artifact@v4
+        if: needs.changes.outputs.framework == 'true'
+        with:
+          name: framework-plan
+          path: .ci-evidence
+      - uses: actions/download-artifact@v4
+        if: needs.changes.outputs.framework == 'true'
+        with:
+          pattern: framework-summary-normal-*-x64
+          path: .ci-evidence/normal-shards
+      - name: Verify complete normal test coverage
+        if: needs.changes.outputs.framework == 'true'
+        run: node .github/scripts/framework-qualification.mjs
   deploy-production:
     if: always() && github.ref == 'refs/heads/main' && needs.changes.outputs.deploy == 'true' && needs.release-gate.result == 'success'
     needs: [changes, release-gate]

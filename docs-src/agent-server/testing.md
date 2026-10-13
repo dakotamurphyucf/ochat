@@ -69,6 +69,13 @@ These use offline providers, production hosts and retained E2E artifacts. The
 required framework CI runs this alias in its E2E tier alongside the separate
 forced normal-test tier.
 
+Normal GitHub CI now divides the same suite into eight groups of nonrecursive
+Dune directory aliases, with two workers per runner. A source-derived inventory
+includes tests in `bin`, `lib` and `test`; the release gate requires every planned
+group to pass with complete, matching execution evidence. Local `dune runtest`
+continues to run the complete normal suite. Test grouping changes scheduling,
+not the opt-in status of the broader qualification tiers below.
+
 The subset does not replace full runtime, permission, security, persistence and
 crash qualification. Use the affected aliases or `@agent-e2e-safe` for that wider
 matrix. Read [the alias definitions](../../test/agent_server_e2e/dune) before

@@ -626,6 +626,10 @@ also run explicitly, outside ordinary CI: `opam exec -- dune build --force -j 2
 `@agent-managed-qualification` or `@agent-authoring-qualification` for affected
 workflows. Normal tests retain focused runtime/transport/security regressions;
 the full matrices remain available for local change and release qualification.
+Required CI divides the normal suite across eight Dune directory groups and
+checks complete source-bound execution evidence before merging. Local
+`dune runtest` is unchanged. Compilation caches may reuse compatible objects
+across groups, while every selected test alias still executes with `--force`.
 See [test tiers](docs-src/agent-server/testing.md#complete-offline-workflow-qualification)
 for the coverage split. A green PR does not certify the explicit matrices.
 

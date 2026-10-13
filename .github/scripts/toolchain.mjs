@@ -17,6 +17,37 @@ export function cacheKey(fingerprint, read = (name) => fs.readFileSync(name)) {
     hash.update(name).update("\0").update(read(name)).update("\0");
   return `ochat-opam-v1-${hash.digest("hex")}`;
 }
+// Diagnostics use exactly the same inputs as cacheKey. CPU details remain in
+// the existing evidence fingerprint; the summary contains only their digest.
+export function describeCacheIdentity(
+  fingerprint,
+  read = (name) => fs.readFileSync(name),
+) {
+  const dependencyContract = createHash("sha256");
+  for (const name of keyInputs)
+    dependencyContract
+      .update(name)
+      .update("\0")
+      .update(read(name))
+      .update("\0");
+  const key = cacheKey(fingerprint, read);
+  return {
+    key,
+    compilationCachePrefix: `dune-${key}-`,
+    platform: fingerprint.platform,
+    arch: fingerprint.arch,
+    image: fingerprint.image,
+    imageVersion: fingerprint.imageVersion,
+    gcc: fingerprint.gcc,
+    cpuTargetSha256: createHash("sha256")
+      .update(fingerprint.cpuTarget)
+      .digest("hex"),
+    dependencyContractSha256: dependencyContract.digest("hex"),
+    compiler: fingerprint.compiler,
+    opam: fingerprint.opam,
+  };
+}
+
 export function checkRunner(fingerprint) {
   const supportedImage =
     (fingerprint.arch === "x64" && fingerprint.image === "ubuntu24") ||
@@ -82,14 +113,15 @@ function main() {
       opam: config.opam,
     };
     checkRunner(fingerprint);
-    const key = cacheKey(fingerprint);
+    const identity = describeCacheIdentity(fingerprint);
+    const { key } = identity;
     fs.appendFileSync(
       process.env.GITHUB_OUTPUT,
-      `key=${key}\nrepository=${config.repository}\n`,
+      `key=${key}\ncompilation-cache-prefix=${identity.compilationCachePrefix}\nrepository=${config.repository}\n`,
     );
     fs.writeFileSync(
       ".ci-evidence/toolchain-key.json",
-      JSON.stringify({ key, fingerprint }, null, 2) + "\n",
+      JSON.stringify({ key, fingerprint, identity }, null, 2) + "\n",
     );
   } else if (mode === "verify") {
     const installed = run("opam", [
