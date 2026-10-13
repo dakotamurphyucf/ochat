@@ -132,6 +132,9 @@
     lib/chat_response/generated_admission.ml %{dep:../chat_response/generated_admission.ml}
     lib/chat_response/initial_prompt_history.ml %{dep:../chat_response/initial_prompt_history.ml}
     lib/chatmd/chatmd_ast.ml %{dep:../chatmd/chatmd_ast.ml}
+    lib/chatmd/chatmd_tag_scope.ml %{dep:../chatmd/chatmd_tag_scope.ml}
+    lib/chatmd/chatmd_declaration_schema.ml %{dep:../chatmd/chatmd_declaration_schema.ml}
+    lib/chatmd/chatmd_shell_schema.ml %{dep:../chatmd/chatmd_shell_schema.ml}
     lib/chatmd/chatmd_extension_declaration.ml %{dep:../chatmd/chatmd_extension_declaration.ml}
     lib/chatmd/chatmd_extraction_map.ml %{dep:../chatmd/chatmd_extraction_map.ml}
     lib/chatmd/chatmd_import_expansion.ml %{dep:../chatmd/chatmd_import_expansion.ml}
@@ -211,11 +214,14 @@
     lib/chat_response/shell_tool.ml %{dep:../chat_response/shell_tool.ml}
     lib/chat_response/tool.ml %{dep:../chat_response/tool.ml}
     lib/chatmd/chatmd_read_file_declaration.ml %{dep:../chatmd/chatmd_read_file_declaration.ml}
+    lib/chatmd/chatmd_moderator_runtime_declaration.ml %{dep:../chatmd/chatmd_moderator_runtime_declaration.ml}
     lib/chatmd/chatmd_read_file_spec.ml %{dep:../chatmd/chatmd_read_file_spec.ml}
     lib/chatmd/chatmd_shell_declaration.ml %{dep:../chatmd/chatmd_shell_declaration.ml}
     lib/chatmd_shell_spec/manifest_compiler.ml %{dep:../chatmd_shell_spec/manifest_compiler.ml}
     lib/chatmd_shell_spec/path_expr.ml %{dep:../chatmd_shell_spec/path_expr.ml}
     lib/chatmd_shell_spec/shell_tool_spec.ml %{dep:../chatmd_shell_spec/shell_tool_spec.ml}
+    lib/chatmd_shell_spec/chatmd_script_spec.ml %{dep:../chatmd_shell_spec/chatmd_script_spec.ml}
+    lib/chatmd_shell_spec/shell_element.ml %{dep:../chatmd_shell_spec/shell_element.ml}
     lib/functions.ml %{dep:../functions.ml}
     lib/mcp/mcp_tool.ml %{dep:../mcp/mcp_tool.ml}))))
 

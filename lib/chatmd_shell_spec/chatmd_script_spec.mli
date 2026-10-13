@@ -49,6 +49,9 @@ val default_limits : limits
 (** [kind_of_string source value] parses one closed script-kind name. *)
 val kind_of_string : Source_ref.t -> string -> (kind, Diagnostic.t) result
 
+(** Canonical finite kind names consumed by [kind_of_string]. *)
+val kind_names : string list
+
 (** [kind_to_string kind] returns the ChatMD spelling of [kind]. *)
 val kind_to_string : kind -> string
 

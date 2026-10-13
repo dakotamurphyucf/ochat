@@ -1,0 +1,5 @@
+(library
+ (name chatmd_authoring_schema_tests)
+ (libraries core chatmd ochat.chatmd_source_input ochat.chatmd_shell_spec expect_test_helpers_core)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

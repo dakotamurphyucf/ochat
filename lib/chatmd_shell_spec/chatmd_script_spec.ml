@@ -64,6 +64,8 @@ let kinds =
   ]
 ;;
 
+let kind_names = List.map kinds ~f:fst
+
 let kind_to_string kind =
   List.find_map_exn kinds ~f:(fun (name, candidate) ->
     Option.some_if (equal_kind kind candidate) name)

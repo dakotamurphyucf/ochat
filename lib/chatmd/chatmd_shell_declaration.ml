@@ -3,6 +3,7 @@ module A = Chatmd_attributes
 module Ast = Chatmd_ast
 module D = Chatmd_shell_spec.Diagnostic
 module E = Chatmd_shell_spec.Shell_element
+module Schema = Chatmd_shell_schema
 module S = Chatmd_shell_spec.Shell_spec
 module Source_ref = Chatmd_shell_spec.Source_ref
 module Tool = Chatmd_shell_spec.Shell_tool_spec
@@ -32,7 +33,13 @@ let element_children source path children =
     | Ast.Element _ -> true)
 ;;
 
-let attributes source path allowed values =
+let attributes source path values =
+  let root =
+    match path with
+    | "tool" :: _ -> Chatmd_shell_schema.Root.Tool_shell
+    | _ -> Shell_access
+  in
+  let allowed = Chatmd_shell_schema.allowed_for_parser_path_exn ~root ~path in
   match A.create ~source ~path ~allowed values with
   | Ok attributes -> attributes
   | Error diagnostic -> raise_error diagnostic
@@ -62,9 +69,7 @@ let enum source path name value choices =
     fail source (path @ [ name ]) "shell.invalid_attribute" ("invalid value: " ^ value)
 ;;
 
-let bool source path name value =
-  enum source path name value [ "true", true; "false", false ]
-;;
+let bool source path name value = enum source path name value Schema.Enum.bool
 
 let bool_setting source path attributes name =
   Option.value_map (optional attributes name) ~default:S.Inherit ~f:(fun value ->
@@ -77,7 +82,7 @@ let bool_value source path attributes name ~default =
 
 let merge source path attributes =
   Option.value_map (optional attributes "merge") ~default:S.Append ~f:(fun value ->
-    enum source path "merge" value [ "append", S.Append; "replace", S.Replace ])
+    enum source path "merge" value Schema.Enum.merge)
 ;;
 
 let path source path name value =
@@ -103,9 +108,7 @@ let parse_capability_root source node : S.capability_root =
   in
   let name = E.to_string element in
   let path_ = [ "capabilities"; name ] in
-  let attributes =
-    attributes source path_ [ "path"; "path_env"; "optional" ] raw_attributes
-  in
+  let attributes = attributes source path_ raw_attributes in
   no_children source path_ children;
   match optional attributes "path", optional attributes "path_env" with
   | Some value, None -> S.Path (path source path_ "path" value)
@@ -127,29 +130,11 @@ let capability_children source children =
 
 let parse_capabilities source raw_attributes children =
   let path_ = [ "capabilities" ] in
-  let allowed =
-    [ "sandbox"
-    ; "network"
-    ; "child_processes"
-    ; "arbitrary_code"
-    ; "privilege_change"
-    ; "merge"
-    ]
-  in
-  let attributes = attributes source path_ allowed raw_attributes in
+  let attributes = attributes source path_ raw_attributes in
   let read, write = capability_children source children in
   let sandbox =
     Option.value_map (optional attributes "sandbox") ~default:S.Inherit ~f:(fun value ->
-      S.Set
-        (enum
-           source
-           path_
-           "sandbox"
-           value
-           [ "required", S.Required
-           ; "preferred", S.Preferred
-           ; "direct_unsafe", S.Direct_unsafe
-           ]))
+      S.Set (enum source path_ "sandbox" value Schema.Enum.sandbox))
   in
   { S.sandbox
   ; network = bool_setting source path_ attributes "network"
@@ -164,8 +149,7 @@ let parse_capabilities source raw_attributes children =
 
 let parse_executable source raw_attributes children =
   let path_ = [ "resolver"; "executable" ] in
-  let allowed = [ "id"; "path"; "sha256"; "trusted"; "override" ] in
-  let attributes = attributes source path_ allowed raw_attributes in
+  let attributes = attributes source path_ raw_attributes in
   no_children source path_ children;
   { S.id = required attributes "id"
   ; path = path source path_ "path" (required attributes "path")
@@ -181,7 +165,7 @@ let parse_resolver_child source node =
   let path_ = [ "resolver"; name ] in
   match element with
   | E.Search_path | E.Trusted_root ->
-    let attributes = attributes source path_ [ "path" ] raw_attributes in
+    let attributes = attributes source path_ raw_attributes in
     no_children source path_ children;
     let value = path source path_ "path" (required attributes "path") in
     if E.equal element E.Search_path then `Search value else `Trusted value
@@ -191,9 +175,7 @@ let parse_resolver_child source node =
 
 let parse_resolver source raw_attributes children =
   let path_ = [ "resolver" ] in
-  let attributes =
-    attributes source path_ [ "allow_relative_search_path"; "merge" ] raw_attributes
-  in
+  let attributes = attributes source path_ raw_attributes in
   let children =
     element_children source path_ children |> List.map ~f:(parse_resolver_child source)
   in
@@ -222,7 +204,7 @@ let validate_env_name source path_ name =
 
 let parse_env_path source raw_attributes children =
   let path_ = [ "environment"; "path" ] in
-  let attributes = attributes source path_ [ "prepend"; "append" ] raw_attributes in
+  let attributes = attributes source path_ raw_attributes in
   no_children source path_ children;
   match optional attributes "prepend", optional attributes "append" with
   | Some value, None ->
@@ -239,8 +221,7 @@ let parse_env_path source raw_attributes children =
 
 let parse_path_env source raw_attributes children =
   let path_ = [ "environment"; "path_env" ] in
-  let allowed = [ "name"; "suffix"; "position"; "required" ] in
-  let attributes = attributes source path_ allowed raw_attributes in
+  let attributes = attributes source path_ raw_attributes in
   no_children source path_ children;
   let name = required attributes "name" in
   validate_env_name source path_ name;
@@ -250,7 +231,7 @@ let parse_path_env source raw_attributes children =
       path_
       "position"
       (Option.value (optional attributes "position") ~default:"append")
-      [ "prepend", S.Prepend; "append", S.Append_path ]
+      Schema.Enum.path_position
   in
   S.Path_env
     { name
@@ -265,16 +246,16 @@ let parse_environment_child source node =
     shell_element_exn source [ "environment" ] node
   in
   let path_ = [ "environment"; E.to_string element ] in
-  let empty allowed = attributes source path_ allowed raw_attributes in
+  let empty () = attributes source path_ raw_attributes in
   match element with
   | E.Set ->
-    let attributes = empty [ "name"; "value" ] in
+    let attributes = empty () in
     no_children source path_ children;
     let name = required attributes "name" in
     validate_env_name source path_ name;
     S.Set_env { name; value = required attributes "value" }
   | E.Pass ->
-    let attributes = empty [ "name"; "required"; "secret" ] in
+    let attributes = empty () in
     no_children source path_ children;
     let name = required attributes "name" in
     validate_env_name source path_ name;
@@ -284,13 +265,13 @@ let parse_environment_child source node =
       ; secret = bool_value source path_ attributes "secret" ~default:false
       }
   | E.Unset ->
-    let attributes = empty [ "name" ] in
+    let attributes = empty () in
     no_children source path_ children;
     let name = required attributes "name" in
     validate_env_name source path_ name;
     S.Unset_env name
   | E.Unset_prefix ->
-    let attributes = empty [ "value" ] in
+    let attributes = empty () in
     no_children source path_ children;
     S.Unset_prefix (required attributes "value")
   | E.Path -> parse_env_path source raw_attributes children
@@ -300,21 +281,10 @@ let parse_environment_child source node =
 
 let parse_environment source raw_attributes children =
   let path_ = [ "environment" ] in
-  let attributes = attributes source path_ [ "inherit"; "merge" ] raw_attributes in
+  let attributes = attributes source path_ raw_attributes in
   let inherit_ =
     Option.value_map (optional attributes "inherit") ~default:S.Inherit ~f:(fun value ->
-      S.Set
-        (enum
-           source
-           path_
-           "inherit"
-           value
-           [ "none", S.None_
-           ; "safe", S.Safe
-           ; "selected", S.Selected
-           ; "all_sanitized", S.All_sanitized
-           ; "raw", S.Raw
-           ]))
+      S.Set (enum source path_ "inherit" value Schema.Enum.environment_inherit))
   in
   { S.inherit_
   ; operations =
@@ -359,20 +329,7 @@ let int_setting source path_ attributes name =
 
 let parse_limits source raw_attributes children =
   let path_ = [ "limits" ] in
-  let allowed =
-    [ "wall_time"
-    ; "idle_time"
-    ; "max_stdin"
-    ; "stdout"
-    ; "stderr"
-    ; "total_output"
-    ; "cpu_time"
-    ; "memory"
-    ; "file_size"
-    ; "open_files"
-    ]
-  in
-  let attributes = attributes source path_ allowed raw_attributes in
+  let attributes = attributes source path_ raw_attributes in
   no_children source path_ children;
   { S.wall_time = duration_setting source path_ attributes "wall_time"
   ; idle_time = duration_setting source path_ attributes "idle_time"
@@ -393,13 +350,12 @@ let platform source path_ attributes =
     path_
     "when"
     (Option.value (optional attributes "when") ~default:"any")
-    [ "macos", S.Macos; "linux", S.Linux; "windows", S.Windows; "any", S.Any ]
+    Schema.Enum.platform
 ;;
 
 let parse_seatbelt source raw_attributes children =
   let path_ = [ "backends"; "seatbelt" ] in
-  let allowed = [ "id"; "when"; "executable"; "allow_system_reads" ] in
-  let attributes = attributes source path_ allowed raw_attributes in
+  let attributes = attributes source path_ raw_attributes in
   no_children source path_ children;
   S.Seatbelt
     { id = optional attributes "id"
@@ -412,8 +368,7 @@ let parse_seatbelt source raw_attributes children =
 
 let parse_bubblewrap source raw_attributes children =
   let path_ = [ "backends"; "bubblewrap" ] in
-  let allowed = [ "id"; "when"; "executable"; "private_tmp"; "proc"; "dev" ] in
-  let attributes = attributes source path_ allowed raw_attributes in
+  let attributes = attributes source path_ raw_attributes in
   no_children source path_ children;
   S.Bubblewrap
     { id = optional attributes "id"
@@ -431,46 +386,42 @@ let parse_backend_atom source node =
   no_children source path_ children;
   match element with
   | E.Arg ->
-    let attributes = attributes source path_ [ "value" ] raw_attributes in
+    let attributes = attributes source path_ raw_attributes in
     S.Literal_atom (required attributes "value")
   | Cwd_value ->
-    ignore (attributes source path_ [] raw_attributes : A.t);
+    ignore (attributes source path_ raw_attributes : A.t);
     Cwd_atom
   | Target_executable ->
-    ignore (attributes source path_ [] raw_attributes : A.t);
+    ignore (attributes source path_ raw_attributes : A.t);
     Target_executable_atom
   | Command_argv ->
-    ignore (attributes source path_ [] raw_attributes : A.t);
+    ignore (attributes source path_ raw_attributes : A.t);
     Command_argv_atom
   | Read_roots | Write_roots ->
-    let attributes = attributes source path_ [ "flag" ] raw_attributes in
+    let attributes = attributes source path_ raw_attributes in
     let repeated = S.{ flag = required attributes "flag" } in
     if E.equal element E.Read_roots
     then Read_roots_atom repeated
     else Write_roots_atom repeated
   | Network_flag ->
-    let attributes = attributes source path_ [ "value" ] raw_attributes in
+    let attributes = attributes source path_ raw_attributes in
     Network_flag_atom (required attributes "value")
   | Resource_limit_args ->
-    ignore (attributes source path_ [] raw_attributes : A.t);
+    ignore (attributes source path_ raw_attributes : A.t);
     Resource_limit_args_atom
   | _ -> fail source path_ "shell.unknown_element" (E.to_string element)
 ;;
 
 let parse_external_backend source raw_attributes children =
   let path_ = [ "backends"; "external_backend" ] in
-  let allowed = [ "id"; "when"; "executable"; "sha256"; "confinement" ] in
-  let attributes = attributes source path_ allowed raw_attributes in
+  let attributes = attributes source path_ raw_attributes in
   let confinement =
     enum
       source
       path_
       "confinement"
       (Option.value (optional attributes "confinement") ~default:"none")
-      [ "verified", S.Verified_confinement
-      ; "declared", S.Declared_confinement
-      ; "none", S.No_confinement
-      ]
+      Schema.Enum.confinement
   in
   S.External
     { id = optional attributes "id"
@@ -478,7 +429,8 @@ let parse_external_backend source raw_attributes children =
     ; executable = path source path_ "executable" (required attributes "executable")
     ; sha256 = optional attributes "sha256"
     ; confinement
-    ; atoms = element_children source path_ children |> List.map ~f:(parse_backend_atom source)
+    ; atoms =
+        element_children source path_ children |> List.map ~f:(parse_backend_atom source)
     }
 ;;
 
@@ -489,7 +441,7 @@ let parse_backend source node =
   | E.Bubblewrap -> parse_bubblewrap source raw_attributes children
   | E.Direct ->
     let path_ = [ "backends"; "direct" ] in
-    let attributes = attributes source path_ [ "id"; "when" ] raw_attributes in
+    let attributes = attributes source path_ raw_attributes in
     no_children source path_ children;
     S.Direct { id = optional attributes "id"; when_ = platform source path_ attributes }
   | E.External_backend -> parse_external_backend source raw_attributes children
@@ -498,8 +450,7 @@ let parse_backend source node =
 
 let parse_backends source raw_attributes children =
   let path_ = [ "backends" ] in
-  let allowed = [ "accept_declared_confinement"; "merge" ] in
-  let attributes = attributes source path_ allowed raw_attributes in
+  let attributes = attributes source path_ raw_attributes in
   { S.values =
       element_children source path_ children |> List.map ~f:(parse_backend source)
   ; accept_declared_confinement =
@@ -509,19 +460,7 @@ let parse_backends source raw_attributes children =
 ;;
 
 let parse_effect source path_ attributes =
-  enum
-    source
-    path_
-    "name"
-    (required attributes "name")
-    [ "read_path", S.Read_path
-    ; "write_path", S.Write_path
-    ; "network", S.Network
-    ; "child_processes", S.Child_processes
-    ; "arbitrary_code", S.Arbitrary_code
-    ; "privilege_change", S.Privilege_change
-    ; "unknown", S.Unknown
-    ]
+  enum source path_ "name" (required attributes "name") Schema.Enum.process_effect
 ;;
 
 let lifecycle source path_ attributes ~default =
@@ -530,7 +469,7 @@ let lifecycle source path_ attributes ~default =
     path_
     "lifecycle"
     (Option.value (optional attributes "lifecycle") ~default)
-    [ "invocation", S.Invocation; "session", S.Session; "runtime", S.Runtime ]
+    Schema.Enum.lifecycle
 ;;
 
 let hook_failure source path_ attributes ~default =
@@ -539,12 +478,7 @@ let hook_failure source path_ attributes ~default =
     path_
     "failure"
     (Option.value (optional attributes "failure") ~default)
-    [ "deny", S.Deny_failure
-    ; "error", S.Error_failure
-    ; "no_match", S.No_match_failure
-    ; "unknown", S.Unknown_failure
-    ; "keep", S.Keep_failure
-    ]
+    Schema.Enum.hook_failure
 ;;
 
 let optional_duration source path_ attributes name =
@@ -568,7 +502,7 @@ let executable_hook source path_ attributes =
       path_
       "protocol"
       (Option.value (optional attributes "protocol") ~default:"shell-hook-json-v1")
-      [ "shell-hook-json-v1", S.Shell_hook_json_v1 ]
+      Schema.Enum.hook_protocol
   in
   S.
     { executable = path source path_ "executable" (required attributes "executable")
@@ -592,7 +526,7 @@ let csv source path_ value =
 let value_matcher source element raw_attributes children constructor =
   let name = E.to_string element in
   let path_ = [ "policy"; name ] in
-  let attributes = attributes source path_ [ "value" ] raw_attributes in
+  let attributes = attributes source path_ raw_attributes in
   no_children source path_ children;
   constructor (required attributes "value")
 ;;
@@ -601,7 +535,7 @@ let rec parse_matcher source node =
   let element, raw_attributes, children = shell_element_exn source [ "policy" ] node in
   let empty name =
     let path_ = [ "policy"; name ] in
-    ignore (attributes source path_ [] raw_attributes : A.t);
+    ignore (attributes source path_ raw_attributes : A.t);
     no_children source path_ children
   in
   match element with
@@ -642,13 +576,13 @@ let rec parse_matcher source node =
 
 and parse_argv_prefix source raw_attributes children =
   let path_ = [ "policy"; "argv_prefix" ] in
-  let attributes = attributes source path_ [ "values" ] raw_attributes in
+  let attributes = attributes source path_ raw_attributes in
   no_children source path_ children;
   S.Argv_prefix (csv source path_ (required attributes "values"))
 
 and parse_effect_matcher source raw_attributes children =
   let path_ = [ "policy"; "effect" ] in
-  let attributes = attributes source path_ [ "name"; "under" ] raw_attributes in
+  let attributes = attributes source path_ raw_attributes in
   no_children source path_ children;
   S.Effect
     { kind = parse_effect source path_ attributes
@@ -657,7 +591,7 @@ and parse_effect_matcher source raw_attributes children =
 
 and parse_matcher_list source name raw_attributes children =
   let path_ = [ "policy"; name ] in
-  ignore (attributes source path_ [] raw_attributes : A.t);
+  ignore (attributes source path_ raw_attributes : A.t);
   let values =
     element_children source path_ children |> List.map ~f:(parse_matcher source)
   in
@@ -667,16 +601,14 @@ and parse_matcher_list source name raw_attributes children =
 
 and parse_single_matcher source raw_attributes children =
   let path_ = [ "policy"; "not" ] in
-  ignore (attributes source path_ [] raw_attributes : A.t);
+  ignore (attributes source path_ raw_attributes : A.t);
   match element_children source path_ children with
   | [ child ] -> parse_matcher source child
   | _ -> fail source path_ "shell.matcher_arity" "not requires exactly one matcher"
 
 and parse_chatml_matcher source raw_attributes children =
   let path_ = [ "policy"; "chatml_match" ] in
-  let attributes =
-    attributes source path_ [ "script"; "function"; "failure" ] raw_attributes
-  in
+  let attributes = attributes source path_ raw_attributes in
   no_children source path_ children;
   S.Chatml_match
     { script = Source_ref.qualify source (required attributes "script")
@@ -693,9 +625,7 @@ let parse_rule source node =
   if not (E.equal element E.Rule)
   then fail source [ "policy" ] "shell.unknown_element" (E.to_string element);
   let path_ = [ "policy"; "rule" ] in
-  let attributes =
-    attributes source path_ [ "id"; "action"; "override" ] raw_attributes
-  in
+  let attributes = attributes source path_ raw_attributes in
   let matcher =
     match element_children source path_ children with
     | [ child ] -> parse_matcher source child
@@ -704,12 +634,7 @@ let parse_rule source node =
   in
   { S.id = required attributes "id"
   ; action =
-      enum
-        source
-        path_
-        "action"
-        (required attributes "action")
-        [ "allow", S.Allow; "ask", S.Ask; "deny", S.Deny ]
+      enum source path_ "action" (required attributes "action") Schema.Enum.policy_action
   ; matcher
   ; override = bool_value source path_ attributes "override" ~default:false
   }
@@ -717,16 +642,10 @@ let parse_rule source node =
 
 let parse_policy source raw_attributes children =
   let path_ = [ "policy" ] in
-  let attributes = attributes source path_ [ "default"; "merge" ] raw_attributes in
+  let attributes = attributes source path_ raw_attributes in
   let default =
     Option.value_map (optional attributes "default") ~default:S.Inherit ~f:(fun value ->
-      S.Set
-        (enum
-           source
-           path_
-           "default"
-           value
-           [ "allow", S.Allow; "ask", S.Ask; "deny", S.Deny ]))
+      S.Set (enum source path_ "default" value Schema.Enum.policy_action))
   in
   { S.default
   ; rules = element_children source path_ children |> List.map ~f:(parse_rule source)
@@ -738,41 +657,25 @@ let approval_scopes source path_ attributes =
   Option.value_map (optional attributes "scopes") ~default:[] ~f:(fun value ->
     csv source (path_ @ [ "scopes" ]) value
     |> List.map ~f:(fun value ->
-      enum
-        source
-        path_
-        "scopes"
-        value
-        [ "once", S.Once
-        ; "exact_session", S.Exact_session
-        ; "prefix_session", S.Prefix_session
-        ; "durable_exact", S.Durable_exact
-        ]))
+      enum source path_ "scopes" value Schema.Enum.approval_scope))
 ;;
 
 let parse_approvals source raw_attributes children =
   let path_ = [ "approvals" ] in
-  let allowed = [ "provider"; "unavailable"; "scopes"; "durable" ] in
-  let attributes = attributes source path_ allowed raw_attributes in
+  let attributes = attributes source path_ raw_attributes in
   no_children source path_ children;
   { S.provider =
       Option.value_map
         (optional attributes "provider")
         ~default:S.Inherit
         ~f:(fun value ->
-          S.Set (enum source path_ "provider" value [ "ui", S.Ui; "none", S.No_provider ]))
+          S.Set (enum source path_ "provider" value Schema.Enum.approval_provider))
   ; unavailable =
       Option.value_map
         (optional attributes "unavailable")
         ~default:S.Inherit
         ~f:(fun value ->
-          S.Set
-            (enum
-               source
-               path_
-               "unavailable"
-               value
-               [ "deny", S.Deny_unavailable; "error", S.Error_unavailable ]))
+          S.Set (enum source path_ "unavailable" value Schema.Enum.approval_unavailable))
   ; scopes = approval_scopes source path_ attributes
   ; durable = bool_setting source path_ attributes "durable"
   }
@@ -783,47 +686,42 @@ let parse_reviewer source node =
   if not (E.equal element E.Reviewer)
   then fail source [ "reviewers" ] "shell.unknown_element" (E.to_string element);
   let path_ = [ "reviewers"; "reviewer" ] in
-  let allowed =
-    [ "id"; "kind"; "script"; "agent"; "model"; "lifecycle"; "failure"
-    ; "executable"; "sha256"; "runtime"; "protocol"; "timeout"; "max_input"
-    ; "max_output"
-    ]
-  in
-  let attributes = attributes source path_ allowed raw_attributes in
+  let attributes = attributes source path_ raw_attributes in
   no_children source path_ children;
   let id = required attributes "id" in
-  match required attributes "kind" with
-  | "ui" -> S.Ui_reviewer { id }
-  | "chatml" ->
+  let kind = required attributes "kind" in
+  match Schema.Reviewer_kind.of_string kind with
+  | Some Ui -> S.Ui_reviewer { id }
+  | Some Chatml ->
     S.Chatml_reviewer
       { id
       ; script = Source_ref.qualify source (required attributes "script")
       ; lifecycle = lifecycle source path_ attributes ~default:"session"
       ; failure = hook_failure source path_ attributes ~default:"deny"
       }
-  | "model" ->
+  | Some Model ->
     S.Model_reviewer
       { id
       ; agent = required attributes "agent"
       ; model = optional attributes "model"
       ; failure = hook_failure source path_ attributes ~default:"deny"
       }
-  | "executable" ->
+  | Some Executable ->
     S.Executable_reviewer
       { id
       ; hook = executable_hook source path_ attributes
       ; failure = hook_failure source path_ attributes ~default:"deny"
       }
-  | value -> fail source (path_ @ [ "kind" ]) "shell.invalid_attribute" value
+  | None -> fail source (path_ @ [ "kind" ]) "shell.invalid_attribute" kind
 ;;
 
 let parse_reviewers source raw_attributes children : S.reviewers =
   let path_ = [ "reviewers" ] in
-  let attributes = attributes source path_ [ "strategy"; "merge" ] raw_attributes in
+  let attributes = attributes source path_ raw_attributes in
   let strategy =
-    Option.value (optional attributes "strategy") ~default:"first_terminal"
+    Option.value (optional attributes "strategy") ~default:Schema.reviewer_strategy
   in
-  if not (String.equal strategy "first_terminal")
+  if not (String.equal strategy Schema.reviewer_strategy)
   then
     fail source path_ "shell.invalid_attribute" "reviewer strategy must be first_terminal";
   { S.values =
@@ -841,7 +739,7 @@ let parse_match_child source children =
     in
     if not (E.equal element E.Match)
     then fail source [ "interceptors" ] "shell.unknown_element" (E.to_string element);
-    ignore (attributes source [ "interceptors"; "match" ] [] raw_attributes : A.t);
+    ignore (attributes source [ "interceptors"; "match" ] raw_attributes : A.t);
     (match element_children source [ "interceptors"; "match" ] children with
      | [ matcher ] -> Some (parse_matcher source matcher)
      | _ ->
@@ -865,19 +763,9 @@ let parse_interceptor source node =
   if not (E.equal element E.Interceptor)
   then fail source [ "interceptors" ] "shell.unknown_element" (E.to_string element);
   let path_ = [ "interceptors"; "interceptor" ] in
-  let allowed =
-    [ "id"; "phase"; "script"; "lifecycle"; "failure"; "executable"; "sha256"
-    ; "runtime"; "protocol"; "timeout"; "max_input"; "max_output"
-    ]
-  in
-  let attributes = attributes source path_ allowed raw_attributes in
+  let attributes = attributes source path_ raw_attributes in
   let phase =
-    enum
-      source
-      path_
-      "phase"
-      (required attributes "phase")
-      [ "before", S.Before; "after", S.After ]
+    enum source path_ "phase" (required attributes "phase") Schema.Enum.interceptor_phase
   in
   let matcher = parse_match_child source children in
   if S.equal_interceptor_phase phase S.After && Option.is_some matcher
@@ -896,7 +784,11 @@ let parse_interceptor source node =
         }
     | None, Some _ -> Executable_extension (executable_hook source path_ attributes)
     | _ ->
-      fail source path_ "shell.invalid_extension" "exactly one of script or executable is required"
+      fail
+        source
+        path_
+        "shell.invalid_extension"
+        "exactly one of script or executable is required"
   in
   { S.id = required attributes "id"
   ; phase
@@ -908,7 +800,7 @@ let parse_interceptor source node =
 
 let parse_interceptors source raw_attributes children : S.interceptors =
   let path_ = [ "interceptors" ] in
-  let attributes = attributes source path_ [ "merge" ] raw_attributes in
+  let attributes = attributes source path_ raw_attributes in
   { S.values =
       element_children source path_ children |> List.map ~f:(parse_interceptor source)
   ; merge = merge source path_ attributes
@@ -922,23 +814,18 @@ let parse_analyzer source node =
   if not (E.equal element E.Analyzer)
   then fail source [ "effect_analysis" ] "shell.unknown_element" (E.to_string element);
   let path_ = [ "effect_analysis"; "analyzer" ] in
-  let allowed =
-    [ "id"; "kind"; "script"; "lifecycle"; "replace"; "failure"; "executable"
-    ; "sha256"; "runtime"; "protocol"; "timeout"; "max_input"; "max_output"
-    ]
-  in
-  let attributes = attributes source path_ allowed raw_attributes in
+  let attributes = attributes source path_ raw_attributes in
   no_children source path_ children;
   let kind = Option.value (optional attributes "kind") ~default:"chatml" in
   let extension =
-    match kind with
-    | "chatml" ->
+    match Schema.Analyzer_kind.of_string kind with
+    | Some Chatml ->
       S.Chatml_extension
         { script = Source_ref.qualify source (required attributes "script")
         ; lifecycle = lifecycle source path_ attributes ~default:"invocation"
         }
-    | "executable" -> Executable_extension (executable_hook source path_ attributes)
-    | _ -> fail source (path_ @ [ "kind" ]) "shell.invalid_attribute" kind
+    | Some Executable -> Executable_extension (executable_hook source path_ attributes)
+    | None -> fail source (path_ @ [ "kind" ]) "shell.invalid_attribute" kind
   in
   { S.id = required attributes "id"
   ; extension
@@ -949,7 +836,7 @@ let parse_analyzer source node =
 
 let parse_effect_analysis source raw_attributes children =
   let path_ = [ "effect_analysis" ] in
-  let attributes = attributes source path_ [ "merge" ] raw_attributes in
+  let attributes = attributes source path_ raw_attributes in
   { S.analyzers =
       element_children source path_ children |> List.map ~f:(parse_analyzer source)
   ; merge = merge source path_ attributes
@@ -961,16 +848,14 @@ let parse_secret source node =
   let path_ = [ "secrets"; E.to_string element ] in
   match element with
   | E.From_env ->
-    let attributes = attributes source path_ [ "name"; "optional" ] raw_attributes in
+    let attributes = attributes source path_ raw_attributes in
     no_children source path_ children;
     S.From_env
       { name = required attributes "name"
       ; optional = bool_value source path_ attributes "optional" ~default:false
       }
   | E.From_file ->
-    let attributes =
-      attributes source path_ [ "path"; "optional"; "strip" ] raw_attributes
-    in
+    let attributes = attributes source path_ raw_attributes in
     no_children source path_ children;
     S.From_file
       { path = path source path_ "path" (required attributes "path")
@@ -978,7 +863,7 @@ let parse_secret source node =
       ; strip = bool_value source path_ attributes "strip" ~default:true
       }
   | E.Literal ->
-    let attributes = attributes source path_ [ "value" ] raw_attributes in
+    let attributes = attributes source path_ raw_attributes in
     no_children source path_ children;
     S.Literal (required attributes "value")
   | _ -> fail source path_ "shell.unknown_element" (E.to_string element)
@@ -986,7 +871,7 @@ let parse_secret source node =
 
 let parse_secrets source raw_attributes children =
   let path_ = [ "secrets" ] in
-  let attributes = attributes source path_ [ "replacement"; "merge" ] raw_attributes in
+  let attributes = attributes source path_ raw_attributes in
   { S.replacement =
       Option.value_map
         (optional attributes "replacement")
@@ -999,8 +884,7 @@ let parse_secrets source raw_attributes children =
 
 let parse_audit source raw_attributes children =
   let path_ = [ "audit" ] in
-  let allowed = [ "format"; "path"; "content"; "failure" ] in
-  let audit_attributes = attributes source path_ allowed raw_attributes in
+  let audit_attributes = attributes source path_ raw_attributes in
   let children = element_children source path_ children in
   let format =
     enum
@@ -1008,7 +892,7 @@ let parse_audit source raw_attributes children =
       path_
       "format"
       (required audit_attributes "format")
-      [ "none", S.No_audit; "stderr", S.Stderr; "jsonl", S.Jsonl; "session", S.Session ]
+      Schema.Enum.audit_format
   in
   let path = path_option source path_ audit_attributes "path" in
   if S.equal_audit_format format S.Jsonl && Option.is_none path
@@ -1021,12 +905,7 @@ let parse_audit source raw_attributes children =
       if not (E.equal element E.Filter)
       then fail source path_ "shell.unknown_element" (E.to_string element);
       let filter_path = [ "audit"; "filter" ] in
-      let attributes =
-        attributes source filter_path
-          [ "script"; "lifecycle"; "executable"; "sha256"; "runtime"; "protocol"
-          ; "timeout"; "max_input"; "max_output"
-          ] raw_attributes
-      in
+      let attributes = attributes source filter_path raw_attributes in
       no_children source [ "audit"; "filter" ] children;
       (match optional attributes "script", optional attributes "executable" with
        | Some script, None ->
@@ -1035,9 +914,14 @@ let parse_audit source raw_attributes children =
               { script = Source_ref.qualify source script
               ; lifecycle = lifecycle source filter_path attributes ~default:"session"
               })
-       | None, Some _ -> Some (Executable_extension (executable_hook source filter_path attributes))
+       | None, Some _ ->
+         Some (Executable_extension (executable_hook source filter_path attributes))
        | _ ->
-         fail source filter_path "shell.invalid_extension" "exactly one of script or executable is required")
+         fail
+           source
+           filter_path
+           "shell.invalid_extension"
+           "exactly one of script or executable is required")
     | _ -> fail source path_ "shell.duplicate_section" "audit accepts at most one filter"
   in
   { S.format
@@ -1048,14 +932,14 @@ let parse_audit source raw_attributes children =
         path_
         "content"
         (Option.value (optional audit_attributes "content") ~default:"redacted")
-        [ "metadata", S.Metadata; "redacted", S.Redacted; "full", S.Full ]
+        Schema.Enum.audit_content
   ; failure =
       enum
         source
         path_
         "failure"
         (Option.value (optional audit_attributes "failure") ~default:"continue")
-        [ "continue", S.Continue; "deny_start", S.Deny_start; "terminate", S.Terminate ]
+        Schema.Enum.audit_failure
   ; filter
   }
 ;;
@@ -1159,9 +1043,7 @@ let parse_runtime_exn source node =
   if not (Ast.tag_equal tag Ast.Shell_access)
   then fail source [ "shell_access" ] "shell.invalid_root" "expected shell_access";
   let path_ = [ "shell_access" ] in
-  let attributes =
-    attributes source path_ [ "id"; "extends"; "cwd"; "pipefail" ] raw_attributes
-  in
+  let attributes = attributes source path_ raw_attributes in
   let id =
     let id = Source_ref.qualify source (required attributes "id") in
     match S.Runtime_id.of_string ~source id with
@@ -1203,18 +1085,18 @@ let tool_argument source node =
   let path_ = [ "tool"; "command"; E.to_string element ] in
   match element with
   | E.Arg ->
-    let attributes = attributes source path_ [ "value" ] raw_attributes in
+    let attributes = attributes source path_ raw_attributes in
     no_children source path_ children;
     Tool.Literal (required attributes "value")
   | E.Secret_arg ->
-    let attributes = attributes source path_ [ "env"; "prefix" ] raw_attributes in
+    let attributes = attributes source path_ raw_attributes in
     no_children source path_ children;
     Tool.Secret_env
       { name = required attributes "env"
       ; prefix = Option.value (optional attributes "prefix") ~default:""
       }
   | E.Path_arg ->
-    let attributes = attributes source path_ [ "base"; "path" ] raw_attributes in
+    let attributes = attributes source path_ raw_attributes in
     no_children source path_ children;
     let path_value = required attributes "path" in
     let value =
@@ -1227,9 +1109,7 @@ let tool_argument source node =
 
 let parse_command source raw_attributes children =
   let path_ = [ "tool"; "command" ] in
-  let attributes =
-    attributes source path_ [ "program"; "executable_ref" ] raw_attributes
-  in
+  let attributes = attributes source path_ raw_attributes in
   let program = optional attributes "program" in
   let executable_ref = optional attributes "executable_ref" in
   if Option.is_some program && Option.is_some executable_ref
@@ -1256,8 +1136,7 @@ let parse_command source raw_attributes children =
 
 let parse_arguments source raw_attributes children =
   let path_ = [ "tool"; "arguments" ] in
-  let allowed = [ "mode"; "min_count"; "max_count"; "max_item_bytes" ] in
-  let attributes = attributes source path_ allowed raw_attributes in
+  let attributes = attributes source path_ raw_attributes in
   no_children source path_ children;
   let integer name =
     Option.map (optional attributes name) ~f:(fun value ->
@@ -1276,10 +1155,7 @@ let parse_arguments source raw_attributes children =
         path_
         "mode"
         (required attributes "mode")
-        [ "none", Tool.No_arguments
-        ; "optional", Tool.Optional_arguments
-        ; "required", Tool.Required_arguments
-        ]
+        Schema.Enum.tool_arguments_mode
   ; min_count = integer "min_count"
   ; max_count = integer "max_count"
   ; max_item_bytes = integer "max_item_bytes"
@@ -1308,29 +1184,7 @@ let parse_tool_exn source node =
   let tag, raw_attributes, children = element_exn source [ "tool" ] node in
   if not (Ast.tag_equal tag Ast.Tool)
   then fail source [ "tool" ] "shell.invalid_root" "expected tool";
-  let allowed =
-    [ "name"
-    ; "type"
-    ; "mode"
-    ; "runtime"
-    ; "description"
-    ; "command"
-    ; "executable_ref"
-    ; "executable"
-    ; "script"
-    ; "interpreter"
-    ; "arguments_before_script"
-    ; "fixed_arguments"
-    ; "verification"
-    ; "max_source_bytes"
-    ; "stdin"
-    ; "rationale"
-    ; "result"
-    ; "stream"
-    ; "nonzero"
-    ]
-  in
-  let attributes = attributes source [ "tool" ] allowed raw_attributes in
+  let attributes = attributes source [ "tool" ] raw_attributes in
   let command, arguments = tool_children source children in
   match
     Tool.parse_declaration
