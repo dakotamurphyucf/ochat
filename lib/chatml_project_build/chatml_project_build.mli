@@ -299,8 +299,11 @@ module Effective : sig
 
   (** [root_project] must occur exactly once in [sources]. [sources] contains
       every supplied project/dependency declaration and member exactly once;
-      it excludes the old/generated lock. A captured entry may overlap a member
-      only at the same exact source ID and revision. The selected [entry] and
+      it excludes the old/generated lock. An uploaded captured entry may occur
+      there once even when standalone: the existing selected catalog plan alone
+      decides whether that exact candidate is a member. A captured entry may
+      overlap a member only at the same exact source ID and revision; a changed
+      revision rejects, and no other surplus source is filtered. The selected [entry] and
       [selection] must agree: Declared requires an Entry selection; Captured
       requires Library. A host-selected captured entry may be a derived script
       body outside every catalog and is then passed separately through [entry],
