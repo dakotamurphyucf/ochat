@@ -186,12 +186,11 @@ jobs:
         with:
           name: framework-plan
           path: .ci-evidence
-      - id: shard-plan
-        name: Validate normal shard and select native fixture
+      - name: Validate normal shard
         if: matrix.tier == 'normal'
         run: node .github/scripts/framework-plan.mjs inspect ${{ matrix.shard }}
       - name: Provision pinned Git candidate for real native qualification
-        if: matrix.tier == 'git-native' || steps.shard-plan.outputs.native-git == 'true'
+        if: matrix.tier != 'e2e'
         timeout-minutes: 20
         run: bash .github/scripts/provision-git-host.sh
       - name: Run framework tests

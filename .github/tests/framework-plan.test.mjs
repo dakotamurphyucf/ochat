@@ -10,7 +10,6 @@ import {
   currentPlan,
   loadCurrentPlan,
   planPath,
-  needsNativeGit,
 } from "../scripts/framework-plan.mjs";
 
 function withRepository(f) {
@@ -60,9 +59,6 @@ test("repository identity and persisted plan bind deterministic tracked source a
     assert.deepEqual(currentPlan(root), plan);
     write("untracked-local-note.txt", "not committed CI input");
     assert.deepEqual(repositoryIdentity(root), identity);
-    const native = plan.shards.filter(needsNativeGit);
-    assert.equal(native.length, 1);
-    assert.deepEqual(native[0].aliases, ["@@test/chatml_git_host/runtest"]);
   }));
 
 test("edited source, newly tracked tests, timing changes and another run invalidate retained plan", () => {
@@ -144,3 +140,31 @@ test("qualification script consumes nested reports and rejects missing, duplicat
         });
     });
 });
+
+// Shared test-support libraries can consume Git indirectly. Every group must
+// receive the same fixture environment as the unsharded suite.
+test("every normal group rejects missing native Git before invoking Dune", () =>
+  withRepository(({ root, plan }) => {
+    const script = fileURLToPath(
+      new URL("../scripts/framework-tests.mjs", import.meta.url),
+    );
+    const env = { ...process.env };
+    delete env.OCHAT_TEST_GIT_2_56_DIRECTORY;
+    for (const { index } of plan.shards) {
+      const result = spawnSync(
+        process.execPath,
+        [script, "normal", String(index)],
+        {
+          cwd: root,
+          encoding: "utf8",
+          env,
+        },
+      );
+      assert.notEqual(result.status, 0);
+      assert.match(
+        result.stderr,
+        /Pinned Git fixture provisioning is required/,
+      );
+      assert.ok(!fs.existsSync(path.join(root, ".ci-evidence/normal.log")));
+    }
+  }));

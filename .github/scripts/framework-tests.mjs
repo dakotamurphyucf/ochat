@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { startProgressMonitor } from "./framework-progress.mjs";
-import { loadCurrentPlan, needsNativeGit } from "./framework-plan.mjs";
+import { loadCurrentPlan } from "./framework-plan.mjs";
 const tier = process.argv[2];
 const shardIndex =
   process.argv[3] === undefined ? undefined : Number(process.argv[3]);
@@ -31,8 +31,7 @@ const commands = {
 if (!Object.hasOwn(commands, tier))
   throw new Error("Expected normal, e2e or git-native");
 if (
-  (tier === "git-native" ||
-    (tier === "normal" && (!shard || needsNativeGit(shard)))) &&
+  (tier === "git-native" || tier === "normal") &&
   !path.isAbsolute(process.env.OCHAT_TEST_GIT_2_56_DIRECTORY ?? "")
 )
   throw new Error(

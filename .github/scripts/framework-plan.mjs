@@ -8,9 +8,6 @@ import { discoverInventory } from "./framework-inventory.mjs";
 import { createPlan, validatePlan } from "./framework-shards.mjs";
 
 export const planPath = ".ci-evidence/framework-plan.json";
-export function needsNativeGit(shard) {
-  return shard.aliases.includes("@@test/chatml_git_host/runtest");
-}
 
 /** Bind evidence to tracked source bytes, including workflow and test selection. */
 export function repositoryIdentity(root = ".") {
@@ -76,14 +73,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       ({ index }) => index === Number(process.argv[3]),
     );
     assert.ok(shard, "Invalid framework shard");
-    if (process.env.GITHUB_OUTPUT)
-      fs.appendFileSync(
-        process.env.GITHUB_OUTPUT,
-        `native-git=${needsNativeGit(shard)}\n`,
-      );
-    console.log(
-      `Shard ${shard.index}: ${shard.aliases.length} aliases; native Git fixture: ${needsNativeGit(shard)}`,
-    );
+    console.log(`Shard ${shard.index}: ${shard.aliases.length} aliases`);
   } else {
     assert.equal(process.argv.length, 2, "Unexpected framework plan arguments");
     const plan = currentPlan();

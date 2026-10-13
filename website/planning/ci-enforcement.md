@@ -74,8 +74,9 @@ workflow run. The gate downloads only small summary artifacts; full diagnostic
 logs and traces remain available separately. Missing, duplicate, stale or
 partial evidence fails the gate.
 Successful reports from earlier attempts of the same run remain usable when
-rerunning failed jobs. Only the shard owning `test/chatml_git_host` builds the
-pinned Git fixture; the separate ARM64 native job still builds and tests it.
+rerunning failed jobs. Each normal group provisions the pinned Git fixture,
+preserving the unsharded suite’s environment even for indirect consumers of
+shared Git test support. The separate ARM64 native job still builds and tests it.
 
 Load, soak, live-provider, and manual-terminal tiers remain separate. These jobs
 receive no model credentials and make no paid model requests. Website jobs start
