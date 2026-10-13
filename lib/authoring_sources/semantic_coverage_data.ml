@@ -242,7 +242,7 @@ let features =
       ] )
   ; ( "scope.configured_dependencies"
     , "Source-owned configured checking, REPL lookup provenance, incremental selected \
-       roots and entry-rooted value dependency selection"
+       roots, value dependency selection and once-per-epoch module initialization"
     , [ "lib/chatml_graph/chatml_configured_lookup.ml"
       ; "lib/chatml_graph/chatml_dependency_graph.ml"
       ; "lib/chatml_graph/chatml_dependency_session.ml"
@@ -251,6 +251,9 @@ let features =
       ; "lib/chatml/chatml_configured_check.ml"
       ; "lib/chatml/chatml_repl_type_roots.ml"
       ; "lib/chatml/chatml_repl_typing.ml"
+      ; "lib/chatml_linked_runtime/chatml_linked_runtime.ml"
+      ; "lib/chatml_linked_runtime/chatml_module_initializer.ml"
+      ; "lib/chatml_linked_runtime/chatml_repl_modules.ml"
       ; "lib/chatml/chatml_static_surface.ml"
       ; "lib/chatml/chatml_compiler_contract.ml"
       ; "lib/chatml/chatml_module_reference.ml"
@@ -278,6 +281,8 @@ let features =
     , "chatml.inference"
     , [ "test/chatml_graph/configured_checker_tests.ml"
       ; "test/chatml_repl_typing/typing_tests.ml"
+      ; "test/chatml_linked_runtime/repl_module_tests.ml"
+      ; "test/chatml_linked_runtime/runtime_tests.ml"
       ; "test/chatml_graph/repl_scope_tests.ml"
       ; "test/chatml_graph/incremental_roots_tests.ml"
       ; "test/chatml_linked/linkage_tests.ml"
@@ -436,7 +441,7 @@ let implementation_sources =
   ; ( "lib/chatml_graph/chatml_configured_lookup.ml"
     , "7c43c26f645c130dfce7a544b18d609ac173706ae98ea31a95493e87cba00799" )
   ; ( "lib/chatml_graph/chatml_dependency_graph.ml"
-    , "61b968e8bb38885385f1779628ca7d11cc76c621491ca957cc3fc4d93c755e0f" )
+    , "f664b34d95bba086188bc0a93337cfa39a304d4bef5fc4695e22c92b965bcff2" )
   ; ( "lib/chatml_graph/chatml_dependency_session.ml"
     , "60faab8598e232e90c83ab555cda480d5b348dac441cb04fe9f5cafa5d85f1d4" )
   ; ( "lib/chatml/chatml_value_scope.ml"
@@ -448,7 +453,13 @@ let implementation_sources =
   ; ( "lib/chatml/chatml_repl_type_roots.ml"
     , "0bac19ea0e5ff7c82793bcd50b4d0f76071dede9950dfd2e04ed1d020e0c3af5" )
   ; ( "lib/chatml/chatml_repl_typing.ml"
-    , "7bb17211c1be881db0a3964b84eb3950b0e380077bfae610ad90972de914303a" )
+    , "5dd1d90acf5008a27a255d73f2b916583cbf21bebf916221e0b0318792254f51" )
+  ; ( "lib/chatml_linked_runtime/chatml_linked_runtime.ml"
+    , "45ccf948bf8c8185d3eff317bc2f6c9ee845585e681888d7665d08f8923ba2f1" )
+  ; ( "lib/chatml_linked_runtime/chatml_module_initializer.ml"
+    , "fccec1e6cb793c9caf9448db7474cbc2a40e6a42412e34a3b0967f256ebbf47a" )
+  ; ( "lib/chatml_linked_runtime/chatml_repl_modules.ml"
+    , "42fe1312dbbe7c725bc8979f49f4397721d6bd61ab7049c9c9357ffd35ae1bc7" )
   ; ( "lib/chatml/chatml_static_surface.ml"
     , "07c8f7a97e1e6da286ff4e103181ce4b22b12ebb6f370ac19918f171c0723111" )
   ; ( "lib/chatml/chatml_compiler_contract.ml"

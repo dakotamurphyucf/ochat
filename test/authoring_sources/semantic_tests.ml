@@ -23,6 +23,7 @@ let%expect_test
         || String.is_prefix path ~prefix:"lib/chatml_sources/"
         || String.is_prefix path ~prefix:"lib/chatml_graph/"
         || String.is_prefix path ~prefix:"lib/chatml_linked/"
+        || String.is_prefix path ~prefix:"lib/chatml_linked_runtime/"
         || String.is_prefix path ~prefix:"lib/chatml_semantics/")
        (* Host control belongs to the separate runtime contract inventory. *)
        && not
@@ -52,6 +53,6 @@ let%expect_test
     , (List.map incomplete.missing ~f:(fun target -> target.V.id) : string list)];
   [%expect
     {|
-    (40 160 63 (one_off_v1/semantics/lex.identifiers))
+    (40 160 66 (one_off_v1/semantics/lex.identifiers))
     |}]
 ;;

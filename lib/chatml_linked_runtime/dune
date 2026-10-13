@@ -1,6 +1,7 @@
 (library
  (name chatml_linked_runtime)
  (public_name ochat.chatml_linked_runtime)
- (modules chatml_linked_runtime)
- (libraries core chatml chatml_builtin_modules chatml_linked_program chatml_graph chatml_prepared_program chatml_source chatml_diagnostic chatml_trace)
+ (modules chatml_linked_runtime chatml_module_initializer chatml_repl_modules)
+ (private_modules chatml_module_initializer)
+ (libraries core chatml chatml_builtin_modules chatml_linked_program chatml_graph chatml_prepared_program chatml_source chatml_diagnostic chatml_trace chatml_repl_typing chatml_resolver)
  (preprocess (pps ppx_jane)))
