@@ -2,7 +2,7 @@ open Core
 module Bundle = Agent_protocol.Authoring_bundle.Bundle
 module Captured = Chatml_source
 module Project = Chatml_authoring_bundle_project
-module Binding = Chatml_prompt_programs.Binding
+module Binding = Chatml_prompt_binding
 module Contract = Chatml.Chatml_compiler_contract
 module Parsed = Prompt.Chat_markdown.Parsed
 module Declaration = Prompt.Chat_markdown.Declaration

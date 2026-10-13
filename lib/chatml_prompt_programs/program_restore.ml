@@ -3,7 +3,7 @@ open Core
 let iter_result values ~f = List.fold_result values ~init:() ~f:(fun () value -> f value)
 
 module Inventory = Program_inventory
-module Binding = Program_binding
+module Binding = Chatml_prompt_binding
 module Contract = Chatml.Chatml_compiler_contract
 module Captured = Chatml_source
 module Revision = Program_source_revision

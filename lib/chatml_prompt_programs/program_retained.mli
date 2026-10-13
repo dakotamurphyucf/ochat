@@ -10,7 +10,7 @@ module Program : sig
     | Selected of Captured.t
 
   val key : t -> string
-  val binding : t -> Program_binding.t
+  val binding : t -> Chatml_prompt_binding.t
   val compiler_contract : t -> Captured.Digest.t
   val input : t -> input
 end

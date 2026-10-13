@@ -530,6 +530,9 @@ outcomes while preserving cancellation and unexpected exceptions. The parser's
 read members and actual `Parsed.declarations`/`Binding` determine the complete
 script set, registration and declaring input, byte range, extracted body and
 external `src` origin; manifest selectors cannot invent declarations. A
+single parser-owned `Chatml_prompt_binding` implementation supplies this
+binding to both captured ChatMD validation and program custody;
+`Chatml_prompt_programs.Binding` remains a type-equal public facade. A
 `Source_only` script has no authored project and yields no fabricated graph.
 Each selected Project must resolve from the declaration's actual portable input
 to an explicit document member, match the authored environment and use a

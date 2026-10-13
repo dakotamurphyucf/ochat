@@ -1,0 +1,6 @@
+(library
+ (name chatml_prompt_binding)
+ (public_name ochat.chatml_prompt_binding)
+ (modules chatml_prompt_binding)
+ (libraries core digestif source chatml_source ochat.chatmd_source_input chatmd)
+ (preprocess (pps ppx_jane)))
