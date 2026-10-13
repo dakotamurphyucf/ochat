@@ -384,6 +384,7 @@ let kind_to_string kind =
     ~equal:equal_kind
 ;;
 
+let kind_to_json kind = `String (kind_to_string kind)
 let kind_of_json = Json_codec.enum ~name:"job kind" kind_values
 
 let status_name = function

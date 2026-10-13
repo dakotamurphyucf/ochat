@@ -25,7 +25,13 @@ let with_temp_directory name f =
       ~finally:(fun () -> Eio.Path.rmtree ~missing_ok:true root))
 ;;
 
-let fault_after_authority_rename_env env ~rename_armed ~sync_blocked ~parent_sync_blocked =
+let fault_after_authority_rename_env
+      ?(after_rename = fun () -> ())
+      env
+      ~rename_armed
+      ~sync_blocked
+      ~parent_sync_blocked
+  =
   let rec wrap
     :  'tags.
        location:string
@@ -61,6 +67,7 @@ let fault_after_authority_rename_env env ~rename_armed ~sync_blocked ~parent_syn
         then (
           rename_armed := false;
           Original.rename directory source destination target;
+          after_rename ();
           raise (Core_unix.Unix_error (EIO, "injected post-rename failure", target)))
         else Original.rename directory source destination target
       ;;

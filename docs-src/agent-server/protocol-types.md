@@ -3162,8 +3162,9 @@ module Launch : sig
 
   (** [parent_job] names the exact creating attempt, if any. A run-root launch
       need not fabricate a native invocation. The optional attempt and depth
-      must be nonnegative. These are comparison coordinates; the actor proves a
-      live run scope or active invocation separately. *)
+      must be nonnegative. The recorded ancestry alone cannot derive the live
+      scheduler depth. These are comparison coordinates; the actor proves the
+      live run scope or active invocation and depth separately. *)
   val create
     :  parent:parent
     -> parent_job:(Id.Job.t * int) option
@@ -3249,6 +3250,13 @@ val payload : t -> Jsonaf.t
 val retry_policy : t -> Job.retry_policy
 val created_at : t -> Timestamp.t
 val state : t -> State.t
+
+(** Version-one developer-only record codec. It preserves the exact immutable
+    launch/owner/capture/payload/retry fields and validated state. Neither a
+    decoded record nor a result descriptor grants execution or disclosure. *)
+val to_json : t -> Jsonaf.t
+
+val of_json : Jsonaf.t -> (t, Protocol_error.t) result
 ```
 
 ## envelope
@@ -4004,6 +4012,14 @@ val validate : t -> (unit, Error.t) result
 val dispatch : t -> (t, Error.t) result
 val resolve : t -> Invocation.outcome -> (t, Error.t) result
 val cancel : t -> reason:string -> (t, Error.t) result
+
+(** Persist only the developer arm in the daemon-owned run document. This
+    version-one value encoding rejects conversation records, unknown fields and
+    Published status; developer invocations have no provider publication. Decode
+    reconstructs through validated pure transitions and grants no authority. *)
+val developer_to_json : t -> (Jsonaf.t, Error.t) result
+
+val developer_of_json : Jsonaf.t -> (t, Error.t) result
 ```
 
 ## host_job
@@ -4651,6 +4667,14 @@ type status =
   | Published of outcome
 [@@deriving equal, sexp]
 
+(** Shared value codecs for developer-only invocation persistence. They do not
+    encode a conversation context or grant transition authority. *)
+val origin_to_json : origin -> Jsonaf.t
+
+val origin_of_json : Jsonaf.t -> (origin, Error.t) result
+val status_to_json : status -> Jsonaf.t
+val status_of_json : Jsonaf.t -> (status, Error.t) result
+
 type call_kind =
   | Function
   | Custom
@@ -4932,6 +4956,17 @@ type retry_policy =
       ; backoff_ms : int
       }
 [@@deriving sexp]
+
+(** Shared closed value codecs for owner-neutral job persistence. These encode
+    only the named value; a developer job never acquires a Session ID by using
+    them. Callers still validate the containing job and its authority. *)
+val kind_to_json : kind -> Jsonaf.t
+
+val kind_of_json : Jsonaf.t -> (kind, Error.t) result
+val status_to_json : status -> Jsonaf.t
+val status_of_json : Jsonaf.t -> (status, Error.t) result
+val retry_to_json : retry_policy -> Jsonaf.t
+val retry_of_json : Jsonaf.t -> (retry_policy, Error.t) result
 
 type discard_reason = Authority_changed [@@deriving equal, sexp]
 

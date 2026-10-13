@@ -561,6 +561,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_store/delegation_store.mli` | [contract](../../lib/agent_store/delegation_store.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_store/developer_run_document.mli` | [contract](../../lib/agent_store/developer_run_document.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/developer_run_store.mli` | [contract](../../lib/agent_store/developer_run_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/agent_store/developer_run_transition.mli` | [contract](../../lib/agent_store/developer_run_transition.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/document_fields.mli` | [contract](../../lib/agent_store/document_fields.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/document_record.mli` | [contract](../../lib/agent_store/document_record.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/durable_file.mli` | [contract](../../lib/agent_store/durable_file.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |

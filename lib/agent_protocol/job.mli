@@ -49,6 +49,17 @@ type retry_policy =
       }
 [@@deriving sexp]
 
+(** Shared closed value codecs for owner-neutral job persistence. These encode
+    only the named value; a developer job never acquires a Session ID by using
+    them. Callers still validate the containing job and its authority. *)
+val kind_to_json : kind -> Jsonaf.t
+
+val kind_of_json : Jsonaf.t -> (kind, Error.t) result
+val status_to_json : status -> Jsonaf.t
+val status_of_json : Jsonaf.t -> (status, Error.t) result
+val retry_to_json : retry_policy -> Jsonaf.t
+val retry_of_json : Jsonaf.t -> (retry_policy, Error.t) result
+
 type discard_reason = Authority_changed [@@deriving equal, sexp]
 
 type delivery =
