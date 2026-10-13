@@ -320,9 +320,17 @@ Closed invalid script discriminators and duplicate strict attributes are
 reported as authoring-malformed prefixes without changing batch acceptance.
 The schema caps one authoring query at 128 completed attributes, 4096 bytes per
 name or value and 65536 bytes total; exceeding it yields no attribute
-candidates and does not reject the underlying document. The later tolerant
-cursor and suggestion producer consume this schema; neither is installed by
-this source-only step.
+candidates and does not reject the underlying document. The tolerant ChatMD
+cursor now reads exact authored bytes through the same bounded highlighter
+scan and the strict lexer's attribute spelling decoder. It returns
+source-bound raw prefix and completed attribute ranges, strict-decoded
+completed values, and explicit uncertainty for an unfinished name, value,
+quote, escape or entity. It uses the validator's existing tag scope; an
+irreparable fragment or mismatched official close is opaque rather than a guessed parent
+scope. Invalid UTF-8 remains byte-exact, and a work-limited scan cannot claim
+facts beyond its inspected prefix. The separate suggestion producer consumes
+this cursor and schema; cursor output alone certifies no declaration or
+semantic fact.
 
 The OCH-260 implementation recognizes outer `program_stmts` reductions from the
 existing ChatML parser. It retains one latest completed statement or `;;`
