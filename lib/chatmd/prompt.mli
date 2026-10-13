@@ -251,6 +251,56 @@ module Chat_markdown : sig
     (** Body is the actual inline extraction / loaded external body already used
         by the script parser; artifact custody computes/reconciles its digest. *)
     val script_body : t -> string
+
+    module Extraction : sig
+      type bound
+      type input_span
+
+      val input : input_span -> Chatmd_parser_input.t
+      val start_byte : input_span -> int
+      val end_byte : input_span -> int
+
+      type projection =
+        | Exact_inline of input_span
+        | External_origin of
+            { member : string
+            ; body_digest : Chatml_source.Digest.t
+            ; start_byte : int
+            ; end_byte : int
+            }
+        | Approximate_declaration of Chatmd_parser_input.Range.t
+
+      type error =
+        | Stale_script_source
+        | Invalid_compiler_location
+      [@@deriving sexp_of]
+
+      (** The actual parser-owned declaration supplies the map. The caller
+          authenticates Parsed membership and its capture/overlay revision, then
+          binds the exact compiled source ID/digest/bytes. Comparison and hash
+          scan the admitted script body/source bytes under their independent
+          parser/capture byte bounds, even if map recording degraded. Callback
+          and cancellation exceptions propagate unchanged. *)
+      val bind
+        :  t
+        -> compiled_source:Chatml_source.t
+        -> checkpoint:(unit -> unit)
+        -> (bound, error) Result.t
+
+      (** Only fully continuous identity bytes project exactly. Empty spans
+          require an unambiguous boundary. Mixed, transformed or effective-only
+          bytes yield the approximate declaration as a related site while the
+          caller retains the native exact ChatML location. External_origin
+          carries the actual successful read member/digest, NOT an editor source
+          ID; host custody alone may turn it into an external exact location.
+          Work is bounded by the parser's finite map segment/work caps; overflow
+          returns approximate, never a partial exact map. *)
+      val project_raw
+        :  bound
+        -> Chatml_source.Location.t
+        -> checkpoint:(unit -> unit)
+        -> (projection, error) Result.t
+    end
   end
 
   module Agent_reference : sig

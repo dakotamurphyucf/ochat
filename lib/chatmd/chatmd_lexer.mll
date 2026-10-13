@@ -77,6 +77,15 @@ let create_state () =
   ; scratch = Buffer.create 256
   }
 
+let text_fragment ~text ~start_byte ~end_byte =
+  TEXT (Chatmd_parser_builder.Text_fragment.create ~text ~start_byte ~end_byte)
+
+let lexeme_text lexbuf text =
+  text_fragment
+    ~text
+    ~start_byte:(Lexing.lexeme_start lexbuf)
+    ~end_byte:(Lexing.lexeme_end lexbuf)
+
 (*--------------------------------------------------------------------------*)
 (* Helpers                                                                  *)
 (*--------------------------------------------------------------------------*)
@@ -330,8 +339,14 @@ rule token_inner state = parse
   (* Opening RAW delimiter – optional leading horizontal or vertical
      whitespace is permitted, but we also accept the delimiter directly
      after arbitrary text. *)
-  | [' ' '\t' '\r' '\n']* "RAW|" { Buffer.clear state.scratch; raw_block state lexbuf }
-  | "RAW|"                            { Buffer.clear state.scratch; raw_block state lexbuf }
+  | [' ' '\t' '\r' '\n']* "RAW|" {
+      Buffer.clear state.scratch;
+      raw_block state (Lexing.lexeme_end lexbuf) lexbuf
+    }
+  | "RAW|" {
+      Buffer.clear state.scratch;
+      raw_block state (Lexing.lexeme_end lexbuf) lexbuf
+    }
 
   (* RAW opener preceded by in-line text – we split the token stream into two   *)
   (* events: the leading text as a TEXT token (returned now) and the token      *)
@@ -343,10 +358,14 @@ rule token_inner state = parse
          trailing "RAW|" forms the leading TEXT token. *)
       let txt_len = String.length raw_prefix_delim - 4 (* len "RAW|" *) in
       let prefix = String.sub raw_prefix_delim ~pos:0 ~len:txt_len in
+      let prefix_start = Lexing.lexeme_start lexbuf in
       Buffer.clear state.scratch;
-      let next_tok = raw_block state lexbuf in
+      let next_tok = raw_block state (Lexing.lexeme_end lexbuf) lexbuf in
       state.pending_token <- Some next_tok;
-      TEXT prefix
+      text_fragment
+        ~text:prefix
+        ~start_byte:prefix_start
+        ~end_byte:(prefix_start + txt_len)
     }
 
  
@@ -360,7 +379,7 @@ rule token_inner state = parse
         let tag = tag_of_string_exn state name in
         SELF (tag, attrs)
       else
-        TEXT raw_tag
+        lexeme_text lexbuf raw_tag
     }
 
   (* normal start tag                                                 *)
@@ -383,7 +402,7 @@ rule token_inner state = parse
 
            This is exactly what higher layers expect.  We no longer try to
            collapse the whole unknown subtree into a single token. *)
-        TEXT raw_tag
+        lexeme_text lexbuf raw_tag
     }
 
   (* end tag                                                          *)
@@ -395,7 +414,7 @@ rule token_inner state = parse
         leave_element state;
         END tag
       else
-        TEXT raw_tag
+        lexeme_text lexbuf raw_tag
     }
 
 
@@ -405,16 +424,16 @@ rule token_inner state = parse
   (* as *one* TEXT token so sequences like "<<<<<" do **not** explode   *)
   (* into five separate tokens anymore.                                  *)
   (*--------------------------------------------------------------------*)
-  | '<'+ as lt_run { TEXT lt_run }
+  | '<'+ as lt_run { lexeme_text lexbuf lt_run }
 
   (* raw text – sequence of characters that does *not* contain '<' or the pipe
      character.  We *exclude* `|` so that the RAW| / |RAW delimiters are
      detected by their dedicated rules above instead of being swallowed by
      this catch-all clause due to the longest-match heuristic of ocamllex. *)
-  | [^'<' '|']+                  { TEXT (Lexing.lexeme lexbuf) }
+  | [^'<' '|']+                  { lexeme_text lexbuf (Lexing.lexeme lexbuf) }
 
   (* lone pipe – emitted verbatim as text *)
-  | '|'                          { TEXT (Lexing.lexeme lexbuf) }
+  | '|'                          { lexeme_text lexbuf (Lexing.lexeme lexbuf) }
 
   | eof                          { EOF }
 
@@ -428,7 +447,7 @@ rule token_inner state = parse
 (* Helper rule – skip an entire unknown element and return a single TEXT   *)
 (*--------------------------------------------------------------------------*)
 
-and skip_unknown state name depth = parse
+and skip_unknown state name depth start_byte = parse
   | "</" ['a'-'z''A'-'Z''_']+ [^'>' ]* '>' as raw_tag {
       Buffer.add_string state.scratch raw_tag;
       let len = String.length raw_tag in
@@ -437,40 +456,43 @@ and skip_unknown state name depth = parse
       if depth = 0 then (
         let txt = Buffer.contents state.scratch in
         Buffer.clear state.scratch;
-        TEXT txt
-      ) else skip_unknown state name depth lexbuf
+        text_fragment ~text:txt ~start_byte ~end_byte:(Lexing.lexeme_end lexbuf)
+      ) else skip_unknown state name depth start_byte lexbuf
     }
 
   | '<' ['a'-'z''A'-'Z''_'] [^'>' ]* "/>" as raw_tag {
       Buffer.add_string state.scratch raw_tag;
-      skip_unknown state name depth lexbuf
+      skip_unknown state name depth start_byte lexbuf
     }
 
   | '<' ['a'-'z''A'-'Z''_'] [^'>' ]* '>' as raw_tag {
       Buffer.add_string state.scratch raw_tag;
       let open_name, _, self = dissect raw_tag in
       let depth = if (not self) && String.equal open_name name then depth + 1 else depth in
-      skip_unknown state name depth lexbuf
+      skip_unknown state name depth start_byte lexbuf
     }
 
-  | '<' { Buffer.add_string state.scratch "<"; skip_unknown state name depth lexbuf }
+  | '<' { Buffer.add_string state.scratch "<"; skip_unknown state name depth start_byte lexbuf }
 
-  | [^ '<' ]+ as chunk { Buffer.add_string state.scratch chunk; skip_unknown state name depth lexbuf }
+  | [^ '<' ]+ as chunk { Buffer.add_string state.scratch chunk; skip_unknown state name depth start_byte lexbuf }
 
   | eof { failwithf "Unterminated unknown tag <%s>" name () }
 
-and raw_block state = parse
+and raw_block state start_byte = parse
   (* Terminating delimiter *)
   | "|RAW" {
       let txt = Buffer.contents state.scratch in
       Buffer.clear state.scratch;
-      TEXT txt
+      text_fragment
+        ~text:txt
+        ~start_byte
+        ~end_byte:(Lexing.lexeme_start lexbuf)
     }
 
   (* Any character – accumulate and continue *)
   | _ as c {
       Buffer.add_char state.scratch c;
-      raw_block state lexbuf
+      raw_block state start_byte lexbuf
     }
 
   | eof { failwith "Unterminated raw block RAW| ... |RAW" }

@@ -193,14 +193,25 @@ source revision, graph/checker, recording, freezing and publication. It keeps
 one boundary and at most one prefix graph per request. Cancellation discards
 that attempt without changing any full-document result.
 
-For embedded ChatML, extraction must publish a parser-owned map from each body
-byte interval to an exact ChatMD input interval or mark it unmappable. Compose
-this with imported-input provenance. External `src` errors point to the external
-captured file with the declaring attribute as a related location. When RAW or
-entity transformation prevents exact mapping, report a declaration-level range
-marked approximate; do not search for matching text or invent an exact range.
-Live analysis reads authored bytes with no effectful root preprocessing. These
-mapping rules apply to diagnostics, navigation and highlighting alike.
+For embedded ChatML, the owned ChatMD lexer records byte offsets for each text
+fragment through the existing grammar and conversion. Each declaration retains
+the map produced while serializing its actual script body. An exact inline
+projection requires every queried byte to match one continuous authored input
+interval; imported text keeps its imported input owner. RAW delimiters, generated
+child serialization, mixed intervals and ambiguous empty boundaries yield the
+declaration range as an approximate related site, while the original exact
+ChatML location remains available. The root's effective bytes project to an
+authored location only when the authored and effective inputs match exactly.
+The one parse invocation charges a finite byte, segment and work ledger for
+map recording; exhaustion only degrades location precision and does not alter
+the script body. An external `src` first yields its actual successful read
+member and body digest, never an inferred editor source ID. The host may turn
+that into an exact external location only through the same captured-source
+receipt and source construction used for the program; the declaring element
+range remains related context. No consumer searches for matching text or rereads a
+file to infer provenance. Live analysis reads authored bytes without effectful
+root preprocessing. These mapping rules apply to diagnostics, navigation and
+highlighting alike.
 
 `Builtin_instructions` already embeds and resolves `builtin:chatml`, which M4
 captured-content tests exercise. M5 completion can enumerate actual installed

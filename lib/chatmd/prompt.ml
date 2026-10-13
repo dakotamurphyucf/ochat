@@ -639,7 +639,15 @@ module Chat_markdown = struct
     |> failwith
   ;;
 
-  let parse_script ~dir ~loader ~source_node ~source_ref ~attrs ~children =
+  let parse_script
+        ~dir
+        ~loader
+        ~source_node
+        ~source_ref
+        ~attrs
+        ~inline_source
+        ~on_external_source
+    =
     if
       List.exists attrs ~f:(function
         | "api", _ | "kind", Some "tool" -> true
@@ -647,24 +655,26 @@ module Chat_markdown = struct
     then (
       match
         Chatmd_extension_declaration.script
+          ~on_external_source
           ~dir
           ~loader
           ~source_node
           ~source:source_ref
           ~attributes:attrs
-          ~inline_source:(script_body_of_children children)
+          ~inline_source
       with
       | Ok script -> Extension_script script
       | Error diagnostics -> script_error diagnostics)
     else (
       match
         Chatmd_script_declaration.parse
+          ~on_external_source
           ~dir
           ~loader
           ~source_node
           ~source:source_ref
           ~attributes:attrs
-          ~inline_source:(script_body_of_children children)
+          ~inline_source
       with
       | Error diagnostics -> script_error diagnostics
       | Ok script ->
@@ -674,6 +684,13 @@ module Chat_markdown = struct
   ;;
 
   (*--------------------------------------------------------------------------*)
+  type converted_node =
+    { element : chat_element
+    ; text_fragments : Chatmd_parser_builder.Text_fragment.t list
+    ; input : Chatmd_parser_input.t option
+    ; extraction_map : Chatmd_extraction_map.t option
+    }
+
   (* Fold the expanded source tree. Generated parsing preserves the provenance
      of inline imports; the legacy parser retains its existing parent context. *)
   let tree ~preserve_child_sources sourced ~f =
@@ -687,7 +704,13 @@ module Chat_markdown = struct
            | Ast.Text _ -> []
            | Ast.Element (_, _, children) ->
              List.map children ~f:(fun node ->
-               { sourced with node; children = None; range = None }))
+               { sourced with
+                 node
+               ; children = None
+               ; range = None
+               ; text_fragments = []
+               ; input = None
+               }))
       in
       let results = List.map children ~f:(walk display false) in
       f
@@ -695,6 +718,8 @@ module Chat_markdown = struct
         ~source_node:display.source_node
         ~actual_source_node:sourced.source_node
         ~range:sourced.range
+        ~text_fragments:sourced.text_fragments
+        ~input:sourced.input
         ~is_root
         sourced.node
         results
@@ -741,354 +766,298 @@ module Chat_markdown = struct
         ?(on_document = fun _ ~items:_ -> ())
         ?(on_agent = ignore)
         ?(checkpoint = ignore)
+        ?extraction_budget
         ~dir
         ~loader
         ~preserve_child_sources
         sourced
     =
-    tree
-      ~preserve_child_sources
-      sourced
-      ~f:
-        (fun
-          ~source_ref ~source_node ~actual_source_node ~range ~is_root node children ->
-        checkpoint ();
-        let parse_msg_children children =
-          parse_msg_children
-            ?on_document:(if is_root then Some on_document else None)
-            ?on_agent:(if is_root then Some on_agent else None)
-            children
-        in
-        let source_context = source_ref.Chatmd_shell_spec.Source_ref.file in
-        match node with
-        | Element (Msg, attrs, _) ->
-          let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
-          let content_opt = parse_msg_children children in
-          Message (attr_to_msg ~source_context attr content_opt)
-        | Element (Developer, attrs, _) ->
-          let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
-          let content_opt = parse_msg_children children in
-          let role_attr = "role", "developer" in
-          let attrs = role_attr :: attr in
-          Developer_msg (attr_to_msg ~source_context attrs content_opt)
-        | Element (System, attrs, _) ->
-          let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
-          let content_opt = parse_msg_children children in
-          let role_attr = "role", "system" in
-          let attrs = role_attr :: attr in
-          System_msg (attr_to_msg ~source_context attrs content_opt)
-        | Element (User, attrs, _) ->
-          let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
-          let content_opt = parse_msg_children children in
-          let role_attr = "role", "user" in
-          let attrs = role_attr :: attr in
-          User_msg (attr_to_msg ~source_context attrs content_opt)
-        | Element (Assistant, attrs, _) ->
-          let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
-          let content_opt = parse_msg_children children in
-          let role_attr = "role", "assistant" in
-          let attrs = role_attr :: attr in
-          Assistant_msg (attr_to_msg ~source_context attrs content_opt)
-        | Element (Tool_call, attrs, _) ->
-          let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
-          let content_opt = parse_msg_children children in
-          let role_attr = "role", "assistant" in
-          let tool_call_attr = "tool_call", "true" in
-          let attrs = role_attr :: tool_call_attr :: attr in
-          Tool_call_msg (attr_to_msg ~source_context attrs content_opt)
-        | Element (Tool_response, attrs, _) ->
-          let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
-          let content_opt = parse_msg_children children in
-          let role_attr = "role", "tool" in
-          let attrs = role_attr :: attr in
-          Tool_response_msg (attr_to_msg ~source_context attrs content_opt)
-        | Element (Img, attrs, _) ->
-          let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
-          let tbl = Hashtbl.create (module String) in
-          List.iter attr ~f:(fun (nm, v) -> Hashtbl.set tbl ~key:nm ~data:v);
-          let url = Option.value (Hashtbl.find tbl "src") ~default:"" in
-          let is_local = Hashtbl.mem tbl "local" in
-          Image (url, is_local)
-        | Element (Doc, attrs, _) ->
-          let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
-          let tbl = Hashtbl.create (module String) in
-          List.iter attr ~f:(fun (nm, v) -> Hashtbl.set tbl ~key:nm ~data:v);
-          let url = Option.value (Hashtbl.find tbl "src") ~default:"" in
-          let local = Hashtbl.mem tbl "local" in
-          let strip = Hashtbl.mem tbl "strip" in
-          let md = Hashtbl.mem tbl "markdown" in
-          let selection =
-            Document_occurrence.Selection.of_attributes
-              ~src:url
-              ~local
-              ~capture:(Hashtbl.mem tbl "capture")
-            |> Or_error.ok_exn
+    let converted =
+      tree
+        ~preserve_child_sources
+        sourced
+        ~f:
+          (fun
+            ~source_ref
+            ~source_node
+            ~actual_source_node
+            ~range
+            ~text_fragments
+            ~input
+            ~is_root
+            node
+            child_nodes
+          ->
+          checkpoint ();
+          let children = List.map child_nodes ~f:(fun child -> child.element) in
+          let extraction_map = ref None in
+          let parse_msg_children children =
+            parse_msg_children
+              ?on_document:(if is_root then Some on_document else None)
+              ?on_agent:(if is_root then Some on_agent else None)
+              children
           in
-          if
-            (not owned_documents)
-            && not (Document_occurrence.Selection.equal selection Dynamic)
-          then failwith "captured and builtin documents require owned prompt preparation";
-          let source =
-            if owned_documents
-            then
-              Some
-                (Document_occurrence.Source.create
-                   (Option.value_exn range)
-                   ~src:url
-                   ~selection
-                   ~local
-                   ~cleanup_html:strip
-                   ~markdown:md)
-            else None
-          in
-          Document (url, local, strip, md, source)
-        | Element (Config, attrs, _) ->
-          let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
-          let tbl = attr_table attr in
-          let max_tokens = Option.map (Hashtbl.find tbl "max_tokens") ~f:Int.of_string in
-          let model = Hashtbl.find tbl "model" in
-          let reasoning_effort = Hashtbl.find tbl "reasoning_effort" in
-          let temperature =
-            Option.map (Hashtbl.find tbl "temperature") ~f:Float.of_string
-          in
-          let show_tool_call = Hashtbl.mem tbl "show_tool_call" in
-          let id = Hashtbl.find tbl "id" in
-          Config { max_tokens; model; reasoning_effort; temperature; show_tool_call; id }
-        | Element (Script, attrs, _) ->
-          parse_script ~dir ~loader ~source_node ~source_ref ~attrs ~children
-        | Element (Summary, attrs, _) ->
-          let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
-          let typ =
-            List.find_map attr ~f:(fun (n, v) ->
-              if String.equal n "type" then Some v else None)
-            |> Option.value ~default:"summary_text"
-          in
-          let txt =
-            List.map children ~f:chat_element_to_string
-            |> String.concat ~sep:""
-            |> String.strip
-          in
-          Summary { text = txt; _type = typ }
-        | Element (Reasoning, attrs, _) ->
-          let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
-          let history_ids =
-            List.filter_map attr ~f:(fun (name, value) ->
-              if String.equal name "ochat-history-id" then Some value else None)
-          in
-          let ochat_history_id =
-            match history_ids with
-            | [] -> None
-            | [ encoded ] ->
-              (match History_entry.Id.of_string encoded with
-               | Ok id -> Some id
-               | Error error -> failwith ("Invalid ochat-history-id: " ^ error))
-            | _ -> failwith "Duplicate ochat-history-id attribute"
-          in
-          let source_context =
-            Option.first_some
-              (List.Assoc.find
-                 attr
-                 ~equal:String.equal
-                 Chatmd_import_expansion.source_attribute)
-              (Some source_context)
-          in
-          let tbl = Hashtbl.create (module String) in
-          List.iter attr ~f:(fun (n, v) -> Hashtbl.set tbl ~key:n ~data:v);
-          let id = Hashtbl.find_exn tbl "id" in
-          let status = Hashtbl.find tbl "status" in
-          let summaries =
-            List.filter_map children ~f:(function
-              | Summary s -> Some s
-              | Text t when not (String.is_empty (String.strip t)) ->
-                Some { text = String.strip t; _type = "summary_text" }
-              | _ -> None)
-          in
-          Reasoning
-            { id
-            ; status
-            ; _type = "reasoning"
-            ; summary = summaries
-            ; ochat_history_id
-            ; source_context
-            }
-        | Element (Agent, attrs, __bin_read_content_item__) ->
-          let source_mode = agent_source_mode attrs in
-          let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
-          let url_attr =
-            List.find_map attr ~f:(fun (nm, v) ->
-              if String.equal nm "src" then Some v else None)
-          in
-          let agent_url = Option.value url_attr ~default:"" in
-          let agent_is_local =
-            List.exists attr ~f:(fun (nm, _) -> String.(nm = "local"))
-          in
-          check_agent_source_mode ~owned:owned_documents ~local:agent_is_local source_mode;
-          if owned_documents
-          then (
-            let range = owned_agent_range range in
-            let agent_url, queued_key =
-              resolve_owned_agent
-                loader
-                ~base:actual_source_node
-                ~reference:agent_url
-                ~is_local:agent_is_local
-            in
-            Owned_agent_content
-              (agent_url, agent_is_local, children, range, queued_key, source_mode))
-          else (
-            let agent_url =
-              if agent_is_local
+          let source_context = source_ref.Chatmd_shell_spec.Source_ref.file in
+          let element =
+            match node with
+            | Element (Msg, attrs, _) ->
+              let attr =
+                List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"")
+              in
+              let content_opt = parse_msg_children children in
+              Message (attr_to_msg ~source_context attr content_opt)
+            | Element (Developer, attrs, _) ->
+              let attr =
+                List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"")
+              in
+              let content_opt = parse_msg_children children in
+              let role_attr = "role", "developer" in
+              let attrs = role_attr :: attr in
+              Developer_msg (attr_to_msg ~source_context attrs content_opt)
+            | Element (System, attrs, _) ->
+              let attr =
+                List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"")
+              in
+              let content_opt = parse_msg_children children in
+              let role_attr = "role", "system" in
+              let attrs = role_attr :: attr in
+              System_msg (attr_to_msg ~source_context attrs content_opt)
+            | Element (User, attrs, _) ->
+              let attr =
+                List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"")
+              in
+              let content_opt = parse_msg_children children in
+              let role_attr = "role", "user" in
+              let attrs = role_attr :: attr in
+              User_msg (attr_to_msg ~source_context attrs content_opt)
+            | Element (Assistant, attrs, _) ->
+              let attr =
+                List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"")
+              in
+              let content_opt = parse_msg_children children in
+              let role_attr = "role", "assistant" in
+              let attrs = role_attr :: attr in
+              Assistant_msg (attr_to_msg ~source_context attrs content_opt)
+            | Element (Tool_call, attrs, _) ->
+              let attr =
+                List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"")
+              in
+              let content_opt = parse_msg_children children in
+              let role_attr = "role", "assistant" in
+              let tool_call_attr = "tool_call", "true" in
+              let attrs = role_attr :: tool_call_attr :: attr in
+              Tool_call_msg (attr_to_msg ~source_context attrs content_opt)
+            | Element (Tool_response, attrs, _) ->
+              let attr =
+                List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"")
+              in
+              let content_opt = parse_msg_children children in
+              let role_attr = "role", "tool" in
+              let attrs = role_attr :: attr in
+              Tool_response_msg (attr_to_msg ~source_context attrs content_opt)
+            | Element (Img, attrs, _) ->
+              let attr =
+                List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"")
+              in
+              let tbl = Hashtbl.create (module String) in
+              List.iter attr ~f:(fun (nm, v) -> Hashtbl.set tbl ~key:nm ~data:v);
+              let url = Option.value (Hashtbl.find tbl "src") ~default:"" in
+              let is_local = Hashtbl.mem tbl "local" in
+              Image (url, is_local)
+            | Element (Doc, attrs, _) ->
+              let attr =
+                List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"")
+              in
+              let tbl = Hashtbl.create (module String) in
+              List.iter attr ~f:(fun (nm, v) -> Hashtbl.set tbl ~key:nm ~data:v);
+              let url = Option.value (Hashtbl.find tbl "src") ~default:"" in
+              let local = Hashtbl.mem tbl "local" in
+              let strip = Hashtbl.mem tbl "strip" in
+              let md = Hashtbl.mem tbl "markdown" in
+              let selection =
+                Document_occurrence.Selection.of_attributes
+                  ~src:url
+                  ~local
+                  ~capture:(Hashtbl.mem tbl "capture")
+                |> Or_error.ok_exn
+              in
+              if
+                (not owned_documents)
+                && not (Document_occurrence.Selection.equal selection Dynamic)
               then
-                Source_loader.agent_reference
-                  loader
-                  ~base:source_node
-                  ~reference:agent_url
-                |> Result.ok_or_failwith
-              else agent_url
-            in
-            Agent (agent_url, agent_is_local, children))
-        | Element (Tool, attrs, _) ->
-          let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
-          let tbl = Hashtbl.create (module String) in
-          List.iter attr ~f:(fun (nm, v) -> Hashtbl.set tbl ~key:nm ~data:v);
-          let name =
-            Hashtbl.find tbl "name" |> Option.value ~default:"" |> String.strip
-          in
-          let command = Hashtbl.find tbl "command" in
-          let agent = Hashtbl.find tbl "agent" in
-          let source_mode = agent_source_mode attrs in
-          if
-            Option.is_none agent
-            && List.exists attrs ~f:(fun (name, _) -> String.equal name "source_mode")
-          then failwith "source_mode is only supported on agent declarations";
-          let mcp_server = Hashtbl.find tbl "mcp_server" in
-          let description = Hashtbl.find tbl "description" in
-          let is_local = Hashtbl.mem tbl "local" in
-          let persistence =
-            match
-              List.filter attrs ~f:(fun (name, _) -> String.equal name "persistence")
-            with
-            | [] -> None
-            | [ (_, Some "one_off") ] -> Some None
-            | [ (_, Some "persistent") ] -> Some (Some Persistent)
-            | [ (_, Some "optional") ] -> Some (Some Optional)
-            | _ ->
-              failwith
-                "Tool persistence must be one_off, persistent or optional, specified \
-                 once."
-          in
-          (match
-             ( persistence
-             , agent
-             , command
-             , mcp_server
-             , Hashtbl.find tbl "type"
-             , Hashtbl.find tbl "runtime" )
-           with
-           | None, _, _, _, _, _ -> ()
-           | Some _, Some _, None, None, None, None -> ()
-           | _ -> failwith "Tool persistence is only supported on agent declarations.");
-          let is_shell =
-            Option.value_map
-              (Hashtbl.find tbl "type")
-              ~default:false
-              ~f:(String.equal "shell")
-            || Hashtbl.mem tbl "runtime"
-          in
-          if
-            List.exists attrs ~f:(function
-              | "type", Some "inherited" -> true
-              | _ -> false)
-          then (
-            let allowed =
-              Chatmd_attributes.create
-                ~source:source_ref
-                ~path:[ "tool" ]
-                ~allowed:[ "name"; "type" ]
-                attrs
-            in
-            let attributes =
-              match allowed with
-              | Ok value -> value
-              | Error d -> script_error [ d ]
-            in
-            let inherited =
-              match Chatmd_attributes.required attributes "name" with
-              | Ok value -> value
-              | Error d -> script_error [ d ]
-            in
-            if
-              String.is_empty inherited
-              || String.length inherited > 256
-              || not
-                   (String.for_all inherited ~f:(function
-                      | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '-' | ':' | '.' ->
-                        true
-                      | _ -> false))
-            then failwith "invalid inherited tool name";
-            (match node with
-             | Ast.Element (_, _, children)
-               when List.for_all children ~f:(function
-                      | Ast.Text text -> String.for_all text ~f:Char.is_whitespace
-                      | _ -> false) -> ()
-             | _ -> failwith "inherited tool references cannot have children");
-            Tool (Inherited inherited))
-          else if
-            List.exists attrs ~f:(function
-              | "type", Some ("moderator" | "chatml") -> true
-              | _ -> false)
-          then (
-            match
-              Chatmd_extension_declaration.tool
-                ~loader
-                ~source_node
-                ~source:source_ref
-                node
-            with
-            | Ok tool -> Tool (Extension tool)
-            | Error diagnostics -> script_error diagnostics)
-          else if is_shell
-          then (
-            match Chatmd_shell_declaration.parse_tool ~source:source_ref node with
-            | Ok tool -> Tool (Shell tool)
-            | Error diagnostics ->
-              failwith
-                (String.concat
-                   ~sep:"; "
-                   (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string)))
-          else (
-            match command, agent, mcp_server with
-            | Some _, Some _, _ | Some _, _, Some _ | _, Some _, Some _ ->
-              failwith
-                "<tool> cannot combine 'command', 'agent' and 'mcp_server' attributes."
-            | Some cmd, None, None ->
-              if String.is_empty name then failwith "Tool name cannot be empty.";
-              let cmd = String.strip cmd in
-              if String.is_empty cmd then failwith "Tool command cannot be empty.";
-              let description = Option.map description ~f:String.strip in
-              Tool (Custom { name; description; command = cmd; source = source_ref })
-            | None, Some agent_url, None ->
-              check_agent_source_mode ~owned:owned_documents ~local:is_local source_mode;
-              if String.is_empty name then failwith "Tool name cannot be empty.";
-              let agent_url = String.strip agent_url in
-              if String.is_empty agent_url then failwith "Tool agent URL cannot be empty.";
-              let description = Option.map description ~f:String.strip in
+                failwith "captured and builtin documents require owned prompt preparation";
+              let source =
+                if owned_documents
+                then
+                  Some
+                    (Document_occurrence.Source.create
+                       (Option.value_exn range)
+                       ~src:url
+                       ~selection
+                       ~local
+                       ~cleanup_html:strip
+                       ~markdown:md)
+                else None
+              in
+              Document (url, local, strip, md, source)
+            | Element (Config, attrs, _) ->
+              let attr =
+                List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"")
+              in
+              let tbl = attr_table attr in
+              let max_tokens =
+                Option.map (Hashtbl.find tbl "max_tokens") ~f:Int.of_string
+              in
+              let model = Hashtbl.find tbl "model" in
+              let reasoning_effort = Hashtbl.find tbl "reasoning_effort" in
+              let temperature =
+                Option.map (Hashtbl.find tbl "temperature") ~f:Float.of_string
+              in
+              let show_tool_call = Hashtbl.mem tbl "show_tool_call" in
+              let id = Hashtbl.find tbl "id" in
+              Config
+                { max_tokens; model; reasoning_effort; temperature; show_tool_call; id }
+            | Element (Script, attrs, _) ->
+              let inline_source, producer =
+                match extraction_budget, range with
+                | Some budget, Some declaration ->
+                  let producer =
+                    Chatmd_extraction_map.Producer.create budget ~declaration ~checkpoint
+                  in
+                  List.iter child_nodes ~f:(fun child ->
+                    let output = chat_element_to_string child.element in
+                    match child.element, child.input with
+                    | Text _, Some input ->
+                      Chatmd_extraction_map.Producer.append_text
+                        producer
+                        ~input
+                        ~fragments:child.text_fragments
+                        ~output
+                    | _ -> Chatmd_extraction_map.Producer.append_unmapped producer output);
+                  let source, map =
+                    Chatmd_extraction_map.Producer.finish_inline producer
+                  in
+                  extraction_map := Some map;
+                  source, Some producer
+                | None, _ | Some _, None -> script_body_of_children children, None
+              in
+              let external_source = ref None in
+              let on_external_source resolved contents =
+                checkpoint ();
+                external_source := Some (Source_loader.relative_path resolved, contents)
+              in
+              let value =
+                parse_script
+                  ~dir
+                  ~loader
+                  ~source_node
+                  ~source_ref
+                  ~attrs
+                  ~inline_source
+                  ~on_external_source
+              in
+              (match producer, !external_source with
+               | Some producer, Some (member, source_text) ->
+                 let _, map =
+                   Chatmd_extraction_map.Producer.finish_external
+                     producer
+                     ~member
+                     ~source_text
+                 in
+                 extraction_map := Some map
+               | Some _, None | None, _ -> ());
+              value
+            | Element (Summary, attrs, _) ->
+              let attr =
+                List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"")
+              in
+              let typ =
+                List.find_map attr ~f:(fun (n, v) ->
+                  if String.equal n "type" then Some v else None)
+                |> Option.value ~default:"summary_text"
+              in
+              let txt =
+                List.map children ~f:chat_element_to_string
+                |> String.concat ~sep:""
+                |> String.strip
+              in
+              Summary { text = txt; _type = typ }
+            | Element (Reasoning, attrs, _) ->
+              let attr =
+                List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"")
+              in
+              let history_ids =
+                List.filter_map attr ~f:(fun (name, value) ->
+                  if String.equal name "ochat-history-id" then Some value else None)
+              in
+              let ochat_history_id =
+                match history_ids with
+                | [] -> None
+                | [ encoded ] ->
+                  (match History_entry.Id.of_string encoded with
+                   | Ok id -> Some id
+                   | Error error -> failwith ("Invalid ochat-history-id: " ^ error))
+                | _ -> failwith "Duplicate ochat-history-id attribute"
+              in
+              let source_context =
+                Option.first_some
+                  (List.Assoc.find
+                     attr
+                     ~equal:String.equal
+                     Chatmd_import_expansion.source_attribute)
+                  (Some source_context)
+              in
+              let tbl = Hashtbl.create (module String) in
+              List.iter attr ~f:(fun (n, v) -> Hashtbl.set tbl ~key:n ~data:v);
+              let id = Hashtbl.find_exn tbl "id" in
+              let status = Hashtbl.find tbl "status" in
+              let summaries =
+                List.filter_map children ~f:(function
+                  | Summary s -> Some s
+                  | Text t when not (String.is_empty (String.strip t)) ->
+                    Some { text = String.strip t; _type = "summary_text" }
+                  | _ -> None)
+              in
+              Reasoning
+                { id
+                ; status
+                ; _type = "reasoning"
+                ; summary = summaries
+                ; ochat_history_id
+                ; source_context
+                }
+            | Element (Agent, attrs, __bin_read_content_item__) ->
+              let source_mode = agent_source_mode attrs in
+              let attr =
+                List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"")
+              in
+              let url_attr =
+                List.find_map attr ~f:(fun (nm, v) ->
+                  if String.equal nm "src" then Some v else None)
+              in
+              let agent_url = Option.value url_attr ~default:"" in
+              let agent_is_local =
+                List.exists attr ~f:(fun (nm, _) -> String.(nm = "local"))
+              in
+              check_agent_source_mode
+                ~owned:owned_documents
+                ~local:agent_is_local
+                source_mode;
               if owned_documents
               then (
                 let range = owned_agent_range range in
-                let agent, queued_key =
+                let agent_url, queued_key =
                   resolve_owned_agent
                     loader
                     ~base:actual_source_node
                     ~reference:agent_url
-                    ~is_local
+                    ~is_local:agent_is_local
                 in
-                let specification = { name; description; agent; is_local } in
-                Owned_agent_tool
-                  (specification, Option.join persistence, range, queued_key, source_mode))
+                Owned_agent_content
+                  (agent_url, agent_is_local, children, range, queued_key, source_mode))
               else (
-                let agent =
-                  if is_local
+                let agent_url =
+                  if agent_is_local
                   then
                     Source_loader.agent_reference
                       loader
@@ -1097,93 +1066,268 @@ module Chat_markdown = struct
                     |> Result.ok_or_failwith
                   else agent_url
                 in
-                let specification = { name; description; agent; is_local } in
-                match Option.join persistence with
-                | None -> Tool (Agent specification)
-                | Some policy -> Tool (Persistent_agent (specification, policy)))
-            | None, None, Some mcp_uri ->
-              let mcp_uri = String.strip mcp_uri in
-              if String.is_empty mcp_uri
-              then failwith "Tool mcp_server URI cannot be empty.";
-              let description = Option.map description ~f:String.strip in
-              let strict = Hashtbl.mem tbl "strict" in
-              let client_id_env = Hashtbl.find tbl "client_id_env" in
-              let client_secret_env = Hashtbl.find tbl "client_secret_env" in
-              (* Accept both [include] and [includes] as attribute names to avoid
-              confusion.  If both are present we prefer the more specific
-              [include] spelling. *)
-              let include_ =
-                match Hashtbl.find tbl "include" with
-                | Some v -> String.strip v
-                | None ->
-                  Hashtbl.find tbl "includes" |> Option.value ~default:"" |> String.strip
+                Agent (agent_url, agent_is_local, children))
+            | Element (Tool, attrs, _) ->
+              let attr =
+                List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"")
               in
-              let names =
-                if not @@ String.is_empty name
-                then Some [ name ]
-                else if not @@ String.is_empty include_
-                then Some (String.split ~on:',' include_ |> List.map ~f:String.strip)
-                else None
+              let tbl = Hashtbl.create (module String) in
+              List.iter attr ~f:(fun (nm, v) -> Hashtbl.set tbl ~key:nm ~data:v);
+              let name =
+                Hashtbl.find tbl "name" |> Option.value ~default:"" |> String.strip
               in
-              Tool
-                (Mcp
-                   { names
-                   ; description
-                   ; mcp_server = mcp_uri
-                   ; strict
-                   ; client_id_env
-                   ; client_secret_env
-                   })
-            | None, None, None ->
-              if String.is_empty name
-              then failwith "Tool name cannot be empty."
-              else if String.equal name "read_file" || String.equal name "get_contents"
+              let command = Hashtbl.find tbl "command" in
+              let agent = Hashtbl.find tbl "agent" in
+              let source_mode = agent_source_mode attrs in
+              if
+                Option.is_none agent
+                && List.exists attrs ~f:(fun (name, _) -> String.equal name "source_mode")
+              then failwith "source_mode is only supported on agent declarations";
+              let mcp_server = Hashtbl.find tbl "mcp_server" in
+              let description = Hashtbl.find tbl "description" in
+              let is_local = Hashtbl.mem tbl "local" in
+              let persistence =
+                match
+                  List.filter attrs ~f:(fun (name, _) -> String.equal name "persistence")
+                with
+                | [] -> None
+                | [ (_, Some "one_off") ] -> Some None
+                | [ (_, Some "persistent") ] -> Some (Some Persistent)
+                | [ (_, Some "optional") ] -> Some (Some Optional)
+                | _ ->
+                  failwith
+                    "Tool persistence must be one_off, persistent or optional, specified \
+                     once."
+              in
+              (match
+                 ( persistence
+                 , agent
+                 , command
+                 , mcp_server
+                 , Hashtbl.find tbl "type"
+                 , Hashtbl.find tbl "runtime" )
+               with
+               | None, _, _, _, _, _ -> ()
+               | Some _, Some _, None, None, None, None -> ()
+               | _ -> failwith "Tool persistence is only supported on agent declarations.");
+              let is_shell =
+                Option.value_map
+                  (Hashtbl.find tbl "type")
+                  ~default:false
+                  ~f:(String.equal "shell")
+                || Hashtbl.mem tbl "runtime"
+              in
+              if
+                List.exists attrs ~f:(function
+                  | "type", Some "inherited" -> true
+                  | _ -> false)
               then (
-                match Chatmd_read_file_declaration.parse ~source:source_ref node with
-                | Ok specification -> Tool (Read_file specification)
+                let allowed =
+                  Chatmd_attributes.create
+                    ~source:source_ref
+                    ~path:[ "tool" ]
+                    ~allowed:[ "name"; "type" ]
+                    attrs
+                in
+                let attributes =
+                  match allowed with
+                  | Ok value -> value
+                  | Error d -> script_error [ d ]
+                in
+                let inherited =
+                  match Chatmd_attributes.required attributes "name" with
+                  | Ok value -> value
+                  | Error d -> script_error [ d ]
+                in
+                if
+                  String.is_empty inherited
+                  || String.length inherited > 256
+                  || not
+                       (String.for_all inherited ~f:(function
+                          | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '-' | ':' | '.'
+                            -> true
+                          | _ -> false))
+                then failwith "invalid inherited tool name";
+                (match node with
+                 | Ast.Element (_, _, children)
+                   when List.for_all children ~f:(function
+                          | Ast.Text text -> String.for_all text ~f:Char.is_whitespace
+                          | _ -> false) -> ()
+                 | _ -> failwith "inherited tool references cannot have children");
+                Tool (Inherited inherited))
+              else if
+                List.exists attrs ~f:(function
+                  | "type", Some ("moderator" | "chatml") -> true
+                  | _ -> false)
+              then (
+                match
+                  Chatmd_extension_declaration.tool
+                    ~loader
+                    ~source_node
+                    ~source:source_ref
+                    node
+                with
+                | Ok tool -> Tool (Extension tool)
+                | Error diagnostics -> script_error diagnostics)
+              else if is_shell
+              then (
+                match Chatmd_shell_declaration.parse_tool ~source:source_ref node with
+                | Ok tool -> Tool (Shell tool)
                 | Error diagnostics ->
                   failwith
                     (String.concat
                        ~sep:"; "
                        (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string)))
-              else Tool (Builtin name))
-        | Element (Shell_access, _, _) ->
-          (match Chatmd_shell_declaration.parse_runtime ~source:source_ref node with
-           | Ok runtime -> Shell_runtime runtime
-           | Error diagnostics ->
-             failwith
-               (String.concat
-                  ~sep:"; "
-                  (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string)))
-        | Element (Moderator_runtime, _, _) ->
-          (match Chatmd_moderator_runtime_declaration.parse ~source:source_ref node with
-           | Ok moderator -> Moderator_runtime moderator
-           | Error diagnostics ->
-             failwith
-               (String.concat
-                  ~sep:"; "
-                  (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string)))
-        | Element (Authoring_help, _, _) ->
-          (match Chatmd_extension_declaration.authoring_help ~source:source_ref node with
-           | Ok help -> Authoring_help help
-           | Error diagnostics -> script_error diagnostics)
-        | Element (Authoring_context, _, _) ->
-          (match
-             Chatmd_extension_declaration.authoring_context ~source:source_ref node
-           with
-           | Ok config -> Authoring_context config
-           | Error diagnostics -> script_error diagnostics)
-        | Element (Uses, _, _) | Element (Shell_element _, _, _) -> Text ""
-        | Element (Import, attrs, _) ->
-          let attr_to_string (n, v) =
-            Printf.sprintf "%s=\"%s\"" n (Option.value v ~default:"")
+              else (
+                match command, agent, mcp_server with
+                | Some _, Some _, _ | Some _, _, Some _ | _, Some _, Some _ ->
+                  failwith
+                    "<tool> cannot combine 'command', 'agent' and 'mcp_server' \
+                     attributes."
+                | Some cmd, None, None ->
+                  if String.is_empty name then failwith "Tool name cannot be empty.";
+                  let cmd = String.strip cmd in
+                  if String.is_empty cmd then failwith "Tool command cannot be empty.";
+                  let description = Option.map description ~f:String.strip in
+                  Tool (Custom { name; description; command = cmd; source = source_ref })
+                | None, Some agent_url, None ->
+                  check_agent_source_mode
+                    ~owned:owned_documents
+                    ~local:is_local
+                    source_mode;
+                  if String.is_empty name then failwith "Tool name cannot be empty.";
+                  let agent_url = String.strip agent_url in
+                  if String.is_empty agent_url
+                  then failwith "Tool agent URL cannot be empty.";
+                  let description = Option.map description ~f:String.strip in
+                  if owned_documents
+                  then (
+                    let range = owned_agent_range range in
+                    let agent, queued_key =
+                      resolve_owned_agent
+                        loader
+                        ~base:actual_source_node
+                        ~reference:agent_url
+                        ~is_local
+                    in
+                    let specification = { name; description; agent; is_local } in
+                    Owned_agent_tool
+                      ( specification
+                      , Option.join persistence
+                      , range
+                      , queued_key
+                      , source_mode ))
+                  else (
+                    let agent =
+                      if is_local
+                      then
+                        Source_loader.agent_reference
+                          loader
+                          ~base:source_node
+                          ~reference:agent_url
+                        |> Result.ok_or_failwith
+                      else agent_url
+                    in
+                    let specification = { name; description; agent; is_local } in
+                    match Option.join persistence with
+                    | None -> Tool (Agent specification)
+                    | Some policy -> Tool (Persistent_agent (specification, policy)))
+                | None, None, Some mcp_uri ->
+                  let mcp_uri = String.strip mcp_uri in
+                  if String.is_empty mcp_uri
+                  then failwith "Tool mcp_server URI cannot be empty.";
+                  let description = Option.map description ~f:String.strip in
+                  let strict = Hashtbl.mem tbl "strict" in
+                  let client_id_env = Hashtbl.find tbl "client_id_env" in
+                  let client_secret_env = Hashtbl.find tbl "client_secret_env" in
+                  (* Accept both [include] and [includes] as attribute names to avoid
+              confusion.  If both are present we prefer the more specific
+              [include] spelling. *)
+                  let include_ =
+                    match Hashtbl.find tbl "include" with
+                    | Some v -> String.strip v
+                    | None ->
+                      Hashtbl.find tbl "includes"
+                      |> Option.value ~default:""
+                      |> String.strip
+                  in
+                  let names =
+                    if not @@ String.is_empty name
+                    then Some [ name ]
+                    else if not @@ String.is_empty include_
+                    then Some (String.split ~on:',' include_ |> List.map ~f:String.strip)
+                    else None
+                  in
+                  Tool
+                    (Mcp
+                       { names
+                       ; description
+                       ; mcp_server = mcp_uri
+                       ; strict
+                       ; client_id_env
+                       ; client_secret_env
+                       })
+                | None, None, None ->
+                  if String.is_empty name
+                  then failwith "Tool name cannot be empty."
+                  else if
+                    String.equal name "read_file" || String.equal name "get_contents"
+                  then (
+                    match Chatmd_read_file_declaration.parse ~source:source_ref node with
+                    | Ok specification -> Tool (Read_file specification)
+                    | Error diagnostics ->
+                      failwith
+                        (String.concat
+                           ~sep:"; "
+                           (List.map
+                              diagnostics
+                              ~f:Chatmd_shell_spec.Diagnostic.to_string)))
+                  else Tool (Builtin name))
+            | Element (Shell_access, _, _) ->
+              (match Chatmd_shell_declaration.parse_runtime ~source:source_ref node with
+               | Ok runtime -> Shell_runtime runtime
+               | Error diagnostics ->
+                 failwith
+                   (String.concat
+                      ~sep:"; "
+                      (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string)))
+            | Element (Moderator_runtime, _, _) ->
+              (match
+                 Chatmd_moderator_runtime_declaration.parse ~source:source_ref node
+               with
+               | Ok moderator -> Moderator_runtime moderator
+               | Error diagnostics ->
+                 failwith
+                   (String.concat
+                      ~sep:"; "
+                      (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string)))
+            | Element (Authoring_help, _, _) ->
+              (match
+                 Chatmd_extension_declaration.authoring_help ~source:source_ref node
+               with
+               | Ok help -> Authoring_help help
+               | Error diagnostics -> script_error diagnostics)
+            | Element (Authoring_context, _, _) ->
+              (match
+                 Chatmd_extension_declaration.authoring_context ~source:source_ref node
+               with
+               | Ok config -> Authoring_context config
+               | Error diagnostics -> script_error diagnostics)
+            | Element (Uses, _, _) | Element (Shell_element _, _, _) -> Text ""
+            | Element (Import, attrs, _) ->
+              let attr_to_string (n, v) =
+                Printf.sprintf "%s=\"%s\"" n (Option.value v ~default:"")
+              in
+              let attr = List.map attrs ~f:attr_to_string in
+              let raw_content =
+                Printf.sprintf "<%s %s/>" "import" (String.concat ~sep:" " attr)
+              in
+              Text raw_content
+            | Text t -> Text t
           in
-          let attr = List.map attrs ~f:attr_to_string in
-          let raw_content =
-            Printf.sprintf "<%s %s/>" "import" (String.concat ~sep:" " attr)
-          in
-          Text raw_content
-        | Text t -> Text t)
+          { element; text_fragments; input; extraction_map = !extraction_map })
+    in
+    converted.element, converted.extraction_map
   ;;
 
   (* We only want to capture recognised top-level chat elements. *)
@@ -1387,6 +1531,7 @@ module Chat_markdown = struct
       ; script_body : string
       ; project_selection : Chatmd_shell_spec.Script_project.t option
       ; script_path : string option
+      ; extraction_map : Chatmd_extraction_map.t
       }
 
     let range t = t.range
@@ -1396,7 +1541,44 @@ module Chat_markdown = struct
     let project_selection t = t.project_selection
     let script_path t = t.script_path
 
-    let of_conversion range (converted : chat_element) =
+    module Extraction = struct
+      type bound = Chatmd_extraction_map.bound
+      type input_span = Chatmd_extraction_map.Input_span.t
+
+      let input = Chatmd_extraction_map.Input_span.input
+      let start_byte = Chatmd_extraction_map.Input_span.start_byte
+      let end_byte = Chatmd_extraction_map.Input_span.end_byte
+
+      type projection =
+        | Exact_inline of input_span
+        | External_origin of
+            { member : string
+            ; body_digest : Chatml_source.Digest.t
+            ; start_byte : int
+            ; end_byte : int
+            }
+        | Approximate_declaration of Chatmd_parser_input.Range.t
+
+      type error = Chatmd_extraction_map.Error.t =
+        | Stale_script_source
+        | Invalid_compiler_location
+      [@@deriving sexp_of]
+
+      let bind declaration ~compiled_source ~checkpoint =
+        Chatmd_extraction_map.bind declaration.extraction_map ~compiled_source ~checkpoint
+      ;;
+
+      let project_raw bound location ~checkpoint =
+        Chatmd_extraction_map.project_raw bound location ~checkpoint
+        |> Result.map ~f:(function
+          | Exact_inline span -> Exact_inline span
+          | External_origin { member; body_digest; start_byte; end_byte } ->
+            External_origin { member; body_digest; start_byte; end_byte }
+          | Approximate_declaration range -> Approximate_declaration range)
+      ;;
+    end
+
+    let of_conversion range (converted : chat_element) extraction_map =
       let source_text (source : Script_spec.source) =
         match source with
         | Inline text -> text
@@ -1462,11 +1644,20 @@ module Chat_markdown = struct
         | Owned_agent_tool _
         | Owned_agent_content _ -> None
       in
-      match range, script with
+      match range, script, extraction_map with
       | ( Some range
-        , Some (script_id, script_body, source_ref, project_selection, script_path) ) ->
-        Some { range; source_ref; script_id; script_body; project_selection; script_path }
-      | None, _ | Some _, None -> None
+        , Some (script_id, script_body, source_ref, project_selection, script_path)
+        , Some extraction_map ) ->
+        Some
+          { range
+          ; source_ref
+          ; script_id
+          ; script_body
+          ; project_selection
+          ; script_path
+          ; extraction_map
+          }
+      | None, _, _ | Some _, None, _ | Some _, Some _, None -> None
     ;;
   end
 
@@ -1770,6 +1961,30 @@ module Chat_markdown = struct
        : Document_projection.t)
   ;;
 
+  let extraction_budget owner =
+    let limits = Chatmd_owned_parser.limits owner in
+    let bytes = Limits.input_bytes limits in
+    let tokens = Limits.token_limit limits in
+    let saturating_add a b = if a > Int.max_value - b then Int.max_value else a + b in
+    let saturating_multiply_four value =
+      if value > Int.max_value / 4 then Int.max_value else value * 4
+    in
+    let blocks = 1 + ((bytes - 1) / 4096) in
+    let work =
+      saturating_add
+        16
+        (saturating_add
+           (saturating_multiply_four tokens)
+           (saturating_multiply_four blocks))
+    in
+    Chatmd_extraction_map.Limits.create
+      ~max_map_bytes:bytes
+      ~max_segments:tokens
+      ~max_work_steps:work
+    |> Or_error.ok_exn
+    |> Chatmd_extraction_map.Budget.create
+  ;;
+
   let parse_owned
         ~parse_document
         ~canonical_sources
@@ -1783,6 +1998,7 @@ module Chat_markdown = struct
         ~dir
     =
     let checkpoint () = Chatmd_owned_parser.checkpoint owner in
+    let map_budget = extraction_budget owner in
     let loader = Chatmd_owned_parser.bound_loader owner loader in
     let root_source =
       Source_loader.root loader ~file:source_file |> Result.ok_or_failwith
@@ -1833,11 +2049,12 @@ module Chat_markdown = struct
     let converted =
       List.mapi (chat_elements expanded) ~f:(fun top_level sourced ->
         checkpoint ();
-        let converted =
+        let converted, extraction_map =
           parse_chat_element
             ~owned_documents:true
             ~on_agent
             ~checkpoint
+            ~extraction_budget:map_budget
             ~on_document:(fun source ~items ->
               checkpoint ();
               let slot = Document_occurrence.Slot.create ~top_level ~items in
@@ -1852,7 +2069,7 @@ module Chat_markdown = struct
             sourced
         in
         Option.iter
-          (Declaration.of_conversion sourced.range converted)
+          (Declaration.of_conversion sourced.range converted extraction_map)
           ~f:(fun declaration -> declarations := declaration :: !declarations);
         converted)
     in
@@ -2058,7 +2275,8 @@ module Chat_markdown = struct
     let chat_elements = chat_elements expanded in
     let parsed_elements =
       List.map chat_elements ~f:(fun sourced ->
-        parse_chat_element ~dir ~loader ~preserve_child_sources:canonical_sources sourced)
+        parse_chat_element ~dir ~loader ~preserve_child_sources:canonical_sources sourced
+        |> fst)
     in
     of_chat_elements parsed_elements |> validate_scripts
   ;;

@@ -1,5 +1,73 @@
 open Core
 
+module Projection_receipt : sig
+  type t
+
+  val binding : t -> Chatml_prompt_programs.Binding.t
+  val compiler_contract : t -> Chatml_source.Digest.t
+  val declaration_range : t -> Chatmd_parser_input.Range.t
+
+  type projection =
+    | Exact_inline of Prompt.Chat_markdown.Declaration.Extraction.input_span
+    | Exact_external of Chatml_source.Location.t
+    | Approximate_declaration of Chatmd_parser_input.Range.t
+
+  type error = Prompt.Chat_markdown.Declaration.Extraction.error =
+    | Stale_script_source
+    | Invalid_compiler_location
+  [@@deriving sexp_of]
+
+  (** An immutable receipt from the SAME admitted parser/capture program-source
+      construction. It holds no native source capability or callback. Only a
+      sealed location in that source/revision is accepted. External exact sites
+      require the producer's successful read member/digest to match the same
+      captured route/member/bytes used to build the source ID. A mismatch yields
+      the declaration as approximate. Query work is finite and checkpointed;
+      cancellation exceptions propagate unchanged. *)
+  val project
+    :  t
+    -> Chatml_source.Location.t
+    -> checkpoint:(unit -> unit)
+    -> (projection, error) Result.t
+end
+
+module Captured : sig
+  type t
+
+  val programs : t -> Chatml_prompt_programs.t
+  val projections : t -> Projection_receipt.t list
+end
+
+(** One pass through the existing source-custody path. Projection receipts are
+    created only for selected/implicit host-constructed sources, after actual
+    Parsed/capture membership, route/member/raw-byte, binding, contract and
+    namespace checks. Arbitrary Provided graphs receive no external receipt.
+    Receipt count and retained bytes share existing program/source ceilings. *)
+val capture_with_projections
+  :  Prompt_source_owner.Scope.t
+  -> capture:Prompt_source_owner.Capture.t
+  -> root_plan:Chat_response.Script_contract_plan.t
+  -> role_plans:Chat_response.Script_contract_plan.t list
+  -> operation:
+       (Chat_response.Script_contract_plan.Program.t -> Chatml_project_build.Operation.t)
+  -> provided:(Chatml_prompt_programs.Binding.t * Chatml_prepared_program.t) list
+  -> additional_anchors:Chatml_local_roots.Anchor.t list
+  -> git_store:Chatml_git_host.Store.t option
+  -> git_grants:Chatml_git_host.Grant.t list
+  -> root_limits:Chatml_local_roots.Limits.t
+  -> max_grants:int
+  -> max_grant_bytes:int
+  -> max_request_bytes:int
+  -> max_path_components:int
+  -> max_input_bytes:int
+  -> max_work_steps:int
+  -> policy:Chatml_project_prepare.Policy.t
+  -> limits:Chatml_project_prepare.Limits.t
+  -> custody_limits:Chatml_prompt_programs.Limits.t
+  -> clock:_ Eio.Time.Mono.t
+  -> checkpoint:(unit -> unit)
+  -> (Captured.t, Prompt_revision_builder.Diagnostic.t list) Result.t
+
 (** Source-only script custody over SAME original admission/scope. No live tool
     capability, compiler or initializer is constructed. Callback is never retained. *)
 val capture

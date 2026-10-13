@@ -197,7 +197,15 @@ let tool ~loader ~source_node ~source node =
       fail source [ "tool" ] "chatmd.extension_expected_tool" "expected tool declaration")
 ;;
 
-let script ~dir ~loader ~source_node ~source ~attributes:raw ~inline_source =
+let script
+      ~on_external_source
+      ~dir
+      ~loader
+      ~source_node
+      ~source
+      ~attributes:raw
+      ~inline_source
+  =
   protect (fun () ->
     let allowed =
       [ "id"
@@ -250,7 +258,10 @@ let script ~dir ~loader ~source_node ~source ~attributes:raw ~inline_source =
     let text =
       match path with
       | None -> inline_source
-      | Some path -> snd (load loader source_node source [ "script"; "src" ] path)
+      | Some path ->
+        let resolved, text = load loader source_node source [ "script"; "src" ] path in
+        on_external_source resolved text;
+        text
     in
     if String.length text > 1024 * 1024
     then
@@ -283,6 +294,7 @@ let script ~dir ~loader ~source_node ~source ~attributes:raw ~inline_source =
     in
     let parsed =
       Chatmd_script_declaration.parse
+        ~on_external_source:(fun _ _ -> ())
         ~dir
         ~loader
         ~source_node

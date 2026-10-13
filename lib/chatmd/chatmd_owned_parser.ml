@@ -23,6 +23,7 @@ module Limits = struct
 
   let policy_identity = sexp_of_t
   let input_bytes t = t.input_bytes
+  let token_limit t = t.tokens
 end
 
 module Input_key = struct
@@ -52,6 +53,8 @@ let create limits ~checkpoint =
   ; poll = checkpoint
   }
 ;;
+
+let limits t = t.limits
 
 let checkpoint t =
   Eio.Fiber.check ();
@@ -161,8 +164,19 @@ let parse_worker t ?(check_token = ignore) input =
     token
   in
   try
+    let bytes = Chatmd_parser_input.effective input in
+    let next_byte = ref 0 in
+    let lexbuf =
+      Lexing.from_function (fun destination requested ->
+        poll ();
+        let available = String.length bytes - !next_byte in
+        let count = Int.min 4096 (Int.min requested available) in
+        Stdlib.Bytes.blit_string bytes !next_byte destination 0 count;
+        next_byte := !next_byte + count;
+        count)
+    in
     let document =
-      Parser.document token (Lexing.from_string (Chatmd_parser_input.effective input))
+      Parser.document token lexbuf
     in
     poll ();
     Ok document
