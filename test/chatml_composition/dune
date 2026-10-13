@@ -29,3 +29,14 @@
   (glob_files_rec ../chatml_extensibility_fixtures/x11-authoring-repair/*))
  (preprocess
   (pps ppx_jane ppx_blob ppx_expect)))
+
+; Documentation edits can change reviewed native-reference closure digests.
+; Keep their contract snapshots and executable examples in the docs-only gate.
+(rule
+ (alias agent-docs-check)
+ (deps native_contract_tests.ml ../../bin/ochat_agent_stdio.exe)
+ (action
+  (run %{exe:.chatml_composition_test.inline-tests/inline-test-runner.exe}
+   inline-test-runner chatml_composition_test
+   -partition native_contract_tests.ml -source-tree-root ../..
+   -strict -show-counts -diff-cmd "diff -u")))
