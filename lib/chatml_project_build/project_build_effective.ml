@@ -93,6 +93,17 @@ let compose_with_budget
         then fail (Duplicate_capture id)
         else Ok (Map.set seen ~key:id ~data:source))
   in
+  let%bind () =
+    match entry with
+    | Entry.Declared -> Ok ()
+    | Captured selected ->
+      (match Map.find source_by_id (Captured.id selected) with
+       | None -> Ok ()
+       | Some source ->
+         if Budget.equal_source budget source selected
+         then Ok ()
+         else fail (Duplicate_capture (Captured.id selected)))
+  in
   let%bind route_by_id =
     List.fold_result
       routes
@@ -130,7 +141,13 @@ let compose_with_budget
           checkpoint ();
           same_string namespace (Captured.Id.package_namespace decoded.route.declaration))
       in
-      if owned then Ok () else fail (Unexpected_catalog id))
+      let is_selected_entry =
+        match entry with
+        | Entry.Declared -> false
+        | Captured selected ->
+          same_id id (Captured.id selected) && Budget.equal_source budget source selected
+      in
+      if owned || is_selected_entry then Ok () else fail (Unexpected_catalog id))
   in
   let%bind root =
     Map.find decoded root_project
@@ -212,6 +229,10 @@ let compose_with_budget
           budget
           ~project:decoded.project
           ~request
+          ~captured_entry:
+            (match entry with
+             | Declared -> None
+             | Captured source -> Some source)
           ~sources:captures
       in
       { Input.catalog

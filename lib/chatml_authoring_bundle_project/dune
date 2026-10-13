@@ -1,0 +1,7 @@
+(library
+ (name chatml_authoring_bundle_project)
+ (public_name ochat.chatml_authoring_bundle_project)
+ (modules chatml_authoring_bundle_project authoring_bundle_project_result)
+ (private_modules authoring_bundle_project_result)
+ (libraries core agent_protocol chatml_project_build chatml_project chatml_prepared_program chatml_source chatml document_schema source)
+ (preprocess (pps ppx_jane)))
