@@ -1,10 +1,16 @@
 (library
+ (name chatmd_source_input)
+ (public_name ochat.chatmd_source_input)
+ (wrapped false)
+ (modules chatmd_ast chatmd_parser_input)
+ (libraries core digestif source chatml_source ochat.chatmd_shell_spec)
+ (preprocess (pps ppx_jane)))
+
+(library
  (name chatmd)
  (public_name ochat.chatmd)
  (wrapped false)
  (modules
-  chatmd_ast
-  chatmd_parser_input
   chatmd_parser_builder
   chatmd_located_ast
   chatmd_owned_parser
@@ -41,7 +47,8 @@
   io
   ochat.meta_prompting
   ochat.history_entry
-  ochat.chatmd_shell_spec)
+  ochat.chatmd_shell_spec
+  ochat.chatmd_source_input)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
 

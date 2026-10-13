@@ -29,6 +29,11 @@ type fallback_reason =
 type info = { fallback : fallback_reason option }
 
 let create ~theme = { resolver = Highlight_theme_resolver.create ~theme; registry = None }
+let theme t = Highlight_theme_resolver.theme t.resolver
+
+let uses_registry t ~registry =
+  Option.value_map t.registry ~default:false ~f:(fun owned -> phys_equal owned registry)
+;;
 
 let with_theme (t : t) ~theme =
   { t with resolver = Highlight_theme_resolver.create ~theme }

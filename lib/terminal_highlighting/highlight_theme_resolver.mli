@@ -9,6 +9,7 @@ open Core
 type t
 
 val create : theme:Highlight_theme.t -> t
+val theme : t -> Highlight_theme.t
 
 (** Scope order and duplicates do not affect lookup. The key encoding keeps
     distinct scope groups distinct even if they contain dots or separators. *)
