@@ -16,8 +16,11 @@ module Validated_history : sig
   val entries : t -> History_entry.t list
 
   (** The same retained receipt checks as [validate_retained], reusing only the
-      snapshot's payload decoding. Provenance, routing, outcome and occurrence
-      order are checked for each invocation. *)
+      snapshot's payload decoding and indexed original occurrences. Successful
+      call/routing checks are reused only within this invocation check. Outcome
+      validation and ordered provider-ID reuse checks still run at their original
+      boundaries. Construction uses O(n log n) time and O(n) additional storage;
+      suffixes share the original list. Identity lookups use O(log n) time. *)
   val validate_retained
     :  t
     -> Agent_protocol.Invocation.t

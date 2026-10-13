@@ -32,14 +32,17 @@ let result ?(relation = Payload.Call_relation.Bound (id 0)) sequence kind text =
   entry sequence "same" (Result { relation; kind; output = Text text })
 ;;
 
-let invocation ?routing () =
+let invocation ?routing ?context () =
   I.create
     ?routing
-    { (invocation_fixture ()).context with
-      origin = Model
-    ; provider_call_id = Some "same"
-    ; call_entry_id = Some (id 0)
-    }
+    (Option.value
+       context
+       ~default:
+         { (invocation_fixture ()).context with
+           origin = Model
+         ; provider_call_id = Some "same"
+         ; call_entry_id = Some (id 0)
+         })
   |> protocol_ok
   |> I.dispatch
   |> protocol_ok
@@ -243,4 +246,83 @@ let%expect_test "snapshot construction rejects malformed history before reuse" =
      rejected";
   [%expect
     {| malformed payload, guidance, redaction, classification and duplicate identity rejected |}]
+;;
+
+let%expect_test "indexed receipts agree with linear checks for generated histories" =
+  let digest = Chatmd_shell_spec.Source_ref.digest in
+  let fingerprint : I.payload_fingerprint = { sha256 = digest "null"; byte_length = 4 } in
+  let routing : I.routing =
+    { kind = Function
+    ; original_name = "read_file"
+    ; original_payload = fingerprint
+    ; final_payload = fingerprint
+    ; canonical_payload = Some fingerprint
+    ; preparation = Passed
+    }
+  in
+  let published routing =
+    I.publish_with_history (invocation ~routing ()) ~output_entry_id:(id 2) |> protocol_ok
+  in
+  let valid = published routing in
+  let publish_context context =
+    I.publish_with_history (invocation ~context ()) ~output_entry_id:(id 2) |> protocol_ok
+  in
+  let invocations =
+    [ valid
+    ; published
+        { routing with canonical_payload = Some { fingerprint with byte_length = 5 } }
+    ; published
+        { routing with
+          canonical_payload = Some { fingerprint with sha256 = digest "wrong" }
+        }
+    ; published { routing with kind = Custom }
+    ; invocation ~context:{ valid.context with call_entry_id = None } ()
+    ; publish_context { valid.context with call_entry_id = Some (id 99) }
+    ; publish_context { valid.context with provider_call_id = Some "other" }
+    ; publish_context { valid.context with tool_name = "other" }
+    ; I.publish_with_history (invocation ()) ~output_entry_id:(id 99) |> protocol_ok
+    ; I.discard_publication (invocation ()) ~reason:"compacted" |> protocol_ok
+    ]
+  in
+  let checks = ref 0 in
+  let generator = Quickcheck.Generator.list (Int.gen_incl 0 7) in
+  Quickcheck.test
+    generator
+    ~seed:(`Deterministic "indexed-retained-receipts")
+    ~trials:2000
+    ~f:(fun choices ->
+      let history =
+        List.filter_mapi choices ~f:(fun index choice ->
+          let sequence = index + 10 in
+          match choice with
+          | 0 -> None
+          | 1 -> Some (call sequence Payload.Call_kind.Function)
+          | 2 -> Some (call sequence Payload.Call_kind.Custom)
+          | 3 -> Some (result sequence Payload.Call_kind.Function outcome_text)
+          | 4 -> Some (result ~relation:(Bound (id 99)) sequence Function "wrong")
+          | 5 -> Some (Codec.user_text ~id:(id sequence) "unrelated" |> Codec.to_protocol)
+          | 6 -> Some { (call sequence Function) with provenance = Moderator_inserted }
+          | _ -> Some (call ~name:"other" sequence Function))
+      in
+      let original = call 0 Payload.Call_kind.Function in
+      let output = result 2 Payload.Call_kind.Function outcome_text in
+      (* Include arbitrary compaction and both sides of the receipt boundary.
+         IDs are unique even when provider call IDs repeat. *)
+      List.iter
+        [ history
+        ; original :: history
+        ; history @ [ output ]
+        ; (original :: history) @ [ output ]
+        ; original :: output :: history
+        ; (output :: history) @ [ original ]
+        ]
+        ~f:(fun history ->
+          let snapshot = H.Validated_history.create history |> protocol_ok in
+          List.iter invocations ~f:(fun invocation ->
+            assert_same_result
+              (H.validate_retained ~history invocation)
+              (H.Validated_history.validate_retained snapshot invocation);
+            Int.incr checks)));
+  print_s [%sexp (!checks : int), "exact results agree for generated receipt boundaries"];
+  [%expect {| (120000 "exact results agree for generated receipt boundaries") |}]
 ;;

@@ -153,97 +153,83 @@ module Json = struct
   ;;
 
   let validate_and_measure ~limits t =
-    let fields_seen = ref 0 in
-    let nodes_seen = ref 0 in
-    let bytes_seen = ref 0 in
-    let charge_bytes count =
-      if count > limits.Limits.max_bytes - !bytes_seen
-      then Error (Error.Limit_exceeded "bytes")
-      else (
-        bytes_seen := !bytes_seen + count;
-        Ok ())
-    in
-    (* Match Jsonaf's compact string serializer without allocating escaped text.
-       Check before every addition so even rejected authored values stay bounded. *)
-    let charge_string text =
-      let available = limits.Limits.max_bytes - !bytes_seen in
-      let encoded_bytes = ref 2 in
-      let index = ref 0 in
-      let exceeds_limit = ref (available < 2) in
-      let seen_bits = ref 0 in
-      while !index < String.length text && not !exceeds_limit do
-        let byte = text.[!index] in
-        seen_bits := !seen_bits lor Char.to_int byte;
-        let width =
-          match byte with
-          | '"' | '\\' | '\b' | '\012' | '\n' | '\r' | '\t' -> 2
-          | '\000' .. '\031' -> 6
-          | _ -> 1
-        in
-        if width > available - !encoded_bytes
-        then exceeds_limit := true
-        else encoded_bytes := !encoded_bytes + width;
-        incr index
-      done;
-      if !exceeds_limit
-      then Error (Error.Limit_exceeded "bytes")
-      else
-        let open Result.Let_syntax in
-        let%map () = charge_bytes !encoded_bytes in
-        (* A successful charge visited every byte. If none had its high bit set,
-           the same bounded scan also proved that the string is valid UTF-8. *)
+    (* Keep the per-node walk allocation-light. This private escape preserves the
+       first validation error without allocating Result callbacks at every field;
+       callers still receive the same bounded byte count or structured error. *)
+    With_return.with_return (fun return ->
+      let fail error = return.return (Error error) in
+      let invalid path reason = fail (Error.Invalid_field { path; reason }) in
+      let fields_seen = ref 0 in
+      let nodes_seen = ref 0 in
+      let bytes_seen = ref 0 in
+      let charge_bytes count =
+        if count > limits.Limits.max_bytes - !bytes_seen
+        then fail (Error.Limit_exceeded "bytes");
+        bytes_seen := !bytes_seen + count
+      in
+      (* Match compact string encoding while rejecting before any byte-budget
+         overflow. The same scan proves UTF-8 validity for ASCII strings. *)
+      let charge_string text =
+        let available = limits.Limits.max_bytes - !bytes_seen in
+        let encoded_bytes = ref 2 in
+        let index = ref 0 in
+        let exceeds_limit = ref (available < 2) in
+        let seen_bits = ref 0 in
+        while !index < String.length text && not !exceeds_limit do
+          let byte = text.[!index] in
+          seen_bits := !seen_bits lor Char.to_int byte;
+          let width =
+            match byte with
+            | '"' | '\\' | '\b' | '\012' | '\n' | '\r' | '\t' -> 2
+            | '\000' .. '\031' -> 6
+            | _ -> 1
+          in
+          if width > available - !encoded_bytes
+          then exceeds_limit := true
+          else encoded_bytes := !encoded_bytes + width;
+          incr index
+        done;
+        if !exceeds_limit then fail (Error.Limit_exceeded "bytes");
+        charge_bytes !encoded_bytes;
         !seen_bits land 0x80 = 0
-    in
-    let open Result.Let_syntax in
-    let rec walk t depth rev_path =
-      incr nodes_seen;
-      if depth > limits.Limits.max_depth
-      then Error (Error.Limit_exceeded "depth")
-      else if !nodes_seen > limits.max_nodes
-      then Error (Error.Limit_exceeded "nodes")
-      else (
+      in
+      let rec walk t depth rev_path =
+        incr nodes_seen;
+        if depth > limits.Limits.max_depth then fail (Error.Limit_exceeded "depth");
+        if !nodes_seen > limits.max_nodes then fail (Error.Limit_exceeded "nodes");
         match t with
         | `Object fields ->
-          let%bind () = charge_bytes 2 in
-          List.fold_result fields ~init:String.Set.empty ~f:(fun seen (key, value) ->
+          charge_bytes 2;
+          let seen = ref String.Set.empty in
+          List.iter fields ~f:(fun (key, value) ->
             incr fields_seen;
-            let%bind () = charge_bytes (if Set.is_empty seen then 1 else 2) in
-            let%bind is_ascii = charge_string key in
-            let%bind () =
-              if is_ascii || String.Utf8.is_valid key
-              then Ok ()
-              else invalid (List.rev (key :: rev_path)) "invalid UTF-8 object key"
-            in
-            if !fields_seen > limits.max_fields
-            then Error (Error.Limit_exceeded "fields")
-            else if Set.mem seen key
-            then Error (Error.Duplicate_key (List.rev (key :: rev_path)))
-            else (
-              let%map () = walk value (depth + 1) (key :: rev_path) in
-              Set.add seen key))
-          |> Result.map ~f:(fun _ -> ())
+            charge_bytes (if Set.is_empty !seen then 1 else 2);
+            let is_ascii = charge_string key in
+            if not (is_ascii || String.Utf8.is_valid key)
+            then invalid (List.rev (key :: rev_path)) "invalid UTF-8 object key";
+            if !fields_seen > limits.max_fields then fail (Error.Limit_exceeded "fields");
+            if Set.mem !seen key
+            then fail (Error.Duplicate_key (List.rev (key :: rev_path)));
+            walk value (depth + 1) (key :: rev_path);
+            seen := Set.add !seen key)
         | `Array values ->
-          let%bind () = charge_bytes 2 in
-          List.fold_result values ~init:0 ~f:(fun index value ->
-            let%bind () = if index = 0 then Ok () else charge_bytes 1 in
-            let%map () = walk value (depth + 1) (Int.to_string index :: rev_path) in
-            index + 1)
-          |> Result.map ~f:(fun _ -> ())
+          charge_bytes 2;
+          List.iteri values ~f:(fun index value ->
+            if index > 0 then charge_bytes 1;
+            walk value (depth + 1) (Int.to_string index :: rev_path))
         | `Number number ->
-          let%bind () = charge_bytes (String.length number) in
-          if valid_number number
-          then Ok ()
-          else invalid (List.rev rev_path) "invalid JSON number"
+          charge_bytes (String.length number);
+          if not (valid_number number)
+          then invalid (List.rev rev_path) "invalid JSON number"
         | `String text ->
-          let%bind is_ascii = charge_string text in
-          if is_ascii || String.Utf8.is_valid text
-          then Ok ()
-          else invalid (List.rev rev_path) "invalid UTF-8 string"
+          let is_ascii = charge_string text in
+          if not (is_ascii || String.Utf8.is_valid text)
+          then invalid (List.rev rev_path) "invalid UTF-8 string"
         | `True | `Null -> charge_bytes 4
-        | `False -> charge_bytes 5)
-    in
-    let%map () = walk t 1 [] in
-    !bytes_seen
+        | `False -> charge_bytes 5
+      in
+      walk t 1 [];
+      Ok !bytes_seen)
   ;;
 
   let validate ~limits t = validate_and_measure ~limits t |> Result.map ~f:ignore
@@ -1006,6 +992,16 @@ module Domain_codec = struct
     { Extension_carrier.value; template = Some document; retained }
   ;;
 
+  let rec same_owned_fields previous ~fields ~owned =
+    match previous, fields with
+    | [], [] -> true
+    | (previous_name, Known _) :: previous, (name, _) :: fields ->
+      String.equal previous_name name
+      && Map.mem owned name
+      && same_owned_fields previous ~fields ~owned
+    | (_, Unknown _) :: _, _ | [], _ :: _ | _ :: _, [] -> false
+  ;;
+
   let rec merge (shape : Shape.t) (retained : retained) (known : Json.t) path =
     let open Result.Let_syntax in
     match retained, shape, known with
@@ -1042,6 +1038,23 @@ module Domain_codec = struct
            && ((not (Option.equal String.equal previous_identity identity_field))
                || not (Bool.equal previous_allow_empty allow_empty_identity)) ->
       Error (Error.Extension_conflict path)
+    | Object previous, Shape.Object owned, `Object fields
+      when same_owned_fields previous ~fields ~owned ->
+      (* Every original name is still present and owned, so the general branch's
+         preflight cannot fail. Merge in the same order without indexing three
+         copies of each object's fields. Child extensions still use [merge]. *)
+      let rec merge_ordered previous fields result =
+        match previous, fields with
+        | [], [] -> Ok (`Object (List.rev result))
+        | (_, Known tree) :: previous, (name, value) :: fields ->
+          (match merge (Map.find_exn owned name) tree value (path @ [ name ]) with
+           | Error error -> Error error
+           | Ok value -> merge_ordered previous fields ((name, value) :: result))
+        | (_, Unknown _) :: _, (name, _) :: _ ->
+          Error (Error.Extension_conflict (path @ [ name ]))
+        | [], _ :: _ | _ :: _, [] -> Error (Error.Extension_conflict path)
+      in
+      merge_ordered previous fields []
     | Object previous, Shape.Object owned, `Object fields ->
       (* Both lists originate in duplicate-checked JSON trees. Indexing keeps
          large named-field objects bounded by O(n log n), including templates. *)
