@@ -12,7 +12,7 @@ module Limits = Inventory.Limits
 module Captured = Chatml_source
 module Revision = Program_source_revision
 module Parser = Chatmd_parser_input
-module Binding = Program_binding
+module Binding = Chatml_prompt_binding
 module D = Document_schema
 module F = Program_fields
 module Storage = Agent_store.Prompt_program_bundle
@@ -386,7 +386,7 @@ let adopt incoming ~previous ~authored ~limits ~checkpoint =
         in
         if
           (not same_kind)
-          || (not (Program_binding.equal program.binding actual.binding))
+          || (not (Chatml_prompt_binding.equal program.binding actual.binding))
           || (not
                 (Captured.Digest.equal program.compiler_contract actual.compiler_contract))
           || (not (Captured.Digest.equal program.fingerprint actual.fingerprint))

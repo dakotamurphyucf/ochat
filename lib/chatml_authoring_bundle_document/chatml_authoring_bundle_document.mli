@@ -1,7 +1,7 @@
 module Bundle = Agent_protocol.Authoring_bundle.Bundle
 module Captured = Chatml_source
 module Project = Chatml_authoring_bundle_project
-module Binding = Chatml_prompt_programs.Binding
+module Binding = Chatml_prompt_binding
 module Contract = Chatml.Chatml_compiler_contract
 
 (** Captured-only validation of one uploaded ChatMD definition and all its
@@ -70,7 +70,7 @@ end
     existing generated captured parser with no fallback. Match the manifest's
     scripts one-to-one with ALL actual Parsed.declarations; that registry contains
     only the parser's supported ChatML script families. Bind each declaration via
-    Chatml_prompt_programs.Binding, including its registration Root, actual
+    Chatml_prompt_binding, including its registration Root, actual
     imported declaring input/range, body digest and external-source provenance.
 
     Source_only is accepted only for an actual script with no authored project;
