@@ -19,3 +19,6 @@ val create
   -> git_native:Git.Limits.t
   -> composition:Build.Limits.t
   -> t
+
+val root_limits : t -> Roots.Limits.t
+val local_limits : t -> Chatml_local_capture.Limits.t

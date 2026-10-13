@@ -34,6 +34,10 @@ type t =
   { domain : int
   ; policy : Policy.t
   ; source_preparation : Sources.Policy.t
+  ; authoring_roots : (string * Chatml_local_roots.Anchor.t) list
+  ; project_policy : Chatml_project_prepare.Policy.t
+  ; project_limits : Chatml_project_prepare.Limits.t
+  ; max_project_request_bytes : int
   ; host : Sources.Host.t
   ; activity : Activity.t
   ; cancel : Eio.Cancel.t
@@ -281,6 +285,12 @@ let open_owned
                        ; policy
                        ; source_preparation =
                            Policy.Configured.source_preparation configured
+                       ; authoring_roots =
+                           List.zip_exn configuration.external_roots additional_anchors
+                       ; project_policy = Policy.Configured.project_policy configured
+                       ; project_limits = Policy.Configured.project_limits configured
+                       ; max_project_request_bytes =
+                           Policy.Configured.max_project_request_bytes configured
                        ; host = { Sources.Host.additional_anchors; git_store; git_grants }
                        ; activity
                        ; cancel
@@ -352,6 +362,36 @@ let with_host t ~f =
         Activity.run t.activity (fun () ->
           if t.closed then raise Activity.Closed;
           try f t.source_preparation t.host with
+          | exn -> raise (Callback.Raised (exn, Stdlib.Printexc.get_raw_backtrace ())))
+      in
+      Eio.Fiber.check ();
+      Ok result
+    with
+    | Callback.Raised (exn, trace) -> Exn.raise_with_original_backtrace exn trace
+    | Activity.Closed -> Error Error.Closed
+;;
+
+let with_authoring t ~f =
+  if not (Int.equal t.domain (domain ()))
+  then Error Error.Foreign_domain
+  else if t.closed
+  then Error Error.Closed
+  else
+    let module Callback = struct
+      exception Raised of exn * Stdlib.Printexc.raw_backtrace
+    end
+    in
+    try
+      let result =
+        Activity.run t.activity (fun () ->
+          if t.closed then raise Activity.Closed;
+          try
+            f
+              ~roots:t.authoring_roots
+              ~policy:t.project_policy
+              ~limits:t.project_limits
+              ~max_request_bytes:t.max_project_request_bytes
+          with
           | exn -> raise (Callback.Raised (exn, Stdlib.Printexc.get_raw_backtrace ())))
       in
       Eio.Fiber.check ();

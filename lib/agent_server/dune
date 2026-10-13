@@ -8,6 +8,7 @@
   project_source_policy
   project_source_header
   project_source_host
+  authoring_source_host
   authoring_options
   session_helper_policy
   authenticator
@@ -95,6 +96,11 @@
   ochat.document_schema
   ochat.chatml_git_host
   ochat.chatml_local_roots
+  ochat.chatml_local_source
+  ochat.chatml_source
+  ochat.chatml_project
+  ochat.chatml_project_build
+  ochat.chatml
   ochat.chatml_project_prepare
   ochat.chatml_local_capture
   ochat.chatml_git_catalog
@@ -110,6 +116,7 @@
   ochat.agent_client
   ochat.agent_store
   ochat.agent_session
+  source
   chatmd)
  (preprocess
   (pps ppx_jane)))
