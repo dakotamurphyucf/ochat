@@ -97,6 +97,17 @@ val open_or_create
   -> checkpoint:(unit -> unit)
   -> (t, Error.t) Result.t
 
+(** For each serialized operation below, [checkpoint] runs immediately after
+    acquiring the store operation gate, before uncertain-state recovery or
+    private upload access. A host may wrap it with a non-yielding current-grant
+    check; callbacks retain their exception/cancellation identity and do not
+    poison the gate. [now] is a trusted, non-yielding wall-clock callback,
+    sampled only under that gate after any recovery and the admission
+    checkpoint. Production callers must pass a callback that reads their
+    current host clock; fixed callbacks are suitable only for deterministic
+    fixtures. The sampled value governs admission, not a second check after
+    all I/O completes. *)
+
 (** The transport-neutral DTO is already syntactically validated. The store
       revalidates member count, canonical IDs/collisions, byte lengths/digests
       and aggregate ceilings before reserving disk and writing a durable begin
@@ -104,13 +115,12 @@ val open_or_create
       canonical manifest + optional parent provenance. Same key/same payload
       replays one upload ID without double reservation; different payload
       conflicts. A lost begin reply is recoverable after process restart while
-      its bounded idempotency record is retained. `now` is trusted store input,
-      never a wire/client timestamp. *)
+      its bounded idempotency record is retained. *)
 val begin_upload
   :  t
   -> principal:Agent_protocol.Id.Principal.t
   -> request:Bundle.Begin.request
-  -> now:Agent_protocol.Timestamp.t
+  -> now:(unit -> Agent_protocol.Timestamp.t)
   -> checkpoint:(unit -> unit)
   -> (Bundle.Begin.response, Error.t) Result.t
 
@@ -128,7 +138,7 @@ val chunk
   :  t
   -> principal:Agent_protocol.Id.Principal.t
   -> request:Bundle.Chunk.request
-  -> now:Agent_protocol.Timestamp.t
+  -> now:(unit -> Agent_protocol.Timestamp.t)
   -> checkpoint:(unit -> unit)
   -> (Bundle.Chunk.response, Error.t) Result.t
 
@@ -147,14 +157,14 @@ val claim_commit
   :  t
   -> principal:Agent_protocol.Id.Principal.t
   -> request:Bundle.Commit.request
-  -> now:Agent_protocol.Timestamp.t
+  -> now:(unit -> Agent_protocol.Timestamp.t)
   -> checkpoint:(unit -> unit)
   -> (Claim_result.t, Error.t) Result.t
 
 (** A checked, immutable in-memory snapshot under the stage's aggregate byte
       ceiling. This does not parse ChatMD, restore or compose a graph, or grant
       execution. OCH-264 consumes it with existing captured-only validation.
-      [now] is the host-owned clock value. A sealed claim has one fixed receipt
+      [now] is the host-owned clock callback. A sealed claim has one fixed receipt
       deadline set at its first complete commit; retry/status does not renew it.
       An expired claim or a handle from a closed/reopened store cannot snapshot.
       Snapshot creation rechecks durable files after restart; cancellation
@@ -163,7 +173,7 @@ val claim_commit
 val snapshot
   :  t
   -> sealed
-  -> now:Agent_protocol.Timestamp.t
+  -> now:(unit -> Agent_protocol.Timestamp.t)
   -> checkpoint:(unit -> unit)
   -> (Bundle.Manifest.t * Chatml_source.t list, Error.t) Result.t
 
@@ -178,7 +188,7 @@ val status
   :  t
   -> principal:Agent_protocol.Id.Principal.t
   -> upload_id:Agent_protocol.Id.Authoring_upload.t
-  -> now:Agent_protocol.Timestamp.t
+  -> now:(unit -> Agent_protocol.Timestamp.t)
   -> checkpoint:(unit -> unit)
   -> (Status.t, Error.t) Result.t
 
@@ -190,7 +200,7 @@ val cancel
   :  t
   -> principal:Agent_protocol.Id.Principal.t
   -> upload_id:Agent_protocol.Id.Authoring_upload.t
-  -> now:Agent_protocol.Timestamp.t
+  -> now:(unit -> Agent_protocol.Timestamp.t)
   -> checkpoint:(unit -> unit)
   -> (unit, Error.t) Result.t
 
@@ -206,7 +216,7 @@ val cancel
       close/cancel and synced before success. *)
 val prune
   :  t
-  -> now:Agent_protocol.Timestamp.t
+  -> now:(unit -> Agent_protocol.Timestamp.t)
   -> protected_uploads:Agent_protocol.Id.Authoring_upload.t list
   -> checkpoint:(unit -> unit)
   -> (int, Error.t) Result.t

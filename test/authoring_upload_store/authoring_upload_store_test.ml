@@ -172,7 +172,7 @@ let send_chunk store upload_id source byte_offset bytes =
   let request =
     B.Chunk.create_request ~upload_id ~source ~byte_offset ~bytes |> protocol_ok
   in
-  Store.chunk store ~principal ~request ~now:start ~checkpoint:Fn.id
+  Store.chunk store ~principal ~request ~now:(fun () -> start) ~checkpoint:Fn.id
 ;;
 
 let%expect_test
@@ -182,12 +182,22 @@ let%expect_test
     let store = open_store env sw root_handle lock in
     let request = begin_request () in
     let response =
-      Store.begin_upload store ~principal ~request ~now:start ~checkpoint:Fn.id
+      Store.begin_upload
+        store
+        ~principal
+        ~request
+        ~now:(fun () -> start)
+        ~checkpoint:Fn.id
       |> upload_ok
     in
     let upload_id = B.Begin.upload_id response in
     let replay =
-      Store.begin_upload store ~principal ~request ~now:start ~checkpoint:Fn.id
+      Store.begin_upload
+        store
+        ~principal
+        ~request
+        ~now:(fun () -> start)
+        ~checkpoint:Fn.id
       |> upload_ok
     in
     check
@@ -201,7 +211,7 @@ let%expect_test
            store
            ~principal
            ~request:different
-           ~now:start
+           ~now:(fun () -> start)
            ~checkpoint:Fn.id
        with
        | Error Store.Error.Idempotency_conflict -> true
@@ -209,7 +219,12 @@ let%expect_test
     check
       "foreign principal cannot inspect upload"
       (match
-         Store.status store ~principal:foreign ~upload_id ~now:start ~checkpoint:Fn.id
+         Store.status
+           store
+           ~principal:foreign
+           ~upload_id
+           ~now:(fun () -> start)
+           ~checkpoint:Fn.id
        with
        | Error Store.Error.Missing_or_foreign -> true
        | _ -> false);
@@ -230,21 +245,31 @@ let%expect_test
     check
       "incomplete commit consumes no key"
       (match
-         Store.claim_commit store ~principal ~request:commit ~now:start ~checkpoint:Fn.id
+         Store.claim_commit
+           store
+           ~principal
+           ~request:commit
+           ~now:(fun () -> start)
+           ~checkpoint:Fn.id
        with
        | Error Store.Error.Incomplete -> true
        | _ -> false);
     ignore (send_chunk store upload_id script 0 script_bytes |> upload_ok);
     let sealed =
       match
-        Store.claim_commit store ~principal ~request:commit ~now:start ~checkpoint:Fn.id
+        Store.claim_commit
+          store
+          ~principal
+          ~request:commit
+          ~now:(fun () -> start)
+          ~checkpoint:Fn.id
         |> upload_ok
       with
       | Store.Claim_result.Ready sealed -> sealed
       | Rejected _ -> failwith "unexpected rejection"
     in
     let _, sources =
-      Store.snapshot store sealed ~now:start ~checkpoint:Fn.id |> upload_ok
+      Store.snapshot store sealed ~now:(fun () -> start) ~checkpoint:Fn.id |> upload_ok
     in
     check
       "snapshot exact order and bytes"
@@ -256,11 +281,16 @@ let%expect_test
     let reopened = open_store env sw root_handle lock in
     check
       "old sealed handle invalid after reopen"
-      (match Store.snapshot reopened sealed ~now:start ~checkpoint:Fn.id with
+      (match Store.snapshot reopened sealed ~now:(fun () -> start) ~checkpoint:Fn.id with
        | Error Store.Error.Closed -> true
        | _ -> false);
     let replay =
-      Store.begin_upload reopened ~principal ~request ~now:start ~checkpoint:Fn.id
+      Store.begin_upload
+        reopened
+        ~principal
+        ~request
+        ~now:(fun () -> start)
+        ~checkpoint:Fn.id
       |> upload_ok
     in
     check
@@ -272,7 +302,7 @@ let%expect_test
           reopened
           ~principal
           ~request:commit
-          ~now:start
+          ~now:(fun () -> start)
           ~checkpoint:Fn.id
         |> upload_ok
       with
@@ -286,12 +316,14 @@ let%expect_test
            reopened
            ~principal
            ~request:(B.Commit.create_request ~upload_id ~idempotency_key:other_commit_key)
-           ~now:start
+           ~now:(fun () -> start)
            ~checkpoint:Fn.id
        with
        | Error Store.Error.Idempotency_conflict -> true
        | _ -> false);
-    ignore (Store.snapshot reopened sealed ~now:start ~checkpoint:Fn.id |> upload_ok);
+    ignore
+      (Store.snapshot reopened sealed ~now:(fun () -> start) ~checkpoint:Fn.id
+       |> upload_ok);
     Store.close_and_wait reopened |> upload_ok;
     printf "one recovered upload; two exact source revisions\n");
   [%expect {| one recovered upload; two exact source revisions |}]
@@ -304,7 +336,12 @@ let%expect_test "recovery distinguishes interrupted begin, append, and prune" =
     let store = open_store env sw root_handle lock in
     let request = begin_request () in
     let upload_id =
-      Store.begin_upload store ~principal ~request ~now:start ~checkpoint:Fn.id
+      Store.begin_upload
+        store
+        ~principal
+        ~request
+        ~now:(fun () -> start)
+        ~checkpoint:Fn.id
       |> upload_ok
       |> B.Begin.upload_id
     in
@@ -312,7 +349,12 @@ let%expect_test "recovery distinguishes interrupted begin, append, and prune" =
     Eio.Path.unlink (phase_file env root_handle upload_id);
     let recovered = open_store env sw root_handle lock in
     let same =
-      Store.begin_upload recovered ~principal ~request ~now:start ~checkpoint:Fn.id
+      Store.begin_upload
+        recovered
+        ~principal
+        ~request
+        ~now:(fun () -> start)
+        ~checkpoint:Fn.id
       |> upload_ok
       |> B.Begin.upload_id
     in
@@ -356,7 +398,7 @@ let%expect_test "recovery distinguishes interrupted begin, append, and prune" =
         store
         ~principal
         ~request:(begin_request ())
-        ~now:start
+        ~now:(fun () -> start)
         ~checkpoint:Fn.id
       |> upload_ok
       |> B.Begin.upload_id
@@ -371,7 +413,7 @@ let%expect_test "recovery distinguishes interrupted begin, append, and prune" =
       (match
          Store.prune
            store
-           ~now:(later 61000)
+           ~now:(fun () -> later 61000)
            ~protected_uploads:[]
            ~checkpoint:interrupted
        with
@@ -380,7 +422,12 @@ let%expect_test "recovery distinguishes interrupted begin, append, and prune" =
     check
       "same store recovers after interrupted cleanup"
       (match
-         Store.status store ~principal ~upload_id ~now:(later 61000) ~checkpoint:Fn.id
+         Store.status
+           store
+           ~principal
+           ~upload_id
+           ~now:(fun () -> later 61000)
+           ~checkpoint:Fn.id
        with
        | Ok Store.Status.Expired -> true
        | _ -> false);
@@ -403,7 +450,12 @@ let%expect_test "recovery distinguishes interrupted begin, append, and prune" =
     check
       "pruned upload cannot resurrect"
       (match
-         Store.status recovered ~principal ~upload_id ~now:start ~checkpoint:Fn.id
+         Store.status
+           recovered
+           ~principal
+           ~upload_id
+           ~now:(fun () -> start)
+           ~checkpoint:Fn.id
        with
        | Error Store.Error.Missing_or_foreign -> true
        | _ -> false);
@@ -420,7 +472,7 @@ let%expect_test "protected sealed claim retains source through expiry maintenanc
         store
         ~principal
         ~request:(begin_request ())
-        ~now:start
+        ~now:(fun () -> start)
         ~checkpoint:Fn.id
       |> upload_ok
       |> B.Begin.upload_id
@@ -432,13 +484,13 @@ let%expect_test "protected sealed claim retains source through expiry maintenanc
          store
          ~principal
          ~request:(B.Commit.create_request ~upload_id ~idempotency_key:commit_key)
-         ~now:start
+         ~now:(fun () -> start)
          ~checkpoint:Fn.id
        |> upload_ok);
     ignore
       (Store.prune
          store
-         ~now:(later 121000)
+         ~now:(fun () -> later 121000)
          ~protected_uploads:[ upload_id ]
          ~checkpoint:Fn.id
        |> upload_ok);
@@ -447,7 +499,11 @@ let%expect_test "protected sealed claim retains source through expiry maintenanc
     in
     check "protected bytes remain" (String.equal (Eio.Path.load member) root_bytes);
     ignore
-      (Store.prune store ~now:(later 121000) ~protected_uploads:[] ~checkpoint:Fn.id
+      (Store.prune
+         store
+         ~now:(fun () -> later 121000)
+         ~protected_uploads:[]
+         ~checkpoint:Fn.id
        |> upload_ok);
     check
       "unprotected bytes cleaned"
@@ -467,7 +523,7 @@ let%expect_test "recovery reapplies configured member policy and live lock" =
         store
         ~principal
         ~request:(begin_request ())
-        ~now:start
+        ~now:(fun () -> start)
         ~checkpoint:Fn.id
       |> upload_ok
       |> B.Begin.upload_id
@@ -504,13 +560,27 @@ let%expect_test "recovery reapplies configured member policy and live lock" =
     let reopened = open_store env sw root_handle lock in
     check
       "failed open released local registry"
-      (match Store.status reopened ~principal ~upload_id ~now:start ~checkpoint:Fn.id with
+      (match
+         Store.status
+           reopened
+           ~principal
+           ~upload_id
+           ~now:(fun () -> start)
+           ~checkpoint:Fn.id
+       with
        | Ok (Store.Status.Open _) -> true
        | _ -> false);
     Agent_store.Lock.release ~env lock |> store_ok;
     check
       "released daemon lock closes store admission"
-      (match Store.status reopened ~principal ~upload_id ~now:start ~checkpoint:Fn.id with
+      (match
+         Store.status
+           reopened
+           ~principal
+           ~upload_id
+           ~now:(fun () -> start)
+           ~checkpoint:Fn.id
+       with
        | Error Store.Error.Closed -> true
        | _ -> false);
     Store.close_and_wait reopened |> upload_ok);
@@ -538,7 +608,7 @@ let%expect_test "begin reserves all future member progress records" =
            store
            ~principal
            ~request:(begin_request ())
-           ~now:start
+           ~now:(fun () -> start)
            ~checkpoint:Fn.id
        with
        | Error Store.Error.Limit_exceeded -> true

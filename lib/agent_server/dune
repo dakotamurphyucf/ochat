@@ -9,6 +9,7 @@
   project_source_header
   project_source_host
   authoring_source_host
+  authoring_upload_host
   authoring_options
   session_helper_policy
   authenticator

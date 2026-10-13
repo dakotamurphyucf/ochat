@@ -325,6 +325,20 @@ where appropriate, but do not reuse message-input `Send_messages` scope,
 one-hour temporary retention or `allowed_use` as authoring authority. Local,
 HTTP and stdio clients share the same bundle receipt contract.
 
+The host upload facade takes exclusive lifetime ownership of one staging store.
+Its independent upload policy checks the original authenticated actor and
+current grant before each request, again after waiting for the facade gate,
+and within the store operation gate before recovery or private upload access.
+An optional parent context is checked against current context authority at
+begin; it is provenance, not a requirement for upload-only clients. The store
+samples the host wall clock after its own gate and recovery, so queue time
+cannot extend an expired upload. This timestamp governs operation admission;
+completed I/O is not retroactively cancelled at the deadline. Revocation or
+cancellation may leave durable accepted bytes with an uncertain reply, which
+an authorized retry or status call reconciles. The facade joins active work
+before closing the store and returns finite, path-free error codes; it does
+not install a public handler or manufacture publication authority.
+
 The user-facing flow must distinguish `host source`, `local saved`, `unsaved
 overlay` and `uploaded revision`. Analysis and run/test name the exact chosen
 origin. Uploaded source is private to its authorized principal and is not a host
