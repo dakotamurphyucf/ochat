@@ -58,7 +58,13 @@ let instantiate program ~surface ~entrypoints ?control () =
     Error { Error.kind; diagnostic = Diagnostic.create ?site message }
   in
   let runtime result =
-    Result.map_error result ~f:(fun diagnostic -> { Error.kind = Runtime; diagnostic })
+    Result.map_error result ~f:(fun (diagnostic : Diagnostic.t) ->
+      Chatml_trace.Scope.observe_site
+        ~kind:
+          (Chatml_trace.Event.Kind.Unrecovered_failure Chatml_trace.Event.Failure.Runtime)
+        ~site:diagnostic.site
+        ~correlation:None;
+      { Error.kind = Runtime; diagnostic })
   in
   checkpoint ();
   let%bind () =
@@ -167,9 +173,29 @@ let instantiate program ~surface ~entrypoints ?control () =
         in
         let base = { base with Lang.configured_modules } in
         let unit_source = Linked.Unit.implementation unit in
+        let unit_program = Linked.Unit.program unit in
+        let initialization_phase =
+          if Id.equal id (Graph.entry (Linked.graph program))
+          then Chatml_trace.Event.Phase.Entry_initialization
+          else Chatml_trace.Event.Phase.Dependency_initialization
+        in
+        let phase_span =
+          match unit_program.stmts with
+          | stmt :: _ -> stmt.span
+          | [] ->
+            let start = Source.{ line = 1; column = 0; offset = 0 } in
+            Source.{ left = start; right = start }
+        in
+        let phase kind =
+          Chatml_trace.Scope.observe_span
+            ~kind
+            ~source:(Some unit_source)
+            ~span:phase_span
+            ~correlation:None
+        in
+        phase (Chatml_trace.Event.Kind.Phase_started initialization_phase);
         let%bind env =
-          Eval.eval_captured_program base ~source:unit_source (Linked.Unit.program unit)
-          |> runtime
+          Eval.eval_captured_program base ~source:unit_source unit_program |> runtime
         in
         let%bind location =
           match
@@ -206,6 +232,7 @@ let instantiate program ~surface ~entrypoints ?control () =
               Invalid_linkage
               "Linked module initialized more than once"
         in
+        phase (Chatml_trace.Event.Kind.Phase_finished initialization_phase);
         Ok
           ( completed
           , if Id.equal id (Graph.entry (Linked.graph program))
