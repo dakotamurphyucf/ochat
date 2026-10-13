@@ -7,6 +7,10 @@ module E = Chatml_authoring_effective
 module P = Chatml_prepared_program
 module S = Chatml_source
 module CM = Prompt.Chat_markdown
+module F = Chatml_authoring_fallback
+module FD = Chatmd_authoring_fallback
+module AP = Agent_protocol
+module W = AP.Authoring.Assistance.Assistance
 
 let ok = function
   | Ok value -> value
@@ -171,13 +175,76 @@ let site source start_byte end_byte =
   |> Or_error.ok_exn
 ;;
 
+let wire_ok = function
+  | Ok value -> value
+  | Error error -> Error.raise_s (AP.Error.sexp_of_t error)
+;;
+
+let fallback_limits () =
+  F.Limits.create
+    ~lexical:
+      (Language_highlighting.Highlight_snapshot.Limits.create
+         ~max_source_bytes:100_000
+         ~max_identity_bytes:2048
+         ~max_spans:10_000
+         ~max_issues:256
+         ~max_work_units:100_000
+         ~max_nesting:128
+       |> Or_error.ok_exn)
+    ~max_contract_identity_bytes:20_000_000
+    ~max_contract_work_steps:100_000
+    ~max_projection_work_steps:100_000
+    ~max_output_bytes:200_000
+  |> Or_error.ok_exn
+;;
+
+let fallback_adapter_limits () =
+  FD.Limits.create
+    ~max_source_bytes:1_000_000
+    ~max_identity_bytes:2048
+    ~max_work_steps:10_000
+  |> Or_error.ok_exn
+;;
+
+let fallback_request source ~cursor_byte =
+  let generator =
+    AP.Id.Generator.create ~bytes:(fun length -> String.make length '\000')
+  in
+  let host = AP.Id.Server.create_with generator in
+  let id = AP.Id.Authoring_context.create_with generator in
+  let wire_source =
+    AP.Authoring.Source.create
+      ~id:(S.id source)
+      ~digest:(S.digest source)
+      ~byte_length:(S.byte_length source)
+      ~editor_revision:None
+    |> wire_ok
+  in
+  let fingerprint = S.Digest.of_contents "document" ~checkpoint:ignore in
+  let context =
+    AP.Authoring.Context.create
+      ~id
+      ~host
+      ~origin:
+        (AP.Authoring.Context.Supplied_document
+           { source = wire_source; default_environment = None })
+      ~generation:0
+      ~basis:(AP.Authoring.Context.Document { source = wire_source; selection = None })
+      ~basis_fingerprint:fingerprint
+      ~editable_sources:[]
+    |> wire_ok
+    |> AP.Authoring.Context.Expected.of_view
+  in
+  W.Request.create ~context ~source:wire_source ~cursor_byte ~max_items:64 |> wire_ok
+;;
+
 let%test_unit "selected script uses real parser ownership and current document bytes" =
   let authored_body = "let main input = Task.pure(input)" in
   let root =
     sprintf {|<script id="s" language="chatml" kind="tool">%s</script>|} authored_body
   in
   let parsed = parse [ "root.chatmd", root ] in
-  let _fixture, _base, selected = selected_build authored_body in
+  let fixture, _base, selected = selected_build authored_body in
   let id = identity "document" in
   let contexts =
     C.create ~limits:(limits ())
@@ -197,6 +264,77 @@ let%test_unit "selected script uses real parser ownership and current document b
     S.Id.equal
       (D.Document_stamp.selected_script_source stamp)
       (P.entry (B.prepared selected)));
+  let selected_contract =
+    F.Selected_contract.admit
+      selected
+      ~selected_contract:fixture.contract
+      ~limits:(fallback_limits ())
+      ~checkpoint:ignore
+    |> function
+    | Ok selected -> selected
+    | Error error -> Error.raise_s (F.Error.sexp_of_t error)
+  in
+  let authored_input = CM.Parsed.root_input parsed in
+  let authored_source = C.Document.Inputs.source inputs in
+  let origin =
+    match
+      FD.Origin.admit
+        script
+        ~current:inputs
+        ~authored_input
+        ~authored_source
+        ~selected:selected_contract
+        ~limits:(fallback_adapter_limits ())
+        ~checkpoint:ignore
+    with
+    | Ok (Ready origin) -> origin
+    | Ok Unavailable | Error _ -> assert false
+  in
+  let body_start = String.substr_index_exn root ~pattern:authored_body in
+  let request = fallback_request authored_source ~cursor_byte:(body_start + 2) in
+  let fallback =
+    F.produce
+      origin
+      ~request
+      ~selected:(Some selected_contract)
+      ~limits:(fallback_limits ())
+      ~checkpoint:ignore
+    |> function
+    | Ok result -> result
+    | Error error -> Error.raise_s (F.Error.sexp_of_t error)
+  in
+  let let_item =
+    W.Result.items fallback
+    |> List.find_exn ~f:(fun item -> String.equal (W.Suggestion.label item) "let")
+  in
+  let replacement = W.Suggestion.replace let_item in
+  assert (Int.equal (W.Range.start_byte replacement) body_start);
+  assert (Int.equal (W.Range.end_byte replacement) (body_start + 3));
+  (match
+     FD.Origin.admit
+       script
+       ~current:inputs
+       ~authored_input
+       ~authored_source:(source (root ^ " changed"))
+       ~selected:selected_contract
+       ~limits:(fallback_adapter_limits ())
+       ~checkpoint:ignore
+   with
+   | Error FD.Error.Stale_document -> ()
+   | Ok _ | Error _ -> assert false);
+  let foreign_parser = parse [ "root.chatmd", root ] in
+  (match
+     FD.Origin.admit
+       script
+       ~current:inputs
+       ~authored_input:(CM.Parsed.root_input foreign_parser)
+       ~authored_source
+       ~selected:selected_contract
+       ~limits:(fallback_adapter_limits ())
+       ~checkpoint:ignore
+   with
+   | Ok FD.Origin.Unavailable -> ()
+   | Ok (Ready _) | Error _ -> assert false);
   Eio_main.run (fun env ->
     let policy = policy () in
     let candidate =

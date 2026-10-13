@@ -15,6 +15,7 @@ module Projection_receipt : sig
   type error = Prompt.Chat_markdown.Declaration.Extraction.error =
     | Stale_script_source
     | Invalid_compiler_location
+    | Invalid_authored_point
   [@@deriving sexp_of]
 
   (** An immutable receipt from the SAME admitted parser/capture program-source

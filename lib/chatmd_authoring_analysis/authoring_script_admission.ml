@@ -154,6 +154,16 @@ module Script = struct
 
   let document_stamp t = t.stamp
   let selected_source t = t.entry_source
+  let selected_prepared t = Build.prepared t.selected
+  let root_input t = Markdown.Parsed.root_input t.parsed
+
+  let authored_point t ~input ~authored_byte ~checkpoint =
+    Markdown.Declaration.Extraction.authored_point
+      t.extraction
+      ~input
+      ~authored_byte
+      ~checkpoint
+  ;;
 
   let assess inputs ~parsed ~script_id ~selection ~max_membership_work_steps ~checkpoint =
     let open Result.Let_syntax in
@@ -248,7 +258,8 @@ module Script = struct
                     |> Result.map_error ~f:(function
                       | Markdown.Declaration.Extraction.Stale_script_source ->
                         Error.Script_body_mismatch
-                      | Invalid_compiler_location as error -> Error.Projection error)
+                      | (Invalid_compiler_location | Invalid_authored_point) as error ->
+                        Error.Projection error)
                   in
                   let stamp =
                     { Document_stamp.identity = Context.Document.Inputs.identity inputs
