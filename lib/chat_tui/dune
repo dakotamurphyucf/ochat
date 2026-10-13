@@ -93,6 +93,7 @@
   ui_helpers)
  (libraries ochat.inference_host ochat.inference_client ochat.inference_runtime ochat.inference ochat.history_chatmd ochat.transcript ochat.document_schema
   core
+  ochat.terminal_highlighting
   uuseg
   jsonaf
   textmate-language
@@ -115,15 +116,5 @@
   ochat.agent_client
   context_compaction)
  (preprocess
-  (pps ppx_jane ppx_blob))
- (preprocessor_deps
-  grammars/ocaml.json
-  grammars/vscode/python.json
-  grammars/vscode/python-regexp.json
-  grammars/vscode/rust.json
-  grammars/vscode/javascript.json
-  grammars/vscode/javascript-react.json
-  grammars/vscode/typescript.json
-  grammars/vscode/typescript-react.json
-  grammars/markdown.tmLanguage.json)
+  (pps ppx_jane))
  (inline_tests))

@@ -1,0 +1,5 @@
+(library
+ (name terminal_highlighting_boundary_tests)
+ (libraries core notty chat_tui ochat.terminal_highlighting)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

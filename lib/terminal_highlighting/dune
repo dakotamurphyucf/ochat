@@ -1,0 +1,23 @@
+(library
+ (name terminal_highlighting)
+ (public_name ochat.terminal_highlighting)
+ (modules
+  highlight_styles
+  highlight_theme
+  highlight_theme_resolver
+  highlight_tm_loader
+  highlight_tm_engine
+  highlight_grammars)
+ (libraries core notty textmate-language jsonaf)
+ (preprocess (pps ppx_jane ppx_blob))
+ (preprocessor_deps
+  grammars/ocaml.json
+  grammars/vscode/python.json
+  grammars/vscode/python-regexp.json
+  grammars/vscode/rust.json
+  grammars/vscode/javascript.json
+  grammars/vscode/javascript-react.json
+  grammars/vscode/typescript.json
+  grammars/vscode/typescript-react.json
+  grammars/markdown.tmLanguage.json)
+ (inline_tests))
