@@ -46,10 +46,11 @@ Request type names identify the complete field schema there. All mutations
 require applicable actor state and authorization, not merely passing JSON
 validation.
 
-The `authoring.*` core entries below are typed codec contracts for OCH-261.
-No server handler or `authoring.core.v1` feature is installed yet; these methods
-currently return `method_not_found`. OCH-262 will install the corresponding
-principal, source-custody and context handlers before advertising the feature.
+The `authoring.*` entries below are typed codec contracts for OCH-261 and
+OCH-281. No server handler or `authoring.core.v1`/`authoring.bundle.v1` feature
+is installed yet; these methods currently return `method_not_found`.
+Upload-only principals can negotiate the bundle feature without a source
+context once the host installs its independent upload grant and handlers.
 
 | Method | Request type | Minimum method scope | Result / behavior |
 |---|---|---|---|
@@ -147,6 +148,10 @@ principal, source-custody and context handlers before advertising the feature.
 | `authoring.document.version` | `Authoring.Document.Version_request` | Pending authoring handler | Current source/context CAS version; currently unavailable. |
 | `authoring.document.replace` | `Authoring.Document.Replace_request` | Pending authoring handler | Full validated UTF-8 overlay replacement; currently unavailable. |
 | `authoring.document.close` | `Authoring.Document.Close_request` | Pending authoring handler | Revert an overlay with retained editor revision; currently unavailable. |
+| `authoring.bundle.begin` | `Authoring.Bundle.Begin.request` | Pending independent upload handler | Qualified immutable manifest, optional parent provenance and explicit begin idempotency; currently unavailable. |
+| `authoring.bundle.chunk` | `Authoring.Bundle.Chunk.request` | Pending independent upload handler | Bounded exact binary member chunk with replay-safe offset; currently unavailable. |
+| `authoring.bundle.commit` | `Authoring.Bundle.Commit.request` | Pending independent upload handler | Seal complete upload under explicit idempotency; acceptance may precede closure publication; currently unavailable. |
+| `authoring.bundle.status` | `Authoring.Bundle.Status.request` | Pending independent upload handler | Principal-bound staging/validation/publication/retention state for a known upload ID; currently unavailable. |
 
 Read-only attachments cannot authorize writer operations or permission answers.
 Ingress has separate authority: it needs its dedicated scope and matching

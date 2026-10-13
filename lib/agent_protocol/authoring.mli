@@ -13,4 +13,5 @@ module Site = Authoring_common.Site
 module Context = Authoring_context.Context
 module Document = Authoring_context.Document
 module Source_read = Authoring_context.Source_read
+module Bundle = Authoring_bundle.Bundle
 module Wire = Authoring_wire
