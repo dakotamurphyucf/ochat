@@ -63,6 +63,7 @@ let find_job t id =
   List.find t.jobs ~f:(fun job -> P.Id.Job.equal (P.Developer_job.id job) id)
 ;;
 
+let jobs t = t.jobs
 let job_count t = List.length t.jobs
 
 let next_revision revision =

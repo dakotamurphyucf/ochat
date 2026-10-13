@@ -65,6 +65,47 @@ module Registry : sig
     -> workspace_conflict_domain:string
     -> (run, Agent_protocol.Error.t) result
 
+  (** The startup form of [admit]. After acquiring the same physical Run_claim
+      and authenticating the original actor/capture, open the one-shot Store
+      recovery window and call [recover] BEFORE creating or exposing a worker.
+      The callback selects only terminal bookkeeping through that window and
+      must finish it; returned [Ok ()] without a finished window rejects.
+      Caller exceptions/cancellation keep their identity. A clean preselection
+      failure can abort the empty window and release admission. An unresolved
+      Pending retains the provisional slot and Run_claim, excluding any new
+      same-run owner or effect until [resume_recovery] settles it. *)
+  val admit_with_recovery
+    :  t
+    -> actor:Operator_authorization.t
+    -> capture:Chatml_developer_capture.t
+    -> registry:Chat_response.Tool_capability.t
+    -> selected:Chat_response.Tool_capability.t
+    -> job_policy:Chat_response.One_off_request.policy
+    -> handle:Agent_store.Developer_run_store.handle
+    -> workspace_conflict_domain:string
+    -> recover:
+         (Agent_store.Developer_run_store.Recovery.t
+          -> (unit, Agent_protocol.Error.t) result)
+    -> (run, Agent_protocol.Error.t) result
+
+  (** Re-enter only this Registry's retained provisional recovery for the
+      original current actor object and exact physical handle. The same window
+      and any retained terminal preparation are reused; no worker or new
+      Run_claim is created. A revoked actor cannot select a different terminal
+      outcome or receive a worker. Retained custody is preserved until the
+      original actor becomes current again, or a separately authorized future
+      cleanup policy reconciles the exact frozen preparation. There is no
+      fresh-actor rebind in this API.
+      Missing, foreign, closed, concurrent or already-owned slots reject. *)
+  val resume_recovery
+    :  t
+    -> actor:Operator_authorization.t
+    -> handle:Agent_store.Developer_run_store.handle
+    -> recover:
+         (Agent_store.Developer_run_store.Recovery.t
+          -> (unit, Agent_protocol.Error.t) result)
+    -> (run, Agent_protocol.Error.t) result
+
   (** Exclude new admissions, revoke and join each exact run owner, and leave
       shared Store closure to the daemon. Unknown per-run quarantine retains
       its claim and causes an Error, never permits a second owner. Other runs

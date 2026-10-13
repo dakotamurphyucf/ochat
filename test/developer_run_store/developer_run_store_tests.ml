@@ -156,7 +156,7 @@ let replace_epoch_field json ~index ~name ~value =
       | _ -> failwith "expected two saved epochs"))
 ;;
 
-let limits () =
+let limits ?(max_work_steps = 200) ?(max_jobs_per_run = 4) () =
   let document =
     Document_schema.Limits.create
       ~max_bytes:4096
@@ -168,14 +168,14 @@ let limits () =
   R.Limits.create
     ~max_runs:3
     ~max_epochs_per_run:4
-    ~max_jobs_per_run:4
+    ~max_jobs_per_run
     ~max_invocations_per_run:4
     ~max_selected_per_commit:2
     ~max_job_payload_bytes:1024
     ~max_document_bytes:4096
     ~max_recovery_entries:16
     ~max_recovery_bytes:16384
-    ~max_work_steps:200
+    ~max_work_steps
     ~document
   |> Or_error.ok_exn
 ;;
@@ -191,8 +191,21 @@ let create_session env sw root =
   |> store_ok
 ;;
 
-let open_run session sw ?(checkpoint = fun () -> ()) () =
-  match R.open_or_create session ~sw ~limits:(limits ()) ~checkpoint with
+let open_run
+      session
+      sw
+      ?(checkpoint = fun () -> ())
+      ?(max_work_steps = 200)
+      ?(max_jobs_per_run = 4)
+      ()
+  =
+  match
+    R.open_or_create
+      session
+      ~sw
+      ~limits:(limits ~max_work_steps ~max_jobs_per_run ())
+      ~checkpoint
+  with
   | Ok value -> value
   | Error error -> raise_s [%sexp "developer run open failed", (error : R.Error.t)]
 ;;
