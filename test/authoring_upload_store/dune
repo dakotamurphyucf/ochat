@@ -8,7 +8,8 @@
   mirage-crypto-rng.unix
   ochat.agent_store
   ochat.agent_protocol
-  ochat.chatml_source)
+  ochat.chatml_source
+  ochat.chatml_project)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
