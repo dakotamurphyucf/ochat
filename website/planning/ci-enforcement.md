@@ -48,6 +48,15 @@ Load, soak, live-provider, and manual-terminal tiers remain separate. These jobs
 receive no model credentials and make no paid model requests. Website jobs start
 after detection, concurrently with the OCaml jobs.
 
+Full helper/native watcher, managed-session and authoring workflow matrices are
+also separate: `dune build --force -j 2 @agent-qualification` runs them explicitly
+for local or release qualification. The component aliases are
+`@agent-helper-qualification`, `@agent-managed-qualification`, and
+`@agent-authoring-qualification`. They are not dependencies of `runtest` or
+`@agent-e2e-pr`, and this workflow does not schedule them. Required checks retain
+focused real-runtime and transport regressions. Record broad qualification
+separately; a successful release gate proves only the selected CI checks.
+
 ## Browser sharding and artifacts
 
 Each environment builds once and uploads `website-build-preview` or

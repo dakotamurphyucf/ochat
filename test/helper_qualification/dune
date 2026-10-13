@@ -1,0 +1,17 @@
+(library
+ (name helper_smoke_fixture)
+ (modules helper_smoke_fixture)
+ (libraries core jsonaf ochat.agent_protocol ochat.agent_session)
+ (preprocess (pps ppx_jane)))
+
+(rule
+ (alias runtest)
+ (action
+  (run %{exe:../agent_server_helper_test.exe}
+   %{exe:../../bin/ochat_agent_helper.exe} helper-smoke)))
+
+(rule
+ (alias runtest)
+ (action
+  (run %{exe:../agent_server_helper_test.exe}
+   %{exe:../../bin/ochat_agent_helper.exe} native-smoke)))

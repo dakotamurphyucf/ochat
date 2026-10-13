@@ -208,9 +208,10 @@ let with_child
 ;;
 
 let%expect_test
-    "X10 narrowed generated child compacts and authors from its own delegated references"
+    "selected contract survives child compaction with narrowed references and isolated \
+     parent"
   =
-  Flow.exercise with_child;
+  Flow.exercise ~scope:Selected_topic with_child;
   [%expect
-    {| paginated background package -> persisted compaction -> manual pointer -> fresh retrieval -> moderator validation -> executed completion parser |}]
+    {| selected background contract -> persisted compaction -> manual pointer -> fresh retrieval -> moderator validation -> executed completion parser |}]
 ;;

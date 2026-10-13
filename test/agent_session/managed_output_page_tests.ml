@@ -259,6 +259,52 @@ let%expect_test
          read ~max_bytes:exact_bytes large (Some input.id) (Some cursor) |> protocol_ok
        in
        assert (Jsonaf.exactly_equal completed exact);
+       (* Exercise the complete UTF-8/escaping fragment boundary with the pure
+          projection, without one daemon/model exchange per fragment. *)
+       let utf8_answer = String.concat (List.init 350 ~f:(fun _ -> "📚é中\"\\\n")) in
+       let utf8 =
+         { state with
+           conversation =
+             { state.conversation with
+               canonical_history = [ input; assistant 1 utf8_answer; second ]
+             }
+         }
+       in
+       let expected =
+         read ~max_bytes:65536 utf8 (Some input.id) None
+         |> protocol_ok
+         |> fun page ->
+         field page "items"
+         |> Jsonaf.list_exn
+         |> List.hd_exn
+         |> fun item -> field item "value"
+       in
+       let fragments = Buffer.create 8192 in
+       let rec reconstruct cursor pages =
+         assert (pages < 64);
+         let page = read ~max_bytes:2048 utf8 (Some input.id) cursor |> protocol_ok in
+         assert (String.length (Jsonaf.to_string page) <= 2048);
+         List.iter
+           (field page "items" |> Jsonaf.list_exn)
+           ~f:(fun item ->
+             match field item "kind" |> Jsonaf.string_exn with
+             | "output_fragment" ->
+               let fragment = field item "text" |> Jsonaf.string_exn in
+               assert (Stdlib.String.is_valid_utf_8 fragment);
+               Buffer.add_string fragments fragment
+             | "output" -> ()
+             | kind -> failwith ("unexpected managed output kind: " ^ kind));
+         let next = field page "next_cursor" |> P.Page.Cursor.of_json |> protocol_ok in
+         if Jsonaf.bool_exn (field page "caught_up")
+         then pages + 1
+         else (
+           Option.iter cursor ~f:(fun previous ->
+             assert (not (P.Page.Cursor.equal previous next)));
+           reconstruct (Some next) (pages + 1))
+       in
+       assert (reconstruct None 0 > 1);
+       let reconstructed = Buffer.contents fragments |> Jsonaf.of_string in
+       assert (Jsonaf.exactly_equal expected reconstructed);
        print_endline
          "full records carry submission/operation provenance; reads do not consume; gaps \
           require snapshots; redacted bytes stay hidden; undersized limits reject");

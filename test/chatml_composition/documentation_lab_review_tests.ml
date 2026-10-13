@@ -95,9 +95,7 @@ let reviewer_definition =
   ]
 ;;
 
-let%expect_test
-    "lab captures a narrowed reviewer and polls exact receipts without duplicate delivery"
-  =
+let exercise_review () =
   let queued = ref [] in
   let release, release_resolver = Eio.Promise.create () in
   let released = ref false in
@@ -325,13 +323,140 @@ let%expect_test
             produce four notifications";
          print_endline
            "same-session follow-up, authored writer proposal and failed child receipt \
-            remain distinct; close retains stop evidence"));
+            remain distinct; close retains stop evidence"))
+;;
+
+let%expect_test "one lab review preserves create retry and exact watch correlation" =
+  let queued = ref [] in
+  let release, resolver = Eio.Promise.create () in
+  let released = ref false in
+  let release_review () =
+    if not !released
+    then (
+      released := true;
+      Eio.Promise.resolve resolver ())
+  in
+  let provider ~sw:_ ~inputs =
+    let reviewer =
+      List.exists inputs ~f:(function
+        | Res.Item.Input_message message ->
+          let json = Res.Item.jsonaf_of_t (Input_message message) in
+          String.equal (Lab.text json "role") "developer"
+          && Team.contains json "You are a documentation-lab reviewer."
+        | _ -> false)
+    in
+    if reviewer
+    then (
+      let transcript = `Array (List.map inputs ~f:Res.Item.jsonaf_of_t) in
+      if Team.contains transcript "function_call_output"
+      then (
+        assert (Team.contains transcript "sample intentionally omits verification");
+        Eio.Promise.await release;
+        Team.answer
+          ~id:"compact-review-answer"
+          "Review evidence: missing verification guidance.")
+      else
+        Fixtures.call_events
+          [ ( "compact-review-read"
+            , "read_file"
+            , `Object [ "root", `String "project"; "file", `String "tutorials/broken.md" ]
+            )
+          ])
+    else (
+      let calls = !queued in
+      queued := [];
+      Fixtures.call_events calls)
+  in
+  let daemon_clocks, pulse = review_clocks () in
+  Host.with_host
+    ~daemon_clocks
+    ~durable:true
+    ~sources:Lab.sources
+    ~workspace_files:Lab.workspace_files
+    ~permission_profile:
+      { (E.interactive_permission_profile ~authorize_shell_manifest:true) with
+        tool_default = Allow
+      }
+    ~daemon_options:
+      { Agent_server.Daemon.default_options with
+        inference_policy =
+          Agent_server_test_support.inference_policy
+            ~default_model:"fixture-model"
+            ~post_stream:provider
+      }
+    (fun env _ host ->
+       Exn.protect ~finally:release_review ~f:(fun () ->
+         let invoke id name fields =
+           queued := [ id, name, `Object fields ];
+           Workflow.send host id "Perform the requested lab review operation.";
+           Workflow.finish_call ~timeout:60. ~on_poll:pulse env host id;
+           Host.initial_outcome (Host.snapshot host) id
+         in
+         let call id name fields = invoke id name fields |> json_outcome in
+         let create id =
+           call
+             id
+             "agent_create"
+             (reviewer_definition
+              @ [ "start_immediately", `True
+                ; "lifetime", `String "owned"
+                ; "idempotency_key", `String "compact-reviewer"
+                ])
+         in
+         let created = create "compact-create" in
+         let session = Lab.field created "session_id" in
+         let retried = create "compact-retry" in
+         assert (Jsonaf.exactly_equal session (Lab.field retried "session_id"));
+         let receipt =
+           call
+             "compact-send"
+             "agent_send"
+             [ "session_id", session
+             ; "message", `String "Review tutorials/broken.md."
+             ; "idempotency_key", `String "compact-review"
+             ]
+         in
+         let query =
+           [ "tutorial_id", `String "broken"
+           ; "role", `String "reviewer"
+           ; "session_id", session
+           ; "receipt_id", Lab.field receipt "receipt_id"
+           ]
+         in
+         let watch = invoke "compact-watch" "watch_lab_review" query |> pending_watch in
+         Background_shell_tests.wait ~timeout:60. ~on_poll:pulse env (fun () ->
+           List.exists (Host.snapshot host).schedules ~f:(fun timer ->
+             match timer.status with
+             | Scheduled -> Team.contains timer.payload "lab_review_tick"
+             | _ -> false));
+         (match invoke "compact-duplicate" "watch_lab_review" query with
+          | Fail error -> [%test_eq: string] "lab.watch_unavailable" error.code
+          | outcome -> raise_s [%sexp (outcome : P.Invocation.outcome)]);
+         release_review ();
+         (match await_watch ~timeout:60. ~on_poll:pulse env host watch with
+          | Succeeded value ->
+            let observed = Lab.field (Lab.field value "wait") "receipt" in
+            assert (
+              Jsonaf.exactly_equal
+                (Lab.field observed "receipt_id")
+                (Lab.field receipt "receipt_id"));
+            [%test_eq: string] "completed" (Lab.text observed "status");
+            assert (Team.contains value "Review evidence: missing verification guidance.")
+          | outcome -> raise_s [%sexp (outcome : P.Completion.t)]);
+         [%test_eq: int]
+           1
+           (List.count (Host.snapshot host).canonical_history.entries ~f:(fun entry ->
+              match entry.P.Public.History.provenance with
+              | Runtime_notification _ -> true
+              | _ -> false));
+         let closed = call "compact-close" "close_lab" [] in
+         assert (Jsonaf.bool_exn (Lab.field closed "closed"));
+         assert (Team.contains closed "stop");
+         print_endline
+           "one narrowed reviewer; idempotent create; exact receipt; duplicate watch \
+            rejected; one notification; closed"));
   [%expect
-    {|
-    captured reviewer validated and created with only inherited read_file; identical creation retry reuses identity
-    pending probe arms a timer; duplicate receipt watch rejects; four receipts produce four notifications
-    same-session follow-up, authored writer proposal and failed child receipt remain distinct; close retains stop evidence
-    |}]
+    {| one narrowed reviewer; idempotent create; exact receipt; duplicate watch rejected; one notification; closed |}]
 ;;
 
 let%expect_test "closing the lab cancels an outstanding reviewer and its response watch" =

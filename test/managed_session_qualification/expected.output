@@ -1,0 +1,9 @@
+waits distinguish output from terminal receipts; timeout/cancellation preserve children; quiet revocation denies disclosure
+native graceful stop completes existing work; restart/script retries retain receipt without stopping a new lifetime
+native/script retry shares one receipt; busy sends defer; conflicts and foreign IDs do not mutate children; stopped/restarted receipt replay never runs a child
+concurrent first calls create separate durable instances before either finishes
+duplicate provider completions do not create extra invocations or children
+pending continuation receipts remain distinct, coalesce, and interoperate with generic native/ChatML tools
+results stay scoped and readable after stop/restart; send/stop replays add no effects
+cancelling the persistent caller preserves its accepted child request
+children finish without an HTTP client; reconnect reads retained receipts

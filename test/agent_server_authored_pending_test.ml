@@ -85,8 +85,7 @@ let answer id value =
 ;;
 
 let%expect_test
-    "concurrent authored instances and pending receipts use shared lifecycle tools over \
-     HTTP"
+    "HTTP pending ownership survives concurrent reservation, cancellation and reconnect"
   =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
@@ -184,10 +183,9 @@ let%expect_test
             Exn.protect
               ~finally:(fun () -> D.shutdown daemon |> protocol_ok)
               ~f:(fun () ->
-                (* Two batches deliberately wait out the production 10s named-tool
-                   deadline. A full control took 42.9s wall / 21.7s CPU on the first
-                   daemon and 22.1s wall on restart. This outer workflow guard allows
-                   concurrent CI scheduling; production deadlines remain unchanged. *)
+                (* The two named-tool batches retain their production ten-second
+                   deadlines. This guard covers one HTTP daemon epoch, including
+                   reservation contention, cancellation and disconnected completion. *)
                 Failure_diagnostic.reset diagnostic;
                 Failure_diagnostic.mark diagnostic "connect and initialize";
                 try
@@ -201,14 +199,29 @@ let%expect_test
                         ~principal:(principal ())
                     in
                     let client = ref (connect ()) in
-                    let disconnect () = Agent_client.Connection.close !client in
+                    let writers = Hashtbl.create (module P.Id.Session) in
+                    let disconnect () =
+                      Eio.Cancel.protect (fun () ->
+                        let handles = Hashtbl.data writers in
+                        Hashtbl.clear writers;
+                        let rec close = function
+                          | [] -> ()
+                          | handle :: rest ->
+                            Exn.protect
+                              ~finally:(fun () -> close rest)
+                              ~f:(fun () -> H.close handle)
+                        in
+                        Exn.protect
+                          ~finally:(fun () -> Agent_client.Connection.close !client)
+                          ~f:(fun () -> close handles))
+                    in
                     let reconnect () =
                       client := connect ();
                       initialize !client
                     in
                     Exn.protect ~finally:disconnect ~f:(fun () ->
                       initialize !client;
-                      let attach id =
+                      let attach_scoped id =
                         H.attach
                           ~sw
                           ~clock:(Eio.Stdenv.clock env)
@@ -219,7 +232,11 @@ let%expect_test
                           ()
                         |> protocol_ok
                       in
-                      f ~disconnect ~reconnect sw daemon !client attach))
+                      let attach id =
+                        Hashtbl.find_or_add writers id ~default:(fun () ->
+                          attach_scoped id)
+                      in
+                      f ~disconnect ~reconnect ~attach_scoped sw daemon !client attach))
                 with
                 | Eio.Time.Timeout ->
                   Failure_diagnostic.report
@@ -248,31 +265,28 @@ let%expect_test
                sprintf "pending-call-%d" !serial, name, args);
           mark "attach";
           let handle = attach parent in
-          Exn.protect
-            ~finally:(fun () -> H.close handle)
-            ~f:(fun () ->
-              mark "send";
-              H.send_message
-                handle
-                { kind = Plain_text
-                ; text = "Run the requested operations."
-                ; attachments = []
-                }
-              |> protocol_ok
-              |> ignore;
-              mark "wait for inactive parent";
-              await (fun () -> Option.is_none (state daemon parent).active_operation);
-              mark "read invocation outcomes";
-              let fresh =
-                List.filter (state daemon parent).invocations ~f:(fun invocation ->
-                  P.Invocation.equal_origin invocation.context.origin Model
-                  && not
-                       (List.exists before.invocations ~f:(fun old ->
-                          P.Id.Invocation.equal old.context.id invocation.context.id)))
-              in
-              [%test_eq: int] (List.length calls) (List.length fresh);
-              List.map fresh ~f:(fun invocation ->
-                invocation.context.input, invocation.status))
+          mark "send";
+          H.send_message
+            handle
+            { kind = Plain_text
+            ; text = "Run the requested operations."
+            ; attachments = []
+            }
+          |> protocol_ok
+          |> ignore;
+          mark "wait for inactive parent";
+          await (fun () -> Option.is_none (state daemon parent).active_operation);
+          mark "read invocation outcomes";
+          let fresh =
+            List.filter (state daemon parent).invocations ~f:(fun invocation ->
+              P.Invocation.equal_origin invocation.context.origin Model
+              && not
+                   (List.exists before.invocations ~f:(fun old ->
+                      P.Id.Invocation.equal old.context.id invocation.context.id)))
+          in
+          [%test_eq: int] (List.length calls) (List.length fresh);
+          List.map fresh ~f:(fun invocation ->
+            invocation.context.input, invocation.status)
         in
         let invoke_batch daemon attach parent calls =
           invoke_batch_status daemon attach parent calls
@@ -303,13 +317,6 @@ let%expect_test
         let read_args id receipt =
           `Object [ "session_id", P.Id.Session.to_json id; "receipt_id", `String receipt ]
         in
-        let wait_args id receipt =
-          `Object
-            [ "session_id", P.Id.Session.to_json id
-            ; "receipt_id", `String receipt
-            ; "timeout_ms", `Number "0"
-            ]
-        in
         let send_args id =
           `Object
             [ "session_id", P.Id.Session.to_json id
@@ -339,323 +346,216 @@ let%expect_test
             ; "mode", `String "cancel"
             ]
         in
-        let parent, left, right, left_receipts, right_receipt, stopped_history =
-          with_daemon (fun ~disconnect ~reconnect sw daemon client attach ->
-            let parent, _ = create_session ~start_immediately:true client in
-            phase := "concurrent creation";
-            Failure_diagnostic.mark diagnostic "concurrent creation";
-            let first =
-              Eio.Fiber.fork_promise ~sw (fun () ->
-                invoke_batch
-                  daemon
-                  attach
-                  parent.id
-                  [ "researcher", named "LEFT_WORK"; "researcher", named "RIGHT_WORK" ])
-            in
-            await (fun () -> Int.equal !child_calls 2);
-            [%test_eq: int]
-              2
-              (List.count (state daemon parent.id).invocations ~f:(fun invocation ->
-                 match invocation.status with
-                 | Dispatching -> true
-                 | _ -> false));
-            let results = Eio.Promise.await_exn first in
-            let find label =
-              List.find_map_exn results ~f:(fun (input, value) ->
-                if String.equal (text input "input") label then Some value else None)
-            in
-            let left_result = find "LEFT_WORK"
-            and right_result = find "RIGHT_WORK" in
-            List.iter [ left_result; right_result ] ~f:(fun value ->
-              [%test_eq: string] "pending" (text value "status");
-              [%test_eq: string] "assigned" (text (field value "receipt") "status");
-              assert (
-                List.is_empty (field (field value "output") "items" |> Jsonaf.list_exn)));
-            let left = session left_result
-            and right = session right_result in
-            assert (not (P.Id.Session.equal left right));
-            let records =
-              Agent_store.Delegation_store.with_records
-                (Agent_store.Session_store.delegations (D.store daemon))
-                ~max_records:8
-                ~max_bytes:1048576
-                ~f:(fun records -> Ok records)
-              |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
-              |> protocol_ok
-            in
-            [%test_eq: int] 2 (List.length records);
-            List.iter records ~f:(fun record ->
-              assert (P.Id.Session.equal record.key.parent_session_id parent.id);
-              match record.admission.authored_tool with
-              | Some origin -> [%test_eq: string] "researcher" origin.name
-              | None -> failwith "lost authored origin");
-            phase := "concurrent deferred continuation";
-            Failure_diagnostic.mark diagnostic "concurrent deferred continuation";
-            (* Hold the real child read reservation while both continuation
+        with_daemon (fun ~disconnect ~reconnect ~attach_scoped sw daemon client attach ->
+          let parent, _ = create_session ~start_immediately:true client in
+          phase := "concurrent creation";
+          Failure_diagnostic.mark diagnostic "concurrent creation";
+          let first =
+            Eio.Fiber.fork_promise ~sw (fun () ->
+              invoke_batch
+                daemon
+                attach
+                parent.id
+                [ "researcher", named "LEFT_WORK"; "researcher", named "RIGHT_WORK" ])
+          in
+          await (fun () -> Int.equal !child_calls 2);
+          [%test_eq: int]
+            2
+            (List.count (state daemon parent.id).invocations ~f:(fun invocation ->
+               match invocation.status with
+               | Dispatching -> true
+               | _ -> false));
+          let results = Eio.Promise.await_exn first in
+          let find label =
+            List.find_map_exn results ~f:(fun (input, value) ->
+              if String.equal (text input "input") label then Some value else None)
+          in
+          let left_result = find "LEFT_WORK"
+          and right_result = find "RIGHT_WORK" in
+          List.iter [ left_result; right_result ] ~f:(fun value ->
+            [%test_eq: string] "pending" (text value "status");
+            [%test_eq: string] "assigned" (text (field value "receipt") "status");
+            assert (List.is_empty (field (field value "output") "items" |> Jsonaf.list_exn)));
+          let left = session left_result
+          and right = session right_result in
+          assert (not (P.Id.Session.equal left right));
+          let records =
+            Agent_store.Delegation_store.with_records
+              (Agent_store.Session_store.delegations (D.store daemon))
+              ~max_records:8
+              ~max_bytes:1048576
+              ~f:(fun records -> Ok records)
+            |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+            |> protocol_ok
+          in
+          [%test_eq: int] 2 (List.length records);
+          List.iter records ~f:(fun record ->
+            assert (P.Id.Session.equal record.key.parent_session_id parent.id);
+            match record.admission.authored_tool with
+            | Some origin -> [%test_eq: string] "researcher" origin.name
+            | None -> failwith "lost authored origin");
+          phase := "concurrent deferred continuation";
+          Failure_diagnostic.mark diagnostic "concurrent deferred continuation";
+          (* Hold the real child read reservation while both continuation
                calls enter dispatch. The old nonwaiting authorization rejected
                this ordinary overlap; bounded validation must wait for release. *)
-            let entered, enter = Eio.Promise.create () in
-            let release_read, release = Eio.Promise.create () in
-            let held_read =
-              Eio.Fiber.fork_promise ~sw (fun () ->
-                R.with_loaded_read (D.registry daemon) left (fun _ ->
-                  Eio.Promise.resolve enter ();
-                  Eio.Promise.await release_read;
-                  Ok ()))
-            in
-            Eio.Promise.await entered;
-            let continued =
-              Exn.protect
-                ~finally:(fun () ->
-                  Eio.Cancel.protect (fun () ->
-                    if not (Eio.Promise.is_resolved release_read)
-                    then Eio.Promise.resolve release ();
-                    Eio.Promise.await_exn held_read |> protocol_ok))
-                ~f:(fun () ->
-                  let continued =
-                    Eio.Fiber.fork_promise ~sw (fun () ->
-                      invoke_batch
-                        daemon
-                        attach
-                        parent.id
-                        [ "researcher", named ~session_id:left "Deferred first."
-                        ; "researcher", named ~session_id:left "Deferred second."
-                        ])
-                  in
-                  await (fun () ->
-                    Int.equal
-                      2
-                      (List.count
-                         (state daemon parent.id).invocations
-                         ~f:(fun invocation ->
-                           match invocation.status with
-                           | Dispatching -> true
-                           | _ -> false))
-                    || Eio.Promise.is_resolved continued);
-                  (* Drain runnable validation work without advancing the clock
+          let entered, enter = Eio.Promise.create () in
+          let release_read, release = Eio.Promise.create () in
+          let held_read =
+            Eio.Fiber.fork_promise ~sw (fun () ->
+              R.with_loaded_read (D.registry daemon) left (fun _ ->
+                Eio.Promise.resolve enter ();
+                Eio.Promise.await release_read;
+                Ok ()))
+          in
+          Eio.Promise.await entered;
+          let continued =
+            Exn.protect
+              ~finally:(fun () ->
+                Eio.Cancel.protect (fun () ->
+                  if not (Eio.Promise.is_resolved release_read)
+                  then Eio.Promise.resolve release ();
+                  Eio.Promise.await_exn held_read |> protocol_ok))
+              ~f:(fun () ->
+                let continued =
+                  Eio.Fiber.fork_promise ~sw (fun () ->
+                    invoke_batch
+                      daemon
+                      attach
+                      parent.id
+                      [ "researcher", named ~session_id:left "Deferred first."
+                      ; "researcher", named ~session_id:left "Deferred second."
+                      ])
+                in
+                await (fun () ->
+                  Int.equal
+                    2
+                    (List.count (state daemon parent.id).invocations ~f:(fun invocation ->
+                       match invocation.status with
+                       | Dispatching -> true
+                       | _ -> false))
+                  || Eio.Promise.is_resolved continued);
+                (* Drain runnable validation work without advancing the clock
                      or changing authority. The same release protocol is tested
                      against the old implementation as a negative control. *)
-                  for _ = 1 to 128 do
-                    Eio.Fiber.yield ()
-                  done;
-                  Eio.Promise.resolve release ();
-                  Eio.Promise.await_exn held_read |> protocol_ok;
-                  Eio.Promise.await_exn continued)
-            in
-            let deferred =
-              List.map continued ~f:(fun (_, value) ->
-                assert (P.Id.Session.equal left (session value));
-                [%test_eq: string] "pending" (text value "status");
-                [%test_eq: string] "deferred" (text (field value "receipt") "status");
-                receipt value)
-            in
-            [%test_eq: int] 2 !child_calls;
-            let generic = invoke daemon attach parent.id "agent_send" (send_args left) in
-            [%test_eq: string] "deferred" (text generic "status");
-            let replay =
-              invoke
+                for _ = 1 to 128 do
+                  Eio.Fiber.yield ()
+                done;
+                Eio.Promise.resolve release ();
+                Eio.Promise.await_exn held_read |> protocol_ok;
+                Eio.Promise.await_exn continued)
+          in
+          let deferred =
+            List.map continued ~f:(fun (_, value) ->
+              assert (P.Id.Session.equal left (session value));
+              [%test_eq: string] "pending" (text value "status");
+              [%test_eq: string] "deferred" (text (field value "receipt") "status");
+              receipt value)
+          in
+          [%test_eq: int] 2 !child_calls;
+          let generic = invoke daemon attach parent.id "agent_send" (send_args left) in
+          [%test_eq: string] "deferred" (text generic "status");
+          let replay =
+            invoke
+              daemon
+              attach
+              parent.id
+              "run_chatml"
+              (script "agent_send" (send_args left))
+          in
+          assert (Jsonaf.exactly_equal generic replay);
+          phase := "cancel caller after accepted continuation";
+          Failure_diagnostic.mark diagnostic "cancel caller after accepted continuation";
+          let before_cancel = (state daemon left).managed_submissions in
+          let cancelled_call =
+            Eio.Fiber.fork_promise ~sw (fun () ->
+              invoke_batch_status
                 daemon
                 attach
                 parent.id
-                "run_chatml"
-                (script "agent_send" (send_args left))
-            in
-            assert (Jsonaf.exactly_equal generic replay);
-            phase := "cancel caller after accepted continuation";
-            Failure_diagnostic.mark diagnostic "cancel caller after accepted continuation";
-            let before_cancel = (state daemon left).managed_submissions in
-            let cancelled_call =
-              Eio.Fiber.fork_promise ~sw (fun () ->
-                invoke_batch_status
-                  daemon
-                  attach
-                  parent.id
-                  [ ( "researcher"
-                    , named
-                        ~session_id:left
-                        "Keep this accepted request after caller cancellation." )
-                  ])
-            in
-            await (fun () -> List.length (state daemon left).managed_submissions = 5);
-            let accepted = state daemon left in
-            let cancelled_receipt =
-              List.filter accepted.managed_submissions ~f:(fun submission ->
-                not
-                  (List.exists before_cancel ~f:(fun old ->
-                     P.History.Id.equal old.M.history_id submission.history_id)))
-              |> function
-              | [ submission ] -> P.History.Id.to_string submission.M.history_id
-              | _ ->
-                failwith "cancelled caller duplicated or lost its accepted submission"
-            in
-            let parent_handle = attach parent.id in
-            Exn.protect
-              ~finally:(fun () -> H.close parent_handle)
-              ~f:(fun () ->
-                let operation =
-                  Option.value_exn (state daemon parent.id).active_operation
-                in
-                H.cancel_operation parent_handle operation.id |> protocol_ok |> ignore);
-            (match Eio.Promise.await_exn cancelled_call with
-             | [ (_, (Published (Cancelled _) | Resolved (Cancelled _))) ] -> ()
-             | results ->
-               raise_s
-                 [%sexp
-                   "persistent caller cancellation failed"
-                 , (results : (Jsonaf.t * P.Invocation.status) list)]);
-            [%test_eq: Sexp.t]
-              (Agent_session.Session_state.sexp_of_t accepted)
-              (Agent_session.Session_state.sexp_of_t (state daemon left));
-            let left_receipts =
-              receipt left_result
-              :: text generic "receipt_id"
-              :: cancelled_receipt
-              :: deferred
-            in
-            [%test_eq: int]
-              5
-              (List.dedup_and_sort left_receipts ~compare:String.compare |> List.length);
-            [%test_eq: int] 5 (List.length (state daemon left).managed_submissions);
-            [%test_eq: int] 1 (List.length (state daemon right).managed_submissions);
-            let waiting =
-              invoke
-                daemon
-                attach
-                parent.id
-                "agent_wait"
-                (wait_args left (List.hd_exn deferred))
-            in
-            [%test_eq: string] "timeout" (text waiting "reason");
-            let pending =
-              invoke
-                daemon
-                attach
-                parent.id
-                "agent_read"
-                (read_args left (List.hd_exn deferred))
-            in
-            assert (List.is_empty (field pending "items" |> Jsonaf.list_exn));
-            let running =
-              invoke
-                daemon
-                attach
-                parent.id
-                "agent_status"
-                (`Object [ "session_id", P.Id.Session.to_json left ])
-            in
-            [%test_eq: string] "running" (text running "state");
-            (* Accepted child work belongs to the daemon, including while every
-               requesting HTTP client is disconnected. Release both providers
-               only after the original logical connection has closed. *)
-            disconnect ();
-            phase := "release and correlate";
-            Failure_diagnostic.mark diagnostic "release and correlate";
-            Eio.Promise.resolve release_u ();
-            await (fun () ->
-              List.for_all [ left; right ] ~f:(fun child ->
-                let current = state daemon child in
-                Option.is_none current.active_operation
-                && List.for_all current.managed_submissions ~f:(fun submission ->
-                  match submission.M.status with
-                  | Terminal (_, Completed) -> true
-                  | Terminal (_, _) ->
-                    let entry = R.load (D.registry daemon) child |> protocol_ok in
-                    let failures =
-                      match
-                        Agent_session.Durable_event_log.replay
-                          entry.durable_events
-                          ~after_sequence:0L
-                          ~through_sequence:current.counters.event_sequence
-                      with
-                      | Snapshot_required -> []
-                      | Available events ->
-                        List.filter_map events ~f:(fun event ->
-                          match
-                            P.Event.Durable.Payload.of_json
-                              ~kind:event.P.Event.Durable.kind
-                              event.payload
-                            |> protocol_ok
-                          with
-                          | Operation_failed operation -> Some operation
-                          | _ -> None)
-                    in
-                    raise_s
-                      [%sexp
-                        "released child failed"
-                      , (submission.M.status : M.status)
-                      , (failures : P.Operation.t list)]
-                  | _ -> false)));
-            [%test_eq: int] 3 !child_calls;
-            reconnect ();
-            let assigned id =
-              List.find_exn (state daemon left).managed_submissions ~f:(fun submission ->
-                String.equal (P.History.Id.to_string submission.history_id) id)
-            in
-            (match List.map deferred ~f:(fun id -> (assigned id).status) with
-             | [ Terminal (Some first, Completed); Terminal (Some second, Completed) ] ->
-               assert (P.Id.Operation.equal first second)
-             | _ -> failwith "concurrent deferred receipts did not coalesce");
-            List.iter left_receipts ~f:(fun id ->
-              let page =
-                invoke daemon attach parent.id "agent_read" (read_args left id)
+                [ ( "researcher"
+                  , named
+                      ~session_id:left
+                      "Keep this accepted request after caller cancellation." )
+                ])
+          in
+          await (fun () -> List.length (state daemon left).managed_submissions = 5);
+          let accepted = state daemon left in
+          let cancelled_receipt =
+            List.filter accepted.managed_submissions ~f:(fun submission ->
+              not
+                (List.exists before_cancel ~f:(fun old ->
+                   P.History.Id.equal old.M.history_id submission.history_id)))
+            |> function
+            | [ submission ] -> P.History.Id.to_string submission.M.history_id
+            | _ -> failwith "cancelled caller duplicated or lost its accepted submission"
+          in
+          let parent_handle = attach_scoped parent.id in
+          Exn.protect
+            ~finally:(fun () -> H.close parent_handle)
+            ~f:(fun () ->
+              let operation =
+                Option.value_exn (state daemon parent.id).active_operation
               in
-              [%test_eq: string] "completed" (text (field page "receipt") "status");
-              let contents = Jsonaf.to_string (field page "items") in
-              assert (String.is_substring contents ~substring:"left-result");
-              assert (not (String.is_substring contents ~substring:"right-result")));
-            let right_receipt = receipt right_result in
-            let page =
-              invoke
-                daemon
-                attach
-                parent.id
-                "run_chatml"
-                (script "agent_read" (read_args right right_receipt))
-            in
-            assert (
-              String.is_substring
-                (Jsonaf.to_string (field page "items"))
-                ~substring:"right-result");
-            let history = (state daemon left).conversation.canonical_history in
-            let stopped = invoke daemon attach parent.id "agent_stop" (stop_args left) in
-            [%test_eq: string] "stopped" (text stopped "progress");
-            check_history history (state daemon left).conversation.canonical_history;
-            parent.id, left, right, left_receipts, right_receipt, history)
-        in
-        save "child.chatmd" "<developer>Edited source after pending results.</developer>";
-        with_daemon (fun ~disconnect:_ ~reconnect:_ _sw daemon _client attach ->
-          phase := "retained pending receipts after restart";
-          check_history stopped_history (state daemon left).conversation.canonical_history;
-          List.iter
-            ((right, right_receipt) :: List.map left_receipts ~f:(fun id -> left, id))
-            ~f:(fun (child, id) ->
-              let page = invoke daemon attach parent "agent_read" (read_args child id) in
-              [%test_eq: string] "completed" (text (field page "receipt") "status");
-              assert (not (List.is_empty (field page "items" |> Jsonaf.list_exn))));
-          let stopped = invoke daemon attach parent "agent_stop" (stop_args left) in
-          [%test_eq: string] "stopped" (text stopped "progress");
-          check_history stopped_history (state daemon left).conversation.canonical_history;
-          [%test_eq: int] 3 !child_calls)));
+              H.cancel_operation parent_handle operation.id |> protocol_ok |> ignore);
+          (match Eio.Promise.await_exn cancelled_call with
+           | [ (_, (Published (Cancelled _) | Resolved (Cancelled _))) ] -> ()
+           | results ->
+             raise_s
+               [%sexp
+                 "persistent caller cancellation failed"
+               , (results : (Jsonaf.t * P.Invocation.status) list)]);
+          [%test_eq: Sexp.t]
+            (Agent_session.Session_state.sexp_of_t accepted)
+            (Agent_session.Session_state.sexp_of_t (state daemon left));
+          (* Closing all connection-owned writers is part of disconnect. The
+               independently owned cancellation handle above has already closed. *)
+          disconnect ();
+          phase := "release children without HTTP clients";
+          Eio.Promise.resolve release_u ();
+          await (fun () ->
+            List.for_all [ left; right ] ~f:(fun child ->
+              let current = state daemon child in
+              Option.is_none current.active_operation
+              && List.for_all current.managed_submissions ~f:(fun submission ->
+                match submission.M.status with
+                | Terminal (_, Completed) -> true
+                | _ -> false)));
+          [%test_eq: int] 3 !child_calls;
+          reconnect ();
+          let assigned id =
+            List.find_exn (state daemon left).managed_submissions ~f:(fun submission ->
+              String.equal (P.History.Id.to_string submission.history_id) id)
+          in
+          (match List.map deferred ~f:(fun id -> (assigned id).status) with
+           | [ Terminal (Some first, Completed); Terminal (Some second, Completed) ] ->
+             assert (P.Id.Operation.equal first second)
+           | _ -> failwith "concurrent deferred receipts did not coalesce");
+          let left_page =
+            invoke daemon attach parent.id "agent_read" (read_args left cancelled_receipt)
+          in
+          let right_page =
+            invoke
+              daemon
+              attach
+              parent.id
+              "agent_read"
+              (read_args right (receipt right_result))
+          in
+          List.iter [ left_page; right_page ] ~f:(fun page ->
+            [%test_eq: string] "completed" (text (field page "receipt") "status");
+            assert (not (List.is_empty (field page "items" |> Jsonaf.list_exn))));
+          let left_output = Jsonaf.to_string (field left_page "items") in
+          let right_output = Jsonaf.to_string (field right_page "items") in
+          assert (String.is_substring left_output ~substring:"left-result");
+          assert (not (String.is_substring left_output ~substring:"right-result"));
+          assert (String.is_substring right_output ~substring:"right-result");
+          assert (not (String.is_substring right_output ~substring:"left-result"));
+          let stopped = invoke daemon attach parent.id "agent_stop" (stop_args left) in
+          [%test_eq: string] "stopped" (text stopped "progress"))));
   print_endline
-    "concurrent first calls create separate durable instances before either finishes";
-  print_endline
-    "duplicate provider completions do not create extra invocations or children";
-  print_endline
-    "pending continuation receipts remain distinct, coalesce, and interoperate with \
-     generic native/ChatML tools";
-  print_endline
-    "results stay scoped and readable after stop/restart; send/stop replays add no \
-     effects";
-  print_endline "cancelling the persistent caller preserves its accepted child request";
-  print_endline
-    "children finish without an HTTP client; reconnect reads retained receipts";
+    "HTTP concurrent pending receipts remain scoped; reservation contention, caller \
+     cancellation and disconnect preserve accepted child work";
   [%expect
-    {| 
-    concurrent first calls create separate durable instances before either finishes
-    duplicate provider completions do not create extra invocations or children
-    pending continuation receipts remain distinct, coalesce, and interoperate with generic native/ChatML tools
-    results stay scoped and readable after stop/restart; send/stop replays add no effects
-    cancelling the persistent caller preserves its accepted child request
-    children finish without an HTTP client; reconnect reads retained receipts
-  |}]
+    {| HTTP concurrent pending receipts remain scoped; reservation contention, caller cancellation and disconnect preserve accepted child work |}]
 ;;
