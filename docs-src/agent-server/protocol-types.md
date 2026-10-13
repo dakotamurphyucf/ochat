@@ -1,13 +1,14 @@
-# Protocol types and codec reference
+# Protocol types and implementation reference
 
 Generated from the current public interfaces. Do not hand-edit the excerpts.
 The [protocol guide](protocol.md) explains operation semantics and authorization.
-Each section includes the complete typed contract and a link to its JSON codec;
-wire tags/defaults are defined by that codec, not OCaml constructor spelling.
+Each section includes the complete typed contract and its implementation.
+Modules with wire codecs define their tags/defaults there, not through OCaml
+constructor spelling.
 
 ## activity
 
-[JSON codec](../../lib/agent_protocol/activity.ml) · [interface](../../lib/agent_protocol/activity.mli)
+[implementation](../../lib/agent_protocol/activity.ml) · [interface](../../lib/agent_protocol/activity.mli)
 
 ```ocaml
 (** Neutral transient tool activity. A call alias is scoped to an actual source
@@ -144,7 +145,7 @@ end
 
 ## activity_query
 
-[JSON codec](../../lib/agent_protocol/activity_query.ml) · [interface](../../lib/agent_protocol/activity_query.mli)
+[implementation](../../lib/agent_protocol/activity_query.ml) · [interface](../../lib/agent_protocol/activity_query.mli)
 
 ```ocaml
 (** Bounded cross-session query. The scan bound is checked against the authorized
@@ -171,7 +172,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## audit
 
-[JSON codec](../../lib/agent_protocol/audit.ml) · [interface](../../lib/agent_protocol/audit.mli)
+[implementation](../../lib/agent_protocol/audit.ml) · [interface](../../lib/agent_protocol/audit.mli)
 
 ```ocaml
 (** Redacted, cursor-paged server and session audit records. *)
@@ -214,7 +215,7 @@ end
 
 ## authoring
 
-[JSON codec](../../lib/agent_protocol/authoring.ml) · [interface](../../lib/agent_protocol/authoring.mli)
+[implementation](../../lib/agent_protocol/authoring.ml) · [interface](../../lib/agent_protocol/authoring.mli)
 
 ```ocaml
 (** Thin public facade for the portable authoring wire contracts. DTO modules
@@ -238,7 +239,7 @@ module Wire = Authoring_wire
 
 ## authoring_bundle
 
-[JSON codec](../../lib/agent_protocol/authoring_bundle.ml) · [interface](../../lib/agent_protocol/authoring_bundle.mli)
+[implementation](../../lib/agent_protocol/authoring_bundle.ml) · [interface](../../lib/agent_protocol/authoring_bundle.mli)
 
 ```ocaml
 (** Immutable bundle-upload wire values. These DTOs validate portable syntax and
@@ -542,7 +543,7 @@ end
 
 ## authoring_codec
 
-[JSON codec](../../lib/agent_protocol/authoring_codec.ml) · [interface](../../lib/agent_protocol/authoring_codec.mli)
+[implementation](../../lib/agent_protocol/authoring_codec.ml) · [interface](../../lib/agent_protocol/authoring_codec.mli)
 
 ```ocaml
 (** Internal strict, bounded primitives shared by the authoring DTO codecs. *)
@@ -599,7 +600,7 @@ val bytes_base64_json : string -> Jsonaf.t
 
 ## authoring_common
 
-[JSON codec](../../lib/agent_protocol/authoring_common.ml) · [interface](../../lib/agent_protocol/authoring_common.mli)
+[implementation](../../lib/agent_protocol/authoring_common.ml) · [interface](../../lib/agent_protocol/authoring_common.mli)
 
 ```ocaml
 (** Versioned, transport-neutral authoring DTOs. All identities and source sites
@@ -833,7 +834,7 @@ end
 
 ## authoring_context
 
-[JSON codec](../../lib/agent_protocol/authoring_context.ml) · [interface](../../lib/agent_protocol/authoring_context.mli)
+[implementation](../../lib/agent_protocol/authoring_context.ml) · [interface](../../lib/agent_protocol/authoring_context.mli)
 
 ```ocaml
 (** Compatibility umbrella for the three cohesive authoring core DTO families. *)
@@ -845,7 +846,7 @@ module Source_read = Authoring_source_read.Source_read
 
 ## authoring_context_core
 
-[JSON codec](../../lib/agent_protocol/authoring_context_core.ml) · [interface](../../lib/agent_protocol/authoring_context_core.mli)
+[implementation](../../lib/agent_protocol/authoring_context_core.ml) · [interface](../../lib/agent_protocol/authoring_context_core.mli)
 
 ```ocaml
 open Authoring_common
@@ -1063,7 +1064,7 @@ end
 
 ## authoring_document
 
-[JSON codec](../../lib/agent_protocol/authoring_document.ml) · [interface](../../lib/agent_protocol/authoring_document.mli)
+[implementation](../../lib/agent_protocol/authoring_document.ml) · [interface](../../lib/agent_protocol/authoring_document.mli)
 
 ```ocaml
 open Authoring_common
@@ -1155,7 +1156,7 @@ end
 
 ## authoring_guidance
 
-[JSON codec](../../lib/agent_protocol/authoring_guidance.ml) · [interface](../../lib/agent_protocol/authoring_guidance.mli)
+[implementation](../../lib/agent_protocol/authoring_guidance.ml) · [interface](../../lib/agent_protocol/authoring_guidance.mli)
 
 ```ocaml
 (** Host-owned provenance for guidance, never inferred from message text. Source
@@ -1261,7 +1262,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## authoring_reference
 
-[JSON codec](../../lib/agent_protocol/authoring_reference.ml) · [interface](../../lib/agent_protocol/authoring_reference.mli)
+[implementation](../../lib/agent_protocol/authoring_reference.ml) · [interface](../../lib/agent_protocol/authoring_reference.mli)
 
 ```ocaml
 (** Persisted evidence of an exact documentation response, not an execution grant
@@ -1322,7 +1323,7 @@ val scope_for : session_id:Id.Session.t -> generation:int -> string
 
 ## authoring_source_read
 
-[JSON codec](../../lib/agent_protocol/authoring_source_read.ml) · [interface](../../lib/agent_protocol/authoring_source_read.mli)
+[implementation](../../lib/agent_protocol/authoring_source_read.ml) · [interface](../../lib/agent_protocol/authoring_source_read.mli)
 
 ```ocaml
 open Authoring_common
@@ -1497,7 +1498,7 @@ end
 
 ## authoring_wire
 
-[JSON codec](../../lib/agent_protocol/authoring_wire.ml) · [interface](../../lib/agent_protocol/authoring_wire.mli)
+[implementation](../../lib/agent_protocol/authoring_wire.ml) · [interface](../../lib/agent_protocol/authoring_wire.mli)
 
 ```ocaml
 (** Closed, portable dispatch for the authoring core method family. The sum
@@ -1559,7 +1560,7 @@ end
 
 ## blob
 
-[JSON codec](../../lib/agent_protocol/blob.ml) · [interface](../../lib/agent_protocol/blob.mli)
+[implementation](../../lib/agent_protocol/blob.ml) · [interface](../../lib/agent_protocol/blob.mli)
 
 ```ocaml
 (** Server-managed blob metadata and typed message input references. *)
@@ -1656,7 +1657,7 @@ end
 
 ## command
 
-[JSON codec](../../lib/agent_protocol/command.ml) · [interface](../../lib/agent_protocol/command.mli)
+[implementation](../../lib/agent_protocol/command.ml) · [interface](../../lib/agent_protocol/command.mli)
 
 ```ocaml
 (** Typed method dispatch for transport-neutral protocol requests. *)
@@ -1764,7 +1765,7 @@ val supported_methods : string list
 
 ## command_receipt
 
-[JSON codec](../../lib/agent_protocol/command_receipt.ml) · [interface](../../lib/agent_protocol/command_receipt.mli)
+[implementation](../../lib/agent_protocol/command_receipt.ml) · [interface](../../lib/agent_protocol/command_receipt.mli)
 
 ```ocaml
 (** Read-only reconciliation of an original bounded request. The authenticated
@@ -1868,7 +1869,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## completion
 
-[JSON codec](../../lib/agent_protocol/completion.ml) · [interface](../../lib/agent_protocol/completion.mli)
+[implementation](../../lib/agent_protocol/completion.ml) · [interface](../../lib/agent_protocol/completion.mli)
 
 ```ocaml
 (** Terminal background outcomes, separate from initial tool acknowledgements. *)
@@ -1894,7 +1895,7 @@ val wake_of_json : Jsonaf.t -> (wake, Error.t) result
 
 ## completion_contract
 
-[JSON codec](../../lib/agent_protocol/completion_contract.ml) · [interface](../../lib/agent_protocol/completion_contract.mli)
+[implementation](../../lib/agent_protocol/completion_contract.ml) · [interface](../../lib/agent_protocol/completion_contract.mli)
 
 ```ocaml
 open Core
@@ -1919,7 +1920,7 @@ val of_json : Jsonaf.t -> (t, Protocol_error.t) result
 
 ## completion_projection
 
-[JSON codec](../../lib/agent_protocol/completion_projection.ml) · [interface](../../lib/agent_protocol/completion_projection.mli)
+[implementation](../../lib/agent_protocol/completion_projection.ml) · [interface](../../lib/agent_protocol/completion_projection.mli)
 
 ```ocaml
 (** Evidence retained by a host-managed standalone completion adapter. The hashes
@@ -1954,7 +1955,7 @@ val rejection : Invocation.tool_error
 
 ## delivery
 
-[JSON codec](../../lib/agent_protocol/delivery.ml) · [interface](../../lib/agent_protocol/delivery.mli)
+[implementation](../../lib/agent_protocol/delivery.ml) · [interface](../../lib/agent_protocol/delivery.mli)
 
 ```ocaml
 (** Durable notification intent. Committing a delivery is only valid in the
@@ -2079,7 +2080,7 @@ end
 
 ## delivery_subscription_binding
 
-[JSON codec](../../lib/agent_protocol/delivery_subscription_binding.ml) · [interface](../../lib/agent_protocol/delivery_subscription_binding.mli)
+[implementation](../../lib/agent_protocol/delivery_subscription_binding.ml) · [interface](../../lib/agent_protocol/delivery_subscription_binding.mli)
 
 ```ocaml
 (** Immutable subscription epoch captured at actual notification admission.
@@ -2098,9 +2099,120 @@ val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
 ```
 
+## developer_job
+
+[implementation](../../lib/agent_protocol/developer_job.ml) · [interface](../../lib/agent_protocol/developer_job.mli)
+
+```ocaml
+(** Pure developer-owned job record. An ID or this value grants no execution,
+    result-read, cancellation, or source authority. The developer actor admits
+    it only against the current principal, host, epoch, capture and live launch
+    parent, then persists it under the real daemon-owned run root. *)
+
+open! Core
+
+module Launch : sig
+  type parent =
+    | Run_root
+    | Invocation of Id.Invocation.t
+  [@@deriving equal, sexp_of]
+
+  type t
+
+  (** [parent_job] names the exact creating attempt, if any. A run-root launch
+      need not fabricate a native invocation. The optional attempt and depth
+      must be nonnegative. These are comparison coordinates; the actor proves a
+      live run scope or active invocation separately. *)
+  val create
+    :  parent:parent
+    -> parent_job:(Id.Job.t * int) option
+    -> nested_depth:int
+    -> (t, Protocol_error.t) result
+
+  val parent : t -> parent
+  val parent_job : t -> (Id.Job.t * int) option
+  val nested_depth : t -> int
+end
+
+module Result_value : sig
+  (** Artifact metadata is a selected result descriptor, not read authority.
+      The result store binds the final reference to owner/job/attempt, stores
+      verified bytes and checks disclosure. No session artifact is reused. *)
+  type t =
+    | Inline of Completion.t
+    | Artifact of
+        { outcome : Stored_completion.outcome
+        ; blob : Blob.Metadata.t
+        }
+  [@@deriving sexp_of]
+end
+
+module State : sig
+  type t =
+    { status : Job.status
+    ; attempt : int
+    ; started_at : Timestamp.t option
+    ; next_run_at : Timestamp.t option
+    ; completed_at : Timestamp.t option
+    ; result : Result_value.t option
+    ; retry_failure : Protocol_error.t option
+    }
+  [@@deriving sexp_of]
+
+  (** Validates nonnegative attempt and retry coordinates. A new queued attempt
+      has no prior execution state. A queued retry retains its prior attempt
+      count, clears [started_at], sets [next_run_at] and records the previous
+      failure in [retry_failure], separate from the terminal [result].
+      Running and waiting attempts are positive, started, incomplete and have no
+      result; a dependency wait requires an async tool, a deadline no earlier
+      than creation and cannot target its own job ID. Success requires a claimed
+      attempt, start, completion time and matching result; failure, cancellation
+      and interruption may precede claim but require a completion time; only a
+      claimed attempt has a current [started_at]. Inline
+      completions and artifact metadata are validated. Wall-clock timestamps
+      are not ordered against each other: the host clock may step backward.
+      This proves record shape, not authority to make the transition. *)
+  val validate
+    :  job_id:Id.Job.t
+    -> kind:Job.kind
+    -> created_at:Timestamp.t
+    -> t
+    -> (unit, Protocol_error.t) result
+end
+
+type t
+
+val create
+  :  owner:Execution_owner.developer
+  -> capture_fingerprint:Chatml_source.Digest.t
+  -> id:Id.Job.t
+  -> launch:Launch.t
+  -> kind:Job.kind
+  -> payload:Jsonaf.t
+  -> retry_policy:Job.retry_policy
+  -> created_at:Timestamp.t
+  -> state:State.t
+  -> (t, Protocol_error.t) result
+
+(** Recheck the same immutable identity and lifecycle shape after a proposed
+    actor-owned transition. The actor checks previous/current CAS revision,
+    attempt, live parent and execution policy; this pure function is no grant. *)
+val with_state : t -> State.t -> (t, Protocol_error.t) result
+
+val owner : t -> Execution_owner.developer
+val capture_fingerprint : t -> Chatml_source.Digest.t
+val id : t -> Id.Job.t
+val launch : t -> Launch.t
+val kind : t -> Job.kind
+val payload : t -> Jsonaf.t
+val retry_policy : t -> Job.retry_policy
+val created_at : t -> Timestamp.t
+val state : t -> State.t
+```
+
 ## envelope
 
-[JSON codec](../../lib/agent_protocol/envelope.ml) · [interface](../../lib/agent_protocol/envelope.mli)
+[implementation](../../lib/agent_protocol/envelope.ml) · [interface](../../lib/agent_protocol/envelope.mli)
 
 ```ocaml
 (** Ochat JSON-RPC-style transport envelopes. *)
@@ -2161,7 +2273,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## error
 
-[JSON codec](../../lib/agent_protocol/error.ml) · [interface](../../lib/agent_protocol/error.mli)
+[implementation](../../lib/agent_protocol/error.ml) · [interface](../../lib/agent_protocol/error.mli)
 
 ```ocaml
 include module type of Protocol_error
@@ -2169,7 +2281,7 @@ include module type of Protocol_error
 
 ## event
 
-[JSON codec](../../lib/agent_protocol/event.ml) · [interface](../../lib/agent_protocol/event.mli)
+[implementation](../../lib/agent_protocol/event.ml) · [interface](../../lib/agent_protocol/event.mli)
 
 ```ocaml
 (** Durable session events and recoverable operation-scoped live events. *)
@@ -2343,9 +2455,54 @@ module Recoverable : sig
 end
 ```
 
+## execution_owner
+
+[implementation](../../lib/agent_protocol/execution_owner.ml) · [interface](../../lib/agent_protocol/execution_owner.mli)
+
+```ocaml
+(** Pure ownership coordinates for host-executed invocations. No constructor in
+    this module authenticates a principal, admits a run, or grants an effect. *)
+
+type conversation = private
+  { session_id : Id.Session.t
+  ; generation : int
+  }
+[@@deriving compare, equal, sexp_of]
+
+type developer = private
+  { host_id : Id.Server.t
+  ; run_id : Id.Developer_run.t
+  ; epoch : int
+  ; principal_id : Id.Principal.t
+  }
+[@@deriving compare, equal, sexp_of]
+
+type t =
+  | Conversation of conversation
+  | Developer of developer
+[@@deriving compare, equal, sexp_of]
+
+(** Revalidate every typed ID and nonnegative revision coordinate at an
+    admission boundary. S-expression display is intentionally one-way. *)
+val validate : t -> (unit, Error.t) result
+
+val conversation : session_id:Id.Session.t -> generation:int -> (t, Error.t) result
+
+(** The host issues these coordinates only after run/capture admission. The
+    developer actor must still compare them with its current authenticated owner,
+    epoch, source capture, and durable host ID at every effectful boundary.
+    A host ID does not prove a live process lease. *)
+val developer
+  :  host_id:Id.Server.t
+  -> run_id:Id.Developer_run.t
+  -> epoch:int
+  -> principal_id:Id.Principal.t
+  -> (t, Error.t) result
+```
+
 ## extension_capabilities
 
-[JSON codec](../../lib/agent_protocol/extension_capabilities.ml) · [interface](../../lib/agent_protocol/extension_capabilities.mli)
+[implementation](../../lib/agent_protocol/extension_capabilities.ml) · [interface](../../lib/agent_protocol/extension_capabilities.mli)
 
 ```ocaml
 (** Versioned host qualification, separate from record-codec support. Presence of
@@ -2389,7 +2546,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## extension_status
 
-[JSON codec](../../lib/agent_protocol/extension_status.ml) · [interface](../../lib/agent_protocol/extension_status.mli)
+[implementation](../../lib/agent_protocol/extension_status.ml) · [interface](../../lib/agent_protocol/extension_status.mli)
 
 ```ocaml
 (** Payload-free extension lifecycle summaries. These deliberately omit arguments,
@@ -2424,7 +2581,7 @@ val list_of_json : Jsonaf.t -> (t list, Error.t) result
 
 ## grant
 
-[JSON codec](../../lib/agent_protocol/grant.ml) · [interface](../../lib/agent_protocol/grant.mli)
+[implementation](../../lib/agent_protocol/grant.ml) · [interface](../../lib/agent_protocol/grant.mli)
 
 ```ocaml
 (** Durable invocation grants and revocation requests. *)
@@ -2500,7 +2657,7 @@ end
 
 ## health
 
-[JSON codec](../../lib/agent_protocol/health.ml) · [interface](../../lib/agent_protocol/health.mli)
+[implementation](../../lib/agent_protocol/health.ml) · [interface](../../lib/agent_protocol/health.mli)
 
 ```ocaml
 (** Public and administratively detailed daemon health projections. *)
@@ -2547,7 +2704,7 @@ end
 
 ## history
 
-[JSON codec](../../lib/agent_protocol/history.ml) · [interface](../../lib/agent_protocol/history.mli)
+[implementation](../../lib/agent_protocol/history.ml) · [interface](../../lib/agent_protocol/history.mli)
 
 ```ocaml
 (** Presentation-neutral canonical and moderated transcript projections.
@@ -2666,7 +2823,7 @@ end
 
 ## history_edit
 
-[JSON codec](../../lib/agent_protocol/history_edit.ml) · [interface](../../lib/agent_protocol/history_edit.mli)
+[implementation](../../lib/agent_protocol/history_edit.ml) · [interface](../../lib/agent_protocol/history_edit.mli)
 
 ```ocaml
 (** A complete replacement of one canonical user-text occurrence. This intent
@@ -2760,9 +2917,112 @@ module Continuation : sig
 end
 ```
 
+## host_invocation
+
+[implementation](../../lib/agent_protocol/host_invocation.ml) · [interface](../../lib/agent_protocol/host_invocation.mli)
+
+```ocaml
+(** An owner-neutral invocation record for the shared admission path. The
+    conversation arm retains the entire original [Invocation.t], including
+    provider/history/routing/observation/handler/publication metadata. Existing
+    conversation codecs and actor transitions remain authoritative. Developer
+    records have no synthetic Session ID, model call, or provider history. *)
+
+type context =
+  { id : Id.Invocation.t
+  ; owner : Execution_owner.t
+  ; origin : Invocation.origin
+  ; parent_invocation : Id.Invocation.t option
+  ; parent_job : Id.Job.t option
+  ; tool_name : string
+  ; implementation_revision : string
+  ; capability_fingerprint : string
+  ; input : Jsonaf.t
+  ; created_at : Timestamp.t
+  ; deadline : Timestamp.t option
+  }
+[@@deriving equal, sexp_of]
+
+type t
+
+(** Lossless adapter. Projection returns the exact original conversation record,
+    not a reconstruction from [context]. *)
+val of_conversation : Invocation.t -> (t, Error.t) result
+
+val to_conversation : t -> Invocation.t option
+
+(** Pure data construction, not admission. Only a trusted developer actor may
+    persist/dispatch it after checking the exact owner and selected capture.
+    Model/Moderator origins and provider-history fields have no developer form. *)
+val create_developer : context -> (t, Error.t) result
+
+val context : t -> context
+val status : t -> Invocation.status
+val outcome : t -> Invocation.outcome option
+val validate : t -> (unit, Error.t) result
+val dispatch : t -> (t, Error.t) result
+val resolve : t -> Invocation.outcome -> (t, Error.t) result
+val cancel : t -> reason:string -> (t, Error.t) result
+```
+
+## host_job
+
+[implementation](../../lib/agent_protocol/host_job.ml) · [interface](../../lib/agent_protocol/host_job.mli)
+
+```ocaml
+(** Lossless internal job envelope for the shared capacity and scheduler path.
+    Conversation retains the exact original Job.t, including legacy fields and
+    codecs; developer has a distinct validated record and no Session ID. *)
+open! Core
+
+type t
+
+val of_conversation : Job.t -> (t, Protocol_error.t) result
+val of_developer : Developer_job.t -> (t, Protocol_error.t) result
+val to_conversation : t -> Job.t option
+val to_developer : t -> Developer_job.t option
+
+module Identity : sig
+  type t [@@deriving compare, equal, sexp_of]
+
+  include Comparator.S with type t := t
+
+  (** Owner-qualified stable job ID. Epoch/generation belongs to the owner;
+      attempt remains a separate exact reservation/claim coordinate. *)
+  val owner : t -> Execution_owner.t
+
+  val job_id : t -> Id.Job.t
+end
+
+val identity : t -> Identity.t
+val owner : t -> Execution_owner.t
+val id : t -> Id.Job.t
+val kind : t -> Job.kind
+val status : t -> Job.status
+val attempt : t -> int
+val nested_depth : t -> int
+
+module Lifecycle : sig
+  (** One read-only classification used by capacity and the later scheduler for
+      both records. [classify] requires a validated nonnegative attempt; call
+      [lifecycle] for an admitted Host_job. It does not replace actor-owned
+      state transitions. *)
+  type t =
+    | New_queued
+    | Queued_retry
+    | Claimed_or_waiting
+    | Terminal
+  [@@deriving equal, sexp_of]
+
+  val classify : status:Job.status -> attempt:int -> t
+end
+
+val lifecycle : t -> Lifecycle.t
+```
+
 ## id
 
-[JSON codec](../../lib/agent_protocol/id.ml) · [interface](../../lib/agent_protocol/id.mli)
+[implementation](../../lib/agent_protocol/id.ml) · [interface](../../lib/agent_protocol/id.mli)
 
 ```ocaml
 (** Opaque identifiers used by the Ochat agent protocol. *)
@@ -2803,6 +3063,10 @@ end
 module Server : S
 module Session : S
 module Run : S
+
+(* Developer run ownership, distinct from conversation Run and Session.
+   An ID is a comparison coordinate, never authority by possession. *)
+module Developer_run : S
 module Attachment : S
 module Operation : S
 module Event_cursor : S
@@ -2840,7 +3104,7 @@ module Authoring_bundle : S
 
 ## idempotency_key
 
-[JSON codec](../../lib/agent_protocol/idempotency_key.ml) · [interface](../../lib/agent_protocol/idempotency_key.mli)
+[implementation](../../lib/agent_protocol/idempotency_key.ml) · [interface](../../lib/agent_protocol/idempotency_key.mli)
 
 ```ocaml
 (** Client-generated keys used to make mutating commands safely repeatable. *)
@@ -2862,7 +3126,7 @@ val to_json : t -> Jsonaf.t
 
 ## inference_query
 
-[JSON codec](../../lib/agent_protocol/inference_query.ml) · [interface](../../lib/agent_protocol/inference_query.mli)
+[implementation](../../lib/agent_protocol/inference_query.ml) · [interface](../../lib/agent_protocol/inference_query.mli)
 
 ```ocaml
 (** Additive protocol2 inference reads. No OpenAI, private Target, raw request,
@@ -3119,7 +3383,7 @@ end
 
 ## ingress
 
-[JSON codec](../../lib/agent_protocol/ingress.ml) · [interface](../../lib/agent_protocol/ingress.mli)
+[implementation](../../lib/agent_protocol/ingress.ml) · [interface](../../lib/agent_protocol/ingress.mli)
 
 ```ocaml
 (** Scoped external DATA admission. A registration ID is not a credential.
@@ -3158,7 +3422,7 @@ end
 
 ## initialize
 
-[JSON codec](../../lib/agent_protocol/initialize.ml) · [interface](../../lib/agent_protocol/initialize.mli)
+[implementation](../../lib/agent_protocol/initialize.ml) · [interface](../../lib/agent_protocol/initialize.mli)
 
 ```ocaml
 (** Connection initialization and protocol capability negotiation. *)
@@ -3282,7 +3546,7 @@ end
 
 ## invocation
 
-[JSON codec](../../lib/agent_protocol/invocation.ml) · [interface](../../lib/agent_protocol/invocation.mli)
+[implementation](../../lib/agent_protocol/invocation.ml) · [interface](../../lib/agent_protocol/invocation.mli)
 
 ```ocaml
 (** Versioned tool invocation records. These pure transitions do not grant
@@ -3574,7 +3838,7 @@ end
 
 ## job
 
-[JSON codec](../../lib/agent_protocol/job.ml) · [interface](../../lib/agent_protocol/job.mli)
+[implementation](../../lib/agent_protocol/job.ml) · [interface](../../lib/agent_protocol/job.mli)
 
 ```ocaml
 (** Durable background job state and control requests. *)
@@ -3763,7 +4027,7 @@ end
 
 ## job_artifact
 
-[JSON codec](../../lib/agent_protocol/job_artifact.ml) · [interface](../../lib/agent_protocol/job_artifact.mli)
+[implementation](../../lib/agent_protocol/job_artifact.ml) · [interface](../../lib/agent_protocol/job_artifact.mli)
 
 ```ocaml
 (** Versioned reference to a complete serialized terminal result. The reference
@@ -3795,7 +4059,7 @@ val allowed_use : t -> string
 
 ## job_progress
 
-[JSON codec](../../lib/agent_protocol/job_progress.ml) · [interface](../../lib/agent_protocol/job_progress.mli)
+[implementation](../../lib/agent_protocol/job_progress.ml) · [interface](../../lib/agent_protocol/job_progress.mli)
 
 ```ocaml
 (** Best-effort transient display state. It is not a terminal result, canonical
@@ -3830,7 +4094,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## job_result_reference
 
-[JSON codec](../../lib/agent_protocol/job_result_reference.ml) · [interface](../../lib/agent_protocol/job_result_reference.mli)
+[implementation](../../lib/agent_protocol/job_result_reference.ml) · [interface](../../lib/agent_protocol/job_result_reference.mli)
 
 ```ocaml
 (** Bounded reference to an exact retained terminal result, whether inline or
@@ -3870,7 +4134,7 @@ val of_completion
 
 ## json_codec
 
-[JSON codec](../../lib/agent_protocol/json_codec.ml) · [interface](../../lib/agent_protocol/json_codec.mli)
+[implementation](../../lib/agent_protocol/json_codec.ml) · [interface](../../lib/agent_protocol/json_codec.mli)
 
 ```ocaml
 (** Strict JSON decoding helpers for stable protocol codecs. *)
@@ -3944,7 +4208,7 @@ val canonical_string : Jsonaf.t -> (string, Error.t) result
 
 ## method_result
 
-[JSON codec](../../lib/agent_protocol/method_result.ml) · [interface](../../lib/agent_protocol/method_result.mli)
+[implementation](../../lib/agent_protocol/method_result.ml) · [interface](../../lib/agent_protocol/method_result.mli)
 
 ```ocaml
 (** Typed successful results for every Protocol 1.0 method. *)
@@ -4180,7 +4444,7 @@ val supported_methods : string list
 
 ## moderator_execution
 
-[JSON codec](../../lib/agent_protocol/moderator_execution.ml) · [interface](../../lib/agent_protocol/moderator_execution.mli)
+[implementation](../../lib/agent_protocol/moderator_execution.ml) · [interface](../../lib/agent_protocol/moderator_execution.mli)
 
 ```ocaml
 (** Durable execution receipts for ordinary moderator events. These are distinct
@@ -4315,7 +4579,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## mutation_result
 
-[JSON codec](../../lib/agent_protocol/mutation_result.ml) · [interface](../../lib/agent_protocol/mutation_result.mli)
+[implementation](../../lib/agent_protocol/mutation_result.ml) · [interface](../../lib/agent_protocol/mutation_result.mli)
 
 ```ocaml
 (** Revision and durable-event position returned by accepted session mutations. *)
@@ -4338,7 +4602,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## operation
 
-[JSON codec](../../lib/agent_protocol/operation.ml) · [interface](../../lib/agent_protocol/operation.mli)
+[implementation](../../lib/agent_protocol/operation.ml) · [interface](../../lib/agent_protocol/operation.mli)
 
 ```ocaml
 (** Foreground operation metadata shared by transports and clients. *)
@@ -4388,7 +4652,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## organization_group
 
-[JSON codec](../../lib/agent_protocol/organization_group.ml) · [interface](../../lib/agent_protocol/organization_group.mli)
+[implementation](../../lib/agent_protocol/organization_group.ml) · [interface](../../lib/agent_protocol/organization_group.mli)
 
 ```ocaml
 (** Host-owned logical organization; never an execution workspace or authority grant.
@@ -4434,7 +4698,7 @@ module Collection : S with type id = Id.Collection.t
 
 ## organization_request
 
-[JSON codec](../../lib/agent_protocol/organization_request.ml) · [interface](../../lib/agent_protocol/organization_request.mli)
+[implementation](../../lib/agent_protocol/organization_request.ml) · [interface](../../lib/agent_protocol/organization_request.mli)
 
 ```ocaml
 (** CRUD requests are host-qualified. The initialized connection host must match.
@@ -4512,7 +4776,7 @@ module Collection : S with type id = Id.Collection.t
 
 ## organization_result
 
-[JSON codec](../../lib/agent_protocol/organization_result.ml) · [interface](../../lib/agent_protocol/organization_result.mli)
+[implementation](../../lib/agent_protocol/organization_result.ml) · [interface](../../lib/agent_protocol/organization_result.mli)
 
 ```ocaml
 (** Exact organization mutation results; deletion retains the ID forever. *)
@@ -4567,7 +4831,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## page
 
-[JSON codec](../../lib/agent_protocol/page.ml) · [interface](../../lib/agent_protocol/page.mli)
+[implementation](../../lib/agent_protocol/page.ml) · [interface](../../lib/agent_protocol/page.mli)
 
 ```ocaml
 (** Opaque cursor pagination shared by list methods. *)
@@ -4626,7 +4890,7 @@ val of_json : (Jsonaf.t -> ('a, Error.t) result) -> Jsonaf.t -> ('a t, Error.t) 
 
 ## pending_control
 
-[JSON codec](../../lib/agent_protocol/pending_control.ml) · [interface](../../lib/agent_protocol/pending_control.mli)
+[implementation](../../lib/agent_protocol/pending_control.ml) · [interface](../../lib/agent_protocol/pending_control.mli)
 
 ```ocaml
 (** Controls for one still-pending occurrence. The authenticated submitting
@@ -4694,7 +4958,7 @@ end
 
 ## pending_input
 
-[JSON codec](../../lib/agent_protocol/pending_input.ml) · [interface](../../lib/agent_protocol/pending_input.mli)
+[implementation](../../lib/agent_protocol/pending_input.ml) · [interface](../../lib/agent_protocol/pending_input.mli)
 
 ```ocaml
 (** Pending input extends the existing durable deferred history queue. It grants
@@ -4784,7 +5048,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## pending_query
 
-[JSON codec](../../lib/agent_protocol/pending_query.ml) · [interface](../../lib/agent_protocol/pending_query.mli)
+[implementation](../../lib/agent_protocol/pending_query.ml) · [interface](../../lib/agent_protocol/pending_query.mli)
 
 ```ocaml
 (** Authorized nonactivating inspection of pending input. The host enforces
@@ -4893,7 +5157,7 @@ end
 
 ## permission
 
-[JSON codec](../../lib/agent_protocol/permission.ml) · [interface](../../lib/agent_protocol/permission.mli)
+[implementation](../../lib/agent_protocol/permission.ml) · [interface](../../lib/agent_protocol/permission.mli)
 
 ```ocaml
 (** Durable tool-authorization requests and compare-and-set responses. *)
@@ -5003,7 +5267,7 @@ end
 
 ## ping
 
-[JSON codec](../../lib/agent_protocol/ping.ml) · [interface](../../lib/agent_protocol/ping.mli)
+[implementation](../../lib/agent_protocol/ping.ml) · [interface](../../lib/agent_protocol/ping.mli)
 
 ```ocaml
 (** Protocol liveness request and readiness response. *)
@@ -5031,7 +5295,7 @@ end
 
 ## principal
 
-[JSON codec](../../lib/agent_protocol/principal.ml) · [interface](../../lib/agent_protocol/principal.mli)
+[implementation](../../lib/agent_protocol/principal.ml) · [interface](../../lib/agent_protocol/principal.mli)
 
 ```ocaml
 (** Authenticated identity and authorization summary. *)
@@ -5066,7 +5330,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## projection_codec
 
-[JSON codec](../../lib/agent_protocol/projection_codec.ml) · [interface](../../lib/agent_protocol/projection_codec.mli)
+[implementation](../../lib/agent_protocol/projection_codec.ml) · [interface](../../lib/agent_protocol/projection_codec.mli)
 
 ```ocaml
 (** Shared admission boundary for protocol 2 transcript envelopes. *)
@@ -5079,7 +5343,7 @@ val optional : string -> 'a option -> ('a -> Jsonaf.t) -> (string * Jsonaf.t) li
 
 ## prompt
 
-[JSON codec](../../lib/agent_protocol/prompt.ml) · [interface](../../lib/agent_protocol/prompt.mli)
+[implementation](../../lib/agent_protocol/prompt.ml) · [interface](../../lib/agent_protocol/prompt.mli)
 
 ```ocaml
 (** Transport projections for configured ChatMD prompts. *)
@@ -5136,7 +5400,7 @@ end
 
 ## prompt_dependency_selection
 
-[JSON codec](../../lib/agent_protocol/prompt_dependency_selection.ml) · [interface](../../lib/agent_protocol/prompt_dependency_selection.mli)
+[implementation](../../lib/agent_protocol/prompt_dependency_selection.ml) · [interface](../../lib/agent_protocol/prompt_dependency_selection.mli)
 
 ```ocaml
 open! Core
@@ -5258,7 +5522,7 @@ end
 
 ## protocol_error
 
-[JSON codec](../../lib/agent_protocol/protocol_error.ml) · [interface](../../lib/agent_protocol/protocol_error.mli)
+[implementation](../../lib/agent_protocol/protocol_error.ml) · [interface](../../lib/agent_protocol/protocol_error.mli)
 
 ```ocaml
 (** Stable errors exposed by the Ochat agent protocol. *)
@@ -5331,7 +5595,7 @@ val of_json : Jsonaf.t -> (t, t) result
 
 ## provider_operator
 
-[JSON codec](../../lib/agent_protocol/provider_operator.ml) · [interface](../../lib/agent_protocol/provider_operator.mli)
+[implementation](../../lib/agent_protocol/provider_operator.ml) · [interface](../../lib/agent_protocol/provider_operator.mli)
 
 ```ocaml
 open! Core
@@ -5645,7 +5909,7 @@ end
 
 ## public
 
-[JSON codec](../../lib/agent_protocol/public.ml) · [interface](../../lib/agent_protocol/public.mli)
+[implementation](../../lib/agent_protocol/public.ml) · [interface](../../lib/agent_protocol/public.mli)
 
 ```ocaml
 (** Explicit public read boundary. Private snapshot/history/event/result types
@@ -5659,7 +5923,7 @@ module Result = Public_result
 
 ## public_durable_event
 
-[JSON codec](../../lib/agent_protocol/public_durable_event.ml) · [interface](../../lib/agent_protocol/public_durable_event.mli)
+[implementation](../../lib/agent_protocol/public_durable_event.ml) · [interface](../../lib/agent_protocol/public_durable_event.mli)
 
 ```ocaml
 (** Typed public durable events. Hidden entries preserve sequence slots without
@@ -5727,7 +5991,7 @@ val to_notification : t -> Envelope.t
 
 ## public_history
 
-[JSON codec](../../lib/agent_protocol/public_history.ml) · [interface](../../lib/agent_protocol/public_history.mli)
+[implementation](../../lib/agent_protocol/public_history.ml) · [interface](../../lib/agent_protocol/public_history.mli)
 
 ```ocaml
 (** Read-only history projections. Public views never authorize canonical input
@@ -5843,7 +6107,7 @@ end
 
 ## public_result
 
-[JSON codec](../../lib/agent_protocol/public_result.ml) · [interface](../../lib/agent_protocol/public_result.mli)
+[implementation](../../lib/agent_protocol/public_result.ml) · [interface](../../lib/agent_protocol/public_result.mli)
 
 ```ocaml
 (** Public success values. Only get/create/attach replace private inline history
@@ -5910,7 +6174,7 @@ val validate : t -> (unit, Error.t) result
 
 ## public_snapshot
 
-[JSON codec](../../lib/agent_protocol/public_snapshot.ml) · [interface](../../lib/agent_protocol/public_snapshot.mli)
+[implementation](../../lib/agent_protocol/public_snapshot.ml) · [interface](../../lib/agent_protocol/public_snapshot.mli)
 
 ```ocaml
 (** Validated client read state, separate from the persisted internal snapshot.
@@ -5955,7 +6219,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## run
 
-[JSON codec](../../lib/agent_protocol/run.ml) · [interface](../../lib/agent_protocol/run.mli)
+[implementation](../../lib/agent_protocol/run.ml) · [interface](../../lib/agent_protocol/run.mli)
 
 ```ocaml
 (** Durable host run lifecycle. Session liveness and work execution are separate;
@@ -6041,7 +6305,7 @@ val validate_transition : previous:t -> t -> (unit, Error.t) result
 
 ## run_action
 
-[JSON codec](../../lib/agent_protocol/run_action.ml) · [interface](../../lib/agent_protocol/run_action.mli)
+[implementation](../../lib/agent_protocol/run_action.ml) · [interface](../../lib/agent_protocol/run_action.mli)
 
 ```ocaml
 (** Revisioned authored decision, collected transactionally with the actual
@@ -6070,7 +6334,7 @@ val combine : t option -> t option -> (t option, Error.t) result
 
 ## run_limits
 
-[JSON codec](../../lib/agent_protocol/run_limits.ml) · [interface](../../lib/agent_protocol/run_limits.mli)
+[implementation](../../lib/agent_protocol/run_limits.ml) · [interface](../../lib/agent_protocol/run_limits.mli)
 
 ```ocaml
 (** Hard protocol safety ceilings, independent of lower actor/runtime quotas.
@@ -6087,7 +6351,7 @@ val list : (Jsonaf.t -> ('a, Error.t) result) -> Jsonaf.t -> ('a list, Error.t) 
 
 ## run_query
 
-[JSON codec](../../lib/agent_protocol/run_query.ml) · [interface](../../lib/agent_protocol/run_query.mli)
+[implementation](../../lib/agent_protocol/run_query.ml) · [interface](../../lib/agent_protocol/run_query.mli)
 
 ```ocaml
 (** Current-authority, nonactivating shared run inspection. Full work and receipt
@@ -6166,7 +6430,7 @@ end
 
 ## run_receipt
 
-[JSON codec](../../lib/agent_protocol/run_receipt.ml) · [interface](../../lib/agent_protocol/run_receipt.mli)
+[implementation](../../lib/agent_protocol/run_receipt.ml) · [interface](../../lib/agent_protocol/run_receipt.mli)
 
 ```ocaml
 (** Immutable local admission/action receipt. A receipt is evidence, never current
@@ -6213,7 +6477,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## run_result_reference
 
-[JSON codec](../../lib/agent_protocol/run_result_reference.ml) · [interface](../../lib/agent_protocol/run_result_reference.mli)
+[implementation](../../lib/agent_protocol/run_result_reference.ml) · [interface](../../lib/agent_protocol/run_result_reference.mli)
 
 ```ocaml
 (** Authorized bounded references, never retained plaintext tool/provider output.
@@ -6248,7 +6512,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## run_source
 
-[JSON codec](../../lib/agent_protocol/run_source.ml) · [interface](../../lib/agent_protocol/run_source.mli)
+[implementation](../../lib/agent_protocol/run_source.ml) · [interface](../../lib/agent_protocol/run_source.mli)
 
 ```ocaml
 (** Captured actor installation identity, independent of checkpoint revisions.
@@ -6274,7 +6538,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## run_start
 
-[JSON codec](../../lib/agent_protocol/run_start.ml) · [interface](../../lib/agent_protocol/run_start.mli)
+[implementation](../../lib/agent_protocol/run_start.ml) · [interface](../../lib/agent_protocol/run_start.mli)
 
 ```ocaml
 (** Explicit host-authorized run start; no caller-supplied source/run identity.
@@ -6319,7 +6583,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## run_wake
 
-[JSON codec](../../lib/agent_protocol/run_wake.ml) · [interface](../../lib/agent_protocol/run_wake.mli)
+[implementation](../../lib/agent_protocol/run_wake.ml) · [interface](../../lib/agent_protocol/run_wake.mli)
 
 ```ocaml
 (** Exact host-issued delivered occurrence. A whole schedule/subscription ID is
@@ -6370,7 +6634,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## run_work
 
-[JSON codec](../../lib/agent_protocol/run_work.ml) · [interface](../../lib/agent_protocol/run_work.mli)
+[implementation](../../lib/agent_protocol/run_work.ml) · [interface](../../lib/agent_protocol/run_work.mli)
 
 ```ocaml
 (** Exact retained owned occurrence. This identity does not describe its outcome;
@@ -6428,7 +6692,7 @@ end
 
 ## schedule
 
-[JSON codec](../../lib/agent_protocol/schedule.ml) · [interface](../../lib/agent_protocol/schedule.mli)
+[implementation](../../lib/agent_protocol/schedule.ml) · [interface](../../lib/agent_protocol/schedule.mli)
 
 ```ocaml
 (** Durable one-shot ChatML event schedules. *)
@@ -6568,7 +6832,7 @@ end
 
 ## scope
 
-[JSON codec](../../lib/agent_protocol/scope.ml) · [interface](../../lib/agent_protocol/scope.mli)
+[implementation](../../lib/agent_protocol/scope.ml) · [interface](../../lib/agent_protocol/scope.mli)
 
 ```ocaml
 (** Authorization scopes carried by authenticated principals. *)
@@ -6619,7 +6883,7 @@ val set_of_json : Jsonaf.t -> (Set.t, Error.t) result
 
 ## search_hit
 
-[JSON codec](../../lib/agent_protocol/search_hit.ml) · [interface](../../lib/agent_protocol/search_hit.mli)
+[implementation](../../lib/agent_protocol/search_hit.ml) · [interface](../../lib/agent_protocol/search_hit.mli)
 
 ```ocaml
 (** A disclosed occurrence in current canonical history; identity is host-owned.
@@ -6651,7 +6915,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## search_navigation
 
-[JSON codec](../../lib/agent_protocol/search_navigation.ml) · [interface](../../lib/agent_protocol/search_navigation.mli)
+[implementation](../../lib/agent_protocol/search_navigation.ml) · [interface](../../lib/agent_protocol/search_navigation.mli)
 
 ```ocaml
 (** Navigation is a fresh authorized lookup, never authority conveyed by a hit.
@@ -6715,7 +6979,7 @@ end
 
 ## search_page
 
-[JSON codec](../../lib/agent_protocol/search_page.ml) · [interface](../../lib/agent_protocol/search_page.mli)
+[implementation](../../lib/agent_protocol/search_page.ml) · [interface](../../lib/agent_protocol/search_page.mli)
 
 ```ocaml
 (** Bounded traversal progress, not a relevance-ranked or exact-count result.
@@ -6742,7 +7006,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## search_query
 
-[JSON codec](../../lib/agent_protocol/search_query.ml) · [interface](../../lib/agent_protocol/search_query.mli)
+[implementation](../../lib/agent_protocol/search_query.ml) · [interface](../../lib/agent_protocol/search_query.mli)
 
 ```ocaml
 (** Conversation search reuses catalog selectors. Page limit counts hits (1–100),
@@ -6770,7 +7034,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## search_snippet
 
-[JSON codec](../../lib/agent_protocol/search_snippet.ml) · [interface](../../lib/agent_protocol/search_snippet.mli)
+[implementation](../../lib/agent_protocol/search_snippet.ml) · [interface](../../lib/agent_protocol/search_snippet.mli)
 
 ```ocaml
 (** Plain text with one highlighted literal occurrence. Offsets and lengths count
@@ -6798,7 +7062,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## search_term
 
-[JSON codec](../../lib/agent_protocol/search_term.ml) · [interface](../../lib/agent_protocol/search_term.mli)
+[implementation](../../lib/agent_protocol/search_term.ml) · [interface](../../lib/agent_protocol/search_term.mli)
 
 ```ocaml
 (** A nonempty UTF-8 literal of at most 256 bytes. ASCII letters match without
@@ -6814,7 +7078,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## session
 
-[JSON codec](../../lib/agent_protocol/session.ml) · [interface](../../lib/agent_protocol/session.mli)
+[implementation](../../lib/agent_protocol/session.ml) · [interface](../../lib/agent_protocol/session.mli)
 
 ```ocaml
 (** Session specifications, lifecycle projections, attachments, and core requests. *)
@@ -7280,7 +7544,7 @@ end
 
 ## session_activity
 
-[JSON codec](../../lib/agent_protocol/session_activity.ml) · [interface](../../lib/agent_protocol/session_activity.mli)
+[implementation](../../lib/agent_protocol/session_activity.ml) · [interface](../../lib/agent_protocol/session_activity.mli)
 
 ```ocaml
 (** Payload-free attention observed from existing session/work owners. Reading is
@@ -7362,7 +7626,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## session_activity_summary
 
-[JSON codec](../../lib/agent_protocol/session_activity_summary.ml) · [interface](../../lib/agent_protocol/session_activity_summary.mli)
+[implementation](../../lib/agent_protocol/session_activity_summary.ml) · [interface](../../lib/agent_protocol/session_activity_summary.mli)
 
 ```ocaml
 (** Safe command-center session projection. Explicitly excludes Session.Spec,
@@ -7448,7 +7712,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## session_catalog
 
-[JSON codec](../../lib/agent_protocol/session_catalog.ml) · [interface](../../lib/agent_protocol/session_catalog.mli)
+[implementation](../../lib/agent_protocol/session_catalog.ml) · [interface](../../lib/agent_protocol/session_catalog.mli)
 
 ```ocaml
 (** Catalog projection: archive state is registry-owned, and active ownership
@@ -7470,7 +7734,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## session_catalog_query
 
-[JSON codec](../../lib/agent_protocol/session_catalog_query.ml) · [interface](../../lib/agent_protocol/session_catalog_query.mli)
+[implementation](../../lib/agent_protocol/session_catalog_query.ml) · [interface](../../lib/agent_protocol/session_catalog_query.mli)
 
 ```ocaml
 (** Catalog ordering uses bytewise display-name comparison and ascending typed
@@ -7512,7 +7776,7 @@ end
 
 ## session_configuration
 
-[JSON codec](../../lib/agent_protocol/session_configuration.ml) · [interface](../../lib/agent_protocol/session_configuration.mli)
+[implementation](../../lib/agent_protocol/session_configuration.ml) · [interface](../../lib/agent_protocol/session_configuration.mli)
 
 ```ocaml
 open! Core
@@ -7592,7 +7856,7 @@ end
 
 ## session_lifecycle
 
-[JSON codec](../../lib/agent_protocol/session_lifecycle.ml) · [interface](../../lib/agent_protocol/session_lifecycle.mli)
+[implementation](../../lib/agent_protocol/session_lifecycle.ml) · [interface](../../lib/agent_protocol/session_lifecycle.mli)
 
 ```ocaml
 open! Core
@@ -7729,7 +7993,7 @@ end
 
 ## session_metadata
 
-[JSON codec](../../lib/agent_protocol/session_metadata.ml) · [interface](../../lib/agent_protocol/session_metadata.mli)
+[implementation](../../lib/agent_protocol/session_metadata.ml) · [interface](../../lib/agent_protocol/session_metadata.mli)
 
 ```ocaml
 (** Organization metadata confers no execution authority. Stored values retain
@@ -7787,7 +8051,7 @@ end
 
 ## session_organization
 
-[JSON codec](../../lib/agent_protocol/session_organization.ml) · [interface](../../lib/agent_protocol/session_organization.mli)
+[implementation](../../lib/agent_protocol/session_organization.ml) · [interface](../../lib/agent_protocol/session_organization.mli)
 
 ```ocaml
 (** Host-qualified historical membership, independent of execution workspace,
@@ -7892,7 +8156,7 @@ end
 
 ## session_ref
 
-[JSON codec](../../lib/agent_protocol/session_ref.ml) · [interface](../../lib/agent_protocol/session_ref.mli)
+[implementation](../../lib/agent_protocol/session_ref.ml) · [interface](../../lib/agent_protocol/session_ref.mli)
 
 ```ocaml
 (** Persistent host-qualified identity; carries no connection or execution grant. *)
@@ -7911,7 +8175,7 @@ val t_of_sexp : Sexplib0.Sexp.t -> t
 
 ## session_seed
 
-[JSON codec](../../lib/agent_protocol/session_seed.ml) · [interface](../../lib/agent_protocol/session_seed.mli)
+[implementation](../../lib/agent_protocol/session_seed.ml) · [interface](../../lib/agent_protocol/session_seed.mli)
 
 ```ocaml
 open! Core
@@ -8005,7 +8269,7 @@ end
 
 ## session_work
 
-[JSON codec](../../lib/agent_protocol/session_work.ml) · [interface](../../lib/agent_protocol/session_work.mli)
+[implementation](../../lib/agent_protocol/session_work.ml) · [interface](../../lib/agent_protocol/session_work.mli)
 
 ```ocaml
 (** Payload-free work occurrence projections. Current security-view and transcript
@@ -8093,7 +8357,7 @@ end
 
 ## snapshot
 
-[JSON codec](../../lib/agent_protocol/snapshot.ml) · [interface](../../lib/agent_protocol/snapshot.mli)
+[implementation](../../lib/agent_protocol/snapshot.ml) · [interface](../../lib/agent_protocol/snapshot.mli)
 
 ```ocaml
 (** Principal-projected session state used by all connected clients. *)
@@ -8130,7 +8394,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## stored_completion
 
-[JSON codec](../../lib/agent_protocol/stored_completion.ml) · [interface](../../lib/agent_protocol/stored_completion.mli)
+[implementation](../../lib/agent_protocol/stored_completion.ml) · [interface](../../lib/agent_protocol/stored_completion.mli)
 
 ```ocaml
 (** Explicit async-job completion storage. Inline values retain their existing
@@ -8173,7 +8437,7 @@ val materialize
 
 ## stream_error
 
-[JSON codec](../../lib/agent_protocol/stream_error.ml) · [interface](../../lib/agent_protocol/stream_error.mli)
+[implementation](../../lib/agent_protocol/stream_error.ml) · [interface](../../lib/agent_protocol/stream_error.mli)
 
 ```ocaml
 (** Attachment-scoped terminal notification for a failed event subscription.
@@ -8195,7 +8459,7 @@ val to_notification : t -> Envelope.t
 
 ## subscription
 
-[JSON codec](../../lib/agent_protocol/subscription.ml) · [interface](../../lib/agent_protocol/subscription.mli)
+[implementation](../../lib/agent_protocol/subscription.ml) · [interface](../../lib/agent_protocol/subscription.mli)
 
 ```ocaml
 (** Durable moderator subscription identity and terminal state. Workflow-specific
@@ -8264,7 +8528,7 @@ end
 
 ## timestamp
 
-[JSON codec](../../lib/agent_protocol/timestamp.ml) · [interface](../../lib/agent_protocol/timestamp.mli)
+[implementation](../../lib/agent_protocol/timestamp.ml) · [interface](../../lib/agent_protocol/timestamp.mli)
 
 ```ocaml
 (** RFC 3339 UTC timestamps used by the agent protocol. *)
@@ -8303,7 +8567,7 @@ val to_json : t -> Jsonaf.t
 
 ## version
 
-[JSON codec](../../lib/agent_protocol/version.ml) · [interface](../../lib/agent_protocol/version.mli)
+[implementation](../../lib/agent_protocol/version.ml) · [interface](../../lib/agent_protocol/version.mli)
 
 ```ocaml
 (** Ochat agent protocol versions and feature negotiation. *)
@@ -8343,7 +8607,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## workspace
 
-[JSON codec](../../lib/agent_protocol/workspace.ml) · [interface](../../lib/agent_protocol/workspace.mli)
+[implementation](../../lib/agent_protocol/workspace.ml) · [interface](../../lib/agent_protocol/workspace.mli)
 
 ```ocaml
 (** Transport projections for configured workspace definitions. *)

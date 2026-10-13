@@ -37,6 +37,8 @@
   grant
   audit
   job
+  developer_job
+  host_job
   job_progress
   job_artifact
   job_result_reference

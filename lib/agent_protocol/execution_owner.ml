@@ -5,7 +5,7 @@ type conversation =
   { session_id : Id.Session.t
   ; generation : int
   }
-[@@deriving equal, sexp_of]
+[@@deriving compare, equal, sexp_of]
 
 type developer =
   { host_id : Id.Server.t
@@ -13,12 +13,12 @@ type developer =
   ; epoch : int
   ; principal_id : Id.Principal.t
   }
-[@@deriving equal, sexp_of]
+[@@deriving compare, equal, sexp_of]
 
 type t =
   | Conversation of conversation
   | Developer of developer
-[@@deriving equal, sexp_of]
+[@@deriving compare, equal, sexp_of]
 
 let validate = function
   | Conversation { session_id; generation } ->
