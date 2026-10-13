@@ -18,7 +18,7 @@ Choose the closest anchor holistically; do not add a point per file, layer or ri
 
 ## Ticket workflow
 
-1. Before starting a ticket, read its acceptance criteria and dependencies, set its estimate and record a short rationale. Preserve an existing estimate unless scope or new evidence warrants an explained revision.
+1. Before starting a ticket, read its acceptance criteria and dependencies, set its estimate and record a short rationale. Preserve an existing estimate unless scope or new evidence warrants an explained revision. For newly generated tickets, look up the team's current Linear cycle and assign the ticket to it at creation, or at the latest during intake before work starts. Do not hard-code a cycle number or overwrite a deliberate assignment to a different cycle; split implementation children also need their own cycle assignment. Cycle membership is for analytics, not a deadline or a change to dependency order.
 2. If the work exceeds 8, split it into independently verifiable, cohesive outcomes before further implementation. Preserve all acceptance requirements and dependencies. A research ticket can first resolve uncertainty and produce an estimated implementation breakdown.
 3. Estimate actual work once. Leave pure tracking parents unestimated; estimate their implementation children. If a parent retains real work, explicitly distinguish that work from its children.
 4. Before marking a ticket Done, ensure it has an estimate and the required review, validation and merge evidence. Tickets already In Review receive estimates before closure.
