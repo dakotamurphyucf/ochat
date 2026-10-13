@@ -139,7 +139,9 @@ let admit_state_document state_document ~limits =
      the complete admitted layout as the next preservation basis, just as
      journal replay does, including newly present optional fields. *)
   let%bind payload = Session_state_document.encode state_document ~limits in
-  let%map state_document = Session_state_document.decode ~limits payload in
+  let%map state_document =
+    Session_state_document.decode_after state_document ~limits payload
+  in
   payload, state_document
 ;;
 
@@ -158,7 +160,8 @@ let commit t ~command_audit ~(previous : Session_state.t) transition =
      next preservation basis. All admission and transaction validation still
      precedes archive/journal effects. *)
   let%bind state_document =
-    Session_state_document.decode
+    Session_state_document.decode_after
+      (Session_state_document.Admitted.state_document admitted)
       ~limits:t.archive_limits
       (Session_state_document.Admitted.document admitted)
     |> Result.map_error ~f:(fun e -> protocol_error (document_error e))

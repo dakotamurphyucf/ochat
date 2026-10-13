@@ -779,6 +779,18 @@ let run env helper ~native_watch =
                   present);
             Ok ())
           |> protocol_ok;
+          (* Grant denials, reference pages and validation are independent
+             permission probes. Keep their full transcripts in the same probe
+             parent so lifecycle commits and recovery do not repeatedly admit
+             them. Both parents use the same configured prompt, workspace,
+             principal, capabilities and daemon-wide helper grants. *)
+          let probe, _ =
+            create_session
+              ~start_immediately:true
+              ~key:"reference-validation-parent"
+              client.connection
+          in
+          await (fun () -> Option.is_none (state daemon probe.id).active_operation);
           let create_envelope =
             `Object
               [ "version", `Number "1"
@@ -801,7 +813,7 @@ let run env helper ~native_watch =
                    sw
                    daemon
                    client
-                   parent.id
+                   probe.id
                    name
                    (`Object [ "stdin", `String (Jsonaf.to_string create_envelope) ])
                with
@@ -885,17 +897,6 @@ let run env helper ~native_watch =
           let child = id created in
           assert (P.Id.Session.equal child (id one_off_replay));
           check_child_tools daemon child;
-          (* Reference pages and validation are independent permission probes.
-             Keep their complete outputs in a separate parent so later lifecycle
-             commits do not repeatedly validate unrelated reference transcripts.
-             This uses the same prompt, capabilities, helper process and grants. *)
-          let probe, _ =
-            create_session
-              ~start_immediately:true
-              ~key:"reference-validation-parent"
-              client.connection
-          in
-          await (fun () -> Option.is_none (state daemon probe.id).active_operation);
           let docs_request =
             `Object
               [ "version", `Number "1"

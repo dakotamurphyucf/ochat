@@ -41,6 +41,18 @@ val decode
   -> Document_schema.Document.t
   -> (t, Document_schema.Error.t) result
 
+(** The same admission and normalization as [decode], reusing immutable successful
+    wire decodes from [previous] only for exact JSON at unchanged limits. Native
+    validation, extension preservation and pending rehydration always run. The
+    result owns one generation of evidence; [with_value] preserves its original
+    wire basis, authored values have none, and adoption discards this evidence.
+    Reuse supplies no fresh authority and does not relax decoder errors. *)
+val decode_after
+  :  t
+  -> limits:Document_schema.Limits.t
+  -> Document_schema.Document.t
+  -> (t, Document_schema.Error.t) result
+
 val encode
   :  t
   -> limits:Document_schema.Limits.t

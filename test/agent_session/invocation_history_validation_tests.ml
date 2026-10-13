@@ -32,7 +32,7 @@ let result ?(relation = Payload.Call_relation.Bound (id 0)) sequence kind text =
   entry sequence "same" (Result { relation; kind; output = Text text })
 ;;
 
-let invocation ?routing ?context () =
+let invocation ?routing ?context ?(outcome = I.Complete (`String "saved")) () =
   I.create
     ?routing
     (Option.value
@@ -47,8 +47,7 @@ let invocation ?routing ?context () =
   |> I.dispatch
   |> protocol_ok
   |> fun invocation ->
-  I.resolve invocation ~session_id ~generation:0 (Complete (`String "saved"))
-  |> protocol_ok
+  I.resolve invocation ~session_id ~generation:0 outcome |> protocol_ok
 ;;
 
 let outcome_text = Jsonaf.to_string (I.outcome_to_json (Complete (`String "saved")))
@@ -269,6 +268,10 @@ let%expect_test "indexed receipts agree with linear checks for generated histori
   in
   let invocations =
     [ valid
+    ; I.publish_with_history
+        (invocation ~routing ~outcome:(Complete (`String "different")) ())
+        ~output_entry_id:(id 2)
+      |> protocol_ok
     ; published
         { routing with canonical_payload = Some { fingerprint with byte_length = 5 } }
     ; published
@@ -324,5 +327,5 @@ let%expect_test "indexed receipts agree with linear checks for generated histori
               (H.Validated_history.validate_retained snapshot invocation);
             Int.incr checks)));
   print_s [%sexp (!checks : int), "exact results agree for generated receipt boundaries"];
-  [%expect {| (120000 "exact results agree for generated receipt boundaries") |}]
+  [%expect {| (132000 "exact results agree for generated receipt boundaries") |}]
 ;;

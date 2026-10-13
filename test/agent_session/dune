@@ -4,6 +4,7 @@
   fixtures
   inference_ports
   document_adoption_tests
+  decode_evidence_tests
   run_state_tests
   run_replacement_tests
   run_admission_tests

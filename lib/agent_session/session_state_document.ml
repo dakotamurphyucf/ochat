@@ -8,6 +8,7 @@ module J = P.Json_codec
 module S = Session_state
 module Shapes = Session_record_shapes
 module D = Document_schema
+module Decode_evidence = Session_state_decode_evidence
 
 let pairs_to_jsonaf pairs =
   `Array
@@ -435,11 +436,16 @@ let conversation_to_jsonaf ~raw_pending ~limits (t : S.Conversation.t) =
     ]
 ;;
 
-let conversation_of_jsonaf ~limits json =
+let conversation_of_jsonaf ?capture ~limits json =
   let open Result.Let_syntax in
   let%bind fields = X.object_ json in
   let%bind canonical_history =
-    X.required fields "canonical_history" (X.list P.History.entry_of_json)
+    X.required
+      fields
+      "canonical_history"
+      (match capture with
+       | None -> X.list P.History.entry_of_json
+       | Some capture -> Decode_evidence.Capture.canonical_history capture)
   in
   let%bind deferred_user_entries =
     X.required
@@ -611,16 +617,7 @@ let ledger_error error =
   P.Error.invalid_request (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error))
 ;;
 
-let ledger_of_jsonaf ~limits json =
-  let open Result.Let_syntax in
-  let%bind document =
-    D.Document.inspect ~limits json
-    |> Result.map_error ~f:(fun error ->
-      P.Error.invalid_request (Sexp.to_string_hum (D.Error.sexp_of_t error)))
-  in
-  Inference_ledger.of_document document ~limits:Inference_ledger.Limits.default
-  |> Result.map_error ~f:ledger_error
-;;
+let ledger_of_jsonaf = Decode_evidence.ledger_of_jsonaf
 
 type run_state_field =
   | Missing
@@ -728,7 +725,7 @@ let equal_values previous ~limits next =
   D.Json.equal previous next
 ;;
 
-let state_fields_of_jsonaf ~limits json =
+let state_fields_of_jsonaf ?capture ~limits json =
   let open Result.Let_syntax in
   let%bind fields = X.object_ json in
   let%bind identity = X.required fields "identity" identity_of_jsonaf in
@@ -743,7 +740,7 @@ let state_fields_of_jsonaf ~limits json =
     X.required fields "parent_stop_epoch" (X.nullable X.nonnegative_int64)
   in
   let%bind conversation =
-    X.required fields "conversation" (conversation_of_jsonaf ~limits)
+    X.required fields "conversation" (conversation_of_jsonaf ?capture ~limits)
   in
   let%bind active_operation =
     X.required fields "active_operation" (X.nullable P.Operation.of_json)
@@ -755,7 +752,12 @@ let state_fields_of_jsonaf ~limits json =
   let%bind grants = X.required fields "grants" (X.list P.Grant.of_json) in
   let%bind jobs = X.required fields "jobs" (X.list P.Job.of_json) in
   let%bind inference_ledger =
-    X.required fields "inference_ledger" (ledger_of_jsonaf ~limits)
+    X.required
+      fields
+      "inference_ledger"
+      (match capture with
+       | None -> ledger_of_jsonaf ~limits
+       | Some capture -> Decode_evidence.Capture.inference_ledger capture)
   in
   let%bind model_job_targets =
     X.required
@@ -767,7 +769,12 @@ let state_fields_of_jsonaf ~limits json =
     X.required fields "schedules" (X.list P.Schedule.Storage.of_json)
   in
   let%bind invocations =
-    X.required fields "invocations" (X.list P.Invocation.Storage.of_json)
+    X.required
+      fields
+      "invocations"
+      (match capture with
+       | None -> X.list P.Invocation.Storage.of_json
+       | Some capture -> Decode_evidence.Capture.invocations capture)
   in
   let%bind managed_submissions =
     X.required fields "managed_submissions" (X.list Managed_submission.of_jsonaf)
@@ -780,7 +787,12 @@ let state_fields_of_jsonaf ~limits json =
     |> Result.map ~f:Option.join
   in
   let%bind moderator_executions =
-    X.required fields "moderator_executions" (X.list P.Moderator_execution.of_json)
+    X.required
+      fields
+      "moderator_executions"
+      (match capture with
+       | None -> X.list P.Moderator_execution.of_json
+       | Some capture -> Decode_evidence.Capture.moderator_executions capture)
   in
   let%bind subscriptions =
     X.required fields "subscriptions" (X.list P.Subscription.Storage.of_json)
@@ -839,9 +851,9 @@ let state_fields_of_jsonaf ~limits json =
   Ok t
 ;;
 
-let state_of_jsonaf ~limits json =
+let state_of_jsonaf ?capture ~limits json =
   let open Result.Let_syntax in
-  let%bind state = state_fields_of_jsonaf ~limits json in
+  let%bind state = state_fields_of_jsonaf ?capture ~limits json in
   let%map () = S.validate state in
   state
 ;;
@@ -892,6 +904,7 @@ module Original = struct
     ; limits : D.Limits.t
     ; inference_ledger : Inference_ledger.t
     ; presence : Session_state_presence.t
+    ; decode_evidence : Decode_evidence.t option
     }
 end
 
@@ -928,7 +941,7 @@ let validate_run_capacity (state : S.t) document =
             { path = [ "run_state" ]; reason = "admitted run index is missing" }))
 ;;
 
-let decoded carrier ~limits =
+let decoded ?evidence carrier ~limits =
   let template =
     match D.Extension_carrier.template carrier with
     | Some template -> template
@@ -951,6 +964,7 @@ let decoded carrier ~limits =
         ; limits
         ; inference_ledger = (D.Extension_carrier.value carrier).S.inference_ledger
         ; presence
+        ; decode_evidence = evidence
         }
   }
 ;;
@@ -1330,7 +1344,7 @@ let upgrade document ~limits =
   D.Conversion.upgrade conversion document
 ;;
 
-let codec ~limits ~presence =
+let codec ~capture ~limits ~presence =
   match
     D.Domain_codec.create_validated
       ~limits
@@ -1339,7 +1353,7 @@ let codec ~limits ~presence =
       ~shape
       ~supported_semantics:[]
       ~validate:(fun state -> X.document_result (S.validate state))
-      ~decode:(fun json -> X.document_result (state_of_jsonaf ~limits json))
+      ~decode:(fun json -> X.document_result (state_of_jsonaf ?capture ~limits json))
       ~encode:(fun state -> X.document_result (state_to_jsonaf state ~limits ~presence))
   with
   | Ok codec -> codec
@@ -1352,13 +1366,29 @@ let codec_for (t : t) ~limits =
     | None -> Session_state_presence.authored
     | Some original -> original.presence
   in
-  codec ~limits ~presence
+  codec ~capture:None ~limits ~presence
 ;;
 
-let decode ~limits document =
-  let%bind.Result document = upgrade document ~limits in
-  D.Domain_codec.decode (codec ~limits ~presence:Session_state_presence.authored) document
-  |> Result.bind ~f:(decoded ~limits)
+let previous_decode_evidence t =
+  Option.bind t.original ~f:(fun original -> original.decode_evidence)
+;;
+
+let decode_with_evidence ?previous ~limits document =
+  let open Result.Let_syntax in
+  let%bind document = upgrade document ~limits in
+  let capture = Decode_evidence.Capture.create ?previous ~limits () in
+  let%bind carrier =
+    D.Domain_codec.decode
+      (codec ~capture:(Some capture) ~limits ~presence:Session_state_presence.authored)
+      document
+  in
+  decoded ~evidence:(Decode_evidence.Capture.finish capture) carrier ~limits
+;;
+
+let decode ~limits document = decode_with_evidence ~limits document
+
+let decode_after previous ~limits document =
+  decode_with_evidence ?previous:(previous_decode_evidence previous) ~limits document
 ;;
 
 let validate_ledger_carrier (t : t) ~limits =
@@ -1489,7 +1519,7 @@ let retire_canonical_entries t ~retained_ids ~initial_count ~limits =
   let%bind document = D.Document.inspect ~limits raw in
   let%bind carrier =
     D.Domain_codec.decode
-      (codec ~limits ~presence:Session_state_presence.authored)
+      (codec ~capture:None ~limits ~presence:Session_state_presence.authored)
       document
   in
   let%map state =
@@ -1727,7 +1757,7 @@ module Transaction = struct
   let value t = value t.staged
   let with_value t state = { staged = with_value t.staged state }
 
-  let prefix_codec ~limits ~presence =
+  let prefix_codec ~capture ~limits ~presence =
     match
       D.Domain_codec.create
         ~limits
@@ -1735,7 +1765,8 @@ module Transaction = struct
         ~version:current_version
         ~shape
         ~supported_semantics:[]
-        ~decode:(fun json -> state_fields_of_jsonaf ~limits json |> X.document_result)
+        ~decode:(fun json ->
+          state_fields_of_jsonaf ?capture ~limits json |> X.document_result)
         ~encode:(fun state ->
           state_to_jsonaf state ~limits ~presence |> X.document_result)
     with
@@ -1752,11 +1783,16 @@ module Transaction = struct
 
   let encode_prefix t ~limits =
     let open Result.Let_syntax in
+    let capture =
+      Decode_evidence.Capture.create ?previous:(previous_decode_evidence t) ~limits ()
+    in
     let%bind () = validate_ledger_carrier t ~limits in
     let%bind document =
       match t.original with
       | Some _ ->
-        D.Domain_codec.encode (prefix_codec ~limits ~presence:(presence t)) t.carrier
+        D.Domain_codec.encode
+          (prefix_codec ~capture:(Some capture) ~limits ~presence:(presence t))
+          t.carrier
       | None ->
         let%bind payload =
           state_to_jsonaf
@@ -1775,22 +1811,32 @@ module Transaction = struct
         in
         let%bind carrier =
           D.Domain_codec.decode
-            (prefix_codec ~limits ~presence:Session_state_presence.authored)
+            (prefix_codec
+               ~capture:(Some capture)
+               ~limits
+               ~presence:Session_state_presence.authored)
             document
         in
         D.Domain_codec.encode
-          (prefix_codec ~limits ~presence:Session_state_presence.authored)
+          (prefix_codec
+             ~capture:(Some capture)
+             ~limits
+             ~presence:Session_state_presence.authored)
           carrier
     in
     let%map () = validate_run_capacity (value { staged = t }) document in
     document
   ;;
 
-  let decode_prefix ~limits document =
+  let decode_prefix ?previous ~limits document =
     let open Result.Let_syntax in
+    let capture = Decode_evidence.Capture.create ?previous ~limits () in
     let%bind carrier =
       D.Domain_codec.decode
-        (prefix_codec ~limits ~presence:Session_state_presence.authored)
+        (prefix_codec
+           ~capture:(Some capture)
+           ~limits
+           ~presence:Session_state_presence.authored)
         document
     in
     let%bind state =
@@ -1808,6 +1854,7 @@ module Transaction = struct
           ; limits
           ; inference_ledger = state.S.inference_ledger
           ; presence
+          ; decode_evidence = Some (Decode_evidence.Capture.finish capture)
           }
     }
   ;;
@@ -1838,7 +1885,7 @@ module Transaction = struct
         ~expiry_archive
         ~limits
         ~encode_previous
-        ~decode_incoming:decode_prefix
+        ~decode_incoming:(decode_prefix ?previous:(previous_decode_evidence t.staged))
     in
     { staged }
   ;;
