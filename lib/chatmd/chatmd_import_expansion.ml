@@ -7,6 +7,8 @@ type sourced_node =
   ; source : Source_ref.t
   ; source_node : Source_loader.source
   ; range : Chatmd_parser_input.Range.t option
+  ; text_fragments : Chatmd_parser_builder.Text_fragment.t list
+  ; input : Chatmd_parser_input.t option
   ; children : sourced_node list option
   }
 
@@ -206,12 +208,16 @@ module Make (Node : sig
     val node : t -> Ast.node
     val range : t -> Chatmd_parser_input.Range.t option
     val children : t -> t list
+    val text_fragments : t -> Chatmd_parser_builder.Text_fragment.t list
+    val input : t -> Chatmd_parser_input.t option
     val retain_children : bool
   end) =
 struct
-  let make context node range children =
+  let make context node range text_fragments input children =
     { node
     ; range
+    ; text_fragments
+    ; input
     ; source = source_ref context range
     ; source_node = context.source_node
     ; children
@@ -229,7 +235,13 @@ struct
              ~f:(sourced ~check_node ~depth:(depth + 1) context))
       else None
     in
-    make context (Node.node node) (Node.range node) children
+    make
+      context
+      (Node.node node)
+      (Node.range node)
+      (Node.text_fragments node)
+      (Node.input node)
+      children
   ;;
 
   let rec expand_nodes ~checkpoint ~check_node ~read_import ~parse ~depth context nodes =
@@ -309,6 +321,8 @@ struct
         context
         (Ast.Element (tag, attributes, List.map children ~f:(fun child -> child.node)))
         (Node.range node)
+        (Node.text_fragments node)
+        (Node.input node)
         (Some children)
     ]
   ;;
@@ -355,6 +369,8 @@ module Legacy = Make (struct
 
     let node node = node
     let range _ = None
+    let text_fragments _ = []
+    let input _ = None
 
     let children = function
       | Ast.Text _ -> []
@@ -369,6 +385,8 @@ module Located = Make (struct
 
     let node = Chatmd_located_ast.node
     let range = Chatmd_located_ast.range
+    let text_fragments = Chatmd_located_ast.text_fragments
+    let input node = Some (Chatmd_located_ast.input node)
     let children = Chatmd_located_ast.children
     let retain_children = true
   end)

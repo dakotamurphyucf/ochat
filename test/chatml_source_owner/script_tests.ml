@@ -83,6 +83,31 @@ let prepare
     ~checkpoint
 ;;
 
+let prepare_with_projections env scope captured root_plan =
+  Scripts.capture_with_projections
+    scope
+    ~capture:captured
+    ~root_plan
+    ~role_plans:[]
+    ~operation:(fun _ -> Chatml_project_build.Operation.Initial_prepare)
+    ~provided:[]
+    ~additional_anchors:[]
+    ~git_store:None
+    ~git_grants:[]
+    ~root_limits:(Project_tests.root_limits ())
+    ~max_grants:8
+    ~max_grant_bytes:65536
+    ~max_request_bytes:65536
+    ~max_path_components:32
+    ~max_input_bytes:1_000_000
+    ~max_work_steps:1_000_000
+    ~policy:(Project_tests.policy ())
+    ~limits:(Project_tests.limits ())
+    ~custody_limits:(custody_limits ())
+    ~clock:env#mono_clock
+    ~checkpoint:ignore
+;;
+
 let raw = {|<import src="pkg/declarations.chatmd"/>|}
 let body = "let run = fun ctx input -> Task.pure(`Complete(`String(\"captured\")))"
 
@@ -141,6 +166,69 @@ let replay env captured custody =
     |> Option.value_exn
   in
   parsed, restored
+;;
+
+let%test_unit "host receipt projects final selected source through original capture" =
+  with_workspace (fun env _ root ->
+    populate root;
+    let definition = definition root in
+    Eio.Switch.run (fun sw ->
+      let owner = open_owner sw root definition in
+      Owner.with_scope owner ~f:(fun scope ->
+        let captured = capture env scope definition |> ok in
+        let parsed = Builder.Capture.root (Owner.Capture.value captured) in
+        let result = prepare_with_projections env scope captured (plan parsed) |> ok in
+        let custody = Scripts.Captured.programs result in
+        let receipts = Scripts.Captured.projections result in
+        assert (List.length receipts = 2);
+        let _, restored = replay env captured custody in
+        List.iter (C.Restored.programs restored) ~f:(fun program ->
+          let binding = C.Restored.Program.binding program in
+          let receipt =
+            List.find_exn receipts ~f:(fun candidate ->
+              C.Binding.equal (Scripts.Projection_receipt.binding candidate) binding)
+          in
+          let graph = C.Restored.Program.prepared program in
+          let entry = P.find_source graph (P.entry graph) |> Option.value_exn in
+          let location =
+            S.locate entry ~start_byte:0 ~end_byte:3 ~checkpoint:ignore |> ok
+          in
+          let projection =
+            Scripts.Projection_receipt.project receipt location ~checkpoint:ignore |> ok
+          in
+          match C.Restored.Program.input program, projection with
+          | Selected _, Exact_external external_location ->
+            assert (String.equal (S.Id.package_namespace (S.id entry)) "example");
+            assert (
+              String.equal
+                (S.Id.relative_path (S.Location.source external_location))
+                "pkg/lookup.chatml");
+            assert (not (S.Id.equal (S.id entry) (S.Location.source external_location)));
+            assert (Int.equal (S.Location.span external_location).left.offset 0);
+            let forged =
+              S.reidentify
+                entry
+                ~id:
+                  (S.Id.create ~package_namespace:"forged" ~relative_path:"lookup.chatml"
+                   |> Or_error.ok_exn)
+            in
+            let forged_location =
+              S.locate forged ~start_byte:0 ~end_byte:3 ~checkpoint:ignore |> ok
+            in
+            assert (
+              Result.is_error
+                (Scripts.Projection_receipt.project
+                   receipt
+                   forged_location
+                   ~checkpoint:ignore))
+          | Provided _, Exact_inline span ->
+            assert (
+              String.equal
+                (Input.path (CM.Declaration.Extraction.input span))
+                "pkg/declarations.chatmd")
+          | _ -> assert false);
+        Ok ())
+      |> ok))
 ;;
 
 let%expect_test

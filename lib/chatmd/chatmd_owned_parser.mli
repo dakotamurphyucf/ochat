@@ -11,6 +11,7 @@ module Limits : sig
     -> t Or_error.t
 
   val input_bytes : t -> int
+  val token_limit : t -> int
 
   (** Complete numeric parsing policy; no parsed inputs or callbacks. *)
   val policy_identity : t -> Sexp.t
@@ -22,6 +23,8 @@ type t
 
 val create : Limits.t -> checkpoint:(unit -> unit) -> t
 val checkpoint : t -> unit
+
+val limits : t -> Limits.t
 
 (** Preserve any tighter host bound and cap referenced script/schema reads too. *)
 val bound_loader : t -> Source_loader.t -> Source_loader.t

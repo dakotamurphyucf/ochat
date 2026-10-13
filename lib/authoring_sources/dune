@@ -127,6 +127,7 @@
     lib/chat_response/initial_prompt_history.ml %{dep:../chat_response/initial_prompt_history.ml}
     lib/chatmd/chatmd_ast.ml %{dep:../chatmd/chatmd_ast.ml}
     lib/chatmd/chatmd_extension_declaration.ml %{dep:../chatmd/chatmd_extension_declaration.ml}
+    lib/chatmd/chatmd_extraction_map.ml %{dep:../chatmd/chatmd_extraction_map.ml}
     lib/chatmd/chatmd_import_expansion.ml %{dep:../chatmd/chatmd_import_expansion.ml}
     lib/chatmd/chatmd_lexer.mll %{dep:../chatmd/chatmd_lexer.mll}
     lib/chatmd/chatmd_parser_engine.mly %{dep:../chatmd/chatmd_parser_engine.mly}
@@ -187,6 +188,7 @@
     lib/agent_session/authored_source_preparation.ml %{dep:../agent_session/authored_source_preparation.ml}
     lib/agent_store/prompt_source_receipt.ml %{dep:../agent_store/prompt_source_receipt.ml}
     lib/agent_session/prompt_revision_builder.ml %{dep:../agent_session/prompt_revision_builder.ml}
+    lib/agent_session/prompt_script_sources.ml %{dep:../agent_session/prompt_script_sources.ml}
     lib/agent_store/delegation_store.ml %{dep:../agent_store/delegation_store.ml}
     lib/chat_response/authoring_context.ml %{dep:../chat_response/authoring_context.ml}
     lib/chat_response/authoring_validation.ml %{dep:../chat_response/authoring_validation.ml}
