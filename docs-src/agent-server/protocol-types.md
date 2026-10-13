@@ -1126,6 +1126,28 @@ module Assistance : sig
     val of_json : Jsonaf.t -> (t, Error.t) result
   end
 
+  module Selected_tool : sig
+    (** Comparison evidence for one binding in the host's ACTUALLY selected
+        tool registry. Both digests come from the existing SHA-256
+        Tool_capability reference/selected-registry fingerprints, admitted
+        through Digest.of_hex. The host resolves the same capability within
+        the current selected registry before publishing a suggestion. This
+        carries no implementation, invocation or permission grant. *)
+    type t
+
+    val create
+      :  capability_id:Id.Capability.t
+      -> binding_fingerprint:Chatml_source.Digest.t
+      -> selected_registry_fingerprint:Chatml_source.Digest.t
+      -> (t, Error.t) result
+
+    val capability_id : t -> Id.Capability.t
+    val binding_fingerprint : t -> Chatml_source.Digest.t
+    val selected_registry_fingerprint : t -> Chatml_source.Digest.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
   (** Reuse the semantic protocol's exact source-bound, zero-width-capable byte
       range. The host admits replacement only against the current AUTHORED
       source, projecting embedded effective coordinates through the real map;
@@ -1152,11 +1174,13 @@ module Assistance : sig
           ; sha256 : Chatml_source.Digest.t
           }
       | Selected_catalog of Selected_catalog.t
+      | Selected_tool of Selected_tool.t
       | Host_root of Id.Authoring_root.t
     [@@deriving sexp_of]
 
     (** Admitted evidence matrix: Tag/Attribute/Value use Lexical or
-        Parsed_document; Reference uses Parsed_document or Selected_catalog;
+        Parsed_document; Reference uses Parsed_document, Selected_catalog or
+        Selected_tool;
         Path uses Parsed_project for a declared path, or Host_root or
         Selected_catalog for a separately authorized member; Template uses
         Lexical static syntax, Parsed_document or Installed_builtin;
@@ -1198,6 +1222,11 @@ module Assistance : sig
       | Item_limit
       | Work_limit
       | Result_bytes
+      (** A relevant source-derived candidate needs bytes that cannot be
+          represented as valid UTF-8 insert text in this cursor context.
+          Earlier valid items remain; unrelated invalid metadata does not
+          truncate another suggestion family. No source bytes are rewritten. *)
+      | Unrepresentable_text
     [@@deriving compare, equal, sexp_of]
 
     type t =
@@ -1212,6 +1241,25 @@ module Assistance : sig
         checks echoed context/generation/source, every replacement range and
         selected method feature before applying an item. *)
     type t
+
+    module Builder : sig
+      (** Incremental bounded result admission for producers. [Full] means
+          only aggregate output capacity was reached. Invalid ownership or
+          suggestion structure returns the original typed error. The builder
+          reserves the largest finite status envelope before accepting items,
+          so [finish] performs one final shared validation without trimming. *)
+      type completed = t
+
+      type t
+
+      type addition =
+        | Added
+        | Full of Status.truncation
+
+      val create : request:Request.t -> (t, Error.t) result
+      val add : t -> Suggestion.t -> (addition, Error.t) result
+      val finish : t -> status:Status.t -> (completed, Error.t) result
+    end
 
     val create
       :  request:Request.t

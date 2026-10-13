@@ -1,0 +1,29 @@
+(copy_files ../chatml_project_build/support.ml)
+(copy_files ../chatml_project_build/fixtures.ml)
+
+(library
+ (name chatmd_authoring_assistance_tests)
+ (modules support fixtures assistance_tests)
+ (libraries
+  core
+  eio
+  eio.unix
+  eio_main
+  expect_test_helpers_core
+  source
+  ochat.agent_protocol
+  ochat.chatmd_source_input
+  ochat.chatmd
+  ochat.chatmd_shell_spec
+  ochat.language_highlighting
+  chatml
+  ochat.chatml_source
+  chatml_catalog
+  chatml_prepared_program
+  chatml_project
+  chatml_project_build
+  document_schema
+  builtin_instructions
+  chatmd_authoring_assistance)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

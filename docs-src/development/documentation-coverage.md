@@ -789,7 +789,9 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_tui/ui_helpers.mli` | [contract](../../lib/chat_tui/ui_helpers.mli) | [integration](../guide/chat_tui.md) | Public interface + current host guide. |
 | `lib/chat_tui/utf8_edit.mli` | [contract](../../lib/chat_tui/utf8_edit.mli) | [integration](../guide/chat_tui.md) | Public interface + current host guide. |
 | `lib/chat_tui/util.mli` | [contract](../../lib/chat_tui/util.mli) | [integration](../guide/chat_tui.md) | Public interface + current host guide. |
+| `lib/chatmd/chatmd_attribute_lex.mli` | [contract](../../lib/chatmd/chatmd_attribute_lex.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_attributes.mli` | [contract](../../lib/chatmd/chatmd_attributes.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chatmd/chatmd_declaration_schema.mli` | [contract](../../lib/chatmd/chatmd_declaration_schema.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_document_occurrence.mli` | [contract](../../lib/chatmd/chatmd_document_occurrence.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_extension_declaration.mli` | [contract](../../lib/chatmd/chatmd_extension_declaration.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_extraction_map.mli` | [contract](../../lib/chatmd/chatmd_extraction_map.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
@@ -803,8 +805,10 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chatmd/chatmd_read_file_spec.mli` | [contract](../../lib/chatmd/chatmd_read_file_spec.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_script_declaration.mli` | [contract](../../lib/chatmd/chatmd_script_declaration.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_shell_declaration.mli` | [contract](../../lib/chatmd/chatmd_shell_declaration.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
+| `lib/chatmd/chatmd_shell_schema.mli` | [contract](../../lib/chatmd/chatmd_shell_schema.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_shell_serialization.mli` | [contract](../../lib/chatmd/chatmd_shell_serialization.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_source_bundle.mli` | [contract](../../lib/chatmd/chatmd_source_bundle.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chatmd/chatmd_tag_scope.mli` | [contract](../../lib/chatmd/chatmd_tag_scope.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/prompt.mli` | [contract](../../lib/chatmd/prompt.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/chatmd/source_loader.mli` | [contract](../../lib/chatmd/source_loader.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd_shell_spec/authoring_metadata.mli` | [contract](../../lib/chatmd_shell_spec/authoring_metadata.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
@@ -1074,6 +1078,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../design/chatml-authoring-services.md) | `docs-src/design/chatml-authoring-services.md` | Canonical design; conceptual/compatibility qualifications retained. |
 | [page](../design/chatml-developer-runtime.md) | `docs-src/design/chatml-developer-runtime.md` | Canonical design; conceptual/compatibility qualifications retained. |
 | [page](../design/chatml-execution-tracing.md) | `docs-src/design/chatml-execution-tracing.md` | Canonical design; conceptual/compatibility qualifications retained. |
+| [page](../design/chatml-type-display.md) | `docs-src/design/chatml-type-display.md` | Canonical design; conceptual/compatibility qualifications retained. |
 | [page](../design/chatml-type-graph-copy.md) | `docs-src/design/chatml-type-graph-copy.md` | Canonical design; conceptual/compatibility qualifications retained. |
 | [page](../design/ochat-agent-server-implementation-spec.md) | `docs-src/design/ochat-agent-server-implementation-spec.md` | Canonical design; conceptual/compatibility qualifications retained. |
 | [page](../design/ochat-agent-server-spec.md) | `docs-src/design/ochat-agent-server-spec.md` | Canonical design; conceptual/compatibility qualifications retained. |
