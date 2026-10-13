@@ -494,6 +494,16 @@ fingerprint binds its explicit Project or ChatMD document basis, captured root
 and selection, exact owner-local project routes when applicable, and sorted
 member ID/digest/length inventory. `Source.Portable_path` rejects exact,
 ASCII-case and file/directory prefix conflicts within each source namespace.
+The current typed wire admits one shared inventory: each Project names an exact
+member subset, and a selected inline ChatMD script names its authored owner and
+body digest/length separately from any per-script Project. A captured Project
+entry may be an uploaded member or a source derived from that exact script
+selection. A compose request names the full immutable previous-lock source
+revision when one is selected; its metadata is comparison evidence, not a read
+grant. Constructors and decoders reject inconsistent subsets, repeated derived
+source IDs with conflicting revisions, ambiguous paths, and out-of-range script
+selectors. Client replies are checked against the request's tagged manifest;
+these structural checks do not replace the host's captured-source validation.
 Storage/receipt ownership and pure closure validation/publication are separate
 components. The private upload stage records a versioned immutable manifest,
 atomic phase and accepted-offset documents, and numeric member data files under
@@ -511,6 +521,10 @@ publish a bundle or issue a Published receipt. Reuse checked blob-store streamin
 where appropriate, but do not reuse message-input `Send_messages` scope,
 one-hour temporary retention or `allowed_use` as authoring authority. Local,
 HTTP and stdio clients share the same bundle receipt contract.
+The unreleased private staging document uses schema version 2 for this tagged
+manifest. Recovery rejects a prior draft version instead of reinterpreting its
+idempotency key or manufacturing a tagged basis; there is no released-upload
+migration contract for these draft bytes.
 
 The host upload facade takes exclusive lifetime ownership of one staging store.
 Its independent upload policy checks the original authenticated actor and

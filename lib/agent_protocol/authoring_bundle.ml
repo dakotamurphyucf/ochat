@@ -63,20 +63,46 @@ module Bundle = struct
   end
 
   module Manifest = struct
+    module Route = Authoring_bundle_basis.Route
+    module Project = Authoring_bundle_basis.Project_basis
+    module Document_member = Authoring_bundle_basis.Document_member
+    module Script = Authoring_bundle_basis.Script
+    module Chatmd_document = Authoring_bundle_basis.Chatmd_document
+
+    type basis = Authoring_bundle_basis.t =
+      | Project of Project.t
+      | Chatmd_document of Chatmd_document.t
+
+    let equal_basis = Authoring_bundle_basis.equal
+
     type t =
-      { project_source : Chatml_source.Id.t
-      ; selection : Context.Selection.t
+      { basis : basis
       ; members : Member.t list
       ; fingerprint : Chatml_source.Digest.t
       }
-    [@@deriving equal, sexp_of]
 
+    let basis t = t.basis
+    let members t = t.members
+    let fingerprint t = t.fingerprint
     let member_id member = A.Source.id (Member.source member)
 
-    let encoded ~project_source ~selection ~members =
+    let equal left right =
+      Authoring_bundle_basis.equal left.basis right.basis
+      && List.equal Member.equal left.members right.members
+      && Chatml_source.Digest.equal left.fingerprint right.fingerprint
+    ;;
+
+    let sexp_of_t t =
+      [%sexp
+        { fingerprint = (Chatml_source.Digest.to_hex t.fingerprint : string)
+        ; basis = (Jsonaf.to_string (Authoring_bundle_basis.to_json t.basis) : string)
+        ; member_count = (List.length t.members : int)
+        }]
+    ;;
+
+    let encoded ~basis ~members =
       obj
-        [ "project_source", C.source_id_json project_source
-        ; "selection", Context.Selection.to_json selection
+        [ "basis", Authoring_bundle_basis.to_json basis
         ; "members", C.array Member.to_json members
         ]
     ;;
@@ -84,7 +110,7 @@ module Bundle = struct
     let fingerprint_of_canonical canonical =
       let context = Digestif.SHA256.init () in
       let context =
-        Digestif.SHA256.feed_string context "ochat-authoring-bundle-manifest-v1\000"
+        Digestif.SHA256.feed_string context "ochat-authoring-bundle-manifest-v2\000"
       in
       let context = Digestif.SHA256.feed_string context canonical in
       Digestif.SHA256.(to_hex (get context))
@@ -118,8 +144,7 @@ module Bundle = struct
       else Ok ()
     ;;
 
-    let create ~project_source ~selection ~members =
-      let* () = C.validate_source_id project_source in
+    let create ~basis ~members =
       if not (within_count members)
       then C.invalid "too many immutable bundle members"
       else (
@@ -130,7 +155,8 @@ module Bundle = struct
             let* () = C.validate_source_id (A.Source.id source) in
             let length = A.Source.byte_length source in
             if
-              length > Wire_limits.max_member_bytes
+              Option.is_some (A.Source.editor_revision source)
+              || length > Wire_limits.max_member_bytes
               || length > Wire_limits.max_total_declared_bytes - !total
             then C.invalid "bundle declared bytes exceed wire limit"
             else (
@@ -143,44 +169,29 @@ module Bundle = struct
         in
         let* () = check_collisions members in
         let* () =
-          if
-            List.exists members ~f:(fun member ->
-              Chatml_source.Id.equal (member_id member) project_source)
-          then Ok ()
-          else C.invalid "bundle root source is absent from manifest"
+          Authoring_bundle_basis.validate_inventory
+            basis
+            ~member_sources:(List.map members ~f:Member.source)
         in
-        let canonical = encoded ~project_source ~selection ~members |> Jsonaf.to_string in
-        if String.length canonical > Wire_limits.max_manifest_bytes
-        then C.invalid "bundle manifest exceeds wire limit"
-        else
-          Ok
-            { project_source
-            ; selection
-            ; members
-            ; fingerprint = fingerprint_of_canonical canonical
-            })
+        let json = encoded ~basis ~members in
+        let* () = C.admit_json ~max_bytes:Wire_limits.max_manifest_bytes json in
+        let canonical = Jsonaf.to_string json in
+        Ok { basis; members; fingerprint = fingerprint_of_canonical canonical })
     ;;
 
-    let project_source t = t.project_source
-    let selection t = t.selection
-    let members t = t.members
-    let fingerprint t = t.fingerprint
-
-    let to_json t =
-      encoded ~project_source:t.project_source ~selection:t.selection ~members:t.members
-    ;;
+    let to_json t = encoded ~basis:t.basis ~members:t.members
 
     let of_json json =
-      let* fields = C.fields ~allowed:[ "project_source"; "selection"; "members" ] json in
-      let* project_source = C.required_as fields "project_source" C.source_id in
-      let* selection = C.required_as fields "selection" Context.Selection.of_json in
+      let* () = C.admit_json ~max_bytes:Wire_limits.max_manifest_bytes json in
+      let* fields = C.fields ~allowed:[ "basis"; "members" ] json in
+      let* basis = C.required_as fields "basis" Authoring_bundle_basis.of_json in
       let* members =
         C.required_as
           fields
           "members"
           (C.list ~max_items:Wire_limits.max_members Member.of_json)
       in
-      create ~project_source ~selection ~members
+      create ~basis ~members
     ;;
   end
 
@@ -424,58 +435,319 @@ module Bundle = struct
   end
 
   module Receipt = struct
+    module Project = struct
+      type t =
+        { root_source : Chatml_source.Id.t
+        ; entry_source : Chatml_source.Id.t
+        ; selected_lock : Chatml_source.Id.t
+        ; input_fingerprint : Chatml_source.Digest.t
+        ; compiler_contract : Chatml_source.Digest.t
+        ; environment : string
+        }
+
+      let equal left right =
+        Chatml_source.Id.equal left.root_source right.root_source
+        && Chatml_source.Id.equal left.entry_source right.entry_source
+        && Chatml_source.Id.equal left.selected_lock right.selected_lock
+        && Chatml_source.Digest.equal left.input_fingerprint right.input_fingerprint
+        && Chatml_source.Digest.equal left.compiler_contract right.compiler_contract
+        && String.equal left.environment right.environment
+      ;;
+
+      let create
+            ~root_source
+            ~entry_source
+            ~selected_lock
+            ~input_fingerprint
+            ~compiler_contract
+            ~environment
+        =
+        let* () = C.validate_source_id root_source in
+        let* () = C.validate_source_id entry_source in
+        let* () = C.validate_source_id selected_lock in
+        if
+          String.is_empty environment
+          || String.length environment > 256
+          || not (Stdlib.String.is_valid_utf_8 environment)
+        then C.invalid "invalid bundle receipt environment"
+        else
+          Ok
+            { root_source
+            ; entry_source
+            ; selected_lock
+            ; input_fingerprint
+            ; compiler_contract
+            ; environment
+            }
+      ;;
+
+      let root_source t = t.root_source
+      let entry_source t = t.entry_source
+      let selected_lock t = t.selected_lock
+      let input_fingerprint t = t.input_fingerprint
+      let compiler_contract t = t.compiler_contract
+      let environment t = t.environment
+
+      let to_json t =
+        obj
+          [ "root_source", C.source_id_json t.root_source
+          ; "entry_source", C.source_id_json t.entry_source
+          ; "selected_lock", C.source_id_json t.selected_lock
+          ; "input_fingerprint", C.digest_json t.input_fingerprint
+          ; "compiler_contract", C.digest_json t.compiler_contract
+          ; "environment", str t.environment
+          ]
+      ;;
+
+      let of_json json =
+        let* fields =
+          C.fields
+            ~allowed:
+              [ "root_source"
+              ; "entry_source"
+              ; "selected_lock"
+              ; "input_fingerprint"
+              ; "compiler_contract"
+              ; "environment"
+              ]
+            json
+        in
+        let* root_source = C.required_as fields "root_source" C.source_id in
+        let* entry_source = C.required_as fields "entry_source" C.source_id in
+        let* selected_lock = C.required_as fields "selected_lock" C.source_id in
+        let* input_fingerprint = C.required_as fields "input_fingerprint" C.digest in
+        let* compiler_contract = C.required_as fields "compiler_contract" C.digest in
+        let* environment =
+          C.required_as fields "environment" (C.utf8_text ~max_bytes:256)
+        in
+        create
+          ~root_source
+          ~entry_source
+          ~selected_lock
+          ~input_fingerprint
+          ~compiler_contract
+          ~environment
+      ;;
+    end
+
+    module Script = struct
+      type result =
+        | Source_only of
+            { selector : Manifest.Script.Selector.t
+            ; body_digest : Chatml_source.Digest.t
+            }
+        | Selected_project of
+            { selector : Manifest.Script.Selector.t
+            ; body_digest : Chatml_source.Digest.t
+            ; project : Project.t
+            }
+
+      let selector = function
+        | Source_only { selector; _ } | Selected_project { selector; _ } -> selector
+      ;;
+
+      let body_digest = function
+        | Source_only { body_digest; _ } | Selected_project { body_digest; _ } ->
+          body_digest
+      ;;
+
+      let equal_result left right =
+        let common =
+          Manifest.Script.Selector.equal (selector left) (selector right)
+          && Chatml_source.Digest.equal (body_digest left) (body_digest right)
+        in
+        common
+        &&
+        match left, right with
+        | Source_only _, Source_only _ -> true
+        | Selected_project left, Selected_project right ->
+          Project.equal left.project right.project
+        | Source_only _, Selected_project _ | Selected_project _, Source_only _ -> false
+      ;;
+
+      let to_json = function
+        | Source_only { selector; body_digest } ->
+          obj
+            [ "kind", str "source_only"
+            ; "selector", Manifest.Script.Selector.to_json selector
+            ; "body_digest", C.digest_json body_digest
+            ]
+        | Selected_project { selector; body_digest; project } ->
+          obj
+            [ "kind", str "selected_project"
+            ; "selector", Manifest.Script.Selector.to_json selector
+            ; "body_digest", C.digest_json body_digest
+            ; "project", Project.to_json project
+            ]
+      ;;
+
+      let of_json json =
+        let* fields =
+          C.fields ~allowed:[ "kind"; "selector"; "body_digest"; "project" ] json
+        in
+        let* kind = C.required_as fields "kind" (C.string ~max_bytes:24) in
+        let* selector =
+          C.required_as fields "selector" Manifest.Script.Selector.of_json
+        in
+        let* body_digest = C.required_as fields "body_digest" C.digest in
+        if
+          not
+            (Chatml_source.Digest.equal
+               body_digest
+               (Manifest.Script.Selector.body_digest selector))
+        then C.invalid "bundle receipt script digest mismatch"
+        else (
+          match kind with
+          | "source_only" ->
+            let* _ = C.fields ~allowed:[ "kind"; "selector"; "body_digest" ] json in
+            Ok (Source_only { selector; body_digest })
+          | "selected_project" ->
+            let* project = C.required_as fields "project" Project.of_json in
+            Ok (Selected_project { selector; body_digest; project })
+          | _ -> C.invalid "invalid bundle receipt script kind")
+      ;;
+    end
+
+    module Chatmd_document = struct
+      type t =
+        { root_source : Chatml_source.Id.t
+        ; closure_fingerprint : Chatml_source.Digest.t
+        ; scripts : Script.result list
+        }
+
+      let root_source t = t.root_source
+      let closure_fingerprint t = t.closure_fingerprint
+      let scripts t = t.scripts
+
+      let compare_selector left right =
+        Manifest.Script.Selector.key_compare
+          (Script.selector left)
+          (Script.selector right)
+      ;;
+
+      let create ~root_source ~closure_fingerprint ~scripts =
+        let* () = C.validate_source_id root_source in
+        if
+          not
+            (let rec within left = function
+               | [] -> true
+               | _ :: rest when left > 0 -> within (left - 1) rest
+               | _ :: _ -> false
+             in
+             within 256 scripts)
+        then C.invalid "too many bundle receipt scripts"
+        else
+          let* () =
+            List.fold_result scripts ~init:() ~f:(fun () script ->
+              if
+                Chatml_source.Digest.equal
+                  (Script.body_digest script)
+                  (Manifest.Script.Selector.body_digest (Script.selector script))
+              then Ok ()
+              else C.invalid "bundle receipt script digest mismatch")
+          in
+          let scripts = List.sort scripts ~compare:compare_selector in
+          let rec unique = function
+            | [] | [ _ ] -> true
+            | left :: (right :: _ as rest) ->
+              compare_selector left right <> 0 && unique rest
+          in
+          if not (unique scripts)
+          then C.invalid "duplicate bundle receipt script"
+          else Ok { root_source; closure_fingerprint; scripts }
+      ;;
+
+      let equal left right =
+        Chatml_source.Id.equal left.root_source right.root_source
+        && Chatml_source.Digest.equal left.closure_fingerprint right.closure_fingerprint
+        && List.equal Script.equal_result left.scripts right.scripts
+      ;;
+
+      let to_json t =
+        obj
+          [ "root_source", C.source_id_json t.root_source
+          ; "closure_fingerprint", C.digest_json t.closure_fingerprint
+          ; "scripts", C.array Script.to_json t.scripts
+          ]
+      ;;
+
+      let of_json json =
+        let* fields =
+          C.fields ~allowed:[ "root_source"; "closure_fingerprint"; "scripts" ] json
+        in
+        let* root_source = C.required_as fields "root_source" C.source_id in
+        let* closure_fingerprint = C.required_as fields "closure_fingerprint" C.digest in
+        let* scripts =
+          C.required_as fields "scripts" (C.list ~max_items:256 Script.of_json)
+        in
+        create ~root_source ~closure_fingerprint ~scripts
+      ;;
+    end
+
+    type basis =
+      | Project of Project.t
+      | Chatmd_document of Chatmd_document.t
+
+    let equal_basis left right =
+      match left, right with
+      | Project left, Project right -> Project.equal left right
+      | Chatmd_document left, Chatmd_document right -> Chatmd_document.equal left right
+      | Project _, Chatmd_document _ | Chatmd_document _, Project _ -> false
+    ;;
+
+    let basis_to_json = function
+      | Project project ->
+        obj [ "kind", str "project"; "project", Project.to_json project ]
+      | Chatmd_document document ->
+        obj
+          [ "kind", str "chatmd_document"; "document", Chatmd_document.to_json document ]
+    ;;
+
+    let basis_of_json json =
+      let* fields = C.fields ~allowed:[ "kind"; "project"; "document" ] json in
+      let* kind = C.required_as fields "kind" (C.string ~max_bytes:24) in
+      match kind with
+      | "project" ->
+        let* _ = C.fields ~allowed:[ "kind"; "project" ] json in
+        let* project = C.required_as fields "project" Project.of_json in
+        Ok (Project project)
+      | "chatmd_document" ->
+        let* _ = C.fields ~allowed:[ "kind"; "document" ] json in
+        let* document = C.required_as fields "document" Chatmd_document.of_json in
+        Ok (Chatmd_document document)
+      | _ -> C.invalid "invalid bundle receipt basis"
+    ;;
+
     type t =
       { owner : Owner.t
       ; upload_id : Id.Authoring_upload.t
       ; bundle_id : Id.Authoring_bundle.t
       ; manifest_fingerprint : Chatml_source.Digest.t
-      ; project_source : Chatml_source.Id.t
-      ; graph : Chatml_source.Digest.t
-      ; compiler_contract : Chatml_source.Digest.t
-      ; environment : string
+      ; basis : basis
       ; expires_at : Timestamp.t
       }
-    [@@deriving equal, sexp_of]
 
-    let create
-          ~owner
-          ~upload_id
-          ~bundle_id
-          ~manifest_fingerprint
-          ~project_source
-          ~graph
-          ~compiler_contract
-          ~environment
-          ~expires_at
-      =
-      let* () = C.validate_source_id project_source in
-      let* _ =
-        Context.Selection.create
-          ~target:Context.Selection.Library
-          ~environment:(Some environment)
-      in
-      Ok
-        { owner
-        ; upload_id
-        ; bundle_id
-        ; manifest_fingerprint
-        ; project_source
-        ; graph
-        ; compiler_contract
-        ; environment
-        ; expires_at
-        }
+    let create ~owner ~upload_id ~bundle_id ~manifest_fingerprint ~basis ~expires_at =
+      let json = basis_to_json basis in
+      let* () = C.admit_json ~max_bytes:Wire_limits.max_manifest_bytes json in
+      Ok { owner; upload_id; bundle_id; manifest_fingerprint; basis; expires_at }
     ;;
 
     let owner t = t.owner
     let upload_id t = t.upload_id
     let bundle_id t = t.bundle_id
     let manifest_fingerprint t = t.manifest_fingerprint
-    let project_source t = t.project_source
-    let graph t = t.graph
-    let compiler_contract t = t.compiler_contract
-    let environment t = t.environment
+    let basis t = t.basis
     let expires_at t = t.expires_at
+
+    let equal left right =
+      Owner.equal left.owner right.owner
+      && Id.Authoring_upload.equal left.upload_id right.upload_id
+      && Id.Authoring_bundle.equal left.bundle_id right.bundle_id
+      && Chatml_source.Digest.equal left.manifest_fingerprint right.manifest_fingerprint
+      && equal_basis left.basis right.basis
+      && Timestamp.equal left.expires_at right.expires_at
+    ;;
 
     let to_json t =
       obj
@@ -483,15 +755,15 @@ module Bundle = struct
         ; "upload_id", Id.Authoring_upload.to_json t.upload_id
         ; "bundle_id", Id.Authoring_bundle.to_json t.bundle_id
         ; "manifest_fingerprint", C.digest_json t.manifest_fingerprint
-        ; "project_source", C.source_id_json t.project_source
-        ; "graph", C.digest_json t.graph
-        ; "compiler_contract", C.digest_json t.compiler_contract
-        ; "environment", str t.environment
+        ; "basis", basis_to_json t.basis
         ; "expires_at", Timestamp.to_json t.expires_at
         ]
     ;;
 
+    let sexp_of_t t = Sexp.Atom (Jsonaf.to_string (to_json t))
+
     let of_json json =
+      let* () = C.admit_json ~max_bytes:Wire_limits.max_manifest_bytes json in
       let* fields =
         C.fields
           ~allowed:
@@ -499,10 +771,7 @@ module Bundle = struct
             ; "upload_id"
             ; "bundle_id"
             ; "manifest_fingerprint"
-            ; "project_source"
-            ; "graph"
-            ; "compiler_contract"
-            ; "environment"
+            ; "basis"
             ; "expires_at"
             ]
           json
@@ -511,23 +780,9 @@ module Bundle = struct
       let* upload_id = C.required_as fields "upload_id" Id.Authoring_upload.of_json in
       let* bundle_id = C.required_as fields "bundle_id" Id.Authoring_bundle.of_json in
       let* manifest_fingerprint = C.required_as fields "manifest_fingerprint" C.digest in
-      let* project_source = C.required_as fields "project_source" C.source_id in
-      let* graph = C.required_as fields "graph" C.digest in
-      let* compiler_contract = C.required_as fields "compiler_contract" C.digest in
-      let* environment =
-        C.required_as fields "environment" (C.utf8_text ~max_bytes:256)
-      in
+      let* basis = C.required_as fields "basis" basis_of_json in
       let* expires_at = C.required_as fields "expires_at" Timestamp.of_json in
-      create
-        ~owner
-        ~upload_id
-        ~bundle_id
-        ~manifest_fingerprint
-        ~project_source
-        ~graph
-        ~compiler_contract
-        ~environment
-        ~expires_at
+      create ~owner ~upload_id ~bundle_id ~manifest_fingerprint ~basis ~expires_at
     ;;
   end
 

@@ -28,7 +28,7 @@ let exact_envelope document =
 
 let encode ~kind ~max_bytes payload =
   let* limits = document_limit ~max_bytes in
-  let* document = D.Document.create ~limits ~kind ~version:1 ~payload |> F.store in
+  let* document = D.Document.create ~limits ~kind ~version:2 ~payload |> F.store in
   Ok (D.Document.to_string document)
 ;;
 
@@ -38,7 +38,7 @@ let decode ~kind ~max_bytes bytes =
   let* () = exact_envelope document |> F.store in
   if not (String.equal (D.Document.kind document) kind)
   then Error (Store_error.Corrupt "wrong durable upload document kind")
-  else if D.Document.version document <> 1
+  else if D.Document.version document <> 2
   then Error (Store_error.Corrupt "unsupported durable upload document version")
   else Ok (D.Document.payload document)
 ;;

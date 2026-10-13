@@ -11,7 +11,8 @@
   ochat.agent_store
   ochat.agent_protocol
   ochat.operator_authorization
-  ochat.chatml_source)
+  ochat.chatml_source
+  ochat.chatml_project)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
