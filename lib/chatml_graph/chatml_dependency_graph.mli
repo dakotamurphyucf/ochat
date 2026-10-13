@@ -23,7 +23,7 @@ module Edge : sig
 
   (** Value_reference only; Open and Qualified_type do not select an initializer.
       Runtime selection is entry-rooted closure over these edges, not every
-      checked node with an outgoing value edge.187 owns selection/execution. *)
+      checked node with an outgoing value edge. The caller owns execution. *)
   val is_runtime_dependency : t -> bool
 
   val compare : t -> t -> int
@@ -62,3 +62,24 @@ val dependency_order : t -> Prepared.Module_id.t list
     dependency order. Pure selection only; no initialization or runtime registry.
     Value edges in compiler-only checked subtrees do not enter this closure. *)
 val runtime_dependency_order : t -> checkpoint:(unit -> unit) -> Prepared.Module_id.t list
+
+(** Select the transitive Value_reference closure of zero or more authentic
+    direct roots, filtered in the supplied canonical dependency-before-owner
+    order. This is the same pure selection used by [runtime_dependency_order],
+    without inventing a project-main entry for a REPL. Open/Qualified_type
+    edges never select an initializer, including value edges below a branch
+    reached only for types. Empty roots select nothing.
+
+    The caller supplies the incremental root driver's completed Roots order/edges and the pinned
+    Prepared fingerprint; this function validates unique ordered nodes, exact
+    edge input identity/membership/order, and root membership before selection.
+    Every list/edge/closure step polls [checkpoint]. The caller must bound input
+    counts with its admitted Roots policy and shared work budget. On invalid
+    input it returns a bounded diagnostic; callback exceptions propagate. *)
+val runtime_order_for_roots
+  :  input_fingerprint:Chatml_source.Digest.t
+  -> checked_order:Prepared.Module_id.t list
+  -> edges:Edge.t list
+  -> roots:Prepared.Module_id.t list
+  -> checkpoint:(unit -> unit)
+  -> (Prepared.Module_id.t list, Chatml_diagnostic.t) Result.t

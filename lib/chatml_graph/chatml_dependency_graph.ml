@@ -75,7 +75,7 @@ let input_fingerprint t = t.input_fingerprint
 let dependency_order t = t.dependency_order
 let error message = Error (Diagnostic.create message)
 
-let dependency_closure ~entry ~edges ~select ~checkpoint =
+let dependency_closure ~roots ~edges ~select ~checkpoint =
   let adjacency =
     List.fold
       edges
@@ -95,9 +95,14 @@ let dependency_closure ~entry ~edges ~select ~checkpoint =
       else (
         let visited = Set.add visited id in
         let next = Map.find adjacency id |> Option.value ~default:[] in
-        visit visited (List.rev_append next pending))
+        let pending =
+          List.fold next ~init:pending ~f:(fun pending dependency ->
+            checkpoint ();
+            dependency :: pending)
+        in
+        visit visited pending)
   in
-  visit (Set.empty (module Prepared.Module_id)) [ entry ]
+  visit (Set.empty (module Prepared.Module_id)) roots
 ;;
 
 let create ~input_fingerprint ~entry ~dependency_order ~edges ~checkpoint =
@@ -134,7 +139,7 @@ let create ~input_fingerprint ~entry ~dependency_order ~edges ~checkpoint =
   in
   let%bind () =
     let reachable =
-      dependency_closure ~entry ~edges ~select:(fun _ -> true) ~checkpoint
+      dependency_closure ~roots:[ entry ] ~edges ~select:(fun _ -> true) ~checkpoint
     in
     if Set.length reachable <> Map.length positions
     then error "Dependency graph contains nodes not reachable from its entry"
@@ -154,7 +159,7 @@ let create ~input_fingerprint ~entry ~dependency_order ~edges ~checkpoint =
 let runtime_dependency_order t ~checkpoint =
   let selected =
     dependency_closure
-      ~entry:t.entry
+      ~roots:[ t.entry ]
       ~edges:t.edges
       ~select:Edge.is_runtime_dependency
       ~checkpoint
@@ -162,4 +167,47 @@ let runtime_dependency_order t ~checkpoint =
   List.filter t.dependency_order ~f:(fun id ->
     checkpoint ();
     Set.mem selected id)
+;;
+
+let runtime_order_for_roots ~input_fingerprint ~checked_order ~edges ~roots ~checkpoint =
+  let open Result.Let_syntax in
+  let%bind positions =
+    List.foldi
+      checked_order
+      ~init:(Ok (Map.empty (module Prepared.Module_id)))
+      ~f:(fun index result id ->
+        checkpoint ();
+        let%bind positions = result in
+        if Map.mem positions id
+        then error "Duplicate canonical node in dependency order"
+        else Ok (Map.set positions ~key:id ~data:index))
+  in
+  let%bind () =
+    List.fold_result roots ~init:() ~f:(fun () id ->
+      checkpoint ();
+      if Map.mem positions id
+      then Ok ()
+      else error "Runtime root is not an authentic checked canonical unit")
+  in
+  let%bind () =
+    List.fold_result edges ~init:() ~f:(fun () edge ->
+      checkpoint ();
+      if not (Captured.Digest.equal input_fingerprint (Edge.input_fingerprint edge))
+      then error "Dependency edge belongs to another admitted input"
+      else (
+        match
+          Map.find positions (Edge.owner edge), Map.find positions (Edge.dependency edge)
+        with
+        | Some owner, Some dependency when dependency < owner -> Ok ()
+        | Some _, Some _ ->
+          error "Dependency order does not precede its referencing owner"
+        | _ -> error "Dependency edge refers to an absent canonical node"))
+  in
+  let selected =
+    dependency_closure ~roots ~edges ~select:Edge.is_runtime_dependency ~checkpoint
+  in
+  Ok
+    (List.filter checked_order ~f:(fun id ->
+       checkpoint ();
+       Set.mem selected id))
 ;;

@@ -88,6 +88,8 @@ let shared_features =
       ; "lib/chatml/chatml_compilation.ml"
       ; "lib/chatml/chatml_host_runtime.ml"
       ; "lib/chatml_linked_runtime/chatml_linked_runtime.ml"
+      ; "lib/chatml_linked_runtime/chatml_module_initializer.ml"
+      ; "lib/chatml_linked_runtime/chatml_repl_modules.ml"
       ]
     , "runtime.execution"
     , [ "test/chatml_trace/trace_tests.ml"
@@ -97,6 +99,8 @@ let shared_features =
     , "Contract and invocation preflight before effects, canonical once-only value \
        dependencies, execution-local state and shared controls"
     , [ "lib/chatml_linked_runtime/chatml_linked_runtime.ml"
+      ; "lib/chatml_linked_runtime/chatml_module_initializer.ml"
+      ; "lib/chatml_linked_runtime/chatml_repl_modules.ml"
       ; "lib/chatml/chatml_builtin_modules.ml"
       ; "lib/chatml/chatml_compiler_contract.ml"
       ; "lib/chatml/chatml_contract_encoding.ml"
@@ -110,6 +114,7 @@ let shared_features =
       ; "test/chatml_linked_runtime/control_tests.ml"
       ; "test/chatml_linked_runtime/order_model_tests.ml"
       ; "test/chatml_linked_runtime/invocation_tests.ml"
+      ; "test/chatml_linked_runtime/repl_module_tests.ml"
       ] )
   ; ( "diagnostics.deferred_ownership"
     , "Deferred source sites, bounded diagnostics and unchanged task fuel/recovery \
@@ -277,7 +282,11 @@ let implementation_sources =
   ; ( "lib/chatml/chatml_task_array_mode.ml"
     , "8b580d138d8664634a4cfee9b106bef686317ddccc6fa4a5df8dfbd265f4e3cf" )
   ; ( "lib/chatml_linked_runtime/chatml_linked_runtime.ml"
-    , "f670beec8a62d86c0e8ff742b85d307b20a81923c2d7abb80039127dafe94512" )
+    , "45ccf948bf8c8185d3eff317bc2f6c9ee845585e681888d7665d08f8923ba2f1" )
+  ; ( "lib/chatml_linked_runtime/chatml_module_initializer.ml"
+    , "fccec1e6cb793c9caf9448db7474cbc2a40e6a42412e34a3b0967f256ebbf47a" )
+  ; ( "lib/chatml_linked_runtime/chatml_repl_modules.ml"
+    , "42fe1312dbbe7c725bc8979f49f4397721d6bd61ab7049c9c9357ffd35ae1bc7" )
   ; ( "lib/chatml/chatml_builtin_modules.ml"
     , "4d005f60b55cee3263e7925bae6d1c81129ca383cf6218b3cc2dc86270def236" )
   ; ( "lib/chatml/chatml_compiler_contract.ml"

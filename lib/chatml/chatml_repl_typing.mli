@@ -1,4 +1,4 @@
-(** OCH-269 compiler-domain REPL typing contract. *)
+(** Compiler-domain REPL typing contract. *)
 
 open Core
 module Captured = Chatml_source
@@ -52,7 +52,7 @@ module Error : sig
   [@@deriving sexp_of]
 end
 
-(** OCH-286 supplies on-demand selected canonical roots from the pinned
+(** The incremental root driver supplies on-demand selected canonical roots from the pinned
     Prepared input; no eager project-main/unused-module check is needed. One
     actor-owned compiler state for one REPL epoch. [create] verifies the scope
     fingerprint matches Prepared and the authentic selected contract fingerprint
@@ -63,6 +63,16 @@ end
     Alias namespaces are persistent immutable values; candidate weak cells
     are always detached. *)
 type t
+
+type typing_owner = t
+
+(** Immutable inputs pinned by this exact compiler owner. Returning them grants
+    no new source or runtime authority; the runtime layer binds its registry to
+    this [t] identity at creation and validates the selected runtime surface
+    against the same contract. *)
+val prepared : t -> Prepared.t
+
+val contract : t -> Contract.t
 
 val create
   :  prepared:Prepared.t
@@ -113,7 +123,7 @@ module Candidate : sig
 
   module Checked_dependency : sig
     (** Borrowed candidate-owned implementation/companion parse and checked
-        annotations for OCH-276 pre-effect lowering. The exact canonical ID,
+        annotations for the runtime registry pre-effect lowering. The exact canonical ID,
         captured source IDs/digests and checker owner are retained; no caller
         may insert these Checked_unit objects into a later typing cache. *)
     type t
@@ -128,7 +138,7 @@ module Candidate : sig
   val statement : t -> Chatml.Chatml_lang.stmt_node
 
   (** Per-statement checker annotations are source-bound to [source] and only
-      cover this checked statement. OCH-270 lowers via the existing resolver's
+      cover this checked statement. the statement evaluator lowers via the existing resolver's
       source-affine single-statement adapter; future statements cannot read
       missing annotations. Raw checker values remain compiler-local. *)
   val checked : t -> Chatml_typechecker.checked_program
@@ -138,19 +148,37 @@ module Candidate : sig
       published. No raw inference cell or callback escapes through this value. *)
   val frozen_types : t -> Frozen_types.t
 
+  (** Pinned input identity even when no configured dependency/reference was
+      selected. This digest alone is not owner/epoch authority: callers must
+      also validate [t] against the exact live typing owner. *)
+  val input_fingerprint : t -> Captured.Digest.t
+
   (** New canonical units in dependency-before-owner order, exactly the delta
-      from the committed Roots<Public.t> cache. OCH-276 must fully lower these
+      from the committed Roots<Public.t> cache. The runtime registry must fully lower these
       into immutable, source-affine runtime initializer artifacts BEFORE
       [reserve_execution]. Lowering may checkpoint/fail; failure calls
       [discard_candidate] and publishes no runtime registry or typing roots.
-      Prior checked units live only as OCH-276's already lowered artifacts; the
+      Prior checked units live only as the runtime registry's already lowered artifacts; the
       next typing candidate never reads their old Checked_unit annotations or
       private scope. These borrowed raw units are never a service DTO. *)
   val new_checked_dependencies : t -> Checked_dependency.t list
 
+  (** Authentic incremental Roots projection for the runtime registry's pure runtime closure
+      selection. This is the complete candidate cache, including canonical
+      units checked by earlier submissions, in dependency-before-owner order;
+      it is not the project-main graph or a request to initialize every unit.
+      Both projections retain their admitted Prepared input fingerprint and
+      source-owned edges. They contain no raw checker value or runtime grant. *)
+  val checked_dependency_order
+    :  t
+    -> checkpoint:(unit -> unit)
+    -> Prepared.Module_id.t list
+
+  val dependency_edges : t -> Chatml_dependency_graph.Edge.t list
+
   (** Genuine validated direct snippet selections, including distinct Open,
-      Qualified_type and Value_reference events. OCH-286 edges contain only
-      canonical inter-module references; OCH-276 filters these direct events
+      Qualified_type and Value_reference events. Incremental root edges contain only
+      canonical inter-module references; the runtime registry filters these direct events
       by reason for exact value-dependency initialization. *)
   val direct_references : t -> Lookup.Reference.t list
 end
@@ -171,7 +199,7 @@ end
     cells) and AFTER lexical namespaces (including successful new names). BOTH
     outcomes carry the SAME candidate Roots<Public.t> cache, including newly
     checked canonical dependencies and their compatible weak-cell constraints.
-    OCH-276's separately prepared initializer registry is installed only after
+    a separately prepared initializer registry is installed only after
     successful lowering and execution reservation; compiler cache membership
     never means a module initialized. No publication or initializer occurs
     during typechecking. Failure/cancellation discards the whole candidate and
@@ -186,7 +214,13 @@ val prepare_next
   -> checkpoint:(unit -> unit)
   -> (Candidate.t, Error.t) result
 
-(** Reject a successfully typed candidate whose OCH-276 pre-effect lowering
+(** Non-yielding read-only owner/epoch/current-source/generation check used by
+    the runtime lowering adapter before touching a candidate's raw checked
+    units. [reserve_execution] repeats the check after its final checkpoint.
+    A matching Prepared fingerprint without this identity check is insufficient. *)
+val validate_candidate : t -> Candidate.t -> (unit, Error.t) result
+
+(** Reject a successfully typed candidate whose pre-effect runtime lowering
     failed or was cancelled. No reservation, initializer registration or
     inference publication occurred. The Ready submission is aborted; its
     admitted source ID remains consumed. This is not runtime failure and does
@@ -211,6 +245,12 @@ end
 
 module Reservation : sig
   type t
+
+  (** True only while this reservation is still pending for the exact typing
+      owner [owner]. False after finalization, which releases its candidate and
+      owner. This read-only witness lets the runtime registry reject effects
+      after external finalization/reset without retaining a raw candidate. *)
+  val pending_for : t -> owner:typing_owner -> bool
 end
 
 (** Reserve BEFORE any initializer, statement evaluation, Task drive or other
@@ -219,8 +259,8 @@ end
     A successful reservation consumes the candidate and blocks [admit],
     [prepare_next] and [close] until finalization. Rejection/cancellation here
     has no runtime effects and leaves committed inference untouched. The actor
-    first requires OCH-276 lowering to have completed successfully; after this
-    reservation it installs OCH-276's precomputed runtime registry without a
+    first requires the runtime registry lowering to have completed successfully; after this
+    reservation it installs the precomputed runtime registry without a
     checkpoint, then permits effects. It must cancel/join execution and finalize
     before reset or another submission. This is an explicit execution phase,
     not a caller-invented cancellation shield. *)
@@ -240,15 +280,15 @@ val reserve_execution
     consumes exactly one private typing generation and returns a precomputed
     frozen receipt. In both outcomes, commit candidate public schemes and the
     newly checked canonical cache: a later selection reuses its checked module
-    and OCH-276's separately installed runtime artifact, rather than rechecking
+    and its separately installed runtime artifact, rather than rechecking
     or accidentally replaying a partially effected initializer. The failed
-    lexical names are excluded only from the BEFORE namespace. OCH-276 tracks
+    lexical names are excluded only from the BEFORE namespace. The runtime registry tracks
     pending/initialized/faulted state independently; a failed module cannot
     retry its external effects within that runtime registry. The REPL actor's
     broader fault/reset policy is separate. Exact same-outcome retry returns that receipt; conflicting
     outcome returns [Conflicting_finalization] without changing state. Failure
     also aborts the remaining statements in this Ready submission. The actor
-    owns its separate externally visible revision/idempotency receipt (OCH-271).
+    owns its separate externally visible revision/idempotency receipt.
     No API can reserve or finalize a failed typecheck. *)
 val finalize_execution
   :  Reservation.t
