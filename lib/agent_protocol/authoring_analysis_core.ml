@@ -1,0 +1,5 @@
+include Authoring_analysis_location
+include Authoring_analysis_capture
+include Authoring_analysis_facts_core
+include Authoring_analysis_result
+include Authoring_analysis_prefix

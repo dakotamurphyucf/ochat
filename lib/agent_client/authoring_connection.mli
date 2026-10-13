@@ -7,6 +7,11 @@ type t
 
 val create : Connection.t -> feature:string -> (t, Agent_protocol.Error.t) result
 val require_current : t -> (unit, Agent_protocol.Error.t) result
+
+(** Check the immutable initialize selection used by this live connection.
+    Method capability is checked separately by [send]. *)
+val require_feature : t -> string -> (unit, Agent_protocol.Error.t) result
+
 val capabilities : t -> Agent_protocol.Authoring.Capabilities.t
 val host : t -> Agent_protocol.Id.Server.t
 val principal : t -> Agent_protocol.Id.Principal.t

@@ -26,6 +26,10 @@ module Features : sig
   (** Separately negotiated immutable upload access. An upload-only principal
       need not select [core] or open a source context. *)
   val bundle : string
+
+  (** Selected separately from source access, and advertised only when the
+      corresponding analyze/query or lexical/assistance handlers are installed. *)
+  val semantic : string
 end
 
 module Encoding : sig
@@ -56,6 +60,9 @@ module Method : sig
     | Bundle_chunk
     | Bundle_commit
     | Bundle_status
+    | Analyze
+    | Prefix
+    | Query
   [@@deriving compare, equal, sexp_of]
 
   (** Closed stable [authoring.*] method names. A method's presence in this

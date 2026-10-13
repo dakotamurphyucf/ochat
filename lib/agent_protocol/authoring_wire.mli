@@ -20,6 +20,9 @@ module Request : sig
     | Bundle_chunk of Authoring_bundle.Bundle.Chunk.request
     | Bundle_commit of Authoring_bundle.Bundle.Commit.request
     | Bundle_status of Authoring_bundle.Bundle.Status.request
+    | Analyze of Authoring_analysis.Analyze.Request.t
+    | Prefix of Authoring_analysis.Prefix.Request.t
+    | Query of Authoring_analysis.Query.Request.t
   [@@deriving sexp_of]
 
   val method_name : t -> string
@@ -46,6 +49,9 @@ module Response : sig
     | Bundle_chunk of Authoring_bundle.Bundle.Chunk.response
     | Bundle_commit of Authoring_bundle.Bundle.Commit.response
     | Bundle_status of Authoring_bundle.Bundle.Status.t
+    | Analyze of Authoring_analysis.Analyze.t
+    | Prefix of Authoring_analysis.Prefix.t
+    | Query of Authoring_analysis.Query.t
   [@@deriving sexp_of]
 
   val method_name : t -> string
