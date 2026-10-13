@@ -105,6 +105,7 @@ an explanation of what happens when work fails or is cancelled.
 - [Library documentation](lib/README.md)
 - [Architecture specification](design/ochat-agent-server-spec.md)
 - [Implementation specification](design/ochat-agent-server-implementation-spec.md)
+- [ChatMD and ChatML authoring services (M5 design)](design/chatml-authoring-services.md)
 - [Shared host credential lifecycle](lib/credential_registry.doc.md) and [pure registry metadata](lib/credential_registry_model.doc.md)
 - [Documentation coverage ledger](development/documentation-coverage.md)
 - [README content and navigation audit](development/readme-content-audit.md)
