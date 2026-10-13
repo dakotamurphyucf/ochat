@@ -51,15 +51,24 @@
   let _buffer_add_escaped buf c =
     Buffer.add_char buf c
 
+  type incomplete =
+    | Comment_eof
+    | String_eof
+
+  exception Incomplete of incomplete
+
+  let charge_lexeme charge lexbuf =
+    charge (Lexing.lexeme_end lexbuf - Lexing.lexeme_start lexbuf)
+
 }
 
 let white = [' ' '\t'] +
 let newline = '\n' | '\r' | "\r\n"
-rule token = parse
+rule token_checked charge = parse
     (* Whitespace and comments *)
-| white  { token lexbuf }
-| newline { new_line lexbuf; token lexbuf }
-| "(*"                     { comment 1 lexbuf }
+| white  { charge_lexeme charge lexbuf; token_checked charge lexbuf }
+| newline { charge_lexeme charge lexbuf; new_line lexbuf; token_checked charge lexbuf }
+| "(*"                     { charge_lexeme charge lexbuf; comment charge 1 lexbuf }
 
     (* Keywords *)
 | "fun"                    { FUN }
@@ -140,7 +149,7 @@ rule token = parse
 
     (* String literal – supports basic OCaml-style escapes (\n, \t, \'"', \\)
        and can span multiple lines. *)
-| '"' { STRING (string_lit (Buffer.create 32) lexbuf) }
+| '"' { charge_lexeme charge lexbuf; STRING (string_lit charge (Buffer.create 32) lexbuf) }
 
     (* Polymorphic variant: starts with backtick, followed by letters, digits, underscores. *)
 | '`' ['A'-'Z''a'-'z''0'-'9' '_']+ as tickid {
@@ -167,22 +176,30 @@ rule token = parse
         c pos.Lexing.pos_lnum (pos.Lexing.pos_cnum - pos.Lexing.pos_bol))
     }
 
-and comment depth = parse
-| "(*" { comment (depth + 1) lexbuf }
-| "*)" { if depth = 1 then token lexbuf else comment (depth - 1) lexbuf }
-| newline { new_line lexbuf; comment depth lexbuf }
-| eof  { failwith "Unterminated comment" }
-| _    { comment depth lexbuf }
+and comment charge depth = parse
+| "(*" { charge_lexeme charge lexbuf; comment charge (depth + 1) lexbuf }
+| "*)" { charge_lexeme charge lexbuf; if depth = 1 then token_checked charge lexbuf else comment charge (depth - 1) lexbuf }
+| newline { charge_lexeme charge lexbuf; new_line lexbuf; comment charge depth lexbuf }
+| eof  { raise (Incomplete Comment_eof) }
+| _    { charge_lexeme charge lexbuf; comment charge depth lexbuf }
 
-and string_lit buf = parse
-| '"'                           { Buffer.contents buf }
-| "\\n"                         { Buffer.add_char buf '\n'; string_lit buf lexbuf }
-| "\\t"                         { Buffer.add_char buf '\t'; string_lit buf lexbuf }
-| "\\\\"                       { Buffer.add_char buf '\\'; string_lit buf lexbuf }
-| "\\\""                         { Buffer.add_char buf '"'; string_lit buf lexbuf }
+and string_lit charge buf = parse
+| '"'                           { charge_lexeme charge lexbuf; Buffer.contents buf }
+| "\\n"                         { charge_lexeme charge lexbuf; Buffer.add_char buf '\n'; string_lit charge buf lexbuf }
+| "\\t"                         { charge_lexeme charge lexbuf; Buffer.add_char buf '\t'; string_lit charge buf lexbuf }
+| "\\\\"                       { charge_lexeme charge lexbuf; Buffer.add_char buf '\\'; string_lit charge buf lexbuf }
+| "\\\""                         { charge_lexeme charge lexbuf; Buffer.add_char buf '"'; string_lit charge buf lexbuf }
 | newline                     {
+    charge_lexeme charge lexbuf;
     Buffer.add_char buf '\n';
     new_line lexbuf;
-    string_lit buf lexbuf }
-| eof                          { failwith "Unterminated string literal" }
-| _                            { Buffer.add_char buf (Lexing.lexeme_char lexbuf 0); string_lit buf lexbuf }
+    string_lit charge buf lexbuf }
+| eof                          { raise (Incomplete String_eof) }
+| _                            { charge_lexeme charge lexbuf; Buffer.add_char buf (Lexing.lexeme_char lexbuf 0); string_lit charge buf lexbuf }
+
+{
+let token lexbuf =
+  try token_checked (fun _ -> ()) lexbuf with
+  | Incomplete Comment_eof -> failwith "Unterminated comment"
+  | Incomplete String_eof -> failwith "Unterminated string literal"
+}
