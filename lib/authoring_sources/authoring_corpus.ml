@@ -3468,15 +3468,18 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "22c4d323f6a225a82b9fce615e99beaf38776cb9600d7b72e3e373b1b356ec92" ]
+                   [ "61c51102584b197b97d02e32379eeb626f686cc8cff6c128604c5f8ca90509f5" ]
                ; evidence =
                    [ "lib/chatml/chatml_compilation.ml"
                    ; "lib/chatml/chatml_execution.ml"
+                   ; "lib/chatml_trace/chatml_trace.mli"
+                   ; "lib/chatml_trace/chatml_trace.ml"
                    ; "lib/chatml/chatml_value_codec.ml"
                    ; "lib/chat_response/moderator_invocation.ml"
                    ; "lib/chat_response/moderator_manager.ml"
                    ; "test/chatml_compilation_test.ml"
                    ; "test/chatml_execution_budget_test.ml"
+                   ; "test/chatml_trace/trace_tests.ml"
                    ; "test/chatml_linked_runtime/control_tests.ml"
                    ; "test/chatml_linked_runtime/invocation_tests.ml"
                    ; "test/moderation/moderator_execution_budget_test.ml"

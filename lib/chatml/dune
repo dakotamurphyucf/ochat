@@ -39,7 +39,7 @@
   chatml_extension_surface
   chatml_surface_inventory)
  (private_modules chatml_contract_encoding)
- (libraries core jsonaf menhirLib source chatml_source chatml_diagnostic)
+ (libraries core jsonaf menhirLib source chatml_source chatml_diagnostic chatml_trace)
  (preprocess
   (pps ppx_jane)))
 
@@ -79,7 +79,8 @@
   chatml_typechecker
   chatml_resolver
   chatml_builtin_modules
-  chatml_linked_runtime)
+  chatml_linked_runtime
+  chatml_trace)
  (preprocess
   (pps ppx_jane)))
 
@@ -121,7 +122,7 @@
  (name chatml_compilation)
  (public_name ochat.chatml_compilation)
  (modules chatml_compilation)
- (libraries core eio eio.unix mtime chatml chatml_source chatml_prepared_program chatml_linked_program chatml_host_runtime chatml_semantics)
+ (libraries core eio eio.unix mtime chatml chatml_source chatml_prepared_program chatml_linked_program chatml_host_runtime chatml_semantics chatml_trace)
  (preprocess (pps ppx_jane)))
 
 (library
