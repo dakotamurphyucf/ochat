@@ -5,6 +5,9 @@
   store_error
   data_root
   durable_file
+  authoring_upload_document
+  authoring_upload_files
+  authoring_upload_store
   frame
   document_record
   document_fields
@@ -66,7 +69,11 @@
   prompt_artifact_staging
   prompt_artifact_store
   migration)
- (private_modules journal_initial_creation prompt_artifact_staging)
+ (private_modules
+  journal_initial_creation
+  prompt_artifact_staging
+  authoring_upload_document
+  authoring_upload_files)
  (libraries ochat.inference
   core
   core_unix
