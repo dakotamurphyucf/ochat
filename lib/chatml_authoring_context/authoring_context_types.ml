@@ -112,6 +112,9 @@ module Error = struct
     | Open_documents
     | Incompatible_environment
     | Invalid_refresh_identity
+    | Unsupported_basis
+    | Static_selection_unavailable
+    | Invalid_requested_environment
     | Limit_exceeded
     | Generation_overflow
     | Capture of Core.Error.t
@@ -159,6 +162,57 @@ module View = struct
   let editable_sources t = t.editable_sources
   let open_document_count t = t.open_document_count
   let charged_source_bytes t = t.charged_source_bytes
+end
+
+module Basis = struct
+  type t =
+    | Project
+    | Document
+  [@@deriving equal, sexp_of]
+end
+
+module Document = struct
+  module View = struct
+    type t =
+      { identity : Identity.t
+      ; generation : Generation.t
+      ; source : Captured.t
+      ; requested_environment : string option
+      ; selected_environment : string option
+      ; compiler_contract : Captured.Digest.t option
+      ; static_graph : Captured.Digest.t option
+      ; open_document_count : int
+      ; charged_source_bytes : int
+      }
+
+    let identity t = t.identity
+    let generation t = t.generation
+    let source t = t.source
+    let requested_environment t = t.requested_environment
+    let selected_environment t = t.selected_environment
+    let compiler_contract t = t.compiler_contract
+    let static_graph t = t.static_graph
+    let open_document_count t = t.open_document_count
+    let charged_source_bytes t = t.charged_source_bytes
+  end
+
+  module Inputs = struct
+    type t =
+      { identity : Identity.t
+      ; generation : Generation.t
+      ; source : Captured.t
+      ; base : Captured.t
+      ; static_build : Build.t option
+      ; effective_input_bytes : int
+      }
+
+    let identity t = t.identity
+    let generation t = t.generation
+    let source t = t.source
+    let base t = t.base
+    let static_build t = t.static_build
+    let effective_input_bytes t = t.effective_input_bytes
+  end
 end
 
 module Inputs = struct

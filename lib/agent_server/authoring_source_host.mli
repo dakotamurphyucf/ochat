@@ -39,6 +39,20 @@ module Read_policy : sig
   val deny_all : t
 end
 
+module Document_policy : sig
+  type t
+
+  (** Separate host/operator decision to admit client-supplied document bytes.
+      No source-read root, project membership or workspace ID follows from it.
+      The original and request actors are checked for the same current
+      principal on every operation. This pure callback may not yield; its
+      exceptions keep identity/backtrace. Callers explicitly pass [deny_all]
+      unless supplied-document admission is authorized. *)
+  val create : authorize:(Operator_authorization.t -> bool) -> t
+
+  val deny_all : t
+end
+
 module Limits : sig
   type t
 
@@ -77,6 +91,7 @@ module Error : sig
     | Root of Chatml_local_roots.Error.t
     | Local of Chatml_local_source.Error.t
     | Project of Chatml_project_prepare.Error.t
+    | Source_capture of Core.Error.t
 
   (** Finite safe projection. Root errors expose only their finite code;
       project errors use a coarse tag. Neither exposes native paths, exception
@@ -117,6 +132,7 @@ val create
   :  Project_source_host.t
   -> sw:Eio.Switch.t
   -> read_policy:Read_policy.t
+  -> document_policy:Document_policy.t
   -> limits:Limits.t
   -> t
 
@@ -207,6 +223,104 @@ module Context : sig
       operations require the creating domain. Concurrent or reentrant operations
       reject Busy without waiting on their own gate. A close called from its
       own active operation raises [Invalid_argument] rather than self-joining. *)
+  val close_and_wait : t -> unit
+end
+
+module Document_capture : sig
+  (** One exact host-owned source observation. A host member is read through
+      the admitted local root; supplied bytes are captured under a fresh
+      host-minted source ID with no root grant. The receipt contains no live
+      actor, path capability, graph, parser result or execution permission. *)
+  type t
+
+  val source : t -> Chatml_source.t
+end
+
+module Document_context : sig
+  type t
+
+  (** Uses the same host-owned context activity gate, actor/root rechecks,
+      attempt/read quotas, cancellation stack and joined switch lifetime as
+      project source contexts. Nested A -> B -> A work must still see A as
+      active: closing A or the host from that stack rejects self-join. There
+      is no parallel document-specific authority or resolver. *)
+
+  module Origin : sig
+    type t =
+      | Host_member
+      | Supplied
+    [@@deriving equal, sexp_of]
+  end
+
+  val origin : t -> Origin.t
+  val source_id : t -> Chatml_source.Id.t
+
+  (** Recheck the original actor, current request actor, retained root or
+      supplied-byte policy, host lifetime and creating domain without reading
+      or yielding. The handler calls this before serving pinned ledger
+      bytes/overlays or syntax, and again after any yielding preparation before
+      publishing a response. It does not grant project or execution authority.
+      Concurrent pure reads need no activity gate; an async handler must retain
+      its own bounded request lifetime until the final check. *)
+  val check_current : t -> actor:Operator_authorization.t -> (unit, Error.t) Result.t
+
+  (** Bind one exact portable member of an explicitly selected read root.
+      Reuse the host's existing root policy, original actor and joined
+      operation gate; no project declaration, Build, selection or compiler
+      contract is needed. Capture exact bytes once through the existing
+      no-follow local read owner before publishing the context. A failed read
+      registers no context or source. The source ID is minted by this host and
+      remains stable across explicit refresh; later context source reads use
+      the pure ledger's pinned bytes, not a new host observation. *)
+  val open_host
+    :  host
+    -> actor:Operator_authorization.t
+    -> root:Root.t
+    -> member:Source.Portable_path.t
+    -> checkpoint:(unit -> unit)
+    -> (t * Document_capture.t, Error.t) Result.t
+
+  (** Admit exact bounded supplied bytes under [Document_policy], independent
+      of [Read_policy]. [member] is a validated source label, never a host path
+      lookup. Mint a fresh source ID and capture exact bytes under the host's
+      document/source limits, with no project/root authority. Failed capture
+      registers no context. Do not normalize invalid UTF-8 or newlines. Return
+      one immutable initial capture, which the pure ledger then admits. *)
+  val open_supplied
+    :  host
+    -> actor:Operator_authorization.t
+    -> member:Source.Portable_path.t
+    -> contents:string
+    -> checkpoint:(unit -> unit)
+    -> (t * Document_capture.t, Error.t) Result.t
+
+  (** Explicitly re-read only the same retained host root/member after the
+      host-authorized context refresh action. A supplied context returns
+      [Unsupported_source_selection]; changing supplied base bytes requires a
+      new context. The old capture stays immutable. Recheck original and request
+      actor/policy before and after yielding work; charge the same context
+      attempt/read-byte caps. The pure ledger separately checks the expected
+      generation and publishes the new base. *)
+  val refresh
+    :  t
+    -> actor:Operator_authorization.t
+    -> checkpoint:(unit -> unit)
+    -> (Document_capture.t, Error.t) Result.t
+
+  (** Bounded nonrecursive path candidates on a host-member root only. This
+      grants no member read and uses the existing root owner/policy; a supplied
+      document cannot browse a host root. *)
+  val list_directory
+    :  t
+    -> actor:Operator_authorization.t
+    -> directory:Source.Portable_path.t option
+    -> checkpoint:(unit -> unit)
+    -> (Entry.t list, Error.t) Result.t
+
+  (** Idempotently revoke/cancel/join work, including from host switch release.
+      The creating Eio domain owns this context. Concurrent/reentrant work
+      fails [Busy]; closing one's own active operation, including through a
+      nested other context, raises Invalid_argument rather than self-joining. *)
   val close_and_wait : t -> unit
 end
 

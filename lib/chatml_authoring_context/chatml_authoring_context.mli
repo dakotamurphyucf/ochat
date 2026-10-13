@@ -83,6 +83,9 @@ module Error : sig
     | Open_documents
     | Incompatible_environment
     | Invalid_refresh_identity
+    | Unsupported_basis
+    | Static_selection_unavailable
+    | Invalid_requested_environment
     | Limit_exceeded
     | Generation_overflow
     | Capture of Core.Error.t
@@ -104,7 +107,7 @@ module Version : sig
 end
 
 module View : sig
-  (** A bounded summary of the host-owned current context. Source graph,
+  (** A bounded summary of a project-basis context. Source graph,
       environment and contract come from the admitted base build, never client
       identity labels. [base_graph] changes only on explicit refresh, which
       returns a new context identity. *)
@@ -119,6 +122,46 @@ module View : sig
   val editable_sources : t -> Chatml_source.Id.t list
   val open_document_count : t -> int
   val charged_source_bytes : t -> int
+end
+
+module Document : sig
+  module View : sig
+    (** A document-basis summary. The source is the exact current base/overlay
+        revision. [requested_environment] is an inert user preference;
+        [selected_environment] describes one optional host-admitted default
+        static build. A ChatMD file may contain scripts selecting different
+        environments; assistance validates each script against its own
+        authentic selected catalog later. Neither label grants source or
+        runtime access. *)
+    type t
+
+    val identity : t -> Identity.t
+    val generation : t -> Generation.t
+    val source : t -> Chatml_source.t
+    val requested_environment : t -> string option
+    val selected_environment : t -> string option
+    val compiler_contract : t -> Chatml_source.Digest.t option
+    val static_graph : t -> Chatml_source.Digest.t option
+    val open_document_count : t -> int
+    val charged_source_bytes : t -> int
+  end
+
+  module Inputs : sig
+    (** Exact selected document bytes, its immutable original capture, and an
+        optional separately admitted default static build. A build is real
+        selected data, not a synthetic graph for the document; it does not
+        claim to cover all embedded scripts or authorize imports/execution.
+        Each script's selection and separate source/catalog grants are checked
+        by its assistance owner. *)
+    type t
+
+    val identity : t -> Identity.t
+    val generation : t -> Generation.t
+    val source : t -> Chatml_source.t
+    val base : t -> Chatml_source.t
+    val static_build : t -> Chatml_project_build.t option
+    val effective_input_bytes : t -> int
+  end
 end
 
 module Inputs : sig
@@ -161,7 +204,27 @@ val create : limits:Limits.t -> t
 val context_count : t -> int
 val charged_source_bytes : t -> int
 val find : t -> identity:Identity.t -> View.t option
+
+(** Distinguish an unknown ID from a current project/document basis before
+    dispatching basis-specific requests. This is an identity comparison only. *)
+module Basis : sig
+  type t =
+    | Project
+    | Document
+  [@@deriving equal, sexp_of]
+end
+
+val basis : t -> identity:Identity.t -> Basis.t option
+
+(** [find] above projects only Project; a live document ID returns [None] there
+    and [Some] here. The host checks actor/connection affinity independently. *)
+val find_document : t -> identity:Identity.t -> Document.View.t option
+
 val version : t -> identity:Identity.t -> source:Chatml_source.Id.t -> Version.t option
+
+(** Project-only semantic publication key. A document basis always returns
+    [None], including with an optional static build: raw document bytes are not
+    a validated Prepared closure and cannot claim certified graph analysis. *)
 val analysis_key : t -> identity:Identity.t -> Analysis_key.t option
 
 (** Admit one host-captured base build under a fresh host-issued identity. The
@@ -179,6 +242,53 @@ val admit
   -> base:Chatml_project_build.t
   -> editable_sources:Chatml_source.Id.t list
   -> checkpoint:(unit -> unit)
+  -> (t, Error.t) Result.t
+
+(** Admit one host-captured source as a document basis, including an empty or
+    malformed ChatMD file. No Build, Prepared graph, parse, source-root grant or
+    static environment is required. A trusted host mints the source ID and
+    authorizes either its exact root/member read or supplied bytes separately;
+    the pure ledger cannot prove that provenance. [requested_environment] is
+    nonempty when present, at most 256 bytes, and inert intent, never a
+    selected catalog. Invalid names reject [Invalid_requested_environment]
+    before retaining an identity. Charge the base source in
+    the same context/aggregate ledger as project contexts and make this source
+    the sole editable member. Failed admission retains no identity/bytes. *)
+val admit_document
+  :  t
+  -> identity:Identity.t
+  -> base:Chatml_source.t
+  -> requested_environment:string option
+  -> checkpoint:(unit -> unit)
+  -> (t, Error.t) Result.t
+
+(** Attach an actual separately host-admitted DEFAULT static build to a live
+    document at [expected] generation. An unavailable or mismatched requested
+    environment rejects this optional step and leaves editing usable. The host
+    must authorize that catalog and its source roots independently of the
+    document's origin; this pure call grants neither. Recheck all source/byte
+    limits including retained catalog inventory before publication. Advance
+    generation so prior document CAS and analysis results cannot be reused.
+    The build is immutable until explicit detach/refresh, and no document
+    source is inserted into its Prepared graph. Embedded scripts may select
+    different environments; this default does not resolve them automatically.
+    No Analysis_key is published; later document assistance must own its own
+    source-bound result. *)
+val attach_document_static
+  :  t
+  -> identity:Identity.t
+  -> expected:Generation.t
+  -> build:Chatml_project_build.t
+  -> checkpoint:(unit -> unit)
+  -> (t, Error.t) Result.t
+
+(** Drop optional static data without closing or revising the document bytes.
+    Advance the context generation, invalidating prior CAS and any analysis
+    publication. Pure lexical/syntax help remains available. *)
+val detach_document_static
+  :  t
+  -> identity:Identity.t
+  -> expected:Generation.t
   -> (t, Error.t) Result.t
 
 (** Full-text replacement of an existing captured source only. Check exact
@@ -208,7 +318,8 @@ module Refresh : sig
   [@@deriving equal, sexp_of]
 end
 
-(** Explicitly replace one context with a fresh host-captured base and NEW
+(** Project-only: a document basis returns [Unsupported_basis]. Explicitly
+    replace one context with a fresh host-captured base and NEW
     identity. Reject stale generation or open overlays unless the caller selects
     [Discard_open_documents]. The new base must select the same environment and
     authentic compiler contract; a selection change opens a separate context.
@@ -225,7 +336,25 @@ val refresh
   -> checkpoint:(unit -> unit)
   -> (t, Error.t) Result.t
 
-(** Snapshot the exact selected source list for one current generation. This
+(** Explicitly replace a host-document base capture under a NEW context ID.
+    The host re-reads only its retained authorized root/member, then supplies
+    that exact source with the same source ID; the pure ledger checks ID and
+    generation, open-overlay policy and quotas. Optional static selection is
+    dropped and must be separately re-admitted. A supplied document has no
+    refresh read authority: the host must reject that origin and open a new
+    context for different supplied base bytes. This pure function never reads. *)
+val refresh_document
+  :  t
+  -> identity:Identity.t
+  -> expected:Generation.t
+  -> new_identity:Identity.t
+  -> base:Chatml_source.t
+  -> policy:Refresh.policy
+  -> checkpoint:(unit -> unit)
+  -> (t, Error.t) Result.t
+
+(** Project-only: a document basis returns [Unsupported_basis]. Snapshot the
+    exact selected source list for one current generation. This
     may be retained only within the host's independently bounded response/task
     lifetime; the ledger cannot account for arbitrary caller-held old values. *)
 val inputs
@@ -234,7 +363,16 @@ val inputs
   -> checkpoint:(unit -> unit)
   -> (Inputs.t, Error.t) Result.t
 
-(** Record only the key of a separately validated and published OCH-258 result.
+(** Return exact selected document bytes at one generation. Project-basis IDs
+    reject [Unsupported_basis]; no graph validation or semantic certification. *)
+val document_inputs
+  :  t
+  -> identity:Identity.t
+  -> checkpoint:(unit -> unit)
+  -> (Document.Inputs.t, Error.t) Result.t
+
+(** Project-only: a document basis returns [Unsupported_basis]. Record only
+    the key of a separately validated and published OCH-258 result.
     The host must compare OCH-264's complete closure receipt and result identity
     before calling. This cannot certify an arbitrary digest or store a payload.
     Exactly one current key exists per context; a newer publication replaces it. *)
