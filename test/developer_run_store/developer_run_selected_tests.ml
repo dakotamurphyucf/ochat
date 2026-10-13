@@ -53,7 +53,8 @@ let job owner capture ~id ~parent =
 
 let installed = function
   | R.Settlement.Installed value -> R.Installed.observation value
-  | Absent | Diverged -> failwith "expected durable installed transaction"
+  | Absent | Prewrite_conflict | Diverged ->
+    failwith "expected durable installed transaction"
 ;;
 
 let handoff ?(on_settle = fun _ -> ()) () = R.Handoff.create ~settle:on_settle
@@ -284,7 +285,10 @@ let%test_unit "recovery validates member ancestry without equating historical at
           ~selected:[ first; second ]
         |> F.run_ok
       in
-      ignore (R.commit_and_settle handle prepared (handoff ()) |> F.run_ok |> installed);
+      ignore
+        (R.commit_and_settle handle ~admit:(fun () -> true) prepared (handoff ())
+         |> F.run_ok
+         |> installed);
       R.close_and_wait run |> F.run_ok;
       F.store_ok (Agent_store.Session_store.close session);
       let authority =
@@ -486,7 +490,9 @@ let%test_unit "selected jobs appear with exactly their parent transaction" =
     assert (
       Option.is_none (R.Invocation_lookup.prior (R.find_invocation initial invocation_id)));
     let dispatch_observed =
-      R.commit_and_settle handle dispatch (handoff ()) |> F.run_ok |> installed
+      R.commit_and_settle handle ~admit:(fun () -> true) dispatch (handoff ())
+      |> F.run_ok
+      |> installed
     in
     let lookup = R.find_invocation dispatch_observed invocation_id in
     let prior = R.Invocation_lookup.prior lookup |> Option.value_exn in
@@ -518,7 +524,9 @@ let%test_unit "selected jobs appear with exactly their parent transaction" =
     assert (Result.is_error (R.commit handle prepared));
     assert (Option.is_none (R.find_job dispatch_observed child_id));
     let terminal_observed =
-      R.commit_and_settle handle prepared (handoff ()) |> F.run_ok |> installed
+      R.commit_and_settle handle ~admit:(fun () -> true) prepared (handoff ())
+      |> F.run_ok
+      |> installed
     in
     assert (Option.is_some (R.find_job terminal_observed child_id));
     let terminal_entry =
@@ -582,7 +590,9 @@ let%test_unit "selected jobs appear with exactly their parent transaction" =
     assert (Result.is_error (R.commit handle root_prepared));
     assert (Option.is_none (R.find_job terminal_observed root_id));
     let final =
-      R.commit_and_settle handle root_prepared (handoff ()) |> F.run_ok |> installed
+      R.commit_and_settle handle ~admit:(fun () -> true) root_prepared (handoff ())
+      |> F.run_ok
+      |> installed
     in
     assert (Option.is_some (R.find_job final root_id));
     assert (Option.is_some (R.find_job final child_id));
@@ -598,7 +608,10 @@ let%test_unit "selected jobs appear with exactly their parent transaction" =
       let prepared =
         R.prepare_dispatch handle ~expected:observed ~lookup ~dispatched |> F.run_ok
       in
-      ignore (R.commit_and_settle handle prepared (handoff ()) |> F.run_ok |> installed));
+      ignore
+        (R.commit_and_settle handle ~admit:(fun () -> true) prepared (handoff ())
+         |> F.run_ok
+         |> installed));
     let id = P.Id.Invocation.of_string "inv_selected_over_quota" |> F.ok in
     let observed = R.observe handle |> F.run_ok in
     let dispatched = P.Host_invocation.dispatch (admitted ~id owner) |> F.ok in
@@ -680,7 +693,9 @@ let%test_unit "bounded selection agrees with an independent set model" =
       in
       List.iter candidates ~f:(fun id -> assert (Option.is_none (R.find_job before id)));
       let after =
-        R.commit_and_settle handle prepared (handoff ()) |> F.run_ok |> installed
+        R.commit_and_settle handle ~admit:(fun () -> true) prepared (handoff ())
+        |> F.run_ok
+        |> installed
       in
       List.iteri candidates ~f:(fun index id ->
         assert (
@@ -691,7 +706,7 @@ let%test_unit "bounded selection agrees with an independent set model" =
       R.close_and_wait run |> F.run_ok))
 ;;
 
-let%test_unit "handoff settlement is one-way across absent, diverged and callback failure"
+let%test_unit "handoff settlement is one-way across absent, prewrite and callback failure"
   =
   let selected owner capture text =
     job owner capture ~id:(job_id text) ~parent:P.Developer_job.Launch.Run_root
@@ -713,10 +728,14 @@ let%test_unit "handoff settlement is one-way across absent, diverged and callbac
     let token = handoff ~on_settle:(fun _ -> incr calls) () in
     (match R.reconcile_and_settle handle prepared token |> F.run_ok with
      | R.Settlement.Absent -> ()
-     | Installed _ | Diverged -> failwith "new transaction was not absent");
-    (match R.commit_and_settle handle prepared token |> F.run_ok with
+     | Installed _ | Prewrite_conflict | Diverged ->
+       failwith "new transaction was not absent");
+    (match
+       R.commit_and_settle handle ~admit:(fun () -> true) prepared token |> F.run_ok
+     with
      | R.Settlement.Absent -> ()
-     | Installed _ | Diverged -> failwith "settled absence was reversed");
+     | Installed _ | Prewrite_conflict | Diverged ->
+       failwith "settled absence was reversed");
     assert (Int.equal !calls 1);
     let observed = R.observe handle |> F.run_ok in
     assert (Option.is_none (R.find_job observed (P.Developer_job.id chosen)));
@@ -727,7 +746,7 @@ let%test_unit "handoff settlement is one-way across absent, diverged and callbac
     R.close_and_wait run |> F.run_ok);
   F.with_root (fun _env _sw _root _session run ->
     let owner = F.owner 0 in
-    let capture = F.digest "diverged settlement" in
+    let capture = F.digest "prewrite settlement" in
     let handle, initial = F.admit run owner capture in
     let prepare text =
       R.prepare_root_selected
@@ -739,26 +758,45 @@ let%test_unit "handoff settlement is one-way across absent, diverged and callbac
     in
     let stale = prepare "job_diverged_stale" in
     let winner = prepare "job_diverged_winner" in
-    ignore (R.commit_and_settle handle winner (handoff ()) |> F.run_ok |> installed);
+    let identical_unwritten = prepare "job_diverged_winner" in
+    ignore
+      (R.commit_and_settle handle ~admit:(fun () -> true) winner (handoff ())
+       |> F.run_ok
+       |> installed);
     let calls = ref 0 in
     let token = handoff ~on_settle:(fun _ -> incr calls) () in
     (match R.reconcile_and_settle handle stale token |> F.run_ok with
-     | R.Settlement.Diverged -> ()
-     | Installed _ | Absent -> failwith "divergent transaction was settled as valid");
-    (match R.commit_and_settle handle stale token |> F.run_ok with
-     | R.Settlement.Diverged -> ()
-     | Installed _ | Absent -> failwith "divergent handoff was reversed");
+     | R.Settlement.Prewrite_conflict -> ()
+     | Installed _ | Absent | Diverged ->
+       failwith "unattempted transaction was settled as valid");
+    (match R.commit_and_settle handle ~admit:(fun () -> true) stale token |> F.run_ok with
+     | R.Settlement.Prewrite_conflict -> ()
+     | Installed _ | Absent | Diverged -> failwith "prewrite handoff was reversed");
     assert (Int.equal !calls 1);
-    let current = R.observe handle |> F.run_ok in
+    let identical_calls = ref 0 in
+    let identical_token = handoff ~on_settle:(fun _ -> incr identical_calls) () in
     (match
-       R.admit_epoch
-         run
-         ~owner:(F.owner 1)
-         ~capture_fingerprint:capture
-         ~previous:(Some current)
+       R.commit_and_settle
+         handle
+         ~admit:(fun () -> true)
+         identical_unwritten
+         identical_token
+       |> F.run_ok
      with
-     | Error R.Error.Conflict -> ()
-     | _ -> failwith "divergent handoff did not block a fresh epoch mutation");
+     | R.Settlement.Prewrite_conflict -> ()
+     | Installed _ | Absent | Diverged ->
+       failwith "identical after bytes gave a second publication right");
+    assert (Int.equal !identical_calls 1);
+    let current = R.observe handle |> F.run_ok in
+    let _, next =
+      R.admit_epoch
+        run
+        ~owner:(F.owner 1)
+        ~capture_fingerprint:capture
+        ~previous:(Some current)
+      |> F.run_ok
+    in
+    assert (Int.equal (R.Checkpoint.owner (R.Observation.checkpoint next)).epoch 1);
     R.close_and_wait run |> F.run_ok);
   F.with_root (fun _env _sw _root _session run ->
     let owner = F.owner 0 in
@@ -782,7 +820,7 @@ let%test_unit "handoff settlement is one-way across absent, diverged and callbac
           if Int.equal !calls 1 then raise original)
         ()
     in
-    (match R.commit_and_settle handle prepared token with
+    (match R.commit_and_settle handle ~admit:(fun () -> true) prepared token with
      | exception error -> assert (phys_equal error original)
      | Ok _ | Error _ -> failwith "callback exception was lost");
     assert (Int.equal !calls 1);
@@ -800,7 +838,10 @@ let%test_unit "handoff settlement is one-way across absent, diverged and callbac
       R.reconcile_and_settle handle prepared token |> F.run_ok |> installed
     in
     assert (Option.is_some (R.find_job observed (P.Developer_job.id chosen)));
-    ignore (R.commit_and_settle handle prepared token |> F.run_ok |> installed);
+    ignore
+      (R.commit_and_settle handle ~admit:(fun () -> true) prepared token
+       |> F.run_ok
+       |> installed);
     assert (Int.equal !calls 2);
     R.close_and_wait run |> F.run_ok);
   F.with_root (fun _env _sw _root _session run ->
@@ -829,7 +870,8 @@ let%test_unit "handoff settlement is one-way across absent, diverged and callbac
     (match
        Eio.Cancel.sub (fun context ->
          cancellation := Some context;
-         ignore (R.commit_and_settle handle prepared token |> F.run_ok);
+         ignore
+           (R.commit_and_settle handle ~admit:(fun () -> true) prepared token |> F.run_ok);
          Eio.Fiber.check ())
      with
      | exception Eio.Cancel.Cancelled actual -> assert (phys_equal actual reason)
@@ -879,11 +921,14 @@ let%test_unit "uncertain selected commit retains barrier and settles exactly" =
         handoff
           ~on_settle:(function
             | R.Settlement.Installed _ -> incr settlement_calls
-            | Absent | Diverged -> failwith "unexpected selected settlement")
+            | Absent | Prewrite_conflict | Diverged ->
+              failwith "unexpected selected settlement")
           ()
       in
       rename_armed := true;
-      assert (Result.is_error (R.commit_and_settle handle prepared token));
+      assert (
+        Result.is_error
+          (R.commit_and_settle handle ~admit:(fun () -> true) prepared token));
       assert (not !rename_armed);
       assert (Int.equal !settlement_calls 0);
       sync_blocked := false;
@@ -911,9 +956,14 @@ let%test_unit "uncertain selected commit retains barrier and settles exactly" =
         |> F.run_ok
       in
       let later_observed =
-        R.commit_and_settle handle later (handoff ()) |> F.run_ok |> installed
+        R.commit_and_settle handle ~admit:(fun () -> true) later (handoff ())
+        |> F.run_ok
+        |> installed
       in
-      ignore (R.commit_and_settle handle prepared token |> F.run_ok |> installed);
+      ignore
+        (R.commit_and_settle handle ~admit:(fun () -> true) prepared token
+         |> F.run_ok
+         |> installed);
       assert (Int.equal !settlement_calls 1);
       assert (
         Int64.equal (R.Checkpoint.revision (R.Observation.checkpoint later_observed)) 3L);
@@ -933,4 +983,66 @@ let%test_unit "uncertain selected commit retains barrier and settles exactly" =
       assert (Option.is_some (R.find_job recovered selected_id));
       R.close_and_wait run |> F.run_ok;
       F.store_ok (Agent_store.Session_store.close reopened)))
+;;
+
+let%test_unit "selected rename admission rejects after staging without publishing" =
+  let run_case ~admit ~expected_error =
+    F.with_root (fun _env _sw _root _session run ->
+      let owner = F.owner 0 in
+      let capture = F.digest "guarded selected graph" in
+      let handle, initial = F.admit run owner capture in
+      let selected_id = job_id "job_guarded_selected" in
+      let selected =
+        job owner capture ~id:selected_id ~parent:P.Developer_job.Launch.Run_root
+      in
+      let prepared =
+        R.prepare_root_selected
+          handle
+          ~expected:initial
+          ~phase:R.Checkpoint.Active
+          ~selected:[ selected ]
+        |> F.run_ok
+      in
+      let calls = ref 0 in
+      let token = handoff ~on_settle:(fun _ -> incr calls) () in
+      expected_error (fun () -> R.commit_and_settle handle prepared token ~admit);
+      assert (Int.equal !calls 1);
+      (match R.reconcile_and_settle handle prepared token |> F.run_ok with
+       | R.Settlement.Absent -> ()
+       | Installed _ | Prewrite_conflict | Diverged ->
+         failwith "rejected selected write was published");
+      assert (Int.equal !calls 1);
+      let current = R.observe handle |> F.run_ok in
+      assert (Option.is_none (R.find_job current selected_id));
+      assert (
+        Int64.equal
+          (R.Checkpoint.revision (R.Observation.checkpoint current))
+          (R.Checkpoint.revision (R.Observation.checkpoint initial)));
+      let _next_handle, _next =
+        R.admit_epoch
+          run
+          ~owner:(F.owner 1)
+          ~capture_fingerprint:capture
+          ~previous:(Some current)
+        |> F.run_ok
+      in
+      R.close_and_wait run |> F.run_ok)
+  in
+  let checked = ref 0 in
+  run_case
+    ~admit:(fun () ->
+      incr checked;
+      false)
+    ~expected_error:(fun commit ->
+      match commit () with
+      | Error R.Error.Foreign_or_stale -> ()
+      | Ok _ | Error _ -> failwith "rejected pre-rename admission was acknowledged");
+  assert (Int.equal !checked 1);
+  let original = Core_unix.Unix_error (EIO, "injected admission I/O", "selected") in
+  run_case
+    ~admit:(fun () -> raise original)
+    ~expected_error:(fun commit ->
+      match commit () with
+      | exception actual -> assert (phys_equal actual original)
+      | Ok _ | Error _ -> failwith "pre-rename exception identity was lost")
 ;;

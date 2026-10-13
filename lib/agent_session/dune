@@ -154,6 +154,7 @@
   host_permission_subject
   developer_invocation_owner
   developer_job_scope
+  developer_root_job_admission
   authoring_reference_scope
   native_tool_moderation
   script_tool_calls

@@ -39,6 +39,29 @@ end
 
 type t
 type handle
+type store = t
+
+module Run_claim : sig
+  type t
+
+  (** Non-yielding physical claim of one stable run ID in this exact Store.
+      [handle] must have been issued by [store]. Registration precedes any
+      actor admission read or callback, so a second owner for the same run
+      cannot pass an Eio wait and enter; an in-flight same-run [admit_epoch]
+      or unresolved Store transaction also excludes acquisition. Other run IDs
+      remain independent. Acquire/release stay on the issuing Eio domain and
+      perform no Eio operation themselves.
+      This checks physical identity, not principal/source authorization or
+      latest epoch, which the host verifies after acquisition. The claim is
+      distinct from a one-shot worker Claim and is not execution authority. *)
+  val acquire : store:store -> handle:handle -> (t, Error.t) result
+
+  (** Non-yielding release of this exact issuer token after host-owned actions,
+      workers and uncertain handoffs are joined/reconciled. A pending Store
+      transaction for the run rejects release. Repeated release is harmless;
+      the shared Store and unrelated runs stay open. *)
+  val release : t -> (unit, Error.t) result
+end
 
 module Checkpoint : sig
   type phase =
@@ -188,7 +211,11 @@ val open_or_create
     epoch requires an exact prior observation and interrupts the previous epoch;
     its older claimed jobs can later finish bookkeeping without new execution.
     The configured epoch/run quota is reported as [Limit_exceeded]; malformed
-    over-limit documents found on disk fail recovery. *)
+    over-limit documents found on disk fail recovery. A live Run_claim for this
+    run rejects same/new-epoch admission until the physical owner relinquishes
+    it. The exclusion is registered before [admit_epoch]'s first yield and
+    removed on every exit; a Run_claim cannot slip in while that operation
+    waits for I/O. Other runs remain independent. *)
 val admit_epoch
   :  t
   -> owner:Agent_protocol.Execution_owner.developer
@@ -348,9 +375,14 @@ val commit : handle -> Prepared.t -> (Installed.t, Error.t) result
 val reconcile : handle -> Prepared.t -> (reconciliation, Error.t) result
 
 module Settlement : sig
-  type t = reconciliation =
+  type t =
     | Installed of Installed.t
     | Absent
+    (** This selected transaction never attempted replacement and lost its
+        first CAS, including an identical after-image installed by another
+        Prepared. Its exact pending token is retired; provisional capacity
+        remains with the caller for bounded fresh-observation preparation. *)
+    | Prewrite_conflict
     | Diverged
 end
 
@@ -370,14 +402,30 @@ end
     is recorded once and a repeat of the same pair returns that historical
     outcome without writing or calling it again. Native/application effects do
     not repeat. Installed publishes, exact Absent aborts and Diverged quarantines.
-    Unknown I/O retains the bounded pending pair; a later mutation/reset for
-    the same run is rejected until reconciliation. Unexpected exception or
+    A proven prewrite conflict retires only this Prepared's pending token; its
+    callback must retain staged capacity so the caller can reprepare the same
+    sealed selection from a fresh Observation, with a finite retry bound and
+    without replaying the root action. An identical after-image from a
+    different never-attempted Prepared is also a prewrite conflict, not an
+    adoption of publication authority. An attempted or unknown write remains
+    quarantined on divergence. Unknown I/O retains the bounded pending pair;
+    a later mutation/reset for the same run is rejected until reconciliation.
+    Unexpected exception or
     cancellation preserves its original identity after protected bookkeeping.
+    [admit] is a trusted non-yielding host proof checked after temporary-file
+    sync and immediately before entering the authoritative rename. False
+    prevents publication, settles an exact absent handoff and returns
+    [Foreign_or_stale]. The host must bind it to the retained actor, physical
+    run scope, current selection and capture; a caller-supplied ID/digest is
+    not proof. The check cannot be atomic with an external authorization
+    change during the kernel rename. Reconciliation of a write already
+    attempted never calls [admit] or replays the action.
     On process restart the host rebuilds capacity from durable selected jobs. *)
 val commit_and_settle
   :  handle
   -> Prepared.t
   -> Handoff.t
+  -> admit:(unit -> bool)
   -> (Settlement.t, Error.t) result
 
 (** One bounded read/settlement attempt under the same lease, no replay loop.
@@ -389,7 +437,10 @@ val reconcile_and_settle
   -> Handoff.t
   -> (Settlement.t, Error.t) result
 
-(** Stop admission, join owned operations and invalidate all handles. No runtime
+(** Stop admission, join owned operations and invalidate all handles. An active
+    Run_claim rejects explicit close before any state change; the daemon must
+    close/join/release all per-run owners first. This check never waits for a
+    callback while holding the writer lease. No runtime
     callback is replayed by closing. A physically pending handoff belongs to
     this store lifetime and cannot be acknowledged after close; its exact
     durable document remains for fresh recovery. The host actor must retire

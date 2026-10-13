@@ -61,6 +61,7 @@
   start_scheduler
   job_capacity
   developer_job_worker
+  developer_root_owner
   job_scheduler
   permission_review_service
   permission_scheduler
@@ -105,6 +106,7 @@
   ochat.chatml
   ochat.chatml_project_prepare
   ochat.chatml_local_capture
+  ochat.chatml_developer_capture
   ochat.chatml_git_catalog
   eio
   eio.unix
