@@ -11,11 +11,12 @@ REPL execution after this service has selected an immutable source.
 bounded compiler domain without evaluating initializers. `Chatml_semantics`
 publishes immutable, source-qualified symbols, lexical contexts, types, exports,
 references, graph facts and diagnostics for a complete check. A failed check
-publishes diagnostics and syntax from units parsed in that same attempt; it does
-not publish certified semantic facts for the failing unit. Queries already have
-result and work limits. `Chatml_prepared_program` fingerprints the exact source
-IDs and digests, entry, provenance, selected environment, scopes and compiler
-contract. These values describe code, not host authorization or editor revision.
+publishes diagnostics and syntax from units parsed in that same attempt; it
+publishes **no certified semantic facts for any unit** in the failed graph.
+Queries already have result and work limits. `Chatml_prepared_program`
+fingerprints the exact source IDs and digests, entry, provenance, selected
+environment, scopes and compiler contract. These values describe code, not host
+authorization or editor revision.
 
 `Chatml_source.Location` is an exact half-open byte range tied to a source ID and
 digest. `Chatmd_parser_input` retains authored/effective bytes and parser-owned
@@ -124,7 +125,8 @@ truncation/work limit, cancelled and disconnected states.
 resolver. Complete snapshots support diagnostics, visible-symbol completion,
 hover/type, signature and definition/navigation. Exact selected host signatures,
 module scopes, exports and source owners determine results. A failed whole-file
-check exposes only the same-run partial facts that `Chatml_semantics` certifies.
+check exposes only same-run parsed syntax and diagnostics, with no certified
+semantic facts for any unit in the failed graph.
 `Unavailable` and `Ambiguous` remain distinct from a successful empty result.
 No completion operation invokes prompt preprocessing, scripts, tools, model
 inference, Git/HTTP fetch, install or initializer evaluation.
@@ -236,11 +238,12 @@ chat TUI and future desktop editor consume the same portable core/client API.
 
 OCH-132 and OCH-136 remain **unestimated tracking parents** so their complete
 acceptance is not accidentally narrowed or double-counted. The concrete children
-are: host-owned read-only source context and bounded overlay lease (8); OCH-256
-pure position bridge (3); checker/diagnostic projection (5); parser-owned ChatMD
-extraction mapping (5); compiler-owned provisional prefix assistance (5);
-typed protocol/client contract (5); HTTP/stdio server adapters (5); authoring
-bundle staging/storage/receipt (5); and pure closure validation/publication
+are: OCH-257 host-owned read-only source context and bounded overlay lease (8);
+OCH-256 pure position bridge (3); OCH-258 checker/diagnostic projection (5);
+OCH-259 parser-owned ChatMD extraction mapping (5); OCH-260 compiler-owned
+provisional prefix assistance (5); OCH-261 typed protocol/client contract (5);
+OCH-262 HTTP/stdio server adapters (5); OCH-263 authoring bundle
+staging/storage/receipt (5); and OCH-264 pure closure validation/publication
 (5). OCH-133, OCH-134 and OCH-135 retain their own assistance and highlighting
 outcomes. The run/test/trace/REPL implementation belongs to its developer-runtime
 tickets. Assign estimates before starting each ticket and link completion
@@ -248,9 +251,10 @@ dependencies, including the bundle path into editor save/reload integration.
 
 Each implementation ticket updates affected `docs-src/` contracts and runs
 relevant local checks. Draft PRs can skip CI; final integrated M5 validation
-must run the combined CI gate. Validation includes build/analysis agreement,
-cross-file scope and source ownership, failed/partial/provisional separation,
-Unicode and CRLF boundaries, ChatMD RAW/entity/import mapping, changed overlays
+must run the combined CI gate under OCH-254. Validation includes
+build/analysis agreement, cross-file scope and source ownership,
+failed/partial/provisional separation, Unicode and CRLF boundaries, ChatMD
+RAW/entity/import mapping, changed overlays
 and environments, denied host roots, missing upload members, malformed/deep
 sources, cancellation and disconnect cleanup, lost commit reply reconciliation,
 quota exhaustion, no preprocessing/fetch/tool/provider side effects, and
