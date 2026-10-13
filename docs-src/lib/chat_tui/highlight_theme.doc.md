@@ -1,6 +1,7 @@
 # Highlight_theme — mapping TextMate scopes to Notty attributes
 
-`chat_tui/highlight_theme` defines colour palettes and matching logic for
+`Chat_tui.Highlight_theme` re-exports `Terminal_highlighting.Highlight_theme`,
+which defines immutable colour palettes and matching logic for
 syntax highlighting in the terminal UI. Given a list of TextMate-style
 scopes (e.g. `"keyword.operator"`, `"string"`, `"entity.name.function"`),
 it returns a `Notty.A.t` attribute describing foreground/background colours
@@ -99,11 +100,13 @@ dot-separated segments.
   `Highlight_styles.(++)`.
 - The order of `scopes` does **not** matter; they are treated as a set.
 
-Internally the implementation precompiles the theme into an index and keeps
-a small cache keyed by canonicalised scope sets. In the worst case the work
-is linear in the number of rules times the number of scopes, but repeated
-calls for the same scope sets are typically much cheaper. This makes the
-function suitable for per-token use in the highlighter.
+The theme precompiles its rules into an immutable index. Direct
+`attr_of_scopes` calls are pure and do not retain a cache. Each highlighting
+engine uses a `Terminal_highlighting.Highlight_theme_resolver` to cache canonical
+scope sets: at most 4096 entries and 256 KiB of encoded keys. Length-prefixed
+keys distinguish scope groups containing dots; immutable atomic snapshots allow
+concurrent reads. Saturation computes new results without retaining more entries.
+See [shared terminal highlighting](../../development/terminal-highlighting.md).
 
 ```ocaml
 let open Chat_tui in
@@ -141,10 +144,8 @@ let (_ : Notty.image) = image in
 - Customisation API: the module currently exposes only predefined themes and
   the query function. If you need fine-grained theming, extend the module or
   add new constructors in your fork.
-- Complexity: in the worst case resolution cost is linear in (number of
-  rules × number of scopes per token). Internally a small cache keyed by
-  canonicalised scope sets ensures that repeated calls with the same scopes
-  are typically much cheaper.
+- Direct lookup uses the immutable compiled index. Engine-owned bounded
+  resolvers accelerate repeated canonical scope sets without changing results.
 
 ---
 
@@ -282,10 +283,10 @@ the public API. You can still customise the output in a few ways:
 
 ## Performance considerations
 
-The implementation is intentionally simple – a nested loop over rules and
-scopes – and therefore **O(m × n)** where *m* is the number of rules and *n* the number of
-scopes.  In practice both numbers are small (dozens), so a per-token call is
-perfectly fine even on slow terminals.
+Direct lookup uses an immutable compiled selector index. The engine's bounded
+resolver caches repeated scope sets; direct `attr_of_scopes` calls do not mutate
+or cache anything. Performance depends on scope count and depth as well as the
+matching rules.
 
 ## Limitations
 

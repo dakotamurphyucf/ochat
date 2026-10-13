@@ -139,9 +139,9 @@ now resolve the new language tag.
 
 ## Known issues and limitations
 
-- Grammar files are resolved via relative paths under `lib/chat_tui/grammars`.
-  Running the application from a different working directory or repackaging it
-  without these files may result in some grammars failing to load.
+- Bundled grammars are embedded by `Terminal_highlighting` at build time and
+  work outside the checkout. Only explicitly selected custom grammar files need
+  frontend filesystem access; see the [shared library guide](../../development/terminal-highlighting.md).
 - Errors are currently logged with `Core.printf` to standard output, which may
   interleave with normal UI output. In batch or logging-heavy environments you
   may prefer to redirect or filter stdout.

@@ -1,6 +1,8 @@
 # Chat_tui.Highlight_grammars
 
-Vendored or built-in TextMate grammars used by the terminal UI.
+Vendored or built-in TextMate grammars used by terminal frontends. This module
+re-exports `Terminal_highlighting.Highlight_grammars`; see the
+[shared terminal highlighting guide](../../development/terminal-highlighting.md).
 
 `Chat_tui.Highlight_grammars` exposes a small set of helper functions, each of
 which registers one language grammar into a
@@ -9,7 +11,7 @@ which registers one language grammar into a
 and code blocks.
 
 - Namespace: `Chat_tui.Highlight_grammars`
-- Depends on: `Core` (error handling and IO), `Jsonaf` (parsing JSON
+- Depends on: `Core` (collections and error handling), `Jsonaf` (parsing JSON
   grammars), `Chat_tui.Highlight_tm_loader` (registry construction and grammar
   loading), `textmate-language` (underlying tokenizer, via the loader)
 
@@ -51,7 +53,7 @@ Attach the registry to the highlighting engine:
 
 ```ocaml
 let reg = registry () in
-let theme = Chat_tui.Highlight_theme.default_dark in
+let theme = Chat_tui.Highlight_theme.github_dark in
 let engine =
   Chat_tui.Highlight_tm_engine.(
     create ~theme |> with_registry ~registry:reg)
@@ -82,8 +84,8 @@ and pass `reg` to `Highlight_tm_engine.with_registry`.
 | `add_shell` | `source.shell` | `sh`, `bash` | Embedded grammar for POSIX shell/Bash. |
 | `add_diff` | `source.diff` | `diff`, `patch` | Embedded grammar highlighting headers and line prefixes. |
 | `add_json` | `source.json` | `json` | Embedded grammar for JSON structures. |
-| `add_markdown` | `source.gfm` | `md`, `markdown`, `gfm` | Embeds a vendored GitHub-flavoured Markdown grammar at compile time. |
-| `add_html` | `text.html.basic`, `text.html.derivative` | `html`, inline HTML in markdown | Uses a minimal embedded grammar unless a vendored TextMate HTML grammar is present. |
+| `add_markdown` | `text.html.markdown` | `md`, `markdown`, `gfm` | Embeds a vendored GitHub-flavoured Markdown grammar at compile time. |
+| `add_html` | `text.html.basic`, `text.html.derivative` | `html`, inline HTML in markdown | Uses a minimal embedded grammar and a derivative-scope shim. |
 | `add_ochat_apply_patch` | `source.ochat-apply-patch` | internal | Grammar tuned for `ochat`'s `apply_patch` tool output, recognising the banner header, per-file operations (Add/Update/Delete), numbered snippet lines, and delegating inner hunks to the Diff grammar. |
 
 All functions share the same contract:
@@ -94,39 +96,23 @@ All functions share the same contract:
 - they return `Error _` if no valid grammar could be installed.
 
 It is safe to ignore errors if you are happy to silently fall back to plain
-rendering for the affected language. The default registry implementation logs
-failures to `stderr` and keeps going.
+rendering for the affected language. The chat default registry implementation reports
+expected loading errors to standard output and keeps going.
 
 ## Error handling and fallbacks
 
-The implementations differ slightly in how they source grammars:
+All bundled grammars are embedded at build time. OCaml, Markdown and the VS Code
+language bundles use vendored assets under `lib/terminal_highlighting/grammars`;
+the smaller grammars use fixed JSON strings. No `add_*` helper reads the
+filesystem, and installed applications do not require the repository or a
+particular working directory. Malformed embedded JSON or grammar conversion
+returns `Error _`; there is no runtime search for alternative asset files.
 
-- **Embedded-only grammars**: `add_dune`, `add_opam`, `add_shell`, `add_diff`,
-  `add_json`, and `add_ochat_apply_patch` parse fixed JSON strings compiled
-  into the binary. Errors here indicate an internal bug in the application.
-
-- **Vendored with fallback**:
-  - `add_ocaml` first tries `lib/chat_tui/grammars/ocaml.json` and then
-    `lib/chat_tui/grammars/ocaml.tmLanguage.json`. If both attempts fail, it
-    falls back to a lightweight built-in grammar that recognises comments,
-    strings, numbers, operators, and a few syntactic forms.
-  - `add_html` similarly prefers `lib/chat_tui/grammars/html.tmLanguage.json`
-    and otherwise registers a minimal built-in HTML grammar. It always
-    registers a small "shim" grammar whose scope name is
-    `text.html.derivative` and which simply includes `text.html.basic`. This
-    keeps Markdown grammars that refer to `text.html.derivative` working even
-    without a full HTML bundle.
-
-- **Vendored only**:
-  - `add_markdown` loads
-    `lib/chat_tui/grammars/markdown.tmLanguage.json`. If the file is missing
-    or invalid, the function returns `Error _`; there is no built-in fallback.
-    The rest of the UI treats such failures as "no Markdown grammar" and
-    falls back to plain-text rendering.
-
-Because paths are relative (`lib/chat_tui/…`), code that embeds this library
-must either run from the project root or ensure those paths exist in its
-current working directory.
+`add_html` installs the minimal `text.html.basic` grammar and a
+`text.html.derivative` shim so the Markdown grammar can resolve embedded HTML.
+Optional user grammar discovery remains a separate chat frontend policy. Other
+frontends read custom files through their Eio capabilities and pass decoded JSON
+to the shared loader.
 
 ## Known issues and limitations
 
@@ -137,9 +123,8 @@ current working directory.
   only recognises tags, attributes, quoted attribute values, entities, and
   comments. Complex templating languages embedded in HTML will not be
   highlighted.
-- `add_markdown` depends on a vendored GitHub-Flavoured Markdown grammar and
-  does not yet offer an embedded fallback. When the file is not available,
-  markdown blocks are rendered as plain text.
+- Grammar registration can report an embedded-asset conversion error. A caller
+  that continues without that grammar gets plain spans for the missing language.
 - There is currently no public API for removing or replacing grammars in a
   registry; to change the set of installed grammars, create a fresh registry
   and call the appropriate `add_*` functions again.
