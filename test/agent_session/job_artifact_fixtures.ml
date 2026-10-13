@@ -45,11 +45,13 @@ let create env sw (initial : State.t) =
   Eio.Switch.on_release sw (fun () ->
     Agent_store.Session_store.close_session sessions session |> store_ok;
     Agent_store.Session_store.close sessions |> store_ok);
+  let data_root = Agent_store.Session_store.data_root sessions in
+  let temporary_directory = Agent_store.Data_root.temporary_blobs_path data_root in
   let blobs =
     Agent_store.Blob_store.create
       ~env
-      ~temporary_directory:(Filename.concat root "temporary")
-      ~durable_directory:(Filename.concat root "durable")
+      ~temporary_directory
+      ~durable_directory:(Agent_store.Data_root.durable_blobs_path data_root)
       ~max_upload_bytes:100000L
     |> store_ok
   in
@@ -64,10 +66,5 @@ let create env sw (initial : State.t) =
       ~max_bytes:4096
     |> protocol_ok
   in
-  { publisher
-  ; session
-  ; sessions
-  ; blobs
-  ; temporary_directory = Filename.concat root "temporary"
-  }
+  { publisher; session; sessions; blobs; temporary_directory }
 ;;
