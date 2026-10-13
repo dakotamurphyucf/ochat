@@ -113,6 +113,129 @@ let%expect_test
     |}]
 ;;
 
+let%expect_test "publisher phase retains exact reference after callback exception" =
+  with_store (fun env sw blobs _reopen session _ ->
+    let completion = P.Completion.Succeeded (`String "selected") in
+    let prepared = prepare env blobs sw session completion in
+    let reference = Store.reference prepared in
+    let sentinel = Failure "publisher callback failed after possible write" in
+    let attempted = ref 0 in
+    let callback (actual : P.Job_artifact.t) =
+      incr attempted;
+      assert (P.Id.Blob.equal actual.blob.id reference.blob.id);
+      if Int.equal !attempted 1
+      then (
+        assert (
+          match
+            Store.commit prepared ~persist:(fun _ -> failwith "reentered persist")
+          with
+          | Error error -> P.Error.equal_code error.code P.Error.Invalid_state
+          | Ok _ -> false);
+        raise sentinel)
+      else Ok actual
+    in
+    let observed =
+      match Store.commit prepared ~persist:callback with
+      | exception exn -> phys_equal exn sentinel
+      | Ok _ | Error _ -> false
+    in
+    assert observed;
+    assert (Result.is_error (Store.discard prepared));
+    [%test_eq: int] 1 (List.length (Intent.list ~env ~session ~max_count:8 |> store_ok));
+    let installed = Store.commit prepared ~persist:callback |> protocol_ok in
+    assert (P.Id.Blob.equal installed.blob.id reference.blob.id);
+    assert (List.is_empty (Intent.list ~env ~session ~max_count:8 |> store_ok));
+    assert (Result.is_error (Store.commit prepared ~persist:callback));
+    assert (Result.is_error (Store.discard prepared));
+    print_s
+      [%sexp
+        ("same reference retained through callback exception" : string)
+      , (!attempted : int)]);
+  [%expect {| ("same reference retained through callback exception" 2) |}]
+;;
+
+let%expect_test "publisher callbacks reject inline and artifact reentry before waiting" =
+  List.iter [ Store.Publisher.Storage.Automatic; Artifact ] ~f:(fun storage ->
+    with_store (fun env sw blobs _reopen session _ ->
+      let completion = P.Completion.Succeeded (`String "selected") in
+      let running = job session in
+      let publisher =
+        Store.Publisher.create
+          ~env
+          ~blobs
+          ~sw
+          ~session
+          ~principal
+          ~inline_bytes:4096
+          ~max_bytes:4096
+        |> protocol_ok
+      in
+      let callbacks = ref 0 in
+      let entered, enter = Eio.Promise.create () in
+      let reader_started, start_reader = Eio.Promise.create () in
+      let reader =
+        Eio.Fiber.fork_promise ~sw (fun () ->
+          Eio.Promise.await entered;
+          Eio.Promise.resolve start_reader ();
+          Store.Publisher.pending_completion publisher ~job:running)
+      in
+      let descendant = ref None in
+      let rec publish () : (P.Stored_completion.t, P.Error.t) result =
+        Store.Publisher.publish
+          publisher
+          ~storage
+          ~jobs:[ running ]
+          ~job:running
+          ~now:timestamp
+          completion
+          ~persist:(fun stored ->
+            incr callbacks;
+            if Int.equal !callbacks 1
+            then (
+              let child_checked, check_child = Eio.Promise.create () in
+              let child_release, release_child = Eio.Promise.create () in
+              let child =
+                Eio.Fiber.fork_promise ~sw (fun () ->
+                  assert (
+                    match publish () with
+                    | Error error -> P.Error.equal_code error.code P.Error.Invalid_state
+                    | Ok _ -> false);
+                  Eio.Promise.resolve check_child ();
+                  Eio.Promise.await child_release;
+                  ignore (Store.Publisher.pending_completion publisher ~job:running))
+              in
+              descendant := Some (child, release_child);
+              Eio.Promise.await child_checked;
+              assert (
+                match Store.Publisher.pending_completion publisher ~job:running with
+                | exception Invalid_argument _ -> true
+                | _ -> false);
+              assert (
+                match publish () with
+                | Error error -> P.Error.equal_code error.code P.Error.Invalid_state
+                | Ok _ -> false);
+              Eio.Promise.resolve enter ();
+              Eio.Promise.await reader_started;
+              Eio.Fiber.yield ();
+              assert (Option.is_none (Eio.Promise.peek reader));
+              Error (P.Error.invalid_request "retry selected publication"))
+            else Ok stored)
+      in
+      assert (Result.is_error (publish ()));
+      (match !descendant with
+       | None -> failwith "descendant was not started"
+       | Some (child, release_child) ->
+         Eio.Promise.resolve release_child ();
+         Eio.Promise.await_exn child);
+      ignore (Eio.Promise.await_exn reader : P.Completion.t option);
+      ignore (publish () |> protocol_ok : P.Stored_completion.t);
+      [%test_eq: int] 2 !callbacks;
+      print_s [%sexp (storage : Store.Publisher.Storage.t), (!callbacks : int)]));
+  [%expect
+    {| (Automatic 2)
+ (Artifact 2) |}]
+;;
+
 let%expect_test
     "result artifact corruption, read bounds and discarded preparations fail closed"
   =
