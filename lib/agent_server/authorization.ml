@@ -12,6 +12,7 @@ let required_scope = function
   | Provider_logout _
   | Provider_configure_environment _ -> Some Agent_protocol.Scope.Provider_manage
   | Agent_protocol.Command.Protocol_initialize _
+  | Authoring _
   | Command_receipt _
   | Protocol_ping _
   | Server_info
@@ -127,6 +128,13 @@ let authorize principal command =
            ())
   in
   match command with
+  | Agent_protocol.Command.Authoring _ ->
+    Error
+      (Agent_protocol.Error.create
+         Method_not_found
+         ~message:"authoring handler is not installed"
+         ~retryable:false
+         ())
   | Agent_protocol.Command.Session_seed request
     when match Agent_protocol.Session_seed.Request.code request with
          | Catalog _ -> false

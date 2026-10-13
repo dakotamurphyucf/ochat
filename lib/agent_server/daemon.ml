@@ -1581,7 +1581,8 @@ let compose
       | Schedule_get _
       | Schedule_create _
       | Schedule_cancel _
-      | Ingress_submit _ ->
+      | Ingress_submit _
+      | Authoring _ ->
         Error
           (Agent_protocol.Error.create
              Invalid_state

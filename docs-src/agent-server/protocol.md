@@ -39,10 +39,17 @@ unknown wire fields; enum/tag encoding is defined by the linked codec.
 
 ## Method reference
 
-All methods below use the corresponding `Command` variant and `Method_result`
-variant of the same name in the [type reference](protocol-types.md). Request type
-names identify the complete field schema there. All mutations require applicable
-actor state and authorization, not merely passing JSON validation.
+Methods below use typed `Command` and `Method_result` variants in the
+[type reference](protocol-types.md). The authoring family is grouped under one
+`Authoring` outer variant with a closed method-specific request/result sum.
+Request type names identify the complete field schema there. All mutations
+require applicable actor state and authorization, not merely passing JSON
+validation.
+
+The `authoring.*` core entries below are typed codec contracts for OCH-261.
+No server handler or `authoring.core.v1` feature is installed yet; these methods
+currently return `method_not_found`. OCH-262 will install the corresponding
+principal, source-custody and context handlers before advertising the feature.
 
 | Method | Request type | Minimum method scope | Result / behavior |
 |---|---|---|---|
@@ -128,6 +135,18 @@ actor state and authorization, not merely passing JSON validation.
 | `schedule.create` | `Schedule.Create_request` | `session.message.send` | Writable attachment; persist timer/delivery intent. |
 | `schedule.cancel` | `Schedule.Cancel_request` | `session.message.send` | Writable attachment; cancel schedule. |
 | `ingress.submit` | `Ingress.Submit_request` | `ingress.submit` | Protocol 1.1; exact producer-bound registration; durable data acceptance acknowledgement. |
+| `authoring.capabilities` | Empty object | Pending authoring handler | Typed selected-method/encoding/limit reply; currently unavailable. |
+| `authoring.roots` | Empty object | Pending authoring handler | Typed authorized host-root catalog; currently unavailable. |
+| `authoring.host.list` | `Authoring.Source_read.Host_list_request` | Pending authoring handler | Fresh authorized host member listing, not a context-pinned read; currently unavailable. |
+| `authoring.host.read` | `Authoring.Source_read.Host_read_request` | Pending authoring handler | Fresh exact host read with source digest; currently unavailable. |
+| `authoring.context.open` | `Authoring.Context.Open_request` | Pending authoring handler | Project or standalone document capture; currently unavailable. |
+| `authoring.context.refresh` | `Authoring.Context.Refresh_request` | Pending authoring handler | Explicit recapture against context CAS; currently unavailable. |
+| `authoring.context.close` | `Authoring.Context.Close_request` | Pending authoring handler | Close current context generation; currently unavailable. |
+| `authoring.source.list` | `Authoring.Source_read.List_request` | Pending authoring handler | Captured context source inventory; currently unavailable. |
+| `authoring.source.read` | `Authoring.Source_read.Read_request` | Pending authoring handler | Captured exact source read; currently unavailable. |
+| `authoring.document.version` | `Authoring.Document.Version_request` | Pending authoring handler | Current source/context CAS version; currently unavailable. |
+| `authoring.document.replace` | `Authoring.Document.Replace_request` | Pending authoring handler | Full validated UTF-8 overlay replacement; currently unavailable. |
+| `authoring.document.close` | `Authoring.Document.Close_request` | Pending authoring handler | Revert an overlay with retained editor revision; currently unavailable. |
 
 Read-only attachments cannot authorize writer operations or permission answers.
 Ingress has separate authority: it needs its dedicated scope and matching

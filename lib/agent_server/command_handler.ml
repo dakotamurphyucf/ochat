@@ -104,10 +104,11 @@ let create
           |> Agent_protocol.Timestamp.of_time_ns))
   in
   let supported_features features =
-    match seed_factory with
-    | Some _ -> features
-    | None ->
-      List.filter features ~f:(fun feature -> not (String.equal feature "sessions.seed"))
+    List.filter features ~f:(fun feature ->
+      (* OCH261 installs codecs only. OCH262 must advertise this after handler
+         admission and authorization are installed together. *)
+      (not (String.equal feature Agent_protocol.Authoring.Features.core))
+      && (Option.is_some seed_factory || not (String.equal feature "sessions.seed")))
   in
   let initialize ~principal request =
     initialize ~principal request
@@ -397,6 +398,7 @@ let idempotency = function
   | Provider_select _
   | Provider_configure_environment _ -> None
   | Agent_protocol.Command.Ingress_submit _ -> None
+  | Agent_protocol.Command.Authoring _ -> None
   | Agent_protocol.Command.Session_seed request ->
     protected None (Agent_protocol.Session_seed.Request.idempotency_key request)
   | Agent_protocol.Command.Session_create request ->
@@ -2812,7 +2814,8 @@ let prepared_writer_attachment command =
   | Job_get _
   | Schedule_list _
   | Schedule_get _
-  | Ingress_submit _ -> None
+  | Ingress_submit _
+  | Authoring _ -> None
 ;;
 
 let authorize_mutation t ?prepared_writer context command =
@@ -2995,6 +2998,7 @@ let dispatch_authorized
     Error (error Invalid_state "seed requires original receipt dispatch")
   | Command_receipt _ -> Error (error Invalid_state "receipt requires read-only dispatch")
   | Ingress_submit request -> handle_ingress_submit t context request
+  | Authoring _ -> Error (error Method_not_found "authoring handler is not installed")
 ;;
 
 let handle_authorized
@@ -3107,6 +3111,7 @@ let command_session_id = function
   | Schedule_create request -> Some request.session_id
   | Schedule_cancel request -> Some request.session_id
   | Ingress_submit request -> Some request.session_id
+  | Authoring _ -> None
 ;;
 
 let audit_outcome
@@ -3269,8 +3274,8 @@ let receipt_summary ~session_id result =
   | Job_get _
   | Schedule_list _
   | Schedule_get _
-  | Ingress_submit _ ->
-    Error (error Invalid_request "method has no generic command receipt")
+  | Ingress_submit _
+  | Authoring _ -> Error (error Invalid_request "method has no generic command receipt")
 ;;
 
 let retained_run_receipt t ~actor (request : Agent_protocol.Run_start.t) ~request_sha256 =
