@@ -1,8 +1,10 @@
 # ChatMD and ChatML authoring services
 
-Status: M5 design, 2026-10-13. This document defines the selected service and
-edit/save/run boundary. It does not describe an implemented remote language
-service. The [developer runtime](chatml-developer-runtime.md) owns test and
+Status: M5 design, 2026-10-13. The portable project/document context ledger and
+host document capture are implemented; the remote language-service handlers
+and wire document projection are still proposed. This document defines the
+selected service and edit/save/run boundary. The
+[developer runtime](chatml-developer-runtime.md) owns test and
 REPL execution over selected immutable sources; the
 [trace design](chatml-execution-tracing.md) owns execution observations.
 
@@ -64,10 +66,13 @@ adapter may translate into this service later; M5 and the neutral desktop editor
 do not depend on a second LSP lifecycle.
 
 A host-owned **authoring context** binds an authenticated principal, host
-incarnation, connection lease, admitted source origin, selected project and
-environment, authentic static compiler contract, graph identity and resource
-policy. Its origin is either an explicitly authorized read-only host source root
-or a principal-bound uploaded bundle. Logical organization projects and runtime
+incarnation, connection lease, admitted source origin and resource policy.
+A project-basis context also binds its selected project, environment,
+authentic static compiler contract and graph identity. A document-basis
+context binds one exact captured source without requiring those project fields.
+Project origins are explicitly authorized read-only host source roots or
+principal-bound uploaded bundles; a document origin may also be bounded
+client-supplied bytes under a separate operator policy. Logical organization projects and runtime
 workspace definitions do not grant source access. Host source browsing, analysis,
 bundle upload and execution have separate grants. A client-supplied path, digest,
 workspace ID or upload receipt is never sufficient authority by itself. The host
@@ -79,11 +84,20 @@ owner. These reads are fresh observations; reading an immutable context source
 instead returns its pinned captured or overlay bytes. A standalone or malformed
 ChatMD document can open a document-only context from an authorized host member
 or bounded client-supplied bytes without preparing a project graph. The host
-mints its authentic source owner. Optional static environment selection comes
-from an admitted host catalog; its absence still permits lexical and basic
-markup assistance. Project-level path/template/script references need their
-separate source/catalog authorization and may be unavailable in a document-only
-context.
+mints a fresh source ID and captures the exact bytes, including empty or
+invalid UTF-8 input at this host/core boundary; wire admission is specified
+separately. The document ledger shares project contexts' generation,
+overlay revision and source-byte quotas but publishes no project analysis key.
+Project-only graph operations reject its basis explicitly. Optional default
+static environment data is a real separately admitted build; its absence still
+permits lexical and basic markup assistance. A ChatMD file may contain scripts
+selecting different environments, so this default does not resolve every
+script. Project-level path/template/script references need their separate
+source/catalog authorization and may be unavailable in a document-only context.
+The source host rechecks the original and request actor and the document/root
+operator policy before serving pinned bytes or an overlay, and again after
+yielding work before a response is published. Supplied bytes confer no browse,
+path read, project, run or write authority.
 An explicit context refresh captures the current authorized host-document
 member again; its stable root/member locator stays bound to the connection,
 while the captured base source digest may change. A supplied document's base
