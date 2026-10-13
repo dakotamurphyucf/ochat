@@ -276,6 +276,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_server/authoring_options.mli` | [contract](../../lib/agent_server/authoring_options.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_server/authoring_source_host.mli` | [contract](../../lib/agent_server/authoring_source_host.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_server/authoring_upload_host.mli` | [contract](../../lib/agent_server/authoring_upload_host.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
+| `lib/agent_server/authoring_upload_validation.mli` | [contract](../../lib/agent_server/authoring_upload_validation.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_server/authorization.mli` | [contract](../../lib/agent_server/authorization.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
 | `lib/agent_server/catalog_builder.mli` | [contract](../../lib/agent_server/catalog_builder.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/agent_server/catalog_identity.mli` | [contract](../../lib/agent_server/catalog_identity.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
@@ -553,6 +554,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_store/audit_evidence_document.mli` | [contract](../../lib/agent_store/audit_evidence_document.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/audit_store.mli` | [contract](../../lib/agent_store/audit_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/authoring_upload_files.mli` | [contract](../../lib/agent_store/authoring_upload_files.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
+| `lib/agent_store/authoring_upload_publication.mli` | [contract](../../lib/agent_store/authoring_upload_publication.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_store/authoring_upload_store.mli` | [contract](../../lib/agent_store/authoring_upload_store.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_store/blob_metadata.mli` | [contract](../../lib/agent_store/blob_metadata.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/blob_metadata_document.mli` | [contract](../../lib/agent_store/blob_metadata_document.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |

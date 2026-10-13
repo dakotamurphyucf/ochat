@@ -4,6 +4,7 @@ module B = P.Authoring_bundle.Bundle
 module Bundle = B
 module Doc = Authoring_upload_document
 module Files = Authoring_upload_files
+module Publication = Authoring_upload_publication
 module Id = P.Id.Authoring_upload
 
 module Limits = struct
@@ -17,6 +18,14 @@ module Limits = struct
     ; max_chunk_bytes : int
     ; max_reserved_bytes : int
     ; max_reserved_per_principal : int
+    ; max_published_records : int
+    ; max_installed_sources : int
+    ; max_installed_bytes_per_bundle : int
+    ; max_installed_bytes : int
+    ; max_installed_per_principal : int
+    ; max_publication_metadata_bytes : int
+    ; max_intent_bytes : int
+    ; max_marker_bytes : int
     ; max_work_steps : int
     ; max_journal_records : int
     ; max_journal_bytes : int
@@ -51,6 +60,14 @@ module Limits = struct
         ~max_chunk_bytes
         ~max_reserved_bytes
         ~max_reserved_per_principal
+        ~max_published_records
+        ~max_installed_sources
+        ~max_installed_bytes_per_bundle
+        ~max_installed_bytes
+        ~max_installed_per_principal
+        ~max_publication_metadata_bytes
+        ~max_intent_bytes
+        ~max_marker_bytes
         ~max_work_steps
         ~max_journal_records
         ~max_journal_bytes
@@ -69,6 +86,17 @@ module Limits = struct
     let%bind receipt_ttl_ms = span_ms receipt_ttl in
     let%bind expired_tombstone_ttl_ms = span_ms expired_tombstone_ttl in
     let positive values = List.for_all values ~f:(fun value -> value > 0) in
+    let safe_per_record extra =
+      max_active_uploads > 0
+      && max_active_uploads <= 4096
+      && max_bundle_bytes > 0
+      &&
+      let worst_stage =
+        max_active_uploads
+        * Int.min max_bundle_bytes B.Wire_limits.max_total_declared_bytes
+      in
+      extra <= (Int.max_value - worst_stage) / max_active_uploads
+    in
     if
       (not
          (positive
@@ -81,6 +109,14 @@ module Limits = struct
             ; max_chunk_bytes
             ; max_reserved_bytes
             ; max_reserved_per_principal
+            ; max_published_records
+            ; max_installed_sources
+            ; max_installed_bytes_per_bundle
+            ; max_installed_bytes
+            ; max_installed_per_principal
+            ; max_publication_metadata_bytes
+            ; max_intent_bytes
+            ; max_marker_bytes
             ; max_work_steps
             ; max_journal_records
             ; max_journal_bytes
@@ -100,6 +136,17 @@ module Limits = struct
       || max_member_bytes > max_bundle_bytes
       || max_bundle_bytes > max_reserved_bytes
       || max_bundle_bytes > max_reserved_per_principal
+      || max_installed_bytes_per_bundle > max_installed_bytes
+      || max_installed_bytes_per_bundle > max_installed_per_principal
+      || (not (safe_per_record max_installed_bytes_per_bundle))
+      || (not (safe_per_record max_publication_metadata_bytes))
+      || max_intent_bytes > max_publication_metadata_bytes
+      || max_marker_bytes > max_publication_metadata_bytes
+      || max_marker_bytes > max_publication_metadata_bytes - max_intent_bytes
+      || max_published_records > max_active_uploads
+      || max_installed_sources > 65536
+      || max_recovery_source_bytes - max_reserved_bytes < max_installed_bytes
+      || max_recovery_metadata_bytes - max_manifest_bytes < max_publication_metadata_bytes
       || max_active_per_principal > max_active_uploads
       || max_recovery_entries < max_active_uploads
       || max_recovery_source_bytes < max_reserved_bytes
@@ -120,6 +167,14 @@ module Limits = struct
         ; max_chunk_bytes
         ; max_reserved_bytes
         ; max_reserved_per_principal
+        ; max_published_records
+        ; max_installed_sources
+        ; max_installed_bytes_per_bundle
+        ; max_installed_bytes
+        ; max_installed_per_principal
+        ; max_publication_metadata_bytes
+        ; max_intent_bytes
+        ; max_marker_bytes
         ; max_work_steps
         ; max_journal_records
         ; max_journal_bytes
@@ -158,9 +213,63 @@ type sealed =
   ; commit_key : P.Idempotency_key.t
   }
 
+module Snapshot = struct
+  type t =
+    { manifest : B.Manifest.t
+    ; sources : Chatml_source.t list
+    ; upload_id : Id.t
+    ; principal : P.Id.Principal.t
+    ; commit_key : P.Idempotency_key.t
+    ; payload_digest : Chatml_source.Digest.t
+    ; token : unit ref
+    }
+
+  let manifest t = t.manifest
+  let sources t = t.sources
+end
+
+module Proof = Publication.Proof
+
+module Published_capture = struct
+  module Graph = struct
+    type t =
+      { selector : B.Manifest.Script.Selector.t option
+      ; lock_source : Chatml_source.t
+      ; sources : Chatml_source.t list
+      }
+
+    let selector t = t.selector
+    let lock_source t = t.lock_source
+    let sources t = t.sources
+  end
+
+  type t =
+    { receipt : B.Receipt.t
+    ; manifest : B.Manifest.t
+    ; uploaded_sources : Chatml_source.t list
+    ; graphs : Graph.t list
+    }
+
+  let receipt t = t.receipt
+  let manifest t = t.manifest
+  let uploaded_sources t = t.uploaded_sources
+  let graphs t = t.graphs
+end
+
+type publication =
+  | Not_published
+  | Intent of
+      { value : Doc.Intent.t
+      ; intent_bytes : int
+      ; marker : Doc.Marker.t option
+      ; marker_bytes : int
+      ; supplementary_bytes : int
+      }
+
 module Claim_result = struct
   type t =
     | Ready of sealed
+    | Published of B.Receipt.t
     | Rejected of B.Rejection.t
 end
 
@@ -168,6 +277,8 @@ module Status = struct
   type t =
     | Open of B.Status.Progress.t list
     | Ready
+    | Validating
+    | Published of B.Receipt.t
     | Rejected of B.Rejection.t
     | Expired
 end
@@ -180,6 +291,7 @@ type upload =
   ; offsets : int array
   ; progress_bytes : int array
   ; mutable data_bytes : int
+  ; mutable publication : publication
   }
 
 type t =
@@ -191,7 +303,9 @@ type t =
   ; host_id : P.Id.Server.t
   ; limits : Limits.t
   ; gate : Eio.Mutex.t
+  ; readers_idle : Eio.Condition.t
   ; uploads : (Id.t, upload) Hashtbl.t
+  ; read_leases : (Id.t, int) Hashtbl.t
   ; begin_keys : (string, Id.t) Hashtbl.t
   ; token : unit ref
   ; mutable closed : bool
@@ -295,11 +409,12 @@ let with_upload_directory t upload_id f =
             exn))
 ;;
 
-let save_in directory name bytes =
+let save_in ?(before_rename = Fn.id) directory name bytes =
   Durable_file.replace_in
     ~directory
     ~durability:Flush_file_and_directory
     ~basename:name
+    ~before_rename
     bytes
   |> storage
 ;;
@@ -359,10 +474,44 @@ let work limits checkpoint =
     checkpoint ()
 ;;
 
+let installed_bytes upload =
+  match upload.publication with
+  | Not_published -> 0
+  | Intent { supplementary_bytes; _ } -> supplementary_bytes
+;;
+
+let publication_metadata upload =
+  match upload.publication with
+  | Not_published -> 0
+  | Intent { intent_bytes; marker_bytes; _ } -> intent_bytes + marker_bytes
+;;
+
+let reserved_publication_metadata limits upload =
+  match upload.publication with
+  | Not_published -> 0
+  | Intent { intent_bytes; marker; marker_bytes; _ } ->
+    intent_bytes
+    +
+      (match marker with
+      | None -> limits.Limits.max_marker_bytes
+      | Some _ -> marker_bytes)
+;;
+
+let is_published upload =
+  match upload.publication with
+  | Intent { marker = Some _; _ } -> true
+  | Not_published | Intent { marker = None; _ } -> false
+;;
+
+let read_lease_count t upload_id =
+  Hashtbl.find t.read_leases upload_id |> Option.value ~default:0
+;;
+
 let metadata_bytes upload =
   upload.manifest_bytes
   + upload.phase_bytes
   + Array.fold upload.progress_bytes ~init:0 ~f:( + )
+  + publication_metadata upload
 ;;
 
 let journal_records upload =
@@ -385,8 +534,10 @@ let reserved_journal_bytes upload =
   else Array.fold upload.progress_bytes ~init:0 ~f:( + )
 ;;
 
-let potential_metadata_bytes upload =
-  upload.manifest_bytes + reserved_journal_bytes upload
+let potential_metadata_bytes limits upload =
+  upload.manifest_bytes
+  + reserved_journal_bytes upload
+  + reserved_publication_metadata limits upload
 ;;
 
 let manifest_within_limits limits manifest =
@@ -415,7 +566,10 @@ let counts t =
         , tombstone_bytes )
       ->
       let is_active = active upload in
-      let reserved = if is_active then declared_bytes upload else upload.data_bytes in
+      let reserved =
+        (if is_active then declared_bytes upload else upload.data_bytes)
+        + installed_bytes upload
+      in
       let is_tombstone =
         match upload.phase.outcome with
         | Doc.Phase.Expired _ -> true
@@ -438,7 +592,9 @@ let count_principal t principal =
       then (
         let is_active = active upload in
         ( (active_count + if is_active then 1 else 0)
-        , reserved + if is_active then declared_bytes upload else upload.data_bytes ))
+        , reserved
+          + (if is_active then declared_bytes upload else upload.data_bytes)
+          + installed_bytes upload ))
       else active_count, reserved)
 ;;
 
@@ -450,7 +606,7 @@ let ensure_begin_capacity t principal manifest_bytes declared member_count =
   in
   let retained_metadata =
     Hashtbl.fold t.uploads ~init:0 ~f:(fun ~key:_ ~data:upload total ->
-      total + potential_metadata_bytes upload)
+      total + potential_metadata_bytes t.limits upload)
   in
   let reserved_journal =
     Hashtbl.fold t.uploads ~init:0 ~f:(fun ~key:_ ~data:upload total ->
@@ -533,6 +689,327 @@ let verify_members t upload ~materialize ~checkpoint =
   Ok (digest, List.rev !sources)
 ;;
 
+let same_source_bytes left right ~checkpoint =
+  if
+    (not (Chatml_source.Id.equal (Chatml_source.id left) (Chatml_source.id right)))
+    || (not
+          (Chatml_source.Digest.equal
+             (Chatml_source.digest left)
+             (Chatml_source.digest right)))
+    || Chatml_source.byte_length left <> Chatml_source.byte_length right
+  then false
+  else (
+    let left = Chatml_source.contents left in
+    let right = Chatml_source.contents right in
+    let same = ref true in
+    let offset = ref 0 in
+    while !same && !offset < String.length left do
+      if !offset mod 4096 = 0 then checkpoint ();
+      same := Char.equal left.[!offset] right.[!offset];
+      incr offset
+    done;
+    !same)
+;;
+
+let same_source_list left right ~checkpoint =
+  List.length left = List.length right
+  && List.for_all2_exn left right ~f:(fun left right ->
+    same_source_bytes left right ~checkpoint)
+;;
+
+let source_matches_metadata source metadata =
+  Chatml_source.Id.equal (Chatml_source.id source) (P.Authoring.Source.id metadata)
+  && Chatml_source.Digest.equal
+       (Chatml_source.digest source)
+       (P.Authoring.Source.digest metadata)
+  && Int.equal
+       (Chatml_source.byte_length source)
+       (P.Authoring.Source.byte_length metadata)
+;;
+
+let digest_text bytes ~checkpoint = Chatml_source.Digest.of_contents bytes ~checkpoint
+
+let digest_receipt receipt ~checkpoint =
+  B.Receipt.to_json receipt
+  |> Jsonaf.to_string
+  |> fun bytes -> digest_text bytes ~checkpoint
+;;
+
+let feed_checked context text ~checkpoint =
+  let context = ref context in
+  let offset = ref 0 in
+  while !offset < String.length text do
+    checkpoint ();
+    let length = Int.min 4096 (String.length text - !offset) in
+    context
+    := Digestif.SHA256.feed_string !context (String.sub text ~pos:!offset ~len:length);
+    offset := !offset + length
+  done;
+  !context
+;;
+
+let digest_context context =
+  Digestif.SHA256.(get context |> to_hex)
+  |> Chatml_source.Digest.of_hex
+  |> Or_error.ok_exn
+;;
+
+let verify_installed t upload intent sources ~checkpoint =
+  let uploaded = Array.of_list sources in
+  let member_count = Array.length uploaded in
+  let supplementary = Doc.Intent.supplementary intent in
+  let* () =
+    if List.length supplementary > t.limits.max_installed_sources
+    then Error Error.Limit_exceeded
+    else Ok ()
+  in
+  let* installed =
+    with_upload_directory t upload.manifest_doc.upload_id (fun directory ->
+      List.fold
+        supplementary
+        ~init:(Ok (Int.Map.empty, -1, 0))
+        ~f:(fun result (ordinal, metadata) ->
+          let* map, prior, bytes_total = result in
+          checkpoint ();
+          if ordinal <> prior + 1
+          then Error Error.Invalid_manifest
+          else (
+            let length = P.Authoring.Source.byte_length metadata in
+            if length > t.limits.max_installed_bytes_per_bundle - bytes_total
+            then Error Error.Limit_exceeded
+            else
+              let* bytes =
+                Files.read_supplemental
+                  directory
+                  ~ordinal
+                  ~expected_bytes:length
+                  ~checkpoint
+                |> storage
+              in
+              let digest = digest_text bytes ~checkpoint in
+              if
+                not
+                  (Chatml_source.Digest.equal digest (P.Authoring.Source.digest metadata))
+              then Error Error.Invalid_manifest
+              else Ok (Map.set map ~key:ordinal ~data:bytes, ordinal, bytes_total + length))))
+  in
+  let installed, _, installed_bytes = installed in
+  let check_reference source_ref =
+    let metadata = Doc.Intent.Source_ref.source source_ref in
+    match Doc.Intent.Source_ref.location source_ref with
+    | Uploaded_member ordinal ->
+      ordinal >= 0
+      && ordinal < member_count
+      && source_matches_metadata uploaded.(ordinal) metadata
+    | Supplemental_file ordinal ->
+      (match Map.find installed ordinal with
+       | None -> false
+       | Some bytes ->
+         Int.equal (String.length bytes) (P.Authoring.Source.byte_length metadata)
+         && Chatml_source.Digest.equal
+              (digest_text bytes ~checkpoint)
+              (P.Authoring.Source.digest metadata))
+  in
+  let* () =
+    if
+      List.for_all (Doc.Intent.graphs intent) ~f:(fun graph ->
+        checkpoint ();
+        check_reference (Doc.Intent.Graph.lock graph)
+        && List.for_all (Doc.Intent.Graph.sources graph) ~f:(fun source ->
+          checkpoint ();
+          check_reference source))
+    then Ok ()
+    else Error Error.Invalid_manifest
+  in
+  let context =
+    feed_checked
+      Digestif.SHA256.empty
+      (Chatml_source.Digest.to_hex
+         (match upload.phase.outcome with
+          | Doc.Phase.Ready { payload_digest; _ } -> payload_digest
+          | Open | Rejected _ | Expired _ -> assert false))
+      ~checkpoint
+  in
+  let context =
+    Map.fold installed ~init:context ~f:(fun ~key:ordinal ~data:bytes context ->
+      let context =
+        feed_checked
+          context
+          (Int.to_string ordinal ^ ":" ^ Int.to_string (String.length bytes) ^ "\000")
+          ~checkpoint
+      in
+      feed_checked context bytes ~checkpoint)
+  in
+  Ok (digest_context context, installed_bytes)
+;;
+
+let intent_matches_upload upload intent =
+  match upload.phase.outcome with
+  | Doc.Phase.Ready { commit_key; payload_digest; receipt_deadline } ->
+    B.Owner.equal (Doc.Intent.owner intent) upload.manifest_doc.owner
+    && Id.equal (Doc.Intent.upload_id intent) upload.manifest_doc.upload_id
+    && P.Idempotency_key.equal (Doc.Intent.commit_key intent) commit_key
+    && Chatml_source.Digest.equal (Doc.Intent.payload_digest intent) payload_digest
+    && Chatml_source.Digest.equal
+         (Doc.Intent.manifest_fingerprint intent)
+         (B.Manifest.fingerprint upload.manifest_doc.manifest)
+    && P.Timestamp.equal
+         (B.Receipt.expires_at (Doc.Intent.receipt intent))
+         receipt_deadline
+  | Open | Rejected _ | Expired _ -> false
+;;
+
+let verify_publication t upload ~checkpoint =
+  match upload.publication with
+  | Not_published | Intent { marker = None; _ } -> Error Error.Sealed
+  | Intent { value = intent; marker = Some marker; supplementary_bytes; _ } ->
+    if not (intent_matches_upload upload intent)
+    then Error Error.Invalid_manifest
+    else
+      let* payload, sources = verify_members t upload ~materialize:true ~checkpoint in
+      if not (Chatml_source.Digest.equal payload (Doc.Intent.payload_digest intent))
+      then Error Error.Invalid_manifest
+      else
+        let* inventory_digest, actual_bytes =
+          verify_installed t upload intent sources ~checkpoint
+        in
+        if actual_bytes <> supplementary_bytes
+        then Error Error.Invalid_manifest
+        else
+          let* encoded_intent, encoded_marker =
+            with_upload_directory t upload.manifest_doc.upload_id (fun directory ->
+              let* encoded_intent =
+                load_in directory Files.intent_name t.limits.max_intent_bytes
+              in
+              let* encoded_marker =
+                load_in directory Files.marker_name t.limits.max_marker_bytes
+              in
+              Ok (encoded_intent, encoded_marker))
+          in
+          let* canonical_intent =
+            Doc.Intent.to_bytes intent ~max_bytes:t.limits.max_intent_bytes |> storage
+          in
+          let* canonical_marker =
+            Doc.Marker.to_bytes marker ~max_bytes:t.limits.max_marker_bytes |> storage
+          in
+          let receipt = Doc.Intent.receipt intent in
+          if
+            (not (String.equal encoded_intent canonical_intent))
+            || (not (String.equal encoded_marker canonical_marker))
+            || (not
+                  (Chatml_source.Digest.equal
+                     (Doc.Marker.intent_digest marker)
+                     (digest_text encoded_intent ~checkpoint)))
+            || (not
+                  (Chatml_source.Digest.equal
+                     (Doc.Marker.inventory_digest marker)
+                     inventory_digest))
+            || not
+                 (Chatml_source.Digest.equal
+                    (Doc.Marker.receipt_digest marker)
+                    (digest_receipt receipt ~checkpoint))
+          then Error Error.Invalid_manifest
+          else Ok receipt
+;;
+
+let materialize_published t upload published_receipt ~checkpoint =
+  let* _, uploaded_captures = verify_members t upload ~materialize:true ~checkpoint in
+  let uploaded = Array.of_list uploaded_captures in
+  match upload.publication with
+  | Not_published | Intent { marker = None; _ } -> Error Error.Sealed
+  | Intent { value = intent; marker = Some _; _ } ->
+    let* published_graphs =
+      with_upload_directory t upload.manifest_doc.upload_id (fun directory ->
+        let* supplemental =
+          List.fold
+            (Doc.Intent.supplementary intent)
+            ~init:(Ok Int.Map.empty)
+            ~f:(fun result (ordinal, metadata) ->
+              let* values = result in
+              checkpoint ();
+              let* bytes =
+                Files.read_supplemental
+                  directory
+                  ~ordinal
+                  ~expected_bytes:(P.Authoring.Source.byte_length metadata)
+                  ~checkpoint
+                |> storage
+              in
+              let* source =
+                Chatml_source.create
+                  (P.Authoring.Source.id metadata)
+                  ~contents:bytes
+                  ~expected_digest:(Some (P.Authoring.Source.digest metadata))
+                  ~max_bytes:(Some t.limits.max_installed_bytes_per_bundle)
+                  ~checkpoint
+                |> Result.map_error ~f:(fun _ -> Error.Invalid_manifest)
+              in
+              Ok (Map.set values ~key:ordinal ~data:source))
+        in
+        let source_of_ref reference =
+          let metadata = Doc.Intent.Source_ref.source reference in
+          let found =
+            match Doc.Intent.Source_ref.location reference with
+            | Uploaded_member ordinal ->
+              if ordinal < 0 || ordinal >= Array.length uploaded
+              then None
+              else Some uploaded.(ordinal)
+            | Supplemental_file ordinal -> Map.find supplemental ordinal
+          in
+          match found with
+          | Some source when source_matches_metadata source metadata -> Ok source
+          | Some _ | None -> Error Error.Invalid_manifest
+        in
+        List.fold (Doc.Intent.graphs intent) ~init:(Ok []) ~f:(fun result graph ->
+          let* graphs = result in
+          checkpoint ();
+          let* lock_capture = source_of_ref (Doc.Intent.Graph.lock graph) in
+          let* graph_sources =
+            List.map (Doc.Intent.Graph.sources graph) ~f:source_of_ref |> Result.all
+          in
+          Ok
+            (Published_capture.Graph.
+               { selector = Doc.Intent.Graph.selector graph
+               ; lock_source = lock_capture
+               ; sources = graph_sources
+               }
+             :: graphs)))
+    in
+    Ok
+      Published_capture.
+        { receipt = published_receipt
+        ; manifest = upload.manifest_doc.manifest
+        ; uploaded_sources = uploaded_captures
+        ; graphs = List.rev published_graphs
+        }
+;;
+
+let verify_partial_install t upload intent names ~checkpoint =
+  with_upload_directory t upload.manifest_doc.upload_id (fun directory ->
+    List.fold
+      (Doc.Intent.supplementary intent)
+      ~init:(Ok ())
+      ~f:(fun result (ordinal, metadata) ->
+        let* () = result in
+        checkpoint ();
+        let filename = Files.supplemental_name ordinal in
+        if not (List.mem names filename ~equal:String.equal)
+        then Ok ()
+        else
+          let* bytes =
+            Files.read_supplemental
+              directory
+              ~ordinal
+              ~expected_bytes:(P.Authoring.Source.byte_length metadata)
+              ~checkpoint
+            |> storage
+          in
+          let actual = digest_text bytes ~checkpoint in
+          if Chatml_source.Digest.equal actual (P.Authoring.Source.digest metadata)
+          then Ok ()
+          else Error Error.Invalid_manifest))
+;;
+
 let pruning_name upload_id = ".prune-" ^ upload_name upload_id
 
 let cleanup_pruning_directory t reader name ~checkpoint =
@@ -558,6 +1035,7 @@ let cleanup_pruning_directory t reader name ~checkpoint =
     String.equal target Files.manifest_name
     || String.equal target Files.phase_name
     || Files.is_member_filename target
+    || Files.is_publication_filename target
   in
   if not (List.for_all files ~f:valid_file)
   then corrupt "unknown file in upload cleanup directory"
@@ -594,7 +1072,124 @@ let cleanup_pruning_directory t reader name ~checkpoint =
         (Error (Store_error.of_exn ~operation:"finish pruned upload" ~path:name exn)))
 ;;
 
-let recover_upload t reader name ~checkpoint =
+let charge_recovery_source remaining bytes =
+  if bytes < 0 || bytes > !remaining
+  then Error (Store_error.Corrupt "recovered source inventory exceeds configured bounds")
+  else (
+    remaining := !remaining - bytes;
+    Ok ())
+;;
+
+let recover_publication t reader name upload names ~remaining_source ~checkpoint =
+  let has file = List.mem names file ~equal:String.equal in
+  let relative file = name ^ "/" ^ file in
+  let members = B.Manifest.members upload.manifest_doc.manifest in
+  match upload.phase.outcome with
+  | Doc.Phase.Expired _ ->
+    let valid name =
+      let target = Option.value (Durable_file.temporary_target name) ~default:name in
+      String.equal target Files.manifest_name
+      || String.equal target Files.phase_name
+      || Files.is_member_filename target
+      || Files.is_publication_filename target
+    in
+    if List.for_all names ~f:valid
+    then Ok Not_published
+    else Error (Store_error.Corrupt "unknown file in expired upload")
+  | Open | Rejected _ ->
+    if
+      has Files.intent_name
+      || has Files.marker_name
+      || List.exists names ~f:Files.is_publication_filename
+      || not (Files.validate_entry_names members names)
+    then Error (Store_error.Corrupt "unsealed upload has publication state")
+    else Ok Not_published
+  | Ready _ ->
+    let* intent =
+      if not (has Files.intent_name)
+      then Ok None
+      else
+        let* encoded =
+          Retention_reader.read_with_checkpoint
+            reader
+            ~path:(relative Files.intent_name)
+            ~max_bytes:t.limits.max_intent_bytes
+            ~checkpoint
+        in
+        let* value =
+          Doc.Intent.of_bytes
+            encoded
+            ~max_bytes:t.limits.max_intent_bytes
+            ~max_graphs:(t.limits.max_members + 1)
+            ~max_sources:t.limits.max_installed_sources
+        in
+        let* canonical = Doc.Intent.to_bytes value ~max_bytes:t.limits.max_intent_bytes in
+        if String.equal encoded canonical && intent_matches_upload upload value
+        then Ok (Some (value, String.length encoded))
+        else Error (Store_error.Corrupt "published intent differs from sealed upload")
+    in
+    let* marker =
+      if not (has Files.marker_name)
+      then Ok None
+      else
+        let* encoded =
+          Retention_reader.read_with_checkpoint
+            reader
+            ~path:(relative Files.marker_name)
+            ~max_bytes:t.limits.max_marker_bytes
+            ~checkpoint
+        in
+        let* value = Doc.Marker.of_bytes encoded ~max_bytes:t.limits.max_marker_bytes in
+        let* canonical = Doc.Marker.to_bytes value ~max_bytes:t.limits.max_marker_bytes in
+        if String.equal encoded canonical
+        then Ok (Some (value, String.length encoded))
+        else Error (Store_error.Corrupt "noncanonical publication marker")
+    in
+    let intent_value = Option.map intent ~f:fst in
+    let marker_value = Option.map marker ~f:fst in
+    if
+      not
+        (Files.validate_entry_names
+           ?intent:intent_value
+           ?marker:marker_value
+           members
+           names)
+    then Error (Store_error.Corrupt "unknown published upload file")
+    else (
+      match intent, marker with
+      | None, None -> Ok Not_published
+      | None, Some _ -> Error (Store_error.Corrupt "publication marker lacks intent")
+      | Some (value, intent_bytes), marker ->
+        let supplementary_bytes = Doc.Intent.supplementary_bytes value in
+        if
+          Doc.Intent.supplementary_count value > t.limits.max_installed_sources
+          || supplementary_bytes > t.limits.max_installed_bytes_per_bundle
+        then Error (Store_error.Corrupt "publication exceeds configured source bounds")
+        else
+          let* () = charge_recovery_source remaining_source supplementary_bytes in
+          let marker_value = Option.map marker ~f:fst in
+          let marker_bytes = Option.value_map marker ~default:0 ~f:snd in
+          let state =
+            Intent
+              { value
+              ; intent_bytes
+              ; marker = marker_value
+              ; marker_bytes
+              ; supplementary_bytes
+              }
+          in
+          upload.publication <- state;
+          let result =
+            match marker_value with
+            | None -> verify_partial_install t upload value names ~checkpoint
+            | Some _ -> verify_publication t upload ~checkpoint |> Result.map ~f:ignore
+          in
+          Result.map_error result ~f:(fun _ ->
+            Store_error.Corrupt "published upload capture verification failed")
+          |> Result.map ~f:(fun () -> state))
+;;
+
+let recover_upload t reader name ~remaining_source ~checkpoint =
   let upload_id =
     match Id.of_string name with
     | Ok id when String.equal name (Id.to_string id) -> Ok id
@@ -649,7 +1244,7 @@ let recover_upload t reader name ~checkpoint =
     then Error (Store_error.Corrupt "recovered upload exceeds configured manifest bounds")
     else (
       let members = B.Manifest.members manifest_doc.manifest in
-      if not (Files.validate_entry_names members names)
+      if (not (has Files.phase_name)) && not (Files.validate_entry_names members names)
       then Error (Store_error.Corrupt "unknown upload member or record")
       else if not (has Files.phase_name)
       then (
@@ -684,6 +1279,7 @@ let recover_upload t reader name ~checkpoint =
                ; offsets = Array.create ~len:(List.length members) 0
                ; progress_bytes = Array.create ~len:(List.length members) 0
                ; data_bytes = 0
+               ; publication = Not_published
                })))
       else
         let* phase_encoded =
@@ -696,7 +1292,16 @@ let recover_upload t reader name ~checkpoint =
         let* phase = Doc.Phase.of_bytes phase_encoded ~max_bytes:phase_max in
         if not (Id.equal phase.upload_id upload_id)
         then Error (Store_error.Corrupt "upload phase identity differs")
-        else (
+        else
+          let* () =
+            match phase.outcome with
+            | Ready _ ->
+              charge_recovery_source
+                remaining_source
+                (List.fold members ~init:0 ~f:(fun total member ->
+                   total + P.Authoring.Source.byte_length (B.Member.source member)))
+            | Open | Rejected _ | Expired _ -> Ok ()
+          in
           let offsets = Array.create ~len:(List.length members) 0 in
           let progress_bytes = Array.create ~len:(List.length members) 0 in
           let* () =
@@ -733,6 +1338,7 @@ let recover_upload t reader name ~checkpoint =
             ; offsets
             ; progress_bytes
             ; data_bytes = Array.fold offsets ~init:0 ~f:( + )
+            ; publication = Not_published
             }
           in
           let* () =
@@ -754,7 +1360,11 @@ let recover_upload t reader name ~checkpoint =
              Array.fill progress_bytes ~pos:0 ~len:(Array.length progress_bytes) 0;
              upload.data_bytes <- 0
            | Open | Ready _ | Rejected _ -> ());
-          Ok (Some upload)))
+          let* publication =
+            recover_publication t reader name upload names ~remaining_source ~checkpoint
+          in
+          upload.publication <- publication;
+          Ok (Some upload))
 ;;
 
 let check_recovered_limits t ~checkpoint =
@@ -763,7 +1373,7 @@ let check_recovered_limits t ~checkpoint =
   in
   let retained_metadata =
     Hashtbl.fold t.uploads ~init:0 ~f:(fun ~key:_ ~data:upload total ->
-      total + potential_metadata_bytes upload)
+      total + potential_metadata_bytes t.limits upload)
   in
   let reserved_journal =
     Hashtbl.fold t.uploads ~init:0 ~f:(fun ~key:_ ~data:upload total ->
@@ -773,6 +1383,39 @@ let check_recovered_limits t ~checkpoint =
     Hashtbl.fold t.uploads ~init:0 ~f:(fun ~key:_ ~data:upload total ->
       total + reserved_journal_records upload)
   in
+  let within used added limit =
+    used >= 0 && added >= 0 && used <= limit && added <= limit - used
+  in
+  let published_ids = Hash_set.create (module P.Id.Authoring_bundle) in
+  let* published, installed, publication_metadata =
+    Hashtbl.fold
+      t.uploads
+      ~init:(Ok (0, 0, 0))
+      ~f:(fun ~key:_ ~data:upload result ->
+        let* published, installed, metadata = result in
+        checkpoint ();
+        let occupied =
+          match upload.publication with
+          | Not_published -> 0
+          | Intent { value; _ } ->
+            let id = B.Receipt.bundle_id (Doc.Intent.receipt value) in
+            if Hash_set.mem published_ids id
+            then -1
+            else (
+              Hash_set.add published_ids id;
+              1)
+        in
+        let supplement = installed_bytes upload in
+        let record_metadata = reserved_publication_metadata t.limits upload in
+        if
+          occupied < 0
+          || (not (within published occupied t.limits.max_published_records))
+          || (not (within installed supplement t.limits.max_installed_bytes))
+          || not (within metadata record_metadata t.limits.max_publication_metadata_bytes)
+        then corrupt "recovered publication exceeds configured bounds"
+        else Ok (published + occupied, installed + supplement, metadata + record_metadata))
+  in
+  ignore (published, installed, publication_metadata);
   if
     active_count > t.limits.max_active_uploads
     || reserved > t.limits.max_reserved_bytes
@@ -792,26 +1435,38 @@ let check_recovered_limits t ~checkpoint =
       let* () = result in
       checkpoint ();
       let principal = upload.manifest_doc.owner.principal in
-      let previous_active, previous_reserved =
-        Hashtbl.find per_principal principal |> Option.value ~default:(0, 0)
+      let previous_active, previous_reserved, previous_installed =
+        Hashtbl.find per_principal principal |> Option.value ~default:(0, 0, 0)
       in
-      let next_active = previous_active + if active upload then 1 else 0 in
-      let next_reserved =
-        previous_reserved
-        + if active upload then declared_bytes upload else upload.data_bytes
-      in
+      let is_active = if active upload then 1 else 0 in
+      let supplement = installed_bytes upload in
+      let stage = if active upload then declared_bytes upload else upload.data_bytes in
       if
-        next_active > t.limits.max_active_per_principal
-        || next_reserved > t.limits.max_reserved_per_principal
+        (not (within previous_active is_active t.limits.max_active_per_principal))
+        || (not
+              (within previous_installed supplement t.limits.max_installed_per_principal))
+        || (not (within previous_reserved stage t.limits.max_reserved_per_principal))
+        || not
+             (within
+                (previous_reserved + stage)
+                supplement
+                t.limits.max_reserved_per_principal)
       then corrupt "recovered principal upload quota exceeds configured bounds"
       else (
-        Hashtbl.set per_principal ~key:principal ~data:(next_active, next_reserved);
+        Hashtbl.set
+          per_principal
+          ~key:principal
+          ~data:
+            ( previous_active + is_active
+            , previous_reserved + stage + supplement
+            , previous_installed + supplement );
         Ok ())))
 ;;
 
 let recover t ~checkpoint =
   Hashtbl.clear t.uploads;
   Hashtbl.clear t.begin_keys;
+  let remaining_source = ref t.limits.max_recovery_source_bytes in
   let max_bytes =
     t.limits.max_recovery_metadata_bytes + t.limits.max_recovery_source_bytes
   in
@@ -832,7 +1487,9 @@ let recover t ~checkpoint =
       if String.is_prefix name ~prefix:".prune-"
       then cleanup_pruning_directory t reader name ~checkpoint
       else
-        let* recovered = recover_upload t reader name ~checkpoint |> storage in
+        let* recovered =
+          recover_upload t reader name ~remaining_source ~checkpoint |> storage
+        in
         match recovered with
         | None -> Ok ()
         | Some upload ->
@@ -860,7 +1517,7 @@ let recover t ~checkpoint =
       let* () = result in
       match upload.phase.outcome with
       | Doc.Phase.Ready { payload_digest; _ } ->
-        let needed = declared_bytes upload in
+        let needed = declared_bytes upload + installed_bytes upload in
         if needed > t.limits.max_recovery_source_bytes - !source_bytes
         then Error Error.Limit_exceeded
         else (
@@ -926,7 +1583,9 @@ let open_or_create ~env ~sw ~data_root ~daemon_lock ~host_id ~limits ~checkpoint
                ; host_id
                ; limits
                ; gate = Eio.Mutex.create ()
+               ; readers_idle = Eio.Condition.create ()
                ; uploads = Hashtbl.create (module Id)
+               ; read_leases = Hashtbl.create (module Id)
                ; begin_keys = String.Table.create ()
                ; token = ref ()
                ; closed = false
@@ -1060,6 +1719,7 @@ let begin_upload t ~principal ~request ~now ~checkpoint =
           ; offsets = Array.create ~len:(List.length members) 0
           ; progress_bytes = Array.create ~len:(List.length members) 0
           ; data_bytes = 0
+          ; publication = Not_published
           }
         in
         Hashtbl.set t.uploads ~key:upload_id ~data:upload;
@@ -1209,13 +1869,18 @@ let claim_commit t ~principal ~request ~now ~checkpoint =
           let* actual, _ = verify_members t upload ~materialize:false ~checkpoint in
           if not (Chatml_source.Digest.equal actual payload_digest)
           then Error Error.Invalid_manifest
-          else
-            Ok
-              (Claim_result.Ready
-                 { upload_id = request.upload_id
-                 ; token = t.token
-                 ; commit_key = request.idempotency_key
-                 })
+          else (
+            match upload.publication with
+            | Intent { marker = Some _; _ } ->
+              let* receipt = verify_publication t upload ~checkpoint in
+              Ok (Claim_result.Published receipt)
+            | Not_published | Intent { marker = None; _ } ->
+              Ok
+                (Claim_result.Ready
+                   { upload_id = request.upload_id
+                   ; token = t.token
+                   ; commit_key = request.idempotency_key
+                   }))
       | Doc.Phase.Rejected { commit_key; reason; _ } ->
         if P.Idempotency_key.equal commit_key request.idempotency_key
         then Ok (Claim_result.Rejected reason)
@@ -1267,7 +1932,7 @@ let claim_commit t ~principal ~request ~now ~checkpoint =
                   }))))
 ;;
 
-let snapshot t (sealed : sealed) ~now ~checkpoint =
+let snapshot t ~principal (sealed : sealed) ~now ~checkpoint =
   use_gate t (fun () ->
     let checkpoint = work t.limits checkpoint in
     checkpoint ();
@@ -1277,9 +1942,9 @@ let snapshot t (sealed : sealed) ~now ~checkpoint =
     if not (phys_equal sealed.token t.token)
     then Error Error.Closed
     else (
-      match Hashtbl.find t.uploads sealed.upload_id with
-      | None -> Error Error.Expired
-      | Some upload ->
+      match find_owned t principal sealed.upload_id with
+      | Error error -> Error error
+      | Ok upload ->
         (match upload.phase.outcome with
          | Doc.Phase.Ready { commit_key; payload_digest; receipt_deadline }
            when P.Idempotency_key.equal commit_key sealed.commit_key ->
@@ -1290,9 +1955,307 @@ let snapshot t (sealed : sealed) ~now ~checkpoint =
                verify_members t upload ~materialize:true ~checkpoint
              in
              if Chatml_source.Digest.equal actual payload_digest
-             then Ok (upload.manifest_doc.manifest, sources)
+             then
+               Ok
+                 { Snapshot.manifest = upload.manifest_doc.manifest
+                 ; sources
+                 ; upload_id = sealed.upload_id
+                 ; principal
+                 ; commit_key
+                 ; payload_digest
+                 ; token = t.token
+                 }
              else Error Error.Invalid_manifest
          | Open | Rejected _ | Expired _ | Ready _ -> Error Error.Sealed)))
+;;
+
+let ensure_publish_capacity t principal installed ~intent_bytes =
+  let _, reserved, _, _, _, _ = counts t in
+  let _, principal_reserved = count_principal t principal in
+  let records, installed_total, publication_metadata_total, principal_installed =
+    Hashtbl.fold
+      t.uploads
+      ~init:(0, 0, 0, 0)
+      ~f:(fun ~key:_ ~data:upload (records, bytes, metadata, principal_bytes) ->
+        let occupied =
+          match upload.publication with
+          | Not_published -> 0
+          | Intent _ -> 1
+        in
+        let installed = installed_bytes upload in
+        ( records + occupied
+        , bytes + installed
+        , metadata + reserved_publication_metadata t.limits upload
+        , principal_bytes
+          +
+          if P.Id.Principal.equal upload.manifest_doc.owner.principal principal
+          then installed
+          else 0 ))
+  in
+  let supplement_bytes =
+    Doc.Intent.supplementary_bytes (Publication.Installed.intent installed)
+  in
+  let metadata = intent_bytes + t.limits.max_marker_bytes in
+  let within used added limit =
+    used >= 0 && added >= 0 && used <= limit && added <= limit - used
+  in
+  if
+    records >= t.limits.max_published_records
+    || (not (within installed_total supplement_bytes t.limits.max_installed_bytes))
+    || (not
+          (within
+             principal_installed
+             supplement_bytes
+             t.limits.max_installed_per_principal))
+    || (not
+          (within
+             publication_metadata_total
+             metadata
+             t.limits.max_publication_metadata_bytes))
+    || (not (within reserved supplement_bytes t.limits.max_reserved_bytes))
+    || not
+         (within principal_reserved supplement_bytes t.limits.max_reserved_per_principal)
+  then Error Error.Limit_exceeded
+  else Ok ()
+;;
+
+exception Publication_expired
+exception Publication_closed
+
+let publish
+      t
+      ~principal
+      (sealed : sealed)
+      ~(snapshot : Snapshot.t)
+      ~proof
+      ~now
+      ~checkpoint
+      ~final_admission
+  =
+  use_gate t (fun () ->
+    let checkpoint = work t.limits checkpoint in
+    checkpoint ();
+    let* () = ensure_consistent t ~checkpoint in
+    checkpoint ();
+    let admitted_at = now () in
+    if
+      (not (phys_equal sealed.token t.token))
+      || (not (phys_equal snapshot.token t.token))
+      || (not (Id.equal snapshot.upload_id sealed.upload_id))
+      || (not (P.Id.Principal.equal snapshot.principal principal))
+      || not (P.Idempotency_key.equal snapshot.commit_key sealed.commit_key)
+    then Error Error.Closed
+    else
+      let* upload = find_owned t principal sealed.upload_id in
+      match upload.phase.outcome with
+      | Doc.Phase.Ready { commit_key; payload_digest; receipt_deadline } ->
+        if expired admitted_at receipt_deadline
+        then Error Error.Expired
+        else if
+          (not (P.Idempotency_key.equal sealed.commit_key commit_key))
+          || (not (Chatml_source.Digest.equal snapshot.payload_digest payload_digest))
+          || not (B.Manifest.equal snapshot.manifest upload.manifest_doc.manifest)
+        then Error Error.Idempotency_conflict
+        else
+          let* actual_payload, actual_sources =
+            verify_members t upload ~materialize:true ~checkpoint
+          in
+          if
+            (not (Chatml_source.Digest.equal actual_payload payload_digest))
+            || not (same_source_list snapshot.sources actual_sources ~checkpoint)
+          then Error Error.Invalid_manifest
+          else
+            let* candidate =
+              Publication.of_proof upload.manifest_doc.manifest proof ~checkpoint
+              |> Result.map_error ~f:(fun () -> Error.Invalid_manifest)
+            in
+            let bundle_id =
+              match upload.publication with
+              | Not_published -> P.Id.Authoring_bundle.create ()
+              | Intent { value; _ } -> B.Receipt.bundle_id (Doc.Intent.receipt value)
+            in
+            let duplicate_bundle_id =
+              Hashtbl.fold
+                t.uploads
+                ~init:false
+                ~f:(fun ~key:other_id ~data:other found ->
+                  checkpoint ();
+                  found
+                  || ((not (Id.equal other_id sealed.upload_id))
+                      &&
+                      match other.publication with
+                      | Not_published -> false
+                      | Intent { value; _ } ->
+                        P.Id.Authoring_bundle.equal
+                          bundle_id
+                          (B.Receipt.bundle_id (Doc.Intent.receipt value))))
+            in
+            let* () =
+              if duplicate_bundle_id then Error Error.Idempotency_conflict else Ok ()
+            in
+            let* plan =
+              Publication.install_plan
+                candidate
+                ~manifest:upload.manifest_doc.manifest
+                ~uploaded:actual_sources
+                ~owner:upload.manifest_doc.owner
+                ~upload_id:sealed.upload_id
+                ~commit_key
+                ~payload_digest
+                ~bundle_id
+                ~expires_at:receipt_deadline
+                ~max_graphs:(t.limits.max_members + 1)
+                ~max_sources:t.limits.max_installed_sources
+                ~max_supplemental_bytes:t.limits.max_installed_bytes_per_bundle
+                ~max_intent_bytes:t.limits.max_intent_bytes
+                ~checkpoint
+              |> Result.map_error ~f:(fun () -> Error.Limit_exceeded)
+            in
+            let intent = Publication.Installed.intent plan in
+            let intent_bytes = Publication.Installed.intent_bytes plan in
+            let* () =
+              match upload.publication with
+              | Not_published ->
+                ensure_publish_capacity
+                  t
+                  principal
+                  plan
+                  ~intent_bytes:(String.length intent_bytes)
+              | Intent { value; marker; _ } ->
+                let* previous =
+                  Doc.Intent.to_bytes value ~max_bytes:t.limits.max_intent_bytes
+                  |> storage
+                in
+                if not (String.equal previous intent_bytes)
+                then Error Error.Idempotency_conflict
+                else (
+                  match marker with
+                  | None -> Ok ()
+                  | Some _ ->
+                    let* receipt = verify_publication t upload ~checkpoint in
+                    if B.Receipt.equal receipt (Publication.Installed.receipt plan)
+                    then Ok ()
+                    else Error Error.Invalid_manifest)
+            in
+            (match upload.publication with
+             | Intent { marker = Some _; _ } -> Ok (Publication.Installed.receipt plan)
+             | Not_published | Intent { marker = None; _ } ->
+               t.uncertain <- true;
+               let* () =
+                 match upload.publication with
+                 | Not_published ->
+                   with_upload_directory t sealed.upload_id (fun directory ->
+                     save_in directory Files.intent_name intent_bytes)
+                 | Intent _ -> Ok ()
+               in
+               upload.publication
+               <- Intent
+                    { value = intent
+                    ; intent_bytes = String.length intent_bytes
+                    ; marker = None
+                    ; marker_bytes = 0
+                    ; supplementary_bytes = Doc.Intent.supplementary_bytes intent
+                    };
+               let* () =
+                 with_upload_directory t sealed.upload_id (fun directory ->
+                   List.fold
+                     (Publication.Installed.supplemental plan)
+                     ~init:(Ok ())
+                     ~f:(fun result (ordinal, source) ->
+                       let* () = result in
+                       checkpoint ();
+                       Files.install_supplemental
+                         directory
+                         ~ordinal
+                         ~bytes:(Chatml_source.contents source)
+                         ~max_bytes:t.limits.max_installed_bytes_per_bundle
+                         ~checkpoint
+                       |> storage))
+               in
+               let* inventory_digest, installed_bytes =
+                 verify_installed t upload intent actual_sources ~checkpoint
+               in
+               if installed_bytes <> Doc.Intent.supplementary_bytes intent
+               then Error Error.Invalid_manifest
+               else (
+                 let marker =
+                   Doc.Marker.create
+                     ~intent_digest:(digest_text intent_bytes ~checkpoint)
+                     ~inventory_digest
+                     ~receipt_digest:
+                       (digest_receipt (Publication.Installed.receipt plan) ~checkpoint)
+                 in
+                 let* marker_bytes =
+                   Doc.Marker.to_bytes marker ~max_bytes:t.limits.max_marker_bytes
+                   |> storage
+                 in
+                 let* () =
+                   try
+                     with_upload_directory t sealed.upload_id (fun directory ->
+                       save_in
+                         ~before_rename:(fun () ->
+                           if expired (now ()) receipt_deadline
+                           then raise Publication_expired;
+                           final_admission ();
+                           match check_lock t with
+                           | Ok () -> ()
+                           | Error _ -> raise Publication_closed)
+                         directory
+                         Files.marker_name
+                         marker_bytes)
+                   with
+                   | Publication_expired -> Error Error.Expired
+                   | Publication_closed -> Error Error.Closed
+                 in
+                 upload.publication
+                 <- Intent
+                      { value = intent
+                      ; intent_bytes = String.length intent_bytes
+                      ; marker = Some marker
+                      ; marker_bytes = String.length marker_bytes
+                      ; supplementary_bytes = Doc.Intent.supplementary_bytes intent
+                      };
+                 t.uncertain <- false;
+                 verify_publication t upload ~checkpoint))
+      | Open | Rejected _ -> Error Error.Sealed
+      | Expired _ -> Error Error.Expired)
+;;
+
+let reject t ~principal (sealed : sealed) ~reason ~now ~checkpoint =
+  use_gate t (fun () ->
+    let checkpoint = work t.limits checkpoint in
+    checkpoint ();
+    let* () = ensure_consistent t ~checkpoint in
+    checkpoint ();
+    let now = now () in
+    if not (phys_equal sealed.token t.token)
+    then Error Error.Closed
+    else
+      let* upload = find_owned t principal sealed.upload_id in
+      match upload.phase.outcome, upload.publication with
+      | Doc.Phase.Ready { commit_key; receipt_deadline; _ }, Not_published ->
+        if expired now receipt_deadline
+        then Error Error.Expired
+        else if not (P.Idempotency_key.equal sealed.commit_key commit_key)
+        then Error Error.Idempotency_conflict
+        else (
+          let phase =
+            Doc.Phase.
+              { upload_id = sealed.upload_id
+              ; outcome = Rejected { commit_key; reason; receipt_deadline }
+              }
+          in
+          let* bytes = phase_admission phase in
+          save_phase t upload phase bytes)
+      | Doc.Phase.Rejected { commit_key; reason = prior; _ }, Not_published ->
+        if
+          P.Idempotency_key.equal sealed.commit_key commit_key
+          && B.Rejection.equal prior reason
+        then Ok ()
+        else Error Error.Idempotency_conflict
+      | Doc.Phase.Expired _, _ -> Error Error.Expired
+      | (Doc.Phase.Open | Doc.Phase.Ready _ | Doc.Phase.Rejected _), _ ->
+        Error Error.Sealed)
 ;;
 
 let status t ~principal ~upload_id ~now ~checkpoint =
@@ -1319,9 +2282,76 @@ let status t ~principal ~upload_id ~now ~checkpoint =
           |> Result.all
         in
         Ok (Status.Open progress)
-      | Ready _ -> Ok Status.Ready
+      | Ready _ ->
+        (match upload.publication with
+         | Not_published -> Ok Status.Ready
+         | Intent { marker = None; _ } -> Ok Status.Validating
+         | Intent { marker = Some _; _ } ->
+           let* receipt = verify_publication t upload ~checkpoint in
+           Ok (Status.Published receipt))
       | Rejected { reason; _ } -> Ok (Status.Rejected reason)
       | Expired _ -> Ok Status.Expired))
+;;
+
+let active_reads : t list Eio.Fiber.key = Eio.Fiber.create_key ()
+
+let with_published t ~principal ~bundle_id ~now ~checkpoint ~f =
+  let admitted =
+    use_gate t (fun () ->
+      let checkpoint = work t.limits checkpoint in
+      checkpoint ();
+      let* () = ensure_consistent t ~checkpoint in
+      checkpoint ();
+      let admitted_at = now () in
+      if Hashtbl.length t.read_leases > 0
+      then Error Error.Busy
+      else
+        let* upload =
+          Hashtbl.fold
+            t.uploads
+            ~init:(Error Error.Missing_or_foreign)
+            ~f:(fun ~key:_ ~data:upload found ->
+              checkpoint ();
+              match upload.publication with
+              | Intent { value; marker = Some _; _ }
+                when P.Id.Principal.equal upload.manifest_doc.owner.principal principal
+                     && P.Id.Authoring_bundle.equal
+                          (B.Receipt.bundle_id (Doc.Intent.receipt value))
+                          bundle_id -> Ok upload
+              | Not_published | Intent _ -> found)
+        in
+        if expired admitted_at (phase_deadline upload)
+        then Error Error.Expired
+        else
+          let* receipt = verify_publication t upload ~checkpoint in
+          let* capture = materialize_published t upload receipt ~checkpoint in
+          let* () = check_lock t in
+          if expired (now ()) (phase_deadline upload)
+          then Error Error.Expired
+          else (
+            let upload_id = upload.manifest_doc.upload_id in
+            Hashtbl.set
+              t.read_leases
+              ~key:upload_id
+              ~data:(read_lease_count t upload_id + 1);
+            Ok (upload, capture)))
+  in
+  match admitted with
+  | Error _ as error -> error
+  | Ok (upload, capture) ->
+    let active = Option.value (Eio.Fiber.get active_reads) ~default:[] in
+    let release () =
+      Eio.Cancel.protect (fun () ->
+        Eio.Mutex.use_rw ~protect:true t.gate (fun () ->
+          let upload_id = upload.manifest_doc.upload_id in
+          let count = read_lease_count t upload_id in
+          if count <= 1
+          then Hashtbl.remove t.read_leases upload_id
+          else Hashtbl.set t.read_leases ~key:upload_id ~data:(count - 1);
+          Eio.Condition.broadcast t.readers_idle))
+    in
+    Eio.Fiber.with_binding active_reads (t :: active) (fun () ->
+      Fun.protect ~finally:release (fun () -> Ok (f capture)))
 ;;
 
 let cleanup_expired_data t upload ~checkpoint =
@@ -1339,17 +2369,31 @@ let cleanup_expired_data t upload ~checkpoint =
       let* names =
         Retention_reader.list_with_checkpoint reader ~directory:"." ~checkpoint |> storage
       in
+      let intent, marker =
+        match upload.publication with
+        | Not_published -> None, None
+        | Intent { value; marker; _ } -> Some value, marker
+      in
       if
-        not
-          (Files.validate_entry_names
-             (B.Manifest.members upload.manifest_doc.manifest)
-             names)
+        (not
+           (Files.validate_entry_names
+              ?intent
+              ?marker
+              (B.Manifest.members upload.manifest_doc.manifest)
+              names))
+        || not
+             (List.for_all names ~f:(fun name ->
+                String.equal name Files.manifest_name
+                || String.equal name Files.phase_name
+                || Files.is_member_filename name
+                || Files.is_publication_filename name))
       then corrupt "unexpected file in expired upload"
       else Files.cleanup_member_files directory names |> storage)
   in
   Array.fill upload.offsets ~pos:0 ~len:(Array.length upload.offsets) 0;
   Array.fill upload.progress_bytes ~pos:0 ~len:(Array.length upload.progress_bytes) 0;
   upload.data_bytes <- 0;
+  upload.publication <- Not_published;
   t.uncertain <- false;
   Ok ()
 ;;
@@ -1378,7 +2422,9 @@ let cancel t ~principal ~upload_id ~now ~checkpoint =
     checkpoint ();
     let now = now () in
     let* upload = find_owned t principal upload_id in
-    tombstone t upload ~now ~checkpoint)
+    if is_published upload
+    then Error Error.Sealed
+    else tombstone t upload ~now ~checkpoint)
 ;;
 
 let prune_one t upload ~checkpoint =
@@ -1438,7 +2484,7 @@ let prune t ~now ~protected_uploads ~checkpoint =
           match Hashtbl.find t.uploads upload_id with
           | None -> Ok ()
           | Some upload ->
-            if Hash_set.mem protected upload_id
+            if Hash_set.mem protected upload_id || read_lease_count t upload_id > 0
             then Ok ()
             else (
               match upload.phase.outcome with
@@ -1458,7 +2504,8 @@ let prune t ~now ~protected_uploads ~checkpoint =
             (match upload.phase.outcome with
              | Doc.Phase.Expired { tombstone_deadline }
                when expired now tombstone_deadline
-                    && not (Hash_set.mem protected upload_id) ->
+                    && (not (Hash_set.mem protected upload_id))
+                    && read_lease_count t upload_id = 0 ->
                let* () = prune_one t upload ~checkpoint in
                Ok (count + 1)
              | Open | Ready _ | Rejected _ | Expired _ -> Ok count))
@@ -1467,11 +2514,16 @@ let prune t ~now ~protected_uploads ~checkpoint =
 ;;
 
 let close_and_wait t =
-  Eio.Cancel.protect (fun () ->
-    Eio.Mutex.use_rw ~protect:true t.gate (fun () ->
-      if not t.closed
-      then (
+  let active = Option.value (Eio.Fiber.get active_reads) ~default:[] in
+  if List.exists active ~f:(phys_equal t)
+  then Error Error.Busy
+  else
+    Eio.Cancel.protect (fun () ->
+      Eio.Mutex.use_rw ~protect:true t.gate (fun () ->
         t.closed <- true;
-        release_root t.root_path);
-      Ok ()))
+        while Hashtbl.length t.read_leases > 0 do
+          Eio.Condition.await t.readers_idle t.gate
+        done;
+        release_root t.root_path;
+        Ok ()))
 ;;

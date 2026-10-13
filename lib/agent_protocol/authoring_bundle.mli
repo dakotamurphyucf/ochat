@@ -143,6 +143,8 @@ module Bundle : sig
         val script_id : t -> string
         val body_digest : t -> Chatml_source.Digest.t
         val body_byte_length : t -> int
+        val to_json : t -> Jsonaf.t
+        val of_json : Jsonaf.t -> (t, Error.t) result
       end
 
       type choice =

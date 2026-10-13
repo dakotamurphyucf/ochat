@@ -97,8 +97,16 @@ let begin_request ?(manifest = manifest ()) () =
 ;;
 
 let limits
+      ?(max_members = 4)
       ?(max_member_bytes = 128)
       ?(max_chunk_bytes = 64)
+      ?(max_bundle_bytes = 256)
+      ?(max_reserved_bytes = 512)
+      ?(max_reserved_per_principal = 256)
+      ?(max_installed_bytes_per_bundle = 128)
+      ?(max_installed_bytes = 256)
+      ?(max_installed_per_principal = 256)
+      ?(max_recovery_source_bytes = 1024)
       ?(max_work_steps = 10000)
       ?(max_journal_records = 32)
       ()
@@ -106,13 +114,21 @@ let limits
   Store.Limits.create
     ~max_active_uploads:4
     ~max_active_per_principal:2
-    ~max_members:4
+    ~max_members
     ~max_manifest_bytes:65536
     ~max_member_bytes
-    ~max_bundle_bytes:256
+    ~max_bundle_bytes
     ~max_chunk_bytes
-    ~max_reserved_bytes:512
-    ~max_reserved_per_principal:256
+    ~max_reserved_bytes
+    ~max_reserved_per_principal
+    ~max_published_records:4
+    ~max_installed_sources:32
+    ~max_installed_bytes_per_bundle
+    ~max_installed_bytes
+    ~max_installed_per_principal
+    ~max_publication_metadata_bytes:16384
+    ~max_intent_bytes:8192
+    ~max_marker_bytes:2048
     ~max_work_steps
     ~max_journal_records
     ~max_journal_bytes:16384
@@ -121,7 +137,7 @@ let limits
     ~max_tombstone_bytes:600000
     ~max_recovery_entries:1000
     ~max_recovery_metadata_bytes:1048576
-    ~max_recovery_source_bytes:512
+    ~max_recovery_source_bytes
     ~staging_ttl:(Time_ns.Span.of_sec 60.)
     ~receipt_ttl:(Time_ns.Span.of_sec 120.)
     ~expired_tombstone_ttl:(Time_ns.Span.of_sec 180.)
@@ -286,10 +302,12 @@ let%expect_test
         |> upload_ok
       with
       | Store.Claim_result.Ready sealed -> sealed
-      | Rejected _ -> failwith "unexpected rejection"
+      | Published _ | Rejected _ -> failwith "unexpected claim state"
     in
-    let _, sources =
-      Store.snapshot store sealed ~now:(fun () -> start) ~checkpoint:Fn.id |> upload_ok
+    let sources =
+      Store.snapshot store ~principal sealed ~now:(fun () -> start) ~checkpoint:Fn.id
+      |> upload_ok
+      |> Store.Snapshot.sources
     in
     check
       "snapshot exact order and bytes"
@@ -301,7 +319,14 @@ let%expect_test
     let reopened = open_store env sw root_handle lock in
     check
       "old sealed handle invalid after reopen"
-      (match Store.snapshot reopened sealed ~now:(fun () -> start) ~checkpoint:Fn.id with
+      (match
+         Store.snapshot
+           reopened
+           ~principal
+           sealed
+           ~now:(fun () -> start)
+           ~checkpoint:Fn.id
+       with
        | Error Store.Error.Closed -> true
        | _ -> false);
     let replay =
@@ -327,7 +352,7 @@ let%expect_test
         |> upload_ok
       with
       | Store.Claim_result.Ready sealed -> sealed
-      | Rejected _ -> failwith "unexpected recovered rejection"
+      | Published _ | Rejected _ -> failwith "unexpected recovered claim state"
     in
     check
       "different commit key conflicts"
@@ -342,7 +367,7 @@ let%expect_test
        | Error Store.Error.Idempotency_conflict -> true
        | _ -> false);
     ignore
-      (Store.snapshot reopened sealed ~now:(fun () -> start) ~checkpoint:Fn.id
+      (Store.snapshot reopened ~principal sealed ~now:(fun () -> start) ~checkpoint:Fn.id
        |> upload_ok);
     Store.close_and_wait reopened |> upload_ok;
     printf "one recovered upload; two exact source revisions\n");
