@@ -56,6 +56,7 @@
     lib/chatml_semantics/chatml_semantic_identity.ml %{dep:../chatml_semantics/chatml_semantic_identity.ml}
     lib/chatml_semantics/chatml_semantic_limits.ml %{dep:../chatml_semantics/chatml_semantic_limits.ml}
     lib/chatml_semantics/chatml_semantic_partial.ml %{dep:../chatml_semantics/chatml_semantic_partial.ml}
+    lib/chatml_semantics/chatml_semantic_provisional_input.ml %{dep:../chatml_semantics/chatml_semantic_provisional_input.ml}
     lib/chatml_semantics/chatml_semantic_publication.ml %{dep:../chatml_semantics/chatml_semantic_publication.ml}
     lib/chatml_semantics/chatml_semantic_query.ml %{dep:../chatml_semantics/chatml_semantic_query.ml}
     lib/chatml_semantics/chatml_semantic_snapshot.ml %{dep:../chatml_semantics/chatml_semantic_snapshot.ml}
@@ -70,6 +71,7 @@
     lib/chatml/chatml_module_visibility.ml %{dep:../chatml/chatml_module_visibility.ml}
     lib/chatml/chatml_signature_check.ml %{dep:../chatml/chatml_signature_check.ml}
     lib/chatml/chatml_type_probe.ml %{dep:../chatml/chatml_type_probe.ml}
+    lib/chatml/chatml_type_graph_copy.ml %{dep:../chatml/chatml_type_graph_copy.ml}
     lib/chatml/chatml_type_validity.ml %{dep:../chatml/chatml_type_validity.ml}
     lib/chatml/chatml_equality_requirement.ml %{dep:../chatml/chatml_equality_requirement.ml}
     lib/chatml/chatml_resolver.ml %{dep:../chatml/chatml_resolver.ml}

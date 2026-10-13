@@ -47,6 +47,25 @@ graph escapes through the failed result. Resource/admission failure is a typed
 error, while cancellation and unexpected exceptions propagate with their original
 identity and available backtrace. Domain cleanup completes before return.
 
+`Chatml_semantics.analyze_prefix` is a separate, explicitly provisional analysis
+for incomplete implementation sources. The real parser records completed
+top-level statement/separator boundaries; analysis checks one prefix ending at
+the last such boundary at or before the byte cursor. It uses the same configured
+checker and exact dependency inventory, including companion interfaces, while
+skipping only the selected entry's final host-entrypoint requirement. The
+provisional checked graph has no execution conversion. A successful result
+retains the full graph fingerprint, original source digest, prefix digest and
+boundary so clients can label its scope accurately. It is not a `Complete`
+result, and the full analysis remains authoritative for diagnostics.
+
+Missing boundaries, rejected prefixes, sources outside the checked closure and
+incomplete interface files produce explicit unavailable results. There is no
+heuristic type recovery or repeated search through shorter prefixes. Grammar-only
+completion and lexical highlighting can still provide separately labeled
+assistance. `Chatml_compilation.analyze_prepared_prefix` provides the same joined,
+cancellable Eio worker boundary as full analysis. Prefix construction, checking,
+and publication share the analysis work and retention limits.
+
 Analysis input, recorder, frozen graph and publication capacities form one bounded
 plan, with a cumulative cooperative work budget. Publication admits retained facts,
 edges and label bytes before allocation. Query calls separately bound work and

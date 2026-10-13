@@ -394,7 +394,7 @@ let productions =
     , "5c3cb4fb03734b2c0117f00020dfb52ee462fb9c069a9386cc709b69f515f9fa"
     , "chatml.programs" )
   ; ( "program -> program_stmts EOF"
-    , "62e3ad7aea6d21100de63a1463b8fd7841343c4183185a31d2618f2b3e3ae587"
+    , "d5a6421efad1535b6cc2b6c012909898f2217f236eecbd50d8a7efd141aef1b8"
     , "chatml.programs" )
   ; ( "program_stmt -> module_stmt"
     , "58794c5bf009a4a210f75537f5aa8ed2a686843295dc6938f3391ba010d97b4f"
@@ -403,10 +403,10 @@ let productions =
     , "c2996c2a3edc6db165c2afd4ba76c4bae8e79b4cdae071c15ae8e643011a2e70"
     , "chatml.programs" )
   ; ( "program_stmts -> program_stmts SEMISEMI"
-    , "94945cd73b21b8d03a9a51d226b98ee73f38f9ea3217961e4dad07cca49e8a34"
+    , "cf1a1b41fc2d83aec40335013e87c3ee41f896163a0c239367a56ff402c5393e"
     , "chatml.programs" )
   ; ( "program_stmts -> program_stmts program_stmt"
-    , "00099d29534710d61b79af3811b0e155912026efbee51ce8da707c9829cc9b2a"
+    , "086566d26df0e63e2db474cd2a18363cf4c336c5642001ccfcf9f7460668b5c8"
     , "chatml.programs" )
   ; ( "rec_binding -> LIDENT COLON type_expr EQ expr_sequence"
     , "d1709173fbf4a116ac3ff1143bd16c7200215a21138f6705deb2489394f42258"

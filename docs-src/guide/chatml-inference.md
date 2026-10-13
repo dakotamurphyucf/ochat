@@ -564,5 +564,15 @@ anchors; an unsupported whitespace gap is reported as unavailable rather than
 guessed from nearby syntax. Invalid programs expose a separate partial result
 with diagnostics and syntax from that same checking attempt, without certified
 types or exports. Analysis and queries have explicit work and result limits.
+
+For an incomplete implementation file, `Chatml_semantics.analyze_prefix` can
+separately check the last parser-confirmed top-level boundary at or before the
+cursor. The result is explicitly provisional: it identifies both the original
+source and the checked prefix, keeps dependency and companion-interface checks,
+and omits the final entrypoint requirement. It cannot be used as an executable
+artifact or replace the full program's diagnostics. If no valid checked prefix
+is available, the service reports that rather than guessing types. Incomplete
+interface files are not supported by this prefix API.
+
 See the [semantic query contracts](../development/chatml-semantic-queries.md) for
 host integration, failure distinctions and ownership.
