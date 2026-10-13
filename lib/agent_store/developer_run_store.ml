@@ -78,6 +78,7 @@ module Error = struct
   type t =
     | Store of Store_error.t
     | Conflict
+    | Prewrite_conflict
     | Foreign_or_stale
     | Limit_exceeded
     | Closed
@@ -150,11 +151,50 @@ let find_invocation observation id =
 
 let find_job observation id = Doc.find_job observation.Observation.document id
 
+module Job_lookup = struct
+  type t =
+    { observation : Observation.t
+    ; id : P.Id.Job.t
+    ; value : P.Developer_job.t option
+    }
+
+  let value t = t.value
+end
+
+let find_job_exact observation id =
+  Job_lookup.{ observation; id; value = find_job observation id }
+;;
+
+type entry_state =
+  | Unentered
+  | Entered
+  | Abandoned
+[@@deriving equal]
+
+type claim_data =
+  { store_token : unit ref
+  ; handle_token : unit ref
+  ; owner : P.Execution_owner.developer
+  ; job : P.Developer_job.t
+  ; entry_state : entry_state Atomic.t
+  ; mutable issuing_domain : int option
+  ; current_read : claim_data -> (bool, Error.t) result
+  }
+
 module Prepared = struct
   type kind =
     | Foundation_checkpoint
     | Developer_dispatch
     | Selected_transaction
+    | Worker_claim
+    | Claimed_transition
+
+  type claim_status =
+    | Unsettled
+    | Claim_installed
+    | Claim_absent
+    | Claim_diverged
+    | Claim_prewrite_conflict
 
   type t =
     { store_token : unit ref
@@ -165,6 +205,9 @@ module Prepared = struct
     ; after_document : Doc.t
     ; token : unit ref
     ; kind : kind
+    ; claim_data : claim_data option
+    ; mutable claim_status : claim_status
+    ; mutable write_attempted : bool
     }
 end
 
@@ -197,9 +240,12 @@ module Handoff = struct
 end
 
 type pending =
-  { prepared : Prepared.t
-  ; handoff : Handoff.t
-  }
+  | Selected of
+      { prepared : Prepared.t
+      ; handoff : Handoff.t
+      }
+  | Claim of Prepared.t
+  | Transition of Prepared.t
 
 type t =
   { root_owner : Root.owner
@@ -350,6 +396,117 @@ let work t checkpoint =
     checkpoint ()
 ;;
 
+let claim_current_under_lease t ~poll ~for_entry (claim : claim_data) =
+  let* current = read t ~poll claim.owner.run_id in
+  match current with
+  | None -> Error Error.Foreign_or_stale
+  | Some (_, document) ->
+    let* epoch = find_epoch document ~owner:claim.owner in
+    let latest = List.last (Doc.epochs document) in
+    let same_epoch =
+      Option.value_map latest ~default:false ~f:(fun latest ->
+        Int.equal (Doc.epoch_number latest) claim.owner.epoch)
+    in
+    let same_capture =
+      Chatml_source.Digest.equal
+        (Doc.epoch_capture epoch)
+        (P.Developer_job.capture_fingerprint claim.job)
+    in
+    let same_job =
+      Option.value_map
+        (Doc.find_job document (P.Developer_job.id claim.job))
+        ~default:false
+        ~f:(fun current ->
+          let state = P.Developer_job.state current in
+          P.Developer_job.same_immutable current claim.job
+          && Int.equal state.attempt (P.Developer_job.state claim.job).attempt
+          &&
+          match state.status with
+          | P.Job.Running -> true
+          | Waiting_permission _ -> not for_entry
+          | Queued
+          | Waiting_completion _
+          | Succeeded
+          | Failed _
+          | Cancelled
+          | Interrupted _ -> false)
+    in
+    let active =
+      match Doc.epoch_phase epoch with
+      | `Active -> true
+      | `Interrupted | `Closed -> false
+    in
+    Ok (same_epoch && same_capture && same_job && active)
+;;
+
+module Claim = struct
+  type t = claim_data
+
+  let owner (t : t) = t.owner
+  let job (t : t) = t.job
+  let attempt (t : t) = (P.Developer_job.state t.job).attempt
+
+  let current_for_effect t =
+    if equal_entry_state (Atomic.get t.entry_state) Entered
+    then t.current_read t
+    else Ok false
+  ;;
+
+  let try_enter claim ~handle ~admit ~on_enter =
+    let* t = valid_handle handle in
+    if
+      (not (phys_equal claim.store_token t.token))
+      || (not (phys_equal claim.handle_token handle.token))
+      || (not (P.Execution_owner.equal_developer claim.owner handle.owner))
+      ||
+      match claim.issuing_domain with
+      | None -> true
+      | Some domain -> not (Int.equal domain (Stdlib.Domain.self () :> int))
+    then Error Error.Foreign_or_stale
+    else
+      with_lease t (fun ~env:_ ~root:_ ->
+        let poll = work t t.checkpoint in
+        let* current = claim_current_under_lease t ~poll ~for_entry:true claim in
+        if current && admit ()
+        then (
+          let entered = Atomic.compare_and_set claim.entry_state Unentered Entered in
+          if entered then on_enter ();
+          Ok entered)
+        else Error Error.Foreign_or_stale)
+  ;;
+
+  let abandon_before_callback claim ~handle =
+    let* t = valid_handle handle in
+    if
+      (not (phys_equal claim.store_token t.token))
+      || (not (phys_equal claim.handle_token handle.token))
+      || (not (P.Execution_owner.equal_developer claim.owner handle.owner))
+      ||
+      match claim.issuing_domain with
+      | None -> true
+      | Some domain -> not (Int.equal domain (Stdlib.Domain.self () :> int))
+    then Error Error.Foreign_or_stale
+    else (
+      ignore (Atomic.compare_and_set claim.entry_state Entered Abandoned : bool);
+      Ok ())
+  ;;
+end
+
+module Claimed = struct
+  type t =
+    { claim : Claim.t
+    ; observation : Observation.t
+    }
+
+  let claim t = t.claim
+  let observation t = t.observation
+end
+
+type claim_reconciliation =
+  | Claimed of Claimed.t
+  | Claim_absent
+  | Claim_diverged
+
 let scan t ~poll =
   poll ();
   let* () = Durable_file.sync_directory_in ~directory:t.directory |> store in
@@ -470,6 +627,31 @@ let open_or_create session_store ~sw ~limits ~checkpoint =
 ;;
 
 let owner handle = handle.owner
+
+let issued_by t handle =
+  phys_equal t handle.store && phys_equal t.token handle.store.token
+;;
+
+let is_latest_active handle =
+  let* t = valid_handle handle in
+  with_lease t (fun ~env:_ ~root:_ ->
+    let poll = work t t.checkpoint in
+    let* current = read t ~poll handle.owner.run_id in
+    match current with
+    | None -> Error Error.Foreign_or_stale
+    | Some (_, document) ->
+      Ok
+        (Option.value_map
+           (List.last (Doc.epochs document))
+           ~default:false
+           ~f:(fun epoch ->
+             Int.equal (Doc.epoch_number epoch) handle.owner.epoch
+             &&
+             match Doc.epoch_phase epoch with
+             | `Active -> true
+             | `Interrupted | `Closed -> false)))
+;;
+
 let capture_fingerprint handle = handle.capture_fingerprint
 
 let observe handle =
@@ -668,6 +850,9 @@ let prepare_checkpoint handle ~expected ~phase =
             ; after_document = next
             ; token = ref ()
             ; kind = Foundation_checkpoint
+            ; claim_data = None
+            ; claim_status = Unsettled
+            ; write_attempted = false
             })
 ;;
 
@@ -716,6 +901,9 @@ let prepare_change handle ~expected ~kind ~f =
             ; after_document = next
             ; token = ref ()
             ; kind
+            ; claim_data = None
+            ; claim_status = Unsettled
+            ; write_attempted = false
             })
 ;;
 
@@ -787,6 +975,179 @@ let prepare_terminal_selected handle ~expected ~lookup ~terminal ~selected =
       |> transition_result)
 ;;
 
+let matching_job_lookup expected lookup id =
+  phys_equal lookup.Job_lookup.observation expected && P.Id.Job.equal lookup.id id
+;;
+
+let prepare_job_claim handle ~expected ~lookup ~now =
+  let* observed =
+    match Job_lookup.value lookup with
+    | None -> Error Error.Conflict
+    | Some observed -> Ok observed
+  in
+  let id = P.Developer_job.id observed in
+  if not (matching_job_lookup expected lookup id)
+  then Error Error.Conflict
+  else
+    let* prepared =
+      prepare_change handle ~expected ~kind:Worker_claim ~f:(fun t document ~poll ->
+        Developer_run_transition.claim (transition t handle ~poll) document ~observed ~now
+        |> transition_result)
+    in
+    let* claimed_job =
+      match Doc.find_job prepared.after_document id with
+      | None -> Error Error.Conflict
+      | Some job -> Ok job
+    in
+    let t = handle.store in
+    let current_read claim =
+      with_lease t (fun ~env:_ ~root:_ ->
+        let poll = work t t.checkpoint in
+        claim_current_under_lease t ~poll ~for_entry:false claim)
+    in
+    let claim_data : claim_data =
+      { store_token = t.token
+      ; handle_token = handle.token
+      ; owner = handle.owner
+      ; job = claimed_job
+      ; entry_state = Atomic.make Unentered
+      ; issuing_domain = None
+      ; current_read
+      }
+    in
+    Ok { prepared with claim_data = Some claim_data }
+;;
+
+let prepare_claimed_transition_internal
+      handle
+      ~expected
+      ~claim
+      ~after
+      ~revoked_after
+      ~required_entry
+  =
+  let* t = valid_handle handle in
+  if
+    (not (phys_equal claim.store_token t.token))
+    || (not (phys_equal claim.handle_token handle.token))
+    || (not (P.Execution_owner.equal_developer claim.owner handle.owner))
+    || (not (equal_entry_state (Atomic.get claim.entry_state) required_entry))
+    ||
+    match claim.issuing_domain with
+    | None -> true
+    | Some domain -> not (Int.equal domain (Stdlib.Domain.self () :> int))
+  then Error Error.Foreign_or_stale
+  else
+    with_lease t (fun ~env:_ ~root:_ ->
+      let poll = work t t.checkpoint in
+      let* existing = read t ~poll handle.owner.run_id in
+      match existing with
+      | None -> Error Error.Foreign_or_stale
+      | Some (before_bytes, document) ->
+        if not (same_observation t handle expected before_bytes document)
+        then Error Error.Conflict
+        else
+          let* epoch = find_epoch document ~owner:handle.owner in
+          let latest_epoch =
+            Option.value_map
+              (List.last (Doc.epochs document))
+              ~default:false
+              ~f:(fun last -> Int.equal (Doc.epoch_number last) handle.owner.epoch)
+          in
+          let effect_active =
+            latest_epoch
+            &&
+            match Doc.epoch_phase epoch with
+            | `Active -> true
+            | `Interrupted | `Closed -> false
+          in
+          let after = if effect_active then after else revoked_after in
+          let* next =
+            Developer_run_transition.claimed_transition
+              (transition t handle ~poll)
+              document
+              ~claimed:claim.job
+              ~after
+              ~current_epoch:effect_active
+            |> transition_result
+          in
+          poll ();
+          let* after_bytes =
+            Doc.to_bytes
+              next
+              ~poll
+              ~limits:t.limits.document
+              ~max_epochs:t.limits.max_epochs_per_run
+              ~max_jobs:t.limits.max_jobs_per_run
+              ~max_invocations:t.limits.max_invocations_per_run
+              ~max_job_payload_bytes:t.limits.max_job_payload_bytes
+            |> store
+          in
+          Ok
+            Prepared.
+              { store_token = t.token
+              ; handle_token = handle.token
+              ; owner = handle.owner
+              ; before_bytes
+              ; after_bytes
+              ; after_document = next
+              ; token = ref ()
+              ; kind = Claimed_transition
+              ; claim_data = None
+              ; claim_status = Unsettled
+              ; write_attempted = false
+              })
+;;
+
+let prepare_claimed_transition handle ~expected ~claim ~after ~revoked_after =
+  prepare_claimed_transition_internal
+    handle
+    ~expected
+    ~claim
+    ~after
+    ~revoked_after
+    ~required_entry:Entered
+;;
+
+let prepare_unentered_claim_cleanup handle ~expected ~claim ~status ~now =
+  let* t = valid_handle handle in
+  let* () =
+    if
+      phys_equal claim.store_token t.token
+      && phys_equal claim.handle_token handle.token
+      && P.Execution_owner.equal_developer claim.owner handle.owner
+      &&
+      match claim.issuing_domain with
+      | Some domain -> Int.equal domain (Stdlib.Domain.self () :> int)
+      | None -> false
+    then Ok ()
+    else Error Error.Foreign_or_stale
+  in
+  let* () =
+    if
+      Atomic.compare_and_set claim.entry_state Unentered Abandoned
+      || equal_entry_state (Atomic.get claim.entry_state) Abandoned
+    then Ok ()
+    else Error Error.Conflict
+  in
+  let claimed = P.Developer_job.state claim.job in
+  let status =
+    match status with
+    | `Cancelled -> P.Job.Cancelled
+    | `Interrupted reason -> P.Job.Interrupted reason
+  in
+  let after : P.Developer_job.State.t =
+    { claimed with status; completed_at = Some now; result = None; retry_failure = None }
+  in
+  prepare_claimed_transition_internal
+    handle
+    ~expected
+    ~claim
+    ~after
+    ~revoked_after:after
+    ~required_entry:Abandoned
+;;
+
 let prepared_for handle prepared =
   phys_equal prepared.Prepared.store_token handle.store.token
   && phys_equal prepared.handle_token handle.token
@@ -811,6 +1172,11 @@ let no_pending t run_id =
 let bind_handoff t handle prepared handoff =
   if not (prepared_for handle prepared)
   then Error Error.Foreign_or_stale
+  else if
+    match prepared.Prepared.kind with
+    | Developer_dispatch | Selected_transaction -> false
+    | Foundation_checkpoint | Worker_claim | Claimed_transition -> true
+  then Error Error.Conflict
   else
     let* () =
       match handoff.Handoff.bound with
@@ -826,12 +1192,12 @@ let bind_handoff t handle prepared handoff =
       let run_id = handle.owner.run_id in
       (match Hashtbl.find t.pending run_id with
        | None ->
-         Hashtbl.set t.pending ~key:run_id ~data:{ prepared; handoff };
+         Hashtbl.set t.pending ~key:run_id ~data:(Selected { prepared; handoff });
          Ok None
-       | Some pending
+       | Some (Selected pending)
          when phys_equal pending.prepared.token prepared.token
               && phys_equal pending.handoff handoff -> Ok None
-       | Some _ -> Error Error.Conflict)
+       | Some (Selected _ | Claim _ | Transition _) -> Error Error.Conflict)
 ;;
 
 let settle t handle handoff value =
@@ -849,6 +1215,27 @@ let classify_prepared t handle prepared ~poll =
   | Some (bytes, _) when String.equal bytes prepared.Prepared.after_bytes ->
     Result.map (installed t prepared) ~f:(fun installed -> Settlement.Installed installed)
   | Some (bytes, _) when String.equal bytes prepared.before_bytes -> Ok Settlement.Absent
+  | None | Some _ -> Ok Settlement.Diverged
+;;
+
+let install_prepared t handle prepared ~poll =
+  let* existing = read t ~poll handle.owner.run_id in
+  match existing with
+  | Some (bytes, _) when String.equal bytes prepared.Prepared.after_bytes ->
+    Result.map (installed t prepared) ~f:(fun installed -> Settlement.Installed installed)
+  | Some (bytes, _) when String.equal bytes prepared.before_bytes ->
+    poll ();
+    prepared.write_attempted <- true;
+    let* () =
+      Durable_file.replace_in
+        ~directory:t.directory
+        ~durability:Flush_file_and_directory
+        ~basename:(basename handle.owner.run_id)
+        prepared.after_bytes
+      |> store
+    in
+    poll ();
+    Result.map (installed t prepared) ~f:(fun installed -> Settlement.Installed installed)
   | None | Some _ -> Ok Settlement.Diverged
 ;;
 
@@ -872,28 +1259,7 @@ let commit_and_settle handle prepared handoff =
     | Some value -> Ok value
     | None ->
       let poll = work t t.checkpoint in
-      let commit_once () =
-        let* existing = read t ~poll handle.owner.run_id in
-        match existing with
-        | Some (bytes, _) when String.equal bytes prepared.after_bytes ->
-          Result.map (installed t prepared) ~f:(fun installed ->
-            Settlement.Installed installed)
-        | Some (bytes, _) when String.equal bytes prepared.before_bytes ->
-          poll ();
-          let* () =
-            Durable_file.replace_in
-              ~directory:t.directory
-              ~durability:Flush_file_and_directory
-              ~basename:(basename handle.owner.run_id)
-              prepared.after_bytes
-            |> store
-          in
-          poll ();
-          Result.map (installed t prepared) ~f:(fun installed ->
-            Settlement.Installed installed)
-        | None | Some _ -> Ok Settlement.Diverged
-      in
-      (match commit_once () with
+      (match install_prepared t handle prepared ~poll with
        | Ok value -> Ok (settle t handle handoff value)
        | Error original ->
          (match
@@ -913,6 +1279,233 @@ let commit_and_settle handle prepared handoff =
          Stdlib.Printexc.raise_with_backtrace exn backtrace))
 ;;
 
+let bind_claim t handle prepared =
+  if not (prepared_for handle prepared)
+  then Error Error.Foreign_or_stale
+  else (
+    match prepared.Prepared.kind, prepared.claim_data with
+    | Worker_claim, Some _ ->
+      (match prepared.claim_status with
+       | Claim_installed | Claim_absent | Claim_diverged | Claim_prewrite_conflict ->
+         Ok ()
+       | Unsettled ->
+         let run_id = handle.owner.run_id in
+         (match Hashtbl.find t.pending run_id with
+          | None ->
+            Hashtbl.set t.pending ~key:run_id ~data:(Claim prepared);
+            Ok ()
+          | Some (Claim pending) when phys_equal pending.token prepared.token -> Ok ()
+          | Some (Selected _ | Claim _ | Transition _) -> Error Error.Conflict))
+    | ( ( Foundation_checkpoint
+        | Developer_dispatch
+        | Selected_transaction
+        | Claimed_transition )
+      , _ )
+    | Worker_claim, None -> Error Error.Conflict)
+;;
+
+let settle_worker_prepared t handle (prepared : Prepared.t) settlement =
+  let identical_unwritten_claim =
+    match prepared.kind with
+    | Worker_claim -> not prepared.write_attempted
+    | Foundation_checkpoint
+    | Developer_dispatch
+    | Selected_transaction
+    | Claimed_transition -> false
+  in
+  let status =
+    match settlement with
+    | Settlement.Installed _ when identical_unwritten_claim ->
+      Prepared.Claim_prewrite_conflict
+    | Settlement.Installed _ -> Prepared.Claim_installed
+    | Absent -> Claim_absent
+    | Diverged when not prepared.write_attempted -> Claim_prewrite_conflict
+    | Diverged -> Claim_diverged
+  in
+  prepared.claim_status <- status;
+  (match status with
+   | Claim_installed ->
+     Option.iter prepared.claim_data ~f:(fun claim ->
+       claim.issuing_domain <- Some (Stdlib.Domain.self () :> int))
+   | Unsettled | Claim_absent | Claim_diverged | Claim_prewrite_conflict -> ());
+  let retire =
+    match status, prepared.kind with
+    | Claim_installed, (Worker_claim | Claimed_transition)
+    | Claim_absent, Worker_claim
+    | Claim_prewrite_conflict, (Worker_claim | Claimed_transition) -> true
+    | (Unsettled | Claim_absent | Claim_diverged), _
+    | Claim_installed, (Foundation_checkpoint | Developer_dispatch | Selected_transaction)
+    | ( Claim_prewrite_conflict
+      , (Foundation_checkpoint | Developer_dispatch | Selected_transaction) ) -> false
+  in
+  if retire
+  then (
+    match Hashtbl.find t.pending handle.owner.run_id with
+    | Some (Claim pending | Transition pending)
+      when phys_equal pending.token prepared.token ->
+      Hashtbl.remove t.pending handle.owner.run_id
+    | None | Some (Selected _) | Some (Claim _ | Transition _) -> ());
+  match status with
+  | Claim_prewrite_conflict -> Error Error.Prewrite_conflict
+  | Unsettled | Claim_installed | Claim_absent | Claim_diverged -> Ok ()
+;;
+
+let claim_result t prepared =
+  match prepared.Prepared.claim_status, prepared.claim_data with
+  | Claim_installed, Some claim_data ->
+    let* value = installed t prepared in
+    Ok (Claimed Claimed.{ claim = claim_data; observation = Installed.observation value })
+  | Claim_absent, _ -> Ok Claim_absent
+  | Claim_diverged, _ -> Ok Claim_diverged
+  | Claim_prewrite_conflict, _ -> Error Error.Prewrite_conflict
+  | Unsettled, _ | Claim_installed, None -> Error Error.Conflict
+;;
+
+let reconcile_job_claim handle prepared =
+  let* t = valid_handle handle in
+  with_lease t (fun ~env:_ ~root:_ ->
+    let* () = bind_claim t handle prepared in
+    match prepared.claim_status with
+    | Claim_installed | Claim_absent | Claim_diverged | Claim_prewrite_conflict ->
+      claim_result t prepared
+    | Unsettled ->
+      let poll = work t t.checkpoint in
+      let* settlement = classify_prepared t handle prepared ~poll in
+      let* () = settle_worker_prepared t handle prepared settlement in
+      claim_result t prepared)
+;;
+
+let commit_job_claim handle prepared =
+  let* t = valid_handle handle in
+  with_lease t (fun ~env:_ ~root:_ ->
+    let* () = bind_claim t handle prepared in
+    let result () =
+      let* value = claim_result t prepared in
+      match value with
+      | Claimed value -> Ok value
+      | Claim_absent | Claim_diverged -> Error Error.Conflict
+    in
+    match prepared.claim_status with
+    | Claim_installed | Claim_absent | Claim_diverged | Claim_prewrite_conflict ->
+      result ()
+    | Unsettled ->
+      let poll = work t t.checkpoint in
+      (match install_prepared t handle prepared ~poll with
+       | Ok settlement ->
+         let* () = settle_worker_prepared t handle prepared settlement in
+         result ()
+       | Error original ->
+         (match
+            Eio.Cancel.protect (fun () -> classify_prepared t handle prepared ~poll)
+          with
+          | Ok settlement ->
+            let* () = settle_worker_prepared t handle prepared settlement in
+            result ()
+          | Error _ -> Error original)
+       | exception exn ->
+         let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+         (try
+            Eio.Cancel.protect (fun () ->
+              match classify_prepared t handle prepared ~poll with
+              | Ok settlement ->
+                ignore
+                  (settle_worker_prepared t handle prepared settlement
+                   : (unit, Error.t) result)
+              | Error _ -> ())
+          with
+          | _ -> ());
+         Stdlib.Printexc.raise_with_backtrace exn backtrace))
+;;
+
+let bind_claimed_transition t handle prepared =
+  if not (prepared_for handle prepared)
+  then Error Error.Foreign_or_stale
+  else (
+    match prepared.Prepared.kind with
+    | Claimed_transition ->
+      (match prepared.claim_status with
+       | Claim_installed | Claim_diverged | Claim_prewrite_conflict -> Ok ()
+       | Unsettled | Claim_absent ->
+         let run_id = handle.owner.run_id in
+         (match Hashtbl.find t.pending run_id with
+          | None ->
+            Hashtbl.set t.pending ~key:run_id ~data:(Transition prepared);
+            Ok ()
+          | Some (Transition pending) when phys_equal pending.token prepared.token ->
+            Ok ()
+          | Some (Selected _ | Claim _ | Transition _) -> Error Error.Conflict))
+    | Foundation_checkpoint | Developer_dispatch | Selected_transaction | Worker_claim ->
+      Error Error.Conflict)
+;;
+
+let claimed_transition_result t prepared =
+  match prepared.Prepared.claim_status with
+  | Claim_installed -> installed t prepared
+  | Claim_prewrite_conflict -> Error Error.Prewrite_conflict
+  | Unsettled | Claim_absent | Claim_diverged -> Error Error.Conflict
+;;
+
+let claimed_transition_reconciliation t prepared =
+  match prepared.Prepared.claim_status with
+  | Claim_installed -> Result.map (installed t prepared) ~f:(fun value -> Installed value)
+  | Claim_absent -> Ok Absent
+  | Claim_diverged -> Ok Diverged
+  | Claim_prewrite_conflict -> Error Error.Prewrite_conflict
+  | Unsettled -> Error Error.Conflict
+;;
+
+let reconcile_claimed_transition handle prepared =
+  let* t = valid_handle handle in
+  with_lease t (fun ~env:_ ~root:_ ->
+    let* () = bind_claimed_transition t handle prepared in
+    match prepared.claim_status with
+    | Claim_installed | Claim_diverged | Claim_prewrite_conflict ->
+      claimed_transition_reconciliation t prepared
+    | Unsettled | Claim_absent ->
+      let poll = work t t.checkpoint in
+      let* settlement = classify_prepared t handle prepared ~poll in
+      let* () = settle_worker_prepared t handle prepared settlement in
+      claimed_transition_reconciliation t prepared)
+;;
+
+let commit_claimed_transition handle prepared =
+  let* t = valid_handle handle in
+  with_lease t (fun ~env:_ ~root:_ ->
+    let* () = bind_claimed_transition t handle prepared in
+    match prepared.claim_status with
+    | Claim_installed | Claim_diverged | Claim_prewrite_conflict ->
+      claimed_transition_result t prepared
+    | Unsettled | Claim_absent ->
+      let poll = work t t.checkpoint in
+      (match install_prepared t handle prepared ~poll with
+       | Ok settlement ->
+         let* () = settle_worker_prepared t handle prepared settlement in
+         claimed_transition_result t prepared
+       | Error original ->
+         (match
+            Eio.Cancel.protect (fun () -> classify_prepared t handle prepared ~poll)
+          with
+          | Ok settlement ->
+            ignore
+              (settle_worker_prepared t handle prepared settlement
+               : (unit, Error.t) result)
+          | Error _ -> ());
+         Error original
+       | exception exn ->
+         let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+         (try
+            Eio.Cancel.protect (fun () ->
+              match classify_prepared t handle prepared ~poll with
+              | Ok settlement ->
+                ignore
+                  (settle_worker_prepared t handle prepared settlement
+                   : (unit, Error.t) result)
+              | Error _ -> ())
+          with
+          | _ -> ());
+         Stdlib.Printexc.raise_with_backtrace exn backtrace))
+;;
+
 let commit handle prepared =
   let* t = valid_handle handle in
   if not (prepared_for handle prepared)
@@ -920,7 +1513,8 @@ let commit handle prepared =
   else if
     match prepared.kind with
     | Foundation_checkpoint -> false
-    | Developer_dispatch | Selected_transaction -> true
+    | Developer_dispatch | Selected_transaction | Worker_claim | Claimed_transition ->
+      true
   then Error Error.Conflict
   else
     with_lease t (fun ~env:_ ~root:_ ->
@@ -952,7 +1546,8 @@ let reconcile handle prepared =
   else if
     match prepared.kind with
     | Foundation_checkpoint -> false
-    | Developer_dispatch | Selected_transaction -> true
+    | Developer_dispatch | Selected_transaction | Worker_claim | Claimed_transition ->
+      true
   then Error Error.Conflict
   else
     with_lease t (fun ~env:_ ~root:_ ->

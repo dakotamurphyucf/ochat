@@ -324,6 +324,36 @@ let retry_policy t = t.retry_policy
 let created_at t = t.created_at
 let state t = t.state
 
+let same_retry_policy left right =
+  match left, right with
+  | Job.Never, Job.Never -> true
+  | Job.Safe_retry left, Job.Safe_retry right ->
+    Int.equal left.max_attempts right.max_attempts
+    && Int.equal left.backoff_ms right.backoff_ms
+  | Job.Idempotent left, Job.Idempotent right ->
+    Idempotency_key.equal left.key right.key
+    && Int.equal left.max_attempts right.max_attempts
+    && Int.equal left.backoff_ms right.backoff_ms
+  | (Job.Never | Job.Safe_retry _ | Job.Idempotent _), _ -> false
+;;
+
+let same_immutable left right =
+  Execution_owner.equal_developer left.owner right.owner
+  && Chatml_source.Digest.equal left.capture_fingerprint right.capture_fingerprint
+  && Id.Job.equal left.id right.id
+  && Launch.equal_parent (Launch.parent left.launch) (Launch.parent right.launch)
+  && Option.equal
+       (fun (left_id, left_attempt) (right_id, right_attempt) ->
+          Id.Job.equal left_id right_id && Int.equal left_attempt right_attempt)
+       (Launch.parent_job left.launch)
+       (Launch.parent_job right.launch)
+  && Int.equal (Launch.nested_depth left.launch) (Launch.nested_depth right.launch)
+  && Job.equal_kind left.kind right.kind
+  && Jsonaf.exactly_equal left.payload right.payload
+  && same_retry_policy left.retry_policy right.retry_policy
+  && Timestamp.compare left.created_at right.created_at = 0
+;;
+
 let optional name value encode =
   Option.to_list (Option.map value ~f:(fun item -> name, encode item))
 ;;

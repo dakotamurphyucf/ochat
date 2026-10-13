@@ -343,6 +343,31 @@ let append_selected
   { t with revision; jobs = all }
 ;;
 
+let set_job_state t ~poll ~id ~expected_attempt ~after =
+  let open Result.Let_syntax in
+  let%bind prior =
+    match find_job t id with
+    | None -> corrupt "developer job is missing"
+    | Some prior -> Ok prior
+  in
+  let%bind () =
+    if Int.equal (P.Developer_job.state prior).attempt expected_attempt
+    then Ok ()
+    else corrupt "developer job attempt conflicts"
+  in
+  let%bind updated =
+    P.Developer_job.with_state prior after
+    |> Result.map_error ~f:(fun _ -> Store_error.Corrupt "invalid developer job state")
+  in
+  let%map revision = next_revision t.revision in
+  let jobs =
+    List.map t.jobs ~f:(fun job ->
+      poll ();
+      if P.Id.Job.equal (P.Developer_job.id job) id then updated else job)
+  in
+  { t with revision; jobs }
+;;
+
 let append_epoch t ~owner ~capture_fingerprint ~max_epochs =
   let open Result.Let_syntax in
   if not (same_root t owner)

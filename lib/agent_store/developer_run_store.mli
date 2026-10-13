@@ -27,6 +27,10 @@ module Error : sig
   type t =
     | Store of Store_error.t
     | Conflict
+    (** This Prepared never attempted replacement: its first commit lost the
+        before-bytes CAS, or another claim already installed identical
+        after-bytes. Only this exact pending token is retired. *)
+    | Prewrite_conflict
     | Foreign_or_stale
     | Limit_exceeded
     | Closed
@@ -84,6 +88,56 @@ val find_job
   :  Observation.t
   -> Agent_protocol.Id.Job.t
   -> Agent_protocol.Developer_job.t option
+
+module Job_lookup : sig
+  type t
+
+  val value : t -> Agent_protocol.Developer_job.t option
+end
+
+(** Exact job presence and bytes tied to a physical Observation. A copied job
+    or bare ID is not a claim basis. *)
+val find_job_exact : Observation.t -> Agent_protocol.Id.Job.t -> Job_lookup.t
+
+module Claim : sig
+  type t
+
+  val owner : t -> Agent_protocol.Execution_owner.developer
+  val job : t -> Agent_protocol.Developer_job.t
+  val attempt : t -> int
+
+  (** Verify the actual issuing Store and retained handle are live, the job is
+      still in the latest Active epoch, and the caller is on the issuing domain
+      BEFORE atomically consuming this token's one-shot entry bit. A foreign or
+      stale handle rejects without consuming it; [Ok false] means it entered
+      once already. A repeated installed reconciliation returns this SAME token.
+      Entry alone is not host permission or capacity authority. [admit] is a
+      trusted, non-yielding local issuer-liveness check evaluated inside the
+      writer after the Store read and immediately before the atomic entry bit;
+      it must not call the Store or perform Eio operations. [on_enter] is a
+      trusted non-yielding marker executed immediately after this call wins the
+      CAS, before any cancellation point, so the physical scope can distinguish
+      its own interrupted entry from a replayed token belonging to another
+      already-live callback. *)
+  val try_enter
+    :  t
+    -> handle:handle
+    -> admit:(unit -> bool)
+    -> on_enter:(unit -> unit)
+    -> (bool, Error.t) result
+
+  (** Trusted scope cleanup before any callback starts. This closes a token
+      consumed by a Store CAS whose acknowledgement/caller was cancelled before
+      callback entry. A token already abandoned or never consumed is harmless.
+      The scope alone proves its callback has not begun. *)
+  val abandon_before_callback : t -> handle:handle -> (unit, Error.t) result
+
+  (** Read actual latest epoch/phase from the issuing Store on every parent
+      effect check. This may yield; callers recheck local proof liveness after
+      it returns. An actor's missed epoch-advance notice cannot validate an
+      old claim. *)
+  val current_for_effect : t -> (bool, Error.t) result
+end
 
 module Prepared : sig
   type t
@@ -144,7 +198,12 @@ val admit_epoch
 
 val owner : handle -> Agent_protocol.Execution_owner.developer
 val capture_fingerprint : handle -> Chatml_source.Digest.t
+val issued_by : t -> handle -> bool
 val observe : handle -> (Observation.t, Error.t) result
+
+(** Read the authoritative latest epoch/phase under the daemon writer. This is
+    an epoch-lifecycle check, not permission to execute a job. *)
+val is_latest_active : handle -> (bool, Error.t) result
 
 (** Foundation checkpoint-only CAS. The prepared value makes no durability
     claim. A successful commit atomically replaces the file and syncs the
@@ -192,6 +251,84 @@ val prepare_terminal_selected
   -> terminal:Agent_protocol.Host_invocation.t
   -> selected:Agent_protocol.Developer_job.t list
   -> (Prepared.t, Error.t) result
+
+(** Bounded claim preparation from an exact queued lookup in the latest
+    Active epoch. A trusted host samples [now], proves due/current authority
+    and acquires the existing shared capacity lease before this CAS. The
+    resulting distinct Prepared changes only this job to Running, increments
+    the attempt once, starts it and clears retry wait. No callback can run yet. *)
+val prepare_job_claim
+  :  handle
+  -> expected:Observation.t
+  -> lookup:Job_lookup.t
+  -> now:Agent_protocol.Timestamp.t
+  -> (Prepared.t, Error.t) result
+
+module Claimed : sig
+  type t
+
+  val claim : t -> Claim.t
+  val observation : t -> Observation.t
+end
+
+type claim_reconciliation =
+  | Claimed of Claimed.t
+  | Claim_absent
+  | Claim_diverged
+
+(** The one document writer and per-run pending barrier durably install Running
+    before minting a physical Claim. Unknown commit/cancellation enters no
+    callback; exact bounded reconciliation can establish Installed. Repeating a
+    settled Prepared returns the same Claim even after unrelated document
+    mutations. Two separate preparations of the same queued observation and
+    timestamp cannot mint two Claims: only the Prepared that attempted the
+    replacement may accept identical installed after-bytes. A proven prewrite
+    conflict retires only its own pending token; attempted or uncertain writes
+    retain the exact Prepared for recovery. *)
+val commit_job_claim : handle -> Prepared.t -> (Claimed.t, Error.t) result
+
+val reconcile_job_claim : handle -> Prepared.t -> (claim_reconciliation, Error.t) result
+
+(** Fresh-Observation CAS for the SAME physical Claim/owner/capture/job/attempt
+    and immutable launch/payload/retry fields; unrelated document revisions do
+    not invalidate claim ownership. Current epoch allows Waiting_permission
+    within the live scope, resumption to Running, then Queued retry,
+    Waiting_completion or terminal. A stale epoch permits terminal bookkeeping
+    only, never another effect/wait/retry. [revoked_after] is selected under the
+    same authoritative read, so a concurrent reset cannot publish a proposed
+    retry or wait; an already issued Prepared is never rewritten. A
+    completed/superseded attempt cannot be overwritten. Waiting_completion later resolves by actor authority, not
+    by entering this claim again. Result/artifact custody remains higher-layer. *)
+val prepare_claimed_transition
+  :  handle
+  -> expected:Observation.t
+  -> claim:Claim.t
+  -> after:Agent_protocol.Developer_job.State.t
+  -> revoked_after:Agent_protocol.Developer_job.State.t
+  -> (Prepared.t, Error.t) result
+
+(** An issued Claim whose callback never entered can be abandoned exactly once
+    by the trusted worker owner. This atomically closes its entry gate before
+    preparing only Cancelled or Interrupted bookkeeping for the same Running
+    attempt. It cannot create a native effect, retry or result. If I/O is
+    uncertain, reconcile the exact Prepared without reopening entry. *)
+val prepare_unentered_claim_cleanup
+  :  handle
+  -> expected:Observation.t
+  -> claim:Claim.t
+  -> status:[ `Cancelled | `Interrupted of string ]
+  -> now:Agent_protocol.Timestamp.t
+  -> (Prepared.t, Error.t) result
+
+(** A first-commit CAS mismatch before any write returns [Prewrite_conflict]
+    and retires only this pending token. An attempted write never takes that
+    path, even if a later observation diverges. *)
+val commit_claimed_transition : handle -> Prepared.t -> (Installed.t, Error.t) result
+
+val reconcile_claimed_transition
+  :  handle
+  -> Prepared.t
+  -> (reconciliation, Error.t) result
 
 (** Foundation checkpoint-only commit. A developer dispatch or selected-job
     Prepared is rejected; it must use [commit_and_settle]. One serialized writer
