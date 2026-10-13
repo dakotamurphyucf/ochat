@@ -33,6 +33,7 @@ let write_temporary path contents ~on_open =
 ;;
 
 exception Unsupported_directory_sync_provider
+exception Before_rename_raised of exn * Stdlib.Printexc.raw_backtrace
 
 let unsupported_directory_sync ~operation ~path =
   Store_error.Io
@@ -55,12 +56,23 @@ let sync_directory_exn path =
            Eio_unix.run_in_systhread (fun () -> Core_unix.fsync unix_descriptor)))
 ;;
 
-let replace_paths ~durability ~path ~temporary_eio ~destination ~directory contents =
+let replace_paths
+      ~durability
+      ~path
+      ~temporary_eio
+      ~destination
+      ~directory
+      ~before_rename
+      contents
+  =
   let owned = ref false in
   Fun.protect
     (fun () ->
        try
          write_temporary temporary_eio contents ~on_open:(fun () -> owned := true);
+         (try before_rename () with
+          | exn ->
+            raise (Before_rename_raised (exn, Stdlib.Printexc.get_raw_backtrace ())));
          Eio.Path.rename temporary_eio destination;
          owned := false;
          (match durability with
@@ -68,6 +80,8 @@ let replace_paths ~durability ~path ~temporary_eio ~destination ~directory conte
           | Flush_file_and_directory -> sync_directory_exn directory);
          Ok ()
        with
+       | Before_rename_raised (exn, backtrace) ->
+         Exn.raise_with_original_backtrace exn backtrace
        | Unsupported_directory_sync_provider ->
          Error (unsupported_directory_sync ~operation:"replace" ~path)
        | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
@@ -87,10 +101,11 @@ let replace_eio ~env ~durability ~path contents =
     ~temporary_eio:(eio_path env (temporary_path path))
     ~destination:(eio_path env path)
     ~directory:(eio_path env (Filename.dirname path))
+    ~before_rename:(fun () -> ())
     contents
 ;;
 
-let replace_in ~directory ~durability ~basename contents =
+let replace_in ?(before_rename = fun () -> ()) ~directory ~durability ~basename contents =
   if
     String.is_empty basename
     || String.mem basename '\000'
@@ -105,6 +120,7 @@ let replace_in ~directory ~durability ~basename contents =
       ~temporary_eio:Eio.Path.(directory / temporary_path basename)
       ~destination:Eio.Path.(directory / basename)
       ~directory
+      ~before_rename
       contents
 ;;
 

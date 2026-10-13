@@ -214,6 +214,54 @@ let admit run owner capture =
   | Error error -> raise_s [%sexp "developer run admit failed", (error : R.Error.t)]
 ;;
 
+let%test_unit
+    "run claim excludes same-run admission and close without blocking other runs"
+  =
+  with_root (fun env _sw _root _session run ->
+    let capture = digest "physical run claim" in
+    let first_owner = owner 0 in
+    let handle, initial = admit run first_owner capture in
+    let cross_domain =
+      Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) (fun () -> R.observe handle)
+      |> run_ok
+    in
+    assert (
+      Int64.equal
+        (R.Checkpoint.revision (R.Observation.checkpoint cross_domain))
+        (R.Checkpoint.revision (R.Observation.checkpoint initial)));
+    let claim = R.Run_claim.acquire ~store:run ~handle |> run_ok in
+    (match R.Run_claim.acquire ~store:run ~handle with
+     | Error R.Error.Conflict -> ()
+     | Ok _ | Error _ -> failwith "duplicate physical run claim was admitted");
+    (match
+       R.admit_epoch
+         run
+         ~owner:(owner 1)
+         ~capture_fingerprint:capture
+         ~previous:(Some initial)
+     with
+     | Error R.Error.Conflict -> ()
+     | Ok _ | Error _ -> failwith "claimed run admitted a new epoch");
+    (match R.close_and_wait run with
+     | Error R.Error.Conflict -> ()
+     | Ok () | Error _ -> failwith "shared Store closed with a live run claim");
+    let unrelated_id = P.Id.Developer_run.of_string "dvr_unrelated_claim" |> ok in
+    ignore
+      (admit run (owner ~run_id:unrelated_id 0) (digest "unrelated run")
+       : R.handle * R.Observation.t);
+    R.Run_claim.release claim |> run_ok;
+    R.Run_claim.release claim |> run_ok;
+    let _next_handle, _next =
+      R.admit_epoch
+        run
+        ~owner:(owner 1)
+        ~capture_fingerprint:capture
+        ~previous:(Some initial)
+      |> run_ok
+    in
+    R.close_and_wait run |> run_ok)
+;;
+
 let%test_unit "post-rename failure requires admission and reconciliation durability" =
   with_temp_directory "ochat-developer-run-uncertain" (fun env temporary ->
     Eio.Switch.run (fun sw ->

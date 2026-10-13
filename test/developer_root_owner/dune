@@ -1,0 +1,31 @@
+(copy_files ../chatml_project_build/support.ml)
+
+(copy_files ../chatml_project_build/fixtures.ml)
+
+(library
+ (name developer_root_owner_test_suite)
+ (modules support fixtures root_owner_tests)
+ (libraries
+  core
+  digestif
+  eio
+  eio_main
+  jsonaf
+  mirage-crypto-rng.unix
+  source
+  chatml_source
+  chatml_prepared_program
+  document_schema
+  chatml_project
+  chatml_catalog
+  chatml_project_build
+  chatml
+  chatml_developer_capture
+  ochat.agent_store
+  ochat.agent_protocol
+  ochat.agent_server
+  ochat.chat_response
+  developer_run_store_test_suite)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
