@@ -28,6 +28,32 @@ Choose the closest anchor holistically; do not add a point per file, layer or ri
 
 The practical size limit is a coherent outcome with bounded contracts and a reviewable validation argument, not a fixed number of features or files. Safety and correctness remain absolute; splitting work never drops acceptance requirements.
 
+## Milestone implementation and integration
+
+For M5, keep implementation PRs in draft while the milestone is being assembled.
+The GitHub workflow skips draft PR jobs; branch pushes outside `main` do not
+start a separate push build. Run the relevant local code, invariant, formatting
+and integration checks before opening each draft, record their exact commands
+and results, and review each change against the engineering standards. A draft
+without CI is not evidence that the change is ready to merge.
+
+Update public interfaces, relevant `docs-src` files, checked examples and
+installed authoring-reference mappings alongside each feature. Local checks of
+changed behavior and reference contracts remain part of that work. Defer the
+full website build, website-wide tests and holistic documentation reconciliation
+to the final milestone ticket, OCH-254. This separates the full publishing review
+from the source documentation needed to explain and validate each implementation.
+
+Keep a dependency-aware stack of reviewed changes and assemble one integration
+PR against current `main` when the milestone is complete. Run the required CI on
+that combined revision before merging. Resolve failures and review any resulting
+changes; do not bypass checks to meet a cycle boundary. Normal post-merge
+publication and deployment qualification still apply. The final ticket reviews
+all delivered features against the website guides, references, examples and
+navigation, and records merge and publication evidence. Add substantial findings
+as separately estimated blockers instead of expanding the final review without
+bound.
+
 ## Cycle estimation calibration
 
 Review at cycle close using the completed cohort. If tickets remain unfinished, publish a provisional review and add a final review when that cohort is complete; do not delay learning or call unfinished work delivered. Record tickets added, removed, split or cancelled, and preserve their original cycle membership in the review. Completion includes required review, tests and merge evidence.

@@ -2,6 +2,12 @@
 
 Status: M5 design v1, 2026-10-13. The REPL language decisions in §4.3 are accepted; service and implementation interfaces below are proposed contracts for review. This document is not evidence that the services exist yet. OCH-130 owns the research; OCH-137, OCH-138 and their implementation children own delivery.
 
+The [authoring service design](chatml-authoring-services.md) owns source context,
+overlay and immutable upload contracts used here. Implementation and validation
+must preserve that boundary rather than invent a second source resolver.
+The [execution trace design](chatml-execution-tracing.md) defines bounded,
+read-only observations of these executions.
+
 ## 1. Purpose and existing boundary
 
 Developer checks, test runs, live runs and a stateful REPL need explicit source, project, environment and input selection. Their identities and lifetimes differ from an agent conversation. A check executes no initializer; an admitted run may cause external effects. Neither an import nor a successful static check grants tool, process, network or provider authority.
@@ -52,7 +58,7 @@ The existing public checker starts a fresh inference machine and type environmen
 
 Extract the graph-copy traversal into a small internal shared helper used by both `Type_probe.create` and REPL candidate preparation, or initially use `Type_probe.create`/`types` and drop the probe after remapping roots. This is one implementation of graph copying, not a second clone algorithm. Budget the total retained roots, cells, edges and traversal work; the current probe uses linear physical-identity searches and its recursive shape traversal needs qualification under REPL-sized bounds. Its `commit` stale-graph and non-cancellable publication behavior must remain unchanged if refactored. `Chatml_type_scheme.transform` is not a replacement because it deliberately shares free cells; `Chatml_type_snapshot.freeze` is an immutable display projection and omits inference levels needed to resume checking.
 
-The candidate clone includes every scheme reachable from the committed `Value_scope` and configured/imported public module exports, using one identity memo across all roots. Clone inference-machine counters. Keep the existing `Type_alias` namespace by value: it is a functional map, source alias conversion has no inference `Var` construction path, and host closed templates reject mutable inference cells. A candidate is actor-owned and tied to one REPL ID, epoch and base revision. No candidate cell may point back to a committed mutable cell. Per-submission span/visibility/configured-annotation tables and callbacks remain invocation-local. Freeze displayed types and checked facts before a later submission can mutate candidate cells.
+The candidate clone includes every scheme reachable from the committed `Value_scope` and configured/imported public module exports, using one identity memo across all roots. Clone inference-machine counters and reserve names already used by admitted configured schemes. The existing instantiator groups generics by string name, so a fresh counter starting at zero could alias unrelated binders even when mutable cells were copied correctly. Preserve grouped quantification and both ordinary and recursive binder namespaces across submissions. Keep the existing `Type_alias` namespace by value: it is a functional map, source alias conversion has no inference `Var` construction path, and host closed templates reject mutable inference cells. A candidate is actor-owned and tied to one REPL ID, epoch and base revision. No candidate cell may point back to a committed mutable cell. Per-submission span/visibility/configured-annotation tables and callbacks remain invocation-local. Freeze displayed types and checked facts before a later submission can mutate candidate cells.
 
 ### 4.2 Statement transaction
 

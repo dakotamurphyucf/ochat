@@ -2,8 +2,9 @@
 
 Status: M5 design, 2026-10-13. This document defines the selected service and
 edit/save/run boundary. It does not describe an implemented remote language
-service. `docs-src/design/chatml-developer-runtime.md` owns test, trace and
-REPL execution after this service has selected an immutable source.
+service. The [developer runtime](chatml-developer-runtime.md) owns test and
+REPL execution over selected immutable sources; the
+[trace design](chatml-execution-tracing.md) owns execution observations.
 
 ## Existing foundation
 
@@ -77,7 +78,7 @@ The design-level types are deliberately separate from wire DTOs:
 module Authoring_context : sig
   type t
   val identity : t -> Context_identity.t
-  val capture : t -> overlays:Overlay_set.t -> (Chatml_prepared_program.t, Error.t) result
+  val inputs : t -> overlays:Overlay_set.t -> (Pending_sources.t, Error.t) result
 end
 
 module Overlay : sig
@@ -107,6 +108,14 @@ resends a complete overlay set; stdio EOF closes its transient context. Closing
 or expiry cancels and joins work before borrowed source-host resources are
 released. A durable uploaded bundle can be rebound after fresh authorization;
 the old overlay lease cannot.
+
+The pure context owns pending effective sources, not a trusted prepared graph.
+The shared closure validator uses the existing project decoder/catalog planner
+and `compose` to validate authorized base sources plus overlays, or an uploaded
+bundle. Exact lock restoration cannot accept changed source bytes. This validator
+does not require upload transport for local overlay analysis, and never fetches
+missing dependencies. Only its validated result reaches compiler analysis or
+separate execution admission.
 
 Initially retain at most the latest immutable analysis result per context under
 an explicit byte bound. Replace it on graph, overlay, environment or host-policy
@@ -238,7 +247,8 @@ chat TUI and future desktop editor consume the same portable core/client API.
 
 OCH-132 and OCH-136 remain **unestimated tracking parents** so their complete
 acceptance is not accidentally narrowed or double-counted. The concrete children
-are: OCH-257 host-owned read-only source context and bounded overlay lease (8);
+are: OCH-277 host read-grant/capture adapter (5) and OCH-278 pure immutable
+context/overlay lifecycle (5), under unestimated tracking parent OCH-257;
 OCH-256 pure position bridge (3); OCH-258 checker/diagnostic projection (5);
 OCH-259 parser-owned ChatMD extraction mapping (5); OCH-260 compiler-owned
 provisional prefix assistance (5); OCH-261 typed protocol/client contract (5);
