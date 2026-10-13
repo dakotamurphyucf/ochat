@@ -85,6 +85,8 @@
     lib/chatml/chatml_value_codec.ml %{dep:../chatml/chatml_value_codec.ml}
     lib/chatml/chatml_compilation.ml %{dep:../chatml/chatml_compilation.ml}
     lib/chatml/chatml_execution.ml %{dep:../chatml/chatml_execution.ml}
+    lib/chatml_trace/chatml_trace.mli %{dep:../chatml_trace/chatml_trace.mli}
+    lib/chatml_trace/chatml_trace.ml %{dep:../chatml_trace/chatml_trace.ml}
     lib/agent_protocol/delivery.ml %{dep:../agent_protocol/delivery.ml}
     lib/agent_protocol/job.ml %{dep:../agent_protocol/job.ml}
     lib/agent_protocol/stored_completion.ml %{dep:../agent_protocol/stored_completion.ml}

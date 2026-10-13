@@ -195,6 +195,11 @@ let rec finish_eval (initial_frames : Frame_env.env) (initial_res : eval_result)
       in
       let child_env = cl.env in
       let child_frames = param_frame :: cl.frames in
+      Chatml_trace.Scope.observe_span
+        ~kind:Chatml_trace.Event.Kind.Call_entered
+        ~source:child_env.source
+        ~span:cl.body.span
+        ~correlation:None;
       let next_res = eval_expr_tail ~tail:true child_env child_frames cl.body in
       loop child_frames next_res
   in
@@ -654,6 +659,11 @@ and select_module_exports ~span ~(origin : env) (env : env) visibility =
 and eval_stmt_with_exports (env : env) (frames : Frame_env.env) (s : resolved_stmt node)
   : string list
   =
+  Chatml_trace.Scope.observe_span
+    ~kind:Chatml_trace.Event.Kind.Statement_entered
+    ~source:env.source
+    ~span:s.span
+    ~correlation:None;
   match s.value with
   | RSLet (pattern, e1) ->
     let value = finish_eval frames (eval_expr env frames e1) in
