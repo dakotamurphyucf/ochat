@@ -6,10 +6,11 @@
 
 (rule
  (alias agent-managed-qualification)
- (targets output.actual)
- ; Target-producing rules are cached even with --force; qualification must run.
- (deps expected.output (universe))
+ ; No inferred targets: ordinary @all builds must not run qualification.
+ ; Declare inputs explicitly because no-infer also disables dependency inference.
+ (deps expected.output main.exe (universe) (sandbox always))
  (action
-  (progn
-   (with-stdout-to %{targets} (run %{exe:main.exe}))
-   (diff expected.output output.actual))))
+  (no-infer
+   (progn
+    (with-stdout-to output.actual (run %{exe:main.exe}))
+    (diff expected.output output.actual)))))

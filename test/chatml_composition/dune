@@ -38,14 +38,16 @@
 
 (rule
  (alias agent-authoring-qualification)
- (targets authoring_qualification.output)
- ; Target-producing rules are cached even with --force; qualification must run.
- (deps authoring_qualification.expected (universe))
+ ; Keep temporary output out of @all; explicit qualification always reruns.
+ ; no-infer requires both input dependencies to be declared explicitly.
+ (deps authoring_qualification.expected authoring_qualification.exe
+  (universe) (sandbox always))
  (action
-  (progn
-   (with-stdout-to authoring_qualification.output
-    (run %{exe:authoring_qualification.exe}))
-   (diff authoring_qualification.expected authoring_qualification.output))))
+  (no-infer
+   (progn
+    (with-stdout-to authoring_qualification.output
+     (run %{exe:authoring_qualification.exe}))
+    (diff authoring_qualification.expected authoring_qualification.output)))))
 
 ; Documentation edits can change reviewed native-reference closure digests.
 ; Keep their contract snapshots and executable examples in the docs-only gate.

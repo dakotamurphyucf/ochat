@@ -1,6 +1,6 @@
 # Managed-session qualification
 
-Run `dune build @agent-managed-qualification` from the repository root to exercise
+Run `dune build --force @agent-managed-qualification` from the repository root to exercise
 complete managed-send and authored-pending workflows. These scenarios retain the
 former default suite's stdio/HTTP checks, real production named-tool deadlines,
 receipt matrices, UTF-8/escaping fragment reconstruction, dispatcher cancellation,
