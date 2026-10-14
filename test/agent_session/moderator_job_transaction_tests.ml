@@ -194,3 +194,55 @@ let%expect_test "moderator saves select jobs before persistence and never reject
     (Revoke_after (staged validated selected persist installed) true)
     |}]
 ;;
+
+let%test_unit "post-stage selection exception aborts the newly staged reservation" =
+  with_actor (fun env _sw actor _writer _backend ->
+    let calls = ref 0 in
+    let selected = native_registry calls ~raises:false in
+    let job = add_claimed_job actor in
+    let staged = ref false in
+    let aborts = ref 0 in
+    let original = Failure "current binding lookup failed" in
+    let cleanup_failure = Failure "physical abort failed" in
+    let host : Jobs.host =
+      { stage =
+          (fun _owner _request ->
+            staged := true;
+            Ok job)
+      ; select = (fun _owner _ids -> failwith "unexpected select")
+      ; abort =
+          (fun _owner id ->
+            assert (Agent_protocol.Id.Job.equal id job.id);
+            Int.incr aborts;
+            raise cleanup_failure)
+      ; get = (fun _owner _id -> failwith "unexpected get")
+      ; materialize = (fun _owner _job -> failwith "unexpected materialize")
+      ; cancel = (fun _owner _id -> failwith "unexpected cancel")
+      }
+    in
+    let service =
+      Jobs.create
+        ~env
+        ~policy:Chat_response.One_off_request.default_policy
+        ~current_capabilities:(fun () -> if !staged then raise original else selected)
+        ~prepare_source:(fun ~binding:_ ~owner:_ ~request:_ ~checkpoint ->
+          checkpoint ();
+          Ok None)
+        ~host
+    in
+    let run () =
+      Jobs.with_scope
+        service
+        ~owner:(Moderator_event (Agent_protocol.Id.Moderator_execution.create ()))
+        ~selected
+        ~error:Fn.id
+        (fun scope ->
+           let transaction = Jobs.moderator_transaction scope in
+           transaction.handlers.start_tool ~name:"read_file" ~input:(`Object []))
+    in
+    (match run () with
+     | exception actual -> assert (phys_equal actual original)
+     | Ok _ | Error _ -> failwith "post-stage exception was lost");
+    assert (Int.equal !aborts 1);
+    assert (Int.equal !calls 0))
+;;

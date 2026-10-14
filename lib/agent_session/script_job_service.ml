@@ -3,6 +3,7 @@ module P = Agent_protocol
 module B = Chat_response.Background_request
 module C = Chat_response.Tool_capability
 module Ops = Chat_response.Background_job_operations
+module Kernel = Script_job_kernel
 
 type host =
   { stage : P.Job.launch_owner -> B.t -> (P.Job.t, P.Error.t) result
@@ -30,16 +31,8 @@ type scope =
   { service : t
   ; owner : P.Job.launch_owner
   ; selected : C.t
-  ; active : bool Atomic.t
-  ; mutable issued : P.Id.Job.t list
-  ; mutable control : Chatml.Chatml_lang.execution_control option
-  ; mutable commit_state : commit_state
+  ; kernel : Kernel.t
   }
-
-and commit_state =
-  | Open
-  | Prepared
-  | Committed
 
 let create ~env ~policy ~current_capabilities ~prepare_source ~host =
   { env; policy; current_capabilities; prepare_source; host }
@@ -76,87 +69,37 @@ let view (job : P.Job.t) =
     ]
 ;;
 
-let check_selection scope =
-  match Atomic.get scope.active, scope.commit_state with
-  | false, _ | true, Committed -> Error "background script scope has ended"
-  | true, (Open | Prepared) ->
-    let open Result.Let_syntax in
-    let names =
-      List.map (C.references scope.selected) ~f:(fun reference -> reference.C.name)
-    in
-    let%bind current =
-      C.select (scope.service.current_capabilities ()) ~names
-      |> Result.map_error ~f:(fun error -> error.C.message)
-    in
-    (match String.equal (C.fingerprint current) (C.fingerprint scope.selected) with
-     | true -> Ok ()
-     | false -> Error "background tool selection changed")
-;;
-
-let check scope =
-  match scope.commit_state with
-  | Open -> check_selection scope
-  | Prepared | Committed -> Error "background script scope has ended"
-;;
-
-let abort scope id =
-  scope.issued <- List.filter scope.issued ~f:(fun other -> not (P.Id.Job.equal id other));
-  Eio.Cancel.protect (fun () -> scope.service.host.abort scope.owner id)
-;;
-
-let abort_all scope = List.iter scope.issued ~f:(abort scope)
+let check_selection scope = Kernel.check_selection scope.kernel
+let check scope = Kernel.check_open scope.kernel
+let abort scope id = Kernel.rollback_start scope.kernel id
 
 let with_scope service ~owner ~selected ~error f =
-  let scope =
-    { service
-    ; owner
-    ; selected
-    ; active = Atomic.make true
-    ; issued = []
-    ; control = None
-    ; commit_state = Open
-    }
-  in
-  Exn.protect
-    ~finally:(fun () -> Atomic.set scope.active false)
-    ~f:(fun () ->
-      let result =
-        try
-          Result.bind
-            (Result.map_error (check scope) ~f:error)
-            ~f:(fun () ->
-              let open Result.Let_syntax in
-              let%bind value = f scope in
-              let%map () =
-                match scope.commit_state with
-                | Committed -> Ok ()
-                | Prepared -> Error (error "background commit was not acknowledged")
-                | Open ->
-                  Eio.Fiber.yield ();
-                  Option.iter scope.control ~f:(fun control -> control.checkpoint ());
-                  check scope |> Result.map_error ~f:error
-              in
-              value)
-        with
-        | exn ->
-          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-          abort_all scope;
-          Stdlib.Printexc.raise_with_backtrace exn backtrace
-      in
-      match result with
-      | Ok _ -> result
-      | Error _ ->
-        abort_all scope;
-        result)
+  Kernel.with_scope
+    ~selected
+    ~current_capabilities:service.current_capabilities
+    ~abort:(service.host.abort owner)
+    ~error
+    (fun kernel -> f { service; owner; selected; kernel })
 ;;
 
 let stage scope request =
   let open Result.Let_syntax in
   let%bind () = check scope in
   Eio.Cancel.protect (fun () ->
-    let%map job = scope.service.host.stage scope.owner request |> message in
-    scope.issued <- job.id :: scope.issued;
-    job.id)
+    let%bind job = scope.service.host.stage scope.owner request |> message in
+    let recorded =
+      try `Returned (Kernel.record_start scope.kernel job.id) with
+      | exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
+    in
+    match recorded with
+    | `Returned (Ok ()) -> Ok job.id
+    | `Returned (Error error) ->
+      scope.service.host.abort scope.owner job.id;
+      Error error
+    | `Raised (exn, backtrace) ->
+      (try scope.service.host.abort scope.owner job.id with
+       | _ -> ());
+      Stdlib.Printexc.raise_with_backtrace exn backtrace)
 ;;
 
 let accessible_job ~check_scope scope id =
@@ -197,11 +140,7 @@ let handlers scope =
               ~policy:scope.service.policy
             |> message
           in
-          let checkpoint () =
-            Eio.Fiber.check ();
-            Option.iter scope.control ~f:(fun control -> control.checkpoint ());
-            Eio.Fiber.check ()
-          in
+          let checkpoint () = Kernel.checkpoint scope.kernel in
           checkpoint ();
           let%bind artifact =
             scope.service.prepare_source ~binding ~owner:scope.owner ~request ~checkpoint
@@ -268,8 +207,7 @@ let handlers scope =
 ;;
 
 let install ?control scope config =
-  scope.control <- control;
-  Ops.install ?control ~handlers:(handlers scope) config
+  Kernel.install ?control scope.kernel ~handlers:(handlers scope) config
 ;;
 
 let moderator_transaction scope : Ops.transaction =
@@ -280,28 +218,15 @@ let moderator_transaction scope : Ops.transaction =
         let%bind () = check scope in
         let%bind () = scope.service.host.select scope.owner ids |> message in
         Eio.Fiber.yield ();
-        let%map () = check scope in
-        scope.commit_state <- Prepared;
-        fun () ->
-          scope.commit_state <- Committed;
-          scope.issued <- [])
+        Kernel.mark_prepared scope.kernel)
   }
 ;;
 
 let select scope effects =
   let open Result.Let_syntax in
-  let%bind () = check scope in
-  let%bind ids, ordinary = Ops.split_starts effects in
+  let%bind ids, ordinary = Kernel.split_starts scope.kernel effects in
   let%map () = scope.service.host.select scope.owner ids |> message in
   ordinary
 ;;
 
-let validate_work scope = function
-  | P.Invocation.Subscription _ -> Error "subscription service is not installed"
-  | Job id ->
-    let open Result.Let_syntax in
-    let%bind () = check scope in
-    (match List.mem scope.issued id ~equal:P.Id.Job.equal with
-     | true -> Ok ()
-     | false -> Error "pending job was not started by this invocation")
-;;
+let validate_work scope work = Kernel.validate_work scope.kernel work
