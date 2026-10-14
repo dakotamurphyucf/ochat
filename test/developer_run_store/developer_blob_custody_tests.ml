@@ -431,3 +431,68 @@ let%expect_test "unscanned developer run document defers session result deletion
     collection gate excluded a new developer root claim until release
     |}]
 ;;
+
+let%test_unit "an intent entry without a run document blocks conversation collection" =
+  with_custody (fun env sw owner runs blobs ->
+    let session =
+      S.create_session
+        owner
+        ~sw
+        ~transaction_id:(P.Id.Transaction.create ())
+        ~actor_lock_nonce:"developer-intent-presence"
+        (session_metadata ())
+      |> ok
+    in
+    let job = session_job session in
+    let prepared =
+      Agent_store.Job_result_store.prepare
+        blobs
+        ~env
+        ~sw
+        ~session
+        ~job
+        ~creating_principal:F.principal_id
+        ~now:timestamp
+        ~max_bytes:4096
+        (P.Completion.Succeeded `Null)
+      |> ok
+    in
+    let reference = Agent_store.Job_result_store.reference prepared in
+    let publisher =
+      Agent_store.Job_result_store.Publisher.create
+        ~env
+        ~blobs
+        ~sw
+        ~session
+        ~principal:F.principal_id
+        ~inline_bytes:0
+        ~max_bytes:4096
+      |> F.ok
+    in
+    R.close_and_wait runs |> F.run_ok;
+    let directory =
+      Agent_store.Data_root.developer_result_intents_path (S.data_root owner)
+    in
+    Eio.Path.save
+      ~create:(`Exclusive 0o600)
+      Eio.Path.(Eio.Stdenv.fs env / Filename.concat directory "orphan.frame")
+      "unscanned";
+    let limits : Agent_store.Job_result_store.Publisher.collection_limits =
+      { max_intents = 8; max_entries = 100; max_bytes = 65536; max_file_bytes = 4096 }
+    in
+    assert (
+      Result.is_error
+        (Agent_store.Job_result_store.Publisher.collect
+           publisher
+           ~jobs:[]
+           ~generation:0
+           ~limits
+           ~with_roots:(fun ~reader:_ ~candidates:_ ~f -> f [])));
+    let marker =
+      Filename.concat
+        (Filename.concat (S.Handle.directory session) "result-preparations")
+        (P.Id.Blob.to_string reference.blob.id ^ ".frame")
+    in
+    assert (Eio.Path.is_file Eio.Path.(Eio.Stdenv.fs env / marker));
+    S.close_session owner session |> ok)
+;;
