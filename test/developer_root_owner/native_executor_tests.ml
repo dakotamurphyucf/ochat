@@ -200,6 +200,7 @@ let with_job_executor
       ?(checkpoint = ignore)
       ?(current_actor = fun root -> O.original_actor root)
       ?(wrap_env = Fn.id)
+      ?(on_store = fun _ _ _ -> ())
       ?on_capacity
       ?(per_session = 2)
       ~run_name
@@ -215,6 +216,7 @@ let with_job_executor
     ~run_name
     ~make_selected
     ~on_store:(fun env session store ->
+      on_store env session store;
       let root = Agent_store.Session_store.data_root session in
       let blobs =
         Blobs.create
@@ -258,6 +260,7 @@ let with_job_executor
 
 let%test_unit "developer root Job scope selects only the returned physical start" =
   let calls = ref 0 in
+  let data_root_path = ref None in
   let after_actor_read = ref ignore in
   let swap_during_read = ref false in
   let swapped = ref false in
@@ -274,6 +277,9 @@ let%test_unit "developer root Job scope selects only the returned physical start
     Operator_authorization.guarded ~principal:other_principal ~is_current:(fun () -> true)
   in
   with_job_executor
+    ~on_store:(fun _ session _ ->
+      data_root_path
+      := Some (Agent_store.Data_root.path (Agent_store.Session_store.data_root session)))
     ~checkpoint:(fun () -> !after_actor_read ())
     ~current_actor:(fun root ->
       if !swap_during_read
@@ -286,9 +292,27 @@ let%test_unit "developer root Job scope selects only the returned physical start
       else O.original_actor root)
     ~run_name:"dvr_script_root_job"
     ~make_selected:(fun _ -> registry ~custom:false calls)
-    (fun ~env:_ ~root ~executor:_ ~handle ~owner:_ ~selected:_ ~jobs ->
+    (fun ~env ~root ~executor:_ ~handle ~owner:_ ~selected:_ ~jobs ->
        let module Runtime = Chatml_host_runtime in
        let module Value = Chatml.Chatml_value_codec in
+       let persisted_job_ids () =
+         let reader =
+           Agent_store.Retention_reader.create
+             ~env
+             ~root:(Option.value_exn !data_root_path)
+             ~max_entries:64
+             ~max_bytes:65536
+           |> ok
+         in
+         R.Result_root.rows_for_inventory
+           (R.Result_root.of_handle handle |> ok)
+           ~reader
+           ~checkpoint:ignore
+         |> ok
+         |> R.Result_root.Inventory_rows.jobs
+         |> List.map ~f:P.Developer_job.id
+         |> List.sort ~compare:P.Id.Job.compare
+       in
        let effects = ref [] in
        let compiled =
          Runtime.compile_script
@@ -445,6 +469,40 @@ let%test_unit "developer root Job scope selects only the returned physical start
              | `String value -> String.equal value "cancelled"
              | _ -> false)
          | _ -> false);
+       let model_compiled =
+         Runtime.compile_script
+           ~surface:Chatml.Chatml_extension_surface.developer_tool_v1
+           ~source:
+             {|let run ctx input = Task.bind(Model.spawn("agent_prompt_v1", input), fun id ->
+  Task.pure(`Complete(input)))|}
+           ()
+         |> Result.ok_or_failwith
+       in
+       let before_model = persisted_job_ids () in
+       let unavailable =
+         Jobs.with_root_action jobs ~phase:R.Checkpoint.Active (fun ~scope ~sw:_ ->
+           let model_config : Runtime.runtime_config =
+             { surface = Chatml.Chatml_extension_surface.developer_tool_v1
+             ; operations = Runtime.default_operations ()
+             }
+           in
+           let model_config = Jobs.Scope.install scope model_config in
+           Runtime.run_entrypoint
+             ~scoped_async_operation:Runtime.Model_spawn
+             model_config
+             model_compiled
+             ~entrypoint:"run"
+             ~arguments:
+               [ Value.import_json `Null
+               ; Value.import_json
+                   (`Object [ "prompt", `String "p"; "input", `String "i" ])
+               ]
+             ()
+           |> Result.map_error ~f:P.Error.invalid_request
+           |> Result.map ~f:(fun value -> value, []))
+       in
+       assert (Result.is_error unavailable);
+       assert (List.equal P.Id.Job.equal before_model (persisted_job_ids ()));
        swap_during_read := true;
        let denied =
          Or_error.try_with (fun () ->
@@ -460,7 +518,14 @@ let%test_unit "developer root Job scope selects only the returned physical start
          | Ok _ -> false))
 ;;
 
-let managed_job_registry env calls =
+let managed_job_registry
+      ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
+      ?(source =
+        "let run ctx input = Task.bind(Job.start_tool(\"read_file\", input), fun id ->\n\
+        \  Task.pure(`Complete(input)))")
+      env
+      calls
+  =
   let module M = Chat_response.Managed_tool_registry in
   let base = registry ~custom:false calls in
   let dir = Eio.Stdenv.cwd env in
@@ -474,15 +539,21 @@ let managed_job_registry env calls =
     Prompt.Chat_markdown.parse_chat_inputs
       ~dir
       ~source_loader
-      {|<tool name="read_file"/>
+      (Printf.sprintf
+         {|<tool name="read_file"/>
 <script id="owned" language="chatml" kind="tool">
-let run ctx input = Task.bind(Job.start_tool("read_file", input), fun id ->
-  Task.pure(`Complete(input)))
+%s
 </script>
 <tool name="summary" type="chatml" script="owned" entrypoint="run" input_schema="input.json" output_schema="output.json"><uses tool="read_file"/></tool>|}
+         source)
   in
   let managed =
-    M.prepare ~env ~owner:"developer-managed-jobs" ~capabilities:base elements
+    M.prepare
+      ~env
+      ~owner:"developer-managed-jobs"
+      ~capabilities:base
+      ~tool_contract
+      elements
     |> Result.map_error ~f:(fun errors ->
       List.map errors ~f:Chatmd_shell_spec.Diagnostic.to_string |> String.concat ~sep:"; ")
     |> Result.ok_or_failwith
@@ -538,6 +609,8 @@ let%test_unit
                      Runtime.default_operations ~handlers:Runtime.default_handlers ()
                  }
                in
+               let installed = install_jobs config in
+               assert (Option.is_none installed.scoped_async_operation);
                let effects = ref [] in
                ignore
                  (EC.Program.run_in_scope
@@ -546,7 +619,8 @@ let%test_unit
                       effects := local_effects;
                       Ok ignore)
                     ~control:None
-                    ~config:(install_jobs config)
+                    ?scoped_async_operation:installed.scoped_async_operation
+                    ~config:installed.config
                     ~entrypoint:"run"
                     ~arguments:[ Value.import_json `Null; Value.import_json (`Object []) ]
                     ()
@@ -592,7 +666,9 @@ let%test_unit
                     Runtime.default_operations ~handlers:Runtime.default_handlers ()
                 }
               in
-              ignore (escaped config : Runtime.runtime_config)))))
+              ignore
+                (escaped config
+                 : Agent_session.Native_tool_invocation.managed_script_install)))))
 ;;
 
 let%test_unit

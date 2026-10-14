@@ -22,14 +22,31 @@ module Scope : sig
     -> checkpoint:(unit -> unit)
     -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result
 
-  (** Install only the existing Job.* grammar while this exact lexical scope
-      and its real root action or native callback are active. The returned
-      config contains no durable capability; escaped handlers reject. *)
+  (** Install the existing Job.* grammar and an expiring Model.spawn handler
+      while this exact lexical scope and its real root action or native callback
+      are active. The model handler uses the shared recipe grammar and the
+      issuing physical Action/Native_terminal admission; it cannot acquire
+      provider authority from a runtime config. Escaped handlers reject.
+      This config alone leaves standalone asynchronous execution disabled. *)
   val install
     :  ?control:Chatml.Chatml_lang.execution_control
     -> t
     -> Chatml_host_runtime.runtime_config
     -> Chatml_host_runtime.runtime_config
+
+  (** The selected managed installer is bound to the actual
+      Managed_tool_registry.owned_prepared implementation by the native policy
+      kernel, never to a caller-supplied target name. Enable only the closed
+      Model_spawn filter when that implementation has Developer_tool_v1 and the
+      physical root pins a provider selection. Otherwise return no async mode.
+      In either case the installed handler repeats lexical and physical
+      admission at effect entry. Both Single and Prepared consume this pair. *)
+  val install_selected
+    :  ?control:Chatml.Chatml_lang.execution_control
+    -> t
+    -> prepared:Chat_response.Extension_compiler.t
+    -> Chatml_host_runtime.runtime_config
+    -> Agent_session.Native_tool_invocation.managed_script_install
 
   (** Separate exact surviving Job.start IDs from ordinary effects using the
       existing Background_job_operations grammar. IDs must have been staged by

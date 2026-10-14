@@ -228,6 +228,14 @@ type owned_managed_dispatch =
       -> ('a, Agent_protocol.Invocation.outcome) result
   }
 
+(** Installed runtime coordinates for one selected managed callback. A scoped
+    asynchronous mode only filters the interpreter's operation table; actual
+    provider, actor, parent and job admission belong to its physical host. *)
+type managed_script_install =
+  { config : Chatml_host_runtime.runtime_config
+  ; scoped_async_operation : Chatml_host_runtime.scoped_async_operation option
+  }
+
 (** A managed selected callback receives a stage operation for the current
     physical native terminal only. It returns IDs admitted through the shared
     capacity ledger, and both this operation and the selected borrow expire
@@ -245,8 +253,7 @@ type selected_managed_dispatch =
            (request:Chat_response.Background_request.t
             -> checkpoint:(unit -> unit)
             -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result)
-      -> install_jobs:
-           (Chatml_host_runtime.runtime_config -> Chatml_host_runtime.runtime_config)
+      -> install_jobs:(Chatml_host_runtime.runtime_config -> managed_script_install)
       -> (validate_work:(Agent_protocol.Invocation.work -> (unit, string) result)
           -> outcome:Agent_protocol.Invocation.outcome
           -> selected_jobs:Agent_protocol.Id.Job.t list
@@ -266,7 +273,9 @@ type selected_managed_dispatch =
     substituted with the child's own cancellation context. *)
 val run_owned_selected
   :  install_jobs:
-       (Chatml_host_runtime.runtime_config -> Chatml_host_runtime.runtime_config)
+       (Chat_response.Extension_compiler.t
+        -> Chatml_host_runtime.runtime_config
+        -> managed_script_install)
   -> owner:Developer_invocation_owner.Selected.t
   -> parent:Developer_invocation_owner.Selected.parent
   -> dispatch:Developer_invocation_owner.Selected.dispatch_storage
