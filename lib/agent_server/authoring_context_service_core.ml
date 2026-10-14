@@ -88,6 +88,7 @@ module Error = struct
     | Resource_limit
     | Invalid_position of P.Authoring.Failure.invalid_position
     | Invalid_request
+    | Analysis_unavailable
     | Storage_unavailable
     | Upload_failure of Upload.Error.t
 
@@ -130,6 +131,8 @@ module Error = struct
         , "invalid authoring position"
         , Some (P.Authoring.Failure.Invalid_position reason) )
       | Invalid_request -> P.Error.Invalid_request, "invalid authoring request", None
+      | Analysis_unavailable ->
+        P.Error.Internal_error, "authoring analysis unavailable", None
       | Storage_unavailable ->
         P.Error.Internal_error, "authoring storage unavailable", None
       | Upload_failure upload_error ->
@@ -200,6 +203,7 @@ module Retained_document_capture = struct
     ; source_digest : Captured.Digest.t
     ; source_bytes : int
     ; capture : Sources.Document_context.Parsed_capture.t
+    ; project_capture : Sources.Document_context.Project_capture.t option
     }
 
   let same_source left right =
@@ -208,16 +212,27 @@ module Retained_document_capture = struct
     && Int.equal (Captured.byte_length left) (Captured.byte_length right)
   ;;
 
-  let prepare ~context ~inputs ~capture ~max_sources ~max_bytes ~checkpoint =
+  let prepare ~context ~inputs ~capture ~metadata ~max_sources ~max_bytes ~checkpoint =
     let source = Ledger.Document.Inputs.source inputs in
     let captured = Sources.Document_context.Parsed_capture.source capture in
     let bundle = Sources.Document_context.Parsed_capture.bundle capture in
-    if max_sources <= 0 || max_bytes <= 0 || not (same_source source captured)
+    if
+      max_sources <= 0
+      || max_bytes <= 0
+      || (not (same_source source captured))
+      || not
+           (match metadata with
+            | None -> true
+            | Some (declaration, project) ->
+              Sources.Document_context.Project_capture.matches
+                project
+                ~parsed:capture
+                ~declaration)
     then Error Error.Stale_source
     else (
       let rec visit sources count bytes =
         match sources with
-        | [] -> Ok ()
+        | [] -> Ok (count, bytes)
         | (_, contents) :: rest ->
           checkpoint ();
           let length = String.length contents in
@@ -226,7 +241,20 @@ module Retained_document_capture = struct
           else visit rest (count + 1) (bytes + length)
       in
       let open Result.Let_syntax in
-      let%map () = visit (Chatmd_source_bundle.sources bundle) 0 0 in
+      let metadata_source =
+        Option.map metadata ~f:(fun (_, project) ->
+          Sources.Document_context.Project_capture.source project)
+      in
+      let bundle_sources = Chatmd_source_bundle.sources bundle in
+      let metadata_bytes =
+        Option.value_map metadata_source ~default:0 ~f:Captured.byte_length
+      in
+      let metadata_count = Option.value_map metadata_source ~default:0 ~f:(fun _ -> 1) in
+      let%map _, _ =
+        if metadata_bytes > max_bytes
+        then Error Error.Resource_limit
+        else visit bundle_sources metadata_count metadata_bytes
+      in
       { context
       ; identity = Ledger.Document.Inputs.identity inputs
       ; generation = Ledger.Document.Inputs.generation inputs
@@ -234,6 +262,7 @@ module Retained_document_capture = struct
       ; source_digest = Captured.digest source
       ; source_bytes = Captured.byte_length source
       ; capture
+      ; project_capture = Option.map metadata ~f:snd
       })
   ;;
 
@@ -255,6 +284,7 @@ module Retained_document_capture = struct
   ;;
 
   let capture t = t.capture
+  let project_capture t = t.project_capture
 
   let same_head left right =
     match left, right with
@@ -292,6 +322,7 @@ type t =
   ; upload : Upload.t option
   ; supplied_document : Supplied_document_policy.t option
   ; selection_policy : Selection_policy.t
+  ; analysis_policy : Project.Policy.t
   ; protocol_limits : P.Authoring.Limits.t
   ; limits : Limits.t
   ; gate : Eio.Mutex.t
@@ -299,6 +330,7 @@ type t =
   ; mutable project_cache : Project.Project_cache.t
   ; mutable document_cache : Document.Document_cache.t
   ; mutable document_capture : Retained_document_capture.t option
+  ; mutable analysis_index : Authoring_analysis_index.t
   ; mutable closed : bool
   ; mutable release_hook : Eio.Switch.hook
   }
@@ -555,6 +587,11 @@ let with_request
 let transition t contexts =
   t.project_cache <- Project.Project_cache.transition t.project_cache ~contexts;
   t.document_cache <- Document.Document_cache.transition t.document_cache ~contexts;
+  t.analysis_index
+  <- Authoring_analysis_index.transition
+       t.analysis_index
+       ~project:t.project_cache
+       ~document:t.document_cache;
   Option.iter t.document_capture ~f:(fun retained ->
     match Ledger.find_document contexts ~identity:retained.identity with
     | Some view
@@ -576,6 +613,9 @@ module Current = struct
     ; expected : P.Authoring.Context.Expected.t
     ; live : bool ref
     ; retained_document_capture : Retained_document_capture.t option
+    ; borrowed_project_cache : Project.Project_cache.t
+    ; borrowed_document_cache : Document.Document_cache.t
+    ; borrowed_analysis_index : Authoring_analysis_index.t
     }
 
   let basis t =
@@ -585,6 +625,19 @@ module Current = struct
   ;;
 
   let expected t = t.expected
+
+  let analysis_index t =
+    if (not !(t.live)) || not (Int.equal t.domain (Stdlib.Domain.self () :> int))
+    then Error Error.Stale_context
+    else Ok t.borrowed_analysis_index
+  ;;
+
+  let analysis_heads t =
+    if (not !(t.live)) || not (Int.equal t.domain (Stdlib.Domain.self () :> int))
+    then Error Error.Stale_context
+    else
+      Ok (t.borrowed_project_cache, t.borrowed_document_cache, t.borrowed_analysis_index)
+  ;;
 
   let project_inputs t ~checkpoint =
     if (not !(t.live)) || not (Int.equal t.domain (Stdlib.Domain.self () :> int))
@@ -608,6 +661,15 @@ module Current = struct
     Option.bind t.retained_document_capture ~f:(fun retained ->
       if Retained_document_capture.matches_current retained ~context:t.context ~inputs
       then Some (Retained_document_capture.capture retained)
+      else None)
+  ;;
+
+  let project_capture t ~checkpoint =
+    let open Result.Let_syntax in
+    let%map inputs = document_inputs t ~checkpoint in
+    Option.bind t.retained_document_capture ~f:(fun retained ->
+      if Retained_document_capture.matches_current retained ~context:t.context ~inputs
+      then Retained_document_capture.project_capture retained
       else None)
   ;;
 
@@ -728,6 +790,12 @@ let create
     if not (P.Id.Server.equal host (Upload.host_id upload))
     then invalid_arg "authoring upload host does not match service host");
   let contexts = Ledger.create ~limits:context_limits in
+  let analysis_index =
+    Authoring_analysis_index.create
+      ~owner_nonce:(P.Id.Transaction.create ())
+      ~max_rows:(Project.Policy.max_results analysis_policy)
+    |> Or_error.ok_exn
+  in
   let service =
     { sw
     ; domain = (Stdlib.Domain.self () :> int)
@@ -737,6 +805,7 @@ let create
     ; upload
     ; supplied_document
     ; selection_policy
+    ; analysis_policy
     ; protocol_limits
     ; limits
     ; gate = Eio.Mutex.create ()
@@ -744,6 +813,7 @@ let create
     ; project_cache = Project.Project_cache.create ~contexts ~policy:analysis_policy
     ; document_cache = Document.Document_cache.create ~policy:analysis_policy
     ; document_capture = None
+    ; analysis_index
     ; closed = false
     ; release_hook = Eio.Switch.null_hook
     }

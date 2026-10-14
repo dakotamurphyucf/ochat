@@ -1,6 +1,6 @@
 (library
  (name authoring_context_service_tests)
- (modules service_tests foundation_tests)
+ (modules service_tests foundation_tests analysis_tests)
  (libraries
   core
   eio

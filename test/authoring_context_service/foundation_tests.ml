@@ -1,9 +1,8 @@
 open! Core
 module P = Agent_protocol
-module Owner = Agent_server.Authoring_context_owner
-module Service = Agent_server.Authoring_context_service_core
-module Methods = Agent_server.Authoring_context_methods
-module Selection = Agent_server.Authoring_script_selection
+module Service = Agent_server.Authoring_context_service
+module Testing = Agent_server.Authoring_context_service.For_testing
+module Selection = Service.Semantic.Script_selection
 module Ledger = Chatml_authoring_context
 
 let ok = function
@@ -11,7 +10,7 @@ let ok = function
   | Error _ -> failwith "unexpected fixture admission failure"
 ;;
 
-let with_supplied_owner f =
+let with_supplied_owner ?(contents = "<developer>draft</developer>") f =
   Eio_main.run (fun env ->
     Eio.Switch.run (fun sw ->
       let host = P.Id.Server.create () in
@@ -52,7 +51,7 @@ let with_supplied_owner f =
                ~max_open_documents:1
                ~max_document_bytes:1024
                ~max_effective_input_bytes:2048
-               ~max_context_source_bytes:2048
+               ~max_context_source_bytes:4096
                ~max_total_source_bytes:4096
              |> Or_error.ok_exn)
           ~analysis_policy:(Service_tests.analysis_policy ())
@@ -60,7 +59,7 @@ let with_supplied_owner f =
             (P.Authoring.Limits.create
                ~max_sources:4
                ~max_source_bytes:1024
-               ~max_context_source_bytes:2048
+               ~max_context_source_bytes:4096
                ~max_request_bytes:4096
                ~max_result_bytes:4096
                ~max_path_candidates:16
@@ -89,87 +88,66 @@ let with_supplied_owner f =
         P.Authoring.Context.Open_request.create_supplied_document
           ~member:"draft.chatmd"
           ~default_environment:None
-          ~contents:"<developer>draft</developer>"
+          ~contents
         |> ok
       in
       let context =
         match
-          Methods.handle_core
+          Service.handle_core
             service
             ~actor
             ~connection
             (P.Authoring.Wire.Request.Context_open request)
         with
         | Ok (Context_open context) -> context
-        | Ok _ | Error _ -> failwith "document context open failed"
+        | Error error ->
+          failwith (P.Error.code_to_string (Service.Error.to_protocol error).code)
+        | Ok _ -> failwith "document context open returned wrong method"
       in
-      f service actor connection (P.Authoring.Context.Expected.of_view context)))
+      f service actor connection (P.Authoring.Context.Expected.of_view context) env))
 ;;
 
 let%test_unit "feature checks, expired Current and final publication head CAS" =
-  with_supplied_owner (fun service actor connection expected ->
+  with_supplied_owner (fun service actor connection expected _env ->
     let published = ref 0 in
-    let borrowed = ref None in
     let invoke
-          ?(feature = Service.Selected_feature.Semantic)
-          ?(after = Fn.id)
+          ?(feature = Testing.Semantic)
+          ?(after = fun _ -> ())
           ?(final_check = fun () -> Ok ())
           ()
       =
-      Owner.with_current
+      Testing.with_publication_probe
         ~feature
         ~final_check
-        ~publish:(fun value ->
-          incr published;
-          Ok value)
+        ~publish:(fun () -> incr published)
         service
         ~actor
         ~connection
         ~expected
         ~checkpoint:ignore
-        ~f:(fun current ~checkpoint:_ ->
-          borrowed := Some current;
-          after ();
-          Ok 7)
+        ~after_borrow:after
     in
-    [%test_eq: int] (invoke () |> ok) 7;
+    let expired = invoke () |> ok in
+    assert (Testing.expired_borrow_rejects_inputs_index_and_capture expired);
     [%test_eq: int] !published 1;
-    (match !borrowed with
-     | Some current ->
-       (match Service.Current.document_inputs current ~checkpoint:ignore with
-        | Error Service.Error.Stale_context -> ()
-        | Ok _ | Error _ -> failwith "expired Current remained usable")
-     | None -> failwith "request did not borrow Current");
-    let contexts () = Service.Project.Project_cache.contexts service.project_cache in
-    let changed_project_head () =
-      Service.with_gate service (fun () ->
-        service.project_cache
-        <- Service.Project.Project_cache.transition
-             service.project_cache
-             ~contexts:(contexts ()))
-    in
-    let changed_document_head () =
-      Service.with_gate service (fun () ->
-        service.document_cache
-        <- Service.Document.Document_cache.transition
-             service.document_cache
-             ~contexts:(contexts ()))
-    in
     List.iter
-      [ "project", changed_project_head; "document", changed_document_head ]
-      ~f:(fun (name, after) ->
-        match invoke ~after () with
-        | Error Service.Error.Stale_context -> ()
+      [ "project", Testing.Project_cache
+      ; "document", Testing.Document_cache
+      ; "analysis index", Testing.Analysis_index
+      ]
+      ~f:(fun (name, head) ->
+        match invoke ~after:(fun probe -> Testing.replace_head probe head |> ok) () with
+        | Error Testing.Stale_context -> ()
         | Ok _ | Error _ -> failwith (name ^ " cache head published stale result"));
-    (match invoke ~final_check:(fun () -> Error Service.Error.Stale_context) () with
-     | Error Service.Error.Stale_context -> ()
+    (match invoke ~final_check:(fun () -> Error Testing.Stale_context) () with
+     | Error Testing.Stale_context -> ()
      | Ok _ | Error _ -> failwith "rejected final selection published");
-    (match invoke ~feature:Service.Selected_feature.Bundle_upload () with
-     | Error Service.Error.Unselected_feature -> ()
+    (match invoke ~feature:Testing.Bundle_upload () with
+     | Error Testing.Unselected_feature -> ()
      | Ok _ | Error _ -> failwith "unselected sibling feature borrowed context");
     [%test_eq: int] !published 1;
-    [%test_eq: int] (invoke ~feature:Service.Selected_feature.Lexical () |> ok) 7;
-    [%test_eq: int] (invoke ~feature:Service.Selected_feature.Assistance () |> ok) 7;
+    ignore (invoke ~feature:Testing.Lexical () |> ok : Testing.expired_borrow);
+    ignore (invoke ~feature:Testing.Assistance () |> ok : Testing.expired_borrow);
     [%test_eq: int] !published 3)
 ;;
 

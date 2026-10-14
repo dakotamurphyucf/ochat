@@ -134,6 +134,12 @@ module Document_cache = struct
     else Ok { t with results = Map.set t.results ~key:identity ~data:candidate }
   ;;
 
+  let retire t ~identity =
+    if Map.mem t.results identity
+    then { t with results = Map.remove t.results identity }
+    else t
+  ;;
+
   let current t ~contexts ~identity =
     match Map.find t.results identity, Context.find_document contexts ~identity with
     | Some candidate, Some view when same_view (Candidate.stamp candidate) view ->
