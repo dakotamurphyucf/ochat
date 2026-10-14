@@ -211,49 +211,8 @@ Current principal authorization is verified by the host service on every connect
 
 ## 6. Verification and implementation split
 
-The strongest local regression sequence starts with a weakly typed reference. A failed *typecheck* that tentatively constrains it must leave the prior graph unchanged, including cell sharing, cycles, free-variable level/equality and namespace keys. A successfully typed statement that mutates it and then fails at runtime must leave its compatible constraint and value but publish none of its failed names. Add a project main with a visible side effect: creating the REPL, an incomplete parse, and a failed typecheck must leave that effect absent. A successfully checked statement that reads a configured value dependency must initialize only that dependency once, without evaluating project main; a type-only/open edge must remain inert. Add closure rebinding across submissions, failed recursive/module/open publication, source-owner preservation, configured imports, inference cancellation, multiline continuation, explicit Task driving, stub/live admission, permission denial, delayed-binding revocation, output limits, cancellation after effects, stale revisions and reconnect. Compare committed type roots before/after a rejected check with a private canonical graph witness plus behavioral expect tests; do not expose raw inference refs publicly. Test actual local Eio/Notty input, accurate OCH-135 ChatML highlighting, visible type/value, a cancellable wait, reset/close and reconnect. Each implementation ticket runs focused local tests and updates affected `docs-src` contracts; the comprehensive website checks belong to the final milestone ticket.
+The strongest local regression sequence starts with a weakly typed reference. A failed *typecheck* that tentatively constrains it must leave the prior graph unchanged, including cell sharing, cycles, free-variable level/equality and namespace keys. A successfully typed statement that mutates it and then fails at runtime must leave its compatible constraint and value but publish none of its failed names. Add a project main with a visible side effect: creating the REPL, an incomplete parse, and a failed typecheck must leave that effect absent. A successfully checked statement that reads a configured value dependency must initialize only that dependency once, without evaluating project main; a type-only/open edge must remain inert. Add closure rebinding across submissions, failed recursive/module/open publication, source-owner preservation, configured imports, inference cancellation, multiline continuation, explicit Task driving, stub/live admission, permission denial, delayed-binding revocation, output limits, cancellation after effects, stale revisions and reconnect. Compare committed type roots before/after a rejected check with a private canonical graph witness plus behavioral expect tests; do not expose raw inference refs publicly. Test actual local Eio/Notty input, accurate ChatML highlighting, visible type/value, a cancellable wait, reset/close and reconnect. Each change needs focused local tests and updated `docs-src` contracts. Integrated qualification also checks the complete documentation website.
 
-The implementation tickets are these nonoverlapping, independently verifiable outcomes; OCH-137 and OCH-138 are tracking parents with no duplicate estimate:
+The implementation has separate compiler, execution and presentation boundaries. Shared type-graph copying preserves cycles, aliases and free-cell constraints; persistent statement typing builds on that foundation to remap `Value_scope` roots and commit inferred state. Incremental module initialization then provides the dependency registry used by the evaluator without running the project entrypoint. Each boundary needs its own regression evidence, while higher-level checks should exercise their composition without duplicating the lower-level test matrices.
 
-| Ticket | Parent | Outcome | Points | Primary dependency |
-| --- | --- | --- | ---: | --- |
-| OCH-265 | OCH-137 | Immutable capture/check and deterministic fixture runner | 5 | OCH-129 identity and OCH-130 decisions |
-| OCH-287 | OCH-137 | Owner-neutral native invocation, developer actor ledger and shared admission policy | 8 | OCH-265 capture identity |
-| OCH-288 | OCH-137 | Coordination parent for shared developer job scheduling and result custody | — | OCH-287 |
-| OCH-289 | OCH-288 | Owner-tagged job domain and one shared capacity ledger | 5 | OCH-287 |
-| OCH-290 | OCH-288 | Coordination parent for durable run owner and atomic staging | — | OCH-289 |
-| OCH-297 | OCH-290 | Durable daemon-owned run checkpoint and final document foundation | 5 | OCH-289 |
-| OCH-298 | OCH-290 | Coordination parent for selected job and invocation actor transitions | — | OCH-297 |
-| OCH-303 | OCH-298 | One durable invocation and selected-job document transaction with bounded capacity handoff | 8 | OCH-297 |
-| OCH-304 | OCH-298 | Physically claimed developer worker and job-parent proof | 8 | OCH-303 |
-| OCH-305 | OCH-298 | Coordination parent for live selected-job actor and native invocation integration | — | OCH-303 and OCH-304 |
-| OCH-312 | OCH-305 | Physical developer root owner, sealed job staging and shared-capacity lifecycle | 8 | OCH-303 and OCH-304 |
-| OCH-313 | OCH-305 | Tracking parent for native terminal coordination and selected-policy integration | — | OCH-312 |
-| OCH-320 | OCH-313 | Bounded root/native terminal coordinator and exact handoff retention | 8 | OCH-312 |
-| OCH-321 | OCH-313 | Coordination parent for selected native policy and live job-parent integration | — | OCH-320 |
-| OCH-322 | OCH-321 | Selected native policy and exact dispatch/terminal recovery | 8 | OCH-320 |
-| OCH-323 | OCH-321 | Physical claimed job-parent proof at native and managed effect entry | 8 | OCH-322 and OCH-304 |
-| OCH-291 | OCH-288 | Developer result custody, disclosure and artifact lifecycle | 8 | OCH-298 |
-| OCH-292 | OCH-288 | Coordination parent for the full shared script-job adapter outcome (original estimate 5 before split) | — | OCH-289 and OCH-298 |
-| OCH-333 | OCH-292 | Owner-neutral lexical handler kernel and lossless conversation adapter | 5 | OCH-289 and OCH-298 |
-| OCH-334 | OCH-292 | Physical developer stage, select, read and cancel adapter | 8 | OCH-333, OCH-291 and OCH-323 |
-| OCH-335 | OCH-292 | Tracking parent for authentic Model.spawn admission (original estimate 5 before split) | — | OCH-350–OCH-353; execution remains OCH-293 |
-| OCH-350 | OCH-335 | Actor-bound provider selection and shared recipe grammar | 8 | OCH-334 |
-| OCH-351 | OCH-335 | Bounded durable external model intent and Store transition | 5 | OCH-350 |
-| OCH-352 | OCH-335 | Physical root/native call-boundary admission and capacity custody | 8 | OCH-351 |
-| OCH-353 | OCH-335 | Reusable script Model.spawn adapter for developer execution | 5 | OCH-352 |
-| OCH-293 | OCH-288 | One scheduler for conversation and developer jobs | 8 | OCH-298, OCH-291 and OCH-292 |
-| OCH-266 | OCH-137 | Developer run lifecycle, live host admission, cancellation and receipt integration | 8 | OCH-265, OCH-287 and OCH-288 |
-| OCH-267 | OCH-137 | Portable HTTP/stdio run service, bounded inspection and authoring bundle upload/run integration | 5 | OCH-266 and OCH-129 bundle custody |
-| OCH-268 | OCH-138 | Extract/bound shared type-graph copy from `Type_probe`, preserving probe behavior | 3 | OCH-127 correctness audit |
-| OCH-283 | OCH-138 | Bounded production-grammar whole-submission Complete/Need_more/Rejected admission | 3 | OCH-268 |
-| OCH-285 | OCH-138 | Pinned configured REPL scope, distinct import/use provenance and current reference validation | 5 | OCH-283 |
-| OCH-286 | OCH-138 | Incremental canonical module-root checking through the shared dependency driver | 5 | OCH-285 |
-| OCH-269 | OCH-138 | Persistent statement typing and candidate namespace commit rules | 8 | OCH-268, OCH-283, OCH-285 and OCH-286 |
-| OCH-276 | OCH-138 | Session-owned checked value-dependency initialization and inert REPL bootstrap | 5 | OCH-269 and OCH-286 |
-| OCH-270 | OCH-138 | Incremental evaluator, staged bindings, explicit Task drive and partial-effect semantics | 8 | OCH-276 and developer host admission |
-| OCH-271 | OCH-138 | REPL actor, revision/epoch/idempotency lifecycle and portable HTTP/stdio service | 5 | OCH-270 and OCH-267 |
-| OCH-275 | OCH-255 prerequisite | Shared Notty/TextMate renderer extraction, bounded safe theme resolver and chat compatibility | 5 | Existing chat TUI pipeline |
-| OCH-255 | M5 terminal client | Usable standalone Eio/Notty terminal REPL client with accurate ChatML/ChatMD highlighting | 5 | OCH-271, OCH-275 and OCH-135 |
-
-OCH-268 has its own meaningful validation: probe cycle/share/free-cell/commit regressions and a bounded clone API test. OCH-269 owns `Value_scope` root remapping, inferred-state machine snapshots, source-owned annotations and actual statement commit behavior. This avoids implementing graph copying twice or counting it in both tickets. OCH-276 owns the incremental initializer boundary because the existing linked runtime entry evaluation cannot safely serve as REPL bootstrap; OCH-270 consumes its registry and does not reimplement it. OCH-275 owns renderer extraction; OCH-255 retains the broader interactive terminal scope in its existing 5-point estimate. Delivery still requires working test runs and a working REPL; this design alone does not close those outcomes.
+Live execution combines the captured source and selected compiler contract with the host's native invocation admission, shared job capacity, durable ownership and result disclosure. The portable run and REPL services must expose that lifecycle to clients. The terminal REPL must use the shared Eio/Notty rendering components, with interactive input, cancellation and reconnect checks in addition to renderer tests. Delivery requires working test runs and an interactive REPL; this design alone does not establish completion.
