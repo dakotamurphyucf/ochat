@@ -22,6 +22,7 @@ open! Core
 
 type t
 type source
+type loader = t
 
 (** [filesystem ~root] preserves ordinary filesystem traversal behavior. *)
 val filesystem : root:Eio.Fs.dir_ty Eio.Path.t -> t
@@ -54,6 +55,7 @@ module Generated_error : sig
   type t =
     | Invalid_reference
     | Source_unavailable
+    | Limit_exceeded
 
   (** Recognizes only the private checked-generated-loader failure constructor.
       Arbitrary caller/checkpoint exceptions are not classified by message. *)
@@ -144,4 +146,73 @@ val retained_filesystem
   -> owner:Chatml_local_source.t
   -> checkpoint:(unit -> unit)
   -> t
+
+module Generated_retained : sig
+  module Limits : sig
+    type t
+
+    (** The same three ceilings later supplied to the generated source-bundle
+        validator. Admission rejects values outside its supported hard caps;
+        the loader enforces them before each new member read or retention.
+        This source-loader-local type avoids a dependency on the bundle module. *)
+    val create
+      :  max_source_bytes:int
+      -> max_bundle_bytes:int
+      -> max_files:int
+      -> t Or_error.t
+
+    val max_source_bytes : t -> int
+    val max_bundle_bytes : t -> int
+    val max_files : t -> int
+  end
+
+  (** Borrowed checked-generated loader for one authorized document capture.
+      The current editor root is supplied as exact immutable bytes and is
+      never read from [owner]. Every other member resolves under the SAME
+      generated portable-path rules as [generated_filesystem_checked] and is
+      read descriptor-relative through the retained no-follow [owner]. The
+      [root] Eio path is used only for parser display provenance and is never
+      read by this loader. Absolute/escaping paths and external sources reject.
+      Relative agent references are discovered by the same generated resolver,
+      not by a parallel parser. *)
+  type t
+
+  val create
+    :  root:Eio.Fs.dir_ty Eio.Path.t
+    -> owner:Chatml_local_source.t
+    -> root_file:Source.Portable_path.t
+    -> root_contents:string
+    -> limits:Limits.t
+    -> before_import_read:(member:Source.Portable_path.t -> int)
+    -> on_import_read:(member:Source.Portable_path.t -> contents:string -> unit)
+    -> checkpoint:(unit -> unit)
+    -> t Or_error.t
+
+  (** Only the checked Generated parser borrows this loader, synchronously
+      while the source-host owner still holds its joined root lease. It must
+      not retain the loader or use it after that callback returns. The
+      [before_import_read] runs before a NEW native member read and returns that
+      read's remaining host byte maximum. The host owns one charged outer
+      capture request; the generated parser separately charges at most1024
+      individual reads, including cache hits.
+      A negative value is typed [Limit_exceeded]. Root bytes count as the first
+      bundle member, though they are never reread or charged as a host import.
+      Before each new member read, the loader checks the file count, portable
+      path/collision rules, remaining aggregate bundle bytes, per-source bound
+      and caller's host bound, without first allocating a source copy. Exact
+      successful bytes are cached on first read, including the root override;
+      later reads of that member return those same bytes and still incur the
+      generated parser's read/work charges, never a changed host observation.
+      [on_import_read] runs only after an exact successful bounded native
+      read. Callback/cancellation exceptions retain identity. *)
+  val root_file : t -> string
+
+  val limits : t -> Limits.t
+  val loader : t -> loader
+
+  (** Exact successfully observed root/import bytes, for checked bundle
+      construction after the parser has finished. Calling this early grants
+      no publication authority and cannot return bytes that were not read. *)
+  val captured_sources : t -> (string * string) list
+end
 ```

@@ -61,3 +61,21 @@ fiber-local activity stack keeps that guard through nested calls. Expected error
 values; caller cancellation and unexpected checkpoint exceptions preserve
 their original identity. Trusted operator policy callbacks are pure and
 non-yielding; their exceptions also preserve identity and backtrace.
+
+An authorized host-member document can explicitly capture its ChatMD import
+closure for analysis. The current editor revision supplies the root bytes, so
+unsaved edits are parsed without rereading the root file. The existing Generated
+parser and source resolver discover imports, and the same retained local source
+owner reads each new member descriptor-relative with no symlink following. A
+loader-local cache returns the first exact bytes on repeated reads; parser read
+and work limits still count those reads. Source, total bundle byte, file and
+portable path/collision limits are installed before any new member is read or
+retained, then the immutable bundle is validated again. The host also applies
+its remaining per-context read allowance. The result pairs the genuine parser
+inputs with the captured source IDs and bytes that supplied them; it retains no
+owner, loader or further read capability. A missing import, malformed document,
+limit or cancellation returns no partial closure. Supplied documents have no
+host import grant. The language-service handler must adopt a fresh closure only
+on explicit analysis or rebuild; ordinary prefix and query requests use a
+previously adopted immutable closure and never reread imports. The captured
+files are exact individual observations, not an atomic filesystem snapshot.

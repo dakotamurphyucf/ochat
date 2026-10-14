@@ -92,6 +92,8 @@ module Error : sig
     | Local of Chatml_local_source.Error.t
     | Project of Chatml_project_prepare.Error.t
     | Source_capture of Core.Error.t
+    | Document_parser of Prompt.Chat_markdown.Generated.error
+    | Document_bundle_limit
 
   (** Finite safe projection. Root errors expose only their finite code;
       project errors use a coarse tag. Neither exposes native paths, exception
@@ -281,6 +283,29 @@ val read_root_member
 module Document_context : sig
   type t
 
+  module Parsed_capture : sig
+    (** Immutable exact root/import closure plus the genuine same-run parsed
+        receipt. It retains no root owner, actor, loader, request callback or
+        future file-read capability. The selected compiler Build and script
+        membership still belong to the semantic authoring service. *)
+    type t
+
+    val source : t -> Chatml_source.t
+    val bundle : t -> Chatmd_source_bundle.t
+    val parsed : t -> Prompt.Chat_markdown.Generated.receipt
+
+    (** Exact same-run parser Root/Import inputs associated with the captured
+        sources that supplied their authored bytes. Root retains [source]; each
+        imported source uses this context's admitted source-owner namespace and
+        its validated portable captured member. Every input in the genuine
+        parsed root and imported agents is represented once. At most1024 input
+        visits and8MiB of byte comparisons are admitted before the source
+        association is published. The association
+        grants no native read; consumers still compare parser bytes/digest and
+        current document generation before source-owned projections. *)
+    val input_sources : t -> (Chatmd_parser_input.t * Chatml_source.t) list
+  end
+
   (** Uses the same host-owned context activity gate, actor/root rechecks,
       attempt/read quotas, cancellation stack and joined switch lifetime as
       project source contexts. Nested A -> B -> A work must still see A as
@@ -296,6 +321,35 @@ module Document_context : sig
 
   val origin : t -> Origin.t
   val source_id : t -> Chatml_source.Id.t
+
+  (** Explicitly rebuild an authorized imported closure for [source]'s exact
+      current unsaved editor bytes. Reject another source ID or original member
+      label, supplied-document origin, foreign domain, closed/revoked context,
+      or exhausted context request/read allowance before parser allocation.
+      Borrow the SAME configured root/Chatml_local_source under the existing
+      joined context operation; every discovered import consumes its retained
+      no-follow read/byte policy before allocation. The root itself comes only
+      from [source], never from a fresh host read. Count parser work, source
+      paths/files/bytes and retained strings under one validated generated
+      bundle limit installed on the loader before parsing; host import-read
+      allowance is intersected before each new native read. The root input's
+      actual captured source ID and portable member must equal this context's
+      original source ID/member; [dir] is never used as identity or authority.
+      Recheck actor/root after waits before returning. No partial capture is
+      returned on expected failure or cancellation. This operation does not
+      alter the editor ledger or assert a multi-file atomic filesystem read.
+      The caller checks its exact context generation before and after this
+      operation and publishes the immutable result under its own CAS. Later
+      Prefix/Query must not call it. [dir] is a capability-valued path used
+      solely for parser display provenance; this operation never reads it or
+      uses it as an alternative import resolver. *)
+  val capture_parser_bundle
+    :  t
+    -> actor:Operator_authorization.t
+    -> source:Chatml_source.t
+    -> dir:Eio.Fs.dir_ty Eio.Path.t
+    -> checkpoint:(unit -> unit)
+    -> (Parsed_capture.t, Error.t) Result.t
 
   (** Recheck the original actor, current request actor, retained root or
       supplied-byte policy, host lifetime and creating domain without reading

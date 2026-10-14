@@ -588,6 +588,26 @@ module Chat_markdown : sig
       -> checkpoint:(unit -> unit)
       -> before_read:(member:string -> byte_length:int -> unit)
       -> (receipt, error) Result.t
+
+    (** Explicit host-authorized closure capture, using the SAME checked
+        generated parser/lexer, path resolver, read/agent observers and fixed
+        parser depth/token/read caps as [parse_source_bundle]. It borrows one
+        [Source_loader.Generated_retained] whose current root bytes are the
+        unsaved editor revision and whose imports use the retained no-follow
+        source owner. The loader enforces its validated source/bundle byte and
+        file limits before each new native read or retained copy; the resulting
+        immutable bundle is revalidated with those SAME limits before return.
+        Repeat parser reads see the first captured bytes and still consume
+        parser work. A malformed/missing import, resource limit or cancellation
+        publishes no
+        partial receipt/bundle. This capture runs only on explicit Analyze or
+        refresh/rebuild; Prefix/Query consume its immutable bundle and never
+        call this method. The caller still checks original/current actor,
+        root grant and exact editor context generation before/after this call. *)
+    val capture_retained_bundle
+      :  Source_loader.Generated_retained.t
+      -> checkpoint:(unit -> unit)
+      -> (receipt * Chatmd_source_bundle.t, error) Result.t
   end
 
   (** Recheck the parsed declaration registry, including IDs, handler kinds,

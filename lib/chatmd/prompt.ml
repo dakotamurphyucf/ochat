@@ -2406,7 +2406,16 @@ module Chat_markdown = struct
     let parsed t = t.parsed
     let read_members t = t.read_members
 
-    let parse_bundle ~checked ~dir bundle ~checkpoint ~before_read =
+    let parse_bundle
+          ~checked
+          ~dir
+          ~root_file
+          ~max_source_bytes
+          ~source_lengths
+          ~loader
+          ~checkpoint
+          ~before_read
+      =
       let reject problem message =
         if checked then raise (Rejected problem) else failwith message
       in
@@ -2416,28 +2425,16 @@ module Chat_markdown = struct
       let queued = Queue.create ()
       and seen = Hash_set.create (module String)
       and read_members = Hash_set.create (module String) in
-      let source_lengths =
-        if checked
-        then
-          Some
-            (Chatmd_source_bundle.sources bundle
-             |> List.map ~f:(fun (member, text) ->
-               checkpoint ();
-               member, String.length text)
-             |> String.Map.of_alist_exn)
-        else None
-      in
-      let loader =
-        if checked
-        then
-          Source_loader.generated_filesystem_checked
-            ~root:dir
-            ~sources:(Chatmd_source_bundle.sources bundle)
-        else Chatmd_source_bundle.loader bundle ~root:dir
-      in
       let loader =
         match source_lengths with
-        | None -> loader
+        | None when not checked -> loader
+        | None ->
+          Source_loader.with_read_limit loader ~max_bytes:(fun _source ->
+            checkpoint ();
+            if !reads >= 1024 || !bytes > 8 * 1024 * 1024
+            then raise (Rejected Parser_limit);
+            incr reads;
+            (8 * 1024 * 1024) - !bytes)
         | Some source_lengths ->
           Source_loader.with_read_limit loader ~max_bytes:(fun source ->
             let member = Source_loader.relative_path source in
@@ -2454,11 +2451,11 @@ module Chat_markdown = struct
       let loader =
         loader
         |> Source_loader.with_observer ~f:(fun source text ->
-          if not checked
+          if (not checked) || Option.is_none source_lengths
           then (
-            incr reads;
+            if not checked then incr reads;
             if !reads > 1024 || String.length text > (8 * 1024 * 1024) - !bytes
-            then failwith "generated source expansion limit exceeded";
+            then reject Parser_limit "generated source expansion limit exceeded";
             bytes := !bytes + String.length text);
           Hash_set.add read_members (Source_loader.relative_path source))
         |> Source_loader.with_agent_observer ~f:(fun source ->
@@ -2509,10 +2506,7 @@ module Chat_markdown = struct
         Hash_set.add seen file;
         let source = Source_loader.root loader ~file |> Result.ok_or_failwith in
         let content =
-          Source_loader.read_bounded
-            ~max_bytes:(Chatmd_source_bundle.limits bundle).max_source_bytes
-            loader
-            source
+          Source_loader.read_bounded ~max_bytes:max_source_bytes loader source
           |> Result.ok_or_failwith
         in
         let owner =
@@ -2560,7 +2554,7 @@ module Chat_markdown = struct
           ~source_loader:loader
           ~dir
       in
-      let parsed_root = parse_file (Chatmd_source_bundle.root_file bundle) in
+      let parsed_root = parse_file root_file in
       let agents = ref [] in
       while not (Queue.is_empty queued) do
         let file = Queue.dequeue_exn queued in
@@ -2583,12 +2577,76 @@ module Chat_markdown = struct
     ;;
 
     let parse_source_bundle ~dir bundle ~checkpoint ~before_read =
-      try Ok (parse_bundle ~checked:true ~dir bundle ~checkpoint ~before_read) with
+      let sources = Chatmd_source_bundle.sources bundle in
+      let source_lengths =
+        sources
+        |> List.map ~f:(fun (member, text) ->
+          checkpoint ();
+          member, String.length text)
+        |> String.Map.of_alist_exn
+      in
+      let loader = Source_loader.generated_filesystem_checked ~root:dir ~sources in
+      try
+        Ok
+          (parse_bundle
+             ~checked:true
+             ~dir
+             ~root_file:(Chatmd_source_bundle.root_file bundle)
+             ~max_source_bytes:(Chatmd_source_bundle.limits bundle).max_source_bytes
+             ~source_lengths:(Some source_lengths)
+             ~loader
+             ~checkpoint
+             ~before_read)
+      with
       | Rejected error -> Error error
       | exn ->
         (match Source_loader.Generated_error.of_exn exn with
          | Some Invalid_reference -> Error Invalid_source
          | Some Source_unavailable -> Error Source_unavailable
+         | Some Limit_exceeded -> Error Parser_limit
+         | None ->
+           let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+           Stdlib.Printexc.raise_with_backtrace exn backtrace)
+    ;;
+
+    let capture_retained_bundle retained ~checkpoint =
+      let module Retained = Source_loader.Generated_retained in
+      let limits = Retained.limits retained in
+      let bundle_limits : Chatmd_source_bundle.limits =
+        { max_source_bytes = Retained.Limits.max_source_bytes limits
+        ; max_bundle_bytes = Retained.Limits.max_bundle_bytes limits
+        ; max_files = Retained.Limits.max_files limits
+        }
+      in
+      try
+        let receipt =
+          parse_bundle
+            ~checked:true
+            ~dir:(Source_loader.root_dir (Retained.loader retained))
+            ~root_file:(Retained.root_file retained)
+            ~max_source_bytes:bundle_limits.max_source_bytes
+            ~source_lengths:None
+            ~loader:(Retained.loader retained)
+            ~checkpoint
+            ~before_read:(fun ~member:_ ~byte_length:_ -> ())
+        in
+        match
+          Chatmd_source_bundle.create
+            ~limits:bundle_limits
+            ~checkpoint
+            ~root_file:(Retained.root_file retained)
+            ~sources:(Retained.captured_sources retained)
+            ()
+        with
+        | Ok bundle -> Ok (receipt, bundle)
+        | Error _ -> Error Parser_limit
+      with
+      | Rejected error -> Error error
+      | exn ->
+        (match Source_loader.Generated_error.of_exn exn with
+         | Some Invalid_reference -> Error Invalid_source
+         | Some Source_unavailable -> Error Source_unavailable
+         | Some Limit_exceeded -> Error Parser_limit
          | None ->
            let backtrace = Stdlib.Printexc.get_raw_backtrace () in
            Stdlib.Printexc.raise_with_backtrace exn backtrace)
@@ -2599,7 +2657,10 @@ module Chat_markdown = struct
     Generated.parse_bundle
       ~checked:false
       ~dir
-      bundle
+      ~root_file:(Chatmd_source_bundle.root_file bundle)
+      ~max_source_bytes:(Chatmd_source_bundle.limits bundle).max_source_bytes
+      ~source_lengths:None
+      ~loader:(Chatmd_source_bundle.loader bundle ~root:dir)
       ~checkpoint:Eio.Fiber.check
       ~before_read:(fun ~member:_ ~byte_length:_ -> ())
     |> Generated.parsed
