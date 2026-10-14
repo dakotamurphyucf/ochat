@@ -43,6 +43,43 @@ val check_parent
 
 val claim : active -> Agent_store.Developer_run_store.Claim.t
 
+module Parent : sig
+  type t
+
+  (** These are projections of the physically entered Claim, not authority
+      supplied by the invocation request or a decoded Running row. *)
+  val job_id : t -> Agent_protocol.Id.Job.t
+
+  val attempt : t -> int
+  val nested_depth : t -> int
+
+  (** Verify exact owner/capture and current durable Claim/epoch through the
+      issuing Store. This can yield. A later effect must also call [check_now]
+      after its last yielding permission, root-current and Store operation. *)
+  val check
+    :  t
+    -> owner:Agent_protocol.Execution_owner.developer
+    -> capture_fingerprint:Chatml_source.Digest.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Nonyielding physical issuer, entered callback fiber/domain, live bit,
+      unchanged local epoch and exact Claim metadata check. This is the final
+      local proof after [check], not a replacement for its Store read. *)
+  val check_now
+    :  t
+    -> owner:Agent_protocol.Execution_owner.developer
+    -> capture_fingerprint:Chatml_source.Digest.t
+    -> (unit, Agent_protocol.Error.t) result
+end
+
+(** Mint a parent only from this actual issuer's live worker callback. No
+    record, job ID or saved result can construct one. [owns_parent] lets the
+    host compare a retained nested ancestor to its own worker issuer without
+    exposing that issuer or weakening the proof. *)
+val parent : t -> active -> (Parent.t, Agent_protocol.Error.t) result
+
+val owns_parent : t -> Parent.t -> bool
+
 (** Verify an actual new retained Store handle for the same host/run/principal
     and exact next durable epoch. Revoke old active proofs for new effects;
     their physical workers may still complete exact-attempt bookkeeping. An

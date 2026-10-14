@@ -766,7 +766,11 @@ let%test_unit "nested native terminal settles before its live root resumes" =
              O.with_native_callback scope ~dispatched (fun ~sw:_ ->
                incr callbacks;
                let id =
-                 O.Native_terminal.stage_background scope ~request ~checkpoint:ignore
+                 O.Native_terminal.stage_background
+                   scope
+                   ~request
+                   ~checkpoint:ignore
+                   ~check_parent_now:(fun () -> Ok ())
                  |> ok
                in
                child := Some id;
@@ -881,7 +885,11 @@ let%test_unit "nested native terminal settles before its live root resumes" =
             ignore
               (O.with_native_callback scope ~dispatched:sealed_dispatch (fun ~sw:_ ->
                  let id =
-                   O.Native_terminal.stage_background scope ~request ~checkpoint:ignore
+                   O.Native_terminal.stage_background
+                     scope
+                     ~request
+                     ~checkpoint:ignore
+                     ~check_parent_now:(fun () -> Ok ())
                    |> ok
                  in
                  child := Some id;

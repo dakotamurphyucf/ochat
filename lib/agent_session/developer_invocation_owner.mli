@@ -11,6 +11,7 @@ type active
 type parent =
   | Root
   | Child of active
+  | Job_child of Developer_job_scope.Parent.t
 
 type storage =
   { read :
@@ -67,13 +68,13 @@ val check_invocation
   -> Agent_protocol.Host_invocation.t
   -> (unit, Agent_protocol.Error.t) result
 
-(* [Root] admits no invocation/job parent. [Child active] requires exactly that
-    live direct parent from this physical issuer, not merely an equal owner
-    coordinate, and a no-later deadline. [active] is issued only after the
-    parent's durable Dispatching CAS. It expires when that callback returns,
-    including inherited child fibers; ordinary cross-domain use rejects without
-    an explicit trusted handoff. A parent_job requires OCH-288's typed live
-    job-owner proof; this foundation rejects it. *)
+(* [Root] admits no invocation/job parent. [Job_child] requires an actual
+   entered worker Claim from this host/run/capture, no parent invocation, and
+   exactly its job ID in context.parent_job. [Child active] requires this
+   issuer's live direct parent, exact parent_invocation and its inherited job
+   ID (if any). Its deadline may not exceed the direct parent's. [active] is
+   issued only after durable Dispatching and expires when its callback joins;
+   an inherited Claim cannot outlive either physical parent. *)
 
 (** First durable atomic CAS saves Dispatching before the callback. The callback
     runs outside storage serialization and must use the common native admission
@@ -111,6 +112,7 @@ module Selected : sig
   type parent =
     | Root
     | Child of active
+    | Job_child of Developer_job_scope.Parent.t
 
   type 'selection completion
 
@@ -144,16 +146,25 @@ module Selected : sig
   val ceiling : t -> Chat_response.Tool_capability.t
   val same_issuer : t -> t -> bool
 
+  (** The exact physical job ancestor of this entered selected callback. A
+      nested Child inherits it; a root-origin callback returns [None]. The
+      returned proof remains bound to the issuing worker and its live scope. *)
+  val inherited_job_parent
+    :  t
+    -> active
+    -> (Developer_job_scope.Parent.t option, Agent_protocol.Error.t) result
+
   val check_invocation
     :  t
     -> parent:parent
     -> Agent_protocol.Host_invocation.t
     -> (unit, Agent_protocol.Error.t) result
 
-  (** Nonyielding physical issuer, same-domain live direct parent and deadline
-      check. The host calls this after any yielding current/permission read and
-      together with its own nonyielding root effect witness immediately before
-      effect entry. It does not replace authenticated [check_invocation]. *)
+  (** Nonyielding physical issuer, live direct invocation, inherited Claim
+      local state and actual direct-parent deadline check. The host calls this
+      after its last yielding Claim read, with its nonyielding root witness and
+      Claim local checks, immediately before effect entry. It does not replace
+      authenticated [check_invocation] or the Claim's durable read. *)
   val check_parent_now
     :  t
     -> parent:parent
@@ -166,7 +177,11 @@ module Selected : sig
       cancellation are captured in an immutable completion; the host retains
       that completion's terminal on the physical scope before the bracket can
       exit. A failed/uncertain save never triggers handler retry after recovery.
-      [frozen] reads the issuing scope's already sealed outcome/selection without
+      [parent_live_now] is a trusted nonyielding check of the actual enclosing
+      callback Switch and cancellation context; it is stored on the physical
+      active proof. A protected child fiber cannot borrow an active whose
+      parent Switch was cancelled while joining children. There is no
+      default-true selected path. [frozen] reads the issuing scope's already sealed outcome/selection without
       yielding. Once sealed, even a later exception or child-join failure cannot
       replace Complete/Pending plus jobs with Fail/None. The original exception
       remains available for rethrow after terminal bookkeeping. *)
@@ -175,6 +190,7 @@ module Selected : sig
     -> parent:parent
     -> invocation:Agent_protocol.Host_invocation.t
     -> dispatch:dispatch_storage
+    -> parent_live_now:(unit -> bool)
     -> frozen:(unit -> (Agent_protocol.Invocation.outcome * 'selection) option)
     -> (active:active
         -> dispatched:Agent_protocol.Host_invocation.t

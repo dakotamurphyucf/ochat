@@ -5,8 +5,10 @@ module I = P.Invocation
 module R = Agent_store.Developer_run_store
 module O = Agent_server.Developer_root_owner
 module X = Agent_server.Developer_native_executor
+module D = Agent_session.Developer_invocation_owner.Selected
 module C = Chat_response.Tool_capability
 module T = Root_owner_tests
+module Scope = Agent_session.Developer_job_scope
 
 let ok = T.ok
 
@@ -98,10 +100,44 @@ let invocation owner selected reference ~custom =
   |> ok
 ;;
 
+let stage_root_job env root selected =
+  let prepared =
+    Chat_response.One_off_script.prepare_in_domain
+      ~env
+      ~capabilities:selected
+      ~tools:[]
+      ~source:"let main input = Task.pure(input)"
+      ()
+    |> ok
+  in
+  let request =
+    Chat_response.Background_request.script
+      ~prepared
+      ~input:`Null
+      ~policy:Chat_response.One_off_request.default_policy
+    |> ok
+  in
+  O.with_root_action root ~phase:R.Checkpoint.Active (fun ~action ~sw:_ ->
+    let id = O.Action.stage_background action ~request ~checkpoint:ignore |> ok in
+    let selected = O.Action.seal action ~selected:[ id ] |> ok in
+    Ok (id, selected))
+  |> ok
+;;
+
+let succeeded_claim claim =
+  let state = P.Developer_job.state (R.Claim.job claim) in
+  { state with
+    status = P.Job.Succeeded
+  ; completed_at = Some (T.now ())
+  ; result = Some (P.Developer_job.Result_value.Inline (P.Completion.Succeeded `Null))
+  }
+;;
+
 let with_executor
       ?(checkpoint = ignore)
       ?(on_current = ignore)
       ?(wrap_env = Fn.id)
+      ?(now = T.now)
       ~run_name
       ~make_selected
       f
@@ -127,9 +163,7 @@ let with_executor
         ~max_quarantined_workers:2
       |> Or_error.ok_exn
     in
-    let owners =
-      O.Registry.create ~sw ~store ~capacity:(T.capacity ()) ~now:T.now ~limits
-    in
+    let owners = O.Registry.create ~sw ~store ~capacity:(T.capacity ()) ~now ~limits in
     let root =
       O.Registry.admit
         owners
@@ -239,6 +273,527 @@ let%test_unit "selected native Function and Custom share durable dispatch policy
           | Resolved (Fail _) -> ()
           | _ -> failwith "replaced selected capability reached a native effect");
          assert (Int.equal !calls 1)))
+;;
+
+let%test_unit "claimed worker alone admits job child and inherited nested ancestry" =
+  let parent_calls = ref 0 in
+  let child_calls = ref 0 in
+  let invoke_nested = ref (fun () -> ()) in
+  let retained_active = ref None in
+  let nested_id = ref None in
+  with_executor
+    ~run_name:"dvr_claimed_native_parent"
+    ~make_selected:(fun _env ->
+      pair_registry ~on_parent:(fun () -> !invoke_nested ()) parent_calls child_calls)
+    (fun ~env ~root ~executor ~handle ~owner ~selected ->
+       let job_id = stage_root_job env root selected in
+       let parent_binding = C.find selected ~name:"parent_tool" |> ok in
+       let parent_reference = C.reference parent_binding in
+       let child_binding = C.find selected ~name:"child_tool" |> ok in
+       let child_reference = C.reference child_binding in
+       let parent_invocation =
+         let admitted = invocation owner selected parent_reference ~custom:false in
+         H.create_developer { (H.context admitted) with parent_job = Some job_id } |> ok
+       in
+       (invoke_nested
+        := fun () ->
+             let admitted = invocation owner selected child_reference ~custom:false in
+             let child =
+               H.create_developer
+                 { (H.context admitted) with
+                   parent_invocation = Some (H.context parent_invocation).id
+                 ; parent_job = Some job_id
+                 }
+               |> ok
+             in
+             nested_id := Some (H.context child).id;
+             ignore
+               (X.run_child
+                  executor
+                  ~managed:None
+                  ~reference:child_reference
+                  ~invocation:child
+                  ~authorize:(fun _ _ -> Ok ())
+                  ~prepare_output:(fun _ -> Ok (`String "child"))
+                : (H.t, P.Error.t) result));
+       let expected = R.observe handle |> ok in
+       let completed =
+         O.with_claimed_job
+           root
+           ~expected
+           ~lookup:(R.find_job_exact expected job_id)
+           (fun ~active ~sw:_ ->
+              retained_active := Some active;
+              let ancestor = O.job_parent root active |> ok in
+              assert (P.Id.Job.equal (Scope.Parent.job_id ancestor) job_id);
+              assert (Int.equal (Scope.Parent.attempt ancestor) 1);
+              assert (Int.equal (Scope.Parent.nested_depth ancestor) 0);
+              assert (
+                Result.is_error
+                  (Scope.Parent.check_now
+                     ancestor
+                     ~owner:(T.owner "dvr_foreign_claim" 0)
+                     ~capture_fingerprint:
+                       (Chatml_developer_capture.fingerprint (O.capture root))));
+              assert (
+                Result.is_error
+                  (Scope.Parent.check_now
+                     ancestor
+                     ~owner
+                     ~capture_fingerprint:
+                       (Chatml_source.Digest.of_contents
+                          "foreign capture"
+                          ~checkpoint:ignore)));
+              let bad_context =
+                H.create_developer
+                  { (H.context parent_invocation) with
+                    id = P.Id.Invocation.create ()
+                  ; parent_job = Some (P.Id.Job.create ())
+                  }
+                |> ok
+              in
+              assert (
+                Result.is_error
+                  (X.run_job_child
+                     executor
+                     ~active
+                     ~managed:None
+                     ~reference:parent_reference
+                     ~invocation:bad_context
+                     ~authorize:(fun _ _ -> Ok ())
+                     ~prepare_output:(fun _ -> Ok (`String "parent"))));
+              assert (Int.equal !parent_calls 0);
+              let terminal =
+                X.run_job_child
+                  executor
+                  ~active
+                  ~managed:None
+                  ~reference:parent_reference
+                  ~invocation:parent_invocation
+                  ~authorize:(fun _ _ -> Ok ())
+                  ~prepare_output:(fun _ -> Ok (`String "parent"))
+                |> ok
+              in
+              assert (
+                I.equal_status
+                  (H.status terminal)
+                  (Resolved (Complete (`String "parent"))));
+              Ok (succeeded_claim (Scope.claim active)))
+         |> ok
+         |> Option.value_exn
+       in
+       assert (Int.equal !parent_calls 1);
+       assert (Int.equal !child_calls 1);
+       (match (P.Developer_job.state completed).status with
+        | P.Job.Succeeded -> ()
+        | _ -> failwith "claimed worker did not durably complete");
+       let observed = R.observe handle |> ok in
+       let child_id = Option.value_exn !nested_id in
+       assert (
+         Option.is_some (R.Invocation_lookup.prior (R.find_invocation observed child_id)));
+       let expired = Option.value_exn !retained_active in
+       let retry =
+         H.create_developer
+           { (H.context parent_invocation) with id = P.Id.Invocation.create () }
+         |> ok
+       in
+       assert (
+         Result.is_error
+           (X.run_job_child
+              executor
+              ~active:expired
+              ~managed:None
+              ~reference:parent_reference
+              ~invocation:retry
+              ~authorize:(fun _ _ -> Ok ())
+              ~prepare_output:(fun _ -> Ok (`String "parent"))));
+       assert (Int.equal !parent_calls 1))
+;;
+
+let%test_unit "job child permission wait rechecks selection and real deadline" =
+  let expired_at = P.Timestamp.of_string "2026-10-13T00:00:02Z" |> ok in
+  let deadline = P.Timestamp.of_string "2026-10-13T00:00:01Z" |> ok in
+  List.iter [ `Revoke; `Expire ] ~f:(fun mode ->
+    let calls = ref 0 in
+    let clock = ref (T.now ()) in
+    with_executor
+      ~now:(fun () -> !clock)
+      ~run_name:
+        (match mode with
+         | `Revoke -> "dvr_job_revoke"
+         | `Expire -> "dvr_job_expire")
+      ~make_selected:(fun _env -> registry ~custom:false calls)
+      (fun ~env ~root ~executor ~handle ~owner ~selected ->
+         let job_id = stage_root_job env root selected in
+         let reference = List.hd_exn (C.references selected) in
+         let admitted = invocation owner selected reference ~custom:false in
+         let admitted =
+           H.create_developer
+             { (H.context admitted) with
+               parent_job = Some job_id
+             ; deadline = Some deadline
+             }
+           |> ok
+         in
+         let expected = R.observe handle |> ok in
+         ignore
+           (O.with_claimed_job
+              root
+              ~expected
+              ~lookup:(R.find_job_exact expected job_id)
+              (fun ~active ~sw:_ ->
+                 let terminal =
+                   X.run_job_child
+                     executor
+                     ~active
+                     ~managed:None
+                     ~reference
+                     ~invocation:admitted
+                     ~authorize:(fun _ _ ->
+                       Eio.Fiber.yield ();
+                       match mode with
+                       | `Revoke -> O.narrow_selection root ~names:[]
+                       | `Expire ->
+                         clock := expired_at;
+                         Ok ())
+                     ~prepare_output:(fun _ -> Ok (`String "private"))
+                   |> ok
+                 in
+                 (match H.status terminal with
+                  | Resolved (Fail _) -> ()
+                  | _ -> failwith "expired or revoked job parent reached native effect");
+                 Ok (succeeded_claim (Scope.claim active)))
+            |> ok
+            : P.Developer_job.t option);
+         assert (Int.equal !calls 0)))
+;;
+
+let%test_unit "cancelled claimed parent cannot start an effect while child joins" =
+  let calls = ref 0 in
+  let original = Failure "claimed parent cancelled before child joined" in
+  let ready, ready_u = Eio.Promise.create () in
+  let release, release_u = Eio.Promise.create () in
+  let child_denied = ref false in
+  with_executor
+    ~run_name:"dvr_cancelled_job_parent"
+    ~make_selected:(fun _env -> registry ~custom:false calls)
+    (fun ~env ~root ~executor ~handle ~owner ~selected ->
+       let job_id = stage_root_job env root selected in
+       let reference = List.hd_exn (C.references selected) in
+       let admitted = invocation owner selected reference ~custom:false in
+       let admitted =
+         H.create_developer { (H.context admitted) with parent_job = Some job_id } |> ok
+       in
+       let expected = R.observe handle |> ok in
+       (match
+          Eio.Cancel.sub (fun cancellation ->
+            O.with_claimed_job
+              root
+              ~expected
+              ~lookup:(R.find_job_exact expected job_id)
+              (fun ~active ~sw ->
+                 Eio.Fiber.fork ~sw (fun () ->
+                   Eio.Cancel.protect (fun () ->
+                     Eio.Promise.resolve ready_u ();
+                     Eio.Promise.await release;
+                     child_denied
+                     := Result.is_error
+                          (X.run_job_child
+                             executor
+                             ~active
+                             ~managed:None
+                             ~reference
+                             ~invocation:admitted
+                             ~authorize:(fun _ _ -> Ok ())
+                             ~prepare_output:(fun _ -> Ok (`String "private")))));
+                 Eio.Promise.await ready;
+                 Eio.Cancel.protect (fun () ->
+                   Eio.Cancel.cancel cancellation original;
+                   Eio.Promise.resolve release_u ());
+                 Ok (succeeded_claim (Scope.claim active))))
+        with
+        | exception Eio.Cancel.Cancelled actual -> assert (phys_equal actual original)
+        | Ok _ | Error _ -> failwith "claimed worker cancellation identity was lost");
+       assert !child_denied;
+       assert (Int.equal !calls 0))
+;;
+
+let%test_unit "cancelled native parent switch rejects protected nested child" =
+  let original = Failure "native parent switch failed before child join" in
+  let ready, ready_u = Eio.Promise.create () in
+  let release, release_u = Eio.Promise.create () in
+  let child_denied = ref false in
+  let effect_calls = ref 0 in
+  with_executor
+    ~run_name:"dvr_native_parent_switch"
+    ~make_selected:(fun _env -> registry ~custom:false effect_calls)
+    (fun ~env:_ ~root ~executor:_ ~handle:_ ~owner ~selected ->
+       let reference = List.hd_exn (C.references selected) in
+       let admitted = invocation owner selected reference ~custom:false in
+       let child =
+         let initial = invocation owner selected reference ~custom:false in
+         H.create_developer
+           { (H.context initial) with parent_invocation = Some (H.context admitted).id }
+         |> ok
+       in
+       let issuer =
+         D.create
+           ~owner
+           ~capture_fingerprint:(Chatml_developer_capture.fingerprint (O.capture root))
+           ~ceiling:(O.native_ceiling root)
+           ~selected:(fun () -> O.native_selected root)
+           ~current:(fun ~owner:_ ~capture_fingerprint:_ ->
+             Result.map (O.current root) ~f:ignore)
+           ~now:(fun () -> O.native_now root)
+         |> ok
+       in
+       let scope, completion =
+         O.with_native_registration root ~invocation:admitted (fun ~scope ->
+           let dispatch : D.dispatch_storage =
+             { read = O.Native_terminal.read_dispatch scope
+             ; save_dispatch = O.Native_terminal.save_dispatch scope
+             }
+           in
+           let completion =
+             D.with_invocation
+               issuer
+               ~parent:D.Root
+               ~invocation:admitted
+               ~dispatch
+               ~parent_live_now:(fun () -> O.Native_terminal.effect_parent_live_now scope)
+               ~frozen:(fun () -> None)
+               (fun ~active ~dispatched ->
+                  O.with_native_callback scope ~dispatched (fun ~sw ->
+                    Eio.Fiber.fork ~sw (fun () ->
+                      Eio.Cancel.protect (fun () ->
+                        Eio.Promise.resolve ready_u ();
+                        Eio.Promise.await release;
+                        child_denied
+                        := Result.is_error
+                             (D.check_parent_now issuer ~parent:(D.Child active) child);
+                        if not !child_denied then Int.incr effect_calls));
+                    Eio.Promise.await ready;
+                    Eio.Cancel.protect (fun () ->
+                      Eio.Switch.fail sw original;
+                      Eio.Promise.resolve release_u ());
+                    Ok (I.Complete `Null, None)))
+             |> ok
+           in
+           O.Native_terminal.remember_failure
+             scope
+             ~terminal:(D.Completion.terminal completion)
+           |> ok;
+           Ok (scope, completion))
+         |> ok
+       in
+       assert !child_denied;
+       assert (Int.equal !effect_calls 0);
+       (match D.Completion.dispatch completion with
+        | Installed _ -> ()
+        | Awaiting_reconciliation -> failwith "failed native parent lost durable dispatch");
+       let terminal_revision = O.Native_terminal.resolve_remembered scope |> ok in
+       match
+         D.Completion.finish completion ~settlement:(Terminal_saved terminal_revision)
+       with
+       | exception actual -> assert (phys_equal actual original)
+       | Ok _ | Error _ -> failwith "failed native parent lost exception identity")
+;;
+
+let%test_unit "job expiry during managed preparation cannot reserve child capacity" =
+  let module M = Chat_response.Managed_tool_registry in
+  let managed_definition = ref None in
+  let clock = ref (T.now ()) in
+  let expired_at = P.Timestamp.of_string "2026-10-13T00:00:02Z" |> ok in
+  let deadline = P.Timestamp.of_string "2026-10-13T00:00:01Z" |> ok in
+  let denied = ref 0 in
+  with_executor
+    ~now:(fun () -> !clock)
+    ~run_name:"dvr_job_prepare_expiry"
+    ~make_selected:(fun env ->
+      let managed, selected = managed_registry env in
+      managed_definition := Some managed;
+      selected)
+    (fun ~env ~root ~executor ~handle ~owner ~selected ->
+       let job_id = stage_root_job env root selected in
+       let managed = Option.value_exn !managed_definition in
+       let binding = C.find selected ~name:"summary" |> ok in
+       let reference = C.reference binding in
+       let admitted = invocation owner selected reference ~custom:false in
+       let admitted =
+         H.create_developer
+           { (H.context admitted) with
+             implementation_revision = M.execution_revision managed binding |> ok
+           ; parent_job = Some job_id
+           ; deadline = Some deadline
+           }
+         |> ok
+       in
+       let prepared =
+         Chat_response.One_off_script.prepare_in_domain
+           ~env
+           ~capabilities:selected
+           ~tools:[]
+           ~source:"let main input = Task.pure(input)"
+           ()
+         |> ok
+       in
+       let request =
+         Chat_response.Background_request.script
+           ~prepared
+           ~input:`Null
+           ~policy:Chat_response.One_off_request.default_policy
+         |> ok
+       in
+       let service : Agent_session.Native_tool_invocation.selected_managed_dispatch =
+         { definition = managed
+         ; current = (fun () -> selected)
+         ; run =
+             (fun _execution _borrowed ~effect_entry ~stage_background _continuation ->
+               match effect_entry () with
+               | Error _ -> failwith "managed job child expired before preparation"
+               | Ok () ->
+                 (match
+                    stage_background ~request ~checkpoint:(fun () ->
+                      if P.Timestamp.compare !clock deadline < 0
+                      then (
+                        Eio.Fiber.yield ();
+                        clock := expired_at))
+                  with
+                  | Error _ ->
+                    Int.incr denied;
+                    Error
+                      (I.Fail
+                         { code = "expired"
+                         ; message = ""
+                         ; retryable = false
+                         ; details = `Null
+                         })
+                  | Ok _ -> failwith "expired claimed parent reserved child work"))
+         }
+       in
+       let expected = R.observe handle |> ok in
+       ignore
+         (O.with_claimed_job
+            root
+            ~expected
+            ~lookup:(R.find_job_exact expected job_id)
+            (fun ~active ~sw:_ ->
+               let terminal =
+                 X.run_job_child
+                   executor
+                   ~active
+                   ~managed:(Some service)
+                   ~reference
+                   ~invocation:admitted
+                   ~authorize:(fun _ _ -> Ok ())
+                   ~prepare_output:(function
+                     | Openai.Responses.Tool_output.Output.Text value ->
+                       Ok (`String value)
+                     | _ -> Error (P.Error.invalid_request "unexpected managed result"))
+                 |> ok
+               in
+               (match H.status terminal with
+                | Resolved (Fail _) -> ()
+                | _ -> failwith "managed preparation ignored claimed-parent expiry");
+               Ok (succeeded_claim (Scope.claim active)))
+          |> ok
+          : P.Developer_job.t option);
+       assert (Int.equal !denied 1);
+       ignore (stage_root_job env root selected : P.Id.Job.t))
+;;
+
+let%test_unit "managed job child stages exact claimed attempt and nesting depth" =
+  let module M = Chat_response.Managed_tool_registry in
+  let managed_definition = ref None in
+  let selected_child = ref None in
+  with_executor
+    ~run_name:"dvr_job_managed_ancestry"
+    ~make_selected:(fun env ->
+      let managed, selected = managed_registry env in
+      managed_definition := Some managed;
+      selected)
+    (fun ~env ~root ~executor ~handle ~owner ~selected ->
+       let parent_id = stage_root_job env root selected in
+       let managed = Option.value_exn !managed_definition in
+       let binding = C.find selected ~name:"summary" |> ok in
+       let reference = C.reference binding in
+       let admitted = invocation owner selected reference ~custom:false in
+       let admitted =
+         H.create_developer
+           { (H.context admitted) with
+             implementation_revision = M.execution_revision managed binding |> ok
+           ; parent_job = Some parent_id
+           }
+         |> ok
+       in
+       let prepared =
+         Chat_response.One_off_script.prepare_in_domain
+           ~env
+           ~capabilities:selected
+           ~tools:[]
+           ~source:"let main input = Task.pure(input)"
+           ()
+         |> ok
+       in
+       let request =
+         Chat_response.Background_request.script
+           ~prepared
+           ~input:`Null
+           ~policy:Chat_response.One_off_request.default_policy
+         |> ok
+       in
+       let service : Agent_session.Native_tool_invocation.selected_managed_dispatch =
+         { definition = managed
+         ; current = (fun () -> selected)
+         ; run =
+             (fun _execution _borrowed ~effect_entry ~stage_background continuation ->
+               effect_entry () |> ok;
+               let id = stage_background ~request ~checkpoint:ignore |> ok in
+               selected_child := Some id;
+               continuation
+                 ~validate_work:(fun _ -> Ok ())
+                 ~outcome:(I.Complete (`Object []))
+                 ~selected_jobs:[ id ])
+         }
+       in
+       let expected = R.observe handle |> ok in
+       ignore
+         (O.with_claimed_job
+            root
+            ~expected
+            ~lookup:(R.find_job_exact expected parent_id)
+            (fun ~active ~sw:_ ->
+               let terminal =
+                 X.run_job_child
+                   executor
+                   ~active
+                   ~managed:(Some service)
+                   ~reference
+                   ~invocation:admitted
+                   ~authorize:(fun _ _ -> Ok ())
+                   ~prepare_output:(function
+                     | Openai.Responses.Tool_output.Output.Text value ->
+                       Ok (`String value)
+                     | _ -> Error (P.Error.invalid_request "unexpected managed result"))
+                 |> ok
+               in
+               if
+                 not
+                   (I.equal_status (H.status terminal) (Resolved (Complete (`Object []))))
+               then failwith (Sexp.to_string_hum (I.sexp_of_status (H.status terminal)));
+               Ok (succeeded_claim (Scope.claim active)))
+          |> ok
+          : P.Developer_job.t option);
+       let child_id = Option.value_exn !selected_child in
+       let child = R.find_job (R.observe handle |> ok) child_id |> Option.value_exn in
+       let launch = P.Developer_job.launch child in
+       (match P.Developer_job.Launch.parent launch with
+        | Invocation id when P.Id.Invocation.equal id (H.context admitted).id -> ()
+        | Run_root | Invocation _ -> failwith "child launch lost invocation parent");
+       (match P.Developer_job.Launch.parent_job launch with
+        | Some (id, attempt) when P.Id.Job.equal id parent_id && Int.equal attempt 1 -> ()
+        | None | Some _ -> failwith "child launch lost claimed attempt");
+       assert (Int.equal (P.Developer_job.Launch.nested_depth launch) 1))
 ;;
 
 let%test_unit "managed selected IDs survive Complete and staging expires with callback" =
