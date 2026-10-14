@@ -256,6 +256,8 @@ let%expect_test "daemon startup failure releases store and acquired operator imm
                      ~dispatch:(fun ~actor:_ _ ->
                        failwith "operator dispatch unreachable")
                      ~receipt:(fun ~actor:_ _ -> failwith "operator receipt unreachable")
+                     ~current_model_bridge:(fun () ->
+                       Error Agent_protocol.Provider_operator.Error.Unsupported)
                      ~close:(fun () -> Int.incr closed))
               in
               let options =

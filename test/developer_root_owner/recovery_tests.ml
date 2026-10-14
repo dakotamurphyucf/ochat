@@ -126,6 +126,7 @@ let%test_unit "startup retains exact terminal selection and blocks revoked succe
           ~registry
           ~selected:registry
           ~job_policy:Chat_response.One_off_request.default_policy
+          ~selected_model:None
           ~handle
           ~workspace_conflict_domain:"root-recovery"
           ~recover
@@ -139,6 +140,7 @@ let%test_unit "startup retains exact terminal selection and blocks revoked succe
              ~registry
              ~selected:registry
              ~job_policy:Chat_response.One_off_request.default_policy
+             ~selected_model:None
              ~handle
              ~workspace_conflict_domain:"root-recovery"));
       let released = R.Run_claim.acquire ~store ~handle |> Base.ok in

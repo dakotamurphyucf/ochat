@@ -13,6 +13,7 @@ module Opened : sig
   val create
     :  service:Provider_operator.t
     -> backend:Inference_host.Backend.t
+    -> bridge:Inference_host.Credential_bridge.t option
     -> incarnation:DTO.Revision.t
     -> setup_receipt:
          (actor:Actor.t -> DTO.Setup_request.t -> (DTO.Revision.t, DTO.Error.t) Result.t)
@@ -57,6 +58,12 @@ val create
 (** Dynamic views share this state. Recapture is delegated with the captured
     target; setup/selection affects only future fresh captures. *)
 val backend : t -> Inference_host.Backend.t
+
+(** Nonyielding trusted view of the exact currently Opened bridge. It is
+    unavailable before setup and after runtime admission closes; a newly opened
+    owner replaces the prior bridge identity. The provider port performs the
+    actor-specific resolution itself. *)
+val current_model_bridge : t -> (Inference_host.Credential_bridge.t, DTO.Error.t) Result.t
 
 val dispatch
   :  t

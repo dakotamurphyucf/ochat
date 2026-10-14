@@ -708,6 +708,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_response/managed_tool_registry.mli` | [contract](../../lib/chat_response/managed_tool_registry.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/mcp_discovery_cache.mli` | [contract](../../lib/chat_response/mcp_discovery_cache.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/model_executor.mli` | [contract](../../lib/chat_response/model_executor.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chat_response/model_spawn_request.mli` | [contract](../../lib/chat_response/model_spawn_request.mli) | [integration](../design/chatml-developer-runtime.md) | Public shared model recipe decoder + current developer runtime design. |
 | `lib/chat_response/moderation.mli` | [contract](../../lib/chat_response/moderation.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/moderator_invocation.mli` | [contract](../../lib/chat_response/moderator_invocation.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chat_response/moderator_manager.mli` | [contract](../../lib/chat_response/moderator_manager.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |

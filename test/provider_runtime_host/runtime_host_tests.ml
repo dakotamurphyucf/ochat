@@ -9,8 +9,13 @@ module B = Inference_host.Credential_bridge
 module A = Provider_operator.Profile_admin
 module Actor = Operator_authorization
 module Runtime = Provider_runtime
+module Port = Agent_server.Provider_operator_port
 module Backend = Inference_host.Backend
 module RT = Inference_runtime
+module Root = Agent_server.Developer_root_owner
+module Run_store = Agent_store.Developer_run_store
+module Session_store = Agent_store.Session_store
+module Root_fixture = Developer_root_owner_test_suite.Root_owner_tests
 
 let ok r =
   Result.map_error r ~f:(fun _ -> "synthetic runtime-host fixture failed")
@@ -216,6 +221,191 @@ let enroll runtime ~sw name key_name reads =
 let capture runtime =
   Backend.capture (Runtime.backend runtime) ~current:None ~model:"synthetic" ~settings:[]
   |> ok
+;;
+
+let%expect_test
+    "developer model selection uses the actor principal and live opened bridge"
+  =
+  with_fixture (fun _ sw _ create _ ->
+    let runtime = create () in
+    let port = Runtime.operator_port runtime in
+    (match Runtime.current_model_bridge runtime with
+     | Error Store_unavailable -> ()
+     | Ok _ | Error _ -> failwith "pre-setup bridge was exposed");
+    ignore (setup runtime : P.Method_result.t);
+    let reads = ref 0 in
+    ignore (enroll runtime ~sw "one" "model-key" reads : DTO.Configuration_result.t);
+    let target = capture runtime in
+    (match Port.select_model port ~actor:denied_actor ~target with
+     | Error error when P.Error.equal_code error.code Permission_denied -> ()
+     | Ok _ | Error _ -> failwith "denied developer borrowed conversation authority");
+    let selected = Port.select_model port ~actor ~target |> ok in
+    assert (phys_equal (Port.Model_selection.actor selected) actor);
+    assert (Inference.Request.Target.equal (Port.Model_selection.target selected) target);
+    Port.Model_selection.check_current selected |> ok;
+    ignore (enroll runtime ~sw "two" "other-model-key" reads : DTO.Configuration_result.t);
+    let current_selection = (status runtime).selection |> Option.value_exn in
+    ignore
+      (Runtime.dispatch
+         runtime
+         ~actor
+         (P.Command.Provider_select
+            { profile = profile "two"
+            ; expected_revision = current_selection.revision
+            ; idempotency_key = key "other-default"
+            })
+       |> ok
+       : P.Method_result.t);
+    assert (String.equal (Inference.Request.Target.profile (capture runtime)) "two");
+    assert (Inference.Request.Target.equal (Port.Model_selection.target selected) target);
+    Port.Model_selection.check_current selected |> ok;
+    Runtime.close runtime;
+    assert (Result.is_error (Port.Model_selection.check_current selected));
+    let reopened = create () in
+    let reopened_port = Runtime.operator_port reopened in
+    let reopened_target = capture reopened in
+    let live = ref true in
+    let expiring = Actor.guarded ~principal ~is_current:(fun () -> !live) in
+    let expiring_selection =
+      Port.select_model reopened_port ~actor:expiring ~target:reopened_target |> ok
+    in
+    live := false;
+    assert (Result.is_error (Port.Model_selection.check_current expiring_selection));
+    let retained = Port.select_model reopened_port ~actor ~target:reopened_target |> ok in
+    Port.close reopened_port;
+    assert (Result.is_error (Port.Model_selection.check_current retained));
+    Port.close port);
+  print_endline
+    "pre-created port selected the real actor bridge; denied and closed issuers stayed \
+     denied";
+  [%expect
+    {| pre-created port selected the real actor bridge; denied and closed issuers stayed denied |}]
+;;
+
+let%test_unit "physical root admission pins only its original live model selection" =
+  with_fixture (fun env sw anchor create _ ->
+    let runtime = create () in
+    ignore (setup runtime : P.Method_result.t);
+    let reads = ref 0 in
+    ignore (enroll runtime ~sw "one" "root-model-key" reads : DTO.Configuration_result.t);
+    let port = Runtime.operator_port runtime in
+    let target = capture runtime in
+    let selected_model = Port.select_model port ~actor ~target |> ok in
+    let checkpoint_gate = ref ignore in
+    let session =
+      Session_store.create
+        ~env
+        ~sw
+        ~root:(Eio.Path.native_exn Eio.Path.(anchor / "developer-runs"))
+        ~server_id
+        ~process_start_identity:None
+        ~lock_nonce:"model-root-admission"
+      |> ok
+    in
+    let store =
+      Run_store.open_or_create
+        session
+        ~sw
+        ~limits:(Root_fixture.store_limits ())
+        ~checkpoint:(fun () -> !checkpoint_gate ())
+      |> ok
+    in
+    let captured = Root_fixture.capture () in
+    let run_owner =
+      match
+        P.Execution_owner.developer
+          ~host_id:server_id
+          ~run_id:(P.Id.Developer_run.of_string "dvr_selected_model" |> ok)
+          ~epoch:0
+          ~principal_id:principal.id
+        |> ok
+      with
+      | Developer owner -> owner
+      | Conversation _ -> failwith "expected developer owner"
+    in
+    let handle, _ =
+      Run_store.admit_epoch
+        store
+        ~owner:run_owner
+        ~capture_fingerprint:(Chatml_developer_capture.fingerprint captured)
+        ~previous:None
+      |> ok
+    in
+    let tools =
+      Chat_response.Tool_capability.create
+        ~owner:"model-root-test"
+        ~resource_fingerprint:Digestif.SHA256.(digest_string "model-root" |> to_hex)
+        []
+      |> ok
+    in
+    let limits =
+      Root.Limits.create
+        ~max_active_runs:1
+        ~max_staged_jobs:1
+        ~max_native_occupancy:1
+        ~max_active_workers:1
+        ~max_quarantined_workers:1
+      |> Or_error.ok_exn
+    in
+    let registry =
+      Root.Registry.create
+        ~sw
+        ~store
+        ~capacity:(Root_fixture.capacity ())
+        ~now:Root_fixture.now
+        ~limits
+    in
+    let admit actor selected_model =
+      Root.Registry.admit
+        registry
+        ~actor
+        ~capture:captured
+        ~registry:tools
+        ~selected:tools
+        ~selected_model:(Some selected_model)
+        ~job_policy:Chat_response.One_off_request.default_policy
+        ~handle
+        ~workspace_conflict_domain:"model-root-test"
+    in
+    let original = admit actor selected_model |> ok in
+    assert (Option.value_exn (Root.selected_model original) |> phys_equal selected_model);
+    assert (
+      Inference.Request.Target.equal (Port.Model_selection.target selected_model) target);
+    Root.close_and_wait original |> ok;
+    let foreign_actor = Actor.trusted_local principal in
+    assert (Result.is_error (admit foreign_actor selected_model));
+    (* The failed foreign admission did not consume the physical run claim. *)
+    let original_again = admit actor selected_model |> ok in
+    Root.close_and_wait original_again |> ok;
+    let interrupted actor selected_model revoke =
+      let reached, reached_u = Eio.Promise.create () in
+      let release, release_u = Eio.Promise.create () in
+      (checkpoint_gate
+       := fun () ->
+            checkpoint_gate := ignore;
+            Eio.Promise.resolve reached_u ();
+            Eio.Promise.await release);
+      let done_, done_u = Eio.Promise.create () in
+      Eio.Fiber.fork ~sw (fun () ->
+        Eio.Promise.resolve done_u (admit actor selected_model));
+      Eio.Promise.await reached;
+      revoke ();
+      Eio.Promise.resolve release_u ();
+      assert (Result.is_error (Eio.Promise.await done_))
+    in
+    let live = ref true in
+    let expiring = Actor.guarded ~principal ~is_current:(fun () -> !live) in
+    let expiring_model = Port.select_model port ~actor:expiring ~target |> ok in
+    interrupted expiring expiring_model (fun () -> live := false);
+    let after_actor_revoke = admit actor selected_model |> ok in
+    Root.close_and_wait after_actor_revoke |> ok;
+    interrupted actor selected_model (fun () -> Port.close port);
+    let unowned = Run_store.Run_claim.acquire ~store ~handle |> ok in
+    Run_store.Run_claim.release unowned |> ok;
+    Root.Registry.close_and_wait registry |> ok;
+    Run_store.close_and_wait store |> ok;
+    Session_store.close session |> ok;
+    Runtime.close runtime)
 ;;
 
 let%expect_test
@@ -683,6 +873,7 @@ let%expect_test
           Runtime.Opened.create
             ~service
             ~backend:(A.backend profiles ~bridge ~principal:"operator")
+            ~bridge:(Some bridge)
             ~incarnation:(DTO.Revision.of_string "incarnation" |> ok)
             ~setup_receipt:(fun ~actor:_ _ -> Error DTO.Error.Store_unavailable)
             ~close:(fun () ->

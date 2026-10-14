@@ -186,6 +186,7 @@ let create
             Runtime.Opened.create
               ~service
               ~backend:(Admin.backend profiles ~bridge ~principal:inference_principal)
+              ~bridge:(Some bridge)
               ~incarnation:revision
               ~setup_receipt:(fun ~actor request ->
                 let principal_id, method_name, params = setup_identity ~actor request in

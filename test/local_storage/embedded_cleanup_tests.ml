@@ -211,6 +211,8 @@ let%expect_test "started session scope preserves rejection through operator clos
                       (Agent_server.Provider_operator_port.create
                          ~dispatch:(fun ~actor:_ _ -> failwith "unexpected dispatch")
                          ~receipt:(fun ~actor:_ _ -> failwith "unexpected receipt")
+                         ~current_model_bridge:(fun () ->
+                           Error Agent_protocol.Provider_operator.Error.Unsupported)
                          ~close:(fun () ->
                            Int.incr attempts;
                            if Int.equal !attempts 1 then raise Detach_failed)))
