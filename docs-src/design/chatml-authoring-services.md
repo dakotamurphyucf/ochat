@@ -488,7 +488,7 @@ The portable bundle client requires the separately selected
 `authoring.bundle.v1` feature, which does not require `authoring.core.v1`.
 Wire receipts echo authenticated host/principal comparison coordinates and
 the upload ID. A pending commit is distinct from a Published receipt; only
-OCH-296's proof-gated owner may publish a validated graph, compiler-contract,
+the proof-gated store publisher may publish a validated graph, compiler-contract,
 environment, manifest identity and finite expiry. The tagged manifest
 fingerprint binds its explicit Project or ChatMD document basis, captured root
 and selection, exact owner-local project routes when applicable, and sorted
@@ -546,7 +546,7 @@ borrowed parser stage and all selected Builds debit one fail-closed Attempt
 ledger. This remains in-memory closure evidence; publication still binds an
 authenticated live sealed store claim.
 Storage/receipt ownership and pure closure validation/publication are separate
-components. The private upload stage records a versioned immutable manifest,
+components. The private upload store records a versioned immutable manifest,
 atomic phase and accepted-offset documents, and numeric member data files under
 the daemon's locked data root. It fsyncs accepted bytes before advancing an
 offset. Recovery discards unacknowledged suffixes, rechecks sealed payloads,
@@ -557,9 +557,19 @@ tombstone; pruning renames the upload directory to a recognizable cleanup
 marker before deleting its records, so an interrupted deletion cannot recreate
 an Open stage. Finite per-principal source reservations and active-count limits,
 plus global metadata, source-byte and record limits, bound claim and tombstone
-retention. The staging store cannot
-publish a bundle or issue a Published receipt. Reuse checked blob-store streaming mechanics
-where appropriate, but do not reuse message-input `Send_messages` scope,
+retention. A sealed claim stays Ready until the publisher binds the exact
+authenticated snapshot to a genuine captured Project or ChatMD validation
+proof. It durably records an intent, installs any graph and lock captures, and
+exposes Published only after a synced marker names their verified identities.
+An incomplete intent remains Validating; authorized retry reconciles the same
+bundle ID. Recovery verifies every installed source, rejects duplicate bundle
+IDs, and reserves the aggregate retained source allowance before rereading
+installed bytes. One protected published-capture borrow per store may run at a
+time; its read lease survives uncertain recovery and blocks pruning or close
+until the callback returns. The borrowed capture's bytes may be retained as
+data, while the borrow itself conveys no lasting authority. Reuse checked
+blob-store streaming mechanics where appropriate, but do not reuse
+message-input `Send_messages` scope,
 one-hour temporary retention or `allowed_use` as authoring authority. Local,
 HTTP and stdio clients share the same bundle receipt contract.
 The unreleased private staging document uses schema version 2 for this tagged
@@ -574,8 +584,12 @@ and within the store operation gate before recovery or private upload access.
 An optional parent context is checked against current context authority at
 begin; it is provenance, not a requirement for upload-only clients. The store
 samples the host wall clock after its own gate and recovery, so queue time
-cannot extend an expired upload. This timestamp governs operation admission;
-completed I/O is not retroactively cancelled at the deadline. Revocation or
+cannot extend an expired upload. Publication separately rechecks the current
+host-selected contracts, source grant, wall-clock deadline and daemon lock
+immediately before the durable marker rename. A published read also checks
+the deadline and lock after materialization, before lending the capture.
+Ordinary staging timestamps govern operation admission; completed staging I/O
+is not retroactively cancelled at the deadline. Revocation or
 cancellation may leave durable accepted bytes with an uncertain reply, which
 an authorized retry or status call reconciles. The facade joins active work
 before closing the store and returns finite, path-free error codes; it does

@@ -6,6 +6,24 @@ let progress_name index = sprintf "member-%04d.offset.json" index
 let data_name index = sprintf "member-%04d.data" index
 let manifest_name = "manifest.json"
 let phase_name = "phase.json"
+let intent_name = "intent.json"
+let marker_name = "published.json"
+let supplemental_name ordinal = sprintf "installed-%08d.data" ordinal
+
+let supplemental_ordinal name =
+  match
+    String.chop_prefix name ~prefix:"installed-"
+    |> Option.bind ~f:(fun rest -> String.chop_suffix rest ~suffix:".data")
+  with
+  | None -> None
+  | Some digits ->
+    (match Int.of_string_opt digits with
+     | Some ordinal when ordinal >= 0 && String.equal name (supplemental_name ordinal) ->
+       Some ordinal
+     | _ -> None)
+;;
+
+let is_supplemental_filename name = Option.is_some (supplemental_ordinal name)
 
 let file_kind path =
   try Ok (Eio.Path.kind ~follow:false path) with
@@ -38,8 +56,7 @@ let truncate_suffix directory index accepted =
   | _ -> Error (Store_error.Corrupt "upload member is not a regular file")
 ;;
 
-let file_bytes directory index ~max_bytes ~checkpoint =
-  let name = data_name index in
+let file_bytes_named directory name ~max_bytes ~checkpoint =
   let path = Eio.Path.(directory / name) in
   let* kind = file_kind path in
   match kind with
@@ -78,6 +95,77 @@ let file_bytes directory index ~max_bytes ~checkpoint =
        Error (Store_error.of_exn ~operation:"read upload member" ~path:name exn))
   | `Not_found -> Error (Store_error.Corrupt "claimed upload member is absent")
   | _ -> Error (Store_error.Corrupt "upload member is not a regular file")
+;;
+
+let file_bytes directory index ~max_bytes ~checkpoint =
+  file_bytes_named directory (data_name index) ~max_bytes ~checkpoint
+;;
+
+let read_supplemental directory ~ordinal ~expected_bytes ~checkpoint =
+  if ordinal < 0 || expected_bytes < 0
+  then Error (Store_error.Corrupt "invalid installed source bound")
+  else (
+    let name = supplemental_name ordinal in
+    let* kind = file_kind Eio.Path.(directory / name) in
+    match kind with
+    | `Regular_file ->
+      file_bytes_named directory name ~max_bytes:expected_bytes ~checkpoint
+    | `Not_found -> Error (Store_error.Corrupt "installed source is absent")
+    | _ -> Error (Store_error.Corrupt "installed source is not a regular file"))
+;;
+
+exception Installed_conflict
+
+let equal_checked left right ~checkpoint =
+  if String.length left <> String.length right
+  then false
+  else (
+    let equal = ref true in
+    let offset = ref 0 in
+    while !equal && !offset < String.length left do
+      if !offset mod 4096 = 0 then checkpoint ();
+      equal := Char.equal left.[!offset] right.[!offset];
+      incr offset
+    done;
+    !equal)
+;;
+
+let install_supplemental directory ~ordinal ~bytes ~max_bytes ~checkpoint =
+  if ordinal < 0 || String.length bytes > max_bytes || max_bytes < 0
+  then Error (Store_error.Corrupt "invalid installed source bound")
+  else (
+    checkpoint ();
+    let name = supplemental_name ordinal in
+    let final = Eio.Path.(directory / name) in
+    let* kind = file_kind final in
+    match kind with
+    | `Regular_file ->
+      let* existing =
+        read_supplemental
+          directory
+          ~ordinal
+          ~expected_bytes:(String.length bytes)
+          ~checkpoint
+      in
+      if equal_checked existing bytes ~checkpoint
+      then Ok ()
+      else Error (Store_error.Corrupt "installed source differs from durable intent")
+    | `Not_found ->
+      (try
+         Durable_file.replace_in
+           ~directory
+           ~durability:Flush_file_and_directory
+           ~basename:name
+           ~before_rename:(fun () ->
+             checkpoint ();
+             match Eio.Path.kind ~follow:false final with
+             | `Not_found -> ()
+             | _ -> raise Installed_conflict)
+           bytes
+       with
+       | Installed_conflict ->
+         Error (Store_error.Corrupt "installed source appeared during replacement"))
+    | _ -> Error (Store_error.Corrupt "installed source is not a regular file"))
 ;;
 
 let read_repeat directory index ~offset ~bytes ~checkpoint =
@@ -122,13 +210,26 @@ let read_repeat directory index ~offset ~bytes ~checkpoint =
   | _ -> Error (Store_error.Corrupt "accepted upload member is absent")
 ;;
 
-let validate_entry_names members names =
+let validate_entry_names ?intent ?marker members names =
+  let marker : Authoring_upload_document.Marker.t option = marker in
   let allowed =
-    let initial = String.Set.of_list [ manifest_name; phase_name ] in
+    let initial =
+      String.Set.of_list [ manifest_name; phase_name; intent_name; marker_name ]
+    in
     List.foldi members ~init:initial ~f:(fun index allowed _ ->
       Set.add (Set.add allowed (data_name index)) (progress_name index))
   in
-  List.for_all names ~f:(fun name ->
+  let allowed =
+    match intent with
+    | None -> allowed
+    | Some intent ->
+      List.fold
+        (Authoring_upload_document.Intent.supplementary intent)
+        ~init:allowed
+        ~f:(fun allowed (ordinal, _) -> Set.add allowed (supplemental_name ordinal))
+  in
+  (Option.is_none marker || Option.is_some intent)
+  && List.for_all names ~f:(fun name ->
     Set.mem allowed name
     || Option.value_map
          (Durable_file.temporary_target name)
@@ -178,13 +279,20 @@ let is_member_filename name =
      | None -> false)
 ;;
 
+let is_publication_filename name =
+  let target = Option.value (Durable_file.temporary_target name) ~default:name in
+  String.equal target intent_name
+  || String.equal target marker_name
+  || is_supplemental_filename target
+;;
+
 let cleanup_member_files directory names =
   try
     let removed = ref false in
     let* () =
       List.fold names ~init:(Ok ()) ~f:(fun result name ->
         let* () = result in
-        if not (is_member_filename name)
+        if not (is_member_filename name || is_publication_filename name)
         then Ok ()
         else (
           let path = Eio.Path.(directory / name) in

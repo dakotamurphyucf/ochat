@@ -1,14 +1,45 @@
-(* OCH-281 owns the wire DTOs and canonical manifest validation. This module
-   owns private durable staging only; no transport, compiler or publisher. *)
+(* The protocol owns canonical wire DTOs. This module owns one private durable
+   stage and proof-gated publication state, without transport or execution. *)
 
 module Bundle = Agent_protocol.Authoring_bundle.Bundle
 
 type t
 type sealed
 
+module Proof : sig
+  type t =
+    | Project of Chatml_authoring_bundle_project.Validated.t
+    | Chatmd_document of Chatml_authoring_bundle_document.Validated.t
+end
+
+module Snapshot : sig
+  type t
+
+  val manifest : t -> Bundle.Manifest.t
+  val sources : t -> Chatml_source.t list
+end
+
+module Published_capture : sig
+  type t
+
+  module Graph : sig
+    type t
+
+    val selector : t -> Bundle.Manifest.Script.Selector.t option
+    val lock_source : t -> Chatml_source.t
+    val sources : t -> Chatml_source.t list
+  end
+
+  val receipt : t -> Bundle.Receipt.t
+  val manifest : t -> Bundle.Manifest.t
+  val uploaded_sources : t -> Chatml_source.t list
+  val graphs : t -> Graph.t list
+end
+
 module Claim_result : sig
   type t =
     | Ready of sealed
+    | Published of Bundle.Receipt.t
     | Rejected of Bundle.Rejection.t
 end
 
@@ -16,12 +47,14 @@ module Status : sig
   type t =
     | Open of Bundle.Status.Progress.t list
     | Ready
+    | Validating
+    | Published of Bundle.Receipt.t
     | Rejected of Bundle.Rejection.t
     | Expired
 
   (** Offsets are ordered by canonical manifest member order and bounded by
-        max_members. No published state is manufactured in OCH-263. The later
-        proof-gated publisher adds publication state and wire projection. *)
+      max_members. Validating means a durable intent without an authoritative
+      marker; Published requires a verified marker and exact installed bytes. *)
 end
 
 module Limits : sig
@@ -37,6 +70,14 @@ module Limits : sig
     -> max_chunk_bytes:int
     -> max_reserved_bytes:int
     -> max_reserved_per_principal:int
+    -> max_published_records:int
+    -> max_installed_sources:int
+    -> max_installed_bytes_per_bundle:int
+    -> max_installed_bytes:int
+    -> max_installed_per_principal:int
+    -> max_publication_metadata_bytes:int
+    -> max_intent_bytes:int
+    -> max_marker_bytes:int
     -> max_work_steps:int
     -> max_journal_records:int
     -> max_journal_bytes:int
@@ -81,8 +122,7 @@ end
       scans have finite entry/metadata/byte/work ceilings and reject links,
       unknown authoritative records, conflicting keys and corrupt manifests.
       Current phase/progress record, key and tombstone counts/bytes have explicit finite ceilings in
-      addition to staged source bytes. Published records belong to OCH-264's
-      proof-gated owner. At a retention ceiling
+      addition to staged source bytes. At a retention ceiling
       the store rejects new work; it never evicts live or protected receipts to
       make room. No second independently opened store may own the same path.
       The store serializes mutations, recovery and status reads through its
@@ -163,7 +203,7 @@ val claim_commit
 
 (** A checked, immutable in-memory snapshot under the stage's aggregate byte
       ceiling. This does not parse ChatMD, restore or compose a graph, or grant
-      execution. OCH-264 consumes it with existing captured-only validation.
+      execution. The publisher consumes it with captured-only validation.
       [now] is the host-owned clock callback. A sealed claim has one fixed receipt
       deadline set at its first complete commit; retry/status does not renew it.
       An expired claim or a handle from a closed/reopened store cannot snapshot.
@@ -172,17 +212,62 @@ val claim_commit
       bytes and charged to the same work ledger. *)
 val snapshot
   :  t
+  -> principal:Agent_protocol.Id.Principal.t
   -> sealed
   -> now:(unit -> Agent_protocol.Timestamp.t)
   -> checkpoint:(unit -> unit)
-  -> (Bundle.Manifest.t * Chatml_source.t list, Error.t) Result.t
+  -> (Snapshot.t, Error.t) Result.t
 
-(** OCH-264 extends this store with a publisher accepting its abstract
-      validated-closure proof, never a caller-created Receipt. Publication is
-      durably reconciled against the exact sealed upload/payload and installed
-      immutable bundle before status can expose Published. OCH-263 stores the
-      sealed claim and bounded metadata needed for that extension; it cannot
-      issue Published or mint a proof. *)
+(** Publish only from the exact live principal-bound sealed claim, checked
+    snapshot and genuine opaque captured-closure proof. The existing Store gate
+    rechecks exact bytes/manifest, commit key and fixed deadline. Durable intent
+    chooses a stable bundle ID before installed captures; only a final atomic
+    synced marker can expose Published. [final_admission] must be a trusted
+    non-yielding current-actor/selection check. The Store samples fresh trusted
+    time and calls it immediately before that marker rename. Incomplete intent
+    remains Validating and
+    same-key retry keeps its original ID. Cancellation may leave uncertain
+    durable work; authorized status/commit retry reconciles it. *)
+val publish
+  :  t
+  -> principal:Agent_protocol.Id.Principal.t
+  -> sealed
+  -> snapshot:Snapshot.t
+  -> proof:Proof.t
+  -> now:(unit -> Agent_protocol.Timestamp.t)
+  -> checkpoint:(unit -> unit)
+  -> final_admission:(unit -> unit)
+  -> (Bundle.Receipt.t, Error.t) Result.t
+
+(** An authorized validator's coarse rejection before any durable intent.
+    An existing intent cannot lose its selected ID through rejection. *)
+val reject
+  :  t
+  -> principal:Agent_protocol.Id.Principal.t
+  -> sealed
+  -> reason:Bundle.Rejection.t
+  -> now:(unit -> Agent_protocol.Timestamp.t)
+  -> checkpoint:(unit -> unit)
+  -> (unit, Error.t) Result.t
+
+(** An authenticated, deadline-bound borrow of one verified published capture.
+    Admission checks the durable marker and exact installed bytes under the
+    Store gate. The callback runs outside that gate while prune protects its
+    source files; its immutable byte values may escape as data, but the borrow
+    is no longer authority after return. One Store borrow may be active at a
+    time; a second returns Busy without waiting or materializing another
+    capture. The active input bytes and graph metadata obey the configured
+    bundle, installed-source and intent caps; this is not a heap-byte claim.
+    Close joins active borrowers and a
+    borrower calling close on this store receives Busy. *)
+val with_published
+  :  t
+  -> principal:Agent_protocol.Id.Principal.t
+  -> bundle_id:Agent_protocol.Id.Authoring_bundle.t
+  -> now:(unit -> Agent_protocol.Timestamp.t)
+  -> checkpoint:(unit -> unit)
+  -> f:(Published_capture.t -> 'a)
+  -> ('a, Error.t) Result.t
 
 val status
   :  t
@@ -205,9 +290,9 @@ val cancel
   -> (unit, Error.t) Result.t
 
 (** Bounded maintenance: do not delete sealed claims named by
-      [protected_uploads], supplied by the trusted closure-validation owner.
-      This accepts upload IDs rather than future bundle IDs because OCH-263
-      does not mint a bundle. Excessive inputs fail the work limit.
+      [protected_uploads], supplied by the trusted closure-validation owner,
+      or captures with an active Store read lease. Excessive inputs fail the
+      work limit.
       Expire stages, receipts and tombstones according to original absolute
       deadlines, not a renewed connection lease. After a tombstone/idempotency
       record is pruned, its old request key is no longer reserved; the finite

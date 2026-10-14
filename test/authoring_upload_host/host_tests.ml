@@ -113,6 +113,14 @@ let limits
     ~max_chunk_bytes
     ~max_reserved_bytes:512
     ~max_reserved_per_principal:256
+    ~max_published_records:4
+    ~max_installed_sources:32
+    ~max_installed_bytes_per_bundle:128
+    ~max_installed_bytes:256
+    ~max_installed_per_principal:256
+    ~max_publication_metadata_bytes:16384
+    ~max_intent_bytes:8192
+    ~max_marker_bytes:2048
     ~max_work_steps
     ~max_journal_records
     ~max_journal_bytes:16384
@@ -121,7 +129,7 @@ let limits
     ~max_tombstone_bytes:600000
     ~max_recovery_entries:1000
     ~max_recovery_metadata_bytes:1048576
-    ~max_recovery_source_bytes:512
+    ~max_recovery_source_bytes:1024
     ~staging_ttl:(Time_ns.Span.of_sec 60.)
     ~receipt_ttl:(Time_ns.Span.of_sec 120.)
     ~expired_tombstone_ttl:(Time_ns.Span.of_sec 180.)
@@ -250,6 +258,93 @@ let with_host name f =
         Host.create store ~sw:host_sw ~clock ~upload_policy:(make_policy allowed checks)
       in
       f ~env ~sw ~root_handle ~store ~host ~clock ~actor ~current ~allowed ~checks;
+      Host.close_and_wait host |> host_ok))
+;;
+
+let%test_unit "host publishes only an actor-current captured source-only document" =
+  with_root "ochat-upload-host-publication" (fun env sw root_handle lock ->
+    let store = open_store env sw root_handle lock in
+    Eio.Switch.run (fun host_sw ->
+      let allowed = ref true in
+      let current = ref true in
+      let actor = make_actor current in
+      let policy = Host.Publication_policy.create ~select:(fun _ _ _ -> None) in
+      let publication =
+        Host.Publication.create
+          ~policy
+          ~limits:Publication_tests.validation_limits
+          ~document_dir:(Eio.Stdenv.fs env)
+      in
+      let host =
+        Host.create
+          ~publication
+          store
+          ~sw:host_sw
+          ~clock:(Eio_mock.Clock.make ())
+          ~upload_policy:(make_policy allowed (ref 0))
+      in
+      let manifest = Publication_tests.document_manifest (Eio.Stdenv.fs env) in
+      let request =
+        B.Begin.create_request
+          ~idempotency_key:(P.Idempotency_key.of_string "host-publication" |> protocol_ok)
+          ~manifest
+          ()
+      in
+      let upload_id =
+        Host.begin_upload host ~actor ~request ~checkpoint:Fn.id
+        |> host_ok
+        |> B.Begin.upload_id
+      in
+      let bytes = Publication_tests.document_bytes in
+      let first = Int.min 64 (String.length bytes) in
+      let chunk offset bytes =
+        Host.chunk
+          host
+          ~actor
+          ~request:
+            (B.Chunk.create_request
+               ~upload_id
+               ~source:Publication_tests.document_id
+               ~byte_offset:offset
+               ~bytes
+             |> protocol_ok)
+          ~checkpoint:Fn.id
+        |> host_ok
+        |> ignore
+      in
+      chunk 0 (String.prefix bytes first);
+      if first < String.length bytes then chunk first (String.drop_prefix bytes first);
+      let sealed =
+        match
+          Host.claim_commit
+            host
+            ~actor
+            ~request:
+              (B.Commit.create_request
+                 ~upload_id
+                 ~idempotency_key:
+                   (P.Idempotency_key.of_string "host-publication-commit" |> protocol_ok))
+            ~checkpoint:Fn.id
+          |> host_ok
+        with
+        | Ready sealed -> sealed
+        | Published _ | Rejected _ -> failwith "host claim unexpectedly terminal"
+      in
+      let receipt = Host.publish host ~actor ~sealed ~checkpoint:Fn.id |> host_ok in
+      check
+        "host reports actual durable publication"
+        (match
+           Host.status host ~actor ~request:(status_request upload_id) ~checkpoint:Fn.id
+           |> host_ok
+         with
+         | Published published -> B.Receipt.equal receipt published
+         | Open _ | Ready | Validating | Rejected _ | Expired -> false);
+      allowed := false;
+      check
+        "revoked grant cannot reuse published authority"
+        (match Host.publish host ~actor ~sealed ~checkpoint:Fn.id with
+         | Error Host.Error.Unauthorized -> true
+         | Ok _ | Error _ -> false);
       Host.close_and_wait host |> host_ok))
 ;;
 

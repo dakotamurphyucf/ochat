@@ -7,6 +7,7 @@
   durable_file
   authoring_upload_document
   authoring_upload_files
+  authoring_upload_publication
   authoring_upload_store
   developer_run_document
   developer_run_transition
@@ -80,6 +81,7 @@
   prompt_artifact_staging
   authoring_upload_document
   authoring_upload_files
+  authoring_upload_publication
   developer_run_document
   developer_run_transition
   blob_developer_namespace
@@ -93,6 +95,11 @@
   digestif
   ochat.document_schema
   ochat.chatml_source
+  chatml_prompt_binding
+  chatml_prepared_program
+  chatml_project_build
+  chatml_authoring_bundle_project
+  chatml_authoring_bundle_document
   eio
   eio.unix
   ochat.agent_protocol)

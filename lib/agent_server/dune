@@ -10,6 +10,7 @@
   project_source_host
   authoring_source_host
   authoring_upload_host
+  authoring_upload_validation
   authoring_options
   session_helper_policy
   authenticator
@@ -93,7 +94,7 @@
   command_handler
   dispatcher)
  (private_modules session_projection session_seed_layout session_seed_recovery session_factory_catalogs session_seed_admission session_seed_receipt session_seed_command
-  project_source_header dependency_update_receipt developer_job_selected)
+  project_source_header dependency_update_receipt developer_job_selected authoring_upload_validation)
  (libraries ochat.operator_authorization
  core
   base64
@@ -106,6 +107,8 @@
   ochat.chatml_source
   ochat.chatml_project
   ochat.chatml_project_build
+  ochat.chatml_authoring_bundle_project
+  ochat.chatml_authoring_bundle_document
   ochat.chatml
   ochat.chatml_project_prepare
   ochat.chatml_local_capture
