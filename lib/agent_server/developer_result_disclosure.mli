@@ -68,6 +68,10 @@ end
 type t
 type request
 
+(** Physical service-to-Store comparison for trusted host composition. This
+    grants no result read and does not open a historical run. *)
+val issued_by_store : t -> Agent_store.Developer_run_store.t -> bool
+
 (** Check that [runs] is the exact physical developer Store bound to [blobs],
     and that the decoder ceiling fits Blob_store.max_upload_bytes. No new root
     or result capability is minted. *)
@@ -89,6 +93,16 @@ val begin_request
   -> original_actor:Operator_authorization.t
   -> Selection.t
   -> (request, Agent_protocol.Error.t) result
+
+(** Nonyielding reauthorization of the exact issued request with a freshly
+    sampled current actor after a caller's last yielding Store/scope check.
+    Reuses the read path's original/current principal and explicit policy
+    validation; it neither reads bytes nor accepts a replacement selection. *)
+val check_request_now
+  :  t
+  -> request
+  -> current_actor:Operator_authorization.t
+  -> (unit, Agent_protocol.Error.t) result
 
 (** Read without waiting for job completion for one exact selection. Authenticate both the original
     actor retained in [request] and [current_actor], require principal

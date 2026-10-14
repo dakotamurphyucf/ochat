@@ -78,6 +78,8 @@ type request =
   ; selection : Selection.t
   }
 
+let issued_by_store t store = phys_equal t.runs store
+
 let create ~runs ~blobs ~policy ~limits =
   if not (Blobs.developer_binding_matches blobs runs)
   then invalid "developer result Store and Blob roots do not match"
@@ -106,6 +108,12 @@ let begin_request host ~original_actor selection =
   let open Core.Result.Let_syntax in
   let%map () = check_actor host selection original_actor original_actor in
   { host; original_actor; selection }
+;;
+
+let check_request_now host request ~current_actor =
+  if not (phys_equal host request.host)
+  then invalid "developer result request belongs to another disclosure service"
+  else check_actor host request.selection request.original_actor current_actor
 ;;
 
 let store_error = function

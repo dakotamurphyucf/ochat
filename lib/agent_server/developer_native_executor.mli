@@ -8,6 +8,13 @@ type t
 
 val create : root:Developer_root_owner.t -> (t, Agent_protocol.Error.t) result
 
+(** Compose one physically issued developer Script Job service with this same
+    selected executor; the ordinary no-Job caller keeps the original path. *)
+val with_job_service
+  :  t
+  -> Developer_script_job_service.t
+  -> (t, Agent_protocol.Error.t) result
+
 (** Function, Custom and owned managed calls use one existing native policy
     kernel. The host creates one bounded registered terminal scope per call;
     Dispatching is durable before effect and a terminal plus exact selected

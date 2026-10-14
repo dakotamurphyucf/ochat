@@ -1,0 +1,441 @@
+open! Core
+module P = Agent_protocol
+module O = Developer_root_owner
+module D = Developer_result_disclosure
+module K = Agent_session.Script_job_kernel
+module R = Agent_session.Script_job_request
+module Ops = Chat_response.Background_job_operations
+module C = Chat_response.Tool_capability
+module B = Chat_response.Background_request
+module N = Agent_session.Native_tool_invocation
+module H = P.Host_invocation
+
+type t =
+  { root : O.run
+  ; disclosure : D.t
+  ; env : Eio_unix.Stdenv.base
+  ; current_actor : unit -> Operator_authorization.t
+  ; prepare_source :
+      binding:C.binding
+      -> request:B.t
+      -> checkpoint:(unit -> unit)
+      -> (B.Agent_artifact.t option, P.Error.t) result
+  }
+
+type physical =
+  | Root of O.Action.t
+  | Native of O.Native_terminal.t
+
+type native_selection =
+  { terminal : O.Native_terminal.t
+  ; physical : O.Native_terminal.Selection.t
+  ; acknowledge : unit -> unit
+  ; mutable acknowledged : bool
+  }
+
+type scope =
+  { service : t
+  ; physical : physical
+  ; selected : C.t
+  ; selected_now : unit -> (C.t, P.Error.t) result
+  ; kernel : K.t
+  ; check_parent_now : unit -> (unit, P.Error.t) result
+  ; mutable frozen : (P.Invocation.outcome * native_selection) option
+  }
+
+let invalid message = P.Error.invalid_request message
+let ( let* ) result f = Result.bind result ~f
+let message result = Result.map_error result ~f:(fun error -> error.P.Error.message)
+let kernel_result result = Result.map_error result ~f:invalid
+
+let create ~root ~store ~disclosure ~env ~current_actor ~prepare_source =
+  if not (O.issued_by_store root store && D.issued_by_store disclosure store)
+  then Error (invalid "developer job services do not share the physical Store")
+  else Ok { root; disclosure; env; current_actor; prepare_source }
+;;
+
+let issued_by_root t root = phys_equal t.root root
+
+let current scope =
+  let* witness = O.current scope.service.root in
+  let* selected_now = scope.selected_now () in
+  if
+    (not (String.equal (C.fingerprint scope.selected) (C.fingerprint selected_now)))
+    || not
+         (List.for_all (C.references scope.selected) ~f:(fun reference ->
+            Result.is_ok
+              (C.resolve
+                 (O.Current.selected witness)
+                 ~id:reference.id
+                 ~fingerprint:reference.fingerprint)))
+  then Error (invalid "developer job selection changed")
+  else
+    let* () = O.check_effect_now scope.service.root witness in
+    scope.check_parent_now ()
+;;
+
+let check scope =
+  let* () = kernel_result (K.check_open scope.kernel) in
+  current scope
+;;
+
+let stage_physical scope ~checkpoint request =
+  let checkpoint () =
+    checkpoint ();
+    K.checkpoint scope.kernel
+  in
+  match scope.physical with
+  | Root action -> O.Action.stage_background action ~request ~checkpoint
+  | Native terminal ->
+    O.Native_terminal.stage_background
+      terminal
+      ~request
+      ~checkpoint
+      ~check_parent_now:scope.check_parent_now
+;;
+
+let rollback_physical scope id =
+  match scope.physical with
+  | Root action -> O.Action.rollback_staged action id
+  | Native terminal -> O.Native_terminal.rollback_staged terminal id
+;;
+
+let cleanup_physical physical id =
+  match physical with
+  | Root action -> O.Action.cleanup_staged action id
+  | Native terminal -> O.Native_terminal.cleanup_staged terminal id
+;;
+
+let stage scope ~checkpoint request =
+  let* () = check scope in
+  Eio.Cancel.protect (fun () ->
+    let* id = stage_physical scope ~checkpoint request in
+    let recorded =
+      try `Returned (K.record_start scope.kernel id) with
+      | exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
+    in
+    match recorded with
+    | `Returned (Ok ()) -> Ok id
+    | `Returned (Error error) ->
+      let* () = rollback_physical scope id in
+      Error (invalid error)
+    | `Raised (exn, backtrace) ->
+      (try ignore (rollback_physical scope id : (unit, _) result) with
+       | _ -> ());
+      Exn.raise_with_original_backtrace exn backtrace)
+;;
+
+let accessible scope id =
+  let* () = check scope in
+  let* snapshot = O.Job_control.find_current scope.service.root id in
+  let* job =
+    match snapshot with
+    | Some snapshot -> Ok (O.Job_control.job snapshot, snapshot)
+    | None -> Error (invalid "developer job was not found in this run")
+  in
+  let job, snapshot = job in
+  let* () = check scope in
+  let* () =
+    match P.Developer_job.kind job with
+    | Async_tool -> Ok ()
+    | Model_call | Nested_agent | Scheduled_event | Shell_process | Compaction ->
+      Error (invalid "job is not generic script work")
+  in
+  let* request =
+    B.of_json ~policy:(O.job_policy scope.service.root) (P.Developer_job.payload job)
+  in
+  let* () = B.validate_capabilities request ~capabilities:scope.selected in
+  Ok (job, snapshot)
+;;
+
+let view job =
+  let state = P.Developer_job.state job in
+  let status = P.Job.status_name state.status in
+  let result_kind =
+    match state.result with
+    | None -> `Null
+    | Some (Inline _) -> `String "inline"
+    | Some (Artifact _) -> `String "artifact"
+  in
+  `Object
+    [ "version", `Number "1"
+    ; "id", P.Id.Job.to_json (P.Developer_job.id job)
+    ; "status", `String status
+    ; "progress", `Null
+    ; "attempt", `Number (Int.to_string state.attempt)
+    ; "created_at", P.Timestamp.to_json (P.Developer_job.created_at job)
+    ; ( "completed_at"
+      , Option.value_map state.completed_at ~default:`Null ~f:P.Timestamp.to_json )
+    ; "completion", `Null
+    ; "completion_kind", result_kind
+    ]
+;;
+
+let read_result scope job =
+  let state = P.Developer_job.state job in
+  let* selection =
+    D.Selection.create
+      ~owner:(P.Developer_job.owner job)
+      ~capture_fingerprint:(P.Developer_job.capture_fingerprint job)
+      ~job_id:(P.Developer_job.id job)
+      ~attempt:state.attempt
+  in
+  let* request =
+    D.begin_request
+      scope.service.disclosure
+      ~original_actor:(O.original_actor scope.service.root)
+      selection
+  in
+  let* disclosed =
+    Eio.Switch.run (fun sw ->
+      D.read
+        scope.service.disclosure
+        request
+        ~sw
+        ~current_actor:(scope.service.current_actor ()))
+  in
+  let* () = check scope in
+  let* () =
+    D.check_request_now
+      scope.service.disclosure
+      request
+      ~current_actor:(scope.service.current_actor ())
+  in
+  match disclosed with
+  | Pending _ | Terminal_without_result _ -> Ok `Null
+  | Completion completion -> Ok (P.Completion.to_json completion)
+;;
+
+let handlers scope : Ops.handlers =
+  let local result = message result in
+  { start_tool =
+      (fun ~name ~input ->
+        let* () = check scope |> local in
+        let* request =
+          R.tool
+            ~selected:scope.selected
+            ~policy:(O.job_policy scope.service.root)
+            ~prepare_source:scope.service.prepare_source
+            ~name
+            ~input
+            ~checkpoint:(fun () -> K.checkpoint scope.kernel)
+          |> local
+        in
+        let* () = check scope |> local in
+        stage scope ~checkpoint:ignore request |> local)
+  ; start_script =
+      (fun json ->
+        let* () = check scope |> local in
+        K.checkpoint scope.kernel;
+        let* request =
+          R.script
+            ~env:scope.service.env
+            ~selected:scope.selected
+            ~policy:(O.job_policy scope.service.root)
+            json
+          |> local
+        in
+        K.checkpoint scope.kernel;
+        let* () = check scope |> local in
+        stage scope ~checkpoint:ignore request |> local)
+  ; get =
+      (fun id ->
+        let* job, _ = accessible scope id |> local in
+        Ok (view job))
+  ; read_result =
+      (fun id ->
+        let* job, _ = accessible scope id |> local in
+        read_result scope job |> local)
+  ; cancel =
+      (fun id ->
+        let* _, snapshot = accessible scope id |> local in
+        let* _ = O.Job_control.cancel_current scope.service.root snapshot |> local in
+        Ok ())
+  ; rollback_start = (fun id -> K.rollback_start scope.kernel id)
+  }
+;;
+
+module Scope = struct
+  type t = scope
+
+  let stage_background t ~request ~checkpoint = stage t ~checkpoint request
+
+  let install ?control t config =
+    K.install ?control t.kernel ~handlers:(handlers t) config
+  ;;
+
+  let split_starts t effects = kernel_result (K.split_starts t.kernel effects)
+  let validate_work t work = kernel_result (K.validate_work t.kernel work)
+end
+
+let with_kernel service ~physical ~selected ~selected_now ~check_parent_now f =
+  K.with_scope
+    ~selected
+    ~current_capabilities:(fun () ->
+      match selected_now () with
+      | Ok selected -> selected
+      | Error _ -> O.native_selected service.root)
+    ~abort:(fun id ->
+      match cleanup_physical physical id with
+      | Ok O.Action.Aborted | Ok Physically_owned -> ()
+      | Error error -> failwith error.message)
+    ~error:invalid
+    (fun kernel ->
+       f
+         { service
+         ; physical
+         ; selected
+         ; selected_now
+         ; kernel
+         ; check_parent_now
+         ; frozen = None
+         })
+;;
+
+let with_root_action service ~phase f =
+  let* witness = O.current service.root in
+  let selected = O.Current.selected witness in
+  let* () = O.check_effect_now service.root witness in
+  let action = ref None in
+  K.with_scope
+    ~selected
+    ~current_capabilities:(fun () -> O.native_selected service.root)
+    ~abort:(fun id ->
+      match !action with
+      | None -> failwith "root job stage has no issuing physical action"
+      | Some action ->
+        (match O.Action.cleanup_staged action id with
+         | Ok Aborted | Ok Physically_owned -> ()
+         | Error error -> failwith error.message))
+    ~error:invalid
+    (fun kernel ->
+       let* durable =
+         O.with_root_action service.root ~phase (fun ~action:issued ~sw ->
+           action := Some issued;
+           let scope =
+             { service
+             ; physical = Root issued
+             ; selected
+             ; selected_now = (fun () -> Ok (O.native_selected service.root))
+             ; kernel
+             ; check_parent_now = (fun () -> Ok ())
+             ; frozen = None
+             }
+           in
+           let* value, effects = f ~scope ~sw in
+           let* ids, ordinary = Scope.split_starts scope effects in
+           let* selection = O.Action.seal issued ~selected:ids in
+           let* acknowledge = kernel_result (K.mark_prepared kernel) in
+           Ok ((value, ordinary, acknowledge), selection))
+       in
+       let value, ordinary, acknowledge = durable in
+       acknowledge ();
+       Ok (value, ordinary))
+;;
+
+module Native_selection = struct
+  type t = native_selection
+
+  let physical (t : t) = t.physical
+end
+
+let borrowed_selected service terminal borrowed =
+  let context = H.context (O.Native_terminal.invocation terminal) in
+  let* () =
+    if P.Execution_owner.equal context.owner (Developer (O.owner service.root))
+    then Ok ()
+    else Error (invalid "native job owner differs from its physical root")
+  in
+  let* selected =
+    match context.parent_invocation, borrowed with
+    | None, None -> Ok (O.native_selected service.root)
+    | Some expected, Some borrowed ->
+      let parent = H.context (N.selected_borrowed_invocation borrowed) in
+      if
+        (not (P.Id.Invocation.equal expected parent.id))
+        || not (P.Execution_owner.equal context.owner parent.owner)
+      then Error (invalid "native job parent borrow is foreign")
+      else N.selected_borrowed_capabilities borrowed
+    | None, Some _ | Some _, None ->
+      Error (invalid "native job parent borrow is missing or unexpected")
+  in
+  let* current =
+    List.fold_result (C.references selected) ~init:[] ~f:(fun names reference ->
+      let* _actual =
+        C.resolve
+          (O.native_selected service.root)
+          ~id:reference.id
+          ~fingerprint:reference.fingerprint
+        |> Result.map_error ~f:(fun error -> invalid error.message)
+      in
+      Ok (reference.name :: names))
+  in
+  let* narrowed =
+    C.select (O.native_selected service.root) ~names:(List.rev current)
+    |> Result.map_error ~f:(fun error -> invalid error.message)
+  in
+  if String.equal context.capability_fingerprint (C.fingerprint narrowed)
+  then Ok narrowed
+  else Error (invalid "native job borrow differs from admitted child selection")
+;;
+
+let with_native_scope service ~terminal ~borrowed ~check_parent_now f =
+  if not (O.Native_terminal.issued_by_root terminal ~root:service.root)
+  then Error (invalid "native job terminal belongs to another physical root")
+  else
+    let* selected = borrowed_selected service terminal borrowed in
+    with_kernel
+      service
+      ~physical:(Native terminal)
+      ~selected
+      ~selected_now:(fun () -> borrowed_selected service terminal borrowed)
+      ~check_parent_now
+      (fun scope -> f ~scope)
+;;
+
+let seal_native scope ~terminal ~outcome ~selected_jobs =
+  match scope.physical with
+  | Root _ -> Error (invalid "root job scope cannot seal a native terminal")
+  | Native actual when not (phys_equal actual terminal) ->
+    Error (invalid "native job terminal changed before sealing")
+  | Native _ ->
+    (match scope.frozen with
+     | Some (prior, selection) ->
+       if
+         P.Invocation.equal_outcome prior outcome
+         && List.equal
+              P.Id.Job.equal
+              (List.map
+                 (O.Native_terminal.Selection.jobs selection.physical)
+                 ~f:P.Developer_job.id)
+              selected_jobs
+       then Ok selection
+       else Error (invalid "native job selection changed after sealing")
+     | None ->
+       let* () = current scope in
+       let* () = kernel_result (K.check_open scope.kernel) in
+       let* physical = O.Native_terminal.seal terminal ~outcome ~selected:selected_jobs in
+       let* acknowledge = kernel_result (K.mark_prepared scope.kernel) in
+       let selection = { terminal; physical; acknowledge; acknowledged = false } in
+       scope.frozen <- Some (outcome, selection);
+       Ok selection)
+;;
+
+let frozen_native scope ~terminal =
+  match scope.physical, scope.frozen with
+  | Native actual, Some pair when phys_equal actual terminal -> Some pair
+  | Native _, Some _ | Native _, None | Root _, _ -> None
+;;
+
+let acknowledge_native scope selection =
+  match scope.physical, scope.frozen with
+  | Native terminal, Some (_, frozen)
+    when phys_equal terminal selection.terminal
+         && phys_equal frozen selection
+         && not selection.acknowledged ->
+    selection.acknowledge ();
+    selection.acknowledged <- true;
+    Ok ()
+  | Native _, Some _ | Native _, None | Root _, _ ->
+    Error (invalid "native job acknowledgement is foreign, absent, or repeated")
+;;
