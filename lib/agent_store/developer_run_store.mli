@@ -353,6 +353,13 @@ val capture_fingerprint : handle -> Chatml_source.Digest.t
 val issued_by : t -> handle -> bool
 val is_closed : t -> bool
 
+(** Read-only exact configured whole-document JSON limits from this physical
+    live Store handle. The external Model.spawn actor uses them to re-admit a
+    decoded recipe and its complete nonsecret Target envelope before staging
+    capacity. This is not admission authority; the Store repeats all current
+    job, aggregate payload and document checks under its writer lease. *)
+val document_limits : handle -> (Document_schema.Limits.t, Error.t) result
+
 (** Physical issuer comparison for host wiring of the one shared blob
     coordinator. IDs, root paths and host labels do not substitute for this. *)
 val issued_by_session_store : t -> Session_store.t -> bool

@@ -407,6 +407,10 @@ let valid_handle handle =
   if Atomic.get t.closed || Atomic.get t.closing then Error Error.Closed else Ok t
 ;;
 
+let document_limits handle =
+  Result.map (valid_handle handle) ~f:(fun t -> t.limits.document)
+;;
+
 module Run_claim = struct
   type nonrec t =
     { store : t
