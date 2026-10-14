@@ -381,6 +381,7 @@ type t =
   ; mutable uncertain : bool
   }
 
+let host_id t = t.host_id
 let registry = Atomic.make String.Set.empty
 
 let rec reserve_root path =

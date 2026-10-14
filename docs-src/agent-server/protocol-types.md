@@ -1697,6 +1697,11 @@ module Bundle : sig
       | Expired
     [@@deriving sexp_of]
 
+    (** [Validating] covers a sealed claim pending a publisher as well as an
+        active durable validation intent. It promises neither automatic
+        scheduling nor eventual publication. A same-key commit retry is
+        required to resume a sealed claim when publication was unavailable. *)
+
     (** A status response always echoes the upload ID. Staging progress is
         bounded, ordered by qualified source ID and has no duplicate source.
         Published receipts must echo that same owner and upload ID. Status never renews
