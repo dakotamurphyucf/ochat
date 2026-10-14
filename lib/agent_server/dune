@@ -64,6 +64,7 @@
   job_capacity
   developer_job_selected
   developer_job_worker
+  developer_result_disclosure
   developer_terminal_queue
   developer_root_owner
   developer_native_executor
