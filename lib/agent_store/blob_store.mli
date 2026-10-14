@@ -49,6 +49,12 @@ val bind_developer_runs
   -> Developer_run_store.t
   -> (unit, Store_error.t) result
 
+(** Physical comparison for a live developer result publisher: verifies that
+    this facade shares the coordinator bound to [runs], whose Session_store
+    also owns this store's filesystem roots. No run/job/read authority follows
+    from a true result; each result operation still rechecks its Result_root. *)
+val developer_binding_matches : t -> Developer_run_store.t -> bool
+
 (** A result-open observation bound to its original storage root. Every later
     result operation reborrows and revalidates that root; callers cannot pass
     this token to the unscoped [load_verified]/[read_range] functions. *)
@@ -128,7 +134,8 @@ type developer_retention_presence =
   | Has_developer_evidence
 [@@deriving sexp_of]
 
-(** With a live bound Store, validate both recognized developer namespaces
+(** With a live bound Store, validate both recognized developer Blob namespaces
+    and conservatively detect the separate developer result-intent namespace,
     against every existing, bounded, authentic run root, charging run-document
     enumeration and all blob-file work to the same reader allowance as the
     enclosing conversation collection. Without one, verify the original live
@@ -137,7 +144,10 @@ type developer_retention_presence =
     linked/corrupt files, foreign metadata, incomplete unprovable stages and
     exhausted budgets reject the whole proof. Even a run document with no blob
     files returns [Has_developer_evidence], because its contents may reference
-    conversation blobs. Complete developer blobs remain conservatively retained:
+    conversation blobs. Any result-intent entry returns
+    [Has_developer_evidence] even if a run document is absent; unknown/linked
+    namespace structure fails closed. Complete developer blobs remain
+    conservatively retained:
     this operation does not authorize deletion or infer publication/disclosure.
     A closed prior binding uses the issuing Handle's exact live Data_root to
     detect unbound evidence rather than borrowing a stale run issuer. It runs

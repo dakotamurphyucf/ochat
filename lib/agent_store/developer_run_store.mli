@@ -126,6 +126,10 @@ val find_job_exact : Observation.t -> Agent_protocol.Id.Job.t -> Job_lookup.t
 module Claim : sig
   type t
 
+  (** Physical issuer comparison only. This neither consumes claim entry nor
+      authorizes a terminal transition; equal owner/job IDs are insufficient. *)
+  val issued_by : t -> store -> bool
+
   val owner : t -> Agent_protocol.Execution_owner.developer
   val job : t -> Agent_protocol.Developer_job.t
   val attempt : t -> int
@@ -174,6 +178,10 @@ end
 
 module Installed : sig
   type t
+
+  (** Physical Store issuer comparison for an exact selected-result
+      acknowledgement. Equal run/job IDs or copied DTOs do not suffice. *)
+  val issued_by : t -> store -> bool
 
   val observation : t -> Observation.t
 end
@@ -404,6 +412,18 @@ module Result_root : sig
   val with_lease
     :  t
     -> f:(root:Data_root.t -> ('a, Store_error.t) result)
+    -> ('a, Store_error.t) result
+
+  (** The same authenticated root borrow for private result-intent I/O, using
+      the issuing Store's exact Eio filesystem capability rather than a
+      caller-supplied [env]. It holds the run/root storage gate but NOT the
+      Blob coordinator. The callback may use only the selected private
+      namespace and must not reenter this Store, acquire Blob_store, or close
+      the owner while leased. The publisher releases this lease before Blob
+      staging, which acquires Blob coordination before its own root borrow. *)
+  val with_storage_lease
+    :  t
+    -> f:(env:Eio_unix.Stdenv.base -> root:Data_root.t -> ('a, Store_error.t) result)
     -> ('a, Store_error.t) result
 
   (** Retention borrow with the same root/lifetime checks. Its document

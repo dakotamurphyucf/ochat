@@ -52,6 +52,12 @@
   blob_reference_scan
   blob_retention
   retention_reader
+  result_intent_file
+  developer_owner_document
+  developer_result_reference
+  developer_result_intent_document
+  developer_result_intent
+  developer_result_publisher
   job_result_intent
   result_publication_lock
   result_publication_phase
@@ -85,6 +91,10 @@
   developer_run_document
   developer_run_transition
   blob_developer_namespace
+  result_intent_file
+  developer_owner_document
+  developer_result_intent_document
+  developer_result_intent
   result_publication_lock
   result_publication_phase)
  (libraries ochat.inference

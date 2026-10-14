@@ -46,6 +46,15 @@ module Handle : sig
     -> durable_directory:string
     -> (string, Store_error.t) result
 
+  (** The sibling private result-intent namespace under the same checked root
+      and filesystem capability. Presence is evidence, not a result grant. *)
+  val developer_result_intents_directory
+    :  t
+    -> env:Eio_unix.Stdenv.base
+    -> temporary_directory:string
+    -> durable_directory:string
+    -> (string, Store_error.t) result
+
   (** Hold the issuing daemon's developer-root gate through [f]. This must be
       called inside the Blob_store retention coordinator, before any reference
       proof or deletion. A live developer-root owner returns [Ok None], leaving

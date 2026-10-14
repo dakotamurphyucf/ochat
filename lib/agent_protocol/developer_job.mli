@@ -73,6 +73,14 @@ module State : sig
     -> created_at:Timestamp.t
     -> t
     -> (unit, Protocol_error.t) result
+
+  (** The existing canonical state JSON codec, exposed for versioned private
+      result-selection records. [of_json] validates field syntax only; the
+      owner must still call [with_state] on its authentic job to validate the
+      state against kind, creation time and immutable claim identity. *)
+  val to_json : t -> Jsonaf.t
+
+  val of_json : Jsonaf.t -> (t, Protocol_error.t) result
 end
 
 type t

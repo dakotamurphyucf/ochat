@@ -211,20 +211,20 @@ module Prepared = struct
     }
 end
 
-module Installed = struct
+module Installed_data = struct
   type t = { observation : Observation.t }
 
   let observation t = t.observation
 end
 
 type reconciliation =
-  | Installed of Installed.t
+  | Installed of Installed_data.t
   | Absent
   | Diverged
 
 module Settlement = struct
   type t =
-    | Installed of Installed.t
+    | Installed of Installed_data.t
     | Absent
     | Prewrite_conflict
     | Diverged
@@ -288,6 +288,14 @@ type handle =
   }
 
 type store = t
+
+module Installed = struct
+  include Installed_data
+
+  let issued_by installed (store : store) =
+    phys_equal (observation installed).store_token store.token
+  ;;
+end
 
 let with_run_lifecycle t f =
   Stdlib.Mutex.lock t.run_lifecycle_mutex;
@@ -567,6 +575,7 @@ let claim_current_under_lease t ~poll ~for_entry (claim : claim_data) =
 module Claim = struct
   type t = claim_data
 
+  let issued_by claim (store : store) = phys_equal claim.store_token store.token
   let owner (t : t) = t.owner
   let job (t : t) = t.job
   let attempt (t : t) = (P.Developer_job.state t.job).attempt
@@ -980,13 +989,17 @@ module Result_root = struct
             |> store
         in
         if matches t document
-        then f ~root |> Result.map_error ~f:(fun error -> Error.Store error)
+        then f ~env ~root |> Result.map_error ~f:(fun error -> Error.Store error)
         else Error Error.Foreign_or_stale)
       |> Result.map_error ~f:storage_error
   ;;
 
-  let with_lease t ~f = with_borrow t ~reader:None ~f
-  let with_retention_lease t ~reader ~f = with_borrow t ~reader:(Some reader) ~f
+  let with_lease t ~f = with_borrow t ~reader:None ~f:(fun ~env:_ ~root -> f ~root)
+  let with_storage_lease t ~f = with_borrow t ~reader:None ~f
+
+  let with_retention_lease t ~reader ~f =
+    with_borrow t ~reader:(Some reader) ~f:(fun ~env:_ ~root -> f ~root)
+  ;;
 end
 
 let same_observation (t : t) (handle : handle) (expected : Observation.t) bytes document =

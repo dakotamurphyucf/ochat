@@ -68,7 +68,7 @@ module Result_value = struct
   ;;
 end
 
-module State = struct
+module State_core = struct
   type t =
     { status : Job.status
     ; attempt : int
@@ -222,7 +222,7 @@ type t =
   ; payload : Jsonaf.t
   ; retry_policy : Job.retry_policy
   ; created_at : Timestamp.t
-  ; state : State.t
+  ; state : State_core.t
   }
 
 let validate_retry_policy = function
@@ -251,7 +251,7 @@ let validate_attempt retry_policy attempt =
   else Ok ()
 ;;
 
-let validate_retry_state retry_policy (state : State.t) =
+let validate_retry_state retry_policy (state : State_core.t) =
   match retry_policy, state.status with
   | Job.Never, Queued when state.attempt > 0 ->
     Error (Error.invalid_request "nonretrying job cannot queue another attempt")
@@ -279,7 +279,7 @@ let create
       ~payload
       ~retry_policy
       ~created_at
-      ~(state : State.t)
+      ~(state : State_core.t)
   =
   let open Result.Let_syntax in
   let%bind () = Execution_owner.validate (Execution_owner.Developer owner) in
@@ -293,7 +293,7 @@ let create
       Error (Error.invalid_request "developer job cannot parent itself")
     | None | Some _ -> Ok ()
   in
-  let%map () = State.validate ~job_id:id ~kind ~created_at state in
+  let%map () = State_core.validate ~job_id:id ~kind ~created_at state in
   { owner
   ; capture_fingerprint
   ; id
@@ -306,11 +306,13 @@ let create
   }
 ;;
 
-let with_state t (state : State.t) =
+let with_state t (state : State_core.t) =
   let open Result.Let_syntax in
   let%bind () = validate_attempt t.retry_policy state.attempt in
   let%bind () = validate_retry_state t.retry_policy state in
-  let%map () = State.validate ~job_id:t.id ~kind:t.kind ~created_at:t.created_at state in
+  let%map () =
+    State_core.validate ~job_id:t.id ~kind:t.kind ~created_at:t.created_at state
+  in
   { t with state }
 ;;
 
@@ -461,7 +463,7 @@ let result_of_json json =
   | _ -> Error (Error.invalid_request "invalid developer job result type")
 ;;
 
-let state_to_json (state : State.t) =
+let state_to_json (state : State_core.t) =
   `Object
     ([ "status", Job.status_to_json state.status
      ; "attempt", `Number (Int.to_string state.attempt)
@@ -502,8 +504,16 @@ let state_of_json json =
   in
   let%bind result = Json_codec.optional_as fields "result" result_of_json in
   let%map retry_failure = Json_codec.optional_as fields "retry_failure" Error.of_json in
-  State.{ status; attempt; started_at; next_run_at; completed_at; result; retry_failure }
+  State_core.
+    { status; attempt; started_at; next_run_at; completed_at; result; retry_failure }
 ;;
+
+module State = struct
+  include State_core
+
+  let to_json = state_to_json
+  let of_json = state_of_json
+end
 
 let to_json t =
   `Object
