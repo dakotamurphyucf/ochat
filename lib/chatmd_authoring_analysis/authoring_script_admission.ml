@@ -156,6 +156,7 @@ module Script = struct
   let selected_source t = t.entry_source
   let selected_prepared t = Build.prepared t.selected
   let root_input t = Markdown.Parsed.root_input t.parsed
+  let declaration_input t = Input.Range.input (Markdown.Declaration.range t.declaration)
 
   let authored_point t ~input ~authored_byte ~checkpoint =
     Markdown.Declaration.Extraction.authored_point

@@ -93,11 +93,10 @@ module Origin = struct
               (equal_id
                  (Chatmd_authoring_analysis.Document_stamp.document_source stamp)
                  (Captured.id current_source)))
-        || (not
-              (Captured.Digest.equal
-                 (Chatmd_authoring_analysis.Document_stamp.document_digest stamp)
-                 (Captured.digest current_source)))
-        || not (same_capture current_source authored_source)
+        || not
+             (Captured.Digest.equal
+                (Chatmd_authoring_analysis.Document_stamp.document_digest stamp)
+                (Captured.digest current_source))
       then Error Error.Stale_document
       else if
         not
@@ -106,7 +105,15 @@ module Origin = struct
              (Chatml_prepared_program.fingerprint
                 (Fallback.Selected_contract.prepared selected)))
       then Error Error.Stale_selected_build
-      else if not (phys_equal authored_input (Script.root_input script))
+      else if not (phys_equal authored_input (Script.declaration_input script))
+      then Ok Unavailable
+      else if
+        phys_equal authored_input (Script.root_input script)
+        && not (same_capture current_source authored_source)
+      then Error Error.Stale_document
+      else if
+        (not (phys_equal authored_input (Script.root_input script)))
+        && not (Input.Role.equal (Input.role authored_input) Input.Role.Import)
       then Ok Unavailable
       else if
         charge parser_bytes;

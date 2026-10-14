@@ -221,12 +221,21 @@ let%expect_test "selected supplied script publishes certified or same-run failed
              |> ok
            in
            let result =
-             Analyze.analyze
-               (analyzer ~script_selection:(Some selection) owner env)
-               ~actor
-               ~connection
-               request
-             |> ok
+             match
+               Analyze.analyze
+                 (analyzer ~script_selection:(Some selection) owner env)
+                 ~actor
+                 ~connection
+                 request
+             with
+             | Ok result -> result
+             | Error error ->
+               failwith
+                 ("Analyze fixture ("
+                  ^ label
+                  ^ "): "
+                  ^ Jsonaf.to_string
+                      (P.Error.to_json (Core_owner.Error.to_protocol error)))
            in
            let kind, diagnostic_count =
              match result with
@@ -258,12 +267,21 @@ let%expect_test "selected supplied script publishes certified or same-run failed
                |> ok
              in
              let second =
-               Analyze.analyze
-                 (analyzer ~script_selection:(Some selection) owner env)
-                 ~actor
-                 ~connection
-                 second_request
-               |> ok
+               match
+                 Analyze.analyze
+                   (analyzer ~script_selection:(Some selection) owner env)
+                   ~actor
+                   ~connection
+                   second_request
+               with
+               | Ok result -> result
+               | Error error ->
+                 failwith
+                   ("Analyze fixture ("
+                    ^ label
+                    ^ ", second): "
+                    ^ Jsonaf.to_string
+                        (P.Error.to_json (Core_owner.Error.to_protocol error)))
              in
              match result, second with
              | A.Analyze.Complete first, A.Analyze.Complete second ->

@@ -1,6 +1,6 @@
 (library
  (name authoring_context_service_tests)
- (modules service_tests foundation_tests analysis_tests)
+ (modules service_tests foundation_tests analysis_tests assistance_tests)
  (libraries
   core
   eio
@@ -18,6 +18,9 @@
   ochat.chatml_compilation
   ochat.chatml_source
   ochat.chatml
+  ochat.chat_response
+  ochat.ochat_function
+  ochat.openai
   chatml_project_build_tests
   source)
  (inline_tests)
