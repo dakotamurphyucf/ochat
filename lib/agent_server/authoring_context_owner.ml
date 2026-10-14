@@ -8,8 +8,9 @@ let source_host_error = function
   | Foreign_root | Unsupported_source_selection -> Error.Source_unavailable
   | Closed | Foreign_domain -> Error.Closed
   | Busy -> Error.Busy
-  | Context_limit | Result_limit -> Error.Resource_limit
-  | Sources _ | Root _ | Local _ | Project _ | Source_capture _ ->
+  | Context_limit | Result_limit | Document_bundle_limit
+  | Document_parser Prompt.Chat_markdown.Generated.Parser_limit -> Error.Resource_limit
+  | Sources _ | Root _ | Local _ | Project _ | Source_capture _ | Document_parser _ ->
     Error.Source_unavailable
 ;;
 

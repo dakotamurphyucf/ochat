@@ -79,6 +79,8 @@ module Error = struct
     | Local of Local.Error.t
     | Project of Project.Error.t
     | Source_capture of Core.Error.t
+    | Document_parser of Prompt.Chat_markdown.Generated.error
+    | Document_bundle_limit
 
   let sexp_of_t = function
     | Unauthorized -> Sexp.Atom "Unauthorized"
@@ -95,6 +97,9 @@ module Error = struct
     | Local error -> [%sexp "Local", (error : Local.Error.t)]
     | Project _ -> Sexp.Atom "Project"
     | Source_capture _ -> Sexp.Atom "Source_capture"
+    | Document_parser error ->
+      [%sexp "Document_parser", (error : Prompt.Chat_markdown.Generated.error)]
+    | Document_bundle_limit -> Sexp.Atom "Document_bundle_limit"
   ;;
 end
 
@@ -624,6 +629,20 @@ end
 module Document_context = struct
   type t = document_context
 
+  module Parsed_capture = struct
+    type t =
+      { source : Captured.t
+      ; bundle : Chatmd_source_bundle.t
+      ; parsed : Prompt.Chat_markdown.Generated.receipt
+      ; input_sources : (Chatmd_parser_input.t * Captured.t) list
+      }
+
+    let source t = t.source
+    let bundle t = t.bundle
+    let parsed t = t.parsed
+    let input_sources t = t.input_sources
+  end
+
   module Origin = struct
     type t =
       | Host_member
@@ -672,6 +691,144 @@ module Document_context = struct
           |> Result.map_error ~f:(fun error -> Error.Source_capture error)
         in
         { Document_capture.source })
+  ;;
+
+  let bind_parser_inputs ~source ~bundle ~parsed ~max_source_bytes ~poll =
+    let open Result.Let_syntax in
+    let source_id = Captured.id source in
+    let member_contents =
+      Chatmd_source_bundle.sources bundle |> String.Map.of_alist_exn
+    in
+    let generated = Prompt.Chat_markdown.Generated.parsed parsed in
+    let parsed_units = generated.parsed_root :: List.map generated.parsed_agents ~f:snd in
+    let source_cache =
+      ref (String.Map.singleton (Captured.Id.relative_path source_id) source)
+    in
+    let rec visit_units count compared_bytes reversed = function
+      | [] -> Ok (List.rev reversed)
+      | unit :: remaining ->
+        visit_inputs
+          count
+          compared_bytes
+          reversed
+          (Prompt.Chat_markdown.Parsed.inputs unit)
+          remaining
+    and visit_inputs count compared_bytes reversed inputs remaining_units =
+      match inputs with
+      | [] -> visit_units count compared_bytes reversed remaining_units
+      | input :: rest ->
+        poll ();
+        let input_bytes = Chatmd_parser_input.authored_byte_length input in
+        if count >= 1024 || input_bytes > (8 * 1024 * 1024) - compared_bytes
+        then Error Error.Document_bundle_limit
+        else (
+          let member = Chatmd_parser_input.path input in
+          let%bind contents =
+            match Map.find member_contents member with
+            | Some contents -> Ok contents
+            | None -> Error Error.Document_bundle_limit
+          in
+          if not (Chatmd_parser_input.authored_matches input contents ~checkpoint:poll)
+          then Error Error.Document_bundle_limit
+          else (
+            let%bind captured =
+              match Map.find !source_cache member with
+              | Some captured -> Ok captured
+              | None ->
+                let%bind id =
+                  Captured.Id.create
+                    ~package_namespace:(Captured.Id.package_namespace source_id)
+                    ~relative_path:member
+                  |> Result.map_error ~f:(fun error -> Error.Source_capture error)
+                in
+                let%map captured =
+                  Captured.create
+                    id
+                    ~contents
+                    ~expected_digest:None
+                    ~max_bytes:(Some max_source_bytes)
+                    ~checkpoint:poll
+                  |> Result.map_error ~f:(fun error -> Error.Source_capture error)
+                in
+                source_cache := Map.set !source_cache ~key:member ~data:captured;
+                captured
+            in
+            visit_inputs
+              (count + 1)
+              (compared_bytes + input_bytes)
+              ((input, captured) :: reversed)
+              rest
+              remaining_units))
+    in
+    visit_units 0 0 [] parsed_units
+  ;;
+
+  let capture_parser_bundle t ~actor ~source ~dir ~checkpoint =
+    let open Result.Let_syntax in
+    let%bind () = check_all t.common actor in
+    let source_id = Captured.id source in
+    if
+      (not (Captured.Id.equal source_id t.source_id))
+      || not
+           (String.equal (Captured.Id.relative_path source_id) (Path.to_string t.member))
+    then Error Error.Foreign_root
+    else (
+      match t.root with
+      | None -> Error Error.Unsupported_source_selection
+      | Some root ->
+        with_local_root t.common root ~actor ~checkpoint (fun owner ~policy ~poll ->
+          let open Result.Let_syntax in
+          let defaults = Chatmd_source_bundle.default_limits in
+          let%bind limits =
+            Source_loader.Generated_retained.Limits.create
+              ~max_source_bytes:defaults.max_source_bytes
+              ~max_bundle_bytes:defaults.max_bundle_bytes
+              ~max_files:defaults.max_files
+            |> Result.map_error ~f:(fun _ -> Error.Document_bundle_limit)
+          in
+          if Captured.byte_length source > t.common.host.limits.max_read_bytes
+          then Error Error.Document_bundle_limit
+          else (
+            let%bind retained =
+              Source_loader.Generated_retained.create
+                ~root:dir
+                ~owner
+                ~root_file:t.member
+                ~root_contents:(Captured.contents source)
+                ~limits
+                ~before_import_read:(fun ~member:_ ->
+                  poll ();
+                  let remaining =
+                    t.common.host.limits.max_context_read_bytes - t.common.read_bytes
+                  in
+                  if remaining <= 0
+                  then -1
+                  else
+                    Int.min
+                      (Int.min t.common.host.limits.max_read_bytes remaining)
+                      (Chatml_local_capture.Limits.source_bytes
+                         (Project.Policy.local_limits policy)))
+                ~on_import_read:(fun ~member:_ ~contents ->
+                  t.common.read_bytes <- t.common.read_bytes + String.length contents;
+                  poll ())
+                ~checkpoint:poll
+              |> Result.map_error ~f:(fun _ -> Error.Document_bundle_limit)
+            in
+            let%bind parsed, bundle =
+              Prompt.Chat_markdown.Generated.capture_retained_bundle
+                retained
+                ~checkpoint:poll
+              |> Result.map_error ~f:(fun error -> Error.Document_parser error)
+            in
+            let%map input_sources =
+              bind_parser_inputs
+                ~source
+                ~bundle
+                ~parsed
+                ~max_source_bytes:defaults.max_source_bytes
+                ~poll
+            in
+            { Parsed_capture.source; bundle; parsed; input_sources })))
   ;;
 
   let open_host host ~actor ~root ~member ~checkpoint =

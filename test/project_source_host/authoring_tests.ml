@@ -197,6 +197,141 @@ let%test_unit "host document captures exact bytes without project preparation" =
           "\255unfinished `chatml"))
 ;;
 
+let%test_unit "explicit document capture binds unsaved root and imported source bytes" =
+  with_source_context (fun _ root _ allowed denied _ host _ root_path ->
+    let path name = Eio.Path.(root_path / name) in
+    Eio.Path.save
+      ~create:(`Or_truncate 0o600)
+      (path "draft.chatmd")
+      "<developer>native root must not win</developer>";
+    Eio.Path.save
+      ~create:(`Or_truncate 0o600)
+      (path "part.chatmd")
+      "<developer>first import</developer>";
+    let member = Path.create "draft.chatmd" |> Or_error.ok_exn in
+    let context, opened =
+      Authoring.Document_context.open_host
+        host
+        ~actor:allowed
+        ~root
+        ~member
+        ~checkpoint:ignore
+      |> authoring_ok
+    in
+    Exn.protect
+      ~finally:(fun () -> Authoring.Document_context.close_and_wait context)
+      ~f:(fun () ->
+        let original = Authoring.Document_capture.source opened in
+        let edited =
+          Captured.create
+            (Captured.id original)
+            ~contents:
+              {|<import src="part.chatmd" namespace="part"/><developer>unsaved root</developer>|}
+            ~expected_digest:None
+            ~max_bytes:(Some 1024)
+            ~checkpoint:ignore
+          |> Or_error.ok_exn
+        in
+        let capture () =
+          Authoring.Document_context.capture_parser_bundle
+            context
+            ~actor:allowed
+            ~source:edited
+            ~dir:root_path
+            ~checkpoint:ignore
+          |> authoring_ok
+        in
+        (match
+           Authoring.Document_context.capture_parser_bundle
+             context
+             ~actor:denied
+             ~source:edited
+             ~dir:root_path
+             ~checkpoint:ignore
+         with
+         | Error Authoring.Error.Unauthorized -> ()
+         | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+         | Ok _ -> failwith "foreign actor admitted imported closure");
+        let first = capture () in
+        let module Parsed = Authoring.Document_context.Parsed_capture in
+        [%test_eq: string]
+          (Captured.contents (Parsed.source first))
+          (Captured.contents edited);
+        let input_sources = Parsed.input_sources first in
+        [%test_eq: int] (List.length input_sources) 2;
+        let source_at member =
+          input_sources
+          |> List.find_map ~f:(fun (input, source) ->
+            if String.equal (Chatmd_parser_input.path input) member
+            then Some source
+            else None)
+          |> Option.value_exn
+        in
+        assert (phys_equal (source_at "draft.chatmd") edited);
+        [%test_eq: string]
+          (Captured.contents (source_at "part.chatmd"))
+          "<developer>first import</developer>";
+        Eio.Path.save
+          ~create:(`Or_truncate 0o600)
+          (path "part.chatmd")
+          "<developer>second import</developer>";
+        [%test_eq: string]
+          (Captured.contents (source_at "part.chatmd"))
+          "<developer>first import</developer>";
+        let second = capture () in
+        let second_import =
+          Parsed.input_sources second
+          |> List.find_map ~f:(fun (input, source) ->
+            if String.equal (Chatmd_parser_input.path input) "part.chatmd"
+            then Some source
+            else None)
+          |> Option.value_exn
+        in
+        [%test_eq: string]
+          (Captured.contents second_import)
+          "<developer>second import</developer>";
+        let missing =
+          Captured.create
+            (Captured.id edited)
+            ~contents:{|<import src="missing.chatmd" namespace="missing"/>|}
+            ~expected_digest:None
+            ~max_bytes:(Some 1024)
+            ~checkpoint:ignore
+          |> Or_error.ok_exn
+        in
+        (match
+           Authoring.Document_context.capture_parser_bundle
+             context
+             ~actor:allowed
+             ~source:missing
+             ~dir:root_path
+             ~checkpoint:ignore
+         with
+         | Error (Authoring.Error.Document_parser Source_unavailable) -> ()
+         | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+         | Ok _ -> failwith "missing import produced a partial capture");
+        [%test_eq: string]
+          (Captured.contents (source_at "part.chatmd"))
+          "<developer>first import</developer>";
+        let foreign_id =
+          Captured.Id.create
+            ~package_namespace:(Captured.Id.package_namespace (Captured.id edited))
+            ~relative_path:"foreign.chatmd"
+          |> Or_error.ok_exn
+        in
+        match
+          Authoring.Document_context.capture_parser_bundle
+            context
+            ~actor:allowed
+            ~source:(Captured.reidentify edited ~id:foreign_id)
+            ~dir:root_path
+            ~checkpoint:ignore
+        with
+        | Error Authoring.Error.Foreign_root -> ()
+        | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+        | Ok _ -> failwith "foreign source label admitted as document root"))
+;;
+
 let%test_unit "supplied document needs its own actor policy and no read root" =
   with_source_context (fun _ _ _ allowed denied sources _ _ _ ->
     Eio.Switch.run (fun sw ->

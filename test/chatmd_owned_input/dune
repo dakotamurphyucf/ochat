@@ -1,5 +1,5 @@
 (library
  (name chatmd_owned_input_tests)
- (libraries core eio_main chatmd source agent_session agent_protocol agent_store mirage-crypto-rng.unix expect_test_helpers_core)
+ (libraries core eio_main chatmd source ochat.chatml_local_source agent_session agent_protocol agent_store mirage-crypto-rng.unix expect_test_helpers_core)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))
