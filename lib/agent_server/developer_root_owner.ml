@@ -278,6 +278,9 @@ let owner t = t.owner
 let capture t = t.capture
 let native_ceiling t = t.native_ceiling
 let native_selected t = t.selected
+let original_actor t = t.actor
+let job_policy t = t.job_policy
+let issued_by_store t store = Store.issued_by store t.handle
 let native_now t = t.registry.now ()
 
 let check_current_local ?control t (witness : current) ~allow_pending =
@@ -592,6 +595,11 @@ let same_action_fiber action =
 module Action = struct
   type nonrec t = action
 
+  type cleanup =
+    | Aborted
+    | Physically_owned
+  [@@deriving sexp_of]
+
   let stage_background_with_launch t ~launch ~request ~checkpoint ~check_parent_now =
     let issuer = t.issuer in
     if (not (same_domain issuer.registry)) || (not (same_action_fiber t)) || not t.live
@@ -697,6 +705,22 @@ module Action = struct
           Job_capacity.abort staged.reservation;
           staged.phase <- Aborted;
           Ok ()))
+  ;;
+
+  let cleanup_staged t id =
+    if not (same_domain t.issuer.registry)
+    then invalid "developer staged job belongs to another domain"
+    else (
+      match Hashtbl.find t.staged id with
+      | None -> invalid "developer staged job is not owned by this action"
+      | Some { phase = Aborted; _ } -> Ok Aborted
+      | Some { phase = Published; _ } -> Ok Physically_owned
+      | Some { phase = Provisional; _ } ->
+        if t.queued || Option.is_some t.sealed
+        then Ok Physically_owned
+        else if t.live
+        then Result.map (rollback_staged t id) ~f:(fun () -> Aborted)
+        else invalid "unsealed developer action leaked provisional capacity")
   ;;
 
   let seal t ~selected =
@@ -1143,6 +1167,9 @@ let with_root_action t ~phase f =
 module Native_terminal = struct
   type nonrec t = native_scope
 
+  let issued_by_root (t : t) ~root = phys_equal t.issuer root
+  let invocation t = t.registration.invocation
+
   type dispatch_reconciliation =
     | Installed of H.t * int
     | Absent
@@ -1406,6 +1433,7 @@ module Native_terminal = struct
   ;;
 
   let rollback_staged (t : t) id = Action.rollback_staged t.action id
+  let cleanup_staged (t : t) id = Action.cleanup_staged t.action id
 
   let seal (t : t) ~outcome ~selected =
     let* () =

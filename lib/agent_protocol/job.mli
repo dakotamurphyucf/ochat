@@ -55,6 +55,10 @@ type retry_policy =
 val kind_to_json : kind -> Jsonaf.t
 
 val kind_of_json : Jsonaf.t -> (kind, Error.t) result
+
+(** Stable lowercase status label used by bounded script Job.get views. *)
+val status_name : status -> string
+
 val status_to_json : status -> Jsonaf.t
 val status_of_json : Jsonaf.t -> (status, Error.t) result
 val retry_to_json : retry_policy -> Jsonaf.t

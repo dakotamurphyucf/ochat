@@ -81,8 +81,9 @@ let fault_after_authority_rename_env
           (H (Eio.Fs.Pi.Dir, (module Directory)) :: Eio.Resource.bindings handler) )
   in
   let directory, prefix = Eio.Stdenv.fs env in
+  let wrapped_fs = wrap ~location:prefix directory, prefix in
   object
-    method fs = wrap ~location:prefix directory, prefix
+    method fs = wrapped_fs
     method cwd = env#cwd
     method stdin = env#stdin
     method stdout = env#stdout

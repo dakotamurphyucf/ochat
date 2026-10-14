@@ -133,6 +133,11 @@ end
 module Action : sig
   type t
 
+  type cleanup =
+    | Aborted
+    | Physically_owned
+  [@@deriving sexp_of]
+
   (** Construct and reserve a real typed background job through
       Developer_root_job_admission and the daemon-wide Job_capacity. The
       request must have been produced under the run's authentic selected host
@@ -156,6 +161,18 @@ module Action : sig
     -> Agent_protocol.Id.Job.t
     -> (unit, Agent_protocol.Error.t) result
 
+  (** Cleanup for a lexical Job scope that outlives this action's callback.
+      Check the exact issuing action, domain and staged ID. While the action is
+      live and unsealed, perform [rollback_staged]; after its bracket, report
+      an already proven abort or leave a sealed/queued/uncertain reservation
+      under this root's physical handoff. This cannot release selected work,
+      grant an ID authority, or undo a published job. Ordinary Task.catch
+      continues to use strict [rollback_staged] while the callback is live. *)
+  val cleanup_staged
+    :  t
+    -> Agent_protocol.Id.Job.t
+    -> (cleanup, Agent_protocol.Error.t) result
+
   (** One-shot seal of a distinct subset of this action's own staged IDs.
       Unknown/duplicate/foreign IDs reject. Sealing excludes later staging and
       fixes exact immutable job records; the caller returns this opaque value
@@ -170,6 +187,13 @@ end
 
 module Native_terminal : sig
   type t
+
+  (** Physical scope issuer and immutable original invocation. Developer
+      lexical Job admission compares these before borrowing the native
+      selected ceiling; copied owner coordinates are insufficient. *)
+  val issued_by_root : t -> root:run -> bool
+
+  val invocation : t -> Agent_protocol.Host_invocation.t
 
   module Selection : sig
     type t
@@ -262,6 +286,15 @@ module Native_terminal : sig
     -> Agent_protocol.Id.Job.t
     -> (unit, Agent_protocol.Error.t) result
 
+  (** The native counterpart of Action.cleanup_staged, bound to the same
+      registered terminal and its physical staged ledger. After a sealed or
+      uncertain terminal, lexical cleanup must retain capacity with the root
+      rather than reinterpret its ID as an abort grant. *)
+  val cleanup_staged
+    :  t
+    -> Agent_protocol.Id.Job.t
+    -> (Action.cleanup, Agent_protocol.Error.t) result
+
   (** One-shot seal of this scope's own staged IDs after the callback's
       canonical outcome is known. [submit] compares this exact outcome with
       the resolved terminal record. Nonempty selection stays paired with that
@@ -321,6 +354,16 @@ end
 
 val owner : t -> Agent_protocol.Execution_owner.developer
 val capture : t -> Chatml_developer_capture.t
+
+(** Host-only admission facts retained by this physical owner. The captured
+    actor and policy are not reconstructed from request coordinates. *)
+val original_actor : t -> Operator_authorization.t
+
+val job_policy : t -> Chat_response.One_off_request.policy
+
+(** Physical Store-issuer comparison for composing result disclosure with
+    this run. Equal host/run IDs or paths do not establish this binding. *)
+val issued_by_store : t -> Agent_store.Developer_run_store.t -> bool
 
 (** Read-only authentic data retained by the physical run owner. *)
 val native_ceiling : t -> Chat_response.Tool_capability.t

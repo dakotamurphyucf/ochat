@@ -4,6 +4,7 @@ module B = Chat_response.Background_request
 module C = Chat_response.Tool_capability
 module Ops = Chat_response.Background_job_operations
 module Kernel = Script_job_kernel
+module Request = Script_job_request
 
 type host =
   { stage : P.Job.launch_owner -> B.t -> (P.Job.t, P.Error.t) result
@@ -44,17 +45,7 @@ let message result = Result.map_error result ~f:(fun error -> error.P.Error.mess
 let view (job : P.Job.t) =
   let open Result.Let_syntax in
   let%map completion = P.Job.terminal_result job in
-  let status =
-    match job.status with
-    | Queued -> "queued"
-    | Running -> "running"
-    | Waiting_permission _ -> "waiting_permission"
-    | Waiting_completion _ -> "waiting_completion"
-    | Succeeded -> "succeeded"
-    | Failed _ -> "failed"
-    | Cancelled -> "cancelled"
-    | Interrupted _ -> "interrupted"
-  in
+  let status = P.Job.status_name job.status in
   `Object
     [ "version", `Number "1"
     ; "id", P.Id.Job.to_json job.id
@@ -128,55 +119,33 @@ let handlers scope =
     { start_tool =
         (fun ~name ~input ->
           let%bind () = check scope in
-          let%bind binding =
-            C.find scope.selected ~name
-            |> Result.map_error ~f:(fun error -> error.C.message)
-          in
           let%bind request =
-            B.tool
-              ~capabilities:scope.selected
-              ~reference:(C.reference binding)
-              ~input
+            Request.tool
+              ~selected:scope.selected
               ~policy:scope.service.policy
+              ~prepare_source:(fun ~binding ~request ~checkpoint ->
+                scope.service.prepare_source
+                  ~binding
+                  ~owner:scope.owner
+                  ~request
+                  ~checkpoint)
+              ~name
+              ~input
+              ~checkpoint:(fun () -> Kernel.checkpoint scope.kernel)
             |> message
           in
-          let checkpoint () = Kernel.checkpoint scope.kernel in
-          checkpoint ();
-          let%bind artifact =
-            scope.service.prepare_source ~binding ~owner:scope.owner ~request ~checkpoint
-            |> message
-          in
-          checkpoint ();
           let%bind () = check scope in
-          let%bind request =
-            match artifact with
-            | None -> Ok request
-            | Some artifact -> B.with_agent_artifact request artifact |> message
-          in
           stage scope request)
     ; start_script =
         (fun json ->
           let%bind () = check scope in
-          let diagnostics errors =
-            List.map errors ~f:Chatmd_shell_spec.Diagnostic.to_string
-            |> String.concat ~sep:"\n"
-          in
           let%bind request =
-            Chat_response.One_off_request.decode ~policy:scope.service.policy json
-            |> Result.map_error ~f:diagnostics
-          in
-          let%bind prepared =
-            Chat_response.One_off_script.prepare_in_domain
+            Request.script
               ~env:scope.service.env
-              ~capabilities:scope.selected
-              ~tools:request.tools
-              ~source:request.source
-              ~limits:request.policy.compilation
-              ()
-            |> Result.map_error ~f:diagnostics
-          in
-          let%bind request =
-            B.script ~prepared ~input:request.input ~policy:request.policy |> message
+              ~selected:scope.selected
+              ~policy:scope.service.policy
+              json
+            |> message
           in
           stage scope request)
     ; get =

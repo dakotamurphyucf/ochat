@@ -239,7 +239,7 @@ let implementation_sources =
   ; ( "lib/agent_session/managed_wait_tool.ml"
     , "2482da27415b0f542bbf5e2fa61bf97de70fb047790cb6ee5100ced465b43708" )
   ; ( "lib/agent_session/native_tool_invocation.ml"
-    , "1fe86755d2763785dd882cebcc71128c72e12b1a9ebde0ca47a11ce132a59a64" )
+    , "a2eed7d7fd882b0125487e1380c4ddf34e77955347734fa968430d0d80ab5254" )
   ; ( "lib/agent_session/native_tool_policy.ml"
     , "c3ab2528769b5737c2b4cc22edb01e01c75222ee42520aaa12527414437463fc" )
   ; ( "lib/agent_session/one_off_execution.ml"
