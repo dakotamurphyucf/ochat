@@ -192,6 +192,58 @@ val with_retention
   -> f:(retention -> ('a, Store_error.t) result)
   -> ('a option, Store_error.t) result
 
+(** A cancellable read-only startup use of the SAME shared Blob coordinator and one
+    Retention_reader allowance. The bound [runs] Store must physically issue
+    [root]; recheck that fact and [sw] AFTER waiting for the coordinator and
+    before exposing [f]. The reader is rooted at that Store's exact Data_root
+    with this Blob_store's filesystem capability. [checkpoint] charges the
+    enclosing work allowance before root/reader setup and after waits; its
+    original exception and cancellation propagate. [f] may reborrow Store roots and
+    inspect stages, but must not reenter public Blob_store operations or retain
+    the reader/token afterward. [intent_directory] is the bound developer
+    Store Data_root's authentic sibling result-intent directory, not a caller path.
+    The two developer Blob namespace paths are likewise coordinator-owned;
+    the callback inspects their presence through the same reader before scanning.
+    [Ok None] defers when an upload/read/stage is
+    active, as [with_retention] does. Unlike deletion, this read-only borrow
+    does not protect cancellation through the callback: the coordinator releases
+    safely on the caller's original exception. This serializes the inventory, not
+    result publication or cross-owner deletion. *)
+val with_developer_result_inventory
+  :  t
+  -> sw:Eio.Switch.t
+  -> runs:Developer_run_store.t
+  -> root:Developer_run_store.Result_root.t
+  -> max_entries:int
+  -> max_bytes:int
+  -> checkpoint:(unit -> unit)
+  -> f:
+       (reader:Retention_reader.t
+        -> intent_directory:string
+        -> temporary_namespace:string
+        -> durable_namespace:string
+        -> ('a, Store_error.t) result)
+  -> ('a option, Store_error.t) result
+
+(** A separate finite owner-bound reader scope for ONE later recovery action.
+    It verifies the same physical Blob binding/Result_root and charges all
+    authoritative Store reads to one reader and [checkpoint] allowance.
+    Unlike the global inventory it holds NO Blob coordinator, so [f] may call
+    the existing public Blob staging engine. Each action has a fresh finite
+    allowance, never a reset between its pre/post checks. Backend stage writes
+    retain their own upload cap; a reader cannot claim to meter bytes it did
+    not read. This callback must not reenter itself or retain the reader. *)
+val with_developer_result_reader
+  :  t
+  -> sw:Eio.Switch.t
+  -> runs:Developer_run_store.t
+  -> root:Developer_run_store.Result_root.t
+  -> max_entries:int
+  -> max_bytes:int
+  -> checkpoint:(unit -> unit)
+  -> f:(Retention_reader.t -> ('a, Store_error.t) result)
+  -> ('a, Store_error.t) result
+
 (** The exact session root and shared temporary-blob root under a live retention
     token, for bounded reference readers. This does not authorize another session
     or any deletion. The caller must retain the scope throughout the scan. *)

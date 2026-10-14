@@ -195,18 +195,27 @@ let resolve t relative ~directory =
   walk t.root parts
 ;;
 
-let kind t ~path =
+let kind_or_missing t ~path =
   let open Result.Let_syntax in
   try
     let%bind native_path = resolve t path ~directory:false in
     let%bind () = charge_entry t in
     match Eio.Path.kind ~follow:false (eio_path t native_path) with
-    | `Directory -> Ok `Directory
-    | `Regular_file -> Ok `File
-    | _ -> corrupt "retention root is missing, linked or unsupported"
+    | `Directory -> Ok (Some `Directory)
+    | `Regular_file -> Ok (Some `File)
+    | `Not_found -> Ok None
+    | _ -> corrupt "retention root is linked or unsupported"
   with
   | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
   | exn -> Error (Store_error.of_exn ~operation:"inspect retention root" ~path exn)
+;;
+
+let kind t ~path =
+  let open Result.Let_syntax in
+  let%bind found = kind_or_missing t ~path in
+  match found with
+  | Some found -> Ok found
+  | None -> corrupt "retention root is missing"
 ;;
 
 let list t ~directory =
