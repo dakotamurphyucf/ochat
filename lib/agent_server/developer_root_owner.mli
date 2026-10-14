@@ -202,6 +202,13 @@ module Native_terminal : sig
 
   val callback_complete : t -> bool
 
+  (** Nonyielding liveness of this exact physical callback, including its
+      registered cancellation context and actual child Switch. False while
+      its children join after cancellation/failure, or after bracket exit.
+      The selected invocation issuer retains this check on its active parent;
+      a protected nested child cannot infer liveness from its own context. *)
+  val effect_parent_live_now : t -> bool
+
   (** Return the already frozen canonical pair, if any. A late exception may
       not replace it with Fail/None. *)
   val sealed : t -> (Agent_protocol.Invocation.outcome * Selection.t) option
@@ -220,16 +227,20 @@ module Native_terminal : sig
       replacement outcome or selection. *)
   val resolve_remembered : t -> (int, Agent_protocol.Error.t) result
 
-  (** This scope is terminal custody, not native-effect permission. The later
-      shared invocation policy must durably Dispatch and independently prove
-      its selected binding, permission and live parent before a handler runs.
-      This actor owns the original principal/capture and shared capacity.
-      Until that policy adapter is wired, a staged job may name only this exact
-      invocation as launch parent and no claimed parent job. *)
+  (** This scope is terminal custody, not native-effect permission. The shared
+      invocation policy must durably Dispatch and independently prove its
+      selected binding, permission and live parent before a handler runs. A
+      job-descended scope derives launch parent_job and depth from its exact
+      registered physical Claim ancestor; root-origin staging uses None/0.
+      A yielding preparation repeats the ancestor's nonyielding liveness check
+      immediately before reserving capacity. [check_parent_now] is the trusted
+      selected callback's nonyielding direct-invocation/deadline check at that
+      same boundary; it cannot choose a result or selection. *)
   val stage_background
     :  t
     -> request:Chat_response.Background_request.t
     -> checkpoint:(unit -> unit)
+    -> check_parent_now:(unit -> (unit, Agent_protocol.Error.t) result)
     -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result
 
   (** One-shot seal of this scope's own staged IDs after the callback's
@@ -297,6 +308,37 @@ val native_ceiling : t -> Chat_response.Tool_capability.t
 
 val native_selected : t -> Chat_response.Tool_capability.t
 val native_now : t -> Agent_protocol.Timestamp.t
+
+(** Derive a physically owned job ancestor from this root's actual Worker
+    issuer and an entered callback token. This never accepts a caller-supplied
+    worker issuer, durable Running row or copied job coordinates. *)
+val job_parent
+  :  t
+  -> Agent_session.Developer_job_scope.active
+  -> (Agent_session.Developer_job_scope.Parent.t, Agent_protocol.Error.t) result
+
+(** Enter an exact queued attempt through this root's owned physical Worker,
+    under its registered child Switch and the shared daemon capacity ledger.
+    The callback receives only the entered active Claim; it may call the same
+    selected native executor as a direct job child. The Worker durably claims
+    Running before entry, joins children before finalizing the proposed state,
+    and never replays the callback after uncertain persistence. This method
+    does not expose the Worker issuer or add a scheduler. Root currentness and
+    lifecycle are checked before delegation; every effect still performs its
+    own final root/Claim/permission checks. [select] retains the Worker's exact
+    already-frozen result custody when the higher result actor supplies it. *)
+val with_claimed_job
+  :  t
+  -> expected:Agent_store.Developer_run_store.Observation.t
+  -> lookup:Agent_store.Developer_run_store.Job_lookup.t
+  -> ?select:
+       (claim:Agent_store.Developer_run_store.Claim.t
+        -> proposed:Agent_protocol.Developer_job.State.t
+        -> (Developer_job_worker.Selected.t option, Agent_protocol.Error.t) result)
+  -> (active:Agent_session.Developer_job_scope.active
+      -> sw:Eio.Switch.t
+      -> (Agent_protocol.Developer_job.State.t, Agent_protocol.Error.t) result)
+  -> (Agent_protocol.Developer_job.t option, Agent_protocol.Error.t) result
 
 (** Read actual latest Active epoch through the Store, then recheck original
     actor, same-domain physical lifetime and selected registry without yielding.
@@ -367,6 +409,7 @@ val with_root_action
     from a partial callback. *)
 val with_native_registration
   :  t
+  -> ?job_parent:Agent_session.Developer_job_scope.Parent.t
   -> invocation:Agent_protocol.Host_invocation.t
   -> (scope:Native_terminal.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result

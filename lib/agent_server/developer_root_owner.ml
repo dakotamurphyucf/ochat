@@ -5,6 +5,7 @@ module Capability = Chat_response.Tool_capability
 module Request = Chat_response.Background_request
 module Terminal_queue = Developer_terminal_queue
 module H = P.Host_invocation
+module Job_scope = Agent_session.Developer_job_scope
 
 module Limits = struct
   type t =
@@ -153,6 +154,7 @@ and pending =
 and native_registration =
   { call : call
   ; invocation : H.t
+  ; job_parent : Job_scope.Parent.t option
   ; terminal_slot : terminal_intent Terminal_queue.callback
   ; mutable scope : native_scope option
   }
@@ -162,6 +164,7 @@ and native_scope =
   ; registration : native_registration
   ; action : action
   ; mutable dispatched : H.t option
+  ; mutable callback_switch : Eio.Switch.t option
   ; mutable callback_complete : bool
   ; mutable bracket_exited : bool
   ; mutable sealed : native_selection option
@@ -313,6 +316,22 @@ module Current = struct
   let selected (t : t) = t.selected
 end
 
+let job_parent t active =
+  let issuer = Developer_job_worker.issuer t.worker in
+  let* parent = Job_scope.parent issuer active in
+  let* witness = current t in
+  let capture_fingerprint = Chatml_developer_capture.fingerprint t.capture in
+  let* () = Job_scope.Parent.check parent ~owner:t.owner ~capture_fingerprint in
+  let* () = check_effect_now t witness in
+  let* () = Job_scope.Parent.check_now parent ~owner:t.owner ~capture_fingerprint in
+  Ok parent
+;;
+
+let with_claimed_job t ~expected ~lookup ?select f =
+  let* _ = current t in
+  Developer_job_worker.with_claimed_attempt t.worker ~expected ~lookup ?select f
+;;
+
 module Selection = struct
   type nonrec t = selection
 
@@ -336,7 +355,7 @@ let same_action_fiber action =
 module Action = struct
   type nonrec t = action
 
-  let stage_background_with_launch t ~launch ~request ~checkpoint =
+  let stage_background_with_launch t ~launch ~request ~checkpoint ~check_parent_now =
     let issuer = t.issuer in
     if (not (same_domain issuer.registry)) || (not (same_action_fiber t)) || not t.live
     then invalid "developer root action is not live in this scope"
@@ -375,6 +394,7 @@ module Action = struct
               ~checkpoint
           in
           let* () = check_effect_now issuer current_witness in
+          let* () = check_parent_now () in
           if (not t.live) || Option.is_some t.sealed
           then invalid "developer root action changed during job preparation"
           else (
@@ -410,7 +430,12 @@ module Action = struct
         ~parent_job:None
         ~nested_depth:0
     in
-    stage_background_with_launch t ~launch ~request ~checkpoint
+    stage_background_with_launch
+      t
+      ~launch
+      ~request
+      ~checkpoint
+      ~check_parent_now:(fun () -> Ok ())
   ;;
 
   let seal t ~selected =
@@ -854,6 +879,17 @@ module Native_terminal = struct
 
   let callback_complete (t : t) = t.callback_complete
 
+  let effect_parent_live_now (t : t) =
+    same_domain t.issuer.registry
+    && (not t.bracket_exited)
+    && (not t.callback_complete)
+    && t.action.live
+    && Option.value_map t.registration.call.cancel ~default:false ~f:(fun cancel ->
+      Option.is_none (Eio.Cancel.get_error cancel))
+    && Option.value_map t.callback_switch ~default:false ~f:(fun sw ->
+      Option.is_none (Eio.Switch.get_error sw))
+  ;;
+
   let sealed (t : t) =
     Option.map t.sealed ~f:(fun (selected : native_selection) ->
       selected.outcome, selected)
@@ -1050,15 +1086,44 @@ module Native_terminal = struct
       | _ -> invalid "pre-entry native terminal is not a failure")
   ;;
 
-  let stage_background (t : t) ~request ~checkpoint =
+  let stage_background (t : t) ~request ~checkpoint ~check_parent_now =
     let context = H.context t.registration.invocation in
+    let capture_fingerprint = Chatml_developer_capture.fingerprint t.issuer.capture in
+    let* () =
+      match t.registration.job_parent with
+      | None -> Ok ()
+      | Some parent ->
+        Job_scope.Parent.check parent ~owner:t.issuer.owner ~capture_fingerprint
+    in
+    let* parent_job, nested_depth =
+      match t.registration.job_parent with
+      | None -> Ok (None, 0)
+      | Some parent ->
+        let depth = Job_scope.Parent.nested_depth parent in
+        if depth >= Int.max_value
+        then invalid "developer job nesting depth overflows"
+        else
+          Ok
+            ( Some (Job_scope.Parent.job_id parent, Job_scope.Parent.attempt parent)
+            , depth + 1 )
+    in
     let* launch =
       P.Developer_job.Launch.create
         ~parent:(P.Developer_job.Launch.Invocation context.id)
-        ~parent_job:None
-        ~nested_depth:0
+        ~parent_job
+        ~nested_depth
     in
-    Action.stage_background_with_launch t.action ~launch ~request ~checkpoint
+    Action.stage_background_with_launch
+      t.action
+      ~launch
+      ~request
+      ~checkpoint
+      ~check_parent_now:(fun () ->
+        let* () = check_parent_now () in
+        match t.registration.job_parent with
+        | None -> Ok ()
+        | Some parent ->
+          Job_scope.Parent.check_now parent ~owner:t.issuer.owner ~capture_fingerprint)
   ;;
 
   let seal (t : t) ~outcome ~selected =
@@ -1326,7 +1391,7 @@ let reconcile_pending t =
         else invalid "native terminal remains physically unresolved"))
 ;;
 
-let with_native_registration t ~invocation f =
+let with_native_registration t ?job_parent ~invocation f =
   if not (same_domain t.registry)
   then invalid "developer native owner belongs to another domain"
   else if Option.is_some t.pending || Option.is_some t.dispatch_owner || t.reconciling
@@ -1338,10 +1403,22 @@ let with_native_registration t ~invocation f =
       if
         P.Invocation.equal_status (H.status invocation) Admitted
         && P.Execution_owner.equal context.owner (P.Execution_owner.Developer t.owner)
-        && Option.is_none context.parent_job
         && not (Hashtbl.mem t.native_calls context.id)
       then Ok ()
       else invalid "native terminal registration requires a fresh root invocation"
+    in
+    let* () =
+      match job_parent, context.parent_job with
+      | None, None -> Ok ()
+      | Some parent, Some id
+        when Job_scope.owns_parent (Developer_job_worker.issuer t.worker) parent
+             && P.Id.Job.equal id (Job_scope.Parent.job_id parent) ->
+        Job_scope.Parent.check_now
+          parent
+          ~owner:t.owner
+          ~capture_fingerprint:(Chatml_developer_capture.fingerprint t.capture)
+      | None, Some _ | Some _, None | Some _, Some _ ->
+        invalid "native terminal job parent lacks this root's physical claim"
     in
     let* terminal_slot =
       Terminal_queue.reserve t.terminals ~kind:Native
@@ -1349,14 +1426,32 @@ let with_native_registration t ~invocation f =
     in
     let finished, finish = Eio.Promise.create () in
     let call = { cancel = None; finished; finish } in
-    let registration = { call; invocation; terminal_slot; scope = None } in
+    let registration = { call; invocation; job_parent; terminal_slot; scope = None } in
     Hashtbl.set t.native_calls ~key:context.id ~data:registration;
     let outcome =
       match
         Eio.Cancel.sub (fun cancel ->
           call.cancel <- Some cancel;
           Eio.Fiber.with_binding native_call_key t (fun () ->
+            let* () =
+              match job_parent with
+              | None -> Ok ()
+              | Some parent ->
+                Job_scope.Parent.check
+                  parent
+                  ~owner:t.owner
+                  ~capture_fingerprint:(Chatml_developer_capture.fingerprint t.capture)
+            in
             let* snapshot = current t in
+            let* () =
+              match job_parent with
+              | None -> Ok ()
+              | Some parent ->
+                Job_scope.Parent.check_now
+                  parent
+                  ~owner:t.owner
+                  ~capture_fingerprint:(Chatml_developer_capture.fingerprint t.capture)
+            in
             let action =
               { issuer = t
               ; snapshot
@@ -1374,6 +1469,7 @@ let with_native_registration t ~invocation f =
               ; registration
               ; action
               ; dispatched = None
+              ; callback_switch = None
               ; callback_complete = false
               ; bracket_exited = false
               ; sealed = None
@@ -1475,17 +1571,38 @@ let with_native_callback (scope : native_scope) ~dispatched f =
       then Ok ()
       else invalid "native callback selection changed"
     in
+    let* () =
+      match scope.registration.job_parent with
+      | None -> Ok ()
+      | Some parent ->
+        Job_scope.Parent.check
+          parent
+          ~owner:issuer.owner
+          ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
+    in
+    let* () = check_effect_now issuer latest in
+    let* () =
+      match scope.registration.job_parent with
+      | None -> Ok ()
+      | Some parent ->
+        Job_scope.Parent.check_now
+          parent
+          ~owner:issuer.owner
+          ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
+    in
     scope.dispatched <- Some dispatched;
     scope.action.live <- true;
     let outcome =
       match
         Eio.Switch.run (fun sw ->
+          scope.callback_switch <- Some sw;
           Eio.Fiber.with_binding action_key scope.action (fun () -> f ~sw))
       with
       | value -> `Returned value
       | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
     in
     scope.action.live <- false;
+    scope.callback_switch <- None;
     scope.callback_complete <- true;
     match outcome with
     | `Returned value -> value

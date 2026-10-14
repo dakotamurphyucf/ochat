@@ -29,11 +29,31 @@ val run_root
 
 (** Direct child of the current selected native callback. Obtains the live
     physical parent proof from its expiring borrow, verifies this exact issuer,
-    and narrows against that borrow's current capability ceiling. The child
-    must join within the parent's Eio callback switch. Bare Job_child remains
-    unavailable until claimed-worker integration. *)
+    inherits any physical claimed-job ancestor, and narrows against that
+    borrow's current capability ceiling. The child joins within the parent's
+    Eio callback switch. *)
 val run_child
   :  t
+  -> managed:Agent_session.Native_tool_invocation.selected_managed_dispatch option
+  -> reference:Chat_response.Tool_capability.reference
+  -> invocation:Agent_protocol.Host_invocation.t
+  -> authorize:
+       (Agent_protocol.Host_invocation.t
+        -> Chat_response.Tool_capability.binding
+        -> (unit, Agent_protocol.Error.t) result)
+  -> prepare_output:
+       (Openai.Responses.Tool_output.Output.t
+        -> (Jsonaf.t, Agent_protocol.Error.t) result)
+  -> (Agent_protocol.Host_invocation.t, Agent_protocol.Error.t) result
+
+(** Direct child of the actual claimed worker callback owned by this root.
+    The root derives an abstract job-parent proof from its real Worker issuer;
+    the same selected registry, policy, dispatch and terminal path is used as
+    [run_root]. Invocation context must name the exact claimed job and no
+    parent invocation. This grants no authority from a saved Running row. *)
+val run_job_child
+  :  t
+  -> active:Agent_session.Developer_job_scope.active
   -> managed:Agent_session.Native_tool_invocation.selected_managed_dispatch option
   -> reference:Chat_response.Tool_capability.reference
   -> invocation:Agent_protocol.Host_invocation.t
