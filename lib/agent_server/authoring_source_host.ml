@@ -532,6 +532,7 @@ module Context = struct
   type t = project_context
 
   let root (t : t) = t.root
+  let contract (t : t) = t.contract
   let check_current (t : t) ~actor = check_all t.common actor
 
   let open_root host ~actor ~root ~dependency_roots ~project ~selection ~contract =

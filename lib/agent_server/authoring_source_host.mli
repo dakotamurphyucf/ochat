@@ -172,6 +172,11 @@ module Context : sig
 
   val root : t -> Root.t
 
+  (** The exact contract admitted with this source context. Comparison data
+      for recomposing its current overlay; callers still reauthorize the
+      original/current actor and host selection before using it. *)
+  val contract : t -> Chatml.Chatml_compiler_contract.t
+
   (** Currentness check for pinned project captures, overlays and
       cached analysis. Reuse the original actor plus current request actor and
       every explicitly selected root's existing policy; do not read, recapture

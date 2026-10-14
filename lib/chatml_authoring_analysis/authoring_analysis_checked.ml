@@ -59,6 +59,9 @@ module Policy = struct
   ;;
 
   let max_results t = t.max_results
+  let compilation t = t.compilation
+  let semantic t = t.semantic
+  let max_dependency_depth t = t.max_dependency_depth
 end
 
 module Error = struct

@@ -173,6 +173,12 @@ let target t selector =
   |> Option.map ~f:(fun target -> target.selected)
 ;;
 
+let project_contract t =
+  match Bundle.Manifest.basis t.manifest with
+  | Project _ -> Option.map (target t None) ~f:Selected.contract
+  | Chatmd_document _ -> None
+;;
+
 let project_error problem =
   match Project.Error.problem problem with
   | Work_limit | Input_limit | Accounting_overflow -> Error.Resource_limit

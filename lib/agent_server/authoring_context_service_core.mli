@@ -62,6 +62,9 @@ module Selected_feature : sig
   type t =
     | Core_authoring
     | Bundle_upload
+    | Semantic
+    | Lexical
+    | Assistance
 end
 
 module Error : sig
@@ -101,6 +104,52 @@ type context_owner = Activity.context_owner =
 type context_entry = Activity.context_entry
 type connection_entry = Activity.connection_entry
 
+(** One latest genuine parsed import closure retained in this same owner.
+    Admission checks source identity/digest/length and bounded file/byte work
+    outside the gate. The capture owns no parser loader, source owner or grant.
+    It also retains immutable imported bytes for a later in-memory Prefix
+    reparse after a root edit, never an old Parsed value as current facts. *)
+module Retained_document_capture : sig
+  type t
+
+  val prepare
+    :  context:context_entry
+    -> inputs:Ledger.Document.Inputs.t
+    -> capture:Sources.Document_context.Parsed_capture.t
+    -> max_sources:int
+    -> max_bytes:int
+    -> checkpoint:(unit -> unit)
+    -> (t, Error.t) result
+
+  val matches_current
+    :  t
+    -> context:context_entry
+    -> inputs:Ledger.Document.Inputs.t
+    -> bool
+
+  val matches_import_owner
+    :  t
+    -> context:context_entry
+    -> inputs:Ledger.Document.Inputs.t
+    -> bool
+
+  val capture : t -> Sources.Document_context.Parsed_capture.t
+
+  (** Physical publication-head equality, including [None]. Equal bytes in a
+      later admission do not make an earlier borrowed head current again. *)
+  val same_head : t option -> t option -> bool
+
+  (** Rebuild only the root member from current unsaved bytes, preserving the
+      first captured import bytes. No native read, parser fact or source grant
+      is generated. Newly required imports remain absent and parser rejection
+      becomes typed Unavailable at the service boundary. *)
+  val recompose_bundle
+    :  t
+    -> inputs:Ledger.Document.Inputs.t
+    -> checkpoint:(unit -> unit)
+    -> (Chatmd_source_bundle.t, Error.t) result
+end
+
 (** This private record is the sole mutable connection/context/cache owner.
     Methods borrow it; only the final pure gate transition changes published
     ledger and caches. Host callbacks and source/Store work occur outside it. *)
@@ -119,6 +168,7 @@ type t =
   ; mutable connections : connection_entry list
   ; mutable project_cache : Project.Project_cache.t
   ; mutable document_cache : Document.Document_cache.t
+  ; mutable document_capture : Retained_document_capture.t option
   ; mutable closed : bool
   ; mutable release_hook : Eio.Switch.hook
   }
@@ -182,6 +232,7 @@ module Current : sig
     ; context : context_entry
     ; expected : P.Authoring.Context.Expected.t
     ; live : bool ref
+    ; retained_document_capture : Retained_document_capture.t option
     }
 
   val basis : t -> basis
@@ -192,6 +243,31 @@ module Current : sig
     :  t
     -> checkpoint:(unit -> unit)
     -> (Ledger.Document.Inputs.t, Error.t) result
+
+  (** The genuine capture borrowed at this request's admission for the exact
+      Document identity, generation and root source ID/digest/length. [None]
+      means none was admitted. It never triggers an import read or parser run.
+      A concurrent request may evict this head while work runs; the final pure
+      publication must compare the borrowed head with the CURRENT Core head
+      under the same gate as both analysis cache heads and context generation,
+      rejecting a changed head. An edit hides old Parsed facts; refresh, close
+      or owner replacement also retire its import bytes. Imported source IDs
+      come only from genuine [input_sources] pairs. The token must be live. *)
+  val document_capture
+    :  t
+    -> checkpoint:(unit -> unit)
+    -> (Sources.Document_context.Parsed_capture.t option, Error.t) result
+
+  (** A bundle recomposed solely from current unsaved root bytes and the last
+      immutable imports of this SAME context/source owner borrowed at request
+      admission. It never returns an old Parsed value or reads changed
+      dependency files. A new/missing import is unavailable until explicit
+      Analyze/rebuild. Owner replacement, refresh, close or eviction at
+      admission returns [None]; a later eviction is rejected by final CAS. *)
+  val frozen_document_bundle
+    :  t
+    -> checkpoint:(unit -> unit)
+    -> (Chatmd_source_bundle.t option, Error.t) result
 end
 
 val close_owner : context_owner -> unit

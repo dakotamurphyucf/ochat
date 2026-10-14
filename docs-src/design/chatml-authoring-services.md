@@ -255,6 +255,28 @@ selected-script selector → Complete, Failed or Unavailable),
 unavailability), and `authoring.query` (certified, provisional or syntax-only
 evidence and one query kind → bounded, source-owned facts). Codec support alone
 does not advertise an installed handler; capabilities list actual methods.
+The [shared context owner](../../lib/agent_server/authoring_context_service_core.mli)
+keeps the semantic, lexical and assistance siblings on the same joined
+connection/context ledger. Context creation and editing require the core
+feature; each sibling request checks its own negotiated feature. A borrowed
+`Current` token expires when its callback returns. After yielding work, the
+private owner repeats actor, source and selection checks, then compares the
+context generation, both analysis cache heads and the retained document-capture
+head in one nonyielding publication gate. Replacing an equal-byte capture does
+not restore an earlier result's authority.
+
+Only an explicit analyzed/rebuilt host document can admit a genuine
+[parser/import capture](../../lib/agent_server/authoring_source_host.mli). The
+owner retains at most one bounded immutable capture. An edit hides its old
+Parsed facts immediately, while a later prefix operation may recompose the
+current unsaved root with those already captured import bytes without a host
+read. Refresh, close and owner replacement retire that material. For projects,
+the [shared overlay preparation](../../lib/agent_server/authoring_project_overlay.mli)
+uses the actual admitted compiler contract and existing closure validator; it
+chooses a fresh collision-checked lock identity under a finite work allowance.
+The [selected-script policy](../../lib/agent_server/authoring_script_selection.mli)
+compares an actual selected Build and compiler contract for the genuine parsed
+declaration, without turning that comparison into a read or execution grant.
 Semantic wire labels, messages, names and environment identifiers require
 valid UTF-8; their constructors and decoders return typed errors for malformed
 text. Captured source bytes, digests and native byte sites remain unchanged.
