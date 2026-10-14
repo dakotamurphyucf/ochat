@@ -69,6 +69,7 @@ let validate_script ~max_source_bytes (script : Spec.script) =
 let prepare_with
       ?(validate_schema = Spec.validate_schema)
       ?(moderator_target = Chatml_compilation.Moderator_v1)
+      ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
       ~compile
       ~max_source_bytes
       ~scripts
@@ -97,7 +98,10 @@ let prepare_with
       |> Result.map_error ~f:(fun error ->
         [ D.error ~source:tool.source_ref ~code:error.code error.message ])
       |> Result.map ~f:(fun selected ->
-        script, Spec.Tool_script, Chatml_compilation.Tool_v1, selected)
+        ( script
+        , Spec.Tool_script
+        , Chatml_compilation.Tool_contract.target tool_contract
+        , selected ))
     | _ -> fail "chatml.invalid_binding" "incompatible tool binding or entrypoint"
   in
   let%bind script =
@@ -167,7 +171,13 @@ let require_single_file (script : Spec.script) =
         }
 ;;
 
-let prepare ?(max_source_bytes = 256 * 1024) ~scripts ~capabilities tool =
+let prepare
+      ?(max_source_bytes = 256 * 1024)
+      ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
+      ~scripts
+      ~capabilities
+      tool
+  =
   let compile ~target ~script ~capabilities:_ =
     let open Result.Let_syntax in
     let%bind () = require_single_file script in
@@ -176,6 +186,7 @@ let prepare ?(max_source_bytes = 256 * 1024) ~scripts ~capabilities tool =
       match target with
       | Chatml_compilation.One_off_v1 -> X.one_off_v1, X.one_off_entrypoints
       | Tool_v1 -> X.tool_v1, X.tool_entrypoints
+      | Developer_tool_v1 -> X.developer_tool_v1, X.tool_entrypoints
       | Moderator_v1 -> X.moderator_v1, X.moderator_entrypoints
       | Delegated_moderator_v1 -> X.delegated_moderator_v1, X.moderator_entrypoints
     in
@@ -184,11 +195,12 @@ let prepare ?(max_source_bytes = 256 * 1024) ~scripts ~capabilities tool =
     |> Result.map_error ~f:(fun message ->
       Chatml_compilation.{ code = "chatml.invalid_handler"; message; diagnostic = None })
   in
-  prepare_with ~compile ~max_source_bytes ~scripts ~capabilities tool
+  prepare_with ~tool_contract ~compile ~max_source_bytes ~scripts ~capabilities tool
 ;;
 
 let prepare_in_domain
       ?(limits = Chatml_compilation.default_limits)
+      ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
       ~env
       ~scripts
       ~capabilities
@@ -202,6 +214,7 @@ let prepare_in_domain
     |> Result.map ~f:(fun program -> Program.Single program)
   in
   prepare_with
+    ~tool_contract
     ~compile
     ~max_source_bytes:limits.max_source_bytes
     ~scripts
@@ -357,6 +370,7 @@ let prepare_definition_in_domain
       ?startup
       ?(limits = Chatml_compilation.default_limits)
       ?(delegated_moderator = false)
+      ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
       ?programs
       ~env
       ~capabilities
@@ -515,7 +529,7 @@ let prepare_definition_in_domain
             let target =
               match script.Spec.kind with
               | Moderator_script -> moderator_target
-              | Tool_script -> Tool_v1
+              | Tool_script -> Chatml_compilation.Tool_contract.target tool_contract
             in
             compile ~target ~script ~capabilities
             |> Result.map ~f:(fun program -> (script, program) :: compiled)
@@ -543,6 +557,7 @@ let prepare_definition_in_domain
               prepare_with
                 ~validate_schema
                 ~moderator_target
+                ~tool_contract
                 ~compile:(fun ~target ~script ~capabilities ->
                   match program with
                   | Program.Single _ -> Ok program
@@ -561,7 +576,9 @@ let prepare_definition_in_domain
           , (scripts : Spec.script list)
           , (List.map prepared_tools ~f:fingerprint : string list)
           , (Tool_capability.fingerprint capabilities : string)
-          , (Chatml_compilation.contract Tool_v1 : Sexp.t)
+          , (Chatml_compilation.contract
+               (Chatml_compilation.Tool_contract.target tool_contract)
+             : Sexp.t)
           , (Chatml_compilation.contract moderator_target : Sexp.t)]
           |> Sexp.to_string
           |> Chatmd_shell_spec.Source_ref.digest

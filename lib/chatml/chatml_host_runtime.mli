@@ -125,6 +125,12 @@ type op_kind =
   | External_async
   | Diagnostic
 
+(** Closed, default-off standalone operation filter for a host-selected tool
+    entrypoint. This admits only the canonical Model.spawn operation when it
+    is already installed as External_async; it grants no actor, provider or
+    execution authority. Ordinary callers omit the option. *)
+type scoped_async_operation = Model_spawn
+
 (** Definition of a host operation exposed to ChatML tasks. *)
 type op_def =
   { name : string
@@ -305,9 +311,13 @@ val instantiate_session_detailed
     continuations. Host cancellation/control exceptions propagate after cleanup.
     The host must compile against the intended surface and enforce authority,
     value/allocation/output limits and result validation. No persistent session
-    or model request is created by this function. *)
+    or model request is created by default. Opting into [Model_spawn] permits
+    only an installed, physically authorized Model.spawn handler as an immediate
+    external effect. A later failure, catch or discarded task cannot undo a
+    completed provider request; the host must retain its call-boundary custody. *)
 val run_entrypoint
   :  ?control:execution_control
+  -> ?scoped_async_operation:scoped_async_operation
   -> ?limits:execution_limits
   -> ?prepare_result:
        (value:value -> local_effects:eff list -> (unit -> unit, string) result)
@@ -323,6 +333,7 @@ val run_entrypoint
     propagate after the existing cleanup. *)
 val run_entrypoint_detailed
   :  ?control:execution_control
+  -> ?scoped_async_operation:scoped_async_operation
   -> ?limits:execution_limits
   -> ?prepare_result:
        (value:value -> local_effects:eff list -> (unit -> unit, string) result)
@@ -378,6 +389,7 @@ val run_prepared_entrypoint_detailed
   -> entrypoint:string
   -> arguments:value list
   -> ?control:execution_control
+  -> ?scoped_async_operation:scoped_async_operation
   -> ?limits:execution_limits
   -> ?prepare_result:
        (value:value -> local_effects:eff list -> (unit -> unit, string) result)

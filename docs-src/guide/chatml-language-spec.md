@@ -1642,7 +1642,7 @@ The generic builtin-surface API exposes these standard assembled surfaces:
 - `ui_moderator_surface` (an explicit interactive extension)
 
 Ochat also uses versioned authoring contracts: `one_off_v1`, `tool_v1`,
-`moderator_v1`, and `delegated_moderator_v1`. These select different entrypoints
+`developer_tool_v1`, `moderator_v1`, and `delegated_moderator_v1`. These select different entrypoints
 and capability modules; they are not synonyms for the generic surfaces. See
 section 13.2.2.2.
 
@@ -1753,6 +1753,7 @@ notifications and live approval pause/resume behavior. The default
 |---|---|
 | `one_off_v1` | `main(input)` returns `json task`. Core computation without `print`, plus `Log`, selected `Tool.call`, and `Job`. |
 | `tool_v1` | `run(context, input)` returns `tool_outcome task`; adds the typed invocation context, outcomes and capability aliases. |
+| `developer_tool_v1` | The same `run(context, input)` ABI and tool facilities as `tool_v1`, plus `Model.spawn` and `Model.spawn_text` for a developer host with an admitted provider selection. Static availability alone grants no execution authority. |
 | `moderator_v1` | `initial_state` and `on_event(context, state, event)` share one state type; adds typed invocation, run, job, subscription, notification, ingress and scheduling operations to the ordinary moderator surface. |
 | `delegated_moderator_v1` | The same moderator entrypoint contract, with inherited tool authority; excludes `print`, `Model` and `Process`. |
 

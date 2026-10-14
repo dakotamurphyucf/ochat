@@ -18,11 +18,15 @@ type t
     The host must use the matching prepared definitions under actor ownership and
     current permission/disclosure policy, including revalidation after waits.
     [delegated_moderator] selects the restricted moderator compiler contract and
-    includes it in the managed authority identity; defaults to false. *)
+    includes it in the managed authority identity; defaults to false.
+    [tool_contract] selects the actual static tool compiler contract; default
+    Standard preserves ordinary Tool_v1. This choice is included in authority
+    identity and retained by [rebind_code], never inferred from source text. *)
 val prepare
   :  ?startup:Startup_compilation.t
   -> ?limits:Chatml_compilation.limits
   -> ?delegated_moderator:bool
+  -> ?tool_contract:Chatml_compilation.Tool_contract.t
   -> ?programs:Chatml_prompt_programs.Restored.t
   -> env:Eio_unix.Stdenv.base
   -> owner:string
@@ -52,7 +56,9 @@ val authority_fingerprint : t -> string
 
     Existing capability/permission identities and authority_fingerprint remain
     unchanged. The returned definition/handlers carry their actual new executable
-    fingerprints. The owning host must authorize and dispatch the selected code
+    fingerprints. Rebinding retains this registry's original tool compiler
+    contract; it cannot widen or silently retarget the compiled surface.
+    The owning host must authorize and dispatch the selected code
     under its original resource/actor checks. Borrowed startup/checkpoint cover
     the whole comparison and compilation phase and never escape. Original
     exceptions and cancellation propagate. *)

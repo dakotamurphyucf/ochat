@@ -435,7 +435,8 @@ let create ~build ~origin ~target ~entrypoint ~input ~fixtures ~json_bounds ~che
   let%bind () =
     match target with
     | Contract.Target.One_off_v1 -> Ok ()
-    | Tool_v1 | Moderator_v1 | Delegated_moderator_v1 -> Error Error.Unsupported_target
+    | Tool_v1 | Developer_tool_v1 | Moderator_v1 | Delegated_moderator_v1 ->
+      Error Error.Unsupported_target
   in
   let prepared = Build.prepared build in
   let graph_fingerprint = Prepared.fingerprint prepared in

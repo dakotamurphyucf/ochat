@@ -289,7 +289,7 @@ module Registry = struct
            | Standard Moderator_v1 -> Ok Chatml.Chatml_extension_surface.moderator_v1
            | Standard Delegated_moderator_v1 ->
              Ok Chatml.Chatml_extension_surface.delegated_moderator_v1
-           | Standard (One_off_v1 | Tool_v1) | Native ->
+           | Standard (One_off_v1 | Tool_v1 | Developer_tool_v1) | Native ->
              Error "Lifecycle moderator has an incompatible compiled contract")
       in
       let artifact =

@@ -67,7 +67,13 @@ let map_diagnostics result ~to_string =
     List.map diagnostics ~f:to_string |> String.concat ~sep:"\n" |> failure)
 ;;
 
-let plan t ~startup ~parsed ~invocation =
+let plan
+      ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
+      t
+      ~startup
+      ~parsed
+      ~invocation
+  =
   Startup.within startup ~map_error:compilation_error ~f:(fun () ->
     let open Result.Let_syntax in
     let%bind shell =
@@ -84,6 +90,7 @@ let plan t ~startup ~parsed ~invocation =
     in
     let moderator_surface = Invocation.moderator_surface invocation in
     Plan.create
+      ~tool_contract
       parsed
       ~moderator_invocation
       ~moderator_surface

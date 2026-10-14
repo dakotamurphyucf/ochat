@@ -22,6 +22,11 @@ val one_off_v1 : Chatml_builtin_surface.surface
     and tool_capability aliases. No moderator state is required. *)
 val tool_v1 : Chatml_builtin_surface.surface
 
+(** Distinct developer-host tool contract with the same [run] ABI and Job/Tool
+    surface as [tool_v1], adding only the existing Model.spawn and spawn_text
+    builtins. Static availability grants no provider or execution authority. *)
+val developer_tool_v1 : Chatml_builtin_surface.surface
+
 (** Host types for non-executing compilation with required_bindings.
     Main takes exactly one argument; run takes exactly two. *)
 val one_off_entrypoints : (string * Chatml_builtin_spec.ty) list
