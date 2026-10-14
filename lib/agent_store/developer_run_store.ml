@@ -186,6 +186,7 @@ module Prepared = struct
     | Foundation_checkpoint
     | Developer_dispatch
     | Selected_transaction
+    | External_model
     | Worker_claim
     | Claimed_transition
     | Inactive_cancel
@@ -1554,7 +1555,12 @@ let prepare_change handle ~expected ~kind ~f =
             ~max_jobs:t.limits.max_jobs_per_run
             ~max_invocations:t.limits.max_invocations_per_run
             ~max_job_payload_bytes:t.limits.max_job_payload_bytes
-          |> store
+          |> Result.map_error ~f:(fun error ->
+            match kind, error with
+            | ( Prepared.External_model
+              , Store_error.Document (Document_schema.Error.Limit_exceeded _) ) ->
+              Error.Limit_exceeded
+            | _ -> Error.Store error)
         in
         poll ();
         Ok
@@ -1639,6 +1645,37 @@ let prepare_terminal_selected handle ~expected ~lookup ~terminal ~selected =
         ~terminal
         ~selected
       |> transition_result)
+;;
+
+module External_model_parent = struct
+  type t =
+    | Run_root
+    | Dispatching of Invocation_lookup.t
+end
+
+let prepare_external_model handle ~expected ~parent ~job =
+  let launch = P.Developer_job.launch job in
+  let parent =
+    match parent, P.Developer_job.Launch.parent launch with
+    | External_model_parent.Run_root, Run_root ->
+      Ok Developer_run_transition.External_model_parent.Run_root
+    | Dispatching lookup, Invocation id when matching_lookup expected lookup id ->
+      (match observed_lookup lookup with
+       | Some observed ->
+         let revision, value = observed in
+         Ok (Developer_run_transition.External_model_parent.Dispatching (revision, value))
+       | None -> Error Error.Conflict)
+    | Run_root, Invocation _ | Dispatching _, Run_root | Dispatching _, Invocation _ ->
+      Error Error.Conflict
+  in
+  let* parent = parent in
+  prepare_change handle ~expected ~kind:External_model ~f:(fun t document ~poll ->
+    Developer_run_transition.external_model
+      (transition t handle ~poll)
+      document
+      ~parent
+      ~job
+    |> transition_result)
 ;;
 
 let matching_job_lookup expected lookup id =
@@ -1857,7 +1894,7 @@ let bind_handoff t handle prepared handoff =
   then Error Error.Foreign_or_stale
   else if
     match prepared.Prepared.kind with
-    | Developer_dispatch | Selected_transaction -> false
+    | Developer_dispatch | Selected_transaction | External_model -> false
     | Foundation_checkpoint | Worker_claim | Claimed_transition | Inactive_cancel -> true
   then Error Error.Conflict
   else
@@ -2026,6 +2063,7 @@ let bind_claim t handle prepared =
     | ( ( Foundation_checkpoint
         | Developer_dispatch
         | Selected_transaction
+        | External_model
         | Claimed_transition
         | Inactive_cancel )
       , _ )
@@ -2039,6 +2077,7 @@ let settle_worker_prepared t handle (prepared : Prepared.t) settlement =
     | Foundation_checkpoint
     | Developer_dispatch
     | Selected_transaction
+    | External_model
     | Claimed_transition -> false
   in
   let status =
@@ -2064,9 +2103,16 @@ let settle_worker_prepared t handle (prepared : Prepared.t) settlement =
     | Claim_prewrite_conflict, (Worker_claim | Claimed_transition | Inactive_cancel) ->
       true
     | (Unsettled | Claim_absent | Claim_diverged), _
-    | Claim_installed, (Foundation_checkpoint | Developer_dispatch | Selected_transaction)
+    | ( Claim_installed
+      , ( Foundation_checkpoint
+        | Developer_dispatch
+        | Selected_transaction
+        | External_model ) )
     | ( Claim_prewrite_conflict
-      , (Foundation_checkpoint | Developer_dispatch | Selected_transaction) ) -> false
+      , ( Foundation_checkpoint
+        | Developer_dispatch
+        | Selected_transaction
+        | External_model ) ) -> false
   in
   with_run_lifecycle t (fun () ->
     let run_id = handle.owner.run_id in
@@ -2212,6 +2258,7 @@ let bind_transition path t handle prepared =
       , ( Foundation_checkpoint
         | Developer_dispatch
         | Selected_transaction
+        | External_model
         | Worker_claim
         | Claimed_transition
         | Inactive_cancel ) ) -> Error Error.Conflict)
@@ -2318,6 +2365,7 @@ let commit handle prepared =
     | Foundation_checkpoint -> false
     | Developer_dispatch
     | Selected_transaction
+    | External_model
     | Worker_claim
     | Claimed_transition
     | Inactive_cancel -> true
@@ -2354,6 +2402,7 @@ let reconcile handle prepared =
     | Foundation_checkpoint -> false
     | Developer_dispatch
     | Selected_transaction
+    | External_model
     | Worker_claim
     | Claimed_transition
     | Inactive_cancel -> true

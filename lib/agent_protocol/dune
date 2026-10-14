@@ -37,6 +37,8 @@
   grant
   audit
   job
+  model_spawn_request
+  developer_model_call
   developer_job
   host_job
   job_progress

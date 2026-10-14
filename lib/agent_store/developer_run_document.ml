@@ -66,6 +66,14 @@ let find_job t id =
 let jobs t = t.jobs
 let job_count t = List.length t.jobs
 
+let valid_external_model_launch_shape launch =
+  match P.Developer_job.Launch.parent launch with
+  | Run_root ->
+    Option.is_none (P.Developer_job.Launch.parent_job launch)
+    && Int.equal (P.Developer_job.Launch.nested_depth launch) 0
+  | Invocation _ -> true
+;;
+
 let next_revision revision =
   if Int64.(revision <= zero || revision >= max_value - one)
   then corrupt "developer run document revision exhausted"
@@ -215,6 +223,13 @@ let validate_relations t ~poll =
       poll ();
       let owner = P.Developer_job.owner job in
       let launch = P.Developer_job.launch job in
+      let%bind () =
+        if
+          P.Job.equal_kind (P.Developer_job.kind job) P.Job.Model_call
+          && not (valid_external_model_launch_shape launch)
+        then corrupt "external model root launch has job ancestry or depth"
+        else Ok ()
+      in
       let%bind invocation_edge =
         match P.Developer_job.Launch.parent launch with
         | Run_root -> Ok []
@@ -223,9 +238,12 @@ let validate_relations t ~poll =
           let invocation = Hashtbl.find_exn invocations id in
           let context = P.Host_invocation.context invocation in
           let%bind () =
-            match P.Host_invocation.status invocation with
-            | P.Invocation.Resolved _ -> Ok ()
-            | Admitted | Dispatching | Published _ ->
+            match P.Developer_job.kind job, P.Host_invocation.status invocation with
+            | P.Job.Model_call, (Dispatching | Published _ | Resolved _) -> Ok ()
+            | _, P.Invocation.Resolved _ -> Ok ()
+            | P.Job.Model_call, Admitted ->
+              corrupt "external model job has an unadmitted invocation parent"
+            | _, (Admitted | Dispatching | Published _) ->
               corrupt "developer job has a nonterminal invocation parent"
           in
           let%map () =
@@ -555,7 +573,14 @@ let validate t ~poll ~limits ~max_epochs ~max_jobs ~max_invocations ~max_job_pay
   let%bind () =
     List.fold_result t.jobs ~init:() ~f:(fun () job ->
       poll ();
-      validate_job_owner t job)
+      let%bind () = validate_job_owner t job in
+      match P.Developer_job.kind job with
+      | P.Job.Model_call ->
+        P.Developer_model_call.of_json (P.Developer_job.payload job) ~limits
+        |> Result.map ~f:(fun _ -> ())
+        |> Result.map_error ~f:(fun _ ->
+          Store_error.Corrupt "invalid durable developer model call")
+      | Nested_agent | Scheduled_event | Async_tool | Shell_process | Compaction -> Ok ())
   in
   let%bind () = validate_relations t ~poll in
   let%map _payload_bytes =

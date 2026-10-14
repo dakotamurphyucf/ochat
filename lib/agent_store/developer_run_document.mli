@@ -34,6 +34,11 @@ val find_job : t -> Agent_protocol.Id.Job.t -> Agent_protocol.Developer_job.t op
 val jobs : t -> Agent_protocol.Developer_job.t list
 val job_count : t -> int
 
+(** A Model_call from the physical run root has no job ancestor and depth zero.
+    Invocation descendants carry comparison coordinates; their actual claimed
+    attempt and depth are proved by the host, not by this document predicate. *)
+val valid_external_model_launch_shape : Agent_protocol.Developer_job.Launch.t -> bool
+
 (** Pure validated mutations. Each call advances the document revision; callers
     may compose these before one atomic file replacement. Exact transition
     authority remains in Developer_run_store. *)
