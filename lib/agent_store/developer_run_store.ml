@@ -888,6 +888,67 @@ module Result_root = struct
         else corrupt "developer result root host differs from daemon owner")
   ;;
 
+  let find_job_snapshot t ~owner ~capture_fingerprint ~job_id ~attempt =
+    let valid_owner =
+      P.Execution_owner.validate (P.Execution_owner.Developer owner) |> Result.is_ok
+    in
+    let valid_job = P.Id.Job.of_json (P.Id.Job.to_json job_id) |> Result.is_ok in
+    if
+      (not valid_owner)
+      || (not valid_job)
+      || attempt < 0
+      || (not (issued_by t.issuer t))
+      || (not (P.Id.Server.equal t.host_id owner.host_id))
+      || (not (Id.equal t.run_id owner.run_id))
+      || (not (P.Id.Principal.equal t.principal_id owner.principal_id))
+      ||
+      match t.epoch with
+      | None -> false
+      | Some (number, fingerprint) ->
+        not
+          (Int.equal number owner.epoch
+           && Chatml_source.Digest.equal fingerprint capture_fingerprint)
+    then Error Error.Foreign_or_stale
+    else
+      with_lease t.issuer (fun ~env:_ ~root:_ ->
+        let poll = work t.issuer t.issuer.checkpoint in
+        let* () = if pending_mem t.issuer t.run_id then Error Error.Conflict else Ok () in
+        let* found = read t.issuer ~poll t.run_id in
+        let* () = if pending_mem t.issuer t.run_id then Error Error.Conflict else Ok () in
+        match found with
+        | None -> Error Error.Foreign_or_stale
+        | Some (_, document) ->
+          let epoch =
+            List.find (Doc.epochs document) ~f:(fun epoch ->
+              poll ();
+              Int.equal (Doc.epoch_number epoch) owner.epoch
+              && Chatml_source.Digest.equal (Doc.epoch_capture epoch) capture_fingerprint)
+          in
+          if
+            (not (P.Id.Server.equal t.host_id (Doc.host_id document)))
+            || (not (Id.equal t.run_id (Doc.run_id document)))
+            || (not (P.Id.Principal.equal t.principal_id (Doc.principal_id document)))
+            || Option.is_none epoch
+          then Error Error.Foreign_or_stale
+          else (
+            let job =
+              List.find (Doc.jobs document) ~f:(fun job ->
+                poll ();
+                P.Id.Job.equal (P.Developer_job.id job) job_id)
+            in
+            match job with
+            | None -> Ok None
+            | Some job ->
+              if
+                P.Execution_owner.equal_developer (P.Developer_job.owner job) owner
+                && Chatml_source.Digest.equal
+                     (P.Developer_job.capture_fingerprint job)
+                     capture_fingerprint
+                && Int.equal (P.Developer_job.state job).attempt attempt
+              then Ok (Some job)
+              else Error Error.Foreign_or_stale))
+  ;;
+
   let existing issuer =
     with_lease issuer (fun ~env:_ ~root:_ ->
       let poll = work issuer issuer.checkpoint in

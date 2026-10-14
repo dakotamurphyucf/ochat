@@ -16,6 +16,18 @@ val create
   -> blob:Agent_protocol.Blob.Metadata.t
   -> (t, Store_error.t) result
 
+(** Read-only reconstruction of the same comparison identity from an actual
+    Store-validated terminal job whose Artifact result is already published.
+    Validate the whole job State against immutable kind/creation/attempt and
+    require a terminal Artifact whose outcome agrees with its status; do not
+    infer it merely from a Blob ID.
+    Startup inventory uses this when the private intent marker was retired but
+    a durable Blob remains. A copied DTO cannot prove Store provenance; the
+    caller must obtain [job] through authenticated
+    [Result_root.rows_for_inventory].
+    This does not permit another write, result disclosure or Blob deletion. *)
+val of_terminal_job : Agent_protocol.Developer_job.t -> (t, Store_error.t) result
+
 val owner : t -> Agent_protocol.Execution_owner.developer
 val capture_fingerprint : t -> Chatml_source.Digest.t
 val job_id : t -> Agent_protocol.Id.Job.t

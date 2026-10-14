@@ -5,6 +5,7 @@ module Scope = Agent_session.Developer_job_scope
 module Worker = Agent_server.Developer_job_worker
 module Publisher = Agent_store.Developer_result_publisher
 module Blobs = Agent_store.Blob_store
+module Disclosure = Agent_server.Developer_result_disclosure
 module F = Developer_run_store_tests
 module Selected = Developer_run_selected_tests
 
@@ -130,7 +131,10 @@ let%test_unit "real developer result publisher selects one post-join terminal" =
     ; Automatic, 32768, `String (String.make 32700 'x'), true, false
     ]
     ~f:(fun (storage, inline_bytes, payload, expect_artifact, interrupted_stage) ->
-      F.with_root (fun env sw native_root session store ->
+      let on_checkpoint = ref (fun () -> ()) in
+      let checkpoint () = !on_checkpoint () in
+      let with_root = F.with_root ~checkpoint in
+      with_root (fun env sw native_root session store ->
         let owner = F.owner 0 in
         let capture = F.digest "real developer result publisher" in
         let handle, initial = F.admit store owner capture in
@@ -370,9 +374,258 @@ let%test_unit "real developer result publisher selects one post-join terminal" =
                (P.Completion.to_json (P.Completion.Succeeded payload) |> Jsonaf.to_string))
          | _ -> failwith "publisher changed the selected result or storage mode");
         Worker.close_and_wait worker |> F.ok;
+        let principal =
+          P.Principal.create
+            ~id:owner.principal_id
+            ~authentication_kind:"local.test"
+            ~scopes:P.Scope.Set.empty
+            ~attributes:[]
+          |> F.ok
+        in
+        let actor = Operator_authorization.trusted_local principal in
+        let json =
+          Document_schema.Limits.create
+            ~max_bytes:65536
+            ~max_depth:132
+            ~max_fields:4096
+            ~max_nodes:8192
+          |> F.ok
+        in
+        let read_limits =
+          Disclosure.Limits.create ~max_result_bytes:65536 ~json |> F.ok
+        in
+        let policy =
+          Disclosure.Policy.create ~authorize:(fun actor selection ->
+            P.Id.Principal.equal
+              (Operator_authorization.principal actor).id
+              (Disclosure.Selection.owner selection).principal_id)
+        in
+        let disclosure =
+          Disclosure.create ~runs:store ~blobs ~policy ~limits:read_limits |> F.ok
+        in
+        let selection =
+          Disclosure.Selection.create
+            ~owner
+            ~capture_fingerprint:capture
+            ~job_id:id
+            ~attempt:(P.Developer_job.state completed).attempt
+          |> F.ok
+        in
+        let request =
+          Disclosure.begin_request disclosure ~original_actor:actor selection |> F.ok
+        in
+        let expected = P.Completion.Succeeded payload in
+        let read = Disclosure.read disclosure request ~sw ~current_actor:actor |> F.ok in
+        (match read with
+         | Disclosure.Result.Completion completion ->
+           assert (P.Completion.equal completion expected)
+         | Pending _ | Terminal_without_result _ ->
+           failwith "installed result was not disclosed");
+        let foreign_service =
+          Disclosure.create ~runs:store ~blobs ~policy ~limits:read_limits |> F.ok
+        in
+        assert (
+          Result.is_error
+            (Disclosure.read foreign_service request ~sw ~current_actor:actor));
+        if expect_artifact
+        then (
+          let revoked = ref false in
+          let expiring =
+            Operator_authorization.guarded ~principal ~is_current:(fun () -> not !revoked)
+          in
+          let request =
+            Disclosure.begin_request disclosure ~original_actor:expiring selection |> F.ok
+          in
+          let entered, entered_u = Eio.Promise.create () in
+          let release, release_u = Eio.Promise.create () in
+          let finished, finished_u = Eio.Promise.create () in
+          let first = ref true in
+          (on_checkpoint
+           := fun () ->
+                if !first
+                then (
+                  first := false;
+                  Eio.Promise.resolve entered_u ();
+                  Eio.Promise.await release));
+          let observed = ref None in
+          Eio.Fiber.fork ~sw (fun () ->
+            observed
+            := Some (Disclosure.read disclosure request ~sw ~current_actor:expiring);
+            Eio.Promise.resolve finished_u ());
+          Eio.Promise.await entered;
+          assert (Option.is_none !observed);
+          revoked := true;
+          Eio.Promise.resolve release_u ();
+          Eio.Promise.await finished;
+          (on_checkpoint := fun () -> ());
+          match Option.value_exn !observed with
+          | Error { P.Error.code = Unauthenticated; _ } -> ()
+          | Error error ->
+            raise_s [%sexp "wrong revoked read error", (error.code : P.Error.code)]
+          | Ok _ -> failwith "revoked actor received developer result");
+        let observed = R.observe handle |> F.run_ok in
+        let _new_epoch =
+          R.admit_epoch
+            store
+            ~owner:(F.owner 1)
+            ~capture_fingerprint:(F.digest "new developer disclosure capture")
+            ~previous:(Some observed)
+          |> F.run_ok
+        in
+        (match Disclosure.read disclosure request ~sw ~current_actor:actor |> F.ok with
+         | Disclosure.Result.Completion completion ->
+           assert (P.Completion.equal completion expected)
+         | Pending _ | Terminal_without_result _ ->
+           failwith "historical result was not disclosed");
+        let wrong_capture =
+          Disclosure.Selection.create
+            ~owner
+            ~capture_fingerprint:(F.digest "wrong developer disclosure capture")
+            ~job_id:id
+            ~attempt:(P.Developer_job.state completed).attempt
+          |> F.ok
+        in
+        let wrong_request =
+          Disclosure.begin_request disclosure ~original_actor:actor wrong_capture |> F.ok
+        in
+        assert (
+          Result.is_error
+            (Disclosure.read disclosure wrong_request ~sw ~current_actor:actor));
+        let wrong_attempt =
+          Disclosure.Selection.create
+            ~owner
+            ~capture_fingerprint:capture
+            ~job_id:id
+            ~attempt:0
+          |> F.ok
+        in
+        let wrong_request =
+          Disclosure.begin_request disclosure ~original_actor:actor wrong_attempt |> F.ok
+        in
+        assert (
+          Result.is_error
+            (Disclosure.read disclosure wrong_request ~sw ~current_actor:actor));
+        (match (P.Developer_job.state completed).result with
+         | Some (P.Developer_job.Result_value.Artifact { blob; _ }) ->
+           let data_root = Agent_store.Session_store.data_root session in
+           let file =
+             Filename.concat
+               (Filename.concat
+                  (Filename.concat
+                     (Agent_store.Data_root.durable_blobs_path data_root)
+                     "developer-runs")
+                  (P.Id.Developer_run.to_string owner.run_id))
+               (P.Id.Blob.to_string blob.id ^ ".blob")
+           in
+           Eio.Path.save
+             ~create:(`Or_truncate 0o600)
+             Eio.Path.(Eio.Stdenv.fs env / file)
+             "corrupt-result";
+           assert (
+             Result.is_error (Disclosure.read disclosure request ~sw ~current_actor:actor))
+         | Some (Inline _) | None -> ());
         Option.iter foreign ~f:(fun (other_session, other_store, _, _) ->
           R.close_and_wait other_store |> F.run_ok;
           Agent_store.Session_store.close other_session |> F.store_ok)))
+;;
+
+let%test_unit "developer disclosure distinguishes pending and terminal without result" =
+  F.with_root (fun env sw _root session store ->
+    let owner = F.owner 0 in
+    let capture = F.digest "developer pending disclosure" in
+    let handle, initial = F.admit store owner capture in
+    let data_root = Agent_store.Session_store.data_root session in
+    let blobs =
+      Blobs.create
+        ~env
+        ~temporary_directory:(Agent_store.Data_root.temporary_blobs_path data_root)
+        ~durable_directory:(Agent_store.Data_root.durable_blobs_path data_root)
+        ~max_upload_bytes:4096L
+      |> F.store_ok
+    in
+    Blobs.bind_developer_runs blobs ~session_store:session store |> F.store_ok;
+    let principal =
+      P.Principal.create
+        ~id:owner.principal_id
+        ~authentication_kind:"local.test"
+        ~scopes:P.Scope.Set.empty
+        ~attributes:[]
+      |> F.ok
+    in
+    let actor = Operator_authorization.trusted_local principal in
+    let policy =
+      Disclosure.Policy.create ~authorize:(fun actor selection ->
+        P.Id.Principal.equal
+          (Operator_authorization.principal actor).id
+          (Disclosure.Selection.owner selection).principal_id)
+    in
+    let json =
+      Document_schema.Limits.create
+        ~max_bytes:4096
+        ~max_depth:32
+        ~max_fields:512
+        ~max_nodes:1024
+      |> F.ok
+    in
+    let limits = Disclosure.Limits.create ~max_result_bytes:4096 ~json |> F.ok in
+    let disclosure = Disclosure.create ~runs:store ~blobs ~policy ~limits |> F.ok in
+    let id = Selected.job_id "job_pending_disclosure" in
+    let _, queued = select_root handle initial owner capture id in
+    let pending_selection =
+      Disclosure.Selection.create
+        ~owner
+        ~capture_fingerprint:capture
+        ~job_id:id
+        ~attempt:0
+      |> F.ok
+    in
+    let pending_request =
+      Disclosure.begin_request disclosure ~original_actor:actor pending_selection |> F.ok
+    in
+    (match
+       Disclosure.read disclosure pending_request ~sw ~current_actor:actor |> F.ok
+     with
+     | Disclosure.Result.Pending P.Job.Queued -> ()
+     | Pending _ | Terminal_without_result _ | Completion _ ->
+       failwith "new queued job did not report pending");
+    let worker = worker ~sw ~store ~handle ~capacity:(capacity ()) () in
+    let failed = P.Error.invalid_request "developer handler failed" in
+    let completed =
+      Worker.with_claimed_attempt
+        worker
+        ~expected:queued
+        ~lookup:(R.find_job_exact queued id)
+        (fun ~active ~sw:_ ->
+           Ok (terminal_state (Scope.claim active) (P.Job.Failed failed)))
+      |> F.ok
+      |> Option.value_exn
+    in
+    Worker.close_and_wait worker |> F.ok;
+    assert (
+      Result.is_error
+        (Disclosure.read disclosure pending_request ~sw ~current_actor:actor));
+    let terminal_selection =
+      Disclosure.Selection.create
+        ~owner
+        ~capture_fingerprint:capture
+        ~job_id:id
+        ~attempt:(P.Developer_job.state completed).attempt
+      |> F.ok
+    in
+    let terminal_request =
+      Disclosure.begin_request disclosure ~original_actor:actor terminal_selection |> F.ok
+    in
+    (match
+       Disclosure.read disclosure terminal_request ~sw ~current_actor:actor |> F.ok
+     with
+     | Disclosure.Result.Terminal_without_result (P.Job.Failed _) -> ()
+     | Pending _ | Terminal_without_result _ | Completion _ ->
+       failwith "failed job without result did not report terminal absence");
+    let denied = Disclosure.Policy.deny_all in
+    let denied = Disclosure.create ~runs:store ~blobs ~policy:denied ~limits |> F.ok in
+    assert (
+      Result.is_error
+        (Disclosure.begin_request denied ~original_actor:actor terminal_selection)))
 ;;
 
 let%test_unit

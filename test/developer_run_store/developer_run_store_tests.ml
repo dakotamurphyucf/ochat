@@ -210,12 +210,12 @@ let open_run
   | Error error -> raise_s [%sexp "developer run open failed", (error : R.Error.t)]
 ;;
 
-let with_root f =
+let with_root ?(checkpoint = fun () -> ()) f =
   with_temp_directory "ochat-developer-run" (fun env temporary ->
     Eio.Switch.run (fun sw ->
       let root = Filename.concat temporary "data" in
       let session = create_session env sw root in
-      let run = open_run session sw () in
+      let run = open_run session sw ~checkpoint () in
       Exn.protect
         ~f:(fun () -> f env sw root session run)
         ~finally:(fun () ->

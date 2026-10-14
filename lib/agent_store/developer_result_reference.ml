@@ -42,6 +42,35 @@ let create ~claim ~outcome ~blob =
   }
 ;;
 
+let of_terminal_job job =
+  let state = P.Developer_job.state job in
+  let open Result.Let_syntax in
+  let%bind _ =
+    P.Developer_job.with_state job state
+    |> Result.map_error ~f:(fun _ ->
+      Store_error.Corrupt "developer result terminal job is invalid")
+  in
+  let%bind outcome, blob =
+    match state.result with
+    | Some (P.Developer_job.Result_value.Artifact { outcome; blob })
+      when state.attempt > 0 -> Ok (outcome, blob)
+    | Some (Inline _) | Some (Artifact _) | None ->
+      corrupt "developer result terminal has no valid artifact"
+  in
+  let%map blob =
+    P.Blob.Metadata.of_json (P.Blob.Metadata.to_json blob)
+    |> Result.map_error ~f:(fun _ ->
+      Store_error.Corrupt "developer result terminal blob metadata is invalid")
+  in
+  { owner = P.Developer_job.owner job
+  ; capture_fingerprint = P.Developer_job.capture_fingerprint job
+  ; job_id = P.Developer_job.id job
+  ; attempt = state.attempt
+  ; outcome
+  ; blob
+  }
+;;
+
 let allowed_use t =
   String.concat
     ~sep:":"
