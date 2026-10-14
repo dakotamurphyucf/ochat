@@ -5,6 +5,7 @@ module Semantics = Chatml_semantics
 module Sites = Chatml.Chatml_syntax_sites
 module Recorder = Chatml_typechecker.Semantic
 module Graph = Chatml_typechecker.Type_snapshot
+module Build = Chatml_project_build
 
 let compilation = function
   | Compiler.Analysis_error.Policy error ->
@@ -70,4 +71,30 @@ let wire = function
   | Authoring_analysis_wire.Error.Wire_limit | Projection_limit ->
     Owner.Error.Resource_limit
   | Invalid_stamp | Invalid_site -> Owner.Error.Analysis_unavailable
+;;
+
+let selected_entry_overlay = function
+  | Authoring_selected_script_overlay.Error.Body_limit | Lock_identity_unavailable ->
+    Owner.Error.Resource_limit
+  | Invalid_selected_entry -> Owner.Error.Selection_unavailable
+  | Recomposition error ->
+    (match Build.Error.problem error with
+     | Limit_exceeded | Accounting_overflow -> Owner.Error.Resource_limit
+     | Missing_catalog _
+     | Unexpected_catalog _
+     | Namespace_conflict _
+     | Invalid_repository_member _
+     | Invalid_acquisition_key
+     | Invalid_dependency _
+     | Missing_module _
+     | Compiler_requirement
+     | Invalid_entry_selection
+     | Invalid_lock_identity
+     | Lock_mismatch
+     | Missing_capture _
+     | Duplicate_capture _
+     | Needs_update
+     | Declaration _
+     | Catalog _
+     | Prepared _ -> Owner.Error.Selection_unavailable)
 ;;

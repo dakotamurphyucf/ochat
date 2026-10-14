@@ -22,6 +22,7 @@ type head =
   | Project_cache
   | Document_cache
   | Analysis_index
+  | Provisional_index
   | Parsed_capture
 
 type probe
@@ -61,6 +62,16 @@ val capture_state
   -> expected:P.Authoring.Context.Expected.t
   -> checkpoint:(unit -> unit)
   -> (capture_state, error) result
+
+(** Read-only retained provisional count through the same live owner borrow.
+    It observes no compiler graph and conveys no label lookup authority. *)
+val provisional_count
+  :  Service.t
+  -> actor:Operator_authorization.t
+  -> connection:Connection_context.t
+  -> expected:P.Authoring.Context.Expected.t
+  -> checkpoint:(unit -> unit)
+  -> (int, error) result
 
 type index_view
 

@@ -13,6 +13,39 @@ module Prefix = struct
     | Invalid_rebased_metadata
   [@@deriving equal, sexp_of]
 
+  module Authored_request = struct
+    type t =
+      { source : Source.t
+      ; cursor_byte : int
+      }
+
+    let create ~source ~cursor_byte =
+      let* _ = bounded_nonnegative cursor_byte in
+      if cursor_byte <= Source.byte_length source
+      then Ok { source; cursor_byte }
+      else C.invalid "authored cursor exceeds source"
+    ;;
+
+    let source t = t.source
+    let cursor_byte t = t.cursor_byte
+
+    let equal left right =
+      Source.equal left.source right.source
+      && Int.equal left.cursor_byte right.cursor_byte
+    ;;
+
+    let to_json t =
+      obj [ "source", Source.to_json t.source; "cursor_byte", C.integer t.cursor_byte ]
+    ;;
+
+    let of_json json =
+      let* fields = C.fields ~allowed:[ "source"; "cursor_byte" ] json in
+      let* source = field fields "source" Source.of_json in
+      let* cursor_byte = field fields "cursor_byte" C.nonnegative in
+      create ~source ~cursor_byte
+    ;;
+  end
+
   type provisional =
     { capture : Capture.t
     ; full_source : Source.t
@@ -21,9 +54,10 @@ module Prefix = struct
     ; end_byte : int
     ; prefix_graph : Digest.t
     ; snapshot : Snapshot_id.t
+    ; authored_request : Authored_request.t option
     }
 
-  let create
+  let create_internal
         ~capture
         ~full_source
         ~prefix_source
@@ -31,6 +65,7 @@ module Prefix = struct
         ~end_byte
         ~prefix_graph
         ~snapshot
+        ~authored_request
     =
     let* _ = bounded_nonnegative cursor_byte in
     let* _ = bounded_nonnegative end_byte in
@@ -43,15 +78,19 @@ module Prefix = struct
     else (
       match Capture.target capture with
       | Target.Project_input ->
-        Ok
-          { capture
-          ; full_source
-          ; prefix_source
-          ; cursor_byte
-          ; end_byte
-          ; prefix_graph
-          ; snapshot
-          }
+        if Option.is_some authored_request
+        then C.invalid "project prefix cannot echo authored script request"
+        else
+          Ok
+            { capture
+            ; full_source
+            ; prefix_source
+            ; cursor_byte
+            ; end_byte
+            ; prefix_graph
+            ; snapshot
+            ; authored_request
+            }
       | Target.Script_input stamp ->
         if Source.equal (Target.selected_script_source stamp) full_source
         then
@@ -63,8 +102,50 @@ module Prefix = struct
             ; end_byte
             ; prefix_graph
             ; snapshot
+            ; authored_request
             }
         else C.invalid "provisional source differs from selected script")
+  ;;
+
+  let create
+        ~capture
+        ~full_source
+        ~prefix_source
+        ~cursor_byte
+        ~end_byte
+        ~prefix_graph
+        ~snapshot
+    =
+    create_internal
+      ~capture
+      ~full_source
+      ~prefix_source
+      ~cursor_byte
+      ~end_byte
+      ~prefix_graph
+      ~snapshot
+      ~authored_request:None
+  ;;
+
+  let create_with_authored_request
+        ~capture
+        ~full_source
+        ~prefix_source
+        ~cursor_byte
+        ~end_byte
+        ~prefix_graph
+        ~snapshot
+        ~authored_request
+    =
+    create_internal
+      ~capture
+      ~full_source
+      ~prefix_source
+      ~cursor_byte
+      ~end_byte
+      ~prefix_graph
+      ~snapshot
+      ~authored_request:(Some authored_request)
   ;;
 
   let capture t = t.capture
@@ -74,6 +155,7 @@ module Prefix = struct
   let end_byte t = t.end_byte
   let prefix_graph t = t.prefix_graph
   let snapshot t = t.snapshot
+  let authored_request t = t.authored_request
 
   let equal_provisional left right =
     Capture.equal left.capture right.capture
@@ -83,6 +165,7 @@ module Prefix = struct
     && Int.equal left.end_byte right.end_byte
     && Digest.equal left.prefix_graph right.prefix_graph
     && Snapshot_id.equal left.snapshot right.snapshot
+    && Option.equal Authored_request.equal left.authored_request right.authored_request
   ;;
 
   module Request = struct
@@ -188,15 +271,19 @@ module Prefix = struct
   let to_json = function
     | Provisional value ->
       obj
-        [ "status", str "provisional"
-        ; "capture", Capture.to_json value.capture
-        ; "full_source", Source.to_json value.full_source
-        ; "prefix_source", Source.to_json value.prefix_source
-        ; "cursor_byte", C.integer value.cursor_byte
-        ; "end_byte", C.integer value.end_byte
-        ; "prefix_graph", C.digest_json value.prefix_graph
-        ; "snapshot", Snapshot_id.to_json value.snapshot
-        ]
+        ([ "status", str "provisional"
+         ; "capture", Capture.to_json value.capture
+         ; "full_source", Source.to_json value.full_source
+         ; "prefix_source", Source.to_json value.prefix_source
+         ; "cursor_byte", C.integer value.cursor_byte
+         ; "end_byte", C.integer value.end_byte
+         ; "prefix_graph", C.digest_json value.prefix_graph
+         ; "snapshot", Snapshot_id.to_json value.snapshot
+         ]
+         @ C.optional_field
+             "authored_request"
+             value.authored_request
+             Authored_request.to_json)
     | Unavailable { context; target; source; cursor_byte; reason } ->
       obj
         [ "status", str "unavailable"
@@ -221,6 +308,7 @@ module Prefix = struct
           ; "end_byte"
           ; "prefix_graph"
           ; "snapshot"
+          ; "authored_request"
           ; "context"
           ; "target"
           ; "source"
@@ -242,6 +330,7 @@ module Prefix = struct
             ; "end_byte"
             ; "prefix_graph"
             ; "snapshot"
+            ; "authored_request"
             ]
           json
       in
@@ -252,15 +341,17 @@ module Prefix = struct
       let* end_byte = field fields "end_byte" C.nonnegative in
       let* prefix_graph = field fields "prefix_graph" C.digest in
       let* snapshot = field fields "snapshot" Snapshot_id.of_json in
+      let* authored_request = opt fields "authored_request" Authored_request.of_json in
       Result.map
-        (create
+        (create_internal
            ~capture
            ~full_source
            ~prefix_source
            ~cursor_byte
            ~end_byte
            ~prefix_graph
-           ~snapshot)
+           ~snapshot
+           ~authored_request)
         ~f:provisional
     | "unavailable" ->
       let* fields =
@@ -275,5 +366,9 @@ module Prefix = struct
       let* reason = field fields "reason" unavailable_of_json in
       unavailable ~context ~target ~source ~cursor_byte ~reason
     | _ -> C.invalid "unknown prefix result status"
+  ;;
+
+  let within_bytes t ~max_bytes =
+    C.encoded_size ~max_bytes (to_json t) |> Result.map ~f:(fun _ -> ())
   ;;
 end

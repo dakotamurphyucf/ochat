@@ -467,6 +467,57 @@ let%test_unit "explicit document capture binds unsaved root and imported source 
         [%test_eq: string]
           (Captured.contents second_import)
           "<developer>second import</developer>";
+        let reparse_with_root contents =
+          let root_source =
+            Captured.create
+              (Captured.id edited)
+              ~contents
+              ~expected_digest:None
+              ~max_bytes:(Some 1024)
+              ~checkpoint:ignore
+            |> Or_error.ok_exn
+          in
+          let bundle =
+            Chatmd_source_bundle.create
+              ~root_file:"draft.chatmd"
+              ~sources:
+                (Parsed.bundle first
+                 |> Chatmd_source_bundle.sources
+                 |> List.map ~f:(fun (member, bytes) ->
+                   member, if String.equal member "draft.chatmd" then contents else bytes)
+                )
+              ()
+            |> Result.ok_or_failwith
+          in
+          Parsed.reparse_frozen
+            ~previous:first
+            ~source:root_source
+            ~bundle
+            ~limits:Chatmd_source_bundle.default_limits
+            ~dir:root_path
+            ~checkpoint:ignore
+        in
+        let reparsed =
+          reparse_with_root
+            {|<import src="part.chatmd" namespace="part"/><developer>edited unsaved root</developer>|}
+          |> authoring_ok
+        in
+        let reparsed_import =
+          Parsed.input_sources reparsed
+          |> List.find_map ~f:(fun (input, source) ->
+            if String.equal (Chatmd_parser_input.path input) "part.chatmd"
+            then Some source
+            else None)
+          |> Option.value_exn
+        in
+        assert (phys_equal reparsed_import (source_at "part.chatmd"));
+        [%test_eq: string]
+          (Captured.contents reparsed_import)
+          "<developer>first import</developer>";
+        (match reparse_with_root {|<import src="new.chatmd" namespace="new"/>|} with
+         | Error (Authoring.Error.Document_parser Source_unavailable) -> ()
+         | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+         | Ok _ -> failwith "frozen reparse acquired a newly required import");
         let missing =
           Captured.create
             (Captured.id edited)

@@ -415,6 +415,31 @@ let%test_unit "complete, provisional and each query payload round-trip" =
   in
   let provisional_result = A.Prefix.provisional provisional in
   assert (Result.is_ok (A.Prefix.of_json (A.Prefix.to_json provisional_result)));
+  let authored_request =
+    A.Prefix.Authored_request.create ~source:document ~cursor_byte:20 |> ok
+  in
+  let selected_provisional =
+    A.Prefix.create_with_authored_request
+      ~capture
+      ~full_source:script
+      ~prefix_source
+      ~cursor_byte:3
+      ~end_byte:3
+      ~prefix_graph:(digest "prefix-graph")
+      ~snapshot
+      ~authored_request
+    |> ok
+  in
+  let selected_roundtrip =
+    A.Prefix.of_json (A.Prefix.to_json (A.Prefix.provisional selected_provisional)) |> ok
+  in
+  (match selected_roundtrip with
+   | Provisional returned ->
+     assert (A.Prefix.equal_provisional selected_provisional returned)
+   | Unavailable _ -> assert false);
+  assert (
+    Result.is_error
+      (A.Prefix.within_bytes (A.Prefix.provisional selected_provisional) ~max_bytes:32));
   let open A.Query in
   let display =
     A.Query.Display.create
