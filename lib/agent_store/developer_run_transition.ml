@@ -129,6 +129,7 @@ let root_selected t document ~phase ~selected =
     not
       (List.for_all selected ~f:(fun job ->
          new_job t job
+         && (not (P.Job.equal_kind (P.Developer_job.kind job) P.Job.Model_call))
          &&
          match P.Developer_job.Launch.parent (P.Developer_job.launch job) with
          | Run_root ->
@@ -164,7 +165,12 @@ let terminal_from_dispatch prior terminal =
 
 let terminal_selected t document ~observed ~terminal ~selected =
   let context = P.Host_invocation.context terminal in
-  if not (current_invocation t terminal && List.for_all selected ~f:(new_job t))
+  if
+    not
+      (current_invocation t terminal
+       && List.for_all selected ~f:(fun job ->
+         new_job t job
+         && not (P.Job.equal_kind (P.Developer_job.kind job) P.Job.Model_call)))
   then Error Error.Conflict
   else
     let* () = within_job_limits t document selected in
@@ -228,6 +234,120 @@ let terminal_selected t document ~observed ~terminal ~selected =
       |> store
     in
     if List.is_empty selected then Ok next else append_selected t next selected
+;;
+
+module External_model_parent = struct
+  type t =
+    | Run_root
+    | Dispatching of int * P.Host_invocation.t
+end
+
+let external_model_job_parent_matches
+      document
+      launch
+      (context : P.Host_invocation.context)
+      ~(owner : P.Execution_owner.developer)
+  =
+  let same_owner =
+    match context.owner with
+    | P.Execution_owner.Conversation _ -> false
+    | Developer parent -> P.Execution_owner.equal_developer parent owner
+  in
+  same_owner
+  &&
+  match P.Developer_job.Launch.parent_job launch, context.parent_job with
+  | None, None -> true
+  | Some (id, attempt), Some parent_id when P.Id.Job.equal id parent_id ->
+    Option.value_map (Doc.find_job document id) ~default:false ~f:(fun prior ->
+      P.Execution_owner.equal_developer (P.Developer_job.owner prior) owner
+      && attempt > 0
+      && attempt <= (P.Developer_job.state prior).attempt)
+  | None, Some _ | Some _, None | Some _, Some _ -> false
+;;
+
+let external_model t document ~parent ~job =
+  let launch = P.Developer_job.launch job in
+  if
+    (not (P.Job.equal_kind (P.Developer_job.kind job) P.Job.Model_call))
+    || (not (new_job t job))
+    || (not (Doc.valid_external_model_launch_shape launch))
+    || Option.is_some (Doc.find_job document (P.Developer_job.id job))
+  then Error Error.Conflict
+  else
+    let open Result.Let_syntax in
+    let%bind () =
+      match parent, P.Developer_job.Launch.parent launch with
+      | External_model_parent.Run_root, Run_root -> Ok ()
+      | External_model_parent.Dispatching (revision, observed), Invocation id ->
+        (match Doc.find_invocation document id with
+         | Some current
+           when Int.equal (Doc.Invocation_entry.revision current) revision
+                && P.Host_invocation.equal_context
+                     (P.Host_invocation.context (Doc.Invocation_entry.value current))
+                     (P.Host_invocation.context observed)
+                && P.Id.Invocation.equal (P.Host_invocation.context observed).id id
+                && P.Invocation.equal_status
+                     (P.Host_invocation.status (Doc.Invocation_entry.value current))
+                     Dispatching
+                && P.Invocation.equal_status
+                     (P.Host_invocation.status observed)
+                     Dispatching
+                && external_model_job_parent_matches
+                     document
+                     launch
+                     (P.Host_invocation.context observed)
+                     ~owner:t.owner -> Ok ()
+         | None | Some _ -> Error Error.Conflict)
+      | External_model_parent.Run_root, Invocation _
+      | External_model_parent.Dispatching _, Run_root -> Error Error.Conflict
+    in
+    let%bind () =
+      match
+        P.Developer_model_call.of_json (P.Developer_job.payload job) ~limits:t.limits
+      with
+      | Ok _ -> Ok ()
+      | Error { code = P.Protocol_error.Resource_limit; _ } -> Error Error.Limit_exceeded
+      | Error _ -> Error Error.Conflict
+    in
+    let%bind () =
+      if Doc.job_count document >= t.max_jobs then Error Error.Limit_exceeded else Ok ()
+    in
+    let%bind payload_bytes =
+      List.fold_result (Doc.jobs document) ~init:0 ~f:(fun accumulated prior ->
+        t.poll ();
+        let%bind length =
+          Document_schema.Json.validate_and_measure
+            ~limits:t.limits
+            (P.Developer_job.payload prior)
+          |> Document_fields.store
+          |> store
+        in
+        if length > t.max_job_payload_bytes - accumulated
+        then Error (Error.Store (Store_error.Corrupt "admitted payload exceeds limit"))
+        else Ok (accumulated + length))
+    in
+    let%bind incoming_bytes =
+      Document_schema.Json.validate_and_measure
+        ~limits:t.limits
+        (P.Developer_job.payload job)
+      |> Result.map_error ~f:(function
+        | Document_schema.Error.Limit_exceeded _ -> Error.Limit_exceeded
+        | _ -> Error.Conflict)
+    in
+    let%bind () =
+      if incoming_bytes > t.max_job_payload_bytes - payload_bytes
+      then Error Error.Limit_exceeded
+      else Ok ()
+    in
+    Doc.append_selected
+      document
+      ~poll:t.poll
+      ~limits:t.limits
+      ~selected:[ job ]
+      ~max_jobs:t.max_jobs
+      ~max_selected:1
+      ~max_job_payload_bytes:t.max_job_payload_bytes
+    |> store
 ;;
 
 let claim t document ~observed ~now =

@@ -185,6 +185,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_protocol/delivery.mli` | [contract](../../lib/agent_protocol/delivery.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/delivery_subscription_binding.mli` | [contract](../../lib/agent_protocol/delivery_subscription_binding.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/developer_job.mli` | [contract](../../lib/agent_protocol/developer_job.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/developer_model_call.mli` | [contract](../../lib/agent_protocol/developer_model_call.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/envelope.mli` | [contract](../../lib/agent_protocol/envelope.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/error.mli` | [contract](../../lib/agent_protocol/error.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/event.mli` | [contract](../../lib/agent_protocol/event.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
@@ -209,6 +210,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_protocol/job_result_reference.mli` | [contract](../../lib/agent_protocol/job_result_reference.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_protocol/json_codec.mli` | [contract](../../lib/agent_protocol/json_codec.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/method_result.mli` | [contract](../../lib/agent_protocol/method_result.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/model_spawn_request.mli` | [contract](../../lib/agent_protocol/model_spawn_request.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/moderator_execution.mli` | [contract](../../lib/agent_protocol/moderator_execution.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/mutation_result.mli` | [contract](../../lib/agent_protocol/mutation_result.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/operation.mli` | [contract](../../lib/agent_protocol/operation.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |

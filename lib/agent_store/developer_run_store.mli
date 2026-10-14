@@ -669,6 +669,37 @@ val prepare_terminal_selected
   -> selected:Agent_protocol.Developer_job.t list
   -> (Prepared.t, Error.t) result
 
+module External_model_parent : sig
+  type t =
+    | Run_root
+    | Dispatching of Invocation_lookup.t
+end
+
+(** Prepare exactly one fresh Queued/attempt-zero Model_call as an immediate
+    external effect in the latest Active epoch. [job] carries the versioned
+    bounded Developer_model_call envelope, including the complete nonsecret
+    selected Target and original recipe JSON. Run_root has no parent job and
+    depth zero, and adds no invented native invocation; Dispatching must be the physically observed lookup from
+    [expected] for the exact same-epoch invocation named by the job's launch.
+    The current durable invocation must still be Dispatching. Recorded
+    parent-job relation is checked structurally here; the actual claimed
+    attempt, native depth, live scope and provider authorization belong to the host.
+
+    This distinct Prepared kind uses only the existing per-run pending barrier
+    and exact Handoff through [commit_and_settle]/[reconcile_and_settle]. It
+    cannot be passed to foundation [commit]/[reconcile] or selected-root/native
+    preparation. A copied lookup, job ID or payload never grants execution.
+    Stale/foreign/duplicate/malformed proposals return Conflict; admitted
+    job/payload/document budget exhaustion returns Limit_exceeded. Persisted
+    malformed bytes remain Store errors. No callback is replayed on uncertain
+    write; the host retains its exact Prepared/Handoff and capacity permit. *)
+val prepare_external_model
+  :  handle
+  -> expected:Observation.t
+  -> parent:External_model_parent.t
+  -> job:Agent_protocol.Developer_job.t
+  -> (Prepared.t, Error.t) result
+
 (** Bounded claim preparation from an exact queued lookup in the latest
     Active epoch. A trusted host samples [now], proves due/current authority
     and acquires the existing shared capacity lease before this CAS. The
