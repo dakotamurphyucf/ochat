@@ -9,6 +9,10 @@ module D = Agent_session.Developer_invocation_owner.Selected
 module C = Chat_response.Tool_capability
 module T = Root_owner_tests
 module Scope = Agent_session.Developer_job_scope
+module Jobs = Agent_server.Developer_script_job_service
+module Disclosure = Agent_server.Developer_result_disclosure
+module Blobs = Agent_store.Blob_store
+module F = Developer_run_store_test_suite.Developer_run_store_tests
 
 let ok = T.ok
 
@@ -136,13 +140,16 @@ let succeeded_claim claim =
 let with_executor
       ?(checkpoint = ignore)
       ?(on_current = ignore)
+      ?on_store
+      ?on_capacity
+      ?(per_session = 2)
       ?(wrap_env = Fn.id)
       ?(now = T.now)
       ~run_name
       ~make_selected
       f
   =
-  T.with_store ~checkpoint ~wrap_env (fun env sw store ->
+  T.with_store ~checkpoint ~wrap_env ?on_store (fun env sw store ->
     let captured = T.capture () in
     let owner = T.owner run_name 0 in
     let handle, _ =
@@ -163,7 +170,9 @@ let with_executor
         ~max_quarantined_workers:2
       |> Or_error.ok_exn
     in
-    let owners = O.Registry.create ~sw ~store ~capacity:(T.capacity ()) ~now ~limits in
+    let capacity = T.capacity ~per_session () in
+    Option.iter on_capacity ~f:(fun notify -> notify capacity);
+    let owners = O.Registry.create ~sw ~store ~capacity ~now ~limits in
     let root =
       O.Registry.admit
         owners
@@ -184,6 +193,498 @@ let with_executor
     O.close_and_wait root |> ok;
     O.Registry.close_and_wait owners |> ok;
     result)
+;;
+
+let with_job_executor
+      ?(checkpoint = ignore)
+      ?(current_actor = fun root -> O.original_actor root)
+      ?(wrap_env = Fn.id)
+      ?on_capacity
+      ?(per_session = 2)
+      ~run_name
+      ~make_selected
+      f
+  =
+  let resources = ref None in
+  with_executor
+    ~checkpoint
+    ~wrap_env
+    ?on_capacity
+    ~per_session
+    ~run_name
+    ~make_selected
+    ~on_store:(fun env session store ->
+      let root = Agent_store.Session_store.data_root session in
+      let blobs =
+        Blobs.create
+          ~env
+          ~temporary_directory:(Agent_store.Data_root.temporary_blobs_path root)
+          ~durable_directory:(Agent_store.Data_root.durable_blobs_path root)
+          ~max_upload_bytes:65536L
+        |> ok
+      in
+      Blobs.bind_developer_runs blobs ~session_store:session store
+      |> Result.map_error ~f:(fun error ->
+        Sexp.to_string_hum (Agent_store.Store_error.sexp_of_t error))
+      |> Result.ok_or_failwith;
+      let limits =
+        Disclosure.Limits.create
+          ~max_result_bytes:65536
+          ~json:Document_schema.Limits.default
+        |> ok
+      in
+      let policy = Disclosure.Policy.create ~authorize:(fun _ _ -> true) in
+      let disclosure = Disclosure.create ~runs:store ~blobs ~policy ~limits |> ok in
+      resources := Some (store, disclosure))
+    (fun ~env ~root ~executor ~handle ~owner ~selected ->
+       let store, disclosure = Option.value_exn !resources in
+       let jobs =
+         Jobs.create
+           ~root
+           ~store
+           ~disclosure
+           ~env
+           ~current_actor:(fun () -> current_actor root)
+           ~prepare_source:(fun ~binding:_ ~request:_ ~checkpoint ->
+             checkpoint ();
+             Ok None)
+         |> Result.map_error ~f:(fun error -> error.P.Error.message)
+         |> Result.ok_or_failwith
+       in
+       let executor = X.with_job_service executor jobs |> ok in
+       f ~env ~root ~executor ~handle ~owner ~selected ~jobs)
+;;
+
+let%test_unit "developer root Job scope selects only the returned physical start" =
+  let calls = ref 0 in
+  let after_actor_read = ref ignore in
+  let swap_during_read = ref false in
+  let swapped = ref false in
+  let other_principal =
+    let id = P.Id.Principal.of_string "pri_other_developer_job_reader" |> ok in
+    P.Principal.create
+      ~id
+      ~authentication_kind:"local.test"
+      ~scopes:P.Scope.Set.empty
+      ~attributes:[]
+    |> ok
+  in
+  let foreign_actor =
+    Operator_authorization.guarded ~principal:other_principal ~is_current:(fun () -> true)
+  in
+  with_job_executor
+    ~checkpoint:(fun () -> !after_actor_read ())
+    ~current_actor:(fun root ->
+      if !swap_during_read
+      then
+        if !swapped
+        then foreign_actor
+        else (
+          (after_actor_read := fun () -> swapped := true);
+          O.original_actor root)
+      else O.original_actor root)
+    ~run_name:"dvr_script_root_job"
+    ~make_selected:(fun _ -> registry ~custom:false calls)
+    (fun ~env:_ ~root ~executor:_ ~handle ~owner:_ ~selected:_ ~jobs ->
+       let module Runtime = Chatml_host_runtime in
+       let module Value = Chatml.Chatml_value_codec in
+       let effects = ref [] in
+       let compiled =
+         Runtime.compile_script
+           ~surface:Chatml.Chatml_extension_surface.one_off_v1
+           ~source:
+             {|let main input =
+  Task.bind(Task.catch(
+    Task.bind(Job.start_tool("read_file", input), fun discarded -> Task.fail("discard")),
+    fun ignored -> Task.pure("caught")), fun ignored ->
+  Task.bind(Job.start_tool("read_file", input), fun id -> Task.pure(id)))|}
+           ()
+         |> Result.ok_or_failwith
+       in
+       let config : Runtime.runtime_config =
+         { surface = Chatml.Chatml_extension_surface.one_off_v1
+         ; operations = Runtime.default_operations ~handlers:Runtime.default_handlers ()
+         }
+       in
+       let value, ordinary =
+         Jobs.with_root_action jobs ~phase:R.Checkpoint.Active (fun ~scope ~sw:_ ->
+           let config = Jobs.Scope.install scope config in
+           let value =
+             Runtime.run_entrypoint
+               ~prepare_result:(fun ~value:_ ~local_effects ->
+                 effects := local_effects;
+                 Ok ignore)
+               config
+               compiled
+               ~entrypoint:"main"
+               ~arguments:[ Value.import_json (`Object []) ]
+               ()
+             |> Result.map_error ~f:P.Error.invalid_request
+           in
+           Result.map value ~f:(fun value -> value, !effects))
+         |> Result.map_error ~f:(fun error -> error.P.Error.message)
+         |> Result.ok_or_failwith
+       in
+       assert (List.is_empty ordinary);
+       let ids, _ =
+         Chat_response.Background_job_operations.split_starts !effects
+         |> Result.ok_or_failwith
+       in
+       let id = List.hd_exn ids in
+       assert (
+         match value with
+         | Chatml.Chatml_lang.VString returned ->
+           String.equal returned (P.Id.Job.to_string id)
+         | _ -> false);
+       let job = R.find_job (R.observe handle |> ok) id |> Option.value_exn in
+       assert (
+         P.Execution_owner.equal_developer (P.Developer_job.owner job) (O.owner root));
+       assert (Int.equal !calls 0);
+       let script_compiled =
+         Runtime.compile_script
+           ~surface:Chatml.Chatml_extension_surface.one_off_v1
+           ~source:
+             {|let main input = Job.start_script(`Object([
+  {key="source"; value=`String("let main input = Task.pure(input)")},
+  {key="tools"; value=`Array([])},
+  {key="input"; value=`Null}
+]))|}
+           ()
+         |> Result.ok_or_failwith
+       in
+       let script_effects = ref [] in
+       ignore
+         (Jobs.with_root_action jobs ~phase:R.Checkpoint.Active (fun ~scope ~sw:_ ->
+            let config = Jobs.Scope.install scope config in
+            Runtime.run_entrypoint
+              ~prepare_result:(fun ~value:_ ~local_effects ->
+                script_effects := local_effects;
+                Ok ignore)
+              config
+              script_compiled
+              ~entrypoint:"main"
+              ~arguments:[ Value.import_json `Null ]
+              ()
+            |> Result.map_error ~f:P.Error.invalid_request
+            |> Result.map ~f:(fun value -> value, !script_effects))
+          |> Result.map_error ~f:(fun error -> error.P.Error.message)
+          |> Result.ok_or_failwith
+          : Chatml.Chatml_lang.value * Chatml.Chatml_lang.eff list);
+       let script_ids, _ =
+         Chat_response.Background_job_operations.split_starts !script_effects
+         |> Result.ok_or_failwith
+       in
+       assert (Int.equal (List.length script_ids) 1);
+       assert (
+         Option.is_some (R.find_job (R.observe handle |> ok) (List.hd_exn script_ids)));
+       let run_job_query source =
+         let source =
+           String.substr_replace_all
+             source
+             ~pattern:"JOB_ID"
+             ~with_:(P.Id.Job.to_string id)
+         in
+         let compiled =
+           Runtime.compile_script
+             ~surface:Chatml.Chatml_extension_surface.one_off_v1
+             ~source
+             ()
+           |> Result.ok_or_failwith
+         in
+         let value, ordinary =
+           Jobs.with_root_action jobs ~phase:R.Checkpoint.Active (fun ~scope ~sw:_ ->
+             let config = Jobs.Scope.install scope config in
+             let effects = ref [] in
+             let value =
+               Runtime.run_entrypoint
+                 ~prepare_result:(fun ~value:_ ~local_effects ->
+                   effects := local_effects;
+                   Ok ignore)
+                 config
+                 compiled
+                 ~entrypoint:"main"
+                 ~arguments:[ Value.import_json (`Object []) ]
+                 ()
+               |> Result.map_error ~f:P.Error.invalid_request
+             in
+             Result.map value ~f:(fun value -> value, !effects))
+           |> Result.map_error ~f:(fun error -> error.P.Error.message)
+           |> Result.ok_or_failwith
+         in
+         assert (List.is_empty ordinary);
+         Value.export_json value |> Result.ok_or_failwith
+       in
+       let pending = run_job_query {|let main input = Job.read_result("JOB_ID")|} in
+       assert (
+         match pending with
+         | `Null -> true
+         | _ -> false);
+       let before = run_job_query {|let main input = Job.get("JOB_ID")|} in
+       assert (
+         match before with
+         | `Object fields ->
+           (match
+              ( List.Assoc.find fields "status" ~equal:String.equal
+              , List.Assoc.find fields "completion" ~equal:String.equal
+              , List.Assoc.find fields "completion_kind" ~equal:String.equal )
+            with
+            | Some (`String "queued"), Some `Null, Some `Null -> true
+            | _ -> false)
+         | _ -> false);
+       ignore
+         (run_job_query
+            {|let main input = Task.bind(Job.cancel("JOB_ID"), fun ignored -> Task.pure(`Null))|}
+          : Jsonaf.t);
+       let after = run_job_query {|let main input = Job.get("JOB_ID")|} in
+       assert (
+         match after with
+         | `Object fields ->
+           List.Assoc.find fields "status" ~equal:String.equal
+           |> Option.value_map ~default:false ~f:(function
+             | `String value -> String.equal value "cancelled"
+             | _ -> false)
+         | _ -> false);
+       swap_during_read := true;
+       let denied =
+         Or_error.try_with (fun () ->
+           run_job_query {|let main input = Job.read_result("JOB_ID")|})
+       in
+       assert !swapped;
+       assert (
+         match denied with
+         | Error error ->
+           String.is_substring
+             (Error.to_string_hum error)
+             ~substring:"developer result is unauthorized"
+         | Ok _ -> false))
+;;
+
+let managed_job_registry env calls =
+  let module M = Chat_response.Managed_tool_registry in
+  let base = registry ~custom:false calls in
+  let dir = Eio.Stdenv.cwd env in
+  let source_loader =
+    Source_loader.captured_filesystem
+      ~root:dir
+      ~sources:
+        [ "input.json", {|{"type":"object"}|}; "output.json", {|{"type":"object"}|} ]
+  in
+  let elements =
+    Prompt.Chat_markdown.parse_chat_inputs
+      ~dir
+      ~source_loader
+      {|<tool name="read_file"/>
+<script id="owned" language="chatml" kind="tool">
+let run ctx input = Task.bind(Job.start_tool("read_file", input), fun id ->
+  Task.pure(`Complete(input)))
+</script>
+<tool name="summary" type="chatml" script="owned" entrypoint="run" input_schema="input.json" output_schema="output.json"><uses tool="read_file"/></tool>|}
+  in
+  let managed =
+    M.prepare ~env ~owner:"developer-managed-jobs" ~capabilities:base elements
+    |> Result.map_error ~f:(fun errors ->
+      List.map errors ~f:Chatmd_shell_spec.Diagnostic.to_string |> String.concat ~sep:"; ")
+    |> Result.ok_or_failwith
+  in
+  managed, M.capabilities managed
+;;
+
+let%test_unit
+    "selected managed ChatML installs Job operations only in its live native scope"
+  =
+  let calls = ref 0 in
+  let prepared = ref None in
+  with_job_executor
+    ~run_name:"dvr_script_managed_job"
+    ~make_selected:(fun env ->
+      let managed, selected = managed_job_registry env calls in
+      prepared := Some managed;
+      selected)
+    (fun ~env:_ ~root:_ ~executor ~handle ~owner ~selected ~jobs:_ ->
+       let module M = Chat_response.Managed_tool_registry in
+       let module EC = Chat_response.Extension_compiler in
+       let module Runtime = Chatml_host_runtime in
+       let module Value = Chatml.Chatml_value_codec in
+       let module Ops = Chat_response.Background_job_operations in
+       let managed = Option.value_exn !prepared in
+       let binding = C.find selected ~name:"summary" |> ok in
+       let reference = C.reference binding in
+       let admitted =
+         H.create_developer
+           { (H.context (invocation owner selected reference ~custom:false)) with
+             implementation_revision = M.execution_revision managed binding |> ok
+           }
+         |> ok
+       in
+       let escaped_install = ref None in
+       let selected_ids = ref [] in
+       let service : Agent_session.Native_tool_invocation.selected_managed_dispatch =
+         { definition = managed
+         ; current = (fun () -> selected)
+         ; run =
+             (fun execution
+               _borrowed
+               ~effect_entry
+               ~stage_background:_
+               ~install_jobs
+               continuation ->
+               effect_entry () |> ok;
+               escaped_install := Some install_jobs;
+               let prepared = M.owned_prepared execution in
+               let config : Runtime.runtime_config =
+                 { surface = Chatml.Chatml_extension_surface.tool_v1
+                 ; operations =
+                     Runtime.default_operations ~handlers:Runtime.default_handlers ()
+                 }
+               in
+               let effects = ref [] in
+               ignore
+                 (EC.Program.run_in_scope
+                    (EC.program prepared)
+                    ~prepare_result:(fun ~value:_ ~local_effects ->
+                      effects := local_effects;
+                      Ok ignore)
+                    ~control:None
+                    ~config:(install_jobs config)
+                    ~entrypoint:"run"
+                    ~arguments:[ Value.import_json `Null; Value.import_json (`Object []) ]
+                    ()
+                  |> Result.map_error ~f:(fun error -> error.Chatml_execution.message)
+                  |> Result.ok_or_failwith
+                  : Chatml.Chatml_lang.value);
+               let ids, ordinary = Ops.split_starts !effects |> Result.ok_or_failwith in
+               selected_ids := ids;
+               assert (List.is_empty ordinary);
+               continuation
+                 ~validate_work:(fun work ->
+                   match work with
+                   | P.Invocation.Job id when List.mem ids id ~equal:P.Id.Job.equal ->
+                     Ok ()
+                   | Job _ | Subscription _ -> Error "foreign managed job")
+                 ~outcome:(I.Complete (`Object []))
+                 ~selected_jobs:ids)
+         }
+       in
+       let terminal =
+         X.run_root
+           executor
+           ~managed:(Some service)
+           ~reference
+           ~invocation:admitted
+           ~authorize:(fun _ _ -> Ok ())
+           ~prepare_output:(function
+             | Openai.Responses.Tool_output.Output.Text value -> Ok (`String value)
+             | _ -> Error (P.Error.invalid_request "unexpected output"))
+         |> ok
+       in
+       assert (I.equal_status (H.status terminal) (Resolved (Complete (`Object []))));
+       assert (Int.equal (List.length !selected_ids) 1);
+       assert (
+         Option.is_some (R.find_job (R.observe handle |> ok) (List.hd_exn !selected_ids)));
+       let escaped = Option.value_exn !escaped_install in
+       assert (
+         Result.is_error
+           (Or_error.try_with (fun () ->
+              let config : Runtime.runtime_config =
+                { surface = Chatml.Chatml_extension_surface.tool_v1
+                ; operations =
+                    Runtime.default_operations ~handlers:Runtime.default_handlers ()
+                }
+              in
+              ignore (escaped config : Runtime.runtime_config)))))
+;;
+
+let%test_unit
+    "lexical root cleanup retains uncertain selected capacity for exact reconciliation"
+  =
+  let rename_armed = ref false in
+  let sync_blocked = ref false in
+  let parent_sync_blocked = ref false in
+  let capacity = ref None in
+  let calls = ref 0 in
+  with_job_executor
+    ~run_name:"dvr_script_uncertain_root"
+    ~make_selected:(fun _ -> registry ~custom:false calls)
+    ~per_session:1
+    ~on_capacity:(fun value -> capacity := Some value)
+    ~wrap_env:(fun env ->
+      F.fault_after_authority_rename_env
+        ~after_rename:(fun () -> sync_blocked := true)
+        env
+        ~rename_armed
+        ~sync_blocked
+        ~parent_sync_blocked)
+    (fun ~env:_ ~root ~executor:_ ~handle ~owner:_ ~selected:_ ~jobs ->
+       let module Runtime = Chatml_host_runtime in
+       let module Value = Chatml.Chatml_value_codec in
+       let effects = ref [] in
+       let invoked = ref 0 in
+       let compiled =
+         Runtime.compile_script
+           ~surface:Chatml.Chatml_extension_surface.one_off_v1
+           ~source:{|let main input = Job.start_tool("read_file", input)|}
+           ()
+         |> Result.ok_or_failwith
+       in
+       let config : Runtime.runtime_config =
+         { surface = Chatml.Chatml_extension_surface.one_off_v1
+         ; operations = Runtime.default_operations ~handlers:Runtime.default_handlers ()
+         }
+       in
+       let uncertain =
+         Jobs.with_root_action jobs ~phase:R.Checkpoint.Active (fun ~scope ~sw:_ ->
+           Int.incr invoked;
+           let config = Jobs.Scope.install scope config in
+           let value =
+             Runtime.run_entrypoint
+               ~prepare_result:(fun ~value:_ ~local_effects ->
+                 effects := local_effects;
+                 Ok ignore)
+               config
+               compiled
+               ~entrypoint:"main"
+               ~arguments:[ Value.import_json (`Object []) ]
+               ()
+             |> Result.map_error ~f:P.Error.invalid_request
+           in
+           Result.map value ~f:(fun value ->
+             rename_armed := true;
+             value, !effects))
+       in
+       assert (Result.is_error uncertain);
+       assert (Int.equal !invoked 1);
+       let ids, _ =
+         Chat_response.Background_job_operations.split_starts !effects
+         |> Result.ok_or_failwith
+       in
+       let id = List.hd_exn ids in
+       let project_source =
+         let prepared = Chatml_developer_capture.prepared (O.capture root) in
+         match Chatml_prepared_program.provenance prepared with
+         | Project { declaration; lock = _ } -> declaration
+         | Implicit -> Chatml_prepared_program.entry prepared
+       in
+       let key =
+         Agent_server.Job_capacity.Key.developer
+           ~owner:(O.owner root)
+           ~project_source
+           ~workspace_conflict_domain:"selected-native-test"
+           ~kind:P.Job.Async_tool
+           ~nested_depth:0
+         |> ok
+       in
+       (match Agent_server.Job_capacity.try_acquire (Option.value_exn !capacity) key with
+        | Ok None -> ()
+        | Ok (Some _) | Error _ ->
+          failwith "lexical cleanup released the uncertain selected reservation");
+       assert (
+         Result.is_error
+           (Jobs.with_root_action jobs ~phase:R.Checkpoint.Active (fun ~scope:_ ~sw:_ ->
+              failwith "unknown physical handoff admitted another root callback")));
+       sync_blocked := false;
+       O.reconcile_pending root |> ok;
+       assert (Option.is_some (R.find_job (R.observe handle |> ok) id));
+       assert (Int.equal !invoked 1))
 ;;
 
 let managed_registry env =
@@ -648,7 +1149,12 @@ let%test_unit "job expiry during managed preparation cannot reserve child capaci
          { definition = managed
          ; current = (fun () -> selected)
          ; run =
-             (fun _execution _borrowed ~effect_entry ~stage_background _continuation ->
+             (fun _execution
+               _borrowed
+               ~effect_entry
+               ~stage_background
+               ~install_jobs:_
+               _continuation ->
                match effect_entry () with
                | Error _ -> failwith "managed job child expired before preparation"
                | Ok () ->
@@ -746,7 +1252,12 @@ let%test_unit "managed job child stages exact claimed attempt and nesting depth"
          { definition = managed
          ; current = (fun () -> selected)
          ; run =
-             (fun _execution _borrowed ~effect_entry ~stage_background continuation ->
+             (fun _execution
+               _borrowed
+               ~effect_entry
+               ~stage_background
+               ~install_jobs:_
+               continuation ->
                effect_entry () |> ok;
                let id = stage_background ~request ~checkpoint:ignore |> ok in
                selected_child := Some id;
@@ -840,7 +1351,12 @@ let%test_unit "managed selected IDs survive Complete and staging expires with ca
          { definition = managed
          ; current = (fun () -> selected)
          ; run =
-             (fun _execution _borrowed ~effect_entry ~stage_background continuation ->
+             (fun _execution
+               _borrowed
+               ~effect_entry
+               ~stage_background
+               ~install_jobs:_
+               continuation ->
                stage_after := Some stage_background;
                match effect_entry () with
                | Error _ ->

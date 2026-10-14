@@ -107,6 +107,8 @@ type selected_managed_dispatch =
            (request:Chat_response.Background_request.t
             -> checkpoint:(unit -> unit)
             -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result)
+      -> install_jobs:
+           (Chatml_host_runtime.runtime_config -> Chatml_host_runtime.runtime_config)
       -> (validate_work:(I.work -> (unit, string) result)
           -> outcome:I.outcome
           -> selected_jobs:Agent_protocol.Id.Job.t list
@@ -245,6 +247,7 @@ let borrow_selected () =
 ;;
 
 let selected_borrowed_issuer (scope : selected_borrowed) = scope.issuer
+let selected_borrowed_invocation (scope : selected_borrowed) = scope.invocation
 let selected_borrowed_parent (scope : selected_borrowed) = scope.parent_claim
 
 let selected_borrowed_capabilities (scope : selected_borrowed) =
@@ -944,6 +947,7 @@ let selected_managed_target
       ~dispatched
       ~effect_entry
       ~stage_background
+      ~install_jobs
   =
   Managed.admit_owned
     service.definition
@@ -963,6 +967,7 @@ let selected_managed_target
                    borrowed
                    ~effect_entry
                    ~stage_background
+                   ~install_jobs
                    continuation))
           with
           | Ok result -> result
@@ -1140,6 +1145,7 @@ let run_owned_child ~parent ~managed ~reference ~invocation ~authorize ~prepare_
 ;;
 
 let run_owned_selected
+      ~install_jobs
       ~owner
       ~parent
       ~dispatch
@@ -1187,7 +1193,8 @@ let run_owned_selected
         ~dispatched
         ~effect_entry:(fun () -> effect_entry binding)
         ~stage_background:(fun ~request ~checkpoint ->
-          stage_background binding ~request ~checkpoint))
+          stage_background binding ~request ~checkpoint)
+        ~install_jobs)
   in
   let check_halted () =
     match D.Selected.check_invocation owner ~parent invocation with

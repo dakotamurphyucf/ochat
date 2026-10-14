@@ -6,10 +6,12 @@ module N = Agent_session.Native_tool_invocation
 module C = Chat_response.Tool_capability
 module H = P.Host_invocation
 module Job_scope = Agent_session.Developer_job_scope
+module Jobs = Developer_script_job_service
 
 type t =
   { root : O.t
   ; issuer : D.t
+  ; jobs : Jobs.t option
   }
 
 let invalid message = Error (P.Error.invalid_request message)
@@ -34,7 +36,13 @@ let create ~root =
       ~current
       ~now:(fun () -> O.native_now root)
   in
-  Ok { root; issuer }
+  Ok { root; issuer; jobs = None }
+;;
+
+let with_job_service t jobs =
+  if Jobs.issued_by_root jobs t.root
+  then Ok { t with jobs = Some jobs }
+  else invalid "developer Job service belongs to another physical root"
 ;;
 
 let narrowed_registry t parent =
@@ -153,6 +161,7 @@ let run
       t
       ~parent
       ~job_parent
+      ~borrowed
       ~registry
       ~managed
       ~reference
@@ -162,108 +171,159 @@ let run
   =
   let* entered =
     O.with_native_registration t.root ?job_parent ~invocation (fun ~scope ->
-      let dispatch : D.dispatch_storage =
-        { read = O.Native_terminal.read_dispatch scope
-        ; save_dispatch = O.Native_terminal.save_dispatch scope
-        }
-      in
-      let effect_entry binding =
-        let* witness = O.current t.root in
-        let selected = O.Current.selected witness in
-        let reference = C.reference binding in
-        let* actual =
-          C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint
-          |> Result.map_error ~f:(fun error -> P.Error.invalid_request error.message)
+      let execute job_scope =
+        let dispatch : D.dispatch_storage =
+          { read = O.Native_terminal.read_dispatch scope
+          ; save_dispatch = O.Native_terminal.save_dispatch scope
+          }
         in
-        let* () =
-          match C.native_implementation binding, C.native_implementation actual with
-          | Some expected, Some actual when phys_equal expected actual -> Ok ()
-          | None, None -> Ok ()
-          | Some _, Some _ | Some _, None | None, Some _ ->
-            invalid "selected native implementation changed before effect entry"
-        in
-        let* () =
-          match job_parent with
-          | None -> Ok ()
-          | Some ancestor ->
-            Job_scope.Parent.check
-              ancestor
-              ~owner:(O.owner t.root)
-              ~capture_fingerprint:
-                (Chatml_developer_capture.fingerprint (O.capture t.root))
-        in
-        let* () = O.check_effect_now t.root witness in
-        let* () =
-          match job_parent with
-          | None -> Ok ()
-          | Some ancestor ->
-            Job_scope.Parent.check_now
-              ancestor
-              ~owner:(O.owner t.root)
-              ~capture_fingerprint:
-                (Chatml_developer_capture.fingerprint (O.capture t.root))
-        in
-        D.check_parent_now t.issuer ~parent invocation
-      in
-      let seal outcome ~selected_jobs =
-        match O.Native_terminal.sealed scope with
-        | Some (frozen, selection) ->
-          if
-            P.Invocation.equal_outcome frozen outcome
-            && List.equal
-                 P.Id.Job.equal
-                 (List.map
-                    (O.Native_terminal.Selection.jobs selection)
-                    ~f:P.Developer_job.id)
-                 selected_jobs
-          then Ok (Some selection)
-          else invalid "selected native outcome changed after sealing"
-        | None ->
-          O.Native_terminal.seal scope ~outcome ~selected:selected_jobs
-          |> Result.map ~f:Option.some
-      in
-      let stage_background binding ~request ~checkpoint =
-        let* () = effect_entry binding in
-        O.Native_terminal.stage_background
-          scope
-          ~request
-          ~checkpoint
-          ~check_parent_now:(fun () -> D.check_parent_now t.issuer ~parent invocation)
-      in
-      match
-        N.run_owned_selected
-          ~owner:t.issuer
-          ~parent
-          ~dispatch
-          ~parent_live_now:(fun () -> O.Native_terminal.effect_parent_live_now scope)
-          ~frozen:(fun () -> O.Native_terminal.sealed scope)
-          ~enter_callback:(fun ~dispatched f ->
-            O.with_native_callback scope ~dispatched (fun ~sw:_ -> f ()))
-          ~managed
-          ~registry
-          ~reference
-          ~invocation
-          ~authorize
-          ~prepare_output
-          ~effect_entry
-          ~stage_background
-          ~seal
-      with
-      | Error error -> Ok (`Early_error (scope, error))
-      | exception exn ->
-        Ok (`Early_raised (scope, exn, Stdlib.Printexc.get_raw_backtrace ()))
-      | Ok completion ->
-        if O.Native_terminal.callback_complete scope
-        then
-          Result.map (submit_completion scope completion) ~f:(fun terminal ->
-            `Saved terminal)
-        else
-          let* () =
-            O.Native_terminal.remember_failure
-              scope
-              ~terminal:(D.Completion.terminal completion)
+        let effect_entry binding =
+          let* witness = O.current t.root in
+          let selected = O.Current.selected witness in
+          let reference = C.reference binding in
+          let* actual =
+            C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint
+            |> Result.map_error ~f:(fun error -> P.Error.invalid_request error.message)
           in
-          Ok (`Retained (scope, completion)))
+          let* () =
+            match C.native_implementation binding, C.native_implementation actual with
+            | Some expected, Some actual when phys_equal expected actual -> Ok ()
+            | None, None -> Ok ()
+            | Some _, Some _ | Some _, None | None, Some _ ->
+              invalid "selected native implementation changed before effect entry"
+          in
+          let* () =
+            match job_parent with
+            | None -> Ok ()
+            | Some ancestor ->
+              Job_scope.Parent.check
+                ancestor
+                ~owner:(O.owner t.root)
+                ~capture_fingerprint:
+                  (Chatml_developer_capture.fingerprint (O.capture t.root))
+          in
+          let* () = O.check_effect_now t.root witness in
+          let* () =
+            match job_parent with
+            | None -> Ok ()
+            | Some ancestor ->
+              Job_scope.Parent.check_now
+                ancestor
+                ~owner:(O.owner t.root)
+                ~capture_fingerprint:
+                  (Chatml_developer_capture.fingerprint (O.capture t.root))
+          in
+          D.check_parent_now t.issuer ~parent invocation
+        in
+        let seal outcome ~selected_jobs =
+          let physical selection =
+            match job_scope with
+            | None -> Ok selection
+            | Some lexical ->
+              (match Jobs.frozen_native lexical ~terminal:scope with
+               | Some (frozen, sealed)
+                 when P.Invocation.equal_outcome frozen outcome
+                      && phys_equal (Jobs.Native_selection.physical sealed) selection ->
+                 Ok selection
+               | Some _ | None -> invalid "native Job selection lost its lexical seal")
+          in
+          match O.Native_terminal.sealed scope with
+          | Some (frozen, selection) ->
+            if
+              P.Invocation.equal_outcome frozen outcome
+              && List.equal
+                   P.Id.Job.equal
+                   (List.map
+                      (O.Native_terminal.Selection.jobs selection)
+                      ~f:P.Developer_job.id)
+                   selected_jobs
+            then Result.map (physical selection) ~f:Option.some
+            else invalid "selected native outcome changed after sealing"
+          | None ->
+            (match job_scope with
+             | None -> O.Native_terminal.seal scope ~outcome ~selected:selected_jobs
+             | Some lexical ->
+               let* sealed =
+                 Jobs.seal_native lexical ~terminal:scope ~outcome ~selected_jobs
+               in
+               Ok (Jobs.Native_selection.physical sealed))
+            |> Result.map ~f:Option.some
+        in
+        let stage_background binding ~request ~checkpoint =
+          let* () = effect_entry binding in
+          match job_scope with
+          | None ->
+            O.Native_terminal.stage_background
+              scope
+              ~request
+              ~checkpoint
+              ~check_parent_now:(fun () -> D.check_parent_now t.issuer ~parent invocation)
+          | Some lexical -> Jobs.Scope.stage_background lexical ~request ~checkpoint
+        in
+        match
+          N.run_owned_selected
+            ~install_jobs:(fun config ->
+              match job_scope with
+              | None -> config
+              | Some lexical -> Jobs.Scope.install lexical config)
+            ~owner:t.issuer
+            ~parent
+            ~dispatch
+            ~parent_live_now:(fun () -> O.Native_terminal.effect_parent_live_now scope)
+            ~frozen:(fun () ->
+              match job_scope with
+              | None -> O.Native_terminal.sealed scope
+              | Some lexical ->
+                Option.map
+                  (Jobs.frozen_native lexical ~terminal:scope)
+                  ~f:(fun (outcome, selection) ->
+                    outcome, Jobs.Native_selection.physical selection))
+            ~enter_callback:(fun ~dispatched f ->
+              O.with_native_callback scope ~dispatched (fun ~sw:_ -> f ()))
+            ~managed
+            ~registry
+            ~reference
+            ~invocation
+            ~authorize
+            ~prepare_output
+            ~effect_entry
+            ~stage_background
+            ~seal
+        with
+        | Error error -> Ok (`Early_error (scope, error))
+        | exception exn ->
+          Ok (`Early_raised (scope, exn, Stdlib.Printexc.get_raw_backtrace ()))
+        | Ok completion ->
+          if O.Native_terminal.callback_complete scope
+          then
+            Result.map (submit_completion scope completion) ~f:(fun terminal ->
+              (match job_scope with
+               | None -> ()
+               | Some lexical ->
+                 (match Jobs.frozen_native lexical ~terminal:scope with
+                  | None -> ()
+                  | Some (_, selection) ->
+                    (match Jobs.acknowledge_native lexical selection with
+                     | Ok () -> ()
+                     | Error error -> failwith error.message)));
+              `Saved terminal)
+          else
+            let* () =
+              O.Native_terminal.remember_failure
+                scope
+                ~terminal:(D.Completion.terminal completion)
+            in
+            Ok (`Retained (scope, completion))
+      in
+      match t.jobs with
+      | None -> execute None
+      | Some jobs ->
+        Jobs.with_native_scope
+          jobs
+          ~terminal:scope
+          ~borrowed
+          ~check_parent_now:(fun () -> D.check_parent_now t.issuer ~parent invocation)
+          (fun ~scope:lexical -> execute (Some lexical)))
   in
   match entered with
   | `Saved terminal -> Ok terminal
@@ -285,6 +345,7 @@ let run_root t ~managed ~reference ~invocation ~authorize ~prepare_output =
     t
     ~parent:D.Root
     ~job_parent:None
+    ~borrowed:None
     ~registry:(fun () -> D.selected t.issuer)
     ~managed
     ~reference
@@ -304,6 +365,7 @@ let run_child t ~managed ~reference ~invocation ~authorize ~prepare_output =
       t
       ~parent:(D.Child parent)
       ~job_parent
+      ~borrowed:(Some borrowed)
       ~registry:(fun () -> narrowed_registry t borrowed)
       ~managed
       ~reference
@@ -318,6 +380,7 @@ let run_job_child t ~active ~managed ~reference ~invocation ~authorize ~prepare_
     t
     ~parent:(D.Job_child job_parent)
     ~job_parent:(Some job_parent)
+    ~borrowed:None
     ~registry:(fun () -> D.selected t.issuer)
     ~managed
     ~reference

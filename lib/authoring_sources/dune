@@ -106,6 +106,7 @@
     lib/agent_session/notification_readiness.ml %{dep:../agent_session/notification_readiness.ml}
     lib/agent_session/script_ingress_service.ml %{dep:../agent_session/script_ingress_service.ml}
     lib/agent_session/script_job_kernel.ml %{dep:../agent_session/script_job_kernel.ml}
+    lib/agent_session/script_job_request.ml %{dep:../agent_session/script_job_request.ml}
     lib/agent_session/script_job_service.ml %{dep:../agent_session/script_job_service.ml}
     lib/agent_session/script_notification_service.ml %{dep:../agent_session/script_notification_service.ml}
     lib/agent_session/script_schedule_service.ml %{dep:../agent_session/script_schedule_service.ml}

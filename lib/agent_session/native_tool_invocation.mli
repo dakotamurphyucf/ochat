@@ -61,6 +61,11 @@ type selected_borrowed
 val borrow_selected : unit -> (selected_borrowed, Agent_protocol.Error.t) result
 val selected_borrowed_issuer : selected_borrowed -> Developer_invocation_owner.Selected.t
 
+(** Exact direct parent invocation carried by this live selected borrow. A
+    developer Job scope compares it with its registered physical child context
+    before accepting the borrow's narrowed capability ceiling. *)
+val selected_borrowed_invocation : selected_borrowed -> Agent_protocol.Host_invocation.t
+
 val selected_borrowed_parent
   :  selected_borrowed
   -> Developer_invocation_owner.Selected.active
@@ -240,6 +245,8 @@ type selected_managed_dispatch =
            (request:Chat_response.Background_request.t
             -> checkpoint:(unit -> unit)
             -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result)
+      -> install_jobs:
+           (Chatml_host_runtime.runtime_config -> Chatml_host_runtime.runtime_config)
       -> (validate_work:(Agent_protocol.Invocation.work -> (unit, string) result)
           -> outcome:Agent_protocol.Invocation.outcome
           -> selected_jobs:Agent_protocol.Id.Job.t list
@@ -258,7 +265,9 @@ type selected_managed_dispatch =
     while joining the callback Switch. It is nonyielding and cannot be
     substituted with the child's own cancellation context. *)
 val run_owned_selected
-  :  owner:Developer_invocation_owner.Selected.t
+  :  install_jobs:
+       (Chatml_host_runtime.runtime_config -> Chatml_host_runtime.runtime_config)
+  -> owner:Developer_invocation_owner.Selected.t
   -> parent:Developer_invocation_owner.Selected.parent
   -> dispatch:Developer_invocation_owner.Selected.dispatch_storage
   -> parent_live_now:(unit -> bool)
