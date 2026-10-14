@@ -392,7 +392,13 @@ module Attempt = struct
       else error Previous_lock_mismatch
   ;;
 
-  let validate_project t project ~derived_entry ~previous ~contract ~checkpoint =
+  type published_graph =
+    { lock_source : Captured.t
+    ; sources : Captured.t list
+    }
+
+  let validate_project t project ~derived_entry ~previous ~published ~contract ~checkpoint
+    =
     let open Result.Let_syntax in
     tick t ~checkpoint;
     let%bind sources, entry, extra =
@@ -403,8 +409,25 @@ module Attempt = struct
     in
     let mode = Bundle.Manifest.Project.mode project in
     let%bind build, expected_sources =
-      match mode with
-      | Exact_lock lock_id ->
+      match published, mode with
+      | Some graph, (Exact_lock _ | Compose _) ->
+        let%bind limits = remaining_build_limits t in
+        let%map build =
+          Build.restore
+            graph.lock_source
+            ~sources:graph.sources
+            ~contract
+            ~limits
+            ~checkpoint
+          |> Result.map_error ~f:(fun problem -> Error.create (Builder problem))
+        in
+        let expected_sources =
+          match mode with
+          | Exact_lock _ -> captured_inputs
+          | Compose _ -> graph.lock_source :: captured_inputs
+        in
+        build, expected_sources
+      | None, Exact_lock lock_id ->
         let%bind () =
           match previous with
           | None -> Ok ()
@@ -426,7 +449,7 @@ module Attempt = struct
           |> Result.map_error ~f:(fun problem -> Error.create (Builder problem))
         in
         build, captured_inputs
-      | Compose { selected_previous_lock; generated_lock } ->
+      | None, Compose { selected_previous_lock; generated_lock } ->
         let%bind previous =
           exact_previous t selected_previous_lock previous ~checkpoint
         in
@@ -495,8 +518,36 @@ module Attempt = struct
       ~f:(fun () ->
         match Bundle.Manifest.basis t.manifest with
         | Project project ->
-          validate_project t project ~derived_entry:None ~previous ~contract ~checkpoint
+          validate_project
+            t
+            project
+            ~derived_entry:None
+            ~previous
+            ~published:None
+            ~contract
+            ~checkpoint
         | Chatmd_document _ -> error Wrong_project_basis)
+  ;;
+
+  let selected_project t selector ~checkpoint =
+    match Bundle.Manifest.basis t.manifest with
+    | Project _ -> error Wrong_project_basis
+    | Chatmd_document document ->
+      let rec find = function
+        | [] -> error Missing_selected_script
+        | script :: rest ->
+          tick t ~checkpoint;
+          if
+            Bundle.Manifest.Script.Selector.equal
+              selector
+              (Bundle.Manifest.Script.selector script)
+          then (
+            match Bundle.Manifest.Script.choice script with
+            | Source_only -> error Wrong_project_basis
+            | Selected_project project -> Ok project)
+          else find rest
+      in
+      find (Bundle.Manifest.Chatmd_document.scripts document)
   ;;
 
   let validate_selected_script t ~selector ~derived_entry ~previous ~contract ~checkpoint =
@@ -504,30 +555,58 @@ module Attempt = struct
       t
       ~error_of_problem:(fun problem -> Error.create problem)
       ~f:(fun () ->
+        let open Result.Let_syntax in
+        let%bind project = selected_project t selector ~checkpoint in
+        validate_project
+          t
+          project
+          ~derived_entry
+          ~previous
+          ~published:None
+          ~contract
+          ~checkpoint)
+  ;;
+
+  let restore_published_top t ~lock_source ~sources ~contract ~checkpoint =
+    with_open
+      t
+      ~error_of_problem:(fun problem -> Error.create problem)
+      ~f:(fun () ->
         match Bundle.Manifest.basis t.manifest with
-        | Project _ -> error Wrong_project_basis
-        | Chatmd_document document ->
-          let rec find = function
-            | [] -> error Missing_selected_script
-            | script :: rest ->
-              tick t ~checkpoint;
-              if
-                Bundle.Manifest.Script.Selector.equal
-                  selector
-                  (Bundle.Manifest.Script.selector script)
-              then (
-                match Bundle.Manifest.Script.choice script with
-                | Source_only -> error Wrong_project_basis
-                | Selected_project project ->
-                  validate_project
-                    t
-                    project
-                    ~derived_entry
-                    ~previous
-                    ~contract
-                    ~checkpoint)
-              else find rest
-          in
-          find (Bundle.Manifest.Chatmd_document.scripts document))
+        | Project project ->
+          validate_project
+            t
+            project
+            ~derived_entry:None
+            ~previous:None
+            ~published:(Some { lock_source; sources })
+            ~contract
+            ~checkpoint
+        | Chatmd_document _ -> error Wrong_project_basis)
+  ;;
+
+  let restore_published_selected_script
+        t
+        ~selector
+        ~derived_entry
+        ~lock_source
+        ~sources
+        ~contract
+        ~checkpoint
+    =
+    with_open
+      t
+      ~error_of_problem:(fun problem -> Error.create problem)
+      ~f:(fun () ->
+        let open Result.Let_syntax in
+        let%bind project = selected_project t selector ~checkpoint in
+        validate_project
+          t
+          project
+          ~derived_entry
+          ~previous:None
+          ~published:(Some { lock_source; sources })
+          ~contract
+          ~checkpoint)
   ;;
 end

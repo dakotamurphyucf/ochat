@@ -230,6 +230,34 @@ end
 
 module Proof = Publication.Proof
 
+let same_source_bytes left right ~checkpoint =
+  if
+    (not (Chatml_source.Id.equal (Chatml_source.id left) (Chatml_source.id right)))
+    || (not
+          (Chatml_source.Digest.equal
+             (Chatml_source.digest left)
+             (Chatml_source.digest right)))
+    || Chatml_source.byte_length left <> Chatml_source.byte_length right
+  then false
+  else (
+    let left = Chatml_source.contents left in
+    let right = Chatml_source.contents right in
+    let same = ref true in
+    let offset = ref 0 in
+    while !same && !offset < String.length left do
+      if !offset mod 4096 = 0 then checkpoint ();
+      same := Char.equal left.[!offset] right.[!offset];
+      incr offset
+    done;
+    !same)
+;;
+
+let same_source_list left right ~checkpoint =
+  List.length left = List.length right
+  && List.for_all2_exn left right ~f:(fun left right ->
+    same_source_bytes left right ~checkpoint)
+;;
+
 module Published_capture = struct
   module Graph = struct
     type t =
@@ -254,6 +282,31 @@ module Published_capture = struct
   let manifest t = t.manifest
   let uploaded_sources t = t.uploaded_sources
   let graphs t = t.graphs
+
+  let agrees_with_proof t proof ~checkpoint =
+    match Publication.of_proof t.manifest proof ~checkpoint with
+    | Error () -> false
+    | Ok candidate ->
+      B.Receipt.equal_basis (B.Receipt.basis t.receipt) (Publication.basis candidate)
+      && List.length t.graphs = List.length (Publication.graphs candidate)
+      && List.for_all2_exn
+           t.graphs
+           (Publication.graphs candidate)
+           ~f:(fun saved restored ->
+             checkpoint ();
+             Option.equal
+               B.Manifest.Script.Selector.equal
+               saved.Graph.selector
+               (Publication.Graph.selector restored)
+             && same_source_bytes
+                  saved.lock_source
+                  (Publication.Graph.lock_source restored)
+                  ~checkpoint
+             && same_source_list
+                  saved.sources
+                  (Publication.Graph.sources restored)
+                  ~checkpoint)
+  ;;
 end
 
 type publication =
@@ -687,34 +740,6 @@ let verify_members t upload ~materialize ~checkpoint =
     |> Or_error.ok_exn
   in
   Ok (digest, List.rev !sources)
-;;
-
-let same_source_bytes left right ~checkpoint =
-  if
-    (not (Chatml_source.Id.equal (Chatml_source.id left) (Chatml_source.id right)))
-    || (not
-          (Chatml_source.Digest.equal
-             (Chatml_source.digest left)
-             (Chatml_source.digest right)))
-    || Chatml_source.byte_length left <> Chatml_source.byte_length right
-  then false
-  else (
-    let left = Chatml_source.contents left in
-    let right = Chatml_source.contents right in
-    let same = ref true in
-    let offset = ref 0 in
-    while !same && !offset < String.length left do
-      if !offset mod 4096 = 0 then checkpoint ();
-      same := Char.equal left.[!offset] right.[!offset];
-      incr offset
-    done;
-    !same)
-;;
-
-let same_source_list left right ~checkpoint =
-  List.length left = List.length right
-  && List.for_all2_exn left right ~f:(fun left right ->
-    same_source_bytes left right ~checkpoint)
 ;;
 
 let source_matches_metadata source metadata =
@@ -2295,7 +2320,7 @@ let status t ~principal ~upload_id ~now ~checkpoint =
 
 let active_reads : t list Eio.Fiber.key = Eio.Fiber.create_key ()
 
-let with_published t ~principal ~bundle_id ~now ~checkpoint ~f =
+let with_published t ~principal ~bundle_id ~now ~checkpoint ~admit_metadata ~f =
   let admitted =
     use_gate t (fun () ->
       let checkpoint = work t.limits checkpoint in
@@ -2323,6 +2348,11 @@ let with_published t ~principal ~bundle_id ~now ~checkpoint ~f =
         if expired admitted_at (phase_deadline upload)
         then Error Error.Expired
         else
+          let* () = check_lock t in
+          (match upload.publication with
+           | Intent { value; marker = Some _; _ } ->
+             admit_metadata (Doc.Intent.receipt value) upload.manifest_doc.manifest
+           | Not_published | Intent _ -> assert false);
           let* receipt = verify_publication t upload ~checkpoint in
           let* capture = materialize_published t upload receipt ~checkpoint in
           let* () = check_lock t in

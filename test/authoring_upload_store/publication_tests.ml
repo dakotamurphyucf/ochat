@@ -10,6 +10,12 @@ module Project_fixture = Chatml_project_build_tests.Authoring_bundle_tests
 module Recomposition = Chatml_project_build_tests.Recomposition_tests
 module Build = Chatml_project_build
 module Prepared = Chatml_prepared_program
+module Host = Agent_server.Authoring_upload_host
+
+let host_ok = function
+  | Ok value -> value
+  | Error problem -> raise_s (Host.Error.sexp_of_t problem)
+;;
 
 let protocol_ok = Fixture.protocol_ok
 let upload_ok = Fixture.upload_ok
@@ -235,6 +241,7 @@ let%test_unit "published capture survives uncertain marker, restart and bounded 
       ~bundle_id
       ~now:(fun () -> Fixture.start)
       ~checkpoint:Fn.id
+      ~admit_metadata:(fun _ _ -> ())
       ~f:(fun capture ->
         check
           "borrowed exact document"
@@ -260,6 +267,7 @@ let%test_unit "published capture survives uncertain marker, restart and bounded 
                ~bundle_id
                ~now:(fun () -> Fixture.start)
                ~checkpoint:Fn.id
+               ~admit_metadata:(fun _ _ -> ())
                ~f:(fun _ -> ())
            with
            | Error Store.Error.Busy -> true
@@ -507,6 +515,7 @@ let%test_unit
       ~bundle_id
       ~now:(fun () -> Fixture.start)
       ~checkpoint:Fn.id
+      ~admit_metadata:(fun _ _ -> ())
       ~f:(fun capture ->
         match Store.Published_capture.graphs capture with
         | [ graph ] ->
@@ -514,7 +523,33 @@ let%test_unit
             "published graph has exact generated lock"
             (String.equal
                (Captured.contents (Store.Published_capture.Graph.lock_source graph))
-               (Captured.contents generated_lock))
+               (Captured.contents generated_lock));
+          let attempt =
+            Chatml_authoring_bundle_project.Attempt.admit
+              manifest
+              ~sources:(Store.Published_capture.uploaded_sources capture)
+              ~limits:validation_limits
+              ~checkpoint:Fn.id
+            |> Project_fixture.adapter_ok
+          in
+          let rebound =
+            Chatml_authoring_bundle_project.Attempt.restore_published_top
+              attempt
+              ~lock_source:(Store.Published_capture.Graph.lock_source graph)
+              ~sources:(Store.Published_capture.Graph.sources graph)
+              ~contract
+              ~checkpoint:Fn.id
+            |> Project_fixture.adapter_ok
+          in
+          check
+            "final Compose lock restores without the original previous Build"
+            (Captured.Digest.equal
+               (Chatml_authoring_bundle_project.Validated.input_fingerprint rebound)
+               (Chatml_authoring_bundle_project.Validated.input_fingerprint validated)
+             && Store.Published_capture.agrees_with_proof
+                  capture
+                  (Store.Proof.Project rebound)
+                  ~checkpoint:Fn.id)
         | _ -> failwith "project publication lacked its graph")
     |> upload_ok;
     Store.close_and_wait store |> upload_ok;
@@ -554,6 +589,112 @@ let%test_unit
        with
        | Published recovered -> B.Receipt.equal receipt recovered
        | Open _ | Ready | Validating | Rejected _ | Expired -> false);
+    let selected_environment =
+      Prepared.Environment.name
+        (Prepared.environment
+           (Build.prepared (Chatml_authoring_bundle_project.Validated.build validated)))
+    in
+    let selected_current =
+      Host.Rebind_policy.Selected.create ~environment:selected_environment ~contract
+      |> Or_error.ok_exn
+    in
+    let selected_stale =
+      Host.Rebind_policy.Selected.create ~environment:"changed_environment" ~contract
+      |> Or_error.ok_exn
+    in
+    let selected_wrong_contract =
+      Host.Rebind_policy.Selected.create
+        ~environment:selected_environment
+        ~contract:(Chatml.Chatml_compiler_contract.for_target Tool_v1 ~checkpoint:Fn.id)
+      |> Or_error.ok_exn
+    in
+    let selected = ref selected_current in
+    let selection_calls = ref 0 in
+    let read_checks = ref 0 in
+    let change_at_read_check = ref None in
+    let read_allowed = ref true in
+    Eio.Switch.run (fun host_sw ->
+      let rebind_policy =
+        Host.Rebind_policy.create
+          ~authorize_read:(fun _ ->
+            Int.incr read_checks;
+            if Option.equal Int.equal !change_at_read_check (Some !read_checks)
+            then selected := selected_stale;
+            !read_allowed)
+          ~select:(fun _ _ _ ->
+            Int.incr selection_calls;
+            Some !selected)
+      in
+      let rebind =
+        Host.Rebind.create
+          ~policy:rebind_policy
+          ~limits:validation_limits
+          ~document_dir:(Eio.Stdenv.fs env)
+      in
+      let actor =
+        Operator_authorization.guarded
+          ~principal:
+            (P.Principal.create
+               ~id:Fixture.principal
+               ~authentication_kind:"local.rebind_test"
+               ~scopes:P.Scope.Set.empty
+               ~attributes:[]
+             |> protocol_ok)
+          ~is_current:(fun () -> true)
+      in
+      let host =
+        Host.create
+          ~rebind
+          reopened
+          ~sw:host_sw
+          ~clock:(Eio_mock.Clock.make ())
+          ~upload_policy:
+            (Host.Upload_policy.create
+               ~authorize_upload:(fun _ -> false)
+               ~authorize_parent:(fun _ _ -> false))
+      in
+      let rebound = Host.rebind host ~actor ~bundle_id ~checkpoint:Fn.id |> host_ok in
+      check
+        "host restores the authentic selected Project under independent read grant"
+        (B.Receipt.equal receipt (Host.Rebound.receipt rebound)
+         &&
+         match Host.Rebound.basis rebound with
+         | Project project ->
+           Captured.Digest.equal
+             (Chatml_authoring_bundle_project.Validated.input_fingerprint project)
+             (Chatml_authoring_bundle_project.Validated.input_fingerprint validated)
+         | Chatmd_document _ -> false);
+      check "successful rebind checked selected target" (!selection_calls > 1);
+      let final_read_check = !read_checks in
+      check "successful rebind rechecked read grant" (final_read_check > 2);
+      read_checks := 0;
+      change_at_read_check := Some final_read_check;
+      check
+        "selection changed at the final post-borrow read check is rejected"
+        (match Host.rebind host ~actor ~bundle_id ~checkpoint:Fn.id with
+         | Error Host.Error.Stale_capture -> true
+         | Ok _ | Error _ -> false);
+      change_at_read_check := None;
+      selected := selected_stale;
+      check
+        "current but wrong selected environment rejects saved graph"
+        (match Host.rebind host ~actor ~bundle_id ~checkpoint:Fn.id with
+         | Error Host.Error.Stale_capture -> true
+         | Ok _ | Error _ -> false);
+      selected := selected_wrong_contract;
+      check
+        "current but wrong compiler contract rejects saved graph"
+        (match Host.rebind host ~actor ~bundle_id ~checkpoint:Fn.id with
+         | Error Host.Error.Stale_capture -> true
+         | Ok _ | Error _ -> false);
+      read_allowed := false;
+      check
+        "read denial precedes a private published-capture borrow"
+        (match Host.rebind host ~actor ~bundle_id ~checkpoint:Fn.id with
+         | Error Host.Error.Unauthorized -> true
+         | Ok _ | Error _ -> false);
+      Host.close_and_wait host |> host_ok);
+    let reopened = open_store large_limits |> upload_ok in
     ignore
       (Store.prune
          reopened
