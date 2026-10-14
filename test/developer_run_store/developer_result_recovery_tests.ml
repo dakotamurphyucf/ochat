@@ -55,6 +55,7 @@ type seeded =
 
 let seed_artifact
       ?(payload = `String "exact recovered bytes")
+      ?(rewrite_selected = false)
       ?(poison_nonterminal = false)
       ~env
       ~root
@@ -107,54 +108,45 @@ let seed_artifact
       |> fun (metadata : P.Blob.Metadata.t) -> metadata.id
     in
     let intent =
-      Agent_store.Result_intent_file.developer
-        ~root:result_root
+      Developer_intent_fixture.path
+        (S.data_root session)
         ~owner
         ~job:id
         ~attempt:(R.Claim.attempt claim)
-      |> F.store_ok
     in
-    let intent_bytes =
-      Agent_store.Result_intent_file.read_exact intent ~max_frame_bytes:(128 * 1024)
-      |> F.store_ok
-      |> Option.value_exn
-    in
-    let document =
-      Agent_store.Result_intent_file.decode
-        intent_bytes
-        ~limits:Agent_store.Developer_result_intent_document.limits
-        ~max_frame_bytes:(128 * 1024)
-      |> F.store_ok
-      |> Agent_store.Developer_result_intent_document.of_document
-      |> function
-      | Ok document -> document
-      | Error _ -> failwith "selected fixture intent did not decode"
-    in
+    let document = Developer_intent_fixture.read_document env intent in
+    let intent_payload = Document_schema.Document.payload document in
+    let selection = Developer_intent_fixture.field intent_payload "selection" in
     let temporary_metadata =
-      match Agent_store.Developer_result_intent_document.selection document with
-      | Artifact { stage; _ } -> Agent_store.Blob_stage_documents.temporary_bytes stage
-      | Inline _ -> failwith "selected fixture was not an Artifact"
+      Developer_intent_fixture.string_field selection "temporary_metadata_bytes"
     in
-    if poison_nonterminal
+    let durable_metadata =
+      Developer_intent_fixture.string_field selection "durable_metadata_bytes"
+    in
+    if rewrite_selected
     then (
       assert (not installed);
       let module Reference = Agent_store.Developer_result_reference in
-      let module Intent = Agent_store.Developer_result_intent_document in
       let reference = Publisher.Selected.reference selected |> Option.value_exn in
-      let invalid_content = "{}" in
+      let content =
+        if poison_nonterminal
+        then "{}"
+        else P.Completion.to_json (P.Completion.Succeeded payload) |> Jsonaf.to_string
+      in
       let blob : P.Blob.Metadata.t =
         { (Reference.blob reference) with
-          byte_length = Int64.of_int (String.length invalid_content)
-        ; digest = Digestif.SHA256.(digest_string invalid_content |> to_hex)
+          byte_length = Int64.of_int (String.length content)
+        ; digest = Digestif.SHA256.(digest_string content |> to_hex)
         }
       in
       let reference =
         Reference.create ~claim ~outcome:(Reference.outcome reference) ~blob |> F.store_ok
       in
       let old_stage =
-        match Intent.selection document with
-        | Artifact { stage; _ } -> stage
-        | Inline _ -> failwith "selected fixture lost its stage"
+        Agent_store.Blob_stage_documents.of_publications
+          ~temporary_bytes:temporary_metadata
+          ~durable_bytes:durable_metadata
+        |> F.ok
       in
       let metadata =
         Agent_store.Blob_metadata_document.value
@@ -178,36 +170,27 @@ let seed_artifact
         }
       in
       let altered =
-        Intent.create
-          ~owner
-          ~capture_fingerprint:capture
-          ~job_id:id
-          ~attempt:(R.Claim.attempt claim)
-          ~selected_at:Selected.timestamp
-          ~after
-          ~selection:(Artifact { reference; stage })
-        |> F.ok
-        |> Intent.to_document
-        |> F.ok
-        |> fun document ->
-        Agent_store.Result_intent_file.encode document ~limits:Intent.limits |> F.store_ok
+        let selection =
+          Developer_intent_fixture.replace_fields
+            selection
+            [ "reference", Reference.to_json reference
+            ; ( "temporary_metadata_bytes"
+              , `String (Agent_store.Blob_stage_documents.temporary_bytes stage) )
+            ; ( "durable_metadata_bytes"
+              , `String (Agent_store.Blob_stage_documents.durable_bytes stage) )
+            ]
+        in
+        let intent_payload =
+          Developer_intent_fixture.replace_fields
+            intent_payload
+            [ "after", P.Developer_job.State.to_json after; "selection", selection ]
+        in
+        Developer_intent_fixture.replace_payload document intent_payload
       in
-      let data_root = S.data_root session in
       let run = P.Id.Developer_run.to_string owner.run_id in
-      let frame_path =
-        Filename.concat
-          (Filename.concat
-             (Agent_store.Data_root.developer_result_intents_path data_root)
-             ("run_" ^ run ^ "/epoch_" ^ Int.to_string owner.epoch))
-          ("job_"
-           ^ P.Id.Job.to_string id
-           ^ "-"
-           ^ Int.to_string (R.Claim.attempt claim)
-           ^ ".frame")
-      in
       let durable_directory =
         Filename.concat
-          (Agent_store.Data_root.durable_blobs_path data_root)
+          (Agent_store.Data_root.durable_blobs_path (S.data_root session))
           ("developer-runs/" ^ run)
       in
       let write path contents =
@@ -216,13 +199,13 @@ let seed_artifact
           Eio.Path.(Eio.Stdenv.fs env / path)
           contents
       in
-      write frame_path altered;
+      Developer_intent_fixture.write_document env intent altered;
       write
         (Filename.concat durable_directory (P.Id.Blob.to_string blob.id ^ ".sexp"))
         (Agent_store.Blob_stage_documents.durable_bytes stage);
       write
         (Filename.concat durable_directory (P.Id.Blob.to_string blob.id ^ ".blob"))
-        invalid_content);
+        content);
     if installed
     then (
       let after = Publisher.Selected.after selected in
@@ -455,7 +438,15 @@ let%test_unit "other authentic run's selected content is checked before No_selec
   List.iter [ false; true ] ~f:(fun poison_nonterminal ->
     F.with_temp_directory "ochat-developer-result-global" (fun env temporary ->
       let root = Filename.concat temporary "data" in
-      ignore (seed_artifact ~poison_nonterminal ~env ~root ~installed:false () : seeded);
+      ignore
+        (seed_artifact
+           ~rewrite_selected:true
+           ~poison_nonterminal
+           ~env
+           ~root
+           ~installed:false
+           ()
+         : seeded);
       let run_id = P.Id.Developer_run.of_string "dvr_other_result_run" |> F.ok in
       let owner = F.owner ~run_id 0 in
       let capture = F.digest "other authentic recovery run" in

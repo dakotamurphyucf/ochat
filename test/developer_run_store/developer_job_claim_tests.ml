@@ -232,19 +232,13 @@ let%test_unit "real developer result publisher selects one post-join terminal" =
                   | (exception _) | Ok () | Error _ -> false);
                 let claim = Publisher.Selected.claim stopped in
                 let intent =
-                  Agent_store.Result_intent_file.developer
-                    ~root
+                  Developer_intent_fixture.path
+                    data_root
                     ~owner:(R.Claim.owner claim)
                     ~job:(P.Developer_job.id (R.Claim.job claim))
                     ~attempt:(R.Claim.attempt claim)
-                  |> F.store_ok
                 in
-                assert (
-                  Option.is_none
-                    (Agent_store.Result_intent_file.read_exact
-                       intent
-                       ~max_frame_bytes:65536
-                     |> F.store_ok)));
+                assert (not (Developer_intent_fixture.present env intent)));
               let%bind selection =
                 Publisher.select
                   publisher

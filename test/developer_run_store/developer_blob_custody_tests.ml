@@ -572,19 +572,13 @@ let%expect_test
     in
     assert (Option.is_none inline_reference);
     let private_marker =
-      Agent_store.Result_intent_file.developer
-        ~root:developer_root
+      Developer_intent_fixture.path
+        (S.data_root owner)
         ~owner:developer_owner
         ~job:(P.Developer_job.id developer_job)
         ~attempt:1
-      |> ok
     in
-    assert (
-      Option.is_some
-        (Agent_store.Result_intent_file.read_exact
-           private_marker
-           ~max_frame_bytes:(128 * 1024)
-         |> ok));
+    assert (Developer_intent_fixture.present env private_marker);
     let second_collection =
       Agent_store.Job_result_store.Publisher.collect
         publisher
@@ -596,12 +590,7 @@ let%expect_test
       |> Option.value_exn
     in
     assert (second_collection.retired > 0);
-    assert (
-      Option.is_none
-        (Agent_store.Result_intent_file.read_exact
-           private_marker
-           ~max_frame_bytes:(128 * 1024)
-         |> ok));
+    assert (not (Developer_intent_fixture.present env private_marker));
     let content_only_prepared =
       Agent_store.Job_result_store.prepare
         blobs
@@ -661,19 +650,13 @@ let%expect_test
     in
     let artifact_reference = Option.value_exn artifact_reference in
     let artifact_marker =
-      Agent_store.Result_intent_file.developer
-        ~root:developer_root
+      Developer_intent_fixture.path
+        (S.data_root owner)
         ~owner:developer_owner
         ~job:artifact_job_id
         ~attempt:1
-      |> ok
     in
-    assert (
-      Option.is_some
-        (Agent_store.Result_intent_file.read_exact
-           artifact_marker
-           ~max_frame_bytes:(128 * 1024)
-         |> ok));
+    assert (Developer_intent_fixture.present env artifact_marker);
     let artifact_collection =
       Agent_store.Job_result_store.Publisher.collect
         publisher
@@ -687,12 +670,7 @@ let%expect_test
     assert (artifact_collection.retired > 0);
     assert (artifact_collection.retained >= 2);
     assert (Result.is_ok (B.open_session blobs session content_only_id));
-    assert (
-      Option.is_none
-        (Agent_store.Result_intent_file.read_exact
-           artifact_marker
-           ~max_frame_bytes:(128 * 1024)
-         |> ok));
+    assert (not (Developer_intent_fixture.present env artifact_marker));
     let blocked_prepared =
       Agent_store.Job_result_store.prepare
         blobs
