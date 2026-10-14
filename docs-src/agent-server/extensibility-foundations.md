@@ -300,6 +300,31 @@ generic completion delivery remain under implementation. A decoded request or
 its content digest is not an authorization grant. Execution must still use the
 owning actor and current policy, moderation, approval and output-disclosure checks.
 
+## Portable authoring source and context core
+
+The portable authoring source/context core is owned by
+[`Authoring_context_service`](../../lib/agent_server/authoring_context_service.mli).
+It handles root discovery and fresh host list/read, project or document context
+admission, captured-source list/read, and document version/edit/close. Host roots
+need the existing source owner and a current independent read grant. Uploaded
+projects use the existing published-bundle owner and its current bundle-read
+grant; caller-supplied documents have a separate admission grant and require
+no native root. Context reads return immutable bytes pinned to an admitted
+generation. A fresh host read observes the current file instead. The service
+keeps one context ledger shared by project and document analysis caches; it
+compares the original and request actors, selected contracts and connection
+lease before publishing an edit or returning data. Reinitialization cancels and
+joins old requests and invalidates their contexts before admitting a new
+lease. Document refresh reattaches its actual selected static Build and rejects
+a revoked selection instead of downgrading the context. Context close commits
+an authorized ledger revocation, then joins the retired source owner while the
+request remains active; failed cleanup retains that owner for the next joined
+close. The creating OCaml domain owns this service, and decoded request,
+captured source, context aggregate, host candidates and response admission
+honor the selected finite protocol ceilings. These source/context methods are
+defined here but require the authoring
+installer to select and route their feature on each transport.
+
 ## Readonly script and generated-bundle validation
 
 `Authoring_validation` checks candidates without constructing a ChatML runtime.
