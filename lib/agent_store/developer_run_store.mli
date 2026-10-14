@@ -377,6 +377,26 @@ module Result_root : sig
     -> Agent_protocol.Id.Developer_run.t
     -> (t option, Error.t) result
 
+  (** Read one exact historical job through this root's physically issuing
+      Store and daemon writer lease. [owner] must match this root's host, run
+      and principal; its epoch must occur in the authentic document with the
+      exact [capture_fingerprint]. A found job must match the entire owner,
+      capture, ID and attempt. [None] means only that this authenticated epoch
+      contains no job with [job_id]; a job in another epoch, changed attempt,
+      malformed document, closed Store or uncertain read is an error. The
+      returned immutable snapshot is comparison data, never a result-read
+      grant. This operation uses the Store's existing document byte/work caps
+      and cooperative checkpoint, and releases its lease before the caller
+      enters Blob_store. Repeat after Blob I/O to reject a changed state; a
+      historical epoch need not be the latest Active epoch. *)
+  val find_job_snapshot
+    :  t
+    -> owner:Agent_protocol.Execution_owner.developer
+    -> capture_fingerprint:Chatml_source.Digest.t
+    -> job_id:Agent_protocol.Id.Job.t
+    -> attempt:int
+    -> (Agent_protocol.Developer_job.t option, Error.t) result
+
   (** Return all existing roots in stable run-ID order. The same bounded,
       checkpointed recovery scan validates every name, regular file, document,
       host/run/principal identity and aggregate entry/byte/work limit before
