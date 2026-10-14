@@ -9,6 +9,7 @@ type t =
   ; prompt_artifacts_path : string
   ; temporary_blobs_path : string
   ; durable_blobs_path : string
+  ; developer_result_intents_path : string
   ; audit_path : string
   ; sessions_path : string
   ; migrations_path : string
@@ -23,6 +24,7 @@ let indexes_path t = t.indexes_path
 let prompt_artifacts_path t = t.prompt_artifacts_path
 let temporary_blobs_path t = t.temporary_blobs_path
 let durable_blobs_path t = t.durable_blobs_path
+let developer_result_intents_path t = t.developer_result_intents_path
 let audit_path t = t.audit_path
 let sessions_path t = t.sessions_path
 let migrations_path t = t.migrations_path
@@ -39,6 +41,7 @@ let make path =
   ; prompt_artifacts_path = child path "prompt-artifacts"
   ; temporary_blobs_path = child blobs "temporary"
   ; durable_blobs_path = child blobs "durable"
+  ; developer_result_intents_path = child path "developer-result-preparations"
   ; audit_path = child path "audit"
   ; sessions_path = child path "sessions"
   ; migrations_path = child path "migrations"
@@ -67,6 +70,7 @@ let directories t =
   ; Filename.dirname t.temporary_blobs_path
   ; t.temporary_blobs_path
   ; t.durable_blobs_path
+  ; t.developer_result_intents_path
   ; t.audit_path
   ; t.sessions_path
   ; t.migrations_path

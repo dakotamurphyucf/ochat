@@ -142,7 +142,7 @@ module Handle = struct
   let session_id t = t.metadata.session.id
   let directory t = t.directory
 
-  let developer_evidence_directory t ~env ~temporary_directory ~durable_directory =
+  let developer_evidence_root t ~env ~temporary_directory ~durable_directory =
     let open Result.Let_syntax in
     let%bind _ = metadata_checked t in
     let%bind () =
@@ -158,8 +158,20 @@ module Handle = struct
       && String.equal t.directory (Data_root.session_path t.data_root (session_id t))
       && String.equal temporary_directory (Data_root.temporary_blobs_path t.data_root)
       && String.equal durable_directory (Data_root.durable_blobs_path t.data_root)
-    then Ok (Filename.concat (Data_root.path t.data_root) "developer-runs")
+    then Ok t.data_root
     else Error (Store_error.Corrupt "session and blob storage have different roots")
+  ;;
+
+  let developer_evidence_directory t ~env ~temporary_directory ~durable_directory =
+    Result.map
+      (developer_evidence_root t ~env ~temporary_directory ~durable_directory)
+      ~f:(fun root -> Filename.concat (Data_root.path root) "developer-runs")
+  ;;
+
+  let developer_result_intents_directory t ~env ~temporary_directory ~durable_directory =
+    Result.map
+      (developer_evidence_root t ~env ~temporary_directory ~durable_directory)
+      ~f:Data_root.developer_result_intents_path
   ;;
 
   let with_developer_root_collection t ~f =

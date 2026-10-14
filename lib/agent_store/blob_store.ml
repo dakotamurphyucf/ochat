@@ -1418,6 +1418,13 @@ let bind_developer_runs store ~session_store runs =
       Error (Store_error.Corrupt "developer blob binding is active or has another owner"))
 ;;
 
+let developer_binding_matches store runs =
+  Eio.Mutex.use_ro store.coordination.mutex (fun () ->
+    match store.coordination.developer_binding with
+    | Some (_, bound) -> phys_equal bound runs && not (Developer_run_store.is_closed runs)
+    | None -> false)
+;;
+
 let checked_directory store path =
   match Eio.Path.kind ~follow:false (eio_path store path) with
   | `Directory -> Ok ()
@@ -1729,6 +1736,21 @@ let validate_developer_retention retention ~session ~reader =
     in
     let%bind durable_present = present durable_namespace in
     let%bind temporary_present = present temporary_namespace in
+    let%bind intent_directory =
+      Session_store.Handle.developer_result_intents_directory
+        session
+        ~env:store.env
+        ~temporary_directory:store.temporary_directory
+        ~durable_directory:store.durable_directory
+    in
+    let%bind intent_present = present intent_directory in
+    let%bind intent_entries =
+      if intent_present
+      then (
+        let%bind intent_reader = Retention_reader.at_root reader ~root:intent_directory in
+        Retention_reader.list intent_reader ~directory:".")
+      else Ok []
+    in
     let%bind durable_ids =
       if durable_present
       then Blob_developer_namespace.run_ids ~reader ~directory:durable_namespace
@@ -1784,13 +1806,19 @@ let validate_developer_retention retention ~session ~reader =
                  exn)
         in
         if not present
-        then Ok No_developer_evidence
+        then
+          Ok
+            (if List.is_empty intent_entries
+             then No_developer_evidence
+             else Has_developer_evidence)
         else (
           let%bind authority_reader =
             Retention_reader.at_root reader ~root:authority_directory
           in
           let%map entries = Retention_reader.list authority_reader ~directory:"." in
-          if List.is_empty entries then No_developer_evidence else Has_developer_evidence))
+          if List.is_empty entries && List.is_empty intent_entries
+          then No_developer_evidence
+          else Has_developer_evidence))
     | Some runs ->
       let%bind roots =
         Developer_run_store.Result_root.existing_for_retention runs ~reader
@@ -1841,7 +1869,7 @@ let validate_developer_retention retention ~session ~reader =
                     ~max_blob_bytes:store.max_upload_bytes
                 else Ok ()))
       in
-      if List.is_empty roots && List.is_empty ids
+      if List.is_empty roots && List.is_empty ids && List.is_empty intent_entries
       then No_developer_evidence
       else Has_developer_evidence)
 ;;

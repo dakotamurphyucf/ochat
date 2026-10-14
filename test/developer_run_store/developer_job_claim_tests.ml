@@ -3,6 +3,8 @@ module P = Agent_protocol
 module R = Agent_store.Developer_run_store
 module Scope = Agent_session.Developer_job_scope
 module Worker = Agent_server.Developer_job_worker
+module Publisher = Agent_store.Developer_result_publisher
+module Blobs = Agent_store.Blob_store
 module F = Developer_run_store_tests
 module Selected = Developer_run_selected_tests
 
@@ -119,6 +121,258 @@ let selected_artifact ~claim ~proposed ~ensure_attempted ~acknowledge_installed 
   in
   Worker.Selected.create ~claim ~proposed ~after ~ensure_attempted ~acknowledge_installed
   |> F.ok
+;;
+
+let%test_unit "real developer result publisher selects one post-join terminal" =
+  List.iter
+    [ Publisher.Storage.Automatic, 1024, `Null, false, false
+    ; Artifact, 0, `Null, true, true
+    ; Automatic, 32768, `String (String.make 32700 'x'), true, false
+    ]
+    ~f:(fun (storage, inline_bytes, payload, expect_artifact, interrupted_stage) ->
+      F.with_root (fun env sw native_root session store ->
+        let owner = F.owner 0 in
+        let capture = F.digest "real developer result publisher" in
+        let handle, initial = F.admit store owner capture in
+        let root = R.Result_root.of_handle handle |> F.run_ok in
+        let data_root = Agent_store.Session_store.data_root session in
+        let blobs =
+          Blobs.create
+            ~env
+            ~temporary_directory:(Agent_store.Data_root.temporary_blobs_path data_root)
+            ~durable_directory:(Agent_store.Data_root.durable_blobs_path data_root)
+            ~max_upload_bytes:65536L
+          |> F.store_ok
+        in
+        Blobs.bind_developer_runs blobs ~session_store:session store |> F.store_ok;
+        let limits =
+          Publisher.Limits.create ~inline_bytes ~max_result_bytes:65536 ~max_pending:1
+          |> F.ok
+        in
+        let publisher = Publisher.create ~sw ~runs:store ~root ~blobs ~limits |> F.ok in
+        let id = Selected.job_id "job_real_developer_publisher" in
+        let foreign =
+          if Int.equal inline_bytes 1024
+          then (
+            let other_session =
+              F.create_session
+                env
+                sw
+                (Filename.concat (Filename.dirname native_root) "foreign-data")
+            in
+            let other_store = F.open_run other_session sw () in
+            let other_handle, other_initial = F.admit other_store owner capture in
+            let other_job =
+              Selected.job owner capture ~id ~parent:P.Developer_job.Launch.Run_root
+            in
+            let prepared =
+              R.prepare_root_selected
+                other_handle
+                ~expected:other_initial
+                ~phase:R.Checkpoint.Active
+                ~selected:[ other_job ]
+              |> F.run_ok
+            in
+            let observed =
+              R.commit_and_settle
+                other_handle
+                prepared
+                ~admit:(fun () -> true)
+                (Selected.handoff ())
+              |> F.run_ok
+              |> Selected.installed
+            in
+            let prepared_claim =
+              R.prepare_job_claim
+                other_handle
+                ~expected:observed
+                ~lookup:(R.find_job_exact observed id)
+                ~now:timestamp
+              |> F.run_ok
+            in
+            let claimed = R.commit_job_claim other_handle prepared_claim |> F.run_ok in
+            Some (other_session, other_store, other_handle, claimed))
+          else None
+        in
+        let _, selected = select_root handle initial owner capture id in
+        let worker = worker ~sw ~store ~handle ~capacity:(capacity ()) () in
+        let callback_count = ref 0 in
+        let stage_count = ref 0 in
+        let retained = ref None in
+        let first =
+          Worker.with_claimed_attempt
+            worker
+            ~expected:selected
+            ~lookup:(R.find_job_exact selected id)
+            ~select:(fun ~claim ~proposed ->
+              let open Result.Let_syntax in
+              if Int.equal inline_bytes 1024
+              then (
+                let stopped =
+                  Eio.Switch.run (fun child_sw ->
+                    let publisher =
+                      Publisher.create ~sw:child_sw ~runs:store ~root ~blobs ~limits
+                      |> F.ok
+                    in
+                    Publisher.select
+                      publisher
+                      ~storage
+                      ~claim
+                      ~proposed
+                      ~selected_at:timestamp
+                    |> F.ok)
+                in
+                assert (
+                  match Publisher.Selected.ensure_attempted stopped with
+                  | exception Invalid_argument _ -> true
+                  | (exception _) | Ok () | Error _ -> false);
+                let claim = Publisher.Selected.claim stopped in
+                let intent =
+                  Agent_store.Result_intent_file.developer
+                    ~root
+                    ~owner:(R.Claim.owner claim)
+                    ~job:(P.Developer_job.id (R.Claim.job claim))
+                    ~attempt:(R.Claim.attempt claim)
+                  |> F.store_ok
+                in
+                assert (
+                  Option.is_none
+                    (Agent_store.Result_intent_file.read_exact
+                       intent
+                       ~max_frame_bytes:65536
+                     |> F.store_ok)));
+              let%bind selection =
+                Publisher.select
+                  publisher
+                  ~storage
+                  ~claim
+                  ~proposed
+                  ~selected_at:timestamp
+              in
+              retained := Some selection;
+              Option.iter foreign ~f:(fun (_, _, other_handle, claimed) ->
+                let foreign_claim = R.Claimed.claim claimed in
+                assert (
+                  Result.is_error
+                    (Publisher.select
+                       publisher
+                       ~storage:Publisher.Storage.Automatic
+                       ~claim:foreign_claim
+                       ~proposed
+                       ~selected_at:timestamp));
+                assert (
+                  R.Claim.try_enter
+                    foreign_claim
+                    ~handle:other_handle
+                    ~admit:(fun () -> true)
+                    ~on_enter:(fun () -> ())
+                  |> F.run_ok);
+                Publisher.Selected.ensure_attempted selection |> F.ok;
+                let after = Publisher.Selected.after selection in
+                let prepared =
+                  R.prepare_claimed_transition
+                    other_handle
+                    ~expected:(R.Claimed.observation claimed)
+                    ~claim:foreign_claim
+                    ~after
+                    ~revoked_after:after
+                  |> F.run_ok
+                in
+                let installed =
+                  R.commit_claimed_transition other_handle prepared |> F.run_ok
+                in
+                assert (
+                  Jsonaf.exactly_equal
+                    (P.Developer_job.State.to_json
+                       (P.Developer_job.state
+                          (R.find_job (R.Installed.observation installed) id
+                           |> Option.value_exn)))
+                    (P.Developer_job.State.to_json after));
+                assert (
+                  Result.is_error
+                    (Publisher.Selected.acknowledge_installed selection installed)));
+              let opposite =
+                match storage with
+                | Publisher.Storage.Automatic -> Publisher.Storage.Artifact
+                | Publisher.Storage.Artifact -> Publisher.Storage.Automatic
+              in
+              let%bind replay =
+                Publisher.select
+                  publisher
+                  ~storage:opposite
+                  ~claim
+                  ~proposed
+                  ~selected_at:timestamp
+              in
+              assert (phys_equal replay selection);
+              let%map selected =
+                Worker.Selected.create
+                  ~claim:(Publisher.Selected.claim selection)
+                  ~proposed:(Publisher.Selected.proposed selection)
+                  ~after:(Publisher.Selected.after selection)
+                  ~ensure_attempted:(fun () ->
+                    let open Result.Let_syntax in
+                    let%bind () = Publisher.Selected.ensure_attempted selection in
+                    incr stage_count;
+                    if interrupted_stage && Int.equal !stage_count 1
+                    then
+                      Error (P.Error.invalid_request "stage acknowledgement interrupted")
+                    else Ok ())
+                  ~acknowledge_installed:(fun installed ->
+                    Publisher.Selected.acknowledge_installed selection installed)
+              in
+              Some selected)
+            (fun ~active ~sw:_ ->
+               incr callback_count;
+               let state = terminal_state (Scope.claim active) P.Job.Succeeded in
+               Ok
+                 { state with
+                   result =
+                     Some
+                       (P.Developer_job.Result_value.Inline
+                          (P.Completion.Succeeded payload))
+                 })
+        in
+        let completed =
+          if interrupted_stage
+          then (
+            assert (Result.is_error first);
+            Worker.reconcile_quarantined worker |> F.ok;
+            R.find_job (R.observe handle |> F.run_ok) id |> Option.value_exn)
+          else first |> F.ok |> Option.value_exn
+        in
+        let selection = Option.value_exn !retained in
+        assert (Int.equal !callback_count 1);
+        assert (Int.equal !stage_count (if interrupted_stage then 2 else 1));
+        assert (Option.is_none (Publisher.pending publisher ~job:completed |> F.ok));
+        (match
+           ( (P.Developer_job.state completed).result
+           , Publisher.Selected.reference selection
+           , expect_artifact )
+         with
+         | Some (P.Developer_job.Result_value.Inline completion), None, false ->
+           assert (P.Completion.equal completion (P.Completion.Succeeded payload))
+         | Some (P.Developer_job.Result_value.Artifact result), Some reference, true ->
+           assert (
+             P.Id.Blob.equal
+               result.blob.id
+               (Agent_store.Developer_result_reference.blob reference).id);
+           let read =
+             Blobs.open_result blobs (Blobs.Result_root.developer root) result.blob.id
+             |> F.store_ok
+           in
+           let content =
+             Blobs.load_result_verified blobs ~sw read ~max_bytes:65536 |> F.store_ok
+           in
+           assert (
+             String.equal
+               content
+               (P.Completion.to_json (P.Completion.Succeeded payload) |> Jsonaf.to_string))
+         | _ -> failwith "publisher changed the selected result or storage mode");
+        Worker.close_and_wait worker |> F.ok;
+        Option.iter foreign ~f:(fun (other_session, other_store, _, _) ->
+          R.close_and_wait other_store |> F.run_ok;
+          Agent_store.Session_store.close other_session |> F.store_ok)))
 ;;
 
 let%test_unit
