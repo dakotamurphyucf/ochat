@@ -9,6 +9,8 @@ module C = Chat_response.Tool_capability
 module B = Chat_response.Background_request
 module N = Agent_session.Native_tool_invocation
 module H = P.Host_invocation
+module Runtime = Chatml_host_runtime
+module Value = Chatml.Chatml_value_codec
 
 type t =
   { root : O.run
@@ -135,17 +137,16 @@ let accessible scope id =
   in
   let job, snapshot = job in
   let* () = check scope in
-  let* () =
-    match P.Developer_job.kind job with
-    | Async_tool -> Ok ()
-    | Model_call | Nested_agent | Scheduled_event | Shell_process | Compaction ->
-      Error (invalid "job is not generic script work")
-  in
-  let* request =
-    B.of_json ~policy:(O.job_policy scope.service.root) (P.Developer_job.payload job)
-  in
-  let* () = B.validate_capabilities request ~capabilities:scope.selected in
-  Ok (job, snapshot)
+  match P.Developer_job.kind job with
+  | Async_tool ->
+    let* request =
+      B.of_json ~policy:(O.job_policy scope.service.root) (P.Developer_job.payload job)
+    in
+    let* () = B.validate_capabilities request ~capabilities:scope.selected in
+    Ok (job, snapshot)
+  | Model_call -> Ok (job, snapshot)
+  | Nested_agent | Scheduled_event | Shell_process | Compaction ->
+    Error (invalid "job is not generic script work")
 ;;
 
 let view job =
@@ -255,13 +256,64 @@ let handlers scope : Ops.handlers =
   }
 ;;
 
+let model_spawn_operation ?control scope =
+  let on_model_spawn _session ~recipe ~payload =
+    let* () = check scope |> message in
+    if not (String.equal recipe P.Model_spawn_request.recipe_name)
+    then Error "Model.spawn: unsupported recipe"
+    else (
+      K.checkpoint scope.kernel;
+      let* original = Value.export_json ?control payload in
+      let* request = P.Model_spawn_request.decode original in
+      let* () = check scope |> message in
+      let checkpoint () = K.checkpoint scope.kernel in
+      let admitted =
+        match scope.physical with
+        | Root action -> O.Action.admit_external_model action ~request ~checkpoint
+        | Native terminal ->
+          O.Native_terminal.admit_external_model
+            terminal
+            ~request
+            ~checkpoint
+            ~check_parent_now:scope.check_parent_now
+      in
+      admitted |> message |> Result.map ~f:P.Id.Job.to_string)
+  in
+  let handlers = { Runtime.default_handlers with on_model_spawn } in
+  match
+    List.find (Runtime.default_operations ~handlers ()) ~f:(fun operation ->
+      String.equal operation.name "Model.spawn")
+  with
+  | Some operation -> operation
+  | None -> failwith "canonical Model.spawn operation is unavailable"
+;;
+
 module Scope = struct
   type t = scope
 
   let stage_background t ~request ~checkpoint = stage t ~checkpoint request
 
   let install ?control t config =
-    K.install ?control t.kernel ~handlers:(handlers t) config
+    let config = K.install ?control t.kernel ~handlers:(handlers t) config in
+    let model = model_spawn_operation ?control t in
+    { config with
+      operations =
+        model
+        :: List.filter config.operations ~f:(fun operation ->
+          not (String.equal operation.name model.name))
+    }
+  ;;
+
+  let install_selected ?control t ~prepared config =
+    let config = install ?control t config in
+    let scoped_async_operation =
+      match Chat_response.Extension_compiler.compiler_target prepared with
+      | Chatml_compilation.Developer_tool_v1
+        when Option.is_some (O.selected_model t.service.root) -> Some Runtime.Model_spawn
+      | One_off_v1 | Tool_v1 | Developer_tool_v1 | Moderator_v1 | Delegated_moderator_v1
+        -> None
+    in
+    N.{ config; scoped_async_operation }
   ;;
 
   let split_starts t effects = kernel_result (K.split_starts t.kernel effects)

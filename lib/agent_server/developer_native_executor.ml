@@ -262,10 +262,10 @@ let run
         in
         match
           N.run_owned_selected
-            ~install_jobs:(fun config ->
+            ~install_jobs:(fun prepared config ->
               match job_scope with
-              | None -> config
-              | Some lexical -> Jobs.Scope.install lexical config)
+              | None -> N.{ config; scoped_async_operation = None }
+              | Some lexical -> Jobs.Scope.install_selected lexical ~prepared config)
             ~owner:t.issuer
             ~parent
             ~dispatch
