@@ -81,6 +81,8 @@ module Error = struct
     | Source_capture of Core.Error.t
     | Document_parser of Prompt.Chat_markdown.Generated.error
     | Document_bundle_limit
+    | Project_declaration_unavailable
+    | Invalid_project_declaration
 
   let sexp_of_t = function
     | Unauthorized -> Sexp.Atom "Unauthorized"
@@ -100,6 +102,8 @@ module Error = struct
     | Document_parser error ->
       [%sexp "Document_parser", (error : Prompt.Chat_markdown.Generated.error)]
     | Document_bundle_limit -> Sexp.Atom "Document_bundle_limit"
+    | Project_declaration_unavailable -> Sexp.Atom "Project_declaration_unavailable"
+    | Invalid_project_declaration -> Sexp.Atom "Invalid_project_declaration"
   ;;
 end
 
@@ -504,7 +508,7 @@ let list_directory_on_root context root ~actor ~directory ~checkpoint =
     list_directory_with_owner context.host owner ~policy ~directory ~poll)
 ;;
 
-let read_local context owner ~policy ~member ~poll =
+let read_local ?max_bytes context owner ~policy ~member ~poll =
   let remaining = context.host.limits.max_context_read_bytes - context.read_bytes in
   if remaining <= 0
   then Error Error.Result_limit
@@ -514,13 +518,17 @@ let read_local context owner ~policy ~member ~poll =
         (Int.min context.host.limits.max_read_bytes remaining)
         (Chatml_local_capture.Limits.source_bytes (Project.Policy.local_limits policy))
     in
-    let open Result.Let_syntax in
-    let%map contents =
-      Local.read owner ~member ~max_bytes:maximum ~checkpoint:poll
-      |> Result.map_error ~f:(fun error -> Error.Local error)
-    in
-    context.read_bytes <- context.read_bytes + String.length contents;
-    contents)
+    let maximum = Option.value_map max_bytes ~default:maximum ~f:(Int.min maximum) in
+    if maximum <= 0
+    then Error Error.Result_limit
+    else
+      let open Result.Let_syntax in
+      let%map contents =
+        Local.read owner ~member ~max_bytes:maximum ~checkpoint:poll
+        |> Result.map_error ~f:(fun error -> Error.Local error)
+      in
+      context.read_bytes <- context.read_bytes + String.length contents;
+      contents)
 ;;
 
 let read_member_on_root context root ~actor ~member ~checkpoint =
@@ -643,6 +651,187 @@ module Document_context = struct
     let parsed t = t.parsed
     let input_sources t = t.input_sources
   end
+
+  module Project_capture = struct
+    type t =
+      { source : Captured.t
+      ; project : Chatml_project.t
+      ; root : Root.t
+      ; member : Path.t
+      ; parsed : Parsed_capture.t
+      ; declaration : Prompt.Chat_markdown.Declaration.t
+      ; identity : Captured.Digest.t
+      }
+
+    let source t = t.source
+    let project t = t.project
+    let member t = t.member
+    let identity t = t.identity
+
+    let belongs_to_root t candidate =
+      phys_equal t.root.host_identity candidate.Root.host_identity
+      && Int.equal t.root.index candidate.index
+      && same_principal t.root.original_actor candidate.original_actor
+    ;;
+
+    let matches t ~parsed ~declaration =
+      phys_equal t.parsed parsed && phys_equal t.declaration declaration
+    ;;
+
+    let matches_project_contents t ~build ~max_compare_bytes ~checkpoint =
+      Authoring_project_declaration.matches_project_contents
+        ~source:t.source
+        ~build
+        ~max_compare_bytes
+        ~checkpoint
+      |> Result.map_error ~f:(function
+        | Limit -> Error.Result_limit
+        | Foreign_input | Unavailable_route -> Error.Foreign_root)
+    ;;
+  end
+
+  exception Project_work_limit
+
+  let capture_project_declaration
+        t
+        ~actor
+        ~parsed
+        ~declaration
+        ~schema_limits
+        ~max_locator_bytes
+        ~max_path_components
+        ~max_identity_bytes
+        ~max_work_steps
+        ~checkpoint
+    =
+    let module Pure = Authoring_project_declaration in
+    let open Result.Let_syntax in
+    if
+      max_locator_bytes <= 0
+      || max_locator_bytes > 1024
+      || max_path_components <= 0
+      || max_path_components > 1024
+      || max_identity_bytes <= 0
+      || max_identity_bytes > 1024 * 1024
+      || max_work_steps <= 0
+    then Error Error.Result_limit
+    else (
+      match t.root with
+      | None -> Error Error.Project_declaration_unavailable
+      | Some root ->
+        let remaining = ref max_work_steps in
+        let budgeted_checkpoint () =
+          if !remaining <= 0 then raise Project_work_limit;
+          decr remaining;
+          checkpoint ()
+        in
+        (try
+           with_local_root
+             t.common
+             root
+             ~actor
+             ~checkpoint:budgeted_checkpoint
+             (fun owner ~policy ~poll ->
+                let charge = poll in
+                charge ();
+                let captured_root = Parsed_capture.source parsed in
+                if
+                  (not (Captured.Id.equal (Captured.id captured_root) t.source_id))
+                  || not
+                       (String.equal
+                          (Captured.Id.relative_path (Captured.id captured_root))
+                          (Path.to_string t.member))
+                then Error Error.Foreign_root
+                else (
+                  let%bind input, member, selection =
+                    Pure.admit
+                      ~parsed:(Parsed_capture.parsed parsed)
+                      ~input_sources:(Parsed_capture.input_sources parsed)
+                      ~declaration
+                      ~package_namespace:(Captured.Id.package_namespace t.source_id)
+                      ~max_locator_bytes
+                      ~max_path_components
+                      ~checkpoint:charge
+                    |> Result.map_error ~f:(function
+                      | Foreign_input -> Error.Foreign_root
+                      | Unavailable_route -> Error.Project_declaration_unavailable
+                      | Limit -> Error.Result_limit)
+                  in
+                  let max_bytes = Document_schema.Limits.max_bytes schema_limits in
+                  let%bind contents =
+                    read_local ~max_bytes t.common owner ~policy ~member ~poll:charge
+                    |> Result.map_error ~f:(function
+                      | Error.Local error ->
+                        (match Local.Error.code error with
+                         | Too_large | Invalid_limit | Entry_limit -> Error.Result_limit
+                         | Missing
+                         | Denied
+                         | Unsupported_provider
+                         | Unsupported_kind
+                         | Symlink_or_non_directory
+                         | Changed
+                         | Not_retained_directory
+                         | Closed
+                         | Unavailable -> Error.Project_declaration_unavailable)
+                      | error -> error)
+                  in
+                  let%bind id =
+                    Captured.Id.create
+                      ~package_namespace:(Captured.Id.package_namespace t.source_id)
+                      ~relative_path:(Path.to_string member)
+                    |> Result.map_error ~f:(fun error -> Error.Source_capture error)
+                  in
+                  let%bind source =
+                    Captured.create
+                      id
+                      ~contents
+                      ~expected_digest:None
+                      ~max_bytes:(Some max_bytes)
+                      ~checkpoint:charge
+                    |> Result.map_error ~f:(fun error -> Error.Source_capture error)
+                  in
+                  let%bind project =
+                    Chatml_project.decode source ~limits:schema_limits ~checkpoint:charge
+                    |> Result.map_error ~f:(fun error ->
+                      match Chatml_project.Error.details error with
+                      | Document_schema.Error.Limit_exceeded _ | Invalid_configuration _
+                        -> Error.Result_limit
+                      | Malformed _
+                      | Duplicate_key _
+                      | Unsupported_beta_format
+                      | Unsupported_format _
+                      | Invalid_field _
+                      | Unsupported_kind _
+                      | Unsupported_version _
+                      | Missing_conversion _
+                      | Wrong_kind _
+                      | Wrong_version _
+                      | Required_semantics_unknown _
+                      | Extension_conflict _ -> Error.Invalid_project_declaration)
+                  in
+                  let%map identity =
+                    Pure.identity
+                      ~source
+                      ~input
+                      ~declaration
+                      ~selection
+                      ~max_identity_bytes
+                      ~checkpoint:charge
+                    |> Result.map_error ~f:(function
+                      | Limit -> Error.Result_limit
+                      | Foreign_input | Unavailable_route -> Error.Foreign_root)
+                  in
+                  { Project_capture.source
+                  ; project
+                  ; root
+                  ; member
+                  ; parsed
+                  ; declaration
+                  ; identity
+                  }))
+         with
+         | Project_work_limit -> Error Error.Result_limit))
+  ;;
 
   module Origin = struct
     type t =

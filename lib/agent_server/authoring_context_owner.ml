@@ -5,13 +5,19 @@ open Authoring_context_activity
 let source_host_error = function
   | Sources.Error.Unauthorized -> Error.Unauthorized
   | Expired_actor -> Error.Expired_actor
-  | Foreign_root | Unsupported_source_selection -> Error.Source_unavailable
+  | Foreign_root | Unsupported_source_selection | Project_declaration_unavailable ->
+    Error.Source_unavailable
   | Closed | Foreign_domain -> Error.Closed
   | Busy -> Error.Busy
   | Context_limit | Result_limit | Document_bundle_limit
   | Document_parser Prompt.Chat_markdown.Generated.Parser_limit -> Error.Resource_limit
-  | Sources _ | Root _ | Local _ | Project _ | Source_capture _ | Document_parser _ ->
-    Error.Source_unavailable
+  | Sources _
+  | Root _
+  | Local _
+  | Project _
+  | Source_capture _
+  | Document_parser _
+  | Invalid_project_declaration -> Error.Source_unavailable
 ;;
 
 let upload_host_error = function
