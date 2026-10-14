@@ -14,6 +14,11 @@
   ochat.agent_protocol
   ochat.chatml_source
   ochat.chatml_project
+  ochat.chatml_authoring_context
+  ochat.chatml_authoring_analysis
+  ochat.chatml_semantics
+  ochat.chatml_typechecker
+  ochat.chatml_compilation
   ochat.chatml_authoring_bundle_project
   ochat.chatml_authoring_bundle_document
   ochat.chatml_prompt_binding

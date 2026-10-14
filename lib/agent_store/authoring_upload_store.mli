@@ -19,6 +19,14 @@ module Snapshot : sig
   val sources : t -> Chatml_source.t list
 end
 
+module Published_pin : sig
+  type t
+
+  (** Comparison evidence minted only while this Store verifies a published
+      capture. It is bound to the Store instance, principal, upload, bundle,
+      original deadline and durable publication; it grants no read itself. *)
+end
+
 module Published_capture : sig
   type t
 
@@ -34,6 +42,7 @@ module Published_capture : sig
   val manifest : t -> Bundle.Manifest.t
   val uploaded_sources : t -> Chatml_source.t list
   val graphs : t -> Graph.t list
+  val pin : t -> Published_pin.t
 
   (** Pure, bounded comparison with a newly restored genuine closure. Reuse the
       publisher's one receipt-basis projection and compare every saved graph's
@@ -114,6 +123,22 @@ module Error : sig
     | Storage of Store_error.t
   [@@deriving sexp_of]
 end
+
+(** Check an existing verified capture's publication under this Store's
+    operation gate. Fresh trusted time, live daemon lock, original deadline,
+    current authoritative intent/marker and exact receipt/manifest identity
+    must agree. This checks bounded durable publication metadata, not installed
+    source bytes; an initial read still requires [with_published]. Recovery may
+    itself perform bounded integrity I/O. The host separately reauthorizes its
+    bundle-read grant and selected compiler contracts after this yielding call.
+    A pin from another Store instance or a pruned publication fails closed. *)
+val check_published_pin
+  :  t
+  -> principal:Agent_protocol.Id.Principal.t
+  -> Published_pin.t
+  -> now:(unit -> Agent_protocol.Timestamp.t)
+  -> checkpoint:(unit -> unit)
+  -> (unit, Error.t) Result.t
 
 (** [daemon_lock] must be live, owned by [host_id], and at
       [Data_root.daemon_lock_path data_root]; all three facts are checked on

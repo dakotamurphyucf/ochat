@@ -7,6 +7,19 @@ type transport =
   | Http
 [@@deriving compare, equal, sexp]
 
+module Authoring_negotiation = struct
+  type t =
+    { token : unit ref
+    ; owner : unit ref
+    ; revoked : bool Atomic.t
+    ; lease_label : string
+    ; enabled_features : string list
+    }
+
+  let lease_label t = t.lease_label
+  let selected t feature = List.mem t.enabled_features feature ~equal:String.equal
+end
+
 type t =
   { connection_id : string
   ; principal : Agent_protocol.Principal.t
@@ -15,8 +28,11 @@ type t =
   ; publish_notification : Agent_protocol.Envelope.t -> unit
   ; max_attachments : int
   ; mutex : Eio.Mutex.t
+  ; authoring_owner : unit ref
   ; mutable initialized : bool
   ; mutable protocol_version : Agent_protocol.Version.t option
+  ; mutable authoring_negotiation : Authoring_negotiation.t option
+  ; mutable authoring_closed : bool
   ; mutable reserved_attachments : int
   ; mutable attachments :
       (Agent_protocol.Id.Attachment.t, Agent_protocol.Session.Attachment.t) Map.Poly.t
@@ -38,8 +54,11 @@ let create_authenticated
   ; publish_notification
   ; max_attachments
   ; mutex = Eio.Mutex.create ()
+  ; authoring_owner = ref ()
   ; initialized = false
   ; protocol_version = None
+  ; authoring_negotiation = None
+  ; authoring_closed = false
   ; reserved_attachments = 0
   ; attachments = Map.Poly.empty
   }
@@ -81,11 +100,52 @@ let request_actor t actor =
 
 let initialized t = Eio.Mutex.use_ro t.mutex (fun () -> t.initialized)
 let protocol_version t = Eio.Mutex.use_ro t.mutex (fun () -> t.protocol_version)
+let authoring_negotiation t = Eio.Mutex.use_ro t.mutex (fun () -> t.authoring_negotiation)
+let authoring_closed t = Eio.Mutex.use_ro t.mutex (fun () -> t.authoring_closed)
 
-let mark_initialized ?(version = Agent_protocol.Version.current) t =
+let close_authoring t =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-    t.protocol_version <- Some version;
-    t.initialized <- true)
+    Option.iter t.authoring_negotiation ~f:(fun negotiation ->
+      Atomic.set negotiation.Authoring_negotiation.revoked true);
+    t.authoring_closed <- true;
+    t.authoring_negotiation <- None)
+;;
+
+let current_authoring_negotiation t negotiation =
+  phys_equal t.authoring_owner negotiation.Authoring_negotiation.owner
+  && not (Atomic.get negotiation.Authoring_negotiation.revoked)
+;;
+
+let try_mark_initialized
+      ?(version = Agent_protocol.Version.current)
+      ?(enabled_features = [])
+      t
+  =
+  let negotiation =
+    { Authoring_negotiation.token = ref ()
+    ; owner = t.authoring_owner
+    ; revoked = Atomic.make false
+    ; lease_label = Agent_protocol.Id.Transaction.(create () |> to_string)
+    ; enabled_features
+    }
+  in
+  let next_version = Some version in
+  let next_negotiation = Some negotiation in
+  Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+    if t.authoring_closed
+    then false
+    else (
+      Option.iter t.authoring_negotiation ~f:(fun previous ->
+        Atomic.set previous.Authoring_negotiation.revoked true);
+      t.protocol_version <- next_version;
+      t.authoring_negotiation <- next_negotiation;
+      t.initialized <- true;
+      true))
+;;
+
+let mark_initialized ?version ?enabled_features t =
+  if not (try_mark_initialized ?version ?enabled_features t)
+  then invalid_arg "authoring connection is closed"
 ;;
 
 let attachment_limit_error () =

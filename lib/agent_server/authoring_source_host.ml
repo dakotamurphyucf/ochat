@@ -217,6 +217,12 @@ let check_host host =
   else Ok ()
 ;;
 
+let check_root_current host ~actor root =
+  let open Result.Let_syntax in
+  let%bind () = check_host host in
+  check_root host ~actor root
+;;
+
 let remove_context host context =
   host.contexts
   <- List.filter host.contexts ~f:(fun current -> not (phys_equal current context))
@@ -456,38 +462,41 @@ let with_local_root context root ~actor ~checkpoint f =
     |> Result.bind ~f:Fn.id)
 ;;
 
+let list_directory_with_owner host owner ~policy ~directory ~poll =
+  let maximum =
+    Int.min
+      host.limits.max_browse_entries
+      (Chatml_local_capture.Limits.directory_entries (Project.Policy.local_limits policy))
+  in
+  let entries =
+    Local.fold_directory
+      owner
+      ~directory
+      ~max_entries:maximum
+      ~init:[]
+      ~checkpoint:poll
+      ~f:(fun reversed ~name ->
+        let member =
+          match directory with
+          | None -> name
+          | Some directory -> Path.to_string directory ^ "/" ^ name
+        in
+        match Path.create member with
+        | Error _ -> Ok reversed
+        | Ok member -> Ok ({ Entry.member } :: reversed))
+  in
+  let open Result.Let_syntax in
+  let%map entries, _ =
+    Result.map_error entries ~f:(function
+      | `Filesystem error -> Error.Local error
+      | `Callback error -> error)
+  in
+  List.sort (List.rev entries) ~compare:(fun a b -> Path.compare a.member b.member)
+;;
+
 let list_directory_on_root context root ~actor ~directory ~checkpoint =
   with_local_root context root ~actor ~checkpoint (fun owner ~policy ~poll ->
-    let maximum =
-      Int.min
-        context.host.limits.max_browse_entries
-        (Chatml_local_capture.Limits.directory_entries
-           (Project.Policy.local_limits policy))
-    in
-    let entries =
-      Local.fold_directory
-        owner
-        ~directory
-        ~max_entries:maximum
-        ~init:[]
-        ~checkpoint:poll
-        ~f:(fun reversed ~name ->
-          let member =
-            match directory with
-            | None -> name
-            | Some directory -> Path.to_string directory ^ "/" ^ name
-          in
-          match Path.create member with
-          | Error _ -> Ok reversed
-          | Ok member -> Ok ({ Entry.member } :: reversed))
-    in
-    let open Result.Let_syntax in
-    let%map entries, _ =
-      Result.map_error entries ~f:(function
-        | `Filesystem error -> Error.Local error
-        | `Callback error -> error)
-    in
-    List.sort (List.rev entries) ~compare:(fun a b -> Path.compare a.member b.member))
+    list_directory_with_owner context.host owner ~policy ~directory ~poll)
 ;;
 
 let read_local context owner ~policy ~member ~poll =
@@ -722,5 +731,88 @@ module Document_context = struct
 
   let close_and_wait t = close_context_and_wait t.common
 end
+
+let with_root_owner host ~actor ~root ~checkpoint f =
+  let open Result.Let_syntax in
+  let%bind () = check_host host in
+  let%bind () = check_root host ~actor root in
+  if host.roots_busy
+  then Error Error.Busy
+  else (
+    host.roots_busy <- true;
+    try
+      Exn.protect
+        ~finally:(fun () ->
+          host.roots_cancel <- None;
+          host.roots_busy <- false;
+          Eio.Condition.broadcast host.roots_idle)
+        ~f:(fun () ->
+          with_active (Root_enumeration host) (fun () ->
+            Eio.Cancel.sub (fun cancel ->
+              host.roots_cancel <- Some cancel;
+              let poll () =
+                (match check_host host, check_root host ~actor root with
+                 | Ok (), Ok () -> ()
+                 | Error error, _ | _, Error error -> raise (Revoked error));
+                checkpoint ();
+                match check_host host, check_root host ~actor root with
+                | Ok (), Ok () -> ()
+                | Error error, _ | _, Error error -> raise (Revoked error)
+              in
+              Sources.with_authoring
+                host.source_host
+                ~f:(fun ~roots ~policy ~limits:_ ~max_request_bytes:_ ->
+                  let%bind selected = selected_anchors roots [ root ] in
+                  let prefix, anchor = List.hd_exn selected in
+                  Roots.with_anchors
+                    [ anchor ]
+                    ~limits:(Project.Policy.root_limits policy)
+                    ~checkpoint:poll
+                    ~f:(fun roots ->
+                      match
+                        Roots.resolve roots ~base:None ~locator:prefix ~checkpoint:poll
+                      with
+                      | Error error -> Error (Error.Root error)
+                      | Ok cursor -> f (Roots.Cursor.owner cursor) ~policy ~poll)
+                  |> Result.map_error ~f:(function
+                    | `Roots error -> Error.Root error
+                    | `Callback error -> error))
+              |> Result.map_error ~f:(fun error -> Error.Sources error)
+              |> Result.bind ~f:(fun result ->
+                poll ();
+                result))))
+    with
+    | Revoked error -> Error error)
+;;
+
+let list_root_directory host ~actor ~root ~directory ~checkpoint =
+  with_root_owner host ~actor ~root ~checkpoint (fun owner ~policy ~poll ->
+    list_directory_with_owner host owner ~policy ~directory ~poll)
+;;
+
+let read_root_member host ~actor ~root ~member ~checkpoint =
+  with_root_owner host ~actor ~root ~checkpoint (fun owner ~policy ~poll ->
+    let maximum =
+      Int.min
+        host.limits.max_read_bytes
+        (Chatml_local_capture.Limits.source_bytes (Project.Policy.local_limits policy))
+    in
+    let open Result.Let_syntax in
+    let%bind contents =
+      Local.read owner ~member ~max_bytes:maximum ~checkpoint:poll
+      |> Result.map_error ~f:(fun error -> Error.Local error)
+    in
+    let%bind id = Document_context.mint_source_id member in
+    let%map source =
+      Captured.create
+        id
+        ~contents
+        ~expected_digest:None
+        ~max_bytes:(Some maximum)
+        ~checkpoint:poll
+      |> Result.map_error ~f:(fun error -> Error.Source_capture error)
+    in
+    { Document_capture.source })
+;;
 
 let close_and_wait = close_all_and_wait

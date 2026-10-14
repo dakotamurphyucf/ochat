@@ -36,7 +36,49 @@ val request_actor
 
 val principal : t -> Agent_protocol.Principal.t
 val initialized : t -> bool
-val mark_initialized : ?version:Agent_protocol.Version.t -> t -> unit
+
+module Authoring_negotiation : sig
+  type t
+
+  (** Host-minted comparison lease for one successful initialize on this
+      physical connection. It is not an authorization capability. *)
+  val lease_label : t -> string
+
+  val selected : t -> string -> bool
+end
+
+val authoring_negotiation : t -> Authoring_negotiation.t option
+
+(** Nonyielding physical-connection/lease comparison. Reinitialization and
+    terminal close revoke an earlier lease atomically; this check grants no
+    actor or method authority. *)
+val current_authoring_negotiation : t -> Authoring_negotiation.t -> bool
+
+val authoring_closed : t -> bool
+
+(** Terminal for this physical connection: invalidates its authoring lease and
+    prevents a later initialize from reopening it. The service calls this when
+    joining transport close; unrelated connection attachment state is intact. *)
+val close_authoring : t -> unit
+
+(** Mint a new authoring incarnation atomically with protocol-version and
+    selected-feature replacement. The installed authoring handler must call
+    this only through its joined reinitialization lifecycle transition. *)
+val mark_initialized
+  :  ?version:Agent_protocol.Version.t
+  -> ?enabled_features:string list
+  -> t
+  -> unit
+
+(** Same atomic initialization transition, with a typed terminal-close
+    outcome for the joined authoring lifecycle. [false] leaves the tuple of
+    version, lease and initialized status unchanged. *)
+val try_mark_initialized
+  :  ?version:Agent_protocol.Version.t
+  -> ?enabled_features:string list
+  -> t
+  -> bool
+
 val protocol_version : t -> Agent_protocol.Version.t option
 val reserve_attachment : t -> (unit, Agent_protocol.Error.t) result
 val release_attachment_reservation : t -> unit

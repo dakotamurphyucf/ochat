@@ -104,6 +104,18 @@ type t =
   ; mutable release_hook : Eio.Switch.hook
   }
 
+module Context_capture = struct
+  type nonrec t =
+    { owner : t
+    ; original_actor : Actor.t
+    ; selected : Rebind_validation.t
+    ; pin : Store.Published_pin.t
+    ; rebound : Rebound.t
+    }
+
+  let rebound t = t.rebound
+end
+
 exception Revoked of Error.t
 
 let domain () = (Stdlib.Domain.self () :> int)
@@ -359,7 +371,7 @@ let publish t ~actor ~sealed ~checkpoint =
                 ~final_admission)))
 ;;
 
-let rebind t ~actor ~bundle_id ~checkpoint =
+let rebind_with_pin t ~actor ~bundle_id ~checkpoint =
   match t.rebind with
   | None -> Error Error.Selection_unavailable
   | Some config ->
@@ -430,10 +442,71 @@ let rebind t ~actor ~bundle_id ~checkpoint =
                    Error.Selection_unavailable
                  | Stale_capture -> Error.Stale_capture
                  | Invalid_closure -> Error.Invalid_closure
-                 | Resource_limit -> Error.Resource_limit))
+                 | Resource_limit -> Error.Resource_limit)
+               |> Result.map ~f:(fun rebound ->
+                 rebound, Store.Published_capture.pin capture, selected))
          with
          | Error problem -> Error (Error.of_store problem)
          | Ok result -> result)
+;;
+
+let rebind t ~actor ~bundle_id ~checkpoint =
+  Result.map (rebind_with_pin t ~actor ~bundle_id ~checkpoint) ~f:(fun (result, _, _) ->
+    result)
+;;
+
+let capture_for_context t ~actor ~bundle_id ~checkpoint =
+  Result.map
+    (rebind_with_pin t ~actor ~bundle_id ~checkpoint)
+    ~f:(fun (result, pin, selected) ->
+      Context_capture.
+        { owner = t; original_actor = actor; selected; pin; rebound = result })
+;;
+
+let check_context_selection_now t ~actor (capture : Context_capture.t) =
+  match t.rebind with
+  | None -> Error Error.Selection_unavailable
+  | Some config ->
+    if not (phys_equal t capture.owner)
+    then Error Error.Stale_capture
+    else (
+      let check () =
+        let open Result.Let_syntax in
+        let%bind () = check_read t capture.original_actor config.policy in
+        let%bind () = check_read t actor config.policy in
+        if
+          Rebind_validation.check_current
+            capture.selected
+            ~policy:config.policy
+            ~actor:capture.original_actor
+            ~checkpoint:Fn.id
+          && Rebind_validation.check_current
+               capture.selected
+               ~policy:config.policy
+               ~actor
+               ~checkpoint:Fn.id
+        then Ok ()
+        else Error Error.Stale_capture
+      in
+      check ())
+;;
+
+let check_context_current t ~actor (capture : Context_capture.t) ~checkpoint =
+  match t.rebind with
+  | None -> Error Error.Selection_unavailable
+  | Some _ ->
+    if not (phys_equal t capture.owner)
+    then Error Error.Stale_capture
+    else
+      with_operation
+        t
+        ~actor
+        ~check:(fun () -> check_context_selection_now t ~actor capture)
+        ~map_error:Fn.id
+        ~checkpoint
+        (fun ~principal ~now ~checkpoint ->
+           Store.check_published_pin t.store ~principal capture.pin ~now ~checkpoint
+           |> Result.map_error ~f:Error.of_store)
 ;;
 
 let status t ~actor ~(request : Bundle.Status.request) ~checkpoint =
