@@ -5,6 +5,7 @@ module D = Agent_session.Developer_invocation_owner.Selected
 module N = Agent_session.Native_tool_invocation
 module C = Chat_response.Tool_capability
 module H = P.Host_invocation
+module Job_scope = Agent_session.Developer_job_scope
 
 type t =
   { root : O.t
@@ -148,9 +149,19 @@ let recover_early scope =
     invalid "pre-dispatch failure left a durable or uncertain invocation"
 ;;
 
-let run t ~parent ~registry ~managed ~reference ~invocation ~authorize ~prepare_output =
+let run
+      t
+      ~parent
+      ~job_parent
+      ~registry
+      ~managed
+      ~reference
+      ~invocation
+      ~authorize
+      ~prepare_output
+  =
   let* entered =
-    O.with_native_registration t.root ~invocation (fun ~scope ->
+    O.with_native_registration t.root ?job_parent ~invocation (fun ~scope ->
       let dispatch : D.dispatch_storage =
         { read = O.Native_terminal.read_dispatch scope
         ; save_dispatch = O.Native_terminal.save_dispatch scope
@@ -171,7 +182,27 @@ let run t ~parent ~registry ~managed ~reference ~invocation ~authorize ~prepare_
           | Some _, Some _ | Some _, None | None, Some _ ->
             invalid "selected native implementation changed before effect entry"
         in
+        let* () =
+          match job_parent with
+          | None -> Ok ()
+          | Some ancestor ->
+            Job_scope.Parent.check
+              ancestor
+              ~owner:(O.owner t.root)
+              ~capture_fingerprint:
+                (Chatml_developer_capture.fingerprint (O.capture t.root))
+        in
         let* () = O.check_effect_now t.root witness in
+        let* () =
+          match job_parent with
+          | None -> Ok ()
+          | Some ancestor ->
+            Job_scope.Parent.check_now
+              ancestor
+              ~owner:(O.owner t.root)
+              ~capture_fingerprint:
+                (Chatml_developer_capture.fingerprint (O.capture t.root))
+        in
         D.check_parent_now t.issuer ~parent invocation
       in
       let seal outcome ~selected_jobs =
@@ -193,13 +224,18 @@ let run t ~parent ~registry ~managed ~reference ~invocation ~authorize ~prepare_
       in
       let stage_background binding ~request ~checkpoint =
         let* () = effect_entry binding in
-        O.Native_terminal.stage_background scope ~request ~checkpoint
+        O.Native_terminal.stage_background
+          scope
+          ~request
+          ~checkpoint
+          ~check_parent_now:(fun () -> D.check_parent_now t.issuer ~parent invocation)
       in
       match
         N.run_owned_selected
           ~owner:t.issuer
           ~parent
           ~dispatch
+          ~parent_live_now:(fun () -> O.Native_terminal.effect_parent_live_now scope)
           ~frozen:(fun () -> O.Native_terminal.sealed scope)
           ~enter_callback:(fun ~dispatched f ->
             O.with_native_callback scope ~dispatched (fun ~sw:_ -> f ()))
@@ -248,6 +284,7 @@ let run_root t ~managed ~reference ~invocation ~authorize ~prepare_output =
   run
     t
     ~parent:D.Root
+    ~job_parent:None
     ~registry:(fun () -> D.selected t.issuer)
     ~managed
     ~reference
@@ -257,17 +294,34 @@ let run_root t ~managed ~reference ~invocation ~authorize ~prepare_output =
 ;;
 
 let run_child t ~managed ~reference ~invocation ~authorize ~prepare_output =
-  let* parent = N.borrow_selected () in
-  if not (D.same_issuer t.issuer (N.selected_borrowed_issuer parent))
+  let* borrowed = N.borrow_selected () in
+  if not (D.same_issuer t.issuer (N.selected_borrowed_issuer borrowed))
   then invalid "selected child belongs to another native executor"
-  else
+  else (
+    let parent = N.selected_borrowed_parent borrowed in
+    let* job_parent = D.inherited_job_parent t.issuer parent in
     run
       t
-      ~parent:(D.Child (N.selected_borrowed_parent parent))
-      ~registry:(fun () -> narrowed_registry t parent)
+      ~parent:(D.Child parent)
+      ~job_parent
+      ~registry:(fun () -> narrowed_registry t borrowed)
       ~managed
       ~reference
       ~invocation
       ~authorize
-      ~prepare_output
+      ~prepare_output)
+;;
+
+let run_job_child t ~active ~managed ~reference ~invocation ~authorize ~prepare_output =
+  let* job_parent = O.job_parent t.root active in
+  run
+    t
+    ~parent:(D.Job_child job_parent)
+    ~job_parent:(Some job_parent)
+    ~registry:(fun () -> D.selected t.issuer)
+    ~managed
+    ~reference
+    ~invocation
+    ~authorize
+    ~prepare_output
 ;;

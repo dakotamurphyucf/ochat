@@ -60,8 +60,28 @@ let check_local t active =
   && Int.equal active.domain_id t.domain_id
   && (not t.closed)
   && Atomic.get active.live
+  && Option.value_map active.cancel ~default:false ~f:(fun context ->
+    Option.is_none (Eio.Cancel.get_error context))
   && Option.value_map (Eio.Fiber.get active_key) ~default:false ~f:(fun current ->
     phys_equal current active)
+;;
+
+let check_claim_now t active ~owner ~capture_fingerprint ~job_id ~attempt =
+  if not (check_local t active)
+  then invalid "developer job parent is no longer live"
+  else (
+    let claim = active.claim in
+    let job = Store.Claim.job claim in
+    if
+      P.Execution_owner.equal_developer (Store.Claim.owner claim) owner
+      && P.Execution_owner.equal_developer owner t.current
+      && Chatml_source.Digest.equal
+           (P.Developer_job.capture_fingerprint job)
+           capture_fingerprint
+      && P.Id.Job.equal (P.Developer_job.id job) job_id
+      && Int.equal (Store.Claim.attempt claim) attempt
+    then Ok ()
+    else invalid "developer job parent does not match the claimed attempt")
 ;;
 
 let with_claim t ~handle ~claim f =
@@ -130,29 +150,73 @@ let with_claim t ~handle ~claim f =
 ;;
 
 let check_parent t active ~owner ~capture_fingerprint ~job_id ~attempt =
-  if not (check_local t active)
-  then invalid "developer job parent is no longer live"
-  else (
-    let claim = active.claim in
-    let job = Store.Claim.job claim in
-    if
-      (not (P.Execution_owner.equal_developer (Store.Claim.owner claim) owner))
-      || (not (P.Execution_owner.equal_developer owner t.current))
-      || (not
-            (Chatml_source.Digest.equal
-               (P.Developer_job.capture_fingerprint job)
-               capture_fingerprint))
-      || (not (P.Id.Job.equal (P.Developer_job.id job) job_id))
-      || not (Int.equal (Store.Claim.attempt claim) attempt)
-    then invalid "developer job parent does not match the claimed attempt"
-    else (
-      match Store.Claim.current_for_effect claim with
-      | Error error -> Error (of_store_error error)
-      | Ok true
-        when check_local t active && P.Execution_owner.equal_developer owner t.current ->
-        Ok ()
-      | Ok false | Ok true -> invalid "developer job parent is no longer current"))
+  let open Result.Let_syntax in
+  let%bind () = check_claim_now t active ~owner ~capture_fingerprint ~job_id ~attempt in
+  match Store.Claim.current_for_effect active.claim with
+  | Error error -> Error (of_store_error error)
+  | Ok false -> invalid "developer job parent is no longer current"
+  | Ok true -> check_claim_now t active ~owner ~capture_fingerprint ~job_id ~attempt
 ;;
+
+type issuer_state = t
+
+module Parent = struct
+  type t =
+    { issuer : issuer_state
+    ; active : active
+    ; job_id : P.Id.Job.t
+    ; attempt : int
+    ; nested_depth : int
+    }
+
+  let job_id t = t.job_id
+  let attempt t = t.attempt
+  let nested_depth t = t.nested_depth
+
+  let check t ~owner ~capture_fingerprint =
+    check_parent
+      t.issuer
+      t.active
+      ~owner
+      ~capture_fingerprint
+      ~job_id:t.job_id
+      ~attempt:t.attempt
+  ;;
+
+  let check_now t ~owner ~capture_fingerprint =
+    check_claim_now
+      t.issuer
+      t.active
+      ~owner
+      ~capture_fingerprint
+      ~job_id:t.job_id
+      ~attempt:t.attempt
+  ;;
+end
+
+let parent t active =
+  let claim = active.claim in
+  let job = Store.Claim.job claim in
+  let open Result.Let_syntax in
+  let%map () =
+    check_claim_now
+      t
+      active
+      ~owner:(Store.Claim.owner claim)
+      ~capture_fingerprint:(P.Developer_job.capture_fingerprint job)
+      ~job_id:(P.Developer_job.id job)
+      ~attempt:(Store.Claim.attempt claim)
+  in
+  Parent.
+    { issuer = t
+    ; active
+    ; job_id = P.Developer_job.id job
+    ; attempt = Store.Claim.attempt claim
+    ; nested_depth = P.Developer_job.Launch.nested_depth (P.Developer_job.launch job)
+    }
+;;
+
+let owns_parent t parent = phys_equal t parent.Parent.issuer
 
 let advance_epoch t ~new_current =
   if t.closed || not (same_domain t)

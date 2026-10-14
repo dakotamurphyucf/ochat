@@ -1143,6 +1143,7 @@ let run_owned_selected
       ~owner
       ~parent
       ~dispatch
+      ~parent_live_now
       ~frozen
       ~enter_callback
       ~(managed : selected_managed_dispatch option)
@@ -1161,6 +1162,7 @@ let run_owned_selected
       ~parent
       ~invocation
       ~dispatch
+      ~parent_live_now
       ~frozen
       (fun ~active ~dispatched ->
          enter_callback ~dispatched (fun () ->

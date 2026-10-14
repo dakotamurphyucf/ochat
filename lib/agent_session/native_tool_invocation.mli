@@ -252,11 +252,16 @@ type selected_managed_dispatch =
     and seal continuation from a registered native terminal. [effect_entry]
     checks fresh root/current-parent authority at the actual handler entry,
     including after a managed handler's own yields. Failure never silently
-    selects provisional work; Pending requires the scope's exact Job ID. *)
+    selects provisional work; Pending requires the scope's exact Job ID.
+    [parent_live_now] comes from that same physical native bracket and is
+    checked for every nested child after its parent may have been cancelled
+    while joining the callback Switch. It is nonyielding and cannot be
+    substituted with the child's own cancellation context. *)
 val run_owned_selected
   :  owner:Developer_invocation_owner.Selected.t
   -> parent:Developer_invocation_owner.Selected.parent
   -> dispatch:Developer_invocation_owner.Selected.dispatch_storage
+  -> parent_live_now:(unit -> bool)
   -> frozen:(unit -> (Agent_protocol.Invocation.outcome * 'selection) option)
   -> enter_callback:
        (dispatched:Agent_protocol.Host_invocation.t
