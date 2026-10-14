@@ -7,6 +7,7 @@ module Target : sig
   type t =
     | One_off_v1
     | Tool_v1
+    | Developer_tool_v1
     | Moderator_v1
     | Delegated_moderator_v1
   [@@deriving equal, sexp]

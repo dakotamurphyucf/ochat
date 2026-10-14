@@ -38,7 +38,11 @@ let%test_unit "standard static contracts preserve exact old compiler identities"
       assert (
         Chatml_source.Digest.equal
           (C.fingerprint actual ~checkpoint)
-          (Chatml_source.Digest.of_contents (Sexp.to_string expected) ~checkpoint)))
+          (Chatml_source.Digest.of_contents (Sexp.to_string expected) ~checkpoint)));
+  let contract = C.for_target Tool_v1 ~checkpoint in
+  [%test_eq: string]
+    (Chatml_source.Digest.to_hex (C.fingerprint contract ~checkpoint))
+    "ecfaf3ef5d5cb1f228ee1fbdb02d6ffe3f6866ee56a9eda27f7a309233a7c951"
 ;;
 
 let%test_unit

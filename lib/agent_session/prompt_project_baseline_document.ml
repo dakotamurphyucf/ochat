@@ -116,6 +116,7 @@ let portable json =
 let target = function
   | "one_off_v1" -> Ok Chatml.Chatml_compiler_contract.Target.One_off_v1
   | "tool_v1" -> Ok Tool_v1
+  | "developer_tool_v1" -> Ok Developer_tool_v1
   | "moderator_v1" -> Ok Moderator_v1
   | "delegated_moderator_v1" -> Ok Delegated_moderator_v1
   | _ -> invalid "target" "Unsupported standard role target"
@@ -314,6 +315,7 @@ let encode_role encoding role =
               (match target with
                | One_off_v1 -> "one_off_v1"
                | Tool_v1 -> "tool_v1"
+               | Developer_tool_v1 -> "developer_tool_v1"
                | Moderator_v1 -> "moderator_v1"
                | Delegated_moderator_v1 -> "delegated_moderator_v1") )
       ]

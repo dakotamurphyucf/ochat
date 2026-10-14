@@ -12,6 +12,7 @@ type t =
   ; authority_fingerprint : string
   ; original_elements : CM.top_level_elements list
   ; execution_revisions : (Agent_protocol.Id.Capability.t * string) list option
+  ; tool_contract : Chatml_compilation.Tool_contract.t
   }
 
 let capabilities t = t.capabilities
@@ -22,6 +23,7 @@ let prepare
       ?startup
       ?(limits = Chatml_compilation.default_limits)
       ?(delegated_moderator = false)
+      ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
       ?programs
       ~env
       ~owner
@@ -206,7 +208,9 @@ let prepare
           , (List.map tools ~f:compact_tool : Spec.tool list)
           , (helps : Spec.authoring_help list)
           , (base_permissions : (string * string) list)
-          , (Chatml_compilation.contract Tool_v1 : Sexp.t)
+          , (Chatml_compilation.contract
+               (Chatml_compilation.Tool_contract.target tool_contract)
+             : Sexp.t)
           , (Chatml_compilation.contract
                (match delegated_moderator with
                 | false -> Moderator_v1
@@ -288,6 +292,7 @@ let prepare
             ~startup
             ~limits
             ~delegated_moderator
+            ~tool_contract
             ?programs
             ~env
             ~capabilities
@@ -308,6 +313,7 @@ let prepare
         ; authority_fingerprint
         ; original_elements = elements
         ; execution_revisions = None
+        ; tool_contract
         }))
     ()
 ;;
@@ -382,6 +388,7 @@ let rebind_code
       ~startup
       ~limits
       ~delegated_moderator
+      ~tool_contract:t.tool_contract
       ?programs
       ~env
       ~capabilities:t.capabilities

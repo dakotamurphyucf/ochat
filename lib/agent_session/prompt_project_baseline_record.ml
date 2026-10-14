@@ -240,6 +240,7 @@ module Reference = struct
       ; (match target with
          | One_off_v1 -> "one_off_v1"
          | Tool_v1 -> "tool_v1"
+         | Developer_tool_v1 -> "developer_tool_v1"
          | Moderator_v1 -> "moderator_v1"
          | Delegated_moderator_v1 -> "delegated_moderator_v1")
       ]

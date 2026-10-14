@@ -13,11 +13,21 @@ let source_revision t ~single_file_revision =
     |> Chatml_source.Digest.to_hex
 ;;
 
-let run_in_scope t ?prepare_result ~control ~config ~entrypoint ~arguments () =
+let run_in_scope
+      t
+      ?scoped_async_operation
+      ?prepare_result
+      ~control
+      ~config
+      ~entrypoint
+      ~arguments
+      ()
+  =
   match t with
   | Single program ->
     Chatml_execution.run_in_scope
       ?prepare_result
+      ?scoped_async_operation
       ~control
       ~config
       ~program
@@ -27,6 +37,7 @@ let run_in_scope t ?prepare_result ~control ~config ~entrypoint ~arguments () =
   | Prepared program ->
     Chatml_execution.run_prepared_in_scope
       program
+      ?scoped_async_operation
       ?prepare_result
       ~control
       ~config

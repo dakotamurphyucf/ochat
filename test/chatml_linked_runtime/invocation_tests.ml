@@ -133,6 +133,9 @@ let%test_unit
   List.iter
     [ C.Target.One_off_v1, X.one_off_v1, "let main input = Task.pure(input)"
     ; Tool_v1, X.tool_v1, "let run ctx input = Task.pure(`Complete(input))"
+    ; ( Developer_tool_v1
+      , X.developer_tool_v1
+      , "let run ctx input = Task.pure(`Complete(input))" )
     ; ( Moderator_v1
       , X.moderator_v1
       , "let initial_state = 0 let on_event ctx state event = Task.pure(state)" )
@@ -170,7 +173,7 @@ let%test_unit
       let config = Host.default_runtime_config ~surface () in
       let invalid =
         match target with
-        | One_off_v1 | Tool_v1 ->
+        | One_off_v1 | Tool_v1 | Developer_tool_v1 ->
           Host.instantiate_prepared_session_detailed
             config
             program
@@ -220,5 +223,5 @@ let%test_unit
         in
         assert (L.equal_value result (L.VVariant ("Null", [])));
         assert (Int.equal !calls 1)
-      | Tool_v1 -> ())
+      | Tool_v1 | Developer_tool_v1 -> ())
 ;;

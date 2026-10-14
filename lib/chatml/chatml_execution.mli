@@ -112,6 +112,7 @@ val run_in_scope
        (value:Chatml.Chatml_lang.value
         -> local_effects:Chatml.Chatml_lang.eff list
         -> (unit -> unit, string) result)
+  -> ?scoped_async_operation:Chatml_host_runtime.scoped_async_operation
   -> control:Chatml.Chatml_lang.execution_control option
   -> config:Chatml_host_runtime.runtime_config
   -> program:Chatml_host_runtime.compiled_script
@@ -162,6 +163,7 @@ val run
     prepare_result commit boundary as run_in_scope; no implicit source capture. *)
 val run_prepared_in_scope
   :  Chatml_linked_program.t
+  -> ?scoped_async_operation:Chatml_host_runtime.scoped_async_operation
   -> control:Chatml.Chatml_lang.execution_control option
   -> config:Chatml_host_runtime.runtime_config
   -> entrypoint:string

@@ -11,6 +11,7 @@ let select inventory ~script ~target ~capabilities ~checkpoint =
     match target with
     | Chatml_compilation.One_off_v1 -> One_off_v1
     | Tool_v1 -> Tool_v1
+    | Developer_tool_v1 -> Developer_tool_v1
     | Moderator_v1 -> Moderator_v1
     | Delegated_moderator_v1 -> Delegated_moderator_v1
   in

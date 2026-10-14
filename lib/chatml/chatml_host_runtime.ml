@@ -114,6 +114,10 @@ type op_kind =
   | External_async
   | Diagnostic
 
+type scoped_async_operation = Model_spawn
+
+let model_spawn_operation_name = "Model.spawn"
+
 type op_def =
   { name : string
   ; kind : op_kind
@@ -681,7 +685,7 @@ let default_operations ?(handlers = default_handlers) () : op_def list =
           | Error msg -> Error msg
           | Ok recipe -> handlers.on_model_call session ~recipe ~payload)
     }
-  ; { name = "Model.spawn"
+  ; { name = model_spawn_operation_name
     ; kind = External_async
     ; phase_check = allow_all_phases
     ; perform =
@@ -1464,12 +1468,20 @@ and interpret_task session exec ~frames (task : Lang.task) =
         | Ok (Effect_suspend _) -> assert false))
 ;;
 
-let standalone_operations (config : runtime_config) ~prepare_result =
+let standalone_operations
+      (config : runtime_config)
+      ~prepare_result
+      ~scoped_async_operation
+  =
   List.filter config.operations ~f:(fun operation ->
     match operation.kind with
     | Diagnostic | External_sync -> true
     | Local_transactional_with_result _ -> Option.is_some prepare_result
-    | Local_transactional | External_async -> false)
+    | Local_transactional -> false
+    | External_async ->
+      (match scoped_async_operation with
+       | None -> false
+       | Some Model_spawn -> String.equal operation.name model_spawn_operation_name))
   |> operations_map
 ;;
 
@@ -1546,6 +1558,7 @@ let run_initialized_entrypoint
 
 let run_entrypoint_internal
       ?control
+      ?scoped_async_operation
       ?limits
       ?prepare_result
       (config : runtime_config)
@@ -1562,7 +1575,9 @@ let run_entrypoint_internal
       ~runtime_surface:config.surface
     |> host_result
   in
-  let%bind operations = standalone_operations config ~prepare_result |> host_result in
+  let%bind operations =
+    standalone_operations config ~prepare_result ~scoped_async_operation |> host_result
+  in
   let env = Builtin_modules.create_env_with_surface ?control config.surface in
   let env = { env with source = compiled.source } in
   try
@@ -1592,6 +1607,7 @@ let run_entrypoint_internal
 
 let run_entrypoint_detailed
       ?control
+      ?scoped_async_operation
       ?limits
       ?prepare_result
       config
@@ -1602,6 +1618,7 @@ let run_entrypoint_detailed
   =
   run_entrypoint_internal
     ?control
+    ?scoped_async_operation
     ?limits
     ?prepare_result
     config
@@ -1614,6 +1631,7 @@ let run_entrypoint_detailed
 
 let run_entrypoint
       ?control
+      ?scoped_async_operation
       ?limits
       ?prepare_result
       config
@@ -1624,6 +1642,7 @@ let run_entrypoint
   =
   run_entrypoint_internal
     ?control
+    ?scoped_async_operation
     ?limits
     ?prepare_result
     config
@@ -2172,6 +2191,7 @@ let run_prepared_entrypoint_detailed
       ~entrypoint
       ~arguments
       ?control
+      ?scoped_async_operation
       ?limits
       ?prepare_result
       ()
@@ -2191,7 +2211,8 @@ let run_prepared_entrypoint_detailed
       ~checkpoint
   in
   let%bind operations =
-    standalone_operations config ~prepare_result |> Result.map_error ~f:Diagnostic.create
+    standalone_operations config ~prepare_result ~scoped_async_operation
+    |> Result.map_error ~f:Diagnostic.create
   in
   let%bind instance =
     Chatml_linked_runtime.instantiate

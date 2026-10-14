@@ -5,9 +5,21 @@ open Core
 type target =
   | One_off_v1
   | Tool_v1
+  | Developer_tool_v1
   | Moderator_v1
   | Delegated_moderator_v1
 [@@deriving sexp, equal]
+
+(** Static tool-host selection, independent of provider credentials and runtime
+    authority. Existing callers retain [Standard] and its original fingerprint. *)
+module Tool_contract : sig
+  type t =
+    | Standard
+    | Developer_model_spawn
+  [@@deriving sexp, equal]
+
+  val target : t -> target
+end
 
 type limits =
   { wall_seconds : float

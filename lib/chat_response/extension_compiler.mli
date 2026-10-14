@@ -17,6 +17,7 @@ val validate_script
 
 val prepare
   :  ?max_source_bytes:int
+  -> ?tool_contract:Chatml_compilation.Tool_contract.t
   -> scripts:Spec.script list
   -> capabilities:Tool_capability.t
   -> Spec.tool
@@ -49,6 +50,7 @@ val completion_schema : t -> Chatmd_shell_spec.Tool_schema.t option
     still apply. Does not expose a tool or authorize generated native config. *)
 val prepare_in_domain
   :  ?limits:Chatml_compilation.limits
+  -> ?tool_contract:Chatml_compilation.Tool_contract.t
   -> env:Eio_unix.Stdenv.base
   -> scripts:Spec.script list
   -> capabilities:Tool_capability.t
@@ -87,6 +89,7 @@ val prepare_definition_in_domain
   :  ?startup:Startup_compilation.t
   -> ?limits:Chatml_compilation.limits
   -> ?delegated_moderator:bool
+  -> ?tool_contract:Chatml_compilation.Tool_contract.t
   -> ?programs:Chatml_prompt_programs.Restored.t
   -> env:Eio_unix.Stdenv.base
   -> capabilities:Tool_capability.t
