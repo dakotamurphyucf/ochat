@@ -150,6 +150,7 @@ let runtime_errors diagnostics =
 ;;
 
 let capture_for_role
+      ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
       policy
       ?startup
       ~root_role
@@ -242,6 +243,7 @@ let capture_for_role
               in
               let%map plan =
                 Plan.create
+                  ~tool_contract
                   parsed
                   ~moderator_invocation
                   ~moderator_surface
@@ -314,6 +316,7 @@ let capture_for_role
 ;;
 
 let capture
+      ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
       policy
       ?startup
       ~root_role
@@ -332,6 +335,7 @@ let capture
     | Headless -> Roles.Role.Headless
   in
   capture_for_role
+    ~tool_contract
     policy
     ?startup
     ~root_role
@@ -346,6 +350,7 @@ let capture
 ;;
 
 let capture_child
+      ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
       policy
       ?startup
       ~invocation
@@ -365,6 +370,7 @@ let capture_child
     | Delegated_ui -> Roles.Role.Delegated_ui
   in
   capture_for_role
+    ~tool_contract
     policy
     ?startup
     ~root_role

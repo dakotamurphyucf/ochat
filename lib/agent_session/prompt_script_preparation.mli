@@ -116,7 +116,8 @@ end
     do not rebuild plans against a later parser or compiler contract.
     No callback, Scope, Startup or grants are retained in the result. *)
 val capture
-  :  Policy.t
+  :  ?tool_contract:Chatml_compilation.Tool_contract.t
+  -> Policy.t
   -> ?startup:Chat_response.Startup_compilation.t
   -> root_role:Root_role.t
   -> host:Host.t
@@ -136,7 +137,8 @@ val capture
     bounds, operation callback, custody and original exception semantics match
     [capture]. Ordinary frontend [capture] retains its Ui|Headless contract. *)
 val capture_child
-  :  Policy.t
+  :  ?tool_contract:Chatml_compilation.Tool_contract.t
+  -> Policy.t
   -> ?startup:Chat_response.Startup_compilation.t
   -> invocation:Runtime_script_preparation.Invocation.t
   -> host:Host.t

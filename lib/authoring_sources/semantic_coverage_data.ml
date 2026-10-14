@@ -463,7 +463,7 @@ let implementation_sources =
   ; ( "lib/chatml/chatml_static_surface.ml"
     , "07c8f7a97e1e6da286ff4e103181ce4b22b12ebb6f370ac19918f171c0723111" )
   ; ( "lib/chatml/chatml_compiler_contract.ml"
-    , "172cd116b1680c9ad2bdf0a94debf38f196090c984668e1bcb6d235f0a3331b4" )
+    , "2fd6019f3a8c9c48125b5d78a25d5301fc9f1e0b5facb153f6f3b768d6677967" )
   ; ( "lib/chatml/chatml_module_reference.ml"
     , "f2e9c1ff541b67a243effe6b4f04b8c0f15763000f9cd42603d6a9a746d0a728" )
   ; ( "lib/chatml/chatml_contract_encoding.ml"

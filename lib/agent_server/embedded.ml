@@ -580,7 +580,8 @@ let script_selection_in_context host ~expected ~startup =
                 then fail Invalid_state "selected revision has multiple moderators"
                 else Ok (Some role, legacy)
               | Legacy_moderator _ -> Ok (versioned, Some role)
-              | Standard (One_off_v1 | Tool_v1) | Native_hook _ -> Ok (versioned, legacy))
+              | Standard (One_off_v1 | Tool_v1 | Developer_tool_v1) | Native_hook _ ->
+                Ok (versioned, legacy))
         in
         Ok
           Script_selection.

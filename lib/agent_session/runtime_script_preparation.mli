@@ -49,7 +49,8 @@ val policy_identity : t -> Sexp.t
     No filesystem access, native setup or initializer. The borrowed startup owner
     covers the complete phase; original callback failures propagate unchanged. *)
 val plan
-  :  t
+  :  ?tool_contract:Chatml_compilation.Tool_contract.t
+  -> t
   -> startup:Chat_response.Startup_compilation.t
   -> parsed:Prompt.Chat_markdown.Parsed.t
   -> invocation:Invocation.t

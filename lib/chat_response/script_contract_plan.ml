@@ -95,6 +95,7 @@ let bytes_equal left right ~checkpoint =
 ;;
 
 let create
+      ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
       parsed
       ~moderator_invocation
       ~moderator_surface
@@ -202,7 +203,10 @@ let create
         let declaration = descriptor_owner script.id script.source_ref in
         let target =
           match script.kind with
-          | Chatmd_shell_spec.Extension_spec.Tool_script -> Contract.Target.Tool_v1
+          | Chatmd_shell_spec.Extension_spec.Tool_script ->
+            (match tool_contract with
+             | Standard -> Contract.Target.Tool_v1
+             | Developer_model_spawn -> Developer_tool_v1)
           | Moderator_script ->
             if delegated_moderator then Delegated_moderator_v1 else Moderator_v1
         in

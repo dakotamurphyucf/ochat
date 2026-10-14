@@ -4,9 +4,22 @@ module X = Chatml.Chatml_extension_surface
 type target =
   | One_off_v1
   | Tool_v1
+  | Developer_tool_v1
   | Moderator_v1
   | Delegated_moderator_v1
 [@@deriving sexp, equal]
+
+module Tool_contract = struct
+  type t =
+    | Standard
+    | Developer_model_spawn
+  [@@deriving sexp, equal]
+
+  let target = function
+    | Standard -> Tool_v1
+    | Developer_model_spawn -> Developer_tool_v1
+  ;;
+end
 
 type limits =
   { wall_seconds : float
@@ -36,6 +49,7 @@ let error ?diagnostic code message =
 let surface = function
   | One_off_v1 -> X.one_off_v1, X.one_off_entrypoints
   | Tool_v1 -> X.tool_v1, X.tool_entrypoints
+  | Developer_tool_v1 -> X.developer_tool_v1, X.tool_entrypoints
   | Moderator_v1 -> X.moderator_v1, X.moderator_entrypoints
   | Delegated_moderator_v1 -> X.delegated_moderator_v1, X.moderator_entrypoints
 ;;
@@ -43,6 +57,7 @@ let surface = function
 let static_target = function
   | One_off_v1 -> Chatml.Chatml_compiler_contract.Target.One_off_v1
   | Tool_v1 -> Tool_v1
+  | Developer_tool_v1 -> Developer_tool_v1
   | Moderator_v1 -> Moderator_v1
   | Delegated_moderator_v1 -> Delegated_moderator_v1
 ;;

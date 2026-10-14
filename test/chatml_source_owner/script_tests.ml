@@ -22,12 +22,14 @@ let custody_limits ?(programs = 16) () =
 let plan
       ?(checkpoint = ignore)
       ?(shell = None)
+      ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
       ?(moderator_invocation = Plan.Program.Role.Moderator_invocation.Ui)
       ?(moderator_surface = Chatml.Chatml_builtin_surface.ui_moderator_surface)
       ?(delegated_moderator = false)
       parsed
   =
   Plan.create
+    ~tool_contract
     parsed
     ~moderator_invocation
     ~moderator_surface
@@ -479,6 +481,26 @@ let%test_unit
         let parsed = Builder.Capture.root (Owner.Capture.value captured) in
         let planned = plan parsed in
         assert (List.length (Plan.programs planned) = 1);
+        let developer =
+          plan
+            ~tool_contract:Chatml_compilation.Tool_contract.Developer_model_spawn
+            parsed
+        in
+        let standard_program = List.hd_exn (Plan.programs planned) in
+        let developer_program = List.hd_exn (Plan.programs developer) in
+        assert (
+          Plan.Program.Role.equal
+            (Plan.Program.role standard_program)
+            (Standard Chatml.Chatml_compiler_contract.Target.Tool_v1));
+        assert (
+          Plan.Program.Role.equal
+            (Plan.Program.role developer_program)
+            (Standard Developer_tool_v1));
+        assert (
+          not
+            (S.Digest.equal
+               (Plan.Program.compiler_contract standard_program)
+               (Plan.Program.compiler_contract developer_program)));
         let custody = prepare env scope captured [ planned ] |> ok in
         assert (not (C.has_active_programs custody));
         assert (
@@ -499,6 +521,9 @@ let%test_unit
             ()
           |> ok
         in
+        assert (
+          Result.is_error
+            (prepare ~provided:[ binding, graph ] env scope captured [ developer ]));
         let provided =
           prepare ~provided:[ binding, graph ] env scope captured [ planned ] |> ok
         in

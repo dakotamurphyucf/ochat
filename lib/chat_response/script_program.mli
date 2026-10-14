@@ -16,6 +16,7 @@ val source_revision : t -> single_file_revision:string -> string
     validation/commit and cancellation behavior of the existing adapters. *)
 val run_in_scope
   :  t
+  -> ?scoped_async_operation:Chatml_host_runtime.scoped_async_operation
   -> ?prepare_result:
        (value:Chatml.Chatml_lang.value
         -> local_effects:Chatml.Chatml_lang.eff list

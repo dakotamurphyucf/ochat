@@ -643,10 +643,20 @@ let checked_run ~control ~arguments ~prepare_result ~f =
     value)
 ;;
 
-let run_in_scope ?prepare_result ~control ~config ~program ~entrypoint ~arguments () =
+let run_in_scope
+      ?prepare_result
+      ?scoped_async_operation
+      ~control
+      ~config
+      ~program
+      ~entrypoint
+      ~arguments
+      ()
+  =
   checked_run ~control ~arguments ~prepare_result ~f:(fun prepare_result ->
     Chatml_host_runtime.run_entrypoint
       ?control
+      ?scoped_async_operation
       ?prepare_result
       config
       program
@@ -665,6 +675,7 @@ let run ?policy ?context ~env ~config ~program ~entrypoint ~arguments () =
 
 let run_prepared_in_scope
       program
+      ?scoped_async_operation
       ~control
       ~config
       ~entrypoint
@@ -676,6 +687,7 @@ let run_prepared_in_scope
     Chatml_host_runtime.run_prepared_entrypoint_detailed
       config
       program
+      ?scoped_async_operation
       ~entrypoint
       ~arguments
       ?control

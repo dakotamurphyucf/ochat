@@ -36,7 +36,8 @@ end
     actual catalog generation and this index generation together. This function
     supplies no publication reservation or independent source authority. *)
 val capture
-  :  Prompt_script_preparation.Policy.t
+  :  ?tool_contract:Chatml_compilation.Tool_contract.t
+  -> Prompt_script_preparation.Policy.t
   -> ?startup:Chat_response.Startup_compilation.t
   -> mode:Mode.t
   -> snapshot:Prompt_project_baseline_store.Snapshot.t
@@ -59,7 +60,8 @@ val capture
     custody/association; no dependency baseline publication or child reservation.
     Bounds, original callbacks and failures match [capture]. *)
 val capture_child
-  :  Prompt_script_preparation.Policy.t
+  :  ?tool_contract:Chatml_compilation.Tool_contract.t
+  -> Prompt_script_preparation.Policy.t
   -> ?startup:Chat_response.Startup_compilation.t
   -> mode:Mode.t
   -> snapshot:Prompt_project_baseline_store.Snapshot.t
