@@ -1,6 +1,6 @@
 # ChatML developer run/test and REPL design
 
-Status: M5 design v1, 2026-10-13. The REPL language decisions in §4.3 are accepted. The owner-neutral native admission, durable developer run checkpoint foundation, selected-document transactions, physical job-claim worker, compiler-side REPL typing transaction and incremental module registry described below are implemented. The developer root staging owner, bounded root/native terminal coordinator and selected native policy are implemented. The claimed job-parent effect-entry proof described in §1.5 is implemented in this change; user-facing run/REPL services and remaining interfaces are pending. OCH-130 owns the research; OCH-137, OCH-138 and their implementation children own delivery.
+Status: M5 design v1, 2026-10-13. The REPL language decisions in §4.3 are accepted. The owner-neutral native admission, durable developer run checkpoint foundation, selected-document transactions, physical job-claim worker, compiler-side REPL typing transaction and incremental module registry described below are implemented. The developer root staging owner, bounded root/native terminal coordinator, selected native policy and claimed job-parent effect-entry proof are implemented. The owner-neutral lexical script-job kernel is implemented; its physical developer adapter, Model.spawn admission, user-facing run/REPL services and remaining interfaces are pending. OCH-130 owns the research; OCH-137, OCH-138 and their implementation children own delivery.
 
 The [authoring service design](chatml-authoring-services.md) owns source context,
 overlay and immutable upload contracts used here. Implementation and validation
@@ -17,6 +17,8 @@ The existing compiler already accepts exact immutable [captured sources](../../l
 OCH-265 implements the [immutable developer capture and deterministic fixture check/test core](../development/chatml-developer-capture.md). It is not yet a hosted run service or live capability admission.
 
 The current one-off host prepares selected source and tools, revalidates live bindings after waits and runs under a borrowed native scope ([one-off script](../../lib/chat_response/one_off_script.mli), [execution](../../lib/agent_session/one_off_execution.ml)). The [script job service](../../lib/agent_session/script_job_service.mli) and [job protocol](../../lib/agent_protocol/job.mli) provide bounded staging, selection, status, permission waits and cancellation for actor-owned work. Their current launch owner is an invocation or moderator event. Developer execution needs its own authenticated owner and run record while reusing those underlying controls; it must not mutate an unrelated production conversation or disguise a developer run as `Agent_protocol.Run`.
+
+The [lexical script-job kernel](../../lib/agent_session/script_job_kernel.mli) shares selected-binding checks, provisional start tracking, returned `Job.start` parsing and all-ID cleanup with the existing conversation adapter. It records IDs only after a concrete owner stages them. Its prepared acknowledgment cannot grant permission or publish a job; physical owner validation, durable selection, result custody and cancellation remain with the adapter. The developer adapter will borrow the same kernel under its authenticated run scope, without constructing a conversation `Session` ID.
 
 ### 1.1 Owner-neutral native admission foundation
 
@@ -224,7 +226,10 @@ The implementation tickets are these nonoverlapping, independently verifiable ou
 | OCH-322 | OCH-321 | Selected native policy and exact dispatch/terminal recovery | 8 | OCH-320 |
 | OCH-323 | OCH-321 | Physical claimed job-parent proof at native and managed effect entry | 8 | OCH-322 and OCH-304 |
 | OCH-291 | OCH-288 | Developer result custody, disclosure and artifact lifecycle | 8 | OCH-298 |
-| OCH-292 | OCH-288 | Shared script job adapter for selected host operations | 5 | OCH-289 and OCH-298 |
+| OCH-292 | OCH-288 | Coordination parent for the full shared script-job adapter outcome (original estimate 5 before split) | — | OCH-289 and OCH-298 |
+| OCH-333 | OCH-292 | Owner-neutral lexical handler kernel and lossless conversation adapter | 5 | OCH-289 and OCH-298 |
+| OCH-334 | OCH-292 | Physical developer stage, select, read and cancel adapter | 8 | OCH-333, OCH-291 and OCH-323 |
+| OCH-335 | OCH-292 | Authentic Model.spawn admission under selected provider and credential policy | 5 | OCH-333 and OCH-334; execution remains OCH-293 |
 | OCH-293 | OCH-288 | One scheduler for conversation and developer jobs | 8 | OCH-298, OCH-291 and OCH-292 |
 | OCH-266 | OCH-137 | Developer run lifecycle, live host admission, cancellation and receipt integration | 8 | OCH-265, OCH-287 and OCH-288 |
 | OCH-267 | OCH-137 | Portable HTTP/stdio run service, bounded inspection and authoring bundle upload/run integration | 5 | OCH-266 and OCH-129 bundle custody |

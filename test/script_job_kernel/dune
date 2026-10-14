@@ -1,0 +1,17 @@
+(library
+ (name script_job_kernel_test_suite)
+ (modules kernel_tests)
+ (libraries
+  core
+  eio
+  eio_main
+  mirage-crypto-rng.unix
+  chatml
+  ochat.agent_protocol
+  ochat.agent_session
+  ochat.chat_response
+  ochat_function
+  openai)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane)))
