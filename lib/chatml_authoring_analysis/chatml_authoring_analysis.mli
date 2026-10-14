@@ -26,6 +26,13 @@ module Policy : sig
     -> t Or_error.t
 
   val max_results : t -> int
+
+  (** Reuse this exact validated policy for provisional prefix checking; the
+      service cannot silently substitute broader compiler or semantic limits. *)
+  val compilation : t -> Chatml_compilation.limits
+
+  val semantic : t -> Chatml_semantics.Limits.t
+  val max_dependency_depth : t -> int
 end
 
 module Error : sig

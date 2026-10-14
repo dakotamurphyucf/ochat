@@ -168,6 +168,9 @@ let check_context_selection_now ?ledger t context ~actor =
 ;;
 
 let with_current
+      ?(feature = Selected_feature.Core_authoring)
+      ?(final_check = fun () -> Ok ())
+      ?(publish = fun value -> Ok value)
       t
       ~actor
       ~connection
@@ -177,7 +180,9 @@ let with_current
   =
   let expected_view = expected in
   let final_context = ref None in
+  let borrowed_heads = ref None in
   with_request
+    ~feature
     t
     ~actor
     ~connection
@@ -185,7 +190,10 @@ let with_current
     ~final_check:(fun () ->
       match !final_context with
       | None -> Error Error.Stale_context
-      | Some context -> check_context_selection_now t context ~actor)
+      | Some context ->
+        let open Result.Let_syntax in
+        let%bind () = check_context_selection_now t context ~actor in
+        final_check ())
     ~commit:(fun value ->
       match !final_context with
       | None -> Error Error.Stale_context
@@ -197,12 +205,20 @@ let with_current
               when phys_equal actual context
                    && P.Authoring.Context.Expected.equal
                         expected
-                        (P.Authoring.Context.Expected.of_view actual.view) -> Ok value
+                        (P.Authoring.Context.Expected.of_view actual.view) ->
+              (match !borrowed_heads with
+               | Some (project_head, document_head, capture_head)
+                 when phys_equal project_head t.project_cache
+                      && phys_equal document_head t.document_cache
+                      && Retained_document_capture.same_head
+                           capture_head
+                           t.document_capture -> publish value
+               | Some _ | None -> Error Error.Stale_context)
             | Some _ | None -> Error Error.Stale_context)
          | None -> Error Error.Stale_negotiation))
     (fun entry ~checkpoint ->
        let open Result.Let_syntax in
-       let%bind context, ledger =
+       let%bind context, ledger, project_head, document_head, capture_head =
          with_gate t (fun () ->
            match find_context entry expected.context_id with
            | None -> Error Error.Stale_context
@@ -211,11 +227,18 @@ let with_current
                P.Authoring.Context.Expected.equal
                  expected
                  (P.Authoring.Context.Expected.of_view context.view)
-             then Ok (context, Project.Project_cache.contexts t.project_cache)
+             then
+               Ok
+                 ( context
+                 , Project.Project_cache.contexts t.project_cache
+                 , t.project_cache
+                 , t.document_cache
+                 , t.document_capture )
              else Error Error.Stale_context)
        in
        let%bind () = check_context_owner t context ~actor ~checkpoint in
        final_context := Some context;
+       borrowed_heads := Some (project_head, document_head, capture_head);
        let current =
          Current.
            { owner = ledger
@@ -223,6 +246,7 @@ let with_current
            ; context
            ; expected = expected_view
            ; live = ref true
+           ; retained_document_capture = capture_head
            }
        in
        Exn.protect

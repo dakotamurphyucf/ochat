@@ -164,7 +164,9 @@ end
     used after callback return; an escaped token fails closed. The short
     ledger/cache gate is not held across [f].
     Semantic/assistance children add actual parser/per-script selection checks
-    before their own publication; this scope does not claim to prove them. *)
+    before their own publication; this scope does not claim to prove them.
+    Semantic and assistance publication use the private owner gate; callers of
+    this public method cannot supply a publication callback. *)
 val with_current
   :  t
   -> actor:Operator_authorization.t
