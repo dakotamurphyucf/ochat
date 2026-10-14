@@ -48,6 +48,14 @@ val charge_bytes : t -> int -> (unit, Store_error.t) result
     files/directories are accepted, and all parent directories are validated. *)
 val kind : t -> path:string -> ([ `Directory | `File ], Store_error.t) result
 
+(** The same charged, no-follow inspection with proved absence distinguished
+    from links/unsupported entries. Startup inventories use this for optional
+    owned namespaces without treating a failed [kind] as absence. *)
+val kind_or_missing
+  :  t
+  -> path:string
+  -> ([ `Directory | `File ] option, Store_error.t) result
+
 (** Select another host-owned absolute root while sharing the same remaining
     entry/byte budgets. This does not reset allowances or authorize paths. The
     caller must own and serialize both roots; reads still reject linked paths. *)
