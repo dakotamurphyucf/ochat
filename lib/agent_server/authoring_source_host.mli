@@ -94,6 +94,8 @@ module Error : sig
     | Source_capture of Core.Error.t
     | Document_parser of Prompt.Chat_markdown.Generated.error
     | Document_bundle_limit
+    | Project_declaration_unavailable
+    | Invalid_project_declaration
 
   (** Finite safe projection. Root errors expose only their finite code;
       project errors use a coarse tag. Neither exposes native paths, exception
@@ -311,6 +313,50 @@ module Document_context : sig
     val input_sources : t -> (Chatmd_parser_input.t * Chatml_source.t) list
   end
 
+  module Project_capture : sig
+    (** Immutable exact declaration source and authoritative decoded project,
+        captured during an explicit document Analyze/rebuild independently of a
+        successful script Build. It contains no live root/read grant. *)
+    type t
+
+    val source : t -> Chatml_source.t
+    val project : t -> Chatml_project.t
+    val member : t -> Source.Portable_path.t
+
+    (** Comparison only with the same host-incarnation selected root, including
+        original actor. It does not reauthorize a current actor or turn this
+        receipt into a root capability. *)
+    val belongs_to_root : t -> Root.t -> bool
+
+    (** Match the same immutable Parsed_capture and actual declaration object
+        admitted by [capture_project_declaration]. This is deliberate parser
+        object identity, not text/path equivalence; the enclosing Core owner
+        separately verifies current source/generation and actor authority. *)
+    val matches
+      :  t
+      -> parsed:Parsed_capture.t
+      -> declaration:Prompt.Chat_markdown.Declaration.t
+      -> bool
+
+    (** Fixed-size identity precomputed with bounded input metadata during
+        admission. Comparison only; the current host policy and Core context
+        generation remain the authority. *)
+    val identity : t -> Chatml_source.Digest.t
+
+    (** Compare exact captured bytes with the ACTUAL root project declaration
+        in [build]'s lock and Prepared inventory. Source namespaces can differ;
+        neither namespace equality nor basename/suffix equality is used. The
+        caller first proves the admitted selected Build belongs to this root
+        and [member] using its real host route/catalog policy. This pure
+        bounded comparison alone grants no route or read authority. *)
+    val matches_project_contents
+      :  t
+      -> build:Chatml_project_build.t
+      -> max_compare_bytes:int
+      -> checkpoint:(unit -> unit)
+      -> (bool, Error.t) result
+  end
+
   (** Uses the same host-owned context activity gate, actor/root rechecks,
       attempt/read quotas, cancellation stack and joined switch lifetime as
       project source contexts. Nested A -> B -> A work must still see A as
@@ -355,6 +401,41 @@ module Document_context : sig
     -> dir:Eio.Fs.dir_ty Eio.Path.t
     -> checkpoint:(unit -> unit)
     -> (Parsed_capture.t, Error.t) Result.t
+
+  (** Explicitly capture one project declaration named by an ACTUAL member of
+      [parsed]'s root/imported declaration registry. Bind its declaring input
+      through [Parsed_capture.input_sources], including exact authored bytes,
+      then resolve the authored project spelling relative to that input's
+      portable member with the existing Source_loader rule. Never use script
+      [src], display provenance or a suffix match. The same Document_context
+      root, original/request actors, joined operation, no-follow reader,
+      request and aggregate-read quotas govern the single local read. The
+      admitted source ID belongs to this context's namespace and exact member.
+      Bound locator components/bytes, membership visits, read bytes, schema
+      decode and identity construction before allocation. [max_work_steps]
+      charges checkpoints throughout root resolution, read and pure admission
+      as one attempt, without a new allowance for each phase. Schema decoding is
+      the existing bounded Chatml_project.decode; its JSON stage does not poll
+      internally. The returned receipt is immutable even if the host file later
+      changes. The caller separately checks exact editor context generation
+      before/after this operation and publishes it with the same Parsed head.
+      A supplied document or ungranted/outside-root route is unavailable; a
+      foreign Parsed/declaration is Foreign_root; malformed project contents
+      are Invalid_project_declaration. Budget exhaustion uses Result_limit.
+      Checkpoint/cancellation exceptions propagate unchanged, with no partial
+      receipt or alternative filesystem/network fallback. *)
+  val capture_project_declaration
+    :  t
+    -> actor:Operator_authorization.t
+    -> parsed:Parsed_capture.t
+    -> declaration:Prompt.Chat_markdown.Declaration.t
+    -> schema_limits:Document_schema.Limits.t
+    -> max_locator_bytes:int
+    -> max_path_components:int
+    -> max_identity_bytes:int
+    -> max_work_steps:int
+    -> checkpoint:(unit -> unit)
+    -> (Project_capture.t, Error.t) Result.t
 
   (** Recheck the original actor, current request actor, retained root or
       supplied-byte policy, host lifetime and creating domain without reading
