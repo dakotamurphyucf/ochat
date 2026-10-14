@@ -1,0 +1,5 @@
+open! Core
+include Authoring_context_service_core
+include Authoring_context_owner
+
+let handle_core = Authoring_context_methods.handle_core

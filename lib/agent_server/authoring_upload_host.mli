@@ -125,6 +125,15 @@ module Rebound : sig
   val basis : t -> basis
 end
 
+module Context_capture : sig
+  type t
+
+  (** One initial protected rebind, its genuine selected-target comparison and
+      a Store-instance publication pin. The immutable result is data, not a
+      continuing bundle-read or execution grant. *)
+  val rebound : t -> Rebound.t
+end
+
 module Error : sig
   module Store_code : sig
     type t =
@@ -246,6 +255,40 @@ val rebind
   -> bundle_id:Agent_protocol.Id.Authoring_bundle.t
   -> checkpoint:(unit -> unit)
   -> (Rebound.t, Error.t) result
+
+(** Initially restore the genuine saved closure once under the same protected
+    read path as [rebind], retaining an owner-affine publication pin. *)
+val capture_for_context
+  :  t
+  -> actor:Operator_authorization.t
+  -> bundle_id:Agent_protocol.Id.Authoring_bundle.t
+  -> checkpoint:(unit -> unit)
+  -> (Context_capture.t, Error.t) result
+
+(** Check both original/current actor, independent bundle-read grant, durable
+    publication pin/deadline and every actual selected target/contract. This
+    runs under the existing host/store gates but does not restore the graph or
+    reread installed source bytes. Selection is checked again AFTER the
+    yielding Store call releases its gate, before returning. A later explicit
+    [rebind] performs full byte verification. *)
+val check_context_current
+  :  t
+  -> actor:Operator_authorization.t
+  -> Context_capture.t
+  -> checkpoint:(unit -> unit)
+  -> (unit, Error.t) result
+
+(** Nonyielding final comparison after a caller's own publication gate. Recheck
+    original/current actor, bundle-read grant and exact selected target/contract
+    against the retained owner-affine capture. The caller MUST have performed
+    [check_context_current] first for durable pin/deadline/current marker; this
+    check alone never authenticates publication or installed bytes. Trusted
+    policy callbacks must remain bounded and nonyielding. *)
+val check_context_selection_now
+  :  t
+  -> actor:Operator_authorization.t
+  -> Context_capture.t
+  -> (unit, Error.t) result
 
 (** This returns the Store's exact Open/Ready/Validating/Published/Rejected/
     Expired state. The facade never manufactures a receipt. *)

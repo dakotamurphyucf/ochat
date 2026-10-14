@@ -11,6 +11,72 @@ module Recomposition = Chatml_project_build_tests.Recomposition_tests
 module Build = Chatml_project_build
 module Prepared = Chatml_prepared_program
 module Host = Agent_server.Authoring_upload_host
+module Context_service = Agent_server.Authoring_context_service
+
+let context_analysis_policy () =
+  let semantic =
+    Chatml_semantics.Limits.create
+      ~max_input_bytes:1_000_000
+      ~recording:
+        (Chatml_typechecker.Semantic.Limits.create
+           ~max_facts:20_000
+           ~max_edges:40_000
+           ~max_label_bytes:400_000
+           ~max_work_steps:400_000
+         |> Or_error.ok_exn)
+      ~type_graph:
+        (Chatml_semantics.Frozen.Limits.create
+           ~max_nodes:20_000
+           ~max_edges:40_000
+           ~max_label_bytes:400_000
+         |> Or_error.ok_exn)
+      ~max_published_facts:20_000
+      ~max_published_edges:40_000
+      ~max_published_label_bytes:400_000
+      ~max_work_steps:400_000
+    |> Or_error.ok_exn
+  in
+  Chatml_authoring_analysis.Policy.create
+    ~compilation:Chatml_compilation.default_limits
+    ~semantic
+    ~max_dependency_depth:16
+    ~max_results:2
+    ~max_projected_diagnostics:4
+    ~max_projected_sites:12
+    ~max_projection_sources:8
+    ~max_position_index_entries:256
+    ~max_projection_source_bytes:1_000_000
+  |> Or_error.ok_exn
+;;
+
+let context_initialize ~server_id ~principal =
+  P.Initialize.Response.create
+    ~protocol_name:"ochat.agent"
+    ~selected_version:(P.Version.create ~major:1 ~minor:0 |> Fixture.protocol_ok)
+    ~implementation:
+      (P.Initialize.Implementation.create ~name:"upload context test" ~version:"1"
+       |> Fixture.protocol_ok)
+    ~server_id
+    ~enabled_features:[ P.Authoring.Features.core ]
+    ~extensions:None
+    ~principal
+    ~limits:
+      { max_request_bytes = 1_000_000
+      ; max_event_bytes = 1024
+      ; max_page_size = 100
+      ; max_attachments_per_connection = 1
+      }
+    ~event_retention:
+      { minimum_age_ms = 0; maximum_events = 1; oldest_replayable_sequence = None }
+    ~timing:
+      { heartbeat_interval_ms = 1000
+      ; owner_lease_duration_ms = 10000
+      ; owner_renew_after_ms = 5000
+      ; disconnect_grace_default_ms = 0
+      }
+    ~server_time:Fixture.start
+  |> Fixture.protocol_ok
+;;
 
 let host_ok = function
   | Ok value -> value
@@ -664,8 +730,121 @@ let%test_unit
              (Chatml_authoring_bundle_project.Validated.input_fingerprint project)
              (Chatml_authoring_bundle_project.Validated.input_fingerprint validated)
          | Chatmd_document _ -> false);
-      check "successful rebind checked selected target" (!selection_calls > 1);
       let final_read_check = !read_checks in
+      let connection =
+        Agent_server.Connection_context.create_authenticated
+          ~actor
+          ~connection_id:"uploaded-project-context-test"
+          ~transport:In_memory
+          ~publish_notification:(fun _ -> ())
+          ~max_attachments:1
+      in
+      let context_service =
+        Context_service.create
+          ~sw:host_sw
+          ~clock:(Eio.Stdenv.mono_clock env)
+          ~host:Fixture.server_id
+          ~sources:None
+          ~upload:(Some host)
+          ~supplied_document:None
+          ~selection_policy:
+            (Context_service.Selection_policy.create
+               ~project_contract:(fun _ ~root:_ ~project:_ ~selection:_ -> None)
+               ~document_static:(fun _ ~requested_environment:_ -> None))
+          ~context_limits:
+            (Chatml_authoring_context.Limits.create
+               ~max_contexts:2
+               ~max_sources:128
+               ~max_open_documents:1
+               ~max_document_bytes:1_000_000
+               ~max_effective_input_bytes:1_000_000
+               ~max_context_source_bytes:1_000_000
+               ~max_total_source_bytes:2_000_000
+             |> Or_error.ok_exn)
+          ~analysis_policy:(context_analysis_policy ())
+          ~protocol_limits:
+            (P.Authoring.Limits.create
+               ~max_sources:128
+               ~max_source_bytes:1_000_000
+               ~max_context_source_bytes:1_000_000
+               ~max_request_bytes:1_000_000
+               ~max_result_bytes:1_000_000
+               ~max_path_candidates:16
+             |> protocol_ok)
+          ~limits:
+            (Context_service.Limits.create
+               ~max_connections:2
+               ~max_active_requests_per_connection:2
+               ~max_roots_per_connection:2
+               ~max_response_bytes:1_000_000
+             |> Or_error.ok_exn)
+      in
+      (match
+         Context_service.publish_initialize_and_wait
+           context_service
+           ~connection
+           ~response:
+             (context_initialize
+                ~server_id:Fixture.server_id
+                ~principal:(Operator_authorization.principal actor))
+       with
+       | Ok () -> ()
+       | Error _ -> failwith "upload-only authoring initialize failed");
+      let core request =
+        Context_service.handle_core context_service ~actor ~connection request
+      in
+      let context =
+        match
+          core
+            (P.Authoring.Wire.Request.Context_open
+               (P.Authoring.Context.Open_request.create_uploaded_project bundle_id))
+        with
+        | Ok (Context_open context) -> context
+        | Ok _ | Error _ -> failwith "published Project context admission failed"
+      in
+      check
+        "upload-only client got genuine selected Project basis"
+        (match P.Authoring.Context.basis context with
+         | Project _ -> true
+         | Document _ -> false);
+      let prepared =
+        Build.prepared (Chatml_authoring_bundle_project.Validated.build validated)
+      in
+      let entry =
+        Prepared.sources prepared
+        |> List.find_exn ~f:(fun source ->
+          Captured.Id.equal (Captured.id source) (Prepared.entry prepared))
+      in
+      let read =
+        P.Authoring.Source_read.Read_request.create
+          ~context:(P.Authoring.Context.Expected.of_view context)
+          ~source_id:(Captured.id entry)
+        |> protocol_ok
+      in
+      (match core (Source_read read) with
+       | Ok (Source_read result) ->
+         [%test_eq: string]
+           (P.Authoring.Source_read.Read_result.contents result)
+           (Captured.contents entry)
+       | Ok _ | Error _ -> failwith "published Project source unavailable");
+      read_allowed := false;
+      check
+        "cached uploaded source repeats independent read grant"
+        (match core (Source_read read) with
+         | Error Context_service.Error.Unauthorized -> true
+         | Ok _ | Error _ -> false);
+      read_allowed := true;
+      selected := selected_stale;
+      check
+        "cached uploaded source repeats selected environment"
+        (match core (Source_read read) with
+         | Error Context_service.Error.Stale_context -> true
+         | Ok _ | Error _ -> false);
+      selected := selected_current;
+      (match Context_service.close_and_wait context_service with
+       | Ok () -> ()
+       | Error _ -> failwith "upload-only authoring close failed");
+      check "successful rebind checked selected target" (!selection_calls > 1);
       check "successful rebind rechecked read grant" (final_read_check > 2);
       read_checks := 0;
       change_at_read_check := Some final_read_check;

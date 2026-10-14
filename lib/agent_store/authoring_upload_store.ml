@@ -258,6 +258,20 @@ let same_source_list left right ~checkpoint =
     same_source_bytes left right ~checkpoint)
 ;;
 
+module Published_pin = struct
+  type t =
+    { store_token : unit ref
+    ; upload_id : Id.t
+    ; principal : P.Id.Principal.t
+    ; bundle_id : P.Id.Authoring_bundle.t
+    ; receipt : B.Receipt.t
+    ; manifest_fingerprint : Chatml_source.Digest.t
+    ; deadline : P.Timestamp.t
+    ; marker_intent_digest : Chatml_source.Digest.t
+    ; marker_inventory_digest : Chatml_source.Digest.t
+    }
+end
+
 module Published_capture = struct
   module Graph = struct
     type t =
@@ -276,12 +290,14 @@ module Published_capture = struct
     ; manifest : B.Manifest.t
     ; uploaded_sources : Chatml_source.t list
     ; graphs : Graph.t list
+    ; pin : Published_pin.t
     }
 
   let receipt t = t.receipt
   let manifest t = t.manifest
   let uploaded_sources t = t.uploaded_sources
   let graphs t = t.graphs
+  let pin t = t.pin
 
   let agrees_with_proof t proof ~checkpoint =
     match Publication.of_proof t.manifest proof ~checkpoint with
@@ -884,6 +900,39 @@ let intent_matches_upload upload intent =
   | Open | Rejected _ | Expired _ -> false
 ;;
 
+let verify_publication_metadata t upload intent marker ~checkpoint =
+  let* encoded_intent, encoded_marker =
+    with_upload_directory t upload.manifest_doc.upload_id (fun directory ->
+      let* encoded_intent =
+        load_in directory Files.intent_name t.limits.max_intent_bytes
+      in
+      let* encoded_marker =
+        load_in directory Files.marker_name t.limits.max_marker_bytes
+      in
+      Ok (encoded_intent, encoded_marker))
+  in
+  let* canonical_intent =
+    Doc.Intent.to_bytes intent ~max_bytes:t.limits.max_intent_bytes |> storage
+  in
+  let* canonical_marker =
+    Doc.Marker.to_bytes marker ~max_bytes:t.limits.max_marker_bytes |> storage
+  in
+  let receipt = Doc.Intent.receipt intent in
+  if
+    (not (String.equal encoded_intent canonical_intent))
+    || (not (String.equal encoded_marker canonical_marker))
+    || (not
+          (Chatml_source.Digest.equal
+             (Doc.Marker.intent_digest marker)
+             (digest_text encoded_intent ~checkpoint)))
+    || not
+         (Chatml_source.Digest.equal
+            (Doc.Marker.receipt_digest marker)
+            (digest_receipt receipt ~checkpoint))
+  then Error Error.Invalid_manifest
+  else Ok ()
+;;
+
 let verify_publication t upload ~checkpoint =
   match upload.publication with
   | Not_published | Intent { marker = None; _ } -> Error Error.Sealed
@@ -901,38 +950,13 @@ let verify_publication t upload ~checkpoint =
         if actual_bytes <> supplementary_bytes
         then Error Error.Invalid_manifest
         else
-          let* encoded_intent, encoded_marker =
-            with_upload_directory t upload.manifest_doc.upload_id (fun directory ->
-              let* encoded_intent =
-                load_in directory Files.intent_name t.limits.max_intent_bytes
-              in
-              let* encoded_marker =
-                load_in directory Files.marker_name t.limits.max_marker_bytes
-              in
-              Ok (encoded_intent, encoded_marker))
-          in
-          let* canonical_intent =
-            Doc.Intent.to_bytes intent ~max_bytes:t.limits.max_intent_bytes |> storage
-          in
-          let* canonical_marker =
-            Doc.Marker.to_bytes marker ~max_bytes:t.limits.max_marker_bytes |> storage
-          in
+          let* () = verify_publication_metadata t upload intent marker ~checkpoint in
           let receipt = Doc.Intent.receipt intent in
           if
-            (not (String.equal encoded_intent canonical_intent))
-            || (not (String.equal encoded_marker canonical_marker))
-            || (not
-                  (Chatml_source.Digest.equal
-                     (Doc.Marker.intent_digest marker)
-                     (digest_text encoded_intent ~checkpoint)))
-            || (not
-                  (Chatml_source.Digest.equal
-                     (Doc.Marker.inventory_digest marker)
-                     inventory_digest))
-            || not
-                 (Chatml_source.Digest.equal
-                    (Doc.Marker.receipt_digest marker)
-                    (digest_receipt receipt ~checkpoint))
+            not
+              (Chatml_source.Digest.equal
+                 (Doc.Marker.inventory_digest marker)
+                 inventory_digest)
           then Error Error.Invalid_manifest
           else Ok receipt
 ;;
@@ -942,7 +966,7 @@ let materialize_published t upload published_receipt ~checkpoint =
   let uploaded = Array.of_list uploaded_captures in
   match upload.publication with
   | Not_published | Intent { marker = None; _ } -> Error Error.Sealed
-  | Intent { value = intent; marker = Some _; _ } ->
+  | Intent { value = intent; marker = Some marker; _ } ->
     let* published_graphs =
       with_upload_directory t upload.manifest_doc.upload_id (fun directory ->
         let* supplemental =
@@ -1006,6 +1030,17 @@ let materialize_published t upload published_receipt ~checkpoint =
         ; manifest = upload.manifest_doc.manifest
         ; uploaded_sources = uploaded_captures
         ; graphs = List.rev published_graphs
+        ; pin =
+            { Published_pin.store_token = t.token
+            ; upload_id = upload.manifest_doc.upload_id
+            ; principal = upload.manifest_doc.owner.principal
+            ; bundle_id = B.Receipt.bundle_id published_receipt
+            ; receipt = published_receipt
+            ; manifest_fingerprint = B.Manifest.fingerprint upload.manifest_doc.manifest
+            ; deadline = B.Receipt.expires_at published_receipt
+            ; marker_intent_digest = Doc.Marker.intent_digest marker
+            ; marker_inventory_digest = Doc.Marker.inventory_digest marker
+            }
         }
 ;;
 
@@ -2382,6 +2417,57 @@ let with_published t ~principal ~bundle_id ~now ~checkpoint ~admit_metadata ~f =
     in
     Eio.Fiber.with_binding active_reads (t :: active) (fun () ->
       Fun.protect ~finally:release (fun () -> Ok (f capture)))
+;;
+
+let check_published_pin t ~principal (pin : Published_pin.t) ~now ~checkpoint =
+  use_gate t (fun () ->
+    let checkpoint = work t.limits checkpoint in
+    checkpoint ();
+    let* () = ensure_consistent t ~checkpoint in
+    checkpoint ();
+    if
+      (not (phys_equal t.token pin.store_token))
+      || not (P.Id.Principal.equal principal pin.principal)
+    then Error Error.Missing_or_foreign
+    else (
+      match Hashtbl.find t.uploads pin.upload_id with
+      | None -> Error Error.Missing_or_foreign
+      | Some upload ->
+        if
+          (not (P.Id.Principal.equal upload.manifest_doc.owner.principal principal))
+          || not
+               (Chatml_source.Digest.equal
+                  (B.Manifest.fingerprint upload.manifest_doc.manifest)
+                  pin.manifest_fingerprint)
+        then Error Error.Missing_or_foreign
+        else if expired (now ()) pin.deadline || expired (now ()) (phase_deadline upload)
+        then Error Error.Expired
+        else (
+          match upload.publication with
+          | Not_published | Intent { marker = None; _ } -> Error Error.Sealed
+          | Intent { value = intent; marker = Some marker; _ } ->
+            let receipt = Doc.Intent.receipt intent in
+            if
+              (not (intent_matches_upload upload intent))
+              || (not (B.Receipt.equal receipt pin.receipt))
+              || (not
+                    (P.Id.Authoring_bundle.equal
+                       (B.Receipt.bundle_id receipt)
+                       pin.bundle_id))
+              || (not (P.Timestamp.equal (B.Receipt.expires_at receipt) pin.deadline))
+              || (not
+                    (Chatml_source.Digest.equal
+                       (Doc.Marker.intent_digest marker)
+                       pin.marker_intent_digest))
+              || not
+                   (Chatml_source.Digest.equal
+                      (Doc.Marker.inventory_digest marker)
+                      pin.marker_inventory_digest)
+            then Error Error.Invalid_manifest
+            else
+              let* () = verify_publication_metadata t upload intent marker ~checkpoint in
+              let* () = check_lock t in
+              if expired (now ()) pin.deadline then Error Error.Expired else Ok ())))
 ;;
 
 let cleanup_expired_data t upload ~checkpoint =

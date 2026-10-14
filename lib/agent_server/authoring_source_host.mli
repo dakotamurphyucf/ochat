@@ -149,6 +149,16 @@ val roots
   -> checkpoint:(unit -> unit)
   -> (Root.t list, Error.t) Result.t
 
+(** Nonyielding final read-grant comparison for a previously issued root.
+    It checks the physical host issuer and both original/current actors using
+    the same current read policy as root operations. It is not a native read or
+    permission to skip the full joined operation above. *)
+val check_root_current
+  :  t
+  -> actor:Operator_authorization.t
+  -> Root.t
+  -> (unit, Error.t) Result.t
+
 module Context : sig
   (** Connection-scoped source selection, not a runtime workspace or prepared
       editor overlay. Stores the original actor and selected root; no native FD
@@ -243,6 +253,30 @@ module Document_capture : sig
 
   val source : t -> Chatml_source.t
 end
+
+(** Fresh root-level observations before any project/document context exists.
+    Both methods require the original Root actor and current request actor's
+    independent native read grant, checked before and after yielding work.
+    They reuse this host's joined root-operation gate, configured no-follow
+    local source owner and existing per-operation path/byte/work ceilings; no
+    project context, resolver or native path grant is minted. Concurrent root
+    operations return Busy. [read_root_member] constructs one exact immutable
+    host-owned source capture; later use still requires a context admission. *)
+val list_root_directory
+  :  t
+  -> actor:Operator_authorization.t
+  -> root:Root.t
+  -> directory:Source.Portable_path.t option
+  -> checkpoint:(unit -> unit)
+  -> (Entry.t list, Error.t) Result.t
+
+val read_root_member
+  :  t
+  -> actor:Operator_authorization.t
+  -> root:Root.t
+  -> member:Source.Portable_path.t
+  -> checkpoint:(unit -> unit)
+  -> (Document_capture.t, Error.t) Result.t
 
 module Document_context : sig
   type t
