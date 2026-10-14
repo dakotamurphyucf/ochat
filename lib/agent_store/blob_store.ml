@@ -1425,6 +1425,137 @@ let developer_binding_matches store runs =
     | None -> false)
 ;;
 
+let borrow_developer_result_reader
+      store
+      ~sw
+      ~session
+      ~root
+      ~max_entries
+      ~max_bytes
+      ~checkpoint
+      ~f
+  =
+  let open Result.Let_syntax in
+  Eio.Switch.check sw;
+  checkpoint ();
+  let%bind reader =
+    Retention_reader.create
+      ~env:store.env
+      ~root:(Data_root.path (Session_store.data_root session))
+      ~max_entries
+      ~max_bytes
+  in
+  let%bind () =
+    Developer_run_store.Result_root.with_result_inventory_lease
+      root
+      ~reader
+      ~checkpoint
+      ~f:(fun ~root:borrowed ->
+        if
+          String.equal
+            (Data_root.path borrowed)
+            (Data_root.path (Session_store.data_root session))
+        then Ok ()
+        else Error (Store_error.Corrupt "developer inventory Data_root differs"))
+  in
+  checkpoint ();
+  Eio.Switch.check sw;
+  let%map result = f reader in
+  checkpoint ();
+  Eio.Switch.check sw;
+  result
+;;
+
+let with_developer_result_reader
+      store
+      ~sw
+      ~runs
+      ~root
+      ~max_entries
+      ~max_bytes
+      ~checkpoint
+      ~f
+  =
+  Eio.Switch.check sw;
+  let session =
+    Eio.Mutex.use_ro store.coordination.mutex (fun () ->
+      match store.coordination.developer_binding with
+      | Some (session, current)
+        when phys_equal current runs
+             && (not (Developer_run_store.is_closed runs))
+             && Developer_run_store.Result_root.issued_by runs root -> Some session
+      | Some _ | None -> None)
+  in
+  match session with
+  | None -> Error (Store_error.Corrupt "developer result Reader has another owner")
+  | Some session ->
+    let open Result.Let_syntax in
+    let%bind result =
+      borrow_developer_result_reader
+        store
+        ~sw
+        ~session
+        ~root
+        ~max_entries
+        ~max_bytes
+        ~checkpoint
+        ~f
+    in
+    if developer_binding_matches store runs
+    then Ok result
+    else Error (Store_error.Corrupt "developer result Reader binding changed")
+;;
+
+let with_developer_result_inventory
+      store
+      ~sw
+      ~runs
+      ~root
+      ~max_entries
+      ~max_bytes
+      ~checkpoint
+      ~f
+  =
+  Eio.Switch.check sw;
+  coordinated store (fun () ->
+    match store.coordination.active_uploads, store.coordination.active_reads with
+    | 0, 0 ->
+      Eio.Switch.check sw;
+      checkpoint ();
+      let open Result.Let_syntax in
+      let%bind session =
+        match store.coordination.developer_binding with
+        | Some (session, current)
+          when phys_equal current runs
+               && (not (Developer_run_store.is_closed runs))
+               && Developer_run_store.Result_root.issued_by runs root -> Ok session
+        | Some _ | None ->
+          Error (Store_error.Corrupt "developer inventory has another physical owner")
+      in
+      let%map result =
+        borrow_developer_result_reader
+          store
+          ~sw
+          ~session
+          ~root
+          ~max_entries
+          ~max_bytes
+          ~checkpoint
+          ~f:(fun reader ->
+            f
+              ~reader
+              ~intent_directory:
+                (Data_root.developer_result_intents_path
+                   (Session_store.data_root session))
+              ~temporary_namespace:
+                (Filename.concat store.temporary_directory "developer-runs")
+              ~durable_namespace:
+                (Filename.concat store.durable_directory "developer-runs"))
+      in
+      Some result
+    | _ -> Ok None)
+;;
+
 let checked_directory store path =
   match Eio.Path.kind ~follow:false (eio_path store path) with
   | `Directory -> Ok ()

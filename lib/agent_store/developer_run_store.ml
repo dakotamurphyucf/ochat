@@ -987,6 +987,21 @@ module Result_root = struct
       Ok (List.map documents ~f:(fun (_, document) -> make issuer document ~epoch:None)))
   ;;
 
+  let existing_for_result_inventory issuer ~reader ~checkpoint =
+    with_lease issuer (fun ~env ~root:_ ->
+      let store_poll = work issuer issuer.checkpoint in
+      let poll () =
+        store_poll ();
+        checkpoint ()
+      in
+      let* reader = shared_reader issuer ~env reader |> store in
+      let* documents = scan_documents issuer ~poll ~reader in
+      Ok
+        (List.map documents ~f:(fun (_, document) ->
+           poll ();
+           make issuer document ~epoch:None)))
+  ;;
+
   let storage_error = function
     | Error.Store error -> error
     | Limit_exceeded ->
@@ -1013,19 +1028,23 @@ module Result_root = struct
         && Chatml_source.Digest.equal fingerprint (Doc.epoch_capture epoch))
   ;;
 
-  let with_borrow t ~reader ~f =
+  let with_borrow t ~reader ~checkpoint ~f =
     if not (issued_by t.issuer t)
     then Error (Store_error.Corrupt "developer result root has another physical issuer")
     else
       with_lease t.issuer (fun ~env ~root ->
-        let poll = work t.issuer t.issuer.checkpoint in
-        let* document =
+        let store_poll = work t.issuer t.issuer.checkpoint in
+        let poll () =
+          store_poll ();
+          checkpoint ()
+        in
+        let* bytes, document =
           match reader with
           | None ->
             let* found = read t.issuer ~poll t.run_id in
             (match found with
              | None -> Error Error.Foreign_or_stale
-             | Some (_, document) -> Ok document)
+             | Some (bytes, document) -> Ok (bytes, document))
           | Some reader ->
             let* reader = shared_reader t.issuer ~env reader |> store in
             let* () =
@@ -1039,27 +1058,118 @@ module Result_root = struct
                 ~checkpoint:poll
               |> store
             in
-            Doc.of_bytes
-              bytes
-              ~poll
-              ~limits:t.issuer.limits.document
-              ~max_epochs:t.issuer.limits.max_epochs_per_run
-              ~max_jobs:t.issuer.limits.max_jobs_per_run
-              ~max_invocations:t.issuer.limits.max_invocations_per_run
-              ~max_job_payload_bytes:t.issuer.limits.max_job_payload_bytes
-            |> store
+            let* document =
+              Doc.of_bytes
+                bytes
+                ~poll
+                ~limits:t.issuer.limits.document
+                ~max_epochs:t.issuer.limits.max_epochs_per_run
+                ~max_jobs:t.issuer.limits.max_jobs_per_run
+                ~max_invocations:t.issuer.limits.max_invocations_per_run
+                ~max_job_payload_bytes:t.issuer.limits.max_job_payload_bytes
+              |> store
+            in
+            Ok (bytes, document)
         in
         if matches t document
-        then f ~env ~root |> Result.map_error ~f:(fun error -> Error.Store error)
+        then
+          f ~env ~root ~bytes ~document
+          |> Result.map_error ~f:(fun error -> Error.Store error)
         else Error Error.Foreign_or_stale)
       |> Result.map_error ~f:storage_error
   ;;
 
-  let with_lease t ~f = with_borrow t ~reader:None ~f:(fun ~env:_ ~root -> f ~root)
-  let with_storage_lease t ~f = with_borrow t ~reader:None ~f
+  let no_checkpoint () = ()
+
+  let with_lease t ~f =
+    with_borrow
+      t
+      ~reader:None
+      ~checkpoint:no_checkpoint
+      ~f:(fun ~env:_ ~root ~bytes:_ ~document:_ -> f ~root)
+  ;;
+
+  let with_storage_lease t ~f =
+    with_borrow
+      t
+      ~reader:None
+      ~checkpoint:no_checkpoint
+      ~f:(fun ~env ~root ~bytes:_ ~document:_ -> f ~env ~root)
+  ;;
 
   let with_retention_lease t ~reader ~f =
-    with_borrow t ~reader:(Some reader) ~f:(fun ~env:_ ~root -> f ~root)
+    with_borrow
+      t
+      ~reader:(Some reader)
+      ~checkpoint:no_checkpoint
+      ~f:(fun ~env:_ ~root ~bytes:_ ~document:_ -> f ~root)
+  ;;
+
+  let with_result_inventory_lease t ~reader ~checkpoint ~f =
+    with_borrow
+      t
+      ~reader:(Some reader)
+      ~checkpoint
+      ~f:(fun ~env:_ ~root ~bytes:_ ~document:_ -> f ~root)
+  ;;
+
+  module Inventory_rows = struct
+    type t =
+      { epochs : (int * Chatml_source.Digest.t) list
+      ; jobs : P.Developer_job.t list
+      }
+
+    let epochs t = t.epochs
+    let jobs t = t.jobs
+  end
+
+  let rows_for_inventory t ~reader ~checkpoint =
+    with_borrow
+      t
+      ~reader:(Some reader)
+      ~checkpoint
+      ~f:(fun ~env:_ ~root:_ ~bytes:_ ~document ->
+        let open Result.Let_syntax in
+        let epochs = Doc.epochs document in
+        let epoch_index = Hashtbl.create (module Int) in
+        let%bind () =
+          List.fold_result epochs ~init:() ~f:(fun () epoch ->
+            checkpoint ();
+            let number = Doc.epoch_number epoch in
+            if Hashtbl.mem epoch_index number
+            then
+              Error (Store_error.Corrupt "developer result run repeats historical epoch")
+            else (
+              Hashtbl.set epoch_index ~key:number ~data:(Doc.epoch_capture epoch);
+              Ok ()))
+        in
+        let%bind jobs =
+          List.fold_result (Doc.jobs document) ~init:[] ~f:(fun acc job ->
+            checkpoint ();
+            let owner = P.Developer_job.owner job in
+            if
+              not
+                (P.Id.Server.equal owner.host_id t.host_id
+                 && Id.equal owner.run_id t.run_id
+                 && P.Id.Principal.equal owner.principal_id t.principal_id)
+            then Error (Store_error.Corrupt "developer result job has foreign owner")
+            else (
+              match Hashtbl.find epoch_index owner.epoch with
+              | Some capture
+                when Chatml_source.Digest.equal
+                       (P.Developer_job.capture_fingerprint job)
+                       capture -> Ok (job :: acc)
+              | Some _ | None ->
+                Error
+                  (Store_error.Corrupt "developer result job has foreign epoch capture")))
+          |> Result.map ~f:List.rev
+        in
+        let%map epochs =
+          List.fold_result epochs ~init:[] ~f:(fun acc epoch ->
+            checkpoint ();
+            Ok ((Doc.epoch_number epoch, Doc.epoch_capture epoch) :: acc))
+        in
+        { Inventory_rows.epochs = List.rev epochs; jobs })
   ;;
 end
 
@@ -2095,6 +2205,7 @@ module Recovery = struct
       { job : P.Developer_job.t
       ; after : P.Developer_job.State.t
       ; prepared : Prepared.t
+      ; window_token : unit ref
       ; mutable can_reprepare : bool
       }
 
@@ -2313,7 +2424,7 @@ module Recovery = struct
                     }
                 in
                 let pending : Pending.t =
-                  { job; after; prepared; can_reprepare = false }
+                  { job; after; prepared; window_token = t.token; can_reprepare = false }
                 in
                 Ok pending)))
   ;;
@@ -2451,5 +2562,145 @@ module Recovery = struct
             Ok ()
           | Recovery_unopened | Recovery_open _ | Recovery_finished | Recovery_aborted ->
             Error Error.Foreign_or_stale))
+  ;;
+end
+
+module Result_recovery_affinity = struct
+  let bound store ~root ~window ~view =
+    Result_root.issued_by store root
+    && phys_equal window.Recovery.store store
+    && phys_equal view.Recovery.View.window_token window.token
+    && Id.equal (Result_root.run_id root) window.claim.run_id
+    && P.Id.Principal.equal
+         (Result_root.principal_id root)
+         window.handle.owner.principal_id
+  ;;
+
+  let with_charged_root root ~reader ~checkpoint ~f =
+    Result_root.with_borrow
+      root
+      ~reader:(Some reader)
+      ~checkpoint
+      ~f:(fun ~env:_ ~root:_ ~bytes ~document -> f ~bytes ~document)
+    |> Result.map_error ~f:(fun error -> Error.Store error)
+  ;;
+
+  let check_view store ~root ~window ~view ~reader ~checkpoint =
+    Recovery.with_operation window (fun () ->
+      if not (bound store ~root ~window ~view)
+      then Error Error.Foreign_or_stale
+      else
+        with_charged_root root ~reader ~checkpoint ~f:(fun ~bytes ~document ->
+          if same_observation store window.handle view.observation bytes document
+          then Ok ()
+          else Error (Store_error.Corrupt "developer result View changed")))
+  ;;
+
+  let check_pending
+        store
+        ~root
+        ~window
+        ~view
+        ~candidate
+        ~pending
+        ~after
+        ~reader
+        ~checkpoint
+    =
+    Recovery.with_operation window (fun () ->
+      if
+        (not (bound store ~root ~window ~view))
+        || (not (phys_equal candidate.Recovery.Candidate.view_token view.token))
+        || (not (phys_equal pending.Recovery.Pending.window_token window.token))
+        || (not (Recovery.same_pending window pending))
+        || (not
+              (List.exists view.candidates ~f:(fun current ->
+                 phys_equal current candidate)))
+        || (not (P.Developer_job.same_immutable candidate.job pending.job))
+        || (not
+              (Int.equal
+                 (P.Developer_job.state candidate.job).attempt
+                 (P.Developer_job.state pending.job).attempt))
+        || not
+             (Jsonaf.exactly_equal
+                (P.Developer_job.State.to_json after)
+                (P.Developer_job.State.to_json pending.after))
+      then Error Error.Foreign_or_stale
+      else
+        with_charged_root root ~reader ~checkpoint ~f:(fun ~bytes ~document ->
+          if
+            not
+              (String.equal bytes pending.prepared.before_bytes
+               || String.equal bytes pending.prepared.after_bytes)
+          then Error (Store_error.Corrupt "developer result Pending has a third revision")
+          else (
+            let original = pending.job in
+            let owner = P.Developer_job.owner original in
+            let* epoch =
+              find_epoch document ~owner
+              |> Result.map_error ~f:(fun _ ->
+                Store_error.Corrupt "developer result Pending epoch changed")
+            in
+            if
+              (not
+                 (Chatml_source.Digest.equal
+                    (Doc.epoch_capture epoch)
+                    (P.Developer_job.capture_fingerprint original)))
+              || not
+                   (Option.value_map
+                      (Doc.find_job document (P.Developer_job.id original))
+                      ~default:false
+                      ~f:(fun job ->
+                        P.Developer_job.same_immutable job original
+                        && Int.equal
+                             (P.Developer_job.state job).attempt
+                             (P.Developer_job.state original).attempt
+                        && Jsonaf.exactly_equal
+                             (P.Developer_job.State.to_json (P.Developer_job.state job))
+                             (P.Developer_job.State.to_json
+                                (if String.equal bytes pending.prepared.before_bytes
+                                 then P.Developer_job.state original
+                                 else after))))
+            then Error (Store_error.Corrupt "developer result Pending job changed")
+            else Ok ())))
+  ;;
+
+  let check_installed
+        store
+        ~root
+        ~window
+        ~view
+        ~candidate
+        ~pending
+        ~after
+        ~installed
+        ~reader
+        ~checkpoint
+    =
+    Recovery.with_operation window (fun () ->
+      let observed = Installed.observation installed in
+      if
+        (not (bound store ~root ~window ~view))
+        || (not (phys_equal candidate.Recovery.Candidate.view_token view.token))
+        || (not (phys_equal pending.Recovery.Pending.window_token window.token))
+        || (not (Installed.issued_by installed store))
+        || (not (String.equal observed.document_bytes pending.prepared.after_bytes))
+        || not
+             (Jsonaf.exactly_equal
+                (P.Developer_job.State.to_json after)
+                (P.Developer_job.State.to_json pending.after))
+      then Error Error.Foreign_or_stale
+      else
+        with_charged_root root ~reader ~checkpoint ~f:(fun ~bytes:_ ~document ->
+          let current = Doc.find_job document (P.Developer_job.id candidate.job) in
+          if
+            Option.exists current ~f:(fun job ->
+              P.Developer_job.same_immutable job candidate.job
+              && Jsonaf.exactly_equal
+                   (P.Developer_job.State.to_json (P.Developer_job.state job))
+                   (P.Developer_job.State.to_json after))
+          then Ok ()
+          else
+            Error (Store_error.Corrupt "installed developer result differs from Pending")))
   ;;
 end

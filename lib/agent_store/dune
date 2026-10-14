@@ -58,6 +58,8 @@
   developer_result_intent_document
   developer_result_intent
   developer_result_publisher
+  developer_result_inventory
+  developer_result_recovery
   job_result_intent
   result_publication_lock
   result_publication_phase
@@ -95,6 +97,7 @@
   developer_owner_document
   developer_result_intent_document
   developer_result_intent
+  developer_result_inventory
   result_publication_lock
   result_publication_phase)
  (libraries ochat.inference

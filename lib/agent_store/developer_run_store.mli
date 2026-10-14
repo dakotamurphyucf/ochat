@@ -414,6 +414,18 @@ module Result_root : sig
     -> reader:Retention_reader.t
     -> (t list, Error.t) result
 
+  (** The same complete Store recovery traversal for result startup. In
+      addition to Store's own budget and the shared reader, [checkpoint]
+      charges the enclosing result-inventory work allowance before each
+      entry, decode/publication step and bounded read chunk. Its exception or
+      cancellation propagates unchanged; this function does not manufacture a
+      new work budget. *)
+  val existing_for_result_inventory
+    :  store
+    -> reader:Retention_reader.t
+    -> checkpoint:(unit -> unit)
+    -> (t list, Error.t) result
+
   val host_id : t -> Agent_protocol.Id.Server.t
   val run_id : t -> Agent_protocol.Id.Developer_run.t
   val principal_id : t -> Agent_protocol.Id.Principal.t
@@ -454,6 +466,96 @@ module Result_root : sig
     -> reader:Retention_reader.t
     -> f:(root:Data_root.t -> ('a, Store_error.t) result)
     -> ('a, Store_error.t) result
+
+  (** The same root borrow for result startup, charging every document read,
+      decode and bounded chunk to both the shared reader and caller work
+      allowance. No callback runs unless the issuing root is still exact. *)
+  val with_result_inventory_lease
+    :  t
+    -> reader:Retention_reader.t
+    -> checkpoint:(unit -> unit)
+    -> f:(root:Data_root.t -> ('a, Store_error.t) result)
+    -> ('a, Store_error.t) result
+
+  module Inventory_rows : sig
+    type t
+
+    val epochs : t -> (int * Chatml_source.Digest.t) list
+    val jobs : t -> Agent_protocol.Developer_job.t list
+  end
+
+  (** Read the authentic persisted run document ONCE for a complete result
+      inventory. Historical epoch identity is necessary even for a verified
+      empty epoch directory. Each returned job retains its actual owner,
+      epoch and capture; both projections are comparison evidence only. The
+      Store document ceilings, shared [reader] and [checkpoint] charge read,
+      decode, each epoch/job visit and retained-list construction. No worker
+      Claim or result authority follows. A Blob must still match one exact
+      terminal job, not merely coincide in Blob ID. *)
+  val rows_for_inventory
+    :  t
+    -> reader:Retention_reader.t
+    -> checkpoint:(unit -> unit)
+    -> (Inventory_rows.t, Store_error.t) result
+end
+
+(** Comparison boundary for a result selected during this Store's exclusive
+    startup Recovery window. These checks do not read or stage result bytes,
+    mint a Claim, or commit a terminal. They bind the physical Store/root,
+    current one-shot window, exact View/Candidate and original historical
+    owner/epoch/capture before higher result custody uses filesystem evidence.
+    Every check rereads current Store authority, so call it before and after
+    yielding inventory or stage I/O; an earlier [Ok] is never a lease. *)
+module Result_recovery_affinity : sig
+  (** Every authoritative read uses this action's shared bounded Reader and
+      checkpoint. A caller cannot use an earlier uncharged observation to
+      bypass currentness after a yielding scan or stage operation. *)
+  val check_view
+    :  t
+    -> root:Result_root.t
+    -> window:Recovery.t
+    -> view:Recovery.View.t
+    -> reader:Retention_reader.t
+    -> checkpoint:(unit -> unit)
+    -> (unit, Error.t) result
+
+  (** [candidate] must belong to [view] from this physical window. [pending]
+      must be that window's CURRENT exact preparation for the candidate's
+      job/attempt and byte-identical [after]. A matching DTO or Pending from
+      another window/Store does not pass. Successful terminal installation
+      clears Pending and makes this operation reject. *)
+  val check_pending
+    :  t
+    -> root:Result_root.t
+    -> window:Recovery.t
+    -> view:Recovery.View.t
+    -> candidate:Recovery.Candidate.t
+    -> pending:Recovery.Pending.t
+    -> after:Agent_protocol.Developer_job.State.t
+    -> reader:Retention_reader.t
+    -> checkpoint:(unit -> unit)
+    -> (unit, Error.t) result
+
+  (** Exact installed-byte comparison for the original physical window and
+      retained Pending. The Store-issued Installed observation must contain
+      that Pending's COMPLETE prepared after-bytes. Installed has no separate
+      provenance token; this claims only exact persisted identity, not a
+      stronger provenance fact. The same reader validates the exact selected
+      job in the current document before the marker is acknowledged; unrelated
+      later job revisions may advance that document. The original window must
+      remain open through acknowledgement. *)
+  val check_installed
+    :  t
+    -> root:Result_root.t
+    -> window:Recovery.t
+    -> view:Recovery.View.t
+    -> candidate:Recovery.Candidate.t
+    -> pending:Recovery.Pending.t
+    -> after:Agent_protocol.Developer_job.State.t
+    -> installed:Installed.t
+    -> reader:Retention_reader.t
+    -> checkpoint:(unit -> unit)
+    -> (unit, Error.t) result
 end
 
 (** Read the authoritative latest epoch/phase under the daemon writer. This is
