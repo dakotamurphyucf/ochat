@@ -162,7 +162,7 @@ module Project_candidate = struct
     | [] | _ :: _ -> false
   ;;
 
-  let analyze_validated inputs ~receipt ~policy ~env ~target ~checkpoint =
+  let analyze_validated_using inputs ~receipt ~policy ~checkpoint ~analyze =
     if
       (not
          (Context.Identity.equal
@@ -176,7 +176,7 @@ module Project_candidate = struct
     then Error Error.Receipt_mismatch
     else (
       let build = Effective.Overlay.build receipt in
-      match Checked.analyze_build build ~policy ~env ~target ~checkpoint with
+      match analyze build with
       | Error error -> Error error
       | Ok checked ->
         let stamp =
@@ -189,6 +189,16 @@ module Project_candidate = struct
           }
         in
         Ok { payload = { Project_payload.stamp; checked }; inputs; policy })
+  ;;
+
+  let analyze_validated inputs ~receipt ~policy ~env ~target ~checkpoint =
+    analyze_validated_using inputs ~receipt ~policy ~checkpoint ~analyze:(fun build ->
+      Checked.analyze_build build ~policy ~env ~target ~checkpoint)
+  ;;
+
+  let analyze_validated_with_contract inputs ~receipt ~contract ~policy ~env ~checkpoint =
+    analyze_validated_using inputs ~receipt ~policy ~checkpoint ~analyze:(fun build ->
+      Checked.analyze_build_with_contract build ~contract ~policy ~env ~checkpoint)
   ;;
 end
 

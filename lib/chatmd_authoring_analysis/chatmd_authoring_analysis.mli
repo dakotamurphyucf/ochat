@@ -145,6 +145,16 @@ module Candidate : sig
     -> target:Chatml_compilation.target
     -> checkpoint:(unit -> unit)
     -> (t, Error.t) Result.t
+
+  (** Same selected-script stamp and captured-source checks with the actual
+      host-selected contract for this script. *)
+  val analyze_with_contract
+    :  Script.t
+    -> contract:Chatml.Chatml_compiler_contract.t
+    -> policy:Chatml_authoring_analysis.Policy.t
+    -> env:Eio_unix.Stdenv.base
+    -> checkpoint:(unit -> unit)
+    -> (t, Error.t) Result.t
 end
 
 module Document_cache : sig

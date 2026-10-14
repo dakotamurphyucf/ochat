@@ -317,7 +317,7 @@ let implementation_sources =
   ; ( "lib/agent_server/delegation_lifecycle.ml"
     , "5bfed8ecc3cd3f7976457adbab4a5e875f8b56bd08f4856d18149c694303ad49" )
   ; ( "lib/chatml/chatml_compilation.ml"
-    , "6d3d2bce6ede0058beb664110fd59aa541783c6f8787168eb6852522ce7b6a07" )
+    , "272fee59d9966491812bd3746a53d077ff83c2eac76b60aaf4ddce028df37ab0" )
   ; ( "lib/chatml/chatml_execution.ml"
     , "4a4bf26d29069eec620086008fa9883b20102ea425753489ed2f72a3abb1afdd" )
   ; ( "lib/chatml/chatml_value_codec.ml"
