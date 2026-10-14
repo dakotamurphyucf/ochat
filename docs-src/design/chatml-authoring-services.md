@@ -588,6 +588,19 @@ cannot extend an expired upload. Publication separately rechecks the current
 host-selected contracts, source grant, wall-clock deadline and daemon lock
 immediately before the durable marker rename. A published read also checks
 the deadline and lock after materialization, before lending the capture.
+Rebinding that capture uses an independent current bundle-read grant under the
+same host gate. Before this request materializes captured source bytes, the
+host compares the saved manifest and receipt with its current selected target,
+environment and compiler contract. The store may perform bounded internal
+recovery reads before this comparison. A rebound Project restores the saved
+**final** lock and exact captured graph under the current contract; it does
+not need the original pre-composition Build. A rebound ChatMD document is
+reparsed from its captured members, binds actual declarations and restores
+each selected script graph under the same aggregate budget. Source-only scripts
+remain graph-free. After waits, the host repeats actor, read-grant and selected
+contract checks before returning. The receipt and rebound value are immutable
+evidence, never a continuing read grant or execution authority; absent,
+foreign, expired and stale captures have finite, path-free outcomes.
 Ordinary staging timestamps govern operation admission; completed staging I/O
 is not retroactively cancelled at the deadline. Revocation or
 cancellation may leave durable accepted bytes with an uncertain reply, which

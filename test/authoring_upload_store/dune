@@ -6,8 +6,11 @@
   core
   eio
   eio_main
+  eio.mock
   mirage-crypto-rng.unix
   ochat.agent_store
+  ochat.agent_server
+  ochat.operator_authorization
   ochat.agent_protocol
   ochat.chatml_source
   ochat.chatml_project

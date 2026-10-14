@@ -3,6 +3,7 @@ module Store = Agent_store.Authoring_upload_store
 module Bundle = Agent_protocol.Authoring_bundle.Bundle
 module Actor = Operator_authorization
 module Validation = Authoring_upload_validation
+module Rebind_validation = Authoring_upload_rebind
 
 module Upload_policy = struct
   type t =
@@ -29,6 +30,23 @@ module Publication = struct
   let create ~policy ~limits ~document_dir = { policy; limits; document_dir }
 end
 
+module Rebind_policy = struct
+  module Selected = Rebind_validation.Selected
+  include Rebind_validation.Policy
+end
+
+module Rebind = struct
+  type t =
+    { policy : Rebind_policy.t
+    ; limits : Chatml_authoring_bundle_project.Limits.t
+    ; document_dir : Eio.Fs.dir_ty Eio.Path.t
+    }
+
+  let create ~policy ~limits ~document_dir = { policy; limits; document_dir }
+end
+
+module Rebound = Rebind_validation.Rebound
+
 module Error = struct
   module Store_code = struct
     type t =
@@ -52,6 +70,7 @@ module Error = struct
     | Closed
     | Busy
     | Selection_unavailable
+    | Stale_capture
     | Invalid_closure
     | Resource_limit
     | Store of Store_code.t
@@ -78,6 +97,7 @@ type t =
   ; now : unit -> Agent_protocol.Timestamp.t
   ; upload_policy : Upload_policy.t
   ; publication : Publication.t option
+  ; rebind : Rebind.t option
   ; gate : Eio.Mutex.t
   ; mutable active_cancel : Eio.Cancel.t option
   ; mutable closed : bool
@@ -122,16 +142,26 @@ let check t actor parent =
       else Error Error.Unauthorized)
 ;;
 
-let check_or_raise t actor parent =
-  match check t actor parent with
+let check_read t actor policy =
+  let open Result.Let_syntax in
+  let%bind () = check_host t in
+  if not (Actor.is_current actor)
+  then Error Error.Expired_actor
+  else if not (Rebind_policy.authorize_read policy actor)
+  then Error Error.Unauthorized
+  else Ok ()
+;;
+
+let check_or_raise check =
+  match check () with
   | Ok () -> ()
   | Error error -> raise (Revoked error)
 ;;
 
-let with_request t ~actor ~parent ~checkpoint f =
+let with_operation t ~actor ~check ~map_error ~checkpoint f =
   let open Result.Let_syntax in
   let%bind () = if is_active t then Error Error.Busy else Ok () in
-  let%bind () = check t actor parent in
+  let%bind () = check () in
   let outcome =
     Eio.Mutex.use_rw ~protect:false t.gate (fun () ->
       match
@@ -141,11 +171,11 @@ let with_request t ~actor ~parent ~checkpoint f =
             ~finally:(fun () -> t.active_cancel <- None)
             ~f:(fun () ->
               with_active t (fun () ->
-                let%bind () = check t actor parent in
+                let%bind () = check () in
                 let guarded_checkpoint () =
-                  check_or_raise t actor parent;
+                  check_or_raise check;
                   checkpoint ();
-                  check_or_raise t actor parent
+                  check_or_raise check
                 in
                 let result =
                   f
@@ -153,8 +183,8 @@ let with_request t ~actor ~parent ~checkpoint f =
                     ~now:t.now
                     ~checkpoint:guarded_checkpoint
                 in
-                let%bind () = check t actor parent in
-                Result.map_error result ~f:Error.of_store)))
+                let%bind () = check () in
+                Result.map_error result ~f:map_error)))
       with
       | result -> `Returned result
       | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ()))
@@ -163,6 +193,16 @@ let with_request t ~actor ~parent ~checkpoint f =
   | `Returned result -> result
   | `Raised (Revoked error, _) -> Error error
   | `Raised (exn, backtrace) -> Stdlib.Printexc.raise_with_backtrace exn backtrace
+;;
+
+let with_request t ~actor ~parent ~checkpoint f =
+  with_operation
+    t
+    ~actor
+    ~check:(fun () -> check t actor parent)
+    ~map_error:Error.of_store
+    ~checkpoint
+    f
 ;;
 
 let close_and_wait t =
@@ -186,7 +226,7 @@ let close_and_wait t =
       | `Raised (exn, backtrace) -> Stdlib.Printexc.raise_with_backtrace exn backtrace))
 ;;
 
-let create ?publication store ~sw ~clock ~upload_policy =
+let create ?publication ?rebind store ~sw ~clock ~upload_policy =
   Eio.Switch.check sw;
   let now () =
     Eio.Time.now clock
@@ -200,6 +240,7 @@ let create ?publication store ~sw ~clock ~upload_policy =
     ; now
     ; upload_policy
     ; publication
+    ; rebind
     ; gate = Eio.Mutex.create ()
     ; active_cancel = None
     ; closed = false
@@ -297,7 +338,7 @@ let publish t ~actor ~sealed ~checkpoint =
                        | Unavailable -> assert false)))
             | Ok proof ->
               let final_admission () =
-                check_or_raise t actor None;
+                check_or_raise (fun () -> check t actor None);
                 if
                   not
                     (Validation.check_current
@@ -316,6 +357,83 @@ let publish t ~actor ~sealed ~checkpoint =
                 ~now
                 ~checkpoint:selected_checkpoint
                 ~final_admission)))
+;;
+
+let rebind t ~actor ~bundle_id ~checkpoint =
+  match t.rebind with
+  | None -> Error Error.Selection_unavailable
+  | Some config ->
+    let admitted = ref None in
+    let check_current () =
+      let open Result.Let_syntax in
+      let%bind () = check_read t actor config.policy in
+      match !admitted with
+      | None -> Ok ()
+      | Some admitted ->
+        if
+          Rebind_validation.check_current
+            admitted
+            ~policy:config.policy
+            ~actor
+            ~checkpoint:Fn.id
+        then Ok ()
+        else Error Error.Stale_capture
+    in
+    with_operation
+      t
+      ~actor
+      ~check:check_current
+      ~map_error:Fn.id
+      ~checkpoint
+      (fun ~principal ~now ~checkpoint ->
+         let selected_checkpoint = checkpoint in
+         let admit_metadata receipt manifest =
+           check_or_raise check_current;
+           let selected =
+             Rebind_validation.admit
+               config.policy
+               ~actor
+               ~receipt
+               ~manifest
+               ~checkpoint:Fn.id
+           in
+           (match selected with
+            | Error Rebind_validation.Error.Selection_unavailable ->
+              raise (Revoked Error.Selection_unavailable)
+            | Error Stale_capture -> raise (Revoked Error.Stale_capture)
+            | Error Invalid_closure -> raise (Revoked Error.Invalid_closure)
+            | Error Resource_limit -> raise (Revoked Error.Resource_limit)
+            | Ok selected -> admitted := Some selected);
+           check_or_raise check_current
+         in
+         match
+           Store.with_published
+             t.store
+             ~principal
+             ~bundle_id
+             ~now
+             ~checkpoint:selected_checkpoint
+             ~admit_metadata
+             ~f:(fun capture ->
+               let selected = Option.value_exn !admitted in
+               let result =
+                 Rebind_validation.validate
+                   selected
+                   ~capture
+                   ~document_dir:config.document_dir
+                   ~limits:config.limits
+                   ~checkpoint:selected_checkpoint
+               in
+               selected_checkpoint ();
+               Result.map_error result ~f:(function
+                 | Rebind_validation.Error.Selection_unavailable ->
+                   Error.Selection_unavailable
+                 | Stale_capture -> Error.Stale_capture
+                 | Invalid_closure -> Error.Invalid_closure
+                 | Resource_limit -> Error.Resource_limit))
+         with
+         | Error problem -> Error (Error.of_store problem)
+         | Ok result -> result)
 ;;
 
 let status t ~actor ~(request : Bundle.Status.request) ~checkpoint =

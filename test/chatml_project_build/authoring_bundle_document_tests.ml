@@ -185,6 +185,42 @@ let%test_unit "actual selected ChatMD script binds its captured Project entry" =
          (B.prepared (Chatml_authoring_bundle_project.Validated.build built))
          (S.id entry)
        |> Option.value_exn);
+    let original_build = Chatml_authoring_bundle_project.Validated.build built in
+    let saved_lock = B.lock_source original_build in
+    let saved_sources =
+      R.sources (B.prepared original_build)
+      |> List.filter ~f:(fun source -> not (S.Id.equal (S.id source) (S.id saved_lock)))
+    in
+    let rebound =
+      match
+        A.rebind
+          upload
+          ~sources:(root :: catalog_sources)
+          ~dir
+          ~selected_projects:
+            [ ( selector
+              , A.Published_selection.create
+                  ~contract
+                  ~lock_source:saved_lock
+                  ~sources:saved_sources )
+            ]
+          ~limits:(limits ())
+          ~checkpoint:ignore
+      with
+      | Ok value -> value
+      | Error _ -> failwith "genuine selected document rebind rejected"
+    in
+    let rebound_script = List.hd_exn (A.Validated.scripts rebound) in
+    let rebound_build =
+      A.Validated.Script.project rebound_script
+      |> Option.value_exn
+      |> Chatml_authoring_bundle_project.Validated.build
+    in
+    assert (
+      S.Digest.equal
+        (R.fingerprint (B.prepared original_build))
+        (R.fingerprint (B.prepared rebound_build)));
+    Support.assert_same_source saved_lock (B.lock_source rebound_build);
     let falsely_source_only =
       W.Manifest.Script.create ~selector ~choice:Source_only |> wire_ok
     in

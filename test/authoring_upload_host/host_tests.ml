@@ -275,9 +275,25 @@ let%test_unit "host publishes only an actor-current captured source-only documen
           ~limits:Publication_tests.validation_limits
           ~document_dir:(Eio.Stdenv.fs env)
       in
+      let read_allowed = ref true in
+      let selected = ref 0 in
+      let rebind_policy =
+        Host.Rebind_policy.create
+          ~authorize_read:(fun _ -> !read_allowed)
+          ~select:(fun _ _ _ ->
+            Int.incr selected;
+            None)
+      in
+      let rebind =
+        Host.Rebind.create
+          ~policy:rebind_policy
+          ~limits:Publication_tests.validation_limits
+          ~document_dir:(Eio.Stdenv.fs env)
+      in
       let host =
         Host.create
           ~publication
+          ~rebind
           store
           ~sw:host_sw
           ~clock:(Eio_mock.Clock.make ())
@@ -339,11 +355,64 @@ let%test_unit "host publishes only an actor-current captured source-only documen
          with
          | Published published -> B.Receipt.equal receipt published
          | Open _ | Ready | Validating | Rejected _ | Expired -> false);
+      let bundle_id = B.Receipt.bundle_id receipt in
+      let successful_polls = ref 0 in
+      let rebound =
+        Host.rebind host ~actor ~bundle_id ~checkpoint:(fun () ->
+          Int.incr successful_polls)
+        |> host_ok
+      in
+      check
+        "source-only rebind retains the saved receipt and a graph-free parsed document"
+        (B.Receipt.equal receipt (Host.Rebound.receipt rebound)
+         && (match Host.Rebound.basis rebound with
+             | Chatmd_document document ->
+               List.length (Chatml_authoring_bundle_document.Validated.scripts document)
+               = 1
+             | Project _ -> false)
+         && Int.equal !selected 0);
+      let sentinel = Failure "interrupted-rebind" in
+      let polls = ref 0 in
+      check "successful rebind reached its protected callback" (!successful_polls > 0);
+      let interrupt_at = !successful_polls in
+      check
+        "interrupted protected read preserves exception and releases its lease"
+        (match
+           Host.rebind host ~actor ~bundle_id ~checkpoint:(fun () ->
+             Int.incr polls;
+             if !polls = interrupt_at then raise sentinel)
+         with
+         | exception exn -> phys_equal exn sentinel
+         | Ok _ | Error _ -> false);
+      check
+        "interrupted read leaves the same bundle rebindable"
+        (Result.is_ok (Host.rebind host ~actor ~bundle_id ~checkpoint:Fn.id));
       allowed := false;
       check
         "revoked grant cannot reuse published authority"
         (match Host.publish host ~actor ~sealed ~checkpoint:Fn.id with
          | Error Host.Error.Unauthorized -> true
+         | Ok _ | Error _ -> false);
+      check
+        "bundle read grant is independent of revoked upload grant"
+        (Result.is_ok (Host.rebind host ~actor ~bundle_id ~checkpoint:Fn.id));
+      read_allowed := false;
+      check
+        "revoked read grant precedes private bundle access"
+        (match Host.rebind host ~actor ~bundle_id ~checkpoint:Fn.id with
+         | Error Host.Error.Unauthorized -> true
+         | Ok _ | Error _ -> false);
+      read_allowed := true;
+      check
+        "foreign principal cannot inspect a published bundle"
+        (match
+           Host.rebind
+             host
+             ~actor:(make_actor ~id:foreign current)
+             ~bundle_id
+             ~checkpoint:Fn.id
+         with
+         | Error (Host.Error.Store Host.Error.Store_code.Missing_or_foreign) -> true
          | Ok _ | Error _ -> false);
       Host.close_and_wait host |> host_ok))
 ;;

@@ -72,6 +72,59 @@ module Publication : sig
     -> t
 end
 
+module Rebind_policy : sig
+  type t
+
+  module Selected : sig
+    type t
+
+    val create
+      :  environment:string
+      -> contract:Chatml.Chatml_compiler_contract.t
+      -> t Core.Or_error.t
+
+    val environment : t -> string
+    val contract : t -> Chatml.Chatml_compiler_contract.t
+  end
+
+  (** Independent bundle-read permission, separate from upload/write and
+      message scopes. Both callbacks are bounded, non-yielding reads of
+      already admitted current host state: no catalog reload, filesystem
+      acquisition or wait. A saved receipt/manifest only supplies comparison
+      coordinates. Source_only scripts select no Project contract. *)
+  val create
+    :  authorize_read:(Operator_authorization.t -> bool)
+    -> select:
+         (Operator_authorization.t
+          -> Bundle.Manifest.t
+          -> Bundle.Manifest.Script.Selector.t option
+          -> Selected.t option)
+    -> t
+end
+
+module Rebind : sig
+  type t
+
+  (** Optional for hosts with no published-bundle read service. The directory
+      anchors generated parser display provenance, never a source fetch. *)
+  val create
+    :  policy:Rebind_policy.t
+    -> limits:Chatml_authoring_bundle_project.Limits.t
+    -> document_dir:Eio.Fs.dir_ty Eio.Path.t
+    -> t
+end
+
+module Rebound : sig
+  type basis =
+    | Project of Chatml_authoring_bundle_project.Validated.t
+    | Chatmd_document of Chatml_authoring_bundle_document.Validated.t
+
+  type t
+
+  val receipt : t -> Bundle.Receipt.t
+  val basis : t -> basis
+end
+
 module Error : sig
   module Store_code : sig
     type t =
@@ -95,6 +148,7 @@ module Error : sig
     | Closed
     | Busy
     | Selection_unavailable
+    | Stale_capture
     | Invalid_closure
     | Resource_limit
     | Store of Store_code.t
@@ -115,6 +169,7 @@ end
     with another facade or used afterward. *)
 val create
   :  ?publication:Publication.t
+  -> ?rebind:Rebind.t
   -> Store.t
   -> sw:Eio.Switch.t
   -> clock:_ Eio.Time.clock
@@ -174,6 +229,23 @@ val publish
   -> sealed:Store.sealed
   -> checkpoint:(unit -> unit)
   -> (Bundle.Receipt.t, Error.t) result
+
+(** Independently authorize current bundle read before Store lookup. Under the
+    SAME host gate/cancellation scope, select current actual target/environment/
+    compiler contracts from saved metadata before this request's captured bytes
+    are materialized, then restore final saved Project locks and reparse genuine
+    captured ChatMD declarations while Store holds a protected read lease.
+    Current actor, read grant and selections are rechecked after waits and
+    before reply. Foreign/missing IDs share one Store code; changed selected
+    contract/receipt/graph identity returns Stale_capture. A competing borrow
+    returns Busy. The immutable Rebound value is data, never a continuing
+    read or execution grant; future use requires its own authorization. *)
+val rebind
+  :  t
+  -> actor:Operator_authorization.t
+  -> bundle_id:Agent_protocol.Id.Authoring_bundle.t
+  -> checkpoint:(unit -> unit)
+  -> (Rebound.t, Error.t) result
 
 (** This returns the Store's exact Open/Ready/Validating/Published/Rejected/
     Expired state. The facade never manufactures a receipt. *)
