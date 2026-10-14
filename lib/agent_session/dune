@@ -124,6 +124,7 @@
   staged_ingress
   staged_notifications
   staged_schedules
+  script_job_kernel
   script_job_service
   script_subscription_service
   script_notification_service

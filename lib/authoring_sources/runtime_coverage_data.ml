@@ -135,12 +135,15 @@ let shared_features =
        retain live authority"
     , [ "lib/chat_response/background_job_operations.ml"
       ; "lib/chat_response/background_request.ml"
+      ; "lib/agent_session/script_job_kernel.ml"
       ; "lib/agent_session/script_job_service.ml"
       ; "lib/agent_session/staged_jobs.ml"
       ]
     , "runtime.jobs.owned"
     , [ "test/chatml_composition/background_tests.ml"
       ; "test/agent_session/background_transaction_tests.ml"
+      ; "test/agent_session/moderator_job_transaction_tests.ml"
+      ; "test/script_job_kernel/kernel_tests.ml"
       ] )
   ; ( "jobs.results"
     , "Retained status, bounded completion projections and authorized artifact reads"
@@ -345,8 +348,10 @@ let implementation_sources =
     , "bd4c4f73cb75daa367a43532591993c92877b159eb2dfe392b751afa281c483d" )
   ; ( "lib/agent_session/script_ingress_service.ml"
     , "0aaa0f00f9fe546c442cc7dcf1bf513d87797e9beea516222f08d17ef2f7a097" )
+  ; ( "lib/agent_session/script_job_kernel.ml"
+    , "b9d98e0898745241b16656b8a5b4b234f26cf6ff822e1a352bcab50ea94212ae" )
   ; ( "lib/agent_session/script_job_service.ml"
-    , "498990091322bf43c97b429bd9b0cdd68485b5e61d04c9a2159dc262fdfde6c9" )
+    , "1c0f5fc1be52cb135b05be452745483556a87a2caf3ed0d2025ccde86dfdfb57" )
   ; ( "lib/agent_session/script_notification_service.ml"
     , "ca17dedcd13940b10e7b530343d61d2cfc8b681cee2d8b03e02498c68644a781" )
   ; ( "lib/agent_session/script_schedule_service.ml"
