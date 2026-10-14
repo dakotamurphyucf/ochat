@@ -6,6 +6,7 @@ module Request = Chat_response.Background_request
 module Terminal_queue = Developer_terminal_queue
 module H = P.Host_invocation
 module Job_scope = Agent_session.Developer_job_scope
+module Model_transaction = Developer_external_model_transaction
 
 module Limits = struct
   type t =
@@ -125,6 +126,7 @@ and t =
   ; mutable control_pending : control_pending option
   ; mutable control_call : call option
   ; mutable dispatch_owner : native_scope option
+  ; mutable external_model : external_model_slot option
   ; mutable effect_revision : int
   ; mutable reconciling : bool
   }
@@ -136,6 +138,7 @@ and action =
   ; mutable stage_in_flight : int
   ; mutable sealed : selection option
   ; mutable live : bool
+  ; mutable callback_switch : Eio.Switch.t option
   ; mutable queued : bool
   ; call : call
   ; terminal_slot : terminal_intent Terminal_queue.callback
@@ -166,6 +169,27 @@ and control_pending =
   ; job : P.Developer_job.t
   ; witness : current
   }
+
+and external_model_source =
+  | Root_model of action
+  | Native_model of native_scope
+
+and external_model_slot =
+  | Model_preparing of
+      { token : unit ref
+      ; source : external_model_source
+      }
+  | Model_reserved of
+      { token : unit ref
+      ; source : external_model_source
+      ; job : P.Developer_job.t
+      ; reservation : Job_capacity.reservation
+      }
+  | Model_pending of
+      { token : unit ref
+      ; source : external_model_source
+      ; transaction : Model_transaction.t
+      }
 
 and native_registration =
   { call : call
@@ -286,7 +310,18 @@ let job_policy t = t.job_policy
 let issued_by_store t store = Store.issued_by store t.handle
 let native_now t = t.registry.now ()
 
-let check_current_local ?control t (witness : current) ~allow_pending =
+let external_model_token = function
+  | Model_preparing { token; _ }
+  | Model_reserved { token; _ }
+  | Model_pending { token; _ } -> token
+;;
+
+let owns_external_model t token =
+  Option.value_map t.external_model ~default:false ~f:(fun slot ->
+    phys_equal (external_model_token slot) token)
+;;
+
+let check_current_local ?control ?external_model t (witness : current) ~allow_pending =
   if
     (not (phys_equal witness.issuer t))
     || (not (same_domain t.registry))
@@ -300,6 +335,10 @@ let check_current_local ?control t (witness : current) ~allow_pending =
         | None, None -> false
         | Some pending, Some allowed when phys_equal pending allowed -> false
         | None, Some _ | Some _, None | Some _, Some _ -> true)
+    || (match t.external_model, external_model with
+        | None, None -> false
+        | Some slot, Some allowed -> not (phys_equal (external_model_token slot) allowed)
+        | None, Some _ | Some _, None -> true)
     || Option.is_some t.dispatch_owner
     || t.reconciling
     || (not (Operator_authorization.is_current t.actor))
@@ -313,7 +352,21 @@ let check_current_local ?control t (witness : current) ~allow_pending =
 
 let check_effect_now t witness = check_current_local t witness ~allow_pending:false
 
-let current t =
+let restore_live_after_retention t =
+  if
+    (match t.state with
+     | Quarantined -> true
+     | Live | Closing | Closed -> false)
+    && Option.is_none t.pending
+    && Option.is_none t.control_pending
+    && Option.is_none t.dispatch_owner
+    && Option.is_none t.external_model
+    && List.is_empty t.unresolved_native
+    && Option.is_some (Terminal_queue.effect_witness t.terminals)
+  then t.state <- Live
+;;
+
+let current_with ?external_model t =
   if not (same_domain t.registry)
   then invalid "developer run owner belongs to another domain"
   else
@@ -332,8 +385,12 @@ let current t =
           ; terminal_witness
           }
         in
-        Result.map (check_effect_now t witness) ~f:(fun () -> witness))
+        Result.map
+          (check_current_local ?external_model t witness ~allow_pending:false)
+          ~f:(fun () -> witness))
 ;;
+
+let current t = current_with t
 
 module Current = struct
   type nonrec t = current
@@ -595,6 +652,315 @@ let same_action_fiber action =
     phys_equal current action)
 ;;
 
+let native_effect_parent_live_now (scope : native_scope) =
+  same_domain scope.issuer.registry
+  && (not scope.bracket_exited)
+  && (not scope.callback_complete)
+  && scope.action.live
+  && Option.value_map scope.registration.call.cancel ~default:false ~f:(fun cancel ->
+    Option.is_none (Eio.Cancel.get_error cancel))
+  && Option.value_map scope.callback_switch ~default:false ~f:(fun sw ->
+    Option.is_none (Eio.Switch.get_error sw))
+;;
+
+let model_source_issuer = function
+  | Root_model action -> action.issuer
+  | Native_model scope -> scope.issuer
+;;
+
+let model_source_now source ~check_parent_now =
+  let issuer = model_source_issuer source in
+  let capture_fingerprint = Chatml_developer_capture.fingerprint issuer.capture in
+  let action =
+    match source with
+    | Root_model action -> action
+    | Native_model scope -> scope.action
+  in
+  if
+    (not (same_domain issuer.registry))
+    || (not (same_action_fiber action))
+    || (not action.live)
+    || Option.is_some action.sealed
+  then invalid "developer model call is outside its physical callback"
+  else (
+    match source with
+    | Root_model action ->
+      if
+        Option.value_map issuer.active ~default:false ~f:(phys_equal action)
+        && Option.value_map action.call.cancel ~default:false ~f:(fun cancel ->
+          Option.is_none (Eio.Cancel.get_error cancel))
+        && Option.value_map action.callback_switch ~default:false ~f:(fun sw ->
+          Option.is_none (Eio.Switch.get_error sw))
+      then Ok ()
+      else invalid "developer model root action is no longer current"
+    | Native_model scope ->
+      let* () =
+        if
+          (not scope.callback_complete)
+          && Option.is_some scope.dispatched
+          && Option.is_some scope.callback_switch
+          && Option.value_map
+               (Hashtbl.find
+                  issuer.native_calls
+                  (H.context scope.registration.invocation).id)
+               ~default:false
+               ~f:(fun registration -> phys_equal registration scope.registration)
+        then Ok ()
+        else invalid "developer model native callback is no longer registered"
+      in
+      let* () =
+        if native_effect_parent_live_now scope
+        then Ok ()
+        else invalid "developer model native parent was cancelled"
+      in
+      let* () =
+        match scope.registration.job_parent with
+        | None -> Ok ()
+        | Some parent ->
+          Job_scope.Parent.check_now parent ~owner:issuer.owner ~capture_fingerprint
+      in
+      check_parent_now ())
+;;
+
+let reserve_external_model source ~check_parent_now =
+  let issuer = model_source_issuer source in
+  let* () = model_source_now source ~check_parent_now in
+  if
+    Option.is_some issuer.external_model
+    || Option.is_some issuer.pending
+    || Option.is_some issuer.control_pending
+    || Option.is_some issuer.dispatch_owner
+    || issuer.reconciling
+  then invalid "developer run already owns a mutation"
+  else if Int.equal issuer.effect_revision Int.max_value
+  then invalid "developer run effect revision is exhausted"
+  else (
+    let token = ref () in
+    issuer.external_model <- Some (Model_preparing { token; source });
+    issuer.effect_revision <- issuer.effect_revision + 1;
+    Ok token)
+;;
+
+let model_source_parent_check source =
+  match source with
+  | Root_model _ -> Ok ()
+  | Native_model scope ->
+    (match scope.registration.job_parent with
+     | None -> Ok ()
+     | Some parent ->
+       Job_scope.Parent.check
+         parent
+         ~owner:scope.issuer.owner
+         ~capture_fingerprint:(Chatml_developer_capture.fingerprint scope.issuer.capture))
+;;
+
+let model_source_launch source =
+  match source with
+  | Root_model _ ->
+    P.Developer_job.Launch.create ~parent:Run_root ~parent_job:None ~nested_depth:0
+  | Native_model scope ->
+    let context = H.context scope.registration.invocation in
+    let* parent_job, nested_depth =
+      match scope.registration.job_parent with
+      | None -> Ok (None, 0)
+      | Some parent ->
+        let depth = Job_scope.Parent.nested_depth parent in
+        if Int.equal depth Int.max_value
+        then invalid "developer model nesting depth overflows"
+        else
+          Ok
+            ( Some (Job_scope.Parent.job_id parent, Job_scope.Parent.attempt parent)
+            , depth + 1 )
+    in
+    P.Developer_job.Launch.create
+      ~parent:(Invocation context.id)
+      ~parent_job
+      ~nested_depth
+;;
+
+let model_parent_in_observation source observed =
+  match source with
+  | Root_model _ -> Ok Store.External_model_parent.Run_root
+  | Native_model scope ->
+    let id = (H.context scope.registration.invocation).id in
+    let lookup = Store.find_invocation observed id in
+    (match Store.Invocation_lookup.prior lookup, scope.dispatched with
+     | Some prior, Some dispatched
+       when H.equal_context
+              (H.context (Store.Invocation_observation.value prior))
+              (H.context dispatched)
+            && P.Invocation.equal_status (H.status dispatched) Dispatching
+            && P.Invocation.equal_status
+                 (H.status (Store.Invocation_observation.value prior))
+                 Dispatching -> Ok (Store.External_model_parent.Dispatching lookup)
+     | None, _ | Some _, None | Some _, Some _ ->
+       invalid "developer model parent is not durably dispatching")
+;;
+
+let clear_external_model issuer token =
+  if owns_external_model issuer token
+  then (
+    issuer.external_model <- None;
+    restore_live_after_retention issuer)
+;;
+
+let abandon_external_model issuer token =
+  match issuer.external_model with
+  | Some (Model_preparing current) when phys_equal current.token token ->
+    clear_external_model issuer token
+  | Some (Model_reserved current) when phys_equal current.token token ->
+    Job_capacity.abort current.reservation;
+    clear_external_model issuer token
+  | Some (Model_pending current) when phys_equal current.token token ->
+    issuer.state <- Quarantined
+  | None | Some _ -> ()
+;;
+
+let reconcile_external_model_once issuer token =
+  match issuer.external_model with
+  | Some (Model_pending current) when phys_equal current.token token ->
+    let* settlement =
+      Model_transaction.reconcile current.transaction issuer.handle
+      |> Result.map_error ~f:error_of_store
+    in
+    (match settlement with
+     | Store.Settlement.Installed _ ->
+       clear_external_model issuer token;
+       Ok settlement
+     | Absent | Prewrite_conflict ->
+       Model_transaction.abort_proven_absent current.transaction;
+       clear_external_model issuer token;
+       Ok settlement
+     | Diverged ->
+       issuer.state <- Quarantined;
+       Ok settlement)
+  | None | Some _ -> invalid "developer model transaction is not pending here"
+;;
+
+let admit_external_model_from_scope source ~request ~checkpoint ~check_parent_now =
+  let issuer = model_source_issuer source in
+  let* token = reserve_external_model source ~check_parent_now in
+  let model_selection = issuer.selected_model in
+  let check_now witness selection =
+    let* () =
+      check_current_local ~external_model:token issuer witness ~allow_pending:false
+    in
+    let* () = Provider_operator_port.Model_selection.check_current selection in
+    model_source_now source ~check_parent_now
+  in
+  let perform () =
+    let* selection =
+      match model_selection with
+      | Some value -> Ok value
+      | None -> invalid "developer Model.spawn has no admitted provider selection"
+    in
+    checkpoint ();
+    let* limits =
+      Store.document_limits issuer.handle |> Result.map_error ~f:error_of_store
+    in
+    let* _ =
+      P.Model_spawn_request.admit (P.Model_spawn_request.original request) ~limits
+    in
+    let* launch = model_source_launch source in
+    let* () = Provider_operator_port.Model_selection.check_current selection in
+    let* job =
+      Developer_external_model_job.create
+        ~owner:issuer.owner
+        ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
+        ~launch
+        ~request
+        ~target:(Provider_operator_port.Model_selection.target selection)
+        ~limits
+        ~created_at:(issuer.registry.now ())
+    in
+    let* witness = current_with ~external_model:token issuer in
+    let* () = model_source_parent_check source in
+    let* () = check_now witness selection in
+    let* key = capacity_key issuer job in
+    let* host_job = P.Host_job.of_developer job in
+    let* reservation =
+      Job_capacity.reserve_host_job issuer.registry.capacity key ~job:host_job
+      |> Result.bind ~f:(function
+        | Some reservation -> Ok reservation
+        | None ->
+          Error
+            (P.Error.create
+               P.Error.Resource_limit
+               ~message:"shared job capacity is full"
+               ~retryable:true
+               ()))
+    in
+    issuer.external_model <- Some (Model_reserved { token; source; job; reservation });
+    let rec save witness remaining =
+      if remaining <= 0
+      then invalid "developer model document changed repeatedly"
+      else (
+        checkpoint ();
+        let* observed =
+          Store.observe_latest_active issuer.handle |> Result.map_error ~f:error_of_store
+        in
+        let* parent = model_parent_in_observation source observed in
+        let* () = model_source_parent_check source in
+        let* () = check_now witness selection in
+        let* prepared =
+          Store.prepare_external_model issuer.handle ~expected:observed ~parent ~job
+          |> Result.map_error ~f:error_of_store
+        in
+        let transaction = Model_transaction.create ~reservation ~prepared in
+        issuer.external_model <- Some (Model_pending { token; source; transaction });
+        let result =
+          Model_transaction.commit transaction issuer.handle ~admit:(fun () ->
+            owns_external_model issuer token && Result.is_ok (check_now witness selection))
+        in
+        let settled =
+          match result with
+          | Ok settlement -> Ok settlement
+          | Error original ->
+            (match
+               Eio.Cancel.protect (fun () ->
+                 Model_transaction.reconcile transaction issuer.handle)
+             with
+             | Ok settlement -> Ok settlement
+             | Error _ -> Error (error_of_store original))
+        in
+        match settled with
+        | Error error ->
+          issuer.state <- Quarantined;
+          Error error
+        | Ok (Store.Settlement.Installed _) ->
+          clear_external_model issuer token;
+          Ok (P.Developer_job.id job)
+        | Ok (Absent | Prewrite_conflict) ->
+          issuer.external_model
+          <- Some (Model_reserved { token; source; job; reservation });
+          let* fresh = current_with ~external_model:token issuer in
+          let* () = model_source_parent_check source in
+          let* () = check_now fresh selection in
+          save fresh (remaining - 1)
+        | Ok Diverged ->
+          issuer.state <- Quarantined;
+          invalid "developer model write remains unresolved")
+    in
+    save witness 3
+  in
+  match perform () with
+  | Ok _ as value -> value
+  | Error _ as error ->
+    abandon_external_model issuer token;
+    error
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    Eio.Cancel.protect (fun () ->
+      (match issuer.external_model with
+       | Some (Model_pending current) when phys_equal current.token token ->
+         (match reconcile_external_model_once issuer token with
+          | Ok _ | Error _ -> ()
+          | exception _ -> ())
+       | None | Some _ -> ());
+      abandon_external_model issuer token);
+    Exn.raise_with_original_backtrace exn backtrace
+;;
+
 module Action = struct
   type nonrec t = action
 
@@ -681,6 +1047,14 @@ module Action = struct
     stage_background_with_launch
       t
       ~launch
+      ~request
+      ~checkpoint
+      ~check_parent_now:(fun () -> Ok ())
+  ;;
+
+  let admit_external_model (t : t) ~request ~checkpoint =
+    admit_external_model_from_scope
+      (Root_model t)
       ~request
       ~checkpoint
       ~check_parent_now:(fun () -> Ok ())
@@ -863,6 +1237,7 @@ let publication_allowed t intent =
     | Root_terminal _ -> false
   in
   same_domain t.registry
+  && Option.is_none t.external_model
   && phys_equal snapshot.issuer t
   && (terminal_only
       || (Int.equal snapshot.selection_revision t.selection_revision
@@ -915,19 +1290,6 @@ let retain_drain t drain =
   Terminal_queue.retain t.terminals drain |> Result.map_error ~f:error_of_terminal_queue
 ;;
 
-let restore_live_after_retention t =
-  if
-    (match t.state with
-     | Quarantined -> true
-     | Live | Closing | Closed -> false)
-    && Option.is_none t.pending
-    && Option.is_none t.control_pending
-    && Option.is_none t.dispatch_owner
-    && List.is_empty t.unresolved_native
-    && Option.is_some (Terminal_queue.effect_witness t.terminals)
-  then t.state <- Live
-;;
-
 let settle_drain t drain =
   let* () =
     Terminal_queue.settle t.terminals drain |> Result.map_error ~f:error_of_terminal_queue
@@ -951,7 +1313,11 @@ let with_retained_head t drain f =
 
 let rec process_head t drain remaining =
   let intent = Terminal_queue.payload drain in
-  if Option.is_some t.dispatch_owner
+  if Option.is_some t.external_model
+  then
+    let* () = retain_drain t drain in
+    invalid "developer model admission blocks terminal preparation"
+  else if Option.is_some t.dispatch_owner
   then
     let* () = retain_drain t drain in
     invalid "developer dispatch blocks terminal preparation"
@@ -1016,7 +1382,9 @@ let rec process_head t drain remaining =
 
 let drain_terminals t =
   let rec loop remaining =
-    if Option.is_some t.dispatch_owner
+    if Option.is_some t.external_model
+    then invalid "developer model admission blocks terminal drain"
+    else if Option.is_some t.dispatch_owner
     then invalid "developer dispatch blocks terminal drain"
     else if remaining <= 0
     then invalid "developer terminal drain exceeded its occupancy bound"
@@ -1079,6 +1447,7 @@ let with_root_action t ~phase f =
     Option.is_some t.root_call
     || Option.is_some t.pending
     || Option.is_some t.control_pending
+    || Option.is_some t.external_model
     || Option.is_some t.dispatch_owner
     || t.reconciling
   then invalid "developer root action is already active or unresolved"
@@ -1114,6 +1483,7 @@ let with_root_action t ~phase f =
               ; stage_in_flight = 0
               ; sealed = None
               ; live = true
+              ; callback_switch = None
               ; queued = false
               ; call
               ; terminal_slot
@@ -1121,8 +1491,12 @@ let with_root_action t ~phase f =
             in
             t.active <- Some action;
             let* value, (selection : selection) =
-              Eio.Switch.run (fun sw ->
-                Eio.Fiber.with_binding action_key action (fun () -> f ~action ~sw))
+              Exn.protect
+                ~finally:(fun () -> action.callback_switch <- None)
+                ~f:(fun () ->
+                  Eio.Switch.run (fun sw ->
+                    action.callback_switch <- Some sw;
+                    Eio.Fiber.with_binding action_key action (fun () -> f ~action ~sw)))
             in
             if
               (not (phys_equal selection.issuer action))
@@ -1185,17 +1559,7 @@ module Native_terminal = struct
   end
 
   let callback_complete (t : t) = t.callback_complete
-
-  let effect_parent_live_now (t : t) =
-    same_domain t.issuer.registry
-    && (not t.bracket_exited)
-    && (not t.callback_complete)
-    && t.action.live
-    && Option.value_map t.registration.call.cancel ~default:false ~f:(fun cancel ->
-      Option.is_none (Eio.Cancel.get_error cancel))
-    && Option.value_map t.callback_switch ~default:false ~f:(fun sw ->
-      Option.is_none (Eio.Switch.get_error sw))
-  ;;
+  let effect_parent_live_now = native_effect_parent_live_now
 
   let sealed (t : t) =
     Option.map t.sealed ~f:(fun (selected : native_selection) ->
@@ -1233,6 +1597,7 @@ module Native_terminal = struct
     Option.value_map issuer.dispatch_owner ~default:false ~f:(phys_equal t)
     && Option.is_none issuer.pending
     && Option.is_none issuer.control_pending
+    && Option.is_none issuer.external_model
     && (match issuer.state with
         | Live -> true
         | Closing | Quarantined | Closed -> false)
@@ -1275,6 +1640,7 @@ module Native_terminal = struct
       || Option.is_some issuer.dispatch_owner
       || Option.is_some issuer.pending
       || Option.is_some issuer.control_pending
+      || Option.is_some issuer.external_model
       || issuer.reconciling
       || (not (phys_equal t.action.snapshot.issuer issuer))
       || (not (H.equal_context (H.context original) (H.context dispatched)))
@@ -1433,6 +1799,14 @@ module Native_terminal = struct
         | None -> Ok ()
         | Some parent ->
           Job_scope.Parent.check_now parent ~owner:t.issuer.owner ~capture_fingerprint)
+  ;;
+
+  let admit_external_model (t : t) ~request ~checkpoint ~check_parent_now =
+    admit_external_model_from_scope
+      (Native_model t)
+      ~request
+      ~checkpoint
+      ~check_parent_now
   ;;
 
   let rollback_staged (t : t) id = Action.rollback_staged t.action id
@@ -1660,6 +2034,17 @@ let reconcile_pending t =
     Exn.protect
       ~finally:(fun () -> t.reconciling <- false)
       ~f:(fun () ->
+        let* () =
+          match t.external_model with
+          | None -> Ok ()
+          | Some (Model_preparing _ | Model_reserved _) ->
+            invalid "developer model admission has not joined"
+          | Some (Model_pending { token; _ }) ->
+            (match reconcile_external_model_once t token with
+             | Ok (Store.Settlement.Installed _ | Absent | Prewrite_conflict) -> Ok ()
+             | Ok Diverged -> invalid "developer model write remains quarantined"
+             | Error error -> Error error)
+        in
         let* () = Job_control.reconcile_pending t in
         let* () =
           List.fold_result t.unresolved_native ~init:() ~f:(fun () scope_registration ->
@@ -1701,7 +2086,7 @@ let reconcile_pending t =
           else invalid "native dispatch still owns the Store writer"
         in
         let* () = drain_terminals t in
-        if List.is_empty t.unresolved_native
+        if List.is_empty t.unresolved_native && Option.is_none t.external_model
         then Ok ()
         else invalid "native terminal remains physically unresolved"))
 ;;
@@ -1712,6 +2097,7 @@ let with_native_registration t ?job_parent ~invocation f =
   else if
     Option.is_some t.pending
     || Option.is_some t.control_pending
+    || Option.is_some t.external_model
     || Option.is_some t.dispatch_owner
     || t.reconciling
   then invalid "developer terminal settlement is unresolved"
@@ -1778,6 +2164,7 @@ let with_native_registration t ?job_parent ~invocation f =
               ; stage_in_flight = 0
               ; sealed = None
               ; live = false
+              ; callback_switch = None
               ; queued = false
               ; call
               ; terminal_slot
@@ -1981,7 +2368,10 @@ let close_owner t =
         | `Returned (Error error), _ | _, `Returned (Error error) -> Error error
       in
       let* () =
-        if Terminal_queue.is_empty t.terminals && List.is_empty t.unresolved_native
+        if
+          Terminal_queue.is_empty t.terminals
+          && List.is_empty t.unresolved_native
+          && Option.is_none t.external_model
         then Ok ()
         else invalid "developer terminal custody remains unresolved"
       in
@@ -2217,6 +2607,7 @@ module Registry = struct
       ; control_pending = None
       ; control_call = None
       ; dispatch_owner = None
+      ; external_model = None
       ; effect_revision = 0
       ; reconciling = false
       }

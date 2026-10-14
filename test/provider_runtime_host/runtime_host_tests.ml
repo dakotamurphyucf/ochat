@@ -16,6 +16,7 @@ module Root = Agent_server.Developer_root_owner
 module Run_store = Agent_store.Developer_run_store
 module Session_store = Agent_store.Session_store
 module Root_fixture = Developer_root_owner_test_suite.Root_owner_tests
+module Store_fixture = Developer_run_store_test_suite.Developer_run_store_tests
 
 let ok r =
   Result.map_error r ~f:(fun _ -> "synthetic runtime-host fixture failed")
@@ -282,7 +283,9 @@ let%expect_test
     {| pre-created port selected the real actor bridge; denied and closed issuers stayed denied |}]
 ;;
 
-let%test_unit "physical root admission pins only its original live model selection" =
+let%test_unit
+    "physical model selection admits root/native calls and retains external effects"
+  =
   with_fixture (fun env sw anchor create _ ->
     let runtime = create () in
     ignore (setup runtime : P.Method_result.t);
@@ -292,9 +295,23 @@ let%test_unit "physical root admission pins only its original live model selecti
     let target = capture runtime in
     let selected_model = Port.select_model port ~actor ~target |> ok in
     let checkpoint_gate = ref ignore in
+    let rename_armed = ref false in
+    let sync_blocked = ref false in
+    let parent_sync_blocked = ref false in
+    let cancel_after_rename = ref (fun () -> ()) in
+    let store_env =
+      Store_fixture.fault_after_authority_rename_env
+        ~after_rename:(fun () ->
+          sync_blocked := true;
+          !cancel_after_rename ())
+        env
+        ~rename_armed
+        ~sync_blocked
+        ~parent_sync_blocked
+    in
     let session =
       Session_store.create
-        ~env
+        ~env:store_env
         ~sw
         ~root:(Eio.Path.native_exn Eio.Path.(anchor / "developer-runs"))
         ~server_id
@@ -306,16 +323,16 @@ let%test_unit "physical root admission pins only its original live model selecti
       Run_store.open_or_create
         session
         ~sw
-        ~limits:(Root_fixture.store_limits ())
+        ~limits:(Root_fixture.store_limits ~max_job_payload_bytes:4096 ())
         ~checkpoint:(fun () -> !checkpoint_gate ())
       |> ok
     in
     let captured = Root_fixture.capture () in
-    let run_owner =
+    let owner run_name =
       match
         P.Execution_owner.developer
           ~host_id:server_id
-          ~run_id:(P.Id.Developer_run.of_string "dvr_selected_model" |> ok)
+          ~run_id:(P.Id.Developer_run.of_string run_name |> ok)
           ~epoch:0
           ~principal_id:principal.id
         |> ok
@@ -323,14 +340,17 @@ let%test_unit "physical root admission pins only its original live model selecti
       | Developer owner -> owner
       | Conversation _ -> failwith "expected developer owner"
     in
-    let handle, _ =
+    let admit_epoch owner =
       Run_store.admit_epoch
         store
-        ~owner:run_owner
+        ~owner
         ~capture_fingerprint:(Chatml_developer_capture.fingerprint captured)
         ~previous:None
       |> ok
+      |> fst
     in
+    let run_owner = owner "dvr_selected_model" in
+    let handle = admit_epoch run_owner in
     let tools =
       Chat_response.Tool_capability.create
         ~owner:"model-root-test"
@@ -351,11 +371,21 @@ let%test_unit "physical root admission pins only its original live model selecti
       Root.Registry.create
         ~sw
         ~store
-        ~capacity:(Root_fixture.capacity ())
+        ~capacity:
+          (Agent_server.Job_capacity.create
+             ~limits:
+               { Agent_server.Config.Server.daemon_total = 4
+               ; per_principal = 4
+               ; per_prompt = 4
+               ; per_workspace = 4
+               ; per_session = 4
+               ; per_kind = 4
+               ; max_nested_depth = 2
+               })
         ~now:Root_fixture.now
         ~limits
     in
-    let admit actor selected_model =
+    let admit_on handle actor selected_model =
       Root.Registry.admit
         registry
         ~actor
@@ -367,6 +397,7 @@ let%test_unit "physical root admission pins only its original live model selecti
         ~handle
         ~workspace_conflict_domain:"model-root-test"
     in
+    let admit actor selected_model = admit_on handle actor selected_model in
     let original = admit actor selected_model |> ok in
     assert (Option.value_exn (Root.selected_model original) |> phys_equal selected_model);
     assert (
@@ -398,7 +429,285 @@ let%test_unit "physical root admission pins only its original live model selecti
     let expiring_model = Port.select_model port ~actor:expiring ~target |> ok in
     interrupted expiring expiring_model (fun () -> live := false);
     let after_actor_revoke = admit actor selected_model |> ok in
+    let model_request =
+      P.Model_spawn_request.decode
+        (`Object [ "prompt", `String "synthetic"; "input", `String "hello" ])
+      |> ok
+    in
+    let prepared =
+      Chat_response.One_off_script.prepare_in_domain
+        ~env
+        ~capabilities:tools
+        ~tools:[]
+        ~source:"let main input = Task.pure(input)"
+        ()
+      |> ok
+    in
+    let script_request =
+      Chat_response.Background_request.script
+        ~prepared
+        ~input:`Null
+        ~policy:Chat_response.One_off_request.default_policy
+      |> ok
+    in
+    let first_model, second_model, script =
+      Root.with_root_action
+        after_actor_revoke
+        ~phase:Run_store.Checkpoint.Active
+        (fun ~action ~sw:_ ->
+           let first_model =
+             Root.Action.admit_external_model
+               action
+               ~request:model_request
+               ~checkpoint:ignore
+             |> ok
+           in
+           let second_model =
+             Root.Action.admit_external_model
+               action
+               ~request:model_request
+               ~checkpoint:ignore
+             |> ok
+           in
+           assert (not (P.Id.Job.equal first_model second_model));
+           let script =
+             Root.Action.stage_background
+               action
+               ~request:script_request
+               ~checkpoint:ignore
+             |> ok
+           in
+           let selected = Root.Action.seal action ~selected:[ script ] |> ok in
+           Ok ((first_model, second_model, script), selected))
+      |> ok
+    in
+    let observed = Run_store.observe handle |> ok in
+    List.iter [ first_model; second_model; script ] ~f:(fun id ->
+      assert (Option.is_some (Run_store.find_job observed id)));
+    let child_model = ref None in
+    let expected = Run_store.observe handle |> ok in
+    ignore
+      (Root.with_claimed_job
+         after_actor_revoke
+         ~expected
+         ~lookup:(Run_store.find_job_exact expected script)
+         (fun ~active ~sw:_ ->
+            let parent = Root.job_parent after_actor_revoke active |> ok in
+            let invocation =
+              P.Host_invocation.create_developer
+                { id = P.Id.Invocation.of_string "inv_model_child" |> ok
+                ; owner = P.Execution_owner.Developer run_owner
+                ; origin = P.Invocation.Script
+                ; parent_invocation = None
+                ; parent_job = Some script
+                ; tool_name = "model.child"
+                ; implementation_revision = "v1"
+                ; capability_fingerprint = "model-test-capability"
+                ; input = `Null
+                ; created_at = Root_fixture.now ()
+                ; deadline = None
+                }
+              |> ok
+            in
+            let dispatched = P.Host_invocation.dispatch invocation |> ok in
+            let expected = Run_store.observe handle |> ok in
+            let lookup =
+              Run_store.find_invocation expected (P.Host_invocation.context invocation).id
+            in
+            let dispatch =
+              Run_store.prepare_dispatch handle ~expected ~lookup ~dispatched |> ok
+            in
+            (match
+               Run_store.commit_and_settle
+                 handle
+                 dispatch
+                 (Run_store.Handoff.create ~settle:(fun _ -> ()))
+                 ~admit:(fun () -> true)
+               |> ok
+             with
+             | Run_store.Settlement.Installed _ -> ()
+             | Absent | Prewrite_conflict | Diverged ->
+               failwith "native dispatch not saved");
+            Root.with_native_registration
+              after_actor_revoke
+              ~job_parent:parent
+              ~invocation
+              (fun ~scope ->
+                 let selected =
+                   Root.with_native_callback scope ~dispatched (fun ~sw:_ ->
+                     child_model
+                     := Some
+                          (Root.Native_terminal.admit_external_model
+                             scope
+                             ~request:model_request
+                             ~checkpoint:ignore
+                             ~check_parent_now:(fun () -> Ok ())
+                           |> ok);
+                     Root.Native_terminal.seal
+                       scope
+                       ~outcome:(P.Invocation.Complete `Null)
+                       ~selected:[])
+                   |> ok
+                 in
+                 let terminal =
+                   P.Host_invocation.resolve dispatched (P.Invocation.Complete `Null)
+                   |> ok
+                 in
+                 ignore
+                   (Root.Native_terminal.submit scope ~terminal ~selected:(Some selected)
+                    |> ok
+                    : int);
+                 Ok ())
+            |> ok;
+            let state =
+              P.Developer_job.state
+                (Run_store.Claim.job (Agent_session.Developer_job_scope.claim active))
+            in
+            Ok
+              { state with
+                status = P.Job.Succeeded
+              ; completed_at = Some (Root_fixture.now ())
+              ; result =
+                  Some
+                    (P.Developer_job.Result_value.Inline (P.Completion.Succeeded `Null))
+              })
+       |> ok
+       : P.Developer_job.t option);
+    let observed = Run_store.observe handle |> ok in
+    assert (Option.is_some (Run_store.find_job observed (Option.value_exn !child_model)));
     Root.close_and_wait after_actor_revoke |> ok;
+    let failure_handle = admit_epoch (owner "dvr_model_failed_parent") in
+    let failed_run = admit_on failure_handle actor selected_model |> ok in
+    let retained_model = ref None in
+    let late_failure = Failure "parent failed after external model admission" in
+    (match
+       Root.with_root_action
+         failed_run
+         ~phase:Run_store.Checkpoint.Active
+         (fun ~action ~sw:_ ->
+            retained_model
+            := Some
+                 (Root.Action.admit_external_model
+                    action
+                    ~request:model_request
+                    ~checkpoint:ignore
+                  |> ok);
+            raise late_failure)
+     with
+     | exception exn when phys_equal exn late_failure -> ()
+     | Ok _ | Error _ | (exception _) -> failwith "late root failure was replaced");
+    assert (
+      Option.is_some
+        (Run_store.find_job
+           (Run_store.observe failure_handle |> ok)
+           (Option.value_exn !retained_model)));
+    Root.close_and_wait failed_run |> ok;
+    let call_live = ref true in
+    let call_actor = Actor.guarded ~principal ~is_current:(fun () -> !call_live) in
+    let call_selection = Port.select_model port ~actor:call_actor ~target |> ok in
+    let revoked_run = admit_on failure_handle call_actor call_selection |> ok in
+    let before =
+      Run_store.Checkpoint.revision
+        (Run_store.Observation.checkpoint (Run_store.observe failure_handle |> ok))
+    in
+    assert (
+      Result.is_error
+        (Root.with_root_action
+           revoked_run
+           ~phase:Run_store.Checkpoint.Active
+           (fun ~action ~sw:_ ->
+              Root.Action.admit_external_model
+                action
+                ~request:model_request
+                ~checkpoint:(fun () -> call_live := false)
+              |> Result.map ~f:(fun _ -> failwith "revoked call admitted a model"))));
+    let after =
+      Run_store.Checkpoint.revision
+        (Run_store.Observation.checkpoint (Run_store.observe failure_handle |> ok))
+    in
+    assert (Int64.equal before after);
+    Root.close_and_wait revoked_run |> ok;
+    let cancelled_run = admit_on failure_handle actor selected_model |> ok in
+    let before =
+      Run_store.Checkpoint.revision
+        (Run_store.Observation.checkpoint (Run_store.observe failure_handle |> ok))
+    in
+    let cancelled_reason = Failure "cancel root before external model admission" in
+    (match
+       Eio.Cancel.sub (fun cancel ->
+         Root.with_root_action
+           cancelled_run
+           ~phase:Run_store.Checkpoint.Active
+           (fun ~action ~sw:_ ->
+              Eio.Cancel.cancel cancel cancelled_reason;
+              Eio.Cancel.protect (fun () ->
+                assert (
+                  Result.is_error
+                    (Root.Action.admit_external_model
+                       action
+                       ~request:model_request
+                       ~checkpoint:ignore)));
+              Eio.Fiber.check ();
+              failwith "cancelled root callback continued"))
+     with
+     | exception Eio.Cancel.Cancelled actual ->
+       assert (phys_equal actual cancelled_reason)
+     | Ok _ | Error _ | (exception _) -> failwith "root cancellation was replaced");
+    let after =
+      Run_store.Checkpoint.revision
+        (Run_store.Observation.checkpoint (Run_store.observe failure_handle |> ok))
+    in
+    assert (Int64.equal before after);
+    Root.close_and_wait cancelled_run |> ok;
+    let uncertain_handle = admit_epoch (owner "dvr_model_uncertain") in
+    let uncertain_run = admit_on uncertain_handle actor selected_model |> ok in
+    let calls = ref 0 in
+    let reason = Failure "cancel after model document rename" in
+    (match
+       Eio.Cancel.sub (fun cancel ->
+         (cancel_after_rename
+          := fun () ->
+               Eio.Cancel.cancel cancel reason;
+               Eio.Fiber.check ());
+         Root.with_root_action
+           uncertain_run
+           ~phase:Run_store.Checkpoint.Active
+           (fun ~action ~sw:_ ->
+              incr calls;
+              rename_armed := true;
+              let id =
+                Root.Action.admit_external_model
+                  action
+                  ~request:model_request
+                  ~checkpoint:ignore
+                |> ok
+              in
+              failwith ("uncertain model call was acknowledged: " ^ P.Id.Job.to_string id)))
+     with
+     | exception Eio.Cancel.Cancelled actual -> assert (phys_equal actual reason)
+     | Ok _ | Error _ | (exception _) -> failwith "model cancellation identity was lost");
+    assert (Int.equal !calls 1 && !sync_blocked && not !rename_armed);
+    assert (Result.is_error (Root.current uncertain_run));
+    assert (Result.is_error (Root.close_and_wait uncertain_run));
+    sync_blocked := false;
+    Root.reconcile_pending uncertain_run |> ok;
+    let reader =
+      Agent_store.Retention_reader.create
+        ~env:store_env
+        ~root:(Agent_store.Data_root.path (Session_store.data_root session))
+        ~max_entries:64
+        ~max_bytes:65536
+      |> ok
+    in
+    let root = Run_store.Result_root.of_handle uncertain_handle |> ok in
+    let rows =
+      Run_store.Result_root.rows_for_inventory root ~reader ~checkpoint:ignore |> ok
+    in
+    let jobs = Run_store.Result_root.Inventory_rows.jobs rows in
+    assert (List.length jobs = 1);
+    assert (P.Job.equal_kind (P.Developer_job.kind (List.hd_exn jobs)) Model_call);
+    assert (Int.equal !calls 1);
+    Root.close_and_wait uncertain_run |> ok;
     interrupted actor selected_model (fun () -> Port.close port);
     let unowned = Run_store.Run_claim.acquire ~store ~handle |> ok in
     Run_store.Run_claim.release unowned |> ok;
