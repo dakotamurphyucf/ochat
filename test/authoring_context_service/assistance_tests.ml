@@ -440,6 +440,7 @@ let%test_unit "host Analyze retains imported references and decoded project meta
                     ~max_active_requests_per_connection:2
                     ~max_roots_per_connection:1
                     ~max_response_bytes:65536
+                    ~max_provisional_results:8
                   |> Or_error.ok_exn)
            in
            Service.publish_initialize_and_wait
@@ -513,6 +514,13 @@ let%test_unit "host Analyze retains imported references and decoded project meta
                     ~max_parser_work_steps:100_000
                     ~max_diagnostic_work_steps:100_000
                   |> Or_error.ok_exn)
+               ~prefix_limits:
+                 (Service.Semantic.Prefix_limits.create
+                    ~max_document_bundle_files:4
+                    ~max_document_bundle_bytes:8192
+                    ~max_parser_work_steps:100_000
+                    ~max_host_work_steps:100_000
+                  |> Or_error.ok_exn)
            in
            let analyze =
              P.Authoring.Analysis.Analyze.Request.create
@@ -569,6 +577,13 @@ let%test_unit "host Analyze retains imported references and decoded project meta
                     ~max_document_bundle_bytes:8192
                     ~max_parser_work_steps:100_000
                     ~max_diagnostic_work_steps:100_000
+                  |> Or_error.ok_exn)
+               ~prefix_limits:
+                 (Service.Semantic.Prefix_limits.create
+                    ~max_document_bundle_files:4
+                    ~max_document_bundle_bytes:8192
+                    ~max_parser_work_steps:100_000
+                    ~max_host_work_steps:100_000
                   |> Or_error.ok_exn)
            in
            (match
