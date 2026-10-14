@@ -17,6 +17,11 @@ module Run_store = Agent_store.Developer_run_store
 module Session_store = Agent_store.Session_store
 module Root_fixture = Developer_root_owner_test_suite.Root_owner_tests
 module Store_fixture = Developer_run_store_test_suite.Developer_run_store_tests
+module Native_fixture = Developer_root_owner_test_suite.Native_executor_tests
+module Jobs = Agent_server.Developer_script_job_service
+module Disclosure = Agent_server.Developer_result_disclosure
+module Native = Agent_server.Developer_native_executor
+module Capabilities = Chat_response.Tool_capability
 
 let ok r =
   Result.map_error r ~f:(fun _ -> "synthetic runtime-host fixture failed")
@@ -385,13 +390,13 @@ let%test_unit
         ~now:Root_fixture.now
         ~limits
     in
-    let admit_on handle actor selected_model =
+    let admit_on ?(selected = tools) handle actor selected_model =
       Root.Registry.admit
         registry
         ~actor
         ~capture:captured
-        ~registry:tools
-        ~selected:tools
+        ~registry:selected
+        ~selected
         ~selected_model:(Some selected_model)
         ~job_policy:Chat_response.One_off_request.default_policy
         ~handle
@@ -577,30 +582,264 @@ let%test_unit
     assert (Option.is_some (Run_store.find_job observed (Option.value_exn !child_model)));
     Root.close_and_wait after_actor_revoke |> ok;
     let failure_handle = admit_epoch (owner "dvr_model_failed_parent") in
-    let failed_run = admit_on failure_handle actor selected_model |> ok in
-    let retained_model = ref None in
+    let managed, selected =
+      Native_fixture.managed_job_registry
+        ~tool_contract:Chatml_compilation.Tool_contract.Developer_model_spawn
+        ~source:
+          {|let run ctx input = Task.bind(Model.spawn("agent_prompt_v1", input), fun id ->
+  Task.bind(Job.get(id), fun status -> Task.pure(`Complete(input))))|}
+        env
+        (ref 0)
+    in
+    let failed_run = admit_on ~selected failure_handle actor selected_model |> ok in
+    let data_root = Session_store.data_root session in
+    let blobs =
+      Agent_store.Blob_store.create
+        ~env:store_env
+        ~temporary_directory:(Agent_store.Data_root.temporary_blobs_path data_root)
+        ~durable_directory:(Agent_store.Data_root.durable_blobs_path data_root)
+        ~max_upload_bytes:65536L
+      |> ok
+    in
+    Agent_store.Blob_store.bind_developer_runs blobs ~session_store:session store |> ok;
+    let disclosure =
+      Disclosure.create
+        ~runs:store
+        ~blobs
+        ~policy:(Disclosure.Policy.create ~authorize:(fun _ _ -> true))
+        ~limits:
+          (Disclosure.Limits.create
+             ~max_result_bytes:65536
+             ~json:Document_schema.Limits.default
+           |> ok)
+      |> ok
+    in
+    let jobs =
+      Jobs.create
+        ~root:failed_run
+        ~store
+        ~disclosure
+        ~env
+        ~current_actor:(fun () -> actor)
+        ~prepare_source:(fun ~binding:_ ~request:_ ~checkpoint ->
+          checkpoint ();
+          Ok None)
+      |> ok
+    in
+    let model_payload = P.Model_spawn_request.original model_request in
+    let inventory_jobs handle =
+      let reader =
+        Agent_store.Retention_reader.create
+          ~env:store_env
+          ~root:(Agent_store.Data_root.path data_root)
+          ~max_entries:64
+          ~max_bytes:65536
+        |> ok
+      in
+      Run_store.Result_root.rows_for_inventory
+        (Run_store.Result_root.of_handle handle |> ok)
+        ~reader
+        ~checkpoint:ignore
+      |> ok
+      |> Run_store.Result_root.Inventory_rows.jobs
+    in
+    let root_compiled =
+      Chatml_compilation.compile
+        ~env
+        ~target:Chatml_compilation.Developer_tool_v1
+        ~source:
+          {|let run ctx input = Task.bind(
+  Task.catch(
+    Task.bind(Model.spawn("agent_prompt_v1", input), fun discarded -> Task.fail("discard")),
+    fun ignored -> Task.pure("caught")),
+  fun ignored -> Task.bind(Model.spawn("agent_prompt_v1", input), fun id ->
+    Task.bind(Job.get(id), fun status ->
+      Task.bind(Job.read_result(id), fun result ->
+        Task.bind(Job.cancel(id), fun ignored -> Task.pure(`Complete(input)))))))|}
+        ()
+      |> Result.map_error ~f:(fun error -> error.Chatml_compilation.message)
+      |> Result.ok_or_failwith
+    in
+    let root_returned = ref None in
+    let root_script_failed =
+      Jobs.with_root_action jobs ~phase:Run_store.Checkpoint.Active (fun ~scope ~sw:_ ->
+        let config : Chatml_host_runtime.runtime_config =
+          { surface = Chatml.Chatml_extension_surface.developer_tool_v1
+          ; operations = Chatml_host_runtime.default_operations ()
+          }
+        in
+        let config = Jobs.Scope.install scope config in
+        let value =
+          Chatml_host_runtime.run_entrypoint
+            ~scoped_async_operation:Chatml_host_runtime.Model_spawn
+            config
+            root_compiled
+            ~entrypoint:"run"
+            ~arguments:
+              [ Chatml.Chatml_value_codec.import_json `Null
+              ; Chatml.Chatml_value_codec.import_json model_payload
+              ]
+            ()
+          |> Result.map_error ~f:P.Error.invalid_request
+        in
+        match value with
+        | Error error -> Error error
+        | Ok value ->
+          root_returned := Some value;
+          Error (P.Error.invalid_request "root failed after compiled Model.spawn"))
+    in
+    assert (Result.is_error root_script_failed);
+    assert (Option.is_some !root_returned);
+    let root_models = inventory_jobs failure_handle in
+    assert (Int.equal (List.length root_models) 2);
+    assert (
+      List.for_all root_models ~f:(fun job ->
+        P.Job.equal_kind (P.Developer_job.kind job) Model_call));
+    assert (
+      Int.equal
+        (List.count root_models ~f:(fun job ->
+           String.equal (P.Job.status_name (P.Developer_job.state job).status) "cancelled"))
+        1);
+    let module Managed = Chat_response.Managed_tool_registry in
+    let module H = P.Host_invocation in
+    let binding = Capabilities.find selected ~name:"summary" |> ok in
+    let reference = Capabilities.reference binding in
+    let template =
+      Native_fixture.invocation
+        (owner "dvr_model_failed_parent")
+        selected
+        reference
+        ~custom:false
+    in
+    let invocation =
+      H.create_developer
+        { (H.context template) with
+          implementation_revision = Managed.execution_revision managed binding |> ok
+        ; input = model_payload
+        }
+      |> ok
+    in
+    let managed_callback : Agent_session.Native_tool_invocation.selected_managed_dispatch =
+      { definition = managed
+      ; current = (fun () -> selected)
+      ; run =
+          (fun execution
+            _borrowed
+            ~effect_entry
+            ~stage_background:_
+            ~install_jobs
+            continuation ->
+            effect_entry () |> ok;
+            let prepared = Managed.owned_prepared execution in
+            assert (
+              Chatml_compilation.equal_target
+                (Chat_response.Extension_compiler.compiler_target prepared)
+                Chatml_compilation.Developer_tool_v1);
+            let config : Chatml_host_runtime.runtime_config =
+              { surface = Chatml.Chatml_extension_surface.developer_tool_v1
+              ; operations = Chatml_host_runtime.default_operations ()
+              }
+            in
+            let installed = install_jobs config in
+            assert (Option.is_some installed.scoped_async_operation);
+            let result =
+              Chat_response.Extension_compiler.Program.run_in_scope
+                (Chat_response.Extension_compiler.program prepared)
+                ?scoped_async_operation:installed.scoped_async_operation
+                ~control:None
+                ~config:installed.config
+                ~entrypoint:"run"
+                ~arguments:
+                  [ Chatml.Chatml_value_codec.import_json `Null
+                  ; Chatml.Chatml_value_codec.import_json model_payload
+                  ]
+                ()
+            in
+            ignore
+              (result
+               |> Result.map_error ~f:(fun error -> error.Chatml_execution.message)
+               |> Result.ok_or_failwith
+               : Chatml.Chatml_lang.value);
+            continuation
+              ~validate_work:(fun _ -> Error "native model callback selected no work")
+              ~outcome:(P.Invocation.Complete model_payload)
+              ~selected_jobs:[])
+      }
+    in
+    let executor = Native.create ~root:failed_run |> ok in
+    let executor = Native.with_job_service executor jobs |> ok in
+    let terminal =
+      Native.run_root
+        executor
+        ~managed:(Some managed_callback)
+        ~reference
+        ~invocation
+        ~authorize:(fun _ _ -> Ok ())
+        ~prepare_output:(function
+          | Openai.Responses.Tool_output.Output.Text value -> Ok (`String value)
+          | _ -> Error (P.Error.invalid_request "unexpected output"))
+      |> ok
+    in
+    assert (
+      P.Invocation.equal_status
+        (H.status terminal)
+        (P.Invocation.Resolved (P.Invocation.Complete model_payload)));
+    let model_rows = inventory_jobs failure_handle in
+    assert (Int.equal (List.length model_rows) 3);
+    assert (
+      List.exists model_rows ~f:(fun job ->
+        match P.Developer_job.Launch.parent (P.Developer_job.launch job) with
+        | P.Developer_job.Launch.Invocation id ->
+          P.Id.Invocation.equal id (H.context invocation).id
+        | P.Developer_job.Launch.Run_root -> false));
+    let contract =
+      Chatml.Chatml_compiler_contract.for_target
+        Chatml.Chatml_compiler_contract.Target.Developer_tool_v1
+        ~checkpoint:ignore
+    in
+    let linked =
+      Support.input
+        contract
+        [ ( "entry.chatml"
+          , {|let run ctx input = Task.bind(Model.spawn("agent_prompt_v1", input), fun id ->
+  Task.pure(`Complete(input)))|}
+          , [] )
+        ]
+      |> Support.compiled contract
+    in
     let late_failure = Failure "parent failed after external model admission" in
     (match
-       Root.with_root_action
-         failed_run
-         ~phase:Run_store.Checkpoint.Active
-         (fun ~action ~sw:_ ->
-            retained_model
-            := Some
-                 (Root.Action.admit_external_model
-                    action
-                    ~request:model_request
-                    ~checkpoint:ignore
-                  |> ok);
-            raise late_failure)
+       Jobs.with_root_action jobs ~phase:Run_store.Checkpoint.Active (fun ~scope ~sw:_ ->
+         let config : Chatml_host_runtime.runtime_config =
+           { surface = Chatml.Chatml_extension_surface.developer_tool_v1
+           ; operations = Chatml_host_runtime.default_operations ()
+           }
+         in
+         let config = Jobs.Scope.install scope config in
+         ignore
+           (Chat_response.Script_program.run_in_scope
+              (Chat_response.Script_program.Prepared linked)
+              ~scoped_async_operation:Chatml_host_runtime.Model_spawn
+              ~control:None
+              ~config
+              ~entrypoint:"run"
+              ~arguments:
+                [ Chatml.Chatml_value_codec.import_json `Null
+                ; Chatml.Chatml_value_codec.import_json model_payload
+                ]
+              ()
+            |> Result.map_error ~f:(fun error -> error.Chatml_execution.message)
+            |> Result.ok_or_failwith
+            : Chatml.Chatml_lang.value);
+         raise late_failure)
      with
      | exception exn when phys_equal exn late_failure -> ()
      | Ok _ | Error _ | (exception _) -> failwith "late root failure was replaced");
+    let retained = inventory_jobs failure_handle in
+    assert (Int.equal (List.length retained) 4);
     assert (
-      Option.is_some
-        (Run_store.find_job
-           (Run_store.observe failure_handle |> ok)
-           (Option.value_exn !retained_model)));
+      List.for_all retained ~f:(fun job ->
+        P.Job.equal_kind (P.Developer_job.kind job) Model_call));
     Root.close_and_wait failed_run |> ok;
     let call_live = ref true in
     let call_actor = Actor.guarded ~principal ~is_current:(fun () -> !call_live) in

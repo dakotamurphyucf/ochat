@@ -10,6 +10,7 @@ type t =
   { declaration : Spec.tool
   ; script : Spec.script
   ; limits : S.limits
+  ; target : Chatml_compilation.target
   ; program : Program.t
   ; capabilities : Tool_capability.t
   ; fingerprint : string
@@ -27,6 +28,7 @@ let source_revision t =
 
 let execution_limits t = t.limits
 let program t = t.program
+let compiler_target t = t.target
 let capabilities t = t.capabilities
 let fingerprint t = t.fingerprint
 let input_schema t = t.input_schema
@@ -150,6 +152,7 @@ let prepare_with
     { declaration = tool
     ; script
     ; limits = script.limits
+    ; target
     ; program
     ; capabilities = selected
     ; fingerprint

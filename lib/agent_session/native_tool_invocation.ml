@@ -95,6 +95,11 @@ type owned_managed_dispatch =
       -> ('a, I.outcome) result
   }
 
+type managed_script_install =
+  { config : Chatml_host_runtime.runtime_config
+  ; scoped_async_operation : Chatml_host_runtime.scoped_async_operation option
+  }
+
 type selected_managed_dispatch =
   { definition : Managed.t
   ; current : unit -> C.t
@@ -107,8 +112,7 @@ type selected_managed_dispatch =
            (request:Chat_response.Background_request.t
             -> checkpoint:(unit -> unit)
             -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result)
-      -> install_jobs:
-           (Chatml_host_runtime.runtime_config -> Chatml_host_runtime.runtime_config)
+      -> install_jobs:(Chatml_host_runtime.runtime_config -> managed_script_install)
       -> (validate_work:(I.work -> (unit, string) result)
           -> outcome:I.outcome
           -> selected_jobs:Agent_protocol.Id.Job.t list
@@ -956,7 +960,8 @@ let selected_managed_target
     ~reference
     ~invocation:dispatched
   |> Result.map ~f:(fun execution ->
-    { Native_tool_policy.prepared = Managed.owned_prepared execution
+    let prepared = Managed.owned_prepared execution in
+    { Native_tool_policy.prepared
     ; run =
         (fun continuation ->
           match
@@ -967,7 +972,7 @@ let selected_managed_target
                    borrowed
                    ~effect_entry
                    ~stage_background
-                   ~install_jobs
+                   ~install_jobs:(install_jobs prepared)
                    continuation))
           with
           | Ok result -> result

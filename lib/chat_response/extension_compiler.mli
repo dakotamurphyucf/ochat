@@ -39,6 +39,12 @@ val source_revision : t -> string
 val execution_limits : t -> Chatmd_shell_spec.Chatmd_script_spec.limits
 
 val program : t -> Program.t
+
+(** Exact static compiler target retained by the selected, already checked
+    implementation for both single-file and linked programs. This coordinate
+    grants no host operation or provider authority. *)
+val compiler_target : t -> Chatml_compilation.target
+
 val capabilities : t -> Tool_capability.t
 val fingerprint : t -> string
 val input_schema : t -> Chatmd_shell_spec.Tool_schema.t
