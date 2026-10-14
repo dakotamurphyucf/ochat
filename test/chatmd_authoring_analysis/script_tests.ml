@@ -346,6 +346,23 @@ let%test_unit "selected script uses real parser ownership and current document b
         ~checkpoint:ignore
       |> ok
     in
+    let selected_candidate =
+      D.Candidate.analyze_with_contract
+        script
+        ~contract:fixture.contract
+        ~policy
+        ~env
+        ~checkpoint:ignore
+      |> ok
+    in
+    assert (
+      S.Digest.equal
+        (A.Checked.selected_contract (D.Candidate.checked candidate))
+        (A.Checked.selected_contract (D.Candidate.checked selected_candidate)));
+    assert (
+      C.Identity.equal
+        (D.Document_stamp.identity (D.Candidate.stamp candidate))
+        (D.Document_stamp.identity (D.Candidate.stamp selected_candidate)));
     let exception Interrupted of unit ref in
     let token = ref () in
     (match

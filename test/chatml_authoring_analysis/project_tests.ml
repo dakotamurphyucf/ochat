@@ -174,6 +174,22 @@ let%test_unit
         ~checkpoint:ignore
       |> ok
     in
+    let selected_candidate =
+      A.Project_candidate.analyze_validated_with_contract
+        inputs
+        ~receipt
+        ~contract:fixture.contract
+        ~policy
+        ~env
+        ~checkpoint:ignore
+      |> ok
+    in
+    assert (
+      S.Digest.equal
+        (A.Project_stamp.input_fingerprint
+           (A.Project_payload.stamp (A.Project_candidate.payload candidate)))
+        (A.Project_stamp.input_fingerprint
+           (A.Project_payload.stamp (A.Project_candidate.payload selected_candidate))));
     let checked = A.Project_payload.checked (A.Project_candidate.payload candidate) in
     assert_native_compiler_agreement env (E.Overlay.build receipt) checked;
     (match A.Checked.status checked with

@@ -236,3 +236,30 @@ val analyze_prepared_prefix
   -> target:target
   -> unit
   -> (Chatml_semantics.Prefix.t, Analysis_error.t) Result.t
+
+(** Joined full and prefix semantic analysis under a host-selected authentic
+    compiler contract. Canonical contract encoding and conservative conversion
+    debits use the same admission as [compile_prepared_with_contract_and_policy]
+    before the worker starts. These calls do not relabel the contract as a
+    static target, execute initializers, or acquire sources. *)
+val analyze_prepared_with_contract_and_policy
+  :  Chatml_prepared_program.t
+  -> contract:Chatml.Chatml_compiler_contract.t
+  -> policy:policy
+  -> semantic_limits:Chatml_semantics.Limits.t
+  -> max_dependency_depth:int
+  -> env:Eio_unix.Stdenv.base
+  -> unit
+  -> (Chatml_semantics.t, Analysis_error.t) Result.t
+
+val analyze_prepared_prefix_with_contract_and_policy
+  :  Chatml_prepared_program.t
+  -> source:Chatml_source.Id.t
+  -> cursor_byte:int
+  -> contract:Chatml.Chatml_compiler_contract.t
+  -> policy:policy
+  -> semantic_limits:Chatml_semantics.Limits.t
+  -> max_dependency_depth:int
+  -> env:Eio_unix.Stdenv.base
+  -> unit
+  -> (Chatml_semantics.Prefix.t, Analysis_error.t) Result.t
