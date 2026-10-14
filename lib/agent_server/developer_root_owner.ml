@@ -55,7 +55,13 @@ type state =
 type staged =
   { job : P.Developer_job.t
   ; reservation : Job_capacity.reservation
+  ; mutable phase : staged_phase
   }
+
+and staged_phase =
+  | Provisional
+  | Aborted
+  | Published
 
 type call =
   { mutable cancel : Eio.Cancel.t option
@@ -114,6 +120,8 @@ and t =
   ; mutable unresolved_native : native_registration list
   ; terminals : terminal_intent Terminal_queue.t
   ; mutable pending : pending option
+  ; mutable control_pending : control_pending option
+  ; mutable control_call : call option
   ; mutable dispatch_owner : native_scope option
   ; mutable effect_revision : int
   ; mutable reconciling : bool
@@ -149,6 +157,12 @@ and pending =
   { prepared : Store.Prepared.t
   ; handoff : Store.Handoff.t
   ; drain : terminal_intent Terminal_queue.drain
+  }
+
+and control_pending =
+  { prepared : Store.Prepared.t
+  ; job : P.Developer_job.t
+  ; witness : current
   }
 
 and native_registration =
@@ -210,6 +224,7 @@ type run = t
 let action_key : action Eio.Fiber.key = Eio.Fiber.create_key ()
 let root_call_key : t Eio.Fiber.key = Eio.Fiber.create_key ()
 let native_call_key : t Eio.Fiber.key = Eio.Fiber.create_key ()
+let control_call_key : t Eio.Fiber.key = Eio.Fiber.create_key ()
 let admission_key : registry Eio.Fiber.key = Eio.Fiber.create_key ()
 let invalid message = Error (P.Error.invalid_request message)
 let ( let* ) result f = Result.bind result ~f
@@ -265,7 +280,7 @@ let native_ceiling t = t.native_ceiling
 let native_selected t = t.selected
 let native_now t = t.registry.now ()
 
-let check_current_local t (witness : current) ~allow_pending =
+let check_current_local ?control t (witness : current) ~allow_pending =
   if
     (not (phys_equal witness.issuer t))
     || (not (same_domain t.registry))
@@ -275,6 +290,10 @@ let check_current_local t (witness : current) ~allow_pending =
     || (not (phys_equal witness.selected t.selected))
     || (not (Terminal_queue.check_effect_witness t.terminals witness.terminal_witness))
     || ((not allow_pending) && Option.is_some t.pending)
+    || (match t.control_pending, control with
+        | None, None -> false
+        | Some pending, Some allowed when phys_equal pending allowed -> false
+        | None, Some _ | Some _, None | Some _, Some _ -> true)
     || Option.is_some t.dispatch_owner
     || t.reconciling
     || (not (Operator_authorization.is_current t.actor))
@@ -331,6 +350,224 @@ let with_claimed_job t ~expected ~lookup ?select f =
   let* _ = current t in
   Developer_job_worker.with_claimed_attempt t.worker ~expected ~lookup ?select f
 ;;
+
+module Job_control = struct
+  type snapshot =
+    { issuer : run
+    ; job : P.Developer_job.t
+    }
+
+  type cancellation =
+    | Already_terminal
+    | Durable_cancelled
+    | Claimed_cancel_requested
+
+  type control_resolution =
+    | Installed
+    | Absent
+
+  let job snapshot = snapshot.job
+
+  let same_attempt left right =
+    P.Developer_job.same_immutable left right
+    && Int.equal
+         (P.Developer_job.state left).attempt
+         (P.Developer_job.state right).attempt
+  ;;
+
+  let owned_job t job =
+    P.Execution_owner.equal_developer (P.Developer_job.owner job) t.owner
+    && Chatml_source.Digest.equal
+         (P.Developer_job.capture_fingerprint job)
+         (Chatml_developer_capture.fingerprint t.capture)
+  ;;
+
+  let find_current t id =
+    let* witness = current t in
+    let* observed =
+      Store.observe_latest_active t.handle |> Result.map_error ~f:error_of_store
+    in
+    let* () = check_effect_now t witness in
+    match Store.find_job observed id with
+    | None -> Ok None
+    | Some job when owned_job t job -> Ok (Some { issuer = t; job })
+    | Some _ -> Ok None
+  ;;
+
+  let finish_installed t (pending : control_pending) installed =
+    let id = P.Developer_job.id pending.job in
+    let observed = Store.Installed.observation installed in
+    match Store.find_job observed id with
+    | Some job
+      when same_attempt pending.job job
+           &&
+           match (P.Developer_job.state job).status with
+           | P.Job.Cancelled -> true
+           | Queued
+           | Running
+           | Waiting_permission _
+           | Waiting_completion _
+           | Succeeded
+           | Failed _
+           | Interrupted _ -> false ->
+      let* host_job = P.Host_job.of_developer job in
+      Eio.Cancel.protect (fun () ->
+        Job_capacity.retire_host_job t.registry.capacity host_job;
+        t.control_pending <- None);
+      Ok Installed
+    | None | Some _ ->
+      t.state <- Quarantined;
+      invalid "installed developer job cancellation differs from its exact attempt"
+  ;;
+
+  let reconcile_control t (pending : control_pending) =
+    match t.control_pending with
+    | Some current when phys_equal current pending ->
+      (match Store.reconcile_inactive_cancel t.handle pending.prepared with
+       | Ok (Store.Installed installed) -> finish_installed t pending installed
+       | Ok Store.Absent | Error Store.Error.Prewrite_conflict ->
+         t.control_pending <- None;
+         Ok Absent
+       | Ok Store.Diverged ->
+         t.state <- Quarantined;
+         invalid "developer job cancellation diverged after an attempted write"
+       | Error error -> Error (error_of_store error))
+    | None | Some _ -> invalid "developer job cancellation lost its physical owner"
+  ;;
+
+  let reconcile_pending t =
+    match t.control_pending with
+    | None -> Ok ()
+    | Some pending -> Result.map (reconcile_control t pending) ~f:(fun _ -> ())
+  ;;
+
+  let matching_job t snapshot observed =
+    let id = P.Developer_job.id snapshot.job in
+    match Store.find_job observed id with
+    | Some job when owned_job t job && same_attempt snapshot.job job -> Ok job
+    | None | Some _ -> invalid "developer job attempt changed since lookup"
+  ;;
+
+  let rec cancel_attempt t snapshot ~remaining =
+    let* witness = current t in
+    let* observed =
+      Store.observe_latest_active t.handle |> Result.map_error ~f:error_of_store
+    in
+    let* job = matching_job t snapshot observed in
+    let* () = check_effect_now t witness in
+    match (P.Developer_job.state job).status with
+    | P.Job.Succeeded | Failed _ | Cancelled | Interrupted _ -> Ok Already_terminal
+    | Running | Waiting_permission _ ->
+      let* outcome = Developer_job_worker.cancel_claimed t.worker ~job in
+      (match outcome with
+       | Developer_job_worker.Cancellation.Joined | Requested_self ->
+         Ok Claimed_cancel_requested
+       | No_live_claim -> invalid "claimed developer job has no live physical worker")
+    | Queued | Waiting_completion _ ->
+      let* () =
+        if
+          (P.Developer_job.state job).attempt > 0
+          ||
+          match (P.Developer_job.state job).status with
+          | Waiting_completion _ -> true
+          | Queued -> false
+          | Running
+          | Waiting_permission _
+          | Succeeded
+          | Failed _
+          | Cancelled
+          | Interrupted _ -> false
+        then Developer_job_worker.join_ended_attempt t.worker ~job
+        else Ok ()
+      in
+      let* fresh =
+        Store.observe_latest_active t.handle |> Result.map_error ~f:error_of_store
+      in
+      let* fresh_job = matching_job t snapshot fresh in
+      let* () = check_effect_now t witness in
+      (match (P.Developer_job.state fresh_job).status with
+       | P.Job.Succeeded | Failed _ | Cancelled | Interrupted _ -> Ok Already_terminal
+       | Running | Waiting_permission _ ->
+         invalid "developer job became claimed before cancellation"
+       | Queued | Waiting_completion _ ->
+         let lookup = Store.find_job_exact fresh (P.Developer_job.id fresh_job) in
+         let* prepared =
+           Store.prepare_inactive_cancel
+             t.handle
+             ~expected:fresh
+             ~lookup
+             ~now:(t.registry.now ())
+           |> Result.map_error ~f:error_of_store
+         in
+         let pending = { prepared; job = fresh_job; witness } in
+         t.control_pending <- Some pending;
+         let admission () =
+           Result.is_ok
+             (check_current_local ~control:pending t witness ~allow_pending:false)
+         in
+         let committed =
+           match Store.commit_inactive_cancel t.handle prepared ~admit:admission with
+           | value -> `Returned value
+           | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
+         in
+         let retry () =
+           if remaining <= 0
+           then invalid "developer job cancellation changed before its write"
+           else cancel_attempt t snapshot ~remaining:(remaining - 1)
+         in
+         (match committed with
+          | `Returned (Ok installed) ->
+            Result.map (finish_installed t pending installed) ~f:(fun _ ->
+              Durable_cancelled)
+          | `Returned (Error Store.Error.Prewrite_conflict) ->
+            t.control_pending <- None;
+            retry ()
+          | `Returned (Error error) ->
+            (match Eio.Cancel.protect (fun () -> reconcile_control t pending) with
+             | Ok Installed -> Ok Durable_cancelled
+             | Ok Absent -> retry ()
+             | Error _ -> Error (error_of_store error))
+          | `Raised (exn, backtrace) ->
+            (try
+               ignore
+                 (Eio.Cancel.protect (fun () -> reconcile_control t pending)
+                  : (control_resolution, P.Error.t) result)
+             with
+             | _ -> ());
+            Exn.raise_with_original_backtrace exn backtrace))
+  ;;
+
+  let cancel_current t snapshot =
+    if not (phys_equal snapshot.issuer t)
+    then invalid "developer job snapshot belongs to another physical run owner"
+    else if not (same_domain t.registry)
+    then invalid "developer job cancellation belongs to another domain"
+    else if Option.is_some t.control_call || Option.is_some t.control_pending
+    then
+      Error
+        (P.Error.create
+           P.Error.Conflict
+           ~message:"developer job cancellation is already in flight or unresolved"
+           ~retryable:true
+           ())
+    else (
+      let finished, finish = Eio.Promise.create () in
+      let call = { cancel = None; finished; finish } in
+      t.control_call <- Some call;
+      Exn.protect
+        ~finally:(fun () ->
+          (match t.control_call with
+           | Some current when phys_equal current call -> t.control_call <- None
+           | None | Some _ -> ());
+          call.cancel <- None;
+          Eio.Promise.resolve finish ())
+        ~f:(fun () ->
+          Eio.Cancel.sub (fun cancel ->
+            call.cancel <- Some cancel;
+            Eio.Fiber.with_binding control_call_key t (fun () ->
+              cancel_attempt t snapshot ~remaining:3))))
+  ;;
+end
 
 module Selection = struct
   type nonrec t = selection
@@ -419,7 +656,7 @@ module Action = struct
                    ~retryable:true
                    ())
             | Some reservation ->
-              Hashtbl.set t.staged ~key:id ~data:{ job; reservation };
+              Hashtbl.set t.staged ~key:id ~data:{ job; reservation; phase = Provisional };
               Ok id)))
   ;;
 
@@ -436,6 +673,30 @@ module Action = struct
       ~request
       ~checkpoint
       ~check_parent_now:(fun () -> Ok ())
+  ;;
+
+  let rollback_staged t id =
+    if not (same_domain t.issuer.registry)
+    then invalid "developer staged job belongs to another domain"
+    else (
+      match Hashtbl.find t.staged id with
+      | None -> invalid "developer staged job is not owned by this action"
+      | Some { phase = Aborted; _ } -> Ok ()
+      | Some { phase = Published; _ } ->
+        invalid "published developer job cannot be rolled back"
+      | Some ({ phase = Provisional; _ } as staged) ->
+        let selected =
+          Option.value_map t.sealed ~default:false ~f:(fun selection ->
+            List.mem selection.selected_ids id ~equal:P.Id.Job.equal)
+        in
+        if selected
+        then invalid "selected developer job retains its physical handoff"
+        else if (not t.live) || not (same_action_fiber t)
+        then invalid "developer staged job rollback is outside its action"
+        else (
+          Job_capacity.abort staged.reservation;
+          staged.phase <- Aborted;
+          Ok ()))
   ;;
 
   let seal t ~selected =
@@ -459,7 +720,9 @@ module Action = struct
             Hash_set.add seen id;
             match Hashtbl.find t.staged id with
             | None -> invalid "developer root selection is not staged here"
-            | Some staged -> Ok (staged.job :: jobs, count + 1)))
+            | Some { phase = Provisional; job; _ } -> Ok (job :: jobs, count + 1)
+            | Some { phase = Aborted | Published; _ } ->
+              invalid "developer root selection is no longer provisional"))
       in
       let value = { issuer = t; jobs = List.rev jobs; selected_ids = selected } in
       t.sealed <- Some value;
@@ -490,16 +753,28 @@ let narrow_selection t ~names =
 ;;
 
 let abort_staged action =
-  Hashtbl.iter action.staged ~f:(fun staged -> Job_capacity.abort staged.reservation)
+  Hashtbl.iter action.staged ~f:(fun staged ->
+    match staged.phase with
+    | Provisional ->
+      Job_capacity.abort staged.reservation;
+      staged.phase <- Aborted
+    | Aborted | Published -> ())
 ;;
 
 let settle_staged action selection = function
   | Store.Settlement.Installed _ ->
     let selected_ids = Hash_set.of_list (module P.Id.Job) selection.selected_ids in
     Hashtbl.iteri action.staged ~f:(fun ~key:id ~data:staged ->
-      if Hash_set.mem selected_ids id
-      then Job_capacity.publish staged.reservation
-      else Job_capacity.abort staged.reservation)
+      match staged.phase with
+      | Provisional ->
+        if Hash_set.mem selected_ids id
+        then (
+          Job_capacity.publish staged.reservation;
+          staged.phase <- Published)
+        else (
+          Job_capacity.abort staged.reservation;
+          staged.phase <- Aborted)
+      | Aborted | Published -> ())
   | Absent -> abort_staged action
   | Prewrite_conflict | Diverged -> ()
 ;;
@@ -619,6 +894,7 @@ let restore_live_after_retention t =
      | Quarantined -> true
      | Live | Closing | Closed -> false)
     && Option.is_none t.pending
+    && Option.is_none t.control_pending
     && Option.is_none t.dispatch_owner
     && List.is_empty t.unresolved_native
     && Option.is_some (Terminal_queue.effect_witness t.terminals)
@@ -775,6 +1051,7 @@ let with_root_action t ~phase f =
   else if
     Option.is_some t.root_call
     || Option.is_some t.pending
+    || Option.is_some t.control_pending
     || Option.is_some t.dispatch_owner
     || t.reconciling
   then invalid "developer root action is already active or unresolved"
@@ -925,6 +1202,7 @@ module Native_terminal = struct
     let snapshot = t.action.snapshot in
     Option.value_map issuer.dispatch_owner ~default:false ~f:(phys_equal t)
     && Option.is_none issuer.pending
+    && Option.is_none issuer.control_pending
     && (match issuer.state with
         | Live -> true
         | Closing | Quarantined | Closed -> false)
@@ -966,6 +1244,7 @@ module Native_terminal = struct
       || t.submitted
       || Option.is_some issuer.dispatch_owner
       || Option.is_some issuer.pending
+      || Option.is_some issuer.control_pending
       || issuer.reconciling
       || (not (phys_equal t.action.snapshot.issuer issuer))
       || (not (H.equal_context (H.context original) (H.context dispatched)))
@@ -1125,6 +1404,8 @@ module Native_terminal = struct
         | Some parent ->
           Job_scope.Parent.check_now parent ~owner:t.issuer.owner ~capture_fingerprint)
   ;;
+
+  let rollback_staged (t : t) id = Action.rollback_staged t.action id
 
   let seal (t : t) ~outcome ~selected =
     let* () =
@@ -1333,6 +1614,8 @@ let reconcile_pending t =
   then invalid "developer root owner belongs to another domain"
   else if Option.is_some t.root_call || not (Hashtbl.is_empty t.native_calls)
   then invalid "developer callback is still active"
+  else if Option.is_some t.control_call
+  then invalid "developer job cancellation is still active"
   else if t.reconciling
   then
     Error
@@ -1346,6 +1629,7 @@ let reconcile_pending t =
     Exn.protect
       ~finally:(fun () -> t.reconciling <- false)
       ~f:(fun () ->
+        let* () = Job_control.reconcile_pending t in
         let* () =
           List.fold_result t.unresolved_native ~init:() ~f:(fun () scope_registration ->
             match scope_registration.scope with
@@ -1394,7 +1678,11 @@ let reconcile_pending t =
 let with_native_registration t ?job_parent ~invocation f =
   if not (same_domain t.registry)
   then invalid "developer native owner belongs to another domain"
-  else if Option.is_some t.pending || Option.is_some t.dispatch_owner || t.reconciling
+  else if
+    Option.is_some t.pending
+    || Option.is_some t.control_pending
+    || Option.is_some t.dispatch_owner
+    || t.reconciling
   then invalid "developer terminal settlement is unresolved"
   else (
     let context = H.context invocation in
@@ -1617,6 +1905,8 @@ let close_owner t =
       phys_equal current t)
     || Option.value_map (Eio.Fiber.get native_call_key) ~default:false ~f:(fun current ->
       phys_equal current t)
+    || Option.value_map (Eio.Fiber.get control_call_key) ~default:false ~f:(fun current ->
+      phys_equal current t)
   then invalid "developer root action cannot close its own owner"
   else (
     match t.state with
@@ -1628,13 +1918,17 @@ let close_owner t =
         |> Result.map_error ~f:error_of_terminal_queue
       in
       let root_call = t.root_call in
+      let control_call = t.control_call in
       let native_calls = Hashtbl.data t.native_calls |> List.map ~f:(fun r -> r.call) in
       Eio.Cancel.protect (fun () ->
         Option.iter root_call ~f:(fun call ->
           Option.iter call.cancel ~f:(fun cancel -> Eio.Cancel.cancel cancel Exit));
+        Option.iter control_call ~f:(fun call ->
+          Option.iter call.cancel ~f:(fun cancel -> Eio.Cancel.cancel cancel Exit));
         List.iter native_calls ~f:(fun call ->
           Option.iter call.cancel ~f:(fun cancel -> Eio.Cancel.cancel cancel Exit));
         Option.iter root_call ~f:(fun call -> Eio.Promise.await call.finished);
+        Option.iter control_call ~f:(fun call -> Eio.Promise.await call.finished);
         List.iter native_calls ~f:(fun call -> Eio.Promise.await call.finished));
       let worker_result =
         match
@@ -1724,6 +2018,10 @@ module Registry = struct
         phys_equal current.registry t)
       || Option.value_map
            (Eio.Fiber.get native_call_key)
+           ~default:false
+           ~f:(fun current -> phys_equal current.registry t)
+      || Option.value_map
+           (Eio.Fiber.get control_call_key)
            ~default:false
            ~f:(fun current -> phys_equal current.registry t)
     then invalid "developer root admission cannot close its own registry"
@@ -1872,6 +2170,8 @@ module Registry = struct
       ; unresolved_native = []
       ; terminals
       ; pending = None
+      ; control_pending = None
+      ; control_call = None
       ; dispatch_owner = None
       ; effect_revision = 0
       ; reconciling = false

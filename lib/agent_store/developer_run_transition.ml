@@ -276,6 +276,42 @@ let claim t document ~observed ~now =
       |> store)
 ;;
 
+let cancel_inactive t document ~observed ~now =
+  let id = P.Developer_job.id observed in
+  match Doc.find_job document id with
+  | None -> Error Error.Conflict
+  | Some prior when not (P.Developer_job.same_immutable prior observed) ->
+    Error Error.Conflict
+  | Some prior ->
+    let before = P.Developer_job.state prior in
+    let issued = P.Developer_job.state observed in
+    if
+      (not (P.Execution_owner.equal_developer (P.Developer_job.owner prior) t.owner))
+      || (not (Int.equal before.attempt issued.attempt))
+      ||
+      match before.status with
+      | P.Job.Queued | Waiting_completion _ -> false
+      | Running | Waiting_permission _ | Succeeded | Failed _ | Cancelled | Interrupted _
+        -> true
+    then Error Error.Conflict
+    else (
+      let after : P.Developer_job.State.t =
+        { before with
+          status = P.Job.Cancelled
+        ; next_run_at = None
+        ; completed_at = Some now
+        ; result = None
+        ; retry_failure = None
+        }
+      in
+      let* _ =
+        P.Developer_job.with_state prior after
+        |> Result.map_error ~f:(fun _ -> Error.Conflict)
+      in
+      Doc.set_job_state document ~poll:t.poll ~id ~expected_attempt:before.attempt ~after
+      |> store)
+;;
+
 let terminal_status = function
   | P.Job.Succeeded | Failed _ | Cancelled | Interrupted _ -> true
   | Queued | Running | Waiting_permission _ | Waiting_completion _ -> false
