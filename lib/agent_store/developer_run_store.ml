@@ -188,6 +188,7 @@ module Prepared = struct
     | Selected_transaction
     | Worker_claim
     | Claimed_transition
+    | Inactive_cancel
 
   type claim_status =
     | Unsettled
@@ -836,6 +837,21 @@ let observe handle =
   with_lease t (fun ~env:_ ~root:_ ->
     let poll = work t t.checkpoint in
     observe_with_poll t handle ~poll)
+;;
+
+let observe_latest_active handle =
+  let* t = valid_handle handle in
+  with_lease t (fun ~env:_ ~root:_ ->
+    let poll = work t t.checkpoint in
+    let* observed = observe_with_poll t handle ~poll in
+    match List.last (Doc.epochs observed.document) with
+    | Some epoch
+      when Int.equal (Doc.epoch_number epoch) handle.owner.epoch
+           &&
+           match Doc.epoch_phase epoch with
+           | `Active -> true
+           | `Interrupted | `Closed -> false -> Ok observed
+    | None | Some _ -> Error Error.Foreign_or_stale)
 ;;
 
 module Result_root = struct
@@ -1535,6 +1551,25 @@ let prepare_job_claim handle ~expected ~lookup ~now =
     Ok { prepared with claim_data = Some claim_data }
 ;;
 
+let prepare_inactive_cancel handle ~expected ~lookup ~now =
+  let* observed =
+    match Job_lookup.value lookup with
+    | None -> Error Error.Conflict
+    | Some observed -> Ok observed
+  in
+  let id = P.Developer_job.id observed in
+  if not (matching_job_lookup expected lookup id)
+  then Error Error.Conflict
+  else
+    prepare_change handle ~expected ~kind:Inactive_cancel ~f:(fun t document ~poll ->
+      Developer_run_transition.cancel_inactive
+        (transition t handle ~poll)
+        document
+        ~observed
+        ~now
+      |> transition_result)
+;;
+
 let prepare_claimed_transition_internal
       handle
       ~expected
@@ -1690,7 +1725,7 @@ let bind_handoff t handle prepared handoff =
   else if
     match prepared.Prepared.kind with
     | Developer_dispatch | Selected_transaction -> false
-    | Foundation_checkpoint | Worker_claim | Claimed_transition -> true
+    | Foundation_checkpoint | Worker_claim | Claimed_transition | Inactive_cancel -> true
   then Error Error.Conflict
   else
     let* () =
@@ -1858,7 +1893,8 @@ let bind_claim t handle prepared =
     | ( ( Foundation_checkpoint
         | Developer_dispatch
         | Selected_transaction
-        | Claimed_transition )
+        | Claimed_transition
+        | Inactive_cancel )
       , _ )
     | Worker_claim, None -> Error Error.Conflict)
 ;;
@@ -1866,7 +1902,7 @@ let bind_claim t handle prepared =
 let settle_worker_prepared t handle (prepared : Prepared.t) settlement =
   let identical_unwritten_claim =
     match prepared.kind with
-    | Worker_claim -> not prepared.write_attempted
+    | Worker_claim | Inactive_cancel -> not prepared.write_attempted
     | Foundation_checkpoint
     | Developer_dispatch
     | Selected_transaction
@@ -1890,9 +1926,10 @@ let settle_worker_prepared t handle (prepared : Prepared.t) settlement =
    | Unsettled | Claim_absent | Claim_diverged | Claim_prewrite_conflict -> ());
   let retire =
     match status, prepared.kind with
-    | Claim_installed, (Worker_claim | Claimed_transition)
-    | Claim_absent, Worker_claim
-    | Claim_prewrite_conflict, (Worker_claim | Claimed_transition) -> true
+    | Claim_installed, (Worker_claim | Claimed_transition | Inactive_cancel)
+    | Claim_absent, (Worker_claim | Inactive_cancel)
+    | Claim_prewrite_conflict, (Worker_claim | Claimed_transition | Inactive_cancel) ->
+      true
     | (Unsettled | Claim_absent | Claim_diverged), _
     | Claim_installed, (Foundation_checkpoint | Developer_dispatch | Selected_transaction)
     | ( Claim_prewrite_conflict
@@ -2016,12 +2053,16 @@ let commit_job_claim handle prepared =
          Stdlib.Printexc.raise_with_backtrace exn backtrace))
 ;;
 
-let bind_claimed_transition t handle prepared =
+type transition_path =
+  | Physical_claim
+  | Inactive_job
+
+let bind_transition path t handle prepared =
   if not (prepared_for handle prepared)
   then Error Error.Foreign_or_stale
   else (
-    match prepared.Prepared.kind with
-    | Claimed_transition ->
+    match path, prepared.Prepared.kind with
+    | Physical_claim, Claimed_transition | Inactive_job, Inactive_cancel ->
       (match prepared.claim_status with
        | Claim_installed | Claim_diverged | Claim_prewrite_conflict -> Ok ()
        | Unsettled | Claim_absent ->
@@ -2034,8 +2075,13 @@ let bind_claimed_transition t handle prepared =
            | Some (Transition pending) when phys_equal pending.token prepared.token ->
              Ok ()
            | Some (Selected _ | Claim _ | Transition _) -> Error Error.Conflict))
-    | Foundation_checkpoint | Developer_dispatch | Selected_transaction | Worker_claim ->
-      Error Error.Conflict)
+    | ( (Physical_claim | Inactive_job)
+      , ( Foundation_checkpoint
+        | Developer_dispatch
+        | Selected_transaction
+        | Worker_claim
+        | Claimed_transition
+        | Inactive_cancel ) ) -> Error Error.Conflict)
 ;;
 
 let claimed_transition_result t prepared =
@@ -2054,10 +2100,10 @@ let claimed_transition_reconciliation t prepared =
   | Unsettled -> Error Error.Conflict
 ;;
 
-let reconcile_claimed_transition_using borrow handle prepared =
+let reconcile_transition_using borrow ~path handle prepared =
   let* t = valid_handle handle in
   borrow t handle (fun ~env:_ ~root:_ ->
-    let* () = bind_claimed_transition t handle prepared in
+    let* () = bind_transition path t handle prepared in
     match prepared.claim_status with
     | Claim_installed | Claim_diverged | Claim_prewrite_conflict ->
       claimed_transition_reconciliation t prepared
@@ -2069,13 +2115,17 @@ let reconcile_claimed_transition_using borrow handle prepared =
 ;;
 
 let reconcile_claimed_transition handle prepared =
-  reconcile_claimed_transition_using with_normal_lease handle prepared
+  reconcile_transition_using with_normal_lease ~path:Physical_claim handle prepared
 ;;
 
-let commit_claimed_transition_using borrow ~admit handle prepared =
+let reconcile_inactive_cancel handle prepared =
+  reconcile_transition_using with_normal_lease ~path:Inactive_job handle prepared
+;;
+
+let commit_transition_using borrow ~path ~admit handle prepared =
   let* t = valid_handle handle in
   borrow t handle (fun ~env:_ ~root:_ ->
-    let* () = bind_claimed_transition t handle prepared in
+    let* () = bind_transition path t handle prepared in
     match prepared.claim_status with
     | Claim_installed | Claim_diverged | Claim_prewrite_conflict ->
       claimed_transition_result t prepared
@@ -2119,7 +2169,11 @@ let commit_claimed_transition_using borrow ~admit handle prepared =
 ;;
 
 let commit_claimed_transition ?(admit = fun () -> true) handle prepared =
-  commit_claimed_transition_using with_normal_lease ~admit handle prepared
+  commit_transition_using with_normal_lease ~path:Physical_claim ~admit handle prepared
+;;
+
+let commit_inactive_cancel ?(admit = fun () -> true) handle prepared =
+  commit_transition_using with_normal_lease ~path:Inactive_job ~admit handle prepared
 ;;
 
 let commit handle prepared =
@@ -2129,8 +2183,11 @@ let commit handle prepared =
   else if
     match prepared.kind with
     | Foundation_checkpoint -> false
-    | Developer_dispatch | Selected_transaction | Worker_claim | Claimed_transition ->
-      true
+    | Developer_dispatch
+    | Selected_transaction
+    | Worker_claim
+    | Claimed_transition
+    | Inactive_cancel -> true
   then Error Error.Conflict
   else
     with_normal_lease t handle (fun ~env:_ ~root:_ ->
@@ -2162,8 +2219,11 @@ let reconcile handle prepared =
   else if
     match prepared.kind with
     | Foundation_checkpoint -> false
-    | Developer_dispatch | Selected_transaction | Worker_claim | Claimed_transition ->
-      true
+    | Developer_dispatch
+    | Selected_transaction
+    | Worker_claim
+    | Claimed_transition
+    | Inactive_cancel -> true
   then Error Error.Conflict
   else
     with_normal_lease t handle (fun ~env:_ ~root:_ ->
@@ -2453,8 +2513,9 @@ module Recovery = struct
       then Error Error.Foreign_or_stale
       else (
         match
-          reconcile_claimed_transition_using
+          reconcile_transition_using
             (fun store _handle f -> with_lease store f)
+            ~path:Physical_claim
             t.handle
             pending.prepared
         with
@@ -2476,8 +2537,9 @@ module Recovery = struct
       then Error Error.Foreign_or_stale
       else
         let* installed =
-          commit_claimed_transition_using
+          commit_transition_using
             (fun store _handle f -> with_lease store f)
+            ~path:Physical_claim
             ~admit
             t.handle
             pending.prepared

@@ -3808,8 +3808,11 @@ module State : sig
       result; a dependency wait requires an async tool, a deadline no earlier
       than creation and cannot target its own job ID. Success requires a claimed
       attempt, start, completion time and matching result; failure, cancellation
-      and interruption may precede claim but require a completion time; only a
-      claimed attempt has a current [started_at]. Inline
+      and interruption may precede claim but require a completion time. A
+      cancelled queued retry keeps its positive prior attempt count and absent
+      current [started_at]; no next attempt is invented. This is record shape,
+      not authority to cancel an unclaimed retry: the Store validates the exact
+      observed transition. Inline
       completions and artifact metadata are validated. Wall-clock timestamps
       are not ordered against each other: the host clock may step backward.
       This proves record shape, not authority to make the transition. *)

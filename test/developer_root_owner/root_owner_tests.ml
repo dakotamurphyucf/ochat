@@ -240,12 +240,17 @@ let%test_unit
           O.Action.stage_background action ~request ~checkpoint:ignore |> ok
         in
         assert (not (P.Id.Job.equal chosen unselected));
+        O.Action.rollback_staged action unselected |> ok;
+        O.Action.rollback_staged action unselected |> ok;
+        assert (
+          Result.is_error (O.Action.stage_background action ~request ~checkpoint:ignore));
         staged_ids := Some (chosen, unselected);
         assert (
           Result.is_error
             (Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) (fun () ->
                O.Action.seal action ~selected:[ chosen ])));
         let selection = O.Action.seal action ~selected:[ chosen ] |> ok in
+        assert (Result.is_error (O.Action.rollback_staged action chosen));
         Ok ("complete", selection))
       |> ok
     in
@@ -454,6 +459,259 @@ let%test_unit
     in
     O.close_and_wait replacement |> ok;
     O.Registry.close_and_wait second |> ok)
+;;
+
+let%test_unit "physical root job control preserves exact inactive attempts" =
+  with_store (fun env sw store ->
+    let captured = capture () in
+    let run_owner = owner "dvr_root_job_control" 0 in
+    let handle, _ =
+      R.admit_epoch
+        store
+        ~owner:run_owner
+        ~capture_fingerprint:(C.fingerprint captured)
+        ~previous:None
+      |> ok
+    in
+    let selected =
+      Chat_response.Tool_capability.create
+        ~owner:"root-owner-test"
+        ~resource_fingerprint:Digestif.SHA256.(digest_string "fixture" |> to_hex)
+        []
+      |> ok
+    in
+    let limits =
+      O.Limits.create
+        ~max_active_runs:2
+        ~max_staged_jobs:2
+        ~max_native_occupancy:2
+        ~max_active_workers:1
+        ~max_quarantined_workers:2
+      |> or_error
+    in
+    let registry = O.Registry.create ~sw ~store ~capacity:(capacity ()) ~now ~limits in
+    let run =
+      O.Registry.admit
+        registry
+        ~actor:(Operator_authorization.trusted_local principal)
+        ~capture:captured
+        ~registry:selected
+        ~selected
+        ~job_policy:Chat_response.One_off_request.default_policy
+        ~handle
+        ~workspace_conflict_domain:"root-owner-test"
+      |> ok
+    in
+    let prepared =
+      Chat_response.One_off_script.prepare_in_domain
+        ~env
+        ~capabilities:selected
+        ~tools:[]
+        ~source:"let main input = Task.pure(input)"
+        ()
+      |> ok
+    in
+    let request =
+      Chat_response.Background_request.script
+        ~prepared
+        ~input:`Null
+        ~policy:Chat_response.One_off_request.default_policy
+      |> ok
+    in
+    let stage () =
+      O.with_root_action run ~phase:R.Checkpoint.Active (fun ~action ~sw:_ ->
+        let id = O.Action.stage_background action ~request ~checkpoint:ignore |> ok in
+        let selection = O.Action.seal action ~selected:[ id ] |> ok in
+        Ok (id, selection))
+      |> function
+      | Ok id -> id
+      | Error error -> raise_s [%sexp "stage failed", (error : P.Error.t)]
+    in
+    let id = stage () in
+    let snapshot = O.Job_control.find_current run id |> ok |> Option.value_exn in
+    assert (
+      match O.Job_control.cancel_current run snapshot |> ok with
+      | O.Job_control.Durable_cancelled -> true
+      | Already_terminal | Claimed_cancel_requested -> false);
+    assert (
+      match O.Job_control.cancel_current run snapshot |> ok with
+      | O.Job_control.Already_terminal -> true
+      | Durable_cancelled | Claimed_cancel_requested -> false);
+    let cancelled = R.find_job (R.observe handle |> ok) id |> Option.value_exn in
+    assert (
+      match (P.Developer_job.state cancelled).status with
+      | P.Job.Cancelled -> true
+      | _ -> false);
+    let claimed_id = stage () in
+    let queued_snapshot =
+      O.Job_control.find_current run claimed_id |> ok |> Option.value_exn
+    in
+    let before_claim = R.observe handle |> ok in
+    let started, started_u = Eio.Promise.create () in
+    let never, _never_u = Eio.Promise.create () in
+    let finished, finished_u = Eio.Promise.create () in
+    let effects = ref 0 in
+    Eio.Fiber.fork ~sw (fun () ->
+      let outcome =
+        match
+          O.with_claimed_job
+            run
+            ~expected:before_claim
+            ~lookup:(R.find_job_exact before_claim claimed_id)
+            (fun ~active:_ ~sw:_ ->
+               incr effects;
+               Eio.Promise.resolve started_u ();
+               Eio.Promise.await never;
+               failwith "cancelled job resumed its callback")
+        with
+        | exception Eio.Cancel.Cancelled _ -> `Cancelled
+        | Ok _ -> `Returned
+        | Error _ -> `Rejected
+      in
+      Eio.Promise.resolve finished_u outcome);
+    Eio.Promise.await started;
+    assert (Result.is_error (O.Job_control.cancel_current run queued_snapshot));
+    let claimed_snapshot =
+      O.Job_control.find_current run claimed_id |> ok |> Option.value_exn
+    in
+    assert (
+      match O.Job_control.cancel_current run claimed_snapshot |> ok with
+      | O.Job_control.Claimed_cancel_requested -> true
+      | Already_terminal | Durable_cancelled -> false);
+    assert (Int.equal !effects 1);
+    assert (
+      match Eio.Promise.await finished with
+      | `Cancelled -> true
+      | `Returned | `Rejected -> false);
+    assert (
+      match
+        (P.Developer_job.state
+           (R.find_job (R.observe handle |> ok) claimed_id |> Option.value_exn))
+          .status
+      with
+      | P.Job.Cancelled -> true
+      | _ -> false);
+    O.close_and_wait run |> ok;
+    O.Registry.close_and_wait registry |> ok)
+;;
+
+let%test_unit "uncertain job cancellation retains owner and capacity until recovery" =
+  let rename_armed = ref false in
+  let sync_blocked = ref false in
+  let parent_sync_blocked = ref false in
+  with_store
+    ~wrap_env:(fun env ->
+      F.fault_after_authority_rename_env
+        ~after_rename:(fun () -> sync_blocked := true)
+        env
+        ~rename_armed
+        ~sync_blocked
+        ~parent_sync_blocked)
+    (fun env sw store ->
+       let captured = capture () in
+       let run_owner = owner "dvr_cancel_unknown" 0 in
+       let handle, _ =
+         R.admit_epoch
+           store
+           ~owner:run_owner
+           ~capture_fingerprint:(C.fingerprint captured)
+           ~previous:None
+         |> ok
+       in
+       let selected =
+         Chat_response.Tool_capability.create
+           ~owner:"root-owner-test"
+           ~resource_fingerprint:Digestif.SHA256.(digest_string "fixture" |> to_hex)
+           []
+         |> ok
+       in
+       let limits =
+         O.Limits.create
+           ~max_active_runs:1
+           ~max_staged_jobs:1
+           ~max_native_occupancy:1
+           ~max_active_workers:1
+           ~max_quarantined_workers:2
+         |> or_error
+       in
+       let capacity = capacity ~per_session:1 () in
+       let registry = O.Registry.create ~sw ~store ~capacity ~now ~limits in
+       let run =
+         O.Registry.admit
+           registry
+           ~actor:(Operator_authorization.trusted_local principal)
+           ~capture:captured
+           ~registry:selected
+           ~selected
+           ~job_policy:Chat_response.One_off_request.default_policy
+           ~handle
+           ~workspace_conflict_domain:"root-owner-test"
+         |> ok
+       in
+       let prepared =
+         Chat_response.One_off_script.prepare_in_domain
+           ~env
+           ~capabilities:selected
+           ~tools:[]
+           ~source:"let main input = Task.pure(input)"
+           ()
+         |> ok
+       in
+       let request =
+         Chat_response.Background_request.script
+           ~prepared
+           ~input:`Null
+           ~policy:Chat_response.One_off_request.default_policy
+         |> ok
+       in
+       let id =
+         O.with_root_action run ~phase:R.Checkpoint.Active (fun ~action ~sw:_ ->
+           let id = O.Action.stage_background action ~request ~checkpoint:ignore |> ok in
+           let selection = O.Action.seal action ~selected:[ id ] |> ok in
+           Ok (id, selection))
+         |> ok
+       in
+       let snapshot = O.Job_control.find_current run id |> ok |> Option.value_exn in
+       rename_armed := true;
+       assert (Result.is_error (O.Job_control.cancel_current run snapshot));
+       assert !sync_blocked;
+       assert (
+         Result.is_error
+           (O.with_root_action run ~phase:R.Checkpoint.Active (fun ~action ~sw:_ ->
+              let selection = O.Action.seal action ~selected:[] |> ok in
+              Ok ((), selection))));
+       assert (Result.is_error (O.close_and_wait run));
+       let project_source =
+         match Chatml_prepared_program.provenance (C.prepared captured) with
+         | Project { declaration; lock = _ } -> declaration
+         | Implicit -> Chatml_prepared_program.entry (C.prepared captured)
+       in
+       let key =
+         Agent_server.Job_capacity.Key.developer
+           ~owner:run_owner
+           ~project_source
+           ~workspace_conflict_domain:"root-owner-test"
+           ~kind:P.Job.Async_tool
+           ~nested_depth:0
+         |> ok
+       in
+       (match Agent_server.Job_capacity.try_acquire capacity key with
+        | Ok None -> ()
+        | Ok (Some _) | Error _ ->
+          failwith "uncertain cancellation released selected capacity");
+       sync_blocked := false;
+       O.reconcile_pending run |> ok;
+       let cancelled = R.find_job (R.observe handle |> ok) id |> Option.value_exn in
+       assert (
+         match (P.Developer_job.state cancelled).status with
+         | P.Job.Cancelled -> true
+         | _ -> false);
+       O.close_and_wait run |> ok;
+       let released =
+         Agent_server.Job_capacity.try_acquire capacity key |> ok |> Option.value_exn
+       in
+       Agent_server.Job_capacity.release released;
+       O.Registry.close_and_wait registry |> ok)
 ;;
 
 let%test_unit "uncertain root handoff retains capacity through owner close" =

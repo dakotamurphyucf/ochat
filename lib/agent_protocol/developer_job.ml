@@ -201,7 +201,14 @@ module State_core = struct
       then invalid "invalid terminal developer job time"
       else if Int.equal t.attempt 0 && Option.is_some t.started_at
       then invalid "unclaimed developer job has a start"
-      else if t.attempt > 0 && Option.is_none t.started_at
+      else if
+        t.attempt > 0
+        && Option.is_none t.started_at
+        &&
+        match status with
+        | Cancelled -> false
+        | Succeeded | Failed _ | Interrupted _ -> true
+        | Queued | Running | Waiting_permission _ | Waiting_completion _ -> true
       then invalid "claimed developer job has no start"
       else if
         match status with

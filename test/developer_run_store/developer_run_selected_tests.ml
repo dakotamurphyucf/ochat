@@ -217,6 +217,14 @@ let%test_unit "developer-only codecs roundtrip validated states and reject wrapp
       ; result = None
       ; retry_failure = None
       }
+    ; { status = P.Job.Cancelled
+      ; attempt = 1
+      ; started_at = None
+      ; next_run_at = None
+      ; completed_at = Some timestamp
+      ; result = None
+      ; retry_failure = None
+      }
     ; { status = P.Job.Interrupted "restart"
       ; attempt = 1
       ; started_at = Some timestamp
@@ -704,6 +712,142 @@ let%test_unit "bounded selection agrees with an independent set model" =
             (List.mem indexes index ~equal:Int.equal)));
       assert (Int64.equal (R.Checkpoint.revision (R.Observation.checkpoint after)) 2L);
       R.close_and_wait run |> F.run_ok))
+;;
+
+let%test_unit "inactive cancellation is exact-attempt CAS across stale and absent writes" =
+  F.with_root (fun _env _sw _root _session run ->
+    let owner = F.owner 0 in
+    let capture = F.digest "inactive cancellation CAS" in
+    let handle, initial = F.admit run owner capture in
+    let id = job_id "job_inactive_cancel" in
+    let chosen = job owner capture ~id ~parent:P.Developer_job.Launch.Run_root in
+    let selected =
+      R.prepare_root_selected
+        handle
+        ~expected:initial
+        ~phase:R.Checkpoint.Active
+        ~selected:[ chosen ]
+      |> F.run_ok
+      |> fun prepared ->
+      R.commit_and_settle handle ~admit:(fun () -> true) prepared (handoff ())
+      |> F.run_ok
+      |> installed
+    in
+    let lookup = R.find_job_exact selected id in
+    let stale =
+      R.prepare_inactive_cancel handle ~expected:selected ~lookup ~now:timestamp
+      |> F.run_ok
+    in
+    let unrelated =
+      R.prepare_root_selected
+        handle
+        ~expected:selected
+        ~phase:R.Checkpoint.Active
+        ~selected:[]
+      |> F.run_ok
+    in
+    ignore
+      (R.commit_and_settle handle ~admit:(fun () -> true) unrelated (handoff ())
+       |> F.run_ok
+       |> installed
+       : R.Observation.t);
+    (match R.commit_inactive_cancel handle stale with
+     | Error R.Error.Prewrite_conflict -> ()
+     | Ok _ | Error _ -> failwith "stale cancellation overwrote another revision");
+    (match R.reconcile_inactive_cancel handle stale with
+     | Error R.Error.Prewrite_conflict -> ()
+     | Ok _ | Error _ -> failwith "stale cancellation was adopted");
+    let current = R.observe handle |> F.run_ok in
+    let exact =
+      R.prepare_inactive_cancel
+        handle
+        ~expected:current
+        ~lookup:(R.find_job_exact current id)
+        ~now:timestamp
+      |> F.run_ok
+    in
+    (match R.reconcile_inactive_cancel handle exact |> F.run_ok with
+     | R.Absent -> ()
+     | Installed _ | Diverged -> failwith "unattempted cancellation was not absent");
+    let installed = R.commit_inactive_cancel handle exact |> F.run_ok in
+    let cancelled =
+      R.find_job (R.Installed.observation installed) id |> Option.value_exn
+    in
+    assert (
+      match (P.Developer_job.state cancelled).status with
+      | P.Job.Cancelled -> true
+      | _ -> false);
+    assert (Int.equal (P.Developer_job.state cancelled).attempt 0);
+    (match R.reconcile_inactive_cancel handle exact |> F.run_ok with
+     | R.Installed _ -> ()
+     | Absent | Diverged -> failwith "installed cancellation lost its durable result");
+    let terminal = R.observe handle |> F.run_ok in
+    assert (
+      Result.is_error
+        (R.prepare_inactive_cancel
+           handle
+           ~expected:terminal
+           ~lookup:(R.find_job_exact terminal id)
+           ~now:timestamp));
+    R.close_and_wait run |> F.run_ok)
+;;
+
+let%test_unit "inactive cancellation reconciles a post-rename uncertain write" =
+  F.with_temp_directory "ochat-inactive-cancel-uncertain" (fun original temporary ->
+    Eio.Switch.run (fun sw ->
+      let armed = ref false in
+      let sync_blocked = ref false in
+      let parent_sync_blocked = ref false in
+      let env =
+        F.fault_after_authority_rename_env
+          original
+          ~rename_armed:armed
+          ~sync_blocked
+          ~parent_sync_blocked
+      in
+      let session = F.create_session env sw (Filename.concat temporary "data") in
+      let run = F.open_run session sw () in
+      let owner = F.owner 0 in
+      let capture = F.digest "uncertain inactive cancellation" in
+      let handle, initial = F.admit run owner capture in
+      let id = job_id "job_uncertain_inactive_cancel" in
+      let chosen = job owner capture ~id ~parent:P.Developer_job.Launch.Run_root in
+      let prepared =
+        R.prepare_root_selected
+          handle
+          ~expected:initial
+          ~phase:R.Checkpoint.Active
+          ~selected:[ chosen ]
+        |> F.run_ok
+      in
+      let selected =
+        R.commit_and_settle handle ~admit:(fun () -> true) prepared (handoff ())
+        |> F.run_ok
+        |> installed
+      in
+      let cancellation =
+        R.prepare_inactive_cancel
+          handle
+          ~expected:selected
+          ~lookup:(R.find_job_exact selected id)
+          ~now:timestamp
+        |> F.run_ok
+      in
+      armed := true;
+      assert (Result.is_error (R.commit_inactive_cancel handle cancellation));
+      (match R.reconcile_inactive_cancel handle cancellation |> F.run_ok with
+       | R.Installed installed ->
+         let cancelled =
+           R.find_job (R.Installed.observation installed) id |> Option.value_exn
+         in
+         assert (
+           match (P.Developer_job.state cancelled).status with
+           | P.Job.Cancelled -> true
+           | _ -> false)
+       | Absent | Diverged ->
+         failwith "uncertain cancellation lost its exact installed write");
+      R.close_and_wait run |> F.run_ok;
+      F.store_ok (Agent_store.Session_store.close session)))
 ;;
 
 let%test_unit "handoff settlement is one-way across absent, prewrite and callback failure"
