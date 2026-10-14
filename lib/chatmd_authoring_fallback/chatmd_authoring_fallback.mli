@@ -44,9 +44,13 @@ module Origin : sig
   (** [current] is the host's actual current Document input, not a wire claim.
       The selected Script stamp must match its identity/generation/source, the
       separately selected contract's Prepared closure and exact entry source.
-      [authored_input] must be the parser input containing the exact editable
-      root bytes of [current]; imported declarations are unavailable for this
-      request. A parser-owned inverse point lookup is exact only on one unique
+      [authored_input] must be the exact parser input of the selected
+      declaration. For a root declaration, [authored_source] must be the current
+      root capture. For an imported declaration, the host must already have
+      proven its genuine retained parser-input/captured-source association from
+      the current Parsed_capture; this pure adapter also compares exact
+      authored bytes and never derives custody from an input path. A
+      parser-owned inverse point lookup is exact only on one unique
       identity segment; forward projection of the entire replacement must
       return Exact_inline for that SAME input. All other outcomes return None
       through the trusted map and produce Source_map_unavailable. The exact

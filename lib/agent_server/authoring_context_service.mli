@@ -272,6 +272,94 @@ module Semantic : sig
     -> (P.Authoring.Analysis.Analyze.t, Error.t) result
 end
 
+(** Lexical and early assistance borrow the same current context and joined
+    request lifetime. Creating or editing that context still requires the core
+    feature; each method separately requires its own negotiated feature.
+    Parsed imports and project metadata become available only after an explicit
+    Analyze capture for the current document generation. *)
+module Assistance : sig
+  type t
+
+  module Limits : sig
+    type t
+
+    (** Finite per-request scan, projection, capture and response ceilings.
+        The protocol limits must equal the owner's initialized limits. *)
+    val create
+      :  protocol_limits:P.Authoring.Limits.t
+      -> max_scan_work_steps:int
+      -> max_assistance_work_steps:int
+      -> max_contract_identity_bytes:int
+      -> max_contract_work_steps:int
+      -> max_projection_work_steps:int
+      -> max_parser_input_bytes:int
+      -> max_imported_inputs:int
+      -> max_selected_tools:int
+      -> max_tool_metadata_bytes:int
+      -> t Or_error.t
+  end
+
+  module Selected_tool_policy : sig
+    module Registry : sig
+      type t
+
+      (** Admit only the host's actual selected immutable registry under the
+          same finite assistance limits. This conveys comparison data, not
+          permission to run tools. *)
+      val admit
+        :  Chat_response.Tool_capability.t
+        -> limits:Limits.t
+        -> checkpoint:(unit -> unit)
+        -> (t, Error.t) result
+
+      val selected : t -> Chat_response.Tool_capability.t
+      val equal_identity : t -> t -> bool
+    end
+
+    type t
+
+    (** This bounded nonyielding host callback rechecks both actors against
+        the current selected registry. The context is a comparison view, not
+        a grant. *)
+    val create
+      :  current:
+           (original_actor:Operator_authorization.t
+            -> actor:Operator_authorization.t
+            -> context:P.Authoring.Context.t
+            -> Registry.t option)
+      -> t
+  end
+
+  val create
+    :  owner:owner
+    -> script_selection:Semantic.Script_selection.Policy.t option
+    -> project_metadata:Semantic.Project_metadata.Policy.t option
+    -> selected_tools:Selected_tool_policy.t option
+    -> project_build_limits:Chatml_project_build.Limits.t
+    -> limits:Limits.t
+    -> (t, Error.t) result
+
+  (** Exact authored or effective highlighting uses only currently captured
+      bytes. The request selects lexical independently of semantic. *)
+  val handle_lexical
+    :  t
+    -> actor:Operator_authorization.t
+    -> connection:Connection_context.t
+    -> P.Authoring_assistance.Lexical.Request.t
+    -> (W.Response.t, Error.t) result
+
+  (** Structural help remains available for malformed authored input.
+      Selected catalog, imported script, tool and path suggestions require
+      their genuine current host evidence; missing evidence is reported as
+      unavailable. The request selects assistance independently of semantic. *)
+  val handle_assistance
+    :  t
+    -> actor:Operator_authorization.t
+    -> connection:Connection_context.t
+    -> P.Authoring_assistance.Assistance.Request.t
+    -> (W.Response.t, Error.t) result
+end
+
 (** Deliberately narrow test-only view of the same owner. Its opaque receipts
     cannot grant source access or escape a live publication probe. *)
 module For_testing : sig

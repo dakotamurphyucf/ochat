@@ -116,6 +116,11 @@ module Script : sig
       Used only for exact current editable-document association. *)
   val root_input : t -> Chatmd_parser_input.t
 
+  (** The genuine parser input that owns this selected declaration. It may be
+      the root or one exact retained import occurrence; its identity alone
+      grants no captured-source custody. *)
+  val declaration_input : t -> Chatmd_parser_input.t
+
   (** Forward exact authored cursor lookup through this Script's already bound
       parser extraction map. Host authenticates the current editable input and
       document generation separately. *)

@@ -156,15 +156,17 @@ module Facts : sig
       its exact authored bytes, even if full parse fails. A supplied document
       needs no host root or selected Build for tag/attribute/value help.
 
-      [lexical_input] must be a Root input with exact [authored] bytes, regardless
-      of whether its effective bytes differ. [parsed] is optional and only a
-      successful current Prompt parse; it is
+      Without [parsed], [lexical_input] must be a Root input with exact
+      [authored] bytes. With [parsed], it may instead be a genuine imported
+      input physically present in that same parse, with exactly one matching
+      [captured_inputs] source equal to [authored]. This lets an authorized
+      request scan its imported authored source without projecting root byte
+      offsets onto it. [parsed] is only a successful current Prompt parse,
       never reconstructed from old output after an overlay. [captured_inputs]
-      binds that parse's root/import inputs to exact current captured sources.
-      A mismatch rejects parsed facts atomically; no guessed source ID. The
-      root input of [parsed] must be exactly [lexical_input], including its
-      effective revision; every imported parser input used for a reference
-      must have one authenticated capture.
+      binds every root/import input to its exact current captured source;
+      mismatch rejects parsed facts atomically, without guessing source IDs.
+      The effective revision remains the actual parser input, including for
+      repeated imports of the same source with distinct input objects.
 
       [project] is the actual separately captured/decoded project declaration
       relevant to the cursor's script selection; its bounded public

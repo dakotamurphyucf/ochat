@@ -69,6 +69,7 @@ let native_implementation binding =
 let metadata binding = binding.metadata
 let permission_fingerprint binding = binding.permission_fingerprint
 let result_contract binding = binding.result_contract
+let length t = Map.length t
 let references t = Map.data t |> List.map ~f:reference
 
 let valid_digest value =

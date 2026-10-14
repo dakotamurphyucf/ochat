@@ -429,7 +429,7 @@ let%expect_test "actual parsed script reference carries captured declaration own
         P.Authoring_common.Source.equal source (W.Request.source request)
       | _ -> false));
   let imported_script =
-    {|<script id="worker" language="chatml" kind="tool">let run = fun ctx input -> Task.pure(`Complete(input))</script>|}
+    {|<script id="worker" language="chatml" kind="tool">let run = fun ctx input -> Task.pure(`Complete(input))</script><tool name="inside" type="chatml" script="worker" entrypoint="run" input_schema="../schema.json" output_schema="../schema.json"/>|}
   in
   let imported_root =
     {|<import src="nested/part.chatmd"/><tool name="do_work" type="chatml" script="worker" entrypoint="run" input_schema="schema.json" output_schema="schema.json"/>|}
@@ -488,6 +488,62 @@ let%expect_test "actual parsed script reference carries captured declaration own
              (S.Id.relative_path (P.Authoring_common.Source.id definition))
              "nested/part.chatmd"
       | _ -> false));
+  let imported_input =
+    Prompt.Chat_markdown.Parsed.inputs parsed
+    |> List.find_exn ~f:(fun input ->
+      not (Chatmd_parser_input.Role.equal (Chatmd_parser_input.role input) Root))
+  in
+  let imported_source = source ~name:"nested/part.chatmd" imported_script in
+  let cursor_byte =
+    let marker = {|script="worker"|} in
+    String.substr_index_exn imported_script ~pattern:marker + String.length marker - 1
+  in
+  let request = make_request imported_source ~cursor_byte in
+  let imported_facts =
+    A.Facts.create
+      ~request
+      ~authored:imported_source
+      ~lexical_input:imported_input
+      ~parsed:(Some parsed)
+      ~captured_inputs:captures
+      ~project:None
+      ~selected:None
+      ~paths:[]
+      ~selected_tools:[]
+      ~limits:(limits ())
+      ~checkpoint:ignore
+    |> ok A.Error.sexp_of_t
+  in
+  let imported_result =
+    A.produce imported_facts ~checkpoint:ignore |> ok A.Error.sexp_of_t
+  in
+  assert (
+    List.exists (W.Result.items imported_result) ~f:(fun item ->
+      String.equal (W.Suggestion.insert_text item) "worker"
+      &&
+      match W.Suggestion.evidence item with
+      | Parsed_document definition ->
+        P.Authoring_common.Source.equal definition (W.Request.source request)
+      | _ -> false));
+  let foreign_source = source ~name:"foreign/part.chatmd" imported_script in
+  let foreign_request = make_request foreign_source ~cursor_byte in
+  assert (
+    match
+      A.Facts.create
+        ~request:foreign_request
+        ~authored:foreign_source
+        ~lexical_input:imported_input
+        ~parsed:(Some parsed)
+        ~captured_inputs:captures
+        ~project:None
+        ~selected:None
+        ~paths:[]
+        ~selected_tools:[]
+        ~limits:(limits ())
+        ~checkpoint:ignore
+    with
+    | Error Foreign_import_capture -> true
+    | Ok _ | Error _ -> false);
   print_endline "root/imported script reference owners: PASS";
   [%expect {| root/imported script reference owners: PASS |}]
 ;;

@@ -10,7 +10,12 @@ let ok = function
   | Error _ -> failwith "unexpected fixture admission failure"
 ;;
 
-let with_supplied_owner ?(contents = "<developer>draft</developer>") f =
+let with_supplied_owner
+      ?(contents = "<developer>draft</developer>")
+      ?(result_bytes = 4096)
+      ?(on_context = fun (_ : P.Authoring.Context.t) -> ())
+      f
+  =
   Eio_main.run (fun env ->
     Eio.Switch.run (fun sw ->
       let host = P.Id.Server.create () in
@@ -61,7 +66,7 @@ let with_supplied_owner ?(contents = "<developer>draft</developer>") f =
                ~max_source_bytes:1024
                ~max_context_source_bytes:4096
                ~max_request_bytes:4096
-               ~max_result_bytes:4096
+               ~max_result_bytes:result_bytes
                ~max_path_candidates:16
              |> ok)
           ~limits:
@@ -69,7 +74,7 @@ let with_supplied_owner ?(contents = "<developer>draft</developer>") f =
                ~max_connections:1
                ~max_active_requests_per_connection:2
                ~max_roots_per_connection:1
-               ~max_response_bytes:4096
+               ~max_response_bytes:result_bytes
              |> Or_error.ok_exn)
       in
       let response =
@@ -104,6 +109,7 @@ let with_supplied_owner ?(contents = "<developer>draft</developer>") f =
           failwith (P.Error.code_to_string (Service.Error.to_protocol error).code)
         | Ok _ -> failwith "document context open returned wrong method"
       in
+      on_context context;
       f service actor connection (P.Authoring.Context.Expected.of_view context) env))
 ;;
 
