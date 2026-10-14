@@ -120,19 +120,10 @@ module Checked = struct
     | Failed partial -> Semantics.Partial.diagnostics partial
   ;;
 
-  let analyze_build build ~policy ~env ~target ~checkpoint =
+  let analyze_build_using build ~policy ~env ~checkpoint ~analyze =
     let prepared = Build.prepared build in
     checkpoint ();
-    match
-      Compilation.analyze_prepared
-        prepared
-        ~limits:policy.Policy.compilation
-        ~semantic_limits:policy.semantic
-        ~max_dependency_depth:policy.max_dependency_depth
-        ~env
-        ~target
-        ()
-    with
+    match analyze prepared ~policy ~env with
     | Error error -> Error (Error.Compiler error)
     | Ok semantics ->
       checkpoint ();
@@ -171,5 +162,39 @@ module Checked = struct
           ; selected_contract = Semantics.Identity.selected_contract identity
           ; environment = expected_environment
           }
+  ;;
+
+  let analyze_build build ~policy ~env ~target ~checkpoint =
+    analyze_build_using
+      build
+      ~policy
+      ~env
+      ~checkpoint
+      ~analyze:(fun prepared ~policy ~env ->
+        Compilation.analyze_prepared
+          prepared
+          ~limits:policy.Policy.compilation
+          ~semantic_limits:policy.semantic
+          ~max_dependency_depth:policy.max_dependency_depth
+          ~env
+          ~target
+          ())
+  ;;
+
+  let analyze_build_with_contract build ~contract ~policy ~env ~checkpoint =
+    analyze_build_using
+      build
+      ~policy
+      ~env
+      ~checkpoint
+      ~analyze:(fun prepared ~policy ~env ->
+        Compilation.analyze_prepared_with_contract_and_policy
+          prepared
+          ~contract
+          ~policy:(Compilation.Bounded policy.Policy.compilation)
+          ~semantic_limits:policy.semantic
+          ~max_dependency_depth:policy.max_dependency_depth
+          ~env
+          ())
   ;;
 end

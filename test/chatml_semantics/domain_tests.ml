@@ -10,6 +10,114 @@ let standard target body =
 ;;
 
 let%test_unit
+    "joined analysis uses the exact selected custom contract for full and prefix"
+  =
+  Eio_main.run (fun env ->
+    let required_bindings =
+      Chatml.Chatml_builtin_spec.
+        [ "initial_state", TInt; "hook", TFun ([ TInt; TInt ], task_ty TInt) ]
+    in
+    let contract = H.contract ~requirements:required_bindings () in
+    let body =
+      "let poison = 1 / 0;; let initial_state = 0;; let hook event state = \
+       Task.pure(state);; let helper = 1"
+    in
+    let input = H.input contract [ "entry.chatml", body, [] ] in
+    let run input ~policy =
+      C.analyze_prepared_with_contract_and_policy
+        input
+        ~contract
+        ~policy
+        ~semantic_limits:(H.limits ())
+        ~max_dependency_depth:16
+        ~env
+        ()
+    in
+    let snapshot =
+      match run input ~policy:(Bounded C.default_limits) with
+      | Ok (A.Complete snapshot) -> snapshot
+      | _ -> failwith "custom contract did not produce complete semantic facts"
+    in
+    assert (
+      A.Captured.Digest.equal
+        (A.Identity.selected_contract (A.Snapshot.identity snapshot))
+        (Contract.fingerprint contract ~checkpoint:H.checkpoint));
+    let context =
+      H.context snapshot (H.point snapshot input "entry.chatml" (String.length body))
+    in
+    assert (
+      List.mem
+        (H.names snapshot (H.candidates snapshot context Value))
+        "helper"
+        ~equal:String.equal);
+    (match
+       C.analyze_prepared_prefix_with_contract_and_policy
+         input
+         ~source:(A.Captured.id (H.source input "entry.chatml"))
+         ~cursor_byte:(String.length body)
+         ~contract
+         ~policy:(Bounded C.default_limits)
+         ~semantic_limits:(H.limits ())
+         ~max_dependency_depth:16
+         ~env
+         ()
+     with
+     | Ok (A.Prefix.Provisional provisional) ->
+       assert (
+         A.Captured.Digest.equal
+           (A.Provisional.full_input_fingerprint provisional)
+           (Chatml_prepared_program.fingerprint input));
+       assert (
+         A.Captured.Digest.equal
+           (A.Identity.selected_contract
+              (A.Snapshot.identity (A.Provisional.snapshot provisional)))
+           (Contract.fingerprint contract ~checkpoint:H.checkpoint))
+     | _ -> failwith "custom contract prefix facts unavailable");
+    let partial = H.input contract [ "entry.chatml", "let initial_state =", [] ] in
+    (match run partial ~policy:(Bounded C.default_limits) with
+     | Ok (A.Failed _) -> ()
+     | _ -> failwith "invalid custom-contract source was not partial");
+    let foreign = Contract.for_target One_off_v1 ~checkpoint:H.checkpoint in
+    (match
+       C.analyze_prepared_with_contract_and_policy
+         input
+         ~contract:foreign
+         ~policy:(Bounded C.default_limits)
+         ~semantic_limits:(H.limits ())
+         ~max_dependency_depth:16
+         ~env
+         ()
+     with
+     | Error (Analysis _) -> ()
+     | Ok _ | Error (Policy _) -> failwith "foreign contract was accepted");
+    let entered = Atomic.make 0 in
+    let measured =
+      Domain_fixture.environment
+        env
+        ~before:(fun () -> Atomic.incr entered)
+        ~finally:(fun () -> ())
+    in
+    let input_bytes =
+      Chatml_prepared_program.Accounting.input_bytes
+        (Chatml_prepared_program.accounting input)
+    in
+    (match
+       C.analyze_prepared_with_contract_and_policy
+         input
+         ~contract
+         ~policy:(Bounded { C.default_limits with max_source_bytes = input_bytes + 1 })
+         ~semantic_limits:(H.limits ())
+         ~max_dependency_depth:16
+         ~env:measured
+         ()
+     with
+     | Error (Policy error) ->
+       [%test_eq: string] error.code "chatml.metadata_allocation_limit"
+     | _ -> failwith "custom contract metadata admission escaped");
+    [%test_eq: int] (Atomic.get entered) 0)
+;;
+
+let%test_unit
     "joined standard analysis and pure analysis agree without initializer execution"
   =
   Eio_main.run (fun env ->

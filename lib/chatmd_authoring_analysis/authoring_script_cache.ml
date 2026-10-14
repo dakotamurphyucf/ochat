@@ -18,15 +18,10 @@ module Candidate = struct
   let stamp t = Script.document_stamp t.script
   let checked t = t.checked
 
-  let analyze script ~policy ~env ~target ~checkpoint =
+  let analyze_using script ~policy ~checkpoint ~analyze =
     let open Result.Let_syntax in
     let%bind checked =
-      Analysis.Checked.analyze_build
-        script.Script.selected
-        ~policy
-        ~env
-        ~target
-        ~checkpoint
+      analyze script.Script.selected
       |> Result.map_error ~f:(fun error -> Error.Compiler error)
     in
     let stamp = Script.document_stamp script in
@@ -49,6 +44,21 @@ module Candidate = struct
               (Prepared.Environment.name (Document_stamp.environment stamp)))
     then Error Error.Selection_mismatch
     else Ok { script; checked; policy }
+  ;;
+
+  let analyze script ~policy ~env ~target ~checkpoint =
+    analyze_using script ~policy ~checkpoint ~analyze:(fun build ->
+      Analysis.Checked.analyze_build build ~policy ~env ~target ~checkpoint)
+  ;;
+
+  let analyze_with_contract script ~contract ~policy ~env ~checkpoint =
+    analyze_using script ~policy ~checkpoint ~analyze:(fun build ->
+      Analysis.Checked.analyze_build_with_contract
+        build
+        ~contract
+        ~policy
+        ~env
+        ~checkpoint)
   ;;
 end
 

@@ -21,6 +21,14 @@ fingerprints the exact source IDs and digests, entry, provenance, selected
 environment, scopes and compiler contract. These values describe code, not host
 authorization or editor revision.
 
+When a host has selected an authentic custom compiler contract, the joined
+full and prefix analysis entry points accept that exact contract. They share
+canonical input and conservative conversion admission with explicit-contract
+compilation, then use the same semantic checker and immutable result types.
+The project and selected ChatMD script adapters preserve their existing
+receipt, source and result-identity checks. The standard target entry points
+still select their fixed contracts inside the bounded worker.
+
 `Chatml_source.Location` is an exact half-open byte range tied to a source ID and
 digest. `Chatmd_parser_input` retains authored/effective bytes and parser-owned
 ranges; located import expansion retains each imported source owner. The current
@@ -179,7 +187,8 @@ to a native host directory, and cannot authorize later filesystem reads.
 
 The project analysis core checks an OCH-294 overlay receipt against the same
 OCH-278 context inputs, including exact captured source bytes and the old lock,
-before handing its completed Build to `Chatml_compilation.analyze_prepared`.
+before handing its completed Build to joined semantic analysis with its actual
+selected compiler contract.
 It checks the returned compiler identity against the prepared input fingerprint,
 required and selected contract, and environment. Failed checks retain same-run
 syntax and diagnostics, not certified facts. Native primary and related

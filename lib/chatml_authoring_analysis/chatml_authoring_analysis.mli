@@ -82,6 +82,16 @@ module Checked : sig
     -> target:Chatml_compilation.target
     -> checkpoint:(unit -> unit)
     -> (t, Error.t) Result.t
+
+  (** Same joined checker and exact result-identity validation with the actual
+      host-selected contract already associated with this Build. *)
+  val analyze_build_with_contract
+    :  Chatml_project_build.t
+    -> contract:Chatml.Chatml_compiler_contract.t
+    -> policy:Policy.t
+    -> env:Eio_unix.Stdenv.base
+    -> checkpoint:(unit -> unit)
+    -> (t, Error.t) Result.t
 end
 
 module Project_stamp : sig
@@ -121,6 +131,17 @@ module Project_candidate : sig
     -> policy:Policy.t
     -> env:Eio_unix.Stdenv.base
     -> target:Chatml_compilation.target
+    -> checkpoint:(unit -> unit)
+    -> (t, Error.t) Result.t
+
+  (** Preserve the exact receipt/context comparison and stamp while checking
+      with the authentic selected contract. *)
+  val analyze_validated_with_contract
+    :  Chatml_authoring_context.Inputs.t
+    -> receipt:Chatml_authoring_effective.Overlay.t
+    -> contract:Chatml.Chatml_compiler_contract.t
+    -> policy:Policy.t
+    -> env:Eio_unix.Stdenv.base
     -> checkpoint:(unit -> unit)
     -> (t, Error.t) Result.t
 end
