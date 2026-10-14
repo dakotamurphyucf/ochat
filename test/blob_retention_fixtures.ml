@@ -74,12 +74,25 @@ let stage env sw blobs session id value =
 ;;
 
 let scan ?(max_bytes = 65536) ?(max_entries = 256) env blobs session =
-  Blob.with_retention blobs ~f:(fun scope ->
+  Blob.with_collection_proof blobs ~f:(fun scope ->
     let open Result.Let_syntax in
     let%bind reader =
       Reader.create ~env ~root:(Handle.directory session) ~max_entries ~max_bytes
     in
     let%bind intents = Intent.list_with_reader ~reader ~session ~max_count:16 in
-    Retention.scan ~scope ~session ~reader ~intents ~max_file_bytes:16384)
-  |> Result.map ~f:(fun result -> Option.value_exn result)
+    Blob.with_developer_retention
+      scope
+      ~session
+      ~reader
+      ~checkpoint:(fun () -> ())
+      ~f:(fun developer ->
+        Retention.scan
+          ~scope
+          ~developer
+          ~session
+          ~reader
+          ~checkpoint:(fun () -> ())
+          ~intents
+          ~max_file_bytes:16384))
+  |> Result.map ~f:(fun result -> Option.value_exn (Option.join result))
 ;;

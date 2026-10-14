@@ -124,11 +124,10 @@ val with_max_upload_bytes : t -> max_upload_bytes:int64 -> (t, Store_error.t) re
 
 type retention
 
-(** Presence of developer evidence after validating the recognized namespace
-    and all authentic run documents. This is not a reference or deletion proof.
-    A conversation collector must hold the original Session_store Handle's
-    developer-root gate through this check and the final deletion, excluding
-    a new developer Store claim while an empty result is used. *)
+(** Historical conservative presence projection. This is a bounded diagnostic
+    and comparison API, not the collector's current reference or deletion
+    proof; cross-owner collection uses [with_developer_retention] and the
+    complete shared inventory below. *)
 type developer_retention_presence =
   | No_developer_evidence
   | Has_developer_evidence
@@ -192,6 +191,69 @@ val with_retention
   -> f:(retention -> ('a, Store_error.t) result)
   -> ('a option, Store_error.t) result
 
+(** Collection-only borrow of the SAME coordinator and retention token as
+    [with_retention], excluding active uploads/reads without masking caller
+    cancellation during a potentially large reference inventory. The callback
+    must complete proof before [protect_collection_mutation] is called. Neither
+    phase may reenter this Blob_store or retain the token. The coordinator is
+    never released between proof and deletion. Other [with_retention] callers
+    keep their existing cancellation policy. *)
+val with_collection_proof
+  :  t
+  -> f:(retention -> ('a, Store_error.t) result)
+  -> ('a option, Store_error.t) result
+
+(** The physically configured Blob upload ceiling for the active retention
+    scope. This is only a bound, not authority to address a path. *)
+val retention_max_upload_bytes : retention -> (int64, Store_error.t) result
+
+(** Shield only the exact, retryable deletion/marker cleanup after a complete
+    proof and final caller cancellation checkpoint, while the same retention
+    token, Blob coordinator and developer-root gate remain live. A typed error
+    leaves the remaining records for retry. *)
+val protect_collection_mutation
+  :  retention
+  -> f:(unit -> ('a, Store_error.t) result)
+  -> ('a, Store_error.t) result
+
+(** Scoped, comparison-only proof of the exact developer source BINDING for
+    this collector. It is minted only while BOTH the Blob coordinator and the
+    selected developer-root gate are held. It is NOT a complete Blob or
+    reference proof: [Blob_retention.scan] must still inventory and validate
+    all developer documents, intents and Blob pairs before any deletion. Its
+    paths are owner-derived and do not authorize arbitrary native filesystem
+    access. A retained token is invalid as soon as either callback exits. *)
+module Developer_retention : sig
+  type t
+
+  val inventory : t -> Developer_run_store.Retention.t option
+  val intent_directory : t -> string
+  val temporary_namespace : t -> string
+  val durable_namespace : t -> string
+  val check_current : t -> retention -> (unit, Store_error.t) result
+end
+
+(** Under a live retention token, select ONE developer-root exclusion path.
+    With the physically bound live Store, enter its long [Retention.with_inventory]
+    lease: this is the same Session_store developer-root gate, so the Handle's
+    unbound collection gate must NOT be nested around it. For an unbound Store,
+    hold the Handle's existing gate and prove the authority directory, sibling
+    intent namespace and both developer Blob namespaces empty under [reader].
+    A closed/stale binding or unbound nonempty evidence fails closed; an active
+    but not yet bound root owner may defer with [Ok None]. The callback runs
+    while the chosen gate is held, through graph traversal and deletion.
+    The scoped [Developer_retention] supplies paths derived from the
+    authenticated Data_root and this Blob_store's exact filesystem capability,
+    not caller input. [checkpoint]
+    charges bounded scan work; exception/cancellation identity is preserved. *)
+val with_developer_retention
+  :  retention
+  -> session:Session_store.Handle.t
+  -> reader:Retention_reader.t
+  -> checkpoint:(unit -> unit)
+  -> f:(Developer_retention.t -> ('a, Store_error.t) result)
+  -> ('a option, Store_error.t) result
+
 (** A cancellable read-only startup use of the SAME shared Blob coordinator and one
     Retention_reader allowance. The bound [runs] Store must physically issue
     [root]; recheck that fact and [sw] AFTER waiting for the coordinator and
@@ -253,8 +315,8 @@ val retention_directories
   -> (string * string, Store_error.t) result
 
 (** The global durable root used only by the recognized developer namespace.
-    This path alone proves no ownership; use [validate_developer_retention]
-    under the same token before accepting any nonempty contents. *)
+    This path alone proves no ownership; the collector needs a scoped
+    [Developer_retention] and complete inventory before deletion. *)
 val retention_reserved_directory : retention -> (string, Store_error.t) result
 
 (** Remove an unreferenced host-owned stage under a live retention scope.

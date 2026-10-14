@@ -13,11 +13,14 @@ val published : t -> Agent_protocol.Id.Blob.t -> bool
     private intents. Candidate files may be absent or partially prepared; complete
     data must match its intent and decode as a completion. A shorter candidate
     partial is not a readable completion and supplies no dependency edges.
-    Other blobs require complete matching metadata/data. The shared bounded
-    developer namespace is validated through the same Blob_store coordinator
-    and authentic Developer_run_store roots. Until a cross-owner reference proof
-    is available, any developer run document or namespace entry blocks session
-    deletion; a nonempty namespace without the bound Store fails. Unknown files, unowned
+    Other blobs require complete matching metadata/data. [developer] is minted
+    by the SAME live Blob coordinator and developer-root gate. It proves only
+    source binding/exclusion: this [scan] itself MUST invoke the complete
+    [Developer_result_inventory.Collection.scan] for every historical
+    run/epoch/job, private intent and Blob pair and feed original bytes plus
+    decoded strings into this candidate graph. An unbound token is
+    valid only after the authentic authority/intent/Blob namespaces are proved
+    empty; no caller-provided absence flag can bypass this requirement. Unknown files, unowned
     partials, identity/digest/JSON errors and exhausted budgets fail the entire
     scan. Original raw length/digest validation precedes JSON admission. The full
     decoded content must satisfy the shared document depth/field/node profile
@@ -29,8 +32,10 @@ val published : t -> Agent_protocol.Id.Blob.t -> bool
     with every other root and using the result. *)
 val scan
   :  scope:Blob_store.retention
+  -> developer:Blob_store.Developer_retention.t
   -> session:Session_store.Handle.t
   -> reader:Retention_reader.t
+  -> checkpoint:(unit -> unit)
   -> intents:Job_result_intent.t list
   -> max_file_bytes:int
   -> (t, Store_error.t) result
@@ -42,5 +47,26 @@ val scan
     candidate set are ignored. No partial reference set is returned on error. *)
 val references
   :  t
+  -> checkpoint:(unit -> unit)
   -> roots:Agent_protocol.Id.Blob.t list
   -> (Agent_protocol.Id.Blob.t list, Store_error.t) result
+
+(** After [references] and all caller roots succeed, retire exact developer
+    private markers embedded in this same fully validated graph only when
+    their authentic installed terminal agrees with the selected Completion.
+    Artifact selections additionally require an exact complete durable Blob;
+    Inline selections require no Blob but still retire their exact marker.
+    Uses
+    [Result_intent_file]'s exact removal with the SAME borrowed Store root,
+    reader and Blob coordinator; no recursive Store lease or replacement
+    terminal writer. The caller invokes this inside the protected mutation
+    phase after its final cancellation checkpoint. An unbound, proved-empty
+    developer namespace retires zero markers. Any failed exact cleanup remains
+    retryable and cannot authorize orphan Blob deletion. *)
+val retire_published_developer_markers
+  :  t
+  -> scope:Blob_store.retention
+  -> developer:Blob_store.Developer_retention.t
+  -> reader:Retention_reader.t
+  -> checkpoint:(unit -> unit)
+  -> (int, Store_error.t) result

@@ -8,7 +8,7 @@ let assert_references expected graph roots =
     List.equal
       P.Id.Blob.equal
       (List.sort expected ~compare:P.Id.Blob.compare)
-      (Retention.references graph ~roots |> store_ok))
+      (Retention.references graph ~checkpoint:(fun () -> ()) ~roots |> store_ok))
 ;;
 
 let%expect_test
@@ -96,7 +96,9 @@ let%expect_test
     Eio.Path.save ~create:(`Or_truncate 0o600) partial (String.prefix contents 8);
     let graph = scan env blobs session |> store_ok in
     assert_references [] graph [];
-    assert (Result.is_error (Retention.references graph ~roots:[ parent ]));
+    assert (
+      Result.is_error
+        (Retention.references graph ~checkpoint:(fun () -> ()) ~roots:[ parent ]));
     Eio.Path.save
       ~create:(`Or_truncate 0o600)
       partial
@@ -105,7 +107,9 @@ let%expect_test
     Eio.Path.unlink partial;
     let graph = scan env blobs session |> store_ok in
     assert_references [] graph [];
-    assert (Result.is_error (Retention.references graph ~roots:[ parent ]));
+    assert (
+      Result.is_error
+        (Retention.references graph ~checkpoint:(fun () -> ()) ~roots:[ parent ]));
     Eio.Path.save ~create:(`Exclusive 0o600) partial contents;
     List.iter [ ".blob"; ".sexp" ] ~f:(fun suffix ->
       Eio.Path.unlink
@@ -116,7 +120,9 @@ let%expect_test
           / (P.Id.Blob.to_string child ^ suffix)));
     let graph = scan env blobs session |> store_ok in
     assert_references [] graph [];
-    assert (Result.is_error (Retention.references graph ~roots:[ parent ]));
+    assert (
+      Result.is_error
+        (Retention.references graph ~checkpoint:(fun () -> ()) ~roots:[ parent ]));
     print_endline
       "complete partial retained its child; unrooted incomplete/missing stages stayed \
        unreferenced";

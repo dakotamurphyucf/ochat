@@ -153,6 +153,63 @@ let admit_root ?(owner = F.owner 0) runs =
   R.Result_root.of_handle handle |> F.run_ok |> B.Result_root.developer
 ;;
 
+let publish_without_ack ~storage ~content ~sw ~runs ~blobs ~handle ~root ~observed ~job_id
+  =
+  let prepared =
+    R.prepare_job_claim
+      handle
+      ~expected:observed
+      ~lookup:(R.find_job_exact observed job_id)
+      ~now:timestamp
+    |> F.run_ok
+  in
+  let claimed = R.commit_job_claim handle prepared |> F.run_ok in
+  let claim = R.Claimed.claim claimed in
+  assert (
+    R.Claim.try_enter claim ~handle ~admit:(fun () -> true) ~on_enter:(fun () -> ())
+    |> F.run_ok);
+  let state = P.Developer_job.state (R.Claim.job claim) in
+  let proposed : P.Developer_job.State.t =
+    { state with
+      status = Succeeded
+    ; completed_at = Some timestamp
+    ; result = Some (Inline (P.Completion.Succeeded (`String content)))
+    }
+  in
+  let limits =
+    Agent_store.Developer_result_publisher.Limits.create
+      ~inline_bytes:4096
+      ~max_result_bytes:4096
+      ~max_pending:1
+    |> F.ok
+  in
+  let publisher =
+    Agent_store.Developer_result_publisher.create ~sw ~runs ~root ~blobs ~limits |> F.ok
+  in
+  let selected =
+    Agent_store.Developer_result_publisher.select
+      publisher
+      ~storage
+      ~claim
+      ~proposed
+      ~selected_at:timestamp
+    |> F.ok
+  in
+  Agent_store.Developer_result_publisher.Selected.ensure_attempted selected |> F.ok;
+  let after = Agent_store.Developer_result_publisher.Selected.after selected in
+  let transition =
+    R.prepare_claimed_transition
+      handle
+      ~expected:(R.Claimed.observation claimed)
+      ~claim
+      ~after
+      ~revoked_after:after
+    |> F.run_ok
+  in
+  ignore (R.commit_claimed_transition handle transition |> F.run_ok : R.Installed.t);
+  Agent_store.Developer_result_publisher.Selected.reference selected
+;;
+
 let stage root contents =
   let blob =
     P.Blob.Metadata.create
@@ -324,9 +381,20 @@ let%expect_test "closed developer issuer cannot lend a prior result read to a ne
   [%expect {|old issuer token rejected; new issuer reopened original verified bytes|}]
 ;;
 
-let%expect_test "unscanned developer run document defers session result deletion" =
+let%expect_test
+    "scanned unrelated developer run permits collection; unbound evidence defers"
+  =
   with_custody (fun env sw owner runs blobs ->
-    let _developer = admit_root runs in
+    let developer_owner = F.owner 0 in
+    let capture = F.digest "developer-blob-custody" in
+    let developer, original =
+      R.admit_epoch
+        runs
+        ~owner:developer_owner
+        ~capture_fingerprint:capture
+        ~previous:None
+      |> F.run_ok
+    in
     let session =
       S.create_session
         owner
@@ -352,6 +420,84 @@ let%expect_test "unscanned developer run document defers session result deletion
       |> ok
     in
     let reference = Agent_store.Job_result_store.reference prepared in
+    let retained_job = session_job session in
+    let retained_prepared =
+      Agent_store.Job_result_store.prepare
+        blobs
+        ~env
+        ~sw
+        ~session
+        ~job:retained_job
+        ~creating_principal:F.principal_id
+        ~now:timestamp
+        ~max_bytes:4096
+        (P.Completion.Succeeded (`String "referenced across owners"))
+      |> ok
+    in
+    let retained_reference = Agent_store.Job_result_store.reference retained_prepared in
+    let reference_text = P.Id.Blob.to_string retained_reference.blob.id in
+    let developer_job =
+      let id = P.Id.Job.create () in
+      let launch =
+        P.Developer_job.Launch.create ~parent:Run_root ~parent_job:None ~nested_depth:0
+        |> F.ok
+      in
+      let state : P.Developer_job.State.t =
+        { status = Queued
+        ; attempt = 0
+        ; started_at = None
+        ; next_run_at = None
+        ; completed_at = None
+        ; result = None
+        ; retry_failure = None
+        }
+      in
+      P.Developer_job.create
+        ~owner:developer_owner
+        ~capture_fingerprint:capture
+        ~id
+        ~launch
+        ~kind:Async_tool
+        ~payload:(`String reference_text)
+        ~retry_policy:Never
+        ~created_at:timestamp
+        ~state
+      |> F.ok
+    in
+    let selected =
+      R.prepare_root_selected
+        developer
+        ~expected:original
+        ~phase:R.Checkpoint.Active
+        ~selected:[ developer_job ]
+      |> F.run_ok
+    in
+    let handoff = R.Handoff.create ~settle:(fun _ -> ()) in
+    let _selected_observed =
+      match R.commit_and_settle developer selected handoff ~admit:(fun () -> true) with
+      | Ok (R.Settlement.Installed installed) -> R.Installed.observation installed
+      | Ok (Absent | Prewrite_conflict | Diverged) ->
+        failwith "selected job not installed"
+      | Error error -> raise_s [%sexp (error : R.Error.t)]
+    in
+    let authority =
+      Eio.Path.(
+        Eio.Stdenv.fs env
+        / Agent_store.Data_root.path (S.data_root owner)
+        / "developer-runs"
+        / ("run_" ^ P.Id.Developer_run.to_string developer_owner.run_id ^ ".json"))
+    in
+    let original_bytes = Eio.Path.load authority in
+    let escaped =
+      "\\u"
+      ^ sprintf "%04x" (Char.to_int reference_text.[0])
+      ^ String.drop_prefix reference_text 1
+    in
+    let escaped_bytes =
+      String.substr_replace_all original_bytes ~pattern:reference_text ~with_:escaped
+    in
+    assert (not (String.equal escaped_bytes original_bytes));
+    Eio.Path.save ~create:(`Or_truncate 0o600) authority escaped_bytes;
     let marker =
       Filename.concat
         (Filename.concat (S.Handle.directory session) "result-preparations")
@@ -369,7 +515,12 @@ let%expect_test "unscanned developer run document defers session result deletion
       |> F.ok
     in
     let limits : Agent_store.Job_result_store.Publisher.collection_limits =
-      { max_intents = 8; max_entries = 100; max_bytes = 65536; max_file_bytes = 4096 }
+      { max_intents = 8
+      ; max_entries = 100
+      ; max_bytes = 65536
+      ; max_file_bytes = 4096
+      ; max_work = 100_000
+      }
     in
     let collected =
       Agent_store.Job_result_store.Publisher.collect
@@ -379,7 +530,219 @@ let%expect_test "unscanned developer run document defers session result deletion
         ~limits
         ~with_roots:(fun ~reader:_ ~candidates:_ ~f -> f [])
     in
-    assert (Option.is_none (ok collected));
+    let collected = ok collected |> Option.value_exn in
+    [%test_eq: int] 1 collected.discarded;
+    [%test_eq: int] 1 collected.retained;
+    let cancellation = Failure "cancel scoped cross-owner proof" in
+    (match
+       Eio.Cancel.sub (fun cancel ->
+         let reader =
+           Agent_store.Retention_reader.create
+             ~env
+             ~root:(S.Handle.directory session)
+             ~max_entries:100
+             ~max_bytes:65536
+           |> ok
+         in
+         B.with_collection_proof blobs ~f:(fun scope ->
+           B.with_developer_retention
+             scope
+             ~session
+             ~reader
+             ~checkpoint:(fun () -> ())
+             ~f:(fun _developer ->
+               Eio.Cancel.cancel cancel cancellation;
+               Eio.Fiber.check ();
+               Ok ())))
+     with
+     | exception Eio.Cancel.Cancelled actual -> assert (phys_equal actual cancellation)
+     | Ok _ | Error _ -> failwith "collection proof masked cancellation");
+    let developer_root = R.Result_root.of_handle developer |> F.run_ok in
+    let inline_reference =
+      publish_without_ack
+        ~storage:Automatic
+        ~content:"developer published"
+        ~sw
+        ~runs
+        ~blobs
+        ~handle:developer
+        ~root:developer_root
+        ~observed:(R.observe developer |> F.run_ok)
+        ~job_id:(P.Developer_job.id developer_job)
+    in
+    assert (Option.is_none inline_reference);
+    let private_marker =
+      Agent_store.Result_intent_file.developer
+        ~root:developer_root
+        ~owner:developer_owner
+        ~job:(P.Developer_job.id developer_job)
+        ~attempt:1
+      |> ok
+    in
+    assert (
+      Option.is_some
+        (Agent_store.Result_intent_file.read_exact
+           private_marker
+           ~max_frame_bytes:(128 * 1024)
+         |> ok));
+    let second_collection =
+      Agent_store.Job_result_store.Publisher.collect
+        publisher
+        ~jobs:[]
+        ~generation:0
+        ~limits
+        ~with_roots:(fun ~reader:_ ~candidates:_ ~f -> f [])
+      |> ok
+      |> Option.value_exn
+    in
+    assert (second_collection.retired > 0);
+    assert (
+      Option.is_none
+        (Agent_store.Result_intent_file.read_exact
+           private_marker
+           ~max_frame_bytes:(128 * 1024)
+         |> ok));
+    let content_only_prepared =
+      Agent_store.Job_result_store.prepare
+        blobs
+        ~env
+        ~sw
+        ~session
+        ~job:(session_job session)
+        ~creating_principal:F.principal_id
+        ~now:timestamp
+        ~max_bytes:4096
+        (P.Completion.Succeeded (`String "Blob-content-only reference"))
+      |> ok
+    in
+    let content_only_id =
+      (Agent_store.Job_result_store.reference content_only_prepared).blob.id
+    in
+    let artifact_job_id = P.Id.Job.create () in
+    let artifact_job =
+      Developer_run_selected_tests.job
+        developer_owner
+        capture
+        ~id:artifact_job_id
+        ~parent:Run_root
+    in
+    let next_selected =
+      R.prepare_root_selected
+        developer
+        ~expected:(R.observe developer |> F.run_ok)
+        ~phase:R.Checkpoint.Active
+        ~selected:[ artifact_job ]
+      |> F.run_ok
+    in
+    let artifact_observed =
+      match
+        R.commit_and_settle
+          developer
+          next_selected
+          (R.Handoff.create ~settle:(fun _ -> ()))
+          ~admit:(fun () -> true)
+      with
+      | Ok (R.Settlement.Installed installed) -> R.Installed.observation installed
+      | Ok (Absent | Prewrite_conflict | Diverged) ->
+        failwith "artifact job not installed"
+      | Error error -> raise_s [%sexp (error : R.Error.t)]
+    in
+    let artifact_reference =
+      publish_without_ack
+        ~storage:Artifact
+        ~content:(P.Id.Blob.to_string content_only_id)
+        ~sw
+        ~runs
+        ~blobs
+        ~handle:developer
+        ~root:developer_root
+        ~observed:artifact_observed
+        ~job_id:artifact_job_id
+    in
+    let artifact_reference = Option.value_exn artifact_reference in
+    let artifact_marker =
+      Agent_store.Result_intent_file.developer
+        ~root:developer_root
+        ~owner:developer_owner
+        ~job:artifact_job_id
+        ~attempt:1
+      |> ok
+    in
+    assert (
+      Option.is_some
+        (Agent_store.Result_intent_file.read_exact
+           artifact_marker
+           ~max_frame_bytes:(128 * 1024)
+         |> ok));
+    let artifact_collection =
+      Agent_store.Job_result_store.Publisher.collect
+        publisher
+        ~jobs:[]
+        ~generation:0
+        ~limits
+        ~with_roots:(fun ~reader:_ ~candidates:_ ~f -> f [])
+      |> ok
+      |> Option.value_exn
+    in
+    assert (artifact_collection.retired > 0);
+    assert (artifact_collection.retained >= 2);
+    assert (Result.is_ok (B.open_session blobs session content_only_id));
+    assert (
+      Option.is_none
+        (Agent_store.Result_intent_file.read_exact
+           artifact_marker
+           ~max_frame_bytes:(128 * 1024)
+         |> ok));
+    let blocked_prepared =
+      Agent_store.Job_result_store.prepare
+        blobs
+        ~env
+        ~sw
+        ~session
+        ~job:(session_job session)
+        ~creating_principal:F.principal_id
+        ~now:timestamp
+        ~max_bytes:4096
+        (P.Completion.Succeeded (`String "must survive failed global proof"))
+      |> ok
+    in
+    let blocked_id = (Agent_store.Job_result_store.reference blocked_prepared).blob.id in
+    let blocked_marker =
+      Filename.concat
+        (Filename.concat (S.Handle.directory session) "result-preparations")
+        (P.Id.Blob.to_string blocked_id ^ ".frame")
+    in
+    let exhausted =
+      Agent_store.Job_result_store.Publisher.collect
+        publisher
+        ~jobs:[]
+        ~generation:0
+        ~limits:{ limits with max_work = 1 }
+        ~with_roots:(fun ~reader:_ ~candidates:_ ~f -> f [])
+    in
+    assert (Result.is_error exhausted);
+    assert (Eio.Path.is_file Eio.Path.(Eio.Stdenv.fs env / blocked_marker));
+    let artifact_data =
+      Eio.Path.(
+        Eio.Stdenv.fs env
+        / Agent_store.Data_root.durable_blobs_path (S.data_root owner)
+        / "developer-runs"
+        / P.Id.Developer_run.to_string developer_owner.run_id
+        / (P.Id.Blob.to_string
+             (Agent_store.Developer_result_reference.blob artifact_reference).id
+           ^ ".blob"))
+    in
+    Eio.Path.save ~create:(`Or_truncate 0o600) artifact_data "corrupt";
+    let corrupted =
+      Agent_store.Job_result_store.Publisher.collect
+        publisher
+        ~jobs:[]
+        ~generation:0
+        ~limits
+        ~with_roots:(fun ~reader:_ ~candidates:_ ~f -> f [])
+    in
+    assert (Result.is_error corrupted);
+    assert (Eio.Path.is_file Eio.Path.(Eio.Stdenv.fs env / blocked_marker));
     R.close_and_wait runs |> F.run_ok;
     let unbound_collection =
       Agent_store.Job_result_store.Publisher.collect
@@ -416,18 +779,17 @@ let%expect_test "unscanned developer run document defers session result deletion
     assert (not (Atomic.get claim_completed));
     Eio.Promise.resolve signal_release ();
     Eio.Promise.await claimed;
-    assert (Eio.Path.is_file Eio.Path.(Eio.Stdenv.fs env / marker));
-    let handle = B.open_session blobs session reference.blob.id |> ok in
-    let bytes = B.load_verified blobs ~sw handle ~max_bytes:4096 |> ok in
-    assert (String.length bytes > 512);
+    assert (not (Eio.Path.is_file Eio.Path.(Eio.Stdenv.fs env / marker)));
+    assert (Result.is_error (B.open_session blobs session reference.blob.id));
+    assert (Result.is_ok (B.open_session blobs session retained_reference.blob.id));
     S.close_session owner session |> ok;
     print_endline
-      "bound owner deferred; unbound run document blocked deletion; marker and data \
-       remained";
+      "escaped developer job reference retained its candidate; unrelated candidate \
+       deleted; unbound run evidence blocked collection";
     print_endline "collection gate excluded a new developer root claim until release");
   [%expect
     {|
-    bound owner deferred; unbound run document blocked deletion; marker and data remained
+    escaped developer job reference retained its candidate; unrelated candidate deleted; unbound run evidence blocked collection
     collection gate excluded a new developer root claim until release
     |}]
 ;;
@@ -478,7 +840,12 @@ let%test_unit "an intent entry without a run document blocks conversation collec
       Eio.Path.(Eio.Stdenv.fs env / Filename.concat directory "orphan.frame")
       "unscanned";
     let limits : Agent_store.Job_result_store.Publisher.collection_limits =
-      { max_intents = 8; max_entries = 100; max_bytes = 65536; max_file_bytes = 4096 }
+      { max_intents = 8
+      ; max_entries = 100
+      ; max_bytes = 65536
+      ; max_file_bytes = 4096
+      ; max_work = 100_000
+      }
     in
     assert (
       Result.is_error

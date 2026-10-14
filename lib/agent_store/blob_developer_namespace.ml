@@ -63,11 +63,22 @@ module Entry = struct
     { id : P.Id.Blob.t
     ; state : State.t
     ; durable : bool
+    ; metadata_bytes : string option
+    ; metadata_document : Document_schema.Document.t option
     }
 
   let id t = t.id
   let state t = t.state
   let durable t = t.durable
+  let metadata_bytes t = t.metadata_bytes
+
+  let iter_metadata_strings t ~checkpoint ~f =
+    Option.iter t.metadata_document ~f:(fun document ->
+      Document_fields.iter_strings_with_checkpoint
+        (Document_schema.Document.json document)
+        ~checkpoint
+        ~f)
+  ;;
 end
 
 let digest_string ~checkpoint data =
@@ -110,7 +121,7 @@ let scan_run ~reader ~checkpoint ~directory ~target ~durable ~max_blob_bytes =
     checkpoint ();
     let name suffix = P.Id.Blob.to_string id ^ suffix in
     let has suffix = Set.mem suffixes suffix in
-    let%bind metadata =
+    let%bind metadata, metadata_bytes, metadata_document =
       if has ".sexp"
       then (
         let%bind metadata_bytes =
@@ -121,12 +132,17 @@ let scan_run ~reader ~checkpoint ~directory ~target ~durable ~max_blob_bytes =
             ~checkpoint
         in
         checkpoint ();
-        let%map document =
-          Blob_metadata_document.of_bytes metadata_bytes
-          |> Result.map_error ~f:(fun error -> Store_error.Document error)
+        let%bind source =
+          Document_schema.Document.decode
+            ~limits:Blob_metadata_document.limits
+            metadata_bytes
+          |> Document_fields.store
         in
-        Some (Blob_metadata_document.value document))
-      else Ok None
+        let%map document =
+          Blob_metadata_document.of_document source |> Document_fields.store
+        in
+        Some (Blob_metadata_document.value document), Some metadata_bytes, Some source)
+      else Ok (None, None, None)
     in
     let%bind () =
       match metadata with
@@ -196,7 +212,7 @@ let scan_run ~reader ~checkpoint ~directory ~target ~durable ~max_blob_bytes =
       | metadata, _, _ -> Ok (Partial metadata)
     in
     checkpoint ();
-    Ok { Entry.id; state; durable })
+    Ok { Entry.id; state; durable; metadata_bytes; metadata_document })
   |> Result.all
 ;;
 

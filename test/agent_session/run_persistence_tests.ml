@@ -534,6 +534,7 @@ let%expect_test "physical retry carrier survives reopen and complete result coll
                   ; max_entries = 1024
                   ; max_bytes = 16777216
                   ; max_file_bytes = 1048576
+                  ; max_work = 100_000
                   }
                 ~max_frame_bytes:1048576
                 ~max_events:256

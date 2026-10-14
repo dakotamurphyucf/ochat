@@ -70,3 +70,22 @@ val remove_exact
   -> expected:string
   -> max_frame_bytes:int
   -> (unit, Store_error.t) result
+
+(** The SAME exact-frame removal algorithm during cross-owner collection,
+    using the already-held physical Store [Retention] borrow instead of
+    recursively acquiring [Result_root.with_storage_lease]. It accepts only a
+    developer [t] whose Result_root belongs to that borrow. Exact revalidation
+    reads debit the collector's one Reader; missing is idempotent, mismatched,
+    linked or incomplete frames fail closed. The caller must already have
+    proved this marker's real terminal job and matching selected Completion;
+    an Artifact also needs exact durable Blob publication, while Inline does not,
+    and must run cleanup inside the protected mutation phase. This operation
+    neither manufactures that proof nor deletes Blob data. *)
+val remove_exact_with_retention
+  :  t
+  -> retention:Developer_run_store.Retention.t
+  -> reader:Retention_reader.t
+  -> checkpoint:(unit -> unit)
+  -> expected:string
+  -> max_frame_bytes:int
+  -> (unit, Store_error.t) result
