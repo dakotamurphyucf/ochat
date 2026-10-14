@@ -391,7 +391,19 @@ let%test_unit "host root read is fresh while project context remains captured" =
            Eio.Path.(directory / "chatml.project.json")
            {|{"schema_version":1,"namespace":"authoring","entries":{"main":{"source":"main.chatml","target":"one_off_v1"}}}|};
          let script_file = Eio.Path.(directory / "main.chatml") in
-         Eio.Path.save ~create:(`Or_truncate 0o600) script_file "let main = 1\n";
+         Eio.Path.save
+           ~create:(`Or_truncate 0o600)
+           script_file
+           "let main input = Task.pure(input)\n";
+         let authored_document =
+           "<script id=\"s\" language=\"chatml\" kind=\"tool\" \
+            project=\"./chatml.project.json\">let main input = Task.pure(input)\n\
+            </script>"
+         in
+         Eio.Path.save
+           ~create:(`Or_truncate 0o600)
+           Eio.Path.(directory / "draft.chatmd")
+           authored_document;
          let data_root =
            Agent_store.Data_root.create
              ~env
@@ -527,7 +539,12 @@ let%test_unit "host root read is fresh while project context remains captured" =
            S.publish_initialize_and_wait
              service
              ~connection
-             ~response:(initialize_response ~server_id:host ~principal)
+             ~response:
+               (initialize_response_with_features
+                  ~enabled_features:
+                    [ P.Authoring.Features.core; P.Authoring.Features.semantic ]
+                  ~server_id:host
+                  ~principal)
            |> ok;
            let call request = S.handle_core service ~actor ~connection request in
            let root =
@@ -562,6 +579,40 @@ let%test_unit "host root read is fresh while project context remains captured" =
              | Ok _ | Error _ -> failwith "actual project context open failed"
            in
            let expected = P.Authoring.Context.Expected.of_view context in
+           let analyze =
+             S.Semantic.create
+               ~owner:service
+               ~env
+               ~document_dir:(Eio.Stdenv.cwd env)
+               ~script_selection:None
+               ~project_metadata:None
+               ~project_build_limits:
+                 (Chatml_project_build.Limits.create
+                    ~max_work_steps:100_000
+                    ~max_input_bytes:(Some 4096)
+                    ~document:Document_schema.Limits.default
+                  |> Or_error.ok_exn)
+               ~limits:
+                 (S.Semantic.Limits.create
+                    ~max_document_bundle_files:4
+                    ~max_document_bundle_bytes:2048
+                    ~max_parser_work_steps:100_000
+                    ~max_diagnostic_work_steps:100_000
+                  |> Or_error.ok_exn)
+           in
+           let analysis_request =
+             P.Authoring.Analysis.Analyze.Request.create
+               ~context:expected
+               ~target:P.Authoring.Analysis.Target.project
+             |> ok
+           in
+           (match S.Semantic.analyze analyze ~actor ~connection analysis_request with
+            | Ok (P.Authoring.Analysis.Analyze.Complete _) -> ()
+            | Ok result ->
+              failwith
+                (Sexp.to_string_hum (P.Authoring.Analysis.Analyze.sexp_of_t result))
+            | Error error ->
+              failwith (P.Error.code_to_string (S.Error.to_protocol error).code));
            let inventory =
              P.Authoring.Source_read.List_request.create
                ~context:expected
@@ -602,7 +653,7 @@ let%test_unit "host root read is fresh while project context remains captured" =
             | Ok (Source_read result) ->
               [%test_eq: string]
                 (P.Authoring.Source_read.Read_result.contents result)
-                "let main = 1\n"
+                "let main input = Task.pure(input)\n"
             | Ok _ | Error _ -> failwith "pinned project read changed with disk");
            let refreshed =
              match
@@ -646,6 +697,171 @@ let%test_unit "host root read is fresh while project context remains captured" =
            (match call (Source_read updated_read) with
             | Error S.Error.Stale_context -> ()
             | Ok _ | Error _ -> failwith "closed project remained readable");
+           let bounded_document =
+             match
+               call
+                 (Context_open
+                    (P.Authoring.Context.Open_request.create_host_document
+                       ~root
+                       ~member:"draft.chatmd"
+                       ~default_environment:None
+                     |> ok))
+             with
+             | Ok (Context_open context) -> context
+             | Ok _ | Error _ -> failwith "host ChatMD document open failed"
+           in
+           let bounded_expected = P.Authoring.Context.Expected.of_view bounded_document in
+           let bounded_analyze =
+             S.Semantic.create
+               ~owner:service
+               ~env
+               ~document_dir:(Eio.Stdenv.cwd env)
+               ~script_selection:None
+               ~project_metadata:
+                 (Some
+                    (S.Semantic.Project_metadata.Policy.create
+                       ~authorize_now:
+                         (fun
+                           ~original_actor:_
+                           ~actor:_
+                           ~current:_
+                           ~parsed:_
+                           ~declaration:_
+                           ~capture:_
+                         -> true)))
+               ~project_build_limits:
+                 (Chatml_project_build.Limits.create
+                    ~max_work_steps:100_000
+                    ~max_input_bytes:(Some 4096)
+                    ~document:Document_schema.Limits.default
+                  |> Or_error.ok_exn)
+               ~limits:
+                 (S.Semantic.Limits.create
+                    ~max_document_bundle_files:2
+                    ~max_document_bundle_bytes:(String.length authored_document)
+                    ~max_parser_work_steps:100_000
+                    ~max_diagnostic_work_steps:100_000
+                  |> Or_error.ok_exn)
+           in
+           let bounded_request =
+             P.Authoring.Analysis.Analyze.Request.create
+               ~context:bounded_expected
+               ~target:(P.Authoring.Analysis.Target.selected_script "s" |> ok)
+             |> ok
+           in
+           (match
+              S.Semantic.analyze bounded_analyze ~actor ~connection bounded_request
+            with
+            | Error S.Error.Resource_limit -> ()
+            | Ok _ | Error _ -> failwith "project metadata budget did not reject Analyze");
+           (match
+              Agent_server.Authoring_context_service.For_testing.capture_state
+                service
+                ~actor
+                ~connection
+                ~expected:bounded_expected
+                ~checkpoint:ignore
+            with
+            | Ok state when not state.parsed -> ()
+            | Ok _ | Error _ ->
+              failwith "rejected metadata capture published document facts");
+           let selected =
+             S.Semantic.Script_selection.Selected.admit
+               ~build:static_build
+               ~contract:
+                 (Chatml.Chatml_compiler_contract.for_target
+                    One_off_v1
+                    ~checkpoint:ignore)
+               ~limits:
+                 (S.Semantic.Script_selection.Limits.create
+                    ~max_identity_bytes:(4 * 1024 * 1024)
+                    ~max_work_steps:100_000
+                  |> Or_error.ok_exn)
+               ~checkpoint:ignore
+             |> ok
+           in
+           let selected_policy =
+             S.Semantic.Script_selection.Policy.create
+               ~select_script:
+                 (fun
+                   ~original_actor:_
+                   ~actor:_
+                   ~current:_
+                   ~parsed:_
+                   ~declaration:_
+                   ~metadata:_
+                 -> Some selected)
+           in
+           let selected_analyze =
+             S.Semantic.create
+               ~owner:service
+               ~env
+               ~document_dir:(Eio.Stdenv.cwd env)
+               ~script_selection:(Some selected_policy)
+               ~project_metadata:
+                 (Some
+                    (S.Semantic.Project_metadata.Policy.create
+                       ~authorize_now:
+                         (fun
+                           ~original_actor:_
+                           ~actor:_
+                           ~current:_
+                           ~parsed:_
+                           ~declaration:_
+                           ~capture:_
+                         -> true)))
+               ~project_build_limits:
+                 (Chatml_project_build.Limits.create
+                    ~max_work_steps:100_000
+                    ~max_input_bytes:(Some 4096)
+                    ~document:Document_schema.Limits.default
+                  |> Or_error.ok_exn)
+               ~limits:
+                 (S.Semantic.Limits.create
+                    ~max_document_bundle_files:2
+                    ~max_document_bundle_bytes:2048
+                    ~max_parser_work_steps:100_000
+                    ~max_diagnostic_work_steps:100_000
+                  |> Or_error.ok_exn)
+           in
+           (match
+              S.Semantic.analyze selected_analyze ~actor ~connection bounded_request
+            with
+            | Ok (P.Authoring.Analysis.Analyze.Complete _) -> ()
+            | Ok result ->
+              failwith
+                (Sexp.to_string_hum (P.Authoring.Analysis.Analyze.sexp_of_t result))
+            | Error error ->
+              failwith (P.Error.code_to_string (S.Error.to_protocol error).code));
+           Eio.Path.save
+             ~create:(`Or_truncate 0o600)
+             Eio.Path.(directory / "chatml.project.json")
+             {|{"schema_version":1,"namespace":"authoring","entries":{"main":{"source":"main.chatml","target":"one_off_v1"}},"capabilities":["fresh.read"]}|};
+           (match
+              S.Semantic.analyze selected_analyze ~actor ~connection bounded_request
+            with
+            | Ok
+                (P.Authoring.Analysis.Analyze.Unavailable
+                   { reason = No_validated_project; _ }) -> ()
+            | Ok _ | Error _ ->
+              failwith "stale selected Build certified fresh project declaration");
+           (match
+              Agent_server.Authoring_context_service.For_testing.capture_state
+                service
+                ~actor
+                ~connection
+                ~expected:bounded_expected
+                ~checkpoint:ignore
+            with
+            | Ok state when state.parsed && state.project_metadata -> ()
+            | Ok _ | Error _ -> failwith "parsed-only metadata capture did not publish");
+           (match
+              call
+                (Context_close
+                   (P.Authoring.Context.Close_request.create ~expected:bounded_expected))
+            with
+            | Ok (Context_close _) -> ()
+            | Ok _ | Error _ -> failwith "host ChatMD document close failed");
            let document =
              match
                call

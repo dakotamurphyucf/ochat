@@ -41,7 +41,8 @@ val with_current
     recheck. [publish] runs inside that gate only after the exact connection,
     context and expected generation are compared again. It may perform a pure
     compare-and-swap of already prepared immutable values only after comparing
-    BOTH analysis cache heads and the retained document-capture head borrowed
+    BOTH analysis cache heads, the analysis-index head and the retained
+    document-capture head borrowed
     at request admission; any changed head rejects the result. It constructs
     no new graph, parser result or wire response. The borrowed [Current] token
     has expired by then; neither callback may use it or perform I/O, wait or

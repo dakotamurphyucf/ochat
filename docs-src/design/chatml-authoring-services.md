@@ -474,6 +474,24 @@ file to infer provenance. Live analysis reads authored bytes without effectful
 root preprocessing. These mapping rules apply to diagnostics, navigation and
 highlighting alike.
 
+An explicit semantic Analyze request borrows the existing authoring context
+owner and checks its negotiated semantic feature. Project analysis recomposes
+the current admitted overlay and uses its actual selected compiler contract.
+Document analysis captures imports only during this explicit request through
+the current host source owner; a supplied document parses its supplied bytes
+without a host read grant and cannot acquire missing imports. A successful
+parse with no admitted script Build may retain one bounded immutable parser
+bundle (and separately authorized decoded project metadata) while returning
+semantic `Unavailable`. Complete results publish a certified snapshot label;
+Failed results retain same-run syntax and diagnostics without one. Native
+diagnostic sites retain their exact source owner, with authored ChatMD
+projections marked exact or approximate. Invalid or oversized display text is
+visibly byte-escaped; diagnostic clipping is reported. The final no-yielding
+gate rechecks actor, context generation, selected Build and every cache/capture
+head before one pure publication. Source/parser/projection work, the joined
+checker and response bytes each use their stated finite limits; cancellation
+before publication changes no retained analysis facts.
+
 `Builtin_instructions` already embeds and resolves `builtin:chatml`, which M4
 captured-content tests exercise. M5 completion can enumerate actual installed
 assets through that same catalog; unknown assets such as `builtin:skills` remain

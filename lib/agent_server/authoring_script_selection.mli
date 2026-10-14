@@ -8,6 +8,7 @@ open! Core
 module Ledger = Chatml_authoring_context
 module Parsed = Prompt.Chat_markdown.Parsed
 module Declaration = Prompt.Chat_markdown.Declaration
+module Project_capture = Authoring_source_host.Document_context.Project_capture
 
 module Limits : sig
   type t
@@ -66,6 +67,11 @@ module Policy : sig
       Parsed value and an actual member of
       Parsed.declarations. The policy independently checks BOTH original and
       request actors against the current selected project/environment/catalog;
+      [metadata], when present, is the exact captured declaration project
+      receipt from this owner head. The callback must prove its real admitted
+      route/root relationship to the selected Build. When absent, a Build may
+      still be selected from independent authorized static/upload/catalog
+      evidence; no native project file is required universally.
       it cannot fetch, parse, compose, compile, wait, or infer from a client ID
       or display path. [None] is genuinely no admitted selection. The semantic
       and assistance services still prove Parsed membership, selected entry
@@ -77,6 +83,7 @@ module Policy : sig
           -> current:Ledger.Document.Inputs.t
           -> parsed:Parsed.t
           -> declaration:Declaration.t
+          -> metadata:Project_capture.t option
           -> Selected.t option)
     -> t
 
@@ -87,6 +94,7 @@ module Policy : sig
     -> current:Ledger.Document.Inputs.t
     -> parsed:Parsed.t
     -> declaration:Declaration.t
+    -> metadata:Project_capture.t option
     -> Selected.t option
 
   (** Repeat that same nonyielding host lookup after yielding work and compare
@@ -100,6 +108,7 @@ module Policy : sig
     -> current:Ledger.Document.Inputs.t
     -> parsed:Parsed.t
     -> declaration:Declaration.t
+    -> metadata:Project_capture.t option
     -> selected:Selected.t
     -> bool
 end

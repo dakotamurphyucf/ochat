@@ -84,6 +84,7 @@ module Error : sig
     | Resource_limit
     | Invalid_position of P.Authoring.Failure.invalid_position
     | Invalid_request
+    | Analysis_unavailable
     | Storage_unavailable
     | Upload_failure of Upload.Error.t
 
@@ -116,6 +117,9 @@ module Retained_document_capture : sig
     :  context:context_entry
     -> inputs:Ledger.Document.Inputs.t
     -> capture:Sources.Document_context.Parsed_capture.t
+    -> metadata:
+         (Prompt.Chat_markdown.Declaration.t * Sources.Document_context.Project_capture.t)
+           option
     -> max_sources:int
     -> max_bytes:int
     -> checkpoint:(unit -> unit)
@@ -134,6 +138,11 @@ module Retained_document_capture : sig
     -> bool
 
   val capture : t -> Sources.Document_context.Parsed_capture.t
+
+  (** At most one independently authorized project declaration from this
+      exact parser receipt. This is decoded comparison evidence, not a grant
+      or an assertion that a selected Build exists. *)
+  val project_capture : t -> Sources.Document_context.Project_capture.t option
 
   (** Physical publication-head equality, including [None]. Equal bytes in a
       later admission do not make an earlier borrowed head current again. *)
@@ -162,6 +171,7 @@ type t =
   ; upload : Upload.t option
   ; supplied_document : Supplied_document_policy.t option
   ; selection_policy : Selection_policy.t
+  ; analysis_policy : Project.Policy.t
   ; protocol_limits : P.Authoring.Limits.t
   ; limits : Limits.t
   ; gate : Eio.Mutex.t
@@ -169,6 +179,7 @@ type t =
   ; mutable project_cache : Project.Project_cache.t
   ; mutable document_cache : Document.Document_cache.t
   ; mutable document_capture : Retained_document_capture.t option
+  ; mutable analysis_index : Authoring_analysis_index.t
   ; mutable closed : bool
   ; mutable release_hook : Eio.Switch.hook
   }
@@ -233,10 +244,24 @@ module Current : sig
     ; expected : P.Authoring.Context.Expected.t
     ; live : bool ref
     ; retained_document_capture : Retained_document_capture.t option
+    ; borrowed_project_cache : Project.Project_cache.t
+    ; borrowed_document_cache : Document.Document_cache.t
+    ; borrowed_analysis_index : Authoring_analysis_index.t
     }
 
   val basis : t -> basis
   val expected : t -> P.Authoring.Context.Expected.t
+  val analysis_index : t -> (Authoring_analysis_index.t, Error.t) result
+
+  (** Exactly the immutable heads captured with [owner] for this live request.
+      Candidate work uses this coherent tuple; final Owner CAS rejects any
+      intervening replacement before the pure publication callback. *)
+  val analysis_heads
+    :  t
+    -> ( Project.Project_cache.t * Document.Document_cache.t * Authoring_analysis_index.t
+         , Error.t )
+         result
+
   val project_inputs : t -> checkpoint:(unit -> unit) -> (Ledger.Inputs.t, Error.t) result
 
   val document_inputs
@@ -257,6 +282,14 @@ module Current : sig
     :  t
     -> checkpoint:(unit -> unit)
     -> (Sources.Document_context.Parsed_capture.t option, Error.t) result
+
+  (** The one actual declaration project receipt within the matching current
+      Parsed head, when explicit Analyze captured it. It is decoded evidence
+      only; the shared host policy still reauthorizes its route and actors. *)
+  val project_capture
+    :  t
+    -> checkpoint:(unit -> unit)
+    -> (Sources.Document_context.Project_capture.t option, Error.t) result
 
   (** A bundle recomposed solely from current unsaved root bytes and the last
       immutable imports of this SAME context/source owner borrowed at request
