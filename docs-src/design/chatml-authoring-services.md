@@ -299,6 +299,14 @@ chooses a fresh collision-checked lock identity under a finite work allowance.
 The [selected-script policy](../../lib/agent_server/authoring_script_selection.mli)
 compares an actual selected Build and compiler contract for the genuine parsed
 declaration, without turning that comparison into a read or execution grant.
+When an unsaved root edit changes that declaration's script body, the
+[selected-entry overlay](../../lib/agent_server/authoring_selected_script_overlay.mli)
+recomposes only the selected entry from the current parser body and frozen
+Build sources. Analyze and Prefix use the resulting pure Build for checking;
+the final gate still rechecks the original host-selected Build and contract.
+An incomplete body can yield a provisional prefix only where the compiler
+finds a completed leading statement. New imports and changed project routing
+remain unavailable until an explicit authorized capture.
 Semantic wire labels, messages, names and environment identifiers require
 valid UTF-8; their constructors and decoders return typed errors for malformed
 text. Captured source bytes, digests and native byte sites remain unchanged.

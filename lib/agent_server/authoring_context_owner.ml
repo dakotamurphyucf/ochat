@@ -213,19 +213,30 @@ let with_current
                         expected
                         (P.Authoring.Context.Expected.of_view actual.view) ->
               (match !borrowed_heads with
-               | Some (project_head, document_head, capture_head, index_head)
+               | Some (project_head, document_head, capture_head, index_head, prefix_head)
                  when phys_equal project_head t.project_cache
                       && phys_equal document_head t.document_cache
                       && Retained_document_capture.same_head
                            capture_head
                            t.document_capture
-                      && phys_equal index_head t.analysis_index -> publish value
+                      && phys_equal index_head t.analysis_index
+                      && Authoring_provisional_index.same_head
+                           prefix_head
+                           t.provisional_index -> publish value
                | Some _ | None -> Error Error.Stale_context)
             | Some _ | None -> Error Error.Stale_context)
          | None -> Error Error.Stale_negotiation))
     (fun entry ~checkpoint ->
        let open Result.Let_syntax in
-       let%bind context, ledger, project_head, document_head, capture_head, index_head =
+       let%bind
+           ( context
+           , ledger
+           , project_head
+           , document_head
+           , capture_head
+           , index_head
+           , prefix_head )
+         =
          with_gate t (fun () ->
            match find_context entry expected.context_id with
            | None -> Error Error.Stale_context
@@ -241,12 +252,14 @@ let with_current
                  , t.project_cache
                  , t.document_cache
                  , t.document_capture
-                 , t.analysis_index )
+                 , t.analysis_index
+                 , t.provisional_index )
              else Error Error.Stale_context)
        in
        let%bind () = check_context_owner t context ~actor ~checkpoint in
        final_context := Some context;
-       borrowed_heads := Some (project_head, document_head, capture_head, index_head);
+       borrowed_heads
+       := Some (project_head, document_head, capture_head, index_head, prefix_head);
        let current =
          Current.
            { owner = ledger
@@ -258,6 +271,7 @@ let with_current
            ; borrowed_project_cache = project_head
            ; borrowed_document_cache = document_head
            ; borrowed_analysis_index = index_head
+           ; borrowed_provisional_index = prefix_head
            }
        in
        Exn.protect

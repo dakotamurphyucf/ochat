@@ -67,3 +67,10 @@ val current
 
 val capture : row -> P.Authoring.Analysis.Capture.t
 val validated_graph : row -> Chatml_source.Digest.t
+
+(** Full context/target/declaration/source/contract/environment comparison
+    reused by the separate provisional index; no label or authority check. *)
+val same_capture
+  :  P.Authoring.Analysis.Capture.t
+  -> P.Authoring.Analysis.Capture.t
+  -> bool

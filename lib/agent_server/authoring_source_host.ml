@@ -638,7 +638,37 @@ end
 module Document_context = struct
   type t = document_context
 
-  let bind_parser_inputs ~source ~bundle ~parsed ~max_source_bytes ~poll =
+  let equal_bytes_bounded left right ~poll =
+    if String.length left <> String.length right
+    then false
+    else (
+      let rec visit offset =
+        poll ();
+        if offset >= String.length left
+        then true
+        else (
+          let finish = Int.min (offset + 4096) (String.length left) in
+          let rec compare byte =
+            if byte >= finish
+            then visit finish
+            else if Char.equal left.[byte] right.[byte]
+            then compare (byte + 1)
+            else false
+          in
+          compare offset)
+      in
+      visit 0)
+  ;;
+
+  let bind_parser_inputs
+        ~source
+        ~bundle
+        ~parsed
+        ~reuse_imports
+        ~strict_reuse
+        ~max_source_bytes
+        ~poll
+    =
     let open Result.Let_syntax in
     let source_id = Captured.id source in
     let member_contents =
@@ -647,7 +677,7 @@ module Document_context = struct
     let generated = Prompt.Chat_markdown.Generated.parsed parsed in
     let parsed_units = generated.parsed_root :: List.map generated.parsed_agents ~f:snd in
     let source_cache =
-      ref (String.Map.singleton (Captured.Id.relative_path source_id) source)
+      ref (Map.set reuse_imports ~key:(Captured.Id.relative_path source_id) ~data:source)
     in
     let rec visit_units count compared_bytes reversed = function
       | [] -> Ok (List.rev reversed)
@@ -679,6 +709,7 @@ module Document_context = struct
             let%bind captured =
               match Map.find !source_cache member with
               | Some captured -> Ok captured
+              | None when strict_reuse -> Error Error.Document_bundle_limit
               | None ->
                 let%bind id =
                   Captured.Id.create
@@ -760,10 +791,132 @@ module Document_context = struct
             ~source
             ~bundle
             ~parsed
+            ~reuse_imports:String.Map.empty
+            ~strict_reuse:false
             ~max_source_bytes:limits.max_source_bytes
             ~poll:checkpoint
         in
         { source; bundle; parsed; input_sources })
+    ;;
+
+    let reparse_frozen
+          ~previous
+          ~source
+          ~bundle
+          ~(limits : Chatmd_source_bundle.limits)
+          ~dir
+          ~checkpoint
+      =
+      let open Result.Let_syntax in
+      let defaults = Chatmd_source_bundle.default_limits in
+      let source_id = Captured.id source in
+      let root_file = Captured.Id.relative_path source_id in
+      if
+        limits.max_source_bytes <= 0
+        || limits.max_bundle_bytes <= 0
+        || limits.max_files <= 0
+        || limits.max_source_bytes > defaults.max_source_bytes
+        || limits.max_bundle_bytes > defaults.max_bundle_bytes
+        || limits.max_files > defaults.max_files
+        || (not (Captured.Id.equal source_id (Captured.id previous.source)))
+        || (not (String.equal root_file (Chatmd_source_bundle.root_file previous.bundle)))
+        || (not (String.equal root_file (Chatmd_source_bundle.root_file bundle)))
+        || Captured.byte_length source > limits.max_source_bytes
+      then Error Error.Document_bundle_limit
+      else (
+        let%bind bundle =
+          Chatmd_source_bundle.create
+            ~limits
+            ~checkpoint
+            ~root_file
+            ~sources:(Chatmd_source_bundle.sources bundle)
+            ()
+          |> Result.map_error ~f:(fun _ -> Error.Document_bundle_limit)
+        in
+        let prior =
+          Chatmd_source_bundle.sources previous.bundle |> String.Map.of_alist_exn
+        in
+        let current = Chatmd_source_bundle.sources bundle in
+        if Map.length prior <> List.length current
+        then Error Error.Document_bundle_limit
+        else (
+          let%bind () =
+            List.fold_result current ~init:() ~f:(fun () (member, bytes) ->
+              checkpoint ();
+              match Map.find prior member with
+              | None -> Error Error.Document_bundle_limit
+              | Some _ when String.equal member root_file ->
+                if equal_bytes_bounded bytes (Captured.contents source) ~poll:checkpoint
+                then Ok ()
+                else Error Error.Document_bundle_limit
+              | Some old_bytes ->
+                if equal_bytes_bounded bytes old_bytes ~poll:checkpoint
+                then Ok ()
+                else Error Error.Document_bundle_limit)
+          in
+          let%bind reuse_imports =
+            List.fold_result
+              previous.input_sources
+              ~init:String.Map.empty
+              ~f:(fun retained (input, captured) ->
+                checkpoint ();
+                let member = Chatmd_parser_input.path input in
+                if String.equal member root_file
+                then Ok retained
+                else (
+                  let id = Captured.id captured in
+                  if
+                    (not
+                       (String.equal
+                          (Captured.Id.package_namespace id)
+                          (Captured.Id.package_namespace source_id)))
+                    || not (String.equal (Captured.Id.relative_path id) member)
+                  then Error Error.Document_bundle_limit
+                  else (
+                    match Map.find prior member with
+                    | None -> Error Error.Document_bundle_limit
+                    | Some bytes ->
+                      if
+                        not
+                          (equal_bytes_bounded
+                             bytes
+                             (Captured.contents captured)
+                             ~poll:checkpoint)
+                      then Error Error.Document_bundle_limit
+                      else (
+                        match Map.find retained member with
+                        | Some prior_captured
+                          when (not
+                                  (Captured.Id.equal
+                                     (Captured.id prior_captured)
+                                     (Captured.id captured)))
+                               || not
+                                    (Captured.Digest.equal
+                                       (Captured.digest prior_captured)
+                                       (Captured.digest captured)) ->
+                          Error Error.Document_bundle_limit
+                        | Some _ -> Ok retained
+                        | None -> Ok (Map.set retained ~key:member ~data:captured)))))
+          in
+          let%bind parsed =
+            Prompt.Chat_markdown.Generated.parse_source_bundle
+              ~dir
+              bundle
+              ~checkpoint
+              ~before_read:(fun ~member:_ ~byte_length:_ -> checkpoint ())
+            |> Result.map_error ~f:(fun error -> Error.Document_parser error)
+          in
+          let%map input_sources =
+            bind_parser_inputs
+              ~source
+              ~bundle
+              ~parsed
+              ~reuse_imports
+              ~strict_reuse:true
+              ~max_source_bytes:limits.max_source_bytes
+              ~poll:checkpoint
+          in
+          { source; bundle; parsed; input_sources }))
     ;;
   end
 
@@ -1079,6 +1232,8 @@ module Document_context = struct
                   ~source
                   ~bundle
                   ~parsed
+                  ~reuse_imports:String.Map.empty
+                  ~strict_reuse:false
                   ~max_source_bytes:limits.max_source_bytes
                   ~poll
               in

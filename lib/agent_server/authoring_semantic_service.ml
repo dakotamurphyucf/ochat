@@ -13,6 +13,9 @@ module Project_capture = Sources.Document_context.Project_capture
 module Markdown = Prompt.Chat_markdown
 module Selection = Authoring_script_selection
 module Metadata = Authoring_project_metadata
+module Prefix = Authoring_semantic_prefix
+module Provisional_index = Authoring_provisional_index
+module Prefix_limits = Prefix.Limits
 
 module Limits = struct
   type t =
@@ -67,6 +70,7 @@ type t =
   ; project_metadata : Metadata.Policy.t option
   ; project_build_limits : Chatml_project_build.Limits.t
   ; limits : Limits.t
+  ; prefix_limits : Prefix.Limits.t
   }
 
 let create
@@ -77,6 +81,7 @@ let create
       ~project_metadata
       ~project_build_limits
       ~limits
+      ~prefix_limits
   =
   { owner
   ; env
@@ -85,6 +90,7 @@ let create
   ; project_metadata
   ; project_build_limits
   ; limits
+  ; prefix_limits
   }
 ;;
 
@@ -377,9 +383,17 @@ let analyze_document t current ~actor ~script_id ~checkpoint ~set_final_check =
             ~reason:No_validated_project
             ~checkpoint
         | Some selected ->
+          let%bind selected_build =
+            Authoring_selected_script_overlay.prepare
+              selected
+              ~declaration
+              ~max_body_bytes:t.limits.max_document_bundle_bytes
+              ~limits:t.project_build_limits
+              ~checkpoint
+            |> Result.map_error ~f:Authoring_semantic_error.selected_entry_overlay
+          in
           let selection =
-            Chatmd_authoring_analysis.Selection.Validated_build
-              (Selection.Selected.build selected)
+            Chatmd_authoring_analysis.Selection.Validated_build selected_build
           in
           let%bind admission =
             Chatmd_authoring_analysis.Script.assess
@@ -419,6 +433,7 @@ let analyze_document t current ~actor ~script_id ~checkpoint ~set_final_check =
 let analyze t ~actor ~connection request =
   let expected = Analysis.Analyze.Request.context request in
   let borrowed_index = ref None in
+  let borrowed_identity = ref None in
   let final_check = ref (fun () -> Ok ()) in
   let remaining = ref t.limits.max_work_steps in
   let result =
@@ -431,7 +446,13 @@ let analyze t ~actor ~connection request =
           | None -> Error Owner.Error.Stale_context
           | Some borrowed_index ->
             Publication.publish_now t.owner ~borrowed_index prepared
-            |> Result.map ~f:(fun _ -> prepared))
+            |> Result.map ~f:(fun _ ->
+              (match !borrowed_identity, Publication.Prepared.outcome prepared with
+               | Some identity, (Parsed_only | Checked_project | Checked_document) ->
+                 t.owner.provisional_index
+                 <- Provisional_index.retire t.owner.provisional_index ~identity
+               | None, _ | Some _, No_acquisition -> ());
+              prepared))
         t.owner
         ~actor
         ~connection
@@ -446,6 +467,7 @@ let analyze t ~actor ~connection request =
           let open Result.Let_syntax in
           let%bind index = Owner.Current.analysis_index current in
           borrowed_index := Some index;
+          borrowed_identity := Some current.context.identity;
           match Analysis.Analyze.Request.target request, Owner.Current.basis current with
           | Analysis.Target.Project, Owner.Current.Project ->
             Project.prepare
@@ -468,4 +490,60 @@ let analyze t ~actor ~connection request =
     | Work_limit -> Error Owner.Error.Resource_limit
   in
   Result.map result ~f:Publication.Prepared.response
+;;
+
+let prefix t ~actor ~connection request =
+  let expected = Analysis.Prefix.Request.context request in
+  let final_check = ref (fun () -> Ok ()) in
+  let remaining = ref (Prefix.Limits.max_host_work_steps t.prefix_limits) in
+  let result =
+    try
+      Host.with_current
+        ~feature:Owner.Selected_feature.Semantic
+        ~final_check:(fun () -> !final_check ())
+        ~publish:(fun prepared ->
+          Option.iter (Prefix.provisional_after prepared) ~f:(fun after ->
+            t.owner.provisional_index <- after);
+          Ok prepared)
+        t.owner
+        ~actor
+        ~connection
+        ~expected
+        ~checkpoint:Eio.Fiber.check
+        ~f:(fun current ~checkpoint ->
+          let charge () =
+            if !remaining <= 0 then raise Work_limit;
+            decr remaining;
+            checkpoint ()
+          in
+          let open Result.Let_syntax in
+          let%bind prepared =
+            Prefix.prepare
+              t.owner
+              current
+              ~actor
+              ~env:t.env
+              ~document_dir:t.document_dir
+              ~script_selection:t.script_selection
+              ~project_metadata:t.project_metadata
+              ~project_build_limits:t.project_build_limits
+              ~limits:t.prefix_limits
+              request
+              ~checkpoint:charge
+          in
+          let%map () =
+            Analysis.Prefix.within_bytes
+              (Prefix.response prepared)
+              ~max_bytes:
+                (Int.min
+                   t.owner.limits.max_response_bytes
+                   Analysis.Limits.max_result_bytes)
+            |> Result.map_error ~f:(fun _ -> Owner.Error.Resource_limit)
+          in
+          (final_check := fun () -> Prefix.final_check_now prepared);
+          prepared)
+    with
+    | Work_limit -> Error Owner.Error.Resource_limit
+  in
+  Result.map result ~f:Prefix.response
 ;;

@@ -35,19 +35,20 @@ let selected_contract (current : Owner.Current.t) =
   | Host_document _ | Supplied_document _ -> None
 ;;
 
-let fresh_lock_id inputs ~poll =
-  let old_lock = Captured.id (Build.lock_source (Ledger.Inputs.base inputs)) in
+let fresh_lock_id_from_sources ~sources ~prior_lock ~checkpoint =
   let open Result.Let_syntax in
   let%bind seen, count =
     List.fold_result
-      (Ledger.Inputs.sources inputs)
-      ~init:(Set.singleton (module Captured.Id) old_lock, 0)
+      sources
+      ~init:(Set.singleton (module Captured.Id) prior_lock, 0)
       ~f:(fun (seen, count) source ->
-        poll ();
-        Ok (Set.add seen (Captured.id source), count + 1))
+        checkpoint ();
+        if count >= Int.max_value - 1
+        then Error Error.Lock_identity_unavailable
+        else Ok (Set.add seen (Captured.id source), count + 1))
   in
   let rec choose ordinal =
-    poll ();
+    checkpoint ();
     if ordinal > count + 1
     then Error Error.Lock_identity_unavailable
     else (
@@ -78,7 +79,12 @@ let prepare current ~limits ~checkpoint =
     let%bind contract =
       selected_contract current |> Result.of_option ~error:Error.No_selected_contract
     in
-    let%bind lock_id = fresh_lock_id inputs ~poll in
+    let%bind lock_id =
+      fresh_lock_id_from_sources
+        ~sources:(Ledger.Inputs.sources inputs)
+        ~prior_lock:(Captured.id (Build.lock_source (Ledger.Inputs.base inputs)))
+        ~checkpoint:poll
+    in
     let%map overlay =
       Effective.validate_overlay inputs ~lock_id ~contract ~limits ~checkpoint:poll
       |> Result.map_error ~f:(fun error -> Error.Invalid_overlay error)

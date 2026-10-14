@@ -52,6 +52,7 @@ type head =
   | Project_cache
   | Document_cache
   | Analysis_index
+  | Provisional_index
   | Parsed_capture
 
 type probe =
@@ -116,6 +117,12 @@ let replace_head { owner; current } head =
            ~owner_nonce:(P.Id.Transaction.create ())
            ~max_rows:(Project.Policy.max_results owner.analysis_policy)
          |> Or_error.ok_exn
+    | Provisional_index ->
+      owner.provisional_index
+      <- Authoring_provisional_index.create
+           ~owner_nonce:(P.Id.Transaction.create ())
+           ~max_rows:owner.limits.max_provisional_results
+         |> Or_error.ok_exn
     | Parsed_capture -> owner.document_capture <- None)
   |> Result.map_error ~f:error
 ;;
@@ -124,10 +131,12 @@ let expired_borrow_rejects_inputs_index_and_capture current =
   match
     ( Core_owner.Current.document_inputs current ~checkpoint:ignore
     , Core_owner.Current.analysis_index current
+    , Core_owner.Current.provisional_index current
     , Core_owner.Current.document_capture current ~checkpoint:ignore
     , Core_owner.Current.frozen_document_bundle current ~checkpoint:ignore )
   with
   | ( Error Core_owner.Error.Stale_context
+    , Error Core_owner.Error.Stale_context
     , Error Core_owner.Error.Stale_context
     , Error Core_owner.Error.Stale_context
     , Error Core_owner.Error.Stale_context ) -> true
@@ -172,6 +181,20 @@ let capture_state owner ~actor ~connection ~expected ~checkpoint =
       ; project_metadata = Option.is_some metadata
       ; complete_rows = Index.retained_count index
       })
+  |> Result.map_error ~f:error
+;;
+
+let provisional_count owner ~actor ~connection ~expected ~checkpoint =
+  Owner.with_current
+    ~feature:Core_owner.Selected_feature.Semantic
+    owner
+    ~actor
+    ~connection
+    ~expected
+    ~checkpoint
+    ~f:(fun current ~checkpoint:_ ->
+      Core_owner.Current.provisional_index current
+      |> Result.map ~f:Authoring_provisional_index.retained_count)
   |> Result.map_error ~f:error
 ;;
 
@@ -260,6 +283,11 @@ let preview_project_overlay
           Index.create
             ~owner_nonce:(P.Id.Transaction.create ())
             ~max_rows:(Project.Policy.max_results analysis_policy)
+          |> Or_error.ok_exn
+      ; borrowed_provisional_index =
+          Authoring_provisional_index.create
+            ~owner_nonce:(P.Id.Transaction.create ())
+            ~max_rows:1
           |> Or_error.ok_exn
       }
   in

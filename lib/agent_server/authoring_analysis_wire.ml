@@ -351,16 +351,15 @@ let project ~contexts ~expected ~stamp ~checked ~snapshot ~policy ~checkpoint =
       ~checkpoint)
 ;;
 
-let document_capture ~contexts ~expected ~source:document_source ~script ~candidate =
+let document_script_capture ~contexts ~expected ~source:document_source ~script =
   let open Result.Let_syntax in
-  let stamp = Document.Candidate.stamp candidate in
+  let stamp = Document.Script.document_stamp script in
   let selected_source = Document.Script.selected_source script in
   if
-    (not (Document.Document_stamp.equal stamp (Document.Script.document_stamp script)))
-    || (not
-          (Captured.Id.equal
-             (Captured.id document_source)
-             (Document.Document_stamp.document_source stamp)))
+    (not
+       (Captured.Id.equal
+          (Captured.id document_source)
+          (Document.Document_stamp.document_source stamp)))
     || (not
           (Captured.Digest.equal
              (Captured.digest document_source)
@@ -409,6 +408,16 @@ let document_capture ~contexts ~expected ~source:document_source ~script ~candid
       ~required_contract:(Document.Document_stamp.required_contract stamp)
       ~selected_contract:(Document.Document_stamp.selected_contract stamp)
     |> wire ~error:Error.Invalid_stamp)
+;;
+
+let document_capture ~contexts ~expected ~source ~script ~candidate =
+  if
+    not
+      (Document.Document_stamp.equal
+         (Document.Candidate.stamp candidate)
+         (Document.Script.document_stamp script))
+  then Error Error.Invalid_stamp
+  else document_script_capture ~contexts ~expected ~source ~script
 ;;
 
 let document

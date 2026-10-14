@@ -329,10 +329,12 @@ end
 
 module Prefix : sig
   (** Full and prefix owners remain separate. [full_source] is the current
-      source revision; [prefix_source] is the parser-confirmed prefix revision
-      under the same source ID, normally with another digest/length. The prefix
-      graph can be queried provisionally only, never run or relabelled Complete.
-      Unavailable carries a reason, not an empty successful prefix. *)
+      compiler-owned source revision; [prefix_source] is its parser-confirmed
+      prefix under the same source ID, normally with another digest/length.
+      For selected ChatMD scripts an optional authored request echoes the
+      distinct current editor source/cursor while this compiled prefix remains
+      native. The prefix graph can be queried provisionally only, never run or
+      relabelled Complete. Unavailable is distinct from an empty success. *)
   type unavailable =
     | No_complete_statement
     | Unsupported_source_phase
@@ -342,6 +344,19 @@ module Prefix : sig
   [@@deriving equal, sexp_of]
 
   type provisional
+
+  module Authored_request : sig
+    (** An exact current Document or imported authored source cursor echoed
+        alongside a selected script's DIFFERENT compiled full source/cursor.
+        Construction validates the source and byte bound. This is comparison
+        data only; the host proves physical parser-input and extraction-map
+        ownership before producing it. *)
+    type t
+
+    val create : source:Source.t -> cursor_byte:int -> (t, Error.t) result
+    val source : t -> Source.t
+    val cursor_byte : t -> int
+  end
 
   val create
     :  capture:Capture.t
@@ -353,6 +368,23 @@ module Prefix : sig
     -> snapshot:Snapshot_id.t
     -> (provisional, Error.t) result
 
+  (** The native full/prefix sources and cursor remain the compiler-owned
+      emitted script body. [authored_request] echoes the exact editor request;
+      it is admitted only for a Script_input target, with its cursor in range.
+      The host separately proves its parser-input membership and maps it via
+      the selected Script's bound extraction map. It must not label compiled
+      prefix bytes as an authored document prefix. *)
+  val create_with_authored_request
+    :  capture:Capture.t
+    -> full_source:Source.t
+    -> prefix_source:Source.t
+    -> cursor_byte:int
+    -> end_byte:int
+    -> prefix_graph:Chatml_source.Digest.t
+    -> snapshot:Snapshot_id.t
+    -> authored_request:Authored_request.t
+    -> (provisional, Error.t) result
+
   val capture : provisional -> Capture.t
   val full_source : provisional -> Source.t
   val prefix_source : provisional -> Source.t
@@ -360,6 +392,11 @@ module Prefix : sig
   val end_byte : provisional -> int
   val prefix_graph : provisional -> Chatml_source.Digest.t
   val snapshot : provisional -> Snapshot_id.t
+  val authored_request : provisional -> Authored_request.t option
+
+  (** Compare the complete admitted provisional wire value, including its
+      optional authored request. This is comparison data, not authority. *)
+  val equal_provisional : provisional -> provisional -> bool
 
   module Request : sig
     type t
@@ -402,6 +439,11 @@ module Prefix : sig
     -> (t, Error.t) result
 
   val to_json : t -> Jsonaf.t
+
+  (** Bounded structural encoded-size preflight under the host's smaller
+      response ceiling, using the protocol's existing node/depth/byte codec. *)
+  val within_bytes : t -> max_bytes:int -> (unit, Error.t) result
+
   val of_json : Jsonaf.t -> (t, Error.t) result
   val sexp_of_t : t -> Core.Sexp.t
 end

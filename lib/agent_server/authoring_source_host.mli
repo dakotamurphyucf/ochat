@@ -323,6 +323,26 @@ module Document_context : sig
       -> dir:Eio.Fs.dir_ty Eio.Path.t
       -> checkpoint:(unit -> unit)
       -> (t, Error.t) Result.t
+
+    (** Pure bounded reparse after an unsaved root edit, using only the same
+        owner's previously captured immutable imports. [bundle]'s root bytes
+        must equal [source]; each retained import member/byte/source ID must
+        match [previous] exactly. The existing Generated parser and input
+        binder create a NEW genuine Parsed receipt and associate its new parser
+        input objects with the original captured source objects. It never
+        reads [dir], recaptures a dependency or reuses old Parsed facts. New
+        imports absent from the frozen bundle fail with the existing typed
+        parser error until explicit Analyze/rebuild. The validated source,
+        file, aggregate byte and parser-work limits are checked before copy or
+        parse; checkpoint/cancellation exceptions retain their identity. *)
+    val reparse_frozen
+      :  previous:t
+      -> source:Chatml_source.t
+      -> bundle:Chatmd_source_bundle.t
+      -> limits:Chatmd_source_bundle.limits
+      -> dir:Eio.Fs.dir_ty Eio.Path.t
+      -> checkpoint:(unit -> unit)
+      -> (t, Error.t) Result.t
   end
 
   module Project_capture : sig

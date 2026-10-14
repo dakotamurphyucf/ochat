@@ -153,6 +153,7 @@ let with_supplied_service
                ~max_active_requests_per_connection:2
                ~max_roots_per_connection:2
                ~max_response_bytes:4096
+               ~max_provisional_results:8
              |> Or_error.ok_exn)
       in
       let response = initialize_response ~server_id:host ~principal in
@@ -534,6 +535,7 @@ let%test_unit "host root read is fresh while project context remains captured" =
                     ~max_active_requests_per_connection:2
                     ~max_roots_per_connection:2
                     ~max_response_bytes:4096
+                    ~max_provisional_results:8
                   |> Or_error.ok_exn)
            in
            S.publish_initialize_and_wait
@@ -599,6 +601,13 @@ let%test_unit "host root read is fresh while project context remains captured" =
                     ~max_parser_work_steps:100_000
                     ~max_diagnostic_work_steps:100_000
                   |> Or_error.ok_exn)
+               ~prefix_limits:
+                 (S.Semantic.Prefix_limits.create
+                    ~max_document_bundle_files:4
+                    ~max_document_bundle_bytes:2048
+                    ~max_parser_work_steps:100_000
+                    ~max_host_work_steps:100_000
+                  |> Or_error.ok_exn)
            in
            let analysis_request =
              P.Authoring.Analysis.Analyze.Request.create
@@ -620,7 +629,7 @@ let%test_unit "host root read is fresh while project context remains captured" =
                ~directory:None
              |> ok
            in
-           let script_id =
+           let script_source =
              match call (Source_list inventory) with
              | Ok (Source_list result) ->
                List.find_exn
@@ -629,9 +638,36 @@ let%test_unit "host root read is fresh while project context remains captured" =
                    String.equal
                      (Chatml_source.Id.relative_path (P.Authoring.Source.id source))
                      "main.chatml")
-               |> P.Authoring.Source.id
              | Ok _ | Error _ -> failwith "project inventory unavailable"
            in
+           let script_id = P.Authoring.Source.id script_source in
+           let prefix_request =
+             P.Authoring.Analysis.Prefix.Request.create
+               ~context:expected
+               ~target:P.Authoring.Analysis.Target.project
+               ~source:script_source
+               ~cursor_byte:(P.Authoring.Source.byte_length script_source)
+             |> ok
+           in
+           (match S.Semantic.prefix analyze ~actor ~connection prefix_request with
+            | Ok (P.Authoring.Analysis.Prefix.Provisional provisional) ->
+              assert (
+                P.Authoring.Source.equal
+                  (P.Authoring.Analysis.Prefix.full_source provisional)
+                  script_source)
+            | Ok result ->
+              failwith (Sexp.to_string_hum (P.Authoring.Analysis.Prefix.sexp_of_t result))
+            | Error error ->
+              failwith (P.Error.code_to_string (S.Error.to_protocol error).code));
+           [%test_eq: int]
+             (S.For_testing.provisional_count
+                service
+                ~actor
+                ~connection
+                ~expected
+                ~checkpoint:ignore
+              |> ok)
+             1;
            let pinned =
              P.Authoring.Source_read.Read_request.create
                ~context:expected
@@ -666,6 +702,15 @@ let%test_unit "host root read is fresh while project context remains captured" =
              | Ok (Context_refresh context) -> context
              | Ok _ | Error _ -> failwith "explicit project refresh failed"
            in
+           [%test_eq: int]
+             (S.For_testing.provisional_count
+                service
+                ~actor
+                ~connection
+                ~expected:(P.Authoring.Context.Expected.of_view refreshed)
+                ~checkpoint:ignore
+              |> ok)
+             0;
            assert (
              not
                (P.Id.Authoring_context.equal
@@ -741,6 +786,13 @@ let%test_unit "host root read is fresh while project context remains captured" =
                     ~max_document_bundle_bytes:(String.length authored_document)
                     ~max_parser_work_steps:100_000
                     ~max_diagnostic_work_steps:100_000
+                  |> Or_error.ok_exn)
+               ~prefix_limits:
+                 (S.Semantic.Prefix_limits.create
+                    ~max_document_bundle_files:4
+                    ~max_document_bundle_bytes:2048
+                    ~max_parser_work_steps:100_000
+                    ~max_host_work_steps:100_000
                   |> Or_error.ok_exn)
            in
            let bounded_request =
@@ -823,6 +875,13 @@ let%test_unit "host root read is fresh while project context remains captured" =
                     ~max_parser_work_steps:100_000
                     ~max_diagnostic_work_steps:100_000
                   |> Or_error.ok_exn)
+               ~prefix_limits:
+                 (S.Semantic.Prefix_limits.create
+                    ~max_document_bundle_files:4
+                    ~max_document_bundle_bytes:2048
+                    ~max_parser_work_steps:100_000
+                    ~max_host_work_steps:100_000
+                  |> Or_error.ok_exn)
            in
            (match
               S.Semantic.analyze selected_analyze ~actor ~connection bounded_request
@@ -831,6 +890,52 @@ let%test_unit "host root read is fresh while project context remains captured" =
             | Ok result ->
               failwith
                 (Sexp.to_string_hum (P.Authoring.Analysis.Analyze.sexp_of_t result))
+            | Error error ->
+              failwith (P.Error.code_to_string (S.Error.to_protocol error).code));
+           let document_source =
+             match P.Authoring.Context.basis bounded_document with
+             | Document { source; _ } -> source
+             | Project _ -> failwith "document source missing"
+           in
+           let authored_cursor =
+             String.substr_index_exn authored_document ~pattern:"Task.pure(input)"
+             + String.length "Task.pure(input)"
+           in
+           let document_prefix_request =
+             P.Authoring.Analysis.Prefix.Request.create
+               ~context:bounded_expected
+               ~target:(P.Authoring.Analysis.Target.selected_script "s" |> ok)
+               ~source:document_source
+               ~cursor_byte:authored_cursor
+             |> ok
+           in
+           (match
+              S.Semantic.prefix
+                selected_analyze
+                ~actor
+                ~connection
+                document_prefix_request
+            with
+            | Ok (P.Authoring.Analysis.Prefix.Provisional provisional) ->
+              let authored =
+                P.Authoring.Analysis.Prefix.authored_request provisional
+                |> Option.value_exn
+              in
+              [%test_eq: int]
+                (P.Authoring.Analysis.Prefix.Authored_request.cursor_byte authored)
+                authored_cursor;
+              assert (
+                P.Authoring.Source.equal
+                  (P.Authoring.Analysis.Prefix.Authored_request.source authored)
+                  document_source);
+              assert (
+                not
+                  (Chatml_source.Id.equal
+                     (P.Authoring.Source.id
+                        (P.Authoring.Analysis.Prefix.full_source provisional))
+                     (P.Authoring.Source.id document_source)))
+            | Ok result ->
+              failwith (Sexp.to_string_hum (P.Authoring.Analysis.Prefix.sexp_of_t result))
             | Error error ->
               failwith (P.Error.code_to_string (S.Error.to_protocol error).code));
            Eio.Path.save
@@ -862,6 +967,179 @@ let%test_unit "host root read is fresh while project context remains captured" =
             with
             | Ok (Context_close _) -> ()
             | Ok _ | Error _ -> failwith "host ChatMD document close failed");
+           Eio.Path.save
+             ~create:(`Or_truncate 0o600)
+             Eio.Path.(directory / "chatml.project.json")
+             {|{"schema_version":1,"namespace":"authoring","entries":{"main":{"source":"main.chatml","target":"one_off_v1"}}}|};
+           let editable =
+             match
+               call
+                 (Context_open
+                    (P.Authoring.Context.Open_request.create_host_document
+                       ~root
+                       ~member:"draft.chatmd"
+                       ~default_environment:None
+                     |> ok))
+             with
+             | Ok (Context_open context) -> context
+             | Ok _ | Error _ -> failwith "editable ChatMD open failed"
+           in
+           let editable_expected = P.Authoring.Context.Expected.of_view editable in
+           let selected_target = P.Authoring.Analysis.Target.selected_script "s" |> ok in
+           let baseline_capture =
+             match
+               S.Semantic.analyze
+                 selected_analyze
+                 ~actor
+                 ~connection
+                 (P.Authoring.Analysis.Analyze.Request.create
+                    ~context:editable_expected
+                    ~target:selected_target
+                  |> ok)
+             with
+             | Ok (P.Authoring.Analysis.Analyze.Complete { capture; _ }) -> capture
+             | Ok _ | Error _ -> failwith "editable ChatMD baseline was not checked"
+           in
+           let editable_source =
+             match P.Authoring.Context.basis editable with
+             | Document { source; _ } -> source
+             | Project _ -> failwith "editable ChatMD source missing"
+           in
+           let version =
+             match
+               call
+                 (Document_version
+                    (P.Authoring.Document.Version_request.create
+                       ~context:editable_expected
+                       ~source_id:(P.Authoring.Source.id editable_source)
+                     |> ok))
+             with
+             | Ok (Document_version version) -> version
+             | Ok _ | Error _ -> failwith "editable ChatMD version missing"
+           in
+           let valid_script_body = "let x = 1;; let main input = Task.pure(input)" in
+           let edited_body =
+             String.substr_replace_all
+               authored_document
+               ~pattern:"let main input = Task.pure(input)"
+               ~with_:valid_script_body
+           in
+           let edited =
+             match
+               call
+                 (Document_replace
+                    (P.Authoring.Document.Replace_request.create
+                       ~expected:version
+                       ~next_editor_revision:1
+                       ~contents:edited_body
+                     |> ok))
+             with
+             | Ok (Document_replace result) -> result
+             | Ok _ | Error _ -> failwith "editable ChatMD replacement failed"
+           in
+           let edited_context = edited.P.Authoring.Document.Result.context in
+           let edited_source =
+             match P.Authoring.Context.basis edited_context with
+             | Document { source; _ } -> source
+             | Project _ -> failwith "edited ChatMD source missing"
+           in
+           assert (not (P.Authoring.Source.equal editable_source edited_source));
+           (match
+              S.Semantic.analyze
+                selected_analyze
+                ~actor
+                ~connection
+                (P.Authoring.Analysis.Analyze.Request.create
+                   ~context:(P.Authoring.Context.Expected.of_view edited_context)
+                   ~target:selected_target
+                 |> ok)
+            with
+            | Ok (P.Authoring.Analysis.Analyze.Complete { capture; _ }) ->
+              assert (
+                not
+                  (Chatml_source.Digest.equal
+                     (P.Authoring.Analysis.Capture.input_fingerprint capture)
+                     (P.Authoring.Analysis.Capture.input_fingerprint baseline_capture)))
+            | Ok _ | Error _ -> failwith "edited selected body was not checked");
+           let incomplete_script_body = "let x = 1;; let main input = Task.pure(inpu" in
+           let incomplete_body =
+             String.substr_replace_all
+               edited_body
+               ~pattern:valid_script_body
+               ~with_:incomplete_script_body
+           in
+           let incomplete =
+             match
+               call
+                 (Document_replace
+                    (P.Authoring.Document.Replace_request.create
+                       ~expected:edited.P.Authoring.Document.Result.version
+                       ~next_editor_revision:2
+                       ~contents:incomplete_body
+                     |> ok))
+             with
+             | Ok (Document_replace result) -> result
+             | Ok _ | Error _ -> failwith "incomplete ChatMD replacement failed"
+           in
+           let incomplete_context = incomplete.P.Authoring.Document.Result.context in
+           let incomplete_source =
+             match P.Authoring.Context.basis incomplete_context with
+             | Document { source; _ } -> source
+             | Project _ -> failwith "incomplete ChatMD source missing"
+           in
+           let edited_cursor =
+             String.substr_index_exn incomplete_body ~pattern:"Task.pure(inpu"
+             + String.length "Task.pure(inpu"
+           in
+           (match
+              S.Semantic.prefix
+                selected_analyze
+                ~actor
+                ~connection
+                (P.Authoring.Analysis.Prefix.Request.create
+                   ~context:(P.Authoring.Context.Expected.of_view incomplete_context)
+                   ~target:selected_target
+                   ~source:incomplete_source
+                   ~cursor_byte:edited_cursor
+                 |> ok)
+            with
+            | Ok (P.Authoring.Analysis.Prefix.Provisional provisional) ->
+              let full_source = P.Authoring.Analysis.Prefix.full_source provisional in
+              let exact_compiled_body = incomplete_script_body ^ "\n" in
+              [%test_eq: int]
+                (P.Authoring.Source.byte_length full_source)
+                (String.length exact_compiled_body);
+              assert (
+                Chatml_source.Digest.equal
+                  (P.Authoring.Source.digest full_source)
+                  (Chatml_source.Digest.of_contents
+                     exact_compiled_body
+                     ~checkpoint:ignore));
+              let authored =
+                P.Authoring.Analysis.Prefix.authored_request provisional
+                |> Option.value_exn
+              in
+              assert (
+                P.Authoring.Source.equal
+                  (P.Authoring.Analysis.Prefix.Authored_request.source authored)
+                  incomplete_source);
+              [%test_eq: int]
+                (P.Authoring.Analysis.Prefix.Authored_request.cursor_byte authored)
+                edited_cursor
+            | Ok (P.Authoring.Analysis.Prefix.Unavailable { reason; _ }) ->
+              failwith
+                (Sexp.to_string_hum
+                   (P.Authoring.Analysis.Prefix.sexp_of_unavailable reason))
+            | Error error ->
+              failwith (P.Error.code_to_string (S.Error.to_protocol error).code));
+           (match
+              call
+                (Context_close
+                   (P.Authoring.Context.Close_request.create
+                      ~expected:(P.Authoring.Context.Expected.of_view incomplete_context)))
+            with
+            | Ok (Context_close _) -> ()
+            | Ok _ | Error _ -> failwith "edited ChatMD close failed");
            let document =
              match
                call

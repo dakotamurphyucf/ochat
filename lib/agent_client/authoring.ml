@@ -416,11 +416,26 @@ let analyze_prefix t (request : P.Analysis.Prefix.Request.t) =
         match result with
         | P.Analysis.Prefix.Provisional prefix ->
           let capture = P.Analysis.Prefix.capture prefix in
+          let request_source_matches =
+            match P.Analysis.Prefix.authored_request prefix with
+            | None ->
+              P.Source.equal (P.Analysis.Prefix.full_source prefix) source
+              && Int.equal (P.Analysis.Prefix.cursor_byte prefix) cursor_byte
+            | Some authored ->
+              (match P.Analysis.Capture.target capture with
+               | P.Analysis.Target.Project_input -> false
+               | P.Analysis.Target.Script_input _ ->
+                 P.Source.equal
+                   (P.Analysis.Prefix.Authored_request.source authored)
+                   source
+                 && Int.equal
+                      (P.Analysis.Prefix.Authored_request.cursor_byte authored)
+                      cursor_byte)
+          in
           P.Context.Expected.equal (P.Analysis.Capture.context capture) expected
           && selected_target_matches selector (P.Analysis.Capture.target capture)
           && current_target t expected (P.Analysis.Capture.target capture)
-          && P.Source.equal (P.Analysis.Prefix.full_source prefix) source
-          && Int.equal (P.Analysis.Prefix.cursor_byte prefix) cursor_byte
+          && request_source_matches
         | P.Analysis.Prefix.Unavailable result ->
           P.Context.Expected.equal result.context expected
           && P.Analysis.Target.equal_selector result.target selector
