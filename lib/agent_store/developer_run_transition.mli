@@ -45,6 +45,28 @@ val terminal_selected
   -> selected:Agent_protocol.Developer_job.t list
   -> (Developer_run_document.t, Error.t) result
 
+module External_model_parent : sig
+  type t =
+    | Run_root
+    | Dispatching of int * Agent_protocol.Host_invocation.t
+end
+
+(** Pure single-append transformation for a fresh queued Model_call with a
+    validated Developer_model_call payload. A native parent must be the exact
+    current same-epoch Dispatching invocation value and revision projected by
+    the Store from an authentic observation. A Run_root launch has no parent
+    job and depth zero; it adds no invented invocation. Structural parent-job
+    history and graph cycles remain checked by the one document validator;
+    actual native ancestry/depth belongs to the host. This uses the normal job/document payload
+    limits, independently of the selected-job per-commit count; no physical
+    capacity or live provider authority is minted. *)
+val external_model
+  :  t
+  -> Developer_run_document.t
+  -> parent:External_model_parent.t
+  -> job:Agent_protocol.Developer_job.t
+  -> (Developer_run_document.t, Error.t) result
+
 (** Exact queued attempt -> Running, due at trusted [now]. The caller already
     bound [observed] to the current document and acquired shared capacity. *)
 val claim
