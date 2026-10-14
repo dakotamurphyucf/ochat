@@ -354,6 +354,22 @@ Build; a declared path is not presented as a verified file. Both methods are
 independently negotiated and unavailable until their actual handlers are
 installed. Neither method certifies semantic facts or requires a successful
 whole-file check.
+The [lexical and assistance service](../../lib/agent_server/authoring_context_service.mli)
+borrows the existing joined context owner; it does not create a second context
+or capture imports while answering. Authored highlighting and local structural
+help use the current source even when parsing fails. Effective highlighting and
+parsed references require the immutable capture from an explicit Analyze for
+that exact document generation. Project help uses the current validated overlay
+and selected compiler contract; an invalid overlay retains bounded lexical
+help without stale catalog names. Declared project environment names may come
+from the one authorized captured declaration even when its selected Build
+failed. Imported declarations keep the requested captured source and physical
+parser-input association, while a transformed input without an exact authored
+coordinate proof falls back to authored-only lexical help. Host path names and
+selected tool references require their separate current host grants. The
+service checks the selected method feature and final owner/selection state
+before returning a bounded response; transport installation and advertised
+capabilities remain separate.
 `Unavailable` and `Ambiguous` remain distinct from a successful empty result.
 No completion operation invokes prompt preprocessing, scripts, tools, model
 inference, Git/HTTP fetch, install or initializer evaluation.

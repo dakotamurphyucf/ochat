@@ -17,4 +17,5 @@ module Semantic = struct
   module Project_metadata = Authoring_project_metadata
 end
 
+module Assistance = Authoring_context_assistance_service
 module For_testing = Authoring_context_testing

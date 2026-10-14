@@ -233,10 +233,11 @@ module Facts = struct
         || Agent_protocol.Authoring_common.Source.byte_length request_source
            <> Chatml_source.byte_length authored
         || Chatml_source.byte_length authored > limits.max_authored_bytes
-        || (not
-              (Chatmd_parser_input.Role.equal
-                 (Chatmd_parser_input.role lexical_input)
-                 Chatmd_parser_input.Role.Root))
+        || (Option.is_none parsed
+            && not
+                 (Chatmd_parser_input.Role.equal
+                    (Chatmd_parser_input.role lexical_input)
+                    Chatmd_parser_input.Role.Root))
         || Chatmd_parser_input.authored_byte_length lexical_input
            <> Chatml_source.byte_length authored
         || not
@@ -312,11 +313,12 @@ module Facts = struct
         then Error Error.Source_mismatch
         else (
           match parsed with
-          | Some parsed
+          | Some _
             when not
-                   (phys_equal
-                      (Prompt.Chat_markdown.Parsed.root_input parsed)
-                      lexical_input) -> Error Error.Parsed_input_mismatch
+                   (List.exists parsed_inputs ~f:(fun input ->
+                      Work.tick work ();
+                      phys_equal input lexical_input)) ->
+            Error Error.Parsed_input_mismatch
           | _ ->
             let unmatched_capture =
               List.find captured_inputs ~f:(fun capture ->
@@ -338,10 +340,12 @@ module Facts = struct
                            (Chatml_source.Id.equal
                               (Chatml_source.id (Captured_input.source capture))
                               (Chatml_source.id authored)))
-                        || not
-                             (Chatml_source.Digest.equal
-                                (Chatml_source.digest (Captured_input.source capture))
-                                (Chatml_source.digest authored))))
+                        || (not
+                              (Chatml_source.Digest.equal
+                                 (Chatml_source.digest (Captured_input.source capture))
+                                 (Chatml_source.digest authored)))
+                        || Chatml_source.byte_length (Captured_input.source capture)
+                           <> Chatml_source.byte_length authored))
                    || List.count captured_inputs ~f:(fun other ->
                         Work.tick work ();
                         phys_equal input (Captured_input.input other))

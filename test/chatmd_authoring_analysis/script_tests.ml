@@ -206,7 +206,7 @@ let fallback_adapter_limits () =
   |> Or_error.ok_exn
 ;;
 
-let fallback_request source ~cursor_byte =
+let fallback_request ?context_source source ~cursor_byte =
   let generator =
     AP.Id.Generator.create ~bytes:(fun length -> String.make length '\000')
   in
@@ -220,6 +220,15 @@ let fallback_request source ~cursor_byte =
       ~editor_revision:None
     |> wire_ok
   in
+  let context_source = Option.value context_source ~default:source in
+  let wire_context_source =
+    AP.Authoring.Source.create
+      ~id:(S.id context_source)
+      ~digest:(S.digest context_source)
+      ~byte_length:(S.byte_length context_source)
+      ~editor_revision:None
+    |> wire_ok
+  in
   let fingerprint = S.Digest.of_contents "document" ~checkpoint:ignore in
   let context =
     AP.Authoring.Context.create
@@ -227,9 +236,10 @@ let fallback_request source ~cursor_byte =
       ~host
       ~origin:
         (AP.Authoring.Context.Supplied_document
-           { source = wire_source; default_environment = None })
+           { source = wire_context_source; default_environment = None })
       ~generation:0
-      ~basis:(AP.Authoring.Context.Document { source = wire_source; selection = None })
+      ~basis:
+        (AP.Authoring.Context.Document { source = wire_context_source; selection = None })
       ~basis_fingerprint:fingerprint
       ~editable_sources:[]
     |> wire_ok
@@ -525,10 +535,10 @@ let%test_unit "imported, transformed and external script provenance remains dist
     [ ( "imported"
       , [ "root.chatmd", {|<import src="part.chatmd" namespace="lib"/>|}
         ; ( "part.chatmd"
-          , {|<script id="s" language="chatml" kind="tool">same same</script>|} )
+          , {|<script id="s" language="chatml" kind="tool">let x = le</script>|} )
         ]
       , "lib:s"
-      , "same same"
+      , "let x = le"
       , "part.chatmd" )
     ; ( "external"
       , [ ( "root.chatmd"
@@ -543,7 +553,7 @@ let%test_unit "imported, transformed and external script provenance remains dist
   List.iter cases ~f:(fun (kind, files, script_id, body, declaring_path) ->
     let parsed = parse files in
     let root = List.Assoc.find_exn files "root.chatmd" ~equal:String.equal in
-    let _fixture, _base, build = selected_build body in
+    let fixture, _base, build = selected_build body in
     let id = identity kind in
     let contexts =
       document_context (C.create ~limits:(limits ())) ~identity:id ~contents:root
@@ -596,7 +606,121 @@ let%test_unit "imported, transformed and external script provenance remains dist
       | { authored = Some (CM.Declaration.Extraction.External_origin origin); _ }
         when String.equal kind "external" ->
         [%test_eq: string] origin.member "code.chatml"
-      | _ -> failwith "script provenance was fabricated or lost"));
+      | _ -> failwith "script provenance was fabricated or lost");
+    if String.equal kind "imported"
+    then (
+      assert (phys_equal (D.Script.declaration_input script) declaring_input);
+      let authored_source =
+        S.create
+          (Support.id ~namespace:"document" declaring_path)
+          ~contents:(List.Assoc.find_exn files declaring_path ~equal:String.equal)
+          ~expected_digest:None
+          ~max_bytes:None
+          ~checkpoint:ignore
+        |> Or_error.ok_exn
+      in
+      let selected_contract =
+        F.Selected_contract.admit
+          build
+          ~selected_contract:fixture.contract
+          ~limits:(fallback_limits ())
+          ~checkpoint:ignore
+        |> function
+        | Ok selected -> selected
+        | Error error -> Error.raise_s (F.Error.sexp_of_t error)
+      in
+      let admit ~current ~authored_input ~authored_source =
+        FD.Origin.admit
+          script
+          ~current
+          ~authored_input
+          ~authored_source
+          ~selected:selected_contract
+          ~limits:(fallback_adapter_limits ())
+          ~checkpoint:ignore
+      in
+      let origin =
+        match admit ~current:inputs ~authored_input:declaring_input ~authored_source with
+        | Ok (Ready origin) -> origin
+        | Ok Unavailable | Error _ -> failwith "genuine imported origin unavailable"
+      in
+      let body_start =
+        String.substr_index_exn (S.contents authored_source) ~pattern:body
+      in
+      let request =
+        fallback_request
+          ~context_source:(C.Document.Inputs.source inputs)
+          authored_source
+          ~cursor_byte:(body_start + 2)
+      in
+      let result =
+        F.produce
+          origin
+          ~request
+          ~selected:(Some selected_contract)
+          ~limits:(fallback_limits ())
+          ~checkpoint:ignore
+        |> function
+        | Ok result -> result
+        | Error error -> Error.raise_s (F.Error.sexp_of_t error)
+      in
+      assert (
+        List.exists (W.Result.items result) ~f:(fun item ->
+          String.equal (W.Suggestion.label item) "let"
+          &&
+          let range = W.Suggestion.replace item in
+          S.Id.equal
+            (AP.Authoring.Source.id (W.Range.source range))
+            (S.id authored_source)
+          && Int.equal (W.Range.start_byte range) body_start
+          && Int.equal (W.Range.end_byte range) (body_start + 3)));
+      let foreign_parsed = parse files in
+      let foreign_input =
+        CM.Parsed.declarations foreign_parsed
+        |> List.find_exn ~f:(fun declaration ->
+          String.equal (CM.Declaration.script_id declaration) script_id)
+        |> CM.Declaration.range
+        |> Chatmd_parser_input.Range.input
+      in
+      (match admit ~current:inputs ~authored_input:foreign_input ~authored_source with
+       | Ok Unavailable -> ()
+       | Ok (Ready _) | Error _ -> failwith "foreign parser input admitted");
+      let altered_source =
+        S.create
+          (S.id authored_source)
+          ~contents:(S.contents authored_source ^ " altered")
+          ~expected_digest:None
+          ~max_bytes:None
+          ~checkpoint:ignore
+        |> Or_error.ok_exn
+      in
+      (match
+         admit
+           ~current:inputs
+           ~authored_input:declaring_input
+           ~authored_source:altered_source
+       with
+       | Error FD.Error.Foreign_authored_input -> ()
+       | Ok _ | Error _ -> failwith "changed imported bytes admitted");
+      let revised =
+        C.replace
+          contexts
+          ~expected:
+            (C.version contexts ~identity:id ~source:(S.id (source root))
+             |> Option.value_exn)
+          ~next_revision:(C.Editor_revision.create 1 |> Or_error.ok_exn)
+          ~contents:(root ^ "<!-- revised -->")
+          ~checkpoint:ignore
+        |> context_ok
+      in
+      let revised_inputs =
+        C.document_inputs revised ~identity:id ~checkpoint:ignore |> context_ok
+      in
+      match
+        admit ~current:revised_inputs ~authored_input:declaring_input ~authored_source
+      with
+      | Error FD.Error.Stale_document -> ()
+      | Ok _ | Error _ -> failwith "revised document admitted old script"));
   let authored = {|<script id="s" language="chatml" kind="tool">x</script>|} in
   let parsed =
     Eio_main.run (fun env ->
