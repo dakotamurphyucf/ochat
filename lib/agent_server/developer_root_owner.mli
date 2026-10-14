@@ -145,6 +145,17 @@ module Action : sig
     -> checkpoint:(unit -> unit)
     -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result
 
+  (** Abort only this action's own unsealed provisional reservation. The
+      issuing physical scope and fiber must still own it, or the action must
+      have conclusively aborted it during bracket cleanup. A sealed/queued,
+      published or uncertain selected job is never released by lexical
+      rollback; its exact Store handoff retains custody. Repetition after a
+      proven abort is harmless. *)
+  val rollback_staged
+    :  t
+    -> Agent_protocol.Id.Job.t
+    -> (unit, Agent_protocol.Error.t) result
+
   (** One-shot seal of a distinct subset of this action's own staged IDs.
       Unknown/duplicate/foreign IDs reject. Sealing excludes later staging and
       fixes exact immutable job records; the caller returns this opaque value
@@ -243,6 +254,14 @@ module Native_terminal : sig
     -> check_parent_now:(unit -> (unit, Agent_protocol.Error.t) result)
     -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result
 
+  (** The same exact provisional rollback as Action.rollback_staged, bound to
+      this physical native terminal's internal action. It cannot remove a job
+      from a frozen canonical outcome/selection or an uncertain handoff. *)
+  val rollback_staged
+    :  t
+    -> Agent_protocol.Id.Job.t
+    -> (unit, Agent_protocol.Error.t) result
+
   (** One-shot seal of this scope's own staged IDs after the callback's
       canonical outcome is known. [submit] compares this exact outcome with
       the resolved terminal record. Nonempty selection stays paired with that
@@ -340,6 +359,51 @@ val with_claimed_job
       -> (Agent_protocol.Developer_job.State.t, Agent_protocol.Error.t) result)
   -> (Agent_protocol.Developer_job.t option, Agent_protocol.Error.t) result
 
+module Job_control : sig
+  type snapshot
+
+  type cancellation =
+    | Already_terminal
+    | Durable_cancelled
+    | Claimed_cancel_requested
+
+  (** A snapshot returns immutable comparison data only. Its opaque issuer and
+      exact Store-read job bind this root, owner, capture and attempt without
+      retaining the whole observed run document; neither the job DTO nor its ID
+      alone grants cancellation authority. *)
+  val job : snapshot -> Agent_protocol.Developer_job.t
+
+  (** Read this run owner's current Active epoch through its physical Store
+      handle and exact admitted capture, then recheck the original actor and
+      local lifetime after the read. Historical or foreign jobs are not
+      returned. *)
+  val find_current
+    :  run
+    -> Agent_protocol.Id.Job.t
+    -> (snapshot option, Agent_protocol.Error.t) result
+
+  (** Cancel the exact observed attempt under its issuing physical run owner.
+      A foreign Store/root, changed attempt, new epoch or immutable mismatch
+      rejects; same-attempt terminal completion is idempotent. A prewrite
+      conflict may reread only this snapshot's immutable job and attempt,
+      never retarget a newly claimed attempt. Queued and Waiting_completion
+      use a fresh Store CAS; a queued retry or Waiting_completion first joins
+      any physical worker handoff and then rereads the exact ended state. A claimed Running or
+      Waiting_permission job targets only the actual registered worker. An
+      already terminal job remains unchanged. [Durable_cancelled] requires a
+      reconciled Store installation; [Claimed_cancel_requested] only confirms
+      the physical cancellation request, even if its callback has joined;
+      it never implies terminal persistence or result disclosure. A
+      self-cancel signals without waiting for its own callback/children.
+      Unknown I/O retains the exact Prepared in this owner's single bounded
+      control-recovery slot, the Store pending barrier and capacity;
+      no second writer, scheduler, effect replay or blind retry is introduced.
+      The original actor, admitted capture, selected run and latest epoch are
+      rechecked after yielding reads and immediately before a new write or
+      signal. *)
+  val cancel_current : run -> snapshot -> (cancellation, Agent_protocol.Error.t) result
+end
+
 (** Read actual latest Active epoch through the Store, then recheck original
     actor, same-domain physical lifetime and selected registry without yielding.
     This can yield. No request-supplied ID, digest, or copied generation creates
@@ -425,7 +489,12 @@ val with_native_callback
   -> ('a, Agent_protocol.Error.t) result
 
 (** One bounded pass over the physically retained root/native terminal head
-    and later immutable intents. No callback reruns. Unknown/divergent state
+    and later immutable intents, plus any exact inactive-cancel Prepared in
+    this owner's finite control-recovery slot. It reconciles that Store write
+    before allowing a new mutation; Installed retires only the exact terminal
+    job's unclaimed reservation, proven Absent may retry the same pinned
+    attempt, and unresolved/diverged state retains the run claim and capacity.
+    No callback reruns. Unknown/divergent state
     keeps the run quarantined and
     blocks new actions/mutations until trusted recovery resolves it. This
     requires the issuing Eio domain and no active root/native callback or

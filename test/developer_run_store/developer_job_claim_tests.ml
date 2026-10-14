@@ -1054,7 +1054,7 @@ let%test_unit "selected handoff rejects another physical claim" =
     Worker.close_and_wait worker |> F.ok)
 ;;
 
-let%test_unit "scheduled claim waits without capacity or callback until due" =
+let%test_unit "scheduled claim and ended waits cancel only their exact attempt" =
   F.with_root (fun _env sw _root _session store ->
     let owner = F.owner 0 in
     let capture = F.digest "scheduled developer claim" in
@@ -1120,7 +1120,153 @@ let%test_unit "scheduled claim waits without capacity or callback until due" =
            callback
          |> F.ok));
     assert (Int.equal !called 2);
+    let retry_id = Selected.job_id "job_scheduled_retry_cancel" in
+    let _, retry_selected =
+      select_root
+        ~retry_policy:(P.Job.Safe_retry { max_attempts = 2; backoff_ms = 0 })
+        handle
+        (R.observe handle |> F.run_ok)
+        owner
+        capture
+        retry_id
+    in
+    now := timestamp;
+    let retry_job =
+      Worker.with_claimed_attempt
+        worker
+        ~expected:retry_selected
+        ~lookup:(R.find_job_exact retry_selected retry_id)
+        first
+      |> F.ok
+      |> Option.value_exn
+    in
+    assert (Int.equal (P.Developer_job.state retry_job).attempt 1);
+    Worker.join_ended_attempt worker ~job:retry_job |> F.ok;
+    let retry_observed = R.observe handle |> F.run_ok in
+    let cancelled =
+      R.prepare_inactive_cancel
+        handle
+        ~expected:retry_observed
+        ~lookup:(R.find_job_exact retry_observed retry_id)
+        ~now:timestamp
+      |> F.run_ok
+      |> R.commit_inactive_cancel handle
+      |> F.run_ok
+      |> R.Installed.observation
+      |> fun observed -> R.find_job observed retry_id |> Option.value_exn
+    in
+    let cancelled_state = P.Developer_job.state cancelled in
+    assert (Int.equal cancelled_state.attempt 1);
+    assert (Option.is_none cancelled_state.started_at);
+    assert (Option.is_none cancelled_state.next_run_at);
+    assert (
+      match cancelled_state.status with
+      | P.Job.Cancelled -> true
+      | _ -> false);
+    Worker.close_and_wait worker |> F.ok);
+  F.with_root (fun _env sw _root _session store ->
+    let owner = F.owner 0 in
+    let capture = F.digest "ended dependency cancellation" in
+    let handle, initial = F.admit store owner capture in
+    let id = Selected.job_id "job_waiting_cancel" in
+    let _, selected = select_root handle initial owner capture id in
+    let worker = worker ~sw ~store ~handle ~capacity:(capacity ()) () in
+    let dependency : P.Job.dependency =
+      { invocation_id = P.Id.Invocation.of_string "inv_waiting_cancel" |> F.ok
+      ; work = P.Invocation.Job (Selected.job_id "job_dependency")
+      ; deadline = timestamp
+      ; completion_schema = None
+      ; max_output_bytes = 128
+      ; max_output_depth = 4
+      }
+    in
+    let ended =
+      Worker.with_claimed_attempt
+        worker
+        ~expected:selected
+        ~lookup:(R.find_job_exact selected id)
+        (fun ~active ~sw:_ ->
+           let state = P.Developer_job.state (R.Claim.job (Scope.claim active)) in
+           Ok { state with status = P.Job.Waiting_completion dependency })
+      |> F.ok
+      |> Option.value_exn
+    in
+    Worker.join_ended_attempt worker ~job:ended |> F.ok;
+    let current = R.observe handle |> F.run_ok in
+    let cancelled =
+      R.prepare_inactive_cancel
+        handle
+        ~expected:current
+        ~lookup:(R.find_job_exact current id)
+        ~now:timestamp
+      |> F.run_ok
+      |> R.commit_inactive_cancel handle
+      |> F.run_ok
+      |> R.Installed.observation
+      |> fun observed -> R.find_job observed id |> Option.value_exn
+    in
+    let state = P.Developer_job.state cancelled in
+    assert (Int.equal state.attempt 1);
+    assert (Option.is_some state.started_at);
+    assert (
+      match state.status with
+      | P.Job.Cancelled -> true
+      | _ -> false);
     Worker.close_and_wait worker |> F.ok)
+;;
+
+let%test_unit "claimed worker self-cancel requests without joining itself" =
+  F.with_root (fun _env sw _root _session store ->
+    let owner = F.owner 0 in
+    let capture = F.digest "worker self cancellation" in
+    let handle, initial = F.admit store owner capture in
+    let id = Selected.job_id "job_self_cancel" in
+    let _, selected = select_root handle initial owner capture id in
+    let worker = worker ~sw ~store ~handle ~capacity:(capacity ()) () in
+    let called = ref 0 in
+    (match
+       Worker.with_claimed_attempt
+         worker
+         ~expected:selected
+         ~lookup:(R.find_job_exact selected id)
+         (fun ~active ~sw:_ ->
+            incr called;
+            let claim = Scope.claim active in
+            let claimed = R.Claim.job claim in
+            assert (
+              match Worker.cancel_claimed worker ~job:claimed |> F.ok with
+              | Worker.Cancellation.Requested_self -> true
+              | No_live_claim | Joined -> false);
+            Ok (terminal_state claim P.Job.Cancelled))
+     with
+     | Ok (Some job) ->
+       assert (
+         match (P.Developer_job.state job).status with
+         | P.Job.Cancelled -> true
+         | _ -> false)
+     | Ok None | Error _ -> failwith "self-cancel did not settle its own attempt"
+     | exception Eio.Cancel.Cancelled _ -> ());
+    assert (Int.equal !called 1);
+    Worker.reconcile_quarantined worker |> F.ok;
+    let observed = R.observe handle |> F.run_ok in
+    assert (
+      match
+        R.find_job observed id
+        |> Option.value_exn
+        |> P.Developer_job.state
+        |> fun (state : P.Developer_job.State.t) -> state.status
+      with
+      | P.Job.Cancelled -> true
+      | _ ->
+        raise_s
+          [%sexp
+            "self-cancel stored unexpected status"
+          , (P.Job.status_to_json
+               (P.Developer_job.state (R.find_job observed id |> Option.value_exn)).status
+             : Jsonaf.t)]);
+    match Worker.close_and_wait worker with
+    | Ok () -> ()
+    | Error error -> raise_s [%sexp "self-cancel close", (error : P.Error.t)])
 ;;
 
 let%test_unit

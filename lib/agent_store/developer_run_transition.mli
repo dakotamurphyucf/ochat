@@ -54,6 +54,21 @@ val claim
   -> now:Agent_protocol.Timestamp.t
   -> (Developer_run_document.t, Error.t) result
 
+(** Cancel an exact unclaimed Queued job, including a queued retry, or an
+    already-ended Waiting_completion job. This is state-only CAS policy for
+    the current Active epoch. Running and Waiting_permission require their
+    physical worker Claim; terminal jobs are never rewritten. Preserve the
+    observed attempt and its started_at convention, clear pending retry/wait
+    and result data, and record a completed Cancelled state at [now]. The
+    caller must bind [observed] to one Store Observation; this pure function
+    does not prove that no worker is still active. *)
+val cancel_inactive
+  :  t
+  -> Developer_run_document.t
+  -> observed:Agent_protocol.Developer_job.t
+  -> now:Agent_protocol.Timestamp.t
+  -> (Developer_run_document.t, Error.t) result
+
 (** State-only transition for an exact physically claimed job. The caller
     proves its live Claim and a fresh document observation. [current_epoch]
     selects ordinary active-scope transitions or old-epoch terminal-only

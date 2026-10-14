@@ -132,6 +132,42 @@ val with_claimed_attempt
       -> (Agent_protocol.Developer_job.State.t, Agent_protocol.Error.t) result)
   -> (Agent_protocol.Developer_job.t option, Agent_protocol.Error.t) result
 
+module Cancellation : sig
+  type t =
+    | No_live_claim
+    | Requested_self
+    | Joined
+end
+
+(** Target only the actually registered callback whose entered physical Claim
+    was issued by this Worker and matches [job]'s immutable identity and
+    attempt. A copied
+    Running row cannot mint a Claim or cause an unrelated callback to be
+    cancelled. [No_live_claim] is not proof that the durable job is inactive:
+    admission, terminal persistence or restart recovery may be in flight.
+    [Requested_self] signals this callback's cancellation without self-join;
+    the owning Eio scope delivers it at its normal cancellation boundary.
+    Otherwise cancel the exact Eio context and join its callback/children
+    before [Joined]. The callback's
+    existing terminal persistence and quarantine own capacity throughout;
+    this operation never writes a job state or releases a lease. *)
+val cancel_claimed
+  :  t
+  -> job:Agent_protocol.Developer_job.t
+  -> (Cancellation.t, Agent_protocol.Error.t) result
+
+(** Before cancelling a durable Waiting_completion row or queued retry, join
+    any registered worker callback for this exact immutable job/attempt and
+    reject an unresolved claim or terminal-write quarantine. This covers the
+    handoff after the worker saved an ended wait/retry but before unregistering.
+    Calling from that same callback rejects rather than self-joining. An
+    absent registered call is not itself proof of the status: the root must
+    reread a fresh Store Observation after this call and use exact CAS. *)
+val join_ended_attempt
+  :  t
+  -> job:Agent_protocol.Developer_job.t
+  -> (unit, Agent_protocol.Error.t) result
+
 (** Actual next Store handle for this stable run identity. Revoke old active
     effects and retire only unclaimed old-epoch reservations; old claimed
     leases stay charged until physical cleanup. Foreign/future/equal epochs

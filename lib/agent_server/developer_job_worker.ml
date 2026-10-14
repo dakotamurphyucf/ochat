@@ -73,6 +73,7 @@ type lease_stage =
 
 type call =
   { mutable cancel : Eio.Cancel.t option
+  ; mutable claim : Store.Claim.t option
   ; finished : unit Eio.Promise.t
   ; finish : unit Eio.Promise.u
   }
@@ -96,6 +97,7 @@ type t =
   }
 
 let call_key : t Eio.Fiber.key = Eio.Fiber.create_key ()
+let call_identity_key : call Eio.Fiber.key = Eio.Fiber.create_key ()
 let invalid message = Error (P.Error.invalid_request message)
 
 let error_of_store error =
@@ -225,7 +227,7 @@ let rec settle_transition
 
 let with_registered_call t f =
   let finished, finish = Eio.Promise.create () in
-  let call = { cancel = None; finished; finish } in
+  let call = { cancel = None; claim = None; finished; finish } in
   t.calls <- call :: t.calls;
   Exn.protect
     ~finally:(fun () ->
@@ -235,7 +237,8 @@ let with_registered_call t f =
     ~f:(fun () ->
       Eio.Cancel.sub (fun context ->
         call.cancel <- Some context;
-        Eio.Fiber.with_binding call_key t (fun () -> f ())))
+        Eio.Fiber.with_binding call_key t (fun () ->
+          Eio.Fiber.with_binding call_identity_key call (fun () -> f call))))
 ;;
 
 let terminal_state t claim status =
@@ -367,7 +370,7 @@ let with_claimed_attempt t ~expected ~lookup ?select f =
         | Interrupted _ -> true
       then Ok None
       else
-        with_registered_call t (fun () ->
+        with_registered_call t (fun call ->
           let handle = t.current in
           if
             t.closed
@@ -455,6 +458,7 @@ let with_claimed_attempt t ~expected ~lookup ?select f =
                     let callback_result =
                       match
                         Scope.with_claim t.scope ~handle ~claim (fun ~active ~sw ->
+                          call.claim <- Some claim;
                           callback_started := true;
                           f ~active ~sw)
                       with
@@ -588,6 +592,69 @@ let with_claimed_attempt t ~expected ~lookup ?select f =
                            }
                        in
                        Error error))))
+;;
+
+module Cancellation = struct
+  type t =
+    | No_live_claim
+    | Requested_self
+    | Joined
+end
+
+let call_matches_job t job call =
+  Option.value_map call.claim ~default:false ~f:(fun claim ->
+    Store.Claim.issued_by claim t.store
+    && P.Developer_job.same_immutable (Store.Claim.job claim) job
+    && Int.equal (Store.Claim.attempt claim) (P.Developer_job.state job).attempt)
+;;
+
+let exact_registered_call t job =
+  match List.filter t.calls ~f:(call_matches_job t job) with
+  | [] -> Ok None
+  | [ call ] -> Ok (Some call)
+  | _ -> invalid "multiple physical callbacks own one developer job attempt"
+;;
+
+let same_call_fiber call =
+  Option.value_map (Eio.Fiber.get call_identity_key) ~default:false ~f:(fun current ->
+    phys_equal current call)
+;;
+
+let cancel_claimed t ~job =
+  if not (same_domain t)
+  then invalid "developer job cancellation belongs to another domain"
+  else
+    let* call = exact_registered_call t job in
+    match call with
+    | None -> Ok Cancellation.No_live_claim
+    | Some call ->
+      (match call.cancel with
+       | None -> invalid "developer job callback has no cancellation context"
+       | Some context ->
+         Eio.Cancel.cancel context Exit;
+         if same_call_fiber call
+         then Ok Cancellation.Requested_self
+         else (
+           Eio.Promise.await call.finished;
+           Ok Cancellation.Joined))
+;;
+
+let join_ended_attempt t ~job =
+  if not (same_domain t)
+  then invalid "developer job wait belongs to another domain"
+  else if not (List.is_empty t.quarantined)
+  then invalid "developer job claim or terminal write remains quarantined"
+  else
+    let* call = exact_registered_call t job in
+    match call with
+    | None -> Ok ()
+    | Some call when same_call_fiber call ->
+      invalid "developer job callback cannot join itself"
+    | Some call ->
+      Eio.Promise.await call.finished;
+      if List.is_empty t.quarantined
+      then Ok ()
+      else invalid "developer job terminal write remains quarantined"
 ;;
 
 let advance_epoch t ~new_current =

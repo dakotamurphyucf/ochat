@@ -359,6 +359,12 @@ val issued_by_session_store : t -> Session_store.t -> bool
 
 val observe : handle -> (Observation.t, Error.t) result
 
+(** The same bounded physical observation, admitted only while this handle's
+    epoch is the document's latest Active epoch in that exact writer read.
+    This is a comparison snapshot, not execution authority; a later CAS must
+    still validate the same condition under its own writer lease. *)
+val observe_latest_active : handle -> (Observation.t, Error.t) result
+
 (** Storage custody for an existing developer run. This is not a worker claim,
     execution grant, current-epoch assertion or result-disclosure grant. A run
     root deliberately covers every retained epoch of that run. *)
@@ -645,6 +651,35 @@ type claim_reconciliation =
 val commit_job_claim : handle -> Prepared.t -> (Claimed.t, Error.t) result
 
 val reconcile_job_claim : handle -> Prepared.t -> (claim_reconciliation, Error.t) result
+
+(** Prepare a same-epoch cancellation of the exact Queued or
+    Waiting_completion job in [lookup]. This uses the one versioned document,
+    the same writer/pending barrier and the same bounded work ledger as a
+    claim; bare IDs and copied job records are not authority. A concurrent
+    claim or epoch change cannot be cancelled through this path. No physical
+    callback or capacity lease is touched by preparation. *)
+val prepare_inactive_cancel
+  :  handle
+  -> expected:Observation.t
+  -> lookup:Job_lookup.t
+  -> now:Agent_protocol.Timestamp.t
+  -> (Prepared.t, Error.t) result
+
+(** Admit a prepared inactive cancellation under the Store writer. [admit] is
+    the trusted owner's final non-yielding currentness/lifetime check just
+    before rename entry; it cannot perform Store I/O or Eio operations. An
+    Error/cancellation may follow a durable rename, so the caller retains the
+    exact Prepared and reconciles before releasing capacity or reporting a
+    terminal cancellation. A proven prewrite CAS conflict retires only this
+    Prepared and may be retried with a fresh Observation; an attempted or
+    uncertain write is never blindly retried. *)
+val commit_inactive_cancel
+  :  ?admit:(unit -> bool)
+  -> handle
+  -> Prepared.t
+  -> (Installed.t, Error.t) result
+
+val reconcile_inactive_cancel : handle -> Prepared.t -> (reconciliation, Error.t) result
 
 (** Fresh-Observation CAS for the SAME physical Claim/owner/capture/job/attempt
     and immutable launch/payload/retry fields; unrelated document revisions do
