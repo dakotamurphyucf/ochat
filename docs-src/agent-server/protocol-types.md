@@ -562,6 +562,14 @@ module Analyze : sig
   val capture : t -> Capture.t option
   val sexp_of_t : t -> Core.Sexp.t
   val to_json : t -> Jsonaf.t
+
+  (** Bounded structural byte/node/depth admission of this already validated
+      result under a host-selected response ceiling. The protocol's private
+      codec performs the same conservative encoding preflight used by its
+      constructors. It constructs a bounded Jsonaf value to measure; callers
+      do not first build an unbounded encoded JSON string. *)
+  val within_bytes : t -> max_bytes:int -> (unit, Error.t) result
+
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
 

@@ -290,6 +290,10 @@ module Analyze = struct
         ]
   ;;
 
+  let within_bytes t ~max_bytes =
+    C.encoded_size ~max_bytes (to_json t) |> Result.map ~f:(fun _ -> ())
+  ;;
+
   let of_json json =
     let* () = C.admit_json ~max_bytes:Limits.max_result_bytes json in
     let* fields =

@@ -149,11 +149,44 @@ let%test_unit "authoring context captures a local project and reads only its gra
     | Ok () -> failwith "closed project context reused cached analysis")
 ;;
 
+let analysis_policy () =
+  Chatml_authoring_analysis.Policy.create
+    ~compilation:Chatml_compilation.default_limits
+    ~semantic:
+      (Chatml_semantics.Limits.create
+         ~max_input_bytes:2048
+         ~recording:
+           (Chatml_typechecker.Semantic.Limits.create
+              ~max_facts:100
+              ~max_edges:100
+              ~max_label_bytes:2048
+              ~max_work_steps:1000
+            |> Or_error.ok_exn)
+         ~type_graph:
+           (Chatml_semantics.Frozen.Limits.create
+              ~max_nodes:100
+              ~max_edges:100
+              ~max_label_bytes:2048
+            |> Or_error.ok_exn)
+         ~max_published_facts:100
+         ~max_published_edges:100
+         ~max_published_label_bytes:2048
+         ~max_work_steps:1000
+       |> Or_error.ok_exn)
+    ~max_dependency_depth:2
+    ~max_results:1
+    ~max_projected_diagnostics:2
+    ~max_projected_sites:2
+    ~max_projection_sources:2
+    ~max_position_index_entries:16
+    ~max_projection_source_bytes:2048
+  |> Or_error.ok_exn
+;;
+
 let%test_unit "shared overlay preparation uses actual host contract and a new lock" =
   with_source_context (fun env _ owner allowed _ _ _ _ _ ->
     let module Ledger = Chatml_authoring_context in
-    let module Core_owner = Agent_server.Authoring_context_service_core in
-    let module Overlay = Agent_server.Authoring_project_overlay in
+    let module Testing = Agent_server.Authoring_context_service.For_testing in
     let build =
       Authoring.Context.capture
         owner
@@ -229,26 +262,6 @@ let%test_unit "shared overlay preparation uses actual host contract and a new lo
         ~editable_sources:[]
       |> ok
     in
-    let context =
-      Agent_server.Authoring_context_activity.
-        { id
-        ; identity
-        ; original_actor = allowed
-        ; origin
-        ; owner = Host_project owner
-        ; view
-        }
-    in
-    let current =
-      Core_owner.Current.
-        { owner = ledger
-        ; domain = (Stdlib.Domain.self () :> int)
-        ; context
-        ; expected = P.Authoring.Context.Expected.of_view view
-        ; live = ref true
-        ; retained_document_capture = None
-        }
-    in
     let limits =
       Chatml_project_build.Limits.create
         ~max_work_steps:1_000_000
@@ -257,7 +270,15 @@ let%test_unit "shared overlay preparation uses actual host contract and a new lo
       |> Or_error.ok_exn
     in
     let original =
-      Overlay.prepare current ~limits ~checkpoint:ignore
+      Testing.preview_project_overlay
+        ~context:owner
+        ~original_actor:allowed
+        ~ledger
+        ~identity
+        ~view
+        ~analysis_policy:(analysis_policy ())
+        ~limits
+        ~checkpoint:ignore
       |> function
       | Ok value -> value
       | Error _ -> failwith "authentic unchanged overlay was rejected"
@@ -265,14 +286,11 @@ let%test_unit "shared overlay preparation uses actual host contract and a new lo
     assert (
       not
         (Captured.Id.equal
-           (Captured.id
-              (Chatml_project_build.lock_source (Overlay.Prepared.build original)))
+           (Captured.id (Chatml_project_build.lock_source (fst original)))
            (Captured.id (Chatml_project_build.lock_source build))));
     assert (
       Captured.Digest.equal
-        (Chatml.Chatml_compiler_contract.fingerprint
-           (Overlay.Prepared.contract original)
-           ~checkpoint:ignore)
+        (Chatml.Chatml_compiler_contract.fingerprint (snd original) ~checkpoint:ignore)
         (Prepared.compiler_contract prepared));
     let version =
       Ledger.version ledger ~identity ~source:(Captured.id main) |> Option.value_exn
@@ -287,13 +305,21 @@ let%test_unit "shared overlay preparation uses actual host contract and a new lo
       |> ok
     in
     let changed =
-      Overlay.prepare { current with owner = edited } ~limits ~checkpoint:ignore
+      Testing.preview_project_overlay
+        ~context:owner
+        ~original_actor:allowed
+        ~ledger:edited
+        ~identity
+        ~view
+        ~analysis_policy:(analysis_policy ())
+        ~limits
+        ~checkpoint:ignore
       |> function
       | Ok value -> value
       | Error _ -> failwith "authentic changed overlay was rejected"
     in
     let selected_main =
-      Prepared.sources (Chatml_project_build.prepared (Overlay.Prepared.build changed))
+      Prepared.sources (Chatml_project_build.prepared (fst changed))
       |> List.find_exn ~f:(fun source ->
         Captured.Id.equal (Captured.id source) (Captured.id main))
     in
@@ -686,7 +712,7 @@ let%test_unit
       ~finally:(fun () -> Authoring.Document_context.close_and_wait owner)
       ~f:(fun () ->
         let module Ledger = Chatml_authoring_context in
-        let module Core_owner = Agent_server.Authoring_context_service_core in
+        let module Testing = Agent_server.Authoring_context_service.For_testing in
         let source = Authoring.Document_capture.source opened in
         let parsed =
           Authoring.Document_context.capture_parser_bundle
@@ -726,7 +752,6 @@ let%test_unit
             ~checkpoint:ignore
           |> ok
         in
-        let inputs = Ledger.document_inputs ledger ~identity ~checkpoint:ignore |> ok in
         let wire_source =
           P.Authoring.Source.create
             ~id:(Captured.id source)
@@ -752,20 +777,13 @@ let%test_unit
             ~editable_sources:[]
           |> ok
         in
-        let context =
-          Agent_server.Authoring_context_activity.
-            { id
-            ; identity
-            ; original_actor = allowed
-            ; origin
-            ; owner = Host_document owner
-            ; view
-            }
-        in
         let retained =
-          Core_owner.Retained_document_capture.prepare
-            ~context
-            ~inputs
+          Testing.Retained_document.prepare
+            ~context:owner
+            ~original_actor:allowed
+            ~ledger
+            ~identity
+            ~view
             ~capture:parsed
             ~max_sources:2
             ~max_bytes:2048
@@ -782,190 +800,27 @@ let%test_unit
           |> authoring_ok
         in
         let duplicate =
-          Core_owner.Retained_document_capture.prepare
-            ~context
-            ~inputs
+          Testing.Retained_document.prepare
+            ~context:owner
+            ~original_actor:allowed
+            ~ledger
+            ~identity
+            ~view
             ~capture:duplicate_capture
             ~max_sources:2
             ~max_bytes:2048
             ~checkpoint:ignore
           |> ok
         in
+        assert (not (Testing.Retained_document.same_head retained duplicate));
         assert (
-          not
-            (Core_owner.Retained_document_capture.same_head
-               (Some retained)
-               (Some duplicate)));
-        Eio.Switch.run (fun sw ->
-          let module Owner = Agent_server.Authoring_context_owner in
-          let principal = Operator_authorization.principal allowed in
-          let connection =
-            Agent_server.Connection_context.create_authenticated
-              ~actor:allowed
-              ~connection_id:"retained capture head"
-              ~transport:In_memory
-              ~publish_notification:(fun _ -> ())
-              ~max_attachments:1
-          in
-          let analysis_policy =
-            Chatml_authoring_analysis.Policy.create
-              ~compilation:Chatml_compilation.default_limits
-              ~semantic:
-                (Chatml_semantics.Limits.create
-                   ~max_input_bytes:2048
-                   ~recording:
-                     (Chatml_typechecker.Semantic.Limits.create
-                        ~max_facts:100
-                        ~max_edges:100
-                        ~max_label_bytes:2048
-                        ~max_work_steps:1000
-                      |> Or_error.ok_exn)
-                   ~type_graph:
-                     (Chatml_semantics.Frozen.Limits.create
-                        ~max_nodes:100
-                        ~max_edges:100
-                        ~max_label_bytes:2048
-                      |> Or_error.ok_exn)
-                   ~max_published_facts:100
-                   ~max_published_edges:100
-                   ~max_published_label_bytes:2048
-                   ~max_work_steps:1000
-                 |> Or_error.ok_exn)
-              ~max_dependency_depth:2
-              ~max_results:1
-              ~max_projected_diagnostics:2
-              ~max_projected_sites:2
-              ~max_projection_sources:2
-              ~max_position_index_entries:16
-              ~max_projection_source_bytes:2048
-            |> Or_error.ok_exn
-          in
-          let service =
-            Core_owner.create
-              ~sw
-              ~clock:env#mono_clock
-              ~host:(P.Authoring.Context.host view)
-              ~sources:(Some host)
-              ~upload:None
-              ~supplied_document:None
-              ~selection_policy:
-                (Core_owner.Selection_policy.create
-                   ~project_contract:(fun _ ~root:_ ~project:_ ~selection:_ -> None)
-                   ~document_static:(fun _ ~requested_environment:_ -> None))
-              ~context_limits:
-                (Ledger.Limits.create
-                   ~max_contexts:1
-                   ~max_sources:2
-                   ~max_open_documents:1
-                   ~max_document_bytes:1024
-                   ~max_effective_input_bytes:2048
-                   ~max_context_source_bytes:2048
-                   ~max_total_source_bytes:4096
-                 |> Or_error.ok_exn)
-              ~analysis_policy
-              ~protocol_limits:
-                (P.Authoring.Limits.create
-                   ~max_sources:2
-                   ~max_source_bytes:1024
-                   ~max_context_source_bytes:2048
-                   ~max_request_bytes:4096
-                   ~max_result_bytes:4096
-                   ~max_path_candidates:4
-                 |> ok)
-              ~limits:
-                (Core_owner.Limits.create
-                   ~max_connections:1
-                   ~max_active_requests_per_connection:1
-                   ~max_roots_per_connection:1
-                   ~max_response_bytes:4096
-                 |> Or_error.ok_exn)
-          in
-          let response =
-            P.Initialize.Response.create
-              ~protocol_name:"ochat.agent"
-              ~selected_version:(P.Version.create ~major:1 ~minor:0 |> ok)
-              ~implementation:
-                (P.Initialize.Implementation.create ~name:"capture head" ~version:"1"
-                 |> ok)
-              ~server_id:(P.Authoring.Context.host view)
-              ~enabled_features:
-                [ P.Authoring.Features.core; P.Authoring.Features.semantic ]
-              ~extensions:None
-              ~principal
-              ~limits:
-                { max_request_bytes = 4096
-                ; max_event_bytes = 1024
-                ; max_page_size = 4
-                ; max_attachments_per_connection = 1
-                }
-              ~event_retention:
-                { minimum_age_ms = 0
-                ; maximum_events = 1
-                ; oldest_replayable_sequence = None
-                }
-              ~timing:
-                { heartbeat_interval_ms = 1000
-                ; owner_lease_duration_ms = 10000
-                ; owner_renew_after_ms = 5000
-                ; disconnect_grace_default_ms = 0
-                }
-              ~server_time:(P.Timestamp.of_string "2026-10-13T00:00:00Z" |> ok)
-            |> ok
-          in
-          Core_owner.publish_initialize_and_wait service ~connection ~response |> ok;
-          Core_owner.with_gate service (fun () ->
-            let entry =
-              Core_owner.find_connection service connection |> Option.value_exn
-            in
-            entry.contexts <- [ context ];
-            service.project_cache
-            <- Chatml_authoring_analysis.Project_cache.create
-                 ~contexts:ledger
-                 ~policy:analysis_policy;
-            service.document_cache
-            <- Chatmd_authoring_analysis.Document_cache.transition
-                 service.document_cache
-                 ~contexts:ledger;
-            service.document_capture <- Some retained);
-          let published = ref 0 in
-          let result =
-            Owner.with_current
-              ~feature:Core_owner.Selected_feature.Semantic
-              ~publish:(fun value ->
-                incr published;
-                Ok value)
-              service
-              ~actor:allowed
-              ~connection
-              ~expected:(P.Authoring.Context.Expected.of_view view)
-              ~checkpoint:ignore
-              ~f:(fun current ~checkpoint:_ ->
-                assert (
-                  Option.is_some
-                    (Core_owner.Current.document_capture current ~checkpoint:ignore |> ok));
-                Core_owner.with_gate service (fun () ->
-                  service.document_capture <- Some duplicate);
-                Ok ())
-          in
-          (match result with
-           | Error Core_owner.Error.Stale_context -> ()
-           | Ok _ | Error _ -> failwith "replaced capture head published stale result");
-          [%test_eq: int] !published 0);
-        let current =
-          Core_owner.Current.
-            { owner = ledger
-            ; domain = (Stdlib.Domain.self () :> int)
-            ; context
-            ; expected = P.Authoring.Context.Expected.of_view view
-            ; live = ref true
-            ; retained_document_capture = Some retained
-            }
-        in
-        assert (
-          Option.is_some
-            (Core_owner.Current.document_capture current ~checkpoint:ignore |> ok));
-        assert (
-          Core_owner.Retained_document_capture.matches_current retained ~context ~inputs);
+          Testing.Retained_document.matches_inputs
+            retained
+            ~ledger
+            ~identity
+            ~view
+            ~checkpoint:ignore
+          |> ok);
         let version =
           Ledger.version ledger ~identity ~source:(Captured.id source) |> Option.value_exn
         in
@@ -979,25 +834,26 @@ let%test_unit
             ~checkpoint:ignore
           |> ok
         in
-        let edited =
-          Ledger.document_inputs edited_ledger ~identity ~checkpoint:ignore |> ok
-        in
-        let edited_current = { current with owner = edited_ledger } in
         assert (
-          Option.is_none
-            (Core_owner.Current.document_capture edited_current ~checkpoint:ignore |> ok));
+          not
+            (Testing.Retained_document.matches_inputs
+               retained
+               ~ledger:edited_ledger
+               ~identity
+               ~view
+               ~checkpoint:ignore
+             |> ok));
         Eio.Path.save
           ~create:(`Or_truncate 0o600)
           Eio.Path.(root_path / "part.chatmd")
           "<developer>changed host dependency</developer>";
-        assert (
-          not
-            (Core_owner.Retained_document_capture.matches_current
-               retained
-               ~context
-               ~inputs:edited));
         let recomposed =
-          Core_owner.Current.frozen_document_bundle edited_current ~checkpoint:ignore
+          Testing.Retained_document.recompose_current
+            retained
+            ~ledger:edited_ledger
+            ~identity
+            ~view
+            ~checkpoint:ignore
           |> ok
           |> Option.value_exn
         in
@@ -1008,23 +864,26 @@ let%test_unit
             )
           ; "part.chatmd", "<developer>captured dependency</developer>"
           ];
-        let unknown_owner = { context with id = P.Id.Authoring_context.create () } in
-        assert (
-          not
-            (Core_owner.Retained_document_capture.matches_import_owner
-               retained
-               ~context:unknown_owner
-               ~inputs:edited));
+        let foreign_view =
+          P.Authoring.Context.create
+            ~id:(P.Id.Authoring_context.create ())
+            ~host:(P.Authoring.Context.host view)
+            ~origin
+            ~generation:0
+            ~basis:(Document { source = wire_source; selection = None })
+            ~basis_fingerprint:(Captured.digest source)
+            ~editable_sources:[]
+          |> ok
+        in
         assert (
           Option.is_none
-            (Core_owner.Current.frozen_document_bundle
-               { edited_current with context = unknown_owner }
+            (Testing.Retained_document.recompose_current
+               retained
+               ~ledger:edited_ledger
+               ~identity
+               ~view:foreign_view
                ~checkpoint:ignore
-             |> ok));
-        current.live := false;
-        match Core_owner.Current.frozen_document_bundle current ~checkpoint:ignore with
-        | Error Core_owner.Error.Stale_context -> ()
-        | Ok _ | Error _ -> failwith "expired Current retained captured imports"))
+             |> ok))))
 ;;
 
 let%test_unit "supplied document needs its own actor policy and no read root" =

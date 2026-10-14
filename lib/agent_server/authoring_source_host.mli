@@ -311,6 +311,18 @@ module Document_context : sig
         grants no native read; consumers still compare parser bytes/digest and
         current document generation before source-owned projections. *)
     val input_sources : t -> (Chatmd_parser_input.t * Chatml_source.t) list
+
+    (** Pure bounded root-only parse of the exact already supplied Source.
+        It owns no host read grant; the one-member bundle makes imports absent
+        unless all genuine parser inputs map to that same root. The enclosing
+        context owner checks actor/source/generation before and after work and
+        under the final publication gate. [dir] is display provenance only. *)
+    val parse_root_only
+      :  limits:Chatmd_source_bundle.limits
+      -> source:Chatml_source.t
+      -> dir:Eio.Fs.dir_ty Eio.Path.t
+      -> checkpoint:(unit -> unit)
+      -> (t, Error.t) Result.t
   end
 
   module Project_capture : sig
@@ -395,7 +407,8 @@ module Document_context : sig
       solely for parser display provenance; this operation never reads it or
       uses it as an alternative import resolver. *)
   val capture_parser_bundle
-    :  t
+    :  ?limits:Chatmd_source_bundle.limits
+    -> t
     -> actor:Operator_authorization.t
     -> source:Chatml_source.t
     -> dir:Eio.Fs.dir_ty Eio.Path.t

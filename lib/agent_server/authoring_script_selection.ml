@@ -2,6 +2,7 @@ open! Core
 module Ledger = Chatml_authoring_context
 module Parsed = Prompt.Chat_markdown.Parsed
 module Declaration = Prompt.Chat_markdown.Declaration
+module Project_capture = Authoring_source_host.Document_context.Project_capture
 module Build = Chatml_project_build
 module Prepared = Chatml_prepared_program
 module Contract = Chatml.Chatml_compiler_contract
@@ -102,18 +103,19 @@ module Policy = struct
         -> current:Ledger.Document.Inputs.t
         -> parsed:Parsed.t
         -> declaration:Declaration.t
+        -> metadata:Project_capture.t option
         -> Selected.t option
     }
 
   let create ~select_script = { select_script }
 
-  let select t ~original_actor ~actor ~current ~parsed ~declaration =
-    t.select_script ~original_actor ~actor ~current ~parsed ~declaration
+  let select t ~original_actor ~actor ~current ~parsed ~declaration ~metadata =
+    t.select_script ~original_actor ~actor ~current ~parsed ~declaration ~metadata
   ;;
 
-  let same_now t ~original_actor ~actor ~current ~parsed ~declaration ~selected =
+  let same_now t ~original_actor ~actor ~current ~parsed ~declaration ~metadata ~selected =
     Option.exists
-      (select t ~original_actor ~actor ~current ~parsed ~declaration)
+      (select t ~original_actor ~actor ~current ~parsed ~declaration ~metadata)
       ~f:(Selected.equal_identity selected)
   ;;
 end

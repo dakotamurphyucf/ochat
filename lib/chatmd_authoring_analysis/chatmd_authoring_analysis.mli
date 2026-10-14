@@ -183,6 +183,12 @@ module Document_cache : sig
     -> checkpoint:(unit -> unit)
     -> (t, Error.t) Result.t
 
+  (** A successfully acquired current Parsed closure can replace old semantic
+      evidence even when this declaration has no admitted Build. Retire only
+      the exact context identity; the host publishes the matching genuine
+      Parsed receipt under its sole final gate. *)
+  val retire : t -> identity:Chatml_authoring_context.Identity.t -> t
+
   (** Recheck current Document revision against the one host-owned ledger;
       host separately checks actor/current parser/selection before exposure. *)
   val current
