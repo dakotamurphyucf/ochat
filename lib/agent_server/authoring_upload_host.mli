@@ -135,6 +135,11 @@ module Context_capture : sig
       a Store-instance publication pin. The immutable result is data, not a
       continuing bundle-read or execution grant. *)
   val rebound : t -> Rebound.t
+
+  (** The one actual top-level Project selection retained in this rebind.
+      ChatMD document bundles have per-script selections and return [None].
+      The contract is comparison data, never a fresh bundle-read grant. *)
+  val project_contract : t -> Chatml.Chatml_compiler_contract.t option
 end
 
 module Error : sig

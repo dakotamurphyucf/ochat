@@ -116,6 +116,7 @@ module Context_capture = struct
     }
 
   let rebound t = t.rebound
+  let project_contract t = Rebind_validation.project_contract t.selected
 end
 
 exception Revoked of Error.t

@@ -67,6 +67,10 @@ end
 
 type t
 
+(** Comparison-only actual top-level selection from this admitted rebind.
+    ChatMD's per-script targets have no top-level Project contract. *)
+val project_contract : t -> Chatml.Chatml_compiler_contract.t option
+
 (** Freeze every current selected target before this request's captured source
     bytes are verified/materialized. The Store's trusted metadata callback calls
     this only after the original actor and independent read grant pass. It

@@ -24,13 +24,28 @@ val check_context_selection_now
   -> (unit, Error.t) result
 
 val with_current
-  :  t
+  :  ?feature:Selected_feature.t
+  -> ?final_check:(unit -> (unit, Error.t) result)
+  -> ?publish:('a -> ('a, Error.t) result)
+  -> t
   -> actor:Operator_authorization.t
   -> connection:Connection_context.t
   -> expected:P.Authoring.Context.Expected.t
   -> checkpoint:(unit -> unit)
   -> f:(Current.t -> checkpoint:(unit -> unit) -> ('a, Error.t) result)
   -> ('a, Error.t) result
+
+(** [feature] chooses the negotiated sibling; absent means Core authoring.
+    [final_check] adds a bounded nonyielding current host selection check
+    immediately before the final gate, after the ordinary actor/source/context
+    recheck. [publish] runs inside that gate only after the exact connection,
+    context and expected generation are compared again. It may perform a pure
+    compare-and-swap of already prepared immutable values only after comparing
+    BOTH analysis cache heads and the retained document-capture head borrowed
+    at request admission; any changed head rejects the result. It constructs
+    no new graph, parser result or wire response. The borrowed [Current] token
+    has expired by then; neither callback may use it or perform I/O, wait or
+    invoke a yielding checkpoint. An error publishes nothing. *)
 
 val view_of_context
   :  t

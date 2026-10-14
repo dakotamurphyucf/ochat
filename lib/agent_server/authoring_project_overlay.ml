@@ -1,0 +1,89 @@
+open! Core
+module Owner = Authoring_context_service_core
+module Effective = Chatml_authoring_effective
+module Ledger = Chatml_authoring_context
+module Build = Chatml_project_build
+module Captured = Chatml_source
+module Contract = Chatml.Chatml_compiler_contract
+
+module Error = struct
+  type t =
+    | Context of Owner.Error.t
+    | No_selected_contract
+    | Work_limit
+    | Lock_identity_unavailable
+    | Invalid_overlay of Build.Error.t
+end
+
+exception Stop_work
+
+module Prepared = struct
+  type t =
+    { overlay : Effective.Overlay.t
+    ; contract : Contract.t
+    }
+
+  let overlay t = t.overlay
+  let build t = Effective.Overlay.build t.overlay
+  let contract t = t.contract
+end
+
+let selected_contract (current : Owner.Current.t) =
+  match current.context.owner with
+  | Owner.Host_project context -> Some (Owner.Sources.Context.contract context)
+  | Uploaded_project context -> Owner.Upload.Context_capture.project_contract context
+  | Host_document _ | Supplied_document _ -> None
+;;
+
+let fresh_lock_id inputs ~poll =
+  let old_lock = Captured.id (Build.lock_source (Ledger.Inputs.base inputs)) in
+  let open Result.Let_syntax in
+  let%bind seen, count =
+    List.fold_result
+      (Ledger.Inputs.sources inputs)
+      ~init:(Set.singleton (module Captured.Id) old_lock, 0)
+      ~f:(fun (seen, count) source ->
+        poll ();
+        Ok (Set.add seen (Captured.id source), count + 1))
+  in
+  let rec choose ordinal =
+    poll ();
+    if ordinal > count + 1
+    then Error Error.Lock_identity_unavailable
+    else (
+      let namespace = "@ochat.authoring.overlay." ^ Int.to_string ordinal in
+      match
+        Captured.Id.create ~package_namespace:namespace ~relative_path:"authoring.lock"
+      with
+      | Error _ -> Error Error.Lock_identity_unavailable
+      | Ok candidate ->
+        if Set.mem seen candidate then choose (ordinal + 1) else Ok candidate)
+  in
+  choose 0
+;;
+
+let prepare current ~limits ~checkpoint =
+  let remaining = ref (Build.Limits.max_work_steps limits) in
+  let poll () =
+    if !remaining <= 0 then raise Stop_work;
+    decr remaining;
+    checkpoint ()
+  in
+  try
+    let open Result.Let_syntax in
+    let%bind inputs =
+      Owner.Current.project_inputs current ~checkpoint:poll
+      |> Result.map_error ~f:(fun error -> Error.Context error)
+    in
+    let%bind contract =
+      selected_contract current |> Result.of_option ~error:Error.No_selected_contract
+    in
+    let%bind lock_id = fresh_lock_id inputs ~poll in
+    let%map overlay =
+      Effective.validate_overlay inputs ~lock_id ~contract ~limits ~checkpoint:poll
+      |> Result.map_error ~f:(fun error -> Error.Invalid_overlay error)
+    in
+    ({ overlay; contract } : Prepared.t)
+  with
+  | Stop_work -> Error Error.Work_limit
+;;

@@ -66,6 +66,9 @@ module Selected_feature = struct
   type t =
     | Core_authoring
     | Bundle_upload
+    | Semantic
+    | Lexical
+    | Assistance
 end
 
 module Error = struct
@@ -188,6 +191,98 @@ type context_owner = Activity.context_owner =
 type context_entry = Activity.context_entry
 type connection_entry = Activity.connection_entry
 
+module Retained_document_capture = struct
+  type t =
+    { context : context_entry
+    ; identity : Ledger.Identity.t
+    ; generation : Ledger.Generation.t
+    ; source_id : Captured.Id.t
+    ; source_digest : Captured.Digest.t
+    ; source_bytes : int
+    ; capture : Sources.Document_context.Parsed_capture.t
+    }
+
+  let same_source left right =
+    Captured.Id.equal (Captured.id left) (Captured.id right)
+    && Captured.Digest.equal (Captured.digest left) (Captured.digest right)
+    && Int.equal (Captured.byte_length left) (Captured.byte_length right)
+  ;;
+
+  let prepare ~context ~inputs ~capture ~max_sources ~max_bytes ~checkpoint =
+    let source = Ledger.Document.Inputs.source inputs in
+    let captured = Sources.Document_context.Parsed_capture.source capture in
+    let bundle = Sources.Document_context.Parsed_capture.bundle capture in
+    if max_sources <= 0 || max_bytes <= 0 || not (same_source source captured)
+    then Error Error.Stale_source
+    else (
+      let rec visit sources count bytes =
+        match sources with
+        | [] -> Ok ()
+        | (_, contents) :: rest ->
+          checkpoint ();
+          let length = String.length contents in
+          if count >= max_sources || length > max_bytes - bytes
+          then Error Error.Resource_limit
+          else visit rest (count + 1) (bytes + length)
+      in
+      let open Result.Let_syntax in
+      let%map () = visit (Chatmd_source_bundle.sources bundle) 0 0 in
+      { context
+      ; identity = Ledger.Document.Inputs.identity inputs
+      ; generation = Ledger.Document.Inputs.generation inputs
+      ; source_id = Captured.id source
+      ; source_digest = Captured.digest source
+      ; source_bytes = Captured.byte_length source
+      ; capture
+      })
+  ;;
+
+  let matches_import_owner t ~context ~inputs =
+    phys_equal t.context context
+    && Ledger.Identity.equal t.identity (Ledger.Document.Inputs.identity inputs)
+    && Captured.Id.equal t.source_id (Captured.id (Ledger.Document.Inputs.source inputs))
+  ;;
+
+  let matches_current t ~context ~inputs =
+    matches_import_owner t ~context ~inputs
+    && Ledger.Generation.equal t.generation (Ledger.Document.Inputs.generation inputs)
+    && Captured.Digest.equal
+         t.source_digest
+         (Captured.digest (Ledger.Document.Inputs.source inputs))
+    && Int.equal
+         t.source_bytes
+         (Captured.byte_length (Ledger.Document.Inputs.source inputs))
+  ;;
+
+  let capture t = t.capture
+
+  let same_head left right =
+    match left, right with
+    | None, None -> true
+    | Some left, Some right -> phys_equal left right
+    | None, Some _ | Some _, None -> false
+  ;;
+
+  let recompose_bundle t ~inputs ~checkpoint =
+    let bundle = Sources.Document_context.Parsed_capture.bundle t.capture in
+    let root_file = Chatmd_source_bundle.root_file bundle in
+    let root = Ledger.Document.Inputs.source inputs in
+    let imports =
+      Chatmd_source_bundle.sources bundle
+      |> List.filter ~f:(fun (member, _) ->
+        checkpoint ();
+        not (String.equal member root_file))
+    in
+    Chatmd_source_bundle.create
+      ~limits:(Chatmd_source_bundle.limits bundle)
+      ~checkpoint
+      ~root_file
+      ~sources:((root_file, Captured.contents root) :: imports)
+      ()
+    |> Result.map_error ~f:(fun _ -> Error.Resource_limit)
+  ;;
+end
+
 type t =
   { sw : Eio.Switch.t
   ; domain : int
@@ -203,6 +298,7 @@ type t =
   ; mutable connections : connection_entry list
   ; mutable project_cache : Project.Project_cache.t
   ; mutable document_cache : Document.Document_cache.t
+  ; mutable document_capture : Retained_document_capture.t option
   ; mutable closed : bool
   ; mutable release_hook : Eio.Switch.hook
   }
@@ -328,6 +424,9 @@ let with_request
           match feature with
           | Selected_feature.Core_authoring -> P.Authoring.Features.core
           | Bundle_upload -> P.Authoring.Features.bundle
+          | Semantic -> P.Authoring.Features.semantic
+          | Lexical -> P.Authoring.Features.lexical
+          | Assistance -> P.Authoring.Features.assistance
         in
         if
           not
@@ -455,7 +554,14 @@ let with_request
 
 let transition t contexts =
   t.project_cache <- Project.Project_cache.transition t.project_cache ~contexts;
-  t.document_cache <- Document.Document_cache.transition t.document_cache ~contexts
+  t.document_cache <- Document.Document_cache.transition t.document_cache ~contexts;
+  Option.iter t.document_capture ~f:(fun retained ->
+    match Ledger.find_document contexts ~identity:retained.identity with
+    | Some view
+      when Captured.Id.equal
+             retained.source_id
+             (Captured.id (Ledger.Document.View.source view)) -> ()
+    | Some _ | None -> t.document_capture <- None)
 ;;
 
 module Current = struct
@@ -469,6 +575,7 @@ module Current = struct
     ; context : context_entry
     ; expected : P.Authoring.Context.Expected.t
     ; live : bool ref
+    ; retained_document_capture : Retained_document_capture.t option
     }
 
   let basis t =
@@ -493,6 +600,29 @@ module Current = struct
     else
       Ledger.document_inputs t.owner ~identity:t.context.identity ~checkpoint
       |> Result.map_error ~f:(fun _ -> Error.Stale_context)
+  ;;
+
+  let document_capture t ~checkpoint =
+    let open Result.Let_syntax in
+    let%map inputs = document_inputs t ~checkpoint in
+    Option.bind t.retained_document_capture ~f:(fun retained ->
+      if Retained_document_capture.matches_current retained ~context:t.context ~inputs
+      then Some (Retained_document_capture.capture retained)
+      else None)
+  ;;
+
+  let frozen_document_bundle t ~checkpoint =
+    let open Result.Let_syntax in
+    let%bind inputs = document_inputs t ~checkpoint in
+    match t.retained_document_capture with
+    | Some retained
+      when Retained_document_capture.matches_import_owner
+             retained
+             ~context:t.context
+             ~inputs ->
+      Retained_document_capture.recompose_bundle retained ~inputs ~checkpoint
+      |> Result.map ~f:Option.some
+    | Some _ | None -> Ok None
   ;;
 end
 
@@ -613,6 +743,7 @@ let create
     ; connections = []
     ; project_cache = Project.Project_cache.create ~contexts ~policy:analysis_policy
     ; document_cache = Document.Document_cache.create ~policy:analysis_policy
+    ; document_capture = None
     ; closed = false
     ; release_hook = Eio.Switch.null_hook
     }
