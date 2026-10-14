@@ -1078,6 +1078,12 @@ let retention_reserved_directory retention =
   | true -> Ok retention.store.durable_directory
 ;;
 
+let retention_max_upload_bytes retention =
+  if retention.active
+  then Ok retention.store.max_upload_bytes
+  else Error (Store_error.Corrupt "blob retention scope has ended")
+;;
+
 let discard_staged_unreferenced retention ~reader session ~stage =
   let metadata = Blob_metadata_document.value (Blob_stage_documents.temporary stage) in
   let open Result.Let_syntax in
@@ -1216,6 +1222,23 @@ let with_retention store ~f =
           ~finally:(fun () -> retention.active <- false)
           ~f:(fun () -> Result.map (f retention) ~f:Option.some)
       | _ -> Ok None))
+;;
+
+let with_collection_proof store ~f =
+  coordinated store (fun () ->
+    match store.coordination.active_uploads, store.coordination.active_reads with
+    | 0, 0 ->
+      let retention = { store; active = true } in
+      Exn.protect
+        ~finally:(fun () -> retention.active <- false)
+        ~f:(fun () -> Result.map (f retention) ~f:Option.some)
+    | _ -> Ok None)
+;;
+
+let protect_collection_mutation retention ~f =
+  if not retention.active
+  then Error (Store_error.Corrupt "blob collection scope has ended")
+  else Eio.Cancel.protect f
 ;;
 
 let reading store f =
@@ -2003,4 +2026,123 @@ let validate_developer_retention retention ~session ~reader =
       if List.is_empty roots && List.is_empty ids && List.is_empty intent_entries
       then No_developer_evidence
       else Has_developer_evidence)
+;;
+
+module Developer_retention = struct
+  type t =
+    { scope : retention
+    ; inventory : Developer_run_store.Retention.t option
+    ; intent_directory : string
+    ; temporary_namespace : string
+    ; durable_namespace : string
+    ; mutable active : bool
+    }
+
+  let inventory t = t.inventory
+  let intent_directory t = t.intent_directory
+  let temporary_namespace t = t.temporary_namespace
+  let durable_namespace t = t.durable_namespace
+
+  let check_current t scope =
+    if t.active && t.scope.active && phys_equal t.scope scope
+    then Ok ()
+    else Error (Store_error.Corrupt "developer retention token has ended or is foreign")
+  ;;
+end
+
+let with_developer_retention scope ~session ~reader ~checkpoint ~f =
+  let open Result.Let_syntax in
+  if not scope.active
+  then Error (Store_error.Corrupt "blob retention scope has ended")
+  else (
+    let store = scope.store in
+    checkpoint ();
+    let%bind authority_directory =
+      Session_store.Handle.developer_evidence_directory
+        session
+        ~env:store.env
+        ~temporary_directory:store.temporary_directory
+        ~durable_directory:store.durable_directory
+    in
+    let%bind () =
+      if
+        String.equal
+          (Retention_reader.root reader)
+          (Session_store.Handle.directory session)
+        && Retention_reader.uses_filesystem reader ~env:store.env
+      then Ok ()
+      else Error (Store_error.Corrupt "developer retention has another Reader root")
+    in
+    let%bind intent_path =
+      Session_store.Handle.developer_result_intents_directory
+        session
+        ~env:store.env
+        ~temporary_directory:store.temporary_directory
+        ~durable_directory:store.durable_directory
+    in
+    let temporary_path = Filename.concat store.temporary_directory "developer-runs" in
+    let durable_path = Filename.concat store.durable_directory "developer-runs" in
+    let use borrowed_inventory =
+      let token =
+        Developer_retention.
+          { scope
+          ; inventory = borrowed_inventory
+          ; intent_directory = intent_path
+          ; temporary_namespace = temporary_path
+          ; durable_namespace = durable_path
+          ; active = true
+          }
+      in
+      Exn.protect
+        ~finally:(fun () -> token.active <- false)
+        ~f:(fun () ->
+          checkpoint ();
+          let%map result = f token in
+          checkpoint ();
+          result)
+    in
+    match store.coordination.developer_binding with
+    | Some (owner, runs) when not (Developer_run_store.is_closed runs) ->
+      let%bind () =
+        if
+          Developer_run_store.issued_by_session_store runs owner
+          && String.equal
+               intent_path
+               (Data_root.developer_result_intents_path (Session_store.data_root owner))
+        then Ok ()
+        else Error (Store_error.Corrupt "developer retention Store has another root")
+      in
+      let%map result =
+        Developer_run_store.Retention.with_inventory
+          runs
+          ~reader
+          ~checkpoint
+          ~f:(fun inventory -> use (Some inventory))
+      in
+      Some result
+    | Some _ -> Error (Store_error.Corrupt "developer retention binding is stale")
+    | None ->
+      Session_store.Handle.with_developer_root_collection session ~f:(fun () ->
+        let empty path =
+          checkpoint ();
+          let%bind () = Retention_reader.charge_entry reader in
+          let native = Eio.Path.(Eio.Stdenv.fs store.env / path) in
+          match Eio.Path.kind ~follow:false native with
+          | `Not_found -> Ok ()
+          | `Directory ->
+            let%bind local = Retention_reader.at_root reader ~root:path in
+            let%bind entries =
+              Retention_reader.list_with_checkpoint local ~directory:"." ~checkpoint
+            in
+            if List.is_empty entries
+            then Ok ()
+            else
+              Error (Store_error.Corrupt "unbound developer evidence prevents collection")
+          | _ -> Error (Store_error.Corrupt "unbound developer namespace is invalid")
+        in
+        let%bind () = empty authority_directory in
+        let%bind () = empty intent_path in
+        let%bind () = empty temporary_path in
+        let%bind () = empty durable_path in
+        use None))
 ;;

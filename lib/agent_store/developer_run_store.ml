@@ -642,7 +642,7 @@ type claim_reconciliation =
   | Claim_absent
   | Claim_diverged
 
-let scan_documents t ~poll ~reader =
+let scan_documents_with t ~poll ~reader ~decode ~document_of ~project =
   poll ();
   let* () = Durable_file.sync_directory_in ~directory:t.directory |> store in
   poll ();
@@ -665,8 +665,8 @@ let scan_documents t ~poll ~reader =
             ~checkpoint:poll
           |> store
         in
-        let* document =
-          Doc.of_bytes
+        let* decoded =
+          decode
             bytes
             ~poll
             ~limits:t.limits.document
@@ -676,11 +676,12 @@ let scan_documents t ~poll ~reader =
             ~max_job_payload_bytes:t.limits.max_job_payload_bytes
           |> store
         in
+        let document = document_of decoded in
         poll ();
         if
           Id.equal id (Doc.run_id document)
           && P.Id.Server.equal t.host_id (Doc.host_id document)
-        then Ok (count + 1, (id, document) :: documents)
+        then Ok (count + 1, project id bytes decoded :: documents)
         else corrupt "developer run authority file has another run ID"
       | None ->
         (match Durable_file.temporary_target name with
@@ -692,6 +693,26 @@ let scan_documents t ~poll ~reader =
          | Some _ | None -> corrupt "unknown developer run authority file"))
   in
   Ok (List.rev documents)
+;;
+
+let scan_documents t ~poll ~reader =
+  scan_documents_with
+    t
+    ~poll
+    ~reader
+    ~decode:Doc.of_bytes
+    ~document_of:Fn.id
+    ~project:(fun id _bytes document -> id, document)
+;;
+
+let scan_document_sources t ~poll ~reader =
+  scan_documents_with
+    t
+    ~poll
+    ~reader
+    ~decode:Doc.of_bytes_with_document
+    ~document_of:fst
+    ~project:(fun id bytes (document, source) -> id, bytes, document, source)
 ;;
 
 let scan t ~poll =
@@ -1186,6 +1207,118 @@ module Result_root = struct
             Ok ((Doc.epoch_number epoch, Doc.epoch_capture epoch) :: acc))
         in
         { Inventory_rows.epochs = List.rev epochs; jobs })
+  ;;
+end
+
+module Retention = struct
+  type run =
+    { root : Result_root.t
+    ; bytes : string
+    ; source : Document_schema.Document.t
+    ; epochs : (int * Chatml_source.Digest.t) list
+    ; jobs : P.Developer_job.t list
+    }
+
+  type t =
+    { issuer : store
+    ; borrowed_root : Data_root.t
+    ; env : Eio_unix.Stdenv.base
+    ; runs : run list
+    ; mutable active : bool
+    }
+
+  let runs t = t.runs
+  let root_directory t = Data_root.path t.borrowed_root
+  let result_root run = run.root
+  let document_bytes run = run.bytes
+  let epochs run = run.epochs
+  let jobs run = run.jobs
+
+  let iter_document_strings run ~checkpoint ~f =
+    Document_fields.iter_strings_with_checkpoint
+      (Document_schema.Document.json run.source)
+      ~checkpoint
+      ~f
+  ;;
+
+  let with_root t ~result_root ~f =
+    if
+      (not t.active)
+      || (not (Result_root.issued_by t.issuer result_root))
+      || not (List.exists t.runs ~f:(fun run -> phys_equal run.root result_root))
+    then Error (Store_error.Corrupt "developer retention root is stale or foreign")
+    else f ~env:t.env ~root:t.borrowed_root
+  ;;
+
+  let with_inventory issuer ~reader ~checkpoint ~f =
+    with_lease issuer (fun ~env ~root ->
+      let collect () =
+        let open Result.Let_syntax in
+        let store_poll = work issuer issuer.checkpoint in
+        let poll () =
+          store_poll ();
+          checkpoint ()
+        in
+        let%bind reader = Result_root.shared_reader issuer ~env reader in
+        let%bind sources =
+          scan_document_sources issuer ~poll ~reader
+          |> Result.map_error ~f:Result_root.storage_error
+        in
+        let%bind runs =
+          List.fold_result sources ~init:[] ~f:(fun acc (_id, bytes, document, source) ->
+            poll ();
+            let epoch_index = Hashtbl.create (module Int) in
+            let%bind epochs =
+              List.fold_result (Doc.epochs document) ~init:[] ~f:(fun acc epoch ->
+                poll ();
+                let number = Doc.epoch_number epoch in
+                if Hashtbl.mem epoch_index number
+                then Error (Store_error.Corrupt "developer retention repeats an epoch")
+                else (
+                  let capture = Doc.epoch_capture epoch in
+                  Hashtbl.set epoch_index ~key:number ~data:capture;
+                  Ok ((number, capture) :: acc)))
+              |> Result.map ~f:List.rev
+            in
+            let%bind jobs =
+              List.fold_result (Doc.jobs document) ~init:[] ~f:(fun acc job ->
+                poll ();
+                let owner = P.Developer_job.owner job in
+                if
+                  not
+                    (P.Id.Server.equal owner.host_id (Doc.host_id document)
+                     && Id.equal owner.run_id (Doc.run_id document)
+                     && P.Id.Principal.equal
+                          owner.principal_id
+                          (Doc.principal_id document))
+                then
+                  Error (Store_error.Corrupt "developer retention job has foreign owner")
+                else (
+                  match Hashtbl.find epoch_index owner.epoch with
+                  | Some capture
+                    when Chatml_source.Digest.equal
+                           capture
+                           (P.Developer_job.capture_fingerprint job) -> Ok (job :: acc)
+                  | Some _ | None ->
+                    Error
+                      (Store_error.Corrupt "developer retention job has foreign epoch")))
+              |> Result.map ~f:List.rev
+            in
+            let root = Result_root.make issuer document ~epoch:None in
+            Ok ({ root; bytes; source; epochs; jobs } :: acc))
+          |> Result.map ~f:List.rev
+        in
+        let borrow = { issuer; borrowed_root = root; env; runs; active = true } in
+        Exn.protect
+          ~finally:(fun () -> borrow.active <- false)
+          ~f:(fun () ->
+            poll ();
+            let%map value = f borrow in
+            poll ();
+            value)
+      in
+      Result.map_error (collect ()) ~f:(fun error -> Error.Store error))
+    |> Result.map_error ~f:Result_root.storage_error
   ;;
 end
 

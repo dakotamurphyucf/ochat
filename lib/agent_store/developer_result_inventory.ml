@@ -17,6 +17,7 @@ type intent =
   ; root : Store.Result_root.t
   ; job : P.Developer_job.t
   ; document : Doc.t
+  ; source_document : Document_schema.Document.t
   ; bytes : string
   }
 
@@ -196,6 +197,40 @@ module Snapshot = struct
             ~message:"developer result inventory has duplicate historical job"))
   ;;
 
+  let roots_from_retention snapshot inventory ~checkpoint =
+    List.fold_result (Store.Retention.runs inventory) ~init:() ~f:(fun () run ->
+      let open Result.Let_syntax in
+      checkpoint ();
+      let root = Store.Retention.result_root run in
+      let epochs = Hashtbl.create (module Int) in
+      let%bind () =
+        List.fold_result
+          (Store.Retention.epochs run)
+          ~init:()
+          ~f:(fun () (number, capture) ->
+            checkpoint ();
+            add_unique
+              epochs
+              ~key:number
+              ~data:capture
+              ~message:"developer result inventory has duplicate epoch")
+      in
+      let%bind () =
+        add_unique
+          snapshot.roots
+          ~key:(Store.Result_root.run_id root)
+          ~data:{ root; epochs }
+          ~message:"developer result inventory has duplicate run"
+      in
+      List.fold_result (Store.Retention.jobs run) ~init:() ~f:(fun () job ->
+        checkpoint ();
+        add_unique
+          snapshot.jobs
+          ~key:(key_of_job job)
+          ~data:job
+          ~message:"developer result inventory has duplicate historical job"))
+  ;;
+
   let expected_ref snapshot ~reference ~stage ~terminal =
     let key = (Developer_result_reference.blob reference).id in
     match Hashtbl.find snapshot.expected key with
@@ -316,7 +351,7 @@ module Snapshot = struct
     add_unique
       snapshot.intents
       ~key
-      ~data:{ key; root = root_rows.root; job; document; bytes }
+      ~data:{ key; root = root_rows.root; job; document; source_document = named; bytes }
       ~message:"developer result intent key occurs twice"
   ;;
 
@@ -740,3 +775,162 @@ let scan
   try run () with
   | Work_limit -> Error (P.Error.invalid_request "developer result inventory work limit")
 ;;
+
+module Collection = struct
+  type t =
+    { snapshot : Snapshot.t
+    ; inventory : Store.Retention.t
+    }
+
+  let scan
+        ~inventory
+        ~scope
+        ~developer
+        ~reader
+        ~checkpoint
+        ~max_result_bytes
+        ~max_blob_bytes
+    =
+    let open Result.Let_syntax in
+    let%bind () = Blob_store.Developer_retention.check_current developer scope in
+    let%bind () =
+      match Blob_store.Developer_retention.inventory developer with
+      | Some current when phys_equal current inventory -> Ok ()
+      | Some _ | None -> corrupt "developer collection has another Store inventory"
+    in
+    let%bind reader =
+      Retention_reader.at_root reader ~root:(Store.Retention.root_directory inventory)
+    in
+    let snapshot = Snapshot.create () in
+    let%bind () = Snapshot.roots_from_retention snapshot inventory ~checkpoint in
+    let%bind () = Snapshot.terminal_references snapshot ~checkpoint in
+    let%bind () =
+      Snapshot.intents
+        snapshot
+        ~reader
+        ~checkpoint
+        ~directory:(Blob_store.Developer_retention.intent_directory developer)
+    in
+    let%bind () =
+      Snapshot.blob_namespace
+        snapshot
+        ~reader
+        ~checkpoint
+        ~directory:(Blob_store.Developer_retention.temporary_namespace developer)
+        ~durable:false
+        ~max_blob_bytes
+    in
+    let%bind () =
+      Snapshot.blob_namespace
+        snapshot
+        ~reader
+        ~checkpoint
+        ~directory:(Blob_store.Developer_retention.durable_namespace developer)
+        ~durable:true
+        ~max_blob_bytes
+    in
+    let%bind () = Snapshot.verify_terminal_blobs snapshot ~checkpoint ~max_result_bytes in
+    let%bind () = Snapshot.verify_all_intents snapshot ~checkpoint ~max_result_bytes in
+    let%map () =
+      Hashtbl.fold snapshot.validated ~init:(Ok ()) ~f:(fun ~key:_ ~data prior ->
+        let%bind () = prior in
+        checkpoint ();
+        match data with
+        | `Complete _ -> Ok ()
+        | `Incomplete ->
+          corrupt "selected developer stage is incomplete, so collection must defer")
+    in
+    { snapshot; inventory }
+  ;;
+
+  let feed_candidate_references t ~scanner ~checkpoint =
+    let feed text =
+      Blob_reference_scan.begin_root scanner;
+      let rec chunks offset =
+        if offset < String.length text
+        then (
+          checkpoint ();
+          let length = Int.min 4096 (String.length text - offset) in
+          Blob_reference_scan.feed scanner (String.sub text ~pos:offset ~len:length);
+          chunks (offset + length))
+      in
+      chunks 0
+    in
+    List.iter (Store.Retention.runs t.inventory) ~f:(fun run ->
+      checkpoint ();
+      feed (Store.Retention.document_bytes run);
+      Store.Retention.iter_document_strings run ~checkpoint ~f:feed);
+    Hashtbl.iter t.snapshot.intents ~f:(fun intent ->
+      checkpoint ();
+      feed intent.bytes;
+      Document_fields.iter_strings_with_checkpoint
+        (Document_schema.Document.json intent.source_document)
+        ~checkpoint
+        ~f:feed);
+    Hashtbl.iter t.snapshot.copies ~f:(fun copy ->
+      List.iter [ copy.temporary; copy.durable ] ~f:(function
+        | None -> ()
+        | Some entry ->
+          checkpoint ();
+          Option.iter (Blob_developer_namespace.Entry.metadata_bytes entry) ~f:feed;
+          Blob_developer_namespace.Entry.iter_metadata_strings entry ~checkpoint ~f:feed;
+          (match Blob_developer_namespace.Entry.state entry with
+           | Complete { content; _ } -> feed content
+           | Partial _ -> ())));
+    Ok ()
+  ;;
+
+  let retire_published_markers t ~inventory ~reader ~checkpoint =
+    let open Result.Let_syntax in
+    if not (phys_equal t.inventory inventory)
+    then corrupt "developer marker retirement has another Store borrow"
+    else
+      Hashtbl.fold t.snapshot.validated ~init:(Ok 0) ~f:(fun ~key ~data prior ->
+        let%bind count = prior in
+        checkpoint ();
+        match data with
+        | `Incomplete -> corrupt "incomplete selected stage cannot retire a marker"
+        | `Complete verified ->
+          let intent = verified.intent in
+          let state = P.Developer_job.state intent.job in
+          let terminal =
+            match state.status with
+            | P.Job.Succeeded | Failed _ | Cancelled | Interrupted _ -> true
+            | Queued | Running | Waiting_permission _ | Waiting_completion _ -> false
+          in
+          if not terminal
+          then Ok count
+          else (
+            let%bind () =
+              match Doc.selection intent.document with
+              | Inline _ -> Ok ()
+              | Artifact { reference; _ } ->
+                let id = (Developer_result_reference.blob reference).id in
+                (match Hashtbl.find t.snapshot.copies id with
+                 | Some { durable = Some entry; _ } ->
+                   (match Blob_developer_namespace.Entry.state entry with
+                    | Complete _ -> Ok ()
+                    | Partial _ ->
+                      corrupt "published Artifact has incomplete durable data")
+                 | Some { durable = None; _ } | None ->
+                   corrupt "published Artifact has no durable data")
+            in
+            let%bind location =
+              Result_intent_file.developer
+                ~root:intent.root
+                ~owner:(Doc.owner intent.document)
+                ~job:key.job
+                ~attempt:(Doc.attempt intent.document)
+            in
+            let%map () =
+              Result_intent_file.remove_exact_with_retention
+                location
+                ~retention:inventory
+                ~reader
+                ~checkpoint
+                ~expected:intent.bytes
+                ~max_frame_bytes:(128 * 1024)
+            in
+            count + 1))
+  ;;
+end

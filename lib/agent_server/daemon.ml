@@ -164,6 +164,7 @@ let default_options =
           ; max_entries = 65_536
           ; max_bytes = 256 * 1024 * 1024
           ; max_file_bytes = 64 * 1024 * 1024
+          ; max_work = 2_000_000
           }
       }
   ; seed_recovery_limits = Session_factory.Seed_recovery_limits.default

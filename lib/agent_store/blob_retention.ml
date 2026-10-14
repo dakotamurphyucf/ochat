@@ -10,6 +10,7 @@ type t =
   ; complete : Id.t list
   ; published : Id.t list
   ; temporary : Id.t list
+  ; developer : Developer_result_inventory.Collection.t option
   }
 
 let corrupt message = Error (Store_error.Corrupt message)
@@ -43,9 +44,9 @@ let json_media_type value =
   String.equal value "application/json" || String.is_suffix value ~suffix:"+json"
 ;;
 
-let files reader directory ~allow_developer_namespace =
+let files reader directory ~allow_developer_namespace ~checkpoint =
   let open Result.Let_syntax in
-  let%bind names = Retention_reader.list reader ~directory in
+  let%bind names = Retention_reader.list_with_checkpoint reader ~directory ~checkpoint in
   let grouped = Hashtbl.create (module Id) in
   let temporary name =
     match Durable_file.temporary_target name with
@@ -57,6 +58,7 @@ let files reader directory ~allow_developer_namespace =
   in
   let%map () =
     List.fold_result names ~init:() ~f:(fun () name ->
+      checkpoint ();
       match
         allow_developer_namespace && String.equal name "developer-runs", temporary name
       with
@@ -72,10 +74,36 @@ let files reader directory ~allow_developer_namespace =
         Hashtbl.update grouped id ~f:(fun previous ->
           Set.add (Option.value previous ~default:String.Set.empty) suffix))
   in
-  Hashtbl.to_alist grouped |> List.sort ~compare:(fun (a, _) (b, _) -> Id.compare a b)
+  Hashtbl.to_alist grouped
+  |> List.sort ~compare:(fun (a, _) (b, _) ->
+    checkpoint ();
+    Id.compare a b)
 ;;
 
-let scan ~scope ~session ~reader ~intents ~max_file_bytes =
+let charge_text ~checkpoint text =
+  let rec loop offset =
+    if offset < String.length text
+    then (
+      checkpoint ();
+      loop (offset + Int.min 4096 (String.length text - offset)))
+  in
+  loop 0
+;;
+
+let digest_string ~checkpoint text =
+  let rec loop state offset =
+    if offset >= String.length text
+    then Digestif.SHA256.(get state |> to_hex)
+    else (
+      checkpoint ();
+      let length = Int.min 4096 (String.length text - offset) in
+      let chunk = String.sub text ~pos:offset ~len:length in
+      loop (Digestif.SHA256.feed_string state chunk) (offset + length))
+  in
+  loop Digestif.SHA256.empty 0
+;;
+
+let scan ~scope ~developer ~session ~reader ~checkpoint ~intents ~max_file_bytes =
   let open Result.Let_syntax in
   let%bind session_root, temporary_root =
     Blob_store.retention_directories scope session
@@ -91,18 +119,39 @@ let scan ~scope ~session ~reader ~intents ~max_file_bytes =
     Document_fields.limits ~max_bytes:max_file_bytes |> Document_fields.store
   in
   let%bind temporary_reader = Retention_reader.at_root reader ~root:temporary_root in
-  let%bind developer_presence =
-    Blob_store.validate_developer_retention scope ~session ~reader
+  let%bind () = Blob_store.Developer_retention.check_current developer scope in
+  let%bind reserved = Blob_store.retention_reserved_directory scope in
+  let%bind reserved_reader = Retention_reader.at_root reader ~root:reserved in
+  let%bind reserved_entries =
+    Retention_reader.list_with_checkpoint reserved_reader ~directory:"." ~checkpoint
   in
   let%bind () =
-    match developer_presence with
-    | Blob_store.No_developer_evidence -> Ok ()
-    | Has_developer_evidence ->
-      corrupt "developer evidence needs cross-owner reference proof before deletion"
+    match reserved_entries with
+    | [] | [ "developer-runs" ] -> Ok ()
+    | _ -> corrupt "unknown global durable blob consumer"
+  in
+  let%bind max_blob_bytes = Blob_store.retention_max_upload_bytes scope in
+  let%bind developer_graph =
+    match Blob_store.Developer_retention.inventory developer with
+    | None -> Ok None
+    | Some inventory ->
+      let%map graph =
+        Developer_result_inventory.Collection.scan
+          ~inventory
+          ~scope
+          ~developer
+          ~reader
+          ~checkpoint
+          ~max_result_bytes:
+            (Int.min max_file_bytes (Retention_reader.remaining_bytes reader))
+          ~max_blob_bytes
+      in
+      Some graph
   in
   let owned = Hashtbl.create (module Id) in
   let%bind () =
     List.fold_result intents ~init:() ~f:(fun () intent ->
+      checkpoint ();
       let reference = Job_result_intent.reference intent in
       match
         P.Id.Session.equal reference.session_id (Session_store.Handle.session_id session)
@@ -114,6 +163,7 @@ let scan ~scope ~session ~reader ~intents ~max_file_bytes =
         Ok ())
   in
   let candidates = Hashtbl.keys owned in
+  checkpoint ();
   let%bind scanner = Blob_reference_scan.create candidates |> protocol in
   let roots = Hash_set.create (module Id) in
   let edges = Hashtbl.create (module Id) in
@@ -121,29 +171,60 @@ let scan ~scope ~session ~reader ~intents ~max_file_bytes =
   let published = Hash_set.create (module Id) in
   let temporary_ids = Hash_set.create (module Id) in
   List.iter intents ~f:(fun intent ->
+    checkpoint ();
     let id = (Job_result_intent.reference intent).blob.id in
     Blob_reference_scan.reset scanner;
     Job_result_intent.iter_reference_strings intent ~f:(fun text ->
+      checkpoint ();
       Blob_reference_scan.begin_root scanner;
-      Blob_reference_scan.feed ~ignore:id scanner text);
+      let rec feed offset =
+        if offset < String.length text
+        then (
+          checkpoint ();
+          let length = Int.min 4096 (String.length text - offset) in
+          Blob_reference_scan.feed
+            ~ignore:id
+            scanner
+            (String.sub text ~pos:offset ~len:length);
+          feed (offset + length))
+      in
+      feed 0);
     Hashtbl.set edges ~key:id ~data:(Blob_reference_scan.references scanner));
   let scan_directory reader directory ~temporary =
-    let%bind groups = files reader directory ~allow_developer_namespace:temporary in
+    let%bind groups =
+      files reader directory ~allow_developer_namespace:temporary ~checkpoint
+    in
     List.fold_result groups ~init:() ~f:(fun () (id, suffixes) ->
+      checkpoint ();
       if temporary then Hash_set.add temporary_ids id;
       Blob_reference_scan.reset scanner;
       let intent = Hashtbl.find owned id in
       let ignored_id = Option.map intent ~f:(fun _ -> id) in
       let feed text =
         Blob_reference_scan.begin_root scanner;
-        Blob_reference_scan.feed ?ignore:ignored_id scanner text
+        let rec chunks offset =
+          if offset < String.length text
+          then (
+            checkpoint ();
+            let length = Int.min 4096 (String.length text - offset) in
+            Blob_reference_scan.feed
+              ?ignore:ignored_id
+              scanner
+              (String.sub text ~pos:offset ~len:length);
+            chunks (offset + length))
+        in
+        chunks 0
       in
       let read suffix =
         let name = Id.to_string id ^ suffix in
         let path =
           if String.equal directory "." then name else Filename.concat directory name
         in
-        Retention_reader.read reader ~path ~max_bytes:max_file_bytes
+        Retention_reader.read_with_checkpoint
+          reader
+          ~path
+          ~max_bytes:max_file_bytes
+          ~checkpoint
       in
       let%bind () =
         match Set.mem suffixes ".part", temporary, intent with
@@ -159,6 +240,7 @@ let scan ~scope ~session ~reader ~intents ~max_file_bytes =
            | None -> corrupt "retained blob data has no metadata")
         | true ->
           let%bind bytes = read ".sexp" in
+          charge_text ~checkpoint bytes;
           let%bind value, document = metadata ~id bytes in
           let%map () =
             match intent with
@@ -176,7 +258,10 @@ let scan ~scope ~session ~reader ~intents ~max_file_bytes =
                 corrupt "retained metadata bytes differ from selected private publication"
           in
           feed bytes;
-          Document_fields.iter_strings (Document_schema.Document.json document) ~f:feed;
+          Document_fields.iter_strings_with_checkpoint
+            (Document_schema.Document.json document)
+            ~checkpoint
+            ~f:feed;
           value
       in
       let%bind () =
@@ -211,6 +296,7 @@ let scan ~scope ~session ~reader ~intents ~max_file_bytes =
       in
       let%bind () =
         List.fold_result [ ".blob"; ".part" ] ~init:() ~f:(fun () suffix ->
+          checkpoint ();
           match Set.mem suffixes suffix with
           | false -> Ok ()
           | true ->
@@ -227,23 +313,19 @@ let scan ~scope ~session ~reader ~intents ~max_file_bytes =
                    Int64.equal length stored_metadata.blob.byte_length
                    && String.equal
                         stored_metadata.blob.digest
-                        Digestif.SHA256.(digest_string contents |> to_hex)
+                        (digest_string ~checkpoint contents)
                  with
                  | true -> Ok ()
                  | false -> corrupt "retained blob length or digest mismatch"
                in
                feed contents;
-               (match Result.try_with (fun () -> Jsonaf.of_string contents) with
-                | Error _ ->
-                  (match json_media_type stored_metadata.blob.media_type with
-                   | true -> corrupt "retained JSON blob is malformed"
-                   | false -> Ok ())
+               charge_text ~checkpoint contents;
+               (match Document_schema.Json.decode ~limits:content_limits contents with
+                | Error (Document_schema.Error.Malformed _)
+                  when not (json_media_type stored_metadata.blob.media_type) -> Ok ()
+                | Error error -> Error (Store_error.Document error)
                 | Ok json ->
-                  let%bind _ =
-                    Document_schema.Json.validate_and_measure ~limits:content_limits json
-                    |> Document_fields.store
-                  in
-                  Document_fields.iter_strings json ~f:feed;
+                  Document_fields.iter_strings_with_checkpoint json ~checkpoint ~f:feed;
                   (match intent with
                    | None -> Ok ()
                    | Some intent ->
@@ -269,6 +351,18 @@ let scan ~scope ~session ~reader ~intents ~max_file_bytes =
       Ok ())
   in
   let%bind () = scan_directory reader "blobs" ~temporary:false in
+  checkpoint ();
+  Blob_reference_scan.reset scanner;
+  let%bind () =
+    match developer_graph with
+    | None -> Ok ()
+    | Some developer ->
+      Developer_result_inventory.Collection.feed_candidate_references
+        developer
+        ~scanner
+        ~checkpoint
+  in
+  List.iter (Blob_reference_scan.references scanner) ~f:(Hash_set.add roots);
   let%map () = scan_directory temporary_reader "." ~temporary:true in
   { candidates
   ; roots = Hash_set.to_list roots
@@ -276,6 +370,7 @@ let scan ~scope ~session ~reader ~intents ~max_file_bytes =
   ; complete = Hash_set.to_list complete
   ; published = Hash_set.to_list published
   ; temporary = Hash_set.to_list temporary_ids
+  ; developer = developer_graph
   }
 ;;
 
@@ -283,7 +378,7 @@ let published t id =
   List.mem t.published id ~equal:Id.equal && not (List.mem t.temporary id ~equal:Id.equal)
 ;;
 
-let references t ~roots =
+let references t ~checkpoint ~roots =
   let candidates = Hash_set.of_list (module Id) t.candidates in
   let edges = Hashtbl.of_alist_exn (module Id) t.edges in
   let visited = Hash_set.create (module Id) in
@@ -291,14 +386,31 @@ let references t ~roots =
   let rec visit = function
     | [] -> Ok ()
     | id :: rest when (not (Hash_set.mem candidates id)) || Hash_set.mem visited id ->
+      checkpoint ();
       visit rest
     | id :: _ when not (Hash_set.mem complete id) ->
+      checkpoint ();
       corrupt "reachable result artifact has no complete verified dependency source"
     | id :: rest ->
+      checkpoint ();
       Hash_set.add visited id;
       visit (Option.value (Hashtbl.find edges id) ~default:[] @ rest)
   in
   Result.map
     (visit (t.roots @ roots))
     ~f:(fun () -> Hash_set.to_list visited |> List.sort ~compare:Id.compare)
+;;
+
+let retire_published_developer_markers t ~scope ~developer ~reader ~checkpoint =
+  let open Result.Let_syntax in
+  let%bind () = Blob_store.Developer_retention.check_current developer scope in
+  match t.developer, Blob_store.Developer_retention.inventory developer with
+  | None, None -> Ok 0
+  | Some graph, Some inventory ->
+    Developer_result_inventory.Collection.retire_published_markers
+      graph
+      ~inventory
+      ~reader
+      ~checkpoint
+  | None, Some _ | Some _, None -> corrupt "developer graph and retention borrow disagree"
 ;;

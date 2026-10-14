@@ -99,3 +99,18 @@ val of_bytes
   -> max_invocations:int
   -> max_job_payload_bytes:int
   -> (t, Store_error.t) result
+
+(** The same bounded decoder also returning its original admitted document
+    tree. Cross-owner retention scans decoded strings, including escaped
+    envelope/payload values, without a second parse or lossy reconstruction
+    from known typed fields. [of_bytes] keeps its existing behavior by
+    projecting this result's [t]. *)
+val of_bytes_with_document
+  :  string
+  -> poll:(unit -> unit)
+  -> limits:Document_schema.Limits.t
+  -> max_epochs:int
+  -> max_jobs:int
+  -> max_invocations:int
+  -> max_job_payload_bytes:int
+  -> (t * Document_schema.Document.t, Store_error.t) result

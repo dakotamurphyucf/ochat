@@ -216,17 +216,80 @@ let read_exact t ~max_frame_bytes =
       read_at ~env ~parents ~directory ~filename ~max_frame_bytes))
 ;;
 
+let remove_at ~env ~directory ~filename ~expected ~read_prior =
+  let native = Filename.concat directory filename in
+  let open Result.Let_syntax in
+  let%bind prior = read_prior () in
+  match prior with
+  | None -> Ok ()
+  | Some prior when String.equal prior expected ->
+    protect_io ~operation:"remove result intent" ~native (fun () ->
+      Eio.Path.unlink (path env native);
+      Durable_file.sync_directory ~env ~path:directory)
+  | Some _ -> corrupt "result intent changed before removal"
+;;
+
 let remove_exact t ~expected ~max_frame_bytes =
   let open Result.Let_syntax in
   let%bind _ = validate_frame expected ~max_frame_bytes in
   with_location t ~f:(fun ~env ~parents ~directory ~filename ->
     let native = Filename.concat directory filename in
-    protect_io ~operation:"remove result intent" ~native (fun () ->
-      let%bind prior = read_at ~env ~parents ~directory ~filename ~max_frame_bytes in
-      match prior with
-      | None -> Ok ()
-      | Some prior when String.equal prior expected ->
-        Eio.Path.unlink (path env native);
-        Durable_file.sync_directory ~env ~path:directory
-      | Some _ -> corrupt "result intent changed before removal"))
+    remove_at ~env ~directory ~filename ~expected ~read_prior:(fun () ->
+      protect_io ~operation:"read result intent" ~native (fun () ->
+        read_at ~env ~parents ~directory ~filename ~max_frame_bytes)))
+;;
+
+let remove_exact_with_retention
+      t
+      ~retention
+      ~reader
+      ~checkpoint
+      ~expected
+      ~max_frame_bytes
+  =
+  let open Result.Let_syntax in
+  let%bind _ = validate_frame expected ~max_frame_bytes in
+  match t with
+  | Conversation _ -> corrupt "conversation intent has no developer retention borrow"
+  | Developer { root; owner; job; attempt } ->
+    Developer_run_store.Retention.with_root
+      retention
+      ~result_root:root
+      ~f:(fun ~env ~root:data_root ->
+        let base = Data_root.developer_result_intents_path data_root in
+        let run =
+          Filename.concat base ("run_" ^ P.Id.Developer_run.to_string owner.run_id)
+        in
+        let epoch = Filename.concat run ("epoch_" ^ Int.to_string owner.epoch) in
+        let parents = [ Data_root.path data_root; base; run; epoch ] in
+        let filename =
+          "job_" ^ P.Id.Job.to_string job ^ "-" ^ Int.to_string attempt ^ ".frame"
+        in
+        let native = Filename.concat epoch filename in
+        let read_prior () =
+          checkpoint ();
+          let%bind present =
+            protect_io ~operation:"inspect result intent" ~native (fun () ->
+              check_parents ~env parents)
+          in
+          if not present
+          then Ok None
+          else (
+            let%bind local = Retention_reader.at_root reader ~root:epoch in
+            let%bind found = Retention_reader.kind_or_missing local ~path:filename in
+            match found with
+            | None -> Ok None
+            | Some `Directory -> corrupt "result intent is not a regular file"
+            | Some `File ->
+              let%bind bytes =
+                Retention_reader.read_with_checkpoint
+                  local
+                  ~path:filename
+                  ~max_bytes:max_frame_bytes
+                  ~checkpoint
+              in
+              let%map _ = validate_frame bytes ~max_frame_bytes in
+              Some bytes)
+        in
+        remove_at ~env ~directory:epoch ~filename ~expected ~read_prior)
 ;;
