@@ -50,7 +50,7 @@ type job_state =
   | `Failed of string
   ]
 
-let agent_prompt_v1_name = "agent_prompt_v1"
+let agent_prompt_v1_name = Model_spawn_request.recipe_name
 
 let create ~sw ~exec_context ?(max_spawned_jobs = 100) () =
   { sw
@@ -175,55 +175,6 @@ let deliver_if_possible (t : t) ~(job_id : string) (job : job) : unit =
           | Error _ -> ())))
 ;;
 
-let json_object_find (fields : (string * Jsonaf.t) list) (key : string) : Jsonaf.t option =
-  List.find_map fields ~f:(fun (k, v) -> if String.equal k key then Some v else None)
-;;
-
-let expect_string_field ~name fields key : (string, string) result =
-  match json_object_find fields key with
-  | Some (`String s) -> Ok s
-  | Some _ -> Error (Printf.sprintf "%s: field %S must be a string" name key)
-  | None -> Error (Printf.sprintf "%s: missing field %S" name key)
-;;
-
-let expect_bool_field_opt fields key : (bool option, string) result =
-  match json_object_find fields key with
-  | None -> Ok None
-  | Some `True -> Ok (Some true)
-  | Some `False -> Ok (Some false)
-  | Some _ -> Error (Printf.sprintf "field %S must be a bool when present" key)
-;;
-
-let expect_string_field_opt fields key : (string option, string) result =
-  match json_object_find fields key with
-  | None -> Ok None
-  | Some (`String s) -> Ok (Some s)
-  | Some _ -> Error (Printf.sprintf "field %S must be a string when present" key)
-;;
-
-let decode_agent_prompt_payload (payload : Jsonaf.t)
-  : (string * bool * string * bool option * string option, string) result
-  =
-  match payload with
-  | `Object fields ->
-    let open Result.Let_syntax in
-    let%bind prompt = expect_string_field ~name:agent_prompt_v1_name fields "prompt" in
-    let%bind input = expect_string_field ~name:agent_prompt_v1_name fields "input" in
-    let%bind is_local =
-      match json_object_find fields "is_local" with
-      | Some `True -> Ok true
-      | Some `False -> Ok false
-      | Some _ ->
-        Error
-          (Printf.sprintf "%s: field %S must be a bool" agent_prompt_v1_name "is_local")
-      | None -> Ok false
-    in
-    let%bind history_compaction = expect_bool_field_opt fields "history_compaction" in
-    let%bind session_id = expect_string_field_opt fields "session_id" in
-    Ok (prompt, is_local, input, history_compaction, session_id)
-  | _ -> Error (Printf.sprintf "%s: payload must be an object" agent_prompt_v1_name)
-;;
-
 let agent_prompt_result_json
       ~(prompt : string)
       ~(is_local : bool)
@@ -252,9 +203,12 @@ let recipe_agent_prompt_v1
   =
   let call ~payload =
     let open Result.Let_syntax in
-    let%bind prompt, is_local, input, history_compaction_opt, nested_session_id_opt =
-      decode_agent_prompt_payload payload
-    in
+    let%bind request = Model_spawn_request.decode payload in
+    let prompt = Model_spawn_request.prompt request in
+    let is_local = Model_spawn_request.is_local request in
+    let input = Model_spawn_request.input request in
+    let history_compaction_opt = Model_spawn_request.history_compaction request in
+    let nested_session_id_opt = Model_spawn_request.nested_prompt_id request in
     let nested_session_id = Option.value nested_session_id_opt ~default:prompt in
     let job () =
       let%bind prompt_xml, prompt_dir =

@@ -10,14 +10,15 @@ module Opened = struct
   type t =
     { service : Service.t
     ; backend : B.t
+    ; bridge : Inference_host.Credential_bridge.t option
     ; incarnation : DTO.Revision.t
     ; setup_receipt :
         actor:Actor.t -> DTO.Setup_request.t -> (DTO.Revision.t, DTO.Error.t) Result.t
     ; close : unit -> unit
     }
 
-  let create ~service ~backend ~incarnation ~setup_receipt ~close =
-    { service; backend; incarnation; setup_receipt; close }
+  let create ~service ~backend ~bridge ~incarnation ~setup_receipt ~close =
+    { service; backend; bridge; incarnation; setup_receipt; close }
   ;;
 
   let close t = t.close ()
@@ -163,6 +164,14 @@ let rec backend_view t bound =
 ;;
 
 let backend t = backend_view t None
+
+let current_model_bridge t =
+  let open Result.Let_syntax in
+  let%bind opened = opened t in
+  match opened.Opened.bridge with
+  | Some bridge -> Ok bridge
+  | None -> Error DTO.Error.Unsupported
+;;
 
 let setup t ~actor request =
   if not (admission_open t)
@@ -316,5 +325,9 @@ let enroll_private_key t ~actor ~profile ~key ~source_reference ~sw ~read =
 ;;
 
 let operator_port t =
-  Port.create ~dispatch:(dispatch t) ~receipt:(receipt t) ~close:(fun () -> close t)
+  Port.create
+    ~dispatch:(dispatch t)
+    ~receipt:(receipt t)
+    ~current_model_bridge:(fun () -> current_model_bridge t)
+    ~close:(fun () -> close t)
 ;;

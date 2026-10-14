@@ -52,6 +52,11 @@ module Registry : sig
       is the pinned host registration; [selected] must resolve within it.
       [job_policy] is the actual admitted host resource ceiling for saved
       Background_request values, not a script-selected fallback.
+      [selected_model], when present, was issued by the actual provider port
+      for this exact original actor token and is pinned once. Admission
+      rechecks its current binding after yielding Store/worker preparation.
+      None makes Model.spawn unavailable; there is no ambient fallback or
+      in-place replacement.
       The host validates capture origin and workspace membership before calling
       this trusted host API; its pure capture value alone grants neither. *)
   val admit
@@ -60,6 +65,7 @@ module Registry : sig
     -> capture:Chatml_developer_capture.t
     -> registry:Chat_response.Tool_capability.t
     -> selected:Chat_response.Tool_capability.t
+    -> selected_model:Provider_operator_port.Model_selection.t option
     -> job_policy:Chat_response.One_off_request.policy
     -> handle:Agent_store.Developer_run_store.handle
     -> workspace_conflict_domain:string
@@ -80,6 +86,7 @@ module Registry : sig
     -> capture:Chatml_developer_capture.t
     -> registry:Chat_response.Tool_capability.t
     -> selected:Chat_response.Tool_capability.t
+    -> selected_model:Provider_operator_port.Model_selection.t option
     -> job_policy:Chat_response.One_off_request.policy
     -> handle:Agent_store.Developer_run_store.handle
     -> workspace_conflict_domain:string
@@ -121,6 +128,11 @@ module Current : sig
       invalidates the witness even if it happens to preserve a particular tool. *)
   val selected : t -> Chat_response.Tool_capability.t
 end
+
+(** Optional nonsecret model selection pinned at physical admission. The
+    selection remains issued by its original provider port; this projection
+    does not turn a copied target into authority. *)
+val selected_model : t -> Provider_operator_port.Model_selection.t option
 
 module Selection : sig
   type t

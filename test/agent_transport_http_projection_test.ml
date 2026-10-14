@@ -279,6 +279,8 @@ let%expect_test "HTTP reused logical connection retains each original bearer exp
                            Error P.Provider_operator.Error.Unsupported)
                          ~receipt:(fun ~actor:_ _ ->
                            Error P.Provider_operator.Error.Unsupported)
+                         ~current_model_bridge:(fun () ->
+                           Error P.Provider_operator.Error.Unsupported)
                          ~close:(fun () -> ())))
             }
           in

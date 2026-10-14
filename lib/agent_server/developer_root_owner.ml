@@ -78,6 +78,7 @@ type admission =
   ; capture : Chatml_developer_capture.t
   ; registry : Chat_response.Tool_capability.t
   ; selected : Chat_response.Tool_capability.t
+  ; selected_model : Provider_operator_port.Model_selection.t option
   ; job_policy : Chat_response.One_off_request.policy
   ; handle : Store.handle
   ; workspace_conflict_domain : string
@@ -112,6 +113,7 @@ and t =
   ; job_policy : Chat_response.One_off_request.policy
   ; native_ceiling : Capability.t
   ; mutable selected : Capability.t
+  ; selected_model : Provider_operator_port.Model_selection.t option
   ; mutable selection_revision : int
   ; mutable state : state
   ; mutable root_call : call option
@@ -278,6 +280,7 @@ let owner t = t.owner
 let capture t = t.capture
 let native_ceiling t = t.native_ceiling
 let native_selected t = t.selected
+let selected_model t = t.selected_model
 let original_actor t = t.actor
 let job_policy t = t.job_policy
 let issued_by_store t store = Store.issued_by store t.handle
@@ -2136,7 +2139,19 @@ module Registry = struct
            (Store.capture_fingerprint admission.handle)
       && (not (String.is_empty admission.workspace_conflict_domain))
       && not t.closed
-    then selected_within ~registry:admission.registry admission.selected
+    then
+      let* () =
+        match admission.selected_model with
+        | None -> Ok ()
+        | Some selection ->
+          if
+            phys_equal
+              (Provider_operator_port.Model_selection.actor selection)
+              admission.actor
+          then Provider_operator_port.Model_selection.check_current selection
+          else invalid "developer model selection belongs to another actor"
+      in
+      selected_within ~registry:admission.registry admission.selected
     else invalid "developer root actor or capture does not match"
   ;;
 
@@ -2190,6 +2205,7 @@ module Registry = struct
       ; job_policy = admission.job_policy
       ; native_ceiling = admission.selected
       ; selected = admission.selected
+      ; selected_model = admission.selected_model
       ; selection_revision = 0
       ; state = Live
       ; root_call = None
@@ -2272,6 +2288,7 @@ module Registry = struct
         ~capture
         ~registry
         ~selected
+        ~selected_model
         ~job_policy
         ~handle
         ~workspace_conflict_domain
@@ -2296,6 +2313,7 @@ module Registry = struct
           ; capture
           ; registry
           ; selected
+          ; selected_model
           ; job_policy
           ; handle
           ; workspace_conflict_domain
@@ -2312,6 +2330,7 @@ module Registry = struct
         ~capture
         ~registry
         ~selected
+        ~selected_model
         ~job_policy
         ~handle
         ~workspace_conflict_domain
@@ -2322,6 +2341,7 @@ module Registry = struct
       ~capture
       ~registry
       ~selected
+      ~selected_model
       ~job_policy
       ~handle
       ~workspace_conflict_domain

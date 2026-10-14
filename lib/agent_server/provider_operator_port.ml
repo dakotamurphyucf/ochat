@@ -1,6 +1,8 @@
 open! Core
 module P = Agent_protocol
 module DTO = P.Provider_operator
+module Bridge = Inference_host.Credential_bridge
+module Context = Inference_runtime.Context
 
 module Close_state = struct
   type t =
@@ -18,14 +20,16 @@ type t =
       actor:Operator_authorization.t
       -> P.Command.t
       -> (P.Command_receipt.t, DTO.Error.t) Result.t
+  ; current_model_bridge : unit -> (Bridge.t, DTO.Error.t) Result.t
   ; close : unit -> unit
   ; close_state : Close_state.t Atomic.t
   ; close_mutex : Eio.Mutex.t
   }
 
-let create ~dispatch ~receipt ~close =
+let create ~dispatch ~receipt ~current_model_bridge ~close =
   { dispatch
   ; receipt
+  ; current_model_bridge
   ; close
   ; close_state = Atomic.make Close_state.Open
   ; close_mutex = Eio.Mutex.create ()
@@ -59,6 +63,90 @@ let protocol_error provider_error =
     ~retryable:(DTO.Error.equal provider_error Busy)
     ~data:(`Object [ "provider_error", DTO.Error.to_json provider_error ])
     ()
+;;
+
+let model_unavailable () =
+  P.Error.create
+    P.Error.Invalid_state
+    ~message:"Selected model provider is unavailable."
+    ~retryable:false
+    ()
+;;
+
+let model_denied () =
+  P.Error.create
+    P.Error.Permission_denied
+    ~message:"Selected model provider is unavailable."
+    ~retryable:false
+    ()
+;;
+
+let bridge_error = function
+  | Bridge.Error.Denied | Profile Denied -> model_denied ()
+  | Invalid_mapping
+  | Invalid_environment
+  | Invalid_credential
+  | Missing_profile
+  | Stale_authorization
+  | Profile _
+  | Lifecycle _
+  | Preparation _ -> model_unavailable ()
+;;
+
+module Model_selection = struct
+  type nonrec t =
+    { issuer : t
+    ; actor : Operator_authorization.t
+    ; target : Inference.Request.Target.t
+    ; bridge : Bridge.t
+    ; context : Context.t
+    }
+
+  let actor t = t.actor
+  let target t = t.target
+
+  let check_current t =
+    if (not (admission_open t.issuer)) || not (Operator_authorization.is_current t.actor)
+    then Error (model_denied ())
+    else (
+      match t.issuer.current_model_bridge () with
+      | Error error -> Error (protocol_error error)
+      | Ok current when not (phys_equal current t.bridge) -> Error (model_unavailable ())
+      | Ok _ ->
+        (match Context.derive t.context ~target:t.target with
+         | Error _ -> Error (model_unavailable ())
+         | Ok _ ->
+           if admission_open t.issuer && Operator_authorization.is_current t.actor
+           then (
+             match t.issuer.current_model_bridge () with
+             | Ok current when phys_equal current t.bridge -> Ok ()
+             | Ok _ -> Error (model_unavailable ())
+             | Error error -> Error (protocol_error error))
+           else Error (model_denied ())))
+  ;;
+end
+
+let select_model t ~actor ~target =
+  if not (admission_open t)
+  then Error (protocol_error Closed)
+  else if not (Operator_authorization.is_current actor)
+  then Error (model_denied ())
+  else
+    let open Result.Let_syntax in
+    let%bind bridge = t.current_model_bridge () |> Result.map_error ~f:protocol_error in
+    let principal = (Operator_authorization.principal actor).id in
+    let%bind context =
+      Bridge.resolve bridge ~principal:(P.Id.Principal.to_string principal) target
+      |> Result.map_error ~f:bridge_error
+    in
+    let%bind () =
+      if Inference.Request.Target.equal (Context.target context) target
+      then Ok ()
+      else Error (model_unavailable ())
+    in
+    let selected : Model_selection.t = { issuer = t; actor; target; bridge; context } in
+    let%map () = Model_selection.check_current selected in
+    selected
 ;;
 
 let dispatch t ~actor command =

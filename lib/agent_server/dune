@@ -140,6 +140,7 @@
   mirage-crypto-rng.unix
   ochat.inference
   ochat.inference_runtime
+  ochat.inference_host
   ochat.inference_client
   ochat.transcript
   ochat.history_entry
