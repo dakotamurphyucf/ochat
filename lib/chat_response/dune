@@ -18,6 +18,7 @@
   neutral_turn
   in_memory_stream
   model_executor
+  model_spawn_request
   runtime_semantics
   automatic_turn_policy
   runtime_request_scope

@@ -6,6 +6,8 @@ module M = Credential_registry_model
 module D = Openai.Responses_driver
 module R = Inference.Request
 module RT = Inference_runtime
+module P = Agent_protocol
+module Port = Agent_server.Provider_operator_port
 
 let ok result =
   Result.map_error result ~f:(fun _ -> "fixture failure") |> Result.ok_or_failwith
@@ -87,6 +89,134 @@ let open_host ?oauth ?net env sw anchor mode ~mappings ~environment ~authorize =
 ;;
 
 let authorize ~principal ~profile:_ ~operation:_ = String.equal principal "operator"
+
+let%expect_test "real bridge resolution cannot issue a model selection after port close" =
+  with_fixture (fun env sw anchor ->
+    let mapping, identity = mapping "one" in
+    let environment =
+      B.Environment.Entry.create
+        ~binding:(id "one")
+        ~identity
+        ~name:"ONE"
+        ~configuration_revision:None
+        ~status:(fun () -> Available)
+        ~resolve:(fun ~sw:_ ->
+          Ok
+            (C.Environment.resolved
+               ~access:
+                 (Provider_secret_store.Secret.of_bytes (Bytes.of_string "synthetic-key")
+                  |> ok)
+               ~configuration_revision:None
+               ~check_current:(fun () -> Ok ())))
+      |> ok
+      |> List.return
+      |> B.Environment.create
+      |> ok
+    in
+    let opened =
+      open_host
+        env
+        sw
+        anchor
+        (Initialize (id "model-port"))
+        ~mappings:[ mapping ]
+        ~environment:(Some environment)
+        ~authorize:(fun ~principal ~profile:_ ~operation:_ ->
+          String.equal principal "pri_operator")
+      |> ok
+    in
+    let bridge = S.Opened.bridge opened in
+    B.configure_environment
+      bridge
+      ~principal:"pri_operator"
+      ~profile:"one"
+      ~operation:(id "first_enrollment")
+      ~name:"ONE"
+      ~configuration_revision:None
+    |> ok;
+    let target =
+      B.capture
+        bridge
+        ~principal:"pri_operator"
+        ~default_profile:"one"
+        ~current:None
+        ~model:"model"
+        ~settings:[]
+      |> ok
+    in
+    let principal =
+      P.Principal.create
+        ~id:(P.Id.Principal.of_string "pri_operator" |> ok)
+        ~authentication_kind:"synthetic"
+        ~scopes:P.Scope.Set.empty
+        ~attributes:[]
+      |> ok
+    in
+    let entered_actor, entered_actor_u = Eio.Promise.create () in
+    let checked = ref false in
+    let actor =
+      Operator_authorization.guarded ~principal ~is_current:(fun () ->
+        if not !checked
+        then (
+          checked := true;
+          Eio.Promise.resolve entered_actor_u ());
+        true)
+    in
+    let port =
+      Port.create
+        ~dispatch:(fun ~actor:_ _ -> Error P.Provider_operator.Error.Unsupported)
+        ~receipt:(fun ~actor:_ _ -> Error P.Provider_operator.Error.Unsupported)
+        ~current_model_bridge:(fun () -> Ok bridge)
+        ~close:(fun () -> ())
+    in
+    let published, published_u = Eio.Promise.create () in
+    let release, release_u = Eio.Promise.create () in
+    let registry = S.Opened.registry opened in
+    C.For_testing.set_after_publication_hook
+      registry
+      (Some
+         (fun () ->
+           C.For_testing.set_after_publication_hook registry None;
+           Eio.Promise.resolve published_u ();
+           Eio.Promise.await release));
+    let publication_done, publication_done_u = Eio.Promise.create () in
+    Eio.Fiber.fork ~sw (fun () ->
+      let result =
+        B.configure_environment
+          bridge
+          ~principal:"pri_operator"
+          ~profile:"one"
+          ~operation:(id "second_enrollment")
+          ~name:"ONE"
+          ~configuration_revision:None
+      in
+      Eio.Promise.resolve publication_done_u result);
+    Eio.Promise.await published;
+    let selected, selected_u = Eio.Promise.create () in
+    Eio.Fiber.fork ~sw (fun () ->
+      Eio.Promise.resolve selected_u (Port.select_model port ~actor ~target));
+    Eio.Promise.await entered_actor;
+    Eio.Fiber.yield ();
+    assert (Option.is_none (Eio.Promise.peek selected));
+    Port.close port;
+    Eio.Promise.resolve release_u ();
+    ignore (Eio.Promise.await publication_done |> ok : unit);
+    (match Eio.Promise.await selected with
+     | Error _ -> ()
+     | Ok _ -> failwith "closed port issued a model selection");
+    let fresh_port =
+      Port.create
+        ~dispatch:(fun ~actor:_ _ -> Error P.Provider_operator.Error.Unsupported)
+        ~receipt:(fun ~actor:_ _ -> Error P.Provider_operator.Error.Unsupported)
+        ~current_model_bridge:(fun () -> Ok bridge)
+        ~close:(fun () -> ())
+    in
+    ignore (Port.select_model fresh_port ~actor ~target |> ok : Port.Model_selection.t);
+    Port.close fresh_port;
+    C.For_testing.set_after_publication_hook registry None);
+  print_endline "real metadata wait crossed port close; no selection escaped";
+  [%expect {| real metadata wait crossed port close; no selection escaped |}]
+;;
 
 let configure bridge profile operation =
   B.configure_environment

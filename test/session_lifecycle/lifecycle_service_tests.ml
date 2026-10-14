@@ -1638,6 +1638,8 @@ let%expect_test "startup failure retains store until actual operator retry compl
             Agent_server.Provider_operator_port.create
               ~dispatch:(fun ~actor:_ _ -> Error P.Provider_operator.Error.Unsupported)
               ~receipt:(fun ~actor:_ _ -> Error P.Provider_operator.Error.Unsupported)
+              ~current_model_bridge:(fun () ->
+                Error P.Provider_operator.Error.Unsupported)
               ~close:(fun () ->
                 Int.incr attempts;
                 if Int.equal !attempts 1 then failwith "original operator cleanup failure")

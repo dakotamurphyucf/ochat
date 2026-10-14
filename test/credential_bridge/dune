@@ -1,5 +1,5 @@
 (library
  (name credential_bridge_tests)
- (libraries core core_unix eio eio_main eio.mock ochat.inference_host ochat.credential_registry ochat.credential_registry_model ochat.private_storage ochat.provider_secret_store)
+ (libraries core core_unix eio eio_main eio.mock ochat.inference_host ochat.credential_registry ochat.credential_registry_model ochat.private_storage ochat.provider_secret_store ochat.agent_server ochat.operator_authorization ochat.agent_protocol)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))

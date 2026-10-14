@@ -180,6 +180,7 @@ let%test_unit
         ~registry
         ~selected:registry
         ~job_policy:Chat_response.One_off_request.default_policy
+        ~selected_model:None
         ~handle
         ~workspace_conflict_domain:"root-owner-test"
     in
@@ -206,6 +207,7 @@ let%test_unit
         ~registry
         ~selected:registry
         ~job_policy:Chat_response.One_off_request.default_policy
+        ~selected_model:None
         ~handle:other_handle
         ~workspace_conflict_domain:"root-owner-test"
       |> ok
@@ -363,6 +365,7 @@ let%test_unit
         ~registry
         ~selected:registry
         ~job_policy:Chat_response.One_off_request.default_policy
+        ~selected_model:None
         ~handle:next_handle
         ~workspace_conflict_domain:"root-owner-test"
       |> ok
@@ -432,6 +435,7 @@ let%test_unit
             ~registry:selected
             ~selected
             ~job_policy:Chat_response.One_off_request.default_policy
+            ~selected_model:None
             ~handle
             ~workspace_conflict_domain:"root-owner-test"
         with
@@ -454,6 +458,7 @@ let%test_unit
         ~registry:selected
         ~selected
         ~job_policy:Chat_response.One_off_request.default_policy
+        ~selected_model:None
         ~handle
         ~workspace_conflict_domain:"root-owner-test"
       |> ok
@@ -499,6 +504,7 @@ let%test_unit "physical root job control preserves exact inactive attempts" =
         ~registry:selected
         ~selected
         ~job_policy:Chat_response.One_off_request.default_policy
+        ~selected_model:None
         ~handle
         ~workspace_conflict_domain:"root-owner-test"
       |> ok
@@ -645,6 +651,7 @@ let%test_unit "uncertain job cancellation retains owner and capacity until recov
            ~registry:selected
            ~selected
            ~job_policy:Chat_response.One_off_request.default_policy
+           ~selected_model:None
            ~handle
            ~workspace_conflict_domain:"root-owner-test"
          |> ok
@@ -791,6 +798,7 @@ let%test_unit "uncertain root handoff retains capacity through owner close" =
            ~registry:selected
            ~selected
            ~job_policy:Chat_response.One_off_request.default_policy
+           ~selected_model:None
            ~handle
            ~workspace_conflict_domain:"root-owner-test"
          |> ok
@@ -970,6 +978,7 @@ let%test_unit "nested native terminal settles before its live root resumes" =
            ~registry:selected
            ~selected
            ~job_policy:Chat_response.One_off_request.default_policy
+           ~selected_model:None
            ~handle
            ~workspace_conflict_domain:"root-owner-test"
          |> ok

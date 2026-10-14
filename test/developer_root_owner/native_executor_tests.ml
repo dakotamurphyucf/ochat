@@ -184,6 +184,7 @@ let with_executor
         ~registry:selected
         ~selected
         ~job_policy:Chat_response.One_off_request.default_policy
+        ~selected_model:None
         ~handle
         ~workspace_conflict_domain:"selected-native-test"
       |> ok
