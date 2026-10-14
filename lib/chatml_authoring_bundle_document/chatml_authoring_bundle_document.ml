@@ -21,6 +21,16 @@ module Selection = struct
   let previous t = t.previous
 end
 
+module Published_selection = struct
+  type t =
+    { contract : Contract.t
+    ; lock_source : Captured.t
+    ; sources : Captured.t list
+    }
+
+  let create ~contract ~lock_source ~sources = { contract; lock_source; sources }
+end
+
 module Error = struct
   type problem =
     | Wrong_document_basis
@@ -351,7 +361,7 @@ let covers_inventory manifest document tasks ~stage =
     Map.mem ids (Agent_protocol.Authoring_common.Source.id (Bundle.Member.source member)))
 ;;
 
-let validate manifest ~sources ~dir ~selected_projects ~limits ~checkpoint =
+let prepare_tasks manifest ~sources ~dir ~select_projects ~limits ~checkpoint =
   let open Result.Let_syntax in
   let%bind document =
     match Bundle.Manifest.basis manifest with
@@ -364,6 +374,7 @@ let validate manifest ~sources ~dir ~selected_projects ~limits ~checkpoint =
   in
   let%bind tasks, bundle_fingerprint =
     Project.Attempt.run_stage attempt ~checkpoint ~f:(fun stage ->
+      let%bind selected_projects = select_projects stage in
       let%bind inputs =
         Inputs.create document ~stage
         |> Result.map_error ~f:(fun () -> Missing_or_surplus_document_member)
@@ -423,6 +434,28 @@ let validate manifest ~sources ~dir ~selected_projects ~limits ~checkpoint =
       | Stage_error problem -> { Error.problem }
       | Budget_error problem -> { Error.problem = Project problem })
   in
+  Ok (document, attempt, tasks, bundle_fingerprint)
+;;
+
+let result_value manifest document bundle_fingerprint scripts =
+  { Validated.manifest_fingerprint = Bundle.Manifest.fingerprint manifest
+  ; root_source = Bundle.Manifest.Chatmd_document.root_source document
+  ; document_bundle_fingerprint = bundle_fingerprint
+  ; scripts
+  }
+;;
+
+let validate manifest ~sources ~dir ~selected_projects ~limits ~checkpoint =
+  let open Result.Let_syntax in
+  let%bind document, attempt, tasks, bundle_fingerprint =
+    prepare_tasks
+      manifest
+      ~sources
+      ~dir
+      ~select_projects:(fun _ -> Ok selected_projects)
+      ~limits
+      ~checkpoint
+  in
   let%map scripts =
     List.fold_result tasks ~init:[] ~f:(fun scripts task ->
       match task.project, task.selection with
@@ -452,9 +485,91 @@ let validate manifest ~sources ~dir ~selected_projects ~limits ~checkpoint =
         Error { Error.problem = Selected_contract_unavailable })
     |> Result.map ~f:List.rev
   in
-  { Validated.manifest_fingerprint = Bundle.Manifest.fingerprint manifest
-  ; root_source = Bundle.Manifest.Chatmd_document.root_source document
-  ; document_bundle_fingerprint = bundle_fingerprint
-  ; scripts
-  }
+  result_value manifest document bundle_fingerprint scripts
+;;
+
+let rebind manifest ~sources ~dir ~selected_projects ~limits ~checkpoint =
+  let open Result.Let_syntax in
+  let select_projects stage =
+    let rec loop count acc = function
+      | [] -> Ok (List.rev acc)
+      | _ when count >= Bundle.Wire_limits.max_members -> error Missing_or_surplus_script
+      | (selector, selected) :: rest ->
+        Stage.checkpoint stage;
+        loop
+          (count + 1)
+          (( selector
+           , Selection.create
+               ~contract:selected.Published_selection.contract
+               ~previous:None )
+           :: acc)
+          rest
+    in
+    loop 0 [] selected_projects
+  in
+  let%bind document, attempt, tasks, bundle_fingerprint =
+    prepare_tasks manifest ~sources ~dir ~select_projects ~limits ~checkpoint
+  in
+  let%bind aligned =
+    Project.Attempt.run_stage attempt ~checkpoint ~f:(fun stage ->
+      let rec remove selector before = function
+        | [] -> None
+        | ((candidate, selected) as item) :: rest ->
+          Stage.checkpoint stage;
+          if Bundle.Manifest.Script.Selector.equal selector candidate
+          then Some (selected, List.rev_append before rest)
+          else remove selector (item :: before) rest
+      in
+      let%bind aligned, remaining =
+        List.fold_result
+          tasks
+          ~init:([], selected_projects)
+          ~f:(fun (aligned, remaining) task ->
+            Stage.checkpoint stage;
+            match task.project with
+            | None -> Ok ((task, None) :: aligned, remaining)
+            | Some _ ->
+              (match remove task.selector [] remaining with
+               | None -> error Selected_contract_unavailable
+               | Some (selected, remaining) ->
+                 Ok ((task, Some selected) :: aligned, remaining)))
+      in
+      if List.is_empty remaining
+      then Ok (List.rev aligned)
+      else error Missing_or_surplus_script)
+    |> Result.map_error ~f:(function
+      | Stage_error problem -> { Error.problem }
+      | Budget_error problem -> { Error.problem = Project problem })
+  in
+  let%map scripts =
+    List.fold_result aligned ~init:[] ~f:(fun scripts (task, published) ->
+      match task.project, published with
+      | None, None ->
+        Ok
+          ({ Validated.Script.selector = task.selector
+           ; binding = task.binding
+           ; project = None
+           }
+           :: scripts)
+      | Some _, Some published ->
+        Project.Attempt.restore_published_selected_script
+          attempt
+          ~selector:task.selector
+          ~derived_entry:task.derived_entry
+          ~lock_source:published.lock_source
+          ~sources:published.sources
+          ~contract:published.contract
+          ~checkpoint
+        |> Result.map_error ~f:(fun problem -> { Error.problem = Project problem })
+        |> Result.map ~f:(fun project ->
+          { Validated.Script.selector = task.selector
+          ; binding = task.binding
+          ; project = Some project
+          }
+          :: scripts)
+      | None, Some _ | Some _, None ->
+        Error { Error.problem = Selected_contract_unavailable })
+    |> Result.map ~f:List.rev
+  in
+  result_value manifest document bundle_fingerprint scripts
 ;;

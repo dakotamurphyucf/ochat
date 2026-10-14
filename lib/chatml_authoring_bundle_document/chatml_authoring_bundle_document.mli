@@ -21,6 +21,20 @@ module Selection : sig
   val previous : t -> Chatml_project_build.t option
 end
 
+module Published_selection : sig
+  type t
+
+  (** Exact published final lock/graph captures and a separately admitted
+      current compiler contract. Constructing this value is not source custody
+      or host authority; the Host obtains bytes only inside Store's protected
+      published-capture borrow. *)
+  val create
+    :  contract:Contract.t
+    -> lock_source:Captured.t
+    -> sources:Captured.t list
+    -> t
+end
+
 module Error : sig
   type problem =
     | Wrong_document_basis
@@ -94,6 +108,24 @@ val validate
   -> sources:Captured.t list
   -> dir:Eio.Fs.dir_ty Eio.Path.t
   -> selected_projects:(Bundle.Manifest.Script.Selector.t * Selection.t) list
+  -> limits:Project.Limits.t
+  -> checkpoint:(unit -> unit)
+  -> (Validated.t, Error.t) result
+
+(** Reparse the exact captured definition with the same generated parser,
+    imported-member and Binding checks as [validate]. Actual parsed declarations
+    must match all manifest selectors, authored body/external source identities,
+    per-script project roots and environments. Source_only retains no graph.
+    Every Selected_project must have exactly one supplied final published graph;
+    a missing, surplus or repeated selector rejects. Its final lock is restored
+    with the selected current contract through Project.Attempt's SAME work/input
+    ledger, without requiring the original Compose previous Build. No host file
+    or network fallback, preprocessing, compiler initializer or runtime work. *)
+val rebind
+  :  Bundle.Manifest.t
+  -> sources:Captured.t list
+  -> dir:Eio.Fs.dir_ty Eio.Path.t
+  -> selected_projects:(Bundle.Manifest.Script.Selector.t * Published_selection.t) list
   -> limits:Project.Limits.t
   -> checkpoint:(unit -> unit)
   -> (Validated.t, Error.t) result

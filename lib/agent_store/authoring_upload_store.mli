@@ -34,6 +34,12 @@ module Published_capture : sig
   val manifest : t -> Bundle.Manifest.t
   val uploaded_sources : t -> Chatml_source.t list
   val graphs : t -> Graph.t list
+
+  (** Pure, bounded comparison with a newly restored genuine closure. Reuse the
+      publisher's one receipt-basis projection and compare every saved graph's
+      selector, lock and source bytes; no saved receipt or captured source
+      grants read or execution authority. *)
+  val agrees_with_proof : t -> Proof.t -> checkpoint:(unit -> unit) -> bool
 end
 
 module Claim_result : sig
@@ -251,8 +257,14 @@ val reject
   -> (unit, Error.t) Result.t
 
 (** An authenticated, deadline-bound borrow of one verified published capture.
+    [admit_metadata] is a trusted bounded non-yielding host callback after the
+    principal/deadline lookup, before this request's captured bytes are verified
+    or materialized. It sees comparison metadata only. Internal recovery before
+    this point may itself perform bounded integrity reads; this hook does not
+    claim to precede all store I/O. The caller must independently authorize the
+    read before entering Store and recheck current selection after waits.
     Admission checks the durable marker and exact installed bytes under the
-    Store gate. The callback runs outside that gate while prune protects its
+    Store gate. [f] runs outside that gate while prune protects its
     source files; its immutable byte values may escape as data, but the borrow
     is no longer authority after return. One Store borrow may be active at a
     time; a second returns Busy without waiting or materializing another
@@ -266,6 +278,7 @@ val with_published
   -> bundle_id:Agent_protocol.Id.Authoring_bundle.t
   -> now:(unit -> Agent_protocol.Timestamp.t)
   -> checkpoint:(unit -> unit)
+  -> admit_metadata:(Bundle.Receipt.t -> Bundle.Manifest.t -> unit)
   -> f:(Published_capture.t -> 'a)
   -> ('a, Error.t) Result.t
 

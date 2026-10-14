@@ -138,6 +138,32 @@ module Attempt : sig
     -> checkpoint:(unit -> unit)
     -> (Validated.t, Error.t) result
 
+  (** Rebind the FINAL published lock and exact graph captures with an
+      independently selected current compiler contract. This never needs the
+      original Compose previous Build and never composes a new lock. Both
+      variants retain this Attempt's one snapshot index, input/work ledger,
+      selected source and declaration/route/result reconciliation. The lower
+      [Build.restore] receives the remaining allowance; its returned work is
+      debited once and its Prepared input is charged even when strings share
+      storage. A graph mismatch closes the Attempt. *)
+  val restore_published_top
+    :  t
+    -> lock_source:Captured.t
+    -> sources:Captured.t list
+    -> contract:Contract.t
+    -> checkpoint:(unit -> unit)
+    -> (Validated.t, Error.t) result
+
+  val restore_published_selected_script
+    :  t
+    -> selector:Bundle.Manifest.Script.Selector.t
+    -> derived_entry:Captured.t option
+    -> lock_source:Captured.t
+    -> sources:Captured.t list
+    -> contract:Contract.t
+    -> checkpoint:(unit -> unit)
+    -> (Validated.t, Error.t) result
+
   val manifest_fingerprint : t -> Captured.Digest.t
 end
 
