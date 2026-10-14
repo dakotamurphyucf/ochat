@@ -79,6 +79,13 @@ let analyzer ?(script_selection = None) owner env =
          ~max_parser_work_steps:100_000
          ~max_diagnostic_work_steps:100_000
        |> Or_error.ok_exn)
+    ~prefix_limits:
+      (Analyze.Prefix_limits.create
+         ~max_document_bundle_files:4
+         ~max_document_bundle_bytes:2048
+         ~max_parser_work_steps:100_000
+         ~max_host_work_steps:100_000
+       |> Or_error.ok_exn)
 ;;
 
 let selected_build ?contract body =

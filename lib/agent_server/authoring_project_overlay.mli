@@ -34,6 +34,17 @@ module Prepared : sig
   val contract : t -> Chatml.Chatml_compiler_contract.t
 end
 
+(** Deterministic bounded generated-lock choice shared by current Project
+    overlays and pure selected-script entry recomposition. It compares the old
+    lock and every supplied captured source ID before choosing a fresh ID;
+    [checkpoint] charges each visit/candidate. The ID is only a derived Build
+    output location, never a source-read or route grant. *)
+val fresh_lock_id_from_sources
+  :  sources:Chatml_source.t list
+  -> prior_lock:Chatml_source.Id.t
+  -> checkpoint:(unit -> unit)
+  -> (Chatml_source.Id.t, Error.t) result
+
 val prepare
   :  Owner.Current.t
   -> limits:Chatml_project_build.Limits.t

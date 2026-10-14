@@ -513,6 +513,37 @@ let%expect_test "client binds source, document transitions and initialization" =
         ~selected_contract:fingerprint
       |> ok
     in
+    let selected_prefix_request =
+      S.Prefix.Request.create
+        ~context:expected
+        ~target:(S.Target.selected_script "selected" |> ok)
+        ~source:base
+        ~cursor_byte:3
+      |> ok
+    in
+    let selected_prefix authored_cursor =
+      let authored_request =
+        S.Prefix.Authored_request.create ~source:base ~cursor_byte:authored_cursor |> ok
+      in
+      S.Prefix.create_with_authored_request
+        ~capture
+        ~full_source:base
+        ~prefix_source:base
+        ~cursor_byte:(A.Source.byte_length base)
+        ~end_byte:(A.Source.byte_length base)
+        ~prefix_graph:fingerprint
+        ~snapshot:(S.Snapshot_id.create "selected-prefix" |> ok)
+        ~authored_request
+      |> ok
+      |> S.Prefix.provisional
+    in
+    prefix_reply := Some (selected_prefix 3);
+    assert (
+      Result.is_ok (Agent_client.Authoring.analyze_prefix client selected_prefix_request));
+    prefix_reply := Some (selected_prefix 2);
+    assert (
+      Result.is_error
+        (Agent_client.Authoring.analyze_prefix client selected_prefix_request));
     let query_request =
       S.Query.Request.create
         ~evidence:(S.Query.Syntax_only capture)

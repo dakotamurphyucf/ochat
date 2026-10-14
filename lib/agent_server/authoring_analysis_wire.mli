@@ -38,9 +38,27 @@ val within_host_limit
   -> max_bytes:int
   -> (unit, Error.t) result
 
+(** Current native captured source descriptor; an editor revision is echoed
+    only when this exact source is in the current Ledger. *)
+val source
+  :  contexts:Ledger.t
+  -> identity:Ledger.Identity.t
+  -> Chatml_source.t
+  -> (P.Authoring.Source.t, Error.t) result
+
 val project_capture
   :  expected:P.Authoring.Context.Expected.t
   -> stamp:Project.Project_stamp.t
+  -> (A.Capture.t, Error.t) result
+
+(** Exact selected Script stamp projection for a provisional prefix. The
+    checked Document candidate is absent; Script admission already proved
+    parser membership and selected Prepared/body association. *)
+val document_script_capture
+  :  contexts:Ledger.t
+  -> expected:P.Authoring.Context.Expected.t
+  -> source:Chatml_source.t
+  -> script:Document.Script.t
   -> (A.Capture.t, Error.t) result
 
 val document_capture

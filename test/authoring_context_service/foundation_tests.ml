@@ -75,6 +75,7 @@ let with_supplied_owner
                ~max_active_requests_per_connection:2
                ~max_roots_per_connection:1
                ~max_response_bytes:result_bytes
+               ~max_provisional_results:8
              |> Or_error.ok_exn)
       in
       let response =
@@ -140,6 +141,7 @@ let%test_unit "feature checks, expired Current and final publication head CAS" =
       [ "project", Testing.Project_cache
       ; "document", Testing.Document_cache
       ; "analysis index", Testing.Analysis_index
+      ; "provisional index", Testing.Provisional_index
       ]
       ~f:(fun (name, head) ->
         match invoke ~after:(fun probe -> Testing.replace_head probe head |> ok) () with

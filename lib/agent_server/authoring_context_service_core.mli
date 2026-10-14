@@ -16,6 +16,7 @@ module Limits : sig
     ; max_active_requests_per_connection : int
     ; max_roots_per_connection : int
     ; max_response_bytes : int
+    ; max_provisional_results : int
     }
 
   val create
@@ -23,6 +24,7 @@ module Limits : sig
     -> max_active_requests_per_connection:int
     -> max_roots_per_connection:int
     -> max_response_bytes:int
+    -> max_provisional_results:int
     -> t Or_error.t
 end
 
@@ -180,6 +182,7 @@ type t =
   ; mutable document_cache : Document.Document_cache.t
   ; mutable document_capture : Retained_document_capture.t option
   ; mutable analysis_index : Authoring_analysis_index.t
+  ; mutable provisional_index : Authoring_provisional_index.t
   ; mutable closed : bool
   ; mutable release_hook : Eio.Switch.hook
   }
@@ -247,11 +250,13 @@ module Current : sig
     ; borrowed_project_cache : Project.Project_cache.t
     ; borrowed_document_cache : Document.Document_cache.t
     ; borrowed_analysis_index : Authoring_analysis_index.t
+    ; borrowed_provisional_index : Authoring_provisional_index.t
     }
 
   val basis : t -> basis
   val expected : t -> P.Authoring.Context.Expected.t
   val analysis_index : t -> (Authoring_analysis_index.t, Error.t) result
+  val provisional_index : t -> (Authoring_provisional_index.t, Error.t) result
 
   (** Exactly the immutable heads captured with [owner] for this live request.
       Candidate work uses this coherent tuple; final Owner CAS rejects any

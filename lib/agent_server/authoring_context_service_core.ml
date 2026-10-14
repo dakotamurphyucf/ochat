@@ -17,6 +17,7 @@ module Limits = struct
     ; max_active_requests_per_connection : int
     ; max_roots_per_connection : int
     ; max_response_bytes : int
+    ; max_provisional_results : int
     }
 
   let create
@@ -24,12 +25,15 @@ module Limits = struct
         ~max_active_requests_per_connection
         ~max_roots_per_connection
         ~max_response_bytes
+        ~max_provisional_results
     =
     if
       max_connections <= 0
       || max_active_requests_per_connection <= 0
       || max_roots_per_connection <= 0
       || max_response_bytes <= 0
+      || max_provisional_results <= 0
+      || max_provisional_results > 1024
     then Or_error.error_string "authoring service limits must be positive"
     else
       Ok
@@ -37,6 +41,7 @@ module Limits = struct
         ; max_active_requests_per_connection
         ; max_roots_per_connection
         ; max_response_bytes
+        ; max_provisional_results
         }
   ;;
 end
@@ -331,6 +336,7 @@ type t =
   ; mutable document_cache : Document.Document_cache.t
   ; mutable document_capture : Retained_document_capture.t option
   ; mutable analysis_index : Authoring_analysis_index.t
+  ; mutable provisional_index : Authoring_provisional_index.t
   ; mutable closed : bool
   ; mutable release_hook : Eio.Switch.hook
   }
@@ -592,6 +598,8 @@ let transition t contexts =
        t.analysis_index
        ~project:t.project_cache
        ~document:t.document_cache;
+  t.provisional_index
+  <- Authoring_provisional_index.transition t.provisional_index ~contexts;
   Option.iter t.document_capture ~f:(fun retained ->
     match Ledger.find_document contexts ~identity:retained.identity with
     | Some view
@@ -616,6 +624,7 @@ module Current = struct
     ; borrowed_project_cache : Project.Project_cache.t
     ; borrowed_document_cache : Document.Document_cache.t
     ; borrowed_analysis_index : Authoring_analysis_index.t
+    ; borrowed_provisional_index : Authoring_provisional_index.t
     }
 
   let basis t =
@@ -630,6 +639,12 @@ module Current = struct
     if (not !(t.live)) || not (Int.equal t.domain (Stdlib.Domain.self () :> int))
     then Error Error.Stale_context
     else Ok t.borrowed_analysis_index
+  ;;
+
+  let provisional_index t =
+    if (not !(t.live)) || not (Int.equal t.domain (Stdlib.Domain.self () :> int))
+    then Error Error.Stale_context
+    else Ok t.borrowed_provisional_index
   ;;
 
   let analysis_heads t =
@@ -783,7 +798,7 @@ let create
       ~context_limits
       ~analysis_policy
       ~protocol_limits
-      ~limits
+      ~(limits : Limits.t)
   =
   Eio.Switch.check sw;
   Option.iter upload ~f:(fun upload ->
@@ -794,6 +809,12 @@ let create
     Authoring_analysis_index.create
       ~owner_nonce:(P.Id.Transaction.create ())
       ~max_rows:(Project.Policy.max_results analysis_policy)
+    |> Or_error.ok_exn
+  in
+  let provisional_index =
+    Authoring_provisional_index.create
+      ~owner_nonce:(P.Id.Transaction.create ())
+      ~max_rows:limits.max_provisional_results
     |> Or_error.ok_exn
   in
   let service =
@@ -814,6 +835,7 @@ let create
     ; document_cache = Document.Document_cache.create ~policy:analysis_policy
     ; document_capture = None
     ; analysis_index
+    ; provisional_index
     ; closed = false
     ; release_hook = Eio.Switch.null_hook
     }

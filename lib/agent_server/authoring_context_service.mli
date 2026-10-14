@@ -18,7 +18,11 @@ module Limits : sig
       semantic/assistance work per connection, while source-host/project build
       and protocol per-request caps continue to apply. [max_response_bytes]
       bounds an individual constructed wire response, not caller retention
-      after it is returned. [max_roots_per_connection] bounds the map of
+      after it is returned. [max_provisional_results] separately caps the
+      latest-per-context provisional prefix snapshots; checked caches remain
+      under the immutable analysis policy's distinct [max_results] cap. Each
+      provisional snapshot uses the same compiler input/fact/edge ceilings,
+      and no client label controls retention. [max_roots_per_connection] bounds the map of
       connection-local root labels. These limits cannot enlarge Ledger,
       Source_host, Upload_host or Initialize limits. *)
   val create
@@ -26,6 +30,7 @@ module Limits : sig
     -> max_active_requests_per_connection:int
     -> max_roots_per_connection:int
     -> max_response_bytes:int
+    -> max_provisional_results:int
     -> t Or_error.t
 end
 
@@ -252,6 +257,20 @@ module Semantic : sig
       -> t Or_error.t
   end
 
+  module Prefix_limits : sig
+    type t
+
+    (** Bounded frozen-bundle parse and host-request work. The joined prefix
+        checker uses the existing immutable Core analysis policy's separate
+        compiler/conversion/semantic budget and selected contract. *)
+    val create
+      :  max_document_bundle_files:int
+      -> max_document_bundle_bytes:int
+      -> max_parser_work_steps:int
+      -> max_host_work_steps:int
+      -> t Or_error.t
+  end
+
   type t
 
   val create
@@ -262,6 +281,7 @@ module Semantic : sig
     -> project_metadata:Project_metadata.Policy.t option
     -> project_build_limits:Chatml_project_build.Limits.t
     -> limits:Limits.t
+    -> prefix_limits:Prefix_limits.t
     -> t
 
   val analyze
@@ -270,6 +290,13 @@ module Semantic : sig
     -> connection:Connection_context.t
     -> P.Authoring.Analysis.Analyze.Request.t
     -> (P.Authoring.Analysis.Analyze.t, Error.t) result
+
+  val prefix
+    :  t
+    -> actor:Operator_authorization.t
+    -> connection:Connection_context.t
+    -> P.Authoring.Analysis.Prefix.Request.t
+    -> (P.Authoring.Analysis.Prefix.t, Error.t) result
 end
 
 (** Lexical and early assistance borrow the same current context and joined
@@ -381,6 +408,7 @@ module For_testing : sig
     | Project_cache
     | Document_cache
     | Analysis_index
+    | Provisional_index
     | Parsed_capture
 
   type probe
@@ -420,6 +448,14 @@ module For_testing : sig
     -> expected:P.Authoring.Context.Expected.t
     -> checkpoint:(unit -> unit)
     -> (capture_state, error) result
+
+  val provisional_count
+    :  owner
+    -> actor:Operator_authorization.t
+    -> connection:Connection_context.t
+    -> expected:P.Authoring.Context.Expected.t
+    -> checkpoint:(unit -> unit)
+    -> (int, error) result
 
   type index_view
 
