@@ -117,16 +117,21 @@ let record_error = function
   | Invalid_digest digest -> Store_error.Corrupt ("invalid document digest: " ^ digest)
 ;;
 
-let rec iter_strings json ~f =
+let rec iter_strings_with_checkpoint json ~checkpoint ~f =
+  checkpoint ();
   match json with
   | `String value -> f value
   | `Object fields ->
     List.iter fields ~f:(fun (key, value) ->
+      checkpoint ();
       f key;
-      iter_strings value ~f)
-  | `Array values -> List.iter values ~f:(fun value -> iter_strings value ~f)
+      iter_strings_with_checkpoint value ~checkpoint ~f)
+  | `Array values ->
+    List.iter values ~f:(fun value -> iter_strings_with_checkpoint value ~checkpoint ~f)
   | `Null | `True | `False | `Number _ -> ()
 ;;
+
+let iter_strings json ~f = iter_strings_with_checkpoint json ~checkpoint:Fn.id ~f
 
 let expect_versions document ~kind ~versions =
   let version = Document_schema.Document.version document in

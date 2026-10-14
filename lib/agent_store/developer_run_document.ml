@@ -621,7 +621,7 @@ let invocation_entry_of_json json =
   { Invocation_entry.revision = Int64.to_int_exn revision; value }
 ;;
 
-let of_bytes
+let of_bytes_with_document
       bytes
       ~poll
       ~limits
@@ -694,5 +694,26 @@ let of_bytes
   let%map () =
     validate t ~poll ~limits ~max_epochs ~max_jobs ~max_invocations ~max_job_payload_bytes
   in
-  t
+  t, document
+;;
+
+let of_bytes
+      bytes
+      ~poll
+      ~limits
+      ~max_epochs
+      ~max_jobs
+      ~max_invocations
+      ~max_job_payload_bytes
+  =
+  Result.map
+    (of_bytes_with_document
+       bytes
+       ~poll
+       ~limits
+       ~max_epochs
+       ~max_jobs
+       ~max_invocations
+       ~max_job_payload_bytes)
+    ~f:fst
 ;;

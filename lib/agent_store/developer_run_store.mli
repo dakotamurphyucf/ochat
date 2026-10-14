@@ -505,6 +505,60 @@ module Result_root : sig
     -> (Inventory_rows.t, Store_error.t) result
 end
 
+(** A single physically issued, bounded borrow for cross-owner collection.
+    It is entered only after the shared Blob coordinator. The callback holds
+    this Store's existing developer-root gate from complete run enumeration
+    through the caller's final deletion; Store writes, claim release and close
+    cannot enter in between. This is not a worker Claim, result disclosure or
+    permission to address arbitrary native paths. *)
+module Retention : sig
+  type t
+  type run
+
+  (** Reuse the canonical no-follow Store recovery scan and document codec,
+      debiting every directory entry, document byte, retained row and bounded
+      processing step to [reader]/[checkpoint] in addition to Store limits.
+      A failed scan exposes no partial inventory. The callback must not reenter
+      this Store or retain [t] as authority; exceptions/cancellation preserve
+      their original identity and release the gate. *)
+  val with_inventory
+    :  store
+    -> reader:Retention_reader.t
+    -> checkpoint:(unit -> unit)
+    -> f:(t -> ('a, Store_error.t) result)
+    -> ('a, Store_error.t) result
+
+  (** Stable, bounded projections of the same authenticated documents read
+      once under [with_inventory]. Original bytes are kept so a conservative
+      reference scan does not lose unknown or escaped fields. *)
+  val runs : t -> run list
+
+  (** The already borrowed canonical Data_root for an at_root view of the same
+      Reader allowance. This path is comparison-only and grants no new root. *)
+  val root_directory : t -> string
+
+  val result_root : run -> Result_root.t
+  val document_bytes : run -> string
+
+  val iter_document_strings
+    :  run
+    -> checkpoint:(unit -> unit)
+    -> f:(string -> unit)
+    -> unit
+
+  val epochs : run -> (int * Chatml_source.Digest.t) list
+  val jobs : run -> Agent_protocol.Developer_job.t list
+
+  (** Callback-only location for the existing exact intent-file algorithm.
+      It checks the still-live borrow; it neither reacquires the same root gate
+      nor treats [Data_root.t] alone as an authority after callback return. *)
+  val with_root
+    :  t
+    -> result_root:Result_root.t
+    -> f:(env:Eio_unix.Stdenv.base -> root:Data_root.t -> ('a, Store_error.t) result)
+    -> ('a, Store_error.t) result
+end
+
 (** Comparison boundary for a result selected during this Store's exclusive
     startup Recovery window. These checks do not read or stage result bytes,
     mint a Claim, or commit a terminal. They bind the physical Store/root,

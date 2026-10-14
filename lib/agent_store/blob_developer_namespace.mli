@@ -30,6 +30,17 @@ module Entry : sig
   val id : t -> Agent_protocol.Id.Blob.t
   val state : t -> State.t
   val durable : t -> bool
+
+  (** Original validated metadata document bytes, if present, retained under
+      the caller's aggregate Reader allowance. Cross-owner reference absence
+      must scan these actual bytes, not only a reserialized typed projection;
+      [None] is possible only for a permitted temporary partial fragment. *)
+  val metadata_bytes : t -> string option
+
+  (** Decoded metadata string fields, including admitted extension fields and
+      escaped values, from the SAME validated document. The caller charges
+      iteration/scanning work and does not treat these strings as authority. *)
+  val iter_metadata_strings : t -> checkpoint:(unit -> unit) -> f:(string -> unit) -> unit
 end
 
 (** Reuse the collector's bounded no-follow namespace scanner for startup

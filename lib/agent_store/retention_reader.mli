@@ -44,6 +44,11 @@ val with_local_limits : t -> max_entries:int -> max_bytes:int -> (t, Store_error
     as filesystem reads. Negative sizes and exhausted budgets fail the attempt. *)
 val charge_bytes : t -> int -> (unit, Store_error.t) result
 
+(** Charge one explicit no-follow kind probe of an authentic owner-derived
+    root, including a missing structural directory. This shares the same
+    allowance as list/read and cannot mint a filesystem capability. *)
+val charge_entry : t -> (unit, Store_error.t) result
+
 (** Inspect a child without following links; consumes one entry. Only regular
     files/directories are accepted, and all parent directories are validated. *)
 val kind : t -> path:string -> ([ `Directory | `File ], Store_error.t) result
