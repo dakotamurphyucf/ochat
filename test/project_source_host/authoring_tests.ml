@@ -21,7 +21,7 @@ let authoring_ok = function
   | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
 ;;
 
-let with_source_context f =
+let with_source_context ?(max_context_requests = 8) f =
   with_workspace (fun env root_path data ->
     Eio.Path.save
       ~create:(`Or_truncate 0o600)
@@ -48,7 +48,7 @@ let with_source_context f =
       let limits =
         Authoring.Limits.create
           ~max_contexts:2
-          ~max_context_requests:8
+          ~max_context_requests
           ~max_manifest_entries:8
           ~max_browse_entries:32
           ~max_read_bytes:1024
@@ -481,6 +481,183 @@ let%test_unit "explicit document capture binds unsaved root and imported source 
         | Error Authoring.Error.Foreign_root -> ()
         | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
         | Ok _ -> failwith "foreign source label admitted as document root"))
+;;
+
+let%test_unit "declared project metadata follows the captured declaring input" =
+  with_source_context
+    ~max_context_requests:16
+    (fun env root project_owner allowed denied _ host _ root_path ->
+       let root_project_text =
+         {|{"schema_version":1,"namespace":"authoring","entries":{"main":{"source":"main.chatml","target":"one_off_v1"}}}|}
+       in
+       let project_text =
+         {|{"schema_version":1,"namespace":"imported","entries":{"main":{"source":"main.chatml","target":"one_off_v1"}}}|}
+       in
+       Eio.Path.mkdir ~perm:0o700 Eio.Path.(root_path / "nested");
+       Eio.Path.save
+         ~create:(`Or_truncate 0o600)
+         Eio.Path.(root_path / "nested" / "chatml.project.json")
+         project_text;
+       Eio.Path.save
+         ~create:(`Or_truncate 0o600)
+         Eio.Path.(root_path / "nested" / "part.chatmd")
+         {|<script id="lookup" language="chatml" kind="tool" project="./chatml.project.json">let main = 1</script>|};
+       Eio.Path.save
+         ~create:(`Or_truncate 0o600)
+         Eio.Path.(root_path / "draft.chatmd")
+         {|<import src="nested/part.chatmd" namespace="part"/>|};
+       let member = Path.create "draft.chatmd" |> Or_error.ok_exn in
+       let owner, opened =
+         Authoring.Document_context.open_host
+           host
+           ~actor:allowed
+           ~root
+           ~member
+           ~checkpoint:ignore
+         |> authoring_ok
+       in
+       Exn.protect
+         ~finally:(fun () -> Authoring.Document_context.close_and_wait owner)
+         ~f:(fun () ->
+           let module DC = Authoring.Document_context in
+           let module PC = DC.Project_capture in
+           let module CM = Prompt.Chat_markdown in
+           let parsed =
+             DC.capture_parser_bundle
+               owner
+               ~actor:allowed
+               ~source:(Authoring.Document_capture.source opened)
+               ~dir:root_path
+               ~checkpoint:ignore
+             |> authoring_ok
+           in
+           let generated = CM.Generated.parsed (DC.Parsed_capture.parsed parsed) in
+           let declaration =
+             List.concat_map
+               (generated.parsed_root :: List.map generated.parsed_agents ~f:snd)
+               ~f:CM.Parsed.declarations
+             |> List.find_exn ~f:(fun declaration ->
+               String.equal (CM.Declaration.script_id declaration) "part:lookup")
+           in
+           let capture
+                 ?(parsed = parsed)
+                 ?(schema_limits = Document_schema.Limits.default)
+                 ?(max_work_steps = 100_000)
+                 ()
+             =
+             DC.capture_project_declaration
+               owner
+               ~actor:allowed
+               ~parsed
+               ~declaration
+               ~schema_limits
+               ~max_locator_bytes:1024
+               ~max_path_components:16
+               ~max_identity_bytes:16_384
+               ~max_work_steps
+               ~checkpoint:ignore
+           in
+           let expect_limit = function
+             | Error Authoring.Error.Result_limit -> ()
+             | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+             | Ok _ -> failwith "declared project limit was bypassed"
+           in
+           let first = capture () |> authoring_ok in
+           [%test_eq: string]
+             (Path.to_string (PC.member first))
+             "nested/chatml.project.json";
+           [%test_eq: string] (Captured.contents (PC.source first)) project_text;
+           [%test_eq: string] (Chatml_project.namespace (PC.project first)) "imported";
+           assert (PC.matches first ~parsed ~declaration);
+           assert (PC.belongs_to_root first root);
+           capture ~max_work_steps:1 () |> expect_limit;
+           let read_limit =
+             Document_schema.Limits.create
+               ~max_bytes:8
+               ~max_depth:16
+               ~max_fields:16
+               ~max_nodes:32
+             |> ok
+           in
+           capture ~schema_limits:read_limit () |> expect_limit;
+           let decode_limit =
+             Document_schema.Limits.create
+               ~max_bytes:1024
+               ~max_depth:16
+               ~max_fields:1
+               ~max_nodes:32
+             |> ok
+           in
+           capture ~schema_limits:decode_limit () |> expect_limit;
+           let build =
+             Authoring.Context.capture
+               project_owner
+               ~actor:allowed
+               ~clock:env#mono_clock
+               ~checkpoint:ignore
+             |> authoring_ok
+             |> Authoring.Capture.build
+           in
+           assert (
+             not
+               (PC.matches_project_contents
+                  first
+                  ~build
+                  ~max_compare_bytes:4096
+                  ~checkpoint:ignore
+                |> authoring_ok));
+           (match
+              DC.capture_project_declaration
+                owner
+                ~actor:denied
+                ~parsed
+                ~declaration
+                ~schema_limits:Document_schema.Limits.default
+                ~max_locator_bytes:1024
+                ~max_path_components:16
+                ~max_identity_bytes:16_384
+                ~max_work_steps:100_000
+                ~checkpoint:ignore
+            with
+            | Error Authoring.Error.Unauthorized -> ()
+            | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+            | Ok _ -> failwith "foreign actor captured project declaration");
+           Eio.Path.save
+             ~create:(`Or_truncate 0o600)
+             Eio.Path.(root_path / "nested" / "chatml.project.json")
+             root_project_text;
+           [%test_eq: string] (Captured.contents (PC.source first)) project_text;
+           let second = capture () |> authoring_ok in
+           assert (not (Captured.Digest.equal (PC.identity first) (PC.identity second)));
+           assert (
+             PC.matches_project_contents
+               second
+               ~build
+               ~max_compare_bytes:4096
+               ~checkpoint:ignore
+             |> authoring_ok);
+           let reparsed =
+             DC.capture_parser_bundle
+               owner
+               ~actor:allowed
+               ~source:(Authoring.Document_capture.source opened)
+               ~dir:root_path
+               ~checkpoint:ignore
+             |> authoring_ok
+           in
+           assert (not (PC.matches first ~parsed:reparsed ~declaration));
+           (match capture ~parsed:reparsed () with
+            | Error Authoring.Error.Foreign_root -> ()
+            | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+            | Ok _ -> failwith "foreign parsed declaration admitted");
+           Eio.Path.save
+             ~create:(`Or_truncate 0o600)
+             Eio.Path.(root_path / "nested" / "chatml.project.json")
+             "{";
+           match capture () with
+           | Error Authoring.Error.Invalid_project_declaration -> ()
+           | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+           | Ok _ -> failwith "malformed project declaration admitted"))
 ;;
 
 let%test_unit

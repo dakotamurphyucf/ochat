@@ -271,7 +271,20 @@ owner retains at most one bounded immutable capture. An edit hides its old
 Parsed facts immediately, while a later prefix operation may recompose the
 current unsaved root with those already captured import bytes without a host
 read. Refresh, close and owner replacement retire that material. For projects,
-the [shared overlay preparation](../../lib/agent_server/authoring_project_overlay.mli)
+an explicit Analyze may also capture the project named by one genuine root or
+imported script declaration. The source host resolves its authored project path
+relative to the declaring parser input, reads through the same authorized
+no-follow root and bounded context allowance, and decodes those exact bytes
+independently of whether the script Build succeeds. The immutable receipt
+retains its source, decoded environment names and fixed comparison identity;
+later assistance reads only the current retained receipt. Exact project-byte
+agreement with a selected Build is comparison evidence. The host must
+separately prove the selected Build belongs to the admitted root and portable
+member and recheck both actors; matching bytes or paths alone grant no source
+authority. The document analysis publication boundary admits metadata for at
+most the latest explicitly analyzed declaration in the bounded capture head.
+
+The [shared project overlay preparation](../../lib/agent_server/authoring_project_overlay.mli)
 uses the actual admitted compiler contract and existing closure validator; it
 chooses a fresh collision-checked lock identity under a finite work allowance.
 The [selected-script policy](../../lib/agent_server/authoring_script_selection.mli)
