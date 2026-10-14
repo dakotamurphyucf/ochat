@@ -162,6 +162,27 @@ module Action : sig
     -> checkpoint:(unit -> unit)
     -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result
 
+  (** Admit an external Model.spawn at THIS call boundary. The request is the
+      shared recipe decoded from the script; the host re-admits its original
+      JSON under the real whole-envelope and job/document bounds before any
+      durable or capacity admission. This physical Action derives its
+      original owner/capture, a fresh Job ID, Run_root ancestry, the provider
+      port's pinned nonsecret Target and the actual project/workspace capacity
+      bucket. The caller cannot supply those coordinates. The existing Store
+      Prepared/Handoff and shared capacity ledger publish one Queued Model_call
+      before returning its ID. This job is independent of [seal]'s final
+      Job.start selection and survives a later callback failure/Task.catch.
+      No model secret is acquired or model execution performed here.
+      An uncertain write retains this root's exact physical reservation and
+      pending transaction; the language callback is never replayed. The root
+      callback Switch and call cancellation remain live through the final
+      nonyielding Store admission, including protected cleanup paths. *)
+  val admit_external_model
+    :  t
+    -> request:Agent_protocol.Model_spawn_request.t
+    -> checkpoint:(unit -> unit)
+    -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result
+
   (** Abort only this action's own unsealed provisional reservation. The
       issuing physical scope and fiber must still own it, or the action must
       have conclusively aborted it during bracket cleanup. A sealed/queued,
@@ -286,6 +307,26 @@ module Native_terminal : sig
   val stage_background
     :  t
     -> request:Chat_response.Background_request.t
+    -> checkpoint:(unit -> unit)
+    -> check_parent_now:(unit -> (unit, Agent_protocol.Error.t) result)
+    -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result
+
+  (** The native call-boundary counterpart of Action.admit_external_model.
+      Its decoded request is re-admitted under the real whole-envelope and
+      job/document bounds. This exact registered scope must own a durable Dispatching invocation.
+      Its root derives Invocation ancestry and any nested Job ID, attempt and
+      depth from the live physical Claim already attached to this scope. After
+      yielding preparation it rechecks that Claim and the selected callback's
+      direct-parent/deadline witness before reservation and again at the final
+      nonyielding Store admission point. [check_parent_now] is a trusted,
+      nonyielding effect-entry check; it cannot choose a provider, outcome,
+      capacity bucket or job selection. A copied invocation
+      or result DTO cannot admit a model call. The durable job remains even if
+      the native callback later fails; unknown write custody stays with the
+      root's single bounded mutation/recovery slot. *)
+  val admit_external_model
+    :  t
+    -> request:Agent_protocol.Model_spawn_request.t
     -> checkpoint:(unit -> unit)
     -> check_parent_now:(unit -> (unit, Agent_protocol.Error.t) result)
     -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result
@@ -544,12 +585,17 @@ val with_native_callback
   -> ('a, Agent_protocol.Error.t) result
 
 (** One bounded pass over the physically retained root/native terminal head
-    and later immutable intents, plus any exact inactive-cancel Prepared in
-    this owner's finite control-recovery slot. It reconciles that Store write
+    and later immutable intents, any exact inactive-cancel Prepared in this
+    owner's finite control-recovery slot, and one exact externally admitted
+    Model_call Prepared/Handoff. It reconciles each owned Store write
     before allowing a new mutation; Installed retires only the exact terminal
     job's unclaimed reservation, proven Absent may retry the same pinned
     attempt, and unresolved/diverged state retains the run claim and capacity.
-    No callback reruns. Unknown/divergent state
+    A known model installation publishes its original shared-capacity
+    reservation once; a proven absent write aborts it; a proven prewrite CAS
+    conflict may reprepare only the same immutable job within the finite
+    retry budget. An attempted unknown write retains its exact Handoff,
+    reservation and mutation exclusion. No callback reruns. Unknown/divergent state
     keeps the run quarantined and
     blocks new actions/mutations until trusted recovery resolves it. This
     requires the issuing Eio domain and no active root/native callback or
