@@ -104,6 +104,15 @@ while the captured base source digest may change. A supplied document's base
 capture stays immutable until a new context is opened. Context generations and
 editor revisions are exact JSON integers up to 2^53−1; mutation receipts
 advance generation and remain bound to the current source owner.
+The host adapter can explicitly parse a current unsaved ChatMD root together
+with its authorized imports, using the existing Generated parser and a retained
+no-follow source owner. It returns one immutable bundle, genuine parsed receipt
+and exact parser-input/source associations, with no retained file-read handle.
+The authoring service will adopt this closure at an explicit Analyze or rebuild
+boundary under the current context-generation check. Prefix and Query consume
+only that admitted closure; a new or changed imported file is unavailable to
+them until an explicit capture. An import read observes exact bytes, but the
+host does not assert a multi-file atomic filesystem snapshot.
 Path candidates are selected from that host manifest, project declarations and
 the uploaded bundle's own inventory. A denied root, missing dependency or
 unavailable environment returns an explicit failure; the service does not search
