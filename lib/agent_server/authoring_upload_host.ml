@@ -104,6 +104,8 @@ type t =
   ; mutable release_hook : Eio.Switch.hook
   }
 
+let host_id t = Store.host_id t.store
+
 module Context_capture = struct
   type nonrec t =
     { owner : t
@@ -153,6 +155,8 @@ let check t actor parent =
       then Ok ()
       else Error Error.Unauthorized)
 ;;
+
+let check_upload_current_now t ~actor = check t actor None
 
 let check_read t actor policy =
   let open Result.Let_syntax in

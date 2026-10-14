@@ -6,6 +6,10 @@ module Bundle = Agent_protocol.Authoring_bundle.Bundle
 type t
 type sealed
 
+(** Comparison coordinate of the daemon that opened this store. This does not
+    grant access to any upload. *)
+val host_id : t -> Agent_protocol.Id.Server.t
+
 module Proof : sig
   type t =
     | Project of Chatml_authoring_bundle_project.Validated.t

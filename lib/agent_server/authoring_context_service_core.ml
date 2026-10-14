@@ -62,6 +62,12 @@ module Supplied_document_policy = struct
   let create ~authorize = { authorize }
 end
 
+module Selected_feature = struct
+  type t =
+    | Core_authoring
+    | Bundle_upload
+end
+
 module Error = struct
   type t =
     | Uninstalled
@@ -80,6 +86,7 @@ module Error = struct
     | Invalid_position of P.Authoring.Failure.invalid_position
     | Invalid_request
     | Storage_unavailable
+    | Upload_failure of Upload.Error.t
 
   let to_protocol error =
     let code, message, reason =
@@ -122,6 +129,40 @@ module Error = struct
       | Invalid_request -> P.Error.Invalid_request, "invalid authoring request", None
       | Storage_unavailable ->
         P.Error.Internal_error, "authoring storage unavailable", None
+      | Upload_failure upload_error ->
+        (match upload_error with
+         | Upload.Error.Unauthorized | Expired_actor | Foreign_domain ->
+           ( P.Error.Permission_denied
+           , "bundle access denied"
+           , Some P.Authoring.Failure.Unauthorized )
+         | Closed ->
+           ( P.Error.Lease_stale
+           , "bundle host closed"
+           , Some P.Authoring.Failure.Context_lease_stale )
+         | Busy | Store Busy -> P.Error.Conflict, "bundle operation busy", None
+         | Selection_unavailable ->
+           ( P.Error.Invalid_request
+           , "bundle selection unavailable"
+           , Some P.Authoring.Failure.Environment_unavailable )
+         | Stale_capture ->
+           ( P.Error.Conflict
+           , "bundle capture changed"
+           , Some P.Authoring.Failure.Stale_source )
+         | Invalid_closure | Store Invalid_manifest ->
+           P.Error.Invalid_request, "invalid bundle closure", None
+         | Resource_limit | Store Limit_exceeded ->
+           ( P.Error.Resource_limit
+           , "bundle limit reached"
+           , Some P.Authoring.Failure.Work_limit )
+         | Store Idempotency_conflict ->
+           P.Error.Idempotency_conflict, "bundle idempotency conflict", None
+         | Store Invalid_offset -> P.Error.Invalid_request, "invalid bundle offset", None
+         | Store Incomplete -> P.Error.Conflict, "bundle incomplete", None
+         | Store Sealed -> P.Error.Conflict, "bundle sealed", None
+         | Store Expired -> P.Error.Lease_stale, "bundle expired", None
+         | Store Missing_or_foreign -> P.Error.Invalid_request, "bundle unavailable", None
+         | Store Storage_failure ->
+           P.Error.Internal_error, "bundle storage unavailable", None)
     in
     let error = P.Error.create code ~message ~retryable:false () in
     match reason with
@@ -263,6 +304,7 @@ let remove_active entry cancel =
 ;;
 
 let with_request
+      ?(feature = Selected_feature.Core_authoring)
       ?(final_check = fun () -> Ok ())
       ?(commit = fun result -> Ok result)
       ?after_commit
@@ -282,12 +324,17 @@ let with_request
       | None -> Error Error.Stale_negotiation
       | Some entry ->
         let%bind () = check_entry t entry in
+        let selected_feature =
+          match feature with
+          | Selected_feature.Core_authoring -> P.Authoring.Features.core
+          | Bundle_upload -> P.Authoring.Features.bundle
+        in
         if
           not
             (Option.exists entry.negotiation ~f:(fun negotiation ->
                Connection_context.Authoring_negotiation.selected
                  negotiation
-                 P.Authoring.Features.core))
+                 selected_feature))
         then Error Error.Unselected_feature
         else Ok (entry, Option.value_exn entry.negotiation))
   in
@@ -547,6 +594,9 @@ let create
       ~limits
   =
   Eio.Switch.check sw;
+  Option.iter upload ~f:(fun upload ->
+    if not (P.Id.Server.equal host (Upload.host_id upload))
+    then invalid_arg "authoring upload host does not match service host");
   let contexts = Ledger.create ~limits:context_limits in
   let service =
     { sw

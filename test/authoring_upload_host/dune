@@ -12,6 +12,12 @@
   authoring_upload_store_test
   ochat.agent_protocol
   ochat.operator_authorization
+  ochat.chatml_authoring_context
+  ochat.chatml_authoring_analysis
+  ochat.chatml_semantics
+  ochat.chatml_typechecker
+  ochat.chatml_compilation
+  ochat.chatml
   ochat.chatml_source
   ochat.chatml_project)
  (inline_tests)
