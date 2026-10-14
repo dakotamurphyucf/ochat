@@ -1,4 +1,4 @@
-(* Joined owner for the source/context subset of portable authoring. *)
+(* Joined owner for source/context and bundle authoring handlers. *)
 
 open! Core
 module P = Agent_protocol
@@ -84,6 +84,7 @@ module Error : sig
     | Invalid_position of P.Authoring.Failure.invalid_position
     | Invalid_request
     | Storage_unavailable
+    | Upload_failure of Upload.Error.t
 
   (** Finite/path-free translation to the existing protocol code + authoring
       Failure reason where one exists. No source, native path, environment
@@ -188,6 +189,17 @@ val with_current
     bundle-only host; this owner does not advertise its own subset as the whole
     service. *)
 val handle_core
+  :  t
+  -> actor:Operator_authorization.t
+  -> connection:Connection_context.t
+  -> W.Request.t
+  -> (W.Response.t, Error.t) result
+
+(** Route the four bundle methods through the independently authorized upload
+    host. An upload-only connection needs the selected bundle feature but no
+    core feature or source context. This handler does not advertise itself;
+    installation and transport routing belong to the protocol installer. *)
+val handle_bundle
   :  t
   -> actor:Operator_authorization.t
   -> connection:Connection_context.t

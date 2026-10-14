@@ -58,6 +58,12 @@ module Supplied_document_policy : sig
   val create : authorize:(Operator_authorization.t -> bool) -> t
 end
 
+module Selected_feature : sig
+  type t =
+    | Core_authoring
+    | Bundle_upload
+end
+
 module Error : sig
   type t =
     | Uninstalled
@@ -76,6 +82,7 @@ module Error : sig
     | Invalid_position of P.Authoring.Failure.invalid_position
     | Invalid_request
     | Storage_unavailable
+    | Upload_failure of Upload.Error.t
 
   val to_protocol : t -> P.Error.t
 end
@@ -137,6 +144,10 @@ val check_actor_context
   -> Operator_authorization.t
   -> (unit, Error.t) result
 
+(* [feature] selects one of the two installed authoring feature names; the
+   default keeps existing core-method callers unchanged. The same physical
+   negotiation lease and joined activity owner apply to both choices. *)
+
 (** Own one registered request through all yielding work and rollback. After
     [final_check], the no-yield gate callback repeats phase/lease and executes
     [commit], then unregisters atomically. [abort] runs under cancellation
@@ -146,7 +157,8 @@ val check_actor_context
     [after_commit], when provided, joins committed cleanup while this request
     remains active; a failed cleanup retains the retired owner for close retry. *)
 val with_request
-  :  ?final_check:(unit -> (unit, Error.t) result)
+  :  ?feature:Selected_feature.t
+  -> ?final_check:(unit -> (unit, Error.t) result)
   -> ?commit:('a -> ('a, Error.t) result)
   -> ?after_commit:(unit -> unit)
   -> ?abort:(unit -> unit)

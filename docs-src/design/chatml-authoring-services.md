@@ -486,6 +486,19 @@ If the begin reply is lost, it repeats the exact begin key, manifest and optiona
 parent context to recover the upload ID; status only reconciles a known ID.
 The portable bundle client requires the separately selected
 `authoring.bundle.v1` feature, which does not require `authoring.core.v1`.
+The bundle service handler borrows the same physical connection lifecycle and
+joined request scope as source authoring, then delegates stage, validation and
+publication to the one upload host. It can serve an upload-only principal with
+no source context. The final protocol installer remains responsible for
+advertising and routing the method on each transport.
+When a complete sealed upload has no available publisher or current selected
+contract, commit returns a typed selection error; it does not promise queued
+work. The exact same commit key can retry the sealed claim after selection is
+available. Status is read-only and reports a sealed pending claim as
+`Validating`, the same coarse wire state used for an active durable validation
+intent. That wire state promises neither automatic scheduling nor eventual
+publication. A known durable Published or Rejected terminal is returned only
+after the upload host verifies it under the current independent upload grant.
 Wire receipts echo authenticated host/principal comparison coordinates and
 the upload ID. A pending commit is distinct from a Published receipt; only
 the proof-gated store publisher may publish a validated graph, compiler-contract,

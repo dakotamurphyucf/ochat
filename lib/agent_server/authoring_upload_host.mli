@@ -9,6 +9,9 @@ module Bundle = Agent_protocol.Authoring_bundle.Bundle
     does not install a protocol handler. *)
 type t
 
+(** Verified store host identity for comparison only; never an upload grant. *)
+val host_id : t -> Agent_protocol.Id.Server.t
+
 module Upload_policy : sig
   type t
 
@@ -168,6 +171,15 @@ module Error : sig
       facade; a native path or source byte is not present in the error value. *)
   val sexp_of_t : t -> Sexp.t
 end
+
+(** Bounded non-yielding current actor/upload-grant check for a caller's final
+    publication boundary after its own yielding lifecycle gate. This grants no
+    store lookup or source read; each upload operation still uses its guarded
+    host/store admission. *)
+val check_upload_current_now
+  :  t
+  -> actor:Operator_authorization.t
+  -> (unit, Error.t) result
 
 (** Take exclusive lifetime ownership of one already opened store. Its owner
     switch must outlive [sw], and callers must make no direct store calls after

@@ -261,6 +261,302 @@ let with_host name f =
       Host.close_and_wait host |> host_ok))
 ;;
 
+module Service = Agent_server.Authoring_context_service
+
+let bundle_analysis_policy () =
+  let semantic =
+    Chatml_semantics.Limits.create
+      ~max_input_bytes:1_000_000
+      ~recording:
+        (Chatml_typechecker.Semantic.Limits.create
+           ~max_facts:20_000
+           ~max_edges:40_000
+           ~max_label_bytes:400_000
+           ~max_work_steps:400_000
+         |> Or_error.ok_exn)
+      ~type_graph:
+        (Chatml_semantics.Frozen.Limits.create
+           ~max_nodes:20_000
+           ~max_edges:40_000
+           ~max_label_bytes:400_000
+         |> Or_error.ok_exn)
+      ~max_published_facts:20_000
+      ~max_published_edges:40_000
+      ~max_published_label_bytes:400_000
+      ~max_work_steps:400_000
+    |> Or_error.ok_exn
+  in
+  Chatml_authoring_analysis.Policy.create
+    ~compilation:Chatml_compilation.default_limits
+    ~semantic
+    ~max_dependency_depth:16
+    ~max_results:2
+    ~max_projected_diagnostics:4
+    ~max_projected_sites:12
+    ~max_projection_sources:8
+    ~max_position_index_entries:256
+    ~max_projection_source_bytes:1_000_000
+  |> Or_error.ok_exn
+;;
+
+let bundle_initialize_response ?(features = [ P.Authoring.Features.bundle ]) ~principal ()
+  =
+  let version = P.Version.create ~major:1 ~minor:0 |> protocol_ok in
+  let implementation =
+    P.Initialize.Implementation.create ~name:"bundle host test" ~version:"1"
+    |> protocol_ok
+  in
+  P.Initialize.Response.create
+    ~protocol_name:"ochat.agent"
+    ~selected_version:version
+    ~implementation
+    ~server_id
+    ~enabled_features:features
+    ~extensions:None
+    ~principal
+    ~limits:
+      { max_request_bytes = 16 * 1024 * 1024
+      ; max_event_bytes = 1024
+      ; max_page_size = 100
+      ; max_attachments_per_connection = 1
+      }
+    ~event_retention:
+      { minimum_age_ms = 0; maximum_events = 1; oldest_replayable_sequence = None }
+    ~timing:
+      { heartbeat_interval_ms = 1000
+      ; owner_lease_duration_ms = 10000
+      ; owner_renew_after_ms = 5000
+      ; disconnect_grace_default_ms = 0
+      }
+    ~server_time:start
+  |> protocol_ok
+;;
+
+let with_bundle_service ~publish f =
+  with_root "ochat-upload-bundle-service" (fun env sw root_handle lock ->
+    let store = open_store env sw root_handle lock in
+    Eio.Switch.run (fun host_sw ->
+      let allowed = ref true in
+      let actor_current = ref true in
+      let actor = make_actor actor_current in
+      let publication =
+        if not publish
+        then None
+        else
+          Some
+            (Host.Publication.create
+               ~policy:(Host.Publication_policy.create ~select:(fun _ _ _ -> None))
+               ~limits:Publication_tests.validation_limits
+               ~document_dir:(Eio.Stdenv.fs env))
+      in
+      let host =
+        Host.create
+          ?publication
+          store
+          ~sw:host_sw
+          ~clock:(Eio_mock.Clock.make ())
+          ~upload_policy:(make_policy allowed (ref 0))
+      in
+      Eio.Switch.run (fun service_sw ->
+        let principal = Operator_authorization.principal actor in
+        let connection =
+          Agent_server.Connection_context.create_authenticated
+            ~actor
+            ~connection_id:"bundle-only test"
+            ~transport:In_memory
+            ~publish_notification:(fun _ -> ())
+            ~max_attachments:1
+        in
+        let service =
+          Service.create
+            ~sw:service_sw
+            ~clock:env#mono_clock
+            ~host:server_id
+            ~sources:None
+            ~upload:(Some host)
+            ~supplied_document:None
+            ~selection_policy:
+              (Service.Selection_policy.create
+                 ~project_contract:(fun _ ~root:_ ~project:_ ~selection:_ -> None)
+                 ~document_static:(fun _ ~requested_environment:_ -> None))
+            ~context_limits:
+              (Chatml_authoring_context.Limits.create
+                 ~max_contexts:2
+                 ~max_sources:4
+                 ~max_open_documents:1
+                 ~max_document_bytes:1024
+                 ~max_effective_input_bytes:2048
+                 ~max_context_source_bytes:2048
+                 ~max_total_source_bytes:4096
+               |> Or_error.ok_exn)
+            ~analysis_policy:(bundle_analysis_policy ())
+            ~protocol_limits:
+              (P.Authoring.Limits.create
+                 ~max_sources:4
+                 ~max_source_bytes:1024
+                 ~max_context_source_bytes:2048
+                 ~max_request_bytes:65536
+                 ~max_result_bytes:65536
+                 ~max_path_candidates:16
+               |> protocol_ok)
+            ~limits:
+              (Service.Limits.create
+                 ~max_connections:2
+                 ~max_active_requests_per_connection:2
+                 ~max_roots_per_connection:2
+                 ~max_response_bytes:65536
+               |> Or_error.ok_exn)
+        in
+        (Service.publish_initialize_and_wait
+           service
+           ~connection
+           ~response:(bundle_initialize_response ~principal ())
+         |> function
+         | Ok () -> ()
+         | Error _ -> failwith "bundle-only initialize failed");
+        f env service connection actor allowed;
+        Service.close_and_wait service
+        |> function
+        | Ok () -> ()
+        | Error _ -> failwith "bundle service close failed");
+      Host.close_and_wait host |> host_ok))
+;;
+
+let%test_unit "bundle-only service routes sealed retry and genuine publication" =
+  List.iter [ false; true ] ~f:(fun publish ->
+    with_bundle_service ~publish (fun env service connection actor allowed ->
+      let open P.Authoring.Wire.Response in
+      let call request = Service.handle_bundle service ~actor ~connection request in
+      let manifest = Publication_tests.document_manifest (Eio.Stdenv.fs env) in
+      let begin_request =
+        B.Begin.create_request
+          ~idempotency_key:
+            (P.Idempotency_key.of_string "bundle-service-begin" |> protocol_ok)
+          ~manifest
+          ()
+      in
+      let upload_id =
+        match call (P.Authoring.Wire.Request.Bundle_begin begin_request) with
+        | Ok (Bundle_begin response) -> B.Begin.upload_id response
+        | Ok _ | Error _ -> failwith "bundle-only begin rejected"
+      in
+      let repeated_begin =
+        match call (P.Authoring.Wire.Request.Bundle_begin begin_request) with
+        | Ok (Bundle_begin response) -> B.Begin.upload_id response
+        | Ok _ | Error _ -> failwith "bundle-only begin retry rejected"
+      in
+      check
+        "begin key reuses exact upload"
+        (P.Id.Authoring_upload.equal upload_id repeated_begin);
+      let bytes = Publication_tests.document_bytes in
+      let send ~offset bytes =
+        let chunk =
+          B.Chunk.create_request
+            ~upload_id
+            ~source:Publication_tests.document_id
+            ~byte_offset:offset
+            ~bytes
+          |> protocol_ok
+        in
+        match call (P.Authoring.Wire.Request.Bundle_chunk chunk) with
+        | Ok (Bundle_chunk response) -> response
+        | Ok _ | Error _ -> failwith "bundle-only chunk rejected"
+      in
+      let first_length = Int.min 64 (String.length bytes) in
+      let first_bytes = String.prefix bytes first_length in
+      let first_response = send ~offset:0 first_bytes in
+      let repeated_response = send ~offset:0 first_bytes in
+      check
+        "same chunk repeats without moving progress"
+        (String.equal
+           (Jsonaf.to_string (B.Chunk.response_to_json first_response))
+           (Jsonaf.to_string (B.Chunk.response_to_json repeated_response)));
+      if first_length < String.length bytes
+      then
+        ignore
+          (send ~offset:first_length (String.drop_prefix bytes first_length)
+           : B.Chunk.response);
+      let commit =
+        B.Commit.create_request
+          ~upload_id
+          ~idempotency_key:
+            (P.Idempotency_key.of_string "bundle-service-commit" |> protocol_ok)
+      in
+      let request = P.Authoring.Wire.Request.Bundle_commit commit in
+      let commit_result = call request in
+      let status_request =
+        P.Authoring.Wire.Request.Bundle_status (B.Status.create_request ~upload_id)
+      in
+      let status () =
+        match call status_request with
+        | Ok (Bundle_status status) -> B.Status.state status
+        | Ok _ | Error _ -> failwith "bundle-only status rejected"
+      in
+      if publish
+      then (
+        let receipt =
+          match commit_result with
+          | Ok (Bundle_commit response) ->
+            (match B.Commit.outcome response with
+             | Published receipt -> receipt
+             | Accepted_for_validation | Rejected _ ->
+               failwith "genuine publisher did not return receipt")
+          | Ok _ | Error _ -> failwith "genuine publication failed"
+        in
+        check
+          "status reports the exact durable receipt"
+          (match status () with
+           | Published reported -> B.Receipt.equal receipt reported
+           | Staging _ | Validating | Rejected _ | Expired -> false);
+        check
+          "same commit key recovers the durable receipt"
+          (match call request with
+           | Ok (Bundle_commit response) ->
+             (match B.Commit.outcome response with
+              | Published again -> B.Receipt.equal receipt again
+              | Accepted_for_validation | Rejected _ -> false)
+           | Ok _ | Error _ -> false))
+      else (
+        check
+          "missing publisher is a typed error, not a promise of work"
+          (match commit_result with
+           | Error (Service.Error.Upload_failure Host.Error.Selection_unavailable) -> true
+           | Ok _ | Error _ -> false);
+        check
+          "sealed claim remains pending after unavailable publication"
+          (match status () with
+           | Validating -> true
+           | Staging _ | Published _ | Rejected _ | Expired -> false);
+        check
+          "same commit key can retry without changing sealed custody"
+          (match call request with
+           | Error (Service.Error.Upload_failure Host.Error.Selection_unavailable) -> true
+           | Ok _ | Error _ -> false));
+      allowed := false;
+      check
+        "revoked independent upload grant blocks status"
+        (match call status_request with
+         | Error (Service.Error.Upload_failure Host.Error.Unauthorized) -> true
+         | Ok _ | Error _ -> false);
+      allowed := true;
+      (Service.publish_initialize_and_wait
+         service
+         ~connection
+         ~response:
+           (bundle_initialize_response
+              ~principal:(Operator_authorization.principal actor)
+              ~features:[ P.Authoring.Features.core ]
+              ())
+       |> function
+       | Ok () -> ()
+       | Error _ -> failwith "bundle feature reinitialize failed");
+      check
+        "core-only negotiation does not select bundle methods"
+        (match call status_request with
+         | Error Service.Error.Unselected_feature -> true
+         | Ok _ | Error _ -> false)))
+;;
+
 let%test_unit "host publishes only an actor-current captured source-only document" =
   with_root "ochat-upload-host-publication" (fun env sw root_handle lock ->
     let store = open_store env sw root_handle lock in
