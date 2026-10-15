@@ -5,6 +5,13 @@ module Scope = Agent_session.Developer_job_scope
 module Selected = Developer_job_selected
 module Staging = Developer_job_staging
 
+module Capacity_decision = struct
+  type t =
+    | Acquired
+    | Unavailable
+    | Rejected
+end
+
 let ( let* ) value f = Result.bind value ~f
 let invalid message = Error (P.Error.invalid_request message)
 
@@ -540,7 +547,16 @@ let ensure_selected terminal =
   | Some selected -> Selected.ensure_attempted selected
 ;;
 
-let with_claimed_attempt_internal t ~expected ~lookup ?select ~on_failure f =
+let with_claimed_attempt_internal
+      t
+      ~expected
+      ~lookup
+      ?on_capacity_decision
+      ?before_claim
+      ?select
+      ~on_failure
+      f
+  =
   if t.closed || not (same_domain t)
   then invalid "developer job worker is closed or on a foreign domain"
   else if t.reconciling
@@ -588,13 +604,34 @@ let with_claimed_attempt_internal t ~expected ~lookup ?select ~on_failure f =
             let* key = capacity_key t job in
             let* host_job = P.Host_job.of_developer job in
             match Job_capacity.try_acquire_host_job t.capacity key ~job:host_job with
-            | Error error -> Error error
-            | Ok None -> Ok None
+            | Error error ->
+              Option.iter on_capacity_decision ~f:(fun notify ->
+                notify Capacity_decision.Rejected);
+              Error error
+            | Ok None ->
+              Option.iter on_capacity_decision ~f:(fun notify ->
+                notify Capacity_decision.Unavailable);
+              Ok None
             | Ok (Some lease) ->
               with_owned_lease t ~handle lease (fun stage ->
-                if t.closed
-                then invalid "developer job worker closed before claim"
+                Option.iter on_capacity_decision ~f:(fun notify ->
+                  notify Capacity_decision.Acquired);
+                let* () =
+                  match before_claim with
+                  | None -> Ok ()
+                  | Some recheck -> recheck ()
+                in
+                if t.closed || not (phys_equal t.current handle)
+                then invalid "developer job worker changed before claim"
                 else
+                  let* () =
+                    if
+                      P.Execution_owner.equal_developer
+                        (Store.owner handle)
+                        (P.Developer_job.owner job)
+                    then Ok ()
+                    else invalid "developer job owner changed before claim"
+                  in
                   let* prepared =
                     Store.prepare_job_claim handle ~expected ~lookup ~now:(t.now ())
                     |> Result.map_error ~f:error_of_store
@@ -861,12 +898,15 @@ let with_claimed_attempt_internal t ~expected ~lookup ?select ~on_failure f =
                        Error error))))
 ;;
 
-let with_claimed_attempt t ~expected ~lookup ?select f =
+let with_claimed_attempt t ~expected ~lookup ?on_capacity_decision ?before_claim ?select f
+  =
   let* result =
     with_claimed_attempt_internal
       t
       ~expected
       ~lookup
+      ?on_capacity_decision
+      ?before_claim
       ?select
       ~on_failure:(fun () -> ())
       (fun ~active ~sw -> Result.map (f ~active ~sw) ~f:(fun state -> state, None))
@@ -874,7 +914,16 @@ let with_claimed_attempt t ~expected ~lookup ?select f =
   Ok (Option.map result ~f:fst)
 ;;
 
-let with_claimed_selected_attempt t ~expected ~lookup ~max_staged_jobs ?select f =
+let with_claimed_selected_attempt
+      t
+      ~expected
+      ~lookup
+      ~max_staged_jobs
+      ?on_capacity_decision
+      ?before_claim
+      ?select
+      f
+  =
   let scope = ref None in
   let on_failure () =
     Option.iter !scope ~f:(fun children ->
@@ -886,6 +935,8 @@ let with_claimed_selected_attempt t ~expected ~lookup ~max_staged_jobs ?select f
       t
       ~expected
       ~lookup
+      ?on_capacity_decision
+      ?before_claim
       ?select
       ~on_failure
       (fun ~active ~sw ->

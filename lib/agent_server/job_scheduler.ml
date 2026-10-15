@@ -1,5 +1,6 @@
 open! Core
 module P = Agent_protocol
+module Developer = Job_scheduler_developer
 
 module Fairness = struct
   type 'candidate group =
@@ -56,31 +57,6 @@ module Fairness = struct
   ;;
 end
 
-module For_testing = struct
-  let fair_order ~after groups =
-    let groups =
-      List.map groups ~f:(fun (owner, candidates) ->
-        if
-          not
-            (List.for_all candidates ~f:(fun candidate ->
-               P.Execution_owner.equal owner (P.Host_job.owner candidate)))
-        then invalid_arg "scheduler candidate owner differs from group";
-        Fairness.{ owner; candidates })
-    in
-    let ordered, after = Fairness.order ~after groups in
-    List.map ordered ~f:(fun group -> group.owner, group.candidates), after
-  ;;
-
-  let fair_conversation_order ~after rows =
-    let groups =
-      List.filter_map rows ~f:(fun (owner, jobs) ->
-        Fairness.conversation_group ~owner:(Some owner) ~jobs ~candidate:jobs)
-    in
-    let ordered, after = Fairness.order ~after groups in
-    List.map ordered ~f:(fun group -> group.owner), after
-  ;;
-end
-
 module Worker_key = struct
   module T = struct
     type t =
@@ -111,7 +87,7 @@ type running_job =
 type t =
   { closed : bool Atomic.t
   ; capacity : Job_capacity.t
-  ; developer_registry : Developer_root_owner.Registry.t option
+  ; developer : Developer.t option
   ; mutex : Eio.Mutex.t
   ; mutable running : running_job Map.M(Worker_key).t
   ; mutable after : P.Execution_owner.t option
@@ -123,6 +99,36 @@ type t =
       -> (Session_factory.model_job_inference, Agent_protocol.Error.t) Result.t
   ; sleep : float -> unit
   }
+
+module For_testing = struct
+  let fair_order ~after groups =
+    let groups =
+      List.map groups ~f:(fun (owner, candidates) ->
+        if
+          not
+            (List.for_all candidates ~f:(fun candidate ->
+               P.Execution_owner.equal owner (P.Host_job.owner candidate)))
+        then invalid_arg "scheduler candidate owner differs from group";
+        Fairness.{ owner; candidates })
+    in
+    let ordered, after = Fairness.order ~after groups in
+    List.map ordered ~f:(fun group -> group.owner, group.candidates), after
+  ;;
+
+  let fair_conversation_order ~after rows =
+    let groups =
+      List.filter_map rows ~f:(fun (owner, jobs) ->
+        Fairness.conversation_group ~owner:(Some owner) ~jobs ~candidate:jobs)
+    in
+    let ordered, after = Fairness.order ~after groups in
+    List.map ordered ~f:(fun group -> group.owner), after
+  ;;
+
+  let developer_retry_pending t ~root =
+    Option.value_map t.developer ~default:false ~f:(fun developer ->
+      Developer.retry_pending developer ~root)
+  ;;
+end
 
 exception Job_cancelled
 
@@ -566,6 +572,34 @@ let claim_one t sw entry jobs =
   loop jobs
 ;;
 
+let claim_developer developer batch =
+  let rec loop = function
+    | [] ->
+      Developer.clear_retry developer batch;
+      Developer.Skipped
+    | candidate :: rest ->
+      (match Developer.Batch.availability batch candidate with
+       | Error _ ->
+         Developer.clear_retry developer batch;
+         Developer.Attempted
+       | Ok
+           ( Developer_background_job_runner.Availability.Runnable
+           | Developer_background_job_runner.Availability.Malformed_supported ) ->
+         (match Developer.offer developer batch candidate with
+          | Ok Developer.Attempted -> Developer.Attempted
+          | Ok Developer.Unavailable -> Developer.Unavailable
+          | Ok Developer.Skipped -> loop rest
+          | Error _ ->
+            Developer.clear_retry developer batch;
+            Developer.Attempted)
+       | Ok
+           ( Developer_background_job_runner.Availability
+             .Agent_artifact_installer_unavailable
+           | Developer_background_job_runner.Availability.Unsupported_kind ) -> loop rest)
+  in
+  loop (Developer.Batch.candidates batch)
+;;
+
 let cancel_terminal_worker t ~actor (job : Agent_protocol.Job.t) =
   match job.status with
   | Cancelled | Interrupted _ ->
@@ -648,19 +682,71 @@ let process t sw registry =
            : (Agent_protocol.Job.t, Agent_protocol.Error.t) result)
       | _ -> ()));
   List.iter states ~f:(fun (entry, _, jobs) -> dispatch_delivery t sw entry jobs);
-  let groups =
+  let conversation_groups =
     List.filter_map states ~f:(fun (entry, owner, jobs) ->
-      Fairness.conversation_group ~owner ~jobs ~candidate:(entry, jobs))
+      Fairness.conversation_group ~owner ~jobs ~candidate:(`Conversation (entry, jobs)))
   in
-  let ordered, after = Fairness.order ~after:t.after groups in
-  t.after <- after;
+  let developer_groups =
+    match t.developer with
+    | None -> []
+    | Some developer ->
+      let admitted batch =
+        match Developer.current developer batch with
+        | Ok true -> Some batch
+        | Ok false | Error _ ->
+          Developer.clear_retry developer batch;
+          None
+      in
+      let retry = Option.bind (Developer.retry_batch developer) ~f:admitted in
+      let fresh = Option.bind (Developer.take_batch developer) ~f:admitted in
+      let batches =
+        match retry, fresh with
+        | Some prior, Some latest
+          when P.Execution_owner.equal
+                 (Developer.Batch.owner prior)
+                 (Developer.Batch.owner latest) ->
+          Developer.clear_retry developer prior;
+          [ latest ]
+        | Some prior, Some latest -> [ prior; latest ]
+        | Some batch, None | None, Some batch -> [ batch ]
+        | None, None -> []
+      in
+      List.map batches ~f:(fun batch ->
+        Fairness.
+          { owner = Developer.Batch.owner batch
+          ; candidates = [ `Developer (developer, batch) ]
+          })
+  in
+  let groups = conversation_groups @ developer_groups in
+  let ordered, _ = Fairness.order ~after:t.after groups in
+  let after = ref t.after in
+  let considered = ref false in
   List.iter ordered ~f:(fun group ->
-    List.iter group.candidates ~f:(fun (entry, jobs) -> claim_one t sw entry jobs))
+    List.iter group.candidates ~f:(function
+      | `Conversation (entry, jobs) ->
+        if not !considered
+        then (
+          considered := true;
+          after := Some group.owner);
+        claim_one t sw entry jobs
+      | `Developer (developer, batch) ->
+        let outcome = claim_developer developer batch in
+        if
+          (not !considered)
+          &&
+          match outcome with
+          | Developer.Attempted -> true
+          | Developer.Unavailable | Developer.Skipped -> false
+        then (
+          considered := true;
+          after := Some group.owner)));
+  t.after <- !after
 ;;
 
 let rec run t sw clock registry =
   if not (Atomic.get t.closed)
   then (
+    Option.iter t.developer ~f:Developer.poll;
     process t sw registry;
     Eio.Time.sleep clock 0.05;
     run t sw clock registry)
@@ -675,10 +761,14 @@ let start_controlled
       ~capacity
       ~model_job_inference
   =
+  let developer =
+    Option.map developer_registry ~f:(fun registry ->
+      Developer.create ~sw ~clock ~registry ~capacity)
+  in
   let t =
     { closed = Atomic.make (not enabled)
     ; capacity
-    ; developer_registry
+    ; developer
     ; model_job_inference
     ; mutex = Eio.Mutex.create ()
     ; running = Map.empty (module Worker_key)
@@ -688,6 +778,7 @@ let start_controlled
     ; sleep = Eio.Time.sleep clock
     }
   in
+  if not enabled then Option.iter developer ~f:Developer.close;
   if enabled then Eio.Fiber.fork ~sw (fun () -> run t sw clock registry);
   t
 ;;
@@ -715,11 +806,43 @@ let cancel_conversation t ~actor ~job =
 
 let close t =
   Atomic.set t.closed true;
+  Option.iter t.developer ~f:Developer.close;
   Eio.Mutex.use_ro t.mutex (fun () ->
     Map.iter t.running ~f:(fun running -> Eio.Switch.fail running.sw Job_cancelled))
 ;;
 
 let is_running t = not (Atomic.get t.closed)
+
+let attach_developer t ~root ~runner =
+  if Atomic.get t.closed
+  then
+    Error
+      (P.Error.create
+         P.Error.Server_shutting_down
+         ~message:"developer scheduler is stopped"
+         ~retryable:true
+         ())
+  else (
+    match t.developer with
+    | None -> Error (P.Error.invalid_request "developer scheduler has no root registry")
+    | Some developer -> Developer.attach developer ~root ~runner)
+;;
+
+let wake_developer t ~root =
+  Option.iter t.developer ~f:(fun developer -> Developer.wake developer ~root)
+;;
+
+let retire_developer t ~root =
+  match t.developer with
+  | None -> Ok ()
+  | Some developer -> Developer.retire developer ~root
+;;
+
+let await_developer_scans_idle t =
+  match t.developer with
+  | None -> Ok ()
+  | Some developer -> Developer.await_idle developer
+;;
 
 let rec await_deliveries_idle t =
   match t.delivering with

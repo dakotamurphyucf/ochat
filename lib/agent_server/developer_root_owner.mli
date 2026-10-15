@@ -30,6 +30,14 @@ end
 module Registry : sig
   type t
 
+  (** Comparison only: the scheduler and this physical Root registry must use
+      the same capacity ledger. This grants no reservation or Root admission. *)
+  val uses_capacity : t -> Job_capacity.t -> bool
+
+  (** Configured bound on active Worker callbacks per Root. This bounds offer
+      fibers; actual claims still use the Worker and shared capacity ledger. *)
+  val max_active_workers : t -> int
+
   (** Snapshot at most the configured active-run bound of physically owned,
       same-domain Live roots. Excludes provisional startup recovery, Closing,
       Quarantined and Closed slots; returning a root grants no job Claim.
@@ -133,6 +141,14 @@ module Current : sig
 
   (** The exact immutable selection this witness observed. A later narrowing
       invalidates the witness even if it happens to preserve a particular tool. *)
+  val selected : t -> Chat_response.Tool_capability.t
+end
+
+module Claim_preflight : sig
+  type t
+
+  (** Selected comparison data for scheduling; unlike [Current.t], this
+      value cannot be passed to effect-currentness checks. *)
   val selected : t -> Chat_response.Tool_capability.t
 end
 
@@ -541,6 +557,7 @@ module Job_candidate : sig
   val with_claimed
     :  run
     -> t
+    -> ?on_capacity_decision:(Developer_job_worker.Capacity_decision.t -> unit)
     -> ?select:
          (claim:Agent_store.Developer_run_store.Claim.t
           -> proposed:Agent_protocol.Developer_job.State.t
@@ -561,6 +578,8 @@ module Job_candidate : sig
   val with_claimed_selected
     :  run
     -> t
+    -> ?on_capacity_decision:(Developer_job_worker.Capacity_decision.t -> unit)
+    -> ?selection_witness:Claim_preflight.t
     -> ?select:
          (claim:Agent_store.Developer_run_store.Claim.t
           -> proposed:Agent_protocol.Developer_job.State.t
@@ -591,6 +610,7 @@ val with_claimed_job
   :  t
   -> expected:Agent_store.Developer_run_store.Observation.t
   -> lookup:Agent_store.Developer_run_store.Job_lookup.t
+  -> ?on_capacity_decision:(Developer_job_worker.Capacity_decision.t -> unit)
   -> ?select:
        (claim:Agent_store.Developer_run_store.Claim.t
         -> proposed:Agent_protocol.Developer_job.State.t
@@ -650,6 +670,14 @@ end
     This can yield. No request-supplied ID, digest, or copied generation creates
     a witness. *)
 val current : t -> (Current.t, Agent_protocol.Error.t) result
+
+(** Nonyielding local scheduling snapshot of the same physical owner, actor,
+    selected object and revision. This is comparison data only: it does not
+    establish latest-Active Store state, authorize an effect or issue a Claim.
+    The Worker reserves capacity first, then [with_claimed_job] or
+    [Job_candidate.with_claimed_selected] performs a fresh yielding [current]
+    and compares this selection before preparing the Store Claim. *)
+val claim_preflight : t -> (Claim_preflight.t, Agent_protocol.Error.t) result
 
 (** Final nonyielding check after another operation's yielding parent/permission
     read and immediately before a real host effect. It compares the physical

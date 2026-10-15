@@ -397,32 +397,45 @@ let select_result t ~claim ~proposed =
   | Some (Artifact _) -> invalid "developer Tool runner cannot select a prior artifact"
 ;;
 
-let run_candidate t candidate =
-  let* ready = availability t candidate in
-  match ready with
-  | Agent_artifact_installer_unavailable | Unsupported_kind ->
-    invalid "developer background target has no installed executor"
-  | Malformed_supported ->
-    O.Job_candidate.with_claimed
-      t.root
-      candidate
-      ~select:(select_result t)
-      (fun ~active ~sw:_ -> execute_claimed t active)
-  | Runnable ->
-    (match decode t (O.Job_candidate.job candidate) with
-     | Error _ -> invalid "developer background target changed after availability"
-     | Ok request ->
-       (match B.target_kind request with
-        | B.Target_kind.Tool ->
-          O.Job_candidate.with_claimed
-            t.root
-            candidate
-            ~select:(select_result t)
-            (fun ~active ~sw:_ -> execute_claimed t active)
-        | Script ->
-          Jobs.with_claimed_worker
-            t.jobs
-            ~candidate
-            ~select:(select_result t)
-            (fun ~active ~scope ~sw:_ -> execute_script_claimed t ~active ~scope)))
+let run_candidate t ?on_capacity_decision candidate =
+  let signalled = ref false in
+  let notify_once decision =
+    if not !signalled
+    then (
+      signalled := true;
+      Option.iter on_capacity_decision ~f:(fun notify -> notify decision))
+  in
+  Exn.protect
+    ~finally:(fun () -> notify_once Developer_job_worker.Capacity_decision.Rejected)
+    ~f:(fun () ->
+      let* ready = availability t candidate in
+      match ready with
+      | Agent_artifact_installer_unavailable | Unsupported_kind ->
+        invalid "developer background target has no installed executor"
+      | Malformed_supported ->
+        O.Job_candidate.with_claimed
+          t.root
+          candidate
+          ~on_capacity_decision:notify_once
+          ~select:(select_result t)
+          (fun ~active ~sw:_ -> execute_claimed t active)
+      | Runnable ->
+        (match decode t (O.Job_candidate.job candidate) with
+         | Error _ -> invalid "developer background target changed after availability"
+         | Ok request ->
+           (match B.target_kind request with
+            | B.Target_kind.Tool ->
+              O.Job_candidate.with_claimed
+                t.root
+                candidate
+                ~on_capacity_decision:notify_once
+                ~select:(select_result t)
+                (fun ~active ~sw:_ -> execute_claimed t active)
+            | Script ->
+              Jobs.with_claimed_worker
+                t.jobs
+                ~candidate
+                ~on_capacity_decision:notify_once
+                ~select:(select_result t)
+                (fun ~active ~scope ~sw:_ -> execute_script_claimed t ~active ~scope))))
 ;;

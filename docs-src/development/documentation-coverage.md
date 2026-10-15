@@ -349,6 +349,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_server/independent_resources.mli` | [contract](../../lib/agent_server/independent_resources.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_server/inference_query_budget.mli` | [contract](../../lib/agent_server/inference_query_budget.mli) | [integration](../lib/inference-observations.md) | Public interface + current host guide. |
 | `lib/agent_server/job_capacity.mli` | [contract](../../lib/agent_server/job_capacity.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/agent_server/job_scheduler_developer.mli` | [contract](../../lib/agent_server/job_scheduler_developer.mli) | [integration](../design/chatml-developer-runtime.md) | Private physical Root attachment, bounded scan and joined offer lifetime in the shared scheduler. |
 | `lib/agent_server/job_scheduler.mli` | [contract](../../lib/agent_server/job_scheduler.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_server/local_selection.mli` | [contract](../../lib/agent_server/local_selection.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/agent_server/local_storage.mli` | [contract](../../lib/agent_server/local_storage.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |

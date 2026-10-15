@@ -224,6 +224,7 @@ val acknowledge_native
 val with_claimed_worker
   :  t
   -> candidate:Developer_root_owner.Job_candidate.t
+  -> ?on_capacity_decision:(Developer_job_worker.Capacity_decision.t -> unit)
   -> ?select:
        (claim:Agent_store.Developer_run_store.Claim.t
         -> proposed:Agent_protocol.Developer_job.State.t

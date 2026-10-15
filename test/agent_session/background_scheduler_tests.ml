@@ -5,11 +5,26 @@ module B = Chat_response.Background_request
 module Scheduler = Agent_server.Job_scheduler
 module Owner = Agent_server.Runtime_owner
 module Registry = Agent_server.Session_registry
+module DR = Agent_server.Developer_root_owner
+module DS = Agent_store.Developer_run_store
+module SS = Agent_store.Session_store
+module DT = Developer_root_owner_test_suite.Root_owner_tests
+module DN = Developer_root_owner_test_suite.Native_executor_tests
+module DC = Chat_response.Tool_capability
+module DSelected = Developer_run_store_test_suite.Developer_run_selected_tests
 
-let with_capacity_scheduler ?(retry_once = false) ~reject_save f =
+let with_capacity_scheduler
+      ?(retry_once = false)
+      ?(on_conversation_call = ignore)
+      ?capacity_limits
+      ~reject_save
+      f
+  =
   with_actor ~reject_save (fun env sw actor _writer backend ->
     let calls = ref 0 in
-    let capabilities = native_registry calls ~raises:false in
+    let capabilities =
+      native_registry ~on_call:on_conversation_call calls ~raises:false
+    in
     let capabilities =
       match retry_once with
       | false -> capabilities
@@ -106,17 +121,19 @@ let with_capacity_scheduler ?(retry_once = false) ~reject_save f =
       }
     in
     Registry.add registry ~session_id entry |> protocol_ok;
+    let default_limits : Agent_server.Config.Server.job_limits =
+      { daemon_total = 1
+      ; per_principal = 1
+      ; per_prompt = 1
+      ; per_workspace = 1
+      ; per_session = 1
+      ; per_kind = 1
+      ; max_nested_depth = 1
+      }
+    in
     let capacity =
       Agent_server.Job_capacity.create
-        ~limits:
-          { daemon_total = 1
-          ; per_principal = 1
-          ; per_prompt = 1
-          ; per_workspace = 1
-          ; per_session = 1
-          ; per_kind = 1
-          ; max_nested_depth = 1
-          }
+        ~limits:(Option.value capacity_limits ~default:default_limits)
     in
     let start () =
       Scheduler.start
@@ -151,6 +168,142 @@ let with_scheduler ?retry_once ~reject_save f =
     ~reject_save
     (fun env actor backend calls registry scheduler start _capacity request ->
        f env actor backend calls registry scheduler start request)
+;;
+
+let with_physical_developer
+      ?store_limits
+      ?(max_active_workers = 1)
+      ~env
+      ~capacity
+      ~on_parent
+      f
+  =
+  let path =
+    Filename.concat
+      (Sys.getenv "TMPDIR" |> Option.value ~default:"/tmp")
+      ("ochat-mixed-scheduler." ^ Agent_protocol.Id.Transaction.(create () |> to_string))
+  in
+  let directory = Eio.Path.(Eio.Stdenv.fs env / path) in
+  Eio.Path.mkdir ~perm:0o700 directory;
+  Exn.protect
+    ~finally:(fun () -> Eio.Path.rmtree ~missing_ok:true directory)
+    ~f:(fun () ->
+      Eio.Switch.run (fun sw ->
+        let session =
+          SS.create
+            ~env
+            ~sw
+            ~root:(Filename.concat path "data")
+            ~server_id:DT.host_id
+            ~process_start_identity:None
+            ~lock_nonce:"mixed-scheduler-test"
+          |> DT.ok
+        in
+        let store =
+          DS.open_or_create
+            session
+            ~sw
+            ~limits:
+              (Option.value
+                 store_limits
+                 ~default:(DT.store_limits ~max_job_payload_bytes:4096 ()))
+            ~checkpoint:ignore
+          |> DT.ok
+        in
+        let capture = DT.capture () in
+        let owner = DT.owner "dvr_scheduler_fairness" 0 in
+        let handle, _ =
+          DS.admit_epoch
+            store
+            ~owner
+            ~capture_fingerprint:(Chatml_developer_capture.fingerprint capture)
+            ~previous:None
+          |> DT.ok
+        in
+        let child_calls = ref 0 in
+        let selected = DN.pair_registry ~on_parent (ref 0) child_calls in
+        let limits =
+          DR.Limits.create
+            ~max_active_runs:2
+            ~max_staged_jobs:2
+            ~max_native_occupancy:2
+            ~max_active_workers
+            ~max_quarantined_workers:2
+          |> Or_error.ok_exn
+        in
+        let owners = DR.Registry.create ~sw ~store ~capacity ~now:DT.now ~limits in
+        let root =
+          DR.Registry.admit
+            owners
+            ~actor:
+              (Operator_authorization.guarded
+                 ~principal:DT.principal
+                 ~is_current:(fun () -> true))
+            ~capture
+            ~registry:selected
+            ~selected
+            ~job_policy:Chat_response.One_off_request.default_policy
+            ~selected_model:None
+            ~handle
+            ~workspace_conflict_domain:"mixed-scheduler-test"
+          |> DT.ok
+        in
+        let data_root = Agent_store.Session_store.data_root session in
+        let blobs =
+          Agent_store.Blob_store.create
+            ~env
+            ~temporary_directory:(Agent_store.Data_root.temporary_blobs_path data_root)
+            ~durable_directory:(Agent_store.Data_root.durable_blobs_path data_root)
+            ~max_upload_bytes:65536L
+          |> DT.ok
+        in
+        Agent_store.Blob_store.bind_developer_runs blobs ~session_store:session store
+        |> DT.ok;
+        let disclosure =
+          Agent_server.Developer_result_disclosure.create
+            ~runs:store
+            ~blobs
+            ~policy:
+              (Agent_server.Developer_result_disclosure.Policy.create
+                 ~authorize:(fun _ _ -> true))
+            ~limits:
+              (Agent_server.Developer_result_disclosure.Limits.create
+                 ~max_result_bytes:65536
+                 ~json:Document_schema.Limits.default
+               |> DT.ok)
+          |> DT.ok
+        in
+        let jobs =
+          Agent_server.Developer_script_job_service.create
+            ~root
+            ~store
+            ~disclosure
+            ~env
+            ~current_actor:(fun () -> DR.original_actor root)
+            ~prepare_source:(fun ~binding:_ ~request:_ ~checkpoint ->
+              checkpoint ();
+              Ok None)
+          |> DT.ok
+        in
+        let runner =
+          DN.background_runner
+            ~sw
+            ~root
+            ~store
+            ~blobs
+            ~env
+            ~managed:None
+            ~jobs
+            ~storage:Agent_store.Developer_result_publisher.Storage.Automatic
+        in
+        let result =
+          f ~sw ~root ~handle ~selected ~owners ~runner ~store ~blobs ~disclosure
+        in
+        DR.close_and_wait root |> DT.ok;
+        DR.Registry.close_and_wait owners |> DT.ok;
+        DS.close_and_wait store |> DT.ok;
+        SS.close session |> DT.ok;
+        result))
 ;;
 
 let new_job ?(retry_policy = J.Never) payload : J.t =
@@ -197,6 +350,591 @@ let terminal backend job =
   match (current backend job).status with
   | Succeeded | Failed _ | Cancelled | Interrupted _ -> true
   | Queued | Running | Waiting_permission _ | Waiting_completion _ -> false
+;;
+
+let%test_unit "shared capacity alternates conversation and developer owner turns" =
+  let conversation_entered, conversation_entered_u = Eio.Promise.create () in
+  let release_conversation, release_conversation_u = Eio.Promise.create () in
+  let developer_entered, developer_entered_u = Eio.Promise.create () in
+  let release_developer, release_developer_u = Eio.Promise.create () in
+  let conversation_released = ref false in
+  let developer_released = ref false in
+  let unblock () =
+    if not !conversation_released
+    then (
+      conversation_released := true;
+      Eio.Promise.resolve release_conversation_u ());
+    if not !developer_released
+    then (
+      developer_released := true;
+      Eio.Promise.resolve release_developer_u ())
+  in
+  with_capacity_scheduler
+    ~on_conversation_call:(fun () ->
+      if not (Eio.Promise.is_resolved conversation_entered)
+      then (
+        Eio.Promise.resolve conversation_entered_u ();
+        Eio.Promise.await release_conversation))
+    ~reject_save:(fun _ -> false)
+    (fun env actor backend calls registry initial _start capacity request ->
+       Scheduler.close initial;
+       with_physical_developer
+         ~env
+         ~capacity
+         ~on_parent:(fun () ->
+           Eio.Promise.resolve developer_entered_u ();
+           Eio.Promise.await release_developer)
+         (fun ~sw
+           ~root
+           ~handle
+           ~selected
+           ~owners
+           ~runner
+           ~store:_
+           ~blobs:_
+           ~disclosure:_ ->
+            let parent = DC.find selected ~name:"parent_tool" |> DT.ok in
+            let pinned = DC.select selected ~names:[ "parent_tool" ] |> DT.ok in
+            let developer_request =
+              B.tool
+                ~capabilities:pinned
+                ~reference:(DC.reference parent)
+                ~input:(`Object [])
+                ~policy:Chat_response.One_off_request.default_policy
+              |> protocol_ok
+            in
+            let developer_id = DSelected.job_id "job_scheduler_capacity_one" in
+            let original =
+              DSelected.job
+                (DR.owner root)
+                (Chatml_developer_capture.fingerprint (DR.capture root))
+                ~id:developer_id
+                ~parent:Agent_protocol.Developer_job.Launch.Run_root
+            in
+            let queued =
+              Agent_protocol.Developer_job.create
+                ~owner:(DR.owner root)
+                ~capture_fingerprint:
+                  (Chatml_developer_capture.fingerprint (DR.capture root))
+                ~id:developer_id
+                ~launch:(Agent_protocol.Developer_job.launch original)
+                ~kind:Async_tool
+                ~payload:(B.to_json developer_request)
+                ~retry_policy:J.Never
+                ~created_at:(Agent_protocol.Developer_job.created_at original)
+                ~state:(Agent_protocol.Developer_job.state original)
+              |> protocol_ok
+            in
+            (* This durable queued row is admitted before this scheduler starts.
+               It has no in-memory capacity reservation, so the scheduler's
+               bounded scan and claim compete with conversation work. *)
+            let prepared =
+              DS.prepare_root_selected
+                handle
+                ~expected:(DS.observe handle |> DT.ok)
+                ~phase:DS.Checkpoint.Active
+                ~selected:[ queued ]
+              |> DT.ok
+            in
+            (match
+               DS.commit_and_settle
+                 handle
+                 ~admit:(fun () -> true)
+                 prepared
+                 (DS.Handoff.create ~settle:ignore)
+               |> DT.ok
+             with
+             | DS.Settlement.Installed _ -> ()
+             | Absent | Prewrite_conflict | Diverged ->
+               failwith "durable queued developer fixture was not installed");
+            let scheduler =
+              Scheduler.start
+                ~sw
+                ~clock:(Eio.Stdenv.clock env)
+                ~registry
+                ~developer_registry:(Some owners)
+                ~capacity
+                ~model_job_inference:(fun _ _ ->
+                  Error (Agent_protocol.Error.invalid_request "unused model job"))
+            in
+            Exn.protect
+              ~finally:(fun () ->
+                unblock ();
+                Scheduler.close scheduler;
+                Scheduler.await_developer_scans_idle scheduler |> protocol_ok)
+              ~f:(fun () ->
+                let first = submit actor (B.to_json request) in
+                Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+                  Eio.Promise.await conversation_entered);
+                Scheduler.attach_developer scheduler ~root ~runner |> protocol_ok;
+                let second = submit actor (B.to_json request) in
+                Scheduler.wake_developer scheduler ~root;
+                Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+                  let rec await_retry () =
+                    if Scheduler.For_testing.developer_retry_pending scheduler ~root
+                    then ()
+                    else (
+                      Eio.Fiber.yield ();
+                      await_retry ())
+                  in
+                  await_retry ());
+                conversation_released := true;
+                Eio.Promise.resolve release_conversation_u ();
+                Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+                  Eio.Promise.await developer_entered);
+                assert (Int.equal !calls 1);
+                (match (current backend second).status with
+                 | Queued -> ()
+                 | Running
+                 | Waiting_permission _
+                 | Waiting_completion _
+                 | Succeeded
+                 | Failed _
+                 | Cancelled
+                 | Interrupted _ ->
+                   failwith "conversation took capacity before developer turn");
+                let developer =
+                  DS.find_job (DS.observe handle |> DT.ok) developer_id
+                  |> Option.value_exn
+                in
+                assert (Int.equal (Agent_protocol.Developer_job.state developer).attempt 1);
+                developer_released := true;
+                Eio.Promise.resolve release_developer_u ();
+                Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+                  until env (fun () ->
+                    terminal backend first
+                    && terminal backend second
+                    &&
+                    match DS.find_job (DS.observe handle |> DT.ok) developer_id with
+                    | Some job ->
+                      (match (Agent_protocol.Developer_job.state job).status with
+                       | Succeeded -> true
+                       | Queued
+                       | Running
+                       | Waiting_permission _
+                       | Waiting_completion _
+                       | Failed _
+                       | Cancelled
+                       | Interrupted _ -> false)
+                    | None -> false));
+                assert (Int.equal !calls 2))))
+;;
+
+let%test_unit "developer scan advances beyond an unsupported 64-job window" =
+  let document =
+    Document_schema.Limits.create
+      ~max_bytes:262144
+      ~max_depth:16
+      ~max_fields:16384
+      ~max_nodes:16384
+    |> DT.ok
+  in
+  let store_limits =
+    DS.Limits.create
+      ~max_runs:3
+      ~max_epochs_per_run:3
+      ~max_jobs_per_run:65
+      ~max_invocations_per_run:5
+      ~max_selected_per_commit:65
+      ~max_job_payload_bytes:262144
+      ~max_document_bytes:262144
+      ~max_recovery_entries:16
+      ~max_recovery_bytes:262144
+      ~max_work_steps:200000
+      ~document
+    |> Or_error.ok_exn
+  in
+  let parent_calls = ref 0 in
+  with_capacity_scheduler
+    ~reject_save:(fun _ -> false)
+    (fun env _actor _backend _calls registry initial _start capacity _request ->
+       Scheduler.close initial;
+       with_physical_developer
+         ~store_limits
+         ~env
+         ~capacity
+         ~on_parent:(fun () -> Int.incr parent_calls)
+         (fun ~sw
+           ~root
+           ~handle
+           ~selected
+           ~owners
+           ~runner
+           ~store:_
+           ~blobs:_
+           ~disclosure:_ ->
+            let parent = DC.find selected ~name:"parent_tool" |> DT.ok in
+            let pinned = DC.select selected ~names:[ "parent_tool" ] |> DT.ok in
+            let tool_request =
+              B.tool
+                ~capabilities:pinned
+                ~reference:(DC.reference parent)
+                ~input:(`Object [])
+                ~policy:Chat_response.One_off_request.default_policy
+              |> protocol_ok
+            in
+            let prepared_script =
+              Chat_response.One_off_script.prepare_in_domain
+                ~env
+                ~capabilities:selected
+                ~tools:[]
+                ~source:"let main input = Task.pure(input)"
+                ()
+              |> Result.map_error ~f:(fun diagnostics ->
+                Sexp.to_string_hum
+                  [%sexp (diagnostics : Chatmd_shell_spec.Diagnostic.t list)])
+              |> Result.ok_or_failwith
+            in
+            let script_request =
+              B.script
+                ~prepared:prepared_script
+                ~input:`Null
+                ~policy:Chat_response.One_off_request.default_policy
+              |> protocol_ok
+            in
+            let make_job index kind payload =
+              let id =
+                DSelected.job_id
+                  (if index < 64
+                   then Printf.sprintf "job_window_%03d" index
+                   else "job_window_zzz")
+              in
+              let original =
+                DSelected.job
+                  (DR.owner root)
+                  (Chatml_developer_capture.fingerprint (DR.capture root))
+                  ~id
+                  ~parent:Agent_protocol.Developer_job.Launch.Run_root
+              in
+              Agent_protocol.Developer_job.create
+                ~owner:(DR.owner root)
+                ~capture_fingerprint:
+                  (Chatml_developer_capture.fingerprint (DR.capture root))
+                ~id
+                ~launch:(Agent_protocol.Developer_job.launch original)
+                ~kind
+                ~payload:(B.to_json payload)
+                ~retry_policy:J.Never
+                ~created_at:(Agent_protocol.Developer_job.created_at original)
+                ~state:(Agent_protocol.Developer_job.state original)
+              |> protocol_ok
+            in
+            let queued =
+              List.init 64 ~f:(fun index -> make_job index Shell_process tool_request)
+              @ [ make_job 64 Async_tool script_request ]
+            in
+            let script_id = List.last_exn queued |> Agent_protocol.Developer_job.id in
+            let prepared =
+              DS.prepare_root_selected
+                handle
+                ~expected:(DS.observe handle |> DT.ok)
+                ~phase:DS.Checkpoint.Active
+                ~selected:queued
+              |> Result.map_error ~f:(fun error ->
+                Sexp.to_string_hum (DS.Error.sexp_of_t error))
+              |> Result.ok_or_failwith
+            in
+            (match
+               DS.commit_and_settle
+                 handle
+                 ~admit:(fun () -> true)
+                 prepared
+                 (DS.Handoff.create ~settle:ignore)
+               |> DT.ok
+             with
+             | DS.Settlement.Installed _ -> ()
+             | Absent | Prewrite_conflict | Diverged ->
+               failwith "window fixture was not durably installed");
+            let candidates =
+              DR.Job_candidate.read_current root ~checkpoint:ignore |> protocol_ok
+            in
+            assert (Int.equal (List.length candidates) 65);
+            assert (
+              List.drop candidates 64
+              |> List.hd_exn
+              |> DR.Job_candidate.job
+              |> Agent_protocol.Developer_job.id
+              |> Agent_protocol.Id.Job.equal script_id);
+            let scheduler =
+              Scheduler.start
+                ~sw
+                ~clock:(Eio.Stdenv.clock env)
+                ~registry
+                ~developer_registry:(Some owners)
+                ~capacity
+                ~model_job_inference:(fun _ _ ->
+                  Error (Agent_protocol.Error.invalid_request "unused model job"))
+            in
+            Exn.protect
+              ~finally:(fun () ->
+                Scheduler.close scheduler;
+                Scheduler.await_developer_scans_idle scheduler |> protocol_ok)
+              ~f:(fun () ->
+                Scheduler.attach_developer scheduler ~root ~runner |> protocol_ok;
+                Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+                  until env (fun () ->
+                    match DS.find_job (DS.observe handle |> DT.ok) script_id with
+                    | Some job ->
+                      (match (Agent_protocol.Developer_job.state job).status with
+                       | Succeeded -> true
+                       | Queued
+                       | Running
+                       | Waiting_permission _
+                       | Waiting_completion _
+                       | Failed _
+                       | Cancelled
+                       | Interrupted _ -> false)
+                    | None -> false));
+                assert (Int.equal !parent_calls 0))))
+;;
+
+let%test_unit "a saturated developer root leaves another physical root runnable" =
+  let capacity_limits : Agent_server.Config.Server.job_limits =
+    { daemon_total = 2
+    ; per_principal = 2
+    ; per_prompt = 2
+    ; per_workspace = 2
+    ; per_session = 1
+    ; per_kind = 2
+    ; max_nested_depth = 1
+    }
+  in
+  let first_entered, first_entered_u = Eio.Promise.create () in
+  let release_first, release_first_u = Eio.Promise.create () in
+  let second_entered, second_entered_u = Eio.Promise.create () in
+  let entered = ref 0 in
+  let first_exited = ref false in
+  let first_released = ref false in
+  with_capacity_scheduler
+    ~capacity_limits
+    ~reject_save:(fun _ -> false)
+    (fun env _actor _backend _calls registry initial _start capacity _request ->
+       Scheduler.close initial;
+       with_physical_developer
+         ~max_active_workers:2
+         ~env
+         ~capacity
+         ~on_parent:(fun () ->
+           Int.incr entered;
+           if Int.equal !entered 1
+           then (
+             Eio.Promise.resolve first_entered_u ();
+             Eio.Cancel.protect (fun () -> Eio.Promise.await release_first);
+             first_exited := true)
+           else if Int.equal !entered 2
+           then Eio.Promise.resolve second_entered_u ())
+         (fun ~sw ~root ~handle ~selected ~owners ~runner ~store ~blobs ~disclosure ->
+            let other_owner = DT.owner "dvr_scheduler_other" 0 in
+            let capture = DR.capture root in
+            let other_handle, _ =
+              DS.admit_epoch
+                store
+                ~owner:other_owner
+                ~capture_fingerprint:(Chatml_developer_capture.fingerprint capture)
+                ~previous:None
+              |> DT.ok
+            in
+            let other_root =
+              DR.Registry.admit
+                owners
+                ~actor:
+                  (Operator_authorization.guarded
+                     ~principal:DT.principal
+                     ~is_current:(fun () -> true))
+                ~capture
+                ~registry:selected
+                ~selected
+                ~job_policy:Chat_response.One_off_request.default_policy
+                ~selected_model:None
+                ~handle:other_handle
+                ~workspace_conflict_domain:"mixed-scheduler-other"
+              |> DT.ok
+            in
+            Exn.protect
+              ~finally:(fun () -> DR.close_and_wait other_root |> DT.ok)
+              ~f:(fun () ->
+                let other_jobs =
+                  Agent_server.Developer_script_job_service.create
+                    ~root:other_root
+                    ~store
+                    ~disclosure
+                    ~env
+                    ~current_actor:(fun () -> DR.original_actor other_root)
+                    ~prepare_source:(fun ~binding:_ ~request:_ ~checkpoint ->
+                      checkpoint ();
+                      Ok None)
+                  |> DT.ok
+                in
+                let other_runner =
+                  DN.background_runner
+                    ~sw
+                    ~root:other_root
+                    ~store
+                    ~blobs
+                    ~env
+                    ~managed:None
+                    ~jobs:other_jobs
+                    ~storage:Agent_store.Developer_result_publisher.Storage.Automatic
+                in
+                let parent = DC.find selected ~name:"parent_tool" |> DT.ok in
+                let pinned = DC.select selected ~names:[ "parent_tool" ] |> DT.ok in
+                let request =
+                  B.tool
+                    ~capabilities:pinned
+                    ~reference:(DC.reference parent)
+                    ~input:(`Object [])
+                    ~policy:Chat_response.One_off_request.default_policy
+                  |> protocol_ok
+                in
+                let add_queued run run_handle name =
+                  let id = DSelected.job_id name in
+                  let original =
+                    DSelected.job
+                      (DR.owner run)
+                      (Chatml_developer_capture.fingerprint (DR.capture run))
+                      ~id
+                      ~parent:Agent_protocol.Developer_job.Launch.Run_root
+                  in
+                  let queued =
+                    Agent_protocol.Developer_job.create
+                      ~owner:(DR.owner run)
+                      ~capture_fingerprint:
+                        (Chatml_developer_capture.fingerprint (DR.capture run))
+                      ~id
+                      ~launch:(Agent_protocol.Developer_job.launch original)
+                      ~kind:Async_tool
+                      ~payload:(B.to_json request)
+                      ~retry_policy:J.Never
+                      ~created_at:(Agent_protocol.Developer_job.created_at original)
+                      ~state:(Agent_protocol.Developer_job.state original)
+                    |> protocol_ok
+                  in
+                  let prepared =
+                    DS.prepare_root_selected
+                      run_handle
+                      ~expected:(DS.observe run_handle |> DT.ok)
+                      ~phase:DS.Checkpoint.Active
+                      ~selected:[ queued ]
+                    |> DT.ok
+                  in
+                  (match
+                     DS.commit_and_settle
+                       run_handle
+                       ~admit:(fun () -> true)
+                       prepared
+                       (DS.Handoff.create ~settle:ignore)
+                     |> DT.ok
+                   with
+                   | DS.Settlement.Installed _ -> ()
+                   | Absent | Prewrite_conflict | Diverged ->
+                     failwith "other-root fixture was not durably installed");
+                  id
+                in
+                let first = add_queued root handle "job_owner_first" in
+                let blocked = add_queued root handle "job_owner_blocked" in
+                let other = add_queued other_root other_handle "job_owner_other" in
+                let scheduler =
+                  Scheduler.start
+                    ~sw
+                    ~clock:(Eio.Stdenv.clock env)
+                    ~registry
+                    ~developer_registry:(Some owners)
+                    ~capacity
+                    ~model_job_inference:(fun _ _ ->
+                      Error (Agent_protocol.Error.invalid_request "unused model job"))
+                in
+                Exn.protect
+                  ~finally:(fun () ->
+                    if not !first_released
+                    then (
+                      first_released := true;
+                      Eio.Promise.resolve release_first_u ());
+                    Scheduler.close scheduler;
+                    Scheduler.await_developer_scans_idle scheduler |> protocol_ok)
+                  ~f:(fun () ->
+                    Scheduler.attach_developer scheduler ~root ~runner |> protocol_ok;
+                    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+                      Eio.Promise.await first_entered);
+                    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+                      let rec await_retry () =
+                        if Scheduler.For_testing.developer_retry_pending scheduler ~root
+                        then ()
+                        else (
+                          Eio.Fiber.yield ();
+                          await_retry ())
+                      in
+                      await_retry ());
+                    Scheduler.attach_developer
+                      scheduler
+                      ~root:other_root
+                      ~runner:other_runner
+                    |> protocol_ok;
+                    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+                      Eio.Promise.await second_entered);
+                    assert (Int.equal !entered 2);
+                    let blocked_state =
+                      DS.find_job (DS.observe handle |> DT.ok) blocked
+                      |> Option.value_exn
+                      |> Agent_protocol.Developer_job.state
+                    in
+                    (match blocked_state.status with
+                     | Queued -> ()
+                     | Running
+                     | Waiting_permission _
+                     | Waiting_completion _
+                     | Succeeded
+                     | Failed _
+                     | Cancelled
+                     | Interrupted _ -> failwith "saturated root claimed its second job");
+                    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+                      until env (fun () ->
+                        match DS.find_job (DS.observe other_handle |> DT.ok) other with
+                        | Some job ->
+                          (match (Agent_protocol.Developer_job.state job).status with
+                           | Succeeded -> true
+                           | Queued
+                           | Running
+                           | Waiting_permission _
+                           | Waiting_completion _
+                           | Failed _
+                           | Cancelled
+                           | Interrupted _ -> false)
+                        | None -> false));
+                    Eio.Fiber.fork ~sw (fun () ->
+                      Eio.Fiber.yield ();
+                      first_released := true;
+                      Eio.Promise.resolve release_first_u ());
+                    Scheduler.retire_developer scheduler ~root |> protocol_ok;
+                    assert !first_exited;
+                    assert (
+                      not (Scheduler.For_testing.developer_retry_pending scheduler ~root));
+                    Scheduler.wake_developer scheduler ~root;
+                    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+                      until env (fun () ->
+                        match DS.find_job (DS.observe handle |> DT.ok) first with
+                        | Some job ->
+                          (match (Agent_protocol.Developer_job.state job).status with
+                           | Succeeded | Failed _ | Cancelled | Interrupted _ -> true
+                           | Queued
+                           | Running
+                           | Waiting_permission _
+                           | Waiting_completion _ -> false)
+                        | None -> false));
+                    let blocked_after =
+                      DS.find_job (DS.observe handle |> DT.ok) blocked
+                      |> Option.value_exn
+                      |> Agent_protocol.Developer_job.state
+                    in
+                    (match blocked_after.status with
+                     | Queued -> assert (Int.equal blocked_after.attempt 0)
+                     | Running
+                     | Waiting_permission _
+                     | Waiting_completion _
+                     | Succeeded
+                     | Failed _
+                     | Cancelled
+                     | Interrupted _ -> failwith "retired retry root claimed another job");
+                    assert (Int.equal !entered 2)))))
 ;;
 
 let pending_save target (transition : Agent_session.Session_transition.t) =

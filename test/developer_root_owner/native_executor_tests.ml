@@ -161,7 +161,9 @@ let with_executor
       ?(on_current = ignore)
       ?on_store
       ?on_capacity
+      ?on_owner
       ?max_job_payload_bytes
+      ?(max_active_workers = 1)
       ?(per_session = 2)
       ?(wrap_env = Fn.id)
       ?(now = T.now)
@@ -186,7 +188,7 @@ let with_executor
         ~max_active_runs:2
         ~max_staged_jobs:2
         ~max_native_occupancy:2
-        ~max_active_workers:1
+        ~max_active_workers
         ~max_quarantined_workers:2
       |> Or_error.ok_exn
     in
@@ -209,6 +211,7 @@ let with_executor
         ~workspace_conflict_domain:"selected-native-test"
       |> ok
     in
+    Option.iter on_owner ~f:(fun notify -> notify owners capacity);
     let executor = X.create ~root |> ok in
     let result = f ~env ~root ~executor ~handle ~owner ~selected in
     O.close_and_wait root |> ok;
@@ -222,7 +225,9 @@ let with_job_executor
       ?(wrap_env = Fn.id)
       ?(on_store = fun _ _ _ -> ())
       ?on_capacity
+      ?on_owner
       ?max_job_payload_bytes
+      ?(max_active_workers = 1)
       ?(per_session = 2)
       ?(now = T.now)
       ~run_name
@@ -234,7 +239,9 @@ let with_job_executor
     ~checkpoint
     ~wrap_env
     ?on_capacity
+    ?on_owner
     ?max_job_payload_bytes
+    ~max_active_workers
     ~per_session
     ~now
     ~run_name
@@ -305,6 +312,201 @@ let background_runner ~sw ~root ~store ~blobs ~env ~managed ~jobs ~storage =
       | Openai.Responses.Tool_output.Output.Text value -> Ok (`String value)
       | _ -> Error (P.Error.invalid_request "unexpected output"))
   |> ok
+;;
+
+let await_developer_status ~env ~handle id wanted =
+  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+    let rec wait () =
+      let job = R.find_job (R.observe handle |> ok) id |> Option.value_exn in
+      let state = P.Developer_job.state job in
+      if wanted state.status
+      then state
+      else (
+        match state.status with
+        | P.Job.Failed _ | Cancelled | Interrupted _ ->
+          failwith (Sexp.to_string_hum [%sexp (state.status : P.Job.status)])
+        | Queued | Running | Waiting_permission _ | Waiting_completion _ | Succeeded ->
+          Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+          wait ())
+    in
+    wait ())
+;;
+
+let%test_unit "shared scheduler overlaps two physically admitted jobs of one root" =
+  let host = ref None in
+  let entered = ref 0 in
+  let both_entered, resolve_both = Eio.Promise.create () in
+  let release_first, resolve_first = Eio.Promise.create () in
+  let release_second, resolve_second = Eio.Promise.create () in
+  let released_first = ref false in
+  let released_second = ref false in
+  let unblock () =
+    if not !released_first
+    then (
+      released_first := true;
+      Eio.Promise.resolve resolve_first ());
+    if not !released_second
+    then (
+      released_second := true;
+      Eio.Promise.resolve resolve_second ())
+  in
+  with_job_executor
+    ~run_name:"dvr_shared_scheduler_overlap"
+    ~max_active_workers:2
+    ~on_owner:(fun owners capacity -> host := Some (owners, capacity))
+    ~make_selected:(fun _ ->
+      pair_registry
+        ~on_parent:(fun () ->
+          Int.incr entered;
+          if Int.equal !entered 2 then Eio.Promise.resolve resolve_both ();
+          Eio.Promise.await
+            (if Int.equal !entered 1 then release_first else release_second))
+        (ref 0)
+        (ref 0))
+    (fun ~env ~root ~executor:_ ~handle ~owner:_ ~selected ~jobs ~store ~blobs ->
+       let owners, capacity = Option.value_exn !host in
+       let parent = C.find selected ~name:"parent_tool" |> ok in
+       let pinned = C.select selected ~names:[ "parent_tool" ] |> ok in
+       let request =
+         Chat_response.Background_request.tool
+           ~capabilities:pinned
+           ~reference:(C.reference parent)
+           ~input:(`Object [])
+           ~policy:Chat_response.One_off_request.default_policy
+         |> ok
+       in
+       let ids =
+         O.with_root_action root ~phase:R.Checkpoint.Active (fun ~action ~sw:_ ->
+           let ids =
+             List.init 2 ~f:(fun _ ->
+               O.Action.stage_background action ~request ~checkpoint:ignore |> ok)
+           in
+           let selected = O.Action.seal action ~selected:ids |> ok in
+           Ok (ids, selected))
+         |> ok
+       in
+       Eio.Switch.run (fun sw ->
+         let runner =
+           background_runner
+             ~sw
+             ~root
+             ~store
+             ~blobs
+             ~env
+             ~managed:None
+             ~jobs
+             ~storage:Agent_store.Developer_result_publisher.Storage.Automatic
+         in
+         let scheduler =
+           Agent_server.Job_scheduler.start
+             ~sw
+             ~clock:(Eio.Stdenv.clock env)
+             ~registry:(Agent_server.Session_registry.create ())
+             ~developer_registry:(Some owners)
+             ~capacity
+             ~model_job_inference:(fun _ _ ->
+               Error (P.Error.invalid_request "unused conversation inference"))
+         in
+         Exn.protect
+           ~finally:(fun () ->
+             unblock ();
+             Agent_server.Job_scheduler.close scheduler;
+             Agent_server.Job_scheduler.await_developer_scans_idle scheduler |> ok)
+           ~f:(fun () ->
+             Agent_server.Job_scheduler.attach_developer scheduler ~root ~runner |> ok;
+             Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+               Eio.Promise.await both_entered);
+             assert (Int.equal !entered 2);
+             unblock ();
+             List.iter ids ~f:(fun id ->
+               let state =
+                 await_developer_status ~env ~handle id (function
+                   | P.Job.Succeeded -> true
+                   | _ -> false)
+               in
+               assert (Int.equal state.attempt 1));
+             assert (Int.equal !entered 2))))
+;;
+
+let%test_unit "developer scheduler retirement joins an entered protected handler" =
+  let host = ref None in
+  let entered, resolve_entered = Eio.Promise.create () in
+  let release, resolve_release = Eio.Promise.create () in
+  let calls = ref 0 in
+  with_job_executor
+    ~run_name:"dvr_scheduler_retire_join"
+    ~on_owner:(fun owners capacity -> host := Some (owners, capacity))
+    ~make_selected:(fun _ ->
+      pair_registry
+        ~on_parent:(fun () ->
+          Int.incr calls;
+          Eio.Promise.resolve resolve_entered ();
+          Eio.Cancel.protect (fun () -> Eio.Promise.await release))
+        (ref 0)
+        (ref 0))
+    (fun ~env ~root ~executor:_ ~handle ~owner:_ ~selected ~jobs ~store ~blobs ->
+       let owners, capacity = Option.value_exn !host in
+       let parent = C.find selected ~name:"parent_tool" |> ok in
+       let pinned = C.select selected ~names:[ "parent_tool" ] |> ok in
+       let request =
+         Chat_response.Background_request.tool
+           ~capabilities:pinned
+           ~reference:(C.reference parent)
+           ~input:(`Object [])
+           ~policy:Chat_response.One_off_request.default_policy
+         |> ok
+       in
+       let id =
+         O.with_root_action root ~phase:R.Checkpoint.Active (fun ~action ~sw:_ ->
+           let id = O.Action.stage_background action ~request ~checkpoint:ignore |> ok in
+           let selected = O.Action.seal action ~selected:[ id ] |> ok in
+           Ok (id, selected))
+         |> ok
+       in
+       Eio.Switch.run (fun sw ->
+         let runner =
+           background_runner
+             ~sw
+             ~root
+             ~store
+             ~blobs
+             ~env
+             ~managed:None
+             ~jobs
+             ~storage:Agent_store.Developer_result_publisher.Storage.Automatic
+         in
+         let scheduler =
+           Agent_server.Job_scheduler.start
+             ~sw
+             ~clock:(Eio.Stdenv.clock env)
+             ~registry:(Agent_server.Session_registry.create ())
+             ~developer_registry:(Some owners)
+             ~capacity
+             ~model_job_inference:(fun _ _ ->
+               Error (P.Error.invalid_request "unused conversation inference"))
+         in
+         Exn.protect
+           ~finally:(fun () ->
+             if not (Eio.Promise.is_resolved release)
+             then Eio.Promise.resolve resolve_release ();
+             Agent_server.Job_scheduler.close scheduler;
+             Agent_server.Job_scheduler.await_developer_scans_idle scheduler |> ok)
+           ~f:(fun () ->
+             Agent_server.Job_scheduler.attach_developer scheduler ~root ~runner |> ok;
+             Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+               Eio.Promise.await entered);
+             Eio.Fiber.fork ~sw (fun () ->
+               Eio.Fiber.yield ();
+               Eio.Promise.resolve resolve_release ());
+             Agent_server.Job_scheduler.retire_developer scheduler ~root |> ok;
+             assert (Eio.Promise.is_resolved release);
+             assert (Int.equal !calls 1);
+             let state =
+               R.find_job (R.observe handle |> ok) id
+               |> Option.value_exn
+               |> P.Developer_job.state
+             in
+             assert (Int.equal state.attempt 1))))
 ;;
 
 let%test_unit "claimed Tool target uses one physical native and result publisher" =
@@ -378,7 +580,52 @@ let%test_unit "claimed Tool target uses one physical native and result publisher
                  true
                | Artifact, Some (Artifact { outcome = P.Stored_completion.Succeeded; _ })
                  -> true
-               | _ -> false))))
+               | _ -> false);
+             let rejected_id =
+               O.with_root_action root ~phase:R.Checkpoint.Active (fun ~action ~sw:_ ->
+                 let id =
+                   O.Action.stage_background action ~request ~checkpoint:ignore |> ok
+                 in
+                 let selected = O.Action.seal action ~selected:[ id ] |> ok in
+                 Ok (id, selected))
+               |> ok
+             in
+             let candidate =
+               O.Job_candidate.read_current root ~checkpoint:ignore
+               |> ok
+               |> List.find_exn ~f:(fun candidate ->
+                 P.Id.Job.equal
+                   rejected_id
+                   (P.Developer_job.id (O.Job_candidate.job candidate)))
+             in
+             let decisions = ref 0 in
+             assert (
+               Result.is_error
+                 (Agent_server.Developer_background_job_runner.run_candidate
+                    runner
+                    ~on_capacity_decision:(function
+                      | Agent_server.Developer_job_worker.Capacity_decision.Acquired ->
+                        Int.incr decisions;
+                        O.narrow_selection root ~names:[] |> ok
+                      | Unavailable | Rejected ->
+                        failwith "postcapacity test did not acquire the shared slot")
+                    candidate));
+             assert (Int.equal !decisions 1);
+             assert (Int.equal !parent_calls 1);
+             let unchanged =
+               R.find_job (R.observe handle |> ok) rejected_id |> Option.value_exn
+             in
+             assert (Int.equal (P.Developer_job.state unchanged).attempt 0);
+             assert (
+               match (P.Developer_job.state unchanged).status with
+               | P.Job.Queued -> true
+               | Running
+               | Waiting_permission _
+               | Waiting_completion _
+               | Succeeded
+               | Failed _
+               | Cancelled
+               | Interrupted _ -> false))))
 ;;
 
 let%test_unit "claimed Script executes selected native and retains its lexical child" =
@@ -543,10 +790,13 @@ let%test_unit "claimed Script cannot catch a physical admission error into anoth
 
 let%test_unit "malformed saved Async_tool enters one physical Failed attempt" =
   let calls = ref 0 in
+  let host = ref None in
   with_job_executor
     ~run_name:"dvr_claimed_malformed_async"
+    ~on_owner:(fun owners capacity -> host := Some (owners, capacity))
     ~make_selected:(fun _ -> registry ~custom:false calls)
     (fun ~env ~root ~executor:_ ~handle ~owner:_ ~selected:_ ~jobs ~store ~blobs ->
+       let owners, capacity = Option.value_exn !host in
        let capture_fingerprint = Chatml_developer_capture.fingerprint (O.capture root) in
        let id = Selected.job_id "job_claimed_malformed_async" in
        let original =
@@ -569,12 +819,26 @@ let%test_unit "malformed saved Async_tool enters one physical Failed attempt" =
            ~state:(P.Developer_job.state original)
          |> ok
        in
+       let unsupported_id = Selected.job_id "job_claimed_unsupported_kind" in
+       let unsupported =
+         P.Developer_job.create
+           ~owner:(O.owner root)
+           ~capture_fingerprint
+           ~id:unsupported_id
+           ~launch:(P.Developer_job.launch original)
+           ~kind:P.Job.Shell_process
+           ~payload:(`Object [])
+           ~retry_policy:P.Job.Never
+           ~created_at:(P.Developer_job.created_at original)
+           ~state:(P.Developer_job.state original)
+         |> ok
+       in
        let prepared =
          R.prepare_root_selected
            handle
            ~expected:(R.observe handle |> ok)
            ~phase:R.Checkpoint.Active
-           ~selected:[ malformed ]
+           ~selected:[ malformed; unsupported ]
          |> ok
        in
        (match
@@ -608,15 +872,42 @@ let%test_unit "malformed saved Async_tool enters one physical Failed attempt" =
              (Agent_server.Developer_background_job_runner.availability runner candidate
               |> ok)
              Malformed_supported);
-         assert (
-           Result.is_error
-             (Agent_server.Developer_background_job_runner.run_candidate runner candidate));
+         let scheduler =
+           Agent_server.Job_scheduler.start
+             ~sw
+             ~clock:(Eio.Stdenv.clock env)
+             ~registry:(Agent_server.Session_registry.create ())
+             ~developer_registry:(Some owners)
+             ~capacity
+             ~model_job_inference:(fun _ _ ->
+               Error (P.Error.invalid_request "unused conversation inference"))
+         in
+         Exn.protect
+           ~finally:(fun () ->
+             Agent_server.Job_scheduler.close scheduler;
+             Agent_server.Job_scheduler.await_developer_scans_idle scheduler |> ok)
+           ~f:(fun () ->
+             Agent_server.Job_scheduler.attach_developer scheduler ~root ~runner |> ok;
+             let state =
+               await_developer_status ~env ~handle id (function
+                 | P.Job.Failed _ -> true
+                 | _ -> false)
+             in
+             assert (Int.equal state.attempt 1));
          assert (Int.equal !calls 0);
          let persisted = R.find_job (R.observe handle |> ok) id |> Option.value_exn in
          assert (Int.equal (P.Developer_job.state persisted).attempt 1);
          assert (
            match (P.Developer_job.state persisted).status with
            | P.Job.Failed _ -> true
+           | _ -> false);
+         let unsupported =
+           R.find_job (R.observe handle |> ok) unsupported_id |> Option.value_exn
+         in
+         assert (Int.equal (P.Developer_job.state unsupported).attempt 0);
+         assert (
+           match (P.Developer_job.state unsupported).status with
+           | P.Job.Queued -> true
            | _ -> false)))
 ;;
 

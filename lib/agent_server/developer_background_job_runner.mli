@@ -122,8 +122,13 @@ val availability
     and capacity; no callback, native effect or result selection is replayed.
     Cancellation and unexpected exceptions keep their original
     identity/backtrace while the Worker performs its protected exact-attempt
-    cleanup. This method does not install a scheduler. *)
+    cleanup. This method does not install a scheduler.
+    [on_capacity_decision] is a trusted nonyielding one-shot scheduling
+    observer. Worker admission reports the real capacity decision; early
+    decode/currentness exit or exception invokes the same observer as fallback.
+    It grants no Claim, effect, or result authority. *)
 val run_candidate
   :  t
+  -> ?on_capacity_decision:(Developer_job_worker.Capacity_decision.t -> unit)
   -> Developer_root_owner.Job_candidate.t
   -> (Agent_protocol.Developer_job.t option, Agent_protocol.Error.t) result
