@@ -195,21 +195,6 @@ let execute_with_budget t active claim job request deadline effective control =
       C.resolve capabilities ~id:reference.id ~fingerprint:reference.fingerprint
       |> Result.map_error ~f:(fun error -> P.Error.invalid_request error.message)
     in
-    let* () =
-      match B.agent_artifact request, t.agent_runtime with
-      | None, _ -> Ok ()
-      | Some _, None -> invalid "saved Agent.run runtime is not installed"
-      | Some _, Some runtime ->
-        Runtime.require_saved_agent_source
-          runtime
-          ~binding
-          ~max_registrations:(O.job_policy t.root).execution.max_array_items
-          ~checkpoint:(fun () ->
-            Option.iter
-              control
-              ~f:(fun (control : Chatml.Chatml_lang.execution_control) ->
-                control.checkpoint ()))
-    in
     let* revision, completion_schema = selected_schema t capabilities reference in
     let context : H.context =
       { id = P.Id.Invocation.create ()
@@ -242,6 +227,11 @@ let execute_with_budget t active claim job request deadline effective control =
       match B.agent_artifact request with
       | None -> run_native ()
       | Some _ ->
+        let* agent_runtime =
+          t.agent_runtime
+          |> Result.of_option
+               ~error:(P.Error.invalid_request "saved Agent.run runtime is not installed")
+        in
         let* parent = O.job_parent t.root active in
         Agent_session.Captured_agent_runner.Claimed_developer.with_saved_artifact
           ~active
@@ -250,6 +240,13 @@ let execute_with_budget t active claim job request deadline effective control =
           ~policy:(O.job_policy t.root)
           ~prepared
           ~binding
+          ~agent_runtime
+          ~max_registrations:(O.job_policy t.root).execution.max_array_items
+          ~checkpoint:(fun () ->
+            Option.iter
+              control
+              ~f:(fun (control : Chatml.Chatml_lang.execution_control) ->
+                control.checkpoint ()))
           ~invocation
           ~check_current:(fun () ->
             let owner = O.owner t.root in

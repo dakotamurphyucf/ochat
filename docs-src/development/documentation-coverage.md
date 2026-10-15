@@ -184,6 +184,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_protocol/completion_projection.mli` | [contract](../../lib/agent_protocol/completion_projection.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_protocol/delivery.mli` | [contract](../../lib/agent_protocol/delivery.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/delivery_subscription_binding.mli` | [contract](../../lib/agent_protocol/delivery_subscription_binding.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/developer_agent_artifact.mli` | [contract](../../lib/agent_protocol/developer_agent_artifact.mli) | [integration](../design/chatml-developer-runtime.md) | Public saved-Agent artifact reference and historical payload shape; current source authority belongs to the entered runtime. |
 | `lib/agent_protocol/developer_job.mli` | [contract](../../lib/agent_protocol/developer_job.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/developer_model_call.mli` | [contract](../../lib/agent_protocol/developer_model_call.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/envelope.mli` | [contract](../../lib/agent_protocol/envelope.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |

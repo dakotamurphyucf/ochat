@@ -163,6 +163,7 @@ and job_result_owner =
 
 and inference_scope =
   { inference_issuer : t
+  ; inference_origin : inference_origin
   ; inference_active_worker : Job_scope.active
   ; inference_parent : Job_scope.Parent.t
   ; inference_context : Inference_runtime.Context.t
@@ -175,6 +176,13 @@ and inference_scope =
   ; mutable inference_calls : inference_call list
   ; mutable inference_issued : inference_route list
   }
+
+and inference_origin =
+  | Claimed_model_job
+  | Claimed_saved_agent of
+      { selected : Agent_session.Captured_agent_runner.Claimed_developer.Selected.t
+      ; terminal : native_scope
+      }
 
 and inference_call =
   { inference_call_parent : Transcript.Scope.parent
@@ -637,7 +645,30 @@ let check_inference_scope_local (scope : inference_scope) =
         ~owner:issuer.owner
         ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
     in
-    Provider_operator_port.Model_selection.check_current selection
+    let* () = Provider_operator_port.Model_selection.check_current selection in
+    match scope.inference_origin with
+    | Claimed_model_job -> Ok ()
+    | Claimed_saved_agent { selected; terminal } ->
+      let* () =
+        Agent_session.Captured_agent_runner.Claimed_developer.Selected.check_now selected
+      in
+      let context = H.context terminal.registration.invocation in
+      if
+        phys_equal terminal.issuer issuer
+        && Option.value_map
+             (Eio.Fiber.get native_call_key)
+             ~default:false
+             ~f:(phys_equal issuer)
+        && Option.value_map
+             (Hashtbl.find issuer.native_calls context.id)
+             ~default:false
+             ~f:(phys_equal terminal.registration)
+        && Option.value_map
+             terminal.registration.scope
+             ~default:false
+             ~f:(phys_equal terminal)
+      then Ok ()
+      else invalid "saved Agent native callback is no longer owned"
 ;;
 
 module Current = struct
@@ -2667,7 +2698,10 @@ module Model_inference = struct
   let check_now ?(allow_tracking = false) t =
     let issuer = t.inference_issuer in
     let* _ = current_local ~allow_tracking issuer in
-    check_inference_scope_local t
+    let* () = check_inference_scope_local t in
+    match t.inference_origin with
+    | Claimed_model_job -> Ok ()
+    | Claimed_saved_agent { terminal; _ } -> Native_terminal.check_completion_now terminal
   ;;
 
   let check t =
@@ -2678,6 +2712,12 @@ module Model_inference = struct
         t.inference_parent
         ~owner:issuer.owner
         ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
+    in
+    let* () =
+      match t.inference_origin with
+      | Claimed_model_job -> Ok ()
+      | Claimed_saved_agent { selected; _ } ->
+        Agent_session.Captured_agent_runner.Claimed_developer.Selected.check selected
     in
     let* () = check_effect_now issuer witness in
     check_now t
@@ -2787,7 +2827,7 @@ module Model_inference = struct
     route
   ;;
 
-  let with_claimed_base issuer ~active ~f =
+  let with_claimed_base issuer ~active ~origin ~f =
     try
       let result =
         let* () =
@@ -2806,15 +2846,38 @@ module Model_inference = struct
         in
         let claim = Job_scope.claim active in
         let* () =
-          if
-            P.Job.equal_kind
-              (P.Developer_job.kind (Store.Claim.job claim))
-              P.Job.Model_call
-          then Ok ()
-          else invalid "developer inference requires a physical Model_call claim"
+          match origin with
+          | Claimed_model_job ->
+            if
+              P.Job.equal_kind
+                (P.Developer_job.kind (Store.Claim.job claim))
+                P.Job.Model_call
+            then Ok ()
+            else invalid "developer inference requires a physical Model_call claim"
+          | Claimed_saved_agent { selected; terminal } ->
+            let* () =
+              if
+                P.Job.equal_kind
+                  (P.Developer_job.kind (Store.Claim.job claim))
+                  P.Job.Async_tool
+                && phys_equal
+                     active
+                     (Agent_session.Captured_agent_runner.Claimed_developer.Selected
+                      .active
+                        selected)
+              then Ok ()
+              else invalid "saved Agent inference requires its physical Async_tool claim"
+            in
+            let* () = Native_terminal.check_completion_now terminal in
+            (match terminal.registration.job_parent with
+             | Some native_parent when Job_scope.Parent.same_claim parent native_parent ->
+               Ok ()
+             | Some _ | None ->
+               invalid "saved Agent inference has a foreign native parent")
         in
         let scope =
           { inference_issuer = issuer
+          ; inference_origin = origin
           ; inference_active_worker = active
           ; inference_parent = parent
           ; inference_context = context
@@ -2889,11 +2952,22 @@ module Model_inference = struct
   let context t = t.inference_context
 
   let admit_external_model t ~request ~checkpoint =
-    admit_external_model_from_scope
-      (Claimed_model t)
-      ~request
-      ~checkpoint
-      ~check_parent_now:(fun () -> Ok ())
+    match t.inference_origin with
+    | Claimed_model_job ->
+      admit_external_model_from_scope
+        (Claimed_model t)
+        ~request
+        ~checkpoint
+        ~check_parent_now:(fun () -> Ok ())
+    | Claimed_saved_agent { selected; terminal } ->
+      let* () = check t in
+      admit_external_model_from_scope
+        (Native_model terminal)
+        ~request
+        ~checkpoint
+        ~check_parent_now:(fun () ->
+          Agent_session.Captured_agent_runner.Claimed_developer.Selected.check_now
+            selected)
   ;;
 
   let identity t : Inference_client.Identity.t =
@@ -2968,7 +3042,9 @@ module Model_inference = struct
               let pending =
                 Mutation_gate.with_owner issuer.mutation_gate ~f:(fun () ->
                   require_store
-                    (Store.Tracking.prepare_admit
+                    ((match t.inference_origin with
+                      | Claimed_model_job -> Store.Tracking.prepare_admit
+                      | Claimed_saved_agent _ -> Store.Tracking.prepare_admit_saved_agent)
                        issuer.tracking
                        ~claim:route.inference_claim
                        ~relation
@@ -3256,8 +3332,8 @@ module Model_inference = struct
     | Tracking_failure error -> Error error
   ;;
 
-  let with_claimed issuer ~active ~f =
-    match with_claimed_base issuer ~active ~f with
+  let with_claimed_origin issuer ~active ~origin ~f =
+    match with_claimed_base issuer ~active ~origin ~f with
     | Ok value ->
       let* () = reconcile issuer in
       Ok value
@@ -3274,6 +3350,36 @@ module Model_inference = struct
        with
        | _ -> ());
       Exn.raise_with_original_backtrace exn backtrace
+  ;;
+
+  let with_claimed issuer ~active ~f =
+    with_claimed_origin issuer ~active ~origin:Claimed_model_job ~f
+  ;;
+
+  let with_claimed_agent issuer ~selected ~f =
+    let module Selected = Agent_session.Captured_agent_runner.Claimed_developer.Selected
+    in
+    let* () = Selected.check selected in
+    let invocation = Selected.invocation selected in
+    let context = H.context invocation in
+    let* terminal =
+      match Hashtbl.find issuer.native_calls context.id with
+      | Some registration when phys_equal registration.invocation invocation ->
+        (match registration.scope with
+         | Some terminal
+           when Option.value_map
+                  (Eio.Fiber.get native_call_key)
+                  ~default:false
+                  ~f:(phys_equal issuer) -> Ok terminal
+         | Some _ | None -> invalid "saved Agent native callback is not entered")
+      | Some _ | None -> invalid "saved Agent native invocation is not registered"
+    in
+    let* () = Native_terminal.check_completion_now terminal in
+    with_claimed_origin
+      issuer
+      ~active:(Selected.active selected)
+      ~origin:(Claimed_saved_agent { selected; terminal })
+      ~f
   ;;
 
   let live issuer =

@@ -110,6 +110,32 @@ val bind_installed
   -> (Chat_response.Tool.Agent_source_runner.t, Agent_protocol.Error.t) Result.t
 
 module Claimed_developer : sig
+  module Selected : sig
+    type t
+
+    (** Physically borrowed saved Agent.run v2 source inside its exact selected
+        native callback. The entered Worker Claim, registered runtime source,
+        selected implementation, borrowed invocation, saved artifact and
+        original/current parent remain bound to this one lexical proof. It
+        expires on callback return and cannot be recreated from payload data. *)
+    val active : t -> Developer_job_scope.active
+
+    val invocation : t -> Agent_protocol.Host_invocation.t
+
+    (** Full yielding source, selected implementation and Worker/current-actor
+        recheck after restoration or host work. No callback or file read is
+        replayed. *)
+    val check : t -> (unit, Agent_protocol.Error.t) result
+
+    (** Local, nonyielding check before Store admission and provider dispatch.
+        Requires the same domain and live inherited lexical saved-source and
+        selected-native callback bindings, exact Worker Parent and native
+        implementation. Joined child fibers may inherit those bindings; none
+        can outlive the enclosing callbacks. Root separately checks its
+        physical Native_terminal, current actor, provider and epoch. *)
+    val check_now : t -> (unit, Agent_protocol.Error.t) result
+  end
+
   (** One saved ordinary Agent.run reference from the exact entered Worker Claim.
       [request] must decode canonically from that Claim's payload under [policy].
       [prepared] is the same request's genuinely re-admitted Tool execution,
@@ -122,7 +148,11 @@ module Claimed_developer : sig
       even when it calls the same function under the same Worker. The later
       native callback must present the actual selected_borrowed for that
       invocation, same physical Worker Parent, selected binding and implementation.
-      The callback calls [check_current] after yielding restoration/selection
+      [agent_runtime] must contain this very implementation's genuine
+      Native_output/Source(Some preparer) registration; admission charges its
+      bounded traversal before binding the saved scope. A copied saved request
+      or caller-supplied function with no registered source cannot mint
+      [Selected.t]. The callback calls [check_current] after yielding restoration/selection
       and before child execution; original exceptions and cancellation pass
       through unchanged. A foreign or expired selected callback rejects rather
       than falling back to File or a conversation native service. *)
@@ -133,9 +163,24 @@ module Claimed_developer : sig
     -> policy:Chat_response.One_off_request.policy
     -> prepared:Chat_response.Background_request.execution
     -> binding:Chat_response.Tool_capability.binding
+    -> agent_runtime:Chat_response.Agent_runtime.t
+    -> max_registrations:int
+    -> checkpoint:(unit -> unit)
     -> invocation:Agent_protocol.Host_invocation.t
     -> check_current:(unit -> (unit, Agent_protocol.Error.t) result)
     -> (unit -> ('a, Agent_protocol.Error.t) result)
+    -> ('a, Agent_protocol.Error.t) result
+
+  (** Only inside the above physically entered saved-source bracket and the
+      existing selected native callback. Verify the borrowed selected scope,
+      exact selected implementation and saved artifact with the current
+      Worker/actor, then lend one non-escaping proof to Root inference. The
+      ordinary [selected] lookup continues to serve Headless restoration and
+      cannot by itself grant provider authority. *)
+  val with_selected
+    :  borrowed:Native_tool_invocation.selected_borrowed
+    -> implementation:Ochat_function.t
+    -> (Selected.t -> ('a, Agent_protocol.Error.t) result)
     -> ('a, Agent_protocol.Error.t) result
 end
 

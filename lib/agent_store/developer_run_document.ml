@@ -470,7 +470,11 @@ let validate_inference_relations
         let%bind () =
           match Hashtbl.find job_by_id job_id with
           | Some job
-            when P.Job.equal_kind (P.Developer_job.kind job) P.Job.Model_call
+            when (P.Job.equal_kind (P.Developer_job.kind job) P.Job.Model_call
+                  || (P.Job.equal_kind (P.Developer_job.kind job) P.Job.Async_tool
+                      && Result.is_ok
+                           (P.Developer_agent_artifact.Saved_tool_request.of_payload
+                              (P.Developer_job.payload job))))
                  && P.Execution_owner.equal_developer (P.Developer_job.owner job) owner
                  && Chatml_source.Digest.equal
                       (P.Developer_job.capture_fingerprint job)
@@ -478,7 +482,7 @@ let validate_inference_relations
                  && attempt > 0
                  && attempt <= (P.Developer_job.state job).attempt -> Ok ()
           | Some _ | None ->
-            corrupt "developer inference has no matching historical model attempt"
+            corrupt "developer inference has no matching historical tracked attempt"
         in
         let%bind recreated =
           Inference_entry.create

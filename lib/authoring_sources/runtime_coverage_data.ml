@@ -174,6 +174,23 @@ let shared_features =
     , [ "test/chatml_composition/background_recovery_tests.ml"
       ; "test/chatml_composition/background_pending_restart_tests.ml"
       ] )
+  ; ( "jobs.saved_agent_inference"
+    , "A physically selected saved-Agent callback reuses bounded developer inference \
+       tracking without granting other async jobs model authority"
+    , [ "lib/agent_protocol/developer_agent_artifact.ml"
+      ; "lib/chat_response/background_request.ml"
+      ; "lib/agent_session/captured_agent_runner.ml"
+      ; "lib/agent_store/developer_run_document.ml"
+      ; "lib/agent_store/developer_run_store.ml"
+      ; "lib/agent_server/developer_root_owner.ml"
+      ; "lib/agent_server/developer_background_job_runner.ml"
+      ]
+    , "runtime.jobs.owned"
+    , [ "test/queued_source_foundation/foundation_tests.ml"
+      ; "test/developer_run_store/developer_inference_tracking_tests.ml"
+      ; "test/developer_root_owner/native_executor_tests.ml"
+      ; "test/provider_runtime_host/runtime_host_tests.ml"
+      ] )
   ]
 ;;
 
@@ -329,6 +346,8 @@ let implementation_sources =
     , "34d04d5b6b6a3e15a4cbdf75cf1a380c3eeb593045620893ba11c05b15d02eb7" )
   ; ( "lib/agent_protocol/delivery.ml"
     , "63ae0f4d478302e84a1e49c84f406abf090794db4c231aa76181ad02072581d9" )
+  ; ( "lib/agent_protocol/developer_agent_artifact.ml"
+    , "ed55a33b64d35a1fdb3b0a1126b1093856cb55b4796bac46e8bf7671d07e9f6a" )
   ; ( "lib/agent_protocol/job.ml"
     , "9f7ce5c6116a85816df7e489d7a6ba0c54114e9248592b2e7b38f0b0097a01bb" )
   ; ( "lib/agent_protocol/stored_completion.ml"
@@ -340,9 +359,11 @@ let implementation_sources =
   ; ( "lib/agent_server/job_scheduler_developer.ml"
     , "2e7ccfedf339f19999699a07772afeb2a7a90a98e9ca664af08e36e8042920ac" )
   ; ( "lib/agent_server/developer_background_job_runner.ml"
-    , "9694ea1078897434f69f9c03f10f1ce5393443bf5a8c42e6b1f04d100eab5ce0" )
+    , "6f5137851d5bdb58fc3e65a7a4824249d4e6d661ce261d2cab7de7040a7aa976" )
   ; ( "lib/agent_server/developer_managed_tool_executor.ml"
     , "3befc8189100e09f54c94db05ddfecde36823ac292992b4d23090fe7102f2f3f" )
+  ; ( "lib/agent_server/developer_root_owner.ml"
+    , "23ba99d7bb0f8753fbec5f41823a6a9594f260005a3291cadeb7a0a14a63f555" )
   ; ( "lib/agent_server/developer_script_job_execution.ml"
     , "4e30550f6585c6afa97ddd12a12042d0be26b84f18aad7f6f92b2f3a3bf4bb32" )
   ; ( "lib/agent_server/developer_script_job_service.ml"
@@ -351,6 +372,12 @@ let implementation_sources =
     , "37cf371632d8ad86693c162e0593d56866f76df577dceb06ddd2ac5fe5bfdae9" )
   ; ( "lib/agent_session/background_execution.ml"
     , "2149c979ce81c6c851c8d8cbe749c622334f3c43d05b72b17ae89873e5d563c3" )
+  ; ( "lib/agent_session/captured_agent_runner.ml"
+    , "3f26bfd4886922309c20cb52479f24565eafc9adef071c4b828619b002c09ca0" )
+  ; ( "lib/agent_store/developer_run_document.ml"
+    , "7274f5aa4214a9fe6fd16614e6f9163d2aeb36b72e12160adb4389f45566fcf7" )
+  ; ( "lib/agent_store/developer_run_store.ml"
+    , "a31e528483d9cbd9d9daed0c424eea5078dc9641bb4894eb71df21ebeb8b66d3" )
   ; ( "lib/agent_session/background_job_event.ml"
     , "5f5a20065fb9652005e4aadeaea85d01f271aff9674a71a318bc9cd6c34e0692" )
   ; ( "lib/agent_session/external_ingress.ml"
@@ -390,7 +417,7 @@ let implementation_sources =
   ; ( "lib/chat_response/background_job_operations.ml"
     , "86e16c6df7d1eafcb41cb8b558318f7f5b310f9b356afc2412f0e0a32055fcb5" )
   ; ( "lib/chat_response/background_request.ml"
-    , "104350ca788bb88e626045dc5269080d8d5f5005b88898c3faa69d9377793788" )
+    , "8d4ef26379439f843bb4003591d7dd98fb472a2116cf49c708d42453abda53ed" )
   ; ( "lib/chat_response/ingress_operations.ml"
     , "d8e2813f75f67ca4c4d3ee6fc264a9731889538987a53d1f80ff27c2c399c825" )
   ; ( "lib/chat_response/moderator_invocation.ml"
