@@ -1115,6 +1115,12 @@ let%test_unit "nested Agent callback cannot consume outer saved artifact pin" =
   let observed = ref [] in
   let source_calls = ref 0 in
   let rejected = ref false in
+  let descendant_checked = ref false in
+  let descendant_error = ref None in
+  let saved_selected = ref None in
+  let nested_invocation = ref None in
+  let current_root = ref None in
+  let selected_registry = ref None in
   let run_nested = ref (fun () -> ()) in
   with_registered_agent
     ~run_name:"dvr_nested_agent_artifact"
@@ -1122,9 +1128,40 @@ let%test_unit "nested Agent callback cannot consume outer saved artifact pin" =
     ~on_run:(fun () ->
       Int.incr source_calls;
       if Int.equal !source_calls 1
-      then !run_nested ()
+      then (
+        let borrowed = Agent_session.Native_tool_invocation.borrow_selected () |> ok in
+        let binding = C.find (Option.value_exn !selected_registry) ~name:"child" |> ok in
+        let implementation = C.native_implementation binding |> Option.value_exn in
+        Agent_session.Captured_agent_runner.Claimed_developer.with_selected
+          ~borrowed
+          ~implementation
+          (fun selected ->
+             saved_selected := Some selected;
+             O.Model_inference.check_saved_agent_source
+               (Option.value_exn !current_root)
+               ~selected
+             |> ok;
+             !run_nested ();
+             Ok ())
+        |> ok)
       else if Int.equal !source_calls 2
-      then ()
+      then (
+        let child = Agent_session.Native_tool_invocation.borrow_selected () |> ok in
+        let actual =
+          Agent_session.Native_tool_invocation.selected_borrowed_invocation child
+        in
+        let expected = Option.value_exn !nested_invocation in
+        if not (P.Id.Invocation.equal (H.context actual).id (H.context expected).id)
+        then descendant_error := Some "second source call retained parent selected borrow"
+        else (
+          match
+            O.Model_inference.check_saved_agent_source_descendant_now
+              (Option.value_exn !current_root)
+              ~selected:(Option.value_exn !saved_selected)
+              ~child
+          with
+          | Ok () -> descendant_checked := true
+          | Error error -> descendant_error := Some error.message))
       else failwith "Agent source entered an unexpected invocation")
     (fun ~env
       ~root
@@ -1139,6 +1176,8 @@ let%test_unit "nested Agent callback cannot consume outer saved artifact pin" =
       ~preparations ->
        let id = stage_registered_agent_tool jobs in
        assert (Int.equal !preparations 1);
+       current_root := Some root;
+       selected_registry := Some selected;
        let binding = C.find selected ~name:"child" |> ok in
        let reference = C.reference binding in
        (run_nested
@@ -1159,6 +1198,7 @@ let%test_unit "nested Agent callback cannot consume outer saved artifact pin" =
                  }
                |> ok
              in
+             nested_invocation := Some child;
              let terminal =
                X.run_child
                  executor
@@ -1262,6 +1302,13 @@ let%test_unit "nested Agent callback cannot consume outer saved artifact pin" =
          | Cancelled
          | Interrupted _ -> false);
        assert !rejected;
+       if not !descendant_checked
+       then
+         failwithf
+           "nested descendant proof failed (%d calls): %s"
+           !source_calls
+           (Option.value !descendant_error ~default:"no result")
+           ();
        assert (Int.equal !source_calls 2))
 ;;
 

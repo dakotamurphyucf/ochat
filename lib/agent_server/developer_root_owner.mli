@@ -856,6 +856,30 @@ val with_native_callback
 module Model_inference : sig
   type t
 
+  (** Compare a saved Agent.run source with this exact physical Root before
+      preparing child MCP/shell/native resources. This factors the existing
+      [with_claimed_agent] admission: current saved source and Worker, exact
+      registered Host invocation object in this Root's native_calls, entered
+      native callback key, live Native_terminal and current Root. It creates
+      no inference scope or Store tracker. A copied owner/artifact/ID cannot
+      substitute for the entered callback. Expected denial is typed; original
+      cancellation and unexpected exception identity are preserved. *)
+  val check_saved_agent_source
+    :  run
+    -> selected:Agent_session.Captured_agent_runner.Claimed_developer.Selected.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Nonyielding recheck after a child selected borrow shadows the saved
+      parent's direct fiber binding. The exact physical selected-ancestor
+      proof, registered invocation/entered native callback, terminal and Root
+      local currentness all remain required. Call immediately before child
+      native/managed effect admission, with no intervening yield. *)
+  val check_saved_agent_source_descendant_now
+    :  run
+    -> selected:Agent_session.Captured_agent_runner.Claimed_developer.Selected.t
+    -> child:Agent_session.Native_tool_invocation.selected_borrowed
+    -> (unit, Agent_protocol.Error.t) result
+
   (** Borrow this root's actual entered, durably Running Model_call Claim. The
       scope checks exact Worker issuer, saved job/attempt/capture and current
       original actor, epoch and pinned model target. It borrows the exact
