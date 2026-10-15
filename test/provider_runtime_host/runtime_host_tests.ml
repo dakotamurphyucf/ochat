@@ -784,7 +784,7 @@ let%test_unit "claimed developer model runner publishes a real offline response"
                ~root
                ~results
                ~env
-               ~managed:None
+               ~managed_definition:None
                ~agent_runtime:None
                ~jobs
                ~authorize:(fun _ _ -> Ok ())
@@ -1940,59 +1940,14 @@ let%test_unit
         }
       |> ok
     in
-    let managed_callback : Agent_session.Native_tool_invocation.selected_managed_dispatch =
-      { definition = managed
-      ; current = (fun () -> selected)
-      ; run =
-          (fun execution
-            _borrowed
-            ~effect_entry
-            ~stage_background:_
-            ~install_jobs
-            continuation ->
-            effect_entry () |> ok;
-            let prepared = Managed.owned_prepared execution in
-            assert (
-              Chatml_compilation.equal_target
-                (Chat_response.Extension_compiler.compiler_target prepared)
-                Chatml_compilation.Developer_tool_v1);
-            let config : Chatml_host_runtime.runtime_config =
-              { surface = Chatml.Chatml_extension_surface.developer_tool_v1
-              ; operations = Chatml_host_runtime.default_operations ()
-              }
-            in
-            let installed = install_jobs config in
-            assert (Option.is_some installed.scoped_async_operation);
-            let result =
-              Chat_response.Extension_compiler.Program.run_in_scope
-                (Chat_response.Extension_compiler.program prepared)
-                ?scoped_async_operation:installed.scoped_async_operation
-                ~control:None
-                ~config:installed.config
-                ~entrypoint:"run"
-                ~arguments:
-                  [ Chatml.Chatml_value_codec.import_json `Null
-                  ; Chatml.Chatml_value_codec.import_json model_payload
-                  ]
-                ()
-            in
-            ignore
-              (result
-               |> Result.map_error ~f:(fun error -> error.Chatml_execution.message)
-               |> Result.ok_or_failwith
-               : Chatml.Chatml_lang.value);
-            continuation
-              ~validate_work:(fun _ -> Error "native model callback selected no work")
-              ~outcome:(P.Invocation.Complete model_payload)
-              ~selected_jobs:[])
-      }
-    in
     let executor = Native.create ~root:failed_run |> ok in
     let executor = Native.with_job_service executor jobs |> ok in
+    let executor =
+      Native.with_managed_definition executor ~definition:managed ~env |> ok
+    in
     let terminal =
       Native.run_root
         executor
-        ~managed:(Some managed_callback)
         ~reference
         ~invocation
         ~authorize:(fun _ _ -> Ok ())

@@ -383,6 +383,15 @@ let model_spawn_operation ?control scope =
 module Scope = struct
   type t = scope
 
+  let issued_by_terminal (t : t) terminal =
+    match t.physical with
+    | Native actual ->
+      phys_equal actual terminal
+      && O.Native_terminal.issued_by_root terminal ~root:t.service.root
+      && Result.is_ok (K.check_open t.kernel)
+    | Root _ | Worker _ -> false
+  ;;
+
   let admit_managed (t : t) execution =
     match t.physical with
     | Root _ | Worker _ ->

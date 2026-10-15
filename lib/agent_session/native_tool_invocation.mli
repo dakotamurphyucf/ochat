@@ -70,6 +70,14 @@ val selected_borrowed_parent
   :  selected_borrowed
   -> Developer_invocation_owner.Selected.active
 
+(** Inherited aggregate execution budget of the SAME live selected callback.
+    A borrowed value retained after that callback expires cannot start another
+    interpreter scope. The returned context is budget ancestry, not a current
+    native effect grant; effect_entry and physical parent checks still apply. *)
+val selected_borrowed_execution_context
+  :  selected_borrowed
+  -> (Chatml_execution.context, Agent_protocol.Error.t) result
+
 val selected_borrowed_capabilities
   :  selected_borrowed
   -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result

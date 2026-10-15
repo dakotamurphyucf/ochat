@@ -34,6 +34,13 @@ end
 module Scope : sig
   type t
 
+  (** Nonyielding physical comparison for the open lexical bracket around
+      this same Native_terminal and Root, including before its handler enters.
+      It rejects a foreign or finished scope; matching run coordinates are
+      insufficient. It grants no effect or callback liveness and does not
+      replace the yielding currentness checks below. *)
+  val issued_by_terminal : t -> Developer_root_owner.Native_terminal.t -> bool
+
   (** Trusted selected native kernel calls this once after its authentic
       Managed.admit_owned succeeds and before invoking user code. The opaque
       owned execution must name this physical terminal, original target and
