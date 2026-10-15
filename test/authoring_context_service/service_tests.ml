@@ -420,6 +420,17 @@ let%test_unit "host root read is fresh while project context remains captured" =
            ~create:(`Or_truncate 0o600)
            script_file
            "let main input = Task.pure(input)\n";
+         let second_project =
+           {|{"schema_version":1,"namespace":"second","environments":{"other":{"modules":{}}},"entries":{"main":{"source":"second.chatml","target":"one_off_v1"}}}|}
+         in
+         Eio.Path.save
+           ~create:(`Or_truncate 0o600)
+           Eio.Path.(directory / "second.project.json")
+           second_project;
+         Eio.Path.save
+           ~create:(`Or_truncate 0o600)
+           Eio.Path.(directory / "second.chatml")
+           "let main input = Task.pure(input)\n\n";
          let authored_document =
            "<script id=\"s\" language=\"chatml\" kind=\"tool\" \
             project=\"./chatml.project.json\">let main input = Task.pure(input)\n\
@@ -504,6 +515,30 @@ let%test_unit "host root read is fresh while project context remains captured" =
              |> Agent_server.Authoring_source_host.Capture.build
            in
            Agent_server.Authoring_source_host.Context.close_and_wait static_owner;
+           let second_owner =
+             Agent_server.Authoring_source_host.Context.open_root
+               source_host
+               ~actor
+               ~root:static_root
+               ~dependency_roots:[]
+               ~project:(Source.Portable_path.create "second.project.json" |> ok)
+               ~selection:
+                 (Chatml_project.Selection.Entry
+                    { name = "main"; environment = Some "other" })
+               ~contract:
+                 (Chatml.Chatml_compiler_contract.for_target One_off_v1 ~checkpoint:Fn.id)
+             |> ok
+           in
+           let second_build =
+             Agent_server.Authoring_source_host.Context.capture
+               second_owner
+               ~actor
+               ~clock:env#mono_clock
+               ~checkpoint:Fn.id
+             |> ok
+             |> Agent_server.Authoring_source_host.Capture.build
+           in
+           Agent_server.Authoring_source_host.Context.close_and_wait second_owner;
            let static_allowed = ref true in
            let project_allowed = ref true in
            let on_static = ref Fn.id in
@@ -631,6 +666,10 @@ let%test_unit "host root read is fresh while project context remains captured" =
                     ~max_document_bundle_bytes:2048
                     ~max_parser_work_steps:100_000
                     ~max_diagnostic_work_steps:100_000
+                    ~max_selection_rows:32
+                    ~max_retained_selection_source_bytes:(16 * 1024 * 1024)
+                    ~max_retained_selection_input_bytes:(16 * 1024 * 1024)
+                    ~max_selection_work_steps:1_000_000
                   |> Or_error.ok_exn)
                ~query_limits:(query_limits ())
                ~prefix_limits:
@@ -1052,6 +1091,10 @@ let%test_unit "host root read is fresh while project context remains captured" =
                     ~max_document_bundle_bytes:(String.length authored_document)
                     ~max_parser_work_steps:100_000
                     ~max_diagnostic_work_steps:100_000
+                    ~max_selection_rows:32
+                    ~max_retained_selection_source_bytes:(16 * 1024 * 1024)
+                    ~max_retained_selection_input_bytes:(16 * 1024 * 1024)
+                    ~max_selection_work_steps:1_000_000
                   |> Or_error.ok_exn)
                ~query_limits:(query_limits ())
                ~prefix_limits:
@@ -1099,6 +1142,21 @@ let%test_unit "host root read is fresh while project context remains captured" =
                ~checkpoint:ignore
              |> ok
            in
+           let selected_second =
+             S.Semantic.Script_selection.Selected.admit
+               ~build:second_build
+               ~contract:
+                 (Chatml.Chatml_compiler_contract.for_target
+                    One_off_v1
+                    ~checkpoint:ignore)
+               ~limits:
+                 (S.Semantic.Script_selection.Limits.create
+                    ~max_identity_bytes:(4 * 1024 * 1024)
+                    ~max_work_steps:100_000
+                  |> Or_error.ok_exn)
+               ~checkpoint:ignore
+             |> ok
+           in
            let allow_selection = ref true in
            let revoke_on_final_check = ref false in
            let selection_calls = ref 0 in
@@ -1111,35 +1169,47 @@ let%test_unit "host root read is fresh while project context remains captured" =
                    ~actor:_
                    ~current:_
                    ~parsed:_
-                   ~declaration:_
+                   ~declaration
                    ~metadata:_
                  ->
                  !on_query_selection ();
                  incr selection_calls;
+                 let script_id = Prompt.Chat_markdown.Declaration.script_id declaration in
                  if
                    !allow_selection
+                   && (not (String.equal script_id "lib:u"))
                    && ((not !revoke_on_final_check) || !selection_calls = 1)
-                 then Some selected
+                 then
+                   Some
+                     (if String.equal script_id "lib:t" then selected_second else selected)
                  else None)
            in
-           let selected_analyze =
+           let selected_analyze_with_rows
+                 ?(with_script_selection = true)
+                 ?(with_project_metadata = true)
+                 max_selection_rows
+             =
              S.Semantic.create
                ~owner:service
                ~env
                ~document_dir:(Eio.Stdenv.cwd env)
-               ~script_selection:(Some selected_policy)
+               ~script_selection:
+                 (if with_script_selection then Some selected_policy else None)
                ~project_metadata:
-                 (Some
-                    (S.Semantic.Project_metadata.Policy.create
-                       ~authorize_now:
-                         (fun
-                           ~original_actor:_
-                           ~actor:_
-                           ~current:_
-                           ~parsed:_
-                           ~declaration:_
-                           ~capture:_
-                         -> true)))
+                 (if not with_project_metadata
+                  then None
+                  else
+                    Some
+                      (S.Semantic.Project_metadata.Policy.create
+                         ~authorize_now:
+                           (fun
+                             ~original_actor:_
+                             ~actor:_
+                             ~current:_
+                             ~parsed:_
+                             ~declaration:_
+                             ~capture:_
+                           -> true)))
                ~project_build_limits:
                  (Chatml_project_build.Limits.create
                     ~max_work_steps:100_000
@@ -1152,6 +1222,10 @@ let%test_unit "host root read is fresh while project context remains captured" =
                     ~max_document_bundle_bytes:2048
                     ~max_parser_work_steps:100_000
                     ~max_diagnostic_work_steps:100_000
+                    ~max_selection_rows
+                    ~max_retained_selection_source_bytes:(16 * 1024 * 1024)
+                    ~max_retained_selection_input_bytes:(16 * 1024 * 1024)
+                    ~max_selection_work_steps:1_000_000
                   |> Or_error.ok_exn)
                ~query_limits:(query_limits ())
                ~prefix_limits:
@@ -1162,6 +1236,7 @@ let%test_unit "host root read is fresh while project context remains captured" =
                     ~max_host_work_steps:100_000
                   |> Or_error.ok_exn)
            in
+           let selected_analyze = selected_analyze_with_rows 32 in
            let selected_capture, selected_snapshot, selected_graph =
              match
                S.Semantic.analyze selected_analyze ~actor ~connection bounded_request
@@ -1202,6 +1277,25 @@ let%test_unit "host root read is fresh while project context remains captured" =
                | _ -> failwith "selected document query lost value candidates")
             | Error error ->
               failwith (P.Error.code_to_string (S.Error.to_protocol error).code));
+           (match
+              S.Semantic.query
+                (selected_analyze_with_rows ~with_project_metadata:false 32)
+                ~actor
+                ~connection
+                selected_query
+            with
+            | Error S.Error.Selection_unavailable -> ()
+            | Ok _ | Error _ ->
+              failwith "retained project metadata lost its admission policy");
+           (match
+              S.Semantic.query
+                (selected_analyze_with_rows ~with_script_selection:false 32)
+                ~actor
+                ~connection
+                selected_query
+            with
+            | Error S.Error.Selection_unavailable -> ()
+            | Ok _ | Error _ -> failwith "retained Build lost its selection policy");
            allow_selection := false;
            (match S.Semantic.query selected_analyze ~actor ~connection selected_query with
             | Error S.Error.Selection_unavailable -> ()
@@ -1552,17 +1646,67 @@ let%test_unit "host root read is fresh while project context remains captured" =
                    (P.Authoring.Analysis.Prefix.sexp_of_unavailable reason))
             | Error error ->
               failwith (P.Error.code_to_string (S.Error.to_protocol error).code));
+           let changed_surface_body =
+             String.substr_replace_all
+               incomplete_body
+               ~pattern:"kind=\"tool\""
+               ~with_:"kind=\"moderator\""
+           in
+           let changed_surface =
+             match
+               call
+                 (Document_replace
+                    (P.Authoring.Document.Replace_request.create
+                       ~expected:incomplete.P.Authoring.Document.Result.version
+                       ~next_editor_revision:3
+                       ~contents:changed_surface_body
+                     |> ok))
+             with
+             | Ok (Document_replace result) -> result
+             | Ok _ | Error _ -> failwith "surface-only ChatMD replacement failed"
+           in
+           let changed_surface_context =
+             changed_surface.P.Authoring.Document.Result.context
+           in
+           let changed_surface_source =
+             match P.Authoring.Context.basis changed_surface_context with
+             | Document { source; _ } -> source
+             | Project _ -> failwith "changed-surface source missing"
+           in
+           (match
+              S.Semantic.prefix
+                selected_analyze
+                ~actor
+                ~connection
+                (P.Authoring.Analysis.Prefix.Request.create
+                   ~context:(P.Authoring.Context.Expected.of_view changed_surface_context)
+                   ~target:selected_target
+                   ~source:changed_surface_source
+                   ~cursor_byte:edited_cursor
+                 |> ok)
+            with
+            | Error S.Error.Selection_unavailable -> ()
+            | Ok _ | Error _ ->
+              failwith "edited declaration kind reused an old selected Build");
            (match
               call
                 (Context_close
                    (P.Authoring.Context.Close_request.create
-                      ~expected:(P.Authoring.Context.Expected.of_view incomplete_context)))
+                      ~expected:
+                        (P.Authoring.Context.Expected.of_view changed_surface_context)))
             with
             | Ok (Context_close _) -> ()
             | Ok _ | Error _ -> failwith "edited ChatMD close failed");
            let imported_part =
              "<script id=\"s\" language=\"chatml\" kind=\"tool\" \
               project=\"./chatml.project.json\">let main input = Task.pure(input)\n\
+              </script>\n\
+              <script id=\"t\" language=\"chatml\" kind=\"tool\" \
+              project=\"./second.project.json\" environment=\"other\">let main input = \
+              Task.pure(input)\n\n\
+              </script>\n\
+              <script id=\"u\" language=\"chatml\" kind=\"tool\" \
+              project=\"./missing.json\">let main input = Task.pure(input)\n\
               </script>"
            in
            Eio.Path.save
@@ -1589,16 +1733,36 @@ let%test_unit "host root read is fresh while project context remains captured" =
            let imported_expected =
              P.Authoring.Context.Expected.of_view imported_context
            in
+           let imported_request =
+             P.Authoring.Analysis.Analyze.Request.create
+               ~context:imported_expected
+               ~target:(P.Authoring.Analysis.Target.selected_script "lib:s" |> ok)
+             |> ok
+           in
+           let calls_before_cap = !selection_calls in
+           (match
+              S.Semantic.analyze
+                (selected_analyze_with_rows 1)
+                ~actor
+                ~connection
+                imported_request
+            with
+            | Error S.Error.Resource_limit -> ()
+            | Ok _ | Error _ -> failwith "incomplete row inventory escaped cap");
+           [%test_eq: int] !selection_calls calls_before_cap;
+           (match
+              S.For_testing.capture_state
+                service
+                ~actor
+                ~connection
+                ~expected:imported_expected
+                ~checkpoint:ignore
+            with
+            | Ok state -> [%test_eq: int] state.selection_rows 0
+            | Error _ -> failwith "rejected row inventory left a capture");
            let imported_capture, imported_snapshot, imported_graph =
              match
-               S.Semantic.analyze
-                 selected_analyze
-                 ~actor
-                 ~connection
-                 (P.Authoring.Analysis.Analyze.Request.create
-                    ~context:imported_expected
-                    ~target:(P.Authoring.Analysis.Target.selected_script "lib:s" |> ok)
-                  |> ok)
+               S.Semantic.analyze selected_analyze ~actor ~connection imported_request
              with
              | Ok (P.Authoring.Analysis.Analyze.Complete complete) ->
                complete.capture, complete.snapshot, complete.validated_graph
@@ -1614,6 +1778,16 @@ let%test_unit "host root read is fresh while project context remains captured" =
                P.Authoring.Analysis.Target.selected_script_source stamp
              | Project_input -> failwith "imported capture lost script target"
            in
+           (match
+              S.For_testing.capture_state
+                service
+                ~actor
+                ~connection
+                ~expected:imported_expected
+                ~checkpoint:ignore
+            with
+            | Ok state -> [%test_eq: int] state.selection_rows 3
+            | Error _ -> failwith "imported declaration rows unavailable");
            let imported_offset =
              String.substr_index_exn imported_part ~pattern:"Task.pure(input)"
              + String.length "Task.pure("
@@ -1656,6 +1830,163 @@ let%test_unit "host root read is fresh while project context remains captured" =
                | _ -> failwith "imported query lost actual reference")
             | Error error ->
               failwith (P.Error.code_to_string (S.Error.to_protocol error).code));
+           let second_body = "let main input = Task.pure(input)\n\n" in
+           let imported_root_source =
+             match P.Authoring.Context.basis imported_context with
+             | Document { source; _ } -> source
+             | Project _ -> failwith "imported document lost source basis"
+           in
+           let imported_fragment_source =
+             P.Authoring.Source.create
+               ~id:
+                 (Chatml_source.Id.create
+                    ~package_namespace:
+                      (Chatml_source.Id.package_namespace
+                         (P.Authoring.Source.id imported_root_source))
+                    ~relative_path:"fragment.chatmd"
+                  |> Or_error.ok_exn)
+               ~digest:(Chatml_source.Digest.of_contents imported_part ~checkpoint:ignore)
+               ~byte_length:(String.length imported_part)
+               ~editor_revision:None
+             |> ok
+           in
+           let second_cursor =
+             String.substr_index_exn
+               imported_part
+               ~pattern:"environment=\"other\">let main input = Task.pure(input)"
+             + String.length "environment=\"other\">let main input = Task.pure(input)"
+           in
+           Eio.Path.unlink Eio.Path.(directory / "second.project.json");
+           (match
+              S.Semantic.prefix
+                selected_analyze
+                ~actor
+                ~connection
+                (P.Authoring.Analysis.Prefix.Request.create
+                   ~context:imported_expected
+                   ~target:(P.Authoring.Analysis.Target.selected_script "lib:t" |> ok)
+                   ~source:imported_fragment_source
+                   ~cursor_byte:second_cursor
+                 |> ok)
+            with
+            | Ok (P.Authoring.Analysis.Prefix.Provisional provisional) ->
+              assert (
+                Chatml_source.Digest.equal
+                  (P.Authoring.Source.digest
+                     (P.Authoring.Analysis.Prefix.full_source provisional))
+                  (Chatml_source.Digest.of_contents second_body ~checkpoint:ignore));
+              let authored =
+                P.Authoring.Analysis.Prefix.authored_request provisional
+                |> Option.value_exn
+              in
+              assert (
+                P.Authoring.Source.equal
+                  (P.Authoring.Analysis.Prefix.Authored_request.source authored)
+                  imported_fragment_source)
+            | Ok result ->
+              failwith (Sexp.to_string_hum (P.Authoring.Analysis.Prefix.sexp_of_t result))
+            | Error error ->
+              failwith (P.Error.code_to_string (S.Error.to_protocol error).code));
+           Eio.Path.save
+             ~create:(`Or_truncate 0o600)
+             Eio.Path.(directory / "second.project.json")
+             second_project;
+           let second_request =
+             P.Authoring.Analysis.Analyze.Request.create
+               ~context:imported_expected
+               ~target:(P.Authoring.Analysis.Target.selected_script "lib:t" |> ok)
+             |> ok
+           in
+           let second_capture, second_snapshot, second_graph =
+             match
+               S.Semantic.analyze selected_analyze ~actor ~connection second_request
+             with
+             | Ok (P.Authoring.Analysis.Analyze.Complete complete) ->
+               complete.capture, complete.snapshot, complete.validated_graph
+             | Ok (P.Authoring.Analysis.Analyze.Unavailable { reason; _ }) ->
+               failwith
+                 (Sexp.to_string_hum
+                    (P.Authoring.Analysis.Analyze.sexp_of_unavailable reason))
+             | Ok (P.Authoring.Analysis.Analyze.Failed { phase; diagnostics; _ }) ->
+               failwith
+                 (Sexp.to_string_hum
+                    [%sexp
+                      (phase : P.Authoring.Analysis.Analyze.failure_phase)
+                    , (List.map diagnostics ~f:P.Authoring.Analysis.Diagnostic.message
+                       : string list)])
+             | Error error ->
+               failwith (P.Error.code_to_string (S.Error.to_protocol error).code)
+           in
+           let second_source =
+             match P.Authoring.Analysis.Capture.target second_capture with
+             | P.Authoring.Analysis.Target.Script_input stamp ->
+               P.Authoring.Analysis.Target.selected_script_source stamp
+             | Project_input -> failwith "second script capture lost its target"
+           in
+           [%test_eq: string]
+             (Chatml_source.Id.relative_path (P.Authoring.Source.id second_source))
+             "second.chatml";
+           assert (
+             Chatml_source.Digest.equal
+               (P.Authoring.Source.digest second_source)
+               (Chatml_source.Digest.of_contents second_body ~checkpoint:ignore));
+           assert (not (P.Authoring.Source.equal imported_compiled_source second_source));
+           (match
+              S.Semantic.query
+                selected_analyze
+                ~actor
+                ~connection
+                (Q.Request.create
+                   ~evidence:
+                     (Q.Certified
+                        { capture = second_capture
+                        ; snapshot = second_snapshot
+                        ; validated_graph = second_graph
+                        })
+                   ~source:second_source
+                   ~byte_offset:
+                     (String.substr_index_exn second_body ~pattern:"Task.pure(input)"
+                      + String.length "Task.pure(")
+                   ~kind:Q.References
+                   ~max_items:1
+                 |> ok)
+            with
+            | Ok answer ->
+              (match Q.payload answer with
+               | Q.References_result
+                   (Q.Available { items = [ reference ]; truncated = false }) ->
+                 (match
+                    P.Authoring.Analysis.Site.projection
+                      (Q.Item.reference_selection reference)
+                  with
+                  | Some (Authored_exact range) ->
+                    [%test_eq: int]
+                      (P.Authoring.Analysis.Byte_range.start_byte range)
+                      (String.substr_index_exn
+                         imported_part
+                         ~pattern:
+                           "environment=\"other\">let main input = Task.pure(input)"
+                       + String.length "environment=\"other\">let main input = Task.pure("
+                      )
+                  | None | Some (External_origin _ | Approximate_declaration _) ->
+                    failwith "second selected project lost imported authored provenance")
+               | _ -> failwith "second selected environment lost its checked reference")
+            | Error _ -> failwith "second selected environment query failed");
+           (match
+              S.Semantic.analyze
+                selected_analyze
+                ~actor
+                ~connection
+                (P.Authoring.Analysis.Analyze.Request.create
+                   ~context:imported_expected
+                   ~target:(P.Authoring.Analysis.Target.selected_script "lib:u" |> ok)
+                 |> ok)
+            with
+            | Ok
+                (P.Authoring.Analysis.Analyze.Unavailable
+                   { reason = No_validated_project; _ }) -> ()
+            | Ok _ | Error _ ->
+              failwith "unavailable third project affected valid selected rows");
            (match
               call
                 (Context_close

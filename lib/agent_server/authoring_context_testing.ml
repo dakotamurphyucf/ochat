@@ -155,6 +155,7 @@ type capture_state =
   { parsed : bool
   ; source_matches : bool
   ; project_metadata : bool
+  ; selection_rows : int
   ; complete_rows : int
   }
 
@@ -169,7 +170,26 @@ let capture_state owner ~actor ~connection ~expected ~checkpoint =
     ~f:(fun current ~checkpoint ->
       let open Result.Let_syntax in
       let%bind capture = Core_owner.Current.document_capture current ~checkpoint in
-      let%bind metadata = Core_owner.Current.project_capture current ~checkpoint in
+      let%bind metadata =
+        match capture with
+        | None -> Ok false
+        | Some capture ->
+          let parsed =
+            (Prompt.Chat_markdown.Generated.parsed
+               (Sources.Document_context.Parsed_capture.parsed capture))
+              .parsed_root
+          in
+          List.fold_result
+            (Prompt.Chat_markdown.Parsed.declarations parsed)
+            ~init:false
+            ~f:(fun found declaration ->
+              let%map row =
+                Core_owner.Current.selection_row current ~declaration ~checkpoint
+              in
+              found
+              || Option.exists row ~f:(fun row ->
+                Option.is_some (Core_owner.Selection_rows.Row.metadata row)))
+      in
       let%map index = Core_owner.Current.analysis_index current in
       let source_matches =
         match capture with
@@ -186,7 +206,16 @@ let capture_state owner ~actor ~connection ~expected ~checkpoint =
       in
       { parsed = Option.is_some capture
       ; source_matches
-      ; project_metadata = Option.is_some metadata
+      ; project_metadata = metadata
+      ; selection_rows =
+          (match capture, current.retained_document_capture with
+           | Some capture, Some retained
+             when phys_equal
+                    capture
+                    (Core_owner.Retained_document_capture.capture retained) ->
+             Core_owner.Retained_document_capture.selection_rows retained
+             |> Core_owner.Selection_rows.retained_count
+           | Some _, _ | None, _ -> 0)
       ; complete_rows = Index.retained_count index
       })
   |> Result.map_error ~f:error
@@ -346,12 +375,36 @@ module Retained_document = struct
       Ledger.document_inputs ledger ~identity ~checkpoint
       |> Result.map_error ~f:(fun _ -> Stale_context)
     in
+    let row_limits =
+      Core_owner.Selection_rows.Limits.create
+        ~max_rows:1024
+        ~max_retained_source_bytes:max_bytes
+        ~max_retained_canonical_input_bytes:max_bytes
+        ~max_collection_work_steps:1_000_000
+      |> Or_error.ok_exn
+    in
+    let%bind rows =
+      Core_owner.Selection_rows.collect
+        ~inputs
+        ~capture
+        ~limits:row_limits
+        ~checkpoint
+        ~prepare_one:(fun declaration ~parsed ~declaring_source ~checkpoint:_ ->
+          Ok
+            (Core_owner.Selection_rows.Row.no_validated_build
+               ~parsed
+               ~declaration
+               ~declaring_source
+               ~metadata:None
+               ~reason:Agent_protocol.Authoring.Analysis.Analyze.No_validated_project))
+      |> Result.map_error ~f:(fun _ -> error Core_owner.Error.Resource_limit)
+    in
     let%map retained =
       Core_owner.Retained_document_capture.prepare
         ~context
         ~inputs
         ~capture
-        ~metadata:None
+        ~rows
         ~max_sources
         ~max_bytes
         ~checkpoint

@@ -264,11 +264,23 @@ module Semantic : sig
   module Limits : sig
     type t
 
+    (** Bundle/parser and response limits remain independent. Selection limits
+        admit one complete finite set of genuine declarations on explicit
+        Analyze/rebuild: row count includes metadata-only/unavailable rows;
+        source and canonical-input bytes measure retained representation, not
+        exact heap or failed native reads. Each lower Project attempt retains
+        its own configured source/file/work caps, and collection shares one
+        checkpoint allowance across all rows. Prefix/Query/Assistance never
+        acquire new project/import bytes. *)
     val create
       :  max_document_bundle_files:int
       -> max_document_bundle_bytes:int
       -> max_parser_work_steps:int
       -> max_diagnostic_work_steps:int
+      -> max_selection_rows:int
+      -> max_retained_selection_source_bytes:int
+      -> max_retained_selection_input_bytes:int
+      -> max_selection_work_steps:int
       -> t Or_error.t
   end
 
@@ -476,6 +488,7 @@ module For_testing : sig
       grouped fixture; imported receipts have distinct genuine source IDs. *)
     ; source_matches : bool
     ; project_metadata : bool
+    ; selection_rows : int
     ; complete_rows : int
     }
 

@@ -45,6 +45,29 @@ let parse sources =
       root)
 ;;
 
+let%test_unit "converted declaration surface tracks contract metadata, not body" =
+  let declaration kind body =
+    let authored =
+      sprintf {|<script id="s" language="chatml" kind="%s">%s</script>|} kind body
+    in
+    match CM.Parsed.declarations (parse [ "root.chatmd", authored ]) with
+    | [ declaration ] -> declaration
+    | _ -> failwith "expected one converted script declaration"
+  in
+  let tool = declaration "tool" "let main = 1" in
+  let edited_body = declaration "tool" "let main = 2" in
+  let moderator = declaration "moderator" "let main = 1" in
+  assert (
+    CM.Declaration.Surface.equal
+      (CM.Declaration.surface tool)
+      (CM.Declaration.surface edited_body));
+  assert (
+    not
+      (CM.Declaration.Surface.equal
+         (CM.Declaration.surface tool)
+         (CM.Declaration.surface moderator)))
+;;
+
 let policy ?(max_results = 2) () =
   let semantic =
     Chatml_semantics.Limits.create

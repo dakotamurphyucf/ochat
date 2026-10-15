@@ -16,6 +16,9 @@ module Metadata = Authoring_project_metadata
 module Project_capture = Authoring_source_host.Document_context.Project_capture
 module Index = Authoring_analysis_index
 module Prefix_index = Authoring_provisional_index
+module Rows = Authoring_document_selection_rows
+module Rebind = Authoring_document_selection_rebind
+module Source_host = Authoring_source_host
 
 module Limits = struct
   type t =
@@ -136,7 +139,7 @@ let current_source ~contexts ~identity source inventory ~checkpoint =
 ;;
 
 let document_selection
-      owner
+      (owner : Owner.t)
       current
       ~actor
       ~script
@@ -152,7 +155,11 @@ let document_selection
   let parsed = Document.Script.parsed script in
   let declaration = Document.Script.declaration script in
   let original_actor = current.context.original_actor in
-  let%bind metadata_head = Owner.Current.project_capture current ~checkpoint in
+  let%bind row =
+    Owner.Current.selection_row current ~declaration ~checkpoint
+    |> Result.bind ~f:(Result.of_option ~error:Owner.Error.Selection_unavailable)
+  in
+  let metadata_head = Rows.Row.metadata row in
   let%bind current_capture = Owner.Current.document_capture current ~checkpoint in
   let%bind metadata =
     match project_metadata, metadata_head with
@@ -161,7 +168,7 @@ let document_selection
         not
           (Option.exists current_capture ~f:(fun current_capture ->
              Project_capture.matches capture ~parsed:current_capture ~declaration))
-      then Ok None
+      then Error Owner.Error.Selection_unavailable
       else if
         Metadata.Policy.authorize_now
           policy
@@ -173,19 +180,14 @@ let document_selection
           ~capture
       then Ok (Some capture)
       else Error Owner.Error.Selection_unavailable
-    | None, _ | Some _, None -> Ok None
+    | None, Some _ -> Error Owner.Error.Selection_unavailable
+    | None, None | Some _, None -> Ok None
   in
-  let%bind selected =
-    Option.bind script_selection ~f:(fun policy ->
-      Selection.Policy.select
-        policy
-        ~original_actor
-        ~actor
-        ~current:inputs
-        ~parsed
-        ~declaration
-        ~metadata)
-    |> Result.of_option ~error:Owner.Error.Selection_unavailable
+  let%bind selected, source =
+    match Rows.Row.status row with
+    | No_validated_build _ -> Error Owner.Error.Selection_unavailable
+    | Independently_selected selected -> Ok (selected, None)
+    | Host_prepared { selected; source } -> Ok (selected, Some source)
   in
   let%bind coherent =
     match metadata with
@@ -201,6 +203,31 @@ let document_selection
   if not coherent
   then Error Owner.Error.Selection_unavailable
   else (
+    let check_selection_now () =
+      match source, script_selection, current.context.owner with
+      | Some source, _, Owner.Host_document document ->
+        Source_host.Document_context.check_selected_now
+          document
+          ~script:source
+          ~actor
+          ~select_contract:owner.selection_policy.project_contract
+        |> Result.map_error ~f:Authoring_context_owner.source_host_error
+      | None, Some policy, _ ->
+        if
+          Selection.Policy.same_now
+            policy
+            ~original_actor
+            ~actor
+            ~current:inputs
+            ~parsed
+            ~declaration
+            ~metadata
+            ~selected
+        then Ok ()
+        else Error Owner.Error.Selection_unavailable
+      | Some _, _, _ | None, None, _ -> Error Owner.Error.Selection_unavailable
+    in
+    let%bind () = check_selection_now () in
     let%bind build =
       Authoring_selected_script_overlay.prepare
         selected
@@ -249,25 +276,86 @@ let document_selection
                 ~capture
             | Some _, None -> false
           in
-          let selected_current =
-            match script_selection with
-            | None -> false
-            | Some policy ->
-              Selection.Policy.same_now
-                policy
-                ~original_actor
-                ~actor
-                ~current:inputs
-                ~parsed
-                ~declaration
-                ~metadata
-                ~selected
+          let open Result.Let_syntax in
+          let%bind () =
+            if metadata_current then Ok () else Error Owner.Error.Selection_unavailable
           in
-          if metadata_current && selected_current
-          then Ok ()
-          else Error Owner.Error.Selection_unavailable
+          check_selection_now ()
         in
         Ok (rebound, final_check_now)))
+;;
+
+let provisional_selection
+      (owner : Owner.t)
+      current
+      ~actor
+      ~script_selection
+      ~project_metadata
+      ~proof
+      ~checkpoint
+  =
+  let open Result.Let_syntax in
+  let%bind inputs = Owner.Current.document_inputs current ~checkpoint in
+  let source = Ledger.Document.Inputs.source inputs in
+  let capture = Rebind.updated_capture proof in
+  let original_actor = current.context.original_actor in
+  let original_parsed = Rebind.original_parsed proof in
+  let original_declaration = Rebind.original_declaration proof in
+  let metadata = Rebind.original_metadata proof in
+  if
+    not
+      (Captured.Id.equal
+         (Captured.id source)
+         (Captured.id (Source_host.Document_context.Parsed_capture.source capture)))
+  then Error Owner.Error.Stale_source
+  else (
+    let check_now () =
+      let%bind () =
+        match metadata, project_metadata with
+        | None, _ -> Ok ()
+        | Some capture, Some policy ->
+          if
+            Project_capture.matches
+              capture
+              ~parsed:(Rebind.original_capture proof)
+              ~declaration:original_declaration
+            && Metadata.Policy.authorize_now
+                 policy
+                 ~original_actor
+                 ~actor
+                 ~current:inputs
+                 ~parsed:original_parsed
+                 ~declaration:original_declaration
+                 ~capture
+          then Ok ()
+          else Error Owner.Error.Selection_unavailable
+        | Some _, None -> Error Owner.Error.Selection_unavailable
+      in
+      match Rebind.host_source proof, script_selection, current.context.owner with
+      | Some source, _, Owner.Host_document document ->
+        Source_host.Document_context.check_selected_now
+          document
+          ~script:source
+          ~actor
+          ~select_contract:owner.selection_policy.project_contract
+        |> Result.map_error ~f:Authoring_context_owner.source_host_error
+      | None, Some policy, _ ->
+        if
+          Selection.Policy.same_now
+            policy
+            ~original_actor
+            ~actor
+            ~current:inputs
+            ~parsed:original_parsed
+            ~declaration:original_declaration
+            ~metadata
+            ~selected:(Rebind.selected proof)
+        then Ok ()
+        else Error Owner.Error.Selection_unavailable
+      | Some _, _, _ | None, None, _ -> Error Owner.Error.Selection_unavailable
+    in
+    let%map () = check_now () in
+    check_now)
 ;;
 
 type facts =
@@ -385,6 +473,7 @@ let resolve_project
 ;;
 
 let resolve_document
+      owner
       (current : Owner.Current.t)
       ~actor
       ~capture
@@ -412,7 +501,7 @@ let resolve_document
   in
   let selection script =
     document_selection
-      current.owner
+      owner
       current
       ~actor
       ~script
@@ -519,10 +608,22 @@ let resolve_document
       Prefix_index.current provisional_index ~identity requested
       |> Result.of_option ~error:Owner.Error.Stale_context
     in
-    let%bind script, input_sources =
+    let%bind document =
       Prefix_index.document row |> Result.of_option ~error:Owner.Error.Stale_context
     in
-    let%bind rebound, final_check_now = selection script in
+    let script = Prefix_index.Document.script document in
+    let input_sources = Prefix_index.Document.input_sources document in
+    let%bind final_check_now =
+      provisional_selection
+        owner
+        current
+        ~actor
+        ~script_selection
+        ~project_metadata
+        ~proof:(Prefix_index.Document.selection document)
+        ~checkpoint
+    in
+    let rebound = script in
     if
       (not
          (Document.Document_stamp.equal
@@ -593,6 +694,7 @@ let prepare
           ~checkpoint:charge
       | Owner.Current.Document, A.Target.Script_input _ ->
         resolve_document
+          owner
           current
           ~actor
           ~capture

@@ -1571,6 +1571,25 @@ module Chat_markdown = struct
   module Limits = Chatmd_owned_parser.Limits
 
   module Declaration = struct
+    module Surface = struct
+      type t =
+        | Script of
+            { language : string
+            ; kind : string
+            }
+        | Shell_script of
+            { language : string
+            ; kind : Script_spec.kind
+            ; limits : Script_spec.limits
+            }
+        | Extension_script of
+            { version : int
+            ; kind : Chatmd_shell_spec.Extension_spec.script_kind
+            ; limits : Script_spec.limits
+            }
+      [@@deriving equal]
+    end
+
     type t =
       { range : Chatmd_parser_input.Range.t
       ; source_ref : Chatmd_shell_spec.Source_ref.t
@@ -1578,6 +1597,7 @@ module Chat_markdown = struct
       ; script_body : string
       ; project_selection : Chatmd_shell_spec.Script_project.t option
       ; script_path : string option
+      ; surface : Surface.t
       ; extraction_map : Chatmd_extraction_map.t
       }
 
@@ -1587,6 +1607,7 @@ module Chat_markdown = struct
     let script_body t = t.script_body
     let project_selection t = t.project_selection
     let script_path t = t.script_path
+    let surface t = t.surface
 
     module Extraction = struct
       type bound = Chatmd_extraction_map.bound
@@ -1675,21 +1696,28 @@ module Chat_markdown = struct
             , body
             , Option.value_exn script.source_ref
             , script.project_selection
-            , path )
+            , path
+            , Surface.Script { language = script.language; kind = script.kind } )
         | Shell_script script ->
           Some
             ( script.id
             , Script_spec.source_text script
             , script.source_ref
             , script.project_selection
-            , script_path script.source )
+            , script_path script.source
+            , Surface.Shell_script
+                { language = script.language; kind = script.kind; limits = script.limits }
+            )
         | Extension_script script ->
           Some
             ( script.id
             , source_text script.source
             , script.source_ref
             , script.project_selection
-            , script_path script.source )
+            , script_path script.source
+            , Surface.Extension_script
+                { version = script.version; kind = script.kind; limits = script.limits }
+            )
         | Message _
         | Developer_msg _
         | System_msg _
@@ -1714,7 +1742,8 @@ module Chat_markdown = struct
       in
       match range, script, extraction_map with
       | ( Some range
-        , Some (script_id, script_body, source_ref, project_selection, script_path)
+        , Some
+            (script_id, script_body, source_ref, project_selection, script_path, surface)
         , Some extraction_map ) ->
         Some
           { range
@@ -1723,6 +1752,7 @@ module Chat_markdown = struct
           ; script_body
           ; project_selection
           ; script_path
+          ; surface
           ; extraction_map
           }
       | None, _, _ | Some _, None, _ | Some _, Some _, None -> None

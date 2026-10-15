@@ -16,6 +16,25 @@ type t
 
 type row
 
+module Document : sig
+  type t
+
+  (** The selected Script, its exact parser-input/source associations and the
+      old-row-to-current-declaration proof are admitted together. This is
+      comparison evidence for the one published provisional row, never a new
+      source-read or selection grant. *)
+  val create
+    :  script:Chatmd_authoring_analysis.Script.t
+    -> input_sources:(Chatmd_parser_input.t * Captured.t) list
+    -> selection:Authoring_document_selection_rebind.t
+    -> checkpoint:(unit -> unit)
+    -> t Or_error.t
+
+  val script : t -> Chatmd_authoring_analysis.Script.t
+  val input_sources : t -> (Chatmd_parser_input.t * Captured.t) list
+  val selection : t -> Authoring_document_selection_rebind.t
+end
+
 module Error : sig
   type t =
     | Retention_limit
@@ -47,9 +66,7 @@ val prepare
   -> full_wire_source:P.Authoring.Source.t
   -> compiled_cursor_byte:int
   -> authored_request:A.Prefix.Authored_request.t option
-  -> document:
-       (Chatmd_authoring_analysis.Script.t * (Chatmd_parser_input.t * Captured.t) list)
-         option
+  -> document:Document.t option
   -> checkpoint:(unit -> unit)
   -> (t * A.Prefix.provisional, Error.t) result
 
@@ -69,7 +86,4 @@ val wire : row -> A.Prefix.provisional
 (** Exactly the selected Script and freshly associated parser inputs admitted
     for this row, if it came from Document Prefix. No owner capability or
     native read path is retained. *)
-val document
-  :  row
-  -> (Chatmd_authoring_analysis.Script.t * (Chatmd_parser_input.t * Captured.t) list)
-       option
+val document : row -> Document.t option

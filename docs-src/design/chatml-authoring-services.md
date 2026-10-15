@@ -301,8 +301,15 @@ later assistance reads only the current retained receipt. Exact project-byte
 agreement with a selected Build is comparison evidence. The host must
 separately prove the selected Build belongs to the admitted root and portable
 member and recheck both actors; matching bytes or paths alone grant no source
-authority. The document analysis publication boundary admits metadata for at
-most the latest explicitly analyzed declaration in the bounded capture head.
+authority. One explicitly analyzed parser/import capture now retains a finite,
+complete row set for all genuine root and queued-agent declarations. Each row
+holds independently validated selection, metadata-only evidence or a typed
+unavailable reason. The host preflights the entire declaration count before
+native preparation and bounds aggregate retained source/input bytes and work;
+an over-cap analysis publishes no partial row set. An unrelated declaration's
+missing Build does not erase a valid requested script or its project metadata.
+Replacing the capture retires every row together, and a missing row requires
+explicit Analyze or rebuild rather than an implicit completion-time read.
 
 The [shared project overlay preparation](../../lib/agent_server/authoring_project_overlay.mli)
 uses the actual admitted compiler contract and existing closure validator; it
@@ -318,6 +325,15 @@ the final gate still rechecks the original host-selected Build and contract.
 An incomplete body can yield a provisional prefix only where the compiler
 finds a completed leading statement. New imports and changed project routing
 remain unavailable until an explicit authorized capture.
+Prefix may use a prior selected row after an unsaved root edit only when the
+current reparse uses exactly the frozen imports and a pure comparison proves
+the same declaring source, project route/environment, external locator and
+converted nonbody script metadata. A body-only inline change can then use the
+existing bounded selected-entry overlay. Its provisional Query retains this
+proof with the selected Script and input-source associations; both endpoints
+repeat the original host selection and project-metadata authorization against
+current Inputs before serving. The proof does not mint a new read or Build
+grant.
 Semantic wire labels, messages, names and environment identifiers require
 valid UTF-8; their constructors and decoders return typed errors for malformed
 text. Captured source bytes, digests and native byte sites remain unchanged.
@@ -532,9 +548,13 @@ the current admitted overlay and uses its actual selected compiler contract.
 Document analysis captures imports only during this explicit request through
 the current host source owner; a supplied document parses its supplied bytes
 without a host read grant and cannot acquire missing imports. A successful
-parse with no admitted script Build may retain one bounded immutable parser
-bundle (and separately authorized decoded project metadata) while returning
-semantic `Unavailable`. Complete results publish a certified snapshot label;
+parse retains one bounded immutable parser bundle and a finite, complete row
+inventory for its declared scripts. Rows admit each script's selected Build and
+independently authorized decoded project metadata, or record why that script is
+unavailable. A missing Build for one script does not erase another script's
+facts. Later Query and Assistance calls must reauthorize the retained selection
+and metadata through their own current host policies; omitting a policy cannot
+downgrade a retained proof. Complete results publish a certified snapshot label;
 Failed results retain same-run syntax and diagnostics without one. Native
 diagnostic sites retain their exact source owner, with authored ChatMD
 projections marked exact or approximate. Invalid or oversized display text is
