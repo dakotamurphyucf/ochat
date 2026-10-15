@@ -11,6 +11,7 @@ type active
 type parent =
   | Root
   | Child of active
+  | Source_child of active
   | Job_child of Developer_job_scope.Parent.t
 
 type storage =
@@ -112,6 +113,7 @@ module Selected : sig
   type parent =
     | Root
     | Child of active
+    | Source_child of active
     | Job_child of Developer_job_scope.Parent.t
 
   type 'selection completion
@@ -140,6 +142,26 @@ module Selected : sig
           -> capture_fingerprint:Chatml_source.Digest.t
           -> (unit, Agent_protocol.Error.t) result)
     -> now:(unit -> Agent_protocol.Timestamp.t)
+    -> (t, Agent_protocol.Error.t) result
+
+  (** Trusted first-entry issuer for one saved-Agent child prepared under an
+      already entered selected parent. Owner, capture fingerprint, current Root
+      check and clock are derived from [parent_issuer]. The exact
+      [parent_active] is retained physically, including its domain, lifetime,
+      Worker ancestry and deadline; only that active may be used as the
+      child's [Source_child] parent. Its liveness is rechecked for every
+      ordinary nested [Child] too, including after yielding currentness work.
+      This issuer cannot enter as [Root] or [Job_child], and later ordinary
+      [Child] entries remain same-issuer.
+      [ceiling] is an immutable child selection; [current_child] only adds a
+      source/live restriction to the parent's currentness and cannot replace
+      it. The owning server must first prove the saved Target, Root and live
+      child package; this lower constructor alone does not grant them. *)
+  val create_source_child
+    :  parent_issuer:t
+    -> parent_active:active
+    -> ceiling:Chat_response.Tool_capability.t
+    -> current_child:(unit -> (unit, Agent_protocol.Error.t) result)
     -> (t, Agent_protocol.Error.t) result
 
   val selected : t -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result
