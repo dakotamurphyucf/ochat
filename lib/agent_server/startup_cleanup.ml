@@ -16,8 +16,10 @@ type t =
   { store : Agent_store.Session_store.t
   ; mutable registry : Session_registry.t option
   ; mutable operator : Provider_operator_port.t option
+  ; mutable authoring : Authoring_installation.t option
   ; mutable registry_closed : bool
   ; mutable operator_closed : bool
+  ; mutable authoring_closed : bool
   ; mutable store_closed : bool
   ; mutable active : bool
   ; mutable failure : Failure.t option
@@ -25,6 +27,7 @@ type t =
 
 let close t =
   Eio.Cancel.protect (fun () ->
+    let open Result.Let_syntax in
     if not t.registry_closed
     then (
       Option.iter t.registry ~f:Session_registry.shutdown;
@@ -33,6 +36,18 @@ let close t =
     then (
       Option.iter t.operator ~f:Provider_operator_port.close;
       t.operator_closed <- true);
+    let%bind () =
+      if t.authoring_closed
+      then Ok ()
+      else (
+        match t.authoring with
+        | None ->
+          t.authoring_closed <- true;
+          Ok ()
+        | Some authoring ->
+          Authoring_installation.close_and_wait authoring
+          |> Result.map ~f:(fun () -> t.authoring_closed <- true))
+    in
     if t.store_closed
     then Ok ()
     else
@@ -57,8 +72,10 @@ let create ~sw ~store =
     { store
     ; registry = None
     ; operator = None
+    ; authoring = None
     ; registry_closed = false
     ; operator_closed = false
+    ; authoring_closed = false
     ; store_closed = false
     ; active = true
     ; failure = None
@@ -97,6 +114,12 @@ let adopt_operator_exn t operator =
   if (not t.active) || t.operator_closed || Option.is_some t.operator
   then failwith "startup operator ownership has already transferred";
   t.operator <- Some operator
+;;
+
+let adopt_authoring_exn t authoring =
+  if (not t.active) || t.authoring_closed || Option.is_some t.authoring
+  then failwith "startup authoring ownership has already transferred";
+  t.authoring <- Some authoring
 ;;
 
 let cleanup_after_failure t primary =

@@ -192,6 +192,76 @@ let open_store env sw root lock =
   |> upload_ok
 ;;
 
+let%expect_test
+    "session owner joins its one authoring upload child before releasing the daemon lock"
+  =
+  with_root "authoring-session-child" (fun env sw root _ ->
+    let session =
+      Agent_store.Session_store.create
+        ~env
+        ~sw
+        ~root:
+          (Filename.concat (Filename.dirname (Agent_store.Data_root.path root)) "session")
+        ~server_id
+        ~process_start_identity:(Some "authoring-session-child")
+        ~lock_nonce:"authoring-session-child"
+      |> store_ok
+    in
+    let first = ref None in
+    let interrupted = ref false in
+    (match
+       Agent_store.Session_store.open_authoring_upload_store
+         session
+         ~sw
+         ~limits:(limits ())
+         ~checkpoint:(fun () ->
+           interrupted := true;
+           raise Exit)
+     with
+     | exception Exit -> ()
+     | Ok _ | Error _ -> failwith "checkpoint interruption lost its exception");
+    assert !interrupted;
+    Eio.Switch.run (fun child_sw ->
+      let child =
+        Agent_store.Session_store.open_authoring_upload_store
+          session
+          ~sw:child_sw
+          ~limits:(limits ())
+          ~checkpoint:Fn.id
+        |> upload_ok
+      in
+      first := Some child;
+      (match
+         Agent_store.Session_store.open_authoring_upload_store
+           session
+           ~sw:child_sw
+           ~limits:(limits ())
+           ~checkpoint:Fn.id
+       with
+       | Error Busy -> ()
+       | Error _ | Ok _ -> failwith "duplicate upload child opened");
+      match Agent_store.Session_store.close session with
+      | Error (Locked _) -> ()
+      | Error _ | Ok _ -> failwith "session lock released before child join");
+    assert (Store.fully_closed (Option.value_exn !first));
+    let replacement =
+      Agent_store.Session_store.open_authoring_upload_store
+        session
+        ~sw
+        ~limits:(limits ())
+        ~checkpoint:Fn.id
+      |> upload_ok
+    in
+    Store.close_and_wait replacement |> upload_ok;
+    assert (Store.fully_closed replacement);
+    Agent_store.Session_store.close session |> store_ok;
+    print_endline
+      "interrupted open freed root; duplicate refused; both child close paths joined; \
+       lock released");
+  [%expect
+    {| interrupted open freed root; duplicate refused; both child close paths joined; lock released |}]
+;;
+
 let upload_directory env root upload_id =
   Eio.Path.(
     Eio.Stdenv.fs env

@@ -292,6 +292,7 @@ type t =
   ; projection_updates : Session_projection_update.t
   ; developer_root_state : Developer_root_state.t
   ; mutable index_was_rebuilt : bool
+  ; mutable authoring_upload_child : Authoring_upload_store.t option
   ; mutable closed : bool
   }
 
@@ -315,6 +316,32 @@ let is_closed t = t.closed
 
 let with_developer_root_gate store ~protect f =
   Developer_root_state.with_gate store.developer_root_state ~protect f
+;;
+
+let open_authoring_upload_store t ~sw ~limits ~checkpoint =
+  with_developer_root_gate t ~protect:false (fun () ->
+    let open Result.Let_syntax in
+    if t.closed || not (Lock.is_live t.daemon_lock)
+    then Error Authoring_upload_store.Error.Closed
+    else if
+      Option.exists t.authoring_upload_child ~f:(fun child ->
+        not (Authoring_upload_store.fully_closed child))
+    then Error Authoring_upload_store.Error.Busy
+    else (
+      let%map child =
+        Authoring_upload_store.open_or_create
+          ~env:t.env
+          ~sw
+          ~data_root:t.root
+          ~daemon_lock:t.daemon_lock
+          ~host_id:t.server_id
+          ~limits
+          ~checkpoint
+      in
+      t.authoring_upload_child <- Some child;
+      child))
+  |> Result.map_error ~f:(fun error -> Authoring_upload_store.Error.Storage error)
+  |> Result.bind ~f:Fn.id
 ;;
 
 module Developer_root = struct
@@ -758,6 +785,7 @@ let make ~env ~root ~server_id ~daemon_lock ~organizations (index, index_was_reb
       Session_projection_update.create ~env ~marker_path:(recovery_marker_path root) ()
   ; developer_root_state = Developer_root_state.create ()
   ; index_was_rebuilt
+  ; authoring_upload_child = None
   ; closed = false
   ; delegations = Delegation_store.create ~env ~data_root:root
   ; organizations
@@ -849,6 +877,10 @@ let close t =
   with_developer_root_gate t ~protect:true (fun () ->
     if t.closed
     then Ok ()
+    else if
+      Option.exists t.authoring_upload_child ~f:(fun child ->
+        not (Authoring_upload_store.fully_closed child))
+    then Error (Store_error.Locked (Some "authoring upload child remains open"))
     else (
       Organization_store.close t.organizations;
       Result.map (Lock.release ~env:t.env t.daemon_lock) ~f:(fun () -> t.closed <- true)))

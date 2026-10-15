@@ -19,6 +19,7 @@ val create
   -> audit_store:Agent_store.Audit_store.t
   -> blob_store:Agent_store.Blob_store.t
   -> session_store:Agent_store.Session_store.t
+  -> authoring:Authoring_installation.t option
   -> lifecycle_service:Session_lifecycle_service.t
   -> retained:Retained_session.t
   -> archive_payload_limit:int
@@ -60,6 +61,9 @@ val handle
   -> Agent_protocol.Command.t
   -> (Agent_protocol.Public.Result.t, Agent_protocol.Error.t) result
 
-(** Detaches every attachment owned by the connection. Detached sessions keep
-    running according to their configured liveness. *)
-val close_connection : t -> Connection_context.t -> unit
+(** Join authoring's exact physical connection BEFORE detaching any session
+    attachment. On failure retain the installation's cleanup custody and do
+    not report successful detach. Daemon owns the only unit transport facade:
+    it records a finite failure and retries at shutdown before releasing
+    borrowed source/upload owners. Unexpected exceptions preserve identity. *)
+val close_connection : t -> Connection_context.t -> (unit, Agent_protocol.Error.t) result
