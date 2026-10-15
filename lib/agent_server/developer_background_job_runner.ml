@@ -8,6 +8,8 @@ module M = Chat_response.Managed_tool_registry
 module N = Developer_native_executor
 module Publisher = Agent_store.Developer_result_publisher
 module H = P.Host_invocation
+module Jobs = Developer_script_job_service
+module Script = Developer_script_job_execution
 
 type t =
   { root : O.run
@@ -16,6 +18,7 @@ type t =
   ; env : Eio_unix.Stdenv.base
   ; managed : Agent_session.Native_tool_invocation.selected_managed_dispatch option
   ; storage : Publisher.Storage.t
+  ; jobs : Jobs.t
   ; authorize : H.t -> C.binding -> (unit, P.Error.t) result
   ; prepare_output : Openai.Responses.Tool_output.Output.t -> (Jsonaf.t, P.Error.t) result
   }
@@ -23,8 +26,9 @@ type t =
 module Availability = struct
   type t =
     | Runnable
-    | Script_target_unavailable
+    | Malformed_supported
     | Agent_artifact_installer_unavailable
+    | Unsupported_kind
   [@@deriving equal, sexp_of]
 end
 
@@ -53,8 +57,10 @@ let create
     in
     let* native = N.create ~root in
     let* native = N.with_job_service native jobs in
-    Ok { root; native; publisher; env; managed; storage; authorize; prepare_output }
+    Ok { root; native; publisher; env; managed; storage; jobs; authorize; prepare_output }
 ;;
+
+let issued_by_root t root = phys_equal t.root root
 
 let decode t job =
   if not (P.Job.equal_kind (P.Developer_job.kind job) P.Job.Async_tool)
@@ -66,12 +72,17 @@ let classify request =
   match B.target_kind request, B.agent_artifact request with
   | B.Target_kind.Tool, None -> Availability.Runnable
   | Tool, Some _ -> Agent_artifact_installer_unavailable
-  | Script, _ -> Script_target_unavailable
+  | Script, _ -> Runnable
 ;;
 
 let availability t candidate =
-  let* request = decode t (O.Job_candidate.job candidate) in
-  Ok (classify request)
+  let job = O.Job_candidate.job candidate in
+  if not (P.Job.equal_kind (P.Developer_job.kind job) P.Job.Async_tool)
+  then Ok Availability.Unsupported_kind
+  else (
+    match decode t job with
+    | Ok request -> Ok (classify request)
+    | Error _ -> Ok Malformed_supported)
 ;;
 
 let deadline job request =
@@ -231,6 +242,32 @@ let execute_with_budget t active claim job request deadline effective control =
        invalid "background Pending subscription is not owned Job work")
 ;;
 
+(* The Tool and Script paths share the saved request deadline and one host
+   budget. [expired] remains target-specific because Script must validate even
+   an unevaluated Expired completion against its saved output envelope. *)
+let with_claim_budget t ~job ~request ~expired run =
+  let* deadline = deadline job request in
+  let stored = B.policy request in
+  let remaining =
+    Time_ns.diff
+      (P.Timestamp.to_time_ns deadline)
+      (P.Timestamp.to_time_ns (O.native_now t.root))
+    |> Time_ns.Span.to_sec
+    |> Float.min stored.execution.wall_seconds
+  in
+  if Float.(remaining <= 0.)
+  then expired stored
+  else (
+    let effective = { stored.execution with wall_seconds = remaining } in
+    Chatml_execution.with_host_budget
+      ~env:t.env
+      ~policy:(Bounded effective)
+      (run ~deadline ~effective)
+    |> Result.map_error ~f:(fun error ->
+      P.Error.create Resource_limit ~message:error.message ~retryable:false ())
+    |> Result.join)
+;;
+
 let execute_claimed t active =
   let claim = Agent_session.Developer_job_scope.claim active in
   let job = Store.Claim.job claim in
@@ -238,32 +275,101 @@ let execute_claimed t active =
   let* () =
     match classify request with
     | Runnable -> Ok ()
-    | Script_target_unavailable | Agent_artifact_installer_unavailable ->
+    | Malformed_supported | Agent_artifact_installer_unavailable | Unsupported_kind ->
       invalid "developer background target has no installed executor"
   in
-  let* deadline = deadline job request in
-  if P.Timestamp.compare deadline (O.native_now t.root) <= 0
-  then Ok (completed_state t claim P.Completion.Expired)
-  else (
-    let stored = B.policy request in
-    let remaining =
-      Time_ns.diff
-        (P.Timestamp.to_time_ns deadline)
-        (P.Timestamp.to_time_ns (O.native_now t.root))
-      |> Time_ns.Span.to_sec
-      |> Float.min stored.execution.wall_seconds
-    in
-    if Float.(remaining <= 0.)
-    then Ok (completed_state t claim P.Completion.Expired)
-    else (
-      let effective = { stored.execution with wall_seconds = remaining } in
-      Chatml_execution.with_host_budget
-        ~env:t.env
-        ~policy:(Bounded effective)
-        (execute_with_budget t active claim job request deadline effective)
-      |> Result.map_error ~f:(fun error ->
-        P.Error.create Resource_limit ~message:error.message ~retryable:false ())
-      |> Result.join))
+  with_claim_budget
+    t
+    ~job
+    ~request
+    ~expired:(fun _ -> Ok (completed_state t claim P.Completion.Expired))
+    (fun ~deadline ~effective control ->
+       execute_with_budget t active claim job request deadline effective control)
+;;
+
+let call_script_tool t ~active ~claim ~deadline ~prepared ~name ~args =
+  let capabilities = Chat_response.One_off_script.capabilities prepared in
+  let* binding =
+    C.find capabilities ~name
+    |> Result.map_error ~f:(fun error -> P.Error.invalid_request error.message)
+  in
+  let reference = C.reference binding in
+  let* revision, _completion_schema = selected_schema t capabilities reference in
+  let context : H.context =
+    { id = P.Id.Invocation.create ()
+    ; owner = P.Execution_owner.Developer (O.owner t.root)
+    ; origin = P.Invocation.Script
+    ; parent_invocation = None
+    ; parent_job = Some (P.Developer_job.id (Store.Claim.job claim))
+    ; tool_name = reference.name
+    ; implementation_revision = revision
+    ; capability_fingerprint = C.fingerprint capabilities
+    ; input = args
+    ; created_at = O.native_now t.root
+    ; deadline = Some deadline
+    }
+  in
+  let* invocation = H.create_developer context in
+  let* terminal =
+    N.run_job_child
+      ~selected:capabilities
+      t.native
+      ~active
+      ~managed:t.managed
+      ~reference
+      ~invocation
+      ~authorize:t.authorize
+      ~prepare_output:t.prepare_output
+  in
+  H.outcome terminal
+  |> Result.of_option
+       ~error:(P.Error.invalid_request "developer Script Tool.call did not resolve")
+;;
+
+let execute_script_claimed t ~active ~scope =
+  let claim = Agent_session.Developer_job_scope.claim active in
+  let job = Store.Claim.job claim in
+  let* request = decode t job in
+  let* () =
+    match B.target_kind request, B.agent_artifact request with
+    | B.Target_kind.Script, None -> Ok ()
+    | Script, Some _ | Tool, _ ->
+      invalid "claimed developer Script target changed before execution"
+  in
+  with_claim_budget
+    t
+    ~job
+    ~request
+    ~expired:(fun policy ->
+      let* executed = Script.expired ~policy in
+      Ok (completed_state t claim (Script.completion executed), []))
+    (fun ~deadline ~effective:_ control ->
+       Option.iter control ~f:(fun control -> control.checkpoint ());
+       let* prepared =
+         B.prepare
+           ~env:t.env
+           ~policy:(O.job_policy t.root)
+           ~current_capabilities:(fun () -> O.native_selected t.root)
+           request
+       in
+       Option.iter control ~f:(fun control -> control.checkpoint ());
+       match prepared with
+       | B.Tool _ -> invalid "claimed developer Script prepared as a Tool"
+       | Script { prepared; input; policy } ->
+         let* executed =
+           Script.run
+             ~env:t.env
+             ~scope
+             ~prepared
+             ~input
+             ~policy
+             ~deadline
+             ~now:(fun () -> O.native_now t.root)
+             ~call_tool:(call_script_tool t ~active ~claim ~deadline ~prepared)
+         in
+         Ok
+           ( completed_state t claim (Script.completion executed)
+           , Script.local_effects executed ))
 ;;
 
 let select_result t ~claim ~proposed =
@@ -294,12 +400,29 @@ let select_result t ~claim ~proposed =
 let run_candidate t candidate =
   let* ready = availability t candidate in
   match ready with
-  | Script_target_unavailable | Agent_artifact_installer_unavailable ->
+  | Agent_artifact_installer_unavailable | Unsupported_kind ->
     invalid "developer background target has no installed executor"
-  | Runnable ->
+  | Malformed_supported ->
     O.Job_candidate.with_claimed
       t.root
       candidate
       ~select:(select_result t)
       (fun ~active ~sw:_ -> execute_claimed t active)
+  | Runnable ->
+    (match decode t (O.Job_candidate.job candidate) with
+     | Error _ -> invalid "developer background target changed after availability"
+     | Ok request ->
+       (match B.target_kind request with
+        | B.Target_kind.Tool ->
+          O.Job_candidate.with_claimed
+            t.root
+            candidate
+            ~select:(select_result t)
+            (fun ~active ~sw:_ -> execute_claimed t active)
+        | Script ->
+          Jobs.with_claimed_worker
+            t.jobs
+            ~candidate
+            ~select:(select_result t)
+            (fun ~active ~scope ~sw:_ -> execute_script_claimed t ~active ~scope)))
 ;;

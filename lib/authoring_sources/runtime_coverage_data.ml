@@ -141,6 +141,7 @@ let shared_features =
       ; "lib/agent_session/staged_jobs.ml"
       ; "lib/agent_server/developer_script_job_service.ml"
       ; "lib/agent_server/developer_background_job_runner.ml"
+      ; "lib/agent_server/developer_script_job_execution.ml"
       ]
     , "runtime.jobs.owned"
     , [ "test/chatml_composition/background_tests.ml"
@@ -335,7 +336,9 @@ let implementation_sources =
   ; ( "lib/agent_server/job_scheduler.ml"
     , "df358d4533811f7cac2ce1e0251614538074d2ea013bcb97fdb2d53eebdf0e3c" )
   ; ( "lib/agent_server/developer_background_job_runner.ml"
-    , "e1700d443e49642242dc4a5173837446b820eaaaf373f380e9fdffe8510357a6" )
+    , "9e890818505752870ca4f8e43a55bd652da7ca163b3665ac71c87661bbcf4119" )
+  ; ( "lib/agent_server/developer_script_job_execution.ml"
+    , "4e30550f6585c6afa97ddd12a12042d0be26b84f18aad7f6f92b2f3a3bf4bb32" )
   ; ( "lib/agent_server/developer_script_job_service.ml"
     , "6c6b3d64db0a1c623ef8595259bcc34e4b2b99e2e0576721d2afdcb82144f6de" )
   ; ( "lib/agent_server/schedule_scheduler.ml"
