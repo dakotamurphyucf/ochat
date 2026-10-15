@@ -20,6 +20,24 @@ The [physical Root registry](../../lib/agent_server/developer_root_owner.mli) ke
 
 OCH-265 implements the [immutable developer capture and deterministic fixture check/test core](../development/chatml-developer-capture.md). It is not yet a hosted run service or live capability admission.
 
+A developer Live owner may resolve a configured Physical workspace or one
+Temporary workspace with `on_session_stop` cleanup through the existing
+[workspace resolver](../../lib/agent_session/workspace_resolver.mli) and shared
+[conflict-domain lease](../../lib/agent_session/workspace_lease.mli). Physical
+roots are never deleted. Developer runs have no session-delete or retained
+workspace lifecycle, so Temporary `on_session_delete` and `retain` are rejected
+before acquisition. The [Store-issued Live directory](../../lib/agent_store/developer_run_store.mli)
+supplies runtime/cache/response paths outside the durable run document and
+remains under the daemon's actual Store lock. Temporary cleanup is a finite,
+cooperatively cancellable no-follow deletion of the exact owned root; it keeps
+the conflict lease until cleanup succeeds, then releases the Live directory.
+Partial deletion retains the same-process owner and lease for retry. At cold
+open, the Store scans bounded abandoned Live children, removes only those with
+its exact ownership marker, and rejects uncertain or unmarked children rather
+than assuming they are safe to delete. This lifetime mechanism does not grant
+source, native-tool, shell or provider authority; hosted run assembly remains
+separate.
+
 The current one-off host prepares selected source and tools, revalidates live bindings after waits and runs under a borrowed native scope ([one-off script](../../lib/chat_response/one_off_script.mli), [execution](../../lib/agent_session/one_off_execution.ml)). The [script job service](../../lib/agent_session/script_job_service.mli) and [job protocol](../../lib/agent_protocol/job.mli) provide bounded staging, selection, status, permission waits and cancellation for actor-owned work. Their current launch owner is an invocation or moderator event. Developer execution needs its own authenticated owner and run record while reusing those underlying controls; it must not mutate an unrelated production conversation or disguise a developer run as `Agent_protocol.Run`.
 
 The [lexical script-job kernel](../../lib/agent_session/script_job_kernel.mli) shares selected-binding checks, provisional start tracking, returned `Job.start` parsing and all-ID cleanup with the existing conversation adapter. [Request preparation](../../lib/agent_session/script_job_request.mli) shares the real tool and script decoder/compiler path. The kernel records IDs only after a concrete owner stages them. Its prepared acknowledgment cannot grant permission or publish a job. The [developer adapter](../../lib/agent_server/developer_script_job_service.mli) borrows it under an authenticated physical root, native or claimed Worker scope, without constructing a conversation `Session` ID. For root actions, the lexical scope stays open through the selected parent save; it acknowledges preparation only after durable success. For native calls, an exact physical scope seals and submits the selected terminal pair. Error cleanup asks the physical owner about each staged ID, retaining selected or uncertain capacity until exact reconciliation. `Job.get` and `Job.cancel` use the current physical job-control path for both background tools and admitted model jobs. The developer `Job.get` view gives status and safe result-kind metadata; its `completion` field is null because result bytes require separate authorization. `Job.read_result` uses [authenticated result disclosure](../../lib/agent_server/developer_result_disclosure.mli), including a fresh actor check after yielding reads. For admitted root/native `Developer_tool_v1` scopes, the adapter installs the canonical Model.spawn grammar in its expiring physical scope, admits its effect through the root or native call-boundary transaction, and enables the closed async runtime mode only for the actual selected developer tool compiler contract and pinned model selection. Hosted run/REPL assembly and the shared scheduler remain separate work.

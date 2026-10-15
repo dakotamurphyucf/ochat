@@ -52,9 +52,17 @@ end
     adopt the exact complete instance before the resolver releases its local
     acquisition bracket. [physical_roots] is the actual current configured
     physical workspace inventory used by existing cleanup protection. No
-    preexisting directory is adopted. Legacy [resolve] remains unchanged. *)
+    preexisting directory is adopted. A trusted nonyielding, nonraising
+    [cleanup_on_complete] is invoked once only after actual owned cleanup
+    succeeds; developer construction uses it to release its exact provisional
+    conflict-domain lease even if resolution fails before returning [Owned.t].
+    Legacy [resolve] remains unchanged. *)
 val resolve_owned
-  :  sw:Eio.Switch.t
+  :  ?cleanup_limits:Workspace_cleanup.Limits.t
+  -> ?cleanup_checkpoint:(unit -> unit)
+  -> ?cleanup_has_active_lease:(conflict_domain:string -> bool)
+  -> ?cleanup_on_complete:(unit -> unit)
+  -> sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
   -> physical_roots:string list
   -> instance_id:Agent_protocol.Id.Workspace_instance.t

@@ -24,6 +24,11 @@ val durable_blobs_path : t -> string
     without an authentic run document; complete inventory comes later. *)
 val developer_result_intents_path : t -> string
 
+(** Ephemeral developer Live resource directory. This sibling is outside the
+    closed developer-run document and result-intent namespaces; existence
+    grants no run, workspace, Store or result authority. *)
+val developer_live_path : t -> string
+
 val audit_path : t -> string
 val sessions_path : t -> string
 val migrations_path : t -> string
