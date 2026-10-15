@@ -953,6 +953,7 @@ module Document_context = struct
       { source : Captured.t
       ; project : Chatml_project.t
       ; root : Root.t
+      ; issuer : Project_source_host.Identity.t
       ; member : Path.t
       ; parsed : Parsed_capture.t
       ; declaration : Prompt.Chat_markdown.Declaration.t
@@ -968,6 +969,17 @@ module Document_context = struct
       phys_equal t.root.host_identity candidate.Root.host_identity
       && Int.equal t.root.index candidate.index
       && same_principal t.root.original_actor candidate.original_actor
+    ;;
+
+    let root_index_if_bound t ~issuer ~original_actor =
+      if
+        Project_source_host.Identity.equal t.issuer issuer
+        && same_principal t.root.original_actor original_actor
+        && String.equal
+             (Actor.principal t.root.original_actor).authentication_kind
+             (Actor.principal original_actor).authentication_kind
+      then Some t.root.index
+      else None
     ;;
 
     let matches t ~parsed ~declaration =
@@ -1176,6 +1188,7 @@ module Document_context = struct
                   { Project_capture.source
                   ; project
                   ; root
+                  ; issuer = Project_source_host.identity t.common.host.source_host
                   ; member
                   ; parsed
                   ; declaration

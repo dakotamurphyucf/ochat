@@ -325,7 +325,10 @@ let prepare
            ~project_capture:metadata
            ~select_contract:t.owner.selection_policy.project_contract
            ~clock:t.env#mono_clock
-           ~max_script_bytes:t.max_document_bundle_bytes
+           ~max_script_bytes:
+             (Int.min
+                t.max_document_bundle_bytes
+                Chatmd_source_bundle.default_limits.max_source_bytes)
            ~max_locator_bytes:1024
            ~max_path_components:256
            ~max_work_steps:t.max_parser_work_steps

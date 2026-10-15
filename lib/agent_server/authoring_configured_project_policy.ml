@@ -7,6 +7,8 @@ module Protocol_selection = Agent_protocol.Authoring.Context.Selection
 
 exception Limit_exceeded
 
+let max_member_identity_bytes = 16 * 1024 * 1024
+
 module Error = struct
   type t =
     | Invalid_configuration
@@ -112,12 +114,18 @@ let bind
         | None ->
           poll ();
           let contract = Contract.for_target target ~checkpoint:poll in
+          let remaining_member_bytes = ref max_member_identity_bytes in
           let allocate bytes =
-            if bytes < 0 || bytes > !remaining_identity_bytes then raise Limit_exceeded;
+            if
+              bytes < 0
+              || bytes > !remaining_identity_bytes
+              || bytes > !remaining_member_bytes
+            then raise Limit_exceeded;
+            remaining_member_bytes := !remaining_member_bytes - bytes;
             remaining_identity_bytes := !remaining_identity_bytes - bytes
           in
           let encoded = Contract.input_bytes contract ~checkpoint:poll ~allocate in
-          if encoded > max_contract_identity_bytes
+          if encoded > max_contract_identity_bytes || encoded > max_member_identity_bytes
           then Error Error.Contract_limit
           else (
             contracts := (target, contract) :: !contracts;
@@ -176,6 +184,17 @@ let admitted_actor t actor ~index =
 let read_policy t =
   Sources.Read_policy.create ~authorize:(fun actor ~root_index ->
     admitted_actor t actor ~index:root_index)
+;;
+
+let project_capture_authorized t ~original_actor ~actor capture =
+  match
+    Sources.Document_context.Project_capture.root_index_if_bound
+      capture
+      ~issuer:t.issuer
+      ~original_actor
+  with
+  | None -> false
+  | Some index -> admitted_actor t original_actor ~index && admitted_actor t actor ~index
 ;;
 
 let project_contract t actor ~root ~project ~selection =
