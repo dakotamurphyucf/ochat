@@ -760,7 +760,7 @@ let%test_unit "recovery rejects invalid epoch lineage and document identity" =
 let%test_unit
     "command reservation, one-shot start and historical terminal retain identity"
   =
-  with_root ~max_document_bytes:16384 (fun _env _sw _root _session run ->
+  with_root ~max_document_bytes:16384 (fun env _sw root _session run ->
     let capture = digest "command capture" in
     let request = digest "command request" in
     let handle, _ = admit run (owner 0) capture in
@@ -833,6 +833,70 @@ let%test_unit
     assert (Result.is_error (C.retire_absent_admission handle abandoned));
     C.retire_absent_admission handle fresh |> run_ok;
     assert (Option.is_none (C.observe handle ~key:abandoned_key |> run_ok));
+    let rebase_key = P.Idempotency_key.of_string "command-rebase-selected" |> ok in
+    let rebase_reserved =
+      C.prepare_reservation
+        handle
+        ~key:rebase_key
+        ~kind:C.Receipt.Kind.Check
+        ~request_fingerprint:(digest "rebase original request")
+      |> run_ok
+      |> command_prepared
+      |> fun pending -> C.commit handle pending ~admit:(fun () -> true) |> run_ok
+    in
+    let authority =
+      Eio.Path.(
+        Eio.Stdenv.fs env
+        / root
+        / "developer-runs"
+        / ("run_" ^ P.Id.Developer_run.to_string run_id ^ ".json"))
+    in
+    let before = Eio.Path.load authority in
+    let unrelated_key = P.Idempotency_key.of_string "command-rebase-unrelated" |> ok in
+    ignore
+      (C.prepare_reservation
+         handle
+         ~key:unrelated_key
+         ~kind:C.Receipt.Kind.Fixture_run
+         ~request_fingerprint:(digest "unrelated request")
+       |> run_ok
+       |> command_prepared
+       |> fun pending -> C.commit handle pending ~admit:(fun () -> true) |> run_ok
+       : C.installed);
+    let newer = Eio.Path.load authority in
+    Eio.Path.save ~create:(`Or_truncate 0o600) authority before;
+    let check_receipt =
+      C.Receipt.create
+        (C.Receipt.Check C.Receipt.Check.Ready)
+        ~limits:(R.document_limits handle |> run_ok)
+        ~poll:ignore
+      |> ok
+    in
+    let selected =
+      C.prepare_change
+        handle
+        ~previous:rebase_reserved.view
+        ~change:(C.Row.Change.Finish check_receipt)
+      |> run_ok
+      |> command_prepared
+    in
+    Eio.Path.save ~create:(`Or_truncate 0o600) authority newer;
+    assert (
+      match C.commit handle selected ~admit:(fun () -> true) with
+      | Error R.Error.Prewrite_conflict -> true
+      | Ok _ | Error _ -> false);
+    let rebased = C.reprepare_after_prewrite_conflict handle selected |> run_ok in
+    assert (Result.is_error (C.reprepare_after_prewrite_conflict handle selected));
+    ignore (C.commit handle rebased ~admit:(fun () -> true) |> run_ok : C.installed);
+    assert (Option.is_some (C.observe handle ~key:unrelated_key |> run_ok));
+    (match C.observe handle ~key:rebase_key |> run_ok with
+     | Some view ->
+       (match C.Row.phase (C.View.row view) with
+        | C.Row.Phase.Terminal { receipt; _ } ->
+          assert (C.Receipt.equal receipt check_receipt)
+        | Reserved | Waiting_permission | Execution_started ->
+          failwith "same selected Check terminal was not rebased")
+     | None -> failwith "rebased command disappeared");
     let current = R.observe handle |> run_ok in
     let newer, _ =
       R.admit_epoch
