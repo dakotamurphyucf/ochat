@@ -58,7 +58,26 @@ let%test_unit "lexical selected starts and aborts follow a bounded reference mod
           ~abort:(fun id -> aborted := id :: !aborted)
           ~error:Fn.id
           (fun scope ->
+             if Int.equal count 1
+             then (
+               K.rebind_selected
+                 scope
+                 ~selected:capabilities
+                 ~current_capabilities:(fun () -> !current)
+               |> ok;
+               assert (
+                 Result.is_error
+                   (K.rebind_selected
+                      scope
+                      ~selected:capabilities
+                      ~current_capabilities:(fun () -> !current))));
              List.iter ids ~f:(fun id -> K.record_start scope id |> ok);
+             assert (
+               Result.is_error
+                 (K.rebind_selected
+                    scope
+                    ~selected:capabilities
+                    ~current_capabilities:(fun () -> !current)));
              let selected_ids = List.filteri ids ~f:(fun index _ -> index % 2 = 0) in
              let effects = List.map selected_ids ~f:start in
              let actual, ordinary = K.split_starts scope effects |> ok in

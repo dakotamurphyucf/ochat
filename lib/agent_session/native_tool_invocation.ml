@@ -949,6 +949,7 @@ let selected_managed_target
       ~reference
       ~selected
       ~dispatched
+      ~admit_managed
       ~effect_entry
       ~stage_background
       ~install_jobs
@@ -964,19 +965,23 @@ let selected_managed_target
     { Native_tool_policy.prepared
     ; run =
         (fun continuation ->
-          match
-            with_selected_managed_scope execution (fun borrowed ->
-              Ok
-                (service.run
-                   execution
-                   borrowed
-                   ~effect_entry
-                   ~stage_background
-                   ~install_jobs:(install_jobs prepared)
-                   continuation))
-          with
-          | Ok result -> result
-          | Error _ -> Error (fail "invocation.handler_failed" "Tool execution failed."))
+          match admit_managed execution with
+          | Error _ -> Error (fail "invocation.handler_failed" "Tool execution failed.")
+          | Ok () ->
+            (match
+               with_selected_managed_scope execution (fun borrowed ->
+                 Ok
+                   (service.run
+                      execution
+                      borrowed
+                      ~effect_entry
+                      ~stage_background
+                      ~install_jobs:(install_jobs prepared)
+                      continuation))
+             with
+             | Ok result -> result
+             | Error _ ->
+               Error (fail "invocation.handler_failed" "Tool execution failed.")))
     })
 ;;
 
@@ -1150,6 +1155,7 @@ let run_owned_child ~parent ~managed ~reference ~invocation ~authorize ~prepare_
 ;;
 
 let run_owned_selected
+      ~admit_managed
       ~install_jobs
       ~owner
       ~parent
@@ -1196,6 +1202,7 @@ let run_owned_selected
         ~reference
         ~selected
         ~dispatched
+        ~admit_managed
         ~effect_entry:(fun () -> effect_entry binding)
         ~stage_background:(fun ~request ~checkpoint ->
           stage_background binding ~request ~checkpoint)

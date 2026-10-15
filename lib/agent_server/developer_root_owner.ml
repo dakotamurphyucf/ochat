@@ -307,6 +307,13 @@ let selected_model t = t.selected_model
 let original_actor t = t.actor
 let job_policy t = t.job_policy
 let issued_by_store t store = Store.issued_by store t.handle
+
+let result_root t =
+  if not (same_domain t.registry)
+  then invalid "developer result root belongs to another domain"
+  else Store.Result_root.of_handle t.handle |> Result.map_error ~f:error_of_store
+;;
+
 let native_now t = t.registry.now ()
 
 let external_model_token = function

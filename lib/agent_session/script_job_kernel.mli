@@ -31,6 +31,18 @@ val with_scope
     for coupled notification validation. Neither checks actor or job custody. *)
 val check_open : t -> (unit, string) result
 
+(** Trusted physical managed admission may replace the initial target selection
+    exactly once with the already admitted implementation's declared dependency
+    selection. The scope must still be open and must never have recorded a start,
+    including one later rolled back. This is comparison state, not permission or
+    a capability grant; the caller proves the prepared implementation and live
+    physical invocation before calling. *)
+val rebind_selected
+  :  t
+  -> selected:Chat_response.Tool_capability.t
+  -> current_capabilities:(unit -> Chat_response.Tool_capability.t)
+  -> (unit, string) result
+
 val check_selection : t -> (unit, string) result
 
 (** Check cancellation in the current fiber and the installed execution control before or after a

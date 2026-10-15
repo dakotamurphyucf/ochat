@@ -51,6 +51,20 @@ type execution =
 let invalid message = Error (Agent_protocol.Error.invalid_request message)
 let policy t = t.policy
 let agent_artifact t = t.agent_artifact
+
+module Target_kind = struct
+  type t =
+    | Tool
+    | Script
+  [@@deriving equal, sexp_of]
+end
+
+let target_kind t =
+  match t.target with
+  | Tool_target _ -> Target_kind.Tool
+  | Script_target _ -> Target_kind.Script
+;;
+
 let digest = Chatmd_shell_spec.Source_ref.digest
 let number value = `Number (Int.to_string value)
 let seconds value = Jsonaf.Export.jsonaf_of_float value

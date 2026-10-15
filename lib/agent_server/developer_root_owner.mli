@@ -469,6 +469,16 @@ val job_policy : t -> Chat_response.One_off_request.policy
     this run. Equal host/run IDs or paths do not establish this binding. *)
 val issued_by_store : t -> Agent_store.Developer_run_store.t -> bool
 
+(** Borrow result-publication custody from this root's actual retained Store
+    handle. The Store revalidates its live issuer and persisted run identity;
+    equal host/run coordinates or a caller-supplied Result_root cannot replace
+    it. This does not grant result reads, worker entry, current-epoch effects or
+    Blob authority. The caller must bind the returned root to this same Store
+    and its shared Blob coordinator before selecting a result. *)
+val result_root
+  :  t
+  -> (Agent_store.Developer_run_store.Result_root.t, Agent_protocol.Error.t) result
+
 (** Read-only authentic data retained by the physical run owner. *)
 val native_ceiling : t -> Chat_response.Tool_capability.t
 

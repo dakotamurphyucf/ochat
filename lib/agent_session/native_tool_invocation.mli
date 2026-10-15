@@ -270,9 +270,18 @@ type selected_managed_dispatch =
     [parent_live_now] comes from that same physical native bracket and is
     checked for every nested child after its parent may have been cancelled
     while joining the callback Switch. It is nonyielding and cannot be
-    substituted with the child's own cancellation context. *)
+    substituted with the child's own cancellation context.
+    [admit_managed] runs only after the managed registry issues the exact
+    [owned_execution] for this dispatched invocation and before its prepared
+    script runs. The trusted physical owner uses that receipt to admit declared
+    lexical dependencies. An Error stops the callback before script effects.
+    This hook grants no authority itself and does not replace native permission,
+    current-parent or effect-entry checks. *)
 val run_owned_selected
-  :  install_jobs:
+  :  admit_managed:
+       (Chat_response.Managed_tool_registry.owned_execution
+        -> (unit, Agent_protocol.Error.t) result)
+  -> install_jobs:
        (Chat_response.Extension_compiler.t
         -> Chatml_host_runtime.runtime_config
         -> managed_script_install)

@@ -9,11 +9,13 @@ type phase =
   | Committed
 
 type t =
-  { selected : C.t
-  ; current_capabilities : unit -> C.t
+  { mutable selected : C.t
+  ; mutable current_capabilities : unit -> C.t
   ; abort : P.Id.Job.t -> unit
   ; active : bool Atomic.t
   ; mutable issued : P.Id.Job.t list
+  ; mutable ever_issued : bool
+  ; mutable selection_rebound : bool
   ; mutable control : Chatml.Chatml_lang.execution_control option
   ; mutable phase : phase
   }
@@ -51,6 +53,31 @@ let check_open t =
   | Prepared | Committed -> Error "background script scope has ended"
 ;;
 
+let rebind_selected t ~selected ~current_capabilities =
+  let open Result.Let_syntax in
+  let%bind () = check_open t in
+  if t.selection_rebound || t.ever_issued
+  then Error "background selection is already bound to started work"
+  else (
+    let names = List.map (C.references selected) ~f:(fun reference -> reference.C.name) in
+    let%bind current =
+      C.select (current_capabilities ()) ~names
+      |> Result.map_error ~f:(fun error -> error.C.message)
+    in
+    if not (String.equal (C.fingerprint current) (C.fingerprint selected))
+    then Error "managed dependency selection changed"
+    else if (not (live t)) || t.selection_rebound || t.ever_issued
+    then Error "background selection is already bound to started work"
+    else (
+      match t.phase with
+      | Prepared | Committed -> Error "background script scope has ended"
+      | Open ->
+        t.selected <- selected;
+        t.current_capabilities <- current_capabilities;
+        t.selection_rebound <- true;
+        Ok ()))
+;;
+
 let checkpoint t =
   Eio.Fiber.check ();
   Option.iter t.control ~f:(fun control -> control.checkpoint ());
@@ -82,6 +109,8 @@ let with_scope ~selected ~current_capabilities ~abort ~error f =
     ; abort
     ; active = Atomic.make true
     ; issued = []
+    ; ever_issued = false
+    ; selection_rebound = false
     ; control = None
     ; phase = Open
     }
@@ -134,6 +163,7 @@ let record_start t id =
   if List.mem t.issued id ~equal:P.Id.Job.equal
   then Error "background stage returned a duplicate job ID"
   else (
+    t.ever_issued <- true;
     t.issued <- id :: t.issued;
     Ok ())
 ;;
