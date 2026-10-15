@@ -1,9 +1,9 @@
-# Authoring source host (OCH-277)
+# Authoring source host
 
 `Authoring_source_host` is the host-only read and capture adapter for M5 editor
-contexts. It is implemented as a separate module in `agent_server`; it is not yet
-exposed over the direct, HTTP or stdio authoring protocol. Portable immutable
-editor revisions and overlay closure validation belong to OCH-278 and OCH-264.
+contexts. The installed authoring service uses this adapter behind its shared
+direct, HTTP and stdio methods. Portable editor revisions and overlay closure
+validation remain with their separate context and project owners.
 
 The adapter borrows `Project_source_host`'s **already admitted** configured
 `external_roots`, paired with their original host prefixes. It borrows the exact
@@ -93,3 +93,18 @@ host import grant. The language-service handler must adopt a fresh closure only
 on explicit analysis or rebuild; ordinary prefix and query requests use a
 previously adopted immutable closure and never reread imports. The captured
 files are exact individual observations, not an atomic filesystem snapshot.
+
+A selected document script can be prepared from that same immutable parser
+capture and an independently authorized project declaration. The source owner
+requires the exact parsed declaration and project capture, resolves the project
+relative to the declaration's genuine parser input, and checks the current
+operator's configured Standard contract for the selected Library environment.
+Inline bodies become bounded captured fragments. External `src` bodies must
+match a member of the retained import bundle byte for byte; an unambiguous
+same-project path can be reconciled with the project catalog, while an external
+path outside that project remains a captured file without an inferred catalog
+route. Both cases use the same joined local project preparation pipeline as a
+project context. The retained result is Build and contract comparison evidence;
+the selected-script checker still validates the script surface and kind before
+serving semantic facts. No new dependency read, Git acquisition or execution
+grant follows from the prepared result.

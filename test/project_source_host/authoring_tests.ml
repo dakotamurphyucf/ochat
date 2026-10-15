@@ -935,13 +935,13 @@ let%test_unit "explicit document capture binds unsaved root and imported source 
 
 let%test_unit "declared project metadata follows the captured declaring input" =
   with_source_context
-    ~max_context_requests:16
+    ~max_context_requests:32
     (fun env root project_owner allowed denied _ host _ root_path ->
        let root_project_text =
          {|{"schema_version":1,"namespace":"authoring","entries":{"main":{"source":"main.chatml","target":"one_off_v1"}}}|}
        in
        let project_text =
-         {|{"schema_version":1,"namespace":"imported","entries":{"main":{"source":"main.chatml","target":"one_off_v1"}}}|}
+         {|{"schema_version":1,"namespace":"imported","environments":{"default":{},"other":{}},"default_environment":"default","entries":{"main":{"source":"main.chatml","target":"one_off_v1"}}}|}
        in
        Eio.Path.mkdir ~perm:0o700 Eio.Path.(root_path / "nested");
        Eio.Path.save
@@ -951,7 +951,15 @@ let%test_unit "declared project metadata follows the captured declaring input" =
        Eio.Path.save
          ~create:(`Or_truncate 0o600)
          Eio.Path.(root_path / "nested" / "part.chatmd")
-         {|<script id="lookup" language="chatml" kind="tool" project="./chatml.project.json">let main = 1</script>|};
+         {|<script id="lookup" language="chatml" kind="tool" project="./chatml.project.json">let main = 1</script><script id="file" language="chatml" kind="tool" project="./chatml.project.json" environment="other" src="lookup.chatml"/><script id="outside" language="chatml" kind="tool" project="./chatml.project.json" src="../outside.chatml"/>|};
+       Eio.Path.save
+         ~create:(`Or_truncate 0o600)
+         Eio.Path.(root_path / "nested" / "lookup.chatml")
+         "let main = 2\n";
+       Eio.Path.save
+         ~create:(`Or_truncate 0o600)
+         Eio.Path.(root_path / "outside.chatml")
+         "let main = 3\n";
        Eio.Path.save
          ~create:(`Or_truncate 0o600)
          Eio.Path.(root_path / "draft.chatmd")
@@ -989,8 +997,23 @@ let%test_unit "declared project metadata follows the captured declaring input" =
              |> List.find_exn ~f:(fun declaration ->
                String.equal (CM.Declaration.script_id declaration) "part:lookup")
            in
+           let external_declaration =
+             List.concat_map
+               (generated.parsed_root :: List.map generated.parsed_agents ~f:snd)
+               ~f:CM.Parsed.declarations
+             |> List.find_exn ~f:(fun declaration ->
+               String.equal (CM.Declaration.script_id declaration) "part:file")
+           in
+           let outside_declaration =
+             List.concat_map
+               (generated.parsed_root :: List.map generated.parsed_agents ~f:snd)
+               ~f:CM.Parsed.declarations
+             |> List.find_exn ~f:(fun declaration ->
+               String.equal (CM.Declaration.script_id declaration) "part:outside")
+           in
            let capture
                  ?(parsed = parsed)
+                 ?(declaration = declaration)
                  ?(schema_limits = Document_schema.Limits.default)
                  ?(max_work_steps = 100_000)
                  ()
@@ -1020,6 +1043,168 @@ let%test_unit "declared project metadata follows the captured declaring input" =
            [%test_eq: string] (Chatml_project.namespace (PC.project first)) "imported";
            assert (PC.matches first ~parsed ~declaration);
            assert (PC.belongs_to_root first root);
+           let contract =
+             Chatml.Chatml_compiler_contract.for_target One_off_v1 ~checkpoint:ignore
+           in
+           let select_contract actor ~root:chosen ~project ~selection =
+             if
+               Operator_authorization.is_current actor
+               && Int.equal (Authoring.Root.index chosen) (Authoring.Root.index root)
+               && Path.equal project (PC.member first)
+               && List.exists [ None; Some "other" ] ~f:(fun environment ->
+                 P.Authoring.Context.Selection.equal
+                   selection
+                   (P.Authoring.Context.Selection.create ~target:Library ~environment
+                    |> ok))
+             then Some contract
+             else None
+           in
+           let prepare ?(max_work_steps = 100_000) declaration project_capture =
+             DC.prepare_selected_script
+               owner
+               ~actor:allowed
+               ~parsed
+               ~declaration
+               ~project_capture
+               ~select_contract
+               ~clock:env#mono_clock
+               ~max_script_bytes:4096
+               ~max_locator_bytes:1024
+               ~max_path_components:16
+               ~max_work_steps
+               ~checkpoint:ignore
+           in
+           let inline = prepare declaration first |> authoring_ok in
+           assert (DC.Script_capture.matches inline ~parsed ~declaration ~project:first);
+           [%test_eq: string]
+             (Captured.contents (DC.Script_capture.entry_source inline))
+             "let main = 1";
+           let external_project =
+             capture ~declaration:external_declaration () |> authoring_ok
+           in
+           let external_script =
+             prepare external_declaration external_project |> authoring_ok
+           in
+           [%test_eq: string]
+             (Captured.contents (DC.Script_capture.entry_source external_script))
+             "let main = 2\n";
+           let prepared =
+             Chatml_project_build.prepared (DC.Script_capture.build external_script)
+           in
+           [%test_eq: string]
+             (Chatml_project.Lock.environment
+                (Chatml_project_build.lock (DC.Script_capture.build external_script)))
+             "other";
+           let selected_entry = Prepared.entry prepared in
+           let selected_source =
+             Prepared.find_source prepared selected_entry |> Option.value_exn
+           in
+           [%test_eq: string] (Captured.contents selected_source) "let main = 2\n";
+           let outside_project =
+             capture ~declaration:outside_declaration () |> authoring_ok
+           in
+           Eio.Path.save
+             ~create:(`Or_truncate 0o600)
+             Eio.Path.(root_path / "outside.chatml")
+             "let main = 999\n";
+           let outside_script =
+             prepare outside_declaration outside_project |> authoring_ok
+           in
+           let outside_prepared =
+             Chatml_project_build.prepared (DC.Script_capture.build outside_script)
+           in
+           let outside_source =
+             Prepared.find_source outside_prepared (Prepared.entry outside_prepared)
+             |> Option.value_exn
+           in
+           [%test_eq: string] (Captured.contents outside_source) "let main = 3\n";
+           [%test_eq: string]
+             (Captured.Id.relative_path (Captured.id outside_source))
+             "outside.chatml";
+           (match prepare external_declaration first with
+            | Error Authoring.Error.Foreign_root -> ()
+            | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+            | Ok _ -> failwith "foreign declaration reused another project capture");
+           (match prepare ~max_work_steps:1 declaration first with
+            | Error Authoring.Error.Result_limit -> ()
+            | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+            | Ok _ -> failwith "script preparation exceeded its work allowance");
+           let selected_contract = ref contract in
+           let selected_calls = ref 0 in
+           let changed_contract =
+             Chatml.Chatml_compiler_contract.for_target Moderator_v1 ~checkpoint:ignore
+           in
+           (match
+              DC.prepare_selected_script
+                owner
+                ~actor:allowed
+                ~parsed
+                ~declaration
+                ~project_capture:first
+                ~select_contract:(fun actor ~root ~project ~selection ->
+                  incr selected_calls;
+                  Option.map
+                    (select_contract actor ~root ~project ~selection)
+                    ~f:(fun _ -> !selected_contract))
+                ~clock:env#mono_clock
+                ~max_script_bytes:4096
+                ~max_locator_bytes:1024
+                ~max_path_components:16
+                ~max_work_steps:100_000
+                ~checkpoint:(fun () ->
+                  if !selected_calls >= 2 then selected_contract := changed_contract)
+            with
+            | Error Authoring.Error.Selected_script_unavailable -> ()
+            | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+            | Ok _ -> failwith "changed compiler selection retained an old Build");
+           assert (!selected_calls >= 4);
+           let current = ref true in
+           let actor_selection_calls = ref 0 in
+           let expiring_actor =
+             Operator_authorization.guarded
+               ~principal:(Operator_authorization.principal allowed)
+               ~is_current:(fun () -> !current)
+           in
+           (match
+              DC.prepare_selected_script
+                owner
+                ~actor:expiring_actor
+                ~parsed
+                ~declaration
+                ~project_capture:first
+                ~select_contract:(fun actor ~root ~project ~selection ->
+                  incr actor_selection_calls;
+                  select_contract actor ~root ~project ~selection)
+                ~clock:env#mono_clock
+                ~max_script_bytes:4096
+                ~max_locator_bytes:1024
+                ~max_path_components:16
+                ~max_work_steps:100_000
+                ~checkpoint:(fun () ->
+                  if !actor_selection_calls >= 2 then current := false)
+            with
+            | Error Authoring.Error.Expired_actor -> ()
+            | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+            | Ok _ -> failwith "revoked request actor retained a script Build");
+           assert (!actor_selection_calls >= 2);
+           (match
+              DC.prepare_selected_script
+                owner
+                ~actor:denied
+                ~parsed
+                ~declaration
+                ~project_capture:first
+                ~select_contract
+                ~clock:env#mono_clock
+                ~max_script_bytes:4096
+                ~max_locator_bytes:1024
+                ~max_path_components:16
+                ~max_work_steps:100_000
+                ~checkpoint:ignore
+            with
+            | Error Authoring.Error.Unauthorized -> ()
+            | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+            | Ok _ -> failwith "foreign actor prepared the captured script");
            capture ~max_work_steps:1 () |> expect_limit;
            let read_limit =
              Document_schema.Limits.create

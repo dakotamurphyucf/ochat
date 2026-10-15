@@ -7,6 +7,7 @@ let source_host_error = function
   | Expired_actor -> Error.Expired_actor
   | Foreign_root | Unsupported_source_selection | Project_declaration_unavailable ->
     Error.Source_unavailable
+  | Selected_script_unavailable -> Error.Selection_unavailable
   | Closed | Foreign_domain -> Error.Closed
   | Busy -> Error.Busy
   | Context_limit | Result_limit | Document_bundle_limit
