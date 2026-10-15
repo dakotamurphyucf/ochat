@@ -56,6 +56,13 @@ module Configured : sig
   type t
 
   val source_preparation : t -> Agent_session.Prompt_script_preparation.Policy.t
+
+  (** Exact project preparation profile already constructed for this admitted
+      source host. Authoring borrows it; it must not rebuild a second profile. *)
+  val project_policy : t -> Chatml_project_prepare.Policy.t
+
+  val project_limits : t -> Chatml_project_prepare.Limits.t
+  val max_project_request_bytes : t -> int
   val git_probe_limits : t -> Shell_access.Bounded_process.Limits.t option
   val git_store_limits : t -> Chatml_git_host.Store_limits.t
 end

@@ -35,6 +35,10 @@ and `Connection_context` already bind authenticated actors to transport
 connections. The OChat protocol already has one closed typed command dispatcher
 over direct, HTTP and full-duplex NDJSON stdio paths.
 
+OCH-277 implements the [host-only source read/capture adapter](../development/chatml-authoring-source-host.md)
+over configured external roots, current operator policy and the existing local
+project preparation path. It is not yet a protocol method or an overlay service.
+
 `Chatml_project_build.restore` validates an exact captured lock/source inventory
 without filesystem or network access. `compose` owns pure project closure and lock
 generation, but an uploaded raw source manifest still needs a new adapter through

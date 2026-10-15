@@ -15,3 +15,6 @@ type t =
 let create ~roots ~local ~git_objects ~git_native ~composition =
   { roots; local; git_objects; git_native; composition }
 ;;
+
+let root_limits t = t.roots
+let local_limits t = t.local

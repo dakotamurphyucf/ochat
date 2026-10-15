@@ -69,6 +69,22 @@ val with_host
   -> f:(Sources.Policy.t -> Sources.Host.t -> 'a)
   -> ('a, Error.t) Result.t
 
+(** Host-only authoring borrow of the SAME startup-admitted prefix/anchor pairs
+    and project policy/limits used for prompt source preparation. Prefixes remain
+    administrative labels, not grants. The caller must apply a current operator
+    read grant and select only its allowed anchors before any resolution/read.
+    No Git store/grant is exposed. The callback must join all source work before
+    return; owner cancellation and foreign-domain behavior match [with_host]. *)
+val with_authoring
+  :  t
+  -> f:
+       (roots:(string * Chatml_local_roots.Anchor.t) list
+        -> policy:Chatml_project_prepare.Policy.t
+        -> limits:Chatml_project_prepare.Limits.t
+        -> max_request_bytes:int
+        -> 'a)
+  -> ('a, Error.t) Result.t
+
 (** Finite original catalog-attempt ceiling, independent of runtime restoration's
     5s policy. This immutable query grants no source authority. *)
 val policy : t -> Policy.t
