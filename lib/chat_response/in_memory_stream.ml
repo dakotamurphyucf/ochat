@@ -8,6 +8,16 @@ exception Inference_failed of Inference.Event.Terminal.t
 
 module Output = Res.Tool_output.Output
 
+module Admitted_call = struct
+  type t =
+    { attempt : Inference_runtime.Attempt.t
+    ; parent : Transcript.Scope.parent
+    }
+
+  let attempt t = t.attempt
+  let parent t = t.parent
+end
+
 type post_stream =
   sw:Eio.Switch.t
   -> inputs:Openai.Responses.Item.t list
@@ -222,6 +232,7 @@ type ctx =
   ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
   ; on_inference_completion : Inference_client.Completion.t -> unit
   ; on_inference_observation : Inference.Observation.t -> unit
+  ; on_admitted_call : Admitted_call.t -> unit
   ; submission_guard : Inference_runtime.Submission_guard.t
   ; before_inference_dispatch : Inference_runtime.Prepared.t -> unit
   ; resolve_inference_assets : History_entry.t list -> Inference.Request.Asset.t list
@@ -290,6 +301,7 @@ type args =
   ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
   ; on_inference_completion : Inference_client.Completion.t -> unit
   ; on_inference_observation : Inference.Observation.t -> unit
+  ; on_admitted_call : Admitted_call.t -> unit
   ; submission_guard : Inference_runtime.Submission_guard.t
   ; before_inference_dispatch : Inference_runtime.Prepared.t -> unit
   ; resolve_inference_assets : History_entry.t list -> Inference.Request.Asset.t list
@@ -1836,6 +1848,7 @@ let accept_inference_candidate
       ~hist
       ~(st : stream_state)
       ~sem
+      ~attempt
       ~(item : Transcript.Item.t)
       ~payload
       ~local_execution
@@ -1869,6 +1882,18 @@ let accept_inference_candidate
         st
         (History_entry.create_with_id ~id payload)
     | Tool_candidate ->
+      (* A candidate that precedes its request's strict attempt acknowledgement
+         cannot commit a host call and only then fail proof issuance. *)
+      let admitted_attempt =
+        Option.value_or_thunk attempt ~default:(fun () ->
+          raise (Inference_runtime.Contract_violation Invalid_candidate))
+      in
+      if
+        not
+          (Transcript.Scope.equal
+             item.scope
+             (Inference_runtime.Attempt.scope admitted_attempt))
+      then raise (Inference_runtime.Contract_violation Invalid_candidate);
       let semantic = P.semantic payload in
       let metadata = P.Semantic.metadata semantic in
       let kind, original_name, original_payload =
@@ -1955,6 +1980,19 @@ let accept_inference_candidate
           History_entry.Id.equal (History_entry.id entry) id)
       in
       let moderated, rejection = !prepared in
+      (* The strict observer and a delayed tool receive the same committed
+         direct-parent binding. *)
+      let inference_parent =
+        Transcript.Scope.
+          { scope = Transcript.Scope.key item.scope
+          ; call_entry_id = Some (History_entry.id call)
+          ; call_alias = Some call_id
+          }
+      in
+      if Option.is_none rejection && Option.is_none moderated.synthetic_result
+      then
+        c.on_admitted_call
+          Admitted_call.{ attempt = admitted_attempt; parent = inference_parent };
       let history_so_far =
         history_so_far ~history_compaction:c.history_compaction ~hist ~st
       in
@@ -1991,13 +2029,6 @@ let accept_inference_candidate
              in
              (* Bind delayed tool execution to the admitted candidate, rather
                 than the mutable current stream scope. *)
-             let inference_parent =
-               Transcript.Scope.
-                 { scope = Transcript.Scope.key item.scope
-                 ; call_entry_id = Some id
-                 ; call_alias = Some call_id
-                 }
-             in
              Tool_call.run_tool
                ~inference_parent
                ~kind
@@ -2230,6 +2261,7 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
       c.transcript_live <- None;
       let run_request inference_context ~on_dispatch =
         let c = { c with inference_context } in
+        let admitted_attempt = ref None in
         let request =
           Inference.Request.create
             ~target:(Inference_runtime.Context.target c.inference_context)
@@ -2253,7 +2285,8 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
             ~on_attempt:(fun attempt ->
               on_dispatch (Inference_runtime.Attempt.configuration attempt);
               c.on_inference_attempt attempt;
-              c.transcript_scope <- Some (Inference_runtime.Attempt.scope attempt))
+              c.transcript_scope <- Some (Inference_runtime.Attempt.scope attempt);
+              admitted_attempt := Some attempt)
             ~on_event:(fun event ->
               match Inference.Event.view event with
               | Live event -> publish_inference_live c ~st:!st event
@@ -2265,6 +2298,7 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
                      ~hist
                      ~st:!st
                      ~sem
+                     ~attempt:!admitted_attempt
                      ~item
                      ~payload
                      ~local_execution
@@ -2376,6 +2410,7 @@ let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
     ; on_inference_attempt = a.on_inference_attempt
     ; on_inference_completion = a.on_inference_completion
     ; on_inference_observation = a.on_inference_observation
+    ; on_admitted_call = a.on_admitted_call
     ; submission_guard = a.submission_guard
     ; before_inference_dispatch = a.before_inference_dispatch
     ; resolve_inference_assets = a.resolve_inference_assets
@@ -2448,6 +2483,7 @@ let run_completion_stream_in_memory_entries
       ?(submission_guard = Inference_runtime.Submission_guard.empty)
       ?(inference_relation = Transcript.Scope.Root)
       ?(on_inference_observation = fun _ -> ())
+      ?(on_admitted_call = fun _ -> ())
       ?(before_inference_dispatch = fun _ -> ())
       ?(resolve_inference_assets = fun _ -> [])
       ?datadir
@@ -2560,6 +2596,7 @@ let run_completion_stream_in_memory_entries
     ; on_inference_attempt
     ; on_inference_completion
     ; on_inference_observation
+    ; on_admitted_call
     ; submission_guard
     ; before_inference_dispatch
     ; resolve_inference_assets
