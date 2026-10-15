@@ -1,6 +1,7 @@
 open! Core
 module P = Agent_protocol
 module Doc = Developer_run_document
+module Cpu = Developer_run_cpu
 module Root = Session_store.Developer_root
 module Id = P.Id.Developer_run
 
@@ -289,6 +290,7 @@ type t =
   ; directory : Eio.Fs.dir_ty Eio.Path.t
   ; limits : Limits.t
   ; checkpoint : unit -> unit
+  ; cpu : Cpu.t
   ; token : unit ref
   ; pending : (Id.t, pending) Hashtbl.t
   ; run_lifecycle_mutex : Stdlib.Mutex.t
@@ -529,7 +531,8 @@ let read t ~poll id =
   | Ok bytes ->
     poll ();
     let* document =
-      Doc.of_bytes
+      Cpu.decode
+        t.cpu
         bytes
         ~poll
         ~limits:t.limits.document
@@ -547,10 +550,16 @@ let read t ~poll id =
 
 let work t checkpoint =
   let remaining = ref t.limits.max_work_steps in
+  let until_yield = ref 32 in
   fun () ->
     if !remaining <= 0 then raise Work_limit;
     decr remaining;
-    checkpoint ()
+    checkpoint ();
+    decr until_yield;
+    if !until_yield = 0
+    then (
+      until_yield := 32;
+      Eio.Fiber.yield ())
 ;;
 
 let claim_current_under_lease t ~poll ~for_entry (claim : claim_data) =
@@ -723,7 +732,7 @@ let scan_documents t ~poll ~reader =
     t
     ~poll
     ~reader
-    ~decode:Doc.of_bytes
+    ~decode:(Cpu.decode t.cpu)
     ~document_of:Fn.id
     ~project:(fun id _bytes document -> id, document)
 ;;
@@ -733,7 +742,7 @@ let scan_document_sources t ~poll ~reader =
     t
     ~poll
     ~reader
-    ~decode:Doc.of_bytes_with_document
+    ~decode:(Cpu.decode_with_document t.cpu)
     ~document_of:fst
     ~project:(fun id bytes (document, source) -> id, bytes, document, source)
 ;;
@@ -801,6 +810,7 @@ let open_or_create session_store ~sw ~limits ~checkpoint =
             ; directory
             ; limits
             ; checkpoint
+            ; cpu = Cpu.create ~domain_mgr:(Eio.Stdenv.domain_mgr env)
             ; token = ref ()
             ; pending = Hashtbl.create (module Id)
             ; run_lifecycle_mutex = Stdlib.Mutex.create ()
@@ -1157,7 +1167,8 @@ module Result_root = struct
               |> store
             in
             let* document =
-              Doc.of_bytes
+              Cpu.decode
+                t.issuer.cpu
                 bytes
                 ~poll
                 ~limits:t.issuer.limits.document
@@ -1434,7 +1445,8 @@ let admit_epoch t ~owner ~capture_fingerprint ~previous =
             let document = Doc.create ~owner ~capture_fingerprint in
             poll ();
             let* bytes =
-              Doc.to_bytes
+              Cpu.encode
+                t.cpu
                 document
                 ~poll
                 ~limits:t.limits.document
@@ -1500,7 +1512,8 @@ let admit_epoch t ~owner ~capture_fingerprint ~previous =
               in
               poll ();
               let* after =
-                Doc.to_bytes
+                Cpu.encode
+                  t.cpu
                   next
                   ~poll
                   ~limits:t.limits.document
@@ -1556,7 +1569,8 @@ let prepare_checkpoint handle ~expected ~phase =
         in
         poll ();
         let* after_bytes =
-          Doc.to_bytes
+          Cpu.encode
+            t.cpu
             next
             ~poll
             ~limits:t.limits.document
@@ -1608,7 +1622,8 @@ let prepare_change handle ~expected ~kind ~f =
         let* next = f t document ~poll in
         poll ();
         let* after_bytes =
-          Doc.to_bytes
+          Cpu.encode
+            t.cpu
             next
             ~poll
             ~limits:t.limits.document
@@ -1868,7 +1883,8 @@ let prepare_claimed_transition_internal
           in
           poll ();
           let* after_bytes =
-            Doc.to_bytes
+            Cpu.encode
+              t.cpu
               next
               ~poll
               ~limits:t.limits.document
@@ -2768,7 +2784,8 @@ module Recovery = struct
                 in
                 poll ();
                 let* after_bytes =
-                  Doc.to_bytes
+                  Cpu.encode
+                    t.store.cpu
                     next
                     ~poll
                     ~limits:t.store.limits.document

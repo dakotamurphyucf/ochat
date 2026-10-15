@@ -122,20 +122,22 @@ module Json = struct
 
   (* Jsonaf accepts some non-JSON number spellings (for example 01). Validate
      the JSON numeric grammar directly, including constructed in-memory values. *)
-  let valid_number number =
+  let valid_number number ~checkpoint =
     let length = String.length number in
     let index = ref 0 in
     let consume_if ~f =
       if !index < length && f number.[!index]
       then (
         incr index;
+        if !index land 0xffff = 0 then checkpoint ();
         true)
       else false
     in
     let consume_digits () =
       let start = !index in
       while !index < length && Char.is_digit number.[!index] do
-        incr index
+        incr index;
+        if !index land 0xffff = 0 then checkpoint ()
       done;
       !index > start
     in
@@ -152,7 +154,43 @@ module Json = struct
     integer && fraction && exponent && Int.equal !index length
   ;;
 
-  let validate_and_measure ~limits t =
+  let valid_utf8_with_checkpoint text ~checkpoint =
+    let length = String.length text in
+    if length <= 65_536
+    then String.Utf8.is_valid text
+    else (
+      let is_continuation index = Char.to_int text.[index] land 0xc0 = 0x80 in
+      let rec check start =
+        if start >= length
+        then true
+        else (
+          let boundary = Int.min length (start + 65_536) in
+          (* A valid code point has at most three continuation bytes. Advancing
+           to the next leading byte keeps each slice independently valid;
+           more than three continuation bytes proves the original invalid. *)
+          let rec finish_boundary boundary remaining =
+            if boundary >= length || not (is_continuation boundary)
+            then Some boundary
+            else if remaining = 0
+            then None
+            else finish_boundary (boundary + 1) (remaining - 1)
+          in
+          match finish_boundary boundary 3 with
+          | None -> false
+          | Some boundary ->
+            let slice = String.sub text ~pos:start ~len:(boundary - start) in
+            if not (String.Utf8.is_valid slice)
+            then false
+            else if boundary >= length
+            then true
+            else (
+              checkpoint ();
+              check boundary))
+      in
+      check 0)
+  ;;
+
+  let validate_and_measure_with_checkpoint ~limits ~checkpoint t =
     (* Keep the per-node walk allocation-light. This private escape preserves the
        first validation error without allocating Result callbacks at every field;
        callers still receive the same bounded byte count or structured error. *)
@@ -187,7 +225,8 @@ module Json = struct
           if width > available - !encoded_bytes
           then exceeds_limit := true
           else encoded_bytes := !encoded_bytes + width;
-          incr index
+          incr index;
+          if !index land 0xffff = 0 then checkpoint ()
         done;
         if !exceeds_limit then fail (Error.Limit_exceeded "bytes");
         charge_bytes !encoded_bytes;
@@ -195,6 +234,7 @@ module Json = struct
       in
       let rec walk t depth rev_path =
         incr nodes_seen;
+        if !nodes_seen land 0xff = 0 then checkpoint ();
         if depth > limits.Limits.max_depth then fail (Error.Limit_exceeded "depth");
         if !nodes_seen > limits.max_nodes then fail (Error.Limit_exceeded "nodes");
         match t with
@@ -205,7 +245,7 @@ module Json = struct
             incr fields_seen;
             charge_bytes (if Set.is_empty !seen then 1 else 2);
             let is_ascii = charge_string key in
-            if not (is_ascii || String.Utf8.is_valid key)
+            if not (is_ascii || valid_utf8_with_checkpoint key ~checkpoint)
             then invalid (List.rev (key :: rev_path)) "invalid UTF-8 object key";
             if !fields_seen > limits.max_fields then fail (Error.Limit_exceeded "fields");
             if Set.mem !seen key
@@ -219,17 +259,21 @@ module Json = struct
             walk value (depth + 1) (Int.to_string index :: rev_path))
         | `Number number ->
           charge_bytes (String.length number);
-          if not (valid_number number)
+          if not (valid_number number ~checkpoint)
           then invalid (List.rev rev_path) "invalid JSON number"
         | `String text ->
           let is_ascii = charge_string text in
-          if not (is_ascii || String.Utf8.is_valid text)
+          if not (is_ascii || valid_utf8_with_checkpoint text ~checkpoint)
           then invalid (List.rev rev_path) "invalid UTF-8 string"
         | `True | `Null -> charge_bytes 4
         | `False -> charge_bytes 5
       in
       walk t 1 [];
       Ok !bytes_seen)
+  ;;
+
+  let validate_and_measure ~limits t =
+    validate_and_measure_with_checkpoint ~limits ~checkpoint:(fun () -> ()) t
   ;;
 
   let validate ~limits t = validate_and_measure ~limits t |> Result.map ~f:ignore
