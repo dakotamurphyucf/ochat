@@ -165,6 +165,18 @@ let find_job_exact observation id =
   Job_lookup.{ observation; id; value = find_job observation id }
 ;;
 
+module Scheduler_candidate = struct
+  type t =
+    { job : P.Developer_job.t
+    ; observation : Observation.t
+    ; lookup : Job_lookup.t
+    }
+
+  let job t = t.job
+  let observation t = t.observation
+  let lookup t = t.lookup
+end
+
 type entry_state =
   | Unentered
   | Entered
@@ -865,19 +877,57 @@ let observe handle =
     observe_with_poll t handle ~poll)
 ;;
 
+let observe_latest_active_with_poll t handle ~poll =
+  let* observed = observe_with_poll t handle ~poll in
+  match List.last (Doc.epochs observed.document) with
+  | Some epoch
+    when Int.equal (Doc.epoch_number epoch) handle.owner.epoch
+         &&
+         match Doc.epoch_phase epoch with
+         | `Active -> true
+         | `Interrupted | `Closed -> false -> Ok observed
+  | None | Some _ -> Error Error.Foreign_or_stale
+;;
+
 let observe_latest_active handle =
   let* t = valid_handle handle in
   with_lease t (fun ~env:_ ~root:_ ->
     let poll = work t t.checkpoint in
-    let* observed = observe_with_poll t handle ~poll in
-    match List.last (Doc.epochs observed.document) with
-    | Some epoch
-      when Int.equal (Doc.epoch_number epoch) handle.owner.epoch
-           &&
-           match Doc.epoch_phase epoch with
-           | `Active -> true
-           | `Interrupted | `Closed -> false -> Ok observed
-    | None | Some _ -> Error Error.Foreign_or_stale)
+    observe_latest_active_with_poll t handle ~poll)
+;;
+
+let scheduler_candidates handle ~checkpoint =
+  let* t = valid_handle handle in
+  with_lease t (fun ~env:_ ~root:_ ->
+    let poll =
+      work t (fun () ->
+        t.checkpoint ();
+        checkpoint ())
+    in
+    let* observation = observe_latest_active_with_poll t handle ~poll in
+    Doc.jobs observation.document
+    |> List.filter_map ~f:(fun job ->
+      poll ();
+      if
+        P.Execution_owner.equal_developer (P.Developer_job.owner job) handle.owner
+        &&
+        match (P.Developer_job.state job).status with
+        | P.Job.Queued -> true
+        | Running
+        | Waiting_permission _
+        | Waiting_completion _
+        | Succeeded
+        | Failed _
+        | Cancelled
+        | Interrupted _ -> false
+      then (
+        poll ();
+        let lookup =
+          Job_lookup.{ observation; id = P.Developer_job.id job; value = Some job }
+        in
+        Some { Scheduler_candidate.job; observation; lookup })
+      else None)
+    |> Result.return)
 ;;
 
 module Result_root = struct

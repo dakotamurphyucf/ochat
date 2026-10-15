@@ -37,7 +37,7 @@ type t =
   ; ping : Agent_protocol.Ping.Request.t -> Agent_protocol.Ping.Response.t
   ; server_info : unit -> Agent_protocol.Method_result.Server_info.t
   ; server_health : Agent_protocol.Health.Request.t -> Agent_protocol.Health.Response.t
-  ; cancel_job : Agent_protocol.Id.Job.t -> unit
+  ; cancel_job : actor:Agent_session.Session_actor.t -> job:Agent_protocol.Job.t -> unit
   ; create_session : create_session
   ; prepare_session_start :
       Session_registry.entry -> (unit, Agent_protocol.Error.t) result
@@ -2548,7 +2548,7 @@ let handle_job_cancel t ?prepared_writer context command_audit request =
                ~job_id:request.job_id
                ())
        in
-       t.cancel_job job.id;
+       t.cancel_job ~actor:entry.actor ~job;
        let%map state = Agent_session.Session_actor.state entry.actor in
        let session = Agent_session.Session_state.summary state in
        Agent_protocol.Method_result.Job_cancel { job; mutation = mutation session })

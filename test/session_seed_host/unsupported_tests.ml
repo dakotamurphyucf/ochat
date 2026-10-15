@@ -85,7 +85,7 @@ let%expect_test "custom host without seed Factory omits discovery and denies see
           ~ping:(fun _ -> failwith "unexpected ping")
           ~server_info:(fun () -> info)
           ~server_health:(fun _ -> failwith "unexpected health")
-          ~cancel_job:(fun _ -> failwith "unexpected cancellation")
+          ~cancel_job:(fun ~actor:_ ~job:_ -> failwith "unexpected cancellation")
           ~create_session:(S.Session_factory.create_session factory)
           ~seed_factory:None
           ~seed_recovery_limits:S.Session_factory.Seed_recovery_limits.default

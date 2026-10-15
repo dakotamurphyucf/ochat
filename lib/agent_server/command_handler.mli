@@ -29,7 +29,7 @@ val create
   -> ping:(Agent_protocol.Ping.Request.t -> Agent_protocol.Ping.Response.t)
   -> server_info:(unit -> Agent_protocol.Method_result.Server_info.t)
   -> server_health:(Agent_protocol.Health.Request.t -> Agent_protocol.Health.Response.t)
-  -> cancel_job:(Agent_protocol.Id.Job.t -> unit)
+  -> cancel_job:(actor:Agent_session.Session_actor.t -> job:Agent_protocol.Job.t -> unit)
   -> create_session:create_session
   -> seed_factory:Session_factory.t option
   -> seed_recovery_limits:Session_factory.Seed_recovery_limits.t

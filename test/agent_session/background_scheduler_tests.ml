@@ -123,6 +123,7 @@ let with_capacity_scheduler ?(retry_once = false) ~reject_save f =
         ~sw
         ~clock:(Eio.Stdenv.clock env)
         ~registry
+        ~developer_registry:None
         ~capacity
         ~model_job_inference:(fun _ _ -> failwith "unexpected model job inference")
     in
@@ -334,7 +335,18 @@ let%expect_test
     (fun env actor backend calls _registry scheduler _start request ->
        let first = submit ~target actor (B.to_json request) in
        until env (fun () -> !rejected >= 2);
-       A.cancel_job_internal actor ~job_id:first.id |> protocol_ok |> ignore;
+       let active = current backend first in
+       Scheduler.cancel_conversation
+         scheduler
+         ~actor
+         ~job:{ active with session_id = Agent_protocol.Id.Session.create () };
+       Scheduler.cancel_conversation
+         scheduler
+         ~actor
+         ~job:{ active with attempt = active.attempt + 1 };
+       [%test_eq: int] 1 (Scheduler.running_count scheduler);
+       let cancelled = A.cancel_job_internal actor ~job_id:first.id |> protocol_ok in
+       Scheduler.cancel_conversation scheduler ~actor ~job:cancelled;
        until env (fun () -> Scheduler.running_count scheduler = 0);
        let second = submit actor (B.to_json request) in
        until env (fun () -> terminal backend second);
