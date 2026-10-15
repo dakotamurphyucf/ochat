@@ -4,6 +4,51 @@ module S = T.Type_snapshot
 module N = S.Node
 module Equality = Chatml.Chatml_equality_requirement
 
+let%test_unit "all selected static host templates convert without mutable cells" =
+  let module Contract = Chatml.Chatml_compiler_contract in
+  let module Static = Chatml.Chatml_static_surface in
+  let check root =
+    let open T in
+    let pending = ref [ T.typ_of_builtin_ty root ] in
+    while not (List.is_empty !pending) do
+      match !pending with
+      | [] -> assert false
+      | node :: rest ->
+        pending := rest;
+        let visit nodes = pending := List.rev_append nodes !pending in
+        (match node with
+         | Var _ -> failwith "static host scheme contains a mutable cell"
+         | Fun (parameters, result) -> visit (result :: parameters)
+         | Con (_, arguments) | Tuple arguments | Variant_payload arguments ->
+           visit arguments
+         | Mu (_, body) | Ref body | Record body | Module body | Variant body | Array body
+           -> visit [ body ]
+         | Field_receiver (kind, row) -> visit [ kind; row ]
+         | Row (fields, tail) -> visit (tail :: List.map (Env.bindings fields) ~f:snd)
+         | Generic _
+         | Rec_var _
+         | Shape_kind _
+         | TInt
+         | TFloat
+         | Boolean
+         | String
+         | Empty_row
+         | Unit -> ())
+    done
+  in
+  List.iter
+    Contract.Target.
+      [ One_off_v1; Tool_v1; Developer_tool_v1; Moderator_v1; Delegated_moderator_v1 ]
+    ~f:(fun target ->
+      let surface =
+        Contract.for_target target ~checkpoint:(fun () -> ()) |> Contract.static_surface
+      in
+      List.iter (Static.globals surface) ~f:(fun binding -> check binding.scheme);
+      List.iter (Static.modules surface) ~f:(fun module_ ->
+        check (Static.Module.scheme module_));
+      List.iter (Static.type_aliases surface) ~f:(fun alias -> check alias.body))
+;;
+
 let limits ?(nodes = 100_000) ?(edges = 100_000) ?(labels = 100_000) () =
   S.Limits.create ~max_nodes:nodes ~max_edges:edges ~max_label_bytes:labels
   |> Or_error.ok_exn

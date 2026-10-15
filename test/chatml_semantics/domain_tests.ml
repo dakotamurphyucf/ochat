@@ -9,6 +9,39 @@ let standard target body =
   contract, H.input contract [ "entry.chatml", body, [] ]
 ;;
 
+let%test_unit "static host schemes remain bounded across referenced modules" =
+  let contract = Contract.for_target Moderator_v1 ~checkpoint:H.checkpoint in
+  List.iter [ 0; 1; 2 ] ~f:(fun count ->
+    let modules =
+      List.init count ~f:(fun index ->
+        let name = if Int.equal index 0 then "Counter" else "Counter2" in
+        let path = if Int.equal index 0 then "counter.chatml" else "counter2.chatml" in
+        name, path)
+    in
+    let entry_body =
+      "let initial_state = 0;; let on_event ctx state event = Task.pure(state)"
+      ^ (List.map modules ~f:(fun (name, _) ->
+           ";; let " ^ String.lowercase name ^ " = " ^ name ^ ".initial")
+         |> String.concat ~sep:"")
+    in
+    let input =
+      H.input
+        contract
+        ~interfaces:(List.map modules ~f:(fun (_, path) -> path, "val initial : int", []))
+        (("entry.chatml", entry_body, modules)
+         :: List.map modules ~f:(fun (_, path) -> path, "let initial = 0", []))
+    in
+    let work = ref 0 in
+    let checkpoint () = incr work in
+    let snapshot =
+      match H.analyze contract input ~checkpoint with
+      | Ok (Complete snapshot) -> snapshot
+      | Ok (Failed _) | Error _ -> failwith "ordinary checked module unavailable"
+    in
+    assert (A.Frozen.node_count (A.Snapshot.types snapshot) <= 20_000);
+    assert (!work <= 400_000))
+;;
+
 let%test_unit
     "joined analysis uses the exact selected custom contract for full and prefix"
   =
