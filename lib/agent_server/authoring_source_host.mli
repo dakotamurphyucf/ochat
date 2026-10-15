@@ -96,6 +96,7 @@ module Error : sig
     | Document_bundle_limit
     | Project_declaration_unavailable
     | Invalid_project_declaration
+    | Selected_script_unavailable
 
   (** Finite safe projection. Root errors expose only their finite code;
       project errors use a coarse tag. Neither exposes native paths, exception
@@ -389,9 +390,84 @@ module Document_context : sig
       -> (bool, Error.t) result
   end
 
+  module Script_capture : sig
+    (** Immutable locally prepared selected script. The declaration, parsed
+        closure and independently captured project are the exact objects used
+        during this one joined source-owner attempt. It may retain the opaque
+        project comparison receipt but exposes no Root getter, native directory,
+        reader, callback, Eio owner or execution grant. Current actors and
+        root policy must be rechecked by the enclosing service. This is an
+        authentic prepared Build and contract, not a checked script or an
+        executable target: the upper Selected admission and semantic checker
+        still prove actual surface/kind compatibility before serving facts. *)
+    type t
+
+    val build : t -> Chatml_project_build.t
+    val contract : t -> Chatml.Chatml_compiler_contract.t
+    val entry_source : t -> Chatml_source.t
+
+    (** Physical same-run association for Core's later bounded immutable
+        selection admission. Equal script IDs or paths are insufficient. *)
+    val matches
+      :  t
+      -> parsed:Parsed_capture.t
+      -> declaration:Prompt.Chat_markdown.Declaration.t
+      -> project:Project_capture.t
+      -> bool
+  end
+
+  (** Prepare one actual parsed script through the SAME joined local source
+      owner and project preparation pipeline used by [Context.capture]. The
+      [project_capture] must physically match [parsed] and [declaration] and
+      belong to this document's private selected root; its project member and
+      declaration-relative route are revalidated. The selected script body
+      comes only from the exact captured parser bundle. Inline bodies use a
+      captured fragment; an external source may use a project-relative
+      captured file only after exact bundle-byte and same-root affinity proof.
+      A missing or ambiguous route fails closed. No Root getter or Prompt owner
+      receipt is exposed.
+
+      [select_contract] is the installer's trusted, pure, nonyielding lookup
+      for the actual root, project member and Library environment selected by
+      this declaration. It must use current authenticated operator policy;
+      this method calls it for both original and request actors before work
+      and rechecks after yielding work. Only the same genuine Standard target
+      can be retained. The lower Project policy reserves finite graph, file,
+      source-byte and work allowances before native acquisition, including on
+      failed attempts; [max_work_steps] bounds this source-host attempt's
+      additional route, source and callback work. The document context's
+      request allowance and actor/root checks remain active. Its separate
+      aggregate-read ledger applies to explicit member/import reads, not to
+      Project preparation, whose per-attempt limits and context request count
+      bound lifetime preparation work.
+      [max_script_bytes] bounds body admission before copy/hash. All supplied
+      limits are positive and bounded by the existing parser/source ceilings.
+      Cancellation and unexpected callback exceptions preserve their original
+      identity/backtrace. A failure publishes no partial Build. *)
+  val prepare_selected_script
+    :  t
+    -> actor:Operator_authorization.t
+    -> parsed:Parsed_capture.t
+    -> declaration:Prompt.Chat_markdown.Declaration.t
+    -> project_capture:Project_capture.t
+    -> select_contract:
+         (Operator_authorization.t
+          -> root:Root.t
+          -> project:Source.Portable_path.t
+          -> selection:Agent_protocol.Authoring.Context.Selection.t
+          -> Chatml.Chatml_compiler_contract.t option)
+    -> clock:_ Eio.Time.Mono.t
+    -> max_script_bytes:int
+    -> max_locator_bytes:int
+    -> max_path_components:int
+    -> max_work_steps:int
+    -> checkpoint:(unit -> unit)
+    -> (Script_capture.t, Error.t) Result.t
+
   (** Uses the same host-owned context activity gate, actor/root rechecks,
-      attempt/read quotas, cancellation stack and joined switch lifetime as
-      project source contexts. Nested A -> B -> A work must still see A as
+      request allowance, explicit-read quotas where applicable, cancellation
+      stack and joined switch lifetime as project source contexts. Nested
+      A -> B -> A work must still see A as
       active: closing A or the host from that stack rejects self-join. There
       is no parallel document-specific authority or resolver. *)
 
