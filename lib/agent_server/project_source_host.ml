@@ -5,6 +5,12 @@ module Configuration = Project_source_configuration
 module Policy = Project_source_policy
 module Activity = Agent_session.Runtime_activity
 
+module Identity = struct
+  type t = unit ref
+
+  let equal = phys_equal
+end
+
 module Error = struct
   type t =
     | Invalid_configuration of Core.Error.t
@@ -31,7 +37,8 @@ module Error = struct
 end
 
 type t =
-  { domain : int
+  { identity : Identity.t
+  ; domain : int
   ; policy : Policy.t
   ; source_preparation : Sources.Policy.t
   ; authoring_roots : (string * Chatml_local_roots.Anchor.t) list
@@ -51,6 +58,11 @@ let domain () = (Stdlib.Domain.self () :> int)
 let check_domain t =
   if not (Int.equal t.domain (domain ()))
   then invalid_arg "Project_source_host: foreign domain"
+;;
+
+let identity t =
+  check_domain t;
+  t.identity
 ;;
 
 let policy t =
@@ -281,7 +293,8 @@ let open_owned
                      let activity = Activity.create ~sw:owned in
                      poll ();
                      Ok
-                       { domain = domain ()
+                       { identity = ref ()
+                       ; domain = domain ()
                        ; policy
                        ; source_preparation =
                            Policy.Configured.source_preparation configured

@@ -110,6 +110,34 @@ metadata. Explicit reload of changed package contents requires a restart, even
 when filenames remain the same. The active snapshot stays unchanged on failure.
 Daemon and embedded hosts provide authoring services by default for selected tools.
 
+`authoring_project_access` declares explicit read grants for configured
+`project_sources.external_roots` and selected Standard Project contracts. Each
+`read_grants` row pairs one root with an authenticated `principal_id` and its
+`authentication_kind`; each `selections` row maps an exact portable project
+member and Entry or Library environment request under that root to one of
+`one_off_v1`, `tool_v1`, `developer_tool_v1`, `moderator_v1` or
+`delegated_moderator_v1`. Root paths resolve relative to this configuration.
+The field is bounded, rejects duplicate or unknown roots/requests, and requires
+a restart when changed. A configured root or this declaration alone grants no
+authoring source read: the active host policy must install the binding to the
+same opened source host, and each request rechecks the authenticated actor.
+For example, these fields can appear together in `server` after replacing the
+root and principal with the deployment's actual values:
+
+```lisp
+(project_sources ((external_roots (./projects))))
+(authoring_project_access
+  ((read_grants
+     (((root ./projects)
+       (principal_id pri_example_operator)
+       (authentication_kind unix.peer))))
+   (selections
+     (((root ./projects)
+       (project chatml.project.json)
+       (request (entry ((name main) (environment prod))))
+       (target one_off_v1))))))
+```
+
 ### Scoped external session helpers
 
 `server.session_helpers` optionally grants a named shell tool access to the same

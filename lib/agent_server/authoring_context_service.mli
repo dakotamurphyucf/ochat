@@ -56,6 +56,20 @@ module Selection_policy : sig
           -> requested_environment:string option
           -> Chatml_project_build.t option)
     -> t
+
+  (** Reuse an existing policy's document-static callback while replacing only
+      its Project contract lookup with the immutable configured host binding.
+      The returned callback remains bounded/nonyielding; neither this method
+      nor a returned contract supplies source authority. *)
+  val with_project_contract
+    :  t
+    -> project_contract:
+         (Operator_authorization.t
+          -> root:Sources.Root.t
+          -> project:Source.Portable_path.t
+          -> selection:P.Authoring.Context.Selection.t
+          -> Chatml.Chatml_compiler_contract.t option)
+    -> t
 end
 
 module Supplied_document_policy : sig

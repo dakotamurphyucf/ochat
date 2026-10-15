@@ -21,6 +21,20 @@ for that actor are listed. A selected root is host-incarnation-local and retains
 the original actor lifetime. Opening a context, reading, browsing and capturing
 recheck the original proof, the current request actor and the operator policy
 for both actors.
+An explicit `server.authoring_project_access` declaration can provide this policy
+for selected Project contexts. It names an admitted administrative root, an exact
+principal ID and authentication kind, and an exact portable project member plus
+Entry/Library environment request mapped to a Standard compiler target. The
+configuration is validated without opening another root. Startup then binds the
+root names to the ordered anchors of one physical `Project_source_host`; the
+bound policy retains only that host's comparison identity and immutable target
+contracts. Installation rejects another host incarnation before opening source
+or upload children, even when its path list and indices are identical. Every
+later selection checks the current actor, while the source owner still checks
+the original and current actors and physical root issuer. No configured root,
+target name, protocol feature or equal path alone authorizes a read. Changing
+these startup grants or target mappings requires restart; the config watcher
+rejects a changed Server record before publication.
 The context explicitly selects any additional permitted dependency roots;
 unselected configured roots never enter its resolver attempt. Connection cleanup
 calls `Context.close_and_wait` before the source host is closed.

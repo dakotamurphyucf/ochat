@@ -84,6 +84,7 @@ type t =
   ; service_limits : Service.Limits.t
   ; semantic : Semantic.t option
   ; assistance : Assistance.t option
+  ; configured_projects : Authoring_configured_project_policy.t option
   }
 
 val validate_initialize : t -> P.Initialize.Limits.t -> (unit, P.Error.t) result
@@ -108,4 +109,11 @@ val basic_supplied : initialize_limits:P.Initialize.Limits.t -> (t, P.Error.t) r
 val upload_only
   :  initialize_limits:P.Initialize.Limits.t
   -> upload:Upload.t
+  -> (t, P.Error.t) result
+
+val with_configured_projects
+  :  t
+  -> bound:Authoring_configured_project_policy.t
+  -> source_limits:Authoring_source_host.Limits.t
+  -> analysis_policy:Chatml_authoring_analysis.Policy.t
   -> (t, P.Error.t) result

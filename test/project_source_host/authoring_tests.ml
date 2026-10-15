@@ -149,29 +149,30 @@ let%test_unit "authoring context captures a local project and reads only its gra
     | Ok () -> failwith "closed project context reused cached analysis")
 ;;
 
-let analysis_policy () =
+let analysis_policy ?(full = false) () =
+  let choose ~ordinary ~full_limit = if full then full_limit else ordinary in
   Chatml_authoring_analysis.Policy.create
     ~compilation:Chatml_compilation.default_limits
     ~semantic:
       (Chatml_semantics.Limits.create
-         ~max_input_bytes:2048
+         ~max_input_bytes:(choose ~ordinary:2048 ~full_limit:1_000_000)
          ~recording:
            (Chatml_typechecker.Semantic.Limits.create
-              ~max_facts:100
-              ~max_edges:100
-              ~max_label_bytes:2048
-              ~max_work_steps:1000
+              ~max_facts:(choose ~ordinary:100 ~full_limit:20_000)
+              ~max_edges:(choose ~ordinary:100 ~full_limit:40_000)
+              ~max_label_bytes:(choose ~ordinary:2048 ~full_limit:400_000)
+              ~max_work_steps:(choose ~ordinary:1000 ~full_limit:400_000)
             |> Or_error.ok_exn)
          ~type_graph:
            (Chatml_semantics.Frozen.Limits.create
-              ~max_nodes:100
-              ~max_edges:100
-              ~max_label_bytes:2048
+              ~max_nodes:(choose ~ordinary:100 ~full_limit:20_000)
+              ~max_edges:(choose ~ordinary:100 ~full_limit:40_000)
+              ~max_label_bytes:(choose ~ordinary:2048 ~full_limit:400_000)
             |> Or_error.ok_exn)
-         ~max_published_facts:100
-         ~max_published_edges:100
-         ~max_published_label_bytes:2048
-         ~max_work_steps:1000
+         ~max_published_facts:(choose ~ordinary:100 ~full_limit:20_000)
+         ~max_published_edges:(choose ~ordinary:100 ~full_limit:40_000)
+         ~max_published_label_bytes:(choose ~ordinary:2048 ~full_limit:400_000)
+         ~max_work_steps:(choose ~ordinary:1000 ~full_limit:400_000)
        |> Or_error.ok_exn)
     ~max_dependency_depth:2
     ~max_results:1
@@ -179,8 +180,380 @@ let analysis_policy () =
     ~max_projected_sites:2
     ~max_projection_sources:2
     ~max_position_index_entries:16
-    ~max_projection_source_bytes:2048
+    ~max_projection_source_bytes:(choose ~ordinary:2048 ~full_limit:1_000_000)
   |> Or_error.ok_exn
+;;
+
+let%test_unit "configured grants retain physical source-host affinity" =
+  with_source_context (fun env _ _ allowed denied source_a _ data root_path ->
+    Eio.Switch.run (fun sw ->
+      let module Access = Agent_server.Authoring_project_access_configuration in
+      let module Bound = Agent_server.Authoring_configured_project_policy in
+      let root_name = Eio.Path.native_exn root_path in
+      let configuration = Configuration.{ external_roots = [ root_name ]; git = None } in
+      let selected =
+        Access.Selection.
+          { root = root_name
+          ; project = "chatml.project.json"
+          ; request = Entry { name = "main"; environment = None }
+          ; target = One_off_v1
+          }
+      in
+      let access =
+        Access.
+          { read_grants =
+              [ { root = root_name
+                ; principal_id = (Operator_authorization.principal allowed).id
+                ; authentication_kind = "local.authoring_test"
+                }
+              ]
+          ; selections = [ selected ]
+          }
+      in
+      let bound =
+        Bound.bind
+          source_a
+          ~configuration:access
+          ~project_sources:configuration
+          ~max_contract_identity_bytes:(16 * 1024 * 1024)
+          ~max_work_steps:1_000_000
+          ~checkpoint:ignore
+        |> function
+        | Ok bound -> bound
+        | Error failure -> Error.raise_s (Bound.Error.sexp_of_t failure)
+      in
+      assert (Bound.issued_by bound source_a);
+      (match
+         Bound.bind
+           source_a
+           ~configuration:access
+           ~project_sources:configuration
+           ~max_contract_identity_bytes:1
+           ~max_work_steps:1_000_000
+           ~checkpoint:ignore
+       with
+       | Error Bound.Error.Contract_limit -> ()
+       | Ok _ | Error _ -> failwith "configured contract escaped aggregate admission");
+      let limits =
+        Authoring.Limits.create
+          ~max_contexts:2
+          ~max_context_requests:8
+          ~max_manifest_entries:8
+          ~max_browse_entries:32
+          ~max_read_bytes:1024
+          ~max_context_read_bytes:2048
+        |> Or_error.ok_exn
+      in
+      let grant_host =
+        Authoring.create
+          source_a
+          ~sw
+          ~read_policy:(Bound.read_policy bound)
+          ~document_policy:Authoring.Document_policy.deny_all
+          ~limits
+      in
+      let roots =
+        Authoring.roots grant_host ~actor:allowed ~checkpoint:ignore |> authoring_ok
+      in
+      [%test_eq: int] (List.length roots) 1;
+      [%test_eq: int]
+        (List.length
+           (Authoring.roots grant_host ~actor:denied ~checkpoint:ignore |> authoring_ok))
+        0;
+      let other_kind =
+        P.Principal.create
+          ~id:(Operator_authorization.principal allowed).id
+          ~authentication_kind:"http.static_bearer"
+          ~scopes:P.Scope.Set.empty
+          ~attributes:[]
+        |> ok
+        |> Operator_authorization.trusted_local
+      in
+      [%test_eq: int]
+        (List.length
+           (Authoring.roots grant_host ~actor:other_kind ~checkpoint:ignore
+            |> authoring_ok))
+        0;
+      let root = List.hd_exn roots in
+      let project = Path.create selected.project |> Or_error.ok_exn in
+      let request =
+        P.Authoring.Context.Selection.create ~target:(Entry "main") ~environment:None
+        |> ok
+      in
+      assert (
+        Option.is_some
+          (Bound.project_contract bound allowed ~root ~project ~selection:request));
+      assert (
+        Option.is_none
+          (Bound.project_contract bound denied ~root ~project ~selection:request));
+      let session =
+        Agent_store.Session_store.create
+          ~env
+          ~sw
+          ~root:(Eio.Path.native_exn Eio.Path.(root_path / "authoring-session"))
+          ~server_id:P.Id.Server.(create ())
+          ~process_start_identity:None
+          ~lock_nonce:"configured-authoring"
+        |> function
+        | Ok session -> session
+        | Error failure -> Error.raise_s (Agent_store.Store_error.sexp_of_t failure)
+      in
+      let initialize_limits = Agent_server.Daemon.default_options.protocol_limits in
+      Eio.Path.save
+        ~create:(`Or_truncate 0o600)
+        Eio.Path.(root_path / "main.chatml")
+        "let main input = Task.pure(input)\n";
+      let module Installation = Agent_server.Authoring_installation in
+      let module Service = Agent_server.Authoring_context_service in
+      let semantic =
+        Installation.Host_policy.Semantic.create
+          ~script_selection:None
+          ~project_metadata:None
+          ~project_build_limits:
+            (Chatml_project_build.Limits.create
+               ~max_work_steps:1_000_000
+               ~max_input_bytes:(Some 64_000)
+               ~document:Document_schema.Limits.default
+             |> Or_error.ok_exn)
+          ~limits:
+            (Service.Semantic.Limits.create
+               ~max_document_bundle_files:4
+               ~max_document_bundle_bytes:2048
+               ~max_parser_work_steps:100_000
+               ~max_diagnostic_work_steps:100_000
+             |> Or_error.ok_exn)
+          ~prefix_limits:
+            (Service.Semantic.Prefix_limits.create
+               ~max_document_bundle_files:4
+               ~max_document_bundle_bytes:2048
+               ~max_parser_work_steps:100_000
+               ~max_host_work_steps:100_000
+             |> Or_error.ok_exn)
+          ~query_limits:
+            (Service.Semantic.Query_limits.create
+               ~max_host_work_steps:100_000
+               ~projection:
+                 (Chatml_authoring_query.Limits.create
+                    ~max_items:8
+                    ~max_member_depth:4
+                    ~max_member_edges:128
+                    ~max_label_bytes:4096
+                    ~max_work_steps:100_000
+                    ~type_display:
+                      (Chatml_type_display.Limits.create
+                         ~max_nodes:512
+                         ~max_edges:1024
+                         ~max_depth:16
+                         ~max_work_steps:100_000
+                         ~max_text_bytes:1024
+                         ~max_output_bytes:4096
+                       |> Or_error.ok_exn)
+                  |> Or_error.ok_exn)
+             |> Or_error.ok_exn)
+          ~document_dir:(Eio.Stdenv.cwd env)
+      in
+      let base_policy =
+        Installation.Host_policy.create
+          ~core:true
+          ~source:None
+          ~upload:None
+          ~supplied_document:
+            (Some (Service.Supplied_document_policy.create ~authorize:(fun _ -> true)))
+          ~selection:
+            (Service.Selection_policy.create
+               ~project_contract:(fun _ ~root:_ ~project:_ ~selection:_ -> None)
+               ~document_static:(fun _ ~requested_environment:_ -> None))
+          ~context_limits:
+            (Chatml_authoring_context.Limits.create
+               ~max_contexts:2
+               ~max_sources:16
+               ~max_open_documents:1
+               ~max_document_bytes:1024
+               ~max_effective_input_bytes:64_000
+               ~max_context_source_bytes:64_000
+               ~max_total_source_bytes:128_000
+             |> Or_error.ok_exn)
+          ~analysis_policy:(analysis_policy ~full:true ())
+          ~protocol_limits:
+            (P.Authoring.Limits.create
+               ~max_sources:4
+               ~max_source_bytes:2048
+               ~max_context_source_bytes:4096
+               ~max_request_bytes:2048
+               ~max_result_bytes:64_000
+               ~max_path_candidates:16
+             |> ok)
+          ~service_limits:
+            (Service.Limits.create
+               ~max_connections:2
+               ~max_active_requests_per_connection:2
+               ~max_roots_per_connection:2
+               ~max_response_bytes:64_000
+               ~max_provisional_results:8
+             |> Or_error.ok_exn)
+          ~semantic:(Some semantic)
+          ~assistance:None
+          ~initialize_limits
+        |> ok
+      in
+      let policy =
+        Agent_server.Authoring_installation.Host_policy.with_configured_projects
+          base_policy
+          ~bound
+          ~source_limits:limits
+          ~analysis_policy:(analysis_policy ~full:true ())
+        |> ok
+      in
+      let installed =
+        Installation.create
+          ~env
+          ~sw
+          ~clock:env#mono_clock
+          ~project_sources:source_a
+          ~store:session
+          ~policy
+          ~initialize_limits
+          ~checkpoint:ignore
+        |> ok
+      in
+      let live = ref true in
+      let principal = Operator_authorization.principal allowed in
+      let service_actor =
+        Operator_authorization.guarded ~principal ~is_current:(fun () -> !live)
+      in
+      let connection =
+        Agent_server.Connection_context.create_authenticated
+          ~actor:service_actor
+          ~connection_id:"configured project authoring"
+          ~transport:In_memory
+          ~publish_notification:(fun _ -> ())
+          ~max_attachments:1
+      in
+      let server_id = Agent_store.Session_store.server_id session in
+      let response =
+        P.Initialize.Response.create
+          ~protocol_name:"ochat.agent"
+          ~selected_version:(P.Version.create ~major:1 ~minor:0 |> ok)
+          ~implementation:
+            (P.Initialize.Implementation.create ~name:"authoring test" ~version:"1" |> ok)
+          ~server_id
+          ~enabled_features:[ P.Authoring.Features.core; P.Authoring.Features.semantic ]
+          ~extensions:None
+          ~principal
+          ~limits:initialize_limits
+          ~event_retention:
+            { minimum_age_ms = 0; maximum_events = 1; oldest_replayable_sequence = None }
+          ~timing:
+            { heartbeat_interval_ms = 1000
+            ; owner_lease_duration_ms = 10000
+            ; owner_renew_after_ms = 5000
+            ; disconnect_grace_default_ms = 0
+            }
+          ~server_time:(P.Timestamp.of_string "2026-10-15T00:00:00Z" |> ok)
+        |> ok
+      in
+      Installation.publish_initialize_and_wait installed ~connection ~response |> ok;
+      let call request =
+        Installation.handle installed ~actor:service_actor ~connection request
+      in
+      let root =
+        match call P.Authoring.Wire.Request.Roots with
+        | Ok (Roots roots) -> (List.hd_exn roots.roots).id
+        | Ok _ | Error _ -> failwith "configured root was not installed"
+      in
+      let opened =
+        match
+          call
+            (Context_open
+               (P.Authoring.Context.Open_request.create_host_project
+                  ~root
+                  ~dependency_roots:[]
+                  ~project_member:selected.project
+                  ~selection:request
+                |> ok))
+        with
+        | Ok (Context_open view) -> view
+        | Ok _ -> failwith "configured project context did not open"
+        | Error failure ->
+          failwith ("configured project context did not open: " ^ failure.message)
+      in
+      let expected = P.Authoring.Context.Expected.of_view opened in
+      let analyze expected =
+        call
+          (Analyze
+             (P.Authoring.Analysis.Analyze.Request.create
+                ~context:expected
+                ~target:P.Authoring.Analysis.Target.project
+              |> ok))
+      in
+      let first =
+        match analyze expected with
+        | Ok (Analyze (Complete complete)) -> complete.capture
+        | Ok (Analyze result) ->
+          failwith
+            ("configured project was not checked: "
+             ^ Sexp.to_string_hum (P.Authoring.Analysis.Analyze.sexp_of_t result))
+        | Ok _ -> failwith "configured project response changed"
+        | Error failure -> failwith ("configured project check failed: " ^ failure.message)
+      in
+      Eio.Path.save
+        ~create:(`Or_truncate 0o600)
+        Eio.Path.(root_path / "main.chatml")
+        "let main value = Task.pure(value)\n";
+      let refreshed =
+        match
+          call
+            (Context_refresh
+               (P.Authoring.Context.Refresh_request.create
+                  ~expected
+                  ~policy:Reject_open_documents))
+        with
+        | Ok (Context_refresh view) -> view
+        | Ok _ | Error _ ->
+          failwith "configured project refresh did not capture disk edit"
+      in
+      let refreshed_expected = P.Authoring.Context.Expected.of_view refreshed in
+      (match analyze expected with
+       | Error failure when P.Error.equal_code failure.code P.Error.Conflict -> ()
+       | Ok _ | Error _ -> failwith "previous configured context survived refresh");
+      let second =
+        match analyze refreshed_expected with
+        | Ok (Analyze (Complete complete)) -> complete.capture
+        | Ok _ | Error _ -> failwith "refreshed configured project was not checked"
+      in
+      assert (
+        not
+          (Captured.Digest.equal
+             (P.Authoring.Analysis.Capture.input_fingerprint first)
+             (P.Authoring.Analysis.Capture.input_fingerprint second)));
+      live := false;
+      (match analyze refreshed_expected with
+       | Error failure when P.Error.equal_code failure.code P.Error.Permission_denied ->
+         ()
+       | Ok _ | Error _ -> failwith "revoked configured actor retained semantic authority");
+      Installation.close_connection_and_wait installed connection |> ok;
+      Installation.close_and_wait installed |> ok;
+      let source_b = open_host ~configuration env data sw in
+      assert (not (Bound.issued_by bound source_b));
+      (match
+         Agent_server.Authoring_installation.create
+           ~env
+           ~sw
+           ~clock:env#mono_clock
+           ~project_sources:source_b
+           ~store:session
+           ~policy
+           ~initialize_limits
+           ~checkpoint:ignore
+       with
+       | Error failure -> assert (P.Error.equal_code failure.code P.Error.Invalid_request)
+       | Ok _ -> failwith "configured grants crossed physical host owners");
+      Authoring.close_and_wait grant_host;
+      Host.close_and_wait source_b;
+      Agent_store.Session_store.close session
+      |> function
+      | Ok () -> ()
+      | Error failure -> Error.raise_s (Agent_store.Store_error.sexp_of_t failure)))
 ;;
 
 let%test_unit "shared overlay preparation uses actual host contract and a new lock" =

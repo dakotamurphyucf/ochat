@@ -75,6 +75,23 @@ module Host_policy : sig
     -> upload:Upload.t
     -> (t, P.Error.t) result
 
+  (** Install the explicit configured read/Project contract binding into an
+      existing core policy, preserving its independent supplied-document,
+      document-static, assistance and protocol settings. Reject a policy that
+      already has a Source origin rather than silently replacing its grant.
+      [analysis_policy] is the actual finite checked policy for these Projects;
+      its compilation ceiling must be admitted for the selected Standard
+      contracts, including Moderator when configured. The existing
+      Authoring_source_host.Context.open_root/capture and owner final checks
+      remain the sole Project acquisition/currentness path. The daemon/CLI
+      composition can add upload deployment policies separately. *)
+  val with_configured_projects
+    :  t
+    -> bound:Authoring_configured_project_policy.t
+    -> source_limits:Authoring_source_host.Limits.t
+    -> analysis_policy:Chatml_authoring_analysis.Policy.t
+    -> (t, P.Error.t) result
+
   (** [core=false] permits a genuine upload-only owner. Semantic, lexical and
       assistance need core to create/edit contexts, while bundle needs its own
       upload owner and feature. [core=true] needs at least one actual source,
@@ -106,7 +123,10 @@ type t
 (** Revalidate [policy]'s advertised request ceiling against the CURRENT
     daemon [initialize_limits] at every installation. A policy made using
     default limits cannot silently widen a later options override. This
-    check precedes opening any optional source/upload owner.
+    check and exact physical [Project_source_host] identity check for a
+    configured-project binding precede opening any optional source/upload
+    owner. Equal root names, paths or list positions cannot substitute for
+    the bound host.
     Open only the opted-in owners. The durable upload store comes from the
     SAME live Session_store daemon lock/root through its narrow opener, then
     transfers exclusive lifetime to Upload_host. Source_host borrows the
