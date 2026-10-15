@@ -114,6 +114,37 @@ val bind_installed
 module Claimed_developer : sig
   module Selected : sig
     type t
+    type selected = t
+
+    module Target : sig
+      type t
+
+      (** The exact selected/restored child revision from this saved Agent.run
+          callback. This is the TARGET artifact, not its defining parent.
+          Captured_agent_runner alone issues it after genuine source selection;
+          callers cannot pair a copied artifact or another source result with
+          a saved selected callback. *)
+      val revision : t -> Prompt_revision.t
+
+      val saved : t -> selected
+
+      (** Full source, Worker and original/current actor check before and after
+          yielding target preparation. No file read or new source selection. *)
+      val check : t -> (unit, Agent_protocol.Error.t) result
+
+      (** Direct nonyielding callback check before a nested selected borrow
+          shadows this target's original native fiber binding. *)
+      val check_now : t -> (unit, Agent_protocol.Error.t) result
+
+      (** Nonyielding same-source ancestor check during a physically entered
+          child. The lower selected-borrow chain must contain the exact saved
+          parent, whose Worker/source scope and implementation remain live.
+          Root/terminal/current child selection checks are separately required. *)
+      val check_descendant_now
+        :  t
+        -> child:Native_tool_invocation.selected_borrowed
+        -> (unit, Agent_protocol.Error.t) result
+    end
 
     (** Physically borrowed saved Agent.run v2 source inside its exact selected
         native callback. The entered Worker Claim, registered runtime source,
@@ -136,6 +167,15 @@ module Claimed_developer : sig
         can outlive the enclosing callbacks. Root separately checks its
         physical Native_terminal, current actor, provider and epoch. *)
     val check_now : t -> (unit, Agent_protocol.Error.t) result
+
+    (** The saved selected callback remains the exact ancestor of a current
+        nested native borrow. This does not bypass the direct [check_now] at
+        saved-source entry; it is only for the physically descended child
+        after that entry's fiber binding has been shadowed. *)
+    val check_descendant_now
+      :  t
+      -> child:Native_tool_invocation.selected_borrowed
+      -> (unit, Agent_protocol.Error.t) result
   end
 
   (** One saved ordinary Agent.run reference from the exact entered Worker Claim.
@@ -248,15 +288,16 @@ module Deferred_developer : sig
       Agent declaration. Duplicate names, foreign declarations and missing
       source preparers reject before any function is exposed. For this developer
       binding only, each selected child (restored, Captured or newly acquired
-      File) receives a bounded preflight before Driver: only literal authored
-      message/config/reasoning content is admitted. Callable Tool declarations,
-      executable Script/Shell/Moderator/extension declarations, authored tool
-      call/response entries, nested Agent content and document/image fetch
-      content reject. Driver otherwise constructs direct child functions and
-      Converter otherwise performs Fetch/recursive Agent effects outside the
-      Root's selected child capability owner. The selected Tool_contract is
-      the explicit value
-      already retained by [source]; a stored digest cannot choose another ABI.
+      File) receives a bounded preflight before Driver. Without
+      [run_selected_target], only literal authored message/config/reasoning
+      content is admitted: callable Tool declarations, executable scripts,
+      authored tool calls/responses, nested Agent content and document/image
+      fetch content reject. With the trusted callback, only an exact saved Tool
+      target in the current selected native scope is lent to that callback;
+      the callback must separately admit every child effect before execution.
+      A callback error never falls back to Driver or the literal path. The
+      selected Tool_contract is the explicit value already retained by
+      [source]; a stored digest cannot choose another ABI.
 
       [with_context] is trusted host code which must reject until the exact
       physical Root is bound, after revocation, or outside a saved selected
@@ -266,7 +307,17 @@ module Deferred_developer : sig
       positive count and shared checkpoint bound declaration/reference scans
       before retaining functions. [sw] joins all port borrowers. *)
   val prepare
-    :  Source_binding.t
+    :  ?run_selected_target:
+         (target:Claimed_developer.Selected.Target.t
+          -> startup:Chat_response.Startup_compilation.t
+          -> compilation_limits:Chatml_compilation.limits
+          -> programs:Chatml_prompt_programs.Restored.t option
+          -> ctx:Eio_unix.Stdenv.base Chat_response.Ctx.t
+          -> input:Prompt.Chat_markdown.content_item list
+          -> observer:Chat_response.Driver.agent_observer option
+          -> source:string
+          -> (string, Agent_protocol.Error.t) result)
+    -> Source_binding.t
     -> script_preparation:Runtime_script_preparation.t
     -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
     -> approval_provider:Shell_runtime.Approval_broker.provider

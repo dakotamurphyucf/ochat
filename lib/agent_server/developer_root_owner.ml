@@ -2079,7 +2079,7 @@ module Native_terminal = struct
   let callback_complete (t : t) = t.callback_complete
   let effect_parent_live_now = native_effect_parent_live_now
 
-  let check_completion_now (scope : t) =
+  let check_completion_state_now (scope : t) ~require_action_fiber =
     let issuer = scope.issuer in
     let context = H.context scope.registration.invocation in
     let dispatched =
@@ -2103,7 +2103,7 @@ module Native_terminal = struct
       || Option.is_some scope.sealed
       || (not dispatched)
       || (not (native_effect_parent_live_now scope))
-      || (not (same_action_fiber scope.action))
+      || (require_action_fiber && not (same_action_fiber scope.action))
       || (not (phys_equal scope.action.snapshot.issuer issuer))
       || (not (phys_equal scope.action.snapshot.selected issuer.selected))
       || (not
@@ -2121,6 +2121,21 @@ module Native_terminal = struct
               ~f:(phys_equal scope))
     then invalid "native callback completion is no longer current"
     else Ok ()
+  ;;
+
+  let check_completion_now scope =
+    check_completion_state_now scope ~require_action_fiber:true
+  ;;
+
+  (* Only a physically entered descendant native callback can use the saved
+     parent's terminal state while its own action shadows the parent's key. *)
+  let check_descendant_parent_now ~(parent : t) ~(child : t) =
+    let* () = check_completion_now child in
+    if phys_equal parent child
+    then invalid "saved Agent callback did not enter a distinct native child"
+    else if not (phys_equal parent.issuer child.issuer)
+    then invalid "saved Agent child belongs to another physical Root"
+    else check_completion_state_now parent ~require_action_fiber:false
   ;;
 
   let sealed (t : t) =
@@ -2669,6 +2684,9 @@ end
 
 module Model_inference = struct
   type nonrec t = inference_scope
+
+  module Saved_selected = Agent_session.Captured_agent_runner.Claimed_developer.Selected
+  module Native_invocation = Agent_session.Native_tool_invocation
 
   exception Tracking_failure of P.Error.t
 
@@ -3356,28 +3374,61 @@ module Model_inference = struct
     with_claimed_origin issuer ~active ~origin:Claimed_model_job ~f
   ;;
 
-  let with_claimed_agent issuer ~selected ~f =
-    let module Selected = Agent_session.Captured_agent_runner.Claimed_developer.Selected
-    in
-    let* () = Selected.check selected in
-    let invocation = Selected.invocation selected in
+  let registered_saved_terminal issuer selected =
+    let invocation = Saved_selected.invocation selected in
     let context = H.context invocation in
-    let* terminal =
+    match Hashtbl.find issuer.native_calls context.id with
+    | Some registration when phys_equal registration.invocation invocation ->
+      (match registration.scope with
+       | Some terminal
+         when phys_equal terminal.issuer issuer
+              && Option.value_map
+                   (Eio.Fiber.get native_call_key)
+                   ~default:false
+                   ~f:(phys_equal issuer) -> Ok terminal
+       | Some _ | None -> invalid "saved Agent native callback is not entered")
+    | Some _ | None -> invalid "saved Agent native invocation is not registered"
+  ;;
+
+  let check_saved_agent_source issuer ~selected =
+    let* () = Saved_selected.check selected in
+    let* terminal = registered_saved_terminal issuer selected in
+    let* () = Native_terminal.check_completion_now terminal in
+    let* _ = current_local issuer in
+    let* () = Saved_selected.check_now selected in
+    Ok ()
+  ;;
+
+  let check_saved_agent_source_descendant_now issuer ~selected ~child =
+    let* () = Saved_selected.check_descendant_now selected ~child in
+    let* parent = registered_saved_terminal issuer selected in
+    let invocation = Native_invocation.selected_borrowed_invocation child in
+    let context = H.context invocation in
+    let* child_terminal =
       match Hashtbl.find issuer.native_calls context.id with
-      | Some registration when phys_equal registration.invocation invocation ->
+      | Some registration when H.equal_context (H.context registration.invocation) context
+        ->
         (match registration.scope with
          | Some terminal
-           when Option.value_map
-                  (Eio.Fiber.get native_call_key)
-                  ~default:false
-                  ~f:(phys_equal issuer) -> Ok terminal
-         | Some _ | None -> invalid "saved Agent native callback is not entered")
-      | Some _ | None -> invalid "saved Agent native invocation is not registered"
+           when phys_equal terminal.issuer issuer
+                && Option.value_map
+                     terminal.dispatched
+                     ~default:false
+                     ~f:(phys_equal invocation) -> Ok terminal
+         | Some _ | None -> invalid "saved Agent child native callback is not entered")
+      | Some _ | None -> invalid "saved Agent child native invocation is not registered"
     in
-    let* () = Native_terminal.check_completion_now terminal in
+    let* () = Native_terminal.check_descendant_parent_now ~parent ~child:child_terminal in
+    let* _ = current_local issuer in
+    Saved_selected.check_descendant_now selected ~child
+  ;;
+
+  let with_claimed_agent issuer ~selected ~f =
+    let* () = check_saved_agent_source issuer ~selected in
+    let* terminal = registered_saved_terminal issuer selected in
     with_claimed_origin
       issuer
-      ~active:(Selected.active selected)
+      ~active:(Saved_selected.active selected)
       ~origin:(Claimed_saved_agent { selected; terminal })
       ~f
   ;;
