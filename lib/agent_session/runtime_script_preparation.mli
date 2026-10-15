@@ -74,6 +74,7 @@ val plan
 val with_revision
   :  t option
   -> ?startup:Chat_response.Startup_compilation.t
+  -> ?tool_contract:Chatml_compilation.Tool_contract.t
   -> Prompt_revision.t
   -> env:Eio_unix.Stdenv.base
   -> invocation:Invocation.t
@@ -93,6 +94,7 @@ val with_revision
 val with_revision_plan
   :  t option
   -> ?startup:Chat_response.Startup_compilation.t
+  -> ?tool_contract:Chatml_compilation.Tool_contract.t
   -> Prompt_revision.t
   -> env:Eio_unix.Stdenv.base
   -> invocation:Invocation.t
@@ -121,6 +123,7 @@ val with_revision_plan
     the callback. Original callback exceptions and cancellation propagate. *)
 val with_authored_child
   :  ?startup:Chat_response.Startup_compilation.t
+  -> ?tool_contract:Chatml_compilation.Tool_contract.t
   -> t option
   -> parent:Prompt_revision.t
   -> tool_name:string
@@ -149,6 +152,7 @@ val with_authored_child
 val with_captured_child
   :  t
   -> ?startup:Chat_response.Startup_compilation.t
+  -> ?tool_contract:Chatml_compilation.Tool_contract.t
   -> Prompt_revision.t
   -> reference:Prompt.Chat_markdown.Agent_reference.t
   -> invocation:Invocation.t

@@ -16,6 +16,7 @@ type t
     and output coordinates, not original source acquisition authority. *)
 val create
   :  script_preparation:Runtime_script_preparation.t
+  -> tool_contract:Chatml_compilation.Tool_contract.t
   -> content_limits:Chatmd_prompt_content.Limits.t option
   -> policy_revision:Chatml_source.Digest.t
   -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
@@ -73,6 +74,7 @@ module Source : sig
     -> preprocess:(string -> string)
     -> prepare_programs:
          (Chat_response.Startup_compilation.t
+          -> tool_contract:Chatml_compilation.Tool_contract.t
           -> invocation:Runtime_script_preparation.Invocation.t
           -> Prompt_source_owner.Scope.t
           -> Prompt_source_owner.Capture.t
@@ -192,6 +194,7 @@ module Source_binding : sig
 
   val create
     :  source:Source.t
+    -> tool_contract:Chatml_compilation.Tool_contract.t
     -> runtime_policy_revision:Chatml_source.Digest.t
     -> content_limits:Chatmd_prompt_content.Limits.t option
     -> artifact_store:Agent_store.Prompt_artifact_store.t
@@ -231,4 +234,57 @@ module Source_binding : sig
     -> revision:Prompt_revision.t
     -> sw:Eio.Switch.t
     -> (Chat_response.Tool.Agent_source_runner.t, Agent_protocol.Error.t) Result.t
+end
+
+module Deferred_developer : sig
+  (** Exact ordinary Agent declarations from one owned Prompt revision, prepared
+      before the physical developer Root exists. This is a source/native
+      registration producer, not an inference or child capability owner. *)
+  type t
+
+  (** Bind [source] to [revision] under its actual original source lease and
+      bounded runtime policy. Scan the genuine Parsed agent references and
+      require exactly one physical Tool reference for every emitted ordinary
+      Agent declaration. Duplicate names, foreign declarations and missing
+      source preparers reject before any function is exposed. For this developer
+      binding only, each selected child (restored, Captured or newly acquired
+      File) receives a bounded preflight before Driver: only literal authored
+      message/config/reasoning content is admitted. Callable Tool declarations,
+      executable Script/Shell/Moderator/extension declarations, authored tool
+      call/response entries, nested Agent content and document/image fetch
+      content reject. Driver otherwise constructs direct child functions and
+      Converter otherwise performs Fetch/recursive Agent effects outside the
+      Root's selected child capability owner. The selected Tool_contract is
+      the explicit value
+      already retained by [source]; a stored digest cannot choose another ABI.
+
+      [with_context] is trusted host code which must reject until the exact
+      physical Root is bound, after revocation, or outside a saved selected
+      Agent callback. This producer never invokes it during preparation. Each
+      native Source preparer delegates to this same bound source port; neither
+      a queued artifact nor [Source_launch] is an original read grant. The
+      positive count and shared checkpoint bound declaration/reference scans
+      before retaining functions. [sw] joins all port borrowers. *)
+  val prepare
+    :  Source_binding.t
+    -> script_preparation:Runtime_script_preparation.t
+    -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+    -> approval_provider:Shell_runtime.Approval_broker.provider
+    -> response_dir:Eio.Fs.dir_ty Eio.Path.t
+    -> env:Eio_unix.Stdenv.base
+    -> revision:Prompt_revision.t
+    -> sw:Eio.Switch.t
+    -> max_agents:int
+    -> max_work_steps:int
+    -> checkpoint:(unit -> unit)
+    -> with_context:
+         (implementation:Ochat_function.t
+          -> invocation:Ochat_function.Invocation.t
+          -> (Eio_unix.Stdenv.base Chat_response.Ctx.t -> string)
+          -> string)
+    -> (t, Agent_protocol.Error.t) result
+
+  (** Immutable registrations for this exact prepared revision/port. An upper
+      native owner must admit their physical implementations before any call. *)
+  val registrations : t -> Chat_response.Agent_runtime.native_registration list
 end

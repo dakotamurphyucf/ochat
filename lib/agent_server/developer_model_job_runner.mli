@@ -56,6 +56,23 @@ val create
     An equal run ID or copied candidate cannot attach it elsewhere. *)
 val issued_by_root : t -> Developer_root_owner.run -> bool
 
+(** Lend the same strict provider Context and recipe used by [run_candidate],
+    now under OCH398's physically entered saved-Agent source/native proof. The
+    receiver must be issued by the same live Root that validates [selected].
+    This calls that Root's existing Model_inference.with_claimed_agent; it does
+    not claim a Model_call job, create a provider or install an alternate
+    tracking engine. Trusted [f] must use the Context only in this lexical
+    callback; its type alone cannot prevent returning it as ['a]. An escaped
+    Context cannot admit a new effect after the physical scope expires because
+    Root/source checks and the composed provider submission guard run at
+    re-entry and effect admission. Original callback exceptions and
+    cancellation preserve identity/backtrace. *)
+val with_saved_agent_context
+  :  t
+  -> selected:Agent_session.Captured_agent_runner.Claimed_developer.Selected.t
+  -> f:(Eio_unix.Stdenv.base Chat_response.Ctx.t -> 'a)
+  -> ('a, Agent_protocol.Error.t) result
+
 (** Scheduling hint only. A saved Model_call envelope is decoded under the
     Root's actual whole-document limits; the later entered Claim is decoded
     again and governs execution. A malformed genuine Model_call is still

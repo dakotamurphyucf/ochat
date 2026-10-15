@@ -110,11 +110,12 @@ let capture_file env store parent lease ?(work = 1_000_000) ?(checkpoint = ignor
     ~source_lease:lease
     ~artifact_store:store
     ~compilation:(Sources.Policy.compilation policy)
+    ~tool_contract:Chatml_compilation.Tool_contract.Standard
     ~parser_limits:(parser_limits ())
     ~content_limits:(Some content_limits)
     ~max_work_steps:work
     ~preprocess:Fn.id
-    ~prepare_programs:(fun startup scope capture ->
+    ~prepare_programs:(fun startup ~tool_contract:_ scope capture ->
       Sources.capture_child
         policy
         ~startup
@@ -204,6 +205,7 @@ let%expect_test
     let captured =
       Child.captured
         ~parent
+        ~tool_contract:Chatml_compilation.Tool_contract.Standard
         ~reference:(reference parent)
         ~artifact_store:store
         ~policy:(Runtime_preparation_tests.policy ())
@@ -266,7 +268,7 @@ let%expect_test
         ~parser_limits:(parser_limits ())
         ~max_work_steps:1_000_000
         ~preprocess:Fn.id
-        ~prepare_programs:(fun startup ~invocation scope capture ->
+        ~prepare_programs:(fun startup ~tool_contract:_ ~invocation scope capture ->
           Sources.capture_child
             policy
             ~startup
@@ -289,6 +291,7 @@ let%expect_test
     let factory =
       Runner.create
         ~script_preparation:(Runtime_preparation_tests.policy ())
+        ~tool_contract:Chatml_compilation.Tool_contract.Standard
         ~content_limits:(Some content_limits)
         ~policy_revision:
           (Chatml_source.Digest.of_contents "fixture-runtime-v1" ~checkpoint:ignore)

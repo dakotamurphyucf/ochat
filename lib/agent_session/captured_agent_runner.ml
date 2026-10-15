@@ -46,6 +46,7 @@ module Source = struct
     ; preprocess : string -> string
     ; prepare_programs :
         Startup.t
+        -> tool_contract:Chatml_compilation.Tool_contract.t
         -> invocation:Preparation.Invocation.t
         -> Prompt_source_owner.Scope.t
         -> Prompt_source_owner.Capture.t
@@ -104,6 +105,8 @@ end
 type t =
   { domain_id : int
   ; script_preparation : Preparation.t
+  ; tool_contract : Chatml_compilation.Tool_contract.t
+  ; developer_literal_child : bool
   ; content_limits : Chatmd_prompt_content.Limits.t option
   ; policy_revision : Chatml_source.Digest.t
   ; manifest_authorizer : Shell_runtime.Manifest_authorizer.t
@@ -113,6 +116,7 @@ type t =
 
 let create
       ~script_preparation
+      ~tool_contract
       ~content_limits
       ~policy_revision
       ~manifest_authorizer
@@ -125,10 +129,13 @@ let create
       [%sexp
         ("runtime.v1" : string)
       , (Preparation.policy_identity script_preparation : Sexp.t)
+      , (tool_contract : Chatml_compilation.Tool_contract.t)
       , (content_policy_identity content_limits : Sexp.t)]
   in
   { domain_id = (Stdlib.Domain.self () :> int)
   ; script_preparation
+  ; tool_contract
+  ; developer_literal_child = false
   ; content_limits
   ; policy_revision
   ; manifest_authorizer
@@ -149,10 +156,6 @@ let check_domain t =
   else Ok ()
 ;;
 
-let compilation_error (error : Chatml_compilation.error) =
-  failure (error.code ^ ": " ^ error.message)
-;;
-
 let bounded t ~checkpoint ~f =
   let module Abort = struct
     exception Limit
@@ -171,6 +174,75 @@ let bounded t ~checkpoint ~f =
     result
   with
   | Abort.Limit -> Error (failure "captured agent lookup exceeds host work allowance")
+;;
+
+let admit_developer_literal_child t revision parsed ~checkpoint =
+  if not t.developer_literal_child
+  then Ok ()
+  else
+    bounded t ~checkpoint ~f:(fun checkpoint ->
+      let open Result.Let_syntax in
+      let denied () =
+        Error (failure "developer child effect needs a selected child owner")
+      in
+      let elements =
+        match Prompt_revision.document_projection revision with
+        | None -> CM.Parsed.elements parsed
+        | Some projection ->
+          if not (phys_equal parsed (CM.Document_projection.parsed projection))
+          then invalid_arg "developer child projection belongs to another parser";
+          CM.Document_projection.elements projection
+      in
+      let admit_content = function
+        | CM.Basic basic ->
+          if
+            String.equal basic.type_ "text"
+            && Option.is_none basic.image_url
+            && Option.is_none basic.document_url
+            && (not basic.is_local)
+            && (not basic.cleanup_html)
+            && not basic.markdown
+          then Ok ()
+          else denied ()
+        | CM.Agent _ -> denied ()
+      in
+      let admit_message (message : CM.msg) =
+        if
+          Option.is_some message.function_call
+          || Option.is_some message.tool_call
+          || Option.is_some message.tool_call_id
+        then denied ()
+        else (
+          match message.content with
+          | None | Some (Text _) -> Ok ()
+          | Some (Items items) ->
+            List.fold_result items ~init:() ~f:(fun () item ->
+              checkpoint ();
+              admit_content item))
+      in
+      List.fold_result elements ~init:() ~f:(fun () element ->
+        checkpoint ();
+        match element with
+        | CM.Msg message
+        | Developer message
+        | System message
+        | User message
+        | Assistant message -> admit_message message
+        | Config _ | Reasoning _ -> Ok ()
+        | Tool_call _
+        | Tool_response _
+        | Tool _
+        | Shell_runtime _
+        | Moderator_runtime _
+        | Script _
+        | Shell_script _
+        | Extension_script _
+        | Authoring_context _
+        | Authoring_help _ -> denied ()))
+;;
+
+let compilation_error (error : Chatml_compilation.error) =
+  failure (error.code ^ ": " ^ error.message)
 ;;
 
 let admit_revision t revision ~checkpoint =
@@ -259,6 +331,7 @@ type selected_source =
 let select_installed_child
       installed
       ~script_preparation
+      ~tool_contract
       ~content_limits
       ~parent
       ~reference
@@ -282,6 +355,7 @@ let select_installed_child
          ~reference
          ~artifact_store:installed.artifact_store
          ~policy:script_preparation
+         ~tool_contract
          ~invocation
          ~content_limits
          ~env:installed.env
@@ -300,12 +374,13 @@ let select_installed_child
          ~source_lease:installed.source_lease
          ~artifact_store:installed.artifact_store
          ~compilation:source.compilation
+         ~tool_contract
          ~parser_limits:source.parser_limits
          ~content_limits
          ~max_work_steps:source.max_work_steps
          ~preprocess:source.preprocess
-         ~prepare_programs:(fun startup scope capture ->
-           source.prepare_programs startup ~invocation scope capture)
+         ~prepare_programs:(fun startup ~tool_contract scope capture ->
+           source.prepare_programs startup ~tool_contract ~invocation scope capture)
          ~env:installed.env
          ~created_at
          ~checkpoint)
@@ -317,6 +392,7 @@ let select_child t installed ~parent ~reference ~invocation ~recorded ~checkpoin
   select_installed_child
     installed
     ~script_preparation:t.script_preparation
+    ~tool_contract:t.tool_contract
     ~content_limits:t.content_limits
     ~parent
     ~reference
@@ -678,6 +754,7 @@ and invoke
             Preparation.with_captured_child
               t.script_preparation
               ~startup
+              ~tool_contract:t.tool_contract
               parent
               ~reference
               ~invocation:Headless
@@ -791,8 +868,15 @@ and invoke
         in
         let%bind () = check_selected () in
         let revision = Prompt_child_source.revision selected in
+        let%bind parsed =
+          Prompt_revision.parser_context revision
+          |> Result.of_option
+               ~error:(failure "selected developer child has no owned parser")
+        in
+        let%bind () = admit_developer_literal_child t revision parsed ~checkpoint in
         Preparation.with_revision
           (Some t.script_preparation)
+          ~tool_contract:t.tool_contract
           revision
           ~env
           ~invocation:Headless
@@ -828,6 +912,7 @@ module Source_binding = struct
   type t =
     { domain_id : int
     ; source : Source.t
+    ; tool_contract : Chatml_compilation.Tool_contract.t
     ; runtime_policy_revision : Chatml_source.Digest.t
     ; content_limits : Chatmd_prompt_content.Limits.t option
     ; artifact_store : Agent_store.Prompt_artifact_store.t
@@ -836,6 +921,7 @@ module Source_binding = struct
 
   let create
         ~source
+        ~tool_contract
         ~runtime_policy_revision
         ~content_limits
         ~artifact_store
@@ -843,6 +929,7 @@ module Source_binding = struct
     =
     { domain_id = (Stdlib.Domain.self () :> int)
     ; source
+    ; tool_contract
     ; runtime_policy_revision
     ; content_limits
     ; artifact_store
@@ -850,8 +937,9 @@ module Source_binding = struct
     }
   ;;
 
-  let bind
+  let bind_with_literal_policy
         t
+        ~developer_literal_child
         ~script_preparation
         ~manifest_authorizer
         ~approval_provider
@@ -866,11 +954,24 @@ module Source_binding = struct
       let runner =
         create_runner
           ~script_preparation
+          ~tool_contract:t.tool_contract
           ~content_limits:t.content_limits
           ~policy_revision:t.runtime_policy_revision
           ~manifest_authorizer
           ~approval_provider
           ~response_dir
+      in
+      let runner =
+        if developer_literal_child
+        then
+          { runner with
+            developer_literal_child = true
+          ; policy_revision =
+              numeric_identity
+                runner.policy_revision
+                [%sexp ("developer-literal-child.v1" : string)]
+          }
+        else runner
       in
       bind_installed
         runner
@@ -880,6 +981,50 @@ module Source_binding = struct
         ~env
         ~revision
         ~sw)
+  ;;
+
+  let bind
+        t
+        ~script_preparation
+        ~manifest_authorizer
+        ~approval_provider
+        ~response_dir
+        ~env
+        ~revision
+        ~sw
+    =
+    bind_with_literal_policy
+      t
+      ~developer_literal_child:false
+      ~script_preparation
+      ~manifest_authorizer
+      ~approval_provider
+      ~response_dir
+      ~env
+      ~revision
+      ~sw
+  ;;
+
+  let bind_developer_literal
+        t
+        ~script_preparation
+        ~manifest_authorizer
+        ~approval_provider
+        ~response_dir
+        ~env
+        ~revision
+        ~sw
+    =
+    bind_with_literal_policy
+      t
+      ~developer_literal_child:true
+      ~script_preparation
+      ~manifest_authorizer
+      ~approval_provider
+      ~response_dir
+      ~env
+      ~revision
+      ~sw
   ;;
 
   let select_child
@@ -906,11 +1051,162 @@ module Source_binding = struct
       select_installed_child
         installed
         ~script_preparation
+        ~tool_contract:t.tool_contract
         ~content_limits:t.content_limits
         ~parent
         ~reference
         ~invocation
         ~recorded
         ~checkpoint)
+  ;;
+end
+
+module Deferred_developer = struct
+  type t =
+    { registrations : Chat_response.Agent_runtime.native_registration list
+    ; port : Port.t
+    }
+
+  let registrations t = t.registrations
+
+  let prepare
+        source
+        ~script_preparation
+        ~manifest_authorizer
+        ~approval_provider
+        ~response_dir
+        ~env
+        ~revision
+        ~sw
+        ~max_agents
+        ~max_work_steps
+        ~checkpoint
+        ~with_context
+    =
+    let module Abort = struct
+      exception Work_limit
+    end
+    in
+    if max_agents <= 0 || max_agents > 1024 || max_work_steps <= 0
+    then Error (failure "deferred Agent registration limits are invalid")
+    else (
+      let remaining = ref max_work_steps in
+      let poll () =
+        if !remaining <= 0 then raise Abort.Work_limit;
+        decr remaining;
+        checkpoint ();
+        Eio.Fiber.check ()
+      in
+      try
+        let open Result.Let_syntax in
+        let%bind port =
+          Source_binding.bind_developer_literal
+            source
+            ~script_preparation
+            ~manifest_authorizer
+            ~approval_provider
+            ~response_dir
+            ~env
+            ~revision
+            ~sw
+        in
+        let%bind parsed =
+          match Prompt_revision.parser_context revision with
+          | Some parsed -> Ok parsed
+          | None -> Error (failure "deferred Agent revision has no owned parser")
+        in
+        let%bind prepare =
+          match port.Port.prepare with
+          | Some prepare -> Ok prepare
+          | None -> Error (failure "deferred Agent source preparer is unavailable")
+        in
+        let membership_runner =
+          create_runner
+            ~script_preparation
+            ~tool_contract:source.tool_contract
+            ~content_limits:source.content_limits
+            ~policy_revision:source.runtime_policy_revision
+            ~manifest_authorizer
+            ~approval_provider
+            ~response_dir
+        in
+        let%map _, _, reversed =
+          List.fold_result
+            (CM.Parsed.elements parsed)
+            ~init:(0, String.Set.empty, [])
+            ~f:(fun (count, names, reversed) element ->
+              poll ();
+              match element with
+              | CM.Tool (Agent declaration) ->
+                if count >= max_agents
+                then Error (failure "deferred Agent registration count exhausted")
+                else if Set.mem names declaration.name
+                then Error (failure "deferred Agent name is duplicated")
+                else (
+                  let%bind (_ : CM.Agent_reference.t) =
+                    tool_reference membership_runner parsed declaration ~checkpoint:poll
+                  in
+                  let deferred =
+                    Chat_response.Tool.Deferred_agent.create
+                      ~declaration
+                      ~runner:port
+                      ~with_context
+                  in
+                  let implementation =
+                    Chat_response.Tool.Deferred_agent.implementation deferred
+                  in
+                  let source_requirement =
+                    Chat_response.Native_tool_pool.Source_requirement.Source
+                      (Some
+                         (Chat_response.Native_source_registration.create
+                            ~implementation
+                            ~prepare:(fun ~launch ~request:_ ~checkpoint ->
+                              match
+                                Chat_response.Source_launch.developer_owner launch
+                              with
+                              | None ->
+                                Error
+                                  (Agent_protocol.Error.invalid_request
+                                     "deferred Agent requires a developer source parent")
+                              | Some _ ->
+                                prepare ~declaration ~launch ~checkpoint
+                                |> Result.map ~f:Option.some)))
+                  in
+                  let registration : Chat_response.Agent_runtime.native_registration =
+                    { implementation
+                    ; implementation_revision =
+                        [%sexp
+                          ("deferred-agent.v1" : string)
+                        , (Chatml_source.Digest.to_hex port.revision : string)
+                        , (declaration : CM.agent_tool)]
+                        |> Sexp.to_string_mach
+                        |> Chatmd_shell_spec.Source_ref.digest
+                    ; result_contract = Native_output
+                    ; authoring_metadata = None
+                    ; source_requirement
+                    }
+                  in
+                  Ok (count + 1, Set.add names declaration.name, registration :: reversed))
+              | CM.Msg _
+              | Developer _
+              | System _
+              | User _
+              | Assistant _
+              | Tool_call _
+              | Tool_response _
+              | Config _
+              | Reasoning _
+              | Tool _
+              | Shell_runtime _
+              | Moderator_runtime _
+              | Script _
+              | Shell_script _
+              | Extension_script _
+              | Authoring_context _
+              | Authoring_help _ -> Ok (count, names, reversed))
+        in
+        { registrations = List.rev reversed; port }
+      with
+      | Abort.Work_limit -> Error (failure "deferred Agent work allowance exhausted"))
   ;;
 end

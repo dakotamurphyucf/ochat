@@ -88,6 +88,7 @@ let file
       ~source_lease
       ~artifact_store
       ~compilation
+      ~tool_contract
       ~parser_limits
       ~content_limits
       ~max_work_steps
@@ -169,7 +170,7 @@ let file
                      let prepare_programs supplied =
                        same_capture supplied;
                        poll ();
-                       prepare_programs startup scope capture
+                       prepare_programs startup ~tool_contract scope capture
                      in
                      let prepare_content =
                        Option.map content_limits ~f:(fun limits supplied ->
@@ -228,6 +229,7 @@ let captured
       ~reference
       ~artifact_store
       ~policy
+      ~tool_contract
       ~invocation
       ~content_limits
       ~env
@@ -235,6 +237,7 @@ let captured
   =
   Runtime_script_preparation.with_captured_child
     policy
+    ~tool_contract
     parent
     ~reference
     ~invocation
