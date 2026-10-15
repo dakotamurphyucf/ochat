@@ -449,6 +449,7 @@ let rebind_capabilities ~pins ~capabilities:current =
 
 let rebind t current = rebind_capabilities ~pins:t.pins ~capabilities:current
 let capability_pins = capture_pins
+let selected_capabilities t ~capabilities = rebind t capabilities
 let validate_capabilities t ~capabilities = Result.map (rebind t capabilities) ~f:ignore
 
 let prepare ~env ~current_capabilities ~policy t =

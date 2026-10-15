@@ -225,6 +225,50 @@ module Action : sig
     -> (Selection.t, Agent_protocol.Error.t) result
 end
 
+(** Bare Script-root action borrowed from this run's already entered Worker
+    Claim. Unlike [Action], it does not reserve a Root terminal slot or commit
+    a separate root-selected transaction. The Worker alone commits its parent
+    state together with this action's selected children. *)
+module Worker_action : sig
+  type t
+
+  module Selection : sig
+    type t = Developer_job_worker.Children.Selection.t
+  end
+
+  (** Use this root's original actor, capture, current selected registry and
+      resource policy with the existing background admission constructor.
+      Derive Run_root plus the exact parent ID/attempt and incremented depth
+      from the physical Worker Parent; never invent a native invocation.
+      Recheck actor/selection/parent after yielding preparation and immediately
+      before the Worker's shared capacity reservation. The returned ID is
+      lexical comparison data only. *)
+  val stage_background
+    :  t
+    -> request:Chat_response.Background_request.t
+    -> checkpoint:(unit -> unit)
+    -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result
+
+  val rollback_staged
+    :  t
+    -> Agent_protocol.Id.Job.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  val cleanup_staged
+    :  t
+    -> Agent_protocol.Id.Job.t
+    -> (Action.cleanup, Agent_protocol.Error.t) result
+
+  (** Seal exactly the staged IDs returned from this Worker-root lexical
+      callback. Physical Worker scope and Claim identity are retained in the
+      opaque selection and rechecked after child join. This performs no Store
+      operation. *)
+  val seal
+    :  t
+    -> selected:Agent_protocol.Id.Job.t list
+    -> (Selection.t, Agent_protocol.Error.t) result
+end
+
 module Native_terminal : sig
   type t
 
@@ -475,6 +519,32 @@ module Job_candidate : sig
         -> sw:Eio.Switch.t
         -> (Agent_protocol.Developer_job.State.t, Agent_protocol.Error.t) result)
     -> (Agent_protocol.Developer_job.t option, Agent_protocol.Error.t) result
+
+  (** The claimed-worker counterpart for a bare Script root. [action] is
+      minted only after this candidate's exact Claim entered; its selection
+      must come from this same live callback and physical parent. The Worker
+      commits the parent and selected children through one Prepared, and
+      returns the Store-proven selected-set disposition. A copied Job or
+      matching run ID cannot substitute for [candidate]. [active] is that
+      same Worker's live parent proof for selected native calls; it cannot be
+      constructed from the action or a job DTO. *)
+  val with_claimed_selected
+    :  run
+    -> t
+    -> ?select:
+         (claim:Agent_store.Developer_run_store.Claim.t
+          -> proposed:Agent_protocol.Developer_job.State.t
+          -> (Developer_job_worker.Selected.t option, Agent_protocol.Error.t) result)
+    -> (active:Agent_session.Developer_job_scope.active
+        -> action:Worker_action.t
+        -> sw:Eio.Switch.t
+        -> ( Agent_protocol.Developer_job.State.t * Worker_action.Selection.t
+             , Agent_protocol.Error.t )
+             result)
+    -> ( (Agent_protocol.Developer_job.t * Developer_job_worker.Children.Settlement.t)
+           option
+         , Agent_protocol.Error.t )
+         result
 end
 
 (** Enter an exact queued attempt through this root's owned physical Worker,

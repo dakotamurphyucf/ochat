@@ -1,5 +1,6 @@
 open! Core
 module P = Agent_protocol
+module Staging = Developer_job_staging
 module Store = Agent_store.Developer_run_store
 module Capability = Chat_response.Tool_capability
 module Request = Chat_response.Background_request
@@ -52,17 +53,6 @@ type state =
   | Closing
   | Quarantined
   | Closed
-
-type staged =
-  { job : P.Developer_job.t
-  ; reservation : Job_capacity.reservation
-  ; mutable phase : staged_phase
-  }
-
-and staged_phase =
-  | Provisional
-  | Aborted
-  | Published
 
 type call =
   { mutable cancel : Eio.Cancel.t option
@@ -134,7 +124,7 @@ and t =
 and action =
   { issuer : t
   ; snapshot : current
-  ; staged : (P.Id.Job.t, staged) Hashtbl.t
+  ; staged : Staging.t
   ; mutable stage_in_flight : int
   ; mutable sealed : selection option
   ; mutable live : bool
@@ -148,6 +138,7 @@ and selection =
   { issuer : action
   ; jobs : P.Developer_job.t list
   ; selected_ids : P.Id.Job.t list
+  ; staged_selection : Staging.Selection.t
   }
 
 and current =
@@ -254,6 +245,14 @@ let control_call_key : t Eio.Fiber.key = Eio.Fiber.create_key ()
 let admission_key : registry Eio.Fiber.key = Eio.Fiber.create_key ()
 let invalid message = Error (P.Error.invalid_request message)
 let ( let* ) result f = Result.bind result ~f
+
+module Action_cleanup = struct
+  type t =
+    | Aborted
+    | Physically_owned
+  [@@deriving sexp_of]
+end
+
 let same_domain registry = Int.equal registry.domain_id (Stdlib.Domain.self () :> int)
 
 let error_of_store error =
@@ -420,6 +419,102 @@ let with_claimed_job t ~expected ~lookup ?select f =
   Developer_job_worker.with_claimed_attempt t.worker ~expected ~lookup ?select f
 ;;
 
+module Worker_action = struct
+  type t =
+    { issuer : run
+    ; children : Developer_job_worker.Children.t
+    ; parent : Job_scope.Parent.t
+    ; snapshot : current
+    ; mutable live : bool
+    }
+
+  module Selection = struct
+    type t = Developer_job_worker.Children.Selection.t
+  end
+
+  let create issuer ~active ~children =
+    let* snapshot = current issuer in
+    let* parent = job_parent issuer active in
+    let* () = check_effect_now issuer snapshot in
+    Ok { issuer; children; parent; snapshot; live = true }
+  ;;
+
+  let check_now t =
+    if not t.live
+    then invalid "developer worker action is no longer live"
+    else
+      let* () = check_effect_now t.issuer t.snapshot in
+      Job_scope.Parent.check_now
+        t.parent
+        ~owner:t.issuer.owner
+        ~capture_fingerprint:(Chatml_developer_capture.fingerprint t.issuer.capture)
+  ;;
+
+  let stage_background t ~request ~checkpoint =
+    let issuer = t.issuer in
+    let* () = check_now t in
+    let* parent_id =
+      let depth = Job_scope.Parent.nested_depth t.parent in
+      if depth >= Int.max_value
+      then invalid "developer job nesting depth overflows"
+      else
+        Ok (Job_scope.Parent.job_id t.parent, Job_scope.Parent.attempt t.parent, depth + 1)
+    in
+    let id, attempt, nested_depth = parent_id in
+    let* launch =
+      P.Developer_job.Launch.create
+        ~parent:P.Developer_job.Launch.Run_root
+        ~parent_job:(Some (id, attempt))
+        ~nested_depth
+    in
+    let* staged =
+      Developer_job_worker.Children.stage t.children ~checkpoint ~prepare:(fun () ->
+        let* prepared =
+          Agent_session.Developer_root_job_admission.background
+            ~owner:issuer.owner
+            ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
+            ~launch
+            ~selected:t.snapshot.selected
+            ~policy:issuer.job_policy
+            ~request
+            ~created_at:(issuer.registry.now ())
+            ~checkpoint
+        in
+        let* () = check_now t in
+        Ok prepared)
+    in
+    match check_now t with
+    | Ok () -> Ok staged
+    | Error error ->
+      ignore
+        (Developer_job_worker.Children.rollback_staged t.children staged
+         : (unit, P.Error.t) result);
+      Error error
+    | exception exn ->
+      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      ignore
+        (Developer_job_worker.Children.rollback_staged t.children staged
+         : (unit, P.Error.t) result);
+      Stdlib.Printexc.raise_with_backtrace exn backtrace
+  ;;
+
+  let rollback_staged t id =
+    let* () = check_now t in
+    Developer_job_worker.Children.rollback_staged t.children id
+  ;;
+
+  let cleanup_staged t id =
+    Result.map (Developer_job_worker.Children.cleanup_staged t.children id) ~f:(function
+      | Developer_job_worker.Children.Aborted -> Action_cleanup.Aborted
+      | Physically_owned -> Action_cleanup.Physically_owned)
+  ;;
+
+  let seal t ~selected =
+    let* () = check_now t in
+    Developer_job_worker.Children.seal t.children ~selected
+  ;;
+end
+
 module Job_candidate = struct
   type t =
     { issuer : run
@@ -459,6 +554,24 @@ module Job_candidate = struct
         ~lookup:(Store.Scheduler_candidate.lookup t.stored)
         ?select
         f
+  ;;
+
+  let with_claimed_selected issuer t ?select f =
+    if not (phys_equal issuer t.issuer)
+    then invalid "developer scheduler candidate belongs to another run"
+    else
+      let* _ = current issuer in
+      Developer_job_worker.with_claimed_selected_attempt
+        issuer.worker
+        ~expected:(Store.Scheduler_candidate.observation t.stored)
+        ~lookup:(Store.Scheduler_candidate.lookup t.stored)
+        ~max_staged_jobs:issuer.registry.limits.max_staged_jobs
+        ?select
+        (fun ~active ~sw ~children ->
+           let* action = Worker_action.create issuer ~active ~children in
+           Exn.protect
+             ~finally:(fun () -> action.live <- false)
+             ~f:(fun () -> f ~active ~action ~sw))
   ;;
 end
 
@@ -1012,7 +1125,7 @@ let admit_external_model_from_scope source ~request ~checkpoint ~check_parent_no
 module Action = struct
   type nonrec t = action
 
-  type cleanup =
+  type cleanup = Action_cleanup.t =
     | Aborted
     | Physically_owned
   [@@deriving sexp_of]
@@ -1024,8 +1137,7 @@ module Action = struct
     else if Option.is_some t.sealed
     then invalid "developer root action selection is sealed"
     else if
-      Hashtbl.length t.staged + t.stage_in_flight
-      >= issuer.registry.limits.max_staged_jobs
+      Staging.count t.staged + t.stage_in_flight >= issuer.registry.limits.max_staged_jobs
     then
       Error
         (P.Error.create
@@ -1061,28 +1173,8 @@ module Action = struct
           then invalid "developer root action changed during job preparation"
           else (
             let job = Agent_session.Developer_root_job_admission.Prepared.job prepared in
-            let id = P.Developer_job.id job in
-            let* () =
-              if Hashtbl.mem t.staged id
-              then invalid "developer root job ID was already staged"
-              else Ok ()
-            in
             let* key = capacity_key issuer job in
-            let* host_job = P.Host_job.of_developer job in
-            let* reserved =
-              Job_capacity.reserve_host_job issuer.registry.capacity key ~job:host_job
-            in
-            match reserved with
-            | None ->
-              Error
-                (P.Error.create
-                   P.Error.Resource_limit
-                   ~message:"shared job capacity is full"
-                   ~retryable:true
-                   ())
-            | Some reservation ->
-              Hashtbl.set t.staged ~key:id ~data:{ job; reservation; phase = Provisional };
-              Ok id)))
+            Staging.reserve t.staged ~capacity:issuer.registry.capacity ~key ~prepared)))
   ;;
 
   let stage_background (t : t) ~request ~checkpoint =
@@ -1111,41 +1203,25 @@ module Action = struct
   let rollback_staged t id =
     if not (same_domain t.issuer.registry)
     then invalid "developer staged job belongs to another domain"
-    else (
-      match Hashtbl.find t.staged id with
-      | None -> invalid "developer staged job is not owned by this action"
-      | Some { phase = Aborted; _ } -> Ok ()
-      | Some { phase = Published; _ } ->
-        invalid "published developer job cannot be rolled back"
-      | Some ({ phase = Provisional; _ } as staged) ->
-        let selected =
-          Option.value_map t.sealed ~default:false ~f:(fun selection ->
-            List.mem selection.selected_ids id ~equal:P.Id.Job.equal)
-        in
-        if selected
-        then invalid "selected developer job retains its physical handoff"
-        else if (not t.live) || not (same_action_fiber t)
-        then invalid "developer staged job rollback is outside its action"
-        else (
-          Job_capacity.abort staged.reservation;
-          staged.phase <- Aborted;
-          Ok ()))
+    else if (not t.live) || not (same_action_fiber t)
+    then invalid "developer staged job rollback is outside its action"
+    else Staging.rollback t.staged id
   ;;
 
   let cleanup_staged t id =
     if not (same_domain t.issuer.registry)
     then invalid "developer staged job belongs to another domain"
     else (
-      match Hashtbl.find t.staged id with
+      match Staging.status t.staged id with
       | None -> invalid "developer staged job is not owned by this action"
-      | Some { phase = Aborted; _ } -> Ok Aborted
-      | Some { phase = Published; _ } -> Ok Physically_owned
-      | Some { phase = Provisional; _ } ->
-        if t.queued || Option.is_some t.sealed
-        then Ok Physically_owned
-        else if t.live
-        then Result.map (rollback_staged t id) ~f:(fun () -> Aborted)
-        else invalid "unsealed developer action leaked provisional capacity")
+      | Some Staging.Aborted -> Ok Aborted
+      | Some Staging.Published -> Ok Physically_owned
+      | Some Staging.Provisional when t.queued || Option.is_some t.sealed ->
+        Ok Physically_owned
+      | Some Staging.Provisional when t.live ->
+        Result.map (rollback_staged t id) ~f:(fun () -> Aborted)
+      | Some Staging.Provisional ->
+        invalid "unsealed developer action leaked provisional capacity")
   ;;
 
   let seal t ~selected =
@@ -1157,25 +1233,17 @@ module Action = struct
     then invalid "developer root action cannot be sealed"
     else if t.stage_in_flight > 0
     then invalid "developer root job preparation is still active"
-    else (
-      let seen = Hash_set.create (module P.Id.Job) in
-      let* jobs, _count =
-        List.fold_result selected ~init:([], 0) ~f:(fun (jobs, count) id ->
-          if count >= t.issuer.registry.limits.max_staged_jobs
-          then invalid "developer root selection exceeds its bound"
-          else if Hash_set.mem seen id
-          then invalid "duplicate developer root selection"
-          else (
-            Hash_set.add seen id;
-            match Hashtbl.find t.staged id with
-            | None -> invalid "developer root selection is not staged here"
-            | Some { phase = Provisional; job; _ } -> Ok (job :: jobs, count + 1)
-            | Some { phase = Aborted | Published; _ } ->
-              invalid "developer root selection is no longer provisional"))
+    else
+      let* staged_selection = Staging.seal t.staged ~selected in
+      let value =
+        { issuer = t
+        ; jobs = Staging.Selection.jobs staged_selection
+        ; selected_ids = selected
+        ; staged_selection
+        }
       in
-      let value = { issuer = t; jobs = List.rev jobs; selected_ids = selected } in
       t.sealed <- Some value;
-      Ok value)
+      Ok value
   ;;
 end
 
@@ -1202,29 +1270,18 @@ let narrow_selection t ~names =
 ;;
 
 let abort_staged action =
-  Hashtbl.iter action.staged ~f:(fun staged ->
-    match staged.phase with
-    | Provisional ->
-      Job_capacity.abort staged.reservation;
-      staged.phase <- Aborted
-    | Aborted | Published -> ())
+  ignore (Staging.abort_pre_handoff action.staged : (unit, P.Error.t) result)
 ;;
 
 let settle_staged action selection = function
   | Store.Settlement.Installed _ ->
-    let selected_ids = Hash_set.of_list (module P.Id.Job) selection.selected_ids in
-    Hashtbl.iteri action.staged ~f:(fun ~key:id ~data:staged ->
-      match staged.phase with
-      | Provisional ->
-        if Hash_set.mem selected_ids id
-        then (
-          Job_capacity.publish staged.reservation;
-          staged.phase <- Published)
-        else (
-          Job_capacity.abort staged.reservation;
-          staged.phase <- Aborted)
-      | Aborted | Published -> ())
-  | Absent -> abort_staged action
+    (match Staging.settle action.staged selection.staged_selection Selected_installed with
+     | Ok () -> ()
+     | Error _ -> failwith "developer staged settlement invariant failed")
+  | Absent ->
+    (match Staging.settle action.staged selection.staged_selection Absent with
+     | Ok () -> ()
+     | Error _ -> failwith "developer staged settlement invariant failed")
   | Prewrite_conflict | Diverged -> ()
 ;;
 
@@ -1524,10 +1581,13 @@ let with_root_action t ~phase f =
           call.cancel <- Some cancel;
           Eio.Fiber.with_binding root_call_key t (fun () ->
             let* snapshot = current t in
+            let* staged =
+              Staging.create ~max_staged_jobs:t.registry.limits.max_staged_jobs
+            in
             let action =
               { issuer = t
               ; snapshot
-              ; staged = Hashtbl.create (module P.Id.Job)
+              ; staged
               ; stage_in_flight = 0
               ; sealed = None
               ; live = true
@@ -1584,6 +1644,7 @@ let with_root_action t ~phase f =
                 |> Result.map_error ~f:error_of_terminal_queue
               in
               action.queued <- true;
+              let* () = Staging.mark_handoff action.staged selection.staged_selection in
               let* () = drain_terminals t in
               let* _ = settled_revision intent in
               Ok value)))
@@ -1923,11 +1984,22 @@ module Native_terminal = struct
       { plan = Native_terminal { scope = t; terminal; selected }; settlement = None }
     in
     let* () =
+      match selected with
+      | None -> Staging.abort_pre_handoff t.action.staged
+      | Some _ -> Ok ()
+    in
+    let* () =
       Terminal_queue.complete issuer.terminals t.registration.terminal_slot ~intent
       |> Result.map_error ~f:error_of_terminal_queue
     in
     t.submitted <- true;
     t.action.queued <- true;
+    let* () =
+      match selected with
+      | None -> Ok ()
+      | Some selected ->
+        Staging.mark_handoff t.action.staged selected.selection.staged_selection
+    in
     let* () = drain_terminals issuer in
     settled_revision intent
   ;;
@@ -1990,11 +2062,22 @@ module Native_terminal = struct
           { plan = Native_terminal { scope = t; terminal; selected }; settlement = None }
         in
         let* () =
+          match selected with
+          | None -> Staging.abort_pre_handoff t.action.staged
+          | Some _ -> Ok ()
+        in
+        let* () =
           Terminal_queue.complete issuer.terminals registration.terminal_slot ~intent
           |> Result.map_error ~f:error_of_terminal_queue
         in
         t.submitted <- true;
         t.action.queued <- true;
+        let* () =
+          match selected with
+          | None -> Ok ()
+          | Some selected ->
+            Staging.mark_handoff t.action.staged selected.selection.staged_selection
+        in
         issuer.unresolved_native
         <- List.filter issuer.unresolved_native ~f:(fun current ->
              not (phys_equal current registration));
@@ -2020,7 +2103,7 @@ module Native_terminal = struct
       || Option.is_some t.dispatched
       || t.callback_complete
       || Option.is_some t.sealed
-      || (not (Hashtbl.is_empty t.action.staged))
+      || (not (Staging.is_empty t.action.staged))
       || (issuer.reconciling && not owned)
       || not
            (List.exists issuer.unresolved_native ~f:(fun current ->
@@ -2205,10 +2288,13 @@ let with_native_registration t ?job_parent ~invocation f =
                   ~owner:t.owner
                   ~capture_fingerprint:(Chatml_developer_capture.fingerprint t.capture)
             in
+            let* staged =
+              Staging.create ~max_staged_jobs:t.registry.limits.max_staged_jobs
+            in
             let action =
               { issuer = t
               ; snapshot
-              ; staged = Hashtbl.create (module P.Id.Job)
+              ; staged
               ; stage_in_flight = 0
               ; sealed = None
               ; live = false

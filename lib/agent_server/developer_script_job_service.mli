@@ -173,3 +173,46 @@ val acknowledge_native
   :  Scope.t
   -> Native_selection.t
   -> (unit, Agent_protocol.Error.t) result
+
+(** Borrow the one lexical Job kernel around an entire physically claimed
+    Worker Script-root operation, including its final Store transaction.
+    [candidate] must come from this service's exact Root. The callback uses
+    the registered Worker's child Switch; this function does not create a
+    second worker, scheduler, result publisher or Job grammar. Its Scope
+    stages through the new physical Worker_action, parses returned Job.start
+    effects, seals the exact surviving IDs and prepares lexical acknowledgement
+    before the Worker callback/children join. The Worker then chooses the
+    result [select] once and atomically installs parent state plus selected
+    children through its existing claimed Prepared/recovery path.
+
+    The lexical scope remains live until that Worker returns. A proven
+    Selected_installed disposition alone invokes its one-shot acknowledgement;
+    an old-epoch omission of nonempty selected children returns a typed stale
+    outcome after the parent terminal/result was durably recorded, without
+    acknowledging or releasing any published child. An uncertain write never
+    acknowledges; cleanup defers sealed/attempted reservations to the Worker.
+    [active] is the same live Claim proof that a selected native child needs;
+    the lexical Scope cannot manufacture or retain it. Callback exceptions
+    and Eio cancellation preserve their original identity.
+    Before entering the lexical scope, the saved payload of this exact
+    Store-issued candidate is decoded under the root's admitted policy and its
+    capability pins rebound to an exact subset of the current root registry.
+    The scope and each later effect recheck that subset; extra root tools never
+    become visible to this job. This is pure admission, not script compilation
+    before the physical Claim. Bare Worker Script roots use One_off_v1 and do
+    not install Model.spawn;
+    the existing Root/Native Developer_tool_v1 path remains unchanged. *)
+val with_claimed_worker
+  :  t
+  -> candidate:Developer_root_owner.Job_candidate.t
+  -> ?select:
+       (claim:Agent_store.Developer_run_store.Claim.t
+        -> proposed:Agent_protocol.Developer_job.State.t
+        -> (Developer_job_worker.Selected.t option, Agent_protocol.Error.t) result)
+  -> (active:Agent_session.Developer_job_scope.active
+      -> scope:Scope.t
+      -> sw:Eio.Switch.t
+      -> ( Agent_protocol.Developer_job.State.t * Chatml.Chatml_lang.eff list
+           , Agent_protocol.Error.t )
+           result)
+  -> (Agent_protocol.Developer_job.t option, Agent_protocol.Error.t) result
