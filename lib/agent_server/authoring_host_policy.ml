@@ -148,6 +148,47 @@ let create
 let profile_error _ = P.Error.invalid_request "invalid built-in authoring profile"
 let admitted result = Result.map_error result ~f:profile_error
 
+let standard_analysis_policy () =
+  let open Result.Let_syntax in
+  let%bind recording =
+    Chatml_typechecker.Semantic.Limits.create
+      ~max_facts:20_000
+      ~max_edges:40_000
+      ~max_label_bytes:400_000
+      ~max_work_steps:400_000
+    |> admitted
+  in
+  let%bind type_graph =
+    Chatml_semantics.Frozen.Limits.create
+      ~max_nodes:20_000
+      ~max_edges:40_000
+      ~max_label_bytes:400_000
+    |> admitted
+  in
+  let%bind semantic =
+    Chatml_semantics.Limits.create
+      ~max_input_bytes:(2 * 1024 * 1024)
+      ~recording
+      ~type_graph
+      ~max_published_facts:20_000
+      ~max_published_edges:40_000
+      ~max_published_label_bytes:400_000
+      ~max_work_steps:400_000
+    |> admitted
+  in
+  Chatml_authoring_analysis.Policy.create
+    ~compilation:{ wall_seconds = 5.; max_source_bytes = 512 * 1024 }
+    ~semantic
+    ~max_dependency_depth:16
+    ~max_results:16
+    ~max_projected_diagnostics:64
+    ~max_projected_sites:256
+    ~max_projection_sources:64
+    ~max_position_index_entries:4096
+    ~max_projection_source_bytes:(4 * 1024 * 1024)
+  |> admitted
+;;
+
 let basic_supplied ~(initialize_limits : P.Initialize.Limits.t) =
   let open Result.Let_syntax in
   let request_bytes = Int.min initialize_limits.max_request_bytes (2 * 1024 * 1024) in
@@ -175,45 +216,7 @@ let basic_supplied ~(initialize_limits : P.Initialize.Limits.t) =
         ~max_total_source_bytes:(16 * 1024 * 1024)
       |> admitted
     in
-    let%bind recording =
-      Chatml_typechecker.Semantic.Limits.create
-        ~max_facts:20_000
-        ~max_edges:40_000
-        ~max_label_bytes:400_000
-        ~max_work_steps:400_000
-      |> admitted
-    in
-    let%bind type_graph =
-      Chatml_semantics.Frozen.Limits.create
-        ~max_nodes:20_000
-        ~max_edges:40_000
-        ~max_label_bytes:400_000
-      |> admitted
-    in
-    let%bind semantic =
-      Chatml_semantics.Limits.create
-        ~max_input_bytes:(2 * 1024 * 1024)
-        ~recording
-        ~type_graph
-        ~max_published_facts:20_000
-        ~max_published_edges:40_000
-        ~max_published_label_bytes:400_000
-        ~max_work_steps:400_000
-      |> admitted
-    in
-    let%bind analysis_policy =
-      Chatml_authoring_analysis.Policy.create
-        ~compilation:{ wall_seconds = 5.; max_source_bytes = 512 * 1024 }
-        ~semantic
-        ~max_dependency_depth:16
-        ~max_results:16
-        ~max_projected_diagnostics:64
-        ~max_projected_sites:256
-        ~max_projection_sources:64
-        ~max_position_index_entries:4096
-        ~max_projection_source_bytes:(4 * 1024 * 1024)
-      |> admitted
-    in
+    let%bind analysis_policy = standard_analysis_policy () in
     let%bind service_limits =
       Service.Limits.create
         ~max_connections:128
@@ -306,4 +309,15 @@ let with_configured_projects t ~bound ~source_limits ~analysis_policy =
       ; analysis_policy
       ; configured_projects = Some bound
       }
+;;
+
+let with_semantic t ~semantic =
+  if
+    (not t.core)
+    || (Option.is_none t.source
+        && Option.is_none t.upload
+        && Option.is_none t.supplied_document)
+    || Option.is_some t.semantic
+  then invalid "authoring semantic service requires one core source origin"
+  else Ok { t with semantic = Some semantic }
 ;;

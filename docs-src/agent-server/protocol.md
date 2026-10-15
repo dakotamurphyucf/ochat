@@ -167,6 +167,16 @@ epoch is published.
 | `authoring.bundle.commit` | `Authoring.Bundle.Commit.request` | `authoring.bundle.v1` selected; installed upload policy | Seal complete upload under explicit idempotency; acceptance may precede closure publication. |
 | `authoring.bundle.status` | `Authoring.Bundle.Status.request` | `authoring.bundle.v1` selected; installed upload policy | Principal-bound staging/validation/publication/retention state for a known upload ID. |
 
+The default daemon installs core lifecycle, exact supplied-document bytes,
+lexical scanning and local assistance. With explicit
+`server.authoring_project_access` grants it also installs native roots and
+semantic Analyze, Prefix and Query on the same owner; clients select both
+`authoring.core.v1` and `authoring.semantic.v1` for those methods. A Project
+Entry request and a host ChatMD script's Library request are distinct configured
+selections. Analysis may return typed Unavailable when the selected source or
+environment is absent. Configure the actor's exact principal ID and
+authentication kind; feature negotiation does not grant source access.
+
 Read-only attachments cannot authorize writer operations or permission answers.
 Ingress has separate authority: it needs its dedicated scope and matching
 registration, without an attachment or transcript permission. Read scopes are

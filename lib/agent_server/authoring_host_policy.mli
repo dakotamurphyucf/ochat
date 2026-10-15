@@ -106,6 +106,14 @@ val create
 
 val basic_supplied : initialize_limits:P.Initialize.Limits.t -> (t, P.Error.t) result
 
+(** The same finite joined checked-analysis profile used by the built-in
+    supplied-document baseline and configured native semantic installation.
+    Its compilation source cap remains separate from canonical contract
+    identity admission. *)
+val standard_analysis_policy
+  :  unit
+  -> (Chatml_authoring_analysis.Policy.t, P.Error.t) result
+
 val upload_only
   :  initialize_limits:P.Initialize.Limits.t
   -> upload:Upload.t
@@ -117,3 +125,10 @@ val with_configured_projects
   -> source_limits:Authoring_source_host.Limits.t
   -> analysis_policy:Chatml_authoring_analysis.Policy.t
   -> (t, P.Error.t) result
+
+(** Add one real semantic sibling to an already admitted core/source policy.
+    Reject a second semantic installation or a policy without both core and a
+    usable source or supplied-document origin. The
+    caller supplies validated lower limits and current selection/metadata
+    policies; this does not create a second context owner or source grant. *)
+val with_semantic : t -> semantic:Semantic.t -> (t, P.Error.t) result

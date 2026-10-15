@@ -1,6 +1,7 @@
 open! Core
 module P = Agent_protocol
 module S = Agent_server
+module Q = P.Authoring.Analysis.Query
 
 let () = Mirage_crypto_rng_unix.use_default ()
 
@@ -11,6 +12,7 @@ let ok = function
 
 let with_daemon
       ?(options = { S.Daemon.default_options with startup_mode = Operator_only })
+      ?(configure = fun ~env:_ ~root:_ config -> config)
       f
   =
   Eio_main.run (fun env ->
@@ -32,6 +34,7 @@ let with_daemon
               root
               root
               (Filename.concat root "prompt.chatmd")
+            |> configure ~env ~root
           in
           let daemon =
             S.Daemon.start
@@ -50,9 +53,12 @@ let with_daemon
             (fun () -> f env sw root daemon))))
 ;;
 
-let connect daemon =
+let connect ?actor daemon =
   let actor =
-    Operator_authorization.trusted_local (Agent_server_test_support.principal ())
+    Option.value
+      actor
+      ~default:
+        (Operator_authorization.trusted_local (Agent_server_test_support.principal ()))
   in
   let context =
     S.Connection_context.create_authenticated
@@ -333,4 +339,542 @@ let%expect_test
       (fun () -> exercise stdio);
     print_endline "local, HTTP, stdio: same installed success and rejection");
   [%expect {| local, HTTP, stdio: same installed success and rejection |}]
+;;
+
+let%expect_test
+    "configured native Project and document semantics use the installed grant on each \
+     transport"
+  =
+  let local = Agent_server_test_support.principal () in
+  let moderator =
+    Chatml.Chatml_compiler_contract.for_target Moderator_v1 ~checkpoint:ignore
+  in
+  let conversion_bytes = ref 0 in
+  let conversion_steps = ref 0 in
+  let moderator_bytes =
+    Chatml.Chatml_compiler_contract.input_bytes
+      moderator
+      ~checkpoint:(fun () -> incr conversion_steps)
+      ~allocate:(fun bytes -> conversion_bytes := !conversion_bytes + bytes)
+  in
+  assert (moderator_bytes < 512 * 1024);
+  assert (!conversion_bytes < 16 * 1024 * 1024);
+  assert (!conversion_steps < 1_000_000);
+  let all_targets =
+    Chatml.Chatml_compiler_contract.Target.
+      [ One_off_v1; Tool_v1; Developer_tool_v1; Moderator_v1; Delegated_moderator_v1 ]
+  in
+  let all_allocated = ref 0 in
+  let all_steps = ref 0 in
+  List.iter all_targets ~f:(fun target ->
+    let contract = Chatml.Chatml_compiler_contract.for_target target ~checkpoint:ignore in
+    ignore
+      (Chatml.Chatml_compiler_contract.input_bytes
+         contract
+         ~checkpoint:(fun () -> incr all_steps)
+         ~allocate:(fun bytes -> all_allocated := !all_allocated + bytes)
+       : int));
+  assert (!all_allocated < 40 * 1024 * 1024);
+  assert (!all_steps < 1_000_000);
+  let peer_id =
+    Digestif.SHA256.(
+      digest_string
+        ("unix-peer:v1:"
+         ^ Int.to_string (Agent_transport_socket.Peer_credentials.effective_uid ()))
+      |> to_hex)
+    |> fun digest -> P.Id.Principal.of_string ("pri_" ^ digest) |> ok
+  in
+  let configure ~env ~root (config : S.Config.t) =
+    let save name contents =
+      Eio.Path.save
+        ~create:(`Exclusive 0o600)
+        Eio.Path.(Eio.Stdenv.fs env / root / name)
+        contents
+    in
+    save
+      "chatml.project.json"
+      {|{"schema_version":1,"namespace":"first","entries":{"main":{"source":"main.chatml","target":"one_off_v1"}}}|};
+    save
+      "second.project.json"
+      {|{"schema_version":1,"namespace":"second","environments":{"other":{"modules":{}}},"entries":{"main":{"source":"second.chatml","target":"one_off_v1"}}}|};
+    save
+      "moderator.project.json"
+      {|{"schema_version":1,"namespace":"moderator","entries":{"main":{"source":"moderator.chatml","target":"moderator_v1"}}}|};
+    save
+      "tool.project.json"
+      {|{"schema_version":1,"namespace":"tool","entries":{"main":{"source":"tool.chatml","target":"tool_v1"}}}|};
+    save
+      "developer-tool.project.json"
+      {|{"schema_version":1,"namespace":"developer","entries":{"main":{"source":"developer.chatml","target":"developer_tool_v1"}}}|};
+    save
+      "delegated.project.json"
+      {|{"schema_version":1,"namespace":"delegated","entries":{"main":{"source":"delegated.chatml","target":"delegated_moderator_v1"}}}|};
+    save "main.chatml" "let main input = Task.pure(input)\n";
+    save "second.chatml" "let main input = Task.pure(input)\n";
+    save
+      "moderator.chatml"
+      "let initial_state = 0\nlet on_event ctx state event = Task.pure(state)\n";
+    save
+      "draft.chatmd"
+      "<script id=\"s\" language=\"chatml\" kind=\"tool\" \
+       project=\"./chatml.project.json\">let main input = Task.pure(input)\n\
+       </script>\n\
+       <script id=\"t\" language=\"chatml\" kind=\"tool\" \
+       project=\"./second.project.json\" environment=\"other\">let main input = \
+       Task.pure(input)\n\
+       </script>";
+    let grant principal_id authentication_kind =
+      S.Authoring_project_access_configuration.Read_grant.
+        { root; principal_id; authentication_kind }
+    in
+    let selected
+          ?(target = Chatml.Chatml_compiler_contract.Target.One_off_v1)
+          project
+          request
+      =
+      S.Authoring_project_access_configuration.Selection.
+        { root; project; request; target }
+    in
+    { config with
+      server =
+        { config.server with
+          project_sources =
+            Some S.Project_source_configuration.{ external_roots = [ root ]; git = None }
+        ; authoring_project_access =
+            Some
+              S.Authoring_project_access_configuration.
+                { read_grants =
+                    [ grant local.id "test"
+                    ; grant local.id "http.static_bearer"
+                    ; grant peer_id "unix.peer"
+                    ]
+                ; selections =
+                    [ selected
+                        "chatml.project.json"
+                        (Entry { name = "main"; environment = None })
+                    ; selected "chatml.project.json" (Library { environment = None })
+                    ; selected
+                        "second.project.json"
+                        (Entry { name = "main"; environment = Some "other" })
+                    ; selected
+                        "second.project.json"
+                        (Library { environment = Some "other" })
+                    ; selected
+                        ~target:Moderator_v1
+                        "moderator.project.json"
+                        (Entry { name = "main"; environment = None })
+                    ; selected
+                        ~target:Tool_v1
+                        "tool.project.json"
+                        (Entry { name = "main"; environment = None })
+                    ; selected
+                        ~target:Developer_tool_v1
+                        "developer-tool.project.json"
+                        (Entry { name = "main"; environment = None })
+                    ; selected
+                        ~target:Delegated_moderator_v1
+                        "delegated.project.json"
+                        (Entry { name = "main"; environment = None })
+                    ]
+                }
+        }
+    }
+  in
+  with_daemon ~configure (fun env sw root daemon ->
+    let exercise connection ~refresh =
+      let enabled =
+        (initialize
+           connection
+           [ P.Authoring.Features.core
+           ; P.Authoring.Features.semantic
+           ; P.Authoring.Features.lexical
+           ; P.Authoring.Features.assistance
+           ])
+          .enabled_features
+      in
+      assert (List.mem enabled P.Authoring.Features.semantic ~equal:String.equal);
+      let capability =
+        match authoring connection P.Authoring.Wire.Request.Capabilities |> ok with
+        | Capabilities value -> value
+        | _ -> failwith "configured native capabilities were absent"
+      in
+      assert (P.Authoring.Capabilities.supports capability Roots);
+      assert (P.Authoring.Capabilities.supports capability Analyze);
+      let source_root =
+        match authoring connection P.Authoring.Wire.Request.Roots |> ok with
+        | Roots roots -> (List.hd_exn roots.roots).id
+        | _ -> failwith "configured native root was absent"
+      in
+      let project ?(checked_template = false) project_member environment =
+        let selection =
+          P.Authoring.Context.Selection.create ~target:(Entry "main") ~environment |> ok
+        in
+        let opened =
+          match
+            authoring
+              connection
+              (Context_open
+                 (P.Authoring.Context.Open_request.create_host_project
+                    ~root:source_root
+                    ~dependency_roots:[]
+                    ~project_member
+                    ~selection
+                  |> ok))
+            |> ok
+          with
+          | Context_open context -> context
+          | _ -> failwith "configured project context did not open"
+        in
+        let capture =
+          match
+            authoring
+              connection
+              (Analyze
+                 (let request =
+                    P.Authoring.Analysis.Analyze.Request.create
+                      ~context:(P.Authoring.Context.Expected.of_view opened)
+                      ~target:P.Authoring.Analysis.Target.project
+                    |> ok
+                  in
+                  if checked_template
+                  then P.Authoring.Analysis.Analyze.Request.with_checked_template request
+                  else request))
+            |> ok
+          with
+          | Analyze (Complete complete) -> complete.capture
+          | Analyze result ->
+            failwith
+              ("configured project was not checked: "
+               ^ Sexp.to_string_hum (P.Authoring.Analysis.Analyze.sexp_of_t result))
+          | _ -> failwith "configured project response changed"
+        in
+        opened, capture
+      in
+      let first_context, first_capture =
+        project ~checked_template:true "chatml.project.json" None
+      in
+      ignore (project "second.project.json" (Some "other"));
+      ignore (project "moderator.project.json" None);
+      if refresh
+      then (
+        let expected = P.Authoring.Context.Expected.of_view first_context in
+        let script_source =
+          match
+            authoring
+              connection
+              (Source_list
+                 (P.Authoring.Source_read.List_request.create
+                    ~context:expected
+                    ~package_namespace:None
+                    ~directory:None
+                  |> ok))
+            |> ok
+          with
+          | Source_list result ->
+            List.find_exn
+              (P.Authoring.Source_read.List_result.sources result)
+              ~f:(fun source ->
+                String.equal
+                  (Chatml_source.Id.relative_path (P.Authoring.Source.id source))
+                  "main.chatml")
+          | _ -> failwith "installed project source inventory unavailable"
+        in
+        let prefix =
+          match
+            authoring
+              connection
+              (Prefix
+                 (P.Authoring.Analysis.Prefix.Request.create
+                    ~context:expected
+                    ~target:P.Authoring.Analysis.Target.project
+                    ~source:script_source
+                    ~cursor_byte:(P.Authoring.Source.byte_length script_source)
+                  |> ok))
+            |> ok
+          with
+          | Prefix (Provisional result) -> result
+          | Prefix _ | _ -> failwith "installed native Prefix unavailable"
+        in
+        let query =
+          Q.Request.create
+            ~evidence:(Q.Provisional prefix)
+            ~source:(P.Authoring.Analysis.Prefix.prefix_source prefix)
+            ~byte_offset:(P.Authoring.Analysis.Prefix.end_byte prefix)
+            ~kind:(Q.Candidates Value)
+            ~max_items:1
+          |> ok
+        in
+        (match authoring connection (Query query) |> ok with
+         | Query result ->
+           (match Q.payload result with
+            | Candidates_result (Selected page) when not (List.is_empty page.items) -> ()
+            | _ -> failwith "installed native Query lacked selected candidates")
+         | _ -> failwith "installed native Query response changed");
+        let assistance_request =
+          P.Authoring_assistance.Assistance.Request.create
+            ~context:expected
+            ~source:script_source
+            ~cursor_byte:4
+            ~max_items:1
+          |> ok
+        in
+        (match authoring connection (Assistance assistance_request) |> ok with
+         | Assistance result ->
+           (match P.Authoring_assistance.Assistance.Result.items result with
+            | [ item ] ->
+              (match P.Authoring_assistance.Assistance.Suggestion.evidence item with
+               | Checked_template checked ->
+                 assert (
+                   P.Authoring_assistance.Assistance.Checked_template.equal_target
+                     (P.Authoring_assistance.Assistance.Checked_template.target checked)
+                     One_off_v1)
+               | _ -> failwith "installed native checked-template evidence absent")
+            | _ -> failwith "installed native checked-template item absent")
+         | _ -> failwith "installed native assistance response changed");
+        Eio.Path.save
+          ~create:(`Or_truncate 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / root / "main.chatml")
+          "let main input = Task.pure(input)\n\n";
+        let old = P.Authoring.Context.Expected.of_view first_context in
+        let next =
+          match
+            authoring
+              connection
+              (Context_refresh
+                 (P.Authoring.Context.Refresh_request.create
+                    ~expected:old
+                    ~policy:Reject_open_documents))
+            |> ok
+          with
+          | Context_refresh context -> context
+          | _ -> failwith "configured source refresh did not publish"
+        in
+        let next_expected = P.Authoring.Context.Expected.of_view next in
+        (match
+           authoring
+             connection
+             (Analyze
+                (P.Authoring.Analysis.Analyze.Request.create
+                   ~context:old
+                   ~target:P.Authoring.Analysis.Target.project
+                 |> ok))
+         with
+         | Error failure when P.Error.equal_code failure.code Conflict -> ()
+         | Ok _ | Error _ -> failwith "old configured source survived refresh");
+        let second_capture =
+          match
+            authoring
+              connection
+              (Analyze
+                 (P.Authoring.Analysis.Analyze.Request.create
+                    ~context:next_expected
+                    ~target:P.Authoring.Analysis.Target.project
+                  |> ok))
+            |> ok
+          with
+          | Analyze (Complete complete) -> complete.capture
+          | _ -> failwith "refreshed source was not checked"
+        in
+        assert (
+          not
+            (Chatml_source.Digest.equal
+               (P.Authoring.Analysis.Capture.input_fingerprint first_capture)
+               (P.Authoring.Analysis.Capture.input_fingerprint second_capture))));
+      let document =
+        match
+          authoring
+            connection
+            (Context_open
+               (P.Authoring.Context.Open_request.create_host_document
+                  ~root:source_root
+                  ~member:"draft.chatmd"
+                  ~default_environment:None
+                |> ok))
+          |> ok
+        with
+        | Context_open context -> context
+        | _ -> failwith "configured host document did not open"
+      in
+      let context = P.Authoring.Context.Expected.of_view document in
+      List.iter [ "s"; "t" ] ~f:(fun script ->
+        match
+          authoring
+            connection
+            (Analyze
+               (P.Authoring.Analysis.Analyze.Request.create
+                  ~context
+                  ~target:(P.Authoring.Analysis.Target.selected_script script |> ok)
+                |> ok))
+        with
+        | Ok (Analyze (Complete _)) -> ()
+        | Ok (Analyze (Unavailable { reason; _ })) ->
+          failwith
+            ("configured document "
+             ^ script
+             ^ " unavailable: "
+             ^ Sexp.to_string_hum
+                 (P.Authoring.Analysis.Analyze.sexp_of_unavailable reason))
+        | Ok (Analyze result) ->
+          failwith
+            ("configured document "
+             ^ script
+             ^ " was not checked: "
+             ^ Sexp.to_string_hum (P.Authoring.Analysis.Analyze.sexp_of_t result))
+        | Error failure ->
+          failwith ("configured document " ^ script ^ " failed: " ^ failure.message)
+        | Ok _ -> failwith "configured document response changed")
+    in
+    let _, local_connection = connect daemon in
+    Fun.protect
+      ~finally:(fun () -> Agent_client.Connection.close local_connection)
+      (fun () -> exercise local_connection ~refresh:true);
+    let http =
+      Agent_server_wire_fixture.http_connector ~sw ~env ~daemon ~root ~principal:local ()
+    in
+    Fun.protect
+      ~finally:(fun () -> Agent_client.Connection.close http)
+      (fun () -> exercise http ~refresh:false);
+    let stdio =
+      Agent_server_wire_fixture.connect_stdio
+        ~sw
+        ~env
+        ~daemon
+        ~socket_path:(Filename.concat root "native-authoring.sock")
+    in
+    Fun.protect
+      ~finally:(fun () -> Agent_client.Connection.close stdio)
+      (fun () -> exercise stdio ~refresh:false);
+    let current = ref true in
+    let actor =
+      Operator_authorization.guarded ~principal:local ~is_current:(fun () -> !current)
+    in
+    let _, revoked = connect ~actor daemon in
+    Fun.protect
+      ~finally:(fun () -> Agent_client.Connection.close revoked)
+      (fun () ->
+         ignore
+           (initialize
+              revoked
+              [ P.Authoring.Features.core; P.Authoring.Features.semantic ]
+            : P.Initialize.Response.t);
+         let root =
+           match authoring revoked P.Authoring.Wire.Request.Roots |> ok with
+           | Roots roots -> (List.hd_exn roots.roots).id
+           | _ -> failwith "revocation setup lost its root"
+         in
+         let context =
+           match
+             authoring
+               revoked
+               (Context_open
+                  (P.Authoring.Context.Open_request.create_host_project
+                     ~root
+                     ~dependency_roots:[]
+                     ~project_member:"chatml.project.json"
+                     ~selection:
+                       (P.Authoring.Context.Selection.create
+                          ~target:(Entry "main")
+                          ~environment:None
+                        |> ok)
+                   |> ok))
+             |> ok
+           with
+           | Context_open context -> P.Authoring.Context.Expected.of_view context
+           | _ -> failwith "revocation setup did not open project"
+         in
+         current := false;
+         match
+           authoring
+             revoked
+             (Analyze
+                (P.Authoring.Analysis.Analyze.Request.create
+                   ~context
+                   ~target:P.Authoring.Analysis.Target.project
+                 |> ok))
+         with
+         | Error failure when P.Error.equal_code failure.code Permission_denied -> ()
+         | Ok _ | Error _ -> failwith "revoked actor retained configured analysis");
+    print_endline "configured native Project and two-script document: local, HTTP, stdio");
+  [%expect {| configured native Project and two-script document: local, HTTP, stdio |}]
+;;
+
+let%expect_test "configured native grants reject an explicitly disabled authoring owner" =
+  Eio_main.run (fun env ->
+    let root =
+      Filename.concat "/tmp" ("ochat-ai-" ^ P.Id.Transaction.(create () |> to_string))
+    in
+    let path = Eio.Path.(Eio.Stdenv.fs env / root) in
+    Eio.Path.mkdir ~perm:0o700 path;
+    Exn.protect
+      ~finally:(fun () -> Eio.Path.rmtree ~missing_ok:true path)
+      ~f:(fun () ->
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(path / "prompt.chatmd")
+          "<developer>Configured authoring startup.</developer>";
+        let principal = Agent_server_test_support.principal () in
+        let config =
+          Agent_server_test_support.config
+            root
+            root
+            (Filename.concat root "prompt.chatmd")
+        in
+        let config =
+          { config with
+            server =
+              { config.server with
+                project_sources =
+                  Some
+                    S.Project_source_configuration.
+                      { external_roots = [ root ]; git = None }
+              ; authoring_project_access =
+                  Some
+                    S.Authoring_project_access_configuration.
+                      { read_grants =
+                          [ { root
+                            ; principal_id = principal.id
+                            ; authentication_kind = "test"
+                            }
+                          ]
+                      ; selections =
+                          [ { root
+                            ; project = "chatml.project.json"
+                            ; request = Entry { name = "main"; environment = None }
+                            ; target = One_off_v1
+                            }
+                          ]
+                      }
+              }
+          }
+        in
+        Eio.Switch.run (fun sw ->
+          let start options =
+            S.Daemon.start
+              ~sw
+              ~env
+              ~config
+              ~tool_dir:root
+              ~home:root
+              ~process_start_identity:None
+              ~options
+              ()
+          in
+          let invalid options =
+            match start options with
+            | Error failure when P.Error.equal_code failure.code Invalid_request -> ()
+            | Error failure -> raise_s [%sexp (failure : P.Error.t)]
+            | Ok daemon ->
+              S.Daemon.shutdown daemon |> ok;
+              failwith "invalid configured authoring startup was admitted"
+          in
+          let base = { S.Daemon.default_options with startup_mode = Operator_only } in
+          invalid { base with authoring = None };
+          invalid
+            { base with
+              protocol_limits = { base.protocol_limits with max_request_bytes = 65536 }
+            };
+          let daemon = start base |> ok in
+          S.Daemon.shutdown daemon |> ok)));
+  print_endline "configured grant conflicts and failed-start cleanup: typed";
+  [%expect {| configured grant conflicts and failed-start cleanup: typed |}]
 ;;
