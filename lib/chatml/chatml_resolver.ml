@@ -405,21 +405,23 @@ let rec resolve_stmt (ctx : resolve_ctx) (snode : L.stmt L.node) : L.resolved_st
      | None -> Some (L.RSOpen (Syntax_name.name nm)))
 ;;
 
+let context_of_checked checked ~checkpoint =
+  let lookup_fun = Chatml_typechecker.checked_lookup_span_type checked in
+  { lookup_type = lookup_fun
+  ; lookup_module_visibility = Chatml_typechecker.checked_module_visibility checked
+  ; lookup_configured = Chatml_typechecker.checked_configured_annotation checked
+  ; checkpoint
+  ; stack = ref []
+  }
+;;
+
 let resolve_checked_program
       ?(checkpoint = fun () -> ())
       (checked : Chatml_typechecker.checked_program)
       (prog : L.program)
   : L.resolved_program
   =
-  let lookup_fun = Chatml_typechecker.checked_lookup_span_type checked in
-  let ctx =
-    { lookup_type = lookup_fun
-    ; lookup_module_visibility = Chatml_typechecker.checked_module_visibility checked
-    ; lookup_configured = Chatml_typechecker.checked_configured_annotation checked
-    ; checkpoint
-    ; stack = ref []
-    }
-  in
+  let ctx = context_of_checked checked ~checkpoint in
   let stmts' =
     prog.stmts
     |> List.filter_map ~f:(fun sn ->
@@ -429,12 +431,7 @@ let resolve_checked_program
   { L.stmts = stmts'; source_text = prog.source_text }
 ;;
 
-let resolve_configured_program
-      (checked : Chatml_typechecker.checked_program)
-      unit
-      ~checkpoint
-  =
-  let source = Chatml.Chatml_parse.Unit.source unit in
+let checked_matches_source (checked : Chatml_typechecker.checked_program) source =
   match checked.source with
   | Some checked_source
     when Chatml_source.Id.equal
@@ -442,16 +439,61 @@ let resolve_configured_program
            (Chatml_source.id checked_source)
          && Chatml_source.Digest.equal
               (Chatml_source.digest source)
-              (Chatml_source.digest checked_source) ->
+              (Chatml_source.digest checked_source) -> true
+  | Some _ | None -> false
+;;
+
+let foreign_checked_source () =
+  Chatml_diagnostic.create
+    "Checked annotations do not belong to this captured source revision"
+;;
+
+let resolve_configured_program
+      (checked : Chatml_typechecker.checked_program)
+      unit
+      ~checkpoint
+  =
+  let source = Chatml.Chatml_parse.Unit.source unit in
+  if checked_matches_source checked source
+  then
     Ok
       (resolve_checked_program
          ~checkpoint
          checked
          (Chatml.Chatml_parse.Unit.program unit))
-  | Some _ | None ->
-    Error
-      (Chatml_diagnostic.create
-         "Checked annotations do not belong to this captured source revision")
+  else Error (foreign_checked_source ())
+;;
+
+let resolve_repl_statement checked unit ~statement_index ~checkpoint =
+  let source = Chatml.Chatml_parse.Unit.source unit in
+  if not (checked_matches_source checked source)
+  then Error (foreign_checked_source ())
+  else if statement_index < 0
+  then Error (Chatml_diagnostic.create "REPL statement index is out of range")
+  else (
+    let rec select index = function
+      | [] -> Error (Chatml_diagnostic.create "REPL statement index is out of range")
+      | statement :: rest ->
+        checkpoint ();
+        if index = 0 then Ok statement else select (index - 1) rest
+    in
+    let open Result.Let_syntax in
+    let%bind statement =
+      select statement_index (Chatml.Chatml_parse.Unit.program unit).stmts
+    in
+    let%bind _location =
+      Chatml_source.locate
+        source
+        ~start_byte:statement.span.left.offset
+        ~end_byte:statement.span.right.offset
+        ~checkpoint
+      |> Result.map_error ~f:(fun _ ->
+        Chatml_diagnostic.create "REPL statement span does not belong to its source")
+    in
+    let ctx = context_of_checked checked ~checkpoint in
+    let result = Option.map (resolve_stmt ctx statement) ~f:(with_stmt_value statement) in
+    checkpoint ();
+    Ok result)
 ;;
 
 let resolve_captured_program checked unit =

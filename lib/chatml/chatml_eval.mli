@@ -49,6 +49,37 @@ val eval_captured_program
   -> resolved_program
   -> (env, runtime_error) result
 
+module Staged_statement : sig
+  (** A candidate top-level binding table, separate from the committed table.
+      Existing cells and completed module objects remain shared. This lower
+      evaluator value is borrowed by the trusted REPL owner; it is never a
+      client receipt or a rollback of prior mutable/external effects. *)
+  type t
+
+  val environment : t -> env
+  val introduced_names : t -> string list
+
+  (** The one expression result computed during evaluation, if the statement
+      was [RSExpr]. No second evaluation is needed for display or task retain. *)
+  val expression_value : t -> value option
+end
+
+(** Evaluate one already resolved statement exactly once into a copied top-level
+    table. The supplied completed configured-module map is the result of THIS
+    statement's genuine runtime initialization. New closures capture [source]
+    and that map; old closures retain their old source/map and shared cells.
+    Validate the statement span against [source] before effects. On a runtime
+    error, discard only the copied table: mutations of old cells and external
+    effects are not undone. Control/cancellation exceptions propagate with
+    original identity and backtrace. The owning REPL validates the resolver's
+    exact parsed/checked provenance before invoking this lower evaluator. *)
+val eval_captured_statement
+  :  env
+  -> source:Chatml_source.t
+  -> configured_modules:Configured_modules.t
+  -> resolved_stmt_node
+  -> (Staged_statement.t, runtime_error) result
+
 (** Select checked public exports into a fresh table while sharing values and
     private closure environments. Reuses inline signature selection, preserving
     source/control/dependencies and polling the current control. Does not execute

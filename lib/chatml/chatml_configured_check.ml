@@ -194,6 +194,13 @@ module Repl_statement = struct
   let after_values t = t.after_values
   let after_types t = t.after_types
   let introduced_values t = t.introduced_values
+
+  let expression_type t =
+    match t.statement.value with
+    | Chatml.Chatml_lang.SExpr expression ->
+      Checker.checked_lookup_span_type t.checked expression.span
+    | SLet _ | SLetRec _ | SType _ | SModule _ | SOpen _ -> None
+  ;;
 end
 
 let check_repl_statement

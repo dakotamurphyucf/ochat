@@ -64,6 +64,12 @@ module Repl_statement : sig
   val after_values : t -> Chatml_typechecker.Value_scope.t
   val after_types : t -> Chatml_typechecker.Type_alias.t
   val introduced_values : t -> string list
+
+  (** For [SExpr], the type inferred and recorded at that expression's exact
+      source span during this check; [None] for every other statement. This
+      borrows compiler-owned cells only until the caller's bounded freeze. It
+      never re-infers the expression for a later display receipt. *)
+  val expression_type : t -> Chatml_typechecker.typ option
 end
 
 (** Check exactly one source-owned top-level statement against the candidate's
