@@ -27,7 +27,7 @@ val response : prepared -> P.Authoring.Analysis.Query.t
 
 (** Nonyielding comparison of the SAME original selected Build/contract and
     independently admitted project-metadata route, if a selected Document
-    result was used. Core repeats context/source/actor checks and all five
+    result was used. Core repeats context/source/actor checks and all current
     cache/capture/index heads around this callback. No expired Current token,
     parser, filesystem read or yielding checkpoint is retained here. *)
 val final_check_now : prepared -> (unit, Owner.Error.t) result

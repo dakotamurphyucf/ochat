@@ -8,31 +8,51 @@ module Analyze = struct
     type t =
       { context : Context.Expected.t
       ; target : Target.selector
+      ; prepare_checked_template : bool
       }
 
-    let create ~context ~target = Ok { context; target }
+    let create ~context ~target = Ok { context; target; prepare_checked_template = false }
+    let with_checked_template t = { t with prepare_checked_template = true }
     let context t = t.context
     let target t = t.target
+    let prepare_checked_template t = t.prepare_checked_template
 
     let equal a b =
       Context.Expected.equal a.context b.context
       && Target.equal_selector a.target b.target
+      && Bool.equal a.prepare_checked_template b.prepare_checked_template
     ;;
 
     let sexp_of_t _ = Sexp.Atom "authoring_analysis_request"
 
     let to_json t =
       obj
-        [ "context", Context.Expected.to_json t.context
-        ; "target", Target.selector_to_json t.target
-        ]
+        ([ "context", Context.Expected.to_json t.context
+         ; "target", Target.selector_to_json t.target
+         ]
+         @
+         if t.prepare_checked_template
+         then [ "prepare_checked_template", C.boolean true ]
+         else [])
     ;;
 
     let of_json json =
-      let* fields = C.fields ~allowed:[ "context"; "target" ] json in
+      let* fields =
+        C.fields ~allowed:[ "context"; "target"; "prepare_checked_template" ] json
+      in
       let* context = field fields "context" Context.Expected.of_json in
       let* target = field fields "target" Target.selector_of_json in
-      create ~context ~target
+      let* prepare_checked_template =
+        C.optional_as fields "prepare_checked_template" (function
+          | `True -> Ok true
+          | `False -> Ok false
+          | _ -> C.invalid "invalid checked-template preparation flag")
+      in
+      let* request = create ~context ~target in
+      Ok
+        (match prepare_checked_template with
+         | Some true -> with_checked_template request
+         | Some false | None -> request)
     ;;
   end
 

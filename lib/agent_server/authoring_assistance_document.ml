@@ -25,6 +25,7 @@ module Selected_tools = Authoring_assistance_admission.Selected_tool_policy
 module Script_policy = Authoring_script_selection.Policy
 module Project_capture = Authoring_source_host.Document_context.Project_capture
 module Project_policy = Authoring_project_metadata.Policy
+module Checked_template = Authoring_checked_template_suggestion
 
 type t =
   { result : Wire.Result.t
@@ -105,6 +106,7 @@ let prepare
       ~script_selection
       ~project_metadata
       ~selected_tools
+      ~project_build_limits
       ~(limits : Limits.t)
       ~checkpoint
   =
@@ -344,10 +346,18 @@ let prepare
        | Tag_name _ | Attribute_name _ | Attribute_value _ | Text | Opaque -> false)
     | Unavailable _ -> false
   in
-  let%bind result =
+  let%bind result, checked_script =
     match selected, script_body_cursor with
     | Some (_, parsed, declaration, selected), true ->
-      let build = Authoring_script_selection.Selected.build selected in
+      let%bind build =
+        Authoring_selected_script_overlay.prepare
+          selected
+          ~declaration
+          ~max_body_bytes:limits.protocol_limits.max_context_source_bytes
+          ~limits:project_build_limits
+          ~checkpoint
+        |> Result.map_error ~f:Authoring_semantic_error.selected_entry_overlay
+      in
       (match
          Script.assess
            inputs
@@ -359,7 +369,7 @@ let prepare
          |> Result.map_error ~f:script_error
        with
        | Error error -> Error error
-       | Ok (Script.Unavailable _) -> Ok markup
+       | Ok (Script.Unavailable _) -> Ok (markup, None)
        | Ok (Script.Ready script) ->
          (match
             Chatml.Selected_contract.admit
@@ -371,7 +381,9 @@ let prepare
           | Error error ->
             (match selected_contract_error error with
              | Error.Resource_limit -> Error Error.Resource_limit
-             | _ -> unavailable request Wire.Status.Catalog_unavailable)
+             | _ ->
+               unavailable request Wire.Status.Catalog_unavailable
+               |> Result.map ~f:(fun result -> result, None))
           | Ok selected_contract ->
             let%bind origin =
               Mapped.Origin.admit
@@ -385,7 +397,7 @@ let prepare
               |> Result.map_error ~f:mapped_error
             in
             (match origin with
-             | Mapped.Origin.Unavailable -> Ok markup
+             | Mapped.Origin.Unavailable -> Ok (markup, None)
              | Mapped.Origin.Ready origin ->
                let%map mapped =
                  Chatml.produce
@@ -396,13 +408,29 @@ let prepare
                    ~checkpoint
                  |> Result.map_error ~f:fallback_error
                in
-               (match Wire.Result.status mapped with
-                | Wire.Status.Unavailable Wire.Status.Source_map_unavailable -> markup
-                | Wire.Status.Complete
-                | Wire.Status.Truncated _
-                | Wire.Status.Unavailable _ -> mapped))))
-    | None, _ | Some _, false -> Ok markup
+               ( (match Wire.Result.status mapped with
+                  | Wire.Status.Unavailable Wire.Status.Source_map_unavailable -> markup
+                  | Wire.Status.Complete
+                  | Wire.Status.Truncated _
+                  | Wire.Status.Unavailable _ -> mapped)
+               , Some script ))))
+    | None, _ | Some _, false -> Ok (markup, None)
   in
+  let%bind checked =
+    match checked_script, declaration with
+    | Some script, Some declaration ->
+      Checked_template.document
+        current
+        ~inputs
+        ~script
+        ~declaration
+        ~authored_input:lexical_input
+        ~authored
+        ~request
+        ~checkpoint
+    | None, _ | Some _, None -> Ok None
+  in
+  let%bind result = Checked_template.include_checked result checked in
   let check_now () =
     let open Result.Let_syntax in
     let%bind () =

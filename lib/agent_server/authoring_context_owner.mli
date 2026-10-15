@@ -42,7 +42,8 @@ val with_current
     context and expected generation are compared again. It may perform a pure
     compare-and-swap of already prepared immutable values only after comparing
     BOTH analysis cache heads, the certified analysis-index head, the
-    provisional-index head and the retained document-capture head borrowed
+    provisional-index head, checked-template head and retained document-capture
+    head borrowed
     at request admission; any changed head rejects the result. It constructs
     no new graph, parser result or wire response. The borrowed [Current] token
     has expired by then; neither callback may use it or perform I/O, wait or

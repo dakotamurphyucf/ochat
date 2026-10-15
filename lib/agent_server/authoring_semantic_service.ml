@@ -18,6 +18,7 @@ module Provisional_index = Authoring_provisional_index
 module Prefix_limits = Prefix.Limits
 module Query = Authoring_semantic_query
 module Query_limits = Query.Limits
+module Checked_template = Authoring_checked_template
 
 module Limits = struct
   type t =
@@ -71,6 +72,7 @@ type t =
   ; script_selection : Selection.Policy.t option
   ; project_metadata : Metadata.Policy.t option
   ; project_build_limits : Chatml_project_build.Limits.t
+  ; checked_template_limits : Checked_template.Limits.t
   ; limits : Limits.t
   ; prefix_limits : Prefix.Limits.t
   ; query_limits : Query.Limits.t
@@ -87,12 +89,29 @@ let create
       ~prefix_limits
       ~query_limits
   =
+  let max_recomposition_input_bytes =
+    Option.value
+      (Chatml_project_build.Limits.max_input_bytes project_build_limits)
+      ~default:owner.Owner.protocol_limits.max_context_source_bytes
+  in
+  let checked_template_limits =
+    Checked_template.Limits.create
+      ~max_example_bytes:4096
+      ~max_recomposition_work_steps:
+        (Chatml_project_build.Limits.max_work_steps project_build_limits)
+      ~max_recomposition_input_bytes
+      ~max_dependency_depth:
+        (Chatml_authoring_analysis.Policy.max_dependency_depth owner.analysis_policy)
+      ~compile:(Chatml_authoring_analysis.Policy.compilation owner.analysis_policy)
+    |> Or_error.ok_exn
+  in
   { owner
   ; env
   ; document_dir
   ; script_selection
   ; project_metadata
   ; project_build_limits
+  ; checked_template_limits
   ; limits
   ; prefix_limits
   ; query_limits
@@ -263,7 +282,15 @@ let selected_for_declaration
   | Some _, None | None, _ -> Ok (raw_selected, raw_selected)
 ;;
 
-let analyze_document t current ~actor ~script_id ~checkpoint ~set_final_check =
+let analyze_document
+      t
+      current
+      ~actor
+      ~script_id
+      ~checked_template
+      ~checkpoint
+      ~set_final_check
+  =
   let open Result.Let_syntax in
   let target =
     Analysis.Target.selected_script script_id
@@ -430,8 +457,11 @@ let analyze_document t current ~actor ~script_id ~checkpoint ~set_final_check =
                ~inputs
                ~retained
                ~script
+               ~selected_build
                ~env:t.env
                ~contract:(Selection.Selected.contract selected)
+               ~checked_template
+               ~template_limits:t.checked_template_limits
                ~checkpoint)))
 ;;
 
@@ -480,6 +510,9 @@ let analyze t ~actor ~connection request =
               current
               ~env:t.env
               ~build_limits:t.project_build_limits
+              ~checked_template:
+                (Analysis.Analyze.Request.prepare_checked_template request)
+              ~template_limits:t.checked_template_limits
               ~checkpoint:charge
           | Selected_script script_id, Document ->
             analyze_document
@@ -487,6 +520,8 @@ let analyze t ~actor ~connection request =
               current
               ~actor
               ~script_id
+              ~checked_template:
+                (Analysis.Analyze.Request.prepare_checked_template request)
               ~checkpoint:charge
               ~set_final_check:(fun check -> final_check := check)
           | Project, Document | Selected_script _, Project ->

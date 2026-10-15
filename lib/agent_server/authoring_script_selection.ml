@@ -17,7 +17,7 @@ module Limits = struct
   let create ~max_identity_bytes ~max_work_steps =
     if
       max_identity_bytes <= 0
-      || max_identity_bytes > 8 * 1024 * 1024
+      || max_identity_bytes > 16 * 1024 * 1024
       || max_work_steps <= 0
       || max_work_steps > 1_000_000
     then Or_error.error_string "invalid selected-script contract admission limits"

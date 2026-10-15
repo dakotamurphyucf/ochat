@@ -637,6 +637,52 @@ let%expect_test "client binds source, document transitions and initialization" =
             ~status:(Unavailable No_local_context)
           |> ok);
     assert (Result.is_ok (Agent_client.Authoring.assist client assistance_request));
+    let example = {|let main input = Task.pure(input)|} in
+    let checked =
+      H.Assistance.Checked_template.create
+        ~selected:
+          (H.Assistance.Selected_catalog.create
+             ~environment:"default"
+             ~input_fingerprint:fingerprint
+             ~compiler_contract:fingerprint
+           |> ok)
+        ~target:One_off_v1
+        ~example_digest:(Chatml_source.Digest.of_contents example ~checkpoint:Fn.id)
+        ~checked_input_fingerprint:fingerprint
+      |> ok
+    in
+    let checked_item =
+      H.Assistance.Suggestion.create
+        ~kind:Template
+        ~label:"Checked one-off example"
+        ~insert_text:example
+        ~replace:
+          (H.Assistance.Range.create
+             ~source:base
+             ~start_byte:0
+             ~end_byte:(A.Source.byte_length base)
+           |> ok)
+        ~evidence:(Checked_template checked)
+      |> ok
+    in
+    assistance_reply
+    := Some
+         (H.Assistance.Result.create
+            ~request:assistance_request
+            ~items:[ checked_item ]
+            ~status:Complete
+          |> ok);
+    (match Agent_client.Authoring.assist client assistance_request with
+     | Ok result ->
+       assert (
+         List.exists (H.Assistance.Result.items result) ~f:(fun item ->
+           match H.Assistance.Suggestion.evidence item with
+           | Checked_template checked ->
+             H.Assistance.Checked_template.equal_target
+               (H.Assistance.Checked_template.target checked)
+               One_off_v1
+           | _ -> false))
+     | Error _ -> failwith "client rejected an exact checked-template reply");
     let changed_assistance_request =
       H.Assistance.Request.create
         ~context:expected

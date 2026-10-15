@@ -32,6 +32,7 @@ let error = function
   | Invalid_position _
   | Invalid_request
   | Analysis_unavailable
+  | Checked_template_failed
   | Storage_unavailable
   | Upload_failure _ -> Other
 ;;
@@ -54,6 +55,7 @@ type head =
   | Analysis_index
   | Provisional_index
   | Parsed_capture
+  | Checked_template
 
 type probe =
   { owner : Service.t
@@ -123,7 +125,13 @@ let replace_head { owner; current } head =
            ~owner_nonce:(P.Id.Transaction.create ())
            ~max_rows:owner.limits.max_provisional_results
          |> Or_error.ok_exn
-    | Parsed_capture -> owner.document_capture <- None)
+    | Parsed_capture -> owner.document_capture <- None
+    | Checked_template ->
+      owner.checked_templates
+      <- Authoring_checked_template_cache.create
+           ~max_rows:(Int.min 512 (Project.Policy.max_results owner.analysis_policy))
+           ~max_retained_bytes:(2 * 1024 * 1024)
+         |> Or_error.ok_exn)
   |> Result.map_error ~f:error
 ;;
 
@@ -289,6 +297,9 @@ let preview_project_overlay
             ~owner_nonce:(P.Id.Transaction.create ())
             ~max_rows:1
           |> Or_error.ok_exn
+      ; borrowed_checked_templates =
+          Authoring_checked_template_cache.create ~max_rows:1 ~max_retained_bytes:4096
+          |> Or_error.ok_exn
       }
   in
   Authoring_project_overlay.prepare current ~limits ~checkpoint
@@ -412,6 +423,7 @@ let classify_compilation_error error =
   | Closed
   | Invalid_position _
   | Storage_unavailable
+  | Checked_template_failed
   | Upload_failure _ -> `Unexpected
 ;;
 

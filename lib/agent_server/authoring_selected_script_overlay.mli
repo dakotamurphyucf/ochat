@@ -16,6 +16,20 @@ module Error : sig
     | Recomposition of Chatml_project_build.Error.t
 end
 
+(** Replace only the exact captured [Prepared.entry] body in an already selected
+    Build. The caller supplies the authentic selected contract and proves why
+    [contents] is the requested candidate; this pure helper grants no source
+    authority. Matching bytes return the original Build. Changed bytes use the
+    same bounded recomposition and collision-checked fresh lock as [prepare]. *)
+val recompose_entry
+  :  Chatml_project_build.t
+  -> contract:Chatml.Chatml_compiler_contract.t
+  -> contents:string
+  -> max_body_bytes:int
+  -> limits:Chatml_project_build.Limits.t
+  -> checkpoint:(unit -> unit)
+  -> (Chatml_project_build.t, Error.t) Result.t
+
 (** [selected] was admitted by the current original/request actor policy for
     this actual declaration. The caller already proved parser membership and
     current root/import source custody. Only the selected Build's exact

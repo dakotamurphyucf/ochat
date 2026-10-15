@@ -8,6 +8,7 @@ module Project = Chatml_authoring_analysis
 module Document = Chatmd_authoring_analysis
 module Ledger = Chatml_authoring_context
 module Analysis = Agent_protocol.Authoring.Analysis
+module Template = Authoring_semantic_template
 
 let check_response_size owner response =
   match
@@ -17,7 +18,15 @@ let check_response_size owner response =
   | Error _ -> Error Owner.Error.Resource_limit
 ;;
 
-let prepare owner current ~env ~build_limits ~checkpoint =
+let prepare
+      owner
+      current
+      ~env
+      ~build_limits
+      ~checked_template
+      ~template_limits
+      ~checkpoint
+  =
   let open Result.Let_syntax in
   let%bind project_before, document_before, index_before =
     Owner.Current.analysis_heads current
@@ -33,6 +42,17 @@ let prepare owner current ~env ~build_limits ~checkpoint =
     | Error (Overlay.Error.Invalid_overlay _) -> Error Owner.Error.Invalid_request
   in
   let contract = Overlay.Prepared.contract prepared in
+  let%bind templates_after =
+    Template.project
+      current
+      ~inputs
+      ~receipt:(Overlay.Prepared.overlay prepared)
+      ~contract
+      ~requested:checked_template
+      ~limits:template_limits
+      ~env
+      ~checkpoint
+  in
   let%bind candidate =
     Project.Project_candidate.analyze_validated_with_contract
       inputs
@@ -94,5 +114,6 @@ let prepare owner current ~env ~build_limits ~checkpoint =
     ~project_after
     ~document_after
     ~index_after
+    ~templates_after
     ~response
 ;;

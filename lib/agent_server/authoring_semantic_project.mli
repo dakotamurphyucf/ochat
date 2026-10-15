@@ -10,5 +10,7 @@ val prepare
   -> Owner.Current.t
   -> env:Eio_unix.Stdenv.base
   -> build_limits:Chatml_project_build.Limits.t
+  -> checked_template:bool
+  -> template_limits:Authoring_checked_template.Limits.t
   -> checkpoint:(unit -> unit)
   -> (Publication.Prepared.t, Owner.Error.t) result

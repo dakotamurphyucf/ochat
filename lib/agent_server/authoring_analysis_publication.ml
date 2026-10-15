@@ -18,18 +18,21 @@ module Prepared = struct
         { retained : Core_owner.Retained_document_capture.t
         ; document_after : Document.Document_cache.t
         ; index_after : Authoring_analysis_index.t
+        ; templates_after : Authoring_checked_template_cache.t
         ; response : P.Authoring.Analysis.Analyze.t
         }
     | Project_result of
         { project_after : Project.Project_cache.t
         ; document_after : Document.Document_cache.t
         ; index_after : Authoring_analysis_index.t
+        ; templates_after : Authoring_checked_template_cache.t
         ; response : P.Authoring.Analysis.Analyze.t
         }
     | Document_result of
         { retained : Core_owner.Retained_document_capture.t
         ; document_after : Document.Document_cache.t
         ; index_after : Authoring_analysis_index.t
+        ; templates_after : Authoring_checked_template_cache.t
         ; response : P.Authoring.Analysis.Analyze.t
         }
 
@@ -49,16 +52,23 @@ module Prepared = struct
 
   let unavailable ~response = Unavailable_result response
 
-  let parsed_only ~retained ~document_after ~index_after ~response =
-    Parsed_result { retained; document_after; index_after; response }
+  let parsed_only ~retained ~document_after ~index_after ~templates_after ~response =
+    Parsed_result { retained; document_after; index_after; templates_after; response }
   ;;
 
-  let checked_project ~project_after ~document_after ~index_after ~response =
-    Project_result { project_after; document_after; index_after; response }
+  let checked_project
+        ~project_after
+        ~document_after
+        ~index_after
+        ~templates_after
+        ~response
+    =
+    Project_result
+      { project_after; document_after; index_after; templates_after; response }
   ;;
 
-  let checked_document ~retained ~document_after ~index_after ~response =
-    Document_result { retained; document_after; index_after; response }
+  let checked_document ~retained ~document_after ~index_after ~templates_after ~response =
+    Document_result { retained; document_after; index_after; templates_after; response }
   ;;
 end
 
@@ -68,17 +78,21 @@ let publish_now owner ~borrowed_index prepared =
   else (
     (match prepared with
      | Prepared.Unavailable_result _ -> ()
-     | Parsed_result { retained; document_after; index_after; _ } ->
+     | Parsed_result { retained; document_after; index_after; templates_after; _ } ->
        owner.document_cache <- document_after;
        owner.document_capture <- Some retained;
-       owner.analysis_index <- index_after
-     | Project_result { project_after; document_after; index_after; _ } ->
+       owner.analysis_index <- index_after;
+       owner.checked_templates <- templates_after
+     | Project_result { project_after; document_after; index_after; templates_after; _ }
+       ->
        owner.project_cache <- project_after;
        owner.document_cache <- document_after;
-       owner.analysis_index <- index_after
-     | Document_result { retained; document_after; index_after; _ } ->
+       owner.analysis_index <- index_after;
+       owner.checked_templates <- templates_after
+     | Document_result { retained; document_after; index_after; templates_after; _ } ->
        owner.document_cache <- document_after;
        owner.document_capture <- Some retained;
-       owner.analysis_index <- index_after);
+       owner.analysis_index <- index_after;
+       owner.checked_templates <- templates_after);
     Ok (Prepared.response prepared))
 ;;

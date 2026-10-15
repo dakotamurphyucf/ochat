@@ -18,6 +18,7 @@ module Chatml = Chatml_authoring_fallback
 module Assistance = P.Authoring_assistance.Assistance
 module Limits = Authoring_assistance_admission.Limits
 module Selected_tool_policy = Authoring_assistance_admission.Selected_tool_policy
+module Checked_template = Authoring_checked_template_suggestion
 
 type t =
   { owner : Owner.t
@@ -196,10 +197,15 @@ let selected_contract_error = function
 
 let project_assistance t current request ~checkpoint =
   let open Result.Let_syntax in
-  let%bind source, _ =
+  let%bind source, basis =
     Source.admit current ~source:(Assistance.Request.source request) ~checkpoint
   in
-  let%bind selected =
+  let%bind inputs =
+    match basis with
+    | Source.Project inputs -> Ok inputs
+    | Document _ -> Error Owner.Error.Stale_context
+  in
+  let%bind selected, receipt =
     match Overlay.prepare current ~limits:t.project_build_limits ~checkpoint with
     | Ok prepared ->
       (match
@@ -209,12 +215,13 @@ let project_assistance t current request ~checkpoint =
            ~limits:t.limits.chatml
            ~checkpoint
        with
-       | Ok selected -> Ok (`Selected selected)
-       | Error error -> selected_contract_error error)
+       | Ok selected -> Ok (`Selected selected, Some (Overlay.Prepared.overlay prepared))
+       | Error error ->
+         selected_contract_error error |> Result.map ~f:(fun result -> result, None))
     | Error (Overlay.Error.Context error) -> Error error
-    | Error No_selected_contract -> Ok `Local
+    | Error No_selected_contract -> Ok (`Local, None)
     | Error (Work_limit | Lock_identity_unavailable) -> Error Owner.Error.Resource_limit
-    | Error (Invalid_overlay _) -> Ok `Local
+    | Error (Invalid_overlay _) -> Ok (`Local, None)
   in
   match selected with
   | `Unavailable -> catalog_unavailable request
@@ -229,7 +236,20 @@ let project_assistance t current request ~checkpoint =
          ~limits:t.limits.chatml
          ~checkpoint
      with
-     | Ok result -> Ok result
+     | Ok result ->
+       let%bind checked =
+         match receipt with
+         | None -> Ok None
+         | Some receipt ->
+           Checked_template.project
+             current
+             ~inputs
+             ~receipt
+             ~authored:source
+             ~request
+             ~checkpoint
+       in
+       Checked_template.include_checked result checked
      | Error (Chatml.Error.Stale_request_source | Stale_selected_build | Contract_mismatch)
        -> Error Owner.Error.Stale_source
      | Error
@@ -272,6 +292,7 @@ let handle_assistance t ~actor ~connection request =
               ~script_selection:t.script_selection
               ~project_metadata:t.project_metadata
               ~selected_tools:t.selected_tools
+              ~project_build_limits:t.project_build_limits
               ~limits:t.limits
               ~checkpoint
           in

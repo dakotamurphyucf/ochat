@@ -92,6 +92,76 @@ module Assistance = struct
     ;;
   end
 
+  module Checked_template = struct
+    type target =
+      | One_off_v1
+      | Tool_v1
+      | Developer_tool_v1
+      | Moderator_v1
+      | Delegated_moderator_v1
+    [@@deriving equal, sexp_of]
+
+    type t =
+      { selected : Selected_catalog.t
+      ; target : target
+      ; example_digest : Digest.t
+      ; checked_input_fingerprint : Digest.t
+      }
+    [@@deriving sexp_of]
+
+    let create ~selected ~target ~example_digest ~checked_input_fingerprint =
+      Ok { selected; target; example_digest; checked_input_fingerprint }
+    ;;
+
+    let selected t = t.selected
+    let target t = t.target
+    let example_digest t = t.example_digest
+    let checked_input_fingerprint t = t.checked_input_fingerprint
+
+    let target_to_json = function
+      | One_off_v1 -> str "one_off_v1"
+      | Tool_v1 -> str "tool_v1"
+      | Developer_tool_v1 -> str "developer_tool_v1"
+      | Moderator_v1 -> str "moderator_v1"
+      | Delegated_moderator_v1 -> str "delegated_moderator_v1"
+    ;;
+
+    let target_of_json json =
+      let* name = C.string ~max_bytes:32 json in
+      match name with
+      | "one_off_v1" -> Ok One_off_v1
+      | "tool_v1" -> Ok Tool_v1
+      | "developer_tool_v1" -> Ok Developer_tool_v1
+      | "moderator_v1" -> Ok Moderator_v1
+      | "delegated_moderator_v1" -> Ok Delegated_moderator_v1
+      | _ -> C.invalid "unknown checked template target"
+    ;;
+
+    let to_json t =
+      obj
+        [ "selected", Selected_catalog.to_json t.selected
+        ; "target", target_to_json t.target
+        ; "example_digest", C.digest_json t.example_digest
+        ; "checked_input_fingerprint", C.digest_json t.checked_input_fingerprint
+        ]
+    ;;
+
+    let of_json json =
+      let* fields =
+        C.fields
+          ~allowed:[ "selected"; "target"; "example_digest"; "checked_input_fingerprint" ]
+          json
+      in
+      let* selected = field fields "selected" Selected_catalog.of_json in
+      let* target = field fields "target" target_of_json in
+      let* example_digest = field fields "example_digest" C.digest in
+      let* checked_input_fingerprint =
+        field fields "checked_input_fingerprint" C.digest
+      in
+      create ~selected ~target ~example_digest ~checked_input_fingerprint
+    ;;
+  end
+
   module Selected_tool = struct
     type t =
       { capability_id : Id.Capability.t
@@ -155,6 +225,7 @@ module Assistance = struct
           ; sha256 : Digest.t
           }
       | Selected_catalog of Selected_catalog.t
+      | Checked_template of Checked_template.t
       | Selected_tool of Selected_tool.t
       | Host_root of Id.Authoring_root.t
     [@@deriving sexp_of]
@@ -172,7 +243,7 @@ module Assistance = struct
       | (Tag | Attribute | Value), (Lexical | Parsed_document _)
       | Reference, (Parsed_document _ | Selected_catalog _ | Selected_tool _)
       | Path, (Parsed_project _ | Selected_catalog _ | Host_root _)
-      | Template, (Lexical | Parsed_document _ | Installed_builtin _)
+      | Template, (Lexical | Parsed_document _ | Installed_builtin _ | Checked_template _)
       | Environment, (Parsed_project _ | Selected_catalog _) -> true
       | _ -> false
     ;;
@@ -208,6 +279,11 @@ module Assistance = struct
             Result.map
               (Id.Authoring_root.of_json (Id.Authoring_root.to_json root))
               ~f:ignore
+          | Checked_template checked ->
+            let actual = Digest.of_contents insert_text ~checkpoint:ignore in
+            if Digest.equal actual (Checked_template.example_digest checked)
+            then Ok ()
+            else C.invalid "checked template text digest mismatch"
           | _ -> Ok ()
         in
         Ok { kind; label; insert_text; replace; evidence }
@@ -257,6 +333,11 @@ module Assistance = struct
       | Selected_catalog selected ->
         obj
           [ "kind", str "selected_catalog"; "catalog", Selected_catalog.to_json selected ]
+      | Checked_template checked ->
+        obj
+          [ "kind", str "checked_template"
+          ; "checked_template", Checked_template.to_json checked
+          ]
       | Selected_tool selected ->
         obj [ "kind", str "selected_tool"; "tool", Selected_tool.to_json selected ]
       | Host_root root ->
@@ -266,7 +347,16 @@ module Assistance = struct
     let evidence_of_json json =
       let* fields =
         C.fields
-          ~allowed:[ "kind"; "source"; "id"; "sha256"; "catalog"; "tool"; "root" ]
+          ~allowed:
+            [ "kind"
+            ; "source"
+            ; "id"
+            ; "sha256"
+            ; "catalog"
+            ; "checked_template"
+            ; "tool"
+            ; "root"
+            ]
           json
       in
       let* kind = field fields "kind" (C.string ~max_bytes:24) in
@@ -290,6 +380,10 @@ module Assistance = struct
         let* fields = C.fields ~allowed:[ "kind"; "catalog" ] json in
         let* value = field fields "catalog" Selected_catalog.of_json in
         Ok (Selected_catalog value)
+      | "checked_template" ->
+        let* fields = C.fields ~allowed:[ "kind"; "checked_template" ] json in
+        let* value = field fields "checked_template" Checked_template.of_json in
+        Ok (Checked_template value)
       | "selected_tool" ->
         let* fields = C.fields ~allowed:[ "kind"; "tool" ] json in
         let* value = field fields "tool" Selected_tool.of_json in

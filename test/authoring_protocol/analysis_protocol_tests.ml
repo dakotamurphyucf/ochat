@@ -48,6 +48,38 @@ let context =
 let expected = P.Authoring.Context.Expected.of_view context
 let selector = A.Target.selected_script "s" |> ok
 
+let%expect_test "checked template Analyze opt-in is strict and defaults off" =
+  let plain = A.Analyze.Request.create ~context:expected ~target:selector |> ok in
+  let opted = A.Analyze.Request.with_checked_template plain in
+  assert (not (A.Analyze.Request.prepare_checked_template plain));
+  assert (A.Analyze.Request.prepare_checked_template opted);
+  assert (not (A.Analyze.Request.equal plain opted));
+  let roundtrip request =
+    A.Analyze.Request.of_json (A.Analyze.Request.to_json request) |> ok
+  in
+  assert (A.Analyze.Request.equal plain (roundtrip plain));
+  assert (A.Analyze.Request.equal opted (roundtrip opted));
+  let fields =
+    match A.Analyze.Request.to_json plain with
+    | `Object fields -> fields
+    | _ -> assert false
+  in
+  assert (
+    Result.is_error
+      (A.Analyze.Request.of_json
+         (`Object (("prepare_checked_template", `Null) :: fields))));
+  assert (
+    Result.is_error
+      (A.Analyze.Request.of_json
+         (`Object (("prepare_checked_template", `String "true") :: fields))));
+  print_s
+    [%sexp
+      { default = (A.Analyze.Request.prepare_checked_template plain : bool)
+      ; opted = (A.Analyze.Request.prepare_checked_template opted : bool)
+      }];
+  [%expect {| ((default false) (opted true)) |}]
+;;
+
 let stamp =
   A.Target.script_stamp
     ~document_source:document

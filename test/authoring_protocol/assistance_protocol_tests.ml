@@ -44,6 +44,60 @@ let context =
 
 let expected = A.Context.Expected.of_view context
 
+let%expect_test "checked template evidence binds the exact bounded inserted text" =
+  let example = "let main input = Task.pure(input)" in
+  let selected =
+    H.Assistance.Selected_catalog.create
+      ~environment:"standard"
+      ~input_fingerprint:(digest "selected build")
+      ~compiler_contract:(digest "actual contract")
+    |> ok
+  in
+  let checked =
+    H.Assistance.Checked_template.create
+      ~selected
+      ~target:One_off_v1
+      ~example_digest:(digest example)
+      ~checked_input_fingerprint:(digest "checked candidate")
+    |> ok
+  in
+  let replace =
+    H.Assistance.Range.create ~source:document ~start_byte:0 ~end_byte:0 |> ok
+  in
+  let make ~kind ~insert_text =
+    H.Assistance.Suggestion.create
+      ~kind
+      ~label:"Checked one-off example"
+      ~insert_text
+      ~replace
+      ~evidence:(Checked_template checked)
+  in
+  let admitted = make ~kind:Template ~insert_text:example |> ok in
+  let decoded =
+    H.Assistance.Suggestion.of_json (H.Assistance.Suggestion.to_json admitted) |> ok
+  in
+  assert (String.equal (H.Assistance.Suggestion.insert_text decoded) example);
+  assert (Result.is_error (make ~kind:Template ~insert_text:"other code"));
+  assert (Result.is_error (make ~kind:Reference ~insert_text:example));
+  let bad_target =
+    match H.Assistance.Checked_template.to_json checked with
+    | `Object fields ->
+      `Object
+        (List.map fields ~f:(fun (name, value) ->
+           if String.equal name "target" then name, `String "unknown" else name, value))
+    | _ -> assert false
+  in
+  assert (Result.is_error (H.Assistance.Checked_template.of_json bad_target));
+  print_s
+    [%sexp
+      { target =
+          (H.Assistance.Checked_template.target checked
+           : H.Assistance.Checked_template.target)
+      ; text = (H.Assistance.Suggestion.insert_text decoded : string)
+      }];
+  [%expect {| ((target One_off_v1) (text "let main input = Task.pure(input)")) |}]
+;;
+
 let%expect_test "malformed source bytes retain exact lexical owner and scanned prefix" =
   let bytes = "\255abc" in
   let captured = source "malformed.chatml" bytes in
