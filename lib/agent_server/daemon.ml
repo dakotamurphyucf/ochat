@@ -1467,8 +1467,27 @@ let compose
                  ~retryable:false
                  ())))
   in
+  let%bind authoring_policy =
+    match config.server.authoring_project_access with
+    | None -> Ok options.authoring
+    | Some configured ->
+      let%bind limits = Authoring_native_policy.Limits.standard in
+      Authoring_native_policy.create
+        ~base:options.authoring
+        ~configured:(Some configured)
+        ~source_configuration:
+          (Option.value
+             config.server.project_sources
+             ~default:Project_source_configuration.local_only)
+        ~source_host:project_sources
+        ~initialize_limits:options.protocol_limits
+        ~document_dir:(Eio.Stdenv.cwd env)
+        ~limits
+        ~checkpoint:Eio.Fiber.check
+      |> Result.map ~f:Authoring_native_policy.host_policy
+  in
   let%bind authoring =
-    match options.authoring with
+    match authoring_policy with
     | None -> Ok None
     | Some policy ->
       Authoring_installation.create

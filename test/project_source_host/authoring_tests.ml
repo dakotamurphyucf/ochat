@@ -940,7 +940,7 @@ let%test_unit "explicit document capture binds unsaved root and imported source 
 let%test_unit "declared project metadata follows the captured declaring input" =
   with_source_context
     ~max_context_requests:32
-    (fun env root project_owner allowed denied _ host _ root_path ->
+    (fun env root project_owner allowed denied source_host host data root_path ->
        let root_project_text =
          {|{"schema_version":1,"namespace":"authoring","entries":{"main":{"source":"main.chatml","target":"one_off_v1"}}}|}
        in
@@ -1047,6 +1047,56 @@ let%test_unit "declared project metadata follows the captured declaring input" =
            [%test_eq: string] (Chatml_project.namespace (PC.project first)) "imported";
            assert (PC.matches first ~parsed ~declaration);
            assert (PC.belongs_to_root first root);
+           Eio.Switch.run (fun sw ->
+             let root_name = Eio.Path.native_exn root_path in
+             let configuration =
+               Configuration.{ external_roots = [ root_name ]; git = None }
+             in
+             let access =
+               Agent_server.Authoring_project_access_configuration.
+                 { read_grants =
+                     [ { root = root_name
+                       ; principal_id = (Operator_authorization.principal allowed).id
+                       ; authentication_kind = "local.authoring_test"
+                       }
+                     ]
+                 ; selections =
+                     [ { root = root_name
+                       ; project = "nested/chatml.project.json"
+                       ; request = Library { environment = None }
+                       ; target = One_off_v1
+                       }
+                     ]
+                 }
+             in
+             let bind source_host =
+               Agent_server.Authoring_configured_project_policy.bind
+                 source_host
+                 ~configuration:access
+                 ~project_sources:configuration
+                 ~max_contract_identity_bytes:(16 * 1024 * 1024)
+                 ~max_work_steps:1_000_000
+                 ~checkpoint:ignore
+               |> function
+               | Ok bound -> bound
+               | Error error ->
+                 Error.raise_s
+                   (Agent_server.Authoring_configured_project_policy.Error.sexp_of_t
+                      error)
+             in
+             let bound = bind source_host in
+             let authorize bound actor =
+               Agent_server.Authoring_configured_project_policy.project_capture_authorized
+                 bound
+                 ~original_actor:allowed
+                 ~actor
+                 first
+             in
+             assert (authorize bound allowed);
+             assert (not (authorize bound denied));
+             let foreign = open_host ~configuration env data sw in
+             assert (not (authorize (bind foreign) allowed));
+             Host.close_and_wait foreign);
            let contract =
              Chatml.Chatml_compiler_contract.for_target One_off_v1 ~checkpoint:ignore
            in

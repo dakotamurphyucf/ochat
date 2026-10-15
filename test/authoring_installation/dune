@@ -6,6 +6,7 @@
   eio
   eio_main
   mirage-crypto-rng.unix
+  digestif
   agent_server_test_support
   agent_server_wire_fixture
   ochat.agent_server

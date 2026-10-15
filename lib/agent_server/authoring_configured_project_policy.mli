@@ -25,9 +25,13 @@ end
     The binding retains only the opened host's opaque physical identity token;
     matching root names, indices or native paths cannot rebind it.
     Every distinct selected Standard target is constructed once with the
-    existing contract adapter, its canonical identity charged under these
-    positive finite byte/work limits before retention. No Build is prepared
-    here. Checkpoint and cancellation exceptions keep identity. *)
+    existing contract adapter, its conversion allocation charged under the
+    positive finite aggregate allocation/work limits before retention. Each
+    distinct target also has a fixed 16 MiB conversion-allocation and
+    encoded-byte cap,
+    so a larger aggregate allowance cannot admit an unbounded single target.
+    No Build is prepared here. Checkpoint and cancellation exceptions keep
+    identity. *)
 val bind
   :  Project_source_host.t
   -> configuration:Configuration.t
@@ -51,6 +55,19 @@ val issued_by : t -> Project_source_host.t -> bool
     request actor checks on every borrow/read/capture. No grant is inferred
     from equal paths, current protocol feature names or catalog labels. *)
 val read_policy : t -> Sources.Read_policy.t
+
+(** Current comparison for one genuine, separately acquired document project
+    receipt. The receipt must be from this bound physical host and the exact
+    original Root actor; both original and request actors must still have this
+    root's explicit configured read grant. This does no I/O and grants neither
+    a native read nor a selected Build. The enclosing Source/Core owner still
+    checks source generation and declaration membership. *)
+val project_capture_authorized
+  :  t
+  -> original_actor:Operator_authorization.t
+  -> actor:Operator_authorization.t
+  -> Sources.Document_context.Project_capture.t
+  -> bool
 
 (** Comparison-only lookup of a preadmitted actual Standard contract for the
     exact authorized root/project/Entry-or-Library environment request. Returns

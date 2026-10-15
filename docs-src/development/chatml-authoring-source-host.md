@@ -25,8 +25,9 @@ An explicit `server.authoring_project_access` declaration can provide this polic
 for selected Project contexts. It names an admitted administrative root, an exact
 principal ID and authentication kind, and an exact portable project member plus
 Entry/Library environment request mapped to a Standard compiler target. The
-configuration is validated without opening another root. Startup then binds the
-root names to the ordered anchors of one physical `Project_source_host`; the
+configuration is validated without opening another root. Daemon startup binds
+the root names to the ordered anchors of one physical `Project_source_host`
+and installs the finite native semantic service when authoring is enabled; the
 bound policy retains only that host's comparison identity and immutable target
 contracts. Installation rejects another host incarnation before opening source
 or upload children, even when its path list and indices are identical. Every

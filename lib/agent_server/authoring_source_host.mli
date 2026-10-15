@@ -361,6 +361,19 @@ module Document_context : sig
         receipt into a root capability. *)
     val belongs_to_root : t -> Root.t -> bool
 
+    (** Comparison-only owner association for an already captured project.
+        Return its bound root index only when [issuer] is the exact physical
+        configured host that minted the captured Root and [original_actor]
+        matches that Root's original principal ID and authentication kind.
+        The index is not a read grant;
+        the configured policy must still authorize both current actors, and
+        the Source owner independently checks current root authority. *)
+    val root_index_if_bound
+      :  t
+      -> issuer:Project_source_host.Identity.t
+      -> original_actor:Operator_authorization.t
+      -> int option
+
     (** Match the same immutable Parsed_capture and actual declaration object
         admitted by [capture_project_declaration]. This is deliberate parser
         object identity, not text/path equivalence; the enclosing Core owner

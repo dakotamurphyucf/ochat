@@ -92,6 +92,15 @@ module Host_policy : sig
     -> analysis_policy:Chatml_authoring_analysis.Policy.t
     -> (t, P.Error.t) result
 
+  (** Install one real semantic sibling on the same core/source policy after
+      finite lower admission. This is used by configured daemon composition;
+      missing core/source origin or a second semantic sibling rejects. *)
+  val with_semantic : t -> semantic:Semantic.t -> (t, P.Error.t) result
+
+  (** Recheck an already built profile against the daemon's current Initialize
+      ceiling before configured contract admission or child opening. *)
+  val validate_initialize : t -> P.Initialize.Limits.t -> (unit, P.Error.t) result
+
   (** [core=false] permits a genuine upload-only owner. Semantic, lexical and
       assistance need core to create/edit contexts, while bundle needs its own
       upload owner and feature. [core=true] needs at least one actual source,

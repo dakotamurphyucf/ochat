@@ -118,9 +118,16 @@ member and Entry or Library environment request under that root to one of
 `one_off_v1`, `tool_v1`, `developer_tool_v1`, `moderator_v1` or
 `delegated_moderator_v1`. Root paths resolve relative to this configuration.
 The field is bounded, rejects duplicate or unknown roots/requests, and requires
-a restart when changed. A configured root or this declaration alone grants no
-authoring source read: the active host policy must install the binding to the
-same opened source host, and each request rechecks the authenticated actor.
+a restart when changed. The daemon binds it to the exact opened source host and
+installs native Project and selected ChatMD semantic methods alongside the
+default supplied-document, lexical and assistance methods. A configured root
+without an exact read grant for the actor grants no authoring source read; each
+request rechecks both original and current actors. Explicitly disabling the
+authoring host while configuring this field is a startup conflict. An Entry
+selection checks a Project context; a selected script in a host ChatMD document
+needs its own Library selection for that project and environment. Standard
+targets retain finite contract, source, parser, compiler and result allowances.
+This policy opens no additional root and grants no tool or execution permission.
 For example, these fields can appear together in `server` after replacing the
 root and principal with the deployment's actual values:
 
