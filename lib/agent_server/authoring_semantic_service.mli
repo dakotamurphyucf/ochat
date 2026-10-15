@@ -2,12 +2,13 @@ open! Core
 module P = Agent_protocol
 module Owner = Authoring_context_service_core
 
-(** PRIVATE Analyze sibling sharing the sole Core context/cache owner. Prefix
-    publication uses the same owner; this module installs no authority or
-    parser cache. Query delivery belongs to the dependent service ticket. *)
+(** PRIVATE semantic sibling sharing the sole Core context/cache owner. Analyze
+    and Prefix publish through that owner; Query reads their exact retained
+    evidence. This module installs no authority or second parser cache. *)
 type t
 
 module Prefix_limits = Authoring_semantic_prefix.Limits
+module Query_limits = Authoring_semantic_query.Limits
 
 module Limits : sig
   type t
@@ -40,6 +41,7 @@ val create
   -> project_build_limits:Chatml_project_build.Limits.t
   -> limits:Limits.t
   -> prefix_limits:Prefix_limits.t
+  -> query_limits:Query_limits.t
   -> t
 
 (** One explicit joined Project or selected-script Document analysis. Host
@@ -68,3 +70,14 @@ val prefix
   -> connection:Connection_context.t
   -> P.Authoring.Analysis.Prefix.Request.t
   -> (P.Authoring.Analysis.Prefix.t, Owner.Error.t) result
+
+(** Read-only current Certified, same-run Syntax_only or exact Provisional
+    query. The sole Owner request joins projection work and performs its
+    fifth-head final gate; no parser/source capture or checked-result
+    publication occurs. *)
+val query
+  :  t
+  -> actor:Operator_authorization.t
+  -> connection:Connection_context.t
+  -> P.Authoring.Analysis.Query.Request.t
+  -> (P.Authoring.Analysis.Query.t, Owner.Error.t) result

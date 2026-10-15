@@ -16,6 +16,8 @@ module Metadata = Authoring_project_metadata
 module Prefix = Authoring_semantic_prefix
 module Provisional_index = Authoring_provisional_index
 module Prefix_limits = Prefix.Limits
+module Query = Authoring_semantic_query
+module Query_limits = Query.Limits
 
 module Limits = struct
   type t =
@@ -71,6 +73,7 @@ type t =
   ; project_build_limits : Chatml_project_build.Limits.t
   ; limits : Limits.t
   ; prefix_limits : Prefix.Limits.t
+  ; query_limits : Query.Limits.t
   }
 
 let create
@@ -82,6 +85,7 @@ let create
       ~project_build_limits
       ~limits
       ~prefix_limits
+      ~query_limits
   =
   { owner
   ; env
@@ -91,6 +95,7 @@ let create
   ; project_build_limits
   ; limits
   ; prefix_limits
+  ; query_limits
   }
 ;;
 
@@ -546,4 +551,54 @@ let prefix t ~actor ~connection request =
     | Work_limit -> Error Owner.Error.Resource_limit
   in
   Result.map result ~f:Prefix.response
+;;
+
+let query t ~actor ~connection request =
+  let evidence = Analysis.Query.Request.evidence request in
+  let capture =
+    match evidence with
+    | Certified { capture; _ } | Syntax_only capture -> capture
+    | Provisional provisional -> Analysis.Prefix.capture provisional
+  in
+  let expected = Analysis.Capture.context capture in
+  let final_check = ref (fun () -> Ok ()) in
+  let result =
+    Host.with_current
+      ~feature:Owner.Selected_feature.Semantic
+      ~final_check:(fun () -> !final_check ())
+      t.owner
+      ~actor
+      ~connection
+      ~expected
+      ~checkpoint:Eio.Fiber.check
+      ~f:(fun current ~checkpoint ->
+        let open Result.Let_syntax in
+        (* This callback runs outside Core's nonyielding publication gate. *)
+        let until_yield = ref 16 in
+        let query_checkpoint () =
+          checkpoint ();
+          decr until_yield;
+          if !until_yield <= 0
+          then (
+            until_yield := 16;
+            Eio.Fiber.yield ();
+            checkpoint ())
+        in
+        let%map prepared =
+          Query.prepare
+            t.owner
+            current
+            ~actor
+            ~script_selection:t.script_selection
+            ~project_metadata:t.project_metadata
+            ~project_build_limits:t.project_build_limits
+            ~max_document_body_bytes:t.limits.max_document_bundle_bytes
+            ~limits:t.query_limits
+            request
+            ~checkpoint:query_checkpoint
+        in
+        (final_check := fun () -> Query.final_check_now prepared);
+        prepared)
+  in
+  Result.map result ~f:Query.response
 ;;

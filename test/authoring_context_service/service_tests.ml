@@ -2,8 +2,32 @@ open! Core
 module P = Agent_protocol
 module S = Agent_server.Authoring_context_service
 module C = Chatml_authoring_context
+module Q = P.Authoring.Analysis.Query
 
 let () = Mirage_crypto_rng_unix.use_default ()
+
+let query_limits () =
+  S.Semantic.Query_limits.create
+    ~max_host_work_steps:100_000
+    ~projection:
+      (Chatml_authoring_query.Limits.create
+         ~max_items:32
+         ~max_member_depth:4
+         ~max_member_edges:128
+         ~max_label_bytes:4096
+         ~max_work_steps:100_000
+         ~type_display:
+           (Chatml_type_display.Limits.create
+              ~max_nodes:512
+              ~max_edges:1024
+              ~max_depth:16
+              ~max_work_steps:100_000
+              ~max_text_bytes:1024
+              ~max_output_bytes:4096
+            |> Or_error.ok_exn)
+       |> Or_error.ok_exn)
+  |> Or_error.ok_exn
+;;
 
 let ok = function
   | Ok value -> value
@@ -601,6 +625,7 @@ let%test_unit "host root read is fresh while project context remains captured" =
                     ~max_parser_work_steps:100_000
                     ~max_diagnostic_work_steps:100_000
                   |> Or_error.ok_exn)
+               ~query_limits:(query_limits ())
                ~prefix_limits:
                  (S.Semantic.Prefix_limits.create
                     ~max_document_bundle_files:4
@@ -615,13 +640,16 @@ let%test_unit "host root read is fresh while project context remains captured" =
                ~target:P.Authoring.Analysis.Target.project
              |> ok
            in
-           (match S.Semantic.analyze analyze ~actor ~connection analysis_request with
-            | Ok (P.Authoring.Analysis.Analyze.Complete _) -> ()
-            | Ok result ->
-              failwith
-                (Sexp.to_string_hum (P.Authoring.Analysis.Analyze.sexp_of_t result))
-            | Error error ->
-              failwith (P.Error.code_to_string (S.Error.to_protocol error).code));
+           let complete_capture, complete_snapshot, complete_graph =
+             match S.Semantic.analyze analyze ~actor ~connection analysis_request with
+             | Ok (P.Authoring.Analysis.Analyze.Complete result) ->
+               result.capture, result.snapshot, result.validated_graph
+             | Ok result ->
+               failwith
+                 (Sexp.to_string_hum (P.Authoring.Analysis.Analyze.sexp_of_t result))
+             | Error error ->
+               failwith (P.Error.code_to_string (S.Error.to_protocol error).code)
+           in
            let inventory =
              P.Authoring.Source_read.List_request.create
                ~context:expected
@@ -641,6 +669,60 @@ let%test_unit "host root read is fresh while project context remains captured" =
              | Ok _ | Error _ -> failwith "project inventory unavailable"
            in
            let script_id = P.Authoring.Source.id script_source in
+           let certified_query =
+             Q.Request.create
+               ~evidence:
+                 (Q.Certified
+                    { capture = complete_capture
+                    ; snapshot = complete_snapshot
+                    ; validated_graph = complete_graph
+                    })
+               ~source:script_source
+               ~byte_offset:0
+               ~kind:(Q.Candidates Value)
+               ~max_items:1
+             |> ok
+           in
+           (match S.Semantic.query analyze ~actor ~connection certified_query with
+            | Ok result ->
+              (match Q.payload result with
+               | Q.Candidates_result (Q.Selected page) when not (List.is_empty page.items)
+                 -> ()
+               | _ -> failwith "certified query lost current value candidates")
+            | Error error ->
+              failwith (P.Error.code_to_string (S.Error.to_protocol error).code));
+           let wide_query =
+             Q.Request.create
+               ~evidence:(Q.Request.evidence certified_query)
+               ~source:script_source
+               ~byte_offset:0
+               ~kind:(Q.Candidates Value)
+               ~max_items:16
+             |> ok
+           in
+           (match S.Semantic.query analyze ~actor ~connection wide_query with
+            | Error S.Error.Resource_limit -> ()
+            | Ok _ | Error _ -> failwith "wide query bypassed host response cap");
+           let foreign_revision =
+             P.Authoring.Source.create
+               ~id:(P.Authoring.Source.id script_source)
+               ~digest:(Chatml_source.Digest.of_contents "foreign" ~checkpoint:ignore)
+               ~byte_length:(P.Authoring.Source.byte_length script_source)
+               ~editor_revision:None
+             |> ok
+           in
+           let stale_source_query =
+             Q.Request.create
+               ~evidence:(Q.Request.evidence certified_query)
+               ~source:foreign_revision
+               ~byte_offset:0
+               ~kind:(Q.Candidates Value)
+               ~max_items:1
+             |> ok
+           in
+           (match S.Semantic.query analyze ~actor ~connection stale_source_query with
+            | Error S.Error.Stale_source -> ()
+            | Ok _ | Error _ -> failwith "forged source revision entered query");
            let prefix_request =
              P.Authoring.Analysis.Prefix.Request.create
                ~context:expected
@@ -649,14 +731,35 @@ let%test_unit "host root read is fresh while project context remains captured" =
                ~cursor_byte:(P.Authoring.Source.byte_length script_source)
              |> ok
            in
-           (match S.Semantic.prefix analyze ~actor ~connection prefix_request with
-            | Ok (P.Authoring.Analysis.Prefix.Provisional provisional) ->
-              assert (
-                P.Authoring.Source.equal
-                  (P.Authoring.Analysis.Prefix.full_source provisional)
-                  script_source)
+           let provisional =
+             match S.Semantic.prefix analyze ~actor ~connection prefix_request with
+             | Ok (P.Authoring.Analysis.Prefix.Provisional provisional) ->
+               assert (
+                 P.Authoring.Source.equal
+                   (P.Authoring.Analysis.Prefix.full_source provisional)
+                   script_source);
+               provisional
+             | Ok result ->
+               failwith
+                 (Sexp.to_string_hum (P.Authoring.Analysis.Prefix.sexp_of_t result))
+             | Error error ->
+               failwith (P.Error.code_to_string (S.Error.to_protocol error).code)
+           in
+           let provisional_query =
+             Q.Request.create
+               ~evidence:(Q.Provisional provisional)
+               ~source:(P.Authoring.Analysis.Prefix.prefix_source provisional)
+               ~byte_offset:(P.Authoring.Analysis.Prefix.end_byte provisional)
+               ~kind:(Q.Candidates Value)
+               ~max_items:1
+             |> ok
+           in
+           (match S.Semantic.query analyze ~actor ~connection provisional_query with
             | Ok result ->
-              failwith (Sexp.to_string_hum (P.Authoring.Analysis.Prefix.sexp_of_t result))
+              (match Q.payload result with
+               | Q.Candidates_result (Q.Selected page) when not (List.is_empty page.items)
+                 -> ()
+               | _ -> failwith "provisional query lost current value candidates")
             | Error error ->
               failwith (P.Error.code_to_string (S.Error.to_protocol error).code));
            [%test_eq: int]
@@ -711,6 +814,9 @@ let%test_unit "host root read is fresh while project context remains captured" =
                 ~checkpoint:ignore
               |> ok)
              0;
+           (match S.Semantic.query analyze ~actor ~connection provisional_query with
+            | Error S.Error.Stale_context -> ()
+            | Ok _ | Error _ -> failwith "retired prefix query survived refresh");
            assert (
              not
                (P.Id.Authoring_context.equal
@@ -787,6 +893,7 @@ let%test_unit "host root read is fresh while project context remains captured" =
                     ~max_parser_work_steps:100_000
                     ~max_diagnostic_work_steps:100_000
                   |> Or_error.ok_exn)
+               ~query_limits:(query_limits ())
                ~prefix_limits:
                  (S.Semantic.Prefix_limits.create
                     ~max_document_bundle_files:4
@@ -832,6 +939,10 @@ let%test_unit "host root read is fresh while project context remains captured" =
                ~checkpoint:ignore
              |> ok
            in
+           let allow_selection = ref true in
+           let revoke_on_final_check = ref false in
+           let selection_calls = ref 0 in
+           let on_query_selection = ref Fn.id in
            let selected_policy =
              S.Semantic.Script_selection.Policy.create
                ~select_script:
@@ -842,7 +953,14 @@ let%test_unit "host root read is fresh while project context remains captured" =
                    ~parsed:_
                    ~declaration:_
                    ~metadata:_
-                 -> Some selected)
+                 ->
+                 !on_query_selection ();
+                 incr selection_calls;
+                 if
+                   !allow_selection
+                   && ((not !revoke_on_final_check) || !selection_calls = 1)
+                 then Some selected
+                 else None)
            in
            let selected_analyze =
              S.Semantic.create
@@ -870,11 +988,12 @@ let%test_unit "host root read is fresh while project context remains captured" =
                   |> Or_error.ok_exn)
                ~limits:
                  (S.Semantic.Limits.create
-                    ~max_document_bundle_files:2
+                    ~max_document_bundle_files:4
                     ~max_document_bundle_bytes:2048
                     ~max_parser_work_steps:100_000
                     ~max_diagnostic_work_steps:100_000
                   |> Or_error.ok_exn)
+               ~query_limits:(query_limits ())
                ~prefix_limits:
                  (S.Semantic.Prefix_limits.create
                     ~max_document_bundle_files:4
@@ -883,15 +1002,80 @@ let%test_unit "host root read is fresh while project context remains captured" =
                     ~max_host_work_steps:100_000
                   |> Or_error.ok_exn)
            in
-           (match
-              S.Semantic.analyze selected_analyze ~actor ~connection bounded_request
-            with
-            | Ok (P.Authoring.Analysis.Analyze.Complete _) -> ()
+           let selected_capture, selected_snapshot, selected_graph =
+             match
+               S.Semantic.analyze selected_analyze ~actor ~connection bounded_request
+             with
+             | Ok (P.Authoring.Analysis.Analyze.Complete result) ->
+               result.capture, result.snapshot, result.validated_graph
+             | Ok result ->
+               failwith
+                 (Sexp.to_string_hum (P.Authoring.Analysis.Analyze.sexp_of_t result))
+             | Error error ->
+               failwith (P.Error.code_to_string (S.Error.to_protocol error).code)
+           in
+           let selected_source =
+             match P.Authoring.Analysis.Capture.target selected_capture with
+             | P.Authoring.Analysis.Target.Script_input stamp ->
+               P.Authoring.Analysis.Target.selected_script_source stamp
+             | Project_input -> failwith "selected document lost script target"
+           in
+           let selected_query =
+             Q.Request.create
+               ~evidence:
+                 (Q.Certified
+                    { capture = selected_capture
+                    ; snapshot = selected_snapshot
+                    ; validated_graph = selected_graph
+                    })
+               ~source:selected_source
+               ~byte_offset:0
+               ~kind:(Q.Candidates Value)
+               ~max_items:1
+             |> ok
+           in
+           (match S.Semantic.query selected_analyze ~actor ~connection selected_query with
             | Ok result ->
-              failwith
-                (Sexp.to_string_hum (P.Authoring.Analysis.Analyze.sexp_of_t result))
+              (match Q.payload result with
+               | Q.Candidates_result (Q.Selected page) when not (List.is_empty page.items)
+                 -> ()
+               | _ -> failwith "selected document query lost value candidates")
             | Error error ->
               failwith (P.Error.code_to_string (S.Error.to_protocol error).code));
+           allow_selection := false;
+           (match S.Semantic.query selected_analyze ~actor ~connection selected_query with
+            | Error S.Error.Selection_unavailable -> ()
+            | Ok _ | Error _ -> failwith "query ignored revoked script selection");
+           allow_selection := true;
+           selection_calls := 0;
+           revoke_on_final_check := true;
+           (match S.Semantic.query selected_analyze ~actor ~connection selected_query with
+            | Error S.Error.Selection_unavailable -> ()
+            | Ok _ | Error _ -> failwith "query ignored final selector recheck");
+           revoke_on_final_check := false;
+           let first_selection, wake_selection = Eio.Promise.create () in
+           let signalled = ref false in
+           (on_query_selection
+            := fun () ->
+                 if not !signalled
+                 then (
+                   signalled := true;
+                   Eio.Promise.resolve wake_selection ()));
+           let concurrent_query = ref None in
+           Eio.Fiber.both
+             (fun () ->
+                concurrent_query
+                := Some
+                     (S.Semantic.query selected_analyze ~actor ~connection selected_query))
+             (fun () ->
+                Eio.Promise.await first_selection;
+                allow_selection := false);
+           on_query_selection := Fn.id;
+           (match Option.value_exn !concurrent_query with
+            | Error S.Error.Selection_unavailable -> ()
+            | Ok _ | Error _ ->
+              failwith "query served after concurrent selector revocation");
+           allow_selection := true;
            let document_source =
              match P.Authoring.Context.basis bounded_document with
              | Document { source; _ } -> source
@@ -1054,12 +1238,71 @@ let%test_unit "host root read is fresh while project context remains captured" =
                    ~target:selected_target
                  |> ok)
             with
-            | Ok (P.Authoring.Analysis.Analyze.Complete { capture; _ }) ->
+            | Ok
+                (P.Authoring.Analysis.Analyze.Complete
+                   { capture; snapshot; validated_graph; _ }) ->
               assert (
                 not
                   (Chatml_source.Digest.equal
                      (P.Authoring.Analysis.Capture.input_fingerprint capture)
-                     (P.Authoring.Analysis.Capture.input_fingerprint baseline_capture)))
+                     (P.Authoring.Analysis.Capture.input_fingerprint baseline_capture)));
+              let compiled_source =
+                match P.Authoring.Analysis.Capture.target capture with
+                | P.Authoring.Analysis.Target.Script_input stamp ->
+                  P.Authoring.Analysis.Target.selected_script_source stamp
+                | Project_input -> failwith "edited document lost selected source"
+              in
+              let offset =
+                String.substr_index_exn valid_script_body ~pattern:"Task.pure(input)"
+                + String.length "Task.pure("
+              in
+              let request =
+                Q.Request.create
+                  ~evidence:(Q.Certified { capture; snapshot; validated_graph })
+                  ~source:compiled_source
+                  ~byte_offset:offset
+                  ~kind:Q.References
+                  ~max_items:1
+                |> ok
+              in
+              (match S.Semantic.query selected_analyze ~actor ~connection request with
+               | Ok answer ->
+                 (match Q.payload answer with
+                  | Q.References_result
+                      (Q.Available { items = [ reference ]; truncated = false }) ->
+                    let site = Q.Item.reference_selection reference in
+                    let expected_authored_offset =
+                      String.substr_index_exn edited_body ~pattern:"Task.pure(input)"
+                      + String.length "Task.pure("
+                    in
+                    let native_range = P.Authoring.Analysis.Site.native site in
+                    assert (
+                      P.Authoring.Source.equal
+                        (P.Authoring.Analysis.Byte_range.source native_range)
+                        compiled_source);
+                    [%test_eq: int]
+                      (P.Authoring.Analysis.Byte_range.start_byte native_range)
+                      offset;
+                    [%test_eq: int]
+                      (P.Authoring.Analysis.Byte_range.end_byte native_range)
+                      (offset + String.length "input");
+                    (match P.Authoring.Analysis.Site.projection site with
+                     | Some (Authored_exact range) ->
+                       assert (
+                         P.Authoring.Source.equal
+                           (P.Authoring.Analysis.Byte_range.source range)
+                           edited_source);
+                       [%test_eq: int]
+                         (P.Authoring.Analysis.Byte_range.start_byte range)
+                         expected_authored_offset;
+                       [%test_eq: int]
+                         (P.Authoring.Analysis.Byte_range.end_byte range)
+                         (expected_authored_offset + String.length "input")
+                     | None | Some (External_origin _ | Approximate_declaration _) ->
+                       failwith "edited query lost exact authored selection")
+                  | _ -> failwith "edited query lost selected reference")
+               | Error error ->
+                 failwith (P.Error.code_to_string (S.Error.to_protocol error).code))
             | Ok _ | Error _ -> failwith "edited selected body was not checked");
            let incomplete_script_body = "let x = 1;; let main input = Task.pure(inpu" in
            let incomplete_body =
@@ -1125,7 +1368,24 @@ let%test_unit "host root read is fresh while project context remains captured" =
                   incomplete_source);
               [%test_eq: int]
                 (P.Authoring.Analysis.Prefix.Authored_request.cursor_byte authored)
-                edited_cursor
+                edited_cursor;
+              let query =
+                Q.Request.create
+                  ~evidence:(Q.Provisional provisional)
+                  ~source:(P.Authoring.Analysis.Prefix.prefix_source provisional)
+                  ~byte_offset:8
+                  ~kind:Q.Type_at
+                  ~max_items:1
+                |> ok
+              in
+              (match S.Semantic.query selected_analyze ~actor ~connection query with
+               | Ok result ->
+                 (match Q.payload result with
+                  | Q.Type_result (Q.Selected display)
+                    when String.equal (Q.Display.text display) "int" -> ()
+                  | _ -> failwith "edited prefix query lost completed x type")
+               | Error error ->
+                 failwith (P.Error.code_to_string (S.Error.to_protocol error).code))
             | Ok (P.Authoring.Analysis.Prefix.Unavailable { reason; _ }) ->
               failwith
                 (Sexp.to_string_hum
@@ -1140,6 +1400,109 @@ let%test_unit "host root read is fresh while project context remains captured" =
             with
             | Ok (Context_close _) -> ()
             | Ok _ | Error _ -> failwith "edited ChatMD close failed");
+           let imported_part =
+             "<script id=\"s\" language=\"chatml\" kind=\"tool\" \
+              project=\"./chatml.project.json\">let main input = Task.pure(input)\n\
+              </script>"
+           in
+           Eio.Path.save
+             ~create:(`Or_truncate 0o600)
+             Eio.Path.(directory / "fragment.chatmd")
+             imported_part;
+           Eio.Path.save
+             ~create:(`Or_truncate 0o600)
+             Eio.Path.(directory / "imported.chatmd")
+             {|<import src="fragment.chatmd" namespace="lib"/>|};
+           let imported_context =
+             match
+               call
+                 (Context_open
+                    (P.Authoring.Context.Open_request.create_host_document
+                       ~root
+                       ~member:"imported.chatmd"
+                       ~default_environment:None
+                     |> ok))
+             with
+             | Ok (Context_open context) -> context
+             | Ok _ | Error _ -> failwith "imported ChatMD open failed"
+           in
+           let imported_expected =
+             P.Authoring.Context.Expected.of_view imported_context
+           in
+           let imported_capture, imported_snapshot, imported_graph =
+             match
+               S.Semantic.analyze
+                 selected_analyze
+                 ~actor
+                 ~connection
+                 (P.Authoring.Analysis.Analyze.Request.create
+                    ~context:imported_expected
+                    ~target:(P.Authoring.Analysis.Target.selected_script "lib:s" |> ok)
+                  |> ok)
+             with
+             | Ok (P.Authoring.Analysis.Analyze.Complete complete) ->
+               complete.capture, complete.snapshot, complete.validated_graph
+             | Ok result ->
+               failwith
+                 (Sexp.to_string_hum (P.Authoring.Analysis.Analyze.sexp_of_t result))
+             | Error error ->
+               failwith (P.Error.code_to_string (S.Error.to_protocol error).code)
+           in
+           let imported_compiled_source =
+             match P.Authoring.Analysis.Capture.target imported_capture with
+             | P.Authoring.Analysis.Target.Script_input stamp ->
+               P.Authoring.Analysis.Target.selected_script_source stamp
+             | Project_input -> failwith "imported capture lost script target"
+           in
+           let imported_offset =
+             String.substr_index_exn imported_part ~pattern:"Task.pure(input)"
+             + String.length "Task.pure("
+           in
+           let imported_query =
+             Q.Request.create
+               ~evidence:
+                 (Q.Certified
+                    { capture = imported_capture
+                    ; snapshot = imported_snapshot
+                    ; validated_graph = imported_graph
+                    })
+               ~source:imported_compiled_source
+               ~byte_offset:(String.length "let main input = Task.pure(")
+               ~kind:Q.References
+               ~max_items:1
+             |> ok
+           in
+           (match S.Semantic.query selected_analyze ~actor ~connection imported_query with
+            | Ok answer ->
+              (match Q.payload answer with
+               | Q.References_result
+                   (Q.Available { items = [ reference ]; truncated = false }) ->
+                 let site = Q.Item.reference_selection reference in
+                 (match P.Authoring.Analysis.Site.projection site with
+                  | Some (Authored_exact range) ->
+                    [%test_eq: string]
+                      (Chatml_source.Id.relative_path
+                         (P.Authoring.Source.id
+                            (P.Authoring.Analysis.Byte_range.source range)))
+                      "fragment.chatmd";
+                    [%test_eq: int]
+                      (P.Authoring.Analysis.Byte_range.start_byte range)
+                      imported_offset;
+                    [%test_eq: int]
+                      (P.Authoring.Analysis.Byte_range.end_byte range)
+                      (imported_offset + String.length "input")
+                  | None | Some (External_origin _ | Approximate_declaration _) ->
+                    failwith "imported query lost parser-owned authored input")
+               | _ -> failwith "imported query lost actual reference")
+            | Error error ->
+              failwith (P.Error.code_to_string (S.Error.to_protocol error).code));
+           (match
+              call
+                (Context_close
+                   (P.Authoring.Context.Close_request.create ~expected:imported_expected))
+            with
+            | Ok (Context_close _) -> ()
+            | Ok _ | Error _ -> failwith "imported ChatMD close failed");
            let document =
              match
                call

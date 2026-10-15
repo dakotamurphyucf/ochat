@@ -271,6 +271,17 @@ module Semantic : sig
       -> t Or_error.t
   end
 
+  module Query_limits : sig
+    type t
+
+    (** Host-owned source/selection admission work plus the existing lower
+        bounded query producer. The request cannot enlarge either allowance. *)
+    val create
+      :  max_host_work_steps:int
+      -> projection:Chatml_authoring_query.Limits.t
+      -> t Or_error.t
+  end
+
   type t
 
   val create
@@ -282,6 +293,7 @@ module Semantic : sig
     -> project_build_limits:Chatml_project_build.Limits.t
     -> limits:Limits.t
     -> prefix_limits:Prefix_limits.t
+    -> query_limits:Query_limits.t
     -> t
 
   val analyze
@@ -297,6 +309,16 @@ module Semantic : sig
     -> connection:Connection_context.t
     -> P.Authoring.Analysis.Prefix.Request.t
     -> (P.Authoring.Analysis.Prefix.t, Error.t) result
+
+  (** Current certified semantic facts, same-run failed syntax, or the exact
+      published provisional prefix. Context lifecycle still requires core;
+      this method checks its own negotiated semantic feature. *)
+  val query
+    :  t
+    -> actor:Operator_authorization.t
+    -> connection:Connection_context.t
+    -> P.Authoring.Analysis.Query.Request.t
+    -> (P.Authoring.Analysis.Query.t, Error.t) result
 end
 
 (** Lexical and early assistance borrow the same current context and joined
