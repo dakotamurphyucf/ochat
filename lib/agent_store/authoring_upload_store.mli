@@ -6,6 +6,10 @@ module Bundle = Agent_protocol.Authoring_bundle.Bundle
 type t
 type sealed
 
+(** The parent recorded in the persisted manifest of this exact Store claim.
+    This is a comparison coordinate, not a Core context or read grant. *)
+val sealed_parent_context : sealed -> Agent_protocol.Authoring.Context.Expected.t option
+
 (** Comparison coordinate of the daemon that opened this store. This does not
     grant access to any upload. *)
 val host_id : t -> Agent_protocol.Id.Server.t
@@ -58,8 +62,18 @@ end
 module Claim_result : sig
   type t =
     | Ready of sealed
-    | Published of Bundle.Receipt.t
-    | Rejected of Bundle.Rejection.t
+    | Published of
+        { receipt : Bundle.Receipt.t
+        ; parent_context : Agent_protocol.Authoring.Context.Expected.t option
+        }
+    | Rejected of
+        { reason : Bundle.Rejection.t
+        ; parent_context : Agent_protocol.Authoring.Context.Expected.t option
+        }
+
+  (** Terminal exact-key retries retain the persisted parent. A caller must
+      recheck it before returning either outcome; a wire Expected alone is not
+      physical parent authority. *)
 end
 
 module Status : sig
@@ -142,6 +156,21 @@ val check_published_pin
   -> Published_pin.t
   -> now:(unit -> Agent_protocol.Timestamp.t)
   -> checkpoint:(unit -> unit)
+  -> (unit, Error.t) Result.t
+
+(** Nonyielding comparison for a previously verified published capture. Try
+    the existing Store gate; Busy means another operation owns it. Under that
+    gate, verify the live daemon lock and compare this physical Store,
+    principal, current in-memory publication marker/receipt/manifest and the
+    original deadline using fresh trusted [now]. No wait, durable read or
+    installed-source verification occurs here;
+    [check_published_pin] remains the full yielding integrity check. Both use
+    the same pure pin-identity comparison. *)
+val check_published_pin_now
+  :  t
+  -> principal:Agent_protocol.Id.Principal.t
+  -> Published_pin.t
+  -> now:(unit -> Agent_protocol.Timestamp.t)
   -> (unit, Error.t) Result.t
 
 (** [daemon_lock] must be live, owned by [host_id], and at
@@ -269,10 +298,22 @@ val publish
   -> sealed
   -> snapshot:Snapshot.t
   -> proof:Proof.t
+  -> parent_pin:Published_pin.t option
   -> now:(unit -> Agent_protocol.Timestamp.t)
   -> checkpoint:(unit -> unit)
   -> final_admission:(unit -> unit)
   -> (Bundle.Receipt.t, Error.t) Result.t
+
+(** [parent_pin] is required even for parentless publication (where it is
+    [None]), so the publisher must make the parent decision explicitly. A
+    parent pin is minted only by the actual uploaded parent capture. After all
+    yielding publication work and ordinary metadata verification, the existing
+    already-held Store gate compares the pin through the same pure identity
+    rule as [check_published_pin_now], immediately before marker rename. It
+    checks the live daemon lock and Store/principal/marker/deadline without
+    recursively borrowing the Store or performing extra I/O. A mismatch leaves pending intent custody
+    for an authorized exact-key retry. [final_admission] independently checks
+    the current physical Core parent/actor and selected publication policy. *)
 
 (** An authorized validator's coarse rejection before any durable intent.
     An existing intent cannot lose its selected ID through rejection. *)

@@ -211,7 +211,10 @@ type sealed =
   { upload_id : Id.t
   ; token : unit ref
   ; commit_key : P.Idempotency_key.t
+  ; parent_context : P.Authoring.Context.Expected.t option
   }
+
+let sealed_parent_context t = t.parent_context
 
 module Snapshot = struct
   type t =
@@ -338,8 +341,14 @@ type publication =
 module Claim_result = struct
   type t =
     | Ready of sealed
-    | Published of B.Receipt.t
-    | Rejected of B.Rejection.t
+    | Published of
+        { receipt : B.Receipt.t
+        ; parent_context : P.Authoring.Context.Expected.t option
+        }
+    | Rejected of
+        { reason : B.Rejection.t
+        ; parent_context : P.Authoring.Context.Expected.t option
+        }
 end
 
 module Status = struct
@@ -1947,17 +1956,23 @@ let claim_commit t ~principal ~request ~now ~checkpoint =
             match upload.publication with
             | Intent { marker = Some _; _ } ->
               let* receipt = verify_publication t upload ~checkpoint in
-              Ok (Claim_result.Published receipt)
+              Ok
+                (Claim_result.Published
+                   { receipt; parent_context = upload.manifest_doc.parent_context })
             | Not_published | Intent { marker = None; _ } ->
               Ok
                 (Claim_result.Ready
                    { upload_id = request.upload_id
                    ; token = t.token
                    ; commit_key = request.idempotency_key
+                   ; parent_context = upload.manifest_doc.parent_context
                    }))
       | Doc.Phase.Rejected { commit_key; reason; _ } ->
         if P.Idempotency_key.equal commit_key request.idempotency_key
-        then Ok (Claim_result.Rejected reason)
+        then
+          Ok
+            (Claim_result.Rejected
+               { reason; parent_context = upload.manifest_doc.parent_context })
         else Error Error.Idempotency_conflict
       | Doc.Phase.Open ->
         if
@@ -1982,7 +1997,9 @@ let claim_commit t ~principal ~request ~now ~checkpoint =
              in
              let* bytes = phase_admission phase in
              let* () = save_phase t upload phase bytes in
-             Ok (Claim_result.Rejected reason)
+             Ok
+               (Claim_result.Rejected
+                  { reason; parent_context = upload.manifest_doc.parent_context })
            | Error error -> Error error
            | Ok (payload_digest, _) ->
              let phase =
@@ -2003,6 +2020,7 @@ let claim_commit t ~principal ~request ~now ~checkpoint =
                   { upload_id = request.upload_id
                   ; token = t.token
                   ; commit_key = request.idempotency_key
+                  ; parent_context = upload.manifest_doc.parent_context
                   }))))
 ;;
 
@@ -2093,8 +2111,52 @@ let ensure_publish_capacity t principal installed ~intent_bytes =
   else Ok ()
 ;;
 
+let compare_published_pin_identity t ~principal (pin : Published_pin.t) ~at =
+  if
+    (not (phys_equal t.token pin.store_token))
+    || not (P.Id.Principal.equal principal pin.principal)
+  then Error Error.Missing_or_foreign
+  else (
+    match Hashtbl.find t.uploads pin.upload_id with
+    | None -> Error Error.Missing_or_foreign
+    | Some upload ->
+      if
+        (not (P.Id.Principal.equal upload.manifest_doc.owner.principal principal))
+        || not
+             (Chatml_source.Digest.equal
+                (B.Manifest.fingerprint upload.manifest_doc.manifest)
+                pin.manifest_fingerprint)
+      then Error Error.Missing_or_foreign
+      else if expired at pin.deadline || expired at (phase_deadline upload)
+      then Error Error.Expired
+      else (
+        match upload.publication with
+        | Not_published | Intent { marker = None; _ } -> Error Error.Sealed
+        | Intent { value = intent; marker = Some marker; _ } ->
+          let receipt = Doc.Intent.receipt intent in
+          if
+            (not (intent_matches_upload upload intent))
+            || (not (B.Receipt.equal receipt pin.receipt))
+            || (not
+                  (P.Id.Authoring_bundle.equal
+                     (B.Receipt.bundle_id receipt)
+                     pin.bundle_id))
+            || (not (P.Timestamp.equal (B.Receipt.expires_at receipt) pin.deadline))
+            || (not
+                  (Chatml_source.Digest.equal
+                     (Doc.Marker.intent_digest marker)
+                     pin.marker_intent_digest))
+            || not
+                 (Chatml_source.Digest.equal
+                    (Doc.Marker.inventory_digest marker)
+                    pin.marker_inventory_digest)
+          then Error Error.Invalid_manifest
+          else Ok (upload, intent, marker)))
+;;
+
 exception Publication_expired
 exception Publication_closed
+exception Publication_parent_invalid of Error.t
 
 let publish
       t
@@ -2102,6 +2164,7 @@ let publish
       (sealed : sealed)
       ~(snapshot : Snapshot.t)
       ~proof
+      ~parent_pin
       ~now
       ~checkpoint
       ~final_admission
@@ -2121,6 +2184,15 @@ let publish
     then Error Error.Closed
     else
       let* upload = find_owned t principal sealed.upload_id in
+      let* () =
+        if
+          Option.equal
+            P.Authoring.Context.Expected.equal
+            sealed.parent_context
+            upload.manifest_doc.parent_context
+        then Ok ()
+        else Error Error.Idempotency_conflict
+      in
       match upload.phase.outcome with
       | Doc.Phase.Ready { commit_key; payload_digest; receipt_deadline } ->
         if expired admitted_at receipt_deadline
@@ -2270,6 +2342,22 @@ let publish
                          ~before_rename:(fun () ->
                            if expired (now ()) receipt_deadline
                            then raise Publication_expired;
+                           (match parent_pin with
+                            | None -> ()
+                            | Some pin ->
+                              (match check_lock t with
+                               | Error error -> raise (Publication_parent_invalid error)
+                               | Ok () ->
+                                 (match
+                                    compare_published_pin_identity
+                                      t
+                                      ~principal
+                                      pin
+                                      ~at:(now ())
+                                  with
+                                  | Ok _ -> ()
+                                  | Error error ->
+                                    raise (Publication_parent_invalid error))));
                            final_admission ();
                            match check_lock t with
                            | Ok () -> ()
@@ -2280,6 +2368,7 @@ let publish
                    with
                    | Publication_expired -> Error Error.Expired
                    | Publication_closed -> Error Error.Closed
+                   | Publication_parent_invalid error -> Error error
                  in
                  upload.publication
                  <- Intent
@@ -2433,55 +2522,33 @@ let with_published t ~principal ~bundle_id ~now ~checkpoint ~admit_metadata ~f =
       Fun.protect ~finally:release (fun () -> Ok (f capture)))
 ;;
 
-let check_published_pin t ~principal (pin : Published_pin.t) ~now ~checkpoint =
+let check_published_pin_now t ~principal pin ~now =
+  if not (Eio.Mutex.try_lock t.gate)
+  then Error Error.Busy
+  else
+    Exn.protect
+      ~finally:(fun () -> Eio.Mutex.unlock t.gate)
+      ~f:(fun () ->
+        let* () = if t.closed then Error Error.Closed else check_lock t in
+        if t.uncertain
+        then Error Error.Busy
+        else
+          let* _, _, _ = compare_published_pin_identity t ~principal pin ~at:(now ()) in
+          Ok ())
+;;
+
+let check_published_pin t ~principal pin ~now ~checkpoint =
   use_gate t (fun () ->
     let checkpoint = work t.limits checkpoint in
     checkpoint ();
     let* () = ensure_consistent t ~checkpoint in
     checkpoint ();
-    if
-      (not (phys_equal t.token pin.store_token))
-      || not (P.Id.Principal.equal principal pin.principal)
-    then Error Error.Missing_or_foreign
-    else (
-      match Hashtbl.find t.uploads pin.upload_id with
-      | None -> Error Error.Missing_or_foreign
-      | Some upload ->
-        if
-          (not (P.Id.Principal.equal upload.manifest_doc.owner.principal principal))
-          || not
-               (Chatml_source.Digest.equal
-                  (B.Manifest.fingerprint upload.manifest_doc.manifest)
-                  pin.manifest_fingerprint)
-        then Error Error.Missing_or_foreign
-        else if expired (now ()) pin.deadline || expired (now ()) (phase_deadline upload)
-        then Error Error.Expired
-        else (
-          match upload.publication with
-          | Not_published | Intent { marker = None; _ } -> Error Error.Sealed
-          | Intent { value = intent; marker = Some marker; _ } ->
-            let receipt = Doc.Intent.receipt intent in
-            if
-              (not (intent_matches_upload upload intent))
-              || (not (B.Receipt.equal receipt pin.receipt))
-              || (not
-                    (P.Id.Authoring_bundle.equal
-                       (B.Receipt.bundle_id receipt)
-                       pin.bundle_id))
-              || (not (P.Timestamp.equal (B.Receipt.expires_at receipt) pin.deadline))
-              || (not
-                    (Chatml_source.Digest.equal
-                       (Doc.Marker.intent_digest marker)
-                       pin.marker_intent_digest))
-              || not
-                   (Chatml_source.Digest.equal
-                      (Doc.Marker.inventory_digest marker)
-                      pin.marker_inventory_digest)
-            then Error Error.Invalid_manifest
-            else
-              let* () = verify_publication_metadata t upload intent marker ~checkpoint in
-              let* () = check_lock t in
-              if expired (now ()) pin.deadline then Error Error.Expired else Ok ())))
+    let* upload, intent, marker =
+      compare_published_pin_identity t ~principal pin ~at:(now ())
+    in
+    let* () = verify_publication_metadata t upload intent marker ~checkpoint in
+    let* () = check_lock t in
+    if expired (now ()) pin.deadline then Error Error.Expired else Ok ())
 ;;
 
 let cleanup_expired_data t upload ~checkpoint =

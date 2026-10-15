@@ -13,6 +13,7 @@ let ok = function
 
 let with_daemon
       ?(options = { S.Daemon.default_options with startup_mode = Operator_only })
+      ?(prepare_options = fun ~env:_ options -> options)
       ?(configure = fun ~env:_ ~root:_ config -> config)
       f
   =
@@ -45,7 +46,7 @@ let with_daemon
               ~tool_dir:root
               ~home:root
               ~process_start_identity:None
-              ~options
+              ~options:(prepare_options ~env options)
               ()
             |> ok
           in
@@ -190,10 +191,12 @@ let configured_upload_access mode grants =
     }
 ;;
 
-let publish_document transport ~key =
+let publish_document ?parent transport ~key =
   let id, contents, manifest = upload_document () in
   let begin_key = P.Idempotency_key.of_string (key ^ "-begin") |> ok in
-  let begin_request = B.Begin.create_request ~idempotency_key:begin_key ~manifest () in
+  let begin_request =
+    B.Begin.create_request ?parent_context:parent ~idempotency_key:begin_key ~manifest ()
+  in
   let upload_id =
     match authoring transport (Bundle_begin begin_request) |> ok with
     | Bundle_begin response -> B.Begin.upload_id response
@@ -214,14 +217,23 @@ let publish_document transport ~key =
       | Accepted_for_validation | Rejected _ ->
         failwith "configured upload did not publish")
    | _ -> failwith "configured upload returned another method");
-  match
-    authoring transport (Bundle_status (B.Status.create_request ~upload_id)) |> ok
-  with
-  | Bundle_status status ->
-    (match B.Status.state status with
-     | Published _ -> ()
-     | _ -> failwith "configured publication was not durable")
-  | _ -> failwith "configured status returned another method"
+  (match
+     authoring transport (Bundle_status (B.Status.create_request ~upload_id)) |> ok
+   with
+   | Bundle_status status ->
+     (match B.Status.state status with
+      | Published _ -> ()
+      | _ -> failwith "configured publication was not durable")
+   | _ -> failwith "configured status returned another method");
+  Option.iter parent ~f:(fun _ ->
+    match authoring transport (Bundle_commit commit) |> ok with
+    | Bundle_commit response ->
+      (match B.Commit.outcome response with
+       | Published _ -> ()
+       | Accepted_for_validation | Rejected _ ->
+         failwith "parent terminal retry lost its durable receipt")
+    | _ -> failwith "parent terminal retry returned another method");
+  commit
 ;;
 
 let project_upload () =
@@ -374,16 +386,191 @@ let moderator_upload () =
     Chatml_prepared_program.Environment.name
       (Chatml_prepared_program.environment (Chatml_project_build.prepared original))
   in
-  Project_fixture.manifest project sources, sources, environment
+  Project_fixture.manifest project sources, sources, environment, original
 ;;
 
-let publish_project transport ~key ~manifest ~sources =
+let moderator_followup original sources previous_lock =
+  let module Project_fixture = Chatml_project_build_tests.Authoring_bundle_tests in
+  let module Support = Chatml_project_build_tests.Support in
+  let entry = Project_fixture.find_entry original in
+  let project =
+    Project_fixture.project
+      original
+      ~source_members:sources
+      ~selection:(Project_fixture.selection Library)
+      ~entry:(Captured (Project_fixture.captured_entry entry))
+      ~mode:
+        (Compose
+           { selected_previous_lock = Some previous_lock
+           ; generated_lock = Support.id ~namespace:"role" "followup.lock.json"
+           })
+  in
+  Project_fixture.manifest project sources
+;;
+
+let selected_document_project ~namespace () =
+  let module Support = Chatml_project_build_tests.Support in
+  let module Project_fixture = Chatml_project_build_tests.Authoring_bundle_tests in
+  let module Build = Chatml_project_build in
+  let contract =
+    Chatml.Chatml_compiler_contract.for_target One_off_v1 ~checkpoint:Fn.id
+  in
+  let declaration =
+    Support.capture
+      ~namespace
+      "chatml.project.json"
+      {|{"schema_version":1,"namespace":"selected","source_dirs":[]}|}
+  in
+  let entry =
+    Support.capture ~namespace "entry.chatml" "let main input = Task.pure(input)\n"
+  in
+  let catalog =
+    Support.catalog declaration ~request:(Library { environment = None }) ~members:[]
+  in
+  let root =
+    Build.Catalog_input.create
+      catalog
+      ~origin:Local
+      ~acquisition_key:"selected-document-parent"
+      ~dependencies:[]
+  in
+  let limits = Support.limits () in
+  let gate, _ =
+    Build.Selection_gate.create Initial_prepare ~limits ~checkpoint:Fn.id |> Support.ok
+  in
+  let build =
+    Build.compose
+      root
+      ~catalogs:[]
+      ~entry:(Captured entry)
+      ~selection_gate:gate
+      ~contract
+      ~lock_id:(Support.id ~namespace "original.lock.json")
+      ~limits
+      ~checkpoint:Fn.id
+    |> Support.ok
+  in
+  let environment =
+    Chatml_prepared_program.Environment.name
+      (Chatml_prepared_program.environment (Build.prepared build))
+  in
+  build, contract, declaration, entry, environment
+;;
+
+let selected_document_upload
+      ~dir
+      ~document_source
+      ~document_bytes
+      ~build
+      ~declaration
+      ~entry
+  =
+  let module Project_fixture = Chatml_project_build_tests.Authoring_bundle_tests in
+  let module Support = Chatml_project_build_tests.Support in
+  let document =
+    Chatml_source.create
+      document_source
+      ~contents:document_bytes
+      ~expected_digest:None
+      ~max_bytes:None
+      ~checkpoint:Fn.id
+    |> Or_error.ok_exn
+  in
+  let parsed =
+    Prompt.Chat_markdown.parse_source_bundle
+      ~dir
+      (Chatmd_source_bundle.create
+         ~root_file:"selected.chatmd"
+         ~sources:[ "selected.chatmd", document_bytes ]
+         ()
+       |> Result.ok_or_failwith)
+  in
+  let declaration_script =
+    List.hd_exn (Prompt.Chat_markdown.Parsed.declarations parsed.parsed_root)
+  in
+  let binding =
+    Chatml_prompt_programs.Binding.of_declaration
+      parsed.parsed_root
+      declaration_script
+      ~checkpoint:Fn.id
+    |> Or_error.ok_exn
+  in
+  let selector =
+    B.Manifest.Script.Selector.create
+      ~registration_source:document_source
+      ~declaration_source:document_source
+      ~start_byte:(Chatml_prompt_programs.Binding.start_byte binding)
+      ~end_byte:(Chatml_prompt_programs.Binding.end_byte binding)
+      ~script_id:(Chatml_prompt_programs.Binding.script_id binding)
+      ~body_digest:(Chatml_prompt_programs.Binding.script_digest binding)
+      ~body_byte_length:
+        (String.length (Prompt.Chat_markdown.Declaration.script_body declaration_script))
+    |> ok
+  in
+  let project =
+    Project_fixture.project
+      build
+      ~source_members:[ declaration ]
+      ~selection:(Project_fixture.selection Library)
+      ~entry:
+        (Captured
+           (B.Manifest.Project.Captured_entry.create
+              ~source:(Project_fixture.metadata entry)
+              ~delivery:Derived_script
+            |> ok))
+      ~mode:
+        (Compose
+           { selected_previous_lock =
+               Some (Project_fixture.metadata (Chatml_project_build.lock_source build))
+           ; generated_lock =
+               Support.id
+                 ~namespace:(Chatml_source.Id.package_namespace document_source)
+                 "next.lock.json"
+           })
+  in
+  let script =
+    B.Manifest.Script.create ~selector ~choice:(Selected_project project) |> ok
+  in
+  let document_member source member =
+    B.Manifest.Document_member.create
+      ~source:(Chatml_source.id source)
+      ~member:(Source.Portable_path.create member |> Or_error.ok_exn)
+    |> ok
+  in
+  let basis =
+    B.Manifest.Chatmd_document.create
+      ~root_source:document_source
+      ~document_members:
+        [ document_member document "selected.chatmd"
+        ; document_member declaration "chatml.project.json"
+        ]
+      ~scripts:[ script ]
+    |> ok
+  in
+  let sources = [ document; declaration ] in
+  let manifest =
+    B.Manifest.create
+      ~basis:(Chatmd_document basis)
+      ~members:
+        (List.map sources ~f:(fun source ->
+           B.Member.create ~source:(Project_fixture.metadata source) |> ok))
+    |> ok
+  in
+  manifest, sources
+;;
+
+let stage_project ?parent transport ~key ~manifest ~sources =
   let begin_key = P.Idempotency_key.of_string (key ^ "-begin") |> ok in
   let upload_id =
     match
       authoring
         transport
-        (Bundle_begin (B.Begin.create_request ~idempotency_key:begin_key ~manifest ()))
+        (Bundle_begin
+           (B.Begin.create_request
+              ?parent_context:parent
+              ~idempotency_key:begin_key
+              ~manifest
+              ()))
       |> ok
     with
     | Bundle_begin response -> B.Begin.upload_id response
@@ -401,11 +588,13 @@ let publish_project transport ~key ~manifest ~sources =
     match authoring transport (Bundle_chunk chunk) |> ok with
     | Bundle_chunk _ -> ()
     | _ -> failwith "configured Project member was not accepted");
-  let commit =
-    B.Commit.create_request
-      ~upload_id
-      ~idempotency_key:(P.Idempotency_key.of_string (key ^ "-commit") |> ok)
-  in
+  B.Commit.create_request
+    ~upload_id
+    ~idempotency_key:(P.Idempotency_key.of_string (key ^ "-commit") |> ok)
+;;
+
+let publish_project ?parent transport ~key ~manifest ~sources =
+  let commit = stage_project ?parent transport ~key ~manifest ~sources in
   match authoring transport (Bundle_commit commit) |> ok with
   | Bundle_commit response ->
     (match B.Commit.outcome response with
@@ -587,7 +776,7 @@ let%expect_test
        in
        assert (List.mem enabled P.Authoring.Features.bundle ~equal:String.equal);
        assert (not (List.mem enabled P.Authoring.Features.core ~equal:String.equal));
-       publish_document transport ~key:"configured-upload";
+       ignore (publish_document transport ~key:"configured-upload" : B.Commit.request);
        let foreign =
          Operator_authorization.trusted_local
            (Agent_server_test_support.principal_with_id "pri_upload_foreign")
@@ -656,6 +845,247 @@ let%expect_test "configured Project upload cannot rebind with only a bundle-read
   [%expect {| bundle read alone cannot rebind |}]
 ;;
 
+let%expect_test "installed selected Document parent supplies only its current exact prior"
+  =
+  let module Service = S.Authoring_context_service in
+  let module Policy = S.Authoring_installation.Host_policy in
+  let selected = ref None in
+  let selected_now = ref true in
+  let script_selection =
+    Service.Semantic.Script_selection.Policy.create
+      ~select_script:
+        (fun
+          ~original_actor ~actor ~current:_ ~parsed:_ ~declaration ~metadata:_ ->
+        if
+          !selected_now
+          && Operator_authorization.is_current original_actor
+          && Operator_authorization.is_current actor
+          && String.equal (Prompt.Chat_markdown.Declaration.script_id declaration) "s"
+        then !selected
+        else None)
+  in
+  let query_limits =
+    Service.Semantic.Query_limits.create
+      ~max_host_work_steps:100_000
+      ~projection:
+        (Chatml_authoring_query.Limits.create
+           ~max_items:8
+           ~max_member_depth:4
+           ~max_member_edges:128
+           ~max_label_bytes:4096
+           ~max_work_steps:100_000
+           ~type_display:
+             (Chatml_type_display.Limits.create
+                ~max_nodes:512
+                ~max_edges:1024
+                ~max_depth:16
+                ~max_work_steps:100_000
+                ~max_text_bytes:1024
+                ~max_output_bytes:4096
+              |> Or_error.ok_exn)
+         |> Or_error.ok_exn)
+    |> Or_error.ok_exn
+  in
+  let base =
+    Policy.basic_supplied ~initialize_limits:S.Daemon.default_options.protocol_limits
+    |> ok
+  in
+  let access =
+    configured_upload_access
+      S.Authoring_upload_access_configuration.Augment_core
+      [ Upload_write; Publish; Bundle_read; Rebind ]
+  in
+  let access =
+    S.Authoring_upload_access_configuration.
+      { access with
+        selections =
+          [ Selection.
+              { principal_id = (Agent_server_test_support.principal ()).id
+              ; authentication_kind = "test"
+              ; request =
+                  S.Authoring_project_access_configuration.Selection.Library
+                    { environment = None }
+              ; selected_environment = "default"
+              ; target = One_off_v1
+              }
+          ]
+      }
+  in
+  let document_bytes =
+    "<script id=\"s\" language=\"chatml\" kind=\"tool\" \
+     project=\"./chatml.project.json\">let main input = Task.pure(input)\n\
+     </script>"
+  in
+  with_daemon
+    ~prepare_options:(fun ~env options ->
+      let semantic =
+        Policy.Semantic.create
+          ~script_selection:(Some script_selection)
+          ~project_metadata:None
+          ~project_build_limits:
+            (Chatml_project_build.Limits.create
+               ~max_work_steps:100_000
+               ~max_input_bytes:(Some 4096)
+               ~document:Document_schema.Limits.default
+             |> Or_error.ok_exn)
+          ~limits:
+            (Service.Semantic.Limits.create
+               ~max_document_bundle_files:4
+               ~max_document_bundle_bytes:2048
+               ~max_parser_work_steps:100_000
+               ~max_diagnostic_work_steps:100_000
+               ~max_selection_rows:4
+               ~max_retained_selection_source_bytes:(4 * 1024 * 1024)
+               ~max_retained_selection_input_bytes:(4 * 1024 * 1024)
+               ~max_selection_work_steps:1_000_000
+             |> Or_error.ok_exn)
+          ~prefix_limits:
+            (Service.Semantic.Prefix_limits.create
+               ~max_document_bundle_files:4
+               ~max_document_bundle_bytes:2048
+               ~max_parser_work_steps:100_000
+               ~max_host_work_steps:100_000
+             |> Or_error.ok_exn)
+          ~query_limits
+          ~document_dir:(Eio.Stdenv.cwd env)
+      in
+      { options with authoring = Some (Policy.with_semantic base ~semantic |> ok) })
+    ~configure:(fun ~env:_ ~root:_ config ->
+      { config with
+        server = { config.server with authoring_upload_access = Some access }
+      })
+    (fun env _ _ daemon ->
+       let _, transport = connect daemon in
+       Fun.protect
+         ~finally:(fun () -> Agent_client.Connection.close transport)
+         (fun () ->
+            let enabled =
+              (initialize
+                 transport
+                 [ P.Authoring.Features.core
+                 ; P.Authoring.Features.semantic
+                 ; P.Authoring.Features.bundle
+                 ])
+                .enabled_features
+            in
+            assert (List.mem enabled P.Authoring.Features.semantic ~equal:String.equal);
+            let opened =
+              match
+                authoring
+                  transport
+                  (Context_open
+                     (P.Authoring.Context.Open_request.create_supplied_document
+                        ~member:"selected.chatmd"
+                        ~default_environment:None
+                        ~contents:document_bytes
+                      |> ok))
+                |> ok
+              with
+              | Context_open context -> context
+              | _ -> failwith "selected Document did not open"
+            in
+            let expected = P.Authoring.Context.Expected.of_view opened in
+            ignore
+              (publish_document ~parent:expected transport ~key:"document-before-analyze"
+               : B.Commit.request);
+            let document_source =
+              match
+                authoring
+                  transport
+                  (Source_list
+                     (P.Authoring.Source_read.List_request.create
+                        ~context:expected
+                        ~package_namespace:None
+                        ~directory:None
+                      |> ok))
+                |> ok
+              with
+              | Source_list result ->
+                P.Authoring.Source.id
+                  (List.find_exn
+                     (P.Authoring.Source_read.List_result.sources result)
+                     ~f:(fun source ->
+                       String.equal
+                         (Chatml_source.Id.relative_path (P.Authoring.Source.id source))
+                         "selected.chatmd"))
+              | _ -> failwith "selected Document source inventory unavailable"
+            in
+            let build, contract, declaration, entry, environment =
+              selected_document_project
+                ~namespace:(Chatml_source.Id.package_namespace document_source)
+                ()
+            in
+            let admitted =
+              Service.Semantic.Script_selection.Selected.admit
+                ~build
+                ~contract
+                ~limits:
+                  (Service.Semantic.Script_selection.Limits.create
+                     ~max_identity_bytes:(4 * 1024 * 1024)
+                     ~max_work_steps:100_000
+                   |> Or_error.ok_exn)
+                ~checkpoint:Fn.id
+              |> function
+              | Ok selected -> selected
+              | Error _ -> failwith "actual selected Document Build was not admitted"
+            in
+            assert (String.equal environment "default");
+            selected := Some admitted;
+            (match
+               authoring
+                 transport
+                 (Analyze
+                    (P.Authoring.Analysis.Analyze.Request.create
+                       ~context:expected
+                       ~target:(P.Authoring.Analysis.Target.selected_script "s" |> ok)
+                     |> ok))
+               |> ok
+             with
+             | Analyze (Complete _) -> ()
+             | _ -> failwith "selected Document did not retain a checked Build");
+            let manifest, sources =
+              selected_document_upload
+                ~dir:(Eio.Stdenv.cwd env)
+                ~document_source
+                ~document_bytes
+                ~build
+                ~declaration
+                ~entry
+            in
+            let selected_commit =
+              stage_project
+                ~parent:expected
+                transport
+                ~key:"selected-document-prior"
+                ~manifest
+                ~sources
+            in
+            (match authoring transport (Bundle_commit selected_commit) |> ok with
+             | Bundle_commit response ->
+               (match B.Commit.outcome response with
+                | Published _ -> ()
+                | outcome ->
+                  failwith
+                    ("selected Document prior was not published: "
+                     ^ Sexp.to_string_hum (B.Commit.sexp_of_outcome outcome)))
+             | _ -> failwith "selected Document commit response changed");
+            let revoked =
+              stage_project
+                ~parent:expected
+                transport
+                ~key:"revoked-document-prior"
+                ~manifest
+                ~sources
+            in
+            selected_now := false;
+            match authoring transport (Bundle_commit revoked) with
+            | Error failure when P.Error.equal_code failure.code Invalid_request -> ()
+            | Ok _ | Error _ ->
+              failwith "revoked selected Document Build supplied prior authority"));
+  print_endline "selected Document exact prior and policy revocation: ok";
+  [%expect {| selected Document exact prior and policy revocation: ok |}]
+;;
+
 let%expect_test
     "installed authoring success and method rejection share local, HTTP and stdio \
      dispatch"
@@ -712,6 +1142,9 @@ let%expect_test
      transport"
   =
   let local = Agent_server_test_support.principal () in
+  let http_principal =
+    Agent_server_test_support.principal_with_id "pri_authoring_native_http"
+  in
   let moderator =
     Chatml.Chatml_compiler_contract.for_target Moderator_v1 ~checkpoint:ignore
   in
@@ -750,7 +1183,7 @@ let%expect_test
       |> to_hex)
     |> fun digest -> P.Id.Principal.of_string ("pri_" ^ digest) |> ok
   in
-  let _, _, upload_environment = moderator_upload () in
+  let _, _, upload_environment, _ = moderator_upload () in
   let configure ~env ~root (config : S.Config.t) =
     let save name contents =
       Eio.Path.save
@@ -820,7 +1253,7 @@ let%expect_test
               S.Authoring_project_access_configuration.
                 { read_grants =
                     [ grant local.id "test"
-                    ; grant local.id "http.static_bearer"
+                    ; grant http_principal.id "http.static_bearer"
                     ; grant peer_id "unix.peer"
                     ]
                 ; selections =
@@ -858,7 +1291,7 @@ let%expect_test
                 { mode = Augment_core
                 ; grants =
                     upload_grants local.id "test"
-                    @ upload_grants local.id "http.static_bearer"
+                    @ upload_grants http_principal.id "http.static_bearer"
                     @ upload_grants peer_id "unix.peer"
                 ; selections =
                     [ S.Authoring_upload_access_configuration.Selection.
@@ -956,6 +1389,30 @@ let%expect_test
       if refresh
       then (
         let expected = P.Authoring.Context.Expected.of_view first_context in
+        let _, other_connection = connect daemon in
+        Fun.protect
+          ~finally:(fun () -> Agent_client.Connection.close other_connection)
+          (fun () ->
+             ignore
+               (initialize
+                  other_connection
+                  [ P.Authoring.Features.core; P.Authoring.Features.bundle ]
+                : P.Initialize.Response.t);
+             let _, _, foreign_manifest = upload_document () in
+             let foreign_begin =
+               B.Begin.create_request
+                 ~parent_context:expected
+                 ~idempotency_key:(P.Idempotency_key.of_string "foreign-parent" |> ok)
+                 ~manifest:foreign_manifest
+                 ()
+             in
+             match authoring other_connection (Bundle_begin foreign_begin) with
+             | Error failure when P.Error.equal_code failure.code Conflict -> ()
+             | Ok _ | Error _ ->
+               failwith "different connection borrowed another parent's context");
+        let parent_commit =
+          publish_document ~parent:expected connection ~key:"native-parent"
+        in
         let script_source =
           match
             authoring
@@ -1048,6 +1505,9 @@ let%expect_test
           | _ -> failwith "configured source refresh did not publish"
         in
         let next_expected = P.Authoring.Context.Expected.of_view next in
+        (match authoring connection (Bundle_commit parent_commit) with
+         | Error failure when P.Error.equal_code failure.code Conflict -> ()
+         | Ok _ | Error _ -> failwith "persisted parent survived native context refresh");
         (match
            authoring
              connection
@@ -1127,8 +1587,7 @@ let%expect_test
       ~finally:(fun () -> Agent_client.Connection.close local_connection)
       (fun () ->
          exercise local_connection ~refresh:true;
-         publish_document local_connection ~key:"native-local";
-         let manifest, sources, _ = moderator_upload () in
+         let manifest, sources, _, original = moderator_upload () in
          let receipt =
            publish_project local_connection ~key:"native-project" ~manifest ~sources
          in
@@ -1144,6 +1603,55 @@ let%expect_test
            | Context_open context -> context
            | _ -> failwith "configured Project rebind did not open"
          in
+         let uploaded_expected = P.Authoring.Context.Expected.of_view opened in
+         let previous_lock =
+           match
+             authoring
+               local_connection
+               (Source_list
+                  (P.Authoring.Source_read.List_request.create
+                     ~context:uploaded_expected
+                     ~package_namespace:None
+                     ~directory:None
+                   |> ok))
+             |> ok
+           with
+           | Source_list result ->
+             List.find_exn
+               (P.Authoring.Source_read.List_result.sources result)
+               ~f:(fun source ->
+                 String.equal
+                   (Chatml_source.Id.relative_path (P.Authoring.Source.id source))
+                   "installed.lock.json")
+           | _ -> failwith "uploaded Project lock inventory unavailable"
+         in
+         let followup = moderator_followup original sources previous_lock in
+         ignore
+           (publish_project
+              ~parent:uploaded_expected
+              local_connection
+              ~key:"native-prior"
+              ~manifest:followup
+              ~sources
+            : B.Receipt.t);
+         let wrong_prior =
+           moderator_followup
+             original
+             sources
+             (Chatml_project_build_tests.Authoring_bundle_tests.metadata
+                (Chatml_project_build.lock_source original))
+         in
+         let wrong_commit =
+           stage_project
+             ~parent:uploaded_expected
+             local_connection
+             ~key:"wrong-native-prior"
+             ~manifest:wrong_prior
+             ~sources
+         in
+         (match authoring local_connection (Bundle_commit wrong_commit) with
+          | Error failure when P.Error.equal_code failure.code Invalid_request -> ()
+          | Ok _ | Error _ -> failwith "wrong prior lock acquired parent Build authority");
          match
            authoring
              local_connection
@@ -1167,13 +1675,19 @@ let%expect_test
                   (P.Authoring.Analysis.Analyze.sexp_of_failure_phase phase))
          | _ -> failwith "configured rebound Project response changed");
     let http =
-      Agent_server_wire_fixture.http_connector ~sw ~env ~daemon ~root ~principal:local ()
+      Agent_server_wire_fixture.http_connector
+        ~sw
+        ~env
+        ~daemon
+        ~root
+        ~principal:http_principal
+        ()
     in
     Fun.protect
       ~finally:(fun () -> Agent_client.Connection.close http)
       (fun () ->
          exercise http ~refresh:false;
-         publish_document http ~key:"native-http");
+         ignore (publish_document http ~key:"native-http" : B.Commit.request));
     let stdio =
       Agent_server_wire_fixture.connect_stdio
         ~sw
@@ -1185,7 +1699,7 @@ let%expect_test
       ~finally:(fun () -> Agent_client.Connection.close stdio)
       (fun () ->
          exercise stdio ~refresh:false;
-         publish_document stdio ~key:"native-stdio");
+         ignore (publish_document stdio ~key:"native-stdio" : B.Commit.request));
     let current = ref true in
     let actor =
       Operator_authorization.guarded ~principal:local ~is_current:(fun () -> !current)

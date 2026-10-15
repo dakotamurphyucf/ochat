@@ -258,6 +258,7 @@ let%test_unit "session close waits for a genuine published upload read lease" =
     in
     let receipt =
       Store.publish
+        ~parent_pin:None
         child
         ~principal:Fixture.principal
         sealed
@@ -388,6 +389,7 @@ let%test_unit "published capture survives uncertain marker, restart and bounded 
       "final admission exception remains original"
       (match
          Store.publish
+           ~parent_pin:None
            store
            ~principal:Fixture.principal
            sealed
@@ -417,6 +419,7 @@ let%test_unit "published capture survives uncertain marker, restart and bounded 
       "fresh time rejects a marker after the original deadline"
       (match
          Store.publish
+           ~parent_pin:None
            store
            ~principal:Fixture.principal
            sealed
@@ -432,6 +435,7 @@ let%test_unit "published capture survives uncertain marker, restart and bounded 
        | Ok _ | Error _ -> false);
     let receipt =
       Store.publish
+        ~parent_pin:None
         store
         ~principal:Fixture.principal
         sealed
@@ -456,151 +460,203 @@ let%test_unit "published capture survives uncertain marker, restart and bounded 
            ~checkpoint:Fn.id
          |> upload_ok
        with
-       | Published replay -> B.Receipt.equal receipt replay
+       | Published { receipt = replay; _ } -> B.Receipt.equal receipt replay
        | Ready _ | Rejected _ -> false);
-    Store.with_published
-      reopened
-      ~principal:Fixture.principal
-      ~bundle_id
-      ~now:(fun () -> Fixture.start)
-      ~checkpoint:Fn.id
-      ~admit_metadata:(fun _ _ -> ())
-      ~f:(fun capture ->
-        check
-          "borrowed exact document"
-          (match Store.Published_capture.uploaded_sources capture with
-           | [ source ] ->
-             Captured.Id.equal (Captured.id captured) (Captured.id source)
-             && String.equal (Captured.contents captured) (Captured.contents source)
-           | _ -> false);
-        check
-          "source-only has no invented graph"
-          (List.is_empty (Store.Published_capture.graphs capture));
-        check
-          "self close cannot lose active lease"
-          (match Store.close_and_wait reopened with
-           | Error Store.Error.Busy -> true
-           | Ok () | Error _ -> false);
-        check
-          "second capture cannot multiply active retained bytes"
-          (match
-             Store.with_published
-               reopened
-               ~principal:Fixture.principal
-               ~bundle_id
-               ~now:(fun () -> Fixture.start)
-               ~checkpoint:Fn.id
-               ~admit_metadata:(fun _ _ -> ())
-               ~f:(fun _ -> ())
-           with
-           | Error Store.Error.Busy -> true
-           | Ok () | Error _ -> false);
-        let second_begin =
-          B.Begin.create_request
-            ~idempotency_key:
-              (P.Idempotency_key.of_string "publication-second" |> protocol_ok)
-            ~manifest
-            ()
-        in
-        let second_id =
-          Store.begin_upload
-            reopened
-            ~principal:Fixture.principal
-            ~request:second_begin
-            ~now:(fun () -> Fixture.start)
-            ~checkpoint:Fn.id
-          |> upload_ok
-          |> B.Begin.upload_id
-        in
-        Fixture.send_chunk
-          reopened
-          second_id
-          document_id
-          0
-          (String.prefix document_bytes first)
-        |> upload_ok
-        |> ignore;
-        if first < String.length document_bytes
-        then
+    let pin =
+      Store.with_published
+        reopened
+        ~principal:Fixture.principal
+        ~bundle_id
+        ~now:(fun () -> Fixture.start)
+        ~checkpoint:Fn.id
+        ~admit_metadata:(fun _ _ -> ())
+        ~f:(fun capture ->
+          let pin = Store.Published_capture.pin capture in
+          check
+            "verified pin stays current in its actual Store"
+            (match
+               Store.check_published_pin_now
+                 reopened
+                 ~principal:Fixture.principal
+                 pin
+                 ~now:(fun () -> Fixture.start)
+             with
+             | Ok () -> true
+             | Error _ -> false);
+          check
+            "original publication deadline revokes pin"
+            (match
+               Store.check_published_pin_now
+                 reopened
+                 ~principal:Fixture.principal
+                 pin
+                 ~now:(fun () -> Fixture.later 121000)
+             with
+             | Error Store.Error.Expired -> true
+             | Ok () | Error _ -> false);
+          check
+            "borrowed exact document"
+            (match Store.Published_capture.uploaded_sources capture with
+             | [ source ] ->
+               Captured.Id.equal (Captured.id captured) (Captured.id source)
+               && String.equal (Captured.contents captured) (Captured.contents source)
+             | _ -> false);
+          check
+            "source-only has no invented graph"
+            (List.is_empty (Store.Published_capture.graphs capture));
+          check
+            "self close cannot lose active lease"
+            (match Store.close_and_wait reopened with
+             | Error Store.Error.Busy -> true
+             | Ok () | Error _ -> false);
+          check
+            "second capture cannot multiply active retained bytes"
+            (match
+               Store.with_published
+                 reopened
+                 ~principal:Fixture.principal
+                 ~bundle_id
+                 ~now:(fun () -> Fixture.start)
+                 ~checkpoint:Fn.id
+                 ~admit_metadata:(fun _ _ -> ())
+                 ~f:(fun _ -> ())
+             with
+             | Error Store.Error.Busy -> true
+             | Ok () | Error _ -> false);
+          let second_begin =
+            B.Begin.create_request
+              ~idempotency_key:
+                (P.Idempotency_key.of_string "publication-second" |> protocol_ok)
+              ~manifest
+              ()
+          in
+          let second_id =
+            Store.begin_upload
+              reopened
+              ~principal:Fixture.principal
+              ~request:second_begin
+              ~now:(fun () -> Fixture.start)
+              ~checkpoint:Fn.id
+            |> upload_ok
+            |> B.Begin.upload_id
+          in
           Fixture.send_chunk
             reopened
             second_id
             document_id
-            first
-            (String.drop_prefix document_bytes first)
+            0
+            (String.prefix document_bytes first)
           |> upload_ok
           |> ignore;
-        let second =
-          match
-            Store.claim_commit
+          if first < String.length document_bytes
+          then
+            Fixture.send_chunk
+              reopened
+              second_id
+              document_id
+              first
+              (String.drop_prefix document_bytes first)
+            |> upload_ok
+            |> ignore;
+          let second =
+            match
+              Store.claim_commit
+                reopened
+                ~principal:Fixture.principal
+                ~request:
+                  (B.Commit.create_request
+                     ~upload_id:second_id
+                     ~idempotency_key:
+                       (P.Idempotency_key.of_string "publication-second-commit"
+                        |> protocol_ok))
+                ~now:(fun () -> Fixture.start)
+                ~checkpoint:Fn.id
+              |> upload_ok
+            with
+            | Ready second -> second
+            | Published _ | Rejected _ -> failwith "second claim unexpectedly terminal"
+          in
+          let second_snapshot =
+            Store.snapshot
               reopened
               ~principal:Fixture.principal
-              ~request:
-                (B.Commit.create_request
-                   ~upload_id:second_id
-                   ~idempotency_key:
-                     (P.Idempotency_key.of_string "publication-second-commit"
-                      |> protocol_ok))
+              second
               ~now:(fun () -> Fixture.start)
               ~checkpoint:Fn.id
             |> upload_ok
-          with
-          | Ready second -> second
-          | Published _ | Rejected _ -> failwith "second claim unexpectedly terminal"
-        in
-        let second_snapshot =
-          Store.snapshot
-            reopened
-            ~principal:Fixture.principal
-            second
-            ~now:(fun () -> Fixture.start)
-            ~checkpoint:Fn.id
-          |> upload_ok
-        in
-        check
-          "another interrupted marker leaves uncertain recovery work"
-          (match
-             Store.publish
-               reopened
-               ~principal:Fixture.principal
-               second
-               ~snapshot:second_snapshot
-               ~proof
-               ~now:(fun () -> Fixture.start)
-               ~checkpoint:Fn.id
-               ~final_admission:(fun () -> raise sentinel)
-           with
-           | exception exn -> phys_equal exn sentinel
-           | Ok _ | Error _ -> false);
-        check
-          "recovery preserves the first published receipt"
-          (match
-             Store.status
-               reopened
-               ~principal:Fixture.principal
-               ~upload_id
-               ~now:(fun () -> Fixture.start)
-               ~checkpoint:Fn.id
-             |> upload_ok
-           with
-           | Published recovered -> B.Receipt.equal recovered receipt
-           | Open _ | Ready | Validating | Rejected _ | Expired -> false);
-        check
-          "recover cannot erase the active reader lease"
-          (match Store.close_and_wait reopened with
-           | Error Store.Error.Busy -> true
-           | Ok () | Error _ -> false);
-        let removed =
-          Store.prune
-            reopened
-            ~now:(fun () -> Fixture.later 121000)
-            ~protected_uploads:[]
-            ~checkpoint:Fn.id
-          |> upload_ok
-        in
-        check "borrow protects expired files" (removed = 0))
-    |> upload_ok;
-    Store.close_and_wait reopened |> upload_ok)
+          in
+          check
+            "another interrupted marker leaves uncertain recovery work"
+            (match
+               Store.publish
+                 ~parent_pin:None
+                 reopened
+                 ~principal:Fixture.principal
+                 second
+                 ~snapshot:second_snapshot
+                 ~proof
+                 ~now:(fun () -> Fixture.start)
+                 ~checkpoint:Fn.id
+                 ~final_admission:(fun () ->
+                   check
+                     "nested final admission cannot reacquire the Store gate"
+                     (match
+                        Store.check_published_pin_now
+                          reopened
+                          ~principal:Fixture.principal
+                          pin
+                          ~now:(fun () -> Fixture.start)
+                      with
+                      | Error Store.Error.Busy -> true
+                      | Ok () | Error _ -> false);
+                   raise sentinel)
+             with
+             | exception exn -> phys_equal exn sentinel
+             | Ok _ | Error _ -> false);
+          check
+            "recovery preserves the first published receipt"
+            (match
+               Store.status
+                 reopened
+                 ~principal:Fixture.principal
+                 ~upload_id
+                 ~now:(fun () -> Fixture.start)
+                 ~checkpoint:Fn.id
+               |> upload_ok
+             with
+             | Published recovered -> B.Receipt.equal recovered receipt
+             | Open _ | Ready | Validating | Rejected _ | Expired -> false);
+          check
+            "recover cannot erase the active reader lease"
+            (match Store.close_and_wait reopened with
+             | Error Store.Error.Busy -> true
+             | Ok () | Error _ -> false);
+          let removed =
+            Store.prune
+              reopened
+              ~now:(fun () -> Fixture.later 121000)
+              ~protected_uploads:[]
+              ~checkpoint:Fn.id
+            |> upload_ok
+          in
+          check "borrow protects expired files" (removed = 0);
+          pin)
+      |> upload_ok
+    in
+    Store.close_and_wait reopened |> upload_ok;
+    let later_store = Fixture.open_store env sw root lock in
+    check
+      "pin from prior physical Store cannot authorize reopened instance"
+      (match
+         Store.check_published_pin_now
+           later_store
+           ~principal:Fixture.principal
+           pin
+           ~now:(fun () -> Fixture.start)
+       with
+       | Error Store.Error.Missing_or_foreign -> true
+       | Ok () | Error _ -> false);
+    Store.close_and_wait later_store |> upload_ok)
 ;;
 
 let%test_unit
@@ -716,6 +772,7 @@ let%test_unit
     in
     let receipt =
       Store.publish
+        ~parent_pin:None
         store
         ~principal:Fixture.principal
         sealed

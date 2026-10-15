@@ -23,18 +23,6 @@ val check_context_selection_now
   -> actor:Operator_authorization.t
   -> (unit, Error.t) result
 
-val with_current
-  :  ?feature:Selected_feature.t
-  -> ?final_check:(unit -> (unit, Error.t) result)
-  -> ?publish:('a -> ('a, Error.t) result)
-  -> t
-  -> actor:Operator_authorization.t
-  -> connection:Connection_context.t
-  -> expected:P.Authoring.Context.Expected.t
-  -> checkpoint:(unit -> unit)
-  -> f:(Current.t -> checkpoint:(unit -> unit) -> ('a, Error.t) result)
-  -> ('a, Error.t) result
-
 (** [feature] chooses the negotiated sibling; absent means Core authoring.
     [final_check] adds a bounded nonyielding current host selection check
     immediately before the final gate, after the ordinary actor/source/context
@@ -48,6 +36,40 @@ val with_current
     no new graph, parser result or wire response. The borrowed [Current] token
     has expired by then; neither callback may use it or perform I/O, wait or
     invoke a yielding checkpoint. An error publishes nothing. *)
+val with_current
+  :  ?feature:Selected_feature.t
+  -> ?final_check:(unit -> (unit, Error.t) result)
+  -> ?publish:('a -> ('a, Error.t) result)
+  -> t
+  -> actor:Operator_authorization.t
+  -> connection:Connection_context.t
+  -> expected:P.Authoring.Context.Expected.t
+  -> checkpoint:(unit -> unit)
+  -> f:(Current.t -> checkpoint:(unit -> unit) -> ('a, Error.t) result)
+  -> ('a, Error.t) result
+
+(** Borrow a parent from the SAME registered physical Core connection and
+    context as [with_current], with Bundle_upload negotiated. [expected] is a
+    lookup coordinate only: the issuer checks the actual Current and owner,
+    then freezes a live operation scope for [f]. Project Inputs.base or one
+    physically associated retained Document row set supplies prior-Build
+    evidence when the manifest requires a previous lock. A Document parent
+    without a required prior remains available before Analyze or after
+    unrelated retained-capture eviction; an uploaded Project parent supplies its exact current
+    Inputs.base plus the verified Context_capture Store pin. The scope
+    expires before this function returns.
+    Core's outer final actor/selection/head/context CAS remains in force after
+    all yielding Host/Store work. No Core gate is held across [f]. *)
+val with_parent_scope
+  :  ?script_selection:Authoring_script_selection.Policy.t
+  -> t
+  -> actor:Operator_authorization.t
+  -> connection:Connection_context.t
+  -> expected:P.Authoring.Context.Expected.t
+  -> operation:Authoring_parent_scope.Operation.t
+  -> checkpoint:(unit -> unit)
+  -> f:(Authoring_parent_scope.t -> checkpoint:(unit -> unit) -> ('a, Error.t) result)
+  -> ('a, Error.t) result
 
 val view_of_context
   :  t
