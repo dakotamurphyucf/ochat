@@ -319,7 +319,9 @@ let%expect_test
     let saved =
       (Option.value_exn installed.prepare)
         ~declaration
-        ~owner:(Invocation (P.Id.Invocation.create ()))
+        ~launch:
+          (Chat_response.Source_launch.conversation
+             (Invocation (P.Id.Invocation.create ())))
         ~checkpoint:ignore
       |> ok
     in
@@ -410,7 +412,9 @@ let%expect_test
       Result.is_error
         ((Option.value_exn installed.prepare)
            ~declaration
-           ~owner:(Invocation (P.Id.Invocation.create ()))
+           ~launch:
+             (Chat_response.Source_launch.conversation
+                (Invocation (P.Id.Invocation.create ())))
            ~checkpoint:ignore));
     [%test_eq: string]
       "selected child"
