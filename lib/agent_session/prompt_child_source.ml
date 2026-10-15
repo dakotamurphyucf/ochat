@@ -26,10 +26,9 @@ let diagnostics values =
 let owner_error error = unavailable (Sexp.to_string_hum (Owner.Error.sexp_of_t error))
 let store_error error = Agent_store.Store_error.to_protocol_error error
 
-let admit revision ~checkpoint =
+let reference_of_artifact (artifact : Store.Artifact.t) ~checkpoint =
   let open Result.Let_syntax in
   checkpoint ();
-  let artifact = Prompt_revision.artifact revision in
   let%bind root_relative_path =
     Source.Portable_path.create artifact.root_relative_path
     |> Result.map_error ~f:(fun _ -> unavailable "Selected artifact root is not portable")
@@ -39,13 +38,18 @@ let admit revision ~checkpoint =
     |> Result.map_error ~f:(fun _ ->
       unavailable "Selected artifact manifest digest is invalid")
   in
-  { revision
-  ; reference =
-      B.Agent_artifact.create
-        ~revision_id:artifact.revision_id
-        ~manifest_sha256
-        ~root_relative_path
-  }
+  B.Agent_artifact.create
+    ~revision_id:artifact.revision_id
+    ~manifest_sha256
+    ~root_relative_path
+;;
+
+let admit revision ~checkpoint =
+  let open Result.Let_syntax in
+  let%map reference =
+    reference_of_artifact (Prompt_revision.artifact revision) ~checkpoint
+  in
+  { revision; reference }
 ;;
 
 let restore ~artifact_store ~definition ~content_limits reference ~checkpoint =
@@ -249,18 +253,22 @@ let captured
       let open Result.Let_syntax in
       poll ();
       let artifact = Prompt_revision.artifact revision in
-      let%bind () =
-        Store.install artifact_store ~transaction_id:(P.Id.Transaction.create ()) artifact
+      let%bind retained =
+        Store.install_or_reuse
+          artifact_store
+          ~transaction_id:(P.Id.Transaction.create ())
+          artifact
+          ~checkpoint:poll
         |> Result.map_error ~f:store_error
       in
       poll ();
-      let%bind selected = admit revision ~checkpoint:poll in
+      let%bind reference = reference_of_artifact retained ~checkpoint:poll in
       (* Rebase through the verified immutable child tree, never the parent's
        authoring or artifact directory. Stored content is independently admitted. *)
       restore
         ~artifact_store
         ~definition:(Prompt_revision.definition parent)
         ~content_limits
-        selected.reference
+        reference
         ~checkpoint:poll)
 ;;
