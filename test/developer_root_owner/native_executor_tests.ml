@@ -2698,7 +2698,7 @@ let%test_unit "uncertain selected dispatch retains exact failure until owner rec
        ignore (O.current root |> ok : O.Current.t))
 ;;
 
-let%test_unit "absent native recovery cannot release another scope's dispatch writer" =
+let%test_unit "absent native recovery serializes another scope's dispatch writer" =
   let pause_first_recovery = ref false in
   let reached, reached_u = Eio.Promise.create () in
   let release, release_u = Eio.Promise.create () in
@@ -2725,16 +2725,20 @@ let%test_unit "absent native recovery cannot release another scope's dispatch wr
        Eio.Switch.run (fun sw ->
          let ready, ready_u = Eio.Promise.create () in
          let go, go_u = Eio.Promise.create () in
+         let save_started, save_started_u = Eio.Promise.create () in
+         let second_saved = ref false in
          let finished, finished_u = Eio.Promise.create () in
          Eio.Fiber.fork ~sw (fun () ->
            let result =
              O.with_native_registration root ~invocation:second (fun ~scope ->
                Eio.Promise.resolve ready_u ();
                Eio.Promise.await go;
+               Eio.Promise.resolve save_started_u ();
                let revision =
                  O.Native_terminal.save_dispatch scope ~expected_revision:None ~dispatched
                  |> ok
                in
+               second_saved := true;
                let selected, terminal =
                  O.with_native_callback scope ~dispatched (fun ~sw:_ ->
                    let selected =
@@ -2761,13 +2765,16 @@ let%test_unit "absent native recovery cannot release another scope's dispatch wr
              (O.Native_terminal.reconcile_dispatch first_scope));
          Eio.Promise.await reached;
          Eio.Promise.resolve go_u ();
-         Eio.Fiber.yield ();
-         assert (Result.is_error (O.check_effect_now root witness));
+         Eio.Promise.await save_started;
+         assert (not !second_saved);
+         assert (Result.is_ok (O.check_effect_now root witness));
          Eio.Promise.resolve release_u ();
          (match Eio.Promise.await first_finished |> ok with
           | O.Native_terminal.Absent -> ()
           | Installed _ | Uncertain -> failwith "untouched scope acquired dispatch");
-         ignore (Eio.Promise.await finished |> ok : int));
+         ignore (Eio.Promise.await finished |> ok : int);
+         assert !second_saved;
+         assert (Result.is_error (O.check_effect_now root witness)));
        assert (Int.equal !calls 0);
        ignore (O.current root |> ok : O.Current.t))
 ;;

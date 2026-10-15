@@ -54,6 +54,24 @@ an attempted result in custody through uncertain saves, so retry never reruns
 the Script callback. Shared scheduler and hosted-run assembly remain separate
 work.
 
+The physical Root serializes transient mutation owners and terminal settlement
+through one private [mutation gate](../../lib/agent_server/developer_root_mutation_gate.mli).
+Native dispatch, external model admission, post-join inactive job cancellation,
+and terminal enqueue/drain use that gate around their Store mutation. A new effect rechecks the original
+actor, selected binding and any parent claim after waits; exact terminal
+bookkeeping retains its frozen outcome and physical scope. A failed dispatch
+write reconciles its exact Prepared/Handoff once before another Root mutation
+can observe the transient writer; an unknown write retains that pair. A native callback's durable
+dispatch and effect entry are admitted under the gate, which is released before
+running the handler. An already-entered callback may seal its frozen result
+while another terminal is queued; that completion check does not grant a new
+effect. Each terminal waits for its own exact installed revision, even when a
+sibling is draining. If a write is genuinely uncertain, its result and staged
+capacity remain with the Root for reconciliation. Worker cancellation joins
+outside the gate; recovery visits retained mutations separately, so neither
+path waits on its own terminal drain. The Store still owns the one durable
+document writer and job capacity still owns reservations.
+
 The run Store keeps its existing exclusive document lease while decoding and
 encoding a bounded run document. Large pure codec work uses the Store's Eio
 domain manager; only copied bytes or immutable encode input cross that boundary,

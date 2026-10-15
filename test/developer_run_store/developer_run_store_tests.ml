@@ -28,6 +28,7 @@ let with_temp_directory name f =
 let fault_after_authority_rename_env
       ?(after_rename = fun () -> ())
       ?(before_rename = fun () -> ())
+      ?(clear_sync_block_on_failure = false)
       env
       ~rename_armed
       ~sync_blocked
@@ -59,7 +60,9 @@ let fault_after_authority_rename_env
         if
           (!sync_blocked && (String.equal path "." || String.is_suffix path ~suffix:"/."))
           || (!parent_sync_blocked && parent_sync)
-        then raise (Core_unix.Unix_error (EIO, "injected directory sync failure", path))
+        then (
+          if clear_sync_block_on_failure then sync_blocked := false;
+          raise (Core_unix.Unix_error (EIO, "injected directory sync failure", path)))
         else Original.open_in directory ~sw path
       ;;
 
