@@ -83,6 +83,25 @@ val create
   -> Prompt.Chat_markdown.top_level_elements list
   -> (t, Error.t list) Result.t
 
+(** The provider-independent sibling of [create]. It derives ordinary env,
+    workspace root and tool directory from the SAME [host] used for shell
+    preparation and source-root resolution. It cannot fabricate a Ctx or
+    nested-agent callback. An authentic supplied Registration can satisfy an
+    Agent declaration; an unsupplied ordinary Agent or [meta_refine] rejects
+    with a typed construction diagnostic before pool exposure. All other
+    registration, duplicate, resource fingerprint and switch ownership rules
+    are identical to [create]. Unlike the legacy session constructor, unexpected
+    native construction exceptions propagate without diagnostic stringification. *)
+val create_without_inference
+  :  sw:Eio.Switch.t
+  -> host:Shell_runtime.Host.t
+  -> shell:Shell_view.t
+  -> admin_policy:Shell_runtime.Admin_policy.t
+  -> ?native_service_revision:string
+  -> registrations:Registration.t list
+  -> Prompt.Chat_markdown.top_level_elements list
+  -> (t, Error.t list) Result.t
+
 val functions : t -> Ochat_function.t list
 val capabilities : t -> (Tool_capability.t, Tool_capability.error) Result.t Lazy.t
 val classifications : t -> (string * Tool_execution_event.agent_page_kind) list

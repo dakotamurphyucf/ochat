@@ -359,3 +359,57 @@ val prepare_extensions
         -> string)
   -> unit
   -> (extension_resources, diagnostic list) result
+
+(** Construct a plain native runtime without a model-provider context. Ordinary
+    Eio, workspace and tool paths come from this exact [host]; there is no Ctx,
+    fake inference Adapter/Target, nested-agent callback or model-completion
+    fallback. The same shell compiler, policy, staged registration and native
+    preflight as [create] apply. An unsupplied ordinary Agent or [meta_refine]
+    declaration rejects before exposure. The effective compiled/merged shell
+    manifest must not require Model_reviewer; rejection occurs before Registry
+    activation, including a reviewer inherited from another runtime. Genuine
+    supplied Agent registrations remain available under their existing source
+    and capability rules. Expected missing-inference denials are typed;
+    unexpected constructor exceptions and cancellation propagate unchanged. *)
+val create_without_inference
+  :  ?native_service_revision:string
+  -> ?startup:Startup_compilation.t
+  -> ?programs:Chatml_prompt_programs.Restored.t
+  -> ?moderator_surface:Chatml.Chatml_builtin_surface.surface
+  -> ?compilation_limits:Chatml_compilation.limits
+  -> ?checkpoint:(unit -> unit)
+  -> sw:Eio.Switch.t
+  -> host:Shell_runtime.Host.t
+  -> platform:Chatmd_shell_spec.Shell_spec.platform
+  -> prompt_elements:Prompt.Chat_markdown.top_level_elements list
+  -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+  -> approval_provider:Shell_runtime.Approval_broker.provider
+  -> approval_store:Shell_access.Approval.store
+  -> unit
+  -> (t, diagnostic list) result
+
+(** Extension-aware counterpart to [create_without_inference]. It shares the
+    exact managed compiler, captured programs, native admission and returned
+    resource identity with [prepare_extensions]. Its preparation result grants
+    no Model.spawn authority: a later managed invocation still requires an
+    authentic selected developer provider, Root and current job scope. The
+    caller owns [sw] through installation and close; failed preparation cannot
+    leave a staged shell registry activated. *)
+val prepare_extensions_without_inference
+  :  ?native_service_revision:string
+  -> ?startup:Startup_compilation.t
+  -> ?moderator_surface:Chatml.Chatml_builtin_surface.surface
+  -> ?compilation_limits:Chatml_compilation.limits
+  -> ?checkpoint:(unit -> unit)
+  -> ?native_registrations:native_registration list
+  -> ?delegated_moderator:bool
+  -> ?programs:Chatml_prompt_programs.Restored.t
+  -> sw:Eio.Switch.t
+  -> host:Shell_runtime.Host.t
+  -> platform:Chatmd_shell_spec.Shell_spec.platform
+  -> prompt_elements:Prompt.Chat_markdown.top_level_elements list
+  -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+  -> approval_provider:Shell_runtime.Approval_broker.provider
+  -> approval_store:Shell_access.Approval.store
+  -> unit
+  -> (extension_resources, diagnostic list) result

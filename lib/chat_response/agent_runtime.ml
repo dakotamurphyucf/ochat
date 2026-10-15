@@ -389,7 +389,7 @@ let instantiate
       ~manifest_authorizer
       ~approval_provider
       ~approval_store
-      ~model_completion
+      ?model_completion
       ~extension_snapshots
       ~persist_extension_snapshots
       ~preflight
@@ -436,7 +436,7 @@ let instantiate
     ~grant
     ~approval_provider
     ~approval_store
-    ~model_completion
+    ?model_completion
     ~extension_snapshots
     ?persist_extension_snapshots
     ~preflight:(fun staged ->
@@ -468,7 +468,7 @@ let shell_registry
       ~manifest_authorizer
       ~approval_provider
       ~approval_store
-      ~model_completion
+      ?model_completion
       ~extension_snapshots
       ~persist_extension_snapshots
       ~preflight
@@ -489,28 +489,41 @@ let shell_registry
          ~map_error:(fun e -> [ diagnostic e.Chatml_compilation.code e.message ])
          ~f:(fun () -> compile ~platform declarations))
       ~f:(fun (manifest, material) ->
-        instantiate
-          ~startup
-          ~programs
-          ~compilation_limits
-          ~checkpoint
-          ~sw
-          ~host
-          ~admin_policy
-          ~manifest_authorizer
-          ~approval_provider
-          ~approval_store
-          ~model_completion
-          ~extension_snapshots
-          ~persist_extension_snapshots
-          ~preflight
-          manifest
-          material
-        |> Result.map ~f:(fun (registry, security_status, admitted) ->
-          ( Some registry
-          , Some (Shell_runtime.Registry.manifest registry)
-          , Some security_status
-          , admitted )))
+        if
+          Option.is_none model_completion
+          && List.mem
+               manifest.Chatmd_shell_spec.Manifest.payload.required_features
+               Chatmd_shell_spec.Feature.model_reviewer
+               ~equal:Chatmd_shell_spec.Feature.equal
+        then
+          Error
+            [ diagnostic
+                "agent.inference_required"
+                "shell model reviewer requires admitted inference"
+            ]
+        else
+          instantiate
+            ~startup
+            ~programs
+            ~compilation_limits
+            ~checkpoint
+            ~sw
+            ~host
+            ~admin_policy
+            ~manifest_authorizer
+            ~approval_provider
+            ~approval_store
+            ?model_completion
+            ~extension_snapshots
+            ~persist_extension_snapshots
+            ~preflight
+            manifest
+            material
+          |> Result.map ~f:(fun (registry, security_status, admitted) ->
+            ( Some registry
+            , Some (Shell_runtime.Registry.manifest registry)
+            , Some security_status
+            , admitted )))
 ;;
 
 let model_completion ~ctx ~agent:_ ~model =
@@ -573,20 +586,19 @@ let create_native
       ~compilation_limits
       ~checkpoint
       ~preflight
-      ?(native_registrations = [])
-      ?native_service_revision
-      ?agent_source_runner
+      ~native_registrations
       ~sw
-      ~ctx
+      ~env
+      ~create_pool
       ~host
       ~platform
       ~prompt_elements
       ~manifest_authorizer
       ~approval_provider
       ~approval_store
+      ?model_completion
       ?(extension_snapshots = [])
       ?persist_extension_snapshots
-      ~run_agent
       ()
   =
   let open Result.Let_syntax in
@@ -618,7 +630,7 @@ let create_native
         else (
           let declarations = declarations prompt_elements in
           let%map admin_policy =
-            Shell_runtime.Admin_policy_loader.load_from_environment ~env:(Ctx.env ctx)
+            Shell_runtime.Admin_policy_loader.load_from_environment ~env
             |> Result.map_error ~f:(fun error -> [ diagnostic error.code error.message ])
           in
           declarations, admin_policy))
@@ -629,17 +641,7 @@ let create_native
       ~map_error:(fun e -> [ diagnostic e.Chatml_compilation.code e.message ])
       ~f:(fun () ->
         let%bind pool =
-          Native_tool_pool.create
-            ~registrations:native_registrations
-            ?native_service_revision
-            ?agent_source_runner
-            ~sw
-            ~ctx
-            ~host
-            ~run_agent
-            ~admin_policy
-            ~shell
-            prompt_elements
+          create_pool ~admin_policy ~shell
           |> Result.map_error
                ~f:
                  (List.map ~f:(fun error ->
@@ -670,7 +672,7 @@ let create_native
       ~manifest_authorizer
       ~approval_provider
       ~approval_store
-      ~model_completion:(model_completion ~ctx)
+      ?model_completion
       ~extension_snapshots
       ~persist_extension_snapshots
       ~preflight:prepare_pool
@@ -727,31 +729,30 @@ let declares_legacy elements =
     | _ -> false)
 ;;
 
-let create
-      ?native_service_revision
+let create_with
       ?startup
-      ?agent_source_runner
       ?programs
       ?(moderator_surface = Chatml.Chatml_builtin_surface.moderator_surface)
       ?(compilation_limits = Chatml_compilation.default_limits)
       ?(checkpoint = Eio.Fiber.check)
       ~sw
-      ~ctx
+      ~env
+      ~create_pool
       ~host
       ~platform
       ~prompt_elements
       ~manifest_authorizer
       ~approval_provider
       ~approval_store
+      ?model_completion
       ?extension_snapshots
       ?persist_extension_snapshots
-      ~run_agent
       ()
   =
   Startup_compilation.with_context
     ?startup
     ~limits:compilation_limits
-    ~env:(Ctx.env ctx)
+    ~env
     ~checkpoint
     ~map_error:(fun e -> [ diagnostic e.Chatml_compilation.code e.message ])
     ~f:(fun startup ->
@@ -778,47 +779,39 @@ let create
                 ~startup
                 ?programs
                 ~surface:moderator_surface
-                ~env:(Ctx.env ctx)
+                ~env
                 ~capabilities
                 ~checkpoint
                 ~limits:compilation_limits
                 prompt_elements)
           in
           capabilities, legacy_moderator, ())
-        ?native_service_revision
-        ?agent_source_runner
+        ~native_registrations:[]
         ~sw
-        ~ctx
+        ~env
+        ~create_pool
         ~host
         ~platform
         ~prompt_elements
         ~manifest_authorizer
         ~approval_provider
         ~approval_store
+        ?model_completion
         ?extension_snapshots
         ?persist_extension_snapshots
-        ~run_agent
         ()
       |> Result.map ~f:fst)
     ()
 ;;
 
-type extension_resources =
-  { native : t
-  ; definition : Extension_compiler.definition
-  ; managed : Managed_tool_registry.t
-  }
-
-let prepare_extensions
+let create
       ?native_service_revision
       ?startup
       ?agent_source_runner
-      ?(moderator_surface = Chatml.Chatml_builtin_surface.moderator_surface)
-      ?(compilation_limits = Chatml_compilation.default_limits)
-      ?(checkpoint = Eio.Fiber.check)
-      ?(native_registrations = [])
-      ?(delegated_moderator = false)
       ?programs
+      ?moderator_surface
+      ?compilation_limits
+      ?checkpoint
       ~sw
       ~ctx
       ~host
@@ -832,10 +825,112 @@ let prepare_extensions
       ~run_agent
       ()
   =
+  create_with
+    ?startup
+    ?programs
+    ?moderator_surface
+    ?compilation_limits
+    ?checkpoint
+    ~sw
+    ~env:(Ctx.env ctx)
+    ~create_pool:(fun ~admin_policy ~shell ->
+      Native_tool_pool.create
+        ~sw
+        ~ctx
+        ~host
+        ~shell
+        ~admin_policy
+        ?native_service_revision
+        ?agent_source_runner
+        ~registrations:[]
+        ~run_agent
+        prompt_elements)
+    ~host
+    ~platform
+    ~prompt_elements
+    ~manifest_authorizer
+    ~approval_provider
+    ~approval_store
+    ~model_completion:(model_completion ~ctx)
+    ?extension_snapshots
+    ?persist_extension_snapshots
+    ()
+;;
+
+let create_without_inference
+      ?native_service_revision
+      ?startup
+      ?programs
+      ?moderator_surface
+      ?compilation_limits
+      ?checkpoint
+      ~sw
+      ~host
+      ~platform
+      ~prompt_elements
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+      ()
+  =
+  create_with
+    ?startup
+    ?programs
+    ?moderator_surface
+    ?compilation_limits
+    ?checkpoint
+    ~sw
+    ~env:host.Shell_runtime.Host.env
+    ~create_pool:(fun ~admin_policy ~shell ->
+      Native_tool_pool.create_without_inference
+        ~sw
+        ~host
+        ~shell
+        ~admin_policy
+        ?native_service_revision
+        ~registrations:[]
+        prompt_elements)
+    ~host
+    ~platform
+    ~prompt_elements
+    ~manifest_authorizer
+    ~approval_provider
+    ~approval_store
+    ()
+;;
+
+type extension_resources =
+  { native : t
+  ; definition : Extension_compiler.definition
+  ; managed : Managed_tool_registry.t
+  }
+
+let prepare_extensions_with
+      ?startup
+      ?(moderator_surface = Chatml.Chatml_builtin_surface.moderator_surface)
+      ?(compilation_limits = Chatml_compilation.default_limits)
+      ?(checkpoint = Eio.Fiber.check)
+      ?(native_registrations = [])
+      ?(delegated_moderator = false)
+      ?programs
+      ~sw
+      ~env
+      ~create_pool
+      ~host
+      ~platform
+      ~prompt_elements
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+      ?model_completion
+      ?extension_snapshots
+      ?persist_extension_snapshots
+      ()
+  =
   Startup_compilation.with_context
     ?startup
     ~limits:compilation_limits
-    ~env:(Ctx.env ctx)
+    ~env
     ~checkpoint
     ~map_error:(fun e -> [ diagnostic e.Chatml_compilation.code e.message ])
     ~f:(fun startup ->
@@ -875,7 +970,7 @@ let prepare_extensions
             ~limits:compilation_limits
             ~delegated_moderator
             ?programs
-            ~env:(Ctx.env ctx)
+            ~env
             ~owner:host.Shell_runtime.Host.session_id
             ~capabilities
             prompt_elements
@@ -908,7 +1003,7 @@ let prepare_extensions
               ~startup
               ?programs
               ~surface:moderator_surface
-              ~env:(Ctx.env ctx)
+              ~env
               ~capabilities
               ~checkpoint
               ~limits:compilation_limits
@@ -925,22 +1020,124 @@ let prepare_extensions
           ~checkpoint
           ~preflight:prepare_managed
           ~native_registrations
-          ?native_service_revision
-          ?agent_source_runner
           ~sw
-          ~ctx
+          ~env
+          ~create_pool
           ~host
           ~platform
           ~prompt_elements
           ~manifest_authorizer
           ~approval_provider
           ~approval_store
+          ?model_completion
           ?extension_snapshots
           ?persist_extension_snapshots
-          ~run_agent
           ()
       in
       { native; definition = Managed_tool_registry.definition managed; managed })
+    ()
+;;
+
+let prepare_extensions
+      ?native_service_revision
+      ?startup
+      ?agent_source_runner
+      ?moderator_surface
+      ?compilation_limits
+      ?checkpoint
+      ?(native_registrations = [])
+      ?delegated_moderator
+      ?programs
+      ~sw
+      ~ctx
+      ~host
+      ~platform
+      ~prompt_elements
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+      ?extension_snapshots
+      ?persist_extension_snapshots
+      ~run_agent
+      ()
+  =
+  prepare_extensions_with
+    ?startup
+    ?moderator_surface
+    ?compilation_limits
+    ?checkpoint
+    ~native_registrations
+    ?delegated_moderator
+    ?programs
+    ~sw
+    ~env:(Ctx.env ctx)
+    ~create_pool:(fun ~admin_policy ~shell ->
+      Native_tool_pool.create
+        ~sw
+        ~ctx
+        ~host
+        ~shell
+        ~admin_policy
+        ?native_service_revision
+        ?agent_source_runner
+        ~registrations:native_registrations
+        ~run_agent
+        prompt_elements)
+    ~host
+    ~platform
+    ~prompt_elements
+    ~manifest_authorizer
+    ~approval_provider
+    ~approval_store
+    ~model_completion:(model_completion ~ctx)
+    ?extension_snapshots
+    ?persist_extension_snapshots
+    ()
+;;
+
+let prepare_extensions_without_inference
+      ?native_service_revision
+      ?startup
+      ?moderator_surface
+      ?compilation_limits
+      ?checkpoint
+      ?(native_registrations = [])
+      ?delegated_moderator
+      ?programs
+      ~sw
+      ~host
+      ~platform
+      ~prompt_elements
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+      ()
+  =
+  prepare_extensions_with
+    ?startup
+    ?moderator_surface
+    ?compilation_limits
+    ?checkpoint
+    ~native_registrations
+    ?delegated_moderator
+    ?programs
+    ~sw
+    ~env:host.Shell_runtime.Host.env
+    ~create_pool:(fun ~admin_policy ~shell ->
+      Native_tool_pool.create_without_inference
+        ~sw
+        ~host
+        ~shell
+        ~admin_policy
+        ?native_service_revision
+        ~registrations:native_registrations
+        prompt_elements)
+    ~host
+    ~platform
+    ~prompt_elements
+    ~manifest_authorizer
+    ~approval_provider
+    ~approval_store
     ()
 ;;
 
