@@ -332,6 +332,17 @@ type run_claim_record =
   ; mutable tracking : tracking_phase
   }
 
+type live_directory_record =
+  { token : unit ref
+  ; handle_token : unit ref
+  ; domain : int
+  ; mutable path : string option
+  ; mutable identity : (int64 * int64) option
+  ; mutable marker_created : bool
+  ; mutable marker_removed : bool
+  ; mutable closed : bool
+  }
+
 type t =
   { root_owner : Root.owner
   ; host_id : P.Id.Server.t
@@ -343,6 +354,7 @@ type t =
   ; pending : (Id.t, pending) Hashtbl.t
   ; run_lifecycle_mutex : Stdlib.Mutex.t
   ; run_claims : (Id.t, run_claim_record) Hashtbl.t
+  ; live_directories : (Id.t, live_directory_record) Hashtbl.t
   ; normal_operations : (Id.t, int) Hashtbl.t
   ; issued_claims : (Id.t, claim_data list) Hashtbl.t
   ; admissions_in_flight : (Id.t, unit) Hashtbl.t
@@ -827,6 +839,7 @@ let close_and_wait t =
     with_run_lifecycle t (fun () ->
       if
         (not (Hashtbl.is_empty t.run_claims))
+        || (not (Hashtbl.is_empty t.live_directories))
         || not (Hashtbl.is_empty t.admissions_in_flight)
       then Error Error.Conflict
       else (
@@ -837,6 +850,139 @@ let close_and_wait t =
     Root.release t.root_owner;
     Atomic.set t.closed true;
     Ok ())
+;;
+
+let live_marker_name = ".owner"
+let live_name id = "live_" ^ Id.to_string id
+
+let live_id_of_name name =
+  match String.chop_prefix name ~prefix:"live_" with
+  | None -> None
+  | Some raw ->
+    Result.ok (Id.of_string raw)
+    |> Option.filter ~f:(fun id -> String.equal (live_name id) name)
+;;
+
+let live_marker host_id id = P.Id.Server.to_string host_id ^ ":" ^ Id.to_string id ^ "\n"
+
+let live_cleanup_limits limits =
+  Bounded_tree_cleanup.Limits.create
+    ~max_entries:limits.Limits.max_recovery_entries
+    ~max_bytes:limits.max_recovery_bytes
+    ~max_work_steps:limits.max_work_steps
+  |> Or_error.ok_exn
+;;
+
+let ensure_live_root ~env ~root =
+  let path = Data_root.developer_live_path root in
+  let native = Eio.Path.(Eio.Stdenv.fs env / path) in
+  try
+    match Eio.Path.kind ~follow:false native with
+    | `Not_found ->
+      Eio.Path.mkdir ~perm:0o700 native;
+      Ok path
+    | `Directory -> Ok path
+    | `Regular_file
+    | `Symbolic_link
+    | `Unknown
+    | `Socket
+    | `Fifo
+    | `Character_special
+    | `Block_device ->
+      Error (Store_error.Corrupt "developer Live root is linked or invalid")
+  with
+  | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+    Error (Store_error.of_exn ~operation:"open developer Live root" ~path exn)
+;;
+
+let scan_abandoned_live ~env ~root ~limits ~host_id ~checkpoint =
+  let open Result.Let_syntax in
+  let%bind path = ensure_live_root ~env ~root in
+  let remaining = ref limits.Limits.max_work_steps in
+  let poll () =
+    if !remaining <= 0 then raise Work_limit;
+    Int.decr remaining;
+    checkpoint ();
+    Eio.Fiber.check ()
+  in
+  let%bind reader =
+    Retention_reader.create
+      ~env
+      ~root:path
+      ~max_entries:limits.max_recovery_entries
+      ~max_bytes:limits.max_recovery_bytes
+  in
+  let%bind names =
+    Retention_reader.list_with_checkpoint reader ~directory:"." ~checkpoint:poll
+  in
+  List.fold_result names ~init:() ~f:(fun () name ->
+    poll ();
+    match live_id_of_name name with
+    | None -> Error (Store_error.Corrupt "unknown developer Live child")
+    | Some id ->
+      let%bind kind = Retention_reader.kind reader ~path:name in
+      let%bind () =
+        match kind with
+        | `Directory -> Ok ()
+        | `File -> Error (Store_error.Corrupt "developer Live child is not a directory")
+      in
+      let child = Filename.concat path name in
+      let%bind child_identity =
+        try
+          let stat = Eio.Path.stat ~follow:false Eio.Path.(Eio.Stdenv.fs env / child) in
+          match stat.kind with
+          | `Directory -> Ok (stat.dev, stat.ino)
+          | `Regular_file
+          | `Symbolic_link
+          | `Unknown
+          | `Socket
+          | `Fifo
+          | `Character_special
+          | `Block_device ->
+            Error (Store_error.Corrupt "developer Live child changed kind")
+        with
+        | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+          Error
+            (Store_error.of_exn ~operation:"inspect developer Live child" ~path:child exn)
+      in
+      let%bind marker =
+        Retention_reader.read_with_checkpoint
+          reader
+          ~path:(Filename.concat name live_marker_name)
+          ~max_bytes:256
+          ~checkpoint:poll
+      in
+      if not (String.equal marker (live_marker host_id id))
+      then Error (Store_error.Corrupt "developer Live child ownership is uncertain")
+      else (
+        let%bind () =
+          Bounded_tree_cleanup.remove_children
+            ~env
+            ~root:child
+            ~expected_root:child_identity
+            ~marker_name:live_marker_name
+            ~limits:(live_cleanup_limits limits)
+            ~checkpoint:poll
+        in
+        try
+          poll ();
+          let stat = Eio.Path.stat ~follow:false Eio.Path.(Eio.Stdenv.fs env / child) in
+          let expected_device, expected_inode = child_identity in
+          if
+            not
+              (Int64.equal stat.dev expected_device && Int64.equal stat.ino expected_inode)
+          then
+            Error (Store_error.Corrupt "developer Live child changed before retirement")
+          else (
+            Eio.Path.unlink
+              Eio.Path.(Eio.Stdenv.fs env / Filename.concat child live_marker_name);
+            poll ();
+            Eio.Path.rmdir Eio.Path.(Eio.Stdenv.fs env / child);
+            Ok ())
+        with
+        | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+          Error
+            (Store_error.of_exn ~operation:"retire developer Live child" ~path:child exn)))
 ;;
 
 let open_or_create session_store ~sw ~limits ~checkpoint =
@@ -866,6 +1012,18 @@ let open_or_create session_store ~sw ~limits ~checkpoint =
              survived a crash, so every open establishes the parent barrier. *)
           let* () = Durable_file.sync_directory ~env ~path:(Data_root.path root) in
           let directory = Eio.Path.open_dir ~sw native in
+          let* () =
+            try
+              scan_abandoned_live
+                ~env
+                ~root
+                ~limits
+                ~host_id:(Session_store.server_id session_store)
+                ~checkpoint
+            with
+            | Work_limit ->
+              Error (Store_error.Corrupt "developer Live recovery work limit")
+          in
           Ok
             { root_owner
             ; host_id = Session_store.server_id session_store
@@ -877,6 +1035,7 @@ let open_or_create session_store ~sw ~limits ~checkpoint =
             ; pending = Hashtbl.create (module Id)
             ; run_lifecycle_mutex = Stdlib.Mutex.create ()
             ; run_claims = Hashtbl.create (module Id)
+            ; live_directories = Hashtbl.create (module Id)
             ; normal_operations = Hashtbl.create (module Id)
             ; issued_claims = Hashtbl.create (module Id)
             ; admissions_in_flight = Hashtbl.create (module Id)
@@ -908,6 +1067,235 @@ let owner handle = handle.owner
 let issued_by t handle =
   phys_equal t handle.store && phys_equal t.token handle.store.token
 ;;
+
+module Live_directory = struct
+  type t =
+    { store : store
+    ; run_id : Id.t
+    ; record : live_directory_record
+    }
+
+  exception Cleanup_failed of Error.t
+
+  let current t =
+    with_run_lifecycle t.store (fun () ->
+      match Hashtbl.find t.store.live_directories t.run_id with
+      | Some record
+        when phys_equal record.token t.record.token
+             && (not record.closed)
+             && Int.equal record.domain (Stdlib.Domain.self () :> int) -> Ok ()
+      | Some _ | None -> Error Error.Foreign_or_stale)
+  ;;
+
+  let path t = Option.value_exn t.record.path
+  let runtime_directory t = Filename.concat (path t) "runtime"
+  let cache_directory t = Filename.concat (path t) "cache"
+  let response_directory t = Filename.concat (path t) "response"
+  let workspace_parent_directory t = Filename.concat (path t) "workspace-parent"
+
+  let verify_root ~env t path =
+    try
+      let stat = Eio.Path.stat ~follow:false Eio.Path.(Eio.Stdenv.fs env / path) in
+      match t.record.identity, stat.kind with
+      | Some (device, inode), `Directory
+        when Int64.equal device stat.dev && Int64.equal inode stat.ino -> Ok ()
+      | ( Some _
+        , ( `Directory
+          | `Regular_file
+          | `Symbolic_link
+          | `Unknown
+          | `Socket
+          | `Fifo
+          | `Character_special
+          | `Block_device ) )
+      | None, _ -> corrupt "developer Live directory identity changed"
+    with
+    | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+      store (Error (Store_error.of_exn ~operation:"verify developer Live" ~path exn))
+  ;;
+
+  let check_live t =
+    let* () = current t in
+    with_lease t.store (fun ~env ~root:_ -> verify_root ~env t (path t))
+  ;;
+
+  let close_and_wait t ~checkpoint =
+    if t.record.closed
+    then Ok ()
+    else
+      let* () = current t in
+      with_lease t.store (fun ~env ~root:_ ->
+        let* () = current t in
+        let* () =
+          match t.record.path with
+          | None -> Ok ()
+          | Some path ->
+            let* () = verify_root ~env t path in
+            let* () =
+              if t.record.marker_removed || not t.record.marker_created
+              then Ok ()
+              else
+                let* reader =
+                  Retention_reader.create ~env ~root:path ~max_entries:4 ~max_bytes:256
+                  |> store
+                in
+                let* actual =
+                  Retention_reader.read_with_checkpoint
+                    reader
+                    ~path:live_marker_name
+                    ~max_bytes:256
+                    ~checkpoint
+                  |> store
+                in
+                if String.equal actual (live_marker t.store.host_id t.run_id)
+                then Ok ()
+                else corrupt "developer Live ownership marker changed"
+            in
+            let workspace = Filename.concat (workspace_parent_directory t) "workspace" in
+            let* () =
+              try
+                match
+                  Eio.Path.kind ~follow:false Eio.Path.(Eio.Stdenv.fs env / workspace)
+                with
+                | `Not_found -> Ok ()
+                | `Directory
+                | `Regular_file
+                | `Symbolic_link
+                | `Unknown
+                | `Socket
+                | `Fifo
+                | `Character_special
+                | `Block_device -> Error Error.Conflict
+              with
+              | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+                store
+                  (Error
+                     (Store_error.of_exn
+                        ~operation:"check developer workspace child"
+                        ~path:workspace
+                        exn))
+            in
+            let* () =
+              Bounded_tree_cleanup.remove_children
+                ~env
+                ~root:path
+                ~expected_root:(Option.value_exn t.record.identity)
+                ~marker_name:live_marker_name
+                ~limits:(live_cleanup_limits t.store.limits)
+                ~checkpoint
+              |> store
+            in
+            (try
+               checkpoint ();
+               let marker = Filename.concat path live_marker_name in
+               if not t.record.marker_removed
+               then (
+                 if t.record.marker_created
+                 then Eio.Path.unlink Eio.Path.(Eio.Stdenv.fs env / marker);
+                 t.record.marker_removed <- true);
+               checkpoint ();
+               let* () = verify_root ~env t path in
+               Eio.Path.rmdir Eio.Path.(Eio.Stdenv.fs env / path);
+               Ok ()
+             with
+             | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+               store
+                 (Error
+                    (Store_error.of_exn
+                       ~operation:"close developer Live directory"
+                       ~path
+                       exn)))
+        in
+        with_run_lifecycle t.store (fun () ->
+          match Hashtbl.find t.store.live_directories t.run_id with
+          | Some record when phys_equal record.token t.record.token ->
+            Hashtbl.remove t.store.live_directories t.run_id;
+            record.closed <- true;
+            Ok ()
+          | Some _ | None -> Error Error.Foreign_or_stale))
+  ;;
+
+  let open_ handle ~sw ~checkpoint =
+    let* issuer = valid_handle handle in
+    let run_id = handle.owner.run_id in
+    let record =
+      { token = ref ()
+      ; handle_token = handle.token
+      ; domain = (Stdlib.Domain.self () :> int)
+      ; path = None
+      ; identity = None
+      ; marker_created = false
+      ; marker_removed = false
+      ; closed = false
+      }
+    in
+    let* () =
+      with_run_lifecycle issuer (fun () ->
+        if Atomic.get issuer.closed || Atomic.get issuer.closing
+        then Error Error.Closed
+        else if Hashtbl.mem issuer.live_directories run_id
+        then Error Error.Conflict
+        else (
+          Hashtbl.set issuer.live_directories ~key:run_id ~data:record;
+          Ok ()))
+    in
+    let t = { store = issuer; run_id; record } in
+    Eio.Switch.on_release sw (fun () ->
+      match close_and_wait t ~checkpoint with
+      | Ok () -> ()
+      | Error error -> raise (Cleanup_failed error));
+    let created =
+      try
+        with_lease issuer (fun ~env ~root ->
+          let* live_root = ensure_live_root ~env ~root |> store in
+          let path = Filename.concat live_root (live_name run_id) in
+          try
+            Eio.Cancel.protect (fun () ->
+              let native = Eio.Path.(Eio.Stdenv.fs env / path) in
+              Eio.Path.mkdir ~perm:0o700 native;
+              (* From this point cleanup must retain the Store slot if stat
+               cannot establish the identity of the directory we created. *)
+              record.path <- Some path;
+              let stat = Eio.Path.stat ~follow:false native in
+              record.identity <- Some (stat.dev, stat.ino));
+            checkpoint ();
+            Eio.Path.save
+              ~create:(`Exclusive 0o600)
+              Eio.Path.(Eio.Stdenv.fs env / Filename.concat path live_marker_name)
+              (live_marker issuer.host_id run_id);
+            record.marker_created <- true;
+            List.iter
+              [ runtime_directory t
+              ; cache_directory t
+              ; response_directory t
+              ; workspace_parent_directory t
+              ]
+              ~f:(fun child ->
+                checkpoint ();
+                Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / child));
+            Ok ()
+          with
+          | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+            store
+              (Error
+                 (Store_error.of_exn ~operation:"open developer Live directory" ~path exn)))
+      with
+      | exn ->
+        let trace = Backtrace.Exn.most_recent () in
+        (try
+           Eio.Cancel.protect (fun () ->
+             ignore (close_and_wait t ~checkpoint:(fun () -> ()) : (unit, Error.t) result))
+         with
+         | _ -> ());
+        Exn.raise_with_original_backtrace exn trace
+    in
+    match created with
+    | Ok () -> Ok t
+    | Error error ->
+      let _cleanup = close_and_wait t ~checkpoint in
+      Error error
+  ;;
+end
 
 let issued_by_session_store t session_store = Root.issued_by t.root_owner session_store
 let is_closed t = Atomic.get t.closed || Atomic.get t.closing

@@ -303,13 +303,20 @@ let read t ~path ~max_bytes =
   | exn -> Error (Store_error.of_exn ~operation:"read retention root" ~path exn)
 ;;
 
-let list_with_checkpoint t ~directory ~checkpoint =
+let list_with_checkpoint_and_names t ~directory ~on_name ~checkpoint =
   with_checkpoint ~checkpoint ~f:(fun poll ->
     let open Result.Let_syntax in
     try
       poll ();
       let%bind path = resolve t directory ~directory:true in
       let%bind () = charge_entry t in
+      let borrowed_identity =
+        match t.authority with
+        | Host _ -> None
+        | Borrowed _ ->
+          let stat = Eio.Path.stat ~follow:true (eio_path t path) in
+          Some (stat.dev, stat.ino)
+      in
       let native_path = Eio.Path.native_exn (eio_path t path) in
       let handle = Eio_unix.run_in_systhread (fun () -> Core_unix.opendir native_path) in
       Exn.protect
@@ -317,6 +324,20 @@ let list_with_checkpoint t ~directory ~checkpoint =
           Eio.Cancel.protect (fun () ->
             Eio_unix.run_in_systhread (fun () -> Core_unix.closedir handle)))
         ~f:(fun () ->
+          let%bind () =
+            match borrowed_identity with
+            | None -> Ok ()
+            | Some (device, inode) ->
+              let actual =
+                Eio_unix.run_in_systhread (fun () ->
+                  Core_unix.fstat (Core_unix.dirfd handle))
+              in
+              if
+                Int64.equal device (Int64.of_int actual.st_dev)
+                && Int64.equal inode (Int64.of_int actual.st_ino)
+              then Ok ()
+              else corrupt "borrowed directory changed before enumeration"
+          in
           let rec loop names =
             poll ();
             let batch =
@@ -330,6 +351,7 @@ let list_with_checkpoint t ~directory ~checkpoint =
                     | Some ("." | "..") -> next (remaining - 1) batch
                     | Some name ->
                       let%bind () = charge_entry t in
+                      let%bind () = on_name name in
                       next (remaining - 1) (name :: batch))
                 in
                 next 64 [])
@@ -350,4 +372,8 @@ let list_with_checkpoint t ~directory ~checkpoint =
     | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
       Error
         (Store_error.of_exn ~operation:"enumerate retention roots" ~path:directory exn))
+;;
+
+let list_with_checkpoint t ~directory ~checkpoint =
+  list_with_checkpoint_and_names t ~directory ~on_name:(fun _ -> Ok ()) ~checkpoint
 ;;

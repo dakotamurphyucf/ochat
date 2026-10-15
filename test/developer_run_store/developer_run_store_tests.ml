@@ -269,6 +269,93 @@ let admit run owner capture =
   | Error error -> raise_s [%sexp "developer run admit failed", (error : R.Error.t)]
 ;;
 
+let%test_unit "Store Live directory keeps close exclusion through interrupted cleanup" =
+  with_root (fun env sw _root _session run ->
+    let handle, _ = admit run (owner 0) (digest "live-directory") in
+    let live = R.Live_directory.open_ handle ~sw ~checkpoint:(fun () -> ()) |> run_ok in
+    assert (Result.is_ok (R.Live_directory.check_live live));
+    let payload = Filename.concat (R.Live_directory.runtime_directory live) "result" in
+    Eio.Path.save ~create:(`Exclusive 0o600) Eio.Path.(Eio.Stdenv.fs env / payload) "ok";
+    assert (
+      match R.close_and_wait run with
+      | Error R.Error.Conflict -> true
+      | _ -> false);
+    let exception Interrupted in
+    let calls = ref 0 in
+    (match
+       R.Live_directory.close_and_wait live ~checkpoint:(fun () ->
+         Int.incr calls;
+         if !calls = 3 then raise Interrupted)
+     with
+     | exception Interrupted -> ()
+     | Ok () | Error _ -> failwith "bounded cleanup did not reach interruption");
+    assert (Result.is_ok (R.Live_directory.check_live live));
+    assert (
+      match R.close_and_wait run with
+      | Error R.Error.Conflict -> true
+      | _ -> false);
+    R.Live_directory.close_and_wait live ~checkpoint:(fun () -> ()) |> run_ok;
+    assert (
+      not (Eio.Path.is_directory Eio.Path.(Eio.Stdenv.fs env / Filename.dirname payload)));
+    assert (Result.is_ok (R.close_and_wait run)))
+;;
+
+let%test_unit "cold Live inventory removes owned children without following links" =
+  with_temp_directory "ochat-developer-live-cold" (fun env temporary ->
+    let root = Filename.concat temporary "data" in
+    Eio.Switch.run (fun sw ->
+      let session = create_session env sw root in
+      let run = open_run session sw () in
+      R.close_and_wait run |> run_ok;
+      S.close session |> store_ok);
+    let live_root = Filename.concat root "developer-live" in
+    let child =
+      Filename.concat live_root ("live_" ^ P.Id.Developer_run.to_string run_id)
+    in
+    let outside = Filename.concat temporary "outside" in
+    Eio.Path.save ~create:(`Exclusive 0o600) Eio.Path.(Eio.Stdenv.fs env / outside) "keep";
+    Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / child);
+    Eio.Path.save
+      ~create:(`Exclusive 0o600)
+      Eio.Path.(Eio.Stdenv.fs env / Filename.concat child ".owner")
+      (P.Id.Server.to_string server_id ^ ":" ^ P.Id.Developer_run.to_string run_id ^ "\n");
+    Core_unix.symlink ~target:outside ~link_name:(Filename.concat child "outside-link");
+    Eio.Switch.run (fun sw ->
+      let session =
+        S.open_existing
+          ~env
+          ~sw
+          ~root
+          ~process_start_identity:None
+          ~lock_nonce:"developer-live-cold"
+        |> store_ok
+      in
+      let run = open_run session sw () in
+      assert (not (Eio.Path.is_directory Eio.Path.(Eio.Stdenv.fs env / child)));
+      assert (String.equal (Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / outside)) "keep");
+      R.close_and_wait run |> run_ok;
+      S.close session |> store_ok);
+    Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / child);
+    Eio.Switch.run (fun sw ->
+      let session =
+        S.open_existing
+          ~env
+          ~sw
+          ~root
+          ~process_start_identity:None
+          ~lock_nonce:"developer-live-quarantine"
+        |> store_ok
+      in
+      assert (
+        match
+          R.open_or_create session ~sw ~limits:(limits ()) ~checkpoint:(fun () -> ())
+        with
+        | Error (R.Error.Store _) -> true
+        | Ok _ | Error _ -> false);
+      assert (Eio.Path.is_directory Eio.Path.(Eio.Stdenv.fs env / child));
+      S.close session |> store_ok))
+;;
+
 let%test_unit
     "run claim excludes same-run admission and close without blocking other runs"
   =

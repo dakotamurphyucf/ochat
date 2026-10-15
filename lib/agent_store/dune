@@ -61,6 +61,7 @@
   blob_reference_scan
   blob_retention
   retention_reader
+  bounded_tree_cleanup
   result_intent_file
   developer_owner_document
   developer_result_reference
