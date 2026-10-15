@@ -1,10 +1,109 @@
 open! Core
+module P = Agent_protocol
+
+module Fairness = struct
+  type 'candidate group =
+    { owner : P.Execution_owner.t
+    ; candidates : 'candidate list
+    }
+
+  let has_queued_claim jobs =
+    List.exists jobs ~f:(fun (job : P.Job.t) ->
+      match job.status, job.delivery with
+      | Queued, (Pending | Delivered _) -> true
+      | Queued, (Not_required | Discarded _)
+      | ( ( Running
+          | Waiting_permission _
+          | Waiting_completion _
+          | Succeeded
+          | Failed _
+          | Cancelled
+          | Interrupted _ )
+        , _ ) -> false)
+  ;;
+
+  let conversation_group ~owner ~jobs ~candidate =
+    if has_queued_claim jobs
+    then Option.map owner ~f:(fun owner -> { owner; candidates = [ candidate ] })
+    else None
+  ;;
+
+  let order ~after groups =
+    let groups =
+      List.filter groups ~f:(fun group -> not (List.is_empty group.candidates))
+      |> List.sort ~compare:(fun left right ->
+        P.Execution_owner.compare left.owner right.owner)
+    in
+    let rec check_unique = function
+      | left :: (right :: _ as rest) ->
+        if P.Execution_owner.equal left.owner right.owner
+        then invalid_arg "duplicate scheduler owner group";
+        check_unique rest
+      | [] | [ _ ] -> ()
+    in
+    check_unique groups;
+    let groups =
+      match after with
+      | None -> groups
+      | Some anchor ->
+        let before, after =
+          List.split_while groups ~f:(fun group ->
+            P.Execution_owner.compare group.owner anchor <= 0)
+        in
+        after @ before
+    in
+    groups, Option.map (List.hd groups) ~f:(fun group -> group.owner)
+  ;;
+end
+
+module For_testing = struct
+  let fair_order ~after groups =
+    let groups =
+      List.map groups ~f:(fun (owner, candidates) ->
+        if
+          not
+            (List.for_all candidates ~f:(fun candidate ->
+               P.Execution_owner.equal owner (P.Host_job.owner candidate)))
+        then invalid_arg "scheduler candidate owner differs from group";
+        Fairness.{ owner; candidates })
+    in
+    let ordered, after = Fairness.order ~after groups in
+    List.map ordered ~f:(fun group -> group.owner, group.candidates), after
+  ;;
+
+  let fair_conversation_order ~after rows =
+    let groups =
+      List.filter_map rows ~f:(fun (owner, jobs) ->
+        Fairness.conversation_group ~owner:(Some owner) ~jobs ~candidate:jobs)
+    in
+    let ordered, after = Fairness.order ~after groups in
+    List.map ordered ~f:(fun group -> group.owner), after
+  ;;
+end
+
+module Worker_key = struct
+  module T = struct
+    type t =
+      { identity : P.Host_job.Identity.t
+      ; attempt : int
+      }
+    [@@deriving compare, sexp_of]
+  end
+
+  include T
+  include Comparator.Make (T)
+
+  let of_conversation (job : P.Job.t) =
+    let open Result.Let_syntax in
+    let%map host = P.Host_job.of_conversation job in
+    { identity = P.Host_job.identity host; attempt = job.attempt }
+  ;;
+end
 
 type running_job =
-  { session_id : Agent_protocol.Id.Session.t
+  { key : Worker_key.t
+  ; session_id : Agent_protocol.Id.Session.t
   ; actor : Agent_session.Session_actor.t
-  ; generation : int
-  ; attempt : int
   ; sw : Eio.Switch.t
   ; rejected : bool
   }
@@ -12,9 +111,10 @@ type running_job =
 type t =
   { closed : bool Atomic.t
   ; capacity : Job_capacity.t
+  ; developer_registry : Developer_root_owner.Registry.t option
   ; mutex : Eio.Mutex.t
-  ; mutable running : (Agent_protocol.Id.Job.t, running_job) Map.Poly.t
-  ; mutable cursor : int
+  ; mutable running : running_job Map.M(Worker_key).t
+  ; mutable after : P.Execution_owner.t option
   ; mutable delivering : Session_registry.entry list
   ; deliveries_idle : Eio.Condition.t
   ; model_job_inference :
@@ -201,32 +301,25 @@ let run_background_job t entry job =
         dependency)
 ;;
 
-let register_running t (job : Agent_protocol.Job.t) job_sw ~actor ~rejected =
+let register_running t key (job : Agent_protocol.Job.t) job_sw ~actor ~rejected =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     if Atomic.get t.closed
     then Eio.Switch.fail job_sw Job_cancelled
+    else if Map.mem t.running key
+    then failwith "duplicate conversation job worker"
     else
       t.running
       <- Map.set
            t.running
-           ~key:job.id
-           ~data:
-             { session_id = job.session_id
-             ; actor
-             ; generation = job.generation
-             ; attempt = job.attempt
-             ; sw = job_sw
-             ; rejected
-             })
+           ~key
+           ~data:{ key; session_id = job.session_id; actor; sw = job_sw; rejected })
 ;;
 
-let unregister_running t (job : Agent_protocol.Job.t) =
+let unregister_running t key ~actor =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-    match Map.find t.running job.id with
-    | Some running
-      when Int.equal running.generation job.generation
-           && Int.equal running.attempt job.attempt ->
-      t.running <- Map.remove t.running job.id
+    match Map.find t.running key with
+    | Some running when phys_equal running.actor actor ->
+      t.running <- Map.remove t.running key
     | None | Some _ -> ())
 ;;
 
@@ -260,6 +353,11 @@ let run_claimed_job t entry job =
 ;;
 
 let dispatch t sw entry job lease rejection =
+  let key =
+    match Worker_key.of_conversation job with
+    | Ok key -> key
+    | Error _ -> failwith "claimed conversation job has invalid identity"
+  in
   Eio.Fiber.fork ~sw (fun () ->
     Exn.protect
       ~f:(fun () ->
@@ -267,6 +365,7 @@ let dispatch t sw entry job lease rejection =
           Eio.Switch.run (fun job_sw ->
             register_running
               t
+              key
               job
               job_sw
               ~actor:entry.Session_registry.actor
@@ -285,7 +384,7 @@ let dispatch t sw entry job lease rejection =
         | Job_cancelled | Eio.Cancel.Cancelled _ -> ())
       ~finally:(fun () ->
         Eio.Cancel.protect (fun () ->
-          unregister_running t job;
+          unregister_running t key ~actor:entry.Session_registry.actor;
           Option.iter lease ~f:Job_capacity.release)))
 ;;
 
@@ -353,16 +452,20 @@ let claim_with_lease t sw entry (job : Agent_protocol.Job.t) lease =
 ;;
 
 let claim t sw entry (job : Agent_protocol.Job.t) =
+  let key = Worker_key.of_conversation job in
   let already_running =
     Eio.Mutex.use_ro t.mutex (fun () ->
-      Map.mem t.running job.id
-      || Map.exists t.running ~f:(fun running ->
-        running.rejected
-        && Agent_protocol.Id.Session.equal running.session_id job.session_id))
+      match key with
+      | Error _ -> false
+      | Ok key ->
+        Map.exists t.running ~f:(fun running ->
+          P.Host_job.Identity.equal running.key.identity key.identity
+          || (running.rejected && P.Id.Session.equal running.session_id job.session_id)))
   in
-  match already_running with
-  | true -> false
-  | false ->
+  match key, already_running with
+  | Error error, _ -> reject_job t sw entry job error
+  | Ok _, true -> false
+  | Ok _, false ->
     (match capacity_key entry job with
      | Error error -> reject_job t sw entry job error
      | Ok key ->
@@ -463,29 +566,42 @@ let claim_one t sw entry jobs =
   loop jobs
 ;;
 
-let cancel_terminal_worker t (job : Agent_protocol.Job.t) =
+let cancel_terminal_worker t ~actor (job : Agent_protocol.Job.t) =
   match job.status with
   | Cancelled | Interrupted _ ->
-    Eio.Mutex.use_ro t.mutex (fun () ->
-      Map.find t.running job.id
-      |> Option.iter ~f:(fun running ->
-        if
-          Int.equal running.generation job.generation
-          && Int.equal running.attempt job.attempt
-        then Eio.Switch.fail running.sw Job_cancelled))
+    (match Worker_key.of_conversation job with
+     | Error _ -> ()
+     | Ok key ->
+       Eio.Mutex.use_ro t.mutex (fun () ->
+         Map.find t.running key
+         |> Option.iter ~f:(fun running ->
+           if
+             phys_equal running.actor actor
+             && P.Host_job.Identity.equal running.key.identity key.identity
+             && Int.equal running.key.attempt job.attempt
+           then Eio.Switch.fail running.sw Job_cancelled)))
   | _ -> ()
 ;;
 
 let state_jobs t entry =
   match Agent_session.Session_actor.state entry.Session_registry.actor with
-  | Error _ -> []
+  | Error _ -> None, []
   | Ok state ->
+    let owner =
+      match
+        P.Execution_owner.conversation
+          ~session_id:state.identity.session_id
+          ~generation:state.identity.generation
+      with
+      | Ok owner -> owner
+      | Error _ -> failwith "validated session has invalid scheduler owner"
+    in
     Job_capacity.retire_previous_generations
       t.capacity
       ~session_id:state.identity.session_id
       ~generation:state.identity.generation;
     List.iter state.jobs ~f:(Job_capacity.retire_job t.capacity);
-    List.iter state.jobs ~f:(cancel_terminal_worker t);
+    List.iter state.jobs ~f:(cancel_terminal_worker t ~actor:entry.actor);
     if
       Agent_protocol.Session.equal_desired_state state.lifecycle.desired Stopped
       || (match state.runtime_initialization with
@@ -495,37 +611,31 @@ let state_jobs t entry =
       match Inference.Selection.view state.spec.inference_target with
       | Unresolved -> true
       | Captured _ -> false
-    then []
+    then Some owner, []
     else
-      List.filter state.jobs ~f:(fun job ->
-        (not state.halted)
-        || not
-             (match job.status with
-              | Queued -> true
-              | _ -> false))
-;;
-
-let rotate entries cursor =
-  match entries with
-  | [] -> [], 0
-  | _ ->
-    let length = List.length entries in
-    let offset = cursor mod length in
-    let before, after = List.split_n entries offset in
-    after @ before, (offset + 1) mod length
+      ( Some owner
+      , List.filter state.jobs ~f:(fun job ->
+          (not state.halted)
+          || not
+               (match job.status with
+                | Queued -> true
+                | _ -> false)) )
 ;;
 
 let process t sw registry =
-  let entries, cursor = rotate (Session_registry.entries registry) t.cursor in
-  t.cursor <- cursor;
+  let entries = Session_registry.entries registry in
   let actors = List.map entries ~f:(fun entry -> entry.Session_registry.actor) in
   Eio.Mutex.use_ro t.mutex (fun () ->
     Map.iter t.running ~f:(fun running ->
       match List.mem actors running.actor ~equal:phys_equal with
       | true -> ()
       | false -> Eio.Switch.fail running.sw Job_cancelled));
-  let states = List.map entries ~f:(fun entry -> entry, state_jobs t entry) in
-  List.iter states ~f:(fun (entry, jobs) ->
+  let states =
+    List.map entries ~f:(fun entry ->
+      let owner, jobs = state_jobs t entry in
+      entry, owner, jobs)
+  in
+  List.iter states ~f:(fun (entry, _, jobs) ->
     List.iter jobs ~f:(fun job ->
       match job.Agent_protocol.Job.status with
       | Waiting_completion _ ->
@@ -537,8 +647,15 @@ let process t sw registry =
              ~attempt:job.attempt
            : (Agent_protocol.Job.t, Agent_protocol.Error.t) result)
       | _ -> ()));
-  List.iter states ~f:(fun (entry, jobs) -> dispatch_delivery t sw entry jobs);
-  List.iter states ~f:(fun (entry, jobs) -> claim_one t sw entry jobs)
+  List.iter states ~f:(fun (entry, _, jobs) -> dispatch_delivery t sw entry jobs);
+  let groups =
+    List.filter_map states ~f:(fun (entry, owner, jobs) ->
+      Fairness.conversation_group ~owner ~jobs ~candidate:(entry, jobs))
+  in
+  let ordered, after = Fairness.order ~after:t.after groups in
+  t.after <- after;
+  List.iter ordered ~f:(fun group ->
+    List.iter group.candidates ~f:(fun (entry, jobs) -> claim_one t sw entry jobs))
 ;;
 
 let rec run t sw clock registry =
@@ -549,14 +666,23 @@ let rec run t sw clock registry =
     run t sw clock registry)
 ;;
 
-let start_controlled ~enabled ~sw ~clock ~registry ~capacity ~model_job_inference =
+let start_controlled
+      ~enabled
+      ~sw
+      ~clock
+      ~registry
+      ~developer_registry
+      ~capacity
+      ~model_job_inference
+  =
   let t =
     { closed = Atomic.make (not enabled)
     ; capacity
+    ; developer_registry
     ; model_job_inference
     ; mutex = Eio.Mutex.create ()
-    ; running = Map.Poly.empty
-    ; cursor = 0
+    ; running = Map.empty (module Worker_key)
+    ; after = None
     ; delivering = []
     ; deliveries_idle = Eio.Condition.create ()
     ; sleep = Eio.Time.sleep clock
@@ -566,14 +692,25 @@ let start_controlled ~enabled ~sw ~clock ~registry ~capacity ~model_job_inferenc
   t
 ;;
 
-let start ~sw ~clock ~registry ~capacity ~model_job_inference =
-  start_controlled ~enabled:true ~sw ~clock ~registry ~capacity ~model_job_inference
+let start ~sw ~clock ~registry ~developer_registry ~capacity ~model_job_inference =
+  start_controlled
+    ~enabled:true
+    ~sw
+    ~clock
+    ~registry
+    ~developer_registry
+    ~capacity
+    ~model_job_inference
 ;;
 
-let cancel t job_id =
-  Eio.Mutex.use_ro t.mutex (fun () ->
-    Map.find t.running job_id
-    |> Option.iter ~f:(fun running -> Eio.Switch.fail running.sw Job_cancelled))
+let cancel_conversation t ~actor ~job =
+  match Worker_key.of_conversation job with
+  | Error _ -> ()
+  | Ok key ->
+    Eio.Mutex.use_ro t.mutex (fun () ->
+      Map.find t.running key
+      |> Option.iter ~f:(fun running ->
+        if phys_equal running.actor actor then Eio.Switch.fail running.sw Job_cancelled))
 ;;
 
 let close t =

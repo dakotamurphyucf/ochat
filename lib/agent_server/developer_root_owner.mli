@@ -30,6 +30,13 @@ end
 module Registry : sig
   type t
 
+  (** Snapshot at most the configured active-run bound of physically owned,
+      same-domain Live roots. Excludes provisional startup recovery, Closing,
+      Quarantined and Closed slots; returning a root grants no job Claim.
+      Closed/foreign-domain registry use fails rather than pretending the
+      scheduler saw an empty host. No Store I/O occurs under registry lookup. *)
+  val active_for_scheduler : t -> (run list, Agent_protocol.Error.t) result
+
   (** One daemon-local owner registry over the ACTUAL shared Store and
       Job_capacity. No separate scheduler, document writer or capacity ledger
       is made. The daemon retains this value through all run owners and closes
@@ -431,6 +438,44 @@ val job_parent
   :  t
   -> Agent_session.Developer_job_scope.active
   -> (Agent_session.Developer_job_scope.Parent.t, Agent_protocol.Error.t) result
+
+module Job_candidate : sig
+  type t
+
+  (** Read only the genuine latest-Active Store candidates for this live root.
+      Recheck its original actor, physical run claim and lifecycle after the
+      yielding read and after per-candidate host projection checkpoints. Each
+      result retains the exact Store observation/lookup
+      and this issuing run; a job DTO or matching owner coordinates cannot
+      construct or rebind it. A failed read exposes no partial candidates. *)
+  val read_current
+    :  run
+    -> checkpoint:(unit -> unit)
+    -> (t list, Agent_protocol.Error.t) result
+
+  val job : t -> Agent_protocol.Developer_job.t
+  val host_job : t -> Agent_protocol.Host_job.t
+
+  (** Validate that [candidate] was issued by this physical run, and delegate
+      its exact Observation/Job_lookup to the existing [with_claimed_job].
+      That worker alone transfers shared capacity, persists Running before
+      [f], owns the one-shot callback/child Switch and selects terminal state.
+      Saturated/not-due/stale candidates do not call [f]. The callback is the
+      existing physical worker continuation, never an authorization Boolean
+      or a second scheduler. A queued job whose executor is not installed
+      must remain queued; callers must not use this operation to fail it. *)
+  val with_claimed
+    :  run
+    -> t
+    -> ?select:
+         (claim:Agent_store.Developer_run_store.Claim.t
+          -> proposed:Agent_protocol.Developer_job.State.t
+          -> (Developer_job_worker.Selected.t option, Agent_protocol.Error.t) result)
+    -> (active:Agent_session.Developer_job_scope.active
+        -> sw:Eio.Switch.t
+        -> (Agent_protocol.Developer_job.State.t, Agent_protocol.Error.t) result)
+    -> (Agent_protocol.Developer_job.t option, Agent_protocol.Error.t) result
+end
 
 (** Enter an exact queued attempt through this root's owned physical Worker,
     under its registered child Switch and the shared daemon capacity ledger.

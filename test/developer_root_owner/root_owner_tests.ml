@@ -535,6 +535,100 @@ let%test_unit "physical root job control preserves exact inactive attempts" =
       | Error error -> raise_s [%sexp "stage failed", (error : P.Error.t)]
     in
     let id = stage () in
+    let initial_candidates = O.Job_candidate.read_current run ~checkpoint:ignore |> ok in
+    assert (Int.equal (List.length initial_candidates) 1);
+    assert (
+      P.Id.Job.equal
+        (P.Developer_job.id (O.Job_candidate.job (List.hd_exn initial_candidates)))
+        id);
+    let physical = O.Job_candidate.host_job (List.hd_exn initial_candidates) in
+    let conversation_job : P.Job.t =
+      { id
+      ; session_id = P.Id.Session.create ()
+      ; generation = 0
+      ; kind = Async_tool
+      ; launch = None
+      ; progress = None
+      ; payload = `Object []
+      ; status = Queued
+      ; retry_policy = Never
+      ; attempt = 0
+      ; created_at = now ()
+      ; started_at = None
+      ; next_run_at = None
+      ; completed_at = None
+      ; result = None
+      ; delivery = Pending
+      }
+    in
+    let conversation = P.Host_job.of_conversation conversation_job |> ok in
+    assert (P.Id.Job.equal (P.Host_job.id physical) (P.Host_job.id conversation));
+    assert (
+      not
+        (P.Host_job.Identity.equal
+           (P.Host_job.identity physical)
+           (P.Host_job.identity conversation)));
+    let groups =
+      [ P.Host_job.owner physical, [ physical ]
+      ; P.Host_job.owner conversation, [ conversation ]
+      ]
+    in
+    let idle_owner =
+      P.Execution_owner.conversation ~session_id:(P.Id.Session.create ()) ~generation:0
+      |> ok
+    in
+    let other_job = { conversation_job with session_id = P.Id.Session.create () } in
+    let other_owner = P.Host_job.of_conversation other_job |> ok |> P.Host_job.owner in
+    let queued_rows =
+      [ P.Host_job.owner conversation, [ conversation_job ]
+      ; idle_owner, []
+      ; other_owner, [ other_job ]
+      ]
+    in
+    let ready_first, ready_after =
+      Agent_server.Job_scheduler.For_testing.fair_conversation_order
+        ~after:None
+        queued_rows
+    in
+    let ready_second, ready_after =
+      Agent_server.Job_scheduler.For_testing.fair_conversation_order
+        ~after:ready_after
+        queued_rows
+    in
+    let ready_third, _ =
+      Agent_server.Job_scheduler.For_testing.fair_conversation_order
+        ~after:ready_after
+        queued_rows
+    in
+    assert (Int.equal (List.length ready_first) 2);
+    assert (Int.equal (List.length ready_second) 2);
+    assert (List.equal P.Execution_owner.equal ready_first ready_third);
+    assert (
+      not (P.Execution_owner.equal (List.hd_exn ready_first) (List.hd_exn ready_second)));
+    let groups = (idle_owner, []) :: groups in
+    let first, after =
+      Agent_server.Job_scheduler.For_testing.fair_order ~after:None groups
+    in
+    let second, after_second =
+      Agent_server.Job_scheduler.For_testing.fair_order ~after groups
+    in
+    let third, _ =
+      Agent_server.Job_scheduler.For_testing.fair_order ~after:after_second groups
+    in
+    assert (Int.equal (List.length first) 2);
+    assert (Int.equal (List.length second) 2);
+    assert (
+      List.equal P.Execution_owner.equal (List.map first ~f:fst) (List.map third ~f:fst));
+    assert (
+      not (P.Execution_owner.equal (fst (List.hd_exn first)) (fst (List.hd_exn second))));
+    let surviving = List.tl_exn first in
+    let after_removal, _ =
+      Agent_server.Job_scheduler.For_testing.fair_order ~after surviving
+    in
+    assert (
+      P.Execution_owner.equal
+        (fst (List.hd_exn surviving))
+        (fst (List.hd_exn after_removal)));
     let snapshot = O.Job_control.find_current run id |> ok |> Option.value_exn in
     assert (
       match O.Job_control.cancel_current run snapshot |> ok with
@@ -553,7 +647,11 @@ let%test_unit "physical root job control preserves exact inactive attempts" =
     let queued_snapshot =
       O.Job_control.find_current run claimed_id |> ok |> Option.value_exn
     in
-    let before_claim = R.observe handle |> ok in
+    let candidate =
+      match O.Job_candidate.read_current run ~checkpoint:ignore |> ok with
+      | [ candidate ] -> candidate
+      | _ -> failwith "scheduler did not project exactly the queued physical job"
+    in
     let started, started_u = Eio.Promise.create () in
     let never, _never_u = Eio.Promise.create () in
     let finished, finished_u = Eio.Promise.create () in
@@ -561,15 +659,13 @@ let%test_unit "physical root job control preserves exact inactive attempts" =
     Eio.Fiber.fork ~sw (fun () ->
       let outcome =
         match
-          O.with_claimed_job
-            run
-            ~expected:before_claim
-            ~lookup:(R.find_job_exact before_claim claimed_id)
-            (fun ~active:_ ~sw:_ ->
-               incr effects;
-               Eio.Promise.resolve started_u ();
-               Eio.Promise.await never;
-               failwith "cancelled job resumed its callback")
+          O.Job_candidate.with_claimed run candidate (fun ~active:_ ~sw:_ ->
+            incr effects;
+            assert (
+              List.is_empty (O.Job_candidate.read_current run ~checkpoint:ignore |> ok));
+            Eio.Promise.resolve started_u ();
+            Eio.Promise.await never;
+            failwith "cancelled job resumed its callback")
         with
         | exception Eio.Cancel.Cancelled _ -> `Cancelled
         | Ok _ -> `Returned

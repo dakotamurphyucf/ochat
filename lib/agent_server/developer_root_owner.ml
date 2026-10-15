@@ -366,6 +366,26 @@ let restore_live_after_retention t =
   then t.state <- Live
 ;;
 
+let current_local ?external_model t =
+  if not (same_domain t.registry)
+  then invalid "developer run owner belongs to another domain"
+  else (
+    match Terminal_queue.effect_witness t.terminals with
+    | None -> invalid "developer terminal settlement excludes effects"
+    | Some terminal_witness ->
+      let witness =
+        { issuer = t
+        ; selected = t.selected
+        ; selection_revision = t.selection_revision
+        ; effect_revision = t.effect_revision
+        ; terminal_witness
+        }
+      in
+      Result.map
+        (check_current_local ?external_model t witness ~allow_pending:false)
+        ~f:(fun () -> witness))
+;;
+
 let current_with ?external_model t =
   if not (same_domain t.registry)
   then invalid "developer run owner belongs to another domain"
@@ -373,21 +393,7 @@ let current_with ?external_model t =
     let* active = Store.is_latest_active t.handle |> Result.map_error ~f:error_of_store in
     if not active
     then invalid "developer run epoch is not active"
-    else (
-      match Terminal_queue.effect_witness t.terminals with
-      | None -> invalid "developer terminal settlement excludes effects"
-      | Some terminal_witness ->
-        let witness =
-          { issuer = t
-          ; selected = t.selected
-          ; selection_revision = t.selection_revision
-          ; effect_revision = t.effect_revision
-          ; terminal_witness
-          }
-        in
-        Result.map
-          (check_current_local ?external_model t witness ~allow_pending:false)
-          ~f:(fun () -> witness))
+    else current_local ?external_model t
 ;;
 
 let current t = current_with t
@@ -413,6 +419,48 @@ let with_claimed_job t ~expected ~lookup ?select f =
   let* _ = current t in
   Developer_job_worker.with_claimed_attempt t.worker ~expected ~lookup ?select f
 ;;
+
+module Job_candidate = struct
+  type t =
+    { issuer : run
+    ; stored : Store.Scheduler_candidate.t
+    ; host_job : P.Host_job.t
+    }
+
+  let job t = Store.Scheduler_candidate.job t.stored
+  let host_job t = t.host_job
+
+  let read_current issuer ~checkpoint =
+    let* witness = current_local issuer in
+    let* stored =
+      Store.scheduler_candidates issuer.handle ~checkpoint
+      |> Result.map_error ~f:error_of_store
+    in
+    let* () = check_effect_now issuer witness in
+    let* candidates =
+      List.map stored ~f:(fun stored ->
+        checkpoint ();
+        let job = Store.Scheduler_candidate.job stored in
+        let* host_job = P.Host_job.of_developer job in
+        Ok { issuer; stored; host_job })
+      |> Result.all
+    in
+    let* () = check_effect_now issuer witness in
+    Ok candidates
+  ;;
+
+  let with_claimed issuer t ?select f =
+    if not (phys_equal issuer t.issuer)
+    then invalid "developer scheduler candidate belongs to another run"
+    else
+      with_claimed_job
+        issuer
+        ~expected:(Store.Scheduler_candidate.observation t.stored)
+        ~lookup:(Store.Scheduler_candidate.lookup t.stored)
+        ?select
+        f
+  ;;
+end
 
 module Job_control = struct
   type snapshot =
@@ -2391,6 +2439,22 @@ let close_and_wait = close_owner
 
 module Registry = struct
   type nonrec t = registry
+
+  let active_for_scheduler t =
+    if t.closed || not (same_domain t)
+    then invalid "developer root registry is closed or foreign"
+    else
+      Hashtbl.data t.owners
+      |> List.filter_map ~f:(function
+        | Owned run ->
+          (match run.state with
+           | Live -> Some run
+           | Closing | Quarantined | Closed -> None)
+        | Admitting _ -> None)
+      |> List.sort ~compare:(fun left right ->
+        P.Id.Developer_run.compare left.owner.run_id right.owner.run_id)
+      |> Result.return
+  ;;
 
   let cleanup_admission t run_id (admission : admission) =
     let* () =
