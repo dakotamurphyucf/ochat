@@ -89,6 +89,12 @@ inference inventory, finished its window and released the claim. An uncertain
 window or command write retains its exact claim or Pending; it is never treated
 as a key miss. A later authorized same-key lookup may reconcile only the
 selected terminal without invoking the command callback again.
+Passive reads prove disclosure of the existing row before starting recovery.
+Only a fresh reservation from the current slot can launch once; an old
+Reserved observation cannot start a callback.
+If a fresh reservation's slot exits before launch, the lifecycle finishes
+that row as Interrupted through the existing Store writer. An uncertain save
+retains the exact selected receipt and capacity charge for reconciliation.
 
 Callbacks run under a daemon-owned switch, each with a joined child switch.
 The submitting request can end while the callback and its capacity charge

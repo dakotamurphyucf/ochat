@@ -28,6 +28,20 @@ let receipt handle value =
   |> ok
 ;;
 
+let%test_unit "daemon owner rejects Store limits too small for its own fallback" =
+  F.with_store ~max_command_terminal_bytes:1 (fun _env sw store ->
+    let disclosure, control = policy () in
+    assert (
+      Result.is_error
+        (L.create
+           ~sw
+           ~store
+           ~max_active_commands:1
+           ~disclosure
+           ~control
+           ~recovery:(recovery ()))))
+;;
+
 let%test_unit "daemon command callback survives its submitting slot and publishes once" =
   let fault_armed = ref false in
   let rename_armed = ref false in
@@ -71,6 +85,7 @@ let%test_unit "daemon command callback survives its submitting slot and publishe
        let actor = Operator_authorization.trusted_local F.principal in
        let run_id = run_owner.run_id in
        let key = P.Idempotency_key.of_string "command-lifecycle-check" |> ok in
+       let second_key = P.Idempotency_key.of_string "command-lifecycle-second" |> ok in
        let request_fingerprint =
          Chatml_source.Digest.of_contents "command check payload" ~checkpoint:ignore
        in
@@ -101,12 +116,23 @@ let%test_unit "daemon command callback survives its submitting slot and publishe
              let%bind launched = L.launch lifecycle slot ~handle ~reserved ~f:callback in
              assert (
                Result.is_error (L.launch lifecycle slot ~handle ~reserved ~f:callback));
+             assert (
+               Result.is_error
+                 (L.reserve
+                    lifecycle
+                    slot
+                    ~handle
+                    ~key:second_key
+                    ~kind:R.Command.Receipt.Kind.Check
+                    ~request_fingerprint
+                    ~admit:(fun () -> true)));
              Ok launched
            in
            reserved)
          |> ok
        in
        Eio.Promise.await entered;
+       assert (Option.is_none (R.Command.observe handle ~key:second_key |> ok));
        assert (Option.is_none (L.View.receipt reserved));
        let same =
          L.with_slot lifecycle ~run_id ~f:(fun slot ->
@@ -146,6 +172,57 @@ let%test_unit "daemon command callback survives its submitting slot and publishe
          R.Command.Receipt.Id.equal
            (R.Command.Row.id (L.View.row retained))
            (R.Command.Row.id (L.View.row terminal)));
+       L.with_slot lifecycle ~run_id ~f:(fun slot ->
+         assert (
+           Result.is_error
+             (L.launch lifecycle slot ~handle ~reserved ~f:(fun _ ~sw:_ ->
+                failwith "retired reservation relaunched")));
+         Ok ())
+       |> ok;
+       let rejected_key = P.Idempotency_key.of_string "command-revoked-reserve" |> ok in
+       L.with_slot lifecycle ~run_id ~f:(fun slot ->
+         assert (
+           Result.is_error
+             (L.reserve
+                lifecycle
+                slot
+                ~handle
+                ~key:rejected_key
+                ~kind:R.Command.Receipt.Kind.Check
+                ~request_fingerprint
+                ~admit:(fun () -> false)));
+         Ok ())
+       |> ok;
+       assert (Option.is_none (R.Command.observe handle ~key:rejected_key |> ok));
+       let abandoned_key = P.Idempotency_key.of_string "command-abandoned-slot" |> ok in
+       let original = Failure "cancel before command launch" in
+       (match
+          L.with_slot lifecycle ~run_id ~f:(fun slot ->
+            ignore
+              (L.reserve
+                 lifecycle
+                 slot
+                 ~handle
+                 ~key:abandoned_key
+                 ~kind:R.Command.Receipt.Kind.Check
+                 ~request_fingerprint
+                 ~admit:(fun () -> true)
+               |> ok
+               : L.View.t);
+            raise original)
+        with
+        | exception actual -> assert (phys_equal actual original)
+        | Ok _ | Error _ -> failwith "abandoned slot lost original failure");
+       let abandoned =
+         R.Command.observe handle ~key:abandoned_key |> ok |> Option.value_exn
+       in
+       (match R.Command.Row.phase (R.Command.View.row abandoned) with
+        | R.Command.Row.Phase.Terminal { receipt; _ } ->
+          (match R.Command.Receipt.value receipt with
+           | R.Command.Receipt.Check Interrupted -> ()
+           | Check _ | Fixture _ | Live _ -> failwith "abandoned slot chose wrong receipt")
+        | Reserved | Waiting_permission | Execution_started ->
+          failwith "abandoned slot stayed Reserved");
        let fault_key = P.Idempotency_key.of_string "command-lifecycle-fault" |> ok in
        let fault_request =
          Chatml_source.Digest.of_contents "command fault payload" ~checkpoint:ignore
@@ -193,7 +270,101 @@ let%test_unit "daemon command callback survives its submitting slot and publishe
        in
        assert (Option.is_some (L.View.receipt recovered));
        assert (Int.equal !calls 1);
-       L.close_and_wait lifecycle |> ok)
+       L.close_and_wait lifecycle |> ok;
+       let dead_lifecycle =
+         Eio.Switch.run (fun dead_sw ->
+           L.create
+             ~sw:dead_sw
+             ~store
+             ~max_active_commands:2
+             ~disclosure
+             ~control
+             ~recovery:(recovery ())
+           |> ok)
+       in
+       let no_fork_key = P.Idempotency_key.of_string "command-lifecycle-no-fork" |> ok in
+       let fork_rejected = ref false in
+       L.with_slot dead_lifecycle ~run_id ~f:(fun slot ->
+         let open Result.Let_syntax in
+         let%bind () = L.ensure_startup_recovered dead_lifecycle slot in
+         let%bind prepared =
+           L.reserve
+             dead_lifecycle
+             slot
+             ~handle
+             ~key:no_fork_key
+             ~kind:R.Command.Receipt.Kind.Check
+             ~request_fingerprint
+             ~admit:(fun () -> true)
+         in
+         (match
+            L.launch dead_lifecycle slot ~handle ~reserved:prepared ~f:(fun _ ~sw:_ ->
+              failwith "closed daemon switch ran callback")
+          with
+          | exception _ -> fork_rejected := true
+          | Ok _ | Error _ -> failwith "closed daemon switch accepted launch");
+         Ok ())
+       |> ok;
+       assert !fork_rejected;
+       let no_fork =
+         R.Command.observe handle ~key:no_fork_key |> ok |> Option.value_exn
+       in
+       (match R.Command.Row.phase (R.Command.View.row no_fork) with
+        | R.Command.Row.Phase.Terminal { receipt; _ } ->
+          (match R.Command.Receipt.value receipt with
+           | R.Command.Receipt.Check Interrupted -> ()
+           | Check _ | Fixture _ | Live _ -> failwith "unlaunched reservation not retired")
+        | Reserved | Waiting_permission | Execution_started ->
+          failwith "unlaunched reservation stayed open");
+       L.close_and_wait dead_lifecycle |> ok;
+       let may_read = ref false in
+       let recovery_calls = ref 0 in
+       let recovery_entered, signal_recovery_entered = Eio.Promise.create () in
+       let disclosure = L.Disclosure_policy.create ~authorize:(fun _ _ -> !may_read) in
+       let recovery =
+         L.Recovery_adapter.create ~recover:(fun ~claim:_ ~handle:_ ~window ->
+           incr recovery_calls;
+           if Int.equal !recovery_calls 1
+           then (
+             Eio.Promise.resolve signal_recovery_entered ();
+             Eio.Fiber.await_cancel ())
+           else (
+             let view = R.Recovery.observe window |> ok in
+             assert (List.is_empty (R.Recovery.View.candidates view));
+             assert (List.is_empty (R.Recovery.View.inference_candidates view));
+             Ok ()))
+       in
+       let recovering =
+         L.create ~sw ~store ~max_active_commands:2 ~disclosure ~control ~recovery |> ok
+       in
+       assert (
+         Result.is_error (L.await_terminal recovering ~actor ~run_id ~key:no_fork_key));
+       assert (Int.equal !recovery_calls 0);
+       may_read := true;
+       let cancellation, signal_cancellation = Eio.Promise.create () in
+       let cancelled, signal_cancelled = Eio.Promise.create () in
+       Eio.Fiber.fork ~sw (fun () ->
+         let outcome =
+           match
+             Eio.Cancel.sub (fun cancel ->
+               Eio.Promise.resolve signal_cancellation cancel;
+               L.with_slot recovering ~run_id ~f:(L.ensure_startup_recovered recovering)
+               |> ok)
+           with
+           | exception Eio.Cancel.Cancelled _ -> `Cancelled
+           | () -> `Unexpected_success
+         in
+         Eio.Promise.resolve signal_cancelled outcome);
+       let cancel = Eio.Promise.await cancellation in
+       Eio.Promise.await recovery_entered;
+       assert (Result.is_error (L.close_and_wait recovering));
+       Eio.Cancel.cancel cancel Exit;
+       (match Eio.Promise.await cancelled with
+        | `Cancelled -> ()
+        | `Unexpected_success -> failwith "cancelled startup returned success");
+       L.with_slot recovering ~run_id ~f:(L.ensure_startup_recovered recovering) |> ok;
+       assert (Int.equal !recovery_calls 2);
+       L.close_and_wait recovering |> ok)
 ;;
 
 let%test_unit

@@ -6,6 +6,7 @@ module Row = Store.Command.Row
 module Root = Developer_root_owner
 module Startup = Developer_command_startup
 module Custody = Developer_command_store_custody
+module Fallback = Developer_command_fallback
 
 let error code message ~retryable = P.Error.create code ~message ~retryable ()
 let busy () = error P.Error.Conflict "developer command is busy" ~retryable:true
@@ -76,7 +77,7 @@ type t =
   ; domain : int
   ; max_runs : int
   ; max_active_commands : int
-  ; document_limits : Document_schema.Limits.t
+  ; fallbacks : Fallback.t
   ; disclosure : Disclosure_policy.t
   ; control : Control_policy.t
   ; recovery_adapter : Recovery_adapter.t
@@ -93,6 +94,7 @@ and run_entry =
   ; mutable slot : slot option
   ; mutable active : active list
   ; mutable pending : Custody.t option
+  ; mutable unlaunched : unlaunched option
   ; mutable recovery : Startup.Acquired.t option
   ; mutable claim_only : Store.Run_claim.t option
   ; mutable persisted : bool
@@ -105,6 +107,13 @@ and slot =
   ; mutable live : bool
   ; mutable transferred : bool
   ; borrowed_charge : bool
+  ; mutable unlaunched : unlaunched option
+  }
+
+and unlaunched =
+  { handle : Store.handle
+  ; view : view
+  ; receipt : Receipt.t
   }
 
 and view =
@@ -112,6 +121,8 @@ and view =
   ; run_id : P.Id.Developer_run.t
   ; row : Row.t
   ; store_view : Store.Command.View.t option
+  ; launch_slot : slot option
+  ; mutable launch_consumed : bool
   }
 
 and active =
@@ -173,10 +184,31 @@ let same_run_view t run_id (view : view) =
 let same_row a b = Document_schema.Json.equal (Row.to_json a) (Row.to_json b)
 
 let view_of_store t run_id (value : Store.Command.View.t) =
-  { issuer = t; run_id; row = Store.Command.View.row value; store_view = Some value }
+  { issuer = t
+  ; run_id
+  ; row = Store.Command.View.row value
+  ; store_view = Some value
+  ; launch_slot = None
+  ; launch_consumed = true
+  }
 ;;
 
-let safe_view t run_id row = { issuer = t; run_id; row; store_view = None }
+let fresh_reservation_view t slot value =
+  { (view_of_store t slot.run.run_id value) with
+    launch_slot = Some slot
+  ; launch_consumed = false
+  }
+;;
+
+let safe_view t run_id row =
+  { issuer = t
+  ; run_id
+  ; row
+  ; store_view = None
+  ; launch_slot = None
+  ; launch_consumed = true
+  }
+;;
 
 let create ~sw ~store:run_store ~max_active_commands ~disclosure ~control ~recovery =
   let open Result.Let_syntax in
@@ -193,21 +225,21 @@ let create ~sw ~store:run_store ~max_active_commands ~disclosure ~control ~recov
     || (max_active_commands / max_runs = max_per_run && max_active_commands % max_runs > 0)
     || Option.is_some (Eio.Switch.get_error sw)
   then Error (limited ())
-  else
-    Ok
-      { sw
-      ; store = run_store
-      ; domain = (Stdlib.Domain.self () :> int)
-      ; max_runs
-      ; max_active_commands
-      ; document_limits = Store.Limits.document limits
-      ; disclosure
-      ; control
-      ; recovery_adapter = recovery
-      ; runs = Hashtbl.create (module P.Id.Developer_run)
-      ; occupied = 0
-      ; closed = false
-      }
+  else (
+    let%map fallbacks = Fallback.create limits in
+    { sw
+    ; store = run_store
+    ; domain = (Stdlib.Domain.self () :> int)
+    ; max_runs
+    ; max_active_commands
+    ; fallbacks
+    ; disclosure
+    ; control
+    ; recovery_adapter = recovery
+    ; runs = Hashtbl.create (module P.Id.Developer_run)
+    ; occupied = 0
+    ; closed = false
+    })
 ;;
 
 let entry t run_id =
@@ -225,6 +257,7 @@ let entry t run_id =
         ; slot = None
         ; active = []
         ; pending = None
+        ; unlaunched = None
         ; recovery = None
         ; claim_only = None
         ; persisted = false
@@ -250,57 +283,6 @@ let with_mutation run f =
     Eio.Cancel.protect (fun () -> Eio.Mutex.unlock run.mutation_gate))
 ;;
 
-let with_slot t ~run_id ~f =
-  if not (on_domain t)
-  then Error (stale ())
-  else if t.closed
-  then Error (closed ())
-  else
-    let open Result.Let_syntax in
-    let%bind run = entry t run_id in
-    match run.slot with
-    | Some _ -> Error (busy ())
-    | None ->
-      let borrowed_charge = run.retained_charge in
-      if (not borrowed_charge) && t.occupied >= t.max_active_commands
-      then Error (busy ())
-      else (
-        let slot =
-          { issuer = t; run; live = true; transferred = false; borrowed_charge }
-        in
-        run.slot <- Some slot;
-        if not borrowed_charge then t.occupied <- t.occupied + 1;
-        Exn.protect
-          ~finally:(fun () ->
-            Eio.Cancel.protect (fun () ->
-              slot.live <- false;
-              (match run.slot with
-               | Some current when phys_equal current slot -> run.slot <- None
-               | None | Some _ -> ());
-              if not slot.transferred
-              then
-                if
-                  Option.is_some run.pending
-                  || Option.is_some run.recovery
-                  || Option.is_some run.claim_only
-                then (
-                  if List.is_empty run.active then run.retained_charge <- true;
-                  if (not (List.is_empty run.active)) && not borrowed_charge
-                  then t.occupied <- t.occupied - 1)
-                else (
-                  run.retained_charge <- false;
-                  t.occupied <- t.occupied - 1);
-              if
-                (not run.persisted)
-                && List.is_empty run.active
-                && Option.is_none run.pending
-                && Option.is_none run.recovery
-                && Option.is_none run.claim_only
-                && Option.is_none run.slot
-              then Hashtbl.remove t.runs run_id))
-          ~f:(fun () -> f slot))
-;;
-
 let update_active_view run (value : Store.Command.View.t) =
   let row = Store.Command.View.row value in
   List.iter run.active ~f:(fun active ->
@@ -324,6 +306,9 @@ let reconcile_retained_unlocked run =
        Ok ()
      | Retired_absent ->
        run.pending <- None;
+       (match Custody.kind pending with
+        | Reserve -> run.unlaunched <- None
+        | Start | Finish -> ());
        if Option.is_none run.recovery then run.phase <- Ready;
        Ok ())
 ;;
@@ -336,6 +321,7 @@ let reconcile_retained run =
     && Option.is_none run.slot
     && List.is_empty run.active
     && Option.is_none run.pending
+    && Option.is_none run.unlaunched
     && Option.is_none run.recovery
     && Option.is_none run.claim_only
   then (
@@ -428,37 +414,41 @@ let ensure_startup_recovered t (slot : slot) =
         | Some claim -> release_clean_claim run claim
       in
       run.phase <- Recovering;
-      let outcome =
-        match
-          Startup.open_existing t.store ~run_id:run.run_id ~on_claim:(fun claim ->
-            run.claim_only <- Some claim)
-        with
-        | Error error ->
-          let original = store_error error in
-          (match run.claim_only with
-           | None -> ()
-           | Some claim ->
-             (try ignore (release_clean_claim run claim : (unit, P.Error.t) result) with
-              | _ ->
-                run.claim_only <- Some claim;
-                run.phase <- Quarantined));
-          Error original
-        | Ok None ->
-          run.phase <- Ready;
-          Ok ()
-        | Ok (Some acquired) ->
-          run.persisted <- true;
-          run.recovery <- Some acquired;
-          run.claim_only <- None;
-          finish_recovery run acquired
-      in
-      (match outcome with
-       | Ok () -> Ok ()
-       | Error _ as error ->
-         if Option.is_none run.recovery && Option.is_none run.claim_only
-         then run.phase <- Cold;
-         error
-       | exception exn ->
+      (try
+         let outcome =
+           match
+             Startup.open_existing t.store ~run_id:run.run_id ~on_claim:(fun claim ->
+               run.claim_only <- Some claim)
+           with
+           | Error error ->
+             let original = store_error error in
+             (match run.claim_only with
+              | None -> ()
+              | Some claim ->
+                (try
+                   ignore (release_clean_claim run claim : (unit, P.Error.t) result)
+                 with
+                 | _ ->
+                   run.claim_only <- Some claim;
+                   run.phase <- Quarantined));
+             Error original
+           | Ok None ->
+             run.phase <- Ready;
+             Ok ()
+           | Ok (Some acquired) ->
+             run.persisted <- true;
+             run.recovery <- Some acquired;
+             run.claim_only <- None;
+             finish_recovery run acquired
+         in
+         match outcome with
+         | Ok () -> Ok ()
+         | Error _ as error ->
+           if Option.is_none run.recovery && Option.is_none run.claim_only
+           then run.phase <- Cold;
+           error
+       with
+       | exn ->
          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
          if Option.is_none run.recovery && Option.is_none run.claim_only
          then run.phase <- Cold
@@ -508,7 +498,7 @@ module Active = struct
     ;;
   end
 
-  let view t = t.view
+  let view (t : t) = t.view
 
   let start_live t ~root ~admit =
     let open Result.Let_syntax in
@@ -561,6 +551,8 @@ end
 let reserve t (slot : slot) ~handle ~key ~kind ~request_fingerprint ~admit =
   if not (slot_current t slot)
   then Error (stale ())
+  else if Option.is_some slot.unlaunched || Option.is_some slot.run.unlaunched
+  then Error (busy ())
   else if
     (not (Store.issued_by t.store handle))
     || not (P.Id.Developer_run.equal (Store.owner handle).run_id slot.run.run_id)
@@ -586,6 +578,13 @@ let reserve t (slot : slot) ~handle ~key ~kind ~request_fingerprint ~admit =
           then Ok (view_of_store t slot.run.run_id value)
           else Error (stale ())
         | Prepared token ->
+          let receipt = Fallback.interrupted t.fallbacks kind in
+          slot.run.unlaunched
+          <- Some
+               { handle
+               ; view = safe_view t slot.run.run_id (Store.Command.Pending.after token)
+               ; receipt
+               };
           let pending =
             Custody.create ~handle ~token ~kind:Reserve ~admit:(fun () ->
               slot_current t slot && admit ())
@@ -594,8 +593,11 @@ let reserve t (slot : slot) ~handle ~key ~kind ~request_fingerprint ~admit =
           (match store (Custody.commit pending ~remaining:3) with
            | Ok installed ->
              slot.run.pending <- None;
+             slot.run.unlaunched <- None;
              slot.run.persisted <- true;
-             Ok (view_of_store t slot.run.run_id installed.view)
+             let view = fresh_reservation_view t slot installed.view in
+             slot.unlaunched <- Some { handle; view; receipt };
+             Ok view
            | Error _ as error ->
              best_effort_reconcile_unlocked slot.run;
              error
@@ -606,55 +608,24 @@ let reserve t (slot : slot) ~handle ~key ~kind ~request_fingerprint ~admit =
 ;;
 
 let conservative_receipt t (active : active) ~cancelled ~typed_failure =
-  let value =
-    match Row.kind active.view.row with
-    | Receipt.Kind.Check ->
-      if cancelled
-      then Receipt.Check Receipt.Check.Cancelled
-      else if typed_failure
-      then
-        Receipt.Check
-          (Receipt.Check.Rejected
-             { Receipt.Diagnostic.code = "developer.command.failed"
-             ; message = "developer check failed before producing a result"
-             ; location = None
-             })
-      else Receipt.Check Receipt.Check.Interrupted
-    | Fixture_run ->
-      Receipt.Fixture
-        (if cancelled then Receipt.Fixture.Cancelled else Receipt.Fixture.Interrupted)
-    | Live_run ->
-      Receipt.Live
-        (if cancelled
-         then Receipt.Live.Cancelled
-         else if typed_failure
-         then
-           Receipt.Live.Failed
-             (error
-                P.Error.Invalid_state
-                "developer command failed before producing a result"
-                ~retryable:false)
-         else Receipt.Live.Interrupted)
-  in
-  Receipt.create value ~limits:t.document_limits ~poll:(fun () -> Eio.Fiber.yield ())
-  |> Result.map_error ~f:(fun _ -> limited ())
+  Ok (Fallback.choose t.fallbacks (Row.kind active.view.row) ~cancelled ~typed_failure)
 ;;
 
-let receipt_for_outcome t active = function
+let receipt_for_outcome t (active : active) = function
   | Ok receipt when Receipt.Kind.equal (Receipt.kind receipt) (Row.kind active.view.row)
     -> Ok receipt
   | Ok _ | Error _ ->
     conservative_receipt t active ~cancelled:active.cancel_requested ~typed_failure:true
 ;;
 
-let finish_active t (active : active) receipt =
+let finish_terminal t ~run ~handle ~previous receipt =
   Eio.Cancel.protect (fun () ->
-    with_mutation active.run (fun () ->
+    with_mutation run (fun () ->
       let open Result.Let_syntax in
-      let%bind () = reconcile_retained_unlocked active.run in
-      let key = Row.key active.view.row in
+      let%bind () = reconcile_retained_unlocked run in
+      let key = Row.key previous.row in
       let rec attempt remaining =
-        let%bind observed = store (Store.Command.observe active.handle ~key) in
+        let%bind observed = store (Store.Command.observe handle ~key) in
         let%bind observed =
           match observed with
           | Some value -> Ok value
@@ -663,50 +634,175 @@ let finish_active t (active : active) receipt =
         let current_row = Store.Command.View.row observed in
         match Row.phase current_row with
         | Row.Phase.Terminal { receipt = installed; _ }
-          when Row.same_identity current_row active.view.row
+          when Row.same_identity current_row previous.row
                && Receipt.equal installed receipt ->
-          active.view <- view_of_store t active.run.run_id observed;
-          Ok active.view
+          Ok (view_of_store t run.run_id observed)
         | Reserved | Waiting_permission | Execution_started ->
-          if not (same_row current_row active.view.row)
+          if not (same_row current_row previous.row)
           then Error (stale ())
           else (
             match
               Store.Command.prepare_change
-                active.handle
+                handle
                 ~previous:observed
                 ~change:(Row.Change.Finish receipt)
             with
             | Error Store.Error.Conflict when remaining > 0 -> attempt (remaining - 1)
             | Error error -> Error (store_error error)
-            | Ok (Store.Command.Unchanged value) ->
-              active.view <- view_of_store t active.run.run_id value;
-              Ok active.view
+            | Ok (Store.Command.Unchanged value) -> Ok (view_of_store t run.run_id value)
             | Ok (Prepared token) ->
               let pending =
-                Custody.create ~handle:active.handle ~token ~kind:Finish ~admit:(fun () ->
+                Custody.create ~handle ~token ~kind:Finish ~admit:(fun () ->
                   on_domain t
-                  && Store.issued_by t.store active.handle
+                  && Store.issued_by t.store handle
                   && P.Execution_owner.equal_developer
-                       (Row.owner active.view.row)
-                       (Store.owner active.handle))
+                       (Row.owner previous.row)
+                       (Store.owner handle))
               in
-              active.run.pending <- Some pending;
+              run.pending <- Some pending;
               (match store (Custody.commit pending ~remaining:3) with
                | Ok installed ->
-                 active.run.pending <- None;
-                 active.view <- view_of_store t active.run.run_id installed.view;
-                 Ok active.view
+                 run.pending <- None;
+                 Ok (view_of_store t run.run_id installed.view)
                | Error _ as error ->
-                 best_effort_reconcile_unlocked active.run;
+                 best_effort_reconcile_unlocked run;
                  error
                | exception exn ->
                  let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-                 best_effort_reconcile_unlocked active.run;
+                 best_effort_reconcile_unlocked run;
                  Stdlib.Printexc.raise_with_backtrace exn backtrace))
         | Terminal _ -> Error (busy ())
       in
       attempt 3))
+;;
+
+let finish_active t (active : active) receipt =
+  match
+    finish_terminal t ~run:active.run ~handle:active.handle ~previous:active.view receipt
+  with
+  | Ok view ->
+    active.view <- view;
+    Ok view
+  | Error _ as error -> error
+;;
+
+let settle_unlaunched t run (selected : unlaunched) =
+  run.unlaunched <- Some selected;
+  let outcome =
+    let open Result.Let_syntax in
+    let%bind () = reconcile_retained run in
+    if Option.is_none run.unlaunched
+    then Ok ()
+    else (
+      let%map _ =
+        finish_terminal
+          t
+          ~run
+          ~handle:selected.handle
+          ~previous:selected.view
+          selected.receipt
+      in
+      ())
+  in
+  match outcome with
+  | Ok _ ->
+    run.unlaunched <- None;
+    if Option.is_none run.recovery && Option.is_none run.pending then run.phase <- Ready;
+    Ok ()
+  | Error _ as error ->
+    run.phase <- Quarantined;
+    error
+;;
+
+let with_slot t ~run_id ~f =
+  if not (on_domain t)
+  then Error (stale ())
+  else if t.closed
+  then Error (closed ())
+  else
+    let open Result.Let_syntax in
+    let%bind run = entry t run_id in
+    match run.slot with
+    | Some _ -> Error (busy ())
+    | None ->
+      let borrowed_charge = run.retained_charge in
+      if (not borrowed_charge) && t.occupied >= t.max_active_commands
+      then Error (busy ())
+      else (
+        let slot =
+          { issuer = t
+          ; run
+          ; live = true
+          ; transferred = false
+          ; borrowed_charge
+          ; unlaunched = None
+          }
+        in
+        run.slot <- Some slot;
+        if not borrowed_charge then t.occupied <- t.occupied + 1;
+        Exn.protect
+          ~finally:(fun () ->
+            Eio.Cancel.protect (fun () ->
+              slot.live <- false;
+              (match run.slot with
+               | Some current when phys_equal current slot -> run.slot <- None
+               | None | Some _ -> ());
+              if not slot.transferred
+              then
+                if
+                  Option.is_some run.pending
+                  || Option.is_some run.unlaunched
+                  || Option.is_some run.recovery
+                  || Option.is_some run.claim_only
+                then (
+                  if List.is_empty run.active then run.retained_charge <- true;
+                  if (not (List.is_empty run.active)) && not borrowed_charge
+                  then t.occupied <- t.occupied - 1)
+                else (
+                  run.retained_charge <- false;
+                  t.occupied <- t.occupied - 1);
+              if
+                (not run.persisted)
+                && List.is_empty run.active
+                && Option.is_none run.pending
+                && Option.is_none run.unlaunched
+                && Option.is_none run.recovery
+                && Option.is_none run.claim_only
+                && Option.is_none run.slot
+              then Hashtbl.remove t.runs run_id))
+          ~f:(fun () ->
+            let outcome =
+              try
+                let prepared =
+                  match run.unlaunched with
+                  | None -> Ok ()
+                  | Some selected -> settle_unlaunched t run selected
+                in
+                `Returned (Result.bind prepared ~f:(fun () -> f slot))
+              with
+              | exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
+            in
+            let cleanup =
+              try
+                Eio.Cancel.protect (fun () ->
+                  match slot.unlaunched with
+                  | None ->
+                    (match run.unlaunched with
+                     | None -> Ok ()
+                     | Some selected -> settle_unlaunched t run selected)
+                  | Some selected ->
+                    slot.unlaunched <- None;
+                    settle_unlaunched t run selected)
+              with
+              | _ ->
+                run.phase <- Quarantined;
+                Error (unavailable ())
+            in
+            match outcome with
+            | `Returned (Ok value) -> Result.map cleanup ~f:(fun () -> value)
+            | `Returned (Error error) -> Error error
+            | `Raised (exn, backtrace) ->
+              Stdlib.Printexc.raise_with_backtrace exn backtrace))
 ;;
 
 let retire_active t (active : active) =
@@ -729,6 +825,11 @@ let launch t (slot : slot) ~handle ~reserved ~f =
   else if
     (not (Store.issued_by t.store handle))
     || (not (same_run_view t slot.run.run_id reserved))
+    || reserved.launch_consumed
+    || (not (Option.value_map reserved.launch_slot ~default:false ~f:(phys_equal slot)))
+    || (not
+          (Option.value_map slot.unlaunched ~default:false ~f:(fun selected ->
+             phys_equal selected.view reserved && phys_equal selected.handle handle)))
     || (not
           (P.Execution_owner.equal_developer
              (Store.owner handle)
@@ -767,6 +868,8 @@ let launch t (slot : slot) ~handle ~reserved ~f =
           }
         in
         slot.run.active <- active :: slot.run.active;
+        reserved.launch_consumed <- true;
+        slot.unlaunched <- None;
         if slot.borrowed_charge then slot.run.retained_charge <- false;
         slot.transferred <- true;
         match
@@ -812,10 +915,24 @@ let launch t (slot : slot) ~handle ~reserved ~f =
         | exception exn ->
           let backtrace = Stdlib.Printexc.get_raw_backtrace () in
           active.live <- false;
-          slot.run.active
-          <- List.filter slot.run.active ~f:(fun item -> not (phys_equal item active));
-          if slot.borrowed_charge then slot.run.retained_charge <- true;
-          slot.transferred <- false;
+          active.private_failure <- Some (exn, backtrace);
+          let terminal =
+            try
+              Eio.Cancel.protect (fun () ->
+                let open Result.Let_syntax in
+                let%bind receipt =
+                  conservative_receipt t active ~cancelled:false ~typed_failure:false
+                in
+                active.selected <- Some receipt;
+                finish_active t active receipt)
+            with
+            | _ -> Error (unavailable ())
+          in
+          active.terminal <- Some terminal;
+          (match terminal with
+           | Ok _ -> retire_active t active
+           | Error _ -> ());
+          Eio.Promise.resolve active.finish ();
           Stdlib.Printexc.raise_with_backtrace exn backtrace)
     | Some _, (Waiting_permission | Execution_started | Terminal _) | None, _ ->
       Error (busy ()))
@@ -864,9 +981,13 @@ let await_terminal t ~actor ~run_id ~key =
           | Some (Error error) -> Error error
           | None | Some (Ok _) -> terminal_view t ~actor ~run_id ~key))
     | None ->
-      with_slot t ~run_id ~f:(fun slot ->
-        let%bind () = ensure_startup_recovered t slot in
-        terminal_view t ~actor ~run_id ~key))
+      let%bind before = snapshot t run_id ~actor ~key in
+      (match before with
+       | None -> Error (stale ())
+       | Some _ ->
+         with_slot t ~run_id ~f:(fun slot ->
+           let%bind () = ensure_startup_recovered t slot in
+           terminal_view t ~actor ~run_id ~key)))
 ;;
 
 let cancel_and_wait t ~actor ~run_id ~key =
@@ -968,6 +1089,8 @@ let lookup t (slot : slot) ~actor ~key ~kind ~request_fingerprint =
 let close_and_wait t =
   if not (on_domain t)
   then Error (stale ())
+  else if Hashtbl.exists t.runs ~f:(fun run -> Option.is_some run.slot)
+  then Error (busy ())
   else if
     Option.value_map (Eio.Fiber.get active_key) ~default:false ~f:(fun active ->
       phys_equal active.issuer t)
@@ -984,15 +1107,22 @@ let close_and_wait t =
         Hashtbl.data t.runs
         |> List.map ~f:(fun run ->
           let pending = reconcile_retained run in
+          let abandonment =
+            Result.bind pending ~f:(fun () ->
+              match run.unlaunched with
+              | None -> Ok ()
+              | Some selected -> settle_unlaunched t run selected)
+          in
+          let settled = Result.bind abandonment ~f:(fun () -> reconcile_retained run) in
           let retried =
             List.map run.active ~f:(retry_finished_active t)
             |> List.find_map ~f:Result.error
           in
-          match pending, retried, run.recovery, run.claim_only with
-          | Ok (), None, None, None when List.is_empty run.active -> Ok ()
-          | Error error, _, _, _ -> Error error
-          | Ok (), Some error, _, _ -> Error error
-          | Ok (), None, _, _ -> Error (busy ()))
+          match settled, retried, run.recovery, run.claim_only, run.unlaunched with
+          | Ok (), None, None, None, None when List.is_empty run.active -> Ok ()
+          | Error error, _, _, _, _ -> Error error
+          | Ok (), Some error, _, _, _ -> Error error
+          | Ok (), None, _, _, _ -> Error (busy ()))
       in
       match List.find_map outcomes ~f:Result.error with
       | None -> Ok ()

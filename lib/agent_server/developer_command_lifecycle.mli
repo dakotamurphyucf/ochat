@@ -93,6 +93,10 @@ end
     slots; a retained unknown Store Pending or quarantined Root retains its
     occupancy. One stable run has Cold/Recovering/Ready/Quarantined state.
     Ready is process-local lifecycle evidence, not a durable execution grant.
+    Construction preadmits this lifecycle's own conservative Check, Fixture
+    and Live terminal receipts against the actual Store terminal, aggregate
+    and whole-document byte caps; a too-small configuration is rejected before
+    any callback can start.
     The number of retained run entries is bounded by Store.Limits.max_runs;
     a clean Ready entry may be evicted only after proving it has no active
     callback, claim, Pending or Root custody. Eviction cannot trigger startup
@@ -111,8 +115,10 @@ val create
     any historical read. A second same-run startup or epoch replacement waits
     outside the slot or returns typed Busy; it cannot race Recovery.finish
     against a newly Reserved row. Other run IDs are independent. All exits
-    release clean slots, including cancellation/exception; unknown custody
-    moves the run to Quarantined instead. This is not a Store Claim. *)
+    release clean slots, including cancellation/exception. A fresh Reserved
+    row abandoned before launch is finished as Interrupted through the same
+    Store writer; uncertain cleanup retains its exact selection and occupancy
+    for later reconciliation. This is not a Store Claim. *)
 val with_slot
   :  t
   -> run_id:P.Id.Developer_run.t
@@ -171,7 +177,10 @@ val reserve
   -> (View.t, P.Error.t) result
 
 (** Register the exact Reserved command as Active while its [Slot] is still
-    held, transferring occupancy without a gap before yielding, then fork its
+    held. Only a fresh reservation returned to that exact Slot carries a
+    one-use launch proof: an Unchanged/historical View or a View retained after
+    its Slot expires cannot launch, even if its row remains Reserved. Transfer
+    occupancy without a gap before yielding, then fork its
     callback under this lifecycle's daemon-owned switch, never a transport
     request switch. A separate per-Active child switch is passed to [f] and
     joined before terminal settlement; cancellation targets that callback and
@@ -190,7 +199,10 @@ val reserve
     terminal save keeps the same selected receipt and per-run occupancy. The
     caller receives the initial persisted
     View after registration; disconnect only drops that caller's waiter.
-    Failure to register/fork performs exact cleanup before returning. *)
+    Failure to register/fork selects a bounded Interrupted terminal and
+    performs exact cleanup before propagating the original exception; an
+    uncertain terminal save retains the selected receipt and occupancy for
+    same-key retry. *)
 val launch
   :  t
   -> Slot.t
@@ -199,8 +211,10 @@ val launch
   -> f:(Active.t -> sw:Eio.Switch.t -> (Store.Command.Receipt.t, P.Error.t) result)
   -> (View.t, P.Error.t) result
 
-(** A Cold restarted nonterminal row first completes joined startup Recovery
-    under the same-run slot and rereads its terminal interruption; it never
+(** A passive read authenticates the exact persisted row and disclosure BEFORE
+    entering Cold startup Recovery. An authorized Cold restarted nonterminal
+    row then completes joined Recovery under the same-run slot and rereads its
+    terminal interruption; it never
     awaits a vanished callback. Otherwise passive authenticated wait only
     detaches this waiter on cancellation; the
     callback belongs to [sw]. Unexpected callback failure appears only as
@@ -224,6 +238,8 @@ val cancel_and_wait
   -> (View.t, P.Error.t) result
 
 (** Stop admissions, cancel/join callbacks and retain unresolved physical
-    claims/Pending for safe retry. The registry and Store remain daemon-owned
-    and are closed afterward, in that order. *)
+    claims/Pending for safe retry. An in-flight admission Slot returns typed
+    Busy before changing close state; its owner must finish or cancel first.
+    The registry and Store remain daemon-owned and are closed afterward, in
+    that order. *)
 val close_and_wait : t -> (unit, P.Error.t) result
