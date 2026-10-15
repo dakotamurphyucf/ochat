@@ -5,6 +5,7 @@
   config
   config_parser
   project_source_configuration
+  authoring_project_access_configuration
   project_source_policy
   project_source_header
   project_source_host
@@ -49,6 +50,7 @@
   authoring_context_methods
   authoring_context_bundle_service
   authoring_context_service
+  authoring_configured_project_policy
   authoring_host_policy
   authoring_installation
   authoring_context_testing

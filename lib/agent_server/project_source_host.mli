@@ -19,6 +19,17 @@ end
 
 type t
 
+(** Comparison-only identity of the actual opened source-host owner. It is minted
+    once at [open_owned], never derived from configured paths or root indices,
+    and grants no borrow, read or lifetime extension. *)
+module Identity : sig
+  type t
+
+  val equal : t -> t -> bool
+end
+
+val identity : t -> Identity.t
+
 (** Startup admission of administrative authority. No Git executable, helper or
     cache is opened for Local-only configuration. External directories are opened
     from the explicitly supplied fs capability and admitted through Anchor.create.

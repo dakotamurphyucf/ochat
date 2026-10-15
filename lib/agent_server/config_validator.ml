@@ -939,6 +939,139 @@ let parse_project_sources context path sexp =
     Some configuration
 ;;
 
+let parse_authoring_project_access context path sexp ~project_sources =
+  let module Access = Authoring_project_access_configuration in
+  let open Result.Let_syntax in
+  let invalid path =
+    fail
+      context
+      ~code:"config.authoring_project_access"
+      ~path
+      ~message:"invalid authoring project access"
+      ~remediation:
+        "Use exact configured roots, authenticated principals and Standard targets."
+  in
+  let bounded_rows path sexp maximum =
+    let%bind rows = list context path sexp in
+    if List.length rows > maximum then invalid path else Ok rows
+  in
+  let parse_grant sexp =
+    let path = path ^ ".read_grants[]" in
+    let%bind fields = record context path sexp in
+    let%bind () =
+      ensure_allowed context path fields [ "root"; "principal_id"; "authentication_kind" ]
+    in
+    let%bind root =
+      required context path fields "root"
+      >>= atom context (path ^ ".root")
+      >>= resolve_project_path context (path ^ ".root")
+    in
+    let%bind principal_id =
+      required context path fields "principal_id"
+      >>= atom context (path ^ ".principal_id")
+      >>= fun id ->
+      match Agent_protocol.Id.Principal.of_string id with
+      | Ok principal_id -> Ok principal_id
+      | Error _ -> invalid (path ^ ".principal_id")
+    in
+    let%map authentication_kind =
+      required context path fields "authentication_kind"
+      >>= atom context (path ^ ".authentication_kind")
+    in
+    Access.Read_grant.{ root; principal_id; authentication_kind }
+  in
+  let parse_request sexp =
+    let request_path = path ^ ".selections[].request" in
+    let%bind name, fields =
+      match sexp with
+      | Sexp.List [ Sexp.Atom name; fields ] -> Ok (name, fields)
+      | _ -> shape_error context request_path "(library fields) or (entry fields)"
+    in
+    let%bind fields = record context request_path fields in
+    let%bind () = ensure_allowed context request_path fields [ "name"; "environment" ] in
+    let%bind environment =
+      match field fields "environment" with
+      | None -> Ok None
+      | Some value ->
+        atom context (request_path ^ ".environment") value |> Result.map ~f:Option.some
+    in
+    match name with
+    | "library" ->
+      if Option.is_some (field fields "name")
+      then invalid request_path
+      else Ok (Access.Selection.Library { environment })
+    | "entry" ->
+      let%map name =
+        required context request_path fields "name"
+        >>= atom context (request_path ^ ".name")
+      in
+      Access.Selection.Entry { name; environment }
+    | _ -> invalid request_path
+  in
+  let parse_selection sexp =
+    let row_path = path ^ ".selections[]" in
+    let%bind fields = record context row_path sexp in
+    let%bind () =
+      ensure_allowed context row_path fields [ "root"; "project"; "request"; "target" ]
+    in
+    let%bind root =
+      required context row_path fields "root"
+      >>= atom context (row_path ^ ".root")
+      >>= resolve_project_path context (row_path ^ ".root")
+    in
+    let%bind project =
+      required context row_path fields "project" >>= atom context (row_path ^ ".project")
+    in
+    let%bind request = required context row_path fields "request" >>= parse_request in
+    let%map target =
+      let%bind spelling =
+        required context row_path fields "target" >>= atom context (row_path ^ ".target")
+      in
+      match spelling with
+      | "one_off_v1" -> Ok Chatml.Chatml_compiler_contract.Target.One_off_v1
+      | "tool_v1" -> Ok Tool_v1
+      | "developer_tool_v1" -> Ok Developer_tool_v1
+      | "moderator_v1" -> Ok Moderator_v1
+      | "delegated_moderator_v1" -> Ok Delegated_moderator_v1
+      | _ -> invalid (row_path ^ ".target")
+    in
+    Access.Selection.{ root; project; request; target }
+  in
+  let%bind sources =
+    match project_sources with
+    | None -> invalid path
+    | Some sources -> Ok sources
+  in
+  let%bind fields = record context path sexp in
+  let%bind () = ensure_allowed context path fields [ "read_grants"; "selections" ] in
+  let%bind grants =
+    required context path fields "read_grants"
+    >>= fun rows ->
+    bounded_rows (path ^ ".read_grants") rows 256
+    >>= fun rows -> List.map rows ~f:parse_grant |> Result.all
+  in
+  let%bind selections =
+    required context path fields "selections"
+    >>= fun rows ->
+    bounded_rows (path ^ ".selections") rows 256
+    >>= fun rows -> List.map rows ~f:parse_selection |> Result.all
+  in
+  let result = Access.{ read_grants = grants; selections } in
+  let%map () =
+    Access.validate result ~project_sources:sources
+    |> Result.map_error ~f:(fun _ ->
+      [ diagnostic
+          context
+          ~code:"config.authoring_project_access"
+          ~path
+          ~message:"authoring read grants or Project selections are invalid"
+          ~remediation:
+            "Use bounded distinct exact principal/root grants and Project targets."
+      ])
+  in
+  result
+;;
+
 let parse_server context sexp =
   let path = "server" in
   let open Result.Let_syntax in
@@ -946,6 +1079,7 @@ let parse_server context sexp =
   let allowed =
     [ "data_dir"
     ; "project_sources"
+    ; "authoring_project_access"
     ; "session_helpers"
     ; "authoring_packages"
     ; "authoring_budget"
@@ -972,6 +1106,17 @@ let parse_server context sexp =
       "project_sources"
       parse_project_sources
       ~default:None
+  in
+  let%bind authoring_project_access =
+    match field fields "authoring_project_access" with
+    | None -> Ok None
+    | Some value ->
+      parse_authoring_project_access
+        context
+        "server.authoring_project_access"
+        value
+        ~project_sources
+      |> Result.map ~f:Option.some
   in
   let%bind session_helpers =
     optional_value
@@ -1120,6 +1265,7 @@ let parse_server context sexp =
   Config.Server.
     { data_dir
     ; project_sources
+    ; authoring_project_access
     ; session_helpers
     ; authoring_packages
     ; authoring_budget

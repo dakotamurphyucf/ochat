@@ -4,6 +4,12 @@ include Authoring_context_owner
 
 type owner = t
 
+module Selection_policy = struct
+  include Authoring_context_service_core.Selection_policy
+
+  let with_project_contract t ~project_contract = { t with project_contract }
+end
+
 let with_current t ~actor ~connection ~expected ~checkpoint ~f =
   Authoring_context_owner.with_current t ~actor ~connection ~expected ~checkpoint ~f
 ;;

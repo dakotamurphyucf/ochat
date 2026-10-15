@@ -99,6 +99,14 @@ let close_untransferred (partial : constructing) =
 let create ~env ~sw ~clock ~project_sources ~store ~policy ~initialize_limits ~checkpoint =
   let open Result.Let_syntax in
   let%bind () = Host_policy.validate_initialize policy initialize_limits in
+  let%bind () =
+    match policy.configured_projects with
+    | None -> Ok ()
+    | Some bound ->
+      if Authoring_configured_project_policy.issued_by bound project_sources
+      then Ok ()
+      else Error (P.Error.invalid_request "authoring source owner mismatch")
+  in
   Eio.Switch.check sw;
   let partial =
     { source = None
