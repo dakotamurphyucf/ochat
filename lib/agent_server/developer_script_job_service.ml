@@ -79,6 +79,22 @@ let current scope =
     scope.check_parent_now ()
 ;;
 
+let completion_current scope terminal =
+  let* () = O.Native_terminal.check_completion_now terminal in
+  let* selected_now = scope.selected_now () in
+  if
+    (not (String.equal (C.fingerprint scope.selected) (C.fingerprint selected_now)))
+    || not
+         (List.for_all (C.references scope.selected) ~f:(fun reference ->
+            Result.is_ok
+              (C.resolve
+                 (O.native_selected scope.service.root)
+                 ~id:reference.id
+                 ~fingerprint:reference.fingerprint)))
+  then Error (invalid "developer job selection changed")
+  else scope.check_parent_now ()
+;;
+
 let check scope =
   let* () = kernel_result (K.check_open scope.kernel) in
   current scope
@@ -617,7 +633,7 @@ let seal_native scope ~terminal ~outcome ~selected_jobs =
        then Ok selection
        else Error (invalid "native job selection changed after sealing")
      | None ->
-       let* () = current scope in
+       let* () = completion_current scope terminal in
        let* () = kernel_result (K.check_open scope.kernel) in
        let* physical = O.Native_terminal.seal terminal ~outcome ~selected:selected_jobs in
        let* acknowledge = kernel_result (K.mark_prepared scope.kernel) in

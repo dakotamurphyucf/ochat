@@ -294,7 +294,11 @@ module Native_terminal : sig
   (** Exact physically registered Dispatching bridge for the shared developer
       invocation kernel. Both operations verify this scope's invocation and
       owner; the issuer retains the one Store Prepared/Handoff pair on [t].
-      Neither method grants native effect authority. *)
+      Neither method grants native effect authority. A failed [save_dispatch]
+      preserves its original error or exception. Before releasing the Root
+      mutation gate it makes one protected reconciliation of an attempted
+      write: exact Installed/Absent evidence updates local custody, while an
+      unknown outcome retains the same pending pair for later recovery. *)
   val read_dispatch
     :  t
     -> Agent_protocol.Id.Invocation.t
@@ -331,6 +335,18 @@ module Native_terminal : sig
       The selected invocation issuer retains this check on its active parent;
       a protected nested child cannot infer liveness from its own context. *)
   val effect_parent_live_now : t -> bool
+
+  (** Nonyielding admission to seal the result of this already-entered,
+      durably dispatched native callback. Requires the exact live registered
+      action/fiber, original selected object and selection revision, current
+      actor and Root; it does not grant another effect or staged job. An
+      earlier terminal may already be queued, so this check deliberately does
+      not require the queue's new-effect witness. A native dispatch increments
+      the Root effect revision itself, and another admitted dispatch may do so
+      while this callback runs; that revision is not completion identity.
+      The lexical caller must separately rebind its selected subset and check
+      its physical parent Claim/attempt before sealing. *)
+  val check_completion_now : t -> (unit, Agent_protocol.Error.t) result
 
   (** Return the already frozen canonical pair, if any. A late exception may
       not replace it with Fail/None. *)

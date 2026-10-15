@@ -55,12 +55,12 @@ let capture () =
   |> ok
 ;;
 
-let store_limits ?(max_job_payload_bytes = 1024) () =
+let store_limits ?(max_job_payload_bytes = 1024) ?(max_invocations_per_run = 5) () =
   R.Limits.create
     ~max_runs:3
     ~max_epochs_per_run:3
     ~max_jobs_per_run:4
-    ~max_invocations_per_run:5
+    ~max_invocations_per_run
     ~max_selected_per_commit:2
     ~max_job_payload_bytes
     ~max_document_bytes:8192
@@ -96,6 +96,7 @@ let with_store
       ?(wrap_env = Fn.id)
       ?(on_store = fun _ _ _ -> ())
       ?(max_job_payload_bytes = 1024)
+      ?(max_invocations_per_run = 5)
       f
   =
   Eio_main.run (fun env ->
@@ -124,7 +125,7 @@ let with_store
             R.open_or_create
               session
               ~sw
-              ~limits:(store_limits ~max_job_payload_bytes ())
+              ~limits:(store_limits ~max_job_payload_bytes ~max_invocations_per_run ())
               ~checkpoint
             |> ok
           in
@@ -1016,13 +1017,16 @@ let%test_unit "nested native terminal settles before its live root resumes" =
   in
   with_store
     ~checkpoint
+    ~max_invocations_per_run:7
     ~wrap_env:(fun env ->
       F.fault_after_authority_rename_env
+        ~clear_sync_block_on_failure:true
         ~before_rename:(fun () ->
           if !fail_before_native_rename
           then
             raise
               (Core_unix.Unix_error (EIO, "injected pre-rename failure", "native terminal")))
+        ~after_rename:(fun () -> sync_blocked := true)
         env
         ~rename_armed
         ~sync_blocked
@@ -1234,9 +1238,12 @@ let%test_unit "nested native terminal settles before its live root resumes" =
            assert (Result.is_ok result));
          Eio.Promise.await reached;
          Eio.Promise.resolve second_go_u ();
-         assert (Result.is_error (Eio.Promise.await second_done));
+         (* The second completed callback joins the same physical drain while
+            the first Store read is paused; it must await its own settlement. *)
+         Eio.Fiber.yield ();
          Eio.Promise.resolve release_u ();
          ignore (Eio.Promise.await first_done |> ok : int);
+         ignore (Eio.Promise.await second_done |> ok : int);
          let selection = O.Action.seal action ~selected:[] |> ok in
          Ok ((), selection))
        |> ok;
@@ -1251,6 +1258,118 @@ let%test_unit "nested native terminal settles before its live root resumes" =
            P.Invocation.equal_status
              (P.Host_invocation.status (R.Invocation_observation.value prior))
              (Resolved (Complete `Null))));
+       let completed, completed_dispatched =
+         admit_dispatch "inv_before_dispatch_writer"
+       in
+       let writing = admitted "inv_transient_dispatch_writer" in
+       let writing_dispatched = P.Host_invocation.dispatch writing |> ok in
+       O.with_root_action run ~phase:R.Checkpoint.Active (fun ~action ~sw ->
+         let terminal_ready, terminal_ready_u = Eio.Promise.create () in
+         let terminal_go, terminal_go_u = Eio.Promise.create () in
+         let terminal_done, terminal_done_u = Eio.Promise.create () in
+         Eio.Fiber.fork ~sw (fun () ->
+           let result =
+             O.with_native_registration run ~invocation:completed (fun ~scope ->
+               let open Result.Let_syntax in
+               let selected, resolved = terminal scope completed_dispatched in
+               Eio.Promise.resolve terminal_ready_u ();
+               Eio.Promise.await terminal_go;
+               let%bind revision =
+                 O.Native_terminal.submit
+                   scope
+                   ~terminal:resolved
+                   ~selected:(Some selected)
+               in
+               Eio.Promise.resolve terminal_done_u revision;
+               Ok ())
+           in
+           assert (Result.is_ok result));
+         Eio.Promise.await terminal_ready;
+         let writer_reached, writer_reached_u = Eio.Promise.create () in
+         let writer_release, writer_release_u = Eio.Promise.create () in
+         let writer_reconciled, writer_reconciled_u = Eio.Promise.create () in
+         let writer_done, writer_done_u = Eio.Promise.create () in
+         read_reached := Some writer_reached_u;
+         read_release := Some writer_release;
+         Eio.Fiber.fork ~sw (fun () ->
+           let retained_scope = ref None in
+           let failed =
+             P.Invocation.Fail
+               { code = "native.dispatch_store_error"
+               ; message = "dispatch write failed after rename"
+               ; retryable = false
+               ; details = `Null
+               }
+           in
+           let failed_terminal =
+             P.Host_invocation.resolve writing_dispatched failed |> ok
+           in
+           let result =
+             O.with_native_registration run ~invocation:writing (fun ~scope ->
+               retained_scope := Some scope;
+               pause_next_read := true;
+               rename_armed := true;
+               assert (
+                 Result.is_error
+                   (O.Native_terminal.save_dispatch
+                      scope
+                      ~expected_revision:None
+                      ~dispatched:writing_dispatched));
+               assert (not !rename_armed);
+               assert (not !sync_blocked);
+               let installed =
+                 R.find_invocation
+                   (R.observe handle |> ok)
+                   (P.Host_invocation.context writing).id
+                 |> R.Invocation_lookup.prior
+                 |> Option.value_exn
+               in
+               assert (
+                 P.Invocation.equal_status
+                   (P.Host_invocation.status (R.Invocation_observation.value installed))
+                   Dispatching);
+               Eio.Promise.resolve writer_reconciled_u ();
+               ignore (Eio.Promise.await terminal_done : int);
+               O.Native_terminal.remember_failure scope ~terminal:failed_terminal |> ok;
+               Ok ())
+           in
+           assert (Result.is_ok result);
+           let retained_scope = Option.value_exn !retained_scope in
+           ignore
+             (O.Native_terminal.resolve_retained retained_scope ~terminal:failed_terminal
+              |> ok
+              : int);
+           Eio.Promise.resolve writer_done_u ());
+         Eio.Promise.await writer_reached;
+         Eio.Promise.resolve terminal_go_u ();
+         (* The already-completed callback waits for the sibling's transient
+            dispatch writer; it cannot turn that temporary owner into Failed. *)
+         Eio.Fiber.yield ();
+         Eio.Promise.resolve writer_release_u ();
+         Eio.Promise.await writer_reconciled;
+         ignore (Eio.Promise.await terminal_done : int);
+         Eio.Promise.await writer_done;
+         let selection = O.Action.seal action ~selected:[] |> ok in
+         Ok ((), selection))
+       |> ok;
+       let observed = R.observe handle |> ok in
+       List.iter [ completed; writing ] ~f:(fun admitted ->
+         let prior =
+           R.find_invocation observed (P.Host_invocation.context admitted).id
+           |> R.Invocation_lookup.prior
+           |> Option.value_exn
+         in
+         let actual = P.Host_invocation.status (R.Invocation_observation.value prior) in
+         if
+           P.Id.Invocation.equal
+             (P.Host_invocation.context admitted).id
+             (P.Host_invocation.context writing).id
+         then
+           assert (
+             match actual with
+             | Resolved (Fail _) -> true
+             | _ -> false)
+         else assert (P.Invocation.equal_status actual (Resolved (Complete `Null))));
        let sealed_invocation, sealed_dispatch = admit_dispatch "inv_retained_sealed" in
        let sealed_scope = ref None in
        let failure = Failure "interrupted after sealing" in

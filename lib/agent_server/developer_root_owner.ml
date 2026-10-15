@@ -8,6 +8,7 @@ module Terminal_queue = Developer_terminal_queue
 module H = P.Host_invocation
 module Job_scope = Agent_session.Developer_job_scope
 module Model_transaction = Developer_external_model_transaction
+module Mutation_gate = Developer_root_mutation_gate
 
 module Limits = struct
   type t =
@@ -112,6 +113,7 @@ and t =
   ; native_calls : (P.Id.Invocation.t, native_registration) Hashtbl.t
   ; mutable unresolved_native : native_registration list
   ; terminals : terminal_intent Terminal_queue.t
+  ; mutation_gate : Mutation_gate.t
   ; mutable pending : pending option
   ; mutable control_pending : control_pending option
   ; mutable control_call : call option
@@ -719,61 +721,72 @@ module Job_control = struct
         then Developer_job_worker.join_ended_attempt t.worker ~job
         else Ok ()
       in
-      let* fresh =
-        Store.observe_latest_active t.handle |> Result.map_error ~f:error_of_store
+      let step =
+        Mutation_gate.with_owner t.mutation_gate ~f:(fun () ->
+          let* current_witness = current t in
+          let* fresh =
+            Store.observe_latest_active t.handle |> Result.map_error ~f:error_of_store
+          in
+          let* fresh_job = matching_job t snapshot fresh in
+          let* () = check_effect_now t current_witness in
+          match (P.Developer_job.state fresh_job).status with
+          | P.Job.Succeeded | Failed _ | Cancelled | Interrupted _ ->
+            Ok (`Finished Already_terminal)
+          | Running | Waiting_permission _ ->
+            invalid "developer job became claimed before cancellation"
+          | Queued | Waiting_completion _ ->
+            let lookup = Store.find_job_exact fresh (P.Developer_job.id fresh_job) in
+            let* prepared =
+              Store.prepare_inactive_cancel
+                t.handle
+                ~expected:fresh
+                ~lookup
+                ~now:(t.registry.now ())
+              |> Result.map_error ~f:error_of_store
+            in
+            let pending = { prepared; job = fresh_job; witness = current_witness } in
+            t.control_pending <- Some pending;
+            let admission () =
+              Result.is_ok
+                (check_current_local
+                   ~control:pending
+                   t
+                   current_witness
+                   ~allow_pending:false)
+            in
+            let committed =
+              match Store.commit_inactive_cancel t.handle prepared ~admit:admission with
+              | value -> `Returned value
+              | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
+            in
+            (match committed with
+             | `Returned (Ok installed) ->
+               Result.map (finish_installed t pending installed) ~f:(fun _ ->
+                 `Finished Durable_cancelled)
+             | `Returned (Error Store.Error.Prewrite_conflict) ->
+               t.control_pending <- None;
+               Ok `Retry
+             | `Returned (Error error) ->
+               (match Eio.Cancel.protect (fun () -> reconcile_control t pending) with
+                | Ok Installed -> Ok (`Finished Durable_cancelled)
+                | Ok Absent -> Ok `Retry
+                | Error _ -> Error (error_of_store error))
+             | `Raised (exn, backtrace) ->
+               (try
+                  ignore
+                    (Eio.Cancel.protect (fun () -> reconcile_control t pending)
+                     : (control_resolution, P.Error.t) result)
+                with
+                | _ -> ());
+               Exn.raise_with_original_backtrace exn backtrace))
       in
-      let* fresh_job = matching_job t snapshot fresh in
-      let* () = check_effect_now t witness in
-      (match (P.Developer_job.state fresh_job).status with
-       | P.Job.Succeeded | Failed _ | Cancelled | Interrupted _ -> Ok Already_terminal
-       | Running | Waiting_permission _ ->
-         invalid "developer job became claimed before cancellation"
-       | Queued | Waiting_completion _ ->
-         let lookup = Store.find_job_exact fresh (P.Developer_job.id fresh_job) in
-         let* prepared =
-           Store.prepare_inactive_cancel
-             t.handle
-             ~expected:fresh
-             ~lookup
-             ~now:(t.registry.now ())
-           |> Result.map_error ~f:error_of_store
-         in
-         let pending = { prepared; job = fresh_job; witness } in
-         t.control_pending <- Some pending;
-         let admission () =
-           Result.is_ok
-             (check_current_local ~control:pending t witness ~allow_pending:false)
-         in
-         let committed =
-           match Store.commit_inactive_cancel t.handle prepared ~admit:admission with
-           | value -> `Returned value
-           | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
-         in
-         let retry () =
-           if remaining <= 0
-           then invalid "developer job cancellation changed before its write"
-           else cancel_attempt t snapshot ~remaining:(remaining - 1)
-         in
-         (match committed with
-          | `Returned (Ok installed) ->
-            Result.map (finish_installed t pending installed) ~f:(fun _ ->
-              Durable_cancelled)
-          | `Returned (Error Store.Error.Prewrite_conflict) ->
-            t.control_pending <- None;
-            retry ()
-          | `Returned (Error error) ->
-            (match Eio.Cancel.protect (fun () -> reconcile_control t pending) with
-             | Ok Installed -> Ok Durable_cancelled
-             | Ok Absent -> retry ()
-             | Error _ -> Error (error_of_store error))
-          | `Raised (exn, backtrace) ->
-            (try
-               ignore
-                 (Eio.Cancel.protect (fun () -> reconcile_control t pending)
-                  : (control_resolution, P.Error.t) result)
-             with
-             | _ -> ());
-            Exn.raise_with_original_backtrace exn backtrace))
+      let* step = step in
+      (match step with
+       | `Finished outcome -> Ok outcome
+       | `Retry ->
+         if remaining <= 0
+         then invalid "developer job cancellation changed before its write"
+         else cancel_attempt t snapshot ~remaining:(remaining - 1))
   ;;
 
   let cancel_current t snapshot =
@@ -901,6 +914,20 @@ let model_source_now source ~check_parent_now =
 let reserve_external_model source ~check_parent_now =
   let issuer = model_source_issuer source in
   let* () = model_source_now source ~check_parent_now in
+  let* fresh = current_with issuer in
+  let* () = model_source_now source ~check_parent_now in
+  let action =
+    match source with
+    | Root_model action -> action
+    | Native_model scope -> scope.action
+  in
+  let* () =
+    if
+      phys_equal action.snapshot.selected fresh.selected
+      && Int.equal action.snapshot.selection_revision fresh.selection_revision
+    then Ok ()
+    else invalid "developer model selection changed before admission"
+  in
   if
     Option.is_some issuer.external_model
     || Option.is_some issuer.pending
@@ -1015,126 +1042,129 @@ let reconcile_external_model_once issuer token =
 
 let admit_external_model_from_scope source ~request ~checkpoint ~check_parent_now =
   let issuer = model_source_issuer source in
-  let* token = reserve_external_model source ~check_parent_now in
-  let model_selection = issuer.selected_model in
-  let check_now witness selection =
-    let* () =
-      check_current_local ~external_model:token issuer witness ~allow_pending:false
+  Mutation_gate.with_owner issuer.mutation_gate ~f:(fun () ->
+    let* token = reserve_external_model source ~check_parent_now in
+    let model_selection = issuer.selected_model in
+    let check_now witness selection =
+      let* () =
+        check_current_local ~external_model:token issuer witness ~allow_pending:false
+      in
+      let* () = Provider_operator_port.Model_selection.check_current selection in
+      model_source_now source ~check_parent_now
     in
-    let* () = Provider_operator_port.Model_selection.check_current selection in
-    model_source_now source ~check_parent_now
-  in
-  let perform () =
-    let* selection =
-      match model_selection with
-      | Some value -> Ok value
-      | None -> invalid "developer Model.spawn has no admitted provider selection"
-    in
-    checkpoint ();
-    let* limits =
-      Store.document_limits issuer.handle |> Result.map_error ~f:error_of_store
-    in
-    let* _ =
-      P.Model_spawn_request.admit (P.Model_spawn_request.original request) ~limits
-    in
-    let* launch = model_source_launch source in
-    let* () = Provider_operator_port.Model_selection.check_current selection in
-    let* job =
-      Developer_external_model_job.create
-        ~owner:issuer.owner
-        ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
-        ~launch
-        ~request
-        ~target:(Provider_operator_port.Model_selection.target selection)
-        ~limits
-        ~created_at:(issuer.registry.now ())
-    in
-    let* witness = current_with ~external_model:token issuer in
-    let* () = model_source_parent_check source in
-    let* () = check_now witness selection in
-    let* key = capacity_key issuer job in
-    let* host_job = P.Host_job.of_developer job in
-    let* reservation =
-      Job_capacity.reserve_host_job issuer.registry.capacity key ~job:host_job
-      |> Result.bind ~f:(function
-        | Some reservation -> Ok reservation
-        | None ->
-          Error
-            (P.Error.create
-               P.Error.Resource_limit
-               ~message:"shared job capacity is full"
-               ~retryable:true
-               ()))
-    in
-    issuer.external_model <- Some (Model_reserved { token; source; job; reservation });
-    let rec save witness remaining =
-      if remaining <= 0
-      then invalid "developer model document changed repeatedly"
-      else (
-        checkpoint ();
-        let* observed =
-          Store.observe_latest_active issuer.handle |> Result.map_error ~f:error_of_store
-        in
-        let* parent = model_parent_in_observation source observed in
-        let* () = model_source_parent_check source in
-        let* () = check_now witness selection in
-        let* prepared =
-          Store.prepare_external_model issuer.handle ~expected:observed ~parent ~job
-          |> Result.map_error ~f:error_of_store
-        in
-        let transaction = Model_transaction.create ~reservation ~prepared in
-        issuer.external_model <- Some (Model_pending { token; source; transaction });
-        let result =
-          Model_transaction.commit transaction issuer.handle ~admit:(fun () ->
-            owns_external_model issuer token && Result.is_ok (check_now witness selection))
-        in
-        let settled =
-          match result with
-          | Ok settlement -> Ok settlement
-          | Error original ->
-            (match
-               Eio.Cancel.protect (fun () ->
-                 Model_transaction.reconcile transaction issuer.handle)
-             with
-             | Ok settlement -> Ok settlement
-             | Error _ -> Error (error_of_store original))
-        in
-        match settled with
-        | Error error ->
-          issuer.state <- Quarantined;
-          Error error
-        | Ok (Store.Settlement.Installed _) ->
-          clear_external_model issuer token;
-          Ok (P.Developer_job.id job)
-        | Ok (Absent | Prewrite_conflict) ->
-          issuer.external_model
-          <- Some (Model_reserved { token; source; job; reservation });
-          let* fresh = current_with ~external_model:token issuer in
+    let perform () =
+      let* selection =
+        match model_selection with
+        | Some value -> Ok value
+        | None -> invalid "developer Model.spawn has no admitted provider selection"
+      in
+      checkpoint ();
+      let* limits =
+        Store.document_limits issuer.handle |> Result.map_error ~f:error_of_store
+      in
+      let* _ =
+        P.Model_spawn_request.admit (P.Model_spawn_request.original request) ~limits
+      in
+      let* launch = model_source_launch source in
+      let* () = Provider_operator_port.Model_selection.check_current selection in
+      let* job =
+        Developer_external_model_job.create
+          ~owner:issuer.owner
+          ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
+          ~launch
+          ~request
+          ~target:(Provider_operator_port.Model_selection.target selection)
+          ~limits
+          ~created_at:(issuer.registry.now ())
+      in
+      let* witness = current_with ~external_model:token issuer in
+      let* () = model_source_parent_check source in
+      let* () = check_now witness selection in
+      let* key = capacity_key issuer job in
+      let* host_job = P.Host_job.of_developer job in
+      let* reservation =
+        Job_capacity.reserve_host_job issuer.registry.capacity key ~job:host_job
+        |> Result.bind ~f:(function
+          | Some reservation -> Ok reservation
+          | None ->
+            Error
+              (P.Error.create
+                 P.Error.Resource_limit
+                 ~message:"shared job capacity is full"
+                 ~retryable:true
+                 ()))
+      in
+      issuer.external_model <- Some (Model_reserved { token; source; job; reservation });
+      let rec save witness remaining =
+        if remaining <= 0
+        then invalid "developer model document changed repeatedly"
+        else (
+          checkpoint ();
+          let* observed =
+            Store.observe_latest_active issuer.handle
+            |> Result.map_error ~f:error_of_store
+          in
+          let* parent = model_parent_in_observation source observed in
           let* () = model_source_parent_check source in
-          let* () = check_now fresh selection in
-          save fresh (remaining - 1)
-        | Ok Diverged ->
-          issuer.state <- Quarantined;
-          invalid "developer model write remains unresolved")
+          let* () = check_now witness selection in
+          let* prepared =
+            Store.prepare_external_model issuer.handle ~expected:observed ~parent ~job
+            |> Result.map_error ~f:error_of_store
+          in
+          let transaction = Model_transaction.create ~reservation ~prepared in
+          issuer.external_model <- Some (Model_pending { token; source; transaction });
+          let result =
+            Model_transaction.commit transaction issuer.handle ~admit:(fun () ->
+              owns_external_model issuer token
+              && Result.is_ok (check_now witness selection))
+          in
+          let settled =
+            match result with
+            | Ok settlement -> Ok settlement
+            | Error original ->
+              (match
+                 Eio.Cancel.protect (fun () ->
+                   Model_transaction.reconcile transaction issuer.handle)
+               with
+               | Ok settlement -> Ok settlement
+               | Error _ -> Error (error_of_store original))
+          in
+          match settled with
+          | Error error ->
+            issuer.state <- Quarantined;
+            Error error
+          | Ok (Store.Settlement.Installed _) ->
+            clear_external_model issuer token;
+            Ok (P.Developer_job.id job)
+          | Ok (Absent | Prewrite_conflict) ->
+            issuer.external_model
+            <- Some (Model_reserved { token; source; job; reservation });
+            let* fresh = current_with ~external_model:token issuer in
+            let* () = model_source_parent_check source in
+            let* () = check_now fresh selection in
+            save fresh (remaining - 1)
+          | Ok Diverged ->
+            issuer.state <- Quarantined;
+            invalid "developer model write remains unresolved")
+      in
+      save witness 3
     in
-    save witness 3
-  in
-  match perform () with
-  | Ok _ as value -> value
-  | Error _ as error ->
-    abandon_external_model issuer token;
-    error
-  | exception exn ->
-    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-    Eio.Cancel.protect (fun () ->
-      (match issuer.external_model with
-       | Some (Model_pending current) when phys_equal current.token token ->
-         (match reconcile_external_model_once issuer token with
-          | Ok _ | Error _ -> ()
-          | exception _ -> ())
-       | None | Some _ -> ());
-      abandon_external_model issuer token);
-    Exn.raise_with_original_backtrace exn backtrace
+    match perform () with
+    | Ok _ as value -> value
+    | Error _ as error ->
+      abandon_external_model issuer token;
+      error
+    | exception exn ->
+      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      Eio.Cancel.protect (fun () ->
+        (match issuer.external_model with
+         | Some (Model_pending current) when phys_equal current.token token ->
+           (match reconcile_external_model_once issuer token with
+            | Ok _ | Error _ -> ()
+            | exception _ -> ())
+         | None | Some _ -> ());
+        abandon_external_model issuer token);
+      Exn.raise_with_original_backtrace exn backtrace)
 ;;
 
 module Action = struct
@@ -1500,7 +1530,7 @@ let rec process_head t drain remaining =
       Exn.raise_with_original_backtrace exn backtrace
 ;;
 
-let drain_terminals t =
+let drain_terminals_unlocked t =
   let rec loop remaining =
     if Option.is_some t.external_model
     then invalid "developer model admission blocks terminal drain"
@@ -1558,6 +1588,22 @@ let drain_terminals t =
         loop (remaining - 1))
   in
   loop (t.registry.limits.max_native_occupancy + 2)
+;;
+
+let drain_terminals t =
+  (* Completed callbacks may arrive while another fiber is yielding in a Store
+     transaction. The queue retains exact intents; one physical drainer owns
+     their ordered settlement until it releases this gate. *)
+  Mutation_gate.with_owner t.mutation_gate ~f:(fun () -> drain_terminals_unlocked t)
+;;
+
+let drain_and_settle_unlocked t intent =
+  let drained = drain_terminals_unlocked t in
+  match intent.settlement with
+  | Some _ -> settled_revision intent
+  | None ->
+    let* () = drained in
+    settled_revision intent
 ;;
 
 let with_root_action t ~phase f =
@@ -1631,38 +1677,39 @@ let with_root_action t ~phase f =
               || action.stage_in_flight > 0
             then invalid "developer root action returned a foreign selection"
             else
-              let* latest = current t in
-              let* () =
-                if phys_equal latest.selected snapshot.selected
-                then Ok ()
-                else invalid "developer root selection changed during callback"
-              in
-              let* () =
-                match phase, selection.jobs with
-                | Store.Checkpoint.Active, _ | (Interrupted | Closed), [] -> Ok ()
-                | (Interrupted | Closed), _ :: _ ->
-                  invalid "closed developer epoch cannot select queued jobs"
-              in
-              let* () =
-                match phase with
-                | Store.Checkpoint.Active -> Ok ()
-                | Interrupted | Closed ->
-                  if Terminal_queue.has_native_occupancy t.terminals
-                  then invalid "native invocations must finish before the epoch closes"
-                  else Ok ()
-              in
-              let intent =
-                { plan = Root_terminal { action; selection; phase }; settlement = None }
-              in
-              let* () =
-                Terminal_queue.complete t.terminals terminal_slot ~intent
-                |> Result.map_error ~f:error_of_terminal_queue
-              in
-              action.queued <- true;
-              let* () = Staging.mark_handoff action.staged selection.staged_selection in
-              let* () = drain_terminals t in
-              let* _ = settled_revision intent in
-              Ok value)))
+              Mutation_gate.with_owner t.mutation_gate ~f:(fun () ->
+                let* () = drain_terminals_unlocked t in
+                let* latest = current t in
+                let* () =
+                  if phys_equal latest.selected snapshot.selected
+                  then Ok ()
+                  else invalid "developer root selection changed during callback"
+                in
+                let* () =
+                  match phase, selection.jobs with
+                  | Store.Checkpoint.Active, _ | (Interrupted | Closed), [] -> Ok ()
+                  | (Interrupted | Closed), _ :: _ ->
+                    invalid "closed developer epoch cannot select queued jobs"
+                in
+                let* () =
+                  match phase with
+                  | Store.Checkpoint.Active -> Ok ()
+                  | Interrupted | Closed ->
+                    if Terminal_queue.has_native_occupancy t.terminals
+                    then invalid "native invocations must finish before the epoch closes"
+                    else Ok ()
+                in
+                let intent =
+                  { plan = Root_terminal { action; selection; phase }; settlement = None }
+                in
+                let* () =
+                  Terminal_queue.complete t.terminals terminal_slot ~intent
+                  |> Result.map_error ~f:error_of_terminal_queue
+                in
+                action.queued <- true;
+                let* () = Staging.mark_handoff action.staged selection.staged_selection in
+                let* _ = drain_and_settle_unlocked t intent in
+                Ok value))))
 ;;
 
 module Native_terminal = struct
@@ -1684,6 +1731,50 @@ module Native_terminal = struct
 
   let callback_complete (t : t) = t.callback_complete
   let effect_parent_live_now = native_effect_parent_live_now
+
+  let check_completion_now (scope : t) =
+    let issuer = scope.issuer in
+    let context = H.context scope.registration.invocation in
+    let dispatched =
+      match scope.dispatched, scope.dispatch_state with
+      | Some active, Dispatch_installed (installed, _)
+        when H.equal_context (H.context active) context
+             && H.equal_context (H.context installed) context
+             && P.Invocation.equal_status (H.status active) Dispatching -> true
+      | None, _ | Some _, (No_attempt | Dispatch_pending _ | Dispatch_installed _) ->
+        false
+    in
+    if
+      (not (same_domain issuer.registry))
+      || issuer.registry.closed
+      || (match issuer.state with
+          | Live -> false
+          | Closing | Quarantined | Closed -> true)
+      || scope.bracket_exited
+      || scope.callback_complete
+      || scope.submitted
+      || Option.is_some scope.sealed
+      || (not dispatched)
+      || (not (native_effect_parent_live_now scope))
+      || (not (same_action_fiber scope.action))
+      || (not (phys_equal scope.action.snapshot.issuer issuer))
+      || (not (phys_equal scope.action.snapshot.selected issuer.selected))
+      || (not
+            (Int.equal scope.action.snapshot.selection_revision issuer.selection_revision))
+      || (not (Operator_authorization.is_current issuer.actor))
+      || (not
+            (Option.value_map
+               (Hashtbl.find issuer.native_calls context.id)
+               ~default:false
+               ~f:(phys_equal scope.registration)))
+      || not
+           (Option.value_map
+              scope.registration.scope
+              ~default:false
+              ~f:(phys_equal scope))
+    then invalid "native callback completion is no longer current"
+    else Ok ()
+  ;;
 
   let sealed (t : t) =
     Option.map t.sealed ~f:(fun (selected : native_selection) ->
@@ -1715,7 +1806,7 @@ module Native_terminal = struct
              , Store.Invocation_observation.value prior )))
   ;;
 
-  let dispatch_allowed (t : t) =
+  let dispatch_allowed (t : t) (witness : current) =
     let issuer = t.issuer in
     let snapshot = t.action.snapshot in
     Option.value_map issuer.dispatch_owner ~default:false ~f:(phys_equal t)
@@ -1729,7 +1820,9 @@ module Native_terminal = struct
     && Operator_authorization.is_current issuer.actor
     && Int.equal snapshot.selection_revision issuer.selection_revision
     && phys_equal snapshot.selected issuer.selected
-    && Terminal_queue.check_effect_witness issuer.terminals snapshot.terminal_witness
+    && phys_equal witness.selected issuer.selected
+    && Int.equal witness.selection_revision issuer.selection_revision
+    && Terminal_queue.check_effect_witness issuer.terminals witness.terminal_witness
   ;;
 
   let mark_installed (t : t) dispatched installed =
@@ -1754,65 +1847,103 @@ module Native_terminal = struct
     Ok Absent
   ;;
 
+  let reconcile_failed_save (t : t) ~prepared ~handoff ~dispatched =
+    let issuer = t.issuer in
+    (* The exact pending pair remains protected by the Root mutation gate.
+       Settle a decidable write before another terminal observes this writer;
+       an unknown result keeps its physical owner for later recovery. *)
+    let settle () =
+      match Store.reconcile_and_settle issuer.handle prepared handoff with
+      | Ok (Store.Settlement.Installed installed) ->
+        (match mark_installed t dispatched installed with
+         | Ok _ -> ()
+         | Error _ -> issuer.state <- Quarantined)
+      | Ok (Absent | Prewrite_conflict) ->
+        ignore (absent t : (dispatch_reconciliation, _) result)
+      | Ok Diverged -> issuer.state <- Quarantined
+      | Error _ -> ()
+    in
+    (* Cleanup may itself fail, but it must never replace the original Store
+       failure or cancellation. Its pending pair remains available to the
+       ordinary exited-bracket reconciliation path. *)
+    try Eio.Cancel.protect settle with
+    | _ -> ()
+  ;;
+
   let save_dispatch (t : t) ~expected_revision ~dispatched =
     let issuer = t.issuer in
     let original = t.registration.invocation in
-    if
-      (not (same_domain issuer.registry))
-      || t.bracket_exited
-      || t.submitted
-      || Option.is_some issuer.dispatch_owner
-      || Option.is_some issuer.pending
-      || Option.is_some issuer.control_pending
-      || Option.is_some issuer.external_model
-      || issuer.reconciling
-      || (not (phys_equal t.action.snapshot.issuer issuer))
-      || (not (H.equal_context (H.context original) (H.context dispatched)))
-      || not (P.Invocation.equal_status (H.status dispatched) Dispatching)
-    then invalid "native dispatch cannot enter this physical scope"
-    else
-      let* () = check_current_local issuer t.action.snapshot ~allow_pending:false in
-      if Int.equal issuer.effect_revision Int.max_value
-      then invalid "developer effect generation is exhausted"
-      else (
-        issuer.dispatch_owner <- Some t;
-        issuer.effect_revision <- issuer.effect_revision + 1;
-        let* observed =
-          Store.observe issuer.handle |> Result.map_error ~f:error_of_store
-        in
-        let lookup = Store.find_invocation observed (H.context dispatched).id in
-        let actual_revision =
-          Option.map
-            (Store.Invocation_lookup.prior lookup)
-            ~f:Store.Invocation_observation.revision
-        in
+    Mutation_gate.with_owner issuer.mutation_gate ~f:(fun () ->
+      if
+        (not (same_domain issuer.registry))
+        || t.bracket_exited
+        || t.submitted
+        || Option.is_some issuer.dispatch_owner
+        || Option.is_some issuer.pending
+        || Option.is_some issuer.control_pending
+        || Option.is_some issuer.external_model
+        || issuer.reconciling
+        || (not (phys_equal t.action.snapshot.issuer issuer))
+        || (not (H.equal_context (H.context original) (H.context dispatched)))
+        || not (P.Invocation.equal_status (H.status dispatched) Dispatching)
+      then invalid "native dispatch cannot enter this physical scope"
+      else
+        let* () = drain_terminals_unlocked issuer in
+        let* fresh = current issuer in
         let* () =
-          if Option.equal Int.equal actual_revision expected_revision
+          if
+            phys_equal fresh.selected t.action.snapshot.selected
+            && Int.equal fresh.selection_revision t.action.snapshot.selection_revision
           then Ok ()
-          else invalid "developer dispatch prior revision changed"
+          else invalid "native dispatch selection changed before its Store write"
         in
-        let* prepared =
-          Store.prepare_dispatch issuer.handle ~expected:observed ~lookup ~dispatched
-          |> Result.map_error ~f:error_of_store
-        in
-        let handoff = Store.Handoff.create ~settle:(fun _ -> ()) in
-        t.dispatch_state <- Dispatch_pending { prepared; handoff; dispatched };
-        match
-          Store.commit_and_settle issuer.handle prepared handoff ~admit:(fun () ->
-            dispatch_allowed t)
-        with
-        | Ok (Store.Settlement.Installed installed) ->
-          mark_installed t dispatched installed
-        | Ok (Absent | Prewrite_conflict) ->
-          let* _ = absent t in
-          invalid "developer dispatch was not installed"
-        | Ok Diverged ->
-          issuer.state <- Quarantined;
-          invalid "developer dispatch is divergent"
-        | Error error -> Error (error_of_store error))
+        if Int.equal issuer.effect_revision Int.max_value
+        then invalid "developer effect generation is exhausted"
+        else
+          let* observed =
+            Store.observe issuer.handle |> Result.map_error ~f:error_of_store
+          in
+          let lookup = Store.find_invocation observed (H.context dispatched).id in
+          let actual_revision =
+            Option.map
+              (Store.Invocation_lookup.prior lookup)
+              ~f:Store.Invocation_observation.revision
+          in
+          let* () =
+            if Option.equal Int.equal actual_revision expected_revision
+            then Ok ()
+            else invalid "developer dispatch prior revision changed"
+          in
+          let* prepared =
+            Store.prepare_dispatch issuer.handle ~expected:observed ~lookup ~dispatched
+            |> Result.map_error ~f:error_of_store
+          in
+          let handoff = Store.Handoff.create ~settle:(fun _ -> ()) in
+          issuer.dispatch_owner <- Some t;
+          issuer.effect_revision <- issuer.effect_revision + 1;
+          t.dispatch_state <- Dispatch_pending { prepared; handoff; dispatched };
+          match
+            Store.commit_and_settle issuer.handle prepared handoff ~admit:(fun () ->
+              dispatch_allowed t fresh)
+          with
+          | Ok (Store.Settlement.Installed installed) ->
+            mark_installed t dispatched installed
+          | Ok (Absent | Prewrite_conflict) ->
+            let* _ = absent t in
+            invalid "developer dispatch was not installed"
+          | Ok Diverged ->
+            issuer.state <- Quarantined;
+            invalid "developer dispatch is divergent"
+          | Error error ->
+            reconcile_failed_save t ~prepared ~handoff ~dispatched;
+            Error (error_of_store error)
+          | exception exn ->
+            let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+            reconcile_failed_save t ~prepared ~handoff ~dispatched;
+            Exn.raise_with_original_backtrace exn backtrace)
   ;;
 
-  let reconcile_dispatch (t : t) =
+  let reconcile_dispatch_unlocked (t : t) =
     let issuer = t.issuer in
     if
       (not (same_domain issuer.registry)) || (not t.bracket_exited) || t.callback_complete
@@ -1844,6 +1975,11 @@ module Native_terminal = struct
          | Ok Diverged ->
            issuer.state <- Quarantined;
            Ok Uncertain))
+  ;;
+
+  let reconcile_dispatch (t : t) =
+    Mutation_gate.with_owner t.issuer.mutation_gate ~f:(fun () ->
+      reconcile_dispatch_unlocked t)
   ;;
 
   let retained (t : t) =
@@ -1998,25 +2134,39 @@ module Native_terminal = struct
     let intent =
       { plan = Native_terminal { scope = t; terminal; selected }; settlement = None }
     in
-    let* () =
-      match selected with
-      | None -> Staging.abort_pre_handoff t.action.staged
-      | Some _ -> Ok ()
-    in
-    let* () =
-      Terminal_queue.complete issuer.terminals t.registration.terminal_slot ~intent
-      |> Result.map_error ~f:error_of_terminal_queue
-    in
-    t.submitted <- true;
-    t.action.queued <- true;
-    let* () =
-      match selected with
-      | None -> Ok ()
-      | Some selected ->
-        Staging.mark_handoff t.action.staged selected.selection.staged_selection
-    in
-    let* () = drain_terminals issuer in
-    settled_revision intent
+    Mutation_gate.with_owner issuer.mutation_gate ~f:(fun () ->
+      let* () =
+        if
+          same_domain issuer.registry
+          && (not t.submitted)
+          && t.callback_complete
+          && Option.value_map t.dispatched ~default:false ~f:(fun current ->
+            H.equal_context (H.context current) terminal_context)
+          && Option.value_map
+               (Hashtbl.find issuer.native_calls context.id)
+               ~default:false
+               ~f:(fun registration -> phys_equal registration t.registration)
+        then validate_selection t outcome selected ~retained:false
+        else invalid "native terminal lost its physical submission owner"
+      in
+      let* () =
+        match selected with
+        | None -> Staging.abort_pre_handoff t.action.staged
+        | Some _ -> Ok ()
+      in
+      let* () =
+        Terminal_queue.complete issuer.terminals t.registration.terminal_slot ~intent
+        |> Result.map_error ~f:error_of_terminal_queue
+      in
+      t.submitted <- true;
+      t.action.queued <- true;
+      let* () =
+        match selected with
+        | None -> Ok ()
+        | Some selected ->
+          Staging.mark_handoff t.action.staged selected.selection.staged_selection
+      in
+      drain_and_settle_unlocked issuer intent)
   ;;
 
   let with_recovery_slot issuer ~owned f =
@@ -2076,28 +2226,38 @@ module Native_terminal = struct
         let intent =
           { plan = Native_terminal { scope = t; terminal; selected }; settlement = None }
         in
-        let* () =
-          match selected with
-          | None -> Staging.abort_pre_handoff t.action.staged
-          | Some _ -> Ok ()
-        in
-        let* () =
-          Terminal_queue.complete issuer.terminals registration.terminal_slot ~intent
-          |> Result.map_error ~f:error_of_terminal_queue
-        in
-        t.submitted <- true;
-        t.action.queued <- true;
-        let* () =
-          match selected with
-          | None -> Ok ()
-          | Some selected ->
-            Staging.mark_handoff t.action.staged selected.selection.staged_selection
-        in
-        issuer.unresolved_native
-        <- List.filter issuer.unresolved_native ~f:(fun current ->
-             not (phys_equal current registration));
-        let* () = drain_terminals issuer in
-        settled_revision intent)
+        Mutation_gate.with_owner issuer.mutation_gate ~f:(fun () ->
+          let* () =
+            if
+              same_domain issuer.registry
+              && (not t.submitted)
+              && t.bracket_exited
+              && List.exists issuer.unresolved_native ~f:(fun current ->
+                phys_equal current registration)
+            then validate_selection t outcome selected ~retained:true
+            else invalid "retained native terminal lost its physical owner"
+          in
+          let* () =
+            match selected with
+            | None -> Staging.abort_pre_handoff t.action.staged
+            | Some _ -> Ok ()
+          in
+          let* () =
+            Terminal_queue.complete issuer.terminals registration.terminal_slot ~intent
+            |> Result.map_error ~f:error_of_terminal_queue
+          in
+          t.submitted <- true;
+          t.action.queued <- true;
+          let* () =
+            match selected with
+            | None -> Ok ()
+            | Some selected ->
+              Staging.mark_handoff t.action.staged selected.selection.staged_selection
+          in
+          issuer.unresolved_native
+          <- List.filter issuer.unresolved_native ~f:(fun current ->
+               not (phys_equal current registration));
+          drain_and_settle_unlocked issuer intent))
   ;;
 
   let resolve_retained t ~terminal = resolve_retained_internal t ~terminal ~owned:false
@@ -2186,12 +2346,18 @@ let reconcile_pending t =
           | Some (Model_preparing _ | Model_reserved _) ->
             invalid "developer model admission has not joined"
           | Some (Model_pending { token; _ }) ->
-            (match reconcile_external_model_once t token with
+            (match
+               Mutation_gate.with_owner t.mutation_gate ~f:(fun () ->
+                 reconcile_external_model_once t token)
+             with
              | Ok (Store.Settlement.Installed _ | Absent | Prewrite_conflict) -> Ok ()
              | Ok Diverged -> invalid "developer model write remains quarantined"
              | Error error -> Error error)
         in
-        let* () = Job_control.reconcile_pending t in
+        let* () =
+          Mutation_gate.with_owner t.mutation_gate ~f:(fun () ->
+            Job_control.reconcile_pending t)
+        in
         let* () =
           List.fold_result t.unresolved_native ~init:() ~f:(fun () scope_registration ->
             match scope_registration.scope with
@@ -2394,74 +2560,86 @@ let with_native_registration t ?job_parent ~invocation f =
 
 let with_native_callback (scope : native_scope) ~dispatched f =
   let issuer = scope.issuer in
-  if not (same_domain issuer.registry)
-  then invalid "native callback belongs to another domain"
-  else if scope.submitted || Option.is_some scope.dispatched
-  then invalid "native callback already entered"
-  else (
-    let context = H.context scope.registration.invocation in
-    let* () =
-      if
-        H.equal_context context (H.context dispatched)
-        && P.Invocation.equal_status (H.status dispatched) Dispatching
-      then Ok ()
-      else invalid "native callback requires its exact dispatched record"
-    in
-    let* observed = Store.observe issuer.handle |> Result.map_error ~f:error_of_store in
-    let lookup = Store.find_invocation observed context.id in
-    let* () =
-      match Store.Invocation_lookup.prior lookup with
-      | Some prior
-        when P.Invocation.equal_status
-               (H.status (Store.Invocation_observation.value prior))
-               Dispatching
-             && H.equal_context
-                  (H.context (Store.Invocation_observation.value prior))
-                  context -> Ok ()
-      | None | Some _ -> invalid "native callback dispatch is not durable"
-    in
-    let* latest = current issuer in
-    let* () =
-      if phys_equal latest.selected scope.action.snapshot.selected
-      then Ok ()
-      else invalid "native callback selection changed"
-    in
-    let* () =
-      match scope.registration.job_parent with
-      | None -> Ok ()
-      | Some parent ->
-        Job_scope.Parent.check
-          parent
-          ~owner:issuer.owner
-          ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
-    in
-    let* () = check_effect_now issuer latest in
-    let* () =
-      match scope.registration.job_parent with
-      | None -> Ok ()
-      | Some parent ->
-        Job_scope.Parent.check_now
-          parent
-          ~owner:issuer.owner
-          ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
-    in
-    scope.dispatched <- Some dispatched;
-    scope.action.live <- true;
-    let outcome =
-      match
-        Eio.Switch.run (fun sw ->
-          scope.callback_switch <- Some sw;
-          Eio.Fiber.with_binding action_key scope.action (fun () -> f ~sw))
-      with
-      | value -> `Returned value
-      | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
-    in
-    scope.action.live <- false;
-    scope.callback_switch <- None;
-    scope.callback_complete <- true;
-    match outcome with
-    | `Returned value -> value
-    | `Raised (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace)
+  let admitted =
+    Mutation_gate.with_owner issuer.mutation_gate ~f:(fun () ->
+      if not (same_domain issuer.registry)
+      then invalid "native callback belongs to another domain"
+      else if scope.submitted || Option.is_some scope.dispatched
+      then invalid "native callback already entered"
+      else (
+        let context = H.context scope.registration.invocation in
+        let* () =
+          if
+            H.equal_context context (H.context dispatched)
+            && P.Invocation.equal_status (H.status dispatched) Dispatching
+          then Ok ()
+          else invalid "native callback requires its exact dispatched record"
+        in
+        let* () = drain_terminals_unlocked issuer in
+        let* observed =
+          Store.observe issuer.handle |> Result.map_error ~f:error_of_store
+        in
+        let lookup = Store.find_invocation observed context.id in
+        let* () =
+          match Store.Invocation_lookup.prior lookup with
+          | Some prior
+            when P.Invocation.equal_status
+                   (H.status (Store.Invocation_observation.value prior))
+                   Dispatching
+                 && H.equal_context
+                      (H.context (Store.Invocation_observation.value prior))
+                      context -> Ok ()
+          | None | Some _ -> invalid "native callback dispatch is not durable"
+        in
+        let* latest = current issuer in
+        let* () =
+          if
+            phys_equal latest.selected scope.action.snapshot.selected
+            && Int.equal
+                 latest.selection_revision
+                 scope.action.snapshot.selection_revision
+          then Ok ()
+          else invalid "native callback selection changed"
+        in
+        let* () =
+          match scope.registration.job_parent with
+          | None -> Ok ()
+          | Some parent ->
+            Job_scope.Parent.check
+              parent
+              ~owner:issuer.owner
+              ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
+        in
+        let* () = check_effect_now issuer latest in
+        let* () =
+          match scope.registration.job_parent with
+          | None -> Ok ()
+          | Some parent ->
+            Job_scope.Parent.check_now
+              parent
+              ~owner:issuer.owner
+              ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
+        in
+        scope.dispatched <- Some dispatched;
+        scope.action.live <- true;
+        Ok ()))
+  in
+  let* () = admitted in
+  let outcome =
+    match
+      Eio.Switch.run (fun sw ->
+        scope.callback_switch <- Some sw;
+        Eio.Fiber.with_binding action_key scope.action (fun () -> f ~sw))
+    with
+    | value -> `Returned value
+    | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
+  in
+  scope.action.live <- false;
+  scope.callback_switch <- None;
+  scope.callback_complete <- true;
+  match outcome with
+  | `Returned value -> value
+  | `Raised (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
 let close_owner t =
@@ -2768,6 +2946,7 @@ module Registry = struct
       ; native_calls = Hashtbl.create (module P.Id.Invocation)
       ; unresolved_native = []
       ; terminals
+      ; mutation_gate = Mutation_gate.create ()
       ; pending = None
       ; control_pending = None
       ; control_call = None
