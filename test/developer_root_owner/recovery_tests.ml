@@ -113,6 +113,8 @@ let%test_unit "startup retains exact terminal selection and blocks revoked succe
           ~max_native_occupancy:2
           ~max_active_workers:1
           ~max_quarantined_workers:2
+          ~max_active_inference_attempts:8
+          ~max_admitted_call_bindings:32
         |> Base.or_error
       in
       let owners =

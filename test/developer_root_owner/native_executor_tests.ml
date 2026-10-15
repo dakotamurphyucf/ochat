@@ -196,6 +196,8 @@ let with_executor
         ~max_native_occupancy:2
         ~max_active_workers
         ~max_quarantined_workers:2
+        ~max_active_inference_attempts:8
+        ~max_admitted_call_bindings:32
       |> Or_error.ok_exn
     in
     let capacity = T.capacity ~per_session () in
