@@ -307,9 +307,9 @@ let with_job_executor
 
 let background_runner_with_runtime
       ~agent_runtime
-      ~sw
+      ~sw:_
       ~root
-      ~store
+      ~store:_
       ~blobs
       ~env
       ~managed
@@ -323,13 +323,12 @@ let background_runner_with_runtime
       ~max_pending:2
     |> ok
   in
+  let results =
+    Agent_server.Developer_root_owner.Job_result.bind root ~blobs ~limits ~storage |> ok
+  in
   Agent_server.Developer_background_job_runner.create
-    ~sw
     ~root
-    ~store
-    ~blobs
-    ~publisher_limits:limits
-    ~storage
+    ~results
     ~env
     ~managed
     ~agent_runtime

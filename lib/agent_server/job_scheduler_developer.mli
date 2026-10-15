@@ -7,6 +7,15 @@ open! Core
     source of current physical roots. *)
 type t
 
+module Availability : sig
+  type t =
+    | Runnable
+    | Malformed_supported
+    | Artifact_installer_unavailable
+    | Executor_unavailable
+  [@@deriving equal, sexp_of]
+end
+
 module Batch : sig
   type t
 
@@ -18,15 +27,16 @@ module Batch : sig
 
   val candidates : t -> Developer_root_owner.Job_candidate.t list
 
-  (** Classification only for a candidate physically contained in this Batch,
-      using the attached runner's admitted saved-request
-      policy. Runnable and Malformed_supported are both offered to the SAME
-      physical runner; unsupported kind/artifact is left queued. Neither
-      classification nor this batch grants a Claim. *)
+  (** Classification only for a candidate physically contained in this Batch.
+      Dispatch by authentic saved Job.kind to the installed Tool/Script or
+      Model package of this SAME Root attachment. Runnable and
+      Malformed_supported are offered to that package's physical Worker Claim;
+      missing package and uninstalled artifact remain queued. This is a hint,
+      never execution authority or a second scan. *)
   val availability
     :  t
     -> Developer_root_owner.Job_candidate.t
-    -> (Developer_background_job_runner.Availability.t, Agent_protocol.Error.t) result
+    -> (Availability.t, Agent_protocol.Error.t) result
 end
 
 type offer_result =
@@ -47,10 +57,26 @@ val create
   -> capacity:Job_capacity.t
   -> t
 
+(** Install the Tool/Script package on the Root's sole attachment. The same
+    issuer, replacement, idempotency and model-only ordering rules as
+    [attach_model] apply. *)
 val attach
   :  t
   -> root:Developer_root_owner.run
   -> runner:Developer_background_job_runner.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Install a Model package on the SAME physical Root attachment and shared
+    scan/offer lifetime. Either package may be attached first, including a
+    Model-only Root; an exact repeated attachment is idempotent, while a
+    different package cannot replace one already exposed. The package must be
+    issued by this exact current Root in [registry]. Addition does not claim
+    queued jobs or create another fairness cursor, worker loop or capacity
+    ledger. Retirement/close joins all offer tasks regardless of package. *)
+val attach_model
+  :  t
+  -> root:Developer_root_owner.run
+  -> runner:Developer_model_job_runner.t
   -> (unit, Agent_protocol.Error.t) result
 
 val wake : t -> root:Developer_root_owner.run -> unit
@@ -75,7 +101,7 @@ val take_batch : t -> Batch.t option
     durable jobs must remain discoverable. A fresh batch from the same owner
     replaces the retry before ordering, so the chooser never sees duplicate
     owner groups; a newer unavailable batch may likewise replace it. Every
-    offer rechecks physical Root/Runner and Worker authority. *)
+    offer rechecks physical Root/package and Worker authority. *)
 val retry_batch : t -> Batch.t option
 
 val clear_retry : t -> Batch.t -> unit
@@ -85,7 +111,7 @@ val clear_retry : t -> Batch.t -> unit
     the test must assert effects and durable state independently. *)
 val retry_pending : t -> root:Developer_root_owner.run -> bool
 
-(** Compare exact attachment generation, physical Root/Runner, and live
+(** Compare exact attachment generation, physical Root/packages, and live
     Registry membership. No job or source bytes are used as authority. A
     stale/foreign batch is rejected before classification or offer. *)
 val current : t -> Batch.t -> (bool, Agent_protocol.Error.t) result
@@ -100,9 +126,9 @@ val current : t -> Batch.t -> (bool, Agent_protocol.Error.t) result
     [Skipped] covers a stale/coalesced offer. No outcome proves a Store Claim. The
     observer is nonyielding and one-shot; the chooser never awaits Store
     claim preparation, a handler, or terminal persistence. The task alone
-    calls the attached Runner on the
+    calls the matching physically attached package on the
     exact candidate and never replays its effect after an error or uncertain
-    save. A full Script/Tool effect cannot serially block the conversation
+    save. A full Script/Tool/Model effect cannot serially block the conversation
     chooser. A malformed supported request is an attempted owner turn even
     if its physical Claim persists Failed and returns Error. *)
 val offer

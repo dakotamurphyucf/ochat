@@ -6,7 +6,6 @@ module B = Chat_response.Background_request
 module C = Chat_response.Tool_capability
 module M = Chat_response.Managed_tool_registry
 module N = Developer_native_executor
-module Publisher = Agent_store.Developer_result_publisher
 module H = P.Host_invocation
 module Jobs = Developer_script_job_service
 module Script = Developer_script_job_execution
@@ -16,11 +15,10 @@ module Claim_scope = Agent_session.Developer_job_scope
 type t =
   { root : O.run
   ; native : N.t
-  ; publisher : Publisher.t
+  ; results : O.Job_result.t
   ; env : Eio_unix.Stdenv.base
   ; managed : Agent_session.Native_tool_invocation.selected_managed_dispatch option
   ; agent_runtime : Runtime.t option
-  ; storage : Publisher.Storage.t
   ; jobs : Jobs.t
   ; authorize : H.t -> C.binding -> (unit, P.Error.t) result
   ; prepare_output : Openai.Responses.Tool_output.Output.t -> (Jsonaf.t, P.Error.t) result
@@ -38,22 +36,9 @@ end
 let invalid message = Error (P.Error.invalid_request message)
 let ( let* ) result f = Result.bind result ~f
 
-let create
-      ~sw
-      ~root
-      ~store
-      ~blobs
-      ~publisher_limits
-      ~storage
-      ~env
-      ~managed
-      ~agent_runtime
-      ~jobs
-      ~authorize
-      ~prepare_output
-  =
-  if not (O.issued_by_store root store)
-  then invalid "developer Tool runner has a foreign Store"
+let create ~root ~results ~env ~managed ~agent_runtime ~jobs ~authorize ~prepare_output =
+  if not (O.Job_result.issued_by_root results root)
+  then invalid "developer Tool runner has another result owner"
   else
     let* () =
       match agent_runtime with
@@ -65,20 +50,15 @@ let create
           ~max_bindings:(O.job_policy root).execution.max_array_items
           ~checkpoint:(fun () -> ())
     in
-    let* result_root = O.result_root root in
-    let* publisher =
-      Publisher.create ~sw ~runs:store ~root:result_root ~blobs ~limits:publisher_limits
-    in
     let* native = N.create ~root in
     let* native = N.with_job_service native jobs in
     Ok
       { root
       ; native
-      ; publisher
+      ; results
       ; env
       ; managed
       ; agent_runtime
-      ; storage
       ; jobs
       ; authorize
       ; prepare_output
@@ -441,31 +421,6 @@ let execute_script_claimed t ~active ~scope =
            , Script.local_effects executed ))
 ;;
 
-let select_result t ~claim ~proposed =
-  match proposed.P.Developer_job.State.result with
-  | Some (P.Developer_job.Result_value.Inline _) ->
-    let* selection =
-      Publisher.select
-        t.publisher
-        ~storage:t.storage
-        ~claim
-        ~proposed
-        ~selected_at:(O.native_now t.root)
-    in
-    let* wrapped =
-      Developer_job_worker.Selected.create
-        ~claim
-        ~proposed
-        ~after:(Publisher.Selected.after selection)
-        ~ensure_attempted:(fun () -> Publisher.Selected.ensure_attempted selection)
-        ~acknowledge_installed:(fun installed ->
-          Publisher.Selected.acknowledge_installed selection installed)
-    in
-    Ok (Some wrapped)
-  | None -> Ok None
-  | Some (Artifact _) -> invalid "developer Tool runner cannot select a prior artifact"
-;;
-
 let run_candidate t ?on_capacity_decision candidate =
   let signalled = ref false in
   let notify_once decision =
@@ -486,7 +441,7 @@ let run_candidate t ?on_capacity_decision candidate =
           t.root
           candidate
           ~on_capacity_decision:notify_once
-          ~select:(select_result t)
+          ~select:(O.Job_result.select t.results)
           (fun ~active ~sw:_ -> execute_claimed t active)
       | Runnable ->
         (match decode t (O.Job_candidate.job candidate) with
@@ -498,13 +453,13 @@ let run_candidate t ?on_capacity_decision candidate =
                 t.root
                 candidate
                 ~on_capacity_decision:notify_once
-                ~select:(select_result t)
+                ~select:(O.Job_result.select t.results)
                 (fun ~active ~sw:_ -> execute_claimed t active)
             | Script ->
               Jobs.with_claimed_worker
                 t.jobs
                 ~candidate
                 ~on_capacity_decision:notify_once
-                ~select:(select_result t)
+                ~select:(O.Job_result.select t.results)
                 (fun ~active ~scope ~sw:_ -> execute_script_claimed t ~active ~scope))))
 ;;
