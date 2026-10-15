@@ -553,56 +553,50 @@ let%test_unit "saved Agent source admits one selected provider attempt" =
         ~data_root:(Agent_store.Data_root.path (Session_store.data_root session))
         ~observed
         ~on_run:(fun () ->
-          if Int.equal !saved_attempts 0
-          then (
-            let selected = Option.value_exn !selected_ref in
-            let binding = Capabilities.find selected ~name:"child" |> ok in
-            let implementation =
-              Capabilities.native_implementation binding |> Option.value_exn
-            in
-            let borrowed =
-              Agent_session.Native_tool_invocation.borrow_selected () |> ok
-            in
-            Agent_session.Captured_agent_runner.Claimed_developer.with_selected
-              ~borrowed
-              ~implementation
-              (fun selected ->
-                 Root.Model_inference.with_claimed_agent
-                   (Option.value_exn !root_ref)
-                   ~selected
-                   ~f:(fun scope ~sw ->
-                     let context = Root.Model_inference.context scope in
-                     assert (
-                       phys_equal
-                         context
-                         (Port.Model_selection.context selected_model |> ok));
-                     let request =
-                       Inference.Request.create
-                         ~target:(Inference_runtime.Context.target context)
-                         ~history:[]
-                         ~tools:[]
-                         ~assets:[]
-                         ~limits:Document_schema.Limits.default
-                       |> ok
-                     in
-                     ignore
-                       (Inference_client.run
-                          context
-                          ~sw
-                          ~identity:(Root.Model_inference.identity scope)
-                          ~relation:Transcript.Scope.Root
-                          ~request
-                          ~before_dispatch:(Root.Model_inference.before_dispatch scope)
-                          ~on_attempt:(Root.Model_inference.on_attempt scope)
-                          ~on_completion:(Root.Model_inference.on_completion scope)
-                          ~on_event:ignore
-                          ~on_observation:(Root.Model_inference.on_observation scope)
-                          ~submission_guard:(Root.Model_inference.submission_guard scope)
-                        |> ok
-                        : Inference_runtime.Receipt.t);
-                     incr saved_attempts))
-            |> ok
-            |> ignore))
+          incr saved_attempts;
+          let selected = Option.value_exn !selected_ref in
+          let binding = Capabilities.find selected ~name:"child" |> ok in
+          let implementation =
+            Capabilities.native_implementation binding |> Option.value_exn
+          in
+          let borrowed = Agent_session.Native_tool_invocation.borrow_selected () |> ok in
+          Agent_session.Captured_agent_runner.Claimed_developer.with_selected
+            ~borrowed
+            ~implementation
+            (fun selected ->
+               Root.Model_inference.with_claimed_agent
+                 (Option.value_exn !root_ref)
+                 ~selected
+                 ~f:(fun scope ~sw ->
+                   let context = Root.Model_inference.context scope in
+                   assert (
+                     phys_equal context (Port.Model_selection.context selected_model |> ok));
+                   let request =
+                     Inference.Request.create
+                       ~target:(Inference_runtime.Context.target context)
+                       ~history:[]
+                       ~tools:[]
+                       ~assets:[]
+                       ~limits:Document_schema.Limits.default
+                     |> ok
+                   in
+                   ignore
+                     (Inference_client.run
+                        context
+                        ~sw
+                        ~identity:(Root.Model_inference.identity scope)
+                        ~relation:Transcript.Scope.Root
+                        ~request
+                        ~before_dispatch:(Root.Model_inference.before_dispatch scope)
+                        ~on_attempt:(Root.Model_inference.on_attempt scope)
+                        ~on_completion:(Root.Model_inference.on_completion scope)
+                        ~on_event:ignore
+                        ~on_observation:(Root.Model_inference.on_observation scope)
+                        ~submission_guard:(Root.Model_inference.submission_guard scope)
+                      |> ok
+                      : Inference_runtime.Receipt.t)))
+          |> ok
+          |> ignore)
     in
     let blobs =
       Agent_store.Blob_store.create
