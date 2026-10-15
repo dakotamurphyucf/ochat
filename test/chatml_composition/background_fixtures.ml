@@ -98,6 +98,14 @@ let with_background_daemon
                failwith ("background fixture timed out: " ^ !stage ^ "\n" ^ dump))
         in
         with_fixture_switch (fun sw ->
+          let protocol_limits =
+            { Agent_server.Daemon.default_options.protocol_limits with max_request_bytes }
+          in
+          let authoring =
+            Agent_server.Authoring_installation.Host_policy.basic_supplied
+              ~initialize_limits:protocol_limits
+            |> protocol_ok
+          in
           let start () =
             Agent_server.Daemon.start
               ~sw
@@ -110,10 +118,8 @@ let with_background_daemon
                 { Agent_server.Daemon.default_options with
                   qualify_chatml_extensions = true
                 ; chatml_runtime_policy = runtime_policy
-                ; protocol_limits =
-                    { Agent_server.Daemon.default_options.protocol_limits with
-                      max_request_bytes
-                    }
+                ; protocol_limits
+                ; authoring = Some authoring
                 ; factory_limits =
                     { Agent_server.Daemon.default_options.factory_limits with
                       job_result_max_bytes

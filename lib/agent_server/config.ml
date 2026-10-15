@@ -67,6 +67,8 @@ module Server = struct
   type t =
     { data_dir : string
     ; project_sources : Project_source_configuration.t option [@sexp.option]
+    ; authoring_project_access : Authoring_project_access_configuration.t option
+          [@sexp.option]
     ; session_helpers : Session_helper_policy.t list [@sexp.list]
     ; authoring_packages : Chat_response.Authoring_package_file.t list [@sexp.list]
     ; authoring_budget : Chat_response.Authoring_validation.context_budget option

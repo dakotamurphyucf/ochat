@@ -126,6 +126,13 @@ module Server : sig
   type t =
     { data_dir : string
     ; project_sources : Project_source_configuration.t option [@sexp.option]
+    ; authoring_project_access : Authoring_project_access_configuration.t option
+          [@sexp.option]
+      (** Explicit principal/root read grants and Project target selections.
+          Requires configured external roots; no authoring permission follows
+          from root presence. Startup binds it to the actual opened source host.
+          Like other Server fields, changes require daemon restart: the config
+          watcher rejects a changed Server record before publication. *)
     ; session_helpers : Session_helper_policy.t list [@sexp.list]
       (** Explicit operator grants for optional external helpers. Changes require
           restart. The helpers still require declared shell tools and normal

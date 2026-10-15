@@ -82,6 +82,7 @@ type t =
   ; service_limits : Service.Limits.t
   ; semantic : Semantic.t option
   ; assistance : Assistance.t option
+  ; configured_projects : Authoring_configured_project_policy.t option
   }
 
 let invalid message = Error (P.Error.invalid_request message)
@@ -137,6 +138,7 @@ let create
       ; service_limits
       ; semantic
       ; assistance
+      ; configured_projects = None
       }
     in
     let%map () = validate_initialize t initialize_limits in
@@ -283,4 +285,25 @@ let upload_only ~initialize_limits ~upload =
   ; semantic = None
   ; assistance = None
   }
+;;
+
+let with_configured_projects t ~bound ~source_limits ~analysis_policy =
+  if Option.is_some t.source || Option.is_some t.configured_projects || not t.core
+  then invalid "authoring source policy is already installed"
+  else
+    Ok
+      { t with
+        source =
+          Some
+            (Source.create
+               ~read:(Authoring_configured_project_policy.read_policy bound)
+               ~document:Authoring_source_host.Document_policy.deny_all
+               ~limits:source_limits)
+      ; selection =
+          Service.Selection_policy.with_project_contract
+            t.selection
+            ~project_contract:(Authoring_configured_project_policy.project_contract bound)
+      ; analysis_policy
+      ; configured_projects = Some bound
+      }
 ;;
