@@ -17,10 +17,12 @@ type t
     raised after all aborts have been attempted. A prepared but unacknowledged
     parent commit fails and aborts. [abort] is the exact borrowed owner's
     cleanup operation, not an authority supplied by this module. It must be
-    idempotent for each ID. *)
+    idempotent for each ID. [current_capabilities] is an owner-provided checked
+    comparison, not permission. A failed current-selection check remains an
+    error; this kernel never substitutes another registry. *)
 val with_scope
   :  selected:Chat_response.Tool_capability.t
-  -> current_capabilities:(unit -> Chat_response.Tool_capability.t)
+  -> current_capabilities:(unit -> (Chat_response.Tool_capability.t, string) result)
   -> abort:(Agent_protocol.Id.Job.t -> unit)
   -> error:(string -> 'error)
   -> (t -> ('a, 'error) result)
@@ -40,7 +42,7 @@ val check_open : t -> (unit, string) result
 val rebind_selected
   :  t
   -> selected:Chat_response.Tool_capability.t
-  -> current_capabilities:(unit -> Chat_response.Tool_capability.t)
+  -> current_capabilities:(unit -> (Chat_response.Tool_capability.t, string) result)
   -> (unit, string) result
 
 val check_selection : t -> (unit, string) result

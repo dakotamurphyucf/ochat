@@ -67,7 +67,7 @@ let abort scope id = Kernel.rollback_start scope.kernel id
 let with_scope service ~owner ~selected ~error f =
   Kernel.with_scope
     ~selected
-    ~current_capabilities:service.current_capabilities
+    ~current_capabilities:(fun () -> Ok (service.current_capabilities ()))
     ~abort:(service.host.abort owner)
     ~error
     (fun kernel -> f { service; owner; selected; kernel })

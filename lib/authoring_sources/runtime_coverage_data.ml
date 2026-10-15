@@ -142,6 +142,7 @@ let shared_features =
       ; "lib/agent_server/developer_script_job_service.ml"
       ; "lib/agent_server/developer_background_job_runner.ml"
       ; "lib/agent_server/developer_managed_tool_executor.ml"
+      ; "lib/agent_server/developer_native_executor.ml"
       ; "lib/agent_server/developer_script_job_execution.ml"
       ]
     , "runtime.jobs.owned"
@@ -362,12 +363,14 @@ let implementation_sources =
     , "6f5137851d5bdb58fc3e65a7a4824249d4e6d661ce261d2cab7de7040a7aa976" )
   ; ( "lib/agent_server/developer_managed_tool_executor.ml"
     , "3befc8189100e09f54c94db05ddfecde36823ac292992b4d23090fe7102f2f3f" )
+  ; ( "lib/agent_server/developer_native_executor.ml"
+    , "bb2132ca60ea1a226be49cefe962cd0a62dfb7c9227c10d51d04ed81e76e4ec2" )
   ; ( "lib/agent_server/developer_root_owner.ml"
     , "a23bbc888c83ee2ad5119383186bfe8bbb711ddacce7218a24813195489debc1" )
   ; ( "lib/agent_server/developer_script_job_execution.ml"
     , "4e30550f6585c6afa97ddd12a12042d0be26b84f18aad7f6f92b2f3a3bf4bb32" )
   ; ( "lib/agent_server/developer_script_job_service.ml"
-    , "665c5e00bff694d182fdaa6d7c25a77fba2323d5e07a2c1d5de4562f7d90b416" )
+    , "2712168308f0e2436393b16a786c2c8cb733a3c6fd4c2fa195d3a283cab6edcd" )
   ; ( "lib/agent_server/schedule_scheduler.ml"
     , "37cf371632d8ad86693c162e0593d56866f76df577dceb06ddd2ac5fe5bfdae9" )
   ; ( "lib/agent_session/background_execution.ml"
@@ -393,11 +396,11 @@ let implementation_sources =
   ; ( "lib/agent_session/script_ingress_service.ml"
     , "0aaa0f00f9fe546c442cc7dcf1bf513d87797e9beea516222f08d17ef2f7a097" )
   ; ( "lib/agent_session/script_job_kernel.ml"
-    , "04c1cfd48c30ab3982640f3f6f57d5d1e54df8306bf9de7253b131ac8795d9cb" )
+    , "a9818d737cced5b3f62b213aad988617813acd6c8b030499d74b0e08c199f804" )
   ; ( "lib/agent_session/script_job_request.ml"
     , "9fdedd1ec520d69cb2bd7d5d32639bcc84d6c0d2dad1835513d7c7feaaf0d9d7" )
   ; ( "lib/agent_session/script_job_service.ml"
-    , "2fee8a9394aae0cc978588ad16f5fe938388c2d2cc23fcb0588ed7f19e4491d8" )
+    , "c716bf64a8834746b818afa567fbf515cbd66947d7172494287fcc5f0b339d79" )
   ; ( "lib/agent_session/script_notification_service.ml"
     , "ca17dedcd13940b10e7b530343d61d2cfc8b681cee2d8b03e02498c68644a781" )
   ; ( "lib/agent_session/script_schedule_service.ml"
