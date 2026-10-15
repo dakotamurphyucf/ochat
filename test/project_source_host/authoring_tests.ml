@@ -321,6 +321,10 @@ let%test_unit "configured grants retain physical source-host affinity" =
                ~max_document_bundle_bytes:2048
                ~max_parser_work_steps:100_000
                ~max_diagnostic_work_steps:100_000
+               ~max_selection_rows:32
+               ~max_retained_selection_source_bytes:(16 * 1024 * 1024)
+               ~max_retained_selection_input_bytes:(16 * 1024 * 1024)
+               ~max_selection_work_steps:1_000_000
              |> Or_error.ok_exn)
           ~prefix_limits:
             (Service.Semantic.Prefix_limits.create

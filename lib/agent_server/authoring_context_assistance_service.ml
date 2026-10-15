@@ -289,6 +289,7 @@ let handle_assistance t ~actor ~connection request =
               current
               ~actor
               ~request
+              ~select_contract:t.owner.selection_policy.project_contract
               ~script_selection:t.script_selection
               ~project_metadata:t.project_metadata
               ~selected_tools:t.selected_tools

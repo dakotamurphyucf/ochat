@@ -416,6 +416,30 @@ module Document_context : sig
       -> bool
   end
 
+  (** Nonyielding owner-bound recheck for one retained Standard script AFTER
+      semantic work may have yielded and BEFORE the Core publication gate. The
+      receipt must have been issued by this exact live Document_context and
+      still match its genuine Parsed/declaration/project objects. Recheck both
+      original and request actors, private root/read grant and the exact
+      project/Library environment's configured Standard target for each actor.
+      Equal IDs, native paths or Build digests are not reauthorization. No
+      filesystem read, source-owner borrow, parser, checkpoint or Eio yield;
+      [select_contract] is trusted, pure and nonyielding. It is not called from
+      the final no-yield Core CAS itself. Ordinary revocation and changed
+      selection return finite [Error.t]; unexpected callback exceptions retain
+      their identity and backtrace. *)
+  val check_selected_now
+    :  t
+    -> script:Script_capture.t
+    -> actor:Operator_authorization.t
+    -> select_contract:
+         (Operator_authorization.t
+          -> root:Root.t
+          -> project:Source.Portable_path.t
+          -> selection:Agent_protocol.Authoring.Context.Selection.t
+          -> Chatml.Chatml_compiler_contract.t option)
+    -> (unit, Error.t) result
+
   (** Prepare one actual parsed script through the SAME joined local source
       owner and project preparation pipeline used by [Context.capture]. The
       [project_capture] must physically match [parsed] and [declaration] and

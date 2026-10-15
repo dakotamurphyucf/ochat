@@ -26,6 +26,7 @@ module Script_policy = Authoring_script_selection.Policy
 module Project_capture = Authoring_source_host.Document_context.Project_capture
 module Project_policy = Authoring_project_metadata.Policy
 module Checked_template = Authoring_checked_template_suggestion
+module Rows = Authoring_document_selection_rows
 
 type t =
   { result : Wire.Result.t
@@ -103,6 +104,7 @@ let prepare
       current
       ~actor
       ~request
+      ~select_contract
       ~script_selection
       ~project_metadata
       ~selected_tools
@@ -206,13 +208,18 @@ let prepare
       Ok (Input.Range.input (Declaration.range declaration), parsed)
     | Exact _, None -> Ok (view_input, if unique_view then parsed else None)
   in
-  let%bind metadata =
+  let%bind row =
     match retained, parsed, declaration with
-    | Some retained, Some _, Some declaration ->
-      let%map candidate = Current.project_capture current ~checkpoint in
-      Option.filter candidate ~f:(fun candidate ->
-        Project_capture.matches candidate ~parsed:retained ~declaration)
+    | Some _, Some _, Some declaration ->
+      Current.selection_row current ~declaration ~checkpoint
     | None, _, _ | Some _, None, _ | Some _, Some _, None -> Ok None
+  in
+  let metadata = Option.bind row ~f:Rows.Row.metadata in
+  let host_source =
+    Option.bind row ~f:(fun row ->
+      match Rows.Row.status row with
+      | Host_prepared { source; _ } -> Some source
+      | Independently_selected _ | No_validated_build _ -> None)
   in
   let%bind used_metadata =
     match metadata, project_metadata, parsed, declaration with
@@ -228,29 +235,26 @@ let prepare
           ~capture
       then Ok (Some (policy, parsed, declaration, capture))
       else Error Error.Selection_unavailable
-    | None, _, _, _ | Some _, None, _, _ -> Ok None
+    | None, _, _, _ -> Ok None
+    | Some _, None, _, _ -> Error Error.Selection_unavailable
     | Some _, Some _, None, _ | Some _, Some _, Some _, None ->
       Error Error.Selection_unavailable
   in
   let admitted_metadata =
     Option.map used_metadata ~f:(fun (_, _, _, capture) -> capture)
   in
-  let selection_witness =
-    match script_selection, parsed, declaration with
-    | Some policy, Some parsed, Some declaration ->
-      Some
-        ( policy
-        , parsed
-        , declaration
-        , Script_policy.select
-            policy
-            ~original_actor
-            ~actor
-            ~current:inputs
-            ~parsed
-            ~declaration
-            ~metadata:admitted_metadata )
-    | _ -> None
+  let%bind selection_witness =
+    match parsed, declaration, row with
+    | Some parsed, Some declaration, Some row ->
+      (match Rows.Row.status row with
+       | Independently_selected selected ->
+         (match script_selection with
+          | Some policy -> Ok (Some (Some policy, parsed, declaration, Some selected))
+          | None -> Error Error.Selection_unavailable)
+       | Host_prepared { selected; _ } ->
+         Ok (Some (None, parsed, declaration, Some selected))
+       | No_validated_build _ -> Ok (Some (script_selection, parsed, declaration, None)))
+    | _, _, _ -> Ok None
   in
   let selected =
     Option.bind selection_witness ~f:(fun (policy, parsed, declaration, selected) ->
@@ -436,7 +440,8 @@ let prepare
     let%bind () =
       match selection_witness with
       | None -> Ok ()
-      | Some (policy, parsed, declaration, None) ->
+      | Some (None, _, _, _) -> Ok ()
+      | Some (Some policy, parsed, declaration, None) ->
         if
           Option.is_none
             (Script_policy.select
@@ -449,7 +454,7 @@ let prepare
                ~metadata:admitted_metadata)
         then Ok ()
         else Error Error.Selection_unavailable
-      | Some (policy, parsed, declaration, Some selected) ->
+      | Some (Some policy, parsed, declaration, Some selected) ->
         if
           Script_policy.same_now
             policy
@@ -462,6 +467,18 @@ let prepare
             ~selected
         then Ok ()
         else Error Error.Selection_unavailable
+    in
+    let%bind () =
+      match host_source, current.context.owner with
+      | None, _ -> Ok ()
+      | Some source, Owner.Host_document document ->
+        Authoring_source_host.Document_context.check_selected_now
+          document
+          ~script:source
+          ~actor
+          ~select_contract
+        |> Result.map_error ~f:Authoring_context_owner.source_host_error
+      | Some _, _ -> Error Error.Selection_unavailable
     in
     let%bind () =
       match used_metadata with

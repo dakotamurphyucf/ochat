@@ -9,6 +9,7 @@ module Upload = Authoring_upload_host
 module Captured = Chatml_source
 module Build = Chatml_project_build
 module Activity = Authoring_context_activity
+module Selection_rows = Authoring_document_selection_rows
 
 module Limits : sig
   type t =
@@ -112,7 +113,9 @@ type connection_entry = Activity.connection_entry
     Admission checks source identity/digest/length and bounded file/byte work
     outside the gate. The capture owns no parser loader, source owner or grant.
     It also retains immutable imported bytes for a later in-memory Prefix
-    reparse after a root edit, never an old Parsed value as current facts. *)
+    reparse after a root edit, never an old Parsed value as current facts.
+    One bounded immutable set of per-declaration selection rows belongs to
+    this same head/generation; no second mutable selection registry exists. *)
 module Retained_document_capture : sig
   type t
 
@@ -120,9 +123,7 @@ module Retained_document_capture : sig
     :  context:context_entry
     -> inputs:Ledger.Document.Inputs.t
     -> capture:Sources.Document_context.Parsed_capture.t
-    -> metadata:
-         (Prompt.Chat_markdown.Declaration.t * Sources.Document_context.Project_capture.t)
-           option
+    -> rows:Selection_rows.t
     -> max_sources:int
     -> max_bytes:int
     -> checkpoint:(unit -> unit)
@@ -142,10 +143,10 @@ module Retained_document_capture : sig
 
   val capture : t -> Sources.Document_context.Parsed_capture.t
 
-  (** At most one independently authorized project declaration from this
-      exact parser receipt. This is decoded comparison evidence, not a grant
-      or an assertion that a selected Build exists. *)
-  val project_capture : t -> Sources.Document_context.Project_capture.t option
+  (** Complete bounded per-declaration evidence for this exact parser receipt.
+      The selected target, metadata and Build in each row remain comparison
+      data; serving them still requires current host policy and script checks. *)
+  val selection_rows : t -> Selection_rows.t
 
   (** Physical publication-head equality, including [None]. Equal bytes in a
       later admission do not make an earlier borrowed head current again. *)
@@ -292,13 +293,15 @@ module Current : sig
     -> checkpoint:(unit -> unit)
     -> (Sources.Document_context.Parsed_capture.t option, Error.t) result
 
-  (** The one actual declaration project receipt within the matching current
-      Parsed head, when explicit Analyze captured it. It is decoded evidence
-      only; the shared host policy still reauthorizes its route and actors. *)
-  val project_capture
+  (** Borrow only the row for this genuine declaration from the matching
+      current Parsed head. Missing/evicted evidence requires explicit Analyze;
+      this lookup performs no import/project read or Build composition. The
+      Current token must still be live before and after its checkpoint. *)
+  val selection_row
     :  t
+    -> declaration:Prompt.Chat_markdown.Declaration.t
     -> checkpoint:(unit -> unit)
-    -> (Sources.Document_context.Project_capture.t option, Error.t) result
+    -> (Selection_rows.Row.t option, Error.t) result
 
   (** A bundle recomposed solely from current unsaved root bytes and the last
       immutable imports of this SAME context/source owner borrowed at request

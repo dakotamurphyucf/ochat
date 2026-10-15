@@ -237,6 +237,31 @@ module Chat_markdown : sig
   module Declaration : sig
     type t
 
+    module Surface : sig
+      type t =
+        | Script of
+            { language : string
+            ; kind : string
+            }
+        | Shell_script of
+            { language : string
+            ; kind : Chatmd_shell_spec.Chatmd_script_spec.kind
+            ; limits : Chatmd_shell_spec.Chatmd_script_spec.limits
+            }
+        | Extension_script of
+            { version : int
+            ; kind : Chatmd_shell_spec.Extension_spec.script_kind
+            ; limits : Chatmd_shell_spec.Chatmd_script_spec.limits
+            }
+      [@@deriving equal]
+    end
+
+    (** Converted nonbody contract metadata. ID, source locator, authored
+        project selection and source provenance have separate exact getters.
+        An edited-body comparison uses this genuine parser field rather than
+        decoding raw attributes a second time. *)
+    val surface : t -> Surface.t
+
     val range : t -> Chatmd_parser_input.Range.t
     val source_ref : t -> Chatmd_shell_spec.Source_ref.t
     val script_id : t -> string

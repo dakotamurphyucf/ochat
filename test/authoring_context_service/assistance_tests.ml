@@ -536,6 +536,10 @@ let%test_unit "host Analyze retains imported references and decoded project meta
                     ~max_document_bundle_bytes:8192
                     ~max_parser_work_steps:100_000
                     ~max_diagnostic_work_steps:100_000
+                    ~max_selection_rows:32
+                    ~max_retained_selection_source_bytes:(16 * 1024 * 1024)
+                    ~max_retained_selection_input_bytes:(16 * 1024 * 1024)
+                    ~max_selection_work_steps:1_000_000
                   |> Or_error.ok_exn)
                ~query_limits:(query_limits ())
                ~prefix_limits:
@@ -601,6 +605,10 @@ let%test_unit "host Analyze retains imported references and decoded project meta
                     ~max_document_bundle_bytes:8192
                     ~max_parser_work_steps:100_000
                     ~max_diagnostic_work_steps:100_000
+                    ~max_selection_rows:32
+                    ~max_retained_selection_source_bytes:(16 * 1024 * 1024)
+                    ~max_retained_selection_input_bytes:(16 * 1024 * 1024)
+                    ~max_selection_work_steps:1_000_000
                   |> Or_error.ok_exn)
                ~query_limits:(query_limits ())
                ~prefix_limits:
@@ -616,11 +624,17 @@ let%test_unit "host Analyze retains imported references and decoded project meta
             with
             | Ok (Complete _) | Ok (Failed _) -> ()
             | Ok _ | Error _ -> failwith "selected host project was not admitted");
-           let make_assistance max_contract_identity_bytes =
+           let make_assistance
+                 ?(with_script_selection = true)
+                 ?(with_project_metadata = true)
+                 max_contract_identity_bytes
+             =
              Assistance.create
                ~owner
-               ~script_selection:(Some selected_policy)
-               ~project_metadata:(Some project_metadata)
+               ~script_selection:
+                 (if with_script_selection then Some selected_policy else None)
+               ~project_metadata:
+                 (if with_project_metadata then Some project_metadata else None)
                ~selected_tools:None
                ~project_build_limits:
                  (Chatml_project_build.Limits.create
@@ -687,6 +701,31 @@ let%test_unit "host Analyze retains imported references and decoded project meta
                    Reference
                  && String.equal (W.Assistance.Suggestion.insert_text item) "Job"
                | _ -> false));
+           let selection_request =
+             W.Assistance.Request.create
+               ~context:expected
+               ~source
+               ~cursor_byte:
+                 (String.substr_index_exn root_text ~pattern:"let main input = "
+                  + String.length "let main input = ")
+               ~max_items:32
+             |> ok
+           in
+           List.iter
+             [ make_assistance ~with_script_selection:false (4 * 1024 * 1024)
+             ; make_assistance ~with_project_metadata:false (4 * 1024 * 1024)
+             ]
+             ~f:(fun unavailable ->
+               match
+                 Assistance.handle_assistance
+                   (unavailable |> ok)
+                   ~actor
+                   ~connection
+                   selection_request
+               with
+               | Error Service.Error.Selection_unavailable -> ()
+               | Ok _ | Error _ ->
+                 failwith "retained assistance facts lost their admission policy");
            let tight_assistance = make_assistance 4096 |> ok in
            let script_cursor =
              String.substr_index_exn root_text ~pattern:"let main input = "
