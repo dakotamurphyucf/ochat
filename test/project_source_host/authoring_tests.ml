@@ -1017,6 +1017,23 @@ let%test_unit "declared project metadata follows the captured declaring input" =
              |> List.find_exn ~f:(fun declaration ->
                String.equal (CM.Declaration.script_id declaration) "part:outside")
            in
+           let source_only declaration =
+             DC.Parsed_capture.script_source
+               parsed
+               ~declaration
+               ~max_script_bytes:4096
+               ~max_locator_bytes:1024
+               ~max_path_components:16
+               ~checkpoint:ignore
+             |> authoring_ok
+           in
+           let imported_inline = source_only declaration in
+           [%test_eq: string] (Captured.contents imported_inline) "let main = 1";
+           let imported_external = source_only external_declaration in
+           [%test_eq: string]
+             (Captured.Id.relative_path (Captured.id imported_external))
+             "nested/lookup.chatml";
+           [%test_eq: string] (Captured.contents imported_external) "let main = 2\n";
            let capture
                  ?(parsed = parsed)
                  ?(declaration = declaration)
@@ -1157,6 +1174,14 @@ let%test_unit "declared project metadata follows the captured declaring input" =
              Prepared.find_source prepared selected_entry |> Option.value_exn
            in
            [%test_eq: string] (Captured.contents selected_source) "let main = 2\n";
+           assert (
+             Captured.Id.equal
+               (Captured.id imported_external)
+               (Captured.id selected_source));
+           assert (
+             Captured.Digest.equal
+               (Captured.digest imported_external)
+               (Captured.digest selected_source));
            let outside_project =
              capture ~declaration:outside_declaration () |> authoring_ok
            in
@@ -1175,6 +1200,9 @@ let%test_unit "declared project metadata follows the captured declaring input" =
              |> Option.value_exn
            in
            [%test_eq: string] (Captured.contents outside_source) "let main = 3\n";
+           [%test_eq: string]
+             (Captured.contents (source_only outside_declaration))
+             "let main = 3\n";
            [%test_eq: string]
              (Captured.Id.relative_path (Captured.id outside_source))
              "outside.chatml";

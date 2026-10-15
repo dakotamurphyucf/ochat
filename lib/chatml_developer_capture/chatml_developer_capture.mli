@@ -49,6 +49,38 @@ module Origin : sig
       principal-owned receipt and graph before calling [create]. *)
   val uploaded_bundle : graph:Chatml_source.Digest.t -> receipt_id:string -> t Or_error.t
 
+  (** Bounded comparison metadata for a host-proven current ChatMD script.
+      The host first proves actual Parsed/declaration membership and the
+      declaring parser input's exact captured source; this constructor cannot
+      grant that parser, context or source authority. [root_source] is the
+      current document root, [declaring_source] is that exact root or genuine
+      import, and [script_source] is the admitted inline fragment or external
+      captured body. Ranges are half-open BYTE offsets in the declaring
+      input's effective bytes, not invented authored offsets or a
+      Ledger.Version for a generated fragment. [input_effective_bytes] and
+      the range must be ordered/nonnegative; source identity fields and
+      [script_id] are charged before canonical origin encoding under
+      [max_identity_bytes]. Same Source.Id with different digest/length rejects.
+      [create_prepared] additionally requires the selected script ID to be
+      Prepared.entry, then compares its digest/length with the exact Prepared
+      inventory under the caller's checkpoint. No field grants a native read,
+      project selection, compiler target or effect. *)
+  val document_script
+    :  graph:Chatml_source.Digest.t
+    -> context:Chatml_authoring_context.Identity.t
+    -> generation:Chatml_authoring_context.Generation.t
+    -> root_source:Chatml_source.t
+    -> declaring_source:Chatml_source.t
+    -> declaring_input_digest:Chatml_source.Digest.t
+    -> input_effective_bytes:int
+    -> declaration_start_byte:int
+    -> declaration_end_byte:int
+    -> script_id:string
+    -> script_source:Chatml_source.t
+    -> max_identity_bytes:int
+    -> checkpoint:(unit -> unit)
+    -> t Or_error.t
+
   val graph : t -> Chatml_source.Digest.t
 end
 
@@ -124,6 +156,23 @@ module Error : sig
   [@@deriving sexp_of]
 end
 
+(** Freeze exact admitted Prepared graph, selected standard standalone contract,
+    entry, bounded JSON input, and optional finite fixture set into one
+    fingerprint. The graph/source/origin checks are identical to [create].
+    A host can use an authentic [Prepared.single_captured] without fabricating
+    a Project Build. Origin labels remain comparison data; the host separately
+    proves their physical source/actor/currentness association. *)
+val create_prepared
+  :  prepared:Chatml_prepared_program.t
+  -> origin:Origin.t
+  -> target:Chatml.Chatml_compiler_contract.Target.t
+  -> entrypoint:string
+  -> input:Jsonaf.t
+  -> fixtures:Fixture.t option
+  -> json_bounds:Json_bounds.t
+  -> checkpoint:(unit -> unit)
+  -> (t, Error.t) Result.t
+
 (** Freeze exact admitted build, selected standard standalone contract, entry,
     bounded JSON input, and optional finite fixture set into one fingerprint.
     The source graph fingerprint already binds contract/environment/provenance
@@ -132,7 +181,8 @@ end
     or selects a filesystem path. OCH-265 executes One_off_v1. Tool_v1's
     two-argument run role needs a separate host-owned invocation/context
     contract. Other targets fail explicitly before compilation.
-    A fixture capture cannot silently become Live. *)
+    A fixture capture cannot silently become Live. This wrapper delegates to
+    [create_prepared ~prepared:(Build.prepared build)] with no weaker checks. *)
 val create
   :  build:Chatml_project_build.t
   -> origin:Origin.t

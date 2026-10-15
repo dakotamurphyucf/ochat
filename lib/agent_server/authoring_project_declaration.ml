@@ -20,6 +20,94 @@ let count_components path ~checkpoint =
   !components
 ;;
 
+module Admitted_input = struct
+  type t =
+    { input : Input.t
+    ; source : Captured.t
+    ; declaration : CM.Declaration.t
+    }
+
+  let input t = t.input
+  let source t = t.source
+  let declaration t = t.declaration
+end
+
+let admit_input ~parsed ~input_sources ~declaration ~package_namespace ~checkpoint =
+  let open Result.Let_syntax in
+  let generated = CM.Generated.parsed parsed in
+  let contains unit =
+    checkpoint ();
+    List.exists (CM.Parsed.declarations unit) ~f:(fun candidate ->
+      checkpoint ();
+      phys_equal candidate declaration)
+  in
+  let belongs =
+    contains generated.parsed_root
+    || List.exists generated.parsed_agents ~f:(fun (_, unit) ->
+      checkpoint ();
+      contains unit)
+  in
+  if not belongs
+  then Error Error.Foreign_input
+  else (
+    let input = Input.Range.input (CM.Declaration.range declaration) in
+    let source =
+      List.find_map input_sources ~f:(fun (candidate, source) ->
+        checkpoint ();
+        if phys_equal candidate input then Some source else None)
+    in
+    match source with
+    | None -> Error Error.Foreign_input
+    | Some source ->
+      let%bind expected_id =
+        Captured.Id.create ~package_namespace ~relative_path:(Input.path input)
+        |> Result.map_error ~f:(fun _ -> Error.Foreign_input)
+      in
+      if
+        (not (Captured.Id.equal (Captured.id source) expected_id))
+        || not (Input.authored_matches input (Captured.contents source) ~checkpoint)
+      then Error Error.Foreign_input
+      else Ok { Admitted_input.input; source; declaration })
+;;
+
+let route admitted ~max_locator_bytes ~max_path_components ~checkpoint =
+  let open Result.Let_syntax in
+  if
+    max_locator_bytes <= 0
+    || max_locator_bytes > 1024
+    || max_path_components <= 0
+    || max_path_components > 1024
+  then Error Error.Limit
+  else (
+    let declaration = Admitted_input.declaration admitted in
+    let input = Admitted_input.input admitted in
+    let%bind selection =
+      CM.Declaration.project_selection declaration
+      |> Result.of_option ~error:Error.Unavailable_route
+    in
+    let spelling = selection.Chatmd_shell_spec.Script_project.project in
+    if String.length spelling > max_locator_bytes
+    then Error Error.Limit
+    else if count_components spelling ~checkpoint > max_path_components
+    then Error Error.Limit
+    else (
+      let%bind base =
+        Path.create (Input.path input)
+        |> Result.map_error ~f:(fun _ -> Error.Foreign_input)
+      in
+      let%bind member =
+        Source_loader.resolve_member
+          base
+          ~reference:spelling
+          ~max_reference_bytes:max_locator_bytes
+          ~checkpoint
+        |> Result.map_error ~f:(fun _ -> Error.Unavailable_route)
+      in
+      if count_components (Path.to_string member) ~checkpoint > max_path_components
+      then Error Error.Limit
+      else Ok (member, selection)))
+;;
+
 let admit
       ~parsed
       ~input_sources
@@ -37,65 +125,13 @@ let admit
     || max_path_components > 1024
   then Error Error.Limit
   else (
-    let generated = CM.Generated.parsed parsed in
-    let contains unit =
-      checkpoint ();
-      List.exists (CM.Parsed.declarations unit) ~f:(fun candidate ->
-        checkpoint ();
-        phys_equal candidate declaration)
+    let%bind admitted =
+      admit_input ~parsed ~input_sources ~declaration ~package_namespace ~checkpoint
     in
-    let belongs =
-      contains generated.parsed_root
-      || List.exists generated.parsed_agents ~f:(fun (_, unit) ->
-        checkpoint ();
-        contains unit)
+    let%map member, selection =
+      route admitted ~max_locator_bytes ~max_path_components ~checkpoint
     in
-    if not belongs
-    then Error Error.Foreign_input
-    else (
-      let input = Input.Range.input (CM.Declaration.range declaration) in
-      let source =
-        List.find_map input_sources ~f:(fun (candidate, source) ->
-          checkpoint ();
-          if phys_equal candidate input then Some source else None)
-      in
-      match source with
-      | None -> Error Error.Foreign_input
-      | Some source ->
-        let%bind expected_id =
-          Captured.Id.create ~package_namespace ~relative_path:(Input.path input)
-          |> Result.map_error ~f:(fun _ -> Error.Foreign_input)
-        in
-        if
-          (not (Captured.Id.equal (Captured.id source) expected_id))
-          || not (Input.authored_matches input (Captured.contents source) ~checkpoint)
-        then Error Error.Foreign_input
-        else (
-          let%bind selection =
-            CM.Declaration.project_selection declaration
-            |> Result.of_option ~error:Error.Unavailable_route
-          in
-          let spelling = selection.Chatmd_shell_spec.Script_project.project in
-          if String.length spelling > max_locator_bytes
-          then Error Error.Limit
-          else if count_components spelling ~checkpoint > max_path_components
-          then Error Error.Limit
-          else (
-            let%bind base =
-              Path.create (Input.path input)
-              |> Result.map_error ~f:(fun _ -> Error.Foreign_input)
-            in
-            let%bind member =
-              Source_loader.resolve_member
-                base
-                ~reference:spelling
-                ~max_reference_bytes:max_locator_bytes
-                ~checkpoint
-              |> Result.map_error ~f:(fun _ -> Error.Unavailable_route)
-            in
-            if count_components (Path.to_string member) ~checkpoint > max_path_components
-            then Error Error.Limit
-            else Ok (input, member, selection)))))
+    Admitted_input.input admitted, member, selection)
 ;;
 
 let identity ~source ~input ~declaration ~selection ~max_identity_bytes ~checkpoint =

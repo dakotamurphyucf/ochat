@@ -1,14 +1,22 @@
 # Developer capture and deterministic fixture tests (OCH-265)
 
-`Chatml_developer_capture` freezes an already admitted `Chatml_project_build.t`,
-its authentic standalone target, entrypoint, exact JSON input, source provenance
-and optional fixture suite. Its graph fingerprint comes from the prepared
-inventory, which binds the selected contract, environment, source IDs and
-digests. The capture fingerprint also binds the provenance label, entrypoint,
-input and fixture digest. Local saved revisions, editor versions and upload
-receipt IDs are comparison data, not authorizations. The host must obtain the
-build and provenance through its current actor/source or bundle admission; a
-capture never saves a file or reads a path. This core runs One_off_v1. Tool_v1
+`Chatml_developer_capture` freezes an already admitted project build or prepared
+single captured source, its authentic standalone target, entrypoint, exact JSON
+input, source provenance and optional fixture suite. Its graph fingerprint comes
+from the prepared inventory, which binds the selected contract, environment,
+source IDs and digests. The capture fingerprint also binds the provenance label,
+entrypoint, input and fixture digest. `single_captured` retains the original
+source identity and bytes under an implicit environment; the old `single_file`
+constructor keeps its fixed synthetic ID through the same preparation algorithm.
+An embedded script origin binds the current document coordinates, genuine parsed
+input and declaration range, and exact selected script source as bounded
+comparison data. Capture admission requires that script to be the prepared
+entry, not merely another source in the graph. The origin does not grant access
+to an editor buffer or native source.
+Local saved revisions, editor versions and upload receipt IDs are comparison
+data, not authorizations. The host must obtain the build or source and provenance
+through its current actor/source or bundle admission; a capture never saves a
+file or reads a path. This core runs One_off_v1. Tool_v1
 needs a host-owned two-argument tool context and outcome contract, so it rejects
 explicitly until that separate admitted developer fixture path is implemented.
 Moderator/session targets also reject before execution.

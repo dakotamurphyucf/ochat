@@ -181,6 +181,25 @@ let bounded_label ~name value =
 ;;
 
 module Origin = struct
+  type source_identity =
+    { id : Captured.Id.t
+    ; digest : Captured.Digest.t
+    ; byte_length : int
+    }
+
+  type document_script =
+    { context : Context.Identity.t
+    ; generation : Context.Generation.t
+    ; root : source_identity
+    ; declaring : source_identity
+    ; input_digest : Captured.Digest.t
+    ; input_effective_bytes : int
+    ; declaration_start_byte : int
+    ; declaration_end_byte : int
+    ; script_id : string
+    ; script : source_identity
+    }
+
   type kind =
     | Local_saved of string
     | Editor_snapshot of
@@ -189,6 +208,7 @@ module Origin = struct
         ; versions : Context.Version.t list
         }
     | Uploaded_bundle of string
+    | Document_script of document_script
 
   type t =
     { graph : Captured.Digest.t
@@ -230,6 +250,102 @@ module Origin = struct
       { graph; kind = Uploaded_bundle receipt_id })
   ;;
 
+  let source_identity source =
+    { id = Captured.id source
+    ; digest = Captured.digest source
+    ; byte_length = Captured.byte_length source
+    }
+  ;;
+
+  let source_identity_consistent left right =
+    (not (Captured.Id.equal left.id right.id))
+    || (Captured.Digest.equal left.digest right.digest
+        && Int.equal left.byte_length right.byte_length)
+  ;;
+
+  let document_script
+        ~graph
+        ~context
+        ~generation
+        ~root_source
+        ~declaring_source
+        ~declaring_input_digest
+        ~input_effective_bytes
+        ~declaration_start_byte
+        ~declaration_end_byte
+        ~script_id
+        ~script_source
+        ~max_identity_bytes
+        ~checkpoint
+    =
+    let root = source_identity root_source in
+    let declaring = source_identity declaring_source in
+    let script = source_identity script_source in
+    if
+      max_identity_bytes <= 0
+      || max_identity_bytes > 1024 * 1024
+      || input_effective_bytes < 0
+      || declaration_start_byte < 0
+      || declaration_end_byte <= declaration_start_byte
+      || declaration_end_byte > input_effective_bytes
+      || String.is_empty script_id
+      || String.length script_id > 1024
+      || (not (source_identity_consistent root declaring))
+      || (not (source_identity_consistent root script))
+      || not (source_identity_consistent declaring script)
+    then Or_error.error_string "invalid document script provenance"
+    else (
+      let remaining = ref max_identity_bytes in
+      let charge value =
+        checkpoint ();
+        let length = String.length value in
+        if length > (!remaining - 64) / 6
+        then false
+        else (
+          remaining := !remaining - (length * 6) - 64;
+          true)
+      in
+      let source_values source =
+        [ Captured.Id.package_namespace source.id
+        ; Captured.Id.relative_path source.id
+        ; Captured.Digest.to_hex source.digest
+        ; Int.to_string source.byte_length
+        ]
+      in
+      let values =
+        [ Sexp.to_string_mach (Context.Identity.sexp_of_t context)
+        ; Sexp.to_string_mach (Context.Generation.sexp_of_t generation)
+        ; Captured.Digest.to_hex declaring_input_digest
+        ; Int.to_string input_effective_bytes
+        ; Int.to_string declaration_start_byte
+        ; Int.to_string declaration_end_byte
+        ; script_id
+        ]
+        @ source_values root
+        @ source_values declaring
+        @ source_values script
+      in
+      if not (List.for_all values ~f:charge)
+      then Or_error.error_string "document script provenance exceeds bound"
+      else
+        Ok
+          { graph
+          ; kind =
+              Document_script
+                { context
+                ; generation
+                ; root
+                ; declaring
+                ; input_digest = declaring_input_digest
+                ; input_effective_bytes
+                ; declaration_start_byte
+                ; declaration_end_byte
+                ; script_id
+                ; script
+                }
+          })
+  ;;
+
   let graph t = t.graph
 
   let descriptor t ~checkpoint =
@@ -247,6 +363,37 @@ module Origin = struct
       , (context : Context.Identity.t)
       , (generation : Context.Generation.t)
       , (versions : Sexp.t list)]
+    | Document_script
+        { context
+        ; generation
+        ; root
+        ; declaring
+        ; input_digest
+        ; input_effective_bytes
+        ; declaration_start_byte
+        ; declaration_end_byte
+        ; script_id
+        ; script
+        } ->
+      checkpoint ();
+      let identity source =
+        [%sexp
+          (source.id : Captured.Id.t)
+        , (source.digest : Captured.Digest.t)
+        , (source.byte_length : int)]
+      in
+      [%sexp
+        ("document_script" : string)
+      , (context : Context.Identity.t)
+      , (generation : Context.Generation.t)
+      , (identity root : Sexp.t)
+      , (identity declaring : Sexp.t)
+      , (input_digest : Captured.Digest.t)
+      , (input_effective_bytes : int)
+      , (declaration_start_byte : int)
+      , (declaration_end_byte : int)
+      , (script_id : string)
+      , (identity script : Sexp.t)]
   ;;
 end
 
@@ -430,7 +577,16 @@ type t =
   ; fingerprint : Captured.Digest.t
   }
 
-let create ~build ~origin ~target ~entrypoint ~input ~fixtures ~json_bounds ~checkpoint =
+let create_prepared
+      ~prepared
+      ~origin
+      ~target
+      ~entrypoint
+      ~input
+      ~fixtures
+      ~json_bounds
+      ~checkpoint
+  =
   let open Result.Let_syntax in
   let%bind () =
     match target with
@@ -438,7 +594,6 @@ let create ~build ~origin ~target ~entrypoint ~input ~fixtures ~json_bounds ~che
     | Tool_v1 | Developer_tool_v1 | Moderator_v1 | Delegated_moderator_v1 ->
       Error Error.Unsupported_target
   in
-  let prepared = Build.prepared build in
   let graph_fingerprint = Prepared.fingerprint prepared in
   let%bind () =
     if Captured.Digest.equal graph_fingerprint (Origin.graph origin)
@@ -465,6 +620,20 @@ let create ~build ~origin ~target ~entrypoint ~input ~fixtures ~json_bounds ~che
                      (Context.Version.digest version) -> Ok (Set.add seen source)
             | _ -> Error (Error.Stale_source source)))
       |> Result.map ~f:ignore
+    | Document_script { script; _ } ->
+      if not (Captured.Id.equal (Prepared.entry prepared) script.id)
+      then Error Error.Invalid_origin
+      else (
+        let selected =
+          List.find_map (Prepared.sources prepared) ~f:(fun source ->
+            checkpoint ();
+            if Captured.Id.equal (Captured.id source) script.id then Some source else None)
+        in
+        match selected with
+        | Some selected
+          when Captured.Digest.equal (Captured.digest selected) script.digest
+               && Int.equal (Captured.byte_length selected) script.byte_length -> Ok ()
+        | Some _ | None -> Error (Error.Stale_source script.id))
   in
   let contract = Contract.for_target target ~checkpoint in
   let%bind () =
@@ -511,6 +680,18 @@ let create ~build ~origin ~target ~entrypoint ~input ~fixtures ~json_bounds ~che
     ; graph_fingerprint
     ; fingerprint
     }
+;;
+
+let create ~build ~origin ~target ~entrypoint ~input ~fixtures ~json_bounds ~checkpoint =
+  create_prepared
+    ~prepared:(Build.prepared build)
+    ~origin
+    ~target
+    ~entrypoint
+    ~input
+    ~fixtures
+    ~json_bounds
+    ~checkpoint
 ;;
 
 let prepared t = t.prepared
