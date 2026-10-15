@@ -102,6 +102,7 @@ let run_stream
       ~note_delivery
       ~on_event
       ~on_observation:_
+      ~submission_guard:_
   =
   let inputs =
     R.history request

@@ -41,6 +41,7 @@ module Identity = struct
 end
 
 let run
+      ?(submission_guard = R.Submission_guard.empty)
       context
       ~sw
       ~(identity : Identity.t)
@@ -81,7 +82,7 @@ let run
       try
         on_attempt attempt;
         `Result
-          (R.Attempt.run attempt ~sw ~on_event ~on_observation
+          (R.Attempt.run attempt ~submission_guard ~sw ~on_event ~on_observation
            |> Result.map_error ~f:(fun error -> Error.Attempt error))
       with
       | exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
@@ -185,6 +186,7 @@ module Execution = struct
     ; on_attempt : R.Attempt.t -> unit
     ; on_completion : Completion.t -> unit
     ; on_observation : Inference.Observation.t -> unit
+    ; submission_guard : R.Submission_guard.t
     }
 
   let create
@@ -208,13 +210,19 @@ module Execution = struct
     ; on_attempt
     ; on_completion
     ; on_observation
+    ; submission_guard = R.Submission_guard.empty
     }
+  ;;
+
+  let with_submission_guard t guard =
+    { t with submission_guard = R.Submission_guard.compose t.submission_guard guard }
   ;;
 
   let context t = t.context
 
   let run t ~sw ~request ~on_event =
     run
+      ~submission_guard:t.submission_guard
       t.context
       ~sw
       ~identity:t.identity

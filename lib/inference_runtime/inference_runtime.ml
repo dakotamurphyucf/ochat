@@ -4,6 +4,19 @@ module Event = Inference.Event
 module Observation = Inference.Observation
 module Session = Session
 
+module Submission_guard = struct
+  type t = (unit -> unit -> unit) list
+
+  let empty = []
+  let create ~refresh = [ refresh ]
+  let compose parent child = List.append parent child
+
+  let check t =
+    let final_checks = List.map t ~f:(fun refresh -> refresh ()) in
+    List.iter final_checks ~f:(fun check_now -> check_now ())
+  ;;
+end
+
 module Preparation_error = struct
   type t =
     | Invalid_request of Request.Error.t
@@ -215,6 +228,7 @@ module Plan = struct
         -> note_delivery:(Event.Terminal.delivery -> unit)
         -> on_event:(Event.t -> unit)
         -> on_observation:(Observation.t -> unit)
+        -> submission_guard:Submission_guard.t
         -> Receipt.t
     }
 
@@ -334,7 +348,7 @@ module Attempt = struct
     Atomic.set t.delivery next
   ;;
 
-  let run t ~sw ~on_event ~on_observation =
+  let run ?(submission_guard = Submission_guard.empty) t ~sw ~on_event ~on_observation =
     if not (Atomic.compare_and_set t.started false true)
     then Error Already_started
     else (
@@ -455,6 +469,7 @@ module Attempt = struct
           ~note_delivery:(note_delivery t)
           ~on_event:publish_event
           ~on_observation:publish_observation
+          ~submission_guard
       in
       let receipt =
         Receipt.create
@@ -705,7 +720,13 @@ module Context = struct
         let plan =
           { plan with
             Plan.run =
-              (fun ~sw ~scope ~accounting_id ~note_delivery ~on_event ~on_observation ->
+              (fun ~sw
+                ~scope
+                ~accounting_id
+                ~note_delivery
+                ~on_event
+                ~on_observation
+                ~submission_guard ->
                 if Option.exists t.session ~f:Session.is_closed
                 then closed_receipt ~scope ~accounting_id ~limits:t.adapter.limits
                 else
@@ -715,7 +736,8 @@ module Context = struct
                     ~accounting_id
                     ~note_delivery
                     ~on_event
-                    ~on_observation)
+                    ~on_observation
+                    ~submission_guard)
           }
         in
         Ok { Prepared.plan; limits = t.adapter.limits }))

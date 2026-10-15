@@ -20,8 +20,8 @@ let accept nonce =
   |> Base64.encode_exn
 ;;
 
-let headers reader =
-  let first = Eio.Buf_read.line reader in
+let headers ?first_byte reader =
+  let first = Option.value first_byte ~default:"" ^ Eio.Buf_read.line reader in
   let rec loop fields =
     let line = Eio.Buf_read.line reader in
     if String.is_empty line
@@ -46,8 +46,11 @@ let upgrade flow fields =
     flow
 ;;
 
-let client_message reader =
-  let header = Eio.Buf_read.take 2 reader in
+let client_message ?first_byte reader =
+  let header =
+    Option.value first_byte ~default:""
+    ^ Eio.Buf_read.take (if Option.is_some first_byte then 1 else 2) reader
+  in
   assert (Char.to_int header.[0] = 0x81);
   let short = Char.to_int header.[1] land 127 in
   assert (Char.to_int header.[1] land 128 <> 0);
@@ -165,6 +168,112 @@ let dispatch driver session auth prepared policy =
           (selected : O.Transport_selection.transport)
         , (fallback : O.Transport_selection.fallback_reason option)])
     ~on_event:ignore
+;;
+
+exception Submission_revoked of unit ref
+
+let%test_unit "HTTP and WebSocket recheck the owner after transport selection waits" =
+  run_env (fun env ->
+    List.iter [ O.Transport_policy.Http_sse; Require_websocket ] ~f:(fun policy ->
+      List.iter [ false; true ] ~f:(fun revoke ->
+        let submitted = ref 0 in
+        let server_done, resolve_server_done = Eio.Promise.create () in
+        with_server
+          env
+          (fun flow ->
+             Exn.protect
+               ~finally:(fun () -> Eio.Promise.resolve resolve_server_done ())
+               ~f:(fun () ->
+                 let reader = Eio.Buf_read.of_flow flow ~max_size:1_000_000 in
+                 if O.Transport_policy.equal policy Require_websocket
+                 then (
+                   let _, fields = headers reader in
+                   upgrade flow fields;
+                   let first_byte = Eio.Buf_read.take 1 reader in
+                   incr submitted;
+                   ignore (client_message ~first_byte reader : Jsonaf.t);
+                   Eio.Flow.copy_string (server_frame completed) flow)
+                 else (
+                   let first_byte = Eio.Buf_read.take 1 reader in
+                   incr submitted;
+                   let _, fields = headers ~first_byte reader in
+                   let length =
+                     List.Assoc.find_exn fields ~equal:String.equal "content-length"
+                     |> Int.of_string
+                   in
+                   ignore (Eio.Buf_read.take length reader : string);
+                   let body = "data: " ^ completed ^ "\n\n" in
+                   Eio.Flow.copy_string
+                     (sprintf
+                        "HTTP/1.1 200 OK\r\n\
+                         Content-Type: text/event-stream\r\n\
+                         Content-Length: %d\r\n\
+                         \r\n\
+                         %s"
+                        (String.length body)
+                        body)
+                     flow)))
+          (fun sw endpoint ->
+             let session = D.Websocket_session.create ~sw in
+             let selected, resolve_selected = Eio.Promise.create () in
+             let resume, resolve_resume = Eio.Promise.create () in
+             let current = ref true in
+             let refreshes = ref 0 in
+             let marker = ref () in
+             let original_backtrace = Stdlib.Printexc.get_callstack 16 in
+             let guard =
+               Inference_runtime.Submission_guard.create ~refresh:(fun () ->
+                 incr refreshes;
+                 fun () ->
+                   if not !current
+                   then
+                     Stdlib.Printexc.raise_with_backtrace
+                       (Submission_revoked marker)
+                       original_backtrace)
+             in
+             let rejected = ref false in
+             Eio.Fiber.both
+               (fun () ->
+                  try
+                    ignore
+                      (D.run_with_transport
+                         ~submission_guard:guard
+                         (driver env)
+                         ~session:(Some session)
+                         ~policy
+                         ~auth:(fun ~sw:_ _ -> Ok (lease ()))
+                         ~prepared:(prepared (profile endpoint) [ input "guarded" ])
+                         ~on_selected:(fun _ _ ->
+                           Eio.Promise.resolve resolve_selected ();
+                           Eio.Promise.await resume)
+                         ~on_event:ignore
+                       |> ok
+                       : D.Terminal.t)
+                  with
+                  | Submission_revoked observed ->
+                    assert (phys_equal observed marker);
+                    let caught =
+                      Stdlib.Printexc.raw_backtrace_to_string
+                        (Stdlib.Printexc.get_raw_backtrace ())
+                    in
+                    let original =
+                      Stdlib.Printexc.raw_backtrace_to_string original_backtrace
+                    in
+                    assert (not (String.is_empty original));
+                    assert (
+                      String.equal
+                        (String.split_lines caught |> List.hd_exn)
+                        (String.split_lines original |> List.hd_exn));
+                    rejected := true)
+               (fun () ->
+                  Eio.Promise.await selected;
+                  if revoke then current := false;
+                  Eio.Promise.resolve resolve_resume ());
+             D.Websocket_session.close session;
+             Eio.Promise.await server_done;
+             assert (Bool.equal !rejected revoke);
+             assert (!refreshes = 1);
+             assert (!submitted = if revoke then 0 else 1)))))
 ;;
 
 let%expect_test

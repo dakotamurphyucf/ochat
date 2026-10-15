@@ -56,6 +56,7 @@ type 'env t =
   ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
   ; on_inference_completion : Inference_client.Completion.t -> unit
   ; on_inference_observation : Inference.Observation.t -> unit
+  ; submission_guard : Inference_runtime.Submission_guard.t
   ; env : 'env
   ; dir : Eio.Fs.dir_ty Eio.Path.t
     (** Root directory used by {!Fetch} helpers for reading local files. *)
@@ -87,6 +88,7 @@ let create
   ; on_inference_attempt
   ; on_inference_completion
   ; on_inference_observation
+  ; submission_guard = Inference_runtime.Submission_guard.empty
   ; env
   ; dir
   ; tool_dir
@@ -123,6 +125,12 @@ exception Inference_admission_rejected
 
 let with_inference t ~inference_context = { t with inference_context }
 
+let with_submission_guard t guard =
+  { t with
+    submission_guard = Inference_runtime.Submission_guard.compose t.submission_guard guard
+  }
+;;
+
 let with_inference_attempt_guard t ~before_attempt =
   { t with
     on_inference_attempt =
@@ -148,6 +156,8 @@ let inference_execution t =
     ~on_attempt:t.on_inference_attempt
     ~on_observation:t.on_inference_observation
     ~on_completion:t.on_inference_completion
+  |> fun execution ->
+  Inference_client.Execution.with_submission_guard execution t.submission_guard
 ;;
 
 (** [net t] exposes the network namespace ([env#net]). *)
