@@ -362,10 +362,15 @@ val admit_exact_saved_agent_registration
     contracts, and all native hook project requirements are admitted against the
     complete staged pool before any hook initializer. Missing graphs reject
     without falling back to script bodies or current files.
+    [tool_contract] selects the managed Tool compiler surface and its authority
+    fingerprint; omission keeps Standard Tool_v1 for existing sessions. A
+    developer owner uses the same Developer_model_spawn choice as its captured
+    planner. This is not Model.spawn execution authority.
     This internal preparation entrypoint does not enable public feature flags. *)
 val prepare_extensions
   :  ?native_service_revision:string
   -> ?startup:Startup_compilation.t
+  -> ?tool_contract:Chatml_compilation.Tool_contract.t
   -> ?agent_source_runner:Tool.Agent_source_runner.t
   -> ?moderator_surface:Chatml.Chatml_builtin_surface.surface
   -> ?compilation_limits:Chatml_compilation.limits
@@ -429,14 +434,18 @@ val create_without_inference
     resource identity with [prepare_extensions]. Its preparation result grants
     no Model.spawn authority: a later managed invocation still requires an
     authentic selected developer provider, Root and current job scope. The
-    caller owns [sw] through installation and close; failed preparation cannot
+    [tool_contract] has the same compiler-identity meaning and Standard default
+    as [prepare_extensions]; Developer_model_spawn does not manufacture a
+    provider Context. The caller owns [sw] through installation and close; failed preparation cannot
     leave a staged shell registry activated. *)
 val prepare_extensions_without_inference
   :  ?native_service_revision:string
   -> ?startup:Startup_compilation.t
+  -> ?tool_contract:Chatml_compilation.Tool_contract.t
   -> ?moderator_surface:Chatml.Chatml_builtin_surface.surface
   -> ?compilation_limits:Chatml_compilation.limits
   -> ?checkpoint:(unit -> unit)
+  -> ?check_preparation_now:(unit -> (unit, diagnostic) result)
   -> ?native_registrations:native_registration list
   -> ?delegated_moderator:bool
   -> ?programs:Chatml_prompt_programs.Restored.t
