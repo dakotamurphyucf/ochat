@@ -228,6 +228,7 @@ module Prepared = struct
     | Inactive_cancel
     | Inference_tracking
     | Inference_recovery
+    | Command_recovery
     | Command_mutation
 
   type claim_status =
@@ -1046,6 +1047,80 @@ module Result_root = struct
         if P.Id.Server.equal issuer.host_id (Doc.host_id document)
         then Ok (Some (make issuer document ~epoch:None))
         else corrupt "developer result root host differs from daemon owner")
+  ;;
+
+  let observe_latest t =
+    if not (issued_by t.issuer t)
+    then Error Error.Foreign_or_stale
+    else
+      with_lease t.issuer (fun ~env:_ ~root:_ ->
+        let poll = work t.issuer t.issuer.checkpoint in
+        let* () = if pending_mem t.issuer t.run_id then Error Error.Conflict else Ok () in
+        let* found = read t.issuer ~poll t.run_id in
+        let* () = if pending_mem t.issuer t.run_id then Error Error.Conflict else Ok () in
+        match found with
+        | None -> Error Error.Foreign_or_stale
+        | Some (bytes, document) ->
+          if
+            (not (P.Id.Server.equal t.host_id (Doc.host_id document)))
+            || (not (Id.equal t.run_id (Doc.run_id document)))
+            || not (P.Id.Principal.equal t.principal_id (Doc.principal_id document))
+          then Error Error.Foreign_or_stale
+          else (
+            let latest = List.last_exn (Doc.epochs document) in
+            let* selected_owner =
+              P.Execution_owner.developer
+                ~host_id:t.host_id
+                ~run_id:t.run_id
+                ~epoch:(Doc.epoch_number latest)
+                ~principal_id:t.principal_id
+              |> Result.map_error ~f:(fun _ -> Error.Foreign_or_stale)
+            in
+            let* owner =
+              match selected_owner with
+              | P.Execution_owner.Developer owner -> Ok owner
+              | Conversation _ -> Error Error.Foreign_or_stale
+            in
+            observation t.issuer ~owner ~bytes document))
+  ;;
+
+  let find_command_snapshot t ~principal ~key =
+    if (not (issued_by t.issuer t)) || not (P.Id.Principal.equal principal t.principal_id)
+    then Error Error.Foreign_or_stale
+    else
+      with_lease t.issuer (fun ~env:_ ~root:_ ->
+        let poll = work t.issuer t.issuer.checkpoint in
+        let* () = if pending_mem t.issuer t.run_id then Error Error.Conflict else Ok () in
+        let* found = read t.issuer ~poll t.run_id in
+        let* () = if pending_mem t.issuer t.run_id then Error Error.Conflict else Ok () in
+        match found with
+        | None -> Error Error.Foreign_or_stale
+        | Some (_, document) ->
+          if
+            (not (P.Id.Server.equal t.host_id (Doc.host_id document)))
+            || (not (Id.equal t.run_id (Doc.run_id document)))
+            || not (P.Id.Principal.equal t.principal_id (Doc.principal_id document))
+          then Error Error.Foreign_or_stale
+          else (
+            match Doc.find_command document key with
+            | None -> Ok None
+            | Some row ->
+              let owner = Command_row.owner row in
+              let epoch =
+                List.find (Doc.epochs document) ~f:(fun epoch ->
+                  poll ();
+                  Int.equal (Doc.epoch_number epoch) owner.epoch)
+              in
+              if
+                P.Id.Server.equal owner.host_id t.host_id
+                && Id.equal owner.run_id t.run_id
+                && P.Id.Principal.equal owner.principal_id t.principal_id
+                && Option.value_map epoch ~default:false ~f:(fun epoch ->
+                  Chatml_source.Digest.equal
+                    (Doc.epoch_capture epoch)
+                    (Command_row.capture_fingerprint row))
+              then Ok (Some row)
+              else Error Error.Foreign_or_stale))
   ;;
 
   let find_job_snapshot t ~owner ~capture_fingerprint ~job_id ~attempt =
@@ -2143,6 +2218,7 @@ let bind_handoff t handle prepared handoff =
     | Inactive_cancel
     | Inference_tracking
     | Inference_recovery
+    | Command_recovery
     | Command_mutation -> true
   then Error Error.Conflict
   else
@@ -2322,6 +2398,7 @@ let bind_claim t handle prepared =
         | Inactive_cancel
         | Inference_tracking
         | Inference_recovery
+        | Command_recovery
         | Command_mutation )
       , _ )
     | Worker_claim, None -> Error Error.Conflict)
@@ -2337,6 +2414,7 @@ let settle_worker_prepared t handle (prepared : Prepared.t) settlement =
     | Selected_transaction
     | External_model
     | Claimed_transition
+    | Command_recovery
     | Command_mutation -> false
   in
   let status =
@@ -2362,7 +2440,8 @@ let settle_worker_prepared t handle (prepared : Prepared.t) settlement =
         | Claimed_transition
         | Inactive_cancel
         | Inference_tracking
-        | Inference_recovery ) )
+        | Inference_recovery
+        | Command_recovery ) )
     | Claim_absent, (Worker_claim | Inactive_cancel)
     | ( Claim_prewrite_conflict
       , ( Worker_claim
@@ -2382,6 +2461,7 @@ let settle_worker_prepared t handle (prepared : Prepared.t) settlement =
         | Developer_dispatch
         | Selected_transaction
         | External_model
+        | Command_recovery
         | Command_mutation ) ) -> false
   in
   with_run_lifecycle t (fun () ->
@@ -2507,6 +2587,7 @@ type transition_path =
   | Inactive_job
   | Tracking_path
   | Recovery_inference_path
+  | Recovery_command_path
 
 let bind_transition path t handle prepared =
   if not (prepared_for handle prepared)
@@ -2516,7 +2597,8 @@ let bind_transition path t handle prepared =
     | Physical_claim, Claimed_transition
     | Inactive_job, Inactive_cancel
     | Tracking_path, Inference_tracking
-    | Recovery_inference_path, Inference_recovery ->
+    | Recovery_inference_path, Inference_recovery
+    | Recovery_command_path, Command_recovery ->
       (match prepared.claim_status with
        | Claim_installed | Claim_diverged | Claim_prewrite_conflict -> Ok ()
        | Unsettled | Claim_absent ->
@@ -2530,7 +2612,11 @@ let bind_transition path t handle prepared =
              Ok ()
            | Some (Selected _ | Claim _ | Transition _ | Command _) ->
              Error Error.Conflict))
-    | ( (Physical_claim | Inactive_job | Tracking_path | Recovery_inference_path)
+    | ( ( Physical_claim
+        | Inactive_job
+        | Tracking_path
+        | Recovery_inference_path
+        | Recovery_command_path )
       , ( Foundation_checkpoint
         | Developer_dispatch
         | Selected_transaction
@@ -2540,6 +2626,7 @@ let bind_transition path t handle prepared =
         | Inactive_cancel
         | Inference_tracking
         | Inference_recovery
+        | Command_recovery
         | Command_mutation ) ) -> Error Error.Conflict)
 ;;
 
@@ -2590,40 +2677,31 @@ let commit_transition_using borrow ~path ~admit handle prepared =
       claimed_transition_result t prepared
     | Unsettled | Claim_absent ->
       let poll = work t t.checkpoint in
+      let best_effort_reconcile () =
+        try
+          Eio.Cancel.protect (fun () ->
+            match classify_prepared t handle prepared ~poll with
+            | Ok settlement ->
+              ignore
+                (settle_worker_prepared t handle prepared settlement
+                 : (unit, Error.t) result)
+            | Error _ -> ())
+        with
+        | _ -> ()
+      in
       (match install_prepared ~admit t handle prepared ~poll with
        | Ok settlement ->
          let* () = settle_worker_prepared t handle prepared settlement in
          claimed_transition_result t prepared
        | Error original ->
-         (match
-            Eio.Cancel.protect (fun () -> classify_prepared t handle prepared ~poll)
-          with
-          | Ok settlement ->
-            ignore
-              (settle_worker_prepared t handle prepared settlement
-               : (unit, Error.t) result)
-          | Error _ -> ());
+         best_effort_reconcile ();
          Error original
        | exception Selected_admission_revoked ->
-         (match
-            Eio.Cancel.protect (fun () -> classify_prepared t handle prepared ~poll)
-          with
-          | Ok settlement ->
-            let* () = settle_worker_prepared t handle prepared settlement in
-            Error Error.Foreign_or_stale
-          | Error original -> Error original)
+         best_effort_reconcile ();
+         Error Error.Foreign_or_stale
        | exception exn ->
          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-         (try
-            Eio.Cancel.protect (fun () ->
-              match classify_prepared t handle prepared ~poll with
-              | Ok settlement ->
-                ignore
-                  (settle_worker_prepared t handle prepared settlement
-                   : (unit, Error.t) result)
-              | Error _ -> ())
-          with
-          | _ -> ());
+         best_effort_reconcile ();
          Stdlib.Printexc.raise_with_backtrace exn backtrace))
 ;;
 
@@ -2690,6 +2768,7 @@ let commit handle prepared =
     | Inactive_cancel
     | Inference_tracking
     | Inference_recovery
+    | Command_recovery
     | Command_mutation -> true
   then Error Error.Conflict
   else
@@ -2730,6 +2809,7 @@ let reconcile handle prepared =
     | Inactive_cancel
     | Inference_tracking
     | Inference_recovery
+    | Command_recovery
     | Command_mutation -> true
   then Error Error.Conflict
   else
@@ -2811,6 +2891,7 @@ module Recovery = struct
     ; token : unit ref
     ; mutable pending : Pending.t option
     ; mutable inference_pending : Inference_pending.t option
+    ; mutable command_pending : Prepared.t option
     ; mutable ever_prepared : bool
     ; mutable busy : bool
     }
@@ -2843,6 +2924,7 @@ module Recovery = struct
             ; token
             ; pending = None
             ; inference_pending = None
+            ; command_pending = None
             ; ever_prepared = false
             ; busy = false
             }
@@ -3348,11 +3430,111 @@ module Recovery = struct
           Ok next))
   ;;
 
+  let prepare_command_interruption t (view : View.t) =
+    with_lease t.store (fun ~env:_ ~root:_ ->
+      let poll = work t.store t.store.checkpoint in
+      let* () = no_pending t.store t.claim.run_id in
+      let* found = read t.store ~poll t.claim.run_id in
+      match found with
+      | None -> Error Error.Foreign_or_stale
+      | Some (before_bytes, document) ->
+        if not (same_observation t.store t.handle view.observation before_bytes document)
+        then Error Error.Conflict
+        else
+          let* after_document =
+            Doc.command_recovery
+              document
+              ~limits:t.store.limits.document
+              ~commands:t.store.limits.commands
+              ~poll
+            |> store
+          in
+          if Int64.equal (Doc.revision after_document) (Doc.revision document)
+          then Ok None
+          else
+            let* after_bytes =
+              Cpu.encode
+                t.store.cpu
+                after_document
+                ~poll
+                ~limits:t.store.limits.document
+                ~max_epochs:t.store.limits.max_epochs_per_run
+                ~max_jobs:t.store.limits.max_jobs_per_run
+                ~max_invocations:t.store.limits.max_invocations_per_run
+                ~max_job_payload_bytes:t.store.limits.max_job_payload_bytes
+                ~max_inference_attempts:t.store.limits.max_inference_attempts_per_run
+                ~max_inference_bytes:t.store.limits.max_inference_bytes_per_run
+                ~commands:t.store.limits.commands
+              |> store
+            in
+            let prepared =
+              Prepared.
+                { store_token = t.store.token
+                ; handle_token = t.handle.token
+                ; owner = t.handle.owner
+                ; before_bytes
+                ; after_bytes
+                ; after_document
+                ; token = ref ()
+                ; kind = Command_recovery
+                ; claim_data = None
+                ; external_model_claim = None
+                ; claim_status = Unsettled
+                ; write_attempted = false
+                ; claimed_selection = None
+                }
+            in
+            let* () = valid t in
+            let* () = bind_transition Recovery_command_path t.store t.handle prepared in
+            t.command_pending <- Some prepared;
+            t.ever_prepared <- true;
+            Ok (Some prepared))
+  ;;
+
+  let settle_command_interruption t prepared =
+    let borrow store _handle f = with_lease store f in
+    let* disposition =
+      reconcile_transition_using borrow ~path:Recovery_command_path t.handle prepared
+    in
+    match disposition with
+    | Installed _ ->
+      t.command_pending <- None;
+      Ok ()
+    | Absent ->
+      let* _ =
+        commit_transition_using
+          borrow
+          ~path:Recovery_command_path
+          ~admit:(fun () -> Result.is_ok (valid t))
+          t.handle
+          prepared
+      in
+      t.command_pending <- None;
+      Ok ()
+    | Diverged -> Error Error.Conflict
+  ;;
+
+  let no_abandoned_commands document ~poll =
+    if
+      List.exists (Doc.command_rows document) ~f:(fun row ->
+        poll ();
+        match Command_row.phase row with
+        | Terminal _ -> false
+        | Reserved | Waiting_permission | Execution_started -> true)
+    then Error Error.Conflict
+    else Ok ()
+  ;;
+
   let finish t =
     with_operation t (fun () ->
       if Option.is_some t.pending || Option.is_some t.inference_pending
       then Error Error.Conflict
-      else (
+      else
+        let* () =
+          match t.command_pending with
+          | None -> Ok ()
+          | Some pending -> settle_command_interruption t pending
+        in
         let poll = work t.store t.store.checkpoint in
         let* view = read_view t ~poll in
         if
@@ -3360,13 +3542,27 @@ module Recovery = struct
           || not (List.is_empty view.inference_candidates)
         then Error Error.Conflict
         else
+          let* prepared = prepare_command_interruption t view in
+          let* () =
+            match prepared with
+            | None -> Ok ()
+            | Some prepared -> settle_command_interruption t prepared
+          in
+          let* final_view = read_view t ~poll in
+          let* () =
+            if
+              List.is_empty final_view.candidates
+              && List.is_empty final_view.inference_candidates
+            then no_abandoned_commands final_view.observation.document ~poll
+            else Error Error.Conflict
+          in
           with_run_lifecycle t.store (fun () ->
             match t.claim.record.recovery with
             | Recovery_open token when phys_equal token t.token ->
               t.claim.record.recovery <- Recovery_finished;
               Ok ()
             | Recovery_unopened | Recovery_open _ | Recovery_finished | Recovery_aborted
-              -> Error Error.Foreign_or_stale)))
+              -> Error Error.Foreign_or_stale))
   ;;
 
   let is_finished t =
@@ -3381,7 +3577,11 @@ module Recovery = struct
 
   let abort_clean t =
     with_operation t (fun () ->
-      if t.ever_prepared || Option.is_some t.pending || Option.is_some t.inference_pending
+      if
+        t.ever_prepared
+        || Option.is_some t.pending
+        || Option.is_some t.inference_pending
+        || Option.is_some t.command_pending
       then Error Error.Conflict
       else
         with_run_lifecycle t.store (fun () ->

@@ -76,6 +76,18 @@ val change_command
   -> poll:(unit -> unit)
   -> (t, Store_error.t) result
 
+(** One pure, bounded recovery projection: retain every command's immutable
+    owner/key/request/ID, and turn each nonterminal row into Interrupted while
+    preserving its execution-started bit. Return the original document when
+    nothing changes. The enclosing physical Recovery window alone may persist
+    this projection; calling it does not grant a writer or result disclosure. *)
+val command_recovery
+  :  t
+  -> limits:Document_schema.Limits.t
+  -> commands:Developer_command_limits.t
+  -> poll:(unit -> unit)
+  -> (t, Store_error.t) result
+
 val last_inference_ordinal : t -> int64
 
 (** The next positive ordinal, or None on ordinary capacity exhaustion; the

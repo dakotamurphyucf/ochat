@@ -33,8 +33,11 @@ end
 
 (** Initial Reserved row only. The physical Store proves that this key was
     absent under its writer and allocates [id] once. The request fingerprint
-    binds kind, capture, entry/input/fixtures and selected execution/output
-    policy; the host owns that canonical request projection. *)
+    binds the original action/payload: kind, route or source selector, requested
+    environment and editor revision, entry/input/fixtures and chosen
+    execution/output policy. It excludes recaptured source bytes and mutable
+    host policy. [capture_fingerprint] separately pins the resolved capture;
+    the host owns both canonical projections. *)
 val create
   :  id:Receipt.Id.t
   -> key:P.Idempotency_key.t

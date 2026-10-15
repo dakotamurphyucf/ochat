@@ -11,12 +11,15 @@ before/after transaction images and pending-write ownership.
 ## Identity and phases
 
 A command key is unique across every epoch of one stable principal/run. Its
-immutable identity includes its original owner, capture, command kind and request
-fingerprint. The host computes that fingerprint over the entrypoint, inputs,
-fixture selection and execution/output policy; the Store compares its exact
-identity and does not inspect those request fields. The Store allocates the command ID only after proving
-the key absent; an exact retry returns the persisted ID. Historical reads retain
-the original epoch and never authorize new execution.
+immutable identity includes its original owner, resolved capture, command kind
+and request fingerprint. The host computes the request fingerprint over the
+original route or source selector, requested environment and editor revision,
+entrypoint, inputs, fixture selection and chosen execution/output policy. It
+excludes resolved source bytes and mutable host policy; the separate capture
+fingerprint pins the actual source and contract. The Store compares both exact
+identities but does not inspect the request fields. It allocates the command ID
+only after proving the key absent; an exact retry returns the persisted ID.
+Historical reads retain the original epoch and never authorize new execution.
 
 All kinds begin Reserved. Only Live_run may enter Waiting_permission or
 Execution_started. Check and Fixture_run remain inert with respect to host tools.
@@ -64,3 +67,13 @@ row and terminal bytes. A proven absent admission may be retired after
 cancellation; frozen terminal selections cannot be discarded that way. Recovery
 joins or reconciles owned work before choosing a truthful terminal, and never
 replays an effect to discover its result.
+
+On restart, the host may read an existing command key before recapturing source.
+An unresolved same-run write makes even a missing-key answer unavailable. For
+fresh work, the host first observes the persisted latest epoch, reissues its
+same-epoch Store handle from that owner and capture, acquires the physical run
+claim, and finishes recovery before reserving a new command. Recovery marks
+older and latest nonterminal command rows Interrupted through the same writer;
+it preserves completed receipts and retains uncertain writes for reconciliation.
+This startup handle does not authorize execution: current actor, source and
+target policy must be checked separately before any new effect.

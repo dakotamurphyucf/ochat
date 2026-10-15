@@ -387,11 +387,22 @@ module Recovery : sig
     -> Inference_pending.t
     -> (Inference_pending.t, Error.t) result
 
-  (** Complete the one-shot startup window only after neither kind of Pending
-      remains and a fresh bounded read finds no Running/Waiting_permission
-      job or Prepared/Running inference row in any retained epoch. A successful
-      close enables normal claims under this Run_claim. No callback may enter
-      a worker between the final read and closing the window. *)
+  (** Complete the one-shot startup window only after no job/inference Pending
+      remains and a fresh bounded read finds no Running/Waiting_permission job
+      or Prepared/Running inference row in any retained epoch. Before closing,
+      derive Interrupted for every nonterminal command from its exact current
+      persisted row, preserving whether Live execution had started. Persist
+      these rows in one full-image transition through the existing run writer,
+      pending map, combined recovery headroom and exact before/after classifier.
+      An uncertain/cancelled replacement retains that exact preparation; a
+      repeated [finish] reconciles it, never chooses a new terminal or grants
+      Execution_start. A proven Absent may retry only after a fresh exact read;
+      Diverged remains blocked. [abort_clean] cannot discard this custody.
+      The host must have joined the former physical owner before opening this
+      Run_claim/Recovery window; a stale read-only command row alone never
+      authorizes interruption. A successful close enables normal claims under
+      this Run_claim. No callback may enter a worker between the final read
+      and closing the window. *)
   val finish : t -> (unit, Error.t) result
 
   (** Non-authorizing lifecycle observation for the owning startup adapter. *)
@@ -640,7 +651,16 @@ val open_or_create
     The configured epoch/run quota is reported as [Limit_exceeded]; malformed
     over-limit documents found on disk fail recovery. A live Run_claim for this
     run rejects same/new-epoch admission until the physical owner relinquishes
-    it. The exclusion is registered before [admit_epoch]'s first yield and
+    it. Repeating the persisted latest owner and capture with [previous = Some
+    exact_observation] is also the read-first startup-recovery route: no epoch
+    is created, and the resulting handle alone grants no execution. The host
+    must finish recovery before reserving a fresh command, then independently
+    reauthorize any new effects against current captured source and actor.
+    A missing run or changed latest epoch/capture conflicts; same-epoch reissue
+    reads the current document revision rather than promising the previous
+    revision is unchanged. This route cannot silently recreate a run from an
+    observed absence. The exclusion is registered
+    before [admit_epoch]'s first yield and
     removed on every exit; a Run_claim cannot slip in while that operation
     waits for I/O. Other runs remain independent. *)
 val admit_epoch
@@ -708,6 +728,37 @@ module Result_root : sig
     :  store
     -> Agent_protocol.Id.Developer_run.t
     -> (t option, Error.t) result
+
+  (** Observe the persisted latest epoch of this exact existing run for startup
+      recovery, before source recapture. The returned physical Observation
+      includes its original owner, capture and observed document revision; it
+      is comparison evidence only. A foreign or changed root, unresolved Store
+      Pending, missing run, closed Store or corrupt document rejects. The read
+      uses the Store's bounded lease, charged work and cooperative checkpoint.
+      The host may pass [Some observation] to [admit_epoch] with the exact
+      Checkpoint owner/capture, then acquire a physical Run_claim and open
+      Recovery. [admit_epoch] re-reads the latest epoch and may observe a newer
+      same-epoch document revision; Recovery re-reads under the exclusive
+      claim. It must not treat this read or the reissued handle as a current
+      source, actor or effect grant. *)
+  val observe_latest : t -> (Observation.t, Error.t) result
+
+  (** Read an already persisted command key before any source recapture or
+      epoch admission. [principal] must match this physical root's retained
+      principal; it is comparison data, not a disclosure grant. The host
+      authenticates the actor and receipt-read policy before and after this
+      yielding operation. A returned row retains its original owner, capture,
+      Receipt.Id and phase; its epoch/capture must occur in the validated
+      document. [None] is an authoritative key miss only when this run has no
+      unresolved Store Pending. Closed/foreign/corrupt or uncertain state
+      fails closed. The existing Store lease, document bounds, charged work and
+      cooperative checkpoint apply. This lookup neither mints a handle nor
+      grants Start, terminal mutation, recapture, or result disclosure. *)
+  val find_command_snapshot
+    :  t
+    -> principal:Agent_protocol.Id.Principal.t
+    -> key:Agent_protocol.Idempotency_key.t
+    -> (Developer_command_row.t option, Error.t) result
 
   (** Read one exact historical job through this root's physically issuing
       Store and daemon writer lease. [owner] must match this root's host, run
