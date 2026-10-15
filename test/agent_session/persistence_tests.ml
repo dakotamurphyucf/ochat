@@ -1,6 +1,112 @@
 open Core
 open Fixtures
 
+let%expect_test "concurrent captured artifact reuse retains one verified publication" =
+  with_temp_directory (fun env temporary ->
+    let module Store = Agent_store.Prompt_artifact_store in
+    let store =
+      Store.create ~env ~root:(Filename.concat temporary "captured-artifacts") |> store_ok
+    in
+    let revision_id =
+      Agent_protocol.Id.Prompt_revision.of_string "prv_reused_captured_child"
+      |> protocol_ok
+    in
+    let artifact ~root_chatmd ~created_at =
+      Store.Artifact.create
+        ~revision_id
+        ~root_chatmd
+        ~sources:[]
+        ~parser_schema_version:5
+        ~runtime_schema_version:1
+        ~created_at
+        ()
+      |> store_ok
+    in
+    let original =
+      artifact ~root_chatmd:"<developer>original</developer>" ~created_at:timestamp
+    in
+    let later =
+      artifact
+        ~root_chatmd:"<developer>original</developer>"
+        ~created_at:(Agent_protocol.Timestamp.add_ms timestamp 1000 |> protocol_ok)
+    in
+    let install candidate ~checkpoint =
+      Store.install_or_reuse
+        store
+        ~transaction_id:(Agent_protocol.Id.Transaction.create ())
+        candidate
+        ~checkpoint
+      |> store_ok
+    in
+    let both_absent, release_both = Eio.Promise.create () in
+    let arrived = ref 0 in
+    (* The Store's second checkpoint is after the absent destination probe,
+       before either fiber attempts its exclusive staging rename. *)
+    let barrier_checkpoint () =
+      let calls = ref 0 in
+      fun () ->
+        Eio.Fiber.check ();
+        Int.incr calls;
+        if Int.equal !calls 2
+        then (
+          Int.incr arrived;
+          if Int.equal !arrived 2 then Eio.Promise.resolve release_both ();
+          Eio.Promise.await both_absent)
+    in
+    let first = ref None in
+    let second = ref None in
+    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
+      Eio.Fiber.both
+        (fun () -> first := Some (install original ~checkpoint:(barrier_checkpoint ())))
+        (fun () -> second := Some (install later ~checkpoint:(barrier_checkpoint ()))));
+    [%test_eq: int] 2 !arrived;
+    let first = Option.value_exn !first in
+    let second = Option.value_exn !second in
+    let retained = Store.load store revision_id |> store_ok in
+    assert (String.equal first.manifest_sha256 second.manifest_sha256);
+    assert (String.equal first.manifest_sha256 retained.manifest_sha256);
+    assert (Agent_protocol.Timestamp.equal first.created_at second.created_at);
+    assert (Agent_protocol.Timestamp.equal first.created_at retained.created_at);
+    let marker = Failure "captured artifact checkpoint" in
+    let raised =
+      try
+        ignore (install original ~checkpoint:(fun () -> raise marker) : Store.Artifact.t);
+        false
+      with
+      | exn -> phys_equal exn marker
+    in
+    assert raised;
+    let conflicting =
+      artifact ~root_chatmd:"<developer>different</developer>" ~created_at:timestamp
+    in
+    assert (
+      Result.is_error
+        (Store.install_or_reuse
+           store
+           ~transaction_id:(Agent_protocol.Id.Transaction.create ())
+           conflicting
+           ~checkpoint:Eio.Fiber.check));
+    let root_file =
+      Eio.Path.(
+        Eio.Stdenv.fs env
+        / temporary
+        / "captured-artifacts"
+        / Agent_protocol.Id.Prompt_revision.to_string revision_id
+        / "root.chatmd")
+    in
+    Eio.Path.unlink root_file;
+    Eio.Path.save ~create:(`Exclusive 0o600) root_file "corrupt";
+    assert (
+      Result.is_error
+        (Store.install_or_reuse
+           store
+           ~transaction_id:(Agent_protocol.Id.Transaction.create ())
+           original
+           ~checkpoint:Eio.Fiber.check)));
+  print_endline "same candidate reused; conflicting and corrupt artifacts rejected";
+  [%expect {| same candidate reused; conflicting and corrupt artifacts rejected |}]
+;;
+
 let durable_event session_id sequence =
   Agent_protocol.Event.Durable.of_payload
     ~session_id

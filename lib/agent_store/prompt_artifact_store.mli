@@ -101,6 +101,27 @@ val install
   -> Artifact.t
   -> (unit, Store_error.t) result
 
+(** Publish an immutable candidate once, or reuse only the fully verified
+    installed artifact at its exact revision ID. The candidate is validated
+    before I/O. An existing destination is loaded with [load], including its
+    manifest, source inventory and materialized tree, and must satisfy
+    [Artifact.same_content]; the returned value is the installed artifact with
+    its original creation metadata and publication digest. A competing
+    same-revision install, or uncertainty after this call's install attempt,
+    succeeds only after the complete installed artifact is verified and the
+    artifact parent directory is synced. Missing, incomplete, symlinked or
+    conflicting content fails closed. The caller owns normal artifact-root
+    publication/pruning lifetime; this operation creates no new authority.
+    [checkpoint] is called around the bounded admission and verification
+    phases, and its exception/cancellation propagates unchanged. Raw [install]
+    retains its exclusive, reject-existing contract. *)
+val install_or_reuse
+  :  t
+  -> transaction_id:Agent_protocol.Id.Transaction.t
+  -> Artifact.t
+  -> checkpoint:(unit -> unit)
+  -> (Artifact.t, Store_error.t) result
+
 (** [load] verifies the original manifest bytes/digest and stored revision identity
     before current named admission, every source digest and the materialized tree.
     Returned artifacts preserve the exact publication rather than reauthoring it.

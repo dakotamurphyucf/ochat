@@ -143,6 +143,10 @@ verify the materialized file inventory and hashes,
 rejecting changed, missing, unexpected or symlinked files. Parsing then uses
 verified captured bytes with no filesystem fallback for source edges. Older
 artifacts retain their existing modes but receive the same verification.
+Repeated launches of an unchanged captured child reuse its fully verified
+installed revision, including the original publication metadata. A changed or
+damaged artifact is rejected; reuse does not rerun an earlier child or grant
+permission to launch it.
 This is not continuous filesystem monitoring or a sandbox against the daemon
 account: keep the store outside tools' writable roots. Absolute/dynamic external
 agent dependencies remain outside this pinning guarantee.
