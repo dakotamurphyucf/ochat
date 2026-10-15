@@ -112,7 +112,14 @@ let service ~commit_call ~commit_output ?prepare_call () : S.Tool_dispatch.t =
   }
 ;;
 
-let run env ~on_history_item_appended ~on_transcript_event ?dispatch_tool responses =
+let run
+      env
+      ~on_history_item_appended
+      ~on_transcript_event
+      ?dispatch_tool
+      ?on_admitted_call
+      responses
+  =
   selected_run
     ~env
     ~datadir:(Eio.Stdenv.cwd env)
@@ -123,9 +130,53 @@ let run env ~on_history_item_appended ~on_transcript_event ?dispatch_tool respon
     ~on_history_item_appended
     ~on_transcript_event
     ?dispatch_tool
+    ?on_admitted_call
     ~parallel_tool_calls:false
     ~post_stream:(post responses)
     ()
+;;
+
+let%expect_test "host-rejected committed call never issues admitted-call proof" =
+  Eio_main.run (fun env ->
+    let tokens = ref 0 in
+    let commits = ref 0 in
+    let dispatch : S.Tool_dispatch.t =
+      { for_fork = None
+      ; commit_call =
+          (fun _ ->
+            Int.incr commits;
+            true)
+      ; prepare_call =
+          Some
+            (fun _ ->
+              Ok (Some (Chat_response.Moderation.Tool_moderation.Reject "denied")))
+      ; validate_original = (fun ~kind:_ ~name:_ ~payload:_ -> Ok ())
+      ; run =
+          (fun ?run_native:_ _ ~authorize:_ ->
+            Some
+              { output = R.Tool_output.Output.Text "denied"
+              ; commit_output = Some ignore
+              ; runtime_requests = []
+              })
+      }
+    in
+    let history =
+      run
+        env
+        ~dispatch_tool:dispatch
+        ~on_admitted_call:(fun _ -> Int.incr tokens)
+        ~on_history_item_appended:ignore
+        ~on_transcript_event:ignore
+        (Queue.of_list [ call_events call; [ done_ (message "done") ] ])
+    in
+    assert (!commits = 1);
+    assert (!tokens = 0);
+    printf
+      "committed_calls=%d tokens=%d history=%d\n"
+      !commits
+      !tokens
+      (List.length history));
+  [%expect {| committed_calls=1 tokens=0 history=3 |}]
 ;;
 
 let%test_unit "all three owner commit seams precede exact finalization" =
