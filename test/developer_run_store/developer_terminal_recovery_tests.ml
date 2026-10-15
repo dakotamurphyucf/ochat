@@ -340,7 +340,9 @@ let%test_unit "recovery work limit and callback exception stay distinct" =
         let before = !ticks in
         let view = R.Recovery.observe recovery |> F.run_ok in
         let observed_work = !ticks - before in
-        if observed_work <= Int.max opening_work admission_work
+        (* Opening now includes the independent abandoned-Live inventory scan;
+           compare recovery against admission work, which this limit probes. *)
+        if observed_work <= admission_work
         then
           failwithf
             "recovery work thresholds: opening=%d admission=%d observed=%d"

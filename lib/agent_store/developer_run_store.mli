@@ -60,6 +60,57 @@ type t
 type handle
 type store = t
 
+module Live_directory : sig
+  type t
+
+  (** Reserve one provisional directory slot for this exact Store-issued Live
+      handle before native resource preparation. This sibling of the durable
+      developer-runs namespace is an exclusive generation-named 0700 child
+      under the SAME daemon lock and filesystem capability borrowed through
+      Store.with_lease. The owner/handle, rather than a caller path or run ID,
+      selects it. A second open for the same run is Conflict. No directory
+      receipt grants Root/Run_claim/workspace/source authority. Failure or
+      cancellation releases only this reservation and removes only a child
+      created by this call; Store.close_and_wait rejects while a child is live.
+
+      [open_or_create] performs finite, no-follow startup inspection and
+      removal of abandoned children under its existing recovery allowance.
+      Unknown or linked child roots/ownership markers and over-limit entries
+      fail closed, not as empty inventory. Symbolic links WITHIN an authenticated
+      owned child are unlinked without following them.
+      Cold terminal recovery never adopts a previous Live directory. *)
+  val open_
+    :  handle
+    -> sw:Eio.Switch.t
+    -> checkpoint:(unit -> unit)
+    -> (t, Error.t) result
+
+  (** Actual owner-derived paths for Runtime_paths and the existing
+      Workspace_resolver Session_dir coordinate. None is an independent native
+      filesystem capability or permission to read a workspace. *)
+  val runtime_directory : t -> string
+
+  val cache_directory : t -> string
+  val response_directory : t -> string
+  val workspace_parent_directory : t -> string
+
+  (** Checks original Store/daemon lock, issuing domain and own live slot.
+      A copied path or equal owner record does not pass. *)
+  val check_live : t -> (unit, Error.t) result
+
+  (** Call only after native/workspace users join and any Session_dir child is
+      cleaned through Workspace_cleanup.remove_bounded. Refuses a remaining
+      workspace child. Each attempt uses a fresh finite no-follow streaming
+      allowance from this Store's immutable recovery limits, retaining this
+      token and Store close exclusion on partial/error cleanup. An inner link is
+      unlinked as a link. A failed final marker/rmdir tail retains in-memory
+      root identity for same-process retry; after restart an unmarked child is
+      quarantined. Repeated close after success is harmless. Switch release
+      retries actual unfinished work. [checkpoint] preserves cancellation and
+      there is no unbounded rmtree tail. *)
+  val close_and_wait : t -> checkpoint:(unit -> unit) -> (unit, Error.t) result
+end
+
 module Run_claim : sig
   type t
 

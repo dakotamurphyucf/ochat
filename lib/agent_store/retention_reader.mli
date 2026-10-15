@@ -79,6 +79,15 @@ val list_with_checkpoint
   -> checkpoint:(unit -> unit)
   -> (string list, Store_error.t) result
 
+(** Same bounded stream with a pure nonyielding admission callback before
+    retaining each name; used when the owner charges aggregate name bytes. *)
+val list_with_checkpoint_and_names
+  :  t
+  -> directory:string
+  -> on_name:(string -> (unit, Store_error.t) result)
+  -> checkpoint:(unit -> unit)
+  -> (string list, Store_error.t) result
+
 (** Read a regular file without following observed links or accepting parent-path
     traversal. Enforces both the per-file and remaining aggregate byte ceilings,
     including growth after stat. Every error invalidates the collection attempt. *)

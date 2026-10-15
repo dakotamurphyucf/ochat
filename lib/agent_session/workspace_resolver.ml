@@ -104,6 +104,10 @@ let planned_root definition ~instance_id ~session_directory =
 
 let resolve_temporary
       ~adopt
+      ~adopt_unverified
+      ~adopt_provisional
+      ~mark_provisional
+      ~bounded_provisional
       ~env
       ~instance_id
       ~session_directory
@@ -115,20 +119,29 @@ let resolve_temporary
   let exclusive = Workspace_definition.equal_temporary_location location System_tmp in
   let owned = ref false in
   let close_failed () =
-    if !owned
+    if !owned && not bounded_provisional
     then (
       try Eio.Cancel.protect (fun () -> Eio.Path.rmtree (eio_path env path)) with
       | _ -> ())
   in
   Exn.protect ~finally:close_failed ~f:(fun () ->
     let resolve () =
-      if exclusive
+      if exclusive || bounded_provisional
       then
         Eio.Cancel.protect (fun () ->
           Eio.Path.mkdir ~perm:0o700 (eio_path env path);
-          owned := true)
+          owned := true;
+          if bounded_provisional
+          then (
+            (* The exclusive mkdir succeeded. Until stat captures its inode,
+               keep an owner receipt that refuses deletion and lease release. *)
+            adopt_unverified path;
+            let stat = Eio.Path.stat ~follow:false (eio_path env path) in
+            adopt_provisional path stat.dev stat.ino))
       else Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 (eio_path env path);
-      write_ownership_marker ~env ~instance_id path;
+      Eio.Cancel.protect (fun () ->
+        write_ownership_marker ~env ~instance_id path;
+        mark_provisional ());
       Result.map (identity ~env path) ~f:(fun canonical_root ->
         make
           definition
@@ -160,6 +173,10 @@ let resolve ~env ~instance_id ~session_directory definition =
   | Temporary { location; cleanup; _ } ->
     resolve_temporary
       ~adopt:ignore
+      ~adopt_unverified:ignore
+      ~adopt_provisional:(fun _ _ _ -> ())
+      ~mark_provisional:(fun () -> ())
+      ~bounded_provisional:false
       ~env
       ~instance_id
       ~session_directory
@@ -171,14 +188,25 @@ let resolve ~env ~instance_id ~session_directory definition =
 module Owned = struct
   exception Cleanup_failed of Agent_store.Store_error.t
 
+  type provisional =
+    | Unverified of string
+    | Verified of string * int64 * int64 * bool * bool
+
   type t =
     { env : Eio_unix.Stdenv.base
     ; domain : int
     ; physical_roots : string list
     ; managed_root : string option
     ; mutable acquired : Workspace_instance.t option
+    ; mutable provisional : provisional option
     ; mutable transferred : bool
     ; mutable cleanup_exception : (exn * Backtrace.t) option
+    ; cleanup_limits : Workspace_cleanup.Limits.t option
+    ; cleanup_checkpoint : unit -> unit
+    ; cleanup_has_active_lease : conflict_domain:string -> bool
+    ; cleanup_progress : Workspace_cleanup.Progress.t
+    ; cleanup_on_complete : unit -> unit
+    ; mutable cleanup_notified : bool
     }
 
   let check_domain_exn t =
@@ -196,41 +224,117 @@ module Owned = struct
     t.transferred <- true
   ;;
 
-  let close_resources t =
+  let close_resources_unprotected t =
     check_domain_exn t;
-    Eio.Cancel.protect (fun () ->
-      if t.transferred
-      then Ok ()
-      else (
-        match t.acquired with
-        | None -> Ok ()
-        | Some instance ->
-          (match instance.Workspace_instance.source_kind, t.managed_root with
-           | Temporary System_tmp, Some managed_root ->
-             Workspace_cleanup.remove
-               ~env:t.env
-               ~protected_roots:
-                 { data_root = managed_root
-                 ; physical_workspaces = t.physical_roots
-                 ; managed_roots = [ managed_root ]
-                 }
-               ~expected_path:instance.canonical_root.native_path
-               ~has_active_lease:(fun ~conflict_domain:_ -> false)
-               ~now:instance.created_at
-               instance
-             |> Result.map ~f:(fun _ -> t.transferred <- true)
-           | (Physical | Current | Temporary Session_dir), _ ->
+    if t.transferred
+    then Ok ()
+    else (
+      match t.acquired with
+      | None ->
+        (match t.provisional, t.cleanup_limits with
+         | None, _ -> Ok ()
+         | Some (Unverified _), _ ->
+           Error
+             (Agent_store.Store_error.Corrupt
+                "provisional workspace identity was not established")
+         | ( Some (Verified (path, device, inode, marker_created, marker_removed))
+           , Some limits ) ->
+           let native = eio_path t.env path in
+           let stat = Eio.Path.stat ~follow:false native in
+           if not (Int64.equal stat.dev device && Int64.equal stat.ino inode)
+           then
+             Error
+               (Agent_store.Store_error.Corrupt "provisional workspace identity changed")
+           else
+             let open Result.Let_syntax in
+             let%bind () =
+               Agent_store.Bounded_tree_cleanup.remove_children
+                 ~env:t.env
+                 ~root:path
+                 ~expected_root:(device, inode)
+                 ~marker_name:Workspace_ownership.marker
+                 ~limits:(Workspace_cleanup.Limits.tree limits)
+                 ~checkpoint:t.cleanup_checkpoint
+             in
+             if marker_created && not marker_removed
+             then (
+               Eio.Path.unlink
+                 (eio_path t.env (Filename.concat path Workspace_ownership.marker));
+               t.provisional
+               <- Some (Verified (path, device, inode, marker_created, true)));
+             Eio.Path.rmdir native;
+             t.provisional <- None;
              t.transferred <- true;
              Ok ()
-           | Temporary System_tmp, None ->
-             Error
-               (Agent_store.Store_error.Corrupt
-                  "owned temporary workspace has no managed root"))))
+         | Some (Verified _), None ->
+           Error
+             (Agent_store.Store_error.Corrupt
+                "provisional workspace lacks bounded cleanup"))
+      | Some instance ->
+        (match instance.Workspace_instance.source_kind, t.managed_root with
+         | Temporary (System_tmp | Session_dir), Some managed_root ->
+           (match t.cleanup_limits with
+            | None
+              when match instance.source_kind with
+                   | Temporary System_tmp -> true
+                   | Physical | Current | Temporary Session_dir -> false ->
+              Workspace_cleanup.remove
+                ~env:t.env
+                ~protected_roots:
+                  { data_root = managed_root
+                  ; physical_workspaces = t.physical_roots
+                  ; managed_roots = [ managed_root ]
+                  }
+                ~expected_path:instance.canonical_root.native_path
+                ~has_active_lease:t.cleanup_has_active_lease
+                ~now:instance.created_at
+                instance
+            | None -> Ok instance
+            | Some limits ->
+              Workspace_cleanup.remove_bounded
+                ~env:t.env
+                ~protected_roots:
+                  { data_root = managed_root
+                  ; physical_workspaces = t.physical_roots
+                  ; managed_roots = [ managed_root ]
+                  }
+                ~expected_path:instance.canonical_root.native_path
+                ~has_active_lease:t.cleanup_has_active_lease
+                ~now:instance.created_at
+                ~limits
+                ~progress:t.cleanup_progress
+                ~checkpoint:t.cleanup_checkpoint
+                instance)
+           |> Result.map ~f:(fun _ -> t.transferred <- true)
+         | (Physical | Current), _ ->
+           t.transferred <- true;
+           Ok ()
+         | Temporary Session_dir, None ->
+           Error
+             (Agent_store.Store_error.Corrupt
+                "owned temporary workspace has no managed root")
+         | Temporary System_tmp, None ->
+           Error
+             (Agent_store.Store_error.Corrupt
+                "owned temporary workspace has no managed root")))
+  ;;
+
+  let close_resources t =
+    match t.cleanup_limits with
+    | None -> Eio.Cancel.protect (fun () -> close_resources_unprotected t)
+    | Some _ -> close_resources_unprotected t
   ;;
 
   let close t =
     match close_resources t with
-    | result -> result
+    | Ok () as result ->
+      if not t.cleanup_notified
+      then (
+        t.cleanup_on_complete ();
+        t.cleanup_notified <- true);
+      t.cleanup_exception <- None;
+      result
+    | Error _ as result -> result
     | exception exn ->
       let trace = Backtrace.Exn.most_recent () in
       t.cleanup_exception <- Some (exn, trace);
@@ -238,8 +342,24 @@ module Owned = struct
   ;;
 end
 
-let resolve_owned ~sw ~env ~physical_roots ~instance_id ~session_directory definition =
-  Eio.Switch.check sw;
+let resolve_owned
+      ?cleanup_limits
+      ?(cleanup_checkpoint = fun () -> ())
+      ?(cleanup_has_active_lease = fun ~conflict_domain:_ -> false)
+      ?(cleanup_on_complete = fun () -> ())
+      ~sw
+      ~env
+      ~physical_roots
+      ~instance_id
+      ~session_directory
+      definition
+  =
+  (try Eio.Switch.check sw with
+   | exn ->
+     (* No owner has been registered and no workspace acquisition has begun.
+        Release any caller-held provisional lease at this sole early exit. *)
+     cleanup_on_complete ();
+     raise exn);
   let owned =
     Owned.
       { env
@@ -247,41 +367,95 @@ let resolve_owned ~sw ~env ~physical_roots ~instance_id ~session_directory defin
       ; physical_roots
       ; managed_root =
           (match definition.Workspace_definition.source with
+           | Temporary { location = Session_dir; _ } when Option.is_some cleanup_limits ->
+             Some session_directory
            | Temporary { managed_root; _ } -> managed_root
            | Physical _ -> None)
       ; acquired = None
+      ; provisional = None
       ; transferred = false
       ; cleanup_exception = None
+      ; cleanup_limits
+      ; cleanup_checkpoint
+      ; cleanup_has_active_lease
+      ; cleanup_progress = Workspace_cleanup.Progress.create ()
+      ; cleanup_on_complete
+      ; cleanup_notified = false
       }
   in
-  Eio.Switch.on_release sw (fun () ->
-    let previous = owned.Owned.cleanup_exception in
-    let result = Owned.close owned in
-    match previous with
-    | Some (exn, trace) -> Exn.raise_with_original_backtrace exn trace
-    | None ->
-      (match result with
-       | Ok () -> ()
-       | Error failure -> raise (Owned.Cleanup_failed failure)));
-  let adopt instance = owned.acquired <- Some instance in
-  let resolved =
-    match definition.Workspace_definition.source with
-    | Physical { configured_root } ->
-      resolve_physical ~env ~instance_id definition configured_root
-      |> Result.map ~f:(fun instance ->
-        adopt instance;
-        instance)
-    | Temporary { location; cleanup; _ } ->
-      resolve_temporary
-        ~adopt
-        ~env
-        ~instance_id
-        ~session_directory
-        definition
-        location
-        cleanup
+  (try
+     Eio.Switch.on_release sw (fun () ->
+       let previous = owned.Owned.cleanup_exception in
+       let result = Owned.close owned in
+       match previous, cleanup_limits with
+       | Some _, Some _ when Result.is_ok result -> ()
+       | Some (exn, trace), _ -> Exn.raise_with_original_backtrace exn trace
+       | None, _ ->
+         (match result with
+          | Ok () -> ()
+          | Error failure -> raise (Owned.Cleanup_failed failure)))
+   with
+   | exn ->
+     let trace = Backtrace.Exn.most_recent () in
+     (* Registration failed before any workspace acquisition. The switch owns
+        no cleanup callback in this case, so release the provisional lease. *)
+     if not owned.cleanup_notified
+     then (
+       cleanup_on_complete ();
+       owned.cleanup_notified <- true);
+     Exn.raise_with_original_backtrace exn trace);
+  let adopt instance =
+    owned.acquired <- Some instance;
+    owned.provisional <- None
   in
-  Result.map resolved ~f:(fun _ -> owned)
+  let adopt_unverified path = owned.provisional <- Some (Owned.Unverified path) in
+  let adopt_provisional path device inode =
+    owned.provisional <- Some (Owned.Verified (path, device, inode, false, false))
+  in
+  let mark_provisional () =
+    owned.provisional
+    <- Option.map owned.provisional ~f:(function
+         | Owned.Unverified path -> Owned.Unverified path
+         | Owned.Verified (path, device, inode, _, marker_removed) ->
+           Owned.Verified (path, device, inode, true, marker_removed))
+  in
+  let resolved =
+    try
+      Eio.Switch.check sw;
+      match definition.Workspace_definition.source with
+      | Physical { configured_root } ->
+        resolve_physical ~env ~instance_id definition configured_root
+        |> Result.map ~f:(fun instance ->
+          adopt instance;
+          instance)
+      | Temporary { location; cleanup; _ } ->
+        resolve_temporary
+          ~adopt
+          ~adopt_unverified
+          ~adopt_provisional
+          ~mark_provisional
+          ~bounded_provisional:(Option.is_some cleanup_limits)
+          ~env
+          ~instance_id
+          ~session_directory
+          definition
+          location
+          cleanup
+    with
+    | exn ->
+      let trace = Backtrace.Exn.most_recent () in
+      (try
+         Eio.Cancel.protect (fun () ->
+           ignore (Owned.close owned : (unit, Agent_store.Store_error.t) result))
+       with
+       | _ -> ());
+      Exn.raise_with_original_backtrace exn trace
+  in
+  match resolved with
+  | Ok _ -> Ok owned
+  | Error error ->
+    ignore (Owned.close owned : (unit, Agent_store.Store_error.t) result);
+    Error error
 ;;
 
 let resolve_current ~env ~instance_id ~path ~access ~created_at =
