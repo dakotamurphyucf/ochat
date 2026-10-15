@@ -124,6 +124,12 @@ module Model_selection = struct
              | Error error -> Error (protocol_error error))
            else Error (model_denied ())))
   ;;
+
+  let context t =
+    let open Result.Let_syntax in
+    let%map () = check_current t in
+    t.context
+  ;;
 end
 
 let select_model t ~actor ~target =

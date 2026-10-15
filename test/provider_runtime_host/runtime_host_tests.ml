@@ -23,9 +23,139 @@ module Disclosure = Agent_server.Developer_result_disclosure
 module Native = Agent_server.Developer_native_executor
 module Capabilities = Chat_response.Tool_capability
 
+exception Model_ack_failed
+
 let ok r =
   Result.map_error r ~f:(fun _ -> "synthetic runtime-host fixture failed")
   |> Result.ok_or_failwith
+;;
+
+let inference_usage ~scope ~accounting_id =
+  let module O = Inference.Observation in
+  let actual value = O.Count.create (Actual value) |> ok in
+  let unknown = O.Count.create (Unknown Not_reported) |> ok in
+  let counts =
+    O.Usage.
+      { input = actual 1L
+      ; output = actual 0L
+      ; reported_total = unknown
+      ; cached_input = unknown
+      ; cache_write_input = unknown
+      ; reasoning_output = unknown
+      }
+  in
+  O.create
+    ~scope
+    ~id:accounting_id
+    ~revision:1L
+    ~payload:(Usage (O.Usage.create ~counts ~inclusions:[] |> ok))
+    ~limits:O.Admission.observation
+  |> ok
+;;
+
+let synthetic_call_context target =
+  let module E = Inference.Event in
+  let module H = History_entry.Payload in
+  let rounds = ref 0 in
+  let call =
+    H.Semantic.create
+      (Call
+         { kind = Function
+         ; name = "inspect"
+         ; namespace = Absent
+         ; input_bytes = "{}"
+         ; async = Absent
+         })
+      ~metadata:{ H.Metadata.empty with call_id = Value "nested-call" }
+    |> ok
+    |> H.authored
+  in
+  let answer =
+    H.Semantic.create
+      (Message
+         { form = Output
+         ; role = Assistant
+         ; content = [ Text { text = "done"; annotations = []; logprobs = Absent } ]
+         ; phase = Absent
+         })
+      ~metadata:H.Metadata.empty
+    |> ok
+    |> H.authored
+  in
+  let candidate scope id payload local_execution =
+    let semantic = H.semantic payload in
+    let call_name =
+      match H.Semantic.view semantic with
+      | Call { name; _ } -> Some name
+      | Message _ | Result _ | Reasoning _ | Unknown _ -> None
+    in
+    let item =
+      Transcript.Item.create
+        ~scope
+        ~id:(Transcript.Item_id.of_string id |> ok)
+        ~entry_id:None
+        ~header:(Some (Transcript.Header.of_semantic semantic))
+        ~call_name
+      |> ok
+    in
+    E.create
+      (Candidate_ready { item; payload; local_execution })
+      ~limits:Transcript.Admission.default
+    |> ok
+  in
+  let run
+        _request
+        ~sw:_
+        ~scope
+        ~accounting_id
+        ~note_delivery:_
+        ~on_event
+        ~on_observation:_
+        ~submission_guard:_
+    =
+    incr rounds;
+    let output =
+      if !rounds = 1
+      then [ candidate scope "nested-eligible" call Tool_candidate ]
+      else [ candidate scope "nested-answer" answer Not_eligible ]
+    in
+    List.iter output ~f:on_event;
+    RT.Receipt.create
+      ~terminal:
+        (E.Terminal.create ~scope ~delivery:Response_started ~outcome:Completed |> ok)
+      ~usage:(inference_usage ~scope ~accounting_id)
+      ~output
+      ~output_coverage:Response_output
+      ~limits:RT.Limits.default
+    |> ok
+  in
+  let prepare ~preparation_id request =
+    let configuration =
+      Inference.Observation.Configuration.of_target
+        (Inference.Request.target request)
+        ~preparation_id
+        ~transport:In_process
+        ~capabilities:[]
+        ~limits:Inference.Observation.Admission.observation
+      |> ok
+    in
+    RT.Plan.create
+      ~request
+      ~configuration
+      ~fingerprint:"synthetic-call"
+      ~run:(run request)
+  in
+  let adapter =
+    RT.Adapter.create
+      ~preflight_history:(fun ~target:_ _ -> Ok ())
+      ~id:(Inference.Request.Target.adapter target)
+      ~limits:RT.Limits.default
+      ~bind:(fun _ -> Ok ())
+      ~prepare
+      ()
+    |> ok
+  in
+  RT.Context.create adapter ~target |> ok, rounds
 ;;
 
 let id s = M.Id.create s |> ok
@@ -328,7 +458,15 @@ let%test_unit
       Run_store.open_or_create
         session
         ~sw
-        ~limits:(Root_fixture.store_limits ~max_job_payload_bytes:4096 ())
+        ~limits:
+          (Root_fixture.store_limits
+             ~max_job_payload_bytes:4096
+             ~max_document_bytes:131072
+             ~max_inference_bytes_per_run:65536
+             ~max_work_steps:4096
+             ~max_document_fields:8192
+             ~max_document_nodes:16384
+             ())
         ~checkpoint:(fun () -> !checkpoint_gate ())
       |> ok
     in
@@ -370,6 +508,8 @@ let%test_unit
         ~max_native_occupancy:1
         ~max_active_workers:1
         ~max_quarantined_workers:1
+        ~max_active_inference_attempts:2
+        ~max_admitted_call_bindings:32
       |> Or_error.ok_exn
     in
     let registry =
@@ -580,7 +720,397 @@ let%test_unit
        : P.Developer_job.t option);
     let observed = Run_store.observe handle |> ok in
     assert (Option.is_some (Run_store.find_job observed (Option.value_exn !child_model)));
+    let model_acknowledgements = ref 0 in
+    let model_completions = ref 0 in
+    let admitted_nested_calls = ref 0 in
+    let nested_effects = ref 0 in
+    let escaped_scope = ref None in
+    let escaped_prepared = ref None in
+    let expected = Run_store.observe handle |> ok in
+    let failed_model_callback =
+      try
+        ignore
+          (Root.with_claimed_job
+             after_actor_revoke
+             ~expected
+             ~lookup:(Run_store.find_job_exact expected first_model)
+             (fun ~active ~sw:_ ->
+                Root.Model_inference.with_claimed
+                  after_actor_revoke
+                  ~active
+                  ~f:(fun scope ~sw ->
+                    escaped_scope := Some scope;
+                    let context = Root.Model_inference.context scope in
+                    assert (
+                      phys_equal
+                        context
+                        (Port.Model_selection.context selected_model |> ok));
+                    let synthetic_context, synthetic_rounds =
+                      synthetic_call_context (RT.Context.target context)
+                    in
+                    let parent_terminal = ref false in
+                    let terminal_ready, release_terminal = Eio.Promise.create () in
+                    let admitted_token = ref None in
+                    let identity = Root.Model_inference.identity scope in
+                    let table = String.Table.create () in
+                    Hashtbl.set table ~key:"inspect" ~data:(fun ~invocation:_ _ ->
+                      Eio.Promise.await terminal_ready;
+                      assert !parent_terminal;
+                      let token = Option.value_exn !admitted_token in
+                      let parent =
+                        Chat_response.In_memory_stream.Admitted_call.parent token
+                      in
+                      let nested_request =
+                        Inference.Request.create
+                          ~target:(RT.Context.target synthetic_context)
+                          ~history:[]
+                          ~tools:[]
+                          ~assets:[]
+                          ~limits:Document_schema.Limits.default
+                        |> ok
+                      in
+                      let prepared =
+                        RT.Context.prepare
+                          synthetic_context
+                          ~preparation_id:"delayed-nested"
+                          nested_request
+                        |> ok
+                      in
+                      identity.with_attempt
+                        prepared
+                        ~relation:(Transcript.Scope.Nested parent)
+                        ~f:(fun ~scope:nested_scope ~accounting_id ->
+                          let attempt =
+                            RT.Prepared.start prepared ~scope:nested_scope ~accounting_id
+                            |> ok
+                          in
+                          Root.Model_inference.on_attempt scope attempt;
+                          incr admitted_nested_calls);
+                      incr nested_effects;
+                      Openai.Responses.Tool_output.Output.Text "done");
+                    let allocator =
+                      History_entry.Allocator.create
+                        ~namespace:"developer-model"
+                        ~next_sequence:0
+                      |> ok
+                    in
+                    ignore
+                      (Chat_response.In_memory_stream
+                       .run_completion_stream_in_memory_entries
+                         ~env
+                         ~inference_context:synthetic_context
+                         ~inference_identity:identity
+                         ~on_inference_attempt:(Root.Model_inference.on_attempt scope)
+                         ~on_inference_completion:(fun completion ->
+                           Root.Model_inference.on_completion scope completion;
+                           if not !parent_terminal
+                           then (
+                             parent_terminal := true;
+                             Eio.Promise.resolve release_terminal ()))
+                         ~on_inference_observation:
+                           (Root.Model_inference.on_observation scope)
+                         ~on_admitted_call:(fun token ->
+                           assert (not !parent_terminal);
+                           Root.Model_inference.on_admitted_call scope token;
+                           admitted_token := Some token)
+                         ~before_inference_dispatch:
+                           (Root.Model_inference.before_dispatch scope)
+                         ~allocator
+                         ~history:[]
+                         ~tools:(Some [])
+                         ~tool_tbl:table
+                         ~parallel_tool_calls:true
+                         ~sw
+                         ()
+                       : History_entry.t list);
+                    assert (!synthetic_rounds = 2);
+                    assert (!admitted_nested_calls = 1 && !nested_effects = 1);
+                    let request =
+                      Inference.Request.create
+                        ~target:(RT.Context.target context)
+                        ~history:[]
+                        ~tools:[]
+                        ~assets:[]
+                        ~limits:Document_schema.Limits.default
+                      |> ok
+                    in
+                    escaped_prepared
+                    := Some
+                         (RT.Context.prepare context ~preparation_id:"escaped" request
+                          |> ok);
+                    ignore
+                      (Inference_client.run
+                         context
+                         ~sw
+                         ~identity:(Root.Model_inference.identity scope)
+                         ~relation:Transcript.Scope.Root
+                         ~request
+                         ~before_dispatch:(Root.Model_inference.before_dispatch scope)
+                         ~on_attempt:(fun attempt ->
+                           let wrong_prepared =
+                             RT.Context.prepare
+                               context
+                               ~preparation_id:"wrong-accounting-attempt"
+                               request
+                             |> ok
+                           in
+                           let wrong_accounting =
+                             Inference.Observation.Observation_id.of_string "wrong-usage"
+                             |> ok
+                           in
+                           let wrong_attempt =
+                             RT.Prepared.start
+                               wrong_prepared
+                               ~scope:(RT.Attempt.scope attempt)
+                               ~accounting_id:wrong_accounting
+                             |> ok
+                           in
+                           let rejected =
+                             try
+                               Root.Model_inference.on_attempt scope wrong_attempt;
+                               false
+                             with
+                             | _ -> true
+                           in
+                           assert rejected;
+                           let wrong_configuration =
+                             RT.Context.prepare
+                               context
+                               ~preparation_id:"wrong-configuration-attempt"
+                               request
+                             |> ok
+                           in
+                           let wrong_configuration_attempt =
+                             RT.Prepared.start
+                               wrong_configuration
+                               ~scope:(RT.Attempt.scope attempt)
+                               ~accounting_id:(RT.Attempt.accounting_id attempt)
+                             |> ok
+                           in
+                           assert (
+                             not
+                               (Inference.Observation.Configuration.equal
+                                  (RT.Attempt.configuration wrong_configuration_attempt)
+                                  (RT.Attempt.configuration attempt)));
+                           assert (
+                             try
+                               Root.Model_inference.on_attempt
+                                 scope
+                                 wrong_configuration_attempt;
+                               false
+                             with
+                             | _ -> true);
+                           Root.Model_inference.on_attempt scope attempt;
+                           incr model_acknowledgements;
+                           raise Model_ack_failed)
+                         ~on_completion:(fun completion ->
+                           Root.Model_inference.on_completion scope completion;
+                           incr model_completions)
+                         ~on_event:ignore
+                         ~on_observation:(Root.Model_inference.on_observation scope)
+                       : (RT.Receipt.t, Inference_client.Error.t) result);
+                    failwith "strict inference acknowledgement did not fail"))
+           |> function
+           | Ok value -> value
+           | Error error ->
+             failwith
+               ("model fixture: "
+                ^ P.Error.code_to_string error.P.Error.code
+                ^ ": "
+                ^ error.P.Error.message));
+        false
+      with
+      | Model_ack_failed -> true
+    in
+    assert failed_model_callback;
+    assert (!model_acknowledgements = 1 && !model_completions = 1);
+    assert (
+      try
+        Root.Model_inference.before_dispatch
+          (Option.value_exn !escaped_scope)
+          (Option.value_exn !escaped_prepared);
+        false
+      with
+      | _ -> true);
+    let sibling_callbacks = ref 0 in
+    let sibling_deferred = ref false in
+    let expected = Run_store.observe handle |> ok in
+    ignore
+      (Root.with_claimed_job
+         after_actor_revoke
+         ~expected
+         ~lookup:(Run_store.find_job_exact expected second_model)
+         (fun ~active ~sw:_ ->
+            (Root.Model_inference.with_claimed
+               after_actor_revoke
+               ~active
+               ~f:(fun scope ~sw:_ ->
+                 let context = Root.Model_inference.context scope in
+                 let request =
+                   Inference.Request.create
+                     ~target:(RT.Context.target context)
+                     ~history:[]
+                     ~tools:[]
+                     ~assets:[]
+                     ~limits:Document_schema.Limits.default
+                   |> ok
+                 in
+                 let prepared label =
+                   RT.Context.prepare context ~preparation_id:label request |> ok
+                 in
+                 let identity = Root.Model_inference.identity scope in
+                 let older_prepared = prepared "older-sibling" in
+                 identity.with_attempt
+                   older_prepared
+                   ~relation:Transcript.Scope.Root
+                   ~f:(fun ~scope:older_scope ~accounting_id:older_accounting ->
+                     let older =
+                       RT.Prepared.start
+                         older_prepared
+                         ~scope:older_scope
+                         ~accounting_id:older_accounting
+                       |> ok
+                     in
+                     Root.Model_inference.on_attempt scope older;
+                     incr sibling_callbacks;
+                     let newer_prepared = prepared "newer-sibling" in
+                     let uncertain_newer =
+                       try
+                         identity.with_attempt
+                           newer_prepared
+                           ~relation:Transcript.Scope.Root
+                           ~f:(fun ~scope:newer_scope ~accounting_id:newer_accounting ->
+                             let newer =
+                               RT.Prepared.start
+                                 newer_prepared
+                                 ~scope:newer_scope
+                                 ~accounting_id:newer_accounting
+                               |> ok
+                             in
+                             let overflow_entered = ref false in
+                             let overflow_rejected =
+                               try
+                                 identity.with_attempt
+                                   (prepared "overflow-sibling")
+                                   ~relation:Transcript.Scope.Root
+                                   ~f:(fun ~scope:_ ~accounting_id:_ ->
+                                     overflow_entered := true);
+                                 false
+                               with
+                               | _ -> true
+                             in
+                             assert (overflow_rejected && not !overflow_entered);
+                             rename_armed := true;
+                             Root.Model_inference.on_attempt scope newer;
+                             incr sibling_callbacks);
+                         false
+                       with
+                       | _ -> true
+                     in
+                     assert uncertain_newer;
+                     assert !sync_blocked;
+                     sync_blocked := false;
+                     let older_observation =
+                       inference_usage ~scope:older_scope ~accounting_id:older_accounting
+                     in
+                     (sibling_deferred
+                      := try
+                           Root.Model_inference.on_observation scope older_observation;
+                           false
+                         with
+                         | _ -> true);
+                     assert !sibling_deferred))
+             |> function
+             | Ok value -> value
+             | Error error ->
+               failwith
+                 ("sibling model fixture: "
+                  ^ P.Error.code_to_string error.P.Error.code
+                  ^ ": "
+                  ^ error.P.Error.message));
+            let state =
+              P.Developer_job.state
+                (Run_store.Claim.job (Agent_session.Developer_job_scope.claim active))
+            in
+            Ok
+              { state with
+                status = P.Job.Succeeded
+              ; completed_at = Some (Root_fixture.now ())
+              ; result =
+                  Some
+                    (P.Developer_job.Result_value.Inline (P.Completion.Succeeded `Null))
+              })
+       |> ok
+       : P.Developer_job.t option);
+    assert (!sibling_callbacks = 1 && !sibling_deferred);
+    let child_model = Option.value_exn !child_model in
+    let close_attempts = ref 0 in
+    let expected = Run_store.observe handle |> ok in
+    let retained_unknown =
+      try
+        ignore
+          (Root.with_claimed_job
+             after_actor_revoke
+             ~expected
+             ~lookup:(Run_store.find_job_exact expected child_model)
+             (fun ~active ~sw:_ ->
+                Root.Model_inference.with_claimed
+                  after_actor_revoke
+                  ~active
+                  ~f:(fun scope ~sw:_ ->
+                    let context = Root.Model_inference.context scope in
+                    let request =
+                      Inference.Request.create
+                        ~target:(RT.Context.target context)
+                        ~history:[]
+                        ~tools:[]
+                        ~assets:[]
+                        ~limits:Document_schema.Limits.default
+                      |> ok
+                    in
+                    let prepared =
+                      RT.Context.prepare
+                        context
+                        ~preparation_id:"close-uncertain-model"
+                        request
+                      |> ok
+                    in
+                    (Root.Model_inference.identity scope).with_attempt
+                      prepared
+                      ~relation:Transcript.Scope.Root
+                      ~f:(fun ~scope:attempt_scope ~accounting_id ->
+                        incr close_attempts;
+                        let attempt =
+                          RT.Prepared.start prepared ~scope:attempt_scope ~accounting_id
+                          |> ok
+                        in
+                        rename_armed := true;
+                        Root.Model_inference.on_attempt scope attempt))
+                |> ok;
+                let state =
+                  P.Developer_job.state
+                    (Run_store.Claim.job (Agent_session.Developer_job_scope.claim active))
+                in
+                Ok
+                  { state with
+                    status = P.Job.Succeeded
+                  ; completed_at = Some (Root_fixture.now ())
+                  ; result =
+                      Some
+                        (P.Developer_job.Result_value.Inline
+                           (P.Completion.Succeeded `Null))
+                  })
+           |> ok);
+        false
+      with
+      | _ -> true
+    in
+    assert (retained_unknown && !sync_blocked);
+    assert (Result.is_error (Root.close_and_wait after_actor_revoke));
+    assert (Result.is_error (admit actor selected_model));
+    sync_blocked := false;
     Root.close_and_wait after_actor_revoke |> ok;
+    assert (!close_attempts = 1);
     let failure_handle = admit_epoch (owner "dvr_model_failed_parent") in
     let managed, selected =
       Native_fixture.managed_job_registry
@@ -700,6 +1230,56 @@ let%test_unit
         (List.count root_models ~f:(fun job ->
            String.equal (P.Job.status_name (P.Developer_job.state job).status) "cancelled"))
         1);
+    let queued_model =
+      List.find_exn root_models ~f:(fun job ->
+        match (P.Developer_job.state job).status with
+        | Queued -> true
+        | Running
+        | Waiting_permission _
+        | Waiting_completion _
+        | Succeeded
+        | Failed _
+        | Cancelled
+        | Interrupted _ -> false)
+    in
+    let cancelled_scope = Failure "cancel live model inference scope" in
+    let guarded_effects = ref 0 in
+    let expected = Run_store.observe failure_handle |> ok in
+    (match
+       Root.with_claimed_job
+         failed_run
+         ~expected
+         ~lookup:(Run_store.find_job_exact expected (P.Developer_job.id queued_model))
+         (fun ~active ~sw:_ ->
+            Root.Model_inference.with_claimed failed_run ~active ~f:(fun scope ~sw ->
+              let context = Root.Model_inference.context scope in
+              let request =
+                Inference.Request.create
+                  ~target:(RT.Context.target context)
+                  ~history:[]
+                  ~tools:[]
+                  ~assets:[]
+                  ~limits:Document_schema.Limits.default
+                |> ok
+              in
+              let prepared =
+                RT.Context.prepare context ~preparation_id:"cancelled-scope" request |> ok
+              in
+              Eio.Switch.fail sw cancelled_scope;
+              Eio.Cancel.protect (fun () ->
+                assert (
+                  try
+                    Root.Model_inference.before_dispatch scope prepared;
+                    incr guarded_effects;
+                    false
+                  with
+                  | _ -> true)))
+            |> ok;
+            failwith "cancelled inference scope continued")
+     with
+     | exception exn when phys_equal exn cancelled_scope -> ()
+     | Ok _ | Error _ | (exception _) -> failwith "inference cancellation was replaced");
+    assert (!guarded_effects = 0);
     let module Managed = Chat_response.Managed_tool_registry in
     let module H = P.Host_invocation in
     let binding = Capabilities.find selected ~name:"summary" |> ok in

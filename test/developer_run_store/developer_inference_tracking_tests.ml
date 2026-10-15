@@ -773,22 +773,30 @@ let%test_unit
       failwith "recovery did not retain possibly submitted interruption")
 ;;
 
-let%test_unit "uncertain inference admission retains one exact token until reconciliation"
-  =
+let%test_unit "inference admission retires only a freshly proved absent attempt" =
   F.with_temp_directory "ochat-developer-inference-uncertain" (fun env temporary ->
     let rename_armed = ref false in
+    let before_armed = ref false in
     let sync_blocked = ref false in
     let parent_sync_blocked = ref false in
     let fault_env =
       F.fault_after_authority_rename_env
         ~after_rename:(fun () -> sync_blocked := true)
+        ~before_rename:(fun () ->
+          if !before_armed
+          then (
+            before_armed := false;
+            raise
+              (Core_unix.Unix_error
+                 (EIO, "injected pre-rename failure", "inference authority"))))
         env
         ~rename_armed
         ~sync_blocked
         ~parent_sync_blocked
     in
     Eio.Switch.run (fun sw ->
-      let session = F.create_session fault_env sw (Filename.concat temporary "data") in
+      let root = Filename.concat temporary "data" in
+      let session = F.create_session fault_env sw root in
       let store = F.open_run session sw ~max_document_bytes:16384 () in
       let owner = F.owner 0 in
       let capture = F.digest "inference uncertain" in
@@ -828,6 +836,59 @@ let%test_unit "uncertain inference admission retains one exact token until recon
       assert (
         R.Claim.try_enter claim ~handle ~admit:(fun () -> true) ~on_enter:(fun () -> ())
         |> F.run_ok);
+      let stale_absent =
+        T.prepare_admit manager ~claim ~relation:T.Root ~configuration |> F.run_ok
+      in
+      (match T.reconcile manager stale_absent |> F.run_ok with
+       | T.Tracking_absent -> ()
+       | Tracking_installed _ | Tracking_diverged ->
+         failwith "unwritten inference admission was not absent");
+      let first =
+        match T.commit manager stale_absent ~admit:(fun () -> true) |> F.run_ok with
+        | T.Admitted registration -> registration
+        | Updated _ -> failwith "new inference admission updated a row"
+      in
+      assert (Result.is_error (T.retire_absent_admission manager stale_absent));
+      let absent_start =
+        match
+          T.prepare_change
+            manager
+            ~claim
+            ~registration:first
+            ~previous:(T.observe manager first |> F.run_ok)
+            ~change:T.Started
+          |> F.run_ok
+        with
+        | T.Prepared pending -> pending
+        | Unchanged _ -> failwith "prepared inference did not start"
+      in
+      before_armed := true;
+      (match T.commit manager absent_start ~admit:(fun () -> true) with
+       | Error (R.Error.Store (Agent_store.Store_error.Io _)) -> ()
+       | Ok _ | Error _ -> failwith "pre-rename Start was not uncertain");
+      assert (not !before_armed);
+      T.retire_absent_start manager absent_start |> F.run_ok;
+      (match
+         O.Attempt_record.state
+           (R.Inference_row.record (T.View.row (T.observe manager first |> F.run_ok)))
+       with
+       | Prepared -> ()
+       | Running | Terminal _ | Interrupted _ ->
+         failwith "an absent Start changed the durable Prepared row");
+      let before_rows = List.length (inference_rows (authority env root owner)) in
+      let absent =
+        T.prepare_admit manager ~claim ~relation:T.Root ~configuration |> F.run_ok
+      in
+      before_armed := true;
+      (match T.commit manager absent ~admit:(fun () -> true) with
+       | Error (R.Error.Store (Agent_store.Store_error.Io _)) -> ()
+       | Ok _ | Error _ -> failwith "pre-rename fault was not retained");
+      assert (not !before_armed);
+      assert (Option.is_some (T.pending manager));
+      T.retire_absent_admission manager absent |> F.run_ok;
+      assert (Option.is_none (T.pending manager));
+      assert (
+        Int.equal (List.length (inference_rows (authority env root owner))) before_rows);
       let pending =
         T.prepare_admit manager ~claim ~relation:T.Root ~configuration |> F.run_ok
       in
@@ -837,6 +898,7 @@ let%test_unit "uncertain inference admission retains one exact token until recon
        | Ok _ | Error _ -> failwith "post-rename fault was acknowledged as durable");
       assert (Option.is_some (T.pending manager));
       assert (Result.is_error (R.Run_claim.release run_claim));
+      assert (Result.is_error (T.retire_absent_admission manager pending));
       sync_blocked := false;
       let other =
         R.prepare_checkpoint
@@ -846,6 +908,7 @@ let%test_unit "uncertain inference admission retains one exact token until recon
         |> F.run_ok
       in
       assert (Result.is_error (R.commit handle other));
+      assert (Result.is_error (T.retire_absent_admission manager pending));
       let registration =
         match T.reconcile manager pending |> F.run_ok with
         | T.Tracking_installed (T.Admitted registration) -> registration
@@ -853,24 +916,50 @@ let%test_unit "uncertain inference admission retains one exact token until recon
           failwith "exact installed inference admission was not recovered"
       in
       assert (Option.is_none (T.pending manager));
-      let previous = T.observe manager registration |> F.run_ok in
-      let interrupted =
-        T.prepare_change
-          manager
-          ~claim
-          ~registration
-          ~previous
-          ~change:
-            (T.Interrupted
-               { reason = O.Attempt_record.Cancelled
-               ; delivery = Inference.Event.Terminal.Definitely_not_submitted
-               })
-        |> F.run_ok
+      let installed_start =
+        match
+          T.prepare_change
+            manager
+            ~claim
+            ~registration
+            ~previous:(T.observe manager registration |> F.run_ok)
+            ~change:T.Started
+          |> F.run_ok
+        with
+        | T.Prepared pending -> pending
+        | Unchanged _ -> failwith "second prepared inference did not start"
       in
-      (match interrupted with
-       | T.Prepared pending ->
-         ignore (T.commit manager pending ~admit:(fun () -> true) |> F.run_ok : T.receipt)
-       | Unchanged _ -> failwith "prepared inference was not interrupted");
+      rename_armed := true;
+      (match T.commit manager installed_start ~admit:(fun () -> true) with
+       | Error (R.Error.Store (Agent_store.Store_error.Io _)) -> ()
+       | Ok _ | Error _ -> failwith "post-rename Start was not uncertain");
+      assert (Result.is_error (T.retire_absent_start manager installed_start));
+      sync_blocked := false;
+      (match T.reconcile manager installed_start |> F.run_ok with
+       | T.Tracking_installed (T.Updated _) -> ()
+       | Tracking_installed (Admitted _) | Tracking_absent | Tracking_diverged ->
+         failwith "an installed Start lost its exact registration");
+      assert (Result.is_error (T.retire_absent_start manager installed_start));
+      List.iter [ first; registration ] ~f:(fun registration ->
+        let previous = T.observe manager registration |> F.run_ok in
+        let interrupted =
+          T.prepare_change
+            manager
+            ~claim
+            ~registration
+            ~previous
+            ~change:
+              (T.Interrupted
+                 { reason = O.Attempt_record.Cancelled
+                 ; delivery = Inference.Event.Terminal.Definitely_not_submitted
+                 })
+          |> F.run_ok
+        in
+        match interrupted with
+        | T.Prepared pending ->
+          ignore
+            (T.commit manager pending ~admit:(fun () -> true) |> F.run_ok : T.receipt)
+        | Unchanged _ -> failwith "prepared inference was not interrupted");
       let current = R.observe handle |> F.run_ok in
       let state = P.Developer_job.state (R.Claim.job claim) in
       let after : P.Developer_job.State.t =

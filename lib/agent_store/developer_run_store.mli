@@ -538,8 +538,11 @@ module Tracking : sig
   val commit : t -> Pending.t -> admit:(unit -> bool) -> (receipt, Error.t) result
 
   (** Classify an uncertain attempted write using the exact retained token;
-      Installed acknowledges its original bytes, Absent permits only
-      [reprepare_same], and Diverged remains quarantined. A proven prewrite
+      Installed acknowledges its original bytes, Absent permits
+      [reprepare_same] or the narrower fresh-proof
+      [retire_absent_admission] when no Attempt/callback was ever admitted, or
+      [retire_absent_start] after a failed strict Start before provider entry,
+      and Diverged remains quarantined. A proven prewrite
       conflict retires only this never-attempted token; it cannot adopt another
       writer's identical after-bytes. The application callback is never retried. *)
   val reconcile : t -> Pending.t -> (reconciliation, Error.t) result
@@ -556,6 +559,31 @@ module Tracking : sig
       admission cannot be dropped. The Store's pending slot is released only
       when that exact token is removed. *)
   val abort_unattempted_admission : t -> Pending.t -> (unit, Error.t) result
+
+  (** Retire an admission whose exact Prepared is FRESHLY classified Absent
+      under this manager's Store lease, after the admitting callback unwound
+      without receiving an Admitted Registration or beginning an Attempt.
+      Unlike [abort_unattempted_admission], this can retire a previously
+      attempted rename that is now conclusively absent; it does not reprepare
+      after the owning Worker has become terminal. The method reclassifies the
+      current bytes itself and atomically removes only its exact pending token
+      without a yield between proof and retirement. A remembered Absent flag,
+      copied Pending, other manager, Installed, unknown or Diverged outcome
+      cannot authorize retirement. An installed registration/attempt is never
+      dropped. This performs no callback or new document write. *)
+  val retire_absent_admission : t -> Pending.t -> (unit, Error.t) result
+
+  (** Retire only this manager's attempted Prepared-to-Running Start mutation
+      after the strict on_attempt callback failed before provider entry and its
+      physical callback/children have joined. The trusted Root proves that
+      lifecycle fact. Under one Store writer lease, this method independently
+      checks the exact original issued Registration, prior Prepared row, same
+      immutable Running proposal, no receipt and a FRESH Absent classification.
+      It removes only that Pending token; the Registration remains issued so
+      Root can durably record Interrupted from the unchanged Prepared row.
+      Installed, unknown, divergent and stale prewrite outcomes retain custody
+      and never authorize dropping a Started record. *)
+  val retire_absent_start : t -> Pending.t -> (unit, Error.t) result
 
   (** Finish after joined callbacks, no Pending, and a fresh bounded document
       read proving every registration issued by this manager is Terminal or

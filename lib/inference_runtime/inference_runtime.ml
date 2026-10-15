@@ -579,6 +579,7 @@ module Context = struct
 
   let target t = t.target
   let transport_policy t = t.policy
+  let limits t = t.adapter.limits
   let detach t = { t with session = None; prepare = t.adapter.prepare ~policy:t.policy }
 
   let with_transport_policy t policy =

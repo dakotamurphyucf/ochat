@@ -17,6 +17,8 @@ module Limits = struct
     ; max_native_occupancy : int
     ; max_active_workers : int
     ; max_quarantined_workers : int
+    ; max_active_inference_attempts : int
+    ; max_admitted_call_bindings : int
     }
 
   let create
@@ -25,6 +27,8 @@ module Limits = struct
         ~max_native_occupancy
         ~max_active_workers
         ~max_quarantined_workers
+        ~max_active_inference_attempts
+        ~max_admitted_call_bindings
     =
     if
       max_active_runs <= 0
@@ -32,11 +36,15 @@ module Limits = struct
       || max_native_occupancy <= 0
       || max_active_workers <= 0
       || max_quarantined_workers < max_active_workers
+      || max_active_inference_attempts <= 0
+      || max_admitted_call_bindings <= 0
       || max_active_runs > 4096
       || max_staged_jobs > 16384
       || max_native_occupancy > 16384
       || max_active_workers > 16384
       || max_quarantined_workers > 16384
+      || max_active_inference_attempts > 256
+      || max_admitted_call_bindings > 16384
     then Or_error.error_string "invalid developer root owner limits"
     else
       Ok
@@ -45,6 +53,8 @@ module Limits = struct
         ; max_native_occupancy
         ; max_active_workers
         ; max_quarantined_workers
+        ; max_active_inference_attempts
+        ; max_admitted_call_bindings
         }
   ;;
 end
@@ -66,6 +76,7 @@ type admission =
   ; mutable claim : Store.Run_claim.t option
   ; mutable worker : Developer_job_worker.t option
   ; mutable recovery : Store.Recovery.t option
+  ; mutable tracking : Store.Tracking.t option
   ; actor : Operator_authorization.t
   ; capture : Chatml_developer_capture.t
   ; registry : Chat_response.Tool_capability.t
@@ -99,6 +110,8 @@ and t =
   ; owner : P.Execution_owner.developer
   ; handle : Store.handle
   ; run_claim : Store.Run_claim.t
+  ; tracking : Store.Tracking.t
+  ; mutable tracking_finished : bool
   ; worker : Developer_job_worker.t
   ; project_source : Chatml_source.Id.t
   ; workspace_conflict_domain : string
@@ -121,6 +134,45 @@ and t =
   ; mutable external_model : external_model_slot option
   ; mutable effect_revision : int
   ; mutable reconciling : bool
+  ; mutable inference_scopes : inference_scope list
+  ; mutable inference_routes : inference_route list
+  ; mutable inference_active : int
+  ; mutable inference_bindings : int
+  ; mutable inference_serial : int
+  }
+
+and inference_scope =
+  { inference_issuer : t
+  ; inference_active_worker : Job_scope.active
+  ; inference_parent : Job_scope.Parent.t
+  ; inference_context : Inference_runtime.Context.t
+  ; inference_selected_model : Provider_operator_port.Model_selection.t
+  ; inference_candidate_limit : int
+  ; mutable inference_live : bool
+  ; mutable inference_exit_reason :
+      Inference.Observation.Attempt_record.interruption option
+  ; mutable inference_switch : Eio.Switch.t option
+  ; mutable inference_calls : inference_call list
+  ; mutable inference_issued : inference_route list
+  }
+
+and inference_call =
+  { inference_call_parent : Transcript.Scope.parent
+  ; inference_call_registration : Store.Tracking.Registration.t
+  }
+
+and inference_route =
+  { inference_scope : inference_scope
+  ; inference_claim : Store.Claim.t
+  ; inference_configuration : Inference.Observation.Configuration.t
+  ; mutable inference_registration : Store.Tracking.Registration.t option
+  ; mutable inference_attempt : Inference_runtime.Attempt.t option
+  ; mutable inference_started : bool
+  ; mutable inference_pending : Store.Tracking.Pending.t option
+  ; mutable inference_pending_change : Store.Tracking.change option
+  ; mutable inference_observation : Inference.Observation.t option
+  ; mutable inference_completion : Store.Tracking.change option
+  ; mutable inference_terminal : bool
   }
 
 and action =
@@ -251,6 +303,8 @@ let root_call_key : t Eio.Fiber.key = Eio.Fiber.create_key ()
 let native_call_key : t Eio.Fiber.key = Eio.Fiber.create_key ()
 let control_call_key : t Eio.Fiber.key = Eio.Fiber.create_key ()
 let admission_key : registry Eio.Fiber.key = Eio.Fiber.create_key ()
+let inference_route_key : inference_route Eio.Fiber.key = Eio.Fiber.create_key ()
+let inference_scope_key : inference_scope Eio.Fiber.key = Eio.Fiber.create_key ()
 let invalid message = Error (P.Error.invalid_request message)
 let ( let* ) result f = Result.bind result ~f
 
@@ -335,7 +389,14 @@ let owns_external_model t token =
     phys_equal (external_model_token slot) token)
 ;;
 
-let check_current_local ?control ?external_model t (witness : current) ~allow_pending =
+let check_current_local
+      ?control
+      ?external_model
+      ?(allow_tracking = false)
+      t
+      (witness : current)
+      ~allow_pending
+  =
   if
     (not (phys_equal witness.issuer t))
     || (not (same_domain t.registry))
@@ -345,6 +406,7 @@ let check_current_local ?control ?external_model t (witness : current) ~allow_pe
     || (not (phys_equal witness.selected t.selected))
     || (not (Terminal_queue.check_effect_witness t.terminals witness.terminal_witness))
     || ((not allow_pending) && Option.is_some t.pending)
+    || ((not allow_tracking) && Option.is_some (Store.Tracking.pending t.tracking))
     || (match t.control_pending, control with
         | None, None -> false
         | Some pending, Some allowed when phys_equal pending allowed -> false
@@ -375,12 +437,13 @@ let restore_live_after_retention t =
     && Option.is_none t.control_pending
     && Option.is_none t.dispatch_owner
     && Option.is_none t.external_model
+    && Option.is_none (Store.Tracking.pending t.tracking)
     && List.is_empty t.unresolved_native
     && Option.is_some (Terminal_queue.effect_witness t.terminals)
   then t.state <- Live
 ;;
 
-let current_local ?external_model t =
+let current_local ?external_model ?(allow_tracking = false) t =
   if not (same_domain t.registry)
   then invalid "developer run owner belongs to another domain"
   else (
@@ -396,7 +459,12 @@ let current_local ?external_model t =
         }
       in
       Result.map
-        (check_current_local ?external_model t witness ~allow_pending:false)
+        (check_current_local
+           ?external_model
+           ~allow_tracking
+           t
+           witness
+           ~allow_pending:false)
         ~f:(fun () -> witness))
 ;;
 
@@ -2367,6 +2435,661 @@ module Native_terminal = struct
   ;;
 end
 
+module Model_inference = struct
+  type nonrec t = inference_scope
+
+  exception Tracking_failure of P.Error.t
+
+  let require = function
+    | Ok value -> value
+    | Error error -> raise (Tracking_failure error)
+  ;;
+
+  let require_store result = require (Result.map_error result ~f:error_of_store)
+
+  let resource_limit message =
+    P.Error.create P.Error.Resource_limit ~message ~retryable:false ()
+  ;;
+
+  let same_parent (left : Transcript.Scope.parent) (right : Transcript.Scope.parent) =
+    Transcript.Scope.Key.equal left.scope right.scope
+    && Option.equal History_entry.Id.equal left.call_entry_id right.call_entry_id
+    && Option.equal String.equal left.call_alias right.call_alias
+  ;;
+
+  let model_selection t =
+    match t.inference_issuer.selected_model with
+    | Some selection when phys_equal selection t.inference_selected_model -> Ok selection
+    | None | Some _ -> invalid "developer inference selection changed"
+  ;;
+
+  let check_now ?(allow_tracking = false) t =
+    let issuer = t.inference_issuer in
+    let callback_live =
+      match t.inference_switch with
+      | None -> true
+      | Some sw ->
+        Option.is_none (Eio.Switch.get_error sw)
+        && Option.value_map
+             (Eio.Fiber.get inference_scope_key)
+             ~default:false
+             ~f:(phys_equal t)
+    in
+    if (not t.inference_live) || not callback_live
+    then invalid "developer inference callback has exited"
+    else
+      let* selection = model_selection t in
+      let* _ = current_local ~allow_tracking issuer in
+      let* () =
+        Job_scope.Parent.check_now
+          t.inference_parent
+          ~owner:issuer.owner
+          ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
+      in
+      Provider_operator_port.Model_selection.check_current selection
+  ;;
+
+  let check t =
+    let issuer = t.inference_issuer in
+    let* witness = current issuer in
+    let* () =
+      Job_scope.Parent.check
+        t.inference_parent
+        ~owner:issuer.owner
+        ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
+    in
+    let* () = check_effect_now issuer witness in
+    check_now t
+  ;;
+
+  let route t =
+    match Eio.Fiber.get inference_route_key with
+    | Some route when phys_equal route.inference_scope t -> route
+    | None | Some _ ->
+      raise
+        (Tracking_failure
+           (P.Error.invalid_request "developer inference route is not owned"))
+  ;;
+
+  let registration route =
+    match route.inference_registration with
+    | Some registration -> registration
+    | None ->
+      raise
+        (Tracking_failure
+           (P.Error.invalid_request "developer inference admission is unsettled"))
+  ;;
+
+  let release_slot route =
+    if not route.inference_terminal
+    then (
+      route.inference_terminal <- true;
+      let issuer = route.inference_scope.inference_issuer in
+      issuer.inference_active <- issuer.inference_active - 1;
+      if
+        Option.is_none route.inference_pending
+        && Option.is_none route.inference_observation
+        && Option.is_none route.inference_completion
+      then (
+        route.inference_attempt <- None;
+        issuer.inference_routes
+        <- List.filter issuer.inference_routes ~f:(fun current ->
+             not (phys_equal current route));
+        route.inference_scope.inference_issued
+        <- List.filter route.inference_scope.inference_issued ~f:(fun current ->
+             not (phys_equal current route))))
+  ;;
+
+  let acknowledge route = function
+    | Store.Tracking.Admitted registration ->
+      route.inference_registration <- Some registration;
+      route.inference_pending <- None;
+      route.inference_pending_change <- None
+    | Store.Tracking.Updated _ ->
+      route.inference_pending <- None;
+      route.inference_pending_change <- None
+  ;;
+
+  let change route change =
+    let issuer = route.inference_scope.inference_issuer in
+    let tracking = issuer.tracking in
+    let registration = registration route in
+    let previous = require_store (Store.Tracking.observe tracking registration) in
+    let prepared =
+      require_store
+        (Store.Tracking.prepare_change
+           tracking
+           ~claim:route.inference_claim
+           ~registration
+           ~previous
+           ~change)
+    in
+    match prepared with
+    | Store.Tracking.Unchanged _ -> ()
+    | Prepared pending ->
+      route.inference_pending <- Some pending;
+      route.inference_pending_change <- Some change;
+      let admit () =
+        match change with
+        | Store.Tracking.Started ->
+          Result.is_ok (check_now ~allow_tracking:true route.inference_scope)
+        | Observed _ | Finished _ | Interrupted _ -> same_domain issuer.registry
+      in
+      (match Store.Tracking.commit tracking pending ~admit with
+       | Ok receipt -> acknowledge route receipt
+       | Error error -> raise (Tracking_failure (error_of_store error)))
+  ;;
+
+  let record_completion route change =
+    match route.inference_completion with
+    | None -> route.inference_completion <- Some change
+    | Some _ ->
+      raise
+        (Tracking_failure
+           (P.Error.invalid_request "developer inference completion changed"))
+  ;;
+
+  let completion_change = function
+    | Inference_client.Completion.Returned terminal -> Store.Tracking.Finished terminal
+    | Interrupted { reason; delivery } -> Interrupted { reason; delivery }
+  ;;
+
+  let current_route t =
+    let route = route t in
+    if route.inference_terminal
+    then
+      raise
+        (Tracking_failure
+           (P.Error.invalid_request "developer inference attempt already settled"));
+    route
+  ;;
+
+  let with_claimed_base issuer ~active ~f =
+    try
+      let result =
+        let* () =
+          if same_domain issuer.registry
+          then Ok ()
+          else invalid "developer inference owner belongs to another domain"
+        in
+        let* selection =
+          match issuer.selected_model with
+          | Some selection -> Ok selection
+          | None -> invalid "developer inference provider is unavailable"
+        in
+        let* context = Provider_operator_port.Model_selection.context selection in
+        let* parent =
+          Job_scope.parent (Developer_job_worker.issuer issuer.worker) active
+        in
+        let claim = Job_scope.claim active in
+        let* () =
+          if
+            P.Job.equal_kind
+              (P.Developer_job.kind (Store.Claim.job claim))
+              P.Job.Model_call
+          then Ok ()
+          else invalid "developer inference requires a physical Model_call claim"
+        in
+        let scope =
+          { inference_issuer = issuer
+          ; inference_active_worker = active
+          ; inference_parent = parent
+          ; inference_context = context
+          ; inference_selected_model = selection
+          ; inference_candidate_limit =
+              Inference_runtime.Limits.max_candidates
+                (Inference_runtime.Context.limits context)
+          ; inference_live = true
+          ; inference_exit_reason = None
+          ; inference_switch = None
+          ; inference_calls = []
+          ; inference_issued = []
+          }
+        in
+        let* () = check scope in
+        issuer.inference_scopes <- scope :: issuer.inference_scopes;
+        let finally ~reason =
+          scope.inference_live <- false;
+          scope.inference_exit_reason <- Some reason;
+          scope.inference_switch <- None;
+          List.iter scope.inference_issued ~f:(fun route ->
+            if
+              (not route.inference_terminal)
+              && Option.is_some route.inference_registration
+              && Option.is_none route.inference_completion
+            then (
+              let delivery =
+                match route.inference_attempt with
+                | Some attempt -> Inference_runtime.Attempt.delivery attempt
+                | None -> Inference.Event.Terminal.Definitely_not_submitted
+              in
+              route.inference_completion
+              <- Some (Store.Tracking.Interrupted { reason; delivery })));
+          issuer.inference_bindings
+          <- issuer.inference_bindings - List.length scope.inference_calls;
+          scope.inference_calls <- [];
+          issuer.inference_scopes
+          <- List.filter issuer.inference_scopes ~f:(fun current ->
+               not (phys_equal current scope));
+          Ok ()
+        in
+        let outcome =
+          try
+            `Returned
+              (Eio.Switch.run (fun sw ->
+                 scope.inference_switch <- Some sw;
+                 Eio.Fiber.with_binding inference_scope_key scope (fun () -> f scope ~sw)))
+          with
+          | exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
+        in
+        match outcome with
+        | `Returned value ->
+          let* () =
+            finally ~reason:Inference.Observation.Attempt_record.Host_interrupted
+          in
+          Ok value
+        | `Raised (exn, backtrace) ->
+          let reason =
+            match exn with
+            | Eio.Cancel.Cancelled _ -> Inference.Observation.Attempt_record.Cancelled
+            | _ -> Host_interrupted
+          in
+          (try ignore (finally ~reason : (unit, P.Error.t) result) with
+           | _ -> ());
+          Exn.raise_with_original_backtrace exn backtrace
+      in
+      result
+    with
+    | Tracking_failure error -> Error error
+  ;;
+
+  let context t = t.inference_context
+
+  let identity t : Inference_client.Identity.t =
+    { new_preparation_id =
+        (fun () ->
+          let issuer = t.inference_issuer in
+          if issuer.inference_serial = Int.max_value
+          then raise (Tracking_failure (resource_limit "inference identity exhausted"));
+          issuer.inference_serial <- issuer.inference_serial + 1;
+          "developer-inference-" ^ Int.to_string issuer.inference_serial)
+    ; with_attempt =
+        (fun prepared ~relation ~f ->
+          let issuer = t.inference_issuer in
+          require (check t);
+          let relation =
+            match relation with
+            | Transcript.Scope.Root -> Store.Tracking.Root
+            | Nested parent ->
+              let binding =
+                List.find t.inference_calls ~f:(fun call ->
+                  same_parent call.inference_call_parent parent)
+              in
+              (match binding with
+               | Some binding ->
+                 Store.Tracking.Nested
+                   { parent = binding.inference_call_registration
+                   ; call_entry_id = parent.call_entry_id
+                   ; call_alias = parent.call_alias
+                   }
+               | None ->
+                 raise
+                   (Tracking_failure
+                      (P.Error.invalid_request
+                         "nested inference has no admitted physical call")))
+          in
+          if
+            issuer.inference_active
+            >= issuer.registry.limits.max_active_inference_attempts
+          then
+            raise
+              (Tracking_failure
+                 (resource_limit "active inference attempt limit was reached"));
+          issuer.inference_active <- issuer.inference_active + 1;
+          let route =
+            { inference_scope = t
+            ; inference_claim = Job_scope.claim t.inference_active_worker
+            ; inference_configuration = Inference_runtime.Prepared.configuration prepared
+            ; inference_registration = None
+            ; inference_attempt = None
+            ; inference_started = false
+            ; inference_pending = None
+            ; inference_pending_change = None
+            ; inference_observation = None
+            ; inference_completion = None
+            ; inference_terminal = false
+            }
+          in
+          issuer.inference_routes <- route :: issuer.inference_routes;
+          t.inference_issued <- route :: t.inference_issued;
+          let discard_unissued () =
+            if
+              Option.is_none route.inference_pending
+              && Option.is_none route.inference_registration
+            then (
+              release_slot route;
+              issuer.inference_routes
+              <- List.filter issuer.inference_routes ~f:(fun current ->
+                   not (phys_equal current route)))
+          in
+          let outcome =
+            try
+              let pending =
+                Mutation_gate.with_owner issuer.mutation_gate ~f:(fun () ->
+                  require_store
+                    (Store.Tracking.prepare_admit
+                       issuer.tracking
+                       ~claim:route.inference_claim
+                       ~relation
+                       ~configuration:(Inference_runtime.Prepared.configuration prepared)))
+              in
+              route.inference_pending <- Some pending;
+              let receipt =
+                Mutation_gate.with_owner issuer.mutation_gate ~f:(fun () ->
+                  require_store
+                    (Store.Tracking.commit issuer.tracking pending ~admit:(fun () ->
+                       Result.is_ok (check_now ~allow_tracking:true t))))
+              in
+              acknowledge route receipt;
+              let registration = registration route in
+              `Returned
+                (Eio.Fiber.with_binding inference_route_key route (fun () ->
+                   f
+                     ~scope:(Store.Tracking.Registration.scope registration)
+                     ~accounting_id:
+                       (Store.Tracking.Registration.accounting_id registration)))
+            with
+            | exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
+          in
+          discard_unissued ();
+          match outcome with
+          | `Returned value -> value
+          | `Raised (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace)
+    }
+  ;;
+
+  let before_dispatch t prepared =
+    require (check t);
+    require
+      (if
+         Inference.Request.Target.equal
+           (Inference_runtime.Prepared.target prepared)
+           (Inference_runtime.Context.target t.inference_context)
+       then Ok ()
+       else invalid "prepared inference target changed")
+  ;;
+
+  let on_attempt t attempt =
+    let route = current_route t in
+    let registration = registration route in
+    if Option.is_some route.inference_attempt
+    then
+      raise
+        (Tracking_failure
+           (P.Error.invalid_request "inference attempt was already acknowledged"));
+    if
+      not
+        (Transcript.Scope.equal
+           (Inference_runtime.Attempt.scope attempt)
+           (Store.Tracking.Registration.scope registration))
+    then
+      raise (Tracking_failure (P.Error.invalid_request "inference attempt scope changed"));
+    if
+      (not
+         (Inference.Observation.Observation_id.equal
+            (Inference_runtime.Attempt.accounting_id attempt)
+            (Store.Tracking.Registration.accounting_id registration)))
+      || not
+           (Inference.Observation.Configuration.equal
+              (Inference_runtime.Attempt.configuration attempt)
+              route.inference_configuration)
+    then
+      raise
+        (Tracking_failure
+           (P.Error.invalid_request
+              "inference attempt accounting or prepared configuration changed"));
+    route.inference_attempt <- Some attempt;
+    Mutation_gate.with_owner t.inference_issuer.mutation_gate ~f:(fun () ->
+      change route Store.Tracking.Started);
+    route.inference_started <- true
+  ;;
+
+  let on_observation t observation =
+    let route = current_route t in
+    if Option.is_some route.inference_observation
+    then
+      raise
+        (Tracking_failure
+           (P.Error.invalid_request "inference observation already retained"));
+    try
+      Mutation_gate.with_owner t.inference_issuer.mutation_gate ~f:(fun () ->
+        change route (Store.Tracking.Observed observation))
+    with
+    | exn ->
+      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      if Option.is_some (Store.Tracking.pending t.inference_issuer.tracking)
+      then route.inference_observation <- Some observation;
+      Exn.raise_with_original_backtrace exn backtrace
+  ;;
+
+  let on_completion t completion =
+    let route = current_route t in
+    let attempt = Inference_client.Completion.attempt completion in
+    if
+      not
+        (Option.value_map route.inference_attempt ~default:false ~f:(fun actual ->
+           phys_equal actual attempt))
+    then
+      raise
+        (Tracking_failure
+           (P.Error.invalid_request "inference completion has another attempt"));
+    let change_plan =
+      completion_change (Inference_client.Completion.outcome completion)
+    in
+    record_completion route change_plan;
+    Mutation_gate.with_owner t.inference_issuer.mutation_gate ~f:(fun () ->
+      change route change_plan);
+    route.inference_completion <- None;
+    release_slot route
+  ;;
+
+  let on_admitted_call t token =
+    require (check_now t);
+    let issuer = t.inference_issuer in
+    let route = current_route t in
+    let registration =
+      match route.inference_attempt, route.inference_registration with
+      | Some attempt, Some registration
+        when route.inference_started
+             && phys_equal
+                  attempt
+                  (Chat_response.In_memory_stream.Admitted_call.attempt token) ->
+        registration
+      | None, _ | Some _, None | Some _, Some _ ->
+        raise
+          (Tracking_failure
+             (P.Error.invalid_request "admitted call belongs to another attempt"))
+    in
+    let parent = Chat_response.In_memory_stream.Admitted_call.parent token in
+    if
+      (not
+         (Transcript.Scope.Key.equal
+            parent.scope
+            (Transcript.Scope.key (Store.Tracking.Registration.scope registration))))
+      || List.exists t.inference_calls ~f:(fun call ->
+        same_parent call.inference_call_parent parent)
+    then
+      raise
+        (Tracking_failure
+           (P.Error.invalid_request "admitted call parent is duplicate or foreign"));
+    if
+      List.count t.inference_calls ~f:(fun call ->
+        phys_equal call.inference_call_registration registration)
+      >= t.inference_candidate_limit
+      || issuer.inference_bindings >= issuer.registry.limits.max_admitted_call_bindings
+    then
+      raise (Tracking_failure (resource_limit "admitted call binding limit was reached"));
+    t.inference_calls
+    <- { inference_call_parent = parent; inference_call_registration = registration }
+       :: t.inference_calls;
+    issuer.inference_bindings <- issuer.inference_bindings + 1
+  ;;
+
+  let submission_guard t =
+    Inference_runtime.Submission_guard.create ~refresh:(fun () ->
+      require (check t);
+      fun () -> require (check_now t))
+  ;;
+
+  let interrupted_change route ~reason =
+    let delivery =
+      match route.inference_attempt with
+      | Some attempt -> Inference_runtime.Attempt.delivery attempt
+      | None -> Inference.Event.Terminal.Definitely_not_submitted
+    in
+    Store.Tracking.Interrupted { reason; delivery }
+  ;;
+
+  let retain_unfinished route ~reason =
+    if
+      (not route.inference_terminal)
+      && Option.is_some route.inference_registration
+      && Option.is_none route.inference_completion
+    then route.inference_completion <- Some (interrupted_change route ~reason)
+  ;;
+
+  let reconcile_one_pending route =
+    let issuer = route.inference_scope.inference_issuer in
+    match route.inference_pending with
+    | None -> ()
+    | Some pending ->
+      let settlement = Store.Tracking.reconcile issuer.tracking pending in
+      (match settlement with
+       | Ok (Store.Tracking.Tracking_installed receipt) -> acknowledge route receipt
+       | Ok Store.Tracking.Tracking_diverged ->
+         raise
+           (Tracking_failure (P.Error.invalid_request "inference persistence diverged"))
+       | Ok Store.Tracking.Tracking_absent ->
+         if
+           (not route.inference_scope.inference_live)
+           && Option.is_none route.inference_registration
+         then (
+           require_store (Store.Tracking.retire_absent_admission issuer.tracking pending);
+           route.inference_pending <- None;
+           release_slot route)
+         else if
+           (not route.inference_scope.inference_live)
+           && (match route.inference_pending_change with
+               | Some Store.Tracking.Started -> true
+               | None | Some (Observed _ | Finished _ | Interrupted _) -> false)
+           && Option.is_some route.inference_registration
+         then (
+           require_store (Store.Tracking.retire_absent_start issuer.tracking pending);
+           route.inference_pending <- None;
+           route.inference_pending_change <- None)
+         else (
+           let next =
+             require_store (Store.Tracking.reprepare_same issuer.tracking pending)
+           in
+           route.inference_pending <- Some next;
+           let admit () =
+             if
+               Option.is_none route.inference_registration
+               ||
+               match route.inference_pending_change with
+               | Some Store.Tracking.Started -> true
+               | None | Some (Observed _ | Finished _ | Interrupted _) -> false
+             then Result.is_ok (check_now ~allow_tracking:true route.inference_scope)
+             else same_domain issuer.registry
+           in
+           acknowledge
+             route
+             (require_store (Store.Tracking.commit issuer.tracking next ~admit)))
+       | Error Store.Error.Prewrite_conflict
+         when (not route.inference_scope.inference_live)
+              && Option.is_none route.inference_registration ->
+         require_store
+           (Store.Tracking.abort_unattempted_admission issuer.tracking pending);
+         route.inference_pending <- None;
+         release_slot route
+       | Error error -> raise (Tracking_failure (error_of_store error)))
+  ;;
+
+  let drain_route route =
+    reconcile_one_pending route;
+    if Option.is_none route.inference_pending
+    then (
+      (match route.inference_scope.inference_exit_reason with
+       | Some reason -> retain_unfinished route ~reason
+       | None -> ());
+      (match route.inference_observation with
+       | None -> ()
+       | Some observation ->
+         change route (Store.Tracking.Observed observation);
+         route.inference_observation <- None);
+      match route.inference_completion with
+      | None -> ()
+      | Some completion ->
+        change route completion;
+        route.inference_completion <- None;
+        release_slot route)
+  ;;
+
+  let reconcile issuer =
+    try
+      Mutation_gate.with_owner issuer.mutation_gate ~f:(fun () ->
+        match Store.Tracking.pending issuer.tracking with
+        | None -> ()
+        | Some pending ->
+          (match
+             List.find issuer.inference_routes ~f:(fun route ->
+               Option.value_map route.inference_pending ~default:false ~f:(fun owned ->
+                 phys_equal owned pending))
+           with
+           | Some route -> reconcile_one_pending route
+           | None ->
+             raise
+               (Tracking_failure
+                  (P.Error.invalid_request
+                     "inference pending has no physical route owner"))));
+      List.iter (List.rev issuer.inference_routes) ~f:(fun route ->
+        Mutation_gate.with_owner issuer.mutation_gate ~f:(fun () -> drain_route route));
+      if
+        Option.is_some (Store.Tracking.pending issuer.tracking)
+        || List.exists issuer.inference_routes ~f:(fun route ->
+          Option.is_some route.inference_observation
+          || Option.is_some route.inference_completion)
+      then invalid "inference bookkeeping remains unsettled"
+      else Ok ()
+    with
+    | Tracking_failure error -> Error error
+  ;;
+
+  let with_claimed issuer ~active ~f =
+    match with_claimed_base issuer ~active ~f with
+    | Ok value ->
+      let* () = reconcile issuer in
+      Ok value
+    | Error error ->
+      (try
+         ignore (Eio.Cancel.protect (fun () -> reconcile issuer) : (unit, _) result)
+       with
+       | _ -> ());
+      Error error
+    | exception exn ->
+      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      (try
+         ignore (Eio.Cancel.protect (fun () -> reconcile issuer) : (unit, _) result)
+       with
+       | _ -> ());
+      Exn.raise_with_original_backtrace exn backtrace
+  ;;
+
+  let live issuer =
+    List.exists issuer.inference_scopes ~f:(fun scope -> scope.inference_live)
+  ;;
+end
+
 let reconcile_pending t =
   if not (same_domain t.registry)
   then invalid "developer root owner belongs to another domain"
@@ -2374,6 +3097,8 @@ let reconcile_pending t =
   then invalid "developer callback is still active"
   else if Option.is_some t.control_call
   then invalid "developer job cancellation is still active"
+  else if Model_inference.live t
+  then invalid "developer inference callback is still active"
   else if t.reconciling
   then
     Error
@@ -2387,6 +3112,7 @@ let reconcile_pending t =
     Exn.protect
       ~finally:(fun () -> t.reconciling <- false)
       ~f:(fun () ->
+        let* () = Model_inference.reconcile t in
         let* () =
           match t.external_model with
           | None -> Ok ()
@@ -2699,6 +3425,10 @@ let close_owner t =
       phys_equal current t)
     || Option.value_map (Eio.Fiber.get control_call_key) ~default:false ~f:(fun current ->
       phys_equal current t)
+    || Option.value_map
+         (Eio.Fiber.get inference_scope_key)
+         ~default:false
+         ~f:(fun scope -> phys_equal scope.inference_issuer t)
   then invalid "developer root action cannot close its own owner"
   else (
     match t.state with
@@ -2734,6 +3464,17 @@ let close_owner t =
         | value -> `Returned value
         | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
       in
+      let worker_result =
+        match worker_result, pending_result with
+        | `Returned (Error _), `Returned (Ok ()) ->
+          (match
+             Eio.Cancel.protect (fun () -> Developer_job_worker.close_and_wait t.worker)
+           with
+           | value -> `Returned value
+           | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ()))
+        | (`Raised _ | `Returned (Ok ())), _
+        | `Returned (Error _), (`Raised _ | `Returned (Error _)) -> worker_result
+      in
       let* () =
         match worker_result, pending_result with
         | `Returned (Ok ()), `Returned (Ok ()) -> Ok ()
@@ -2748,6 +3489,17 @@ let close_owner t =
           && Option.is_none t.external_model
         then Ok ()
         else invalid "developer terminal custody remains unresolved"
+      in
+      let* () = Model_inference.reconcile t in
+      let* () =
+        if t.tracking_finished
+        then Ok ()
+        else
+          let* () =
+            Store.Tracking.finish t.tracking |> Result.map_error ~f:error_of_store
+          in
+          t.tracking_finished <- true;
+          Ok ()
       in
       Job_capacity.close_developer_run t.registry.capacity ~owner:t.owner;
       let* () =
@@ -2808,6 +3560,14 @@ module Registry = struct
         Ok ()
     in
     let* () =
+      match admission.tracking with
+      | None -> Ok ()
+      | Some tracking ->
+        let* () = Store.Tracking.finish tracking |> Result.map_error ~f:error_of_store in
+        admission.tracking <- None;
+        Ok ()
+    in
+    let* () =
       match admission.claim with
       | None -> Ok ()
       | Some claim ->
@@ -2838,6 +3598,10 @@ module Registry = struct
            (Eio.Fiber.get control_call_key)
            ~default:false
            ~f:(fun current -> phys_equal current.registry t)
+      || Option.value_map
+           (Eio.Fiber.get inference_scope_key)
+           ~default:false
+           ~f:(fun scope -> phys_equal scope.inference_issuer.registry t)
     then invalid "developer root admission cannot close its own registry"
     else (
       t.closed <- true;
@@ -2951,6 +3715,16 @@ module Registry = struct
       | Some recovery when Store.Recovery.is_finished recovery -> Ok ()
       | None | Some _ -> invalid "developer terminal recovery is unfinished"
     in
+    let* tracking =
+      match admission.tracking with
+      | Some tracking -> Ok tracking
+      | None ->
+        let* tracking =
+          Store.Tracking.open_ ~claim:token ~handle |> Result.map_error ~f:error_of_store
+        in
+        admission.tracking <- Some tracking;
+        Ok tracking
+    in
     let* active = Store.is_latest_active handle |> Result.map_error ~f:error_of_store in
     let* () = verify_admission t admission in
     let* () = if active then Ok () else invalid "developer root admission expired" in
@@ -2982,6 +3756,8 @@ module Registry = struct
       ; owner
       ; handle
       ; run_claim = token
+      ; tracking
+      ; tracking_finished = false
       ; worker
       ; project_source
       ; workspace_conflict_domain = admission.workspace_conflict_domain
@@ -3004,6 +3780,11 @@ module Registry = struct
       ; external_model = None
       ; effect_revision = 0
       ; reconciling = false
+      ; inference_scopes = []
+      ; inference_routes = []
+      ; inference_active = 0
+      ; inference_bindings = 0
+      ; inference_serial = 0
       }
     in
     Hashtbl.set t.owners ~key:owner.run_id ~data:(Owned run);
@@ -3093,6 +3874,7 @@ module Registry = struct
           { call
           ; claim = None
           ; worker = None
+          ; tracking = None
           ; recovery = None
           ; actor
           ; capture

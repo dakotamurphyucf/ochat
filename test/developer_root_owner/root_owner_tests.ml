@@ -55,26 +55,41 @@ let capture () =
   |> ok
 ;;
 
-let store_limits ?(max_job_payload_bytes = 1024) ?(max_invocations_per_run = 5) () =
+let store_limits
+      ?(max_job_payload_bytes = 1024)
+      ?(max_invocations_per_run = 5)
+      ?(max_document_bytes = 8192)
+      ?(max_inference_bytes_per_run = 8192)
+      ?(max_work_steps = 200)
+      ?max_document_fields
+      ?max_document_nodes
+      ()
+  =
   R.Limits.create
     ~max_runs:3
     ~max_epochs_per_run:3
     ~max_jobs_per_run:4
     ~max_invocations_per_run
     ~max_inference_attempts_per_run:256
-    ~max_inference_bytes_per_run:8192
+    ~max_inference_bytes_per_run
     ~max_selected_per_commit:2
     ~max_job_payload_bytes
-    ~max_document_bytes:8192
+    ~max_document_bytes
     ~max_recovery_entries:16
-    ~max_recovery_bytes:16384
-    ~max_work_steps:200
+    ~max_recovery_bytes:(Int.max 16384 max_document_bytes)
+    ~max_work_steps
     ~document:
       (Document_schema.Limits.create
-         ~max_bytes:8192
+         ~max_bytes:max_document_bytes
          ~max_depth:16
-         ~max_fields:256
-         ~max_nodes:512
+         ~max_fields:
+           (Option.value
+              max_document_fields
+              ~default:(if max_document_bytes <= 8192 then 256 else 1024))
+         ~max_nodes:
+           (Option.value
+              max_document_nodes
+              ~default:(if max_document_bytes <= 8192 then 512 else 2048))
        |> ok)
   |> or_error
 ;;
@@ -182,6 +197,8 @@ let%test_unit
         ~max_native_occupancy:2
         ~max_active_workers:1
         ~max_quarantined_workers:2
+        ~max_active_inference_attempts:8
+        ~max_admitted_call_bindings:32
       |> or_error
     in
     let capacity = capacity () in
@@ -430,6 +447,8 @@ let%test_unit
         ~max_native_occupancy:2
         ~max_active_workers:1
         ~max_quarantined_workers:2
+        ~max_active_inference_attempts:8
+        ~max_admitted_call_bindings:32
       |> or_error
     in
     let registry = O.Registry.create ~sw ~store ~capacity:(capacity ()) ~now ~limits in
@@ -507,6 +526,8 @@ let%test_unit "physical root job control preserves exact inactive attempts" =
         ~max_native_occupancy:2
         ~max_active_workers:1
         ~max_quarantined_workers:2
+        ~max_active_inference_attempts:8
+        ~max_admitted_call_bindings:32
       |> or_error
     in
     let registry = O.Registry.create ~sw ~store ~capacity:(capacity ()) ~now ~limits in
@@ -749,6 +770,8 @@ let%test_unit "uncertain job cancellation retains owner and capacity until recov
            ~max_native_occupancy:1
            ~max_active_workers:1
            ~max_quarantined_workers:2
+           ~max_active_inference_attempts:8
+           ~max_admitted_call_bindings:32
          |> or_error
        in
        let capacity = capacity ~per_session:1 () in
@@ -896,6 +919,8 @@ let%test_unit "uncertain root handoff retains capacity through owner close" =
            ~max_native_occupancy:2
            ~max_active_workers:1
            ~max_quarantined_workers:2
+           ~max_active_inference_attempts:8
+           ~max_admitted_call_bindings:32
          |> or_error
        in
        let capacity = capacity ~per_session:1 () in
@@ -1078,6 +1103,8 @@ let%test_unit "nested native terminal settles before its live root resumes" =
            ~max_native_occupancy:2
            ~max_active_workers:1
            ~max_quarantined_workers:2
+           ~max_active_inference_attempts:8
+           ~max_admitted_call_bindings:32
          |> or_error
        in
        let owner_registry =

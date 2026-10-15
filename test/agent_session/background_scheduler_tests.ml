@@ -229,6 +229,8 @@ let with_physical_developer
             ~max_native_occupancy:2
             ~max_active_workers
             ~max_quarantined_workers:2
+            ~max_active_inference_attempts:8
+            ~max_admitted_call_bindings:32
           |> Or_error.ok_exn
         in
         let owners = DR.Registry.create ~sw ~store ~capacity ~now:DT.now ~limits in
