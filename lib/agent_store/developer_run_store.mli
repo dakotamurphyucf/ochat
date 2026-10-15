@@ -994,17 +994,23 @@ module External_model_parent : sig
   type t =
     | Run_root
     | Dispatching of Invocation_lookup.t
+    | Claimed_model of Claim.t * Job_lookup.t
 end
 
 (** Prepare exactly one fresh Queued/attempt-zero Model_call as an immediate
     external effect in the latest Active epoch. [job] carries the versioned
     bounded Developer_model_call envelope, including the complete nonsecret
     selected Target and original recipe JSON. Run_root has no parent job and
-    depth zero, and adds no invented native invocation; Dispatching must be the physically observed lookup from
-    [expected] for the exact same-epoch invocation named by the job's launch.
+    depth zero; Claimed_model has a Run_root launch with the exact physically
+    entered Running Model_call parent, attempt and next depth. The Job_lookup
+    must come from [expected]; the actual Claim must be entered and retained
+    by this physical Store. The Store rechecks its currentness under its writer
+    lease. No native invocation is invented. Dispatching must be the physically
+    observed lookup from [expected] for the exact same-epoch invocation named
+    by the job's launch.
     The current durable invocation must still be Dispatching. Recorded
-    parent-job relation is checked structurally here; the actual claimed
-    attempt, native depth, live scope and provider authorization belong to the host.
+    parent-job relation is checked structurally here; live callback, actor,
+    selected provider and final effect admission belong to the host.
 
     This distinct Prepared kind uses only the existing per-run pending barrier
     and exact Handoff through [commit_and_settle]/[reconcile_and_settle]. It

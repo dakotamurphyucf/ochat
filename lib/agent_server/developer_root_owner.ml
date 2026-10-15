@@ -218,6 +218,7 @@ and control_pending =
 and external_model_source =
   | Root_model of action
   | Native_model of native_scope
+  | Claimed_model of inference_scope
 
 and external_model_slot =
   | Model_preparing of
@@ -479,6 +480,37 @@ let current_with ?external_model t =
 ;;
 
 let current t = current_with t
+
+let check_inference_scope_local (scope : inference_scope) =
+  let issuer = scope.inference_issuer in
+  let callback_live =
+    match scope.inference_switch with
+    | None -> true
+    | Some sw ->
+      Option.is_none (Eio.Switch.get_error sw)
+      && Option.value_map
+           (Eio.Fiber.get inference_scope_key)
+           ~default:false
+           ~f:(phys_equal scope)
+  in
+  if
+    (not (same_domain issuer.registry)) || (not scope.inference_live) || not callback_live
+  then invalid "developer inference callback has exited"
+  else
+    let* selection =
+      match issuer.selected_model with
+      | Some selection when phys_equal selection scope.inference_selected_model ->
+        Ok selection
+      | None | Some _ -> invalid "developer inference selection changed"
+    in
+    let* () =
+      Job_scope.Parent.check_now
+        scope.inference_parent
+        ~owner:issuer.owner
+        ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
+    in
+    Provider_operator_port.Model_selection.check_current selection
+;;
 
 module Current = struct
   type nonrec t = current
@@ -970,60 +1002,63 @@ let native_effect_parent_live_now (scope : native_scope) =
 let model_source_issuer = function
   | Root_model action -> action.issuer
   | Native_model scope -> scope.issuer
+  | Claimed_model scope -> scope.inference_issuer
 ;;
 
 let model_source_now source ~check_parent_now =
   let issuer = model_source_issuer source in
   let capture_fingerprint = Chatml_developer_capture.fingerprint issuer.capture in
-  let action =
-    match source with
-    | Root_model action -> action
-    | Native_model scope -> scope.action
+  let check_action action =
+    if
+      (not (same_domain issuer.registry))
+      || (not (same_action_fiber action))
+      || (not action.live)
+      || Option.is_some action.sealed
+    then invalid "developer model call is outside its physical callback"
+    else Ok ()
   in
-  if
-    (not (same_domain issuer.registry))
-    || (not (same_action_fiber action))
-    || (not action.live)
-    || Option.is_some action.sealed
-  then invalid "developer model call is outside its physical callback"
-  else (
-    match source with
-    | Root_model action ->
+  match source with
+  | Claimed_model scope ->
+    let* () = check_inference_scope_local scope in
+    check_parent_now ()
+  | Root_model action ->
+    let* () = check_action action in
+    if
+      Option.value_map issuer.active ~default:false ~f:(phys_equal action)
+      && Option.value_map action.call.cancel ~default:false ~f:(fun cancel ->
+        Option.is_none (Eio.Cancel.get_error cancel))
+      && Option.value_map action.callback_switch ~default:false ~f:(fun sw ->
+        Option.is_none (Eio.Switch.get_error sw))
+    then Ok ()
+    else invalid "developer model root action is no longer current"
+  | Native_model scope ->
+    let* () = check_action scope.action in
+    let* () =
       if
-        Option.value_map issuer.active ~default:false ~f:(phys_equal action)
-        && Option.value_map action.call.cancel ~default:false ~f:(fun cancel ->
-          Option.is_none (Eio.Cancel.get_error cancel))
-        && Option.value_map action.callback_switch ~default:false ~f:(fun sw ->
-          Option.is_none (Eio.Switch.get_error sw))
+        (not scope.callback_complete)
+        && Option.is_some scope.dispatched
+        && Option.is_some scope.callback_switch
+        && Option.value_map
+             (Hashtbl.find
+                issuer.native_calls
+                (H.context scope.registration.invocation).id)
+             ~default:false
+             ~f:(fun registration -> phys_equal registration scope.registration)
       then Ok ()
-      else invalid "developer model root action is no longer current"
-    | Native_model scope ->
-      let* () =
-        if
-          (not scope.callback_complete)
-          && Option.is_some scope.dispatched
-          && Option.is_some scope.callback_switch
-          && Option.value_map
-               (Hashtbl.find
-                  issuer.native_calls
-                  (H.context scope.registration.invocation).id)
-               ~default:false
-               ~f:(fun registration -> phys_equal registration scope.registration)
-        then Ok ()
-        else invalid "developer model native callback is no longer registered"
-      in
-      let* () =
-        if native_effect_parent_live_now scope
-        then Ok ()
-        else invalid "developer model native parent was cancelled"
-      in
-      let* () =
-        match scope.registration.job_parent with
-        | None -> Ok ()
-        | Some parent ->
-          Job_scope.Parent.check_now parent ~owner:issuer.owner ~capture_fingerprint
-      in
-      check_parent_now ())
+      else invalid "developer model native callback is no longer registered"
+    in
+    let* () =
+      if native_effect_parent_live_now scope
+      then Ok ()
+      else invalid "developer model native parent was cancelled"
+    in
+    let* () =
+      match scope.registration.job_parent with
+      | None -> Ok ()
+      | Some parent ->
+        Job_scope.Parent.check_now parent ~owner:issuer.owner ~capture_fingerprint
+    in
+    check_parent_now ()
 ;;
 
 let reserve_external_model source ~check_parent_now =
@@ -1031,17 +1066,15 @@ let reserve_external_model source ~check_parent_now =
   let* () = model_source_now source ~check_parent_now in
   let* fresh = current_with issuer in
   let* () = model_source_now source ~check_parent_now in
-  let action =
-    match source with
-    | Root_model action -> action
-    | Native_model scope -> scope.action
-  in
   let* () =
-    if
-      phys_equal action.snapshot.selected fresh.selected
-      && Int.equal action.snapshot.selection_revision fresh.selection_revision
-    then Ok ()
-    else invalid "developer model selection changed before admission"
+    match source with
+    | Claimed_model _ -> Ok ()
+    | Root_model action | Native_model { action; _ } ->
+      if
+        phys_equal action.snapshot.selected fresh.selected
+        && Int.equal action.snapshot.selection_revision fresh.selection_revision
+      then Ok ()
+      else invalid "developer model selection changed before admission"
   in
   if
     Option.is_some issuer.external_model
@@ -1062,6 +1095,12 @@ let reserve_external_model source ~check_parent_now =
 let model_source_parent_check source =
   match source with
   | Root_model _ -> Ok ()
+  | Claimed_model scope ->
+    Job_scope.Parent.check
+      scope.inference_parent
+      ~owner:scope.inference_issuer.owner
+      ~capture_fingerprint:
+        (Chatml_developer_capture.fingerprint scope.inference_issuer.capture)
   | Native_model scope ->
     (match scope.registration.job_parent with
      | None -> Ok ()
@@ -1076,6 +1115,17 @@ let model_source_launch source =
   match source with
   | Root_model _ ->
     P.Developer_job.Launch.create ~parent:Run_root ~parent_job:None ~nested_depth:0
+  | Claimed_model scope ->
+    let parent = scope.inference_parent in
+    let depth = Job_scope.Parent.nested_depth parent in
+    if Int.equal depth Int.max_value
+    then invalid "developer model nesting depth overflows"
+    else
+      P.Developer_job.Launch.create
+        ~parent:Run_root
+        ~parent_job:
+          (Some (Job_scope.Parent.job_id parent, Job_scope.Parent.attempt parent))
+        ~nested_depth:(depth + 1)
   | Native_model scope ->
     let context = H.context scope.registration.invocation in
     let* parent_job, nested_depth =
@@ -1099,6 +1149,29 @@ let model_source_launch source =
 let model_parent_in_observation source observed =
   match source with
   | Root_model _ -> Ok Store.External_model_parent.Run_root
+  | Claimed_model scope ->
+    let claim = Job_scope.claim scope.inference_active_worker in
+    let lookup =
+      Store.find_job_exact observed (Store.Claim.job claim |> P.Developer_job.id)
+    in
+    (match Store.Job_lookup.value lookup with
+     | Some parent
+       when P.Developer_job.same_immutable parent (Store.Claim.job claim)
+            && Int.equal
+                 (P.Developer_job.state parent).attempt
+                 (Store.Claim.attempt claim)
+            &&
+            match (P.Developer_job.state parent).status with
+            | Running -> true
+            | Queued
+            | Waiting_permission _
+            | Waiting_completion _
+            | Succeeded
+            | Failed _
+            | Cancelled
+            | Interrupted _ -> false ->
+       Ok (Store.External_model_parent.Claimed_model (claim, lookup))
+     | None | Some _ -> invalid "developer model claimed parent is not Running")
   | Native_model scope ->
     let id = (H.context scope.registration.invocation).id in
     let lookup = Store.find_invocation observed id in
@@ -2465,28 +2538,8 @@ module Model_inference = struct
 
   let check_now ?(allow_tracking = false) t =
     let issuer = t.inference_issuer in
-    let callback_live =
-      match t.inference_switch with
-      | None -> true
-      | Some sw ->
-        Option.is_none (Eio.Switch.get_error sw)
-        && Option.value_map
-             (Eio.Fiber.get inference_scope_key)
-             ~default:false
-             ~f:(phys_equal t)
-    in
-    if (not t.inference_live) || not callback_live
-    then invalid "developer inference callback has exited"
-    else
-      let* selection = model_selection t in
-      let* _ = current_local ~allow_tracking issuer in
-      let* () =
-        Job_scope.Parent.check_now
-          t.inference_parent
-          ~owner:issuer.owner
-          ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
-      in
-      Provider_operator_port.Model_selection.check_current selection
+    let* _ = current_local ~allow_tracking issuer in
+    check_inference_scope_local t
   ;;
 
   let check t =
@@ -2704,6 +2757,14 @@ module Model_inference = struct
   ;;
 
   let context t = t.inference_context
+
+  let admit_external_model t ~request ~checkpoint =
+    admit_external_model_from_scope
+      (Claimed_model t)
+      ~request
+      ~checkpoint
+      ~check_parent_now:(fun () -> Ok ())
+  ;;
 
   let identity t : Inference_client.Identity.t =
     { new_preparation_id =
