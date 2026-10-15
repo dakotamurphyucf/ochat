@@ -84,6 +84,7 @@ module Check = struct
     | Tool_v1 -> Tool_v1
     | Moderator_v1 -> Moderator_v1
     | Delegated_moderator_v1 -> Delegated_moderator_v1
+    | Developer_tool_v1 -> Developer_tool_v1
   ;;
 
   let perform capture ~id ~policy ~max_dependency_depth ~env =
@@ -310,7 +311,8 @@ let run capture ~check ~id ~limits ~max_output_bytes ~env =
           { surface =
               (match Capture.target capture with
                | One_off_v1 -> Chatml.Chatml_extension_surface.one_off_v1
-               | Tool_v1 | Moderator_v1 | Delegated_moderator_v1 -> assert false)
+               | Tool_v1 | Developer_tool_v1 | Moderator_v1 | Delegated_moderator_v1 ->
+                 assert false)
           ; operations
           }
         in

@@ -11,6 +11,40 @@ module Error : sig
   [@@deriving sexp_of]
 end
 
+module Admitted_input : sig
+  (** Physical membership in one genuine Generated parse and its exact
+      parser-input/captured-source pair. It is pure evidence, not a source
+      owner or a project selection. *)
+  type t
+
+  val input : t -> Chatmd_parser_input.t
+  val source : t -> Chatml_source.t
+  val declaration : t -> Prompt.Chat_markdown.Declaration.t
+end
+
+(** Extract the existing declaration membership, same-run parser input
+    association, expected Source.Id in the admitted package namespace and
+    exact authored-byte comparison. No project spelling or route is required.
+    Every list visit/byte comparison uses the caller's shared checkpoint. *)
+val admit_input
+  :  parsed:Prompt.Chat_markdown.Generated.receipt
+  -> input_sources:(Chatmd_parser_input.t * Chatml_source.t) list
+  -> declaration:Prompt.Chat_markdown.Declaration.t
+  -> package_namespace:string
+  -> checkpoint:(unit -> unit)
+  -> (Admitted_input.t, Error.t) result
+
+(** Resolve the project's authored spelling relative to an already admitted
+    DECLARING input through the existing Source_loader rule. Check both
+    reference and resolved-member component limits. Source-only script
+    admission never calls this route; the existing [admit] wrapper does. *)
+val route
+  :  Admitted_input.t
+  -> max_locator_bytes:int
+  -> max_path_components:int
+  -> checkpoint:(unit -> unit)
+  -> (Source.Portable_path.t * Chatmd_shell_spec.Script_project.t, Error.t) result
+
 (** Prove physical membership in the genuine generated parse and its captured
     input/source association, including exact authored bytes. Resolve the
     project's authored spelling relative to that declaring input using the

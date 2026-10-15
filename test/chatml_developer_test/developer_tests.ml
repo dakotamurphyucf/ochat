@@ -89,6 +89,322 @@ let run env capture check id =
 
 let pure = "let main = fun input -> Task.pure(input)"
 
+let%test_unit
+    "a captured standalone source keeps its host identity through check and fixture"
+  =
+  Eio_main.run (fun env ->
+    let contract =
+      Chatml.Chatml_compiler_contract.for_target One_off_v1 ~checkpoint
+      |> fun contract -> Chatml.Chatml_compiler_contract.fingerprint contract ~checkpoint
+    in
+    let id =
+      S.Id.create ~package_namespace:"host.capture" ~relative_path:"nested/main.chatml"
+      |> Or_error.ok_exn
+    in
+    let source =
+      S.create id ~contents:pure ~expected_digest:None ~max_bytes:(Some 4096) ~checkpoint
+      |> Or_error.ok_exn
+    in
+    let prepared =
+      P.single_captured
+        ~compiler_contract:contract
+        ~source
+        ~max_input_bytes:4096
+        ~checkpoint
+        ()
+      |> function
+      | Ok prepared -> prepared
+      | Error error -> Error.raise_s (P.Error.sexp_of_t error)
+    in
+    assert (S.Id.equal (P.entry prepared) id);
+    assert (S.Id.equal (S.id (P.find_source prepared id |> Option.value_exn)) id);
+    let exact_bytes = P.Accounting.input_bytes (P.accounting prepared) in
+    assert (
+      Result.is_ok
+        (P.single_captured
+           ~compiler_contract:contract
+           ~source
+           ~max_input_bytes:exact_bytes
+           ~checkpoint
+           ()));
+    (match
+       P.single_captured
+         ~compiler_contract:contract
+         ~source
+         ~max_input_bytes:(exact_bytes - 1)
+         ~checkpoint
+         ()
+     with
+     | Error { problem = Input_limit _; _ } -> ()
+     | Error _ | Ok _ -> failwith "single source metadata escaped the input cap");
+    let origin =
+      C.Origin.local_saved
+        ~graph:(P.fingerprint prepared)
+        ~source_revision:(S.Digest.to_hex (S.digest source))
+      |> Or_error.ok_exn
+    in
+    let fixtures =
+      C.Fixture.create ~steps:[] ~max_steps:8 ~max_bytes:4096 ~checkpoint
+      |> Or_error.ok_exn
+    in
+    let captured =
+      C.create_prepared
+        ~prepared
+        ~origin
+        ~target:One_off_v1
+        ~entrypoint:"main"
+        ~input:(`String "captured")
+        ~fixtures:(Some fixtures)
+        ~json_bounds
+        ~checkpoint
+      |> capture_ok
+    in
+    let checked = check env captured in
+    (match T.Check.outcome checked with
+     | Ready -> ()
+     | Rejected _ -> failwith "standalone source did not check");
+    match T.Receipt.outcome (run env captured checked "standalone") with
+    | Succeeded (`String "captured") -> ()
+    | Succeeded _ | Failed _ -> failwith "standalone fixture did not run")
+;;
+
+let%test_unit "an embedded source-only script keeps its parsed origin through fixture" =
+  Eio_main.run (fun env ->
+    let module DC = Agent_server.Authoring_source_host.Document_context in
+    let module CM = Prompt.Chat_markdown in
+    let module Input = Chatmd_parser_input in
+    let module Context = Chatml_authoring_context in
+    let id =
+      S.Id.create ~package_namespace:"host.document" ~relative_path:"draft.chatmd"
+      |> Or_error.ok_exn
+    in
+    let text =
+      {|<script id="worker" language="chatml" kind="tool">let main = fun input -> Task.pure(input)</script>|}
+    in
+    let root =
+      S.create id ~contents:text ~expected_digest:None ~max_bytes:(Some 4096) ~checkpoint
+      |> Or_error.ok_exn
+    in
+    let parsed =
+      DC.Parsed_capture.parse_root_only
+        ~limits:Chatmd_source_bundle.default_limits
+        ~source:root
+        ~dir:(Eio.Stdenv.fs env)
+        ~checkpoint
+      |> function
+      | Ok parsed -> parsed
+      | Error error ->
+        Error.raise_s (Agent_server.Authoring_source_host.Error.sexp_of_t error)
+    in
+    let generated = CM.Generated.parsed (DC.Parsed_capture.parsed parsed) in
+    let declaration = List.hd_exn (CM.Parsed.declarations generated.parsed_root) in
+    let script =
+      DC.Parsed_capture.script_source
+        parsed
+        ~declaration
+        ~max_script_bytes:4096
+        ~max_locator_bytes:1024
+        ~max_path_components:16
+        ~checkpoint
+      |> function
+      | Ok script -> script
+      | Error error ->
+        Error.raise_s (Agent_server.Authoring_source_host.Error.sexp_of_t error)
+    in
+    assert (not (S.Id.equal (S.id root) (S.id script)));
+    [%test_eq: string] (S.contents script) pure;
+    let contract =
+      Chatml.Chatml_compiler_contract.for_target One_off_v1 ~checkpoint
+      |> fun contract -> Chatml.Chatml_compiler_contract.fingerprint contract ~checkpoint
+    in
+    let prepared =
+      P.single_captured
+        ~compiler_contract:contract
+        ~source:script
+        ~max_input_bytes:4096
+        ~checkpoint
+        ()
+      |> function
+      | Ok prepared -> prepared
+      | Error error -> Error.raise_s (P.Error.sexp_of_t error)
+    in
+    let identity =
+      Context.Identity.create
+        ~principal:"test"
+        ~host_incarnation:"host"
+        ~connection_lease:"lease"
+        ~nonce:"context"
+      |> Or_error.ok_exn
+    in
+    let limits =
+      Context.Limits.create
+        ~max_contexts:1
+        ~max_sources:1
+        ~max_open_documents:1
+        ~max_document_bytes:4096
+        ~max_effective_input_bytes:8192
+        ~max_context_source_bytes:8192
+        ~max_total_source_bytes:8192
+      |> Or_error.ok_exn
+    in
+    let context =
+      Context.admit_document
+        (Context.create ~limits)
+        ~identity
+        ~base:root
+        ~requested_environment:None
+        ~checkpoint
+      |> function
+      | Ok context -> context
+      | Error error -> Error.raise_s (Context.Error.sexp_of_t error)
+    in
+    let generation =
+      Context.find_document context ~identity
+      |> Option.value_exn
+      |> Context.Document.View.generation
+    in
+    let declaring_input = Input.Range.input (CM.Declaration.range declaration) in
+    let declaring_source =
+      DC.Parsed_capture.input_sources parsed
+      |> List.find_map ~f:(fun (input, source) ->
+        if phys_equal input declaring_input then Some source else None)
+      |> Option.value_exn
+    in
+    let range = CM.Declaration.range declaration in
+    let input_digest =
+      Input.identity_digest declaring_input ~checkpoint
+      |> S.Digest.of_hex
+      |> Or_error.ok_exn
+    in
+    let document_origin
+          ?(graph = P.fingerprint prepared)
+          ?(script_source = script)
+          ?(end_byte = Input.Range.end_byte range)
+          ()
+      =
+      C.Origin.document_script
+        ~graph
+        ~context:identity
+        ~generation
+        ~root_source:root
+        ~declaring_source
+        ~declaring_input_digest:input_digest
+        ~input_effective_bytes:(Input.effective_byte_length declaring_input)
+        ~declaration_start_byte:(Input.Range.start_byte range)
+        ~declaration_end_byte:end_byte
+        ~script_id:(CM.Declaration.script_id declaration)
+        ~script_source
+        ~max_identity_bytes:16_384
+        ~checkpoint
+    in
+    let origin = document_origin () |> Or_error.ok_exn in
+    let fixtures =
+      C.Fixture.create ~steps:[] ~max_steps:8 ~max_bytes:4096 ~checkpoint
+      |> Or_error.ok_exn
+    in
+    let capture ?(prepared = prepared) origin =
+      C.create_prepared
+        ~prepared
+        ~origin
+        ~target:One_off_v1
+        ~entrypoint:"main"
+        ~input:(`String "embedded")
+        ~fixtures:(Some fixtures)
+        ~json_bounds
+        ~checkpoint
+    in
+    let captured = capture origin |> capture_ok in
+    let checked = check env captured in
+    (match T.Check.outcome checked with
+     | Ready -> ()
+     | Rejected _ -> failwith "embedded script did not check");
+    (match T.Receipt.outcome (run env captured checked "embedded") with
+     | Succeeded (`String "embedded") -> ()
+     | Succeeded _ | Failed _ -> failwith "embedded fixture did not run");
+    let changed =
+      S.create
+        (S.id script)
+        ~contents:"let main = fun input -> Task.fail(\"changed\")"
+        ~expected_digest:None
+        ~max_bytes:(Some 4096)
+        ~checkpoint
+      |> Or_error.ok_exn
+    in
+    (match capture (document_origin ~script_source:changed () |> Or_error.ok_exn) with
+     | Error (Stale_source stale) when S.Id.equal stale (S.id script) -> ()
+     | Error _ | Ok _ -> failwith "changed script body reused prepared source");
+    let other_id =
+      S.Id.create ~package_namespace:"host.document" ~relative_path:"other-entry.chatml"
+      |> Or_error.ok_exn
+    in
+    let other =
+      S.create
+        other_id
+        ~contents:pure
+        ~expected_digest:None
+        ~max_bytes:(Some 4096)
+        ~checkpoint
+      |> Or_error.ok_exn
+    in
+    let other_scope =
+      P.Scope.create other_id ~bindings:[] ~selected_at:None ~checkpoint
+      |> Or_error.ok_exn
+    in
+    let wrong_entry =
+      P.create
+        ~max_input_bytes:(Some 8192)
+        ~compiler_contract:contract
+        ~environment:(P.Environment.implicit ~required_contract:contract)
+        ~provenance:Implicit
+        ~entry:other_id
+        ~sources:[ script; other ]
+        ~definitions:[]
+        ~scopes:(other_scope :: P.scopes prepared)
+        ~checkpoint
+        ()
+      |> function
+      | Ok prepared -> prepared
+      | Error error -> Error.raise_s (P.Error.sexp_of_t error)
+    in
+    assert (Option.is_some (P.find_source wrong_entry (S.id script)));
+    (match
+       capture
+         ~prepared:wrong_entry
+         (document_origin ~graph:(P.fingerprint wrong_entry) () |> Or_error.ok_exn)
+     with
+     | Error Invalid_origin -> ()
+     | Error _ | Ok _ -> failwith "embedded script was only a dependency, not the entry");
+    assert (
+      Result.is_error
+        (document_origin ~end_byte:(Input.effective_byte_length declaring_input + 1) ()));
+    let foreign =
+      DC.Parsed_capture.parse_root_only
+        ~limits:Chatmd_source_bundle.default_limits
+        ~source:root
+        ~dir:(Eio.Stdenv.fs env)
+        ~checkpoint
+      |> function
+      | Ok foreign -> foreign
+      | Error error ->
+        Error.raise_s (Agent_server.Authoring_source_host.Error.sexp_of_t error)
+    in
+    let foreign_generated = CM.Generated.parsed (DC.Parsed_capture.parsed foreign) in
+    let foreign_declaration =
+      List.hd_exn (CM.Parsed.declarations foreign_generated.parsed_root)
+    in
+    match
+      DC.Parsed_capture.script_source
+        parsed
+        ~declaration:foreign_declaration
+        ~max_script_bytes:4096
+        ~max_locator_bytes:1024
+        ~max_path_components:16
+        ~checkpoint
+    with
+    | Error Agent_server.Authoring_source_host.Error.Selected_script_unavailable -> ()
+    | Error _ | Ok _ -> failwith "foreign parsed declaration entered source-only route")
+;;
+
 let tool =
   {|let main = fun input -> Task.bind(Tool.call("fixture", input), fun result ->
   match result with

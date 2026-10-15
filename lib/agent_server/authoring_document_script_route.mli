@@ -17,10 +17,44 @@ module Error : sig
   [@@deriving sexp_of]
 end
 
+module Source_only : sig
+  (** Exact source and genuine declaring-input association before any project
+      selection. This is comparison evidence, never a native source grant. *)
+  type t
+
+  val source : t -> Chatml_source.t
+  val admitted_input : t -> Authoring_project_declaration.Admitted_input.t
+  val external_member : t -> Source.Portable_path.t option
+end
+
+(** Project-independent extraction of the SAME inline/external script-body
+    source admitted by [admit] below. First require physical Generated
+    declaration/input/source membership through
+    [Authoring_project_declaration.admit_input]. Inline bodies retain the
+    existing collision-checked fragment namespace and byte range. External
+    references resolve relative to the genuine DECLARING parser input through
+    Source_loader; exact bundle bytes must equal Declaration.script_body.
+    Missing, duplicate or changed external bytes reject. No project member,
+    environment, Build or filesystem fallback is inferred. [root_source] must
+    match the Parsed root's associated captured source; the enclosing host
+    separately proves the current owner/generation. All scans and comparisons
+    poll the caller's one budget before copying a bounded body. *)
+val admit_source
+  :  parsed:Prompt.Chat_markdown.Generated.receipt
+  -> input_sources:(Chatmd_parser_input.t * Chatml_source.t) list
+  -> bundle:Chatmd_source_bundle.t
+  -> declaration:Prompt.Chat_markdown.Declaration.t
+  -> root_source:Chatml_source.t
+  -> max_script_bytes:int
+  -> max_locator_bytes:int
+  -> max_path_components:int
+  -> checkpoint:(unit -> unit)
+  -> (Source_only.t, Error.t) result
+
 type t
 
-(** First prove actual declaration membership and declaring-input source bytes
-    using the existing {!Authoring_project_declaration.admit} route. Its
+(** Reuse [admit_source] once, then resolve the actual project selection from
+    that SAME admitted input via {!Authoring_project_declaration.route}. Its
     resolved project member must equal [project_member] exactly. Inline script
     bytes come from [declaration] and receive a collision-checked bounded
     logical fragment ID derived from [root_source]'s actual captured identity,

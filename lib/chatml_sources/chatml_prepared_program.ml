@@ -632,6 +632,33 @@ let create
   }
 ;;
 
+let single_captured_with_limit ~compiler_contract ~source ~max_input_bytes ~checkpoint () =
+  let id = Captured.id source in
+  let scope =
+    Scope.create id ~bindings:[] ~selected_at:None ~checkpoint |> Or_error.ok_exn
+  in
+  create
+    ~max_input_bytes
+    ~compiler_contract
+    ~environment:(Environment.implicit ~required_contract:compiler_contract)
+    ~provenance:Implicit
+    ~entry:id
+    ~sources:[ source ]
+    ~definitions:[]
+    ~scopes:[ scope ]
+    ~checkpoint
+    ()
+;;
+
+let single_captured ~compiler_contract ~source ~max_input_bytes ~checkpoint () =
+  single_captured_with_limit
+    ~compiler_contract
+    ~source
+    ~max_input_bytes:(Some max_input_bytes)
+    ~checkpoint
+    ()
+;;
+
 let single_file ~compiler_contract ~source ~checkpoint () =
   (* Constructors cannot reject these internal constants and unconstrained exact
      bytes; checkpoint exceptions retain their original cancellation semantics. *)
@@ -641,22 +668,14 @@ let single_file ~compiler_contract ~source ~checkpoint () =
       ~relative_path:"main.chatml"
     |> Or_error.ok_exn
   in
-  let captured =
+  let source =
     Captured.create id ~contents:source ~expected_digest:None ~max_bytes:None ~checkpoint
     |> Or_error.ok_exn
   in
-  let scope =
-    Scope.create id ~bindings:[] ~selected_at:None ~checkpoint |> Or_error.ok_exn
-  in
-  create
-    ~max_input_bytes:None
+  single_captured_with_limit
     ~compiler_contract
-    ~environment:(Environment.implicit ~required_contract:compiler_contract)
-    ~provenance:Implicit
-    ~entry:id
-    ~sources:[ captured ]
-    ~definitions:[]
-    ~scopes:[ scope ]
+    ~source
+    ~max_input_bytes:None
     ~checkpoint
     ()
 ;;
