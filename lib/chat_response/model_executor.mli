@@ -45,6 +45,25 @@ val create
 
 val agent_prompt_v1_name : string
 
+(** Run the canonical agent_prompt_v1 body on a decoded request. This is the
+    existing prompt fetch, configuration override, selected-target capture,
+    same-target Context.derive, nested agent run and result encoding. Expected
+    recipe failures remain [Error]; unexpected exceptions and cancellation
+    retain their original identity and backtrace. No provider or actor is
+    resolved here: [exec_context.ctx] and the optional inference override must
+    already come from the owning host. Existing Ctx dispatch/submission guards
+    are inherited into nested execution; [before_inference_attempt] composes
+    before its observer. Decoding is deliberately outside this function, so
+    callers retain their existing malformed-payload error boundary. *)
+val call_agent_prompt_v1_strict
+  :  exec_context
+  -> request:Model_spawn_request.t
+  -> ?inference_context:Inference_runtime.Context.t
+  -> ?before_inference_attempt:(Inference_runtime.Attempt.t -> unit)
+  -> capture_recipe_target:(Inference.Request.Target.t -> (unit, string) result)
+  -> unit
+  -> (Moderation.Capabilities.model_call_result, string) result
+
 (** An optional host guard is composed before the existing attempt observer and
     inherited by derived/nested recipe inference. Ctx.Inference_admission_rejected
     becomes the safe Model_error "model inference admission was revoked";

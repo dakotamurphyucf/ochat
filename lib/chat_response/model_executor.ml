@@ -192,6 +192,84 @@ let agent_prompt_result_json
     ]
 ;;
 
+let call_agent_prompt_v1_strict
+      (exec_context : exec_context)
+      ~request
+      ?inference_context
+      ?before_inference_attempt
+      ~capture_recipe_target
+      ()
+  =
+  let open Result.Let_syntax in
+  let prompt = Model_spawn_request.prompt request in
+  let is_local = Model_spawn_request.is_local request in
+  let input = Model_spawn_request.input request in
+  let history_compaction_opt = Model_spawn_request.history_compaction request in
+  let nested_session_id_opt = Model_spawn_request.nested_prompt_id request in
+  let nested_session_id = Option.value nested_session_id_opt ~default:prompt in
+  let%bind prompt_xml, prompt_dir =
+    exec_context.fetch_prompt ~ctx:exec_context.ctx ~prompt ~is_local
+  in
+  let ctx =
+    match inference_context with
+    | None -> exec_context.ctx
+    | Some inference_context -> Ctx.with_inference exec_context.ctx ~inference_context
+  in
+  let ctx =
+    match before_inference_attempt with
+    | None -> ctx
+    | Some before_attempt -> Ctx.with_inference_attempt_guard ctx ~before_attempt
+  in
+  let elements =
+    CM.parse_chat_inputs
+      ~source:prompt
+      ~dir:(Option.value prompt_dir ~default:(Ctx.dir ctx))
+      prompt_xml
+  in
+  let%bind target =
+    Inference_config.apply_overrides
+      (Inference_runtime.Context.target ctx.inference_context)
+      (Config.of_elements elements)
+      ~limits:Transcript.Admission.default
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
+  in
+  let%bind () = capture_recipe_target target in
+  let%bind inference_context =
+    Inference_runtime.Context.derive ctx.inference_context ~target
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
+  in
+  let ctx = Ctx.with_inference ctx ~inference_context in
+  let basic_item : CM.basic_content_item =
+    { type_ = "text"
+    ; text = Some input
+    ; image_url = None
+    ; document_url = None
+    ; is_local = false
+    ; cleanup_html = false
+    ; markdown = false
+    }
+  in
+  let history_compaction = Option.value history_compaction_opt ~default:false in
+  let final_text =
+    exec_context.run_agent
+      ~history_compaction
+      ?prompt_dir
+      ~session_id:nested_session_id
+      ~ctx
+      prompt_xml
+      [ CM.Basic basic_item ]
+  in
+  Ok
+    (Moderation.Capabilities.Model_ok
+       (agent_prompt_result_json
+          ~prompt
+          ~is_local
+          ~session_id:nested_session_id
+          ~final_text))
+;;
+
 let recipe_agent_prompt_v1
       (t : t)
       ~(session_id : string)
@@ -204,78 +282,16 @@ let recipe_agent_prompt_v1
   let call ~payload =
     let open Result.Let_syntax in
     let%bind request = Model_spawn_request.decode payload in
-    let prompt = Model_spawn_request.prompt request in
-    let is_local = Model_spawn_request.is_local request in
-    let input = Model_spawn_request.input request in
-    let history_compaction_opt = Model_spawn_request.history_compaction request in
-    let nested_session_id_opt = Model_spawn_request.nested_prompt_id request in
-    let nested_session_id = Option.value nested_session_id_opt ~default:prompt in
-    let job () =
-      let%bind prompt_xml, prompt_dir =
-        t.exec_context.fetch_prompt ~ctx:t.exec_context.ctx ~prompt ~is_local
-      in
-      let ctx =
-        match inference_context with
-        | None -> t.exec_context.ctx
-        | Some inference_context ->
-          Ctx.with_inference t.exec_context.ctx ~inference_context
-      in
-      let ctx =
-        match before_inference_attempt with
-        | None -> ctx
-        | Some before_attempt -> Ctx.with_inference_attempt_guard ctx ~before_attempt
-      in
-      let elements =
-        CM.parse_chat_inputs
-          ~source:prompt
-          ~dir:(Option.value prompt_dir ~default:(Ctx.dir ctx))
-          prompt_xml
-      in
-      let%bind target =
-        Inference_config.apply_overrides
-          (Inference_runtime.Context.target ctx.inference_context)
-          (Config.of_elements elements)
-          ~limits:Transcript.Admission.default
-        |> Result.map_error ~f:(fun error ->
-          Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
-      in
-      let%bind () = capture_recipe_target target in
-      let%bind inference_context =
-        Inference_runtime.Context.derive ctx.inference_context ~target
-        |> Result.map_error ~f:(fun error ->
-          Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
-      in
-      let ctx = Ctx.with_inference ctx ~inference_context in
-      let basic_item : CM.basic_content_item =
-        { type_ = "text"
-        ; text = Some input
-        ; image_url = None
-        ; document_url = None
-        ; is_local = false
-        ; cleanup_html = false
-        ; markdown = false
-        }
-      in
-      let history_compaction = Option.value history_compaction_opt ~default:false in
-      let final_text =
-        t.exec_context.run_agent
-          ~history_compaction
-          ?prompt_dir
-          ~session_id:nested_session_id
-          ~ctx
-          prompt_xml
-          [ CM.Basic basic_item ]
-      in
-      Ok
-        (Moderation.Capabilities.Model_ok
-           (agent_prompt_result_json
-              ~prompt
-              ~is_local
-              ~session_id:nested_session_id
-              ~final_text))
-    in
     try
-      match job () with
+      match
+        call_agent_prompt_v1_strict
+          t.exec_context
+          ~request
+          ?inference_context
+          ?before_inference_attempt
+          ~capture_recipe_target
+          ()
+      with
       | Ok r -> Ok r
       | Error msg -> Ok (Moderation.Capabilities.Model_error msg)
     with

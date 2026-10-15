@@ -744,6 +744,7 @@ let%expect_test "legacy wrapper fork depths retain the shared child bound" =
         let nested = ref 0 in
         let rejected = ref false in
         let submission_checks = ref 0 in
+        let dispatch_checks = ref 0 in
         let issued_attempts = Queue.create () in
         let root_admissions = ref 0 in
         let nested_admissions = ref 0 in
@@ -790,6 +791,7 @@ let%expect_test "legacy wrapper fork depths retain the shared child bound" =
             ~inference_identity:(identity ())
             ~on_inference_attempt:(Queue.enqueue issued_attempts)
             ~on_inference_completion:ignore
+            ~before_inference_dispatch:(fun _ -> Int.incr dispatch_checks)
             ~on_admitted_call:(fun admitted ->
               let attempt = C.In_memory_stream.Admitted_call.attempt admitted in
               assert (
@@ -832,6 +834,7 @@ let%expect_test "legacy wrapper fork depths retain the shared child bound" =
         assert (List.length history = 3);
         assert !rejected;
         assert (!submission_checks = !calls);
+        assert (!dispatch_checks = !calls);
         assert (!root_admissions > 0);
         if fork_depth < 2 then assert (!nested_admissions > 0);
         print_s
@@ -853,6 +856,8 @@ let%expect_test
   Eio_main.run (fun env ->
     Eio.Switch.run (fun sw ->
       let active = ref false
+      and dispatch_open = ref true
+      and dispatch_checks = ref 0
       and guards = ref 0
       and upstream = ref 0
       and submission_checks = ref 0
@@ -884,6 +889,9 @@ let%expect_test
           ~inference_identity:(identity ())
           ~on_inference_attempt:(fun _ -> Int.incr upstream)
           ~on_inference_completion:ignore
+          ~before_inference_dispatch:(fun _ ->
+            Int.incr dispatch_checks;
+            if not !dispatch_open then raise C.Ctx.Inference_admission_rejected)
           ~env
           ~dir
           ~tool_dir:dir
@@ -928,6 +936,12 @@ let%expect_test
       [%test_eq: int] 1 !upstream;
       [%test_eq: int] 1 !transports;
       [%test_eq: int] 1 !submission_checks;
+      dispatch_open := false;
+      (match complete child with
+       | _ -> failwith "inherited dispatch guard permitted a revoked preparation"
+       | exception C.Ctx.Inference_admission_rejected -> ());
+      [%test_eq: int] 1 !transports;
+      dispatch_open := true;
       active := false;
       let executor =
         C.Model_executor.create
@@ -963,7 +977,8 @@ let%expect_test
       [%test_eq: int] 3 !guards;
       [%test_eq: int] 1 !upstream;
       [%test_eq: int] 1 !submission_checks;
-      [%test_eq: int] 1 !transports));
+      [%test_eq: int] 1 !transports;
+      [%test_eq: int] 4 !dispatch_checks));
   print_endline
     "revoked derived and recipe attempts stop before upstream/transport; live control \
      dispatches";

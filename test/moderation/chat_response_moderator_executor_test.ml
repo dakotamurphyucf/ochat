@@ -9,7 +9,7 @@ module Lang = Chatml.Chatml_lang
 
 (* These tests inject the domain run_agent callback. A selected context is still
    explicit; any accidental inference dispatch must fail, never use a network. *)
-let fixture_ctx ~env ~dir ~tool_dir ~cache =
+let fixture_ctx ?agent_prompt_v1_recipe ~env ~dir ~tool_dir ~cache () =
   let require result =
     Result.map_error result ~f:(fun _ -> "fixture admission") |> Result.ok_or_failwith
   in
@@ -48,11 +48,57 @@ let fixture_ctx ~env ~dir ~tool_dir ~cache =
     ~inference_identity
     ~on_inference_attempt:(fun _ -> failwith "fixture admitted attempt")
     ~on_inference_completion:(fun _ -> ())
+    ?agent_prompt_v1_recipe
     ~env
     ~dir
     ~tool_dir
     ~cache
     ()
+;;
+
+let%test_unit "nested Driver moderator uses its installed canonical recipe" =
+  Eio_main.run (fun env ->
+    let dir = Eio.Stdenv.cwd env in
+    let calls = ref 0 in
+    let physical_recipe : Moderation.Capabilities.model_recipe =
+      { call = (fun ~payload:_ -> failwith "unexpected synchronous model call")
+      ; spawn =
+          (fun ~payload ->
+            (match payload with
+             | `Null -> ()
+             | `Object _ | `Array _ | `String _ | `Number _ | `True | `False ->
+               failwith "unexpected model request payload");
+            Int.incr calls;
+            Ok "physical-model-child")
+      }
+    in
+    let ctx =
+      fixture_ctx
+        ~agent_prompt_v1_recipe:physical_recipe
+        ~env
+        ~dir
+        ~tool_dir:dir
+        ~cache:(Cache.create ~max_size:1 ())
+        ()
+    in
+    let prompt =
+      {|
+<developer>Use the selected model recipe.</developer>
+<script language="chatml" kind="moderator">
+  type state = int
+  type event = [ `Session_start ]
+  let initial_state = 0
+  let on_event : context -> state -> event -> state task =
+    fun ctx st ev ->
+      match ev with
+      | `Session_start ->
+        Task.bind(Model.spawn("agent_prompt_v1", `Null), fun child ->
+        Task.bind(Runtime.end_session("done"), fun ignored -> Task.pure(st + 1)))
+</script>
+|}
+    in
+    Chat_response.Driver.run_agent ~ctx prompt [] |> ignore;
+    assert (Int.equal !calls 1))
 ;;
 
 let json_object_field (json : Jsonaf.t) (key : string) : Jsonaf.t option =
@@ -87,7 +133,7 @@ let%expect_test "agent_prompt_v1 returns structured json (no OpenAI)" =
   Eio.Path.mkdirs ~perm:0o700 tmp;
   let cache_file = Eio.Path.(tmp / "cache.bin") in
   let cache = Cache.load ~file:cache_file ~max_size:10 () in
-  let ctx = fixture_ctx ~env ~dir:tmp ~tool_dir:tmp ~cache in
+  let ctx = fixture_ctx ~env ~dir:tmp ~tool_dir:tmp ~cache () in
   let exec_context : Model_executor.exec_context =
     { ctx
     ; run_agent =
@@ -132,7 +178,50 @@ let%expect_test "agent_prompt_v1 returns structured json (no OpenAI)" =
     {|
     ((recipe agent_prompt_v1) (session_id nested-session) (final_text echo:hi)
      (terminated_normally true))
-    |}]
+    |}];
+  let sentinel = Failure "strict recipe sentinel" in
+  let failing : Model_executor.exec_context =
+    { exec_context with
+      run_agent =
+        (fun ?history_compaction:_ ?prompt_dir:_ ?session_id:_ ~ctx:_ _ _ ->
+          raise sentinel)
+    }
+  in
+  let request =
+    Chat_response.Model_spawn_request.decode payload |> Result.ok_or_failwith
+  in
+  let previous_backtrace = Stdlib.Printexc.backtrace_status () in
+  Stdlib.Printexc.record_backtrace true;
+  Exn.protect
+    ~finally:(fun () -> Stdlib.Printexc.record_backtrace previous_backtrace)
+    ~f:(fun () ->
+      let strict_raised_with_backtrace =
+        match
+          Model_executor.call_agent_prompt_v1_strict
+            failing
+            ~request
+            ~capture_recipe_target:(fun _ -> Ok ())
+            ()
+        with
+        | Ok _ | Error _ -> false
+        | exception exn ->
+          phys_equal exn sentinel
+          && not
+               (String.is_empty
+                  (Stdlib.Printexc.raw_backtrace_to_string
+                     (Stdlib.Printexc.get_raw_backtrace ())))
+      in
+      assert strict_raised_with_backtrace;
+      let conversation = Model_executor.create ~sw ~exec_context:failing () in
+      let wrapped =
+        Model_executor.recipe_agent_prompt_v1 conversation ~session_id:"caller-session" ()
+      in
+      assert (
+        match wrapped.call ~payload with
+        | Ok (Moderation.Capabilities.Model_error message) ->
+          String.is_substring message ~substring:"strict recipe sentinel"
+        | Ok (Moderation.Capabilities.Model_ok _ | Model_refused _) | Error _ -> false);
+      assert (Result.is_error (wrapped.call ~payload:`Null)))
 ;;
 
 let%expect_test "agent_prompt_v1 spawn enforces max_spawned_jobs (no OpenAI)" =
@@ -145,7 +234,7 @@ let%expect_test "agent_prompt_v1 spawn enforces max_spawned_jobs (no OpenAI)" =
   Eio.Path.mkdirs ~perm:0o700 tmp;
   let cache_file = Eio.Path.(tmp / "cache.bin") in
   let cache = Cache.load ~file:cache_file ~max_size:10 () in
-  let ctx = fixture_ctx ~env ~dir:tmp ~tool_dir:tmp ~cache in
+  let ctx = fixture_ctx ~env ~dir:tmp ~tool_dir:tmp ~cache () in
   let exec_context : Model_executor.exec_context =
     { ctx
     ; run_agent =
@@ -229,7 +318,7 @@ let%test_unit
         let tmp = Eio.Path.(cwd / "_tmp_model_spawn_active_owner") in
         Eio.Path.mkdirs ~perm:0o700 tmp;
         let cache = Cache.load ~file:Eio.Path.(tmp / "cache.bin") ~max_size:10 () in
-        let ctx = fixture_ctx ~env ~dir:tmp ~tool_dir:tmp ~cache in
+        let ctx = fixture_ctx ~env ~dir:tmp ~tool_dir:tmp ~cache () in
         let exec_context : Model_executor.exec_context =
           { ctx
           ; run_agent =
@@ -315,7 +404,7 @@ let%expect_test "spawn completion encodes stable internal event variants" =
   let tmp = Eio.Path.(cwd / "_tmp_model_spawn_reinject") in
   Eio.Path.mkdirs ~perm:0o700 tmp;
   let cache = Cache.load ~file:Eio.Path.(tmp / "cache.bin") ~max_size:10 () in
-  let ctx = fixture_ctx ~env ~dir:tmp ~tool_dir:tmp ~cache in
+  let ctx = fixture_ctx ~env ~dir:tmp ~tool_dir:tmp ~cache () in
   let exec_context : Model_executor.exec_context =
     { ctx
     ; run_agent =
@@ -362,7 +451,7 @@ let%expect_test "spawn completion wakes registered session and unregister is ine
   let tmp = Eio.Path.(cwd / "_tmp_model_spawn_wakeup") in
   Eio.Path.mkdirs ~perm:0o700 tmp;
   let cache = Cache.load ~file:Eio.Path.(tmp / "cache.bin") ~max_size:10 () in
-  let ctx = fixture_ctx ~env ~dir:tmp ~tool_dir:tmp ~cache in
+  let ctx = fixture_ctx ~env ~dir:tmp ~tool_dir:tmp ~cache () in
   let exec_context : Model_executor.exec_context =
     { ctx
     ; run_agent =

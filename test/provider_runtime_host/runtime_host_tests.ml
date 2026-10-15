@@ -792,13 +792,66 @@ let%test_unit
                         ^ error.P.Error.message)
                       |> Result.ok_or_failwith
                     in
-                    let second_child =
-                      Root.Model_inference.admit_external_model
-                        scope
-                        ~request:model_request
-                        ~checkpoint:ignore
-                      |> ok
+                    let nested_child = ref None in
+                    let physical_recipe
+                      : Chat_response.Moderation.Capabilities.model_recipe
+                      =
+                      { call =
+                          (fun ~payload:_ ->
+                            failwith
+                              "nested developer script made a synchronous model call")
+                      ; spawn =
+                          (fun ~payload ->
+                            let open Result.Let_syntax in
+                            let%bind request = P.Model_spawn_request.decode payload in
+                            Root.Model_inference.admit_external_model
+                              scope
+                              ~request
+                              ~checkpoint:ignore
+                            |> Result.map_error ~f:(fun error -> error.P.Error.message)
+                            |> Result.map ~f:(fun id ->
+                              nested_child := Some id;
+                              P.Id.Job.to_string id))
+                      }
                     in
+                    let dir = Eio.Stdenv.cwd env in
+                    let nested_ctx =
+                      Chat_response.Ctx.create
+                        ~inference_context:context
+                        ~inference_identity:(Root.Model_inference.identity scope)
+                        ~on_inference_attempt:(Root.Model_inference.on_attempt scope)
+                        ~on_inference_completion:
+                          (Root.Model_inference.on_completion scope)
+                        ~on_inference_observation:
+                          (Root.Model_inference.on_observation scope)
+                        ~on_admitted_call:(Root.Model_inference.on_admitted_call scope)
+                        ~before_inference_dispatch:
+                          (Root.Model_inference.before_dispatch scope)
+                        ~agent_prompt_v1_recipe:physical_recipe
+                        ~env
+                        ~dir
+                        ~tool_dir:dir
+                        ~cache:(Chat_response.Cache.create ~max_size:1 ())
+                        ()
+                    in
+                    let prompt =
+                      Printf.sprintf
+                        {|<developer>Admit one selected nested model job.</developer>
+<script language="chatml" kind="moderator">
+  type state = int
+  type event = [ `Session_start ]
+  let initial_state = 0
+  let on_event : context -> state -> event -> state task =
+    fun ctx st ev ->
+      match ev with
+      | `Session_start ->
+        Task.bind(Model.spawn("agent_prompt_v1", Json.parse(%S)), fun child ->
+        Task.bind(Runtime.end_session("done"), fun ignored -> Task.pure(st + 1)))
+</script>|}
+                        (Jsonaf.to_string (P.Model_spawn_request.original model_request))
+                    in
+                    Chat_response.Driver.run_agent ~ctx:nested_ctx prompt [] |> ignore;
+                    let second_child = Option.value_exn !nested_child in
                     assert (not (P.Id.Job.equal first_child second_child));
                     claimed_children := [ first_child; second_child ];
                     let after_children = Run_store.observe handle |> ok in
