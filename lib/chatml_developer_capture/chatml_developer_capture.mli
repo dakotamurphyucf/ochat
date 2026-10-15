@@ -22,6 +22,13 @@ module Json_bounds : sig
 end
 
 module Origin : sig
+  module Error : sig
+    type t =
+      | Invalid_provenance
+      | Identity_limit
+    [@@deriving sexp_of]
+  end
+
   (** Provenance describes where the host observed the selected bytes. It is
       data for receipts, never a capability or a promise that a local file was
       saved. All graph digests must equal the admitted build's fingerprint.
@@ -79,7 +86,7 @@ module Origin : sig
     -> script_source:Chatml_source.t
     -> max_identity_bytes:int
     -> checkpoint:(unit -> unit)
-    -> t Or_error.t
+    -> (t, Error.t) result
 
   val graph : t -> Chatml_source.Digest.t
 end

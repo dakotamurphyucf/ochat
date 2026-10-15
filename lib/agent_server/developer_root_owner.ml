@@ -72,6 +72,12 @@ type call =
   ; finish : unit Eio.Promise.u
   }
 
+type final_admission =
+  actor:Operator_authorization.t
+  -> capture:Chatml_developer_capture.t
+  -> checkpoint:(unit -> unit)
+  -> (unit -> (unit, P.Error.t) result, P.Error.t) result
+
 type admission =
   { mutable call : call
   ; mutable claim : Store.Run_claim.t option
@@ -86,6 +92,7 @@ type admission =
   ; job_policy : Chat_response.One_off_request.policy
   ; handle : Store.handle
   ; workspace_conflict_domain : string
+  ; final_admission : final_admission option
   ; mutable running : bool
   }
 
@@ -3700,6 +3707,7 @@ let close_owner t =
 let close_and_wait = close_owner
 
 module Registry = struct
+  type nonrec final_admission = final_admission
   type nonrec t = registry
 
   let uses_capacity t capacity = phys_equal t.capacity capacity
@@ -3886,7 +3894,7 @@ module Registry = struct
     else invalid "developer root actor or capture does not match"
   ;;
 
-  let publish_admission t (admission : admission) =
+  let publish_admission t (admission : admission) ~checkpoint =
     let handle = admission.handle in
     let owner = Store.owner handle in
     let* token =
@@ -3933,6 +3941,16 @@ module Registry = struct
     in
     admission.worker <- Some worker;
     let* () = verify_admission t admission in
+    let* final_check =
+      match admission.final_admission with
+      | None -> Ok (fun () -> Ok ())
+      | Some prepare ->
+        let* check =
+          prepare ~actor:admission.actor ~capture:admission.capture ~checkpoint
+        in
+        let* () = verify_admission t admission in
+        Ok check
+    in
     let run =
       { registry = t
       ; actor = admission.actor
@@ -3972,11 +3990,12 @@ module Registry = struct
       ; result_binding = Result_unbound
       }
     in
+    let* () = final_check () in
     Hashtbl.set t.owners ~key:owner.run_id ~data:(Owned run);
     Ok run
   ;;
 
-  let drive_recovery t (admission : admission) ~recover =
+  let drive_recovery t (admission : admission) ~recover ~checkpoint =
     let run_id = (Store.owner admission.handle).run_id in
     let call = admission.call in
     let outcome =
@@ -4008,7 +4027,7 @@ module Registry = struct
                 Ok recovery
             in
             let* () = recover recovery in
-            publish_admission t admission))
+            publish_admission t admission ~checkpoint))
       with
       | value -> `Returned value
       | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
@@ -4034,6 +4053,8 @@ module Registry = struct
   ;;
 
   let admit_with_recovery
+        ?final_admission
+        ?checkpoint
         t
         ~actor
         ~capture
@@ -4045,7 +4066,9 @@ module Registry = struct
         ~workspace_conflict_domain
         ~recover
     =
-    if t.closed || not (same_domain t)
+    if Option.is_some final_admission && Option.is_none checkpoint
+    then invalid "developer final admission needs a fresh checkpoint"
+    else if t.closed || not (same_domain t)
     then invalid "developer root registry is closed or foreign"
     else (
       let run_id = (Store.owner handle).run_id in
@@ -4069,14 +4092,21 @@ module Registry = struct
           ; job_policy
           ; handle
           ; workspace_conflict_domain
+          ; final_admission
           ; running = true
           }
         in
         Hashtbl.set t.owners ~key:run_id ~data:(Admitting admission);
-        drive_recovery t admission ~recover))
+        drive_recovery
+          t
+          admission
+          ~recover
+          ~checkpoint:(Option.value checkpoint ~default:Fn.id)))
   ;;
 
   let admit
+        ?final_admission
+        ?checkpoint
         t
         ~actor
         ~capture
@@ -4088,6 +4118,8 @@ module Registry = struct
         ~workspace_conflict_domain
     =
     admit_with_recovery
+      ?final_admission
+      ?checkpoint
       t
       ~actor
       ~capture
@@ -4106,7 +4138,7 @@ module Registry = struct
         else invalid "abandoned developer job requires terminal recovery")
   ;;
 
-  let resume_recovery t ~actor ~handle ~recover =
+  let resume_recovery ?checkpoint t ~actor ~handle ~recover =
     if t.closed || not (same_domain t)
     then invalid "developer root registry is closed or foreign"
     else (
@@ -4117,10 +4149,17 @@ module Registry = struct
              && phys_equal admission.actor actor
              && phys_equal admission.handle handle
              && Option.is_some admission.recovery ->
-        let finished, finish = Eio.Promise.create () in
-        admission.call <- { cancel = None; finished; finish };
-        admission.running <- true;
-        drive_recovery t admission ~recover
+        if Option.is_some admission.final_admission && Option.is_none checkpoint
+        then invalid "developer resumed final admission needs a fresh checkpoint"
+        else (
+          let finished, finish = Eio.Promise.create () in
+          admission.call <- { cancel = None; finished; finish };
+          admission.running <- true;
+          drive_recovery
+            t
+            admission
+            ~recover
+            ~checkpoint:(Option.value checkpoint ~default:Fn.id))
       | None | Some (Owned _) | Some (Admitting _) ->
         invalid "developer terminal recovery does not belong to this actor")
   ;;
