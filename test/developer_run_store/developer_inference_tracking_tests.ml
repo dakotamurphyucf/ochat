@@ -157,7 +157,7 @@ let interrupted_row_bytes row =
   |> F.ok
 ;;
 
-let interrupted_document_bytes path =
+let projected_document_bytes path ~interrupt_inference ~interrupt_commands =
   let saved = Eio.Path.load path |> Jsonaf.parse |> Or_error.ok_exn in
   let envelope =
     match saved with
@@ -174,11 +174,50 @@ let interrupted_document_bytes path =
     | `Array rows -> rows
     | _ -> failwith "expected inference array"
   in
+  let commands =
+    match List.Assoc.find_exn payload "commands" ~equal:String.equal with
+    | `Array rows -> rows
+    | _ -> failwith "expected command array"
+  in
+  let interrupted_command row =
+    let module C = R.Command in
+    let original =
+      C.Row.of_json row ~limits:Document_schema.Limits.default ~poll:ignore |> F.ok
+    in
+    let receipt =
+      C.Receipt.create
+        (C.Receipt.Check C.Receipt.Check.Interrupted)
+        ~limits:Document_schema.Limits.default
+        ~poll:ignore
+      |> F.ok
+    in
+    C.Row.apply
+      original
+      (C.Row.Change.Finish receipt)
+      ~limits:Document_schema.Limits.default
+      ~poll:ignore
+    |> F.ok
+    |> C.Row.to_json
+  in
+  let recovery_increments =
+    (if interrupt_inference then List.length rows else 0)
+    + if interrupt_commands then List.length commands else 0
+  in
   let payload =
     `Object
       (List.map payload ~f:(fun (name, value) ->
          if String.equal name "inference_attempts"
-         then name, `Array (List.map rows ~f:interrupted_row)
+         then
+           ( name
+           , `Array
+               (if interrupt_inference then List.map rows ~f:interrupted_row else rows) )
+         else if String.equal name "commands"
+         then
+           ( name
+           , `Array
+               (if interrupt_commands
+                then List.map commands ~f:interrupted_command
+                else commands) )
          else if String.equal name "revision"
          then
            ( name
@@ -189,7 +228,7 @@ let interrupted_document_bytes path =
                       (match value with
                        | `String text -> text
                        | _ -> failwith "expected decimal revision")
-                    + of_int (List.length rows))) )
+                    + of_int recovery_increments)) )
          else name, value))
   in
   let envelope =
@@ -203,6 +242,10 @@ let interrupted_document_bytes path =
   |> String.length
 ;;
 
+let interrupted_document_bytes path =
+  projected_document_bytes path ~interrupt_inference:true ~interrupt_commands:false
+;;
+
 let record_state json =
   O.Attempt_record.of_json (saved_record json) ~limits:O.Admission.attempt
   |> F.ok
@@ -210,7 +253,13 @@ let record_state json =
 ;;
 
 let%test_unit "all active inference rows retain aggregate recovery capacity" =
-  let exercise ~max_document_bytes ~max_inference_bytes ~second_expected =
+  let exercise
+        ?(with_command = false)
+        ~max_document_bytes
+        ~max_inference_bytes
+        ~second_expected
+        ()
+    =
     F.with_root
       ~max_document_bytes
       ~max_inference_bytes_per_run:max_inference_bytes
@@ -266,6 +315,24 @@ let%test_unit "all active inference rows retain aggregate recovery capacity" =
            | Updated _ -> failwith "reserve admission changed an existing row"
          in
          let first = admit () in
+         (if with_command
+          then
+            let module C = R.Command in
+            let key = P.Idempotency_key.of_string "joint-inference-command" |> F.ok in
+            let request = F.digest "joint recovery command request" in
+            let pending =
+              match
+                C.prepare_reservation
+                  handle
+                  ~key
+                  ~kind:C.Receipt.Kind.Check
+                  ~request_fingerprint:request
+                |> F.run_ok
+              with
+              | C.Prepared pending -> pending
+              | Unchanged _ -> failwith "joint command already reserved"
+            in
+            ignore (C.commit handle pending ~admit:(fun () -> true) |> F.run_ok));
          let second =
            match T.prepare_admit manager ~claim ~relation:T.Root ~configuration with
            | Error R.Error.Limit_exceeded when not second_expected -> None
@@ -282,7 +349,34 @@ let%test_unit "all active inference rows retain aggregate recovery capacity" =
              let rows = inference_rows (authority env root owner) in
              assert (Int.equal (List.length rows) 2);
              let required_document =
-               interrupted_document_bytes (authority env root owner)
+               projected_document_bytes
+                 (authority env root owner)
+                 ~interrupt_inference:true
+                 ~interrupt_commands:with_command
+             in
+             let separate_max =
+               if with_command
+               then (
+                 let path = authority env root owner in
+                 let inference_only =
+                   projected_document_bytes
+                     path
+                     ~interrupt_inference:true
+                     ~interrupt_commands:false
+                 in
+                 let command_only =
+                   projected_document_bytes
+                     path
+                     ~interrupt_inference:false
+                     ~interrupt_commands:true
+                 in
+                 let current = Eio.Path.load path |> String.length in
+                 let separate_max =
+                   Int.max current (Int.max inference_only command_only)
+                 in
+                 assert (separate_max < required_document);
+                 Some separate_max)
+               else None
              in
              let tight_document =
                Document_schema.Limits.create
@@ -297,7 +391,10 @@ let%test_unit "all active inference rows retain aggregate recovery capacity" =
                  (Document_schema.Document.decode
                     ~limits:tight_document
                     (Eio.Path.load (authority env root owner))));
-             Some (List.sum (module Int) rows ~f:interrupted_row_bytes, required_document)
+             Some
+               ( List.sum (module Int) rows ~f:interrupted_row_bytes
+               , required_document
+               , separate_max )
          in
          List.iter (first :: Option.to_list second) ~f:(fun registration ->
            ignore
@@ -331,27 +428,29 @@ let%test_unit "all active inference rows retain aggregate recovery capacity" =
          in
          T.finish manager |> F.run_ok;
          R.Run_claim.release run_claim |> F.run_ok;
-         Option.map required ~f:(fun (inference_bytes, document_bytes) ->
-           inference_bytes, document_bytes, terminal_document_bytes))
+         Option.map required ~f:(fun (inference_bytes, document_bytes, separate_max) ->
+           inference_bytes, document_bytes, terminal_document_bytes, separate_max))
   in
   let required =
-    exercise ~max_document_bytes:16384 ~max_inference_bytes:16384 ~second_expected:true
+    exercise ~max_document_bytes:16384 ~max_inference_bytes:16384 ~second_expected:true ()
     |> Option.value_exn
   in
-  let aggregate_bytes, document_bytes, terminal_document_bytes = required in
+  let aggregate_bytes, document_bytes, terminal_document_bytes, _ = required in
   assert (aggregate_bytes > 1 && document_bytes - 1 > aggregate_bytes);
   ignore
     (exercise
        ~max_document_bytes:16384
        ~max_inference_bytes:(aggregate_bytes - 1)
        ~second_expected:false
-     : (int * int * int) option);
+       ()
+     : (int * int * int * int option) option);
   assert (
-    [%equal: int * int * int]
+    [%equal: int * int * int * int option]
       (exercise
          ~max_document_bytes:16384
          ~max_inference_bytes:aggregate_bytes
          ~second_expected:true
+         ()
        |> Option.value_exn)
       required);
   ignore
@@ -359,13 +458,34 @@ let%test_unit "all active inference rows retain aggregate recovery capacity" =
        ~max_document_bytes:(document_bytes - 1)
        ~max_inference_bytes:(document_bytes - 1)
        ~second_expected:false
-     : (int * int * int) option);
+       ()
+     : (int * int * int * int option) option);
   ignore
     (exercise
        ~max_document_bytes:(Int.max document_bytes terminal_document_bytes)
        ~max_inference_bytes:(Int.max document_bytes terminal_document_bytes)
        ~second_expected:true
-     : (int * int * int) option)
+       ()
+     : (int * int * int * int option) option);
+  let aggregate, combined, _, separate =
+    exercise
+      ~with_command:true
+      ~max_document_bytes:16384
+      ~max_inference_bytes:16384
+      ~second_expected:true
+      ()
+    |> Option.value_exn
+  in
+  let separate = Option.value_exn separate in
+  assert (aggregate < separate && separate < combined);
+  ignore
+    (exercise
+       ~with_command:true
+       ~max_document_bytes:separate
+       ~max_inference_bytes:separate
+       ~second_expected:false
+       ()
+     : (int * int * int * int option) option)
 ;;
 
 let%test_unit

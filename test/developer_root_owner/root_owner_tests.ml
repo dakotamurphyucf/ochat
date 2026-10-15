@@ -66,12 +66,27 @@ let store_limits
       ?max_document_nodes
       ()
   =
+  let document =
+    Document_schema.Limits.create
+      ~max_bytes:max_document_bytes
+      ~max_depth:16
+      ~max_fields:
+        (Option.value
+           max_document_fields
+           ~default:(if max_document_bytes <= 8192 then 256 else 1024))
+      ~max_nodes:
+        (Option.value
+           max_document_nodes
+           ~default:(if max_document_bytes <= 8192 then 512 else 2048))
+    |> ok
+  in
   R.Limits.create
     ~max_runs:3
     ~max_epochs_per_run:3
     ~max_jobs_per_run
     ~max_invocations_per_run
     ~max_inference_attempts_per_run:256
+    ~commands:(Agent_store.Developer_command_limits.default ~document)
     ~max_inference_bytes_per_run
     ~max_selected_per_commit:2
     ~max_job_payload_bytes
@@ -79,19 +94,7 @@ let store_limits
     ~max_recovery_entries:16
     ~max_recovery_bytes:(Int.max 16384 max_document_bytes)
     ~max_work_steps
-    ~document:
-      (Document_schema.Limits.create
-         ~max_bytes:max_document_bytes
-         ~max_depth:16
-         ~max_fields:
-           (Option.value
-              max_document_fields
-              ~default:(if max_document_bytes <= 8192 then 256 else 1024))
-         ~max_nodes:
-           (Option.value
-              max_document_nodes
-              ~default:(if max_document_bytes <= 8192 then 512 else 2048))
-       |> ok)
+    ~document
   |> or_error
 ;;
 

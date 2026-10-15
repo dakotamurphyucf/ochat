@@ -9,6 +9,12 @@
   authoring_upload_files
   authoring_upload_publication
   authoring_upload_store
+  developer_command_diagnostic
+  developer_command_fixture
+  developer_command_receipt
+  developer_command_row
+  developer_command_limits
+  developer_command_rows
   developer_inference_row
   developer_inference_transition
   developer_run_document
@@ -95,6 +101,7 @@
   authoring_upload_publication
   developer_inference_row
   developer_inference_transition
+  developer_command_rows
   developer_run_document
   developer_run_cpu
   developer_run_transition
