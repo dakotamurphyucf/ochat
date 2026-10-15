@@ -96,6 +96,7 @@
     lib/agent_protocol/stored_completion.ml %{dep:../agent_protocol/stored_completion.ml}
     lib/agent_protocol/subscription.ml %{dep:../agent_protocol/subscription.ml}
     lib/agent_server/job_scheduler.ml %{dep:../agent_server/job_scheduler.ml}
+    lib/agent_server/job_scheduler_developer.ml %{dep:../agent_server/job_scheduler_developer.ml}
     lib/agent_server/schedule_scheduler.ml %{dep:../agent_server/schedule_scheduler.ml}
     lib/agent_session/background_execution.ml %{dep:../agent_session/background_execution.ml}
     lib/agent_session/background_job_event.ml %{dep:../agent_session/background_job_event.ml}
