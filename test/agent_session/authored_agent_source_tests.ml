@@ -278,3 +278,171 @@ let%expect_test "uncaptured external and ambiguous authored definitions cannot b
   print_endline "absolute live source, remote source and duplicate declaration rejected";
   [%expect {| absolute live source, remote source and duplicate declaration rejected |}]
 ;;
+
+let%expect_test "saved child preflight uses the owned parser and denies unowned effects" =
+  with_temp_directory (fun env temporary ->
+    let root = Eio.Path.(Eio.Stdenv.fs env / temporary) in
+    let store =
+      Store.create ~env ~root:(Filename.concat temporary "preflight-artifacts")
+      |> store_ok
+    in
+    let definition =
+      Agent_session.Prompt_definition.create
+        ~root_invocation:Ui
+        ~id:prompt_id
+        ~config_name:"child-preflight"
+        ~root_file:(Filename.concat temporary "root.chatmd")
+        ~allowed_workspaces:[ workspace_id ]
+        ~permission_profile:"interactive"
+        ~runtime_policy:None
+        ~enabled:true
+        ~description:None
+      |> store_ok
+    in
+    let build source =
+      Eio.Path.save ~create:(`Or_truncate 0o600) Eio.Path.(root / "root.chatmd") source;
+      let revision =
+        B.build
+          ~env
+          ~artifact_store:store
+          ~transaction_id:(P.Id.Transaction.create ())
+          ~created_at:timestamp
+          definition
+        |> built
+      in
+      revision, R.parser_context revision |> Option.value_exn
+    in
+    let module Preflight = Agent_session.Developer_child_preflight in
+    let outcome = function
+      | Ok () -> "admitted"
+      | Error (error : P.Error.t) -> P.Error.code_to_string error.code
+    in
+    let text_input =
+      CM.Basic
+        { type_ = "text"
+        ; text = Some "selected input"
+        ; image_url = None
+        ; document_url = None
+        ; is_local = false
+        ; cleanup_html = false
+        ; markdown = false
+        }
+    in
+    let document_input =
+      CM.Basic
+        { type_ = "text"
+        ; text = None
+        ; image_url = None
+        ; document_url = Some "file:///unselected"
+        ; is_local = false
+        ; cleanup_html = false
+        ; markdown = false
+        }
+    in
+    let good, good_parsed =
+      build {|<developer>Selected text</developer><tool name="read_file"/>|}
+    in
+    let selected_text =
+      Preflight.admit_selected
+        ~revision:good
+        ~parsed:good_parsed
+        ~input:[ text_input ]
+        ~checkpoint:ignore
+    in
+    let selected_document =
+      Preflight.admit_selected
+        ~revision:good
+        ~parsed:good_parsed
+        ~input:[ document_input ]
+        ~checkpoint:ignore
+    in
+    let literal =
+      Preflight.admit_literal ~revision:good ~parsed:good_parsed ~checkpoint:ignore
+    in
+    print_s
+      [%sexp
+        ("read_file / text input" : string)
+      , (outcome selected_text : string)
+      , (outcome selected_document : string)
+      , (outcome literal : string)];
+    let oversized_text =
+      match text_input with
+      | CM.Basic basic ->
+        CM.Basic { basic with text = Some (String.make ((8 * 1024 * 1024) + 1) 'x') }
+      | CM.Agent _ -> assert false
+    in
+    let oversized_items = List.init 16_384 ~f:(fun _ -> text_input) in
+    let limited_text =
+      Preflight.admit_selected
+        ~revision:good
+        ~parsed:good_parsed
+        ~input:[ oversized_text ]
+        ~checkpoint:ignore
+    in
+    let limited_nodes =
+      Preflight.admit_selected
+        ~revision:good
+        ~parsed:good_parsed
+        ~input:oversized_items
+        ~checkpoint:ignore
+    in
+    let exception Stop in
+    let stopped =
+      try
+        ignore
+          (Preflight.admit_selected
+             ~revision:good
+             ~parsed:good_parsed
+             ~input:[ text_input ]
+             ~checkpoint:(fun () -> raise Stop));
+        false
+      with
+      | Stop -> true
+    in
+    print_s
+      [%sexp
+        ("bounds / checkpoint" : string)
+      , (outcome limited_text : string)
+      , (outcome limited_nodes : string)
+      , (stopped : bool)];
+    let fork, fork_parsed = build {|<tool name="fork"/>|} in
+    let fork_result =
+      Preflight.admit_selected
+        ~revision:fork
+        ~parsed:fork_parsed
+        ~input:[]
+        ~checkpoint:ignore
+    in
+    let foreign_parser =
+      Preflight.admit_selected
+        ~revision:fork
+        ~parsed:good_parsed
+        ~input:[]
+        ~checkpoint:ignore
+    in
+    print_s
+      [%sexp
+        ("fork / foreign parser" : string)
+      , (outcome fork_result : string)
+      , (outcome foreign_parser : string)];
+    let moderator, moderator_parsed =
+      build
+        {|<script id="state" kind="moderator" language="chatml">let initial_state = 0
+let on_event ctx state event = Task.pure(state)</script>|}
+    in
+    let moderator_result =
+      Preflight.admit_selected
+        ~revision:moderator
+        ~parsed:moderator_parsed
+        ~input:[]
+        ~checkpoint:ignore
+    in
+    print_s [%sexp ("moderator" : string), (outcome moderator_result : string)]);
+  [%expect
+    {|
+    ("read_file / text input" admitted invalid_request invalid_state)
+    ("bounds / checkpoint" resource_limit resource_limit true)
+    ("fork / foreign parser" invalid_request invalid_state)
+    (moderator invalid_request)
+    |}]
+;;

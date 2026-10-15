@@ -181,64 +181,7 @@ let admit_developer_literal_child t revision parsed ~checkpoint =
   then Ok ()
   else
     bounded t ~checkpoint ~f:(fun checkpoint ->
-      let open Result.Let_syntax in
-      let denied () =
-        Error (failure "developer child effect needs a selected child owner")
-      in
-      let elements =
-        match Prompt_revision.document_projection revision with
-        | None -> CM.Parsed.elements parsed
-        | Some projection ->
-          if not (phys_equal parsed (CM.Document_projection.parsed projection))
-          then invalid_arg "developer child projection belongs to another parser";
-          CM.Document_projection.elements projection
-      in
-      let admit_content = function
-        | CM.Basic basic ->
-          if
-            String.equal basic.type_ "text"
-            && Option.is_none basic.image_url
-            && Option.is_none basic.document_url
-            && (not basic.is_local)
-            && (not basic.cleanup_html)
-            && not basic.markdown
-          then Ok ()
-          else denied ()
-        | CM.Agent _ -> denied ()
-      in
-      let admit_message (message : CM.msg) =
-        if
-          Option.is_some message.function_call
-          || Option.is_some message.tool_call
-          || Option.is_some message.tool_call_id
-        then denied ()
-        else (
-          match message.content with
-          | None | Some (Text _) -> Ok ()
-          | Some (Items items) ->
-            List.fold_result items ~init:() ~f:(fun () item ->
-              checkpoint ();
-              admit_content item))
-      in
-      List.fold_result elements ~init:() ~f:(fun () element ->
-        checkpoint ();
-        match element with
-        | CM.Msg message
-        | Developer message
-        | System message
-        | User message
-        | Assistant message -> admit_message message
-        | Config _ | Reasoning _ -> Ok ()
-        | Tool_call _
-        | Tool_response _
-        | Tool _
-        | Shell_runtime _
-        | Moderator_runtime _
-        | Script _
-        | Shell_script _
-        | Extension_script _
-        | Authoring_context _
-        | Authoring_help _ -> denied ()))
+      Developer_child_preflight.admit_literal ~revision ~parsed ~checkpoint)
 ;;
 
 let compilation_error (error : Chatml_compilation.error) =
@@ -557,6 +500,7 @@ module Claimed_developer = struct
     let key : t Eio.Fiber.key = Eio.Fiber.create_key ()
     let active t = t.scope.active
     let invocation t = t.scope.invocation
+    let matches_borrowed t borrowed = phys_equal t.borrowed borrowed
 
     let check_now t =
       let open Result.Let_syntax in
