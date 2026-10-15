@@ -129,6 +129,7 @@
   developer_native_executor
   developer_script_job_execution
   developer_background_job_runner
+  developer_model_job_runner
   job_scheduler_developer
   job_scheduler
   permission_review_service

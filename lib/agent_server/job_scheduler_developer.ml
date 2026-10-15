@@ -2,6 +2,7 @@ open! Core
 module P = Agent_protocol
 module Root = Developer_root_owner
 module Runner = Developer_background_job_runner
+module Model_runner = Developer_model_job_runner
 module Capacity_decision = Developer_job_worker.Capacity_decision
 
 module Offer_key = struct
@@ -24,7 +25,8 @@ type call =
 
 type attachment =
   { root : Root.run
-  ; runner : Runner.t
+  ; mutable runner : Runner.t option
+  ; mutable model_runner : Model_runner.t option
   ; generation : int
   ; mutable alive : bool
   ; mutable wake : bool
@@ -99,6 +101,15 @@ let attachment_live t attachment =
   else Result.map (live_roots t) ~f:(fun roots -> root_live roots attachment.root)
 ;;
 
+module Availability = struct
+  type t =
+    | Runnable
+    | Malformed_supported
+    | Artifact_installer_unavailable
+    | Executor_unavailable
+  [@@deriving equal, sexp_of]
+end
+
 module Batch = struct
   type t = batch
 
@@ -108,7 +119,27 @@ module Batch = struct
   let availability t candidate =
     if not (List.mem t.candidates candidate ~equal:phys_equal)
     then Error (invalid "candidate is not in this developer scheduler batch")
-    else Runner.availability t.attachment.runner candidate
+    else (
+      match P.Developer_job.kind (Root.Job_candidate.job candidate) with
+      | P.Job.Async_tool ->
+        (match t.attachment.runner with
+         | Some runner ->
+           Result.map (Runner.availability runner candidate) ~f:(function
+             | Runner.Availability.Runnable -> Availability.Runnable
+             | Malformed_supported -> Malformed_supported
+             | Agent_artifact_installer_unavailable -> Artifact_installer_unavailable
+             | Unsupported_kind -> Executor_unavailable)
+         | None -> Ok Availability.Executor_unavailable)
+      | Model_call ->
+        (match t.attachment.model_runner with
+         | Some runner ->
+           Result.map (Model_runner.availability runner candidate) ~f:(function
+             | Model_runner.Availability.Runnable -> Availability.Runnable
+             | Malformed_supported -> Malformed_supported
+             | Unsupported_kind -> Executor_unavailable)
+         | None -> Ok Availability.Executor_unavailable)
+      | Nested_agent | Scheduled_event | Shell_process | Compaction ->
+        Ok Availability.Executor_unavailable)
   ;;
 end
 
@@ -134,6 +165,26 @@ let find_attachment t root =
   List.find t.attachments ~f:(fun attachment -> phys_equal attachment.root root)
 ;;
 
+let attach_new t ~root ~roots ~runner ~model_runner =
+  if (not (List.is_empty t.retiring)) || List.length t.attachments >= List.length roots
+  then Error (conflict "developer scheduler attachments are at their bound")
+  else (
+    t.next_generation <- t.next_generation + 1;
+    t.attachments
+    <- t.attachments
+       @ [ { root
+           ; runner
+           ; model_runner
+           ; generation = t.next_generation
+           ; alive = true
+           ; wake = true
+           ; cursor = 0
+           ; offers = []
+           }
+         ];
+    Ok ())
+;;
+
 let attach t ~root ~runner =
   if t.closed
   then Error (stopped ())
@@ -146,27 +197,38 @@ let attach t ~root ~runner =
     then Error (invalid "developer root is not active in this scheduler registry")
     else (
       match find_attachment t root with
-      | Some attachment when phys_equal attachment.runner runner -> Ok ()
-      | Some _ -> Error (conflict "developer root already has another runner")
-      | None ->
-        if
-          (not (List.is_empty t.retiring))
-          || List.length t.attachments >= List.length roots
-        then Error (conflict "developer scheduler attachments are at their bound")
-        else (
-          t.next_generation <- t.next_generation + 1;
-          t.attachments
-          <- t.attachments
-             @ [ { root
-                 ; runner
-                 ; generation = t.next_generation
-                 ; alive = true
-                 ; wake = true
-                 ; cursor = 0
-                 ; offers = []
-                 }
-               ];
-          Ok ()))
+      | Some attachment ->
+        (match attachment.runner with
+         | Some installed when phys_equal installed runner -> Ok ()
+         | Some _ -> Error (conflict "developer root already has another Tool runner")
+         | None ->
+           attachment.runner <- Some runner;
+           attachment.wake <- true;
+           Ok ())
+      | None -> attach_new t ~root ~roots ~runner:(Some runner) ~model_runner:None)
+;;
+
+let attach_model t ~root ~runner =
+  if t.closed
+  then Error (stopped ())
+  else if not (Model_runner.issued_by_root runner root)
+  then Error (invalid "developer Model runner belongs to another physical root")
+  else
+    let open Result.Let_syntax in
+    let%bind roots = live_roots t in
+    if not (root_live roots root)
+    then Error (invalid "developer root is not active in this scheduler registry")
+    else (
+      match find_attachment t root with
+      | Some attachment ->
+        (match attachment.model_runner with
+         | Some installed when phys_equal installed runner -> Ok ()
+         | Some _ -> Error (conflict "developer root already has another Model runner")
+         | None ->
+           attachment.model_runner <- Some runner;
+           attachment.wake <- true;
+           Ok ())
+      | None -> attach_new t ~root ~roots ~runner:None ~model_runner:(Some runner))
 ;;
 
 let wake t ~root =
@@ -363,12 +425,24 @@ let offer t (batch : batch) candidate =
                   match current t batch with
                   | Error _ | Ok false -> ()
                   | Ok true ->
-                    ignore
-                      (Runner.run_candidate
-                         attachment.runner
-                         ~on_capacity_decision:signal_decision
-                         candidate
-                       : (P.Developer_job.t option, P.Error.t) result)))
+                    (match P.Developer_job.kind (Root.Job_candidate.job candidate) with
+                     | P.Job.Async_tool ->
+                       Option.iter attachment.runner ~f:(fun runner ->
+                         ignore
+                           (Runner.run_candidate
+                              runner
+                              ~on_capacity_decision:signal_decision
+                              candidate
+                            : (P.Developer_job.t option, P.Error.t) result))
+                     | Model_call ->
+                       Option.iter attachment.model_runner ~f:(fun runner ->
+                         ignore
+                           (Model_runner.run_candidate
+                              runner
+                              ~on_capacity_decision:signal_decision
+                              candidate
+                            : (P.Developer_job.t option, P.Error.t) result))
+                     | Nested_agent | Scheduled_event | Shell_process | Compaction -> ())))
             with
             | Eio.Cancel.Cancelled _ -> ()));
       match Eio.Promise.await decided with

@@ -16,11 +16,11 @@ module Availability : sig
   [@@deriving equal, sexp_of]
 end
 
-(** Bind the publisher and native executor to [root]'s actual Store, selected
-    registry and original actor. The Result_root is derived inside [create]
-    from the root's retained admitted handle; [blobs] must be the coordinator
-    physically bound to that Store. [sw] is the owning run/service switch and
-    outlives every joined worker and retained publisher selection. [managed]
+(** Bind the native executor and the ONE Root-owned result publisher to this
+    exact physical Root, selected registry and original actor. [results] is
+    issued by [Developer_root_owner.Job_result.bind] once for the run and is
+    also borrowed by any installed Model runner; this package cannot create a
+    second pending table or independently renew its result cap. [managed]
     is the host's selected managed dispatcher, not an authority supplied by a
     job payload. [agent_runtime] borrows the assembler's already constructed
     runtime for the same physical native implementations and switch lifetime;
@@ -44,12 +44,8 @@ end
     [prepare_output] are trusted existing host services, never authority
     inferred from a job ID. *)
 val create
-  :  sw:Eio.Switch.t
-  -> root:Developer_root_owner.run
-  -> store:Agent_store.Developer_run_store.t
-  -> blobs:Agent_store.Blob_store.t
-  -> publisher_limits:Agent_store.Developer_result_publisher.Limits.t
-  -> storage:Agent_store.Developer_result_publisher.Storage.t
+  :  root:Developer_root_owner.run
+  -> results:Developer_root_owner.Job_result.t
   -> env:Eio_unix.Stdenv.base
   -> managed:Agent_session.Native_tool_invocation.selected_managed_dispatch option
   -> agent_runtime:Chat_response.Agent_runtime.t option

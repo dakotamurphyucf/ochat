@@ -9,6 +9,7 @@ module H = P.Host_invocation
 module Job_scope = Agent_session.Developer_job_scope
 module Model_transaction = Developer_external_model_transaction
 module Mutation_gate = Developer_root_mutation_gate
+module Publisher = Agent_store.Developer_result_publisher
 
 module Limits = struct
   type t =
@@ -139,6 +140,18 @@ and t =
   ; mutable inference_active : int
   ; mutable inference_bindings : int
   ; mutable inference_serial : int
+  ; mutable result_binding : job_result_binding
+  }
+
+and job_result_binding =
+  | Result_unbound
+  | Result_binding
+  | Result_bound of job_result_owner
+
+and job_result_owner =
+  { result_issuer : t
+  ; result_publisher : Publisher.t
+  ; result_storage : Publisher.Storage.t
   }
 
 and inference_scope =
@@ -376,6 +389,114 @@ let result_root t =
   then invalid "developer result root belongs to another domain"
   else Store.Result_root.of_handle t.handle |> Result.map_error ~f:error_of_store
 ;;
+
+let document_limits t =
+  if not (same_domain t.registry)
+  then invalid "developer document limits belong to another domain"
+  else Store.document_limits t.handle |> Result.map_error ~f:error_of_store
+;;
+
+module Job_result = struct
+  type nonrec t = job_result_owner
+
+  let issued_by_root t root = phys_equal t.result_issuer root
+
+  let bind issuer ~blobs ~limits ~storage =
+    if not (same_domain issuer.registry)
+    then invalid "developer result owner belongs to another domain"
+    else if issuer.registry.closed
+    then invalid "developer result owner registry is closed"
+    else (
+      match issuer.state, issuer.result_binding with
+      | Live, Result_unbound ->
+        issuer.result_binding <- Result_binding;
+        let installed = ref false in
+        Exn.protect
+          ~finally:(fun () ->
+            if not !installed
+            then (
+              match issuer.result_binding with
+              | Result_binding -> issuer.result_binding <- Result_unbound
+              | Result_unbound | Result_bound _ -> ()))
+          ~f:(fun () ->
+            let* root = result_root issuer in
+            let* publisher =
+              Publisher.create
+                ~sw:issuer.registry.switch
+                ~runs:issuer.registry.store
+                ~root
+                ~blobs
+                ~limits
+            in
+            match issuer.state, issuer.result_binding with
+            | Live, Result_binding when not issuer.registry.closed ->
+              let owner =
+                { result_issuer = issuer
+                ; result_publisher = publisher
+                ; result_storage = storage
+                }
+              in
+              issuer.result_binding <- Result_bound owner;
+              installed := true;
+              Ok owner
+            | Live, Result_binding
+            | Live, Result_unbound
+            | Live, Result_bound _
+            | Closing, _
+            | Quarantined, _
+            | Closed, _ -> invalid "developer result owner admission ended")
+      | Live, Result_binding | Live, Result_bound _ ->
+        Error
+          (P.Error.create
+             P.Error.Conflict
+             ~message:"developer result owner is already bound"
+             ~retryable:true
+             ())
+      | Closing, _ | Quarantined, _ | Closed, _ ->
+        invalid "developer result owner is unavailable")
+  ;;
+
+  let select t ~claim ~proposed =
+    let issuer = t.result_issuer in
+    if not (same_domain issuer.registry)
+    then invalid "developer result selection belongs to another domain"
+    else (
+      let job = Store.Claim.job claim in
+      if
+        (not (Store.Claim.issued_by claim issuer.registry.store))
+        || (not
+              (P.Execution_owner.equal_developer (P.Developer_job.owner job) issuer.owner))
+        || not
+             (Chatml_source.Digest.equal
+                (P.Developer_job.capture_fingerprint job)
+                (Chatml_developer_capture.fingerprint issuer.capture))
+      then invalid "developer result claim belongs to another root"
+      else (
+        match proposed.P.Developer_job.State.result with
+        | None -> Ok None
+        | Some (P.Developer_job.Result_value.Artifact _) ->
+          invalid "developer result was already selected as an artifact"
+        | Some (P.Developer_job.Result_value.Inline _) ->
+          let* selection =
+            Publisher.select
+              t.result_publisher
+              ~storage:t.result_storage
+              ~claim
+              ~proposed
+              ~selected_at:(issuer.registry.now ())
+          in
+          let* wrapped =
+            Developer_job_worker.Selected.create
+              ~claim
+              ~proposed
+              ~after:(Publisher.Selected.after selection)
+              ~ensure_attempted:(fun () -> Publisher.Selected.ensure_attempted selection)
+              ~acknowledge_installed:(fun installed ->
+                Publisher.Selected.acknowledge_installed selection installed)
+          in
+          Ok (Some wrapped)))
+  ;;
+end
 
 let native_now t = t.registry.now ()
 
@@ -2555,6 +2676,8 @@ module Model_inference = struct
     check_now t
   ;;
 
+  let check_current t = require (check t)
+
   let route t =
     match Eio.Fiber.get inference_route_key with
     | Some route when phys_equal route.inference_scope t -> route
@@ -3846,6 +3969,7 @@ module Registry = struct
       ; inference_active = 0
       ; inference_bindings = 0
       ; inference_serial = 0
+      ; result_binding = Result_unbound
       }
     in
     Hashtbl.set t.owners ~key:owner.run_id ~data:(Owned run);

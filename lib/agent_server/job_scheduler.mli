@@ -98,10 +98,12 @@ val start
         -> (Session_factory.model_job_inference, Agent_protocol.Error.t) Result.t)
   -> t
 
-(** Attach the one physical Tool/Script runner for [root]. The registry must be
+(** Attach the physical Tool/Script package for [root]. The registry must be
     present and currently contain this same live Root instance, and [runner]
     must have been issued by it. An exact repeated attachment is idempotent;
-    a different package cannot replace a live one. The bounded attachment
+    a different package cannot replace a live one. Tool/Script and Model
+    packages may be installed in either order on the SAME Root attachment;
+    neither creates another scan/offer loop. The bounded attachment
     table adds no execution authority or second Store/capacity owner. An
     unavailable registry, stopped/closed scheduler, foreign/stale Root or mismatched
     runner gives a finite typed error. No job is read or claimed here. *)
@@ -109,6 +111,19 @@ val attach_developer
   :  t
   -> root:Developer_root_owner.run
   -> runner:Developer_background_job_runner.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Attach the physical Model_call package to that same Root attachment and
+    existing fair scheduler loop. A Model-only Root needs no dummy Tool runner.
+    Issuer/current-registry, exact repeated attachment, replacement, shutdown
+    and no-Claim-on-install rules match [attach_developer]. The host binds one
+    Root.Job_result owner before constructing either package, so both borrow
+    the same result publisher and pending allowance. An uninstalled package
+    leaves its supported queued jobs unclaimed until installation/wakeup. *)
+val attach_developer_model
+  :  t
+  -> root:Developer_root_owner.run
+  -> runner:Developer_model_job_runner.t
   -> (unit, Agent_protocol.Error.t) result
 
 (** Coalesce a scan hint for the exact attached physical Root. Hints grant no
