@@ -21,6 +21,7 @@ type options =
   ; implementation_name : string
   ; implementation_version : string
   ; features : string list
+  ; authoring : Authoring_installation.Host_policy.t option
   ; extension_host : Agent_protocol.Extension_capabilities.host
   ; protocol_limits : Agent_protocol.Initialize.Limits.t
   ; timing : Agent_protocol.Initialize.Timing.t
@@ -59,6 +60,7 @@ type t =
   ; workspaces : Agent_session.Workspace_catalog.t
   ; registry : Session_registry.t
   ; handler : Command_handler.t
+  ; authoring : Authoring_installation.t option
   ; provider_operator : Provider_operator_port.t option
   ; dispatcher : Dispatcher.t
   ; start_scheduler : Start_scheduler.t
@@ -98,12 +100,26 @@ type health_services =
   ; health_status_ref : status ref
   }
 
+let default_protocol_limits : Agent_protocol.Initialize.Limits.t =
+  { max_request_bytes = 16 * 1024 * 1024
+  ; max_event_bytes = 16 * 1024 * 1024
+  ; max_page_size = 1_000
+  ; max_attachments_per_connection = 64
+  }
+;;
+
 let default_options =
   { startup_mode = Execute
   ; root_invocation = Ui
   ; implementation_name = "ochat-agent-server"
   ; implementation_version = "dev"
   ; extension_host = Daemon
+  ; authoring =
+      Some
+        (Authoring_installation.Host_policy.basic_supplied
+           ~initialize_limits:default_protocol_limits
+         |> Result.map_error ~f:(fun failure -> failure.Agent_protocol.Error.message)
+         |> Result.ok_or_failwith)
   ; features =
       [ "sessions.seed"
       ; "attachments.multi_client"
@@ -115,12 +131,7 @@ let default_options =
       ]
       @ Agent_protocol.Extension_capabilities.known_features
       @ Agent_protocol.Inference_query.Features.all
-  ; protocol_limits =
-      { max_request_bytes = 16 * 1024 * 1024
-      ; max_event_bytes = 16 * 1024 * 1024
-      ; max_page_size = 1_000
-      ; max_attachments_per_connection = 64
-      }
+  ; protocol_limits = default_protocol_limits
   ; timing =
       { heartbeat_interval_ms = 15_000
       ; owner_lease_duration_ms = 60_000
@@ -1456,6 +1467,22 @@ let compose
                  ~retryable:false
                  ())))
   in
+  let%bind authoring =
+    match options.authoring with
+    | None -> Ok None
+    | Some policy ->
+      Authoring_installation.create
+        ~env
+        ~sw
+        ~clock:(Eio.Stdenv.mono_clock env)
+        ~project_sources
+        ~store
+        ~policy
+        ~initialize_limits:options.protocol_limits
+        ~checkpoint:Eio.Fiber.check
+      |> Result.map ~f:Option.some
+  in
+  Option.iter authoring ~f:(Startup_cleanup.adopt_authoring_exn startup_cleanup);
   let handler =
     Command_handler.create
       ~sw
@@ -1468,6 +1495,7 @@ let compose
       ~audit_store
       ~blob_store
       ~session_store:store
+      ~authoring
       ~lifecycle_service
       ~retained:
         (Retained_session.create
@@ -1541,7 +1569,8 @@ let compose
       | Provider_login_cancel _
       | Provider_logout _
       | Provider_select _
-      | Provider_configure_environment _ -> Ok ()
+      | Provider_configure_environment _
+      | Authoring _ -> Ok ()
       | Session_create _
       | Session_seed _
       | Session_get _
@@ -1583,8 +1612,7 @@ let compose
       | Schedule_get _
       | Schedule_create _
       | Schedule_cancel _
-      | Ingress_submit _
-      | Authoring _ ->
+      | Ingress_submit _ ->
         Error
           (Agent_protocol.Error.create
              Invalid_state
@@ -1603,6 +1631,7 @@ let compose
     ; workspaces = built.workspaces
     ; registry
     ; handler
+    ; authoring
     ; provider_operator
     ; dispatcher
     ; start_scheduler
@@ -1741,7 +1770,11 @@ let start
       (Prompt_catalog_host.catalog project_catalog))
 ;;
 
-let close_connection t context = Command_handler.close_connection t.handler context
+let close_connection t context =
+  match Command_handler.close_connection t.handler context with
+  | Ok () -> ()
+  | Error failure -> t.status_ref := Failed failure
+;;
 
 let reload_config t =
   Config_watcher.reload t.config_watcher
@@ -1797,6 +1830,12 @@ let shutdown t =
     Config_watcher.close_and_wait t.config_watcher;
     Start_scheduler.close_and_wait t.start_scheduler;
     shutdown_sessions t;
+    let open Result.Let_syntax in
+    let%bind () =
+      match t.authoring with
+      | None -> Ok ()
+      | Some authoring -> Authoring_installation.close_and_wait authoring
+    in
     Option.iter t.provider_operator ~f:Provider_operator_port.close;
     Project_source_host.close_and_wait t.project_sources;
     Agent_store.Session_store.close t.store

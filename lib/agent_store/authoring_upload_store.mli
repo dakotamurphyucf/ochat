@@ -351,3 +351,9 @@ val prune
 (** Close is idempotent and joins the operation gate. Expected sync/cleanup
       failure is returned; cancellation propagates after required cleanup. *)
 val close_and_wait : t -> (unit, Error.t) Result.t
+
+(** True only after [close_and_wait] has joined every read lease and released
+    this Store's process-local live-root reservation. Beginning close is not
+    enough. The issuing Session_store uses this comparison before releasing
+    the exclusive daemon lock borrowed by this child. *)
+val fully_closed : t -> bool

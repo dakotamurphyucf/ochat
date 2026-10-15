@@ -22,6 +22,7 @@ val create : sw:Eio.Switch.t -> store:Agent_store.Session_store.t -> t
 
 val adopt_registry_exn : t -> Session_registry.t -> unit
 val adopt_operator_exn : t -> Provider_operator_port.t -> unit
+val adopt_authoring_exn : t -> Authoring_installation.t -> unit
 
 (** Preserve original Error or exception/backtrace if ordered cleanup also fails.
     On success the actual host takes ownership; this startup guard stops releasing

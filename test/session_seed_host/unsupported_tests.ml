@@ -73,6 +73,7 @@ let%expect_test "custom host without seed Factory omits discovery and denies see
           ~audit_store
           ~blob_store:(S.Daemon.blob_store daemon)
           ~session_store:store
+          ~authoring:None
           ~lifecycle_service
           ~retained:
             (S.Retained_session.create
@@ -113,7 +114,8 @@ let%expect_test "custom host without seed Factory omits discovery and denies see
         C.In_memory.create
           ~notifications
           ~request:(S.Dispatcher.dispatch_command dispatcher ~context)
-          ~close:(fun () -> S.Command_handler.close_connection handler context)
+          ~close:(fun () ->
+            S.Command_handler.close_connection handler context |> protocol_ok)
       in
       Exn.protect
         ~finally:(fun () -> C.Connection.close custom)

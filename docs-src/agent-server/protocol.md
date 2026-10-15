@@ -46,11 +46,20 @@ Request type names identify the complete field schema there. All mutations
 require applicable actor state and authorization, not merely passing JSON
 validation.
 
-The `authoring.*` entries below are typed codec contracts. No server handler or
-authoring feature is installed yet; these methods currently return
-`method_not_found`.
-Upload-only principals can negotiate the bundle feature without a source
-context once the host installs its independent upload grant and handlers.
+The daemon installs one authoring service through the same command dispatcher
+used by embedded, HTTP and stdio connections. `protocol.initialize` selects
+only features with installed handlers. Core is required to create and edit a
+context; semantic, lexical and assistance also require core to be selected.
+Bundle upload can be installed and negotiated independently. Capabilities
+reports the methods available under the current connection's selected features;
+uninstalled methods return `method_not_found`. The default daemon supplies
+core, lexical scanning and local assistance for caller-supplied documents.
+Native source access, durable upload and the semantic handler require explicit
+host policies. The default has no semantic handler, so semantic methods return
+`method_not_found`; an installed semantic handler reports typed Unavailable
+when no authentic selected Build exists. Successful reinitialization
+retires old context generations and joins their work before the new feature
+epoch is published.
 
 | Method | Request type | Minimum method scope | Result / behavior |
 |---|---|---|---|
@@ -136,27 +145,27 @@ context once the host installs its independent upload grant and handlers.
 | `schedule.create` | `Schedule.Create_request` | `session.message.send` | Writable attachment; persist timer/delivery intent. |
 | `schedule.cancel` | `Schedule.Cancel_request` | `session.message.send` | Writable attachment; cancel schedule. |
 | `ingress.submit` | `Ingress.Submit_request` | `ingress.submit` | Protocol 1.1; exact producer-bound registration; durable data acceptance acknowledgement. |
-| `authoring.capabilities` | Empty object | Pending authoring handler | Typed selected-method/encoding/limit reply; currently unavailable. |
-| `authoring.roots` | Empty object | Pending authoring handler | Typed authorized host-root catalog; currently unavailable. |
-| `authoring.host.list` | `Authoring.Source_read.Host_list_request` | Pending authoring handler | Fresh authorized host member listing, not a context-pinned read; currently unavailable. |
-| `authoring.host.read` | `Authoring.Source_read.Host_read_request` | Pending authoring handler | Fresh exact host read with source digest; currently unavailable. |
-| `authoring.context.open` | `Authoring.Context.Open_request` | Pending authoring handler | Project or standalone document capture; currently unavailable. |
-| `authoring.context.refresh` | `Authoring.Context.Refresh_request` | Pending authoring handler | Explicit recapture against context CAS; currently unavailable. |
-| `authoring.context.close` | `Authoring.Context.Close_request` | Pending authoring handler | Close current context generation; currently unavailable. |
-| `authoring.source.list` | `Authoring.Source_read.List_request` | Pending authoring handler | Captured context source inventory; currently unavailable. |
-| `authoring.source.read` | `Authoring.Source_read.Read_request` | Pending authoring handler | Captured exact source read; currently unavailable. |
-| `authoring.document.version` | `Authoring.Document.Version_request` | Pending authoring handler | Current source/context CAS version; currently unavailable. |
-| `authoring.document.replace` | `Authoring.Document.Replace_request` | Pending authoring handler | Full validated UTF-8 overlay replacement; currently unavailable. |
-| `authoring.document.close` | `Authoring.Document.Close_request` | Pending authoring handler | Revert an overlay with retained editor revision; currently unavailable. |
-| `authoring.analysis` | `Authoring.Analysis.Analyze.Request` | Pending authoring handler | Current project or selected ChatMD script analysis; Complete, Failed, or typed Unavailable result; currently unavailable. |
-| `authoring.prefix` | `Authoring.Analysis.Prefix.Request` | Pending authoring handler | The semantic service prepares current, source-bound provisional evidence for Project or selected ChatMD script input. Selected scripts echo the exact authored request while retaining the distinct compiled source/cursor internally. Edits reuse only previously captured imports until explicit analysis or recapture; the transport handler is pending. |
-| `authoring.query` | `Authoring.Analysis.Query.Request` | Pending transport handler; semantic service checks current actor, source, selection and cache labels | Bounded hover, completion, signature, syntax and source navigation over exact Complete, same-run Failed or Provisional evidence. Transport activation remains pending. |
-| `authoring.lexical` | `Authoring.Assistance.Lexical.Request` | Pending lexical handler | Byte-exact ChatML or authored/effective ChatMD roles, open constructs, and scanned-prefix status, including malformed UTF-8 source bytes; currently unavailable. |
-| `authoring.assistance` | `Authoring.Assistance.Assistance.Request` | Pending assistance handler | Bounded local markup, reference, path, template and environment suggestions with exact authored replacements and explicit evidence; currently unavailable. |
-| `authoring.bundle.begin` | `Authoring.Bundle.Begin.request` | Pending independent upload handler | Qualified immutable manifest, optional parent provenance and explicit begin idempotency; currently unavailable. |
-| `authoring.bundle.chunk` | `Authoring.Bundle.Chunk.request` | Pending independent upload handler | Bounded exact binary member chunk with replay-safe offset; currently unavailable. |
-| `authoring.bundle.commit` | `Authoring.Bundle.Commit.request` | Pending independent upload handler | Seal complete upload under explicit idempotency; acceptance may precede closure publication; currently unavailable. |
-| `authoring.bundle.status` | `Authoring.Bundle.Status.request` | Pending independent upload handler | Principal-bound staging/validation/publication/retention state for a known upload ID; currently unavailable. |
+| `authoring.capabilities` | Empty object | `authoring.core.v1` or `authoring.bundle.v1` selected | Typed selected-method/encoding/limit reply. |
+| `authoring.roots` | Empty object | `authoring.core.v1` plus installed native source policy | Typed authorized host-root catalog. |
+| `authoring.host.list` | `Authoring.Source_read.Host_list_request` | `authoring.core.v1` plus installed native source policy | Fresh authorized host member listing, not a context-pinned read. |
+| `authoring.host.read` | `Authoring.Source_read.Host_read_request` | `authoring.core.v1` plus installed native source policy | Fresh exact host read with source digest. |
+| `authoring.context.open` | `Authoring.Context.Open_request` | `authoring.core.v1` selected | Project or standalone document capture. |
+| `authoring.context.refresh` | `Authoring.Context.Refresh_request` | `authoring.core.v1` selected | Explicit recapture against context CAS. |
+| `authoring.context.close` | `Authoring.Context.Close_request` | `authoring.core.v1` selected | Close current context generation. |
+| `authoring.source.list` | `Authoring.Source_read.List_request` | `authoring.core.v1` selected | Captured context source inventory. |
+| `authoring.source.read` | `Authoring.Source_read.Read_request` | `authoring.core.v1` selected | Captured exact source read. |
+| `authoring.document.version` | `Authoring.Document.Version_request` | `authoring.core.v1` selected | Current source/context CAS version. |
+| `authoring.document.replace` | `Authoring.Document.Replace_request` | `authoring.core.v1` selected | Full validated UTF-8 overlay replacement. |
+| `authoring.document.close` | `Authoring.Document.Close_request` | `authoring.core.v1` selected | Revert an overlay with retained editor revision. |
+| `authoring.analysis` | `Authoring.Analysis.Analyze.Request` | `authoring.core.v1` and `authoring.semantic.v1` selected | Current project or selected ChatMD script analysis; Complete, Failed, or typed Unavailable result. |
+| `authoring.prefix` | `Authoring.Analysis.Prefix.Request` | `authoring.core.v1` and `authoring.semantic.v1` selected | The semantic service prepares current, source-bound provisional evidence for Project or selected ChatMD script input. Selected scripts echo the exact authored request while retaining the distinct compiled source/cursor internally. Edits reuse only previously captured imports until explicit analysis or recapture. |
+| `authoring.query` | `Authoring.Analysis.Query.Request` | `authoring.core.v1` and `authoring.semantic.v1` selected | Bounded hover, completion, signature, syntax and source navigation over exact Complete, same-run Failed or Provisional evidence. |
+| `authoring.lexical` | `Authoring.Assistance.Lexical.Request` | `authoring.core.v1` and `authoring.lexical.v1` selected | Byte-exact ChatML or authored/effective ChatMD roles, open constructs, and scanned-prefix status, including malformed UTF-8 source bytes. |
+| `authoring.assistance` | `Authoring.Assistance.Assistance.Request` | `authoring.core.v1` and `authoring.assistance.v1` selected | Bounded local markup, reference, path, template and environment suggestions with exact authored replacements and explicit evidence. |
+| `authoring.bundle.begin` | `Authoring.Bundle.Begin.request` | `authoring.bundle.v1` selected; installed upload policy | Qualified immutable manifest, optional parent provenance and explicit begin idempotency. |
+| `authoring.bundle.chunk` | `Authoring.Bundle.Chunk.request` | `authoring.bundle.v1` selected; installed upload policy | Bounded exact binary member chunk with replay-safe offset. |
+| `authoring.bundle.commit` | `Authoring.Bundle.Commit.request` | `authoring.bundle.v1` selected; installed upload policy | Seal complete upload under explicit idempotency; acceptance may precede closure publication. |
+| `authoring.bundle.status` | `Authoring.Bundle.Status.request` | `authoring.bundle.v1` selected; installed upload policy | Principal-bound staging/validation/publication/retention state for a known upload ID. |
 
 Read-only attachments cannot authorize writer operations or permission answers.
 Ingress has separate authority: it needs its dedicated scope and matching

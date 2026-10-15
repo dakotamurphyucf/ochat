@@ -1,0 +1,17 @@
+(library
+ (name authoring_installation_tests)
+ (modules installation_tests)
+ (libraries
+  core
+  eio
+  eio_main
+  mirage-crypto-rng.unix
+  agent_server_test_support
+  agent_server_wire_fixture
+  ochat.agent_server
+  ochat.agent_store
+  ochat.agent_client
+  ochat.agent_protocol
+  ochat.operator_authorization)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
