@@ -321,7 +321,7 @@ let implementation_sources =
   ; ( "lib/chatml/chatml_contract_encoding.ml"
     , "7f8c6c1a49818abaf5ecbfe7cc1df2f4511930939cc1c573e3d422c94548c138" )
   ; ( "lib/chatml/chatml_eval.ml"
-    , "d571ed9ac9584d52b151bca47b07f44caa343ae99401e32d8cc5b460caac76da" )
+    , "fd6017ab5a829ce8ae18056cb13da322c7ddae323815cf803bfe5fd804e21444" )
   ; ( "lib/chatml_trace/chatml_trace.ml"
     , "6952bb534057fdaefcc42aac25b313122ea39a0e71b30bf20d656047b0c5bd65" )
   ; ( "lib/chatml_trace/chatml_trace.mli"

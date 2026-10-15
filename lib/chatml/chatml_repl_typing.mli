@@ -42,6 +42,7 @@ module Error : sig
     | Root_copy of Root_copy.Error.t
     | Root_check of Session.Roots.Error.t
     | Display_limit
+    | Expression_type_unavailable
     | Type_diagnostic of Chatml_diagnostic.t
     | Foreign_candidate
     | Stale_candidate
@@ -104,6 +105,11 @@ module Frozen_types : sig
 
   val snapshot : t -> Snapshot.t
   val bindings : t -> (string * Snapshot.Id.t) list
+
+  (** Only a successful expression statement has this root. It belongs to the
+      SAME bounded snapshot as [bindings] and was frozen before any runtime
+      effect from the original checked inference, not reconstructed later. *)
+  val expression_type : t -> Snapshot.Id.t option
 end
 
 (** Parse exact captured bytes as one complete unit BEFORE typing or effects.
@@ -136,6 +142,13 @@ module Candidate : sig
 
   val source : t -> Captured.t
   val statement : t -> Chatml.Chatml_lang.stmt_node
+
+  (** The exact parsed unit and selected statement coordinate retained by the
+      admitted Ready submission. Resolver selection must use these together
+      with [checked], after [validate_candidate] on this physical owner. *)
+  val parsed : t -> Parse.Unit.t
+
+  val statement_index : t -> int
 
   (** Per-statement checker annotations are source-bound to [source] and only
       cover this checked statement. the statement evaluator lowers via the existing resolver's

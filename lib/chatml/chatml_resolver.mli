@@ -60,6 +60,21 @@ val resolve_configured_program
   -> checkpoint:(unit -> unit)
   -> (Chatml.Chatml_lang.resolved_program, Chatml_diagnostic.t) Result.t
 
+(** Resolve only the indexed statement of an exact captured REPL parser unit.
+    [checked] must belong to the unit's source ID/digest. Select the statement
+    from the unit rather than accepting a caller-supplied AST, then use the same
+    configured-annotation and lexical resolver as [resolve_configured_program].
+    Bounds, span validation and traversal poll [checkpoint]. A type declaration
+    or configured inert open has no runtime statement and returns [None]; no
+    later statement is traversed using absent checker annotations. This is
+    lowering, not source or execution authority. *)
+val resolve_repl_statement
+  :  Chatml_typechecker.checked_program
+  -> Chatml.Chatml_parse.Unit.t
+  -> statement_index:int
+  -> checkpoint:(unit -> unit)
+  -> (Chatml.Chatml_lang.resolved_stmt_node option, Chatml_diagnostic.t) Result.t
+
 (** Existing resolve_checked_program/resolve_captured_program remain adapters
     over the same traversal. Add optional checkpoint with no-op default if needed
     for compatibility; graph compilation supplies its invocation callback. *)

@@ -45,6 +45,7 @@ module Error = struct
     | Root_copy of Root_copy.Error.t
     | Root_check of Session.Roots.Error.t
     | Display_limit
+    | Expression_type_unavailable
     | Type_diagnostic of Diagnostic.t
     | Foreign_candidate
     | Stale_candidate
@@ -104,10 +105,12 @@ module Frozen_types = struct
   type t =
     { snapshot : Snapshot.t
     ; bindings : (string * Snapshot.Id.t) list
+    ; expression_type : Snapshot.Id.t option
     }
 
   let snapshot t = t.snapshot
   let bindings t = t.bindings
+  let expression_type t = t.expression_type
 end
 
 module Candidate = struct
@@ -131,6 +134,7 @@ module Candidate = struct
     ; generation : int
     ; ready : ready0
     ; statement : Chatml.Chatml_lang.stmt_node
+    ; statement_index : int
     ; checked : Checker.checked_program
     ; frozen_types : Frozen_types.t
     ; frozen_before : Frozen_types.t
@@ -146,6 +150,8 @@ module Candidate = struct
 
   let source t = t.ready.source
   let statement t = t.statement
+  let parsed t = t.ready.parsed
+  let statement_index t = t.statement_index
   let checked t = t.checked
   let frozen_types t = t.frozen_types
   let input_fingerprint t = Session.Roots.input_fingerprint t.modules
@@ -299,7 +305,7 @@ let check_ready t ready ~checkpoint =
     |> Result.map_error ~f:(fun error -> Error.Lookup error)
 ;;
 
-let freeze_values values ~(limits : Limits.t) ~checkpoint =
+let freeze_values ?expression_type values ~(limits : Limits.t) ~checkpoint =
   let open Result.Let_syntax in
   let%bind roots =
     Scope.Roots.capture
@@ -325,6 +331,13 @@ let freeze_values values ~(limits : Limits.t) ~checkpoint =
       checkpoint ();
       Snapshot.Input_group.create [ scheme ])
   in
+  let groups =
+    match expression_type with
+    | None -> groups
+    | Some ty ->
+      checkpoint ();
+      groups @ [ Snapshot.Input_group.create [ ty ] ]
+  in
   let%bind snapshot =
     Snapshot.freeze groups ~limits:limits.display ~checkpoint
     |> Result.map_error ~f:(fun _ -> Error.Display_limit)
@@ -340,8 +353,21 @@ let freeze_values values ~(limits : Limits.t) ~checkpoint =
     | name :: names, [ root ] :: roots -> pair names roots ((name, root) :: reversed)
     | _ -> Error Error.Display_limit
   in
-  let%map bindings = pair names (Snapshot.roots snapshot) [] in
-  { Frozen_types.snapshot; bindings }
+  let%bind binding_roots, expression_root =
+    match expression_type with
+    | None -> Ok (Snapshot.roots snapshot, None)
+    | Some _ ->
+      let rec split reversed = function
+        | [] -> Error Error.Expression_type_unavailable
+        | [ [ root ] ] -> Ok (List.rev reversed, Some root)
+        | group :: rest ->
+          checkpoint ();
+          split (group :: reversed) rest
+      in
+      split [] (Snapshot.roots snapshot)
+  in
+  let%map bindings = pair names binding_roots [] in
+  { Frozen_types.snapshot; bindings; expression_type = expression_root }
 ;;
 
 let reverse_with_checkpoint values ~checkpoint =
@@ -447,11 +473,19 @@ let prepare_next t ready ~checkpoint =
           | None, Ok checked ->
             let before_values = Check.Repl_statement.before_values checked in
             let after_values = Check.Repl_statement.after_values checked in
+            let%bind expression_type =
+              match (Check.Repl_statement.statement checked).value with
+              | Chatml.Chatml_lang.SExpr _ ->
+                (match Check.Repl_statement.expression_type checked with
+                 | Some ty -> Ok (Some ty)
+                 | None -> Error Error.Expression_type_unavailable)
+              | SLet _ | SLetRec _ | SType _ | SModule _ | SOpen _ -> Ok None
+            in
             let%bind frozen_before =
               freeze_values before_values ~limits:t.limits ~checkpoint
             in
             let%bind frozen_types =
-              freeze_values after_values ~limits:t.limits ~checkpoint
+              freeze_values ?expression_type after_values ~limits:t.limits ~checkpoint
             in
             let new_checked_dependencies =
               reverse_with_checkpoint !checked_rev ~checkpoint
@@ -468,6 +502,7 @@ let prepare_next t ready ~checkpoint =
                 ; generation
                 ; ready
                 ; statement = Check.Repl_statement.statement checked
+                ; statement_index = ready.next_index
                 ; checked = Check.Repl_statement.checked checked
                 ; frozen_types
                 ; frozen_before

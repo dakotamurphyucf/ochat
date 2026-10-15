@@ -7,6 +7,7 @@ module Contract = Chatml.Chatml_compiler_contract
 module Parse = Chatml.Chatml_parse
 module Typing = Chatml_repl_typing
 module Registry = Chatml_linked_runtime.Repl_modules
+module Repl = Chatml_repl_execution
 module Surface = Chatml.Chatml_extension_surface
 module Execution = Chatml_execution
 module Lang = Chatml.Chatml_lang
@@ -494,4 +495,336 @@ let%test_unit "interruption after native effect faults unit without replay" =
       [%test_eq: string list] (List.rev !log) [ "catalog" ];
       finish repeat_admission Typing.Published.Constrained_before_runtime_failure;
       Registry.close registry |> ok_registry))
+;;
+
+let repl_limits ?(max_preview_bytes = 128) () =
+  Repl.Limits.create
+    ~max_preview_bytes
+    ~max_preview_nodes:64
+    ~max_preview_depth:16
+    ~max_diagnostic_bytes:128
+    ~max_retained_tasks:1
+  |> Or_error.ok_exn
+;;
+
+let ok_repl = function
+  | Ok value -> value
+  | Error error -> raise_s [%sexp (error : Repl.Error.t)]
+;;
+
+let receipt_label receipt =
+  let status =
+    match Repl.Receipt.outcome receipt with
+    | Succeeded -> "succeeded"
+    | Failed Runtime -> "runtime"
+    | Failed Initializer -> "initializer"
+    | Failed Budget -> "budget"
+  in
+  let task =
+    match Repl.Receipt.task_retention receipt with
+    | Not_a_task -> "none"
+    | Retained _ -> "retained"
+    | Limit_reached -> "limit"
+  in
+  status, Repl.Receipt.value_preview receipt, task
+;;
+
+let%expect_test "portable REPL stages names, preserves old cells and keeps Tasks inert" =
+  Eio_main.run (fun env ->
+    let typing =
+      owner
+        ~catalog_body:"let value = ref(0)"
+        ~contract:(Contract.for_target One_off_v1 ~checkpoint)
+        ()
+    in
+    let repl =
+      Repl.create
+        ~typing
+        ~surface:Surface.one_off_v1
+        ~env
+        ~policy:(Bounded Execution.default_limits)
+        ~limits:(repl_limits ())
+        ~checkpoint
+      |> ok_repl
+    in
+    let execute_candidate candidate =
+      Repl.execute_next repl candidate ~checkpoint |> ok_repl
+    in
+    let execute path body = execute_candidate (candidate typing path body) in
+    let setup_source = capture "setup.chatml" "let cell = ref(0)\nlet old () = !cell" in
+    let setup_ready =
+      match Typing.admit typing setup_source ~checkpoint |> ok_typing with
+      | Ready ready -> ready
+      | Need_more _ | Rejected _ -> failwith "setup was not a complete submission"
+    in
+    let first =
+      execute_candidate (Typing.prepare_next typing setup_ready ~checkpoint |> ok_typing)
+    in
+    let closure =
+      execute_candidate (Typing.prepare_next typing setup_ready ~checkpoint |> ok_typing)
+    in
+    let before = execute "before.chatml" "old()" in
+    let failed = execute "failed.chatml" "let doomed = (cell := 9; 1 / 0)" in
+    let failed_binding_absent =
+      let source = capture "missing.chatml" "doomed" in
+      let ready =
+        match Typing.admit typing source ~checkpoint |> ok_typing with
+        | Ready ready -> ready
+        | Need_more _ | Rejected _ -> failwith "missing-name probe was incomplete"
+      in
+      match Typing.prepare_next typing ready ~checkpoint with
+      | Error (Typing.Error.Type_diagnostic _) -> true
+      | Ok _ | Error _ -> false
+    in
+    let after = execute "after.chatml" "old()" in
+    let shadow = execute "shadow.chatml" "let cell = ref(42)" in
+    let old = execute "old.chatml" "old()" in
+    let current = execute "current.chatml" "!cell" in
+    let opened = execute "inert-open.chatml" "open Catalog" in
+    let catalog_before = execute "catalog-before.chatml" "Catalog.value" in
+    let catalog_write = execute "catalog-write.chatml" "Catalog.value := 5" in
+    let catalog_after = execute "catalog-after.chatml" "Catalog.value" in
+    let broken_candidate =
+      candidate typing "broken-origin.chatml" "let broken () = 1 / 0"
+    in
+    let broken_source = Typing.Candidate.source broken_candidate in
+    let broken_binding = execute_candidate broken_candidate in
+    let broken_call = execute "broken-call.chatml" "broken()" in
+    let original_failure_site =
+      match Repl.Receipt.outcome broken_call, Repl.Receipt.diagnostic broken_call with
+      | Failed Runtime, Some diagnostic ->
+        (match Repl.Diagnostic.location diagnostic with
+         | Some location ->
+           String.equal (Repl.Diagnostic.message diagnostic) "Division by zero"
+           && S.Id.equal (S.Location.source location) (S.id broken_source)
+           && S.Digest.equal (S.Location.source_digest location) (S.digest broken_source)
+           && String.equal (S.read broken_source location |> Or_error.ok_exn) "1 / 0"
+         | None -> false)
+      | Succeeded, _ | Failed (Initializer | Budget), _ | Failed Runtime, None -> false
+    in
+    let task = execute "task.chatml" "Task.fail(\"deferred\")" in
+    let handle =
+      match Repl.Receipt.task_retention task with
+      | Retained handle -> handle
+      | Not_a_task | Limit_reached -> failwith "first task was not retained"
+    in
+    let task_full = execute "task-full.chatml" "Task.pure(8)" in
+    let task_current = Repl.current_task_handle repl handle in
+    let foreign_typing =
+      owner
+        ~catalog_body:"let value = ref(0)"
+        ~contract:(Contract.for_target One_off_v1 ~checkpoint)
+        ()
+    in
+    let foreign_repl =
+      Repl.create
+        ~typing:foreign_typing
+        ~surface:Surface.one_off_v1
+        ~env
+        ~policy:(Bounded Execution.default_limits)
+        ~limits:(repl_limits ())
+        ~checkpoint
+      |> ok_repl
+    in
+    let foreign_handle = Repl.current_task_handle foreign_repl handle in
+    let wrong = candidate foreign_typing "foreign-repl.chatml" "1" in
+    let foreign =
+      match Repl.execute_next repl wrong ~checkpoint with
+      | Error (Repl.Error.Typing Typing.Error.Foreign_candidate) -> true
+      | Ok _ | Error _ -> false
+    in
+    let anonymous_int =
+      let frozen = Repl.Receipt.frozen_types current in
+      let snapshot = Typing.Frozen_types.snapshot frozen in
+      let rec reaches_int seen root =
+        let index = Chatml_typechecker.Type_snapshot.Id.index root in
+        if Set.mem seen index
+        then false
+        else (
+          match Chatml_typechecker.Type_snapshot.find snapshot root with
+          | Some Chatml_typechecker.Type_snapshot.Node.Int -> true
+          | Some (Chatml_typechecker.Type_snapshot.Node.Bound_link next) ->
+            reaches_int (Set.add seen index) next
+          | Some _ | None -> false)
+      in
+      Option.value_map
+        (Repl.Receipt.expression_type current)
+        ~default:false
+        ~f:(reaches_int Int.Set.empty)
+    in
+    print_s
+      [%sexp
+        (receipt_label first : string * string option * string)
+      , (receipt_label closure : string * string option * string)
+      , (receipt_label before : string * string option * string)
+      , (receipt_label failed : string * string option * string)
+      , (receipt_label after : string * string option * string)
+      , (receipt_label shadow : string * string option * string)
+      , (receipt_label old : string * string option * string)
+      , (receipt_label current : string * string option * string)
+      , (receipt_label opened : string * string option * string)
+      , (receipt_label catalog_before : string * string option * string)
+      , (receipt_label catalog_write : string * string option * string)
+      , (receipt_label catalog_after : string * string option * string)
+      , (receipt_label broken_binding : string * string option * string)
+      , (receipt_label broken_call : string * string option * string)
+      , (receipt_label task : string * string option * string)
+      , (receipt_label task_full : string * string option * string)
+      , (task_current : bool)
+      , (foreign_handle : bool)
+      , (failed_binding_absent : bool)
+      , (foreign : bool)
+      , (anonymous_int : bool)];
+    assert original_failure_site;
+    Repl.close foreign_repl |> ok_repl;
+    Repl.close repl |> ok_repl;
+    print_s [%sexp (Repl.current_task_handle repl handle : bool)]);
+  [%expect
+    {|
+    ((succeeded () none) (succeeded () none) (succeeded (0) none)
+     (runtime () none) (succeeded (9) none) (succeeded () none)
+     (succeeded (9) none) (succeeded (42) none) (succeeded () none)
+     (succeeded ("ref(0)") none) (succeeded ("()") none)
+     (succeeded ("ref(5)") none) (succeeded () none) (runtime () none)
+     (succeeded ("fail(deferred)") retained) (succeeded ("pure(8)") limit) true
+     false true true true)
+    false
+    |}]
+;;
+
+let%test_unit "portable REPL finalizes cancellation and budget without replay" =
+  Eio_main.run (fun env ->
+    let calls = ref 0 in
+    let interrupt = ref (fun () -> ()) in
+    let surface =
+      Chatml.Chatml_builtin_surface.merge
+        { Chatml.Chatml_builtin_surface.empty with
+          globals =
+            [ { B.name = "mark"
+              ; scheme = TFun ([], TUnit)
+              ; impl =
+                  (function
+                    | [] ->
+                      incr calls;
+                      !interrupt ();
+                      Lang.VUnit
+                    | _ -> assert false)
+              }
+            ]
+        }
+        Chatml.Chatml_builtin_surface.core_surface
+    in
+    let contract = Support.native_contract ~surface () in
+    let typing = owner ~catalog_body:"let value = 1" ~contract () in
+    let repl =
+      Repl.create
+        ~typing
+        ~surface
+        ~env
+        ~policy:(Bounded Execution.default_limits)
+        ~limits:(repl_limits ())
+        ~checkpoint
+      |> ok_repl
+    in
+    let run path body =
+      Repl.execute_next repl (candidate typing path body) ~checkpoint |> ok_repl
+    in
+    ignore (run "state.chatml" "let state = ref(0)" : Repl.Receipt.t);
+    let marker = Failure "cancel after mark" in
+    (match
+       Eio.Cancel.sub (fun cancellation ->
+         (interrupt
+          := fun () ->
+               Eio.Cancel.cancel cancellation marker;
+               Eio.Fiber.yield ());
+         run "cancelled.chatml" "let missed = (state := 1; mark())")
+     with
+     | exception Eio.Cancel.Cancelled actual -> assert (phys_equal actual marker)
+     | (exception _) | _ -> failwith "cancellation was not preserved");
+    [%test_eq: int] !calls 1;
+    let retained = run "retained.chatml" "!state" in
+    [%test_eq: string option] (Repl.Receipt.value_preview retained) (Some "1");
+    Repl.close repl |> ok_repl;
+    let fuel_limits = { Execution.default_limits with fuel = 1 } in
+    let budget_typing = owner ~catalog_body:"let value = 1" ~contract () in
+    let budget_repl =
+      Repl.create
+        ~typing:budget_typing
+        ~surface
+        ~env
+        ~policy:(Bounded fuel_limits)
+        ~limits:(repl_limits ())
+        ~checkpoint
+      |> ok_repl
+    in
+    let budget =
+      Repl.execute_next
+        budget_repl
+        (candidate budget_typing "budget.chatml" "1 + 2")
+        ~checkpoint
+      |> ok_repl
+    in
+    (match Repl.Receipt.outcome budget with
+     | Failed Budget -> ()
+     | Succeeded | Failed (Runtime | Initializer) ->
+       failwith "bounded execution did not report budget failure");
+    Repl.close budget_repl |> ok_repl;
+    (interrupt := fun () -> ());
+    let fault_typing =
+      owner ~catalog_body:"let started = mark() let value = 1 / 0" ~contract ()
+    in
+    let fault_repl =
+      Repl.create
+        ~typing:fault_typing
+        ~surface
+        ~env
+        ~policy:(Bounded Execution.default_limits)
+        ~limits:(repl_limits ())
+        ~checkpoint
+      |> ok_repl
+    in
+    let attempt path =
+      Repl.execute_next
+        fault_repl
+        (candidate fault_typing path "Catalog.value")
+        ~checkpoint
+      |> ok_repl
+    in
+    let first = attempt "fault-repl-first.chatml" in
+    let second = attempt "fault-repl-second.chatml" in
+    (match Repl.Receipt.outcome first, Repl.Receipt.outcome second with
+     | Failed Initializer, Failed Initializer -> ()
+     | _ -> failwith "faulted initializer was not retained");
+    [%test_eq: int] !calls 2;
+    Repl.close fault_repl |> ok_repl;
+    let utf8_typing =
+      owner
+        ~catalog_body:"let value = 1"
+        ~contract:(Contract.for_target One_off_v1 ~checkpoint)
+        ()
+    in
+    let utf8_repl =
+      Repl.create
+        ~typing:utf8_typing
+        ~surface:Surface.one_off_v1
+        ~env
+        ~policy:(Bounded Execution.default_limits)
+        ~limits:(repl_limits ~max_preview_bytes:3 ())
+        ~checkpoint
+      |> ok_repl
+    in
+    let utf8 =
+      Repl.execute_next
+        utf8_repl
+        (candidate utf8_typing "utf8.chatml" "\"éé\"")
+        ~checkpoint
+      |> ok_repl
+    in
+    (match Repl.Receipt.outcome utf8 with
+     | Succeeded -> ()
+     | Failed _ -> failwith "bounded preview changed successful execution");
+    let preview = Repl.Receipt.value_preview utf8 |> Option.value_exn in
+    assert (Stdlib.String.is_valid_utf_8 preview);
+    assert (String.length preview <= 3);
+    Repl.close utf8_repl |> ok_repl)
 ;;
