@@ -780,6 +780,33 @@ module Document_context = struct
     let parsed t = t.parsed
     let input_sources t = t.input_sources
 
+    let script_source
+          t
+          ~declaration
+          ~max_script_bytes
+          ~max_locator_bytes
+          ~max_path_components
+          ~checkpoint
+      =
+      Authoring_document_script_route.admit_source
+        ~parsed:t.parsed
+        ~input_sources:t.input_sources
+        ~bundle:t.bundle
+        ~declaration
+        ~root_source:t.source
+        ~max_script_bytes
+        ~max_locator_bytes
+        ~max_path_components
+        ~checkpoint
+      |> Result.map ~f:Authoring_document_script_route.Source_only.source
+      |> Result.map_error ~f:(function
+        | Limit -> Error.Result_limit
+        | Foreign_declaration
+        | Invalid_project_route
+        | Missing_external_source
+        | Conflicting_external_source -> Error.Selected_script_unavailable)
+    ;;
+
     let parse_root_only ~(limits : Chatmd_source_bundle.limits) ~source ~dir ~checkpoint =
       let open Result.Let_syntax in
       let defaults = Chatmd_source_bundle.default_limits in

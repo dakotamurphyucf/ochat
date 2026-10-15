@@ -313,6 +313,23 @@ module Document_context : sig
         current document generation before source-owned projections. *)
     val input_sources : t -> (Chatmd_parser_input.t * Chatml_source.t) list
 
+    (** Pure extraction of one source-only script from THIS genuine parsed
+        closure. The private route proves physical declaration/input/source
+        membership and exact inline or captured external body bytes; an
+        external path is relative to its declaring input. No project route,
+        native read, actor grant or current-context assertion follows. The
+        enclosing owner must still check this capture's current generation and
+        separately admit an execution target. Bounds reject before body copy;
+        checkpoint/cancellation exceptions preserve identity. *)
+    val script_source
+      :  t
+      -> declaration:Prompt.Chat_markdown.Declaration.t
+      -> max_script_bytes:int
+      -> max_locator_bytes:int
+      -> max_path_components:int
+      -> checkpoint:(unit -> unit)
+      -> (Chatml_source.t, Error.t) result
+
     (** Pure bounded root-only parse of the exact already supplied Source.
         It owns no host read grant; the one-member bundle makes imports absent
         unless all genuine parser inputs map to that same root. The enclosing

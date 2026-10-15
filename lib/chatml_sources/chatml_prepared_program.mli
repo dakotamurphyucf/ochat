@@ -175,9 +175,27 @@ val create
   -> unit
   -> (t, Error.t) Result.t
 
+(** Admit one ALREADY captured host source with its original Source.Id, digest
+    and exact bytes. The implicit environment/provenance and one empty scope
+    are the same as [single_file]; there is no project, catalog or resolver.
+    [max_input_bytes] is positive and bounds source bytes PLUS canonical
+    Prepared metadata through the existing [create] admission. The host still
+    owns source/read and target-contract authority. Checkpoint exceptions,
+    including cancellation, retain their identity. *)
+val single_captured
+  :  compiler_contract:Captured.Digest.t
+  -> source:Captured.t
+  -> max_input_bytes:int
+  -> checkpoint:(unit -> unit)
+  -> unit
+  -> (t, Error.t) Result.t
+
 (** Fixed in-memory entry identity, implicit environment/provenance, empty catalog
-    and one empty scope. Host checks its existing source policy first; no metadata
-    allowance deduction, compiler-target extraction or ambient project lookup. *)
+    and one empty scope. Its historical unconstrained source-string behavior
+    remains; it shares the internal one-source construction algorithm with
+    [single_captured] but no host source identity or bounded-capture claim.
+    Host checks its existing source policy first; no metadata allowance
+    deduction, compiler-target extraction or ambient project lookup. *)
 val single_file
   :  compiler_contract:Captured.Digest.t
   -> source:string

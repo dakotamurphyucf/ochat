@@ -8,10 +8,13 @@
  (libraries
   core
   eio_main
+  eio
   jsonaf
   source
+  chatmd
   chatml_source
   chatml_prepared_program
+  chatml_authoring_context
   document_schema
   chatml_project
   chatml_catalog
@@ -19,6 +22,7 @@
   chatml
   chatml_developer_capture
   chatml_developer_test
+  agent_server
   chatml_execution
   expect_test_helpers_core)
  (inline_tests)
