@@ -257,7 +257,7 @@ let agent_fn ?agent_source_runner ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.a
       otherwise the full catalog is exposed. *)
 let mcp_tool
       ~sw
-      ~ctx
+      ~env
       CM.{ names; description = _; mcp_server; strict; client_id_env; client_secret_env }
   =
   (* Inject per-server credentials via URI query params if attribute specifies
@@ -276,10 +276,10 @@ let mcp_tool
     let uri = add_param_if_some uri ("client_secret", client_secret_env) in
     Uri.to_string uri
   in
-  let client = Mcp_client.connect ~sw ~env:(Ctx.env ctx) mcp_server_uri in
+  let client = Mcp_client.connect ~sw ~env mcp_server_uri in
   let cache =
     Mcp_discovery_cache.create
-      ~now:(fun () -> Eio.Time.now (Eio.Stdenv.clock (Ctx.env ctx)))
+      ~now:(fun () -> Eio.Time.now (Eio.Stdenv.clock env))
       ~load:(fun () ->
         match Mcp_client.list_tools client with
         | Ok tools -> tools
@@ -379,44 +379,53 @@ let validate_read_roots host = function
   | Persistent_agent _ -> Ok ()
 ;;
 
-let configured_read_file host ctx (specification : Chatmd_read_file_spec.t) =
+let configured_read_file host ~env ~tool_dir (specification : Chatmd_read_file_spec.t) =
   let roots =
     match resolve_read_roots host specification with
     | Ok roots -> roots
     | Error error -> failwithf "[%s] %s" error.code error.message ()
   in
   Functions.get_contents_scoped
-    ~fs:(Eio.Stdenv.fs (Ctx.env ctx))
-    ~dir:(Ctx.tool_dir ctx)
+    ~fs:(Eio.Stdenv.fs env)
+    ~dir:tool_dir
     ~roots
     ?description:specification.description
     ()
 ;;
 
-let default_read_file ctx =
+let default_read_file ~env ~tool_dir =
   let root =
     Functions.read_file_root
       ~id:"cwd"
-      ~path:(Ctx.tool_dir ctx)
+      ~path:tool_dir
       ~description:"ochat launch directory"
       ()
   in
-  Functions.get_contents_scoped
-    ~fs:(Eio.Stdenv.fs (Ctx.env ctx))
-    ~dir:(Ctx.tool_dir ctx)
-    ~roots:[ root ]
-    ()
+  Functions.get_contents_scoped ~fs:(Eio.Stdenv.fs env) ~dir:tool_dir ~roots:[ root ] ()
 ;;
 
-let of_declaration
+module Native_error = struct
+  type t =
+    { code : string
+    ; message : string
+    }
+  [@@deriving sexp, compare, equal]
+end
+
+let inference_required message =
+  Error Native_error.{ code = "agent.inference_required"; message }
+;;
+
+let of_declaration_with
       ?shell_registry
       ?host
       ?agent_source_runner
       ~sw
-      ~(ctx : _ Ctx.t)
-      ~run_agent
+      ~env
+      ~tool_dir
+      ~agent
       (decl : CM.tool)
-  : Ochat_function.t list
+  : (Ochat_function.t list, Native_error.t) result
   =
   match decl with
   | CM.Persistent_agent _ ->
@@ -433,39 +442,29 @@ let of_declaration
        host"
   | CM.Builtin name ->
     (match name with
-     | "apply_patch" -> [ Functions.apply_patch ~dir:(Ctx.tool_dir ctx) ]
-     | "read_dir" -> [ Functions.read_dir ~dir:(Ctx.tool_dir ctx) ]
-     | "append_to_file" -> [ Functions.append_to_file ~dir:(Ctx.tool_dir ctx) ]
-     | "find_and_replace" -> [ Functions.find_and_replace ~dir:(Ctx.tool_dir ctx) ]
-     | "get_contents" | "read_file" -> [ default_read_file ctx ]
+     | "apply_patch" -> Ok [ Functions.apply_patch ~dir:tool_dir ]
+     | "read_dir" -> Ok [ Functions.read_dir ~dir:tool_dir ]
+     | "append_to_file" -> Ok [ Functions.append_to_file ~dir:tool_dir ]
+     | "find_and_replace" -> Ok [ Functions.find_and_replace ~dir:tool_dir ]
+     | "get_contents" | "read_file" -> Ok [ default_read_file ~env ~tool_dir ]
      | "webpage_to_markdown" ->
-       [ Functions.webpage_to_markdown
-           ~env:(Ctx.env ctx)
-           ~dir:(Ctx.tool_dir ctx)
-           ~net:(Ctx.net ctx)
-       ]
-     | "fork" -> [ Functions.fork ]
+       Ok [ Functions.webpage_to_markdown ~env ~dir:tool_dir ~net:(Eio.Stdenv.net env) ]
+     | "fork" -> Ok [ Functions.fork ]
      | "odoc_search" ->
-       [ Functions.odoc_search ~dir:(Ctx.tool_dir ctx) ~net:(Ctx.net ctx) ]
-     | "index_markdown_docs" ->
-       [ Functions.index_markdown_docs ~env:(Ctx.env ctx) ~dir:(Ctx.tool_dir ctx) ]
+       Ok [ Functions.odoc_search ~dir:tool_dir ~net:(Eio.Stdenv.net env) ]
+     | "index_markdown_docs" -> Ok [ Functions.index_markdown_docs ~env ~dir:tool_dir ]
      | "markdown_search" ->
-       [ Functions.markdown_search ~dir:(Ctx.tool_dir ctx) ~net:(Ctx.net ctx) ]
+       Ok [ Functions.markdown_search ~dir:tool_dir ~net:(Eio.Stdenv.net env) ]
      | "query_vector_db" ->
-       [ Functions.query_vector_db ~dir:(Ctx.tool_dir ctx) ~net:(Ctx.net ctx) ]
+       Ok [ Functions.query_vector_db ~dir:tool_dir ~net:(Eio.Stdenv.net env) ]
      | "index_ocaml_code" ->
-       [ Functions.index_ocaml_code
-           ~env:(Ctx.env ctx)
-           ~dir:(Ctx.tool_dir ctx)
-           ~net:(Ctx.net ctx)
-       ]
-     | "import_image" -> [ Functions.import_image ~dir:(Ctx.tool_dir ctx) ]
+       Ok [ Functions.index_ocaml_code ~env ~dir:tool_dir ~net:(Eio.Stdenv.net env) ]
+     | "import_image" -> Ok [ Functions.import_image ~dir:tool_dir ]
      | "meta_refine" ->
-       [ Functions.meta_refine
-           ~env:(Ctx.env ctx)
-           ~inference:(Ctx.inference_execution ctx)
-           ()
-       ]
+       (match agent with
+        | Some (ctx, _) ->
+          Ok [ Functions.meta_refine ~env ~inference:(Ctx.inference_execution ctx) () ]
+        | None -> inference_required "meta_refine requires admitted inference")
      | other -> failwithf "Unknown built-in tool: %s" other ())
   | CM.Read_file specification ->
     let host =
@@ -474,7 +473,7 @@ let of_declaration
           "Configured read_file declarations require a live shell host for path \
            resolution")
     in
-    [ configured_read_file host ctx specification ]
+    Ok [ configured_read_file host ~env ~tool_dir specification ]
   | CM.Custom tool ->
     failwithf
       "Legacy shell tool %S must be constructed through Agent_runtime"
@@ -491,8 +490,47 @@ let of_declaration
          ()
      | Some registry ->
        (match Shell_tool.create registry tool with
-        | Ok tool -> [ tool ]
+        | Ok tool -> Ok [ tool ]
         | Error error -> failwithf "%s: %s" error.code error.message ()))
-  | CM.Agent agent_spec -> [ agent_fn ?agent_source_runner ~ctx ~run_agent agent_spec ]
-  | CM.Mcp mcp -> mcp_tool ~sw ~ctx mcp
+  | CM.Agent agent_spec ->
+    (match agent with
+     | Some (ctx, run_agent) ->
+       Ok [ agent_fn ?agent_source_runner ~ctx ~run_agent agent_spec ]
+     | None -> inference_required "Agent requires admitted inference")
+  | CM.Mcp mcp -> Ok (mcp_tool ~sw ~env mcp)
+;;
+
+let of_declaration
+      ?shell_registry
+      ?host
+      ?agent_source_runner
+      ~sw
+      ~(ctx : _ Ctx.t)
+      ~run_agent
+      (decl : CM.tool)
+  =
+  match
+    of_declaration_with
+      ?shell_registry
+      ?host
+      ?agent_source_runner
+      ~sw
+      ~env:(Ctx.env ctx)
+      ~tool_dir:(Ctx.tool_dir ctx)
+      ~agent:(Some (ctx, run_agent))
+      decl
+  with
+  | Ok functions -> functions
+  | Error error -> failwithf "%s: %s" error.Native_error.code error.message ()
+;;
+
+let of_declaration_without_inference ?shell_registry ~sw ~host decl =
+  of_declaration_with
+    ?shell_registry
+    ~host
+    ~sw
+    ~env:host.Shell_runtime.Host.env
+    ~tool_dir:host.tool_dir
+    ~agent:None
+    decl
 ;;

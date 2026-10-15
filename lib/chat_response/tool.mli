@@ -134,3 +134,28 @@ val of_declaration
         -> string (* assistant answer *))
   -> Prompt.Chat_markdown.tool
   -> Ochat_function.t list
+
+module Native_error : sig
+  type t =
+    { code : string
+    ; message : string
+    }
+  [@@deriving sexp, compare, equal]
+end
+
+(** Construct a provider-independent declaration from the ordinary Eio and
+    filesystem resources of this exact shell host. This path has no Ctx,
+    inference Adapter, Target or nested-agent callback. An ordinary Agent or
+    [meta_refine] declaration therefore returns a typed inference-required
+    error; the pool may instead select an already admitted exact native
+    registration before calling this function. Existing restrictions on
+    Persistent_agent, Inherited and Extension remain in force. Configured
+    Read_file still resolves roots through [host]. MCP clients and listeners
+    remain owned by [sw]. Unexpected exceptions and cancellation propagate;
+    this constructor returns typed errors only for expected missing inference. *)
+val of_declaration_without_inference
+  :  ?shell_registry:Shell_runtime.Registry.t
+  -> sw:Eio.Switch.t
+  -> host:Shell_runtime.Host.t
+  -> Prompt.Chat_markdown.tool
+  -> (Ochat_function.t list, Native_error.t) result
